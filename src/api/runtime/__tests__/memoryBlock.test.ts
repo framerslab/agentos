@@ -117,7 +117,7 @@ describe('memory block: ages count days and carry the date', () => {
 });
 
 describe('memory block: the budget an empty section leaves flows to the sections with content', () => {
-  it('a store of episodic traces alone fills the 1600-token block the GMI asks for, never more', async () => {
+  it('a store of episodic traces alone fills the 1600-token block the GMI asks for with whole traces, never more', async () => {
     const mem = await memoryWith(STYLE_TRAITS.structured);
     try {
       const places = ['north ridge', 'cedar lake', 'river bend', 'pine hollow', 'stone bridge', 'fern valley', 'quarry pond', 'old mill', 'red cliffs', 'birch grove', 'salt marsh', 'echo canyon', 'willow creek', 'granite peak'];
@@ -150,7 +150,15 @@ describe('memory block: the budget an empty section leaves flows to the sections
       expect(bullets.length).toBeGreaterThan(6);
       expect(out!.tokensUsed).toBeLessThanOrEqual(1600);
       expect(tokensOf(text)).toBeLessThanOrEqual(1600);
-      expect(out!.tokensUsed).toBeGreaterThan(1500);
+      // Whole traces only. The fourteen do not all fit: none is cut to fill the block, each one left out is reported
+      // with its reason, and what the block leaves unspent is less than the line of any of them.
+      expect(text).not.toContain('…[cut]');
+      const leftOut = (out!.lineOutcomes ?? []).filter((line) => line.outcome === 'left_out');
+      expect(leftOut.length).toBeGreaterThan(0);
+      for (const line of leftOut) {
+        expect(line, line.id).toMatchObject({ section: 'recentEpisodic', reason: 'section_full' });
+        expect(1600 - out!.tokensUsed, line.id).toBeLessThan(line.tokens);
+      }
     } finally {
       await mem.close();
     }

@@ -10,7 +10,6 @@ import {
   type MemoryAssemblerInput,
 } from '../../src/cognition/memory/core/prompt/MemoryPromptAssembler.js';
 import {
-  cutMemoryContent,
   formatMemoryTrace,
   memoryTraceLineLength,
   MEMORY_CUT_MARKER,
@@ -64,12 +63,15 @@ function blockSections(contextText: string): Map<string, string[]> {
   return sections;
 }
 
-/** Whether `later` is `line`, or `line` lengthened: a cut line's text before its marker starts `later`. */
+/**
+ * Whether `later` is `line`, or `line` lengthened. Only persistent memory's text is ever cut to fit, so only it can be
+ * lengthened: its text before the truncation marker starts `later`.
+ */
 function keepsLine(line: string, later: string): boolean {
   if (later === line) return true;
-  const marker = line.endsWith(PERSISTENT_TRUNCATED) ? PERSISTENT_TRUNCATED : MEMORY_CUT_MARKER;
-  const at = line.lastIndexOf(marker);
-  return at > 0 && later.length > line.length - marker.length && later.startsWith(line.slice(0, at));
+  if (!line.endsWith(PERSISTENT_TRUNCATED)) return false;
+  const at = line.lastIndexOf(PERSISTENT_TRUNCATED);
+  return at > 0 && later.length > line.length - PERSISTENT_TRUNCATED.length && later.startsWith(line.slice(0, at));
 }
 
 /**
@@ -283,7 +285,7 @@ describe('MemoryPromptAssembler', () => {
       expect(result.contextText).not.toContain(MEMORY_CUT_MARKER);
     });
 
-    it('cuts a trace that does not fit what is left of its section to fit, at a word boundary, with a cut marker', () => {
+    it('leaves out a trace that does not fit its section, in every formatting style, though a cut of it would fit', () => {
       const content = wordsText(6000);
       for (const traits of [{ conscientiousness: 0.9 }, { openness: 0.9 }, { emotionality: 0.9 }]) {
         const result = assembleMemoryContext({
@@ -291,17 +293,9 @@ describe('MemoryPromptAssembler', () => {
           traits,
           retrievedTraces: [makeScoredTrace({ id: 'huge', type: 'semantic', content })],
         });
-        expect(result.includedMemoryIds).toEqual(['huge']);
-        const line = sectionLines(result.contextText, '## Relevant Memories')[0];
-        const at = line.indexOf(MEMORY_CUT_MARKER);
-        expect(at, JSON.stringify(traits)).toBeGreaterThan(0);
-        const kept = line.slice(0, at);
-        // The kept text ends on a whole word, and is far longer than a fixed 300-character cut.
-        expect(WORDS.some((word) => kept.endsWith(` ${word}`))).toBe(true);
-        expect(content.startsWith(kept.slice(kept.indexOf(WORDS[0])))).toBe(true);
-        expect(kept.length).toBeGreaterThan(600);
-        expect(result.tokensUsed).toBeLessThanOrEqual(250);
-        expect(tokensOf(result.contextText)).toBeLessThanOrEqual(250);
+        expect(result.contextText, JSON.stringify(traits)).toBe('');
+        expect(result.includedMemoryIds, JSON.stringify(traits)).toEqual([]);
+        expect(result.tokensUsed, JSON.stringify(traits)).toBe(0);
       }
     });
 
@@ -325,6 +319,317 @@ describe('MemoryPromptAssembler', () => {
       // With a boundary late enough, the same room keeps a cut.
       const later = makeScoredTrace({ content: `${'a'.repeat(40)} ${'b'.repeat(100)}` });
       expect(formatMemoryTrace(later, 'structured', { now, maxChars })).toContain(`${'a'.repeat(40)}${MEMORY_CUT_MARKER}`);
+    });
+  });
+
+  describe('whole memories only', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    const NOW = Date.UTC(2026, 10, 9, 12, 0, 0);
+    const SEMANTIC_HEADER = "## Relevant Memories (facts — use as background truth, don't announce)";
+    const EPISODIC_HEADER = '## Recent Experiences (events — weave in naturally, never list)';
+    const RELATED_HEADER = '## Related Context (connected memories — use for depth)';
+    const INVOLUNTARY_PREFIX = '[spontaneous memory] ';
+    const STYLES = [
+      ['structured', { conscientiousness: 0.9 }],
+      ['narrative', { openness: 0.9 }],
+      ['emotional', { emotionality: 0.9 }],
+    ] as const;
+    /** An allocation that gives the whole budget to section `key` and turns the others off. */
+    const only = (key: keyof typeof DEFAULT_BUDGET_ALLOCATION) => ({
+      persistentMemory: 0,
+      workingMemory: 0,
+      semanticRecall: 0,
+      recentEpisodic: 0,
+      prospectiveAlerts: 0,
+      graphAssociations: 0,
+      observationNotes: 0,
+      [key]: 1,
+    });
+    /** Tokens of a line of `chars` characters with its newline, by the assembler's estimate. */
+    const lineTokens = (chars: number) => Math.ceil((1 + chars) / 4);
+    const vividTrace = (content: string) =>
+      makeScoredTrace({
+        id: 'old-vivid',
+        type: 'episodic',
+        createdAt: NOW - 30 * DAY_MS,
+        content,
+        emotionalContext: { valence: 0.8, arousal: 0.9, dominance: 0.5, intensity: 0.72, gmiMood: 'FOCUSED' },
+      });
+
+    it('a memory that does not fit whole in what is left of its section is left out, never cut, and a later one that fits is shown whole', () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(NOW);
+      for (const [style, traits] of STYLES) {
+        const long = makeScoredTrace({ id: 'long', content: wordsText(500), createdAt: NOW });
+        const short = makeScoredTrace({ id: 'short', content: wordsText(150, 3), createdAt: NOW });
+        const longLine = memoryTraceLineLength(long, style, { now: NOW });
+        const shortLine = memoryTraceLineLength(short, style, { now: NOW });
+        // The least budget that holds the short line: under the preamble's threshold, with room for a cut of the long
+        // line and not for the long line.
+        const budget = Math.ceil((2 + SEMANTIC_HEADER.length + 1 + shortLine) / 4);
+        const room = 4 * budget - 2 - SEMANTIC_HEADER.length - 1;
+        expect(room, style).toBeLessThan(longLine);
+        expect(formatMemoryTrace(long, style, { now: NOW, maxChars: room }), style).toContain(MEMORY_CUT_MARKER);
+
+        const result = assembleMemoryContext({
+          totalTokenBudget: budget,
+          allocation: only('semanticRecall'),
+          traits,
+          retrievedTraces: [long, short],
+        });
+        expect(result.contextText, style).not.toContain(MEMORY_CUT_MARKER);
+        expect(sectionLines(result.contextText, '## Relevant Memories'), style).toEqual([formatMemoryTrace(short, style, { now: NOW })]);
+        expect(result.includedMemoryIds, style).toEqual(['short']);
+        expect(result.lineOutcomes, style).toEqual([
+          { id: 'long', section: 'semanticRecall', outcome: 'left_out', reason: 'section_full', tokens: lineTokens(longLine) },
+          { id: 'short', section: 'semanticRecall', outcome: 'included', tokens: lineTokens(shortLine) },
+        ]);
+        expect(result.tokensUsed, style).toBeLessThanOrEqual(budget);
+        expect(tokensOf(result.contextText), style).toBeLessThanOrEqual(budget);
+      }
+    });
+
+    it('reports why a memory is left out: budget when its section was offered no room, section_full when it did not fit the room offered', () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(NOW);
+      const trace = makeScoredTrace({ id: 'a', content: wordsText(40), createdAt: NOW });
+      const tokens = lineTokens(memoryTraceLineLength(trace, 'structured', { now: NOW }));
+
+      const none = assembleMemoryContext({ totalTokenBudget: 0, allocation: only('semanticRecall'), traits: {}, retrievedTraces: [trace] });
+      expect(none.contextText).toBe('');
+      expect(none.lineOutcomes).toEqual([{ id: 'a', section: 'semanticRecall', outcome: 'left_out', reason: 'budget', tokens }]);
+
+      // A section a share of 0 turns off is offered no room either, whatever the budget.
+      const off = assembleMemoryContext({ totalTokenBudget: 1600, allocation: { semanticRecall: 0 }, traits: {}, retrievedTraces: [trace] });
+      expect(off.contextText).not.toContain('## Relevant Memories');
+      expect(off.lineOutcomes).toEqual([{ id: 'a', section: 'semanticRecall', outcome: 'left_out', reason: 'budget', tokens }]);
+
+      // Twenty tokens hold the section's header and eight characters more: some room, too little for the line.
+      const small = assembleMemoryContext({ totalTokenBudget: 20, allocation: only('semanticRecall'), traits: {}, retrievedTraces: [trace] });
+      expect(small.contextText).toBe('');
+      expect(small.lineOutcomes).toEqual([{ id: 'a', section: 'semanticRecall', outcome: 'left_out', reason: 'section_full', tokens }]);
+
+      const whole = assembleMemoryContext({ totalTokenBudget: 1600, traits: {}, retrievedTraces: [trace] });
+      expect(whole.contextText).toContain(trace.content);
+      expect(whole.lineOutcomes).toEqual([{ id: 'a', section: 'semanticRecall', outcome: 'included', tokens }]);
+      expect(whole.lineOutcomes?.[0]).not.toHaveProperty('reason');
+    });
+
+    it('a graph association renders whole or not at all, with or without a trace id', () => {
+      const text = `[associated, activation=0.80] ${wordsText(500)}`;
+      const line = `- ${text}`;
+      // 69 tokens leave Related Context 218 characters for a line: room for a cut of this one, not for the line.
+      const tight = assembleMemoryContext({
+        totalTokenBudget: 69,
+        allocation: only('graphAssociations'),
+        traits: {},
+        graphContext: [{ traceId: 'g', text }, text],
+      });
+      expect(4 * 69 - 2 - RELATED_HEADER.length - 1).toBeLessThan(line.length);
+      expect(tight.contextText).toBe('');
+      expect(tight.tokensUsed).toBe(0);
+      // The association that carries a trace id is reported; a plain line leads to no trace.
+      expect(tight.lineOutcomes).toEqual([
+        { id: 'g', section: 'graphAssociations', outcome: 'left_out', reason: 'section_full', tokens: lineTokens(line.length) },
+      ]);
+
+      const budget = Math.ceil((2 + RELATED_HEADER.length + 1 + line.length) / 4);
+      const roomy = assembleMemoryContext({
+        totalTokenBudget: budget,
+        allocation: only('graphAssociations'),
+        traits: {},
+        graphContext: [{ traceId: 'g', text }],
+      });
+      expect(sectionLines(roomy.contextText, '## Related Context')).toEqual([line]);
+      expect(roomy.lineOutcomes).toEqual([
+        { id: 'g', section: 'graphAssociations', outcome: 'included', tokens: lineTokens(line.length) },
+      ]);
+    });
+
+    it('the involuntary memory renders whole or not at all', () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(NOW);
+      const vivid = vividTrace(wordsText(600));
+      const lineChars = INVOLUNTARY_PREFIX.length + memoryTraceLineLength(vivid, 'structured', { now: NOW });
+      const assemble = (budget: number) =>
+        assembleMemoryContext({
+          totalTokenBudget: budget,
+          traits: { conscientiousness: 0.9 },
+          mechanismsEngine: new CognitiveMechanismsEngine({ involuntaryRecall: { probability: 1 } }),
+          allTraces: [vivid],
+        });
+
+      // 100 tokens have room for a cut of the memory and not for the memory: nothing renders.
+      const tight = assemble(100);
+      expect(tight.contextText).toBe('');
+      expect(tight.includedMemoryIds).toEqual([]);
+      expect(tight.lineOutcomes).toEqual([
+        { id: 'old-vivid', section: 'involuntary', outcome: 'left_out', reason: 'section_full', tokens: lineTokens(lineChars) },
+      ]);
+
+      expect(assemble(0).lineOutcomes).toEqual([
+        { id: 'old-vivid', section: 'involuntary', outcome: 'left_out', reason: 'budget', tokens: lineTokens(lineChars) },
+      ]);
+
+      const roomy = assemble(250);
+      expect(roomy.contextText).toContain(`${INVOLUNTARY_PREFIX}${formatMemoryTrace(vivid, 'structured', { now: NOW })}`);
+      expect(roomy.contextText).not.toContain(MEMORY_CUT_MARKER);
+      expect(roomy.includedMemoryIds).toEqual(['old-vivid']);
+      expect(roomy.lineOutcomes).toEqual([
+        { id: 'old-vivid', section: 'involuntary', outcome: 'included', tokens: lineTokens(lineChars) },
+      ]);
+      expect(roomy.tokensUsed).toBeLessThanOrEqual(250);
+    });
+
+    describe('blocks whose memories all fit whole', () => {
+      const PREAMBLE_HEAD = [
+        '## How To Use Your Memories',
+        '',
+        '- **Working Memory**: Reference directly — this is your active context.',
+        "- **Semantic Recall** (facts): Background truth. Don't announce — let it shape responses naturally.",
+        '- **Episodic Memories** (experiences): Weave in naturally. Never list.',
+        '- **Prospective Alerts** (reminders): Act on these. Bring up naturally.',
+        '- **Relational Signals** (trust/bonds): Modulate TONE, not words. Never state explicitly.',
+        '- **Graph Associations** (connected memories): Use for richer context and connection depth.',
+        '- **Partial Memories** (feeling-of-knowing): Express uncertainty naturally — "I feel like we talked about..."',
+      ];
+      const preamble = (guidance: string) => [...PREAMBLE_HEAD, '', guidance].join('\n');
+      const TIMETABLE = 'We checked the harbor timetable together. The ferry to the island leaves at 7:40 from pier 3.';
+      const BASKET = '[associated, activation=0.40] We bought the picnic basket at the harbor market.';
+      const NIGHT = 'The night the whole team stayed up to fix the outage.';
+
+      /** A structured block of two traces: tags, a confidence above 0.8 and a retrieval score of its own. */
+      const structuredInput = (): MemoryAssemblerInput => ({
+        totalTokenBudget: 1600,
+        traits: {},
+        retrievedTraces: [
+          makeScoredTrace({ id: 'sem', type: 'semantic', content: 'The team meets on Thursdays.', createdAt: NOW, tags: ['team', 'calendar'] }),
+          makeScoredTrace({
+            id: 'epi',
+            type: 'episodic',
+            content: 'We walked to the harbor after the meeting.',
+            createdAt: NOW - 26 * DAY_MS,
+            provenance: { sourceType: 'user_statement', sourceTimestamp: NOW, confidence: 0.9, verificationCount: 0 },
+            retrievalScore: 0.62,
+          }),
+        ],
+      });
+      /** A narrative block with every section, and an association to a trace the block already holds. */
+      const narrativeInput = (): MemoryAssemblerInput => ({
+        totalTokenBudget: 1600,
+        traits: { openness: 0.9 },
+        persistentMemoryText: '# Notes\n- Prefers morning ferries.',
+        workingMemoryText: '- [ACTIVE] mt_0001 (activation: 0.90)\n- [fading] mt_0002 (activation: 0.40)',
+        retrievedTraces: [
+          makeScoredTrace({
+            id: 'd',
+            type: 'episodic',
+            content: TIMETABLE,
+            entities: ['the harbor master', 'the ferry captain', 'the night watch', 'a fourth the line leaves out'],
+            associatedTraceIds: ['e', 'f'],
+            createdAt: NOW - 3 * DAY_MS,
+          }),
+        ],
+        prospectiveAlerts: ['[time_based] Call the harbor office on Monday.'],
+        graphContext: [
+          { traceId: 'd', text: `[associated, activation=0.80] ${TIMETABLE}` },
+          { traceId: 'e', text: BASKET },
+          'A plain line that carries no trace id.',
+        ],
+        observationNotes: ['The user plans trips a week ahead.'],
+      });
+      /** An emotional block of one trace and the involuntary memory. */
+      const emotionalInput = (): MemoryAssemblerInput => ({
+        totalTokenBudget: 1600,
+        traits: { emotionality: 0.9 },
+        retrievedTraces: [
+          makeScoredTrace({
+            id: 'sem',
+            type: 'semantic',
+            content: 'The outage started in the billing queue.',
+            createdAt: NOW - 2 * 3_600_000,
+            emotionalContext: { valence: -0.6, arousal: 0.7, dominance: 0, intensity: 0.42, gmiMood: 'CONCERNED' },
+          }),
+        ],
+        mechanismsEngine: new CognitiveMechanismsEngine({ involuntaryRecall: { probability: 1 } }),
+        allTraces: [vividTrace(NIGHT)],
+      });
+
+      const STRUCTURED_BLOCK = [
+        preamble('Organize your references to past knowledge logically. Connect facts to the current discussion with clear reasoning.'),
+        '',
+        SEMANTIC_HEADER,
+        '- [semantic] The team meets on Thursdays. (just now, 2026-11-09 | moderate confidence | relevance: 0.80 | tags: team, calendar)',
+        '',
+        EPISODIC_HEADER,
+        '- [episodic] We walked to the harbor after the meeting. (26 days ago, 2026-10-14 | high confidence | relevance: 0.62)',
+      ].join('\n');
+      const NARRATIVE_BLOCK = [
+        preamble('Let memories flow into your responses as stories and associations. Draw creative connections between past and present.'),
+        '',
+        '## Persistent Memory',
+        '',
+        '# Notes',
+        '- Prefers morning ferries.',
+        '',
+        '## Active Context (in focus — reference directly)',
+        '- [ACTIVE] mt_0001 (activation: 0.90)',
+        '- [fading] mt_0002 (activation: 0.40)',
+        '',
+        EPISODIC_HEADER,
+        `3d ago, 2026-11-06: ${TIMETABLE} [linked to 2 other memories] (involves: the harbor master, the ferry captain, the night watch)`,
+        '',
+        '## Reminders (act on these — bring up naturally)',
+        '- [time_based] Call the harbor office on Monday.',
+        '',
+        RELATED_HEADER,
+        `- ${BASKET}`,
+        '- A plain line that carries no trace id.',
+        '',
+        '## Observations',
+        '- The user plans trips a week ahead.',
+      ].join('\n');
+      const EMOTIONAL_BLOCK = [
+        preamble('Let emotional memories influence your mood and empathy. If you recall a time the user was struggling, let that inform your warmth now.'),
+        '',
+        SEMANTIC_HEADER,
+        '(-) 2h ago, 2026-11-09: The outage started in the billing queue. [mood: CONCERNED]',
+        '',
+        '## Something This Reminds Me Of',
+        `${INVOLUNTARY_PREFIX}(+) 30 days ago, 2026-10-10: ${NIGHT} [strongly felt, mood: FOCUSED]`,
+      ].join('\n');
+
+      it('render byte for byte the block pinned for them: leaving out what does not fit changes no line of a block that holds everything', () => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        vi.setSystemTime(NOW);
+        // The three blocks are pinned from the assembler that cut a line to fit what was left of its section. None of
+        // their lines needed a cut, so the assembler that leaves such a line out renders them the same.
+        expect(assembleMemoryContext(structuredInput()).contextText).toBe(STRUCTURED_BLOCK);
+        expect(assembleMemoryContext(narrativeInput()).contextText).toBe(NARRATIVE_BLOCK);
+        expect(assembleMemoryContext(emotionalInput()).contextText).toBe(EMOTIONAL_BLOCK);
+      });
+
+      it('report every memory line as included, once: a trace the block shows in its own section is not reported again for its association', () => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        vi.setSystemTime(NOW);
+        const lineOf = (block: string, header: string, index = 0) => sectionLines(block, header)[index].length;
+
+        expect(assembleMemoryContext(structuredInput()).lineOutcomes).toEqual([
+          { id: 'sem', section: 'semanticRecall', outcome: 'included', tokens: lineTokens(lineOf(STRUCTURED_BLOCK, '## Relevant Memories')) },
+          { id: 'epi', section: 'recentEpisodic', outcome: 'included', tokens: lineTokens(lineOf(STRUCTURED_BLOCK, '## Recent Experiences')) },
+        ]);
+        expect(assembleMemoryContext(narrativeInput()).lineOutcomes).toEqual([
+          { id: 'd', section: 'recentEpisodic', outcome: 'included', tokens: lineTokens(lineOf(NARRATIVE_BLOCK, '## Recent Experiences')) },
+          { id: 'e', section: 'graphAssociations', outcome: 'included', tokens: lineTokens(lineOf(NARRATIVE_BLOCK, '## Related Context')) },
+        ]);
+        expect(assembleMemoryContext(emotionalInput()).lineOutcomes).toEqual([
+          { id: 'sem', section: 'semanticRecall', outcome: 'included', tokens: lineTokens(lineOf(EMOTIONAL_BLOCK, '## Relevant Memories')) },
+          { id: 'old-vivid', section: 'involuntary', outcome: 'included', tokens: lineTokens(lineOf(EMOTIONAL_BLOCK, '## Something This Reminds Me Of')) },
+        ]);
+      });
     });
   });
 
@@ -364,47 +669,64 @@ describe('MemoryPromptAssembler', () => {
       );
 
     it('gives an episodic-only recall the whole budget, never more', () => {
+      const traces = many('episodic', 20, 400);
       const result = assembleMemoryContext({
         totalTokenBudget: 1600,
         traits: { conscientiousness: 0.9 },
-        retrievedTraces: many('episodic', 20, 400),
+        retrievedTraces: traces,
       });
       const bullets = sectionLines(result.contextText, '## Recent Experiences');
       // A fixed 25% share held three of these.
       expect(bullets.length).toBeGreaterThan(8);
+      expect(result.contextText).not.toContain(MEMORY_CUT_MARKER);
       expect(result.tokensUsed).toBeLessThanOrEqual(1600);
-      expect(result.tokensUsed).toBeGreaterThan(1550);
       expect(tokensOf(result.contextText)).toBeLessThanOrEqual(1600);
+      // Whole traces only: the room left is smaller than the line of any trace left out.
+      const leftOut = traces.filter((trace) => !result.includedMemoryIds.includes(trace.id));
+      expect(leftOut.length).toBeGreaterThan(0);
+      const least = Math.min(...leftOut.map((trace) => memoryTraceLineLength(trace, 'structured')));
+      expect((1600 - result.tokensUsed) * 4).toBeLessThan(1 + least);
     });
 
     it('fills Semantic Recall first from the spare budget and keeps Recent Episodic at least its own share', () => {
       const budget = 4000;
+      const traces = [...many('semantic', 40, 400), ...many('episodic', 40, 400)];
       const result = assembleMemoryContext({
         totalTokenBudget: budget,
         traits: { conscientiousness: 0.9 },
-        retrievedTraces: [...many('semantic', 40, 400), ...many('episodic', 40, 400)],
+        retrievedTraces: traces,
       });
       const preambleTokens = tokensOf(result.contextText.split('\n\n## Relevant Memories')[0]);
       const available = budget - preambleTokens;
       const semantic = sectionLines(result.contextText, '## Relevant Memories').join('\n');
       const episodic = sectionLines(result.contextText, '## Recent Experiences').join('\n');
-      // Episodic's share, give or take the one trace cut to fit and what Semantic Recall left unspent.
-      expect(tokensOf(episodic)).toBeGreaterThanOrEqual(Math.floor(available * 0.25) - 80);
-      expect(tokensOf(episodic)).toBeLessThanOrEqual(Math.floor(available * 0.25) + 40);
+      /** Tokens of the longest trace line with its newline: the most a section leaves unspent when a trace does not fit. */
+      const lineTokens = Math.ceil((1 + Math.max(...traces.map((trace) => memoryTraceLineLength(trace, 'structured')))) / 4);
+      // Episodic's share, give or take one whole trace: the trace that does not fit it, and what Semantic Recall left
+      // unspent for the same reason. The 20 tokens cover the section's header and the rounding.
+      expect(tokensOf(episodic)).toBeGreaterThan(Math.floor(available * 0.25) - lineTokens - 20);
+      expect(tokensOf(episodic)).toBeLessThanOrEqual(Math.floor(available * 0.25) + lineTokens);
       // Semantic gets its 40% plus every share no other section used.
       expect(tokensOf(semantic)).toBeGreaterThan(Math.floor(available * 0.7) - 60);
       expect(result.tokensUsed).toBeLessThanOrEqual(budget);
     });
 
-    it('gives the grant of a working memory too long for it back to the recalled traces', () => {
-      const result = assembleMemoryContext({
+    it('gives the grant of a working memory too long for the block back to the recalled traces', () => {
+      const input: MemoryAssemblerInput = {
         totalTokenBudget: 600,
         traits: { conscientiousness: 0.9 },
-        workingMemoryText: wordsText(301),
+        workingMemoryText: wordsText(3000),
         retrievedTraces: many('semantic', 20, 400),
-      });
-      // The whole budget less what the cut trace's word boundary and minimum can leave.
-      expect(result.tokensUsed).toBeGreaterThan(560);
+      };
+      const result = assembleMemoryContext(input);
+      expect(result.contextText).not.toContain('## Active Context');
+      // The second pass gives working memory's unspent grant to Relevant Memories, which then holds one more trace.
+      expect(result.includedMemoryIds.length).toBeGreaterThan(assembleMemoryContextFirstPass(input).includedMemoryIds.length);
+      // Whole traces only: the room left is smaller than the line of any trace left out.
+      const leftOut = input.retrievedTraces!.filter((trace) => !result.includedMemoryIds.includes(trace.id));
+      expect(leftOut.length).toBeGreaterThan(0);
+      const least = Math.min(...leftOut.map((trace) => memoryTraceLineLength(trace, 'structured')));
+      expect((600 - result.tokensUsed) * 4).toBeLessThan(1 + least);
       expect(result.tokensUsed).toBeLessThanOrEqual(600);
       expect(tokensOf(result.contextText)).toBeLessThanOrEqual(600);
     });
@@ -457,7 +779,7 @@ describe('MemoryPromptAssembler', () => {
       const cases = [
         // A tenth of 500 tokens after the preamble has no room for the line; the rest of the block is empty.
         { budget: 500, content: 'The night the whole team stayed up to fix the outage.' },
-        // A tenth of 1600 tokens would cut this trace; the rest of the block is empty.
+        // A tenth of 1600 tokens does not hold this trace; the rest of the block is empty.
         { budget: 1600, content: wordsText(1500) },
       ];
       for (const { budget, content } of cases) {
@@ -621,23 +943,17 @@ describe('MemoryPromptAssembler', () => {
       }
     });
 
-    it('a graph association too long for what is left of its section is cut to fit at a word boundary, its tag whole', () => {
+    it('a graph association too long for what is left of its section is left out whole, and rendered whole when it fits', () => {
       const content = `${wordsText(400)} The spare key is under the blue flowerpot. ${wordsText(2000, 3)}`;
       const item = `[associated, activation=0.80] ${content}`;
+      // 200 tokens have room for a cut of the association that would keep the fact, and not for the association.
       const result = assembleMemoryContext({ totalTokenBudget: 200, traits: {}, graphContext: [item] });
-      const [line] = sectionLines(result.contextText, '## Related Context');
-      expect(line).toBeDefined();
-      expect(line.startsWith('- [associated, activation=0.80] ')).toBe(true);
-      expect(line.endsWith(MEMORY_CUT_MARKER)).toBe(true);
-      const kept = line.slice('- [associated, activation=0.80] '.length, -MEMORY_CUT_MARKER.length);
-      expect(content.startsWith(kept)).toBe(true);
-      expect(content[kept.length]).toBe(' ');
-      expect(kept).toContain('The spare key is under the blue flowerpot.');
-      expect(result.tokensUsed).toBeLessThanOrEqual(200);
-      expect(tokensOf(result.contextText)).toBeLessThanOrEqual(200);
+      expect(result.contextText).toBe('');
+      expect(result.tokensUsed).toBe(0);
       // Whole when it fits.
       const whole = assembleMemoryContext({ totalTokenBudget: 1600, traits: {}, graphContext: [item.slice(0, 700)] });
       expect(whole.contextText).toContain(item.slice(0, 700));
+      expect(whole.contextText).not.toContain(MEMORY_CUT_MARKER);
     });
 
     it('leaves out of Related Context an association to a trace the block already holds, and the next association takes its room', () => {
@@ -673,32 +989,74 @@ describe('MemoryPromptAssembler', () => {
       expect(sectionLines(plain.contextText, '## Related Context').join('\n')).toContain(fact);
     });
 
-    it('shows a trace once when the second pass has room for it: Related Context keeps the association the first pass showed, and the room still goes to the block', () => {
-      // The first pass shows the second episodic trace only through its association, cut to fit Related Context. The
-      // second pass has room for the trace in Recent Experiences, which leaves it out, as the block already shows it;
-      // the room goes to the association's cut instead of staying unspent.
-      const budget = 820;
-      const fact = makeScoredTrace({ id: 'sem', type: 'semantic', content: `Harbor notes: ${wordsText(950)}` });
-      const first = makeScoredTrace({ id: 'epi-1', type: 'episodic', content: `Lantern walk: ${wordsText(950, 1)}` });
-      const second = makeScoredTrace({ id: 'epi-2', type: 'episodic', content: `Ferry log: ${wordsText(950, 2)}` });
-      const result = assembleMemoryContext({
-        totalTokenBudget: budget,
-        traits: {},
-        retrievedTraces: [fact, first, second],
-        graphContext: [{ traceId: 'epi-2', text: `[associated, activation=0.70] ${second.content}` }],
+    it('shows a trace once when the second pass has room for it: Related Context keeps the association the first pass showed, and the room goes to the next trace', () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      const now = Date.UTC(2026, 10, 9, 12, 0, 0);
+      vi.setSystemTime(now);
+      const traits = { openness: 0.9 };
+      const style = 'narrative' as const;
+      const first = makeScoredTrace({ id: 'epi-1', type: 'episodic', content: `Lantern walk: ${wordsText(120, 1)}`, createdAt: now });
+      const second = makeScoredTrace({ id: 'epi-2', type: 'episodic', content: `Ferry log: ${wordsText(60, 2)}`, createdAt: now });
+      const third = makeScoredTrace({ id: 'epi-3', type: 'episodic', content: `Harbor notes: ${wordsText(60, 3)}`, createdAt: now });
+      const association = { traceId: 'epi-2', text: '[associated, activation=0.70] Ferry log, in short.' };
+      const [firstLine, secondLine, thirdLine] = [first, second, third].map((trace) => memoryTraceLineLength(trace, style, { now }));
+      const associationLine = 2 + association.text.length;
+      const episodicOverhead = 2 + '## Recent Experiences (events — weave in naturally, never list)'.length;
+      const relatedOverhead = 2 + '## Related Context (connected memories — use for depth)'.length;
+      // First pass: Recent Experiences renders on the tokens its first trace needs, with no room for another, and
+      // Related Context on the tokens its association needs. The note is too long for any room, so its grant goes unspent.
+      const episodicTokens = Math.ceil((episodicOverhead + 1 + firstLine) / 4);
+      const relatedTokens = Math.ceil((relatedOverhead + 1 + associationLine) / 4);
+      // Second pass: the note's grant gives Recent Experiences room for either of the two other traces, not for both.
+      const noteTokens = Math.ceil((1 + Math.max(secondLine, thirdLine)) / 4) + 1;
+      const total = episodicTokens + relatedTokens + noteTokens;
+      const secondPassRoom = 4 * (episodicTokens + noteTokens) - episodicOverhead - 1 - firstLine;
+      expect(secondPassRoom).toBeGreaterThanOrEqual(1 + secondLine);
+      expect(secondPassRoom).toBeGreaterThanOrEqual(1 + thirdLine);
+      expect(secondPassRoom).toBeLessThan(2 + secondLine + thirdLine);
+      const input: MemoryAssemblerInput = {
+        totalTokenBudget: total,
+        allocation: {
+          persistentMemory: 0,
+          workingMemory: 0,
+          semanticRecall: 0,
+          prospectiveAlerts: 0,
+          recentEpisodic: 0.1,
+          graphAssociations: (relatedTokens + 0.5) / total,
+          observationNotes: (noteTokens + 0.5) / total,
+        },
+        traits,
+        retrievedTraces: [first, second, third],
+        graphContext: [association],
         observationNotes: [wordsText(4000, 5)],
-      });
-      expect(result.contextText.split('Ferry log:')).toHaveLength(2);
-      expect(sectionLines(result.contextText, '## Related Context').join('\n')).toContain('Ferry log:');
-      expect(sectionLines(result.contextText, '## Recent Experiences').join('\n')).not.toContain('Ferry log:');
-      expect(result.includedMemoryIds).toEqual(['sem', 'epi-1']);
-      // Something is left out (the association is cut, the note does not fit), so the block fills the budget but for
-      // the few characters a cut at a word boundary leaves.
-      expect(result.tokensUsed).toBeLessThanOrEqual(budget);
-      expect(result.tokensUsed).toBeGreaterThanOrEqual(budget - 5);
+      };
+
+      // The first pass shows the second trace only through its association.
+      const firstPass = assembleMemoryContextFirstPass(input);
+      expect(sectionLines(firstPass.contextText, '## Recent Experiences')).toEqual([formatMemoryTrace(first, style, { now })]);
+      expect(sectionLines(firstPass.contextText, '## Related Context')).toEqual([`- ${association.text}`]);
+
+      // The second pass has room for the second trace in Recent Experiences, which leaves it out, as the block already
+      // shows it; the room goes to the third trace instead of staying unspent.
+      const result = assembleMemoryContext(input);
+      expect(result.contextText.split('Ferry log')).toHaveLength(2);
+      expect(sectionLines(result.contextText, '## Related Context')).toEqual([`- ${association.text}`]);
+      expect(sectionLines(result.contextText, '## Recent Experiences')).toEqual([
+        formatMemoryTrace(first, style, { now }),
+        formatMemoryTrace(third, style, { now }),
+      ]);
+      expect(result.includedMemoryIds).toEqual(['epi-1', 'epi-3']);
+      expect(result.tokensUsed).toBeLessThanOrEqual(total);
+      expect(tokensOf(result.contextText)).toBeLessThanOrEqual(total);
+      // Each trace is reported once: the second under Related Context, which shows it.
+      expect(result.lineOutcomes).toEqual([
+        { id: 'epi-1', section: 'recentEpisodic', outcome: 'included', tokens: Math.ceil((1 + firstLine) / 4) },
+        { id: 'epi-3', section: 'recentEpisodic', outcome: 'included', tokens: Math.ceil((1 + thirdLine) / 4) },
+        { id: 'epi-2', section: 'graphAssociations', outcome: 'included', tokens: Math.ceil((1 + associationLine) / 4) },
+      ]);
     });
 
-    it('keeps working memory to its leading slots when a longer slot does not fit, and skips a graph association too short to cut', () => {
+    it('keeps working memory to its leading slots when a longer slot does not fit, and skips a graph association that does not fit', () => {
       // Slots arrive sorted by activation, highest first; a shorter slot after one that does not fit stays out.
       const slots = [
         '- [ACTIVE] mt_first (activation: 0.95)',
@@ -765,10 +1123,8 @@ describe('MemoryPromptAssembler', () => {
 
       const short = makeScoredTrace({ id: 'short', content: 'The gate code is 4417 at night.', createdAt: now });
       const long = makeScoredTrace({ id: 'long', content: wordsText(2000), createdAt: now });
+      // The room left after the first trace holds the short line, and the long one does not fit it.
       const lineShort = memoryTraceLineLength(short, 'structured', { now });
-      const bareLong = memoryTraceLineLength(long, 'structured', { now }) - long.content.length;
-      // The room left after the first trace holds the short line whole but not the least cut of the long one.
-      expect(lineShort).toBeLessThan(bareLong + MEMORY_CUT_MARKER.length + MIN_CUT_CONTENT_CHARS);
 
       const budget = 200; // under the preamble's threshold, so the section has the whole budget
       const firstLine = 4 * budget - header.length - 4 - lineShort;
@@ -850,18 +1206,18 @@ describe('MemoryPromptAssembler', () => {
         vi.useFakeTimers({ toFake: ['Date'] });
         const now = Date.UTC(2026, 10, 9, 12, 0, 0);
         vi.setSystemTime(now);
-        const long = makeScoredTrace({ id: 'long', type: 'episodic', content: wordsText(2000), createdAt: now });
         const short = makeScoredTrace({ id: 'short', type: 'episodic', content: fact, createdAt: now });
         const bare = memoryTraceLineLength(makeScoredTrace({ type: 'episodic', content: '', createdAt: now }), style, { now });
         const shortLine = memoryTraceLineLength(short, style, { now });
         const overhead = sectionOverhead(now);
 
-        // First pass: room for the short line, too little for the least cut of the long trace.
-        const first = Math.ceil((overhead + bare + 42) / 4);
+        // First pass: room for the short line, too little for the long one, eight characters longer than the room.
+        const first = Math.ceil((overhead + shortLine) / 4);
         const firstRoom = 4 * first - overhead;
         expect(shortLine).toBeLessThanOrEqual(firstRoom);
-        expect(firstRoom - bare - MEMORY_CUT_MARKER.length).toBeLessThan(MIN_CUT_CONTENT_CHARS);
-        // Twenty characters more: the long trace's cut fills the room and the short line no longer fits.
+        const long = makeScoredTrace({ id: 'long', type: 'episodic', content: 'b'.repeat(firstRoom + 8 - bare), createdAt: now });
+        expect(memoryTraceLineLength(long, style, { now })).toBe(firstRoom + 8);
+        // Twenty characters more: the long line fits whole, and the short line no longer fits after it.
         const total = first + 5;
         expect(alone(first, [long, short])).toEqual(['short']);
         expect(alone(total, [long, short])).toEqual(['long']);
@@ -879,8 +1235,7 @@ describe('MemoryPromptAssembler', () => {
         vi.useFakeTimers({ toFake: ['Date'] });
         const now = Date.UTC(2026, 10, 9, 12, 0, 0);
         vi.setSystemTime(now);
-        // Entities lengthen a line without lengthening its content, so the long trace's least cut needs more room than
-        // the short trace's whole line.
+        // Entities lengthen a line without lengthening its content.
         const long = makeScoredTrace({
           id: 'long',
           type: 'episodic',
@@ -896,22 +1251,18 @@ describe('MemoryPromptAssembler', () => {
           createdAt: now,
         });
         const longLine = memoryTraceLineLength(long, style, { now });
-        const longBare = longLine - long.content.length;
         const shortLine = memoryTraceLineLength(short, style, { now });
-        const shortBare = shortLine - short.content.length;
         const overhead = sectionOverhead(now);
         const association = { traceId: 'short', text: '[associated, activation=0.70] Ferry at 7:40.' };
         const graphChars = 2 + '## Related Context (connected memories — use for depth)'.length + 1 + 2 + association.text.length;
 
-        // First pass: room for the short line whole, too little for the long line or its least cut.
+        // First pass: room for the short line, too little for the long line.
         const first = Math.ceil((overhead + shortLine) / 4);
         const firstRoom = 4 * first - overhead;
         expect(firstRoom).toBeLessThan(longLine);
-        expect(firstRoom - longBare - MEMORY_CUT_MARKER.length).toBeLessThan(MIN_CUT_CONTENT_CHARS);
-        // Second pass: the long line whole, then too little room for the short line or its least cut, but what is left
-        // holds Related Context with the association.
+        // Second pass: the long line, then too little room for the short line, but what is left holds Related Context
+        // with the association.
         const left = shortLine - 11;
-        expect(left - 1).toBeLessThan(shortBare + MEMORY_CUT_MARKER.length + MIN_CUT_CONTENT_CHARS);
         expect(Math.floor((left - 3) / 4) * 4).toBeGreaterThanOrEqual(graphChars);
         const total = Math.ceil((overhead + longLine + left) / 4);
         expect(alone(first, [long, short])).toEqual(['short']);
@@ -1033,46 +1384,43 @@ describe('MemoryPromptAssembler', () => {
     });
 
     const RELATED_HEADER = '## Related Context (connected memories — use for depth)';
-    /** The least `maxChars` for which `fits` holds. */
-    const leastRoom = (fits: (maxChars: number) => boolean): number => {
-      for (let maxChars = 0; maxChars <= 2000; maxChars++) if (fits(maxChars)) return maxChars;
-      throw new Error('nothing up to 2000 characters fits');
-    };
 
-    it('keeps a Related Context line the first pass showed when the room left over would fit a cut of a long line before it (R2)', () => {
-      const long = wordsText(2000);
+    it('keeps a Related Context line the first pass showed when the room left over would hold a longer line before it on its own (R2)', () => {
       const short = 'Call Ana at noon';
       const overhead = 2 + RELATED_HEADER.length; // the separator and the header
       const total = 40;
-      // The first pass renders Related Context on its 20 tokens: the line room holds the short line whole, not the
-      // least cut of the long one. The note is too long for any room, so its 20 tokens go unspent.
+      // The first pass renders Related Context on its 20 tokens: the line room holds the short line, not the long one.
+      // The note is too long for any room, so its 20 tokens go unspent.
       const firstRoom = 4 * 20 - overhead - 1;
       expect(firstRoom).toBeGreaterThanOrEqual(2 + short.length);
-      expect(cutMemoryContent(long, firstRoom - 2)).toBe('');
-      // On all 40 tokens, a cut of the long line fits the room the short line would take.
-      expect(cutMemoryContent(long, 4 * total - overhead - 1 - 2)).not.toBe('');
+      // On all 40 tokens the long line fits on its own, with no room for the short line after it; beside the short
+      // line the first pass showed, it does not fit.
+      const totalRoom = 4 * total - overhead - 1;
+      const long = 'x'.repeat(totalRoom - 2 - 4);
+      const longLine = 2 + long.length;
+      expect(longLine).toBeGreaterThan(firstRoom);
+      expect(totalRoom - longLine - 1).toBeLessThan(2 + short.length);
+      expect(totalRoom - (2 + short.length) - 1).toBeLessThan(longLine);
+      const off = { persistentMemory: 0, workingMemory: 0, semanticRecall: 0, recentEpisodic: 0, prospectiveAlerts: 0 };
       const input: MemoryAssemblerInput = {
         totalTokenBudget: total,
-        allocation: {
-          persistentMemory: 0,
-          workingMemory: 0,
-          semanticRecall: 0,
-          recentEpisodic: 0,
-          prospectiveAlerts: 0,
-          graphAssociations: 0.5,
-          observationNotes: 0.5,
-        },
+        allocation: { ...off, graphAssociations: 0.5, observationNotes: 0.5 },
         traits: {},
         graphContext: [long, short],
         observationNotes: [wordsText(4000, 5)],
       };
+      // Rendered from scratch on all 40 tokens, Related Context holds the long line alone.
+      const scratch = assembleMemoryContext({
+        totalTokenBudget: total,
+        allocation: { ...off, graphAssociations: 1, observationNotes: 0 },
+        traits: {},
+        graphContext: [long, short],
+      });
+      expect(sectionLines(scratch.contextText, '## Related Context')).toEqual([`- ${long}`]);
 
       const result = assembleMemoryContext(input);
-      const lines = sectionLines(result.contextText, '## Related Context');
-      expect(lines.at(-1)).toBe(`- ${short}`);
-      expect(lines).toHaveLength(2);
-      expect(lines[0].startsWith(`- ${long.slice(0, 40)}`)).toBe(true);
-      expect(lines[0].endsWith(MEMORY_CUT_MARKER)).toBe(true);
+      expect(sectionLines(result.contextText, '## Related Context')).toEqual([`- ${short}`]);
+      expect(result.contextText).not.toContain(MEMORY_CUT_MARKER);
       expect(result.tokensUsed).toBeLessThanOrEqual(total);
       expect(tokensOf(result.contextText)).toBeLessThanOrEqual(total);
 
@@ -1080,14 +1428,13 @@ describe('MemoryPromptAssembler', () => {
       expectKeepsFirstPass(input, 'R2');
     });
 
-    it('keeps a recalled trace the first pass showed when a longer one would take its room and a later Related Context line would push out the association that showed it (R1)', () => {
+    it('keeps a recalled trace the first pass showed when a longer one would take its room, and adds a later Related Context line beside the association that shows another (R1)', () => {
       vi.useFakeTimers({ toFake: ['Date'] });
       const now = Date.UTC(2026, 10, 9, 12, 0, 0);
       vi.setSystemTime(now);
       const traits = { openness: 0.9 };
       const style = 'narrative' as const;
       const entities = ['the harbor master of the north landing', 'the ferry captain of the evening crossing', 'the night watch at the east gate'];
-      // Short content beside long entity lists: X and S are shown whole or not at all, never cut.
       const x = makeScoredTrace({ id: 'x', type: 'semantic', content: 'The gate code is 4417.', entities, createdAt: now });
       const s = makeScoredTrace({
         id: 's',
@@ -1099,16 +1446,14 @@ describe('MemoryPromptAssembler', () => {
       const e = makeScoredTrace({ id: 'e', type: 'episodic', content: 'We walked to the harbor.', createdAt: now });
       const y = makeScoredTrace({ id: 'y', type: 'episodic', content: wordsText(400), createdAt: now });
       const toY = { traceId: 'y', text: '[associated, activation=0.70] Ferry log for the evening crossing, kept by the harbor master at 9pm' };
-      const tag = '[associated through the harbor ledger and a ferry timetable] ';
-      const plainLong = `${tag}${wordsText(2000)}`;
+      const plain = `[associated through the harbor ledger and a ferry timetable] ${wordsText(50)}`;
       const toX = { traceId: 'x', text: 'Gate code 4417.' };
 
       const lineLength = (trace: ScoredMemoryTrace) => memoryTraceLineLength(trace, style, { now });
       expect([lineLength(x), lineLength(s), lineLength(e)]).toEqual([172, 201, 46]);
-      // The least room a cut of Y needs, and a cut of the long Related Context line (its tag kept whole).
-      expect(leastRoom((maxChars) => formatMemoryTrace(y, style, { now, maxChars }) !== '')).toBe(73);
-      expect(2 + tag.length + leastRoom((maxChars) => cutMemoryContent(wordsText(2000), maxChars) !== '')).toBe(114);
-      expect(2 + toY.text.length).toBe(100);
+      // The two Related Context lines that can show: Y's association, and the plain line, longer than the 9
+      // characters the first pass leaves after it and shorter than the 129 the second pass offers.
+      expect([2 + toY.text.length, 2 + plain.length]).toEqual([100, 115]);
       // On its own, Relevant Memories holds X on the 62 tokens the first pass gives it, and S alone, X pushed out, when
       // rendered from scratch on the 94 the second pass offers.
       const alone = (budget: number) => assembleMemoryContext({ totalTokenBudget: budget, traits, retrievedTraces: [s, x] }).includedMemoryIds;
@@ -1129,7 +1474,7 @@ describe('MemoryPromptAssembler', () => {
         },
         traits,
         retrievedTraces: [s, x, e, y],
-        graphContext: [toY, plainLong, toX],
+        graphContext: [toY, plain, toX],
         observationNotes: [wordsText(4000, 5)],
       };
 
@@ -1140,17 +1485,24 @@ describe('MemoryPromptAssembler', () => {
       expect(result.contextText).not.toContain(toX.text);
       // Y stays shown once, through its association; Recent Experiences does not take it again.
       expect(sectionLines(result.contextText, '## Recent Experiences')).toEqual([formatMemoryTrace(e, style, { now })]);
-      const related = sectionLines(result.contextText, '## Related Context');
-      expect(related).toHaveLength(2);
-      expect(related[0]).toBe(`- ${toY.text}`);
-      expect(related[1].startsWith(`- ${tag}harbor`)).toBe(true);
-      expect(related[1].endsWith(MEMORY_CUT_MARKER)).toBe(true);
+      // The second pass adds the plain line after the association, whole.
+      expect(sectionLines(result.contextText, '## Related Context')).toEqual([`- ${toY.text}`, `- ${plain}`]);
+      expect(result.contextText).not.toContain(MEMORY_CUT_MARKER);
       expect(result.includedMemoryIds).toEqual(['x', 'e']);
       expect(result.tokensUsed).toBeLessThanOrEqual(total);
       expect(tokensOf(result.contextText)).toBeLessThanOrEqual(total);
+      // One entry a trace, in the block's order: S left out of the room Relevant Memories was offered, Y under
+      // Related Context, which shows it, and nothing again for X's association.
+      const lineTokens = (chars: number) => Math.ceil((1 + chars) / 4);
+      expect(result.lineOutcomes).toEqual([
+        { id: 's', section: 'semanticRecall', outcome: 'left_out', reason: 'section_full', tokens: lineTokens(201) },
+        { id: 'x', section: 'semanticRecall', outcome: 'included', tokens: lineTokens(172) },
+        { id: 'e', section: 'recentEpisodic', outcome: 'included', tokens: lineTokens(46) },
+        { id: 'y', section: 'graphAssociations', outcome: 'included', tokens: lineTokens(100) },
+      ]);
 
       // The first pass: X in Relevant Memories, E in Recent Experiences, and Y through its association in Related
-      // Context, where the long line does not fit after it and X's association is left out as a duplicate.
+      // Context, where the plain line does not fit after it and X's association is left out as a duplicate.
       const first = assembleMemoryContextFirstPass(input);
       expect(sectionLines(first.contextText, '## Relevant Memories')).toEqual([formatMemoryTrace(x, style, { now })]);
       expect(sectionLines(first.contextText, '## Recent Experiences')).toEqual([formatMemoryTrace(e, style, { now })]);
@@ -1158,7 +1510,7 @@ describe('MemoryPromptAssembler', () => {
       expectKeepsFirstPass(input, 'R1');
     });
 
-    it('keeps every line the first pass renders, shows each trace once and stays within the budget, over generated blocks', () => {
+    it('keeps every line the first pass renders, shows each trace once, cuts no memory line, reports each trace once and stays within the budget, over generated blocks', () => {
       vi.useFakeTimers({ toFake: ['Date'] });
       const now = Date.UTC(2026, 10, 9, 12, 0, 0);
       vi.setSystemTime(now);
@@ -1176,7 +1528,7 @@ describe('MemoryPromptAssembler', () => {
           return makeScoredTrace({
             id,
             type: random() < 0.5 ? 'semantic' : 'episodic',
-            // Short content is shown whole or not at all; long content can be cut.
+            // Lines of every length: each is shown whole or not at all.
             content: text(id, random() < 0.4 ? int(1, 40) : int(41, 900)),
             entities: random() < 0.3 ? ['the harbor master', 'the ferry captain of the evening crossing'] : [],
             createdAt: now - int(0, 40) * DAY_MS,
@@ -1234,6 +1586,44 @@ describe('MemoryPromptAssembler', () => {
         const referenced = sectionLines(result.contextText, '## Related Context').flatMap((line) => /ref:(\S+)/.exec(line)?.[1] ?? []);
         for (const id of referenced) expect(result.includedMemoryIds, `${label} ${id}`).not.toContain(id);
         expect(new Set(result.includedMemoryIds).size, label).toBe(result.includedMemoryIds.length);
+
+        // No memory line is cut.
+        expect(result.contextText, label).not.toContain(MEMORY_CUT_MARKER);
+        // Every trace the block was given a line for (a retrieved trace, an association that carries its trace's id,
+        // the involuntary memory) is reported once, with what became of it.
+        const outcomes = result.lineOutcomes ?? [];
+        const given = new Set([
+          ...traces.map((trace) => trace.id),
+          ...graphContext.flatMap((item) => (typeof item === 'string' ? [] : [item.traceId])),
+          ...(vivid ? [vivid.id] : []),
+        ]);
+        expect(outcomes.map((line) => line.id).sort(), label).toEqual([...given].sort());
+        const shown = blockSections(result.contextText);
+        const shows = (header: string, needle: string) => (shown.get(header) ?? []).some((line) => line.includes(needle));
+        for (const line of outcomes) {
+          const where = `${label} ${line.id} (${line.section})`;
+          // A trace's own line starts its content with its id; an association names the trace it leads to after `ref:`.
+          const inTraceSection = shows('## Relevant Memories', `${line.id}: `) || shows('## Recent Experiences', `${line.id}: `);
+          const inRelated = shows('## Related Context', `ref:${line.id} `);
+          const asInvoluntary = shows('## Something This Reminds Me Of', `${line.id}: `);
+          expect(line.tokens, where).toBeGreaterThan(0);
+          if (line.outcome === 'included') {
+            expect(line.reason, where).toBeUndefined();
+            const inItsSection =
+              line.section === 'graphAssociations' ? inRelated : line.section === 'involuntary' ? asInvoluntary : inTraceSection;
+            expect(inItsSection, `${where} is shown there`).toBe(true);
+          } else {
+            expect(line.outcome, where).toBe('left_out');
+            expect(['budget', 'section_full'], where).toContain(line.reason);
+            if (input.totalTokenBudget === 0) expect(line.reason, where).toBe('budget');
+            expect(inTraceSection || inRelated || asInvoluntary, `${where} is shown nowhere`).toBe(false);
+          }
+        }
+        // The ids the block lists as included are the traces shown in their own section, and the involuntary memory.
+        expect(
+          outcomes.filter((line) => line.outcome === 'included' && line.section !== 'graphAssociations').map((line) => line.id).sort(),
+          label,
+        ).toEqual([...result.includedMemoryIds].sort());
       }
     });
   });

@@ -8,10 +8,11 @@
  * - **emotional** (high emotionality): includes emotional context annotations
  *
  * A trace's content is rendered whole. Only a caller that passes
- * `maxChars` (the prompt assembler, when a trace does not fit what is left
- * of its section's budget) gets a shortened line: the content is cut at a
- * word boundary so the whole line fits `maxChars`, and ends with
- * {@link MEMORY_CUT_MARKER}. A cut never splits a surrogate pair.
+ * `maxChars` gets a shortened line: the content is cut at a word boundary so
+ * the whole line fits `maxChars`, and ends with {@link MEMORY_CUT_MARKER}. A
+ * cut never splits a surrogate pair. The cut form is for callers outside the
+ * memory block: the prompt assembler passes no `maxChars`, and shows a trace
+ * whole or leaves it out.
  *
  * Each line carries the trace's age and the UTC calendar date it was stored:
  * `just now`, `Nm ago` and `Nh ago` under a day; from a day on, the number of
@@ -35,14 +36,15 @@ export interface FormatMemoryTraceOptions {
    * line is longer, the content is cut at a word boundary to fit and ends with
    * {@link MEMORY_CUT_MARKER}; when even a short cut does not fit
    * ({@link MIN_CUT_CONTENT_CHARS} characters of content), the result is the
-   * empty string. Omitted: the content is rendered whole.
+   * empty string. Omitted: the content is rendered whole. The memory block
+   * never passes it: no line of the block is a trace cut to fit.
    */
   maxChars?: number;
   /** The time ages are measured from, in epoch ms. Defaults to `Date.now()`. */
   now?: number;
 }
 
-/** Ends the content of a trace the formatter had to cut to fit a budget. */
+/** Ends the content of a trace the formatter cut to fit a caller's `maxChars`. No line of the memory block carries it. */
 export const MEMORY_CUT_MARKER = ' …[cut]';
 
 /** The least content, in characters, worth keeping when a trace is cut. */

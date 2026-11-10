@@ -7,7 +7,8 @@
  * provider classes are stubbed (helpers/stubProviders.ts), and the OpenAI
  * stub embeds with a deterministic word hash, so texts that share words
  * recall each other. The memory assembler runs unchanged; a wrapper records
- * its first pass on the same input beside the block it returns.
+ * its first pass on the same input beside the block it returns and what it
+ * reports of each memory line.
  *
  * Each case clears the session's history before the turn it reads, so what it
  * finds in the block reached the prompt through recall, not through history.
@@ -19,6 +20,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CognitiveMemoryPersonaConfig } from '../../cognition/memory/core/config';
+import type { AssembledLineOutcome } from '../../cognition/memory/core/types';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
 const personaMemory = vi.hoisted(() => ({ config: undefined as CognitiveMemoryPersonaConfig | undefined }));
 vi.mock('../runtime/gmiPersona', async (importOriginal) => {
@@ -32,8 +34,21 @@ vi.mock('../runtime/gmiPersona', async (importOriginal) => {
   };
 });
 // Each assembly also renders its first pass on the same input, so a case can check the block the model receives
-// against it. The returned block is the real one: the wrapper hands back what assembleMemoryContext returns.
-const assemblies = vi.hoisted(() => [] as { firstPass: string; block: string }[]);
+// against it, and keeps what the assembly reports of each memory line. The returned block is the real one: the
+// wrapper hands back what assembleMemoryContext returns.
+const assemblies = vi.hoisted(
+  () =>
+    [] as {
+      firstPass: string;
+      block: string;
+      lineOutcomes: AssembledLineOutcome[];
+      includedMemoryIds: string[];
+      /** The content of each trace the assembler was given a line for (retrieved, or led to by an association), by id. */
+      contents: Map<string, string>;
+      /** The ids of the retrieved traces, in the order recall ranked them. */
+      rank: string[];
+    }[],
+);
 vi.mock('../../cognition/memory/core/prompt/MemoryPromptAssembler', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../cognition/memory/core/prompt/MemoryPromptAssembler')>();
   return {
@@ -41,7 +56,21 @@ vi.mock('../../cognition/memory/core/prompt/MemoryPromptAssembler', async (impor
     assembleMemoryContext: (input: Parameters<typeof actual.assembleMemoryContext>[0]) => {
       const firstPass = actual.assembleMemoryContextFirstPass(input);
       const result = actual.assembleMemoryContext(input);
-      assemblies.push({ firstPass: firstPass.contextText, block: result.contextText });
+      const contents = new Map<string, string>();
+      for (const trace of input.retrievedTraces ?? []) contents.set(trace.id, trace.content);
+      for (const item of input.graphContext ?? []) {
+        if (typeof item !== 'string' && item.traceId && !contents.has(item.traceId)) {
+          contents.set(item.traceId, item.text.replace(/^\[[^\]\n]*\]\s/, ''));
+        }
+      }
+      assemblies.push({
+        firstPass: firstPass.contextText,
+        block: result.contextText,
+        lineOutcomes: result.lineOutcomes ?? [],
+        includedMemoryIds: result.includedMemoryIds,
+        contents,
+        rank: (input.retrievedTraces ?? []).map((trace) => trace.id),
+      });
       return result;
     },
   };
@@ -145,12 +174,19 @@ function blockSections(block: string): Map<string, string[]> {
   return sections;
 }
 
-/** Whether `later` is `line`, or `line` lengthened: a cut line's text before its marker starts `later`. */
-function keepsLine(line: string, later: string): boolean {
-  if (later === line) return true;
-  const at = line.lastIndexOf(MEMORY_CUT_MARKER);
-  return at > 0 && later.length > line.length - MEMORY_CUT_MARKER.length && later.startsWith(line.slice(0, at));
-}
+/** The header each memory-line section of the block starts with, by the section `lineOutcomes` names. */
+const OUTCOME_HEADERS: Record<AssembledLineOutcome['section'], string | undefined> = {
+  semanticRecall: '## Relevant Memories',
+  recentEpisodic: '## Recent Experiences',
+  graphAssociations: '## Related Context',
+  involuntary: '## Something This Reminds Me Of',
+  workingMemory: undefined,
+  prospectiveAlerts: undefined,
+  observationNotes: undefined,
+  persistentMemory: undefined,
+};
+/** The sections whose lines show a memory. */
+const MEMORY_LINE_HEADERS = ['## Relevant Memories', '## Recent Experiences', '## Related Context', '## Something This Reminds Me Of'];
 
 beforeEach(() => globalLLMProviderHealth.reset());
 afterEach(() => {
@@ -188,6 +224,121 @@ describe("agent({ runtime: 'gmi' }) memory block in the model request", () => {
       } finally {
         await a.close();
       }
+    }
+  });
+
+  it('a recalled statement longer than the block has room for is left out whole: the request carries no cut line, and the statements that fit are whole', async () => {
+    // Forty sentences of about 170 characters: more than the 1600-token block holds (6,400 characters, preamble included).
+    const LONG_START = 'Inventory line 1 of the camping trip:';
+    const LONG_STATEMENT = Array.from(
+      { length: 40 },
+      (_, i) =>
+        `Inventory line ${i + 1} of the camping trip: the stove parcel waits in a locker at the downtown parcel station, ` +
+        'with the receipt, the trip checklist and a spare fuel canister.',
+    ).join(' ');
+    const SHORT_STATEMENTS = ['The parcel locker for the camping stove is number 14.', 'The code of the camping stove parcel locker is 5832.'];
+    expect(LONG_STATEMENT.startsWith(LONG_START)).toBe(true);
+    expect(LONG_STATEMENT.length).toBeGreaterThan(1600 * 4);
+    const k = key(); const emb = key();
+    const s = script('openai', k, { replies: [reply.text('Noted.'), reply.text('Okay.'), reply.text('Sure.'), reply.text('Locker 14.')] });
+    script('openai', emb, { replies: [] });
+    vi.stubEnv('OPENAI_API_KEY', emb);
+    const a = withMemory(k);
+    try {
+      const session = a.session('s');
+      await session.send(LONG_STATEMENT);
+      for (const statement of SHORT_STATEMENTS) await session.send(statement);
+      session.clear();
+      assemblies.length = 0;
+      await session.send('Which parcel locker holds the camping stove, and what is its code?');
+
+      const block = memoryBlockOf(s, 3);
+      // No line of the block is a memory cut to fit.
+      expect(block, `the block:\n${block}`).not.toContain(MEMORY_CUT_MARKER);
+      // The long statement is nowhere in the request the model receives, in the block or outside it.
+      expect(requestTextOf(s, 3)).not.toContain(LONG_START);
+      // The statements that fit are in Recent Experiences, each once and whole.
+      const experiences = sectionLines(block, EPISODIC_HEADER);
+      for (const statement of SHORT_STATEMENTS) {
+        expect(experiences.filter((line) => line.includes(statement)), `${statement}\nin the block:\n${block}`).toHaveLength(1);
+      }
+      expect(tokensOf(block)).toBeLessThanOrEqual(1600);
+
+      // The assembly behind that request reports what became of each memory line. The three statements are the
+      // episodic traces: the long one left out because its whole line does not fit the room Recent Experiences was
+      // offered (it is more tokens than the whole block), the two short ones included.
+      expect(assemblies.length, 'assemblies on the last turn').toBeGreaterThan(0);
+      const { block: assembled, lineOutcomes } = assemblies[assemblies.length - 1];
+      expect(block.startsWith(assembled.trimEnd()), "the request's block is the assembled one").toBe(true);
+      const leftOut = lineOutcomes.filter((line) => line.outcome === 'left_out');
+      expect(leftOut, JSON.stringify(lineOutcomes)).toHaveLength(1);
+      expect(leftOut[0]).toMatchObject({ section: 'recentEpisodic', reason: 'section_full' });
+      expect(leftOut[0].tokens).toBeGreaterThan(1600);
+      const includedEpisodic = lineOutcomes.filter((line) => line.outcome === 'included' && line.section === 'recentEpisodic');
+      expect(includedEpisodic, JSON.stringify(lineOutcomes)).toHaveLength(SHORT_STATEMENTS.length);
+      for (const line of includedEpisodic) expect(line).not.toHaveProperty('reason');
+    } finally {
+      await a.close();
+    }
+  });
+
+  it('a statement recall ranks first but that does not fit whole is passed over, and the statements ranked below it take its room, whole', async () => {
+    // The question repeats the long statement's sentence, so recall ranks the long statement above the two short ones,
+    // which share only a few of its words. Forty such sentences are more than the 1600-token block holds.
+    const LONG_START = 'Inventory line 1 of the camping trip:';
+    const SENTENCE =
+      'of the camping trip: the stove parcel waits in a locker at the downtown parcel station, ' +
+      'with the receipt, the trip checklist and a spare fuel canister.';
+    const LONG_STATEMENT = Array.from({ length: 40 }, (_, i) => `Inventory line ${i + 1} ${SENTENCE}`).join(' ');
+    const SHORT_STATEMENTS = ['The parcel locker for the camping stove is number 14.', 'The code of the camping stove parcel locker is 5832.'];
+    expect(LONG_STATEMENT.length).toBeGreaterThan(1600 * 4);
+    const k = key(); const emb = key();
+    const s = script('openai', k, { replies: [reply.text('Noted.'), reply.text('Okay.'), reply.text('Sure.'), reply.text('Locker 14.')] });
+    script('openai', emb, { replies: [] });
+    vi.stubEnv('OPENAI_API_KEY', emb);
+    const a = withMemory(k);
+    try {
+      const session = a.session('s');
+      await session.send(LONG_STATEMENT);
+      for (const statement of SHORT_STATEMENTS) await session.send(statement);
+      session.clear();
+      assemblies.length = 0;
+      await session.send(`Inventory line ${SENTENCE} Which locker, and what is its code?`);
+
+      const block = memoryBlockOf(s, 3);
+      expect(assemblies.length, 'assemblies on the last turn').toBeGreaterThan(0);
+      const { block: assembled, lineOutcomes, contents, rank } = assemblies[assemblies.length - 1];
+      expect(block.startsWith(assembled.trimEnd()), "the request's block is the assembled one").toBe(true);
+
+      // The fixture: recall returned the three statements, the long one ranked above both short ones.
+      const idOf = (text: string) => {
+        const ids = [...contents.entries()].filter(([, content]) => content.includes(text)).map(([id]) => id);
+        expect(ids, `traces holding ${JSON.stringify(text.slice(0, 40))}`).toHaveLength(1);
+        return ids[0];
+      };
+      const longId = idOf(LONG_START);
+      const shortIds = SHORT_STATEMENTS.map(idOf);
+      const where = `rank ${JSON.stringify(rank)}; long ${longId}; short ${JSON.stringify(shortIds)}\noutcomes ${JSON.stringify(lineOutcomes)}\nrequest block:\n${block}`;
+      expect(rank.indexOf(longId), where).toBeGreaterThanOrEqual(0);
+      for (const id of shortIds) expect(rank.indexOf(id), where).toBeGreaterThan(rank.indexOf(longId));
+
+      // Recent Experiences reports its lines in rank order: the long statement left out for want of room, and both short
+      // statements after it included, whole and once in the request's block. Nothing in the request is cut.
+      const episodic = lineOutcomes.filter((line) => line.section === 'recentEpisodic');
+      const longAt = episodic.findIndex((line) => line.id === longId);
+      expect(episodic[longAt], where).toMatchObject({ outcome: 'left_out', reason: 'section_full' });
+      expect(episodic[longAt].tokens, where).toBeGreaterThan(1600);
+      for (const [index, id] of shortIds.entries()) {
+        const at = episodic.findIndex((line) => line.id === id);
+        expect(at, where).toBeGreaterThan(longAt);
+        expect(episodic[at], where).toMatchObject({ outcome: 'included' });
+        expect(sectionLines(block, EPISODIC_HEADER).filter((line) => line.includes(SHORT_STATEMENTS[index])), where).toHaveLength(1);
+      }
+      expect(block, where).not.toContain(MEMORY_CUT_MARKER);
+      expect(requestTextOf(s, 3), where).not.toContain(LONG_START);
+      expect(tokensOf(block)).toBeLessThanOrEqual(1600);
+    } finally {
+      await a.close();
     }
   });
 
@@ -286,10 +437,38 @@ describe("agent({ runtime: 'gmi' }) memory block in the model request", () => {
         await session.send('What did we write in the trail journal about the hiking day and the view?');
 
         expect(assemblies.length, `${label}: assemblies on the last turn`).toBeGreaterThan(0);
-        const { firstPass, block: assembled } = assemblies[assemblies.length - 1];
+        const { firstPass, block: assembled, lineOutcomes, includedMemoryIds, contents } = assemblies[assemblies.length - 1];
         const block = memoryBlockOf(s, places.length);
         // The request carries the block the assembler returned.
         expect(block.startsWith(assembled.trimEnd()), `${label}: the request's block is the assembled one`).toBe(true);
+        expect(block, `${label}: no memory line is cut`).not.toContain(MEMORY_CUT_MARKER);
+
+        // What the assembly reports of each memory line matches the request the model received: a hiking note reported
+        // included is whole in the section named, one reported left out is in no memory section of the request.
+        const outcomeIds = lineOutcomes.map((line) => line.id);
+        expect(new Set(outcomeIds).size, `${label}: one outcome a trace`).toBe(outcomeIds.length);
+        const includedIds = new Set(lineOutcomes.filter((line) => line.outcome === 'included').map((line) => line.id));
+        for (const id of includedMemoryIds) expect(includedIds.has(id), `${label}: ${id} is in includedMemoryIds`).toBe(true);
+        const hikes = lineOutcomes.filter((line) => (contents.get(line.id) ?? '').includes('Hiking day'));
+        expect(hikes.filter((line) => line.outcome === 'included').length, `${label}: hiking notes included`).toBeGreaterThan(0);
+        expect(hikes.filter((line) => line.outcome === 'left_out').length, `${label}: hiking notes left out`).toBeGreaterThan(0);
+        for (const line of hikes) {
+          const content = contents.get(line.id)!;
+          const where = `${label}: ${line.outcome} ${line.section} ${JSON.stringify(content.slice(0, 40))}\nrequest block:\n${block}`;
+          expect(line.tokens, where).toBeGreaterThanOrEqual(Math.ceil(content.length / 4));
+          if (line.outcome === 'included') {
+            expect(line, where).not.toHaveProperty('reason');
+            const header = OUTCOME_HEADERS[line.section];
+            expect(header, where).toBeDefined();
+            expect(sectionLines(block, header!).filter((shown) => shown.includes(content)), where).toHaveLength(1);
+          } else {
+            expect(['budget', 'section_full'], where).toContain(line.reason);
+            for (const header of MEMORY_LINE_HEADERS) {
+              const at = content.indexOf('Hiking day');
+              expect(sectionLines(block, header).some((shown) => shown.includes(content.slice(at, at + 60))), `${where}\n(in ${header})`).toBe(false);
+            }
+          }
+        }
 
         const sent = blockSections(block);
         const firstSections = blockSections(firstPass);
@@ -298,7 +477,8 @@ describe("agent({ runtime: 'gmi' }) memory block in the model request", () => {
           const later = sent.get(header) ?? [];
           let at = 0;
           for (const line of lines) {
-            while (at < later.length && !keepsLine(line, later[at])) at++;
+            // A line is whole in both blocks: nothing in them is cut (these agents have no persistent memory text).
+            while (at < later.length && later[at] !== line) at++;
             expect(
               at < later.length,
               `${label} ${header}: the first pass's line ${JSON.stringify(line.slice(0, 100))} is not in the request\n` +
@@ -314,7 +494,7 @@ describe("agent({ runtime: 'gmi' }) memory block in the model request", () => {
           const added = [...blockSections(assembled).entries()].flatMap(([header, lines]) =>
             lines.filter((line) => !placed.has(line)).map((line) => ({ header, line })),
           );
-          expect(added.length, `${label}: lines the second pass added or lengthened`).toBeGreaterThan(0);
+          expect(added.length, `${label}: lines the second pass added`).toBeGreaterThan(0);
           for (const { header, line } of added) {
             expect(sent.get(header) ?? [], `${label} ${header}: a line the second pass placed, in the request`).toContain(line);
           }
@@ -350,6 +530,47 @@ describe("agent({ runtime: 'gmi' }) memory block in the model request", () => {
         } else {
           expect(block, 'default share').toContain(EPISODIC_HEADER);
           expect(sectionLines(block, EPISODIC_HEADER).join('\n')).toContain(FACT);
+        }
+      } finally {
+        await a.close();
+      }
+    }
+  });
+
+  it("a memory whose sections a persona turned off is reported left out for the budget, and no memory section of the request shows it", async () => {
+    // Recent Experiences and Related Context off: the statement (an episodic trace) has a line only in sections offered
+    // no tokens, so the assembly reports it left out with reason budget. With the default shares it is included.
+    for (const off of [false, true]) {
+      personaMemory.config = off ? { tokenBudget: { recentEpisodic: 0, graphAssociations: 0 } } : undefined;
+      const k = key(); const emb = key();
+      const s = script('openai', k, { replies: [reply.text('Noted.'), reply.text('Locker 14.')] });
+      script('openai', emb, { replies: [] });
+      vi.stubEnv('OPENAI_API_KEY', emb);
+      const a = withMemory(k);
+      try {
+        const session = a.session('s');
+        await session.send(STATEMENT);
+        session.clear();
+        assemblies.length = 0;
+        await session.send('Which parcel locker code did we set for the camping stove?');
+        const block = memoryBlockOf(s, 1);
+        expect(assemblies.length, 'assemblies on the last turn').toBeGreaterThan(0);
+        const { block: assembled, lineOutcomes, contents } = assemblies[assemblies.length - 1];
+        expect(block.startsWith(assembled.trimEnd()), "the request's block is the assembled one").toBe(true);
+        const statementIds = [...contents.entries()].filter(([, content]) => content.includes(FACT)).map(([id]) => id);
+        expect(statementIds, `traces holding the statement: ${JSON.stringify([...contents.values()])}`).toHaveLength(1);
+        const outcome = lineOutcomes.find((line) => line.id === statementIds[0]);
+        const where = `${off ? 'sections off' : 'default shares'}: ${JSON.stringify(lineOutcomes)}\nrequest block:\n${block}`;
+        if (off) {
+          expect(outcome, where).toMatchObject({ section: 'recentEpisodic', outcome: 'left_out', reason: 'budget' });
+          expect(outcome!.tokens, where).toBeGreaterThan(Math.ceil(STATEMENT.length / 4) - 1);
+          for (const header of MEMORY_LINE_HEADERS) {
+            expect(sectionLines(block, header).some((line) => line.includes(FACT)), `${where}\n(in ${header})`).toBe(false);
+          }
+        } else {
+          expect(outcome, where).toMatchObject({ section: 'recentEpisodic', outcome: 'included' });
+          expect(outcome, where).not.toHaveProperty('reason');
+          expect(sectionLines(block, EPISODIC_HEADER).filter((line) => line.includes(FACT)), where).toHaveLength(1);
         }
       } finally {
         await a.close();
