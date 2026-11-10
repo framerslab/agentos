@@ -61,8 +61,10 @@ export type MemoryQueryCategory = (typeof MEMORY_QUERY_CATEGORIES)[number];
 /**
  * The retrieval architecture identifiers the router can dispatch to.
  *
- * - `canonical-hybrid`: BM25 + dense + RRF fusion + Cohere rerank-v3.5
- *   over the raw memory traces. The default cheapest-and-fastest path.
+ * - `canonical-hybrid`: BM25 + dense + RRF fusion + rerank over the raw
+ *   memory traces, run by the executor the host passes the dispatcher
+ *   (the shipped presets were calibrated with Cohere rerank-v3.5; any
+ *   reranker fits). The default cheapest-and-fastest path.
  * - `observational-memory-v10`: synthesized observation log fed to the
  *   reader, with classifier-driven routing inside the OM pipeline. No
  *   verbatim citation rule.

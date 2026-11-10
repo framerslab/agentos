@@ -48,3 +48,20 @@ export function warnSoulLoadFailed(source: string, error: unknown): void {
   }
   console.warn(`[@framers/agentos] Failed to load soul: ${message}. Agent will boot without SOUL.md identity.`);
 }
+
+/**
+ * Warn, once per agent build, that a soul given beside `systemBlocks` is not automatically added to the prompt: the
+ * blocks replace the prompt the agent assembles, the soul's prose, style and memory index included. It warns whatever
+ * the blocks hold, so a build that copies the soul's text into them still gets the line, which is why it says what is
+ * not done for the build rather than what the prompt lacks. Does nothing unless both are set.
+ *
+ * @param opts - The agent's `soul` and `systemBlocks`.
+ */
+export function warnSoulBesideSystemBlocks(opts: { soul?: unknown; systemBlocks?: unknown }): void {
+  if (!opts.soul || !opts.systemBlocks) return;
+  console.warn(
+    '[@framers/agentos] The agent has a soul and systemBlocks: the soul\'s prose, style and memory index are not ' +
+      'automatically added to the prompt, because systemBlocks replace the prompt the agent assembles. Put what the ' +
+      'agent needs of the soul in the blocks yourself, or drop systemBlocks.',
+  );
+}

@@ -84,11 +84,23 @@ function calendarDate(timestampMs: number): string | undefined {
   return date.toISOString().slice(0, 10);
 }
 
+/**
+ * The age of a timestamp with its UTC calendar date beside it, as the memory block dates a recalled trace:
+ * `26 days ago, 2026-10-13`, or the age alone when the timestamp has no date.
+ *
+ * @param timestampMs - When the trace was stored, in epoch ms.
+ * @param now - The time the age is measured from, in epoch ms.
+ * @returns The age and the date.
+ */
+export function formatMemoryAge(timestampMs: number, now: number): string {
+  const age = timeAgo(timestampMs, now);
+  const date = calendarDate(timestampMs);
+  return date ? `${age}, ${date}` : age;
+}
+
 /** The age of a trace with the date it was stored beside it: `26 days ago, 2026-10-13`. */
 function when(trace: FormatTrace, now: number): string {
-  const age = timeAgo(trace.createdAt, now);
-  const date = calendarDate(trace.createdAt);
-  return date ? `${age}, ${date}` : age;
+  return formatMemoryAge(trace.createdAt, now);
 }
 
 function confidenceLabel(confidence: number): string {

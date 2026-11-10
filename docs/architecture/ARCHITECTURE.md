@@ -731,12 +731,12 @@ Seven [`IVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cor
 
 ### Reranking
 
-Pluggable providers in `cognition/rag/reranking/providers/`:
-- **Cohere API** ([`CohereReranker`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/reranking/providers/CohereReranker.ts)) -- Cloud-hosted cross-encoder
-- **Transformers.js** ([`LocalCrossEncoderReranker`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/reranking/providers/LocalCrossEncoderReranker.ts)) -- Local cross-encoder model (no API calls)
-- **LLM judge** ([`LlmJudgeReranker`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/reranking/providers/LlmJudgeReranker.ts)) -- A model scores each passage
+[`RerankerService`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/reranking/RerankerService.ts) calls the provider a request names. Three ship in `cognition/rag/reranking/providers/`, and a host can register its own:
+- **`local`** ([`LocalCrossEncoderReranker`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/reranking/providers/LocalCrossEncoderReranker.ts)) -- a cross-encoder run in process through Transformers.js; scoring sends nothing over the network
+- **`cohere`** ([`CohereReranker`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/reranking/providers/CohereReranker.ts)) -- Cohere's rerank API, which receives the query and the passages
+- **`llm-judge`** ([`LlmJudgeReranker`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/reranking/providers/LlmJudgeReranker.ts)) -- a language model, called through your `llmCallFn`, scores the passages and orders the best
 
-For configuration details, see [RAG Memory Configuration](../memory/RAG_MEMORY_CONFIGURATION.md) and [HyDE Retrieval](../memory/HYDE_RETRIEVAL.md).
+[Reranking](../text/RERANKING.md) compares them and documents each provider's settings. For the retrieval pipeline, see [RAG Memory Configuration](../memory/RAG_MEMORY_CONFIGURATION.md) and [HyDE Retrieval](../memory/HYDE_RETRIEVAL.md).
 
 ---
 

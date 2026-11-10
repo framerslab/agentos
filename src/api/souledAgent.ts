@@ -23,46 +23,150 @@ import {
   type AgentOptions,
   type Agent,
   type AgentMemoryProvider,
+  type AgentSession,
 } from './agent.js';
 import { generateText } from './generateText.js';
+import type { StreamTextResult } from './streamText.js';
 import { Memory } from '../cognition/memory/io/facade/Memory.js';
 import { attachMemoryWiki } from '../cognition/memory/io/attachMemoryWiki.js';
 import { SemanticChunker } from '../cognition/rag/chunking/SemanticChunker.js';
 import { estimateTokens } from '../core/utils/text-utils.js';
+import { formatMemoryAge } from '../cognition/memory/core/prompt/MemoryFormatters.js';
+import { parseTraceMetadata } from '../cognition/memory/retrieval/store/tracePersistence.js';
 import { DEFAULT_MEMORY_TOKEN_BUDGET } from './runtime/memoryProviderHooks.js';
 import { messageOf } from './runtime/memoryObserveFailures.js';
+import { asSpendBudget } from './runtime/spendBudget.js';
+import type { AgentOSUsageLedgerOptions } from './runtime/usageLedger.js';
 
 /** Characters a token is estimated at, as `estimateTokens` counts them. */
 const CHARS_PER_TOKEN = 4;
 
 /**
- * Join recalled traces, in rank order, into a recall block that fits `tokenBudget` (estimated with
- * `estimateTokens`). Whole traces are added while they fit; when the first alone is larger, it is cut at the last
- * word boundary that fits (mid-word only when it has none, and never inside a character a surrogate pair encodes),
- * so a matched trace never yields an empty block under a positive budget. A budget of 0 or less asks for no recall,
- * and one that is not a number is the hooks' default.
+ * How long `close()` waits for the agent's turns still running and for the memory writes of its turns before it
+ * compiles, unless an option sets it.
+ */
+export const DEFAULT_PENDING_WRITES_TIMEOUT_MS = 5_000;
+
+/** The longest delay a timer takes (2^31 - 1 ms, about 24.8 days); a longer one fires at once. */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+/** The usage ledger's source for the model calls of the wiki compile a souled agent runs. */
+export const SOULED_AGENT_COMPILE_SOURCE = 'souledAgent.compileWiki';
+
+/**
+ * The key of the trace metadata in which the observer records who spoke a trace: `'user'` or `'assistant'`. It is
+ * kept out of the trace's text and its tags, which the store's full-text search reads, so a search never matches a
+ * trace by who spoke it.
+ */
+export const SPEAKER_METADATA_KEY = 'speaker';
+
+/** Who spoke a trace, as the observer records it. */
+type Speaker = 'user' | 'assistant';
+
+/** The tag a wiki page chunk carries for its page: `page:<id>`. */
+const PAGE_TAG = 'page:';
+
+/** One recalled trace: the label that opens its line, then its text. */
+interface RecallLine {
+  /** `[user, 26 days ago, 2026-10-14] `: who spoke it and when it was stored; ends with a space. */
+  prefix: string;
+  content: string;
+}
+
+/** The page id of a chunk of a wiki page, from the tags the wiki gives it (`wiki` and `page:<id>`); else undefined. */
+function wikiPageOf(trace: { tags: readonly string[] }): string | undefined {
+  if (!trace.tags.includes('wiki')) return undefined;
+  return trace.tags.find((tag) => tag.startsWith(PAGE_TAG))?.slice(PAGE_TAG.length);
+}
+
+/** The speaker recorded in a trace's metadata (`'user'` or `'assistant'`); undefined for any other value or none. */
+function speakerIn(metadata: string | undefined): Speaker | undefined {
+  const speaker = parseTraceMetadata(metadata)[SPEAKER_METADATA_KEY];
+  return speaker === 'user' || speaker === 'assistant' ? speaker : undefined;
+}
+
+/**
+ * The label a recalled trace's line opens with: who spoke it (`user` or `assistant`, as the observer recorded it, or
+ * `note` and the page id for a chunk of a wiki page) and when it was stored, in the memory block's wording
+ * (`26 days ago, 2026-10-14`). A trace with no speaker, such as one stored before speakers were recorded, has the date
+ * alone.
+ */
+function recallPrefix(trace: { createdAt: number }, speaker: string | undefined, now: number): string {
+  const when = formatMemoryAge(trace.createdAt, now);
+  return speaker ? `[${speaker}, ${when}] ` : `[${when}] `;
+}
+
+/**
+ * A trace's text on one line: its lines, each trimmed, joined by one space, blank ones left out. The text of a trace
+ * can then never open a line of the recall block, where only a label opens one. Linear in the text's length.
+ */
+function onOneLine(text: string): string {
+  return text
+    .split(/[\n\r\v\f\u0085\u2028\u2029]/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .join(' ');
+}
+
+/**
+ * Join recalled traces, in rank order, one line each (its label, then its text), into a recall block that fits
+ * `tokenBudget` (estimated with `estimateTokens`). Whole lines are added while they fit; when the first alone is
+ * larger, its text is cut at the last word boundary that fits beside its label (mid-word only when it has none, and
+ * never inside a character a surrogate pair encodes), so a matched trace never yields an empty block under a positive
+ * budget; a label longer than the whole budget is dropped. A budget of 0 or less asks for no recall, and one that is
+ * not a number is the hooks' default.
  *
- * @param contents - The traces' text, best first.
+ * @param lines - The traces' labels and text, best first.
  * @param tokenBudget - The block's token ceiling.
  * @returns The block, or '' when nothing was recalled or the budget is 0 or less.
  */
-function recallWithinBudget(contents: readonly string[], tokenBudget: number): string {
+function recallWithinBudget(lines: readonly RecallLine[], tokenBudget: number): string {
   if (tokenBudget <= 0) return '';
   const budget = Number.isNaN(tokenBudget) ? DEFAULT_MEMORY_TOKEN_BUDGET : Math.floor(tokenBudget);
-  const texts = contents.filter((c) => c.length > 0);
-  if (texts.length === 0) return '';
+  const recalled = lines.filter((line) => line.content.length > 0);
+  if (recalled.length === 0) return '';
   let block = '';
-  for (const text of texts) {
+  for (const line of recalled) {
+    const text = `${line.prefix}${line.content}`;
     const next = block ? `${block}\n${text}` : text;
     if (estimateTokens(next) > budget) break;
     block = next;
   }
   if (block) return block;
-  const maxChars = Math.max(1, budget * CHARS_PER_TOKEN);
-  const head = codePointPrefix(texts[0], maxChars);
-  // Cut back to the last whitespace when the cut falls inside a word.
-  const cut = /\s/.test(texts[0].charAt(maxChars)) ? head : head.replace(/\s+\S*$/, '');
-  return cut.trimEnd() || head;
+  const { content } = recalled[0];
+  const room = budget * CHARS_PER_TOKEN - recalled[0].prefix.length;
+  const prefix = room >= 1 ? recalled[0].prefix : '';
+  const maxChars = Math.max(1, room >= 1 ? room : budget * CHARS_PER_TOKEN);
+  const head = codePointPrefix(content, maxChars);
+  // Cut back to the last whitespace when the cut falls inside a word; text that fits whole is not cut.
+  const whole = head.length >= content.length;
+  const cut = whole || /\s/.test(content.charAt(maxChars)) ? head : head.replace(/\s+\S*$/, '');
+  return prefix + (cut.trimEnd() || head);
+}
+
+/**
+ * Wait for `pending` to empty, up to `timeoutMs`; a promise added while waiting (a turn's memory write, which its
+ * observe hook adds before the turn settles) is waited for too.
+ *
+ * @returns How many promises are still pending when the wait ends.
+ */
+async function waitForWrites(pending: Set<Promise<unknown>>, timeoutMs: number): Promise<number> {
+  if (pending.size === 0 || timeoutMs <= 0) return pending.size;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<'deadline'>((resolve) => {
+    // A timer longer than the longest one fires at once, so a longer wait is held to the longest.
+    timer = setTimeout(() => resolve('deadline'), Math.min(timeoutMs, MAX_TIMER_DELAY_MS));
+    (timer as { unref?: () => void }).unref?.();
+  });
+  try {
+    while (pending.size > 0) {
+      const outcome = await Promise.race([Promise.allSettled([...pending]).then(() => 'settled' as const), deadline]);
+      if (outcome === 'deadline') break;
+    }
+  } finally {
+    clearTimeout(timer);
+  }
+  return pending.size;
 }
 
 /**
@@ -75,9 +179,17 @@ function codePointPrefix(text: string, maxUnits: number): string {
   return end > 0 ? text.slice(0, end) : String.fromCodePoint(text.codePointAt(0) ?? 0);
 }
 
-/** Options for {@link souledAgent}. Identical to {@link AgentOptions}, but `soul` is required. */
+/** Options for {@link souledAgent}: those of {@link AgentOptions}, with `soul` required. */
 export interface SouledAgentOptions extends AgentOptions {
   soul: NonNullable<AgentOptions['soul']>;
+  /**
+   * How long `close()` waits, in milliseconds, for the agent's turns still running and then for the memory writes of
+   * its turns, one deadline for both, before it compiles the wiki. Default {@link DEFAULT_PENDING_WRITES_TIMEOUT_MS}
+   * (5 seconds); 0 waits for none, and `Infinity` (or any wait past the longest timer, about 24.8 days) waits for them
+   * all. When the wait ends with turns or writes still pending, the compile takes what is stored and one `console.warn`
+   * line gives their number.
+   */
+  pendingWritesTimeoutMs?: number;
 }
 
 /**
@@ -95,22 +207,50 @@ export type SouledAgent = Agent & { memory?: Memory };
  * When the soul resolves to a workspace directory, the wiki is wired end to end
  * (store + write-back + `read_memory_page` tool + prelude `index.md`). For inline
  * souls (`{ content }`) there is no workspace, so this falls back to a plain
- * {@link agent}.
+ * {@link agent} and says so in one `console.warn` line.
+ *
+ * Each stored turn records who spoke it in the trace's metadata ({@link SPEAKER_METADATA_KEY}), outside its text and
+ * its tags, so recall never matches a trace by its speaker; each recalled trace is rendered on one line with its
+ * speaker and its date. The wiki compile's model calls go on the agent's route with its fallback
+ * settings, are checked against and charged to its spend budget, and are written to its usage ledger under the source
+ * {@link SOULED_AGENT_COMPILE_SOURCE}.
+ *
+ * `close()` first closes the agent (with `runtime: 'gmi'` that stops its session turns), then waits, within one
+ * deadline (see {@link SouledAgentOptions.pendingWritesTimeoutMs}), for the turns still running (a `generate()`, a
+ * `stream()`, a session's `send()` or `stream()`, on either runtime; a stream whose signal aborted before anything was
+ * read from it is not waited for, and on the default runtime a stream nobody reads and nobody aborts keeps the wait
+ * until the deadline) and for the memory writes of its turns, then compiles the wiki, then closes the store. A turn or a write
+ * still pending when the deadline passes is left out of the compile, and a write that reaches the store after it is
+ * closed is not stored.
  *
  * @param opts - Agent options with a required `soul`.
  * @returns A fully-wired {@link Agent}.
  */
 export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent> {
-  const loaded = loadSoulFromOption(opts.soul);
+  const { pendingWritesTimeoutMs, ...rest } = opts;
+  const loaded = loadSoulFromOption(rest.soul);
   if (!loaded) {
     // The soul failed to load, and loadSoulFromOption has warned: a plain agent without it, which loads it no
     // second time and so does not warn again.
-    return agent({ ...opts, soul: undefined });
+    return agent({ ...rest, soul: undefined });
   }
   if (!loaded.memoryDir) {
-    // Inline soul: no workspace dir → no wiki. Plain agent.
-    return agent(opts);
+    // Inline soul: no workspace dir, so no wiki. A plain agent, and a line that says so.
+    console.warn(
+      '[agentos] souledAgent: the soul has no workspace folder (an inline { content } soul), so no wiki memory is ' +
+        'wired: no memory index, no read_memory_page tool and no compile on close. Pass the folder that holds ' +
+        'SOUL.md to have them.',
+    );
+    return agent(rest);
   }
+  // NaN, a negative number or none is the default; Infinity is held to the longest timer when the wait starts.
+  const waitMs =
+    typeof pendingWritesTimeoutMs === 'number' && pendingWritesTimeoutMs >= 0
+      ? pendingWritesTimeoutMs
+      : DEFAULT_PENDING_WRITES_TIMEOUT_MS;
+  // One budget for the agent and the compile, so both draw on the same total.
+  const budget = asSpendBudget(rest.budget);
+  const ledger = (rest.observability?.usageLedger as AgentOSUsageLedgerOptions | undefined) ?? rest.usageLedger;
 
   const agentId = loaded.frontmatter.agentId ?? opts.name ?? 'agent';
 
@@ -122,36 +262,119 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     selfImprove: true,
   });
 
+  // The turns still running and the memory writes the observer has started, until each settles: close() waits for
+  // them before it compiles. A turn never waits for its writes.
+  const pending = new Set<Promise<unknown>>();
+  /** Adds `work` to what close() waits for, until it settles; returns it unchanged. */
+  const awaitedOnClose = <T>(work: Promise<T>): Promise<T> => {
+    pending.add(work);
+    const settle = () => {
+      pending.delete(work);
+    };
+    void work.then(settle, settle);
+    return work;
+  };
+  /**
+   * A stream is settled once its usage is known, which is after its observe hook has run. On the default runtime a
+   * stream runs only once a consumer reads it, so one whose `signal` aborts before anything was read from it would
+   * never settle: its entry is released on that abort instead. An abort after the first read ends the stream on either
+   * runtime, which settles its usage.
+   */
+  const awaitStreamOnClose = (result: StreamTextResult, signal: AbortSignal | undefined): StreamTextResult => {
+    const settled = result.usage.then(() => undefined, () => undefined);
+    if (!signal) {
+      awaitedOnClose(settled);
+      return result;
+    }
+    let read = false;
+    const abortedUnread = new Promise<void>((resolve) => {
+      const onAbort = () => {
+        if (!read) resolve();
+      };
+      if (signal.aborted) {
+        onAbort();
+      } else {
+        signal.addEventListener('abort', onAbort, { once: true });
+        void settled.then(() => signal.removeEventListener('abort', onAbort));
+      }
+    });
+    awaitedOnClose(Promise.race([settled, abortedUnread]));
+    const onRead = <T>(iterable: AsyncIterable<T>): AsyncIterable<T> => ({
+      [Symbol.asyncIterator](): AsyncIterator<T> {
+        const inner = iterable[Symbol.asyncIterator]();
+        return {
+          next: (...args: [] | [undefined]) => {
+            read = true;
+            return inner.next(...args);
+          },
+          ...(inner.return ? { return: inner.return.bind(inner) } : {}),
+          ...(inner.throw ? { throw: inner.throw.bind(inner) } : {}),
+        };
+      },
+    });
+    result.textStream = onRead(result.textStream);
+    result.fullStream = onRead(result.fullStream);
+    return result;
+  };
+
   // Adapt the Memory facade directly to the provider contract. AgentMemory's own
   // getContext/observe signatures don't match AgentMemoryProvider, so wrap the
   // facade's remember/recall here.
   const provider: AgentMemoryProvider = {
-    observe: async (_role, text) => {
-      await memory.remember(text, { type: 'episodic', scope: 'persona', scopeId: agentId });
+    observe: (role, text) => {
+      // Who spoke goes in the trace's metadata: outside its text and its tags, which full-text search reads.
+      const write = awaitedOnClose(
+        memory.remember(text, {
+          type: 'episodic',
+          scope: 'persona',
+          scopeId: agentId,
+          metadata: { [SPEAKER_METADATA_KEY]: role },
+        }),
+      );
+      return write.then(() => undefined);
     },
     getContext: async (text, options) => {
       const scored = await memory.recall(text, { limit: 8 });
-      const contextText = recallWithinBudget(
-        scored.map((s) => s.trace.content),
-        options?.tokenBudget ?? DEFAULT_MEMORY_TOKEN_BUDGET,
+      const now = Date.now();
+      // A recalled trace carries no metadata, so each one's speaker is read from its stored record.
+      const lines = await Promise.all(
+        scored.map(async ({ trace }) => {
+          const page = wikiPageOf(trace);
+          const speaker = page ? `note ${page}` : speakerIn((await memory.readTrace(trace.id))?.metadata);
+          return { prefix: recallPrefix(trace, speaker, now), content: onOneLine(trace.content) };
+        }),
       );
+      const contextText = recallWithinBudget(lines, options?.tokenBudget ?? DEFAULT_MEMORY_TOKEN_BUDGET);
       return contextText ? { contextText } : null;
     },
   };
 
+  // The compile's model calls: the agent's route and fallback settings, its completion cap (the budget's check
+  // estimates a call without one at 4,096 output tokens), its budget (checked before each call and charged after it; a
+  // refusal fails the compile, and the watermark stays where it was), and its usage ledger.
   const llm = async (prompt: string): Promise<string> =>
     (
       await generateText({
-        provider: opts.provider,
-        model: opts.model,
+        provider: rest.provider,
+        model: rest.model,
         prompt,
-        apiKey: opts.apiKey,
-        baseUrl: opts.baseUrl,
+        maxTokens: rest.maxTokens ?? rest.controls?.maxTotalTokens,
+        apiKey: rest.apiKey,
+        baseUrl: rest.baseUrl,
+        fallbackProviders: rest.fallbackProviders,
+        onFallback: rest.onFallback,
+        router: rest.router,
+        hostPolicy: rest.hostPolicy,
+        routerParams: rest.routerParams,
+        policyTier: rest.policyTier,
+        ...(budget ? { budget } : {}),
+        ...(rest.accountIdOf ? { accountIdOf: rest.accountIdOf } : {}),
+        usageLedger: { ...(ledger ?? {}), source: SOULED_AGENT_COMPILE_SOURCE },
       })
     ).text;
 
   const chunker = new SemanticChunker();
-  const priorTools = opts.tools;
+  const priorTools = rest.tools;
   const { tools: augmentedTools } = await attachMemoryWiki({
     memory,
     memoryDir: loaded.memoryDir,
@@ -168,29 +391,67 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     priorTools && !Array.isArray(priorTools) ? priorTools : augmentedTools
   ) as AgentOptions['tools'];
 
-  const built = agent({ ...opts, memoryProvider: provider, tools }) as SouledAgent;
+  const built = agent({ ...rest, ...(budget ? { budget } : {}), memoryProvider: provider, tools }) as SouledAgent;
 
-  // On teardown: fold the session's conversation into the wiki, then close the
-  // backing store. The compile is best-effort (a failed LLM merge must never
-  // block teardown) and a failure is logged; closing prevents leaked SQLite
-  // handles in long-lived hosts.
+  // Every turn joins what close() waits for: its promise, or a stream's settled usage. The default runtime's own close
+  // does not wait for a running turn, and the GMI runtime's does not wait for a one-shot call.
+  const generateTurn = built.generate.bind(built);
+  built.generate = (prompt, extra) => awaitedOnClose(generateTurn(prompt, extra));
+  const streamTurn = built.stream.bind(built);
+  built.stream = (prompt, extra) => awaitStreamOnClose(streamTurn(prompt, extra), extra?.abortSignal);
+  const openSession = built.session.bind(built);
+  const trackedSessions = new WeakSet<AgentSession>();
+  built.session = (id, sessionOptions) => {
+    const session = openSession(id, sessionOptions);
+    // A runtime that hands the same session object back is wrapped once.
+    if (!trackedSessions.has(session)) {
+      trackedSessions.add(session);
+      const send = session.send.bind(session) as (...args: unknown[]) => Promise<unknown>;
+      session.send = ((...args: unknown[]) => awaitedOnClose(send(...args))) as AgentSession['send'];
+      const streamSession = session.stream.bind(session);
+      session.stream = (input, streamOpts) => awaitStreamOnClose(streamSession(input, streamOpts), streamOpts?.abortSignal);
+    }
+    return session;
+  };
+
+  // On teardown: close the agent (with runtime: 'gmi' that stops its running session turns and shuts its sessions
+  // down); wait, within one deadline, for the turns still running and then for the memory writes of its turns; fold
+  // the conversation into the wiki; then close the backing store. The compile is best-effort (a failed LLM merge must
+  // never block teardown) and a failure is logged; closing prevents leaked SQLite handles in long-lived hosts. An
+  // error from the agent's own close is thrown once the store is closed.
   const originalClose = built.close.bind(built);
   built.close = async () => {
-    try {
-      await memory.compileWiki({ reason: 'session-end' });
-    } catch (err) {
-      // The watermark moves only past compiled traces, so the next compile takes these up again.
-      // The reason goes in as text alone: the console's inspection of an error can throw, and close must go on.
-      console.warn(
-        `[agentos] souledAgent: the memory wiki compile on close failed (${messageOf(err)}); ` +
-          'the conversation traces stay in the store for the next compile.',
-      );
-    }
+    let closeFailed = false;
+    let closeError: unknown;
     try {
       await originalClose();
+    } catch (err) {
+      closeFailed = true;
+      closeError = err;
+    }
+    try {
+      const stillPending = await waitForWrites(pending, waitMs);
+      if (stillPending > 0) {
+        console.warn(
+          `[agentos] souledAgent: close() waited ${waitMs} ms for its turns still running and the memory writes of ` +
+            `its turns; still pending: ${stillPending}. The wiki compile takes what is stored, and a write that ` +
+            'reaches the store once it is closed is not stored.',
+        );
+      }
+      try {
+        await memory.compileWiki({ reason: 'session-end' });
+      } catch (err) {
+        // The watermark moves only past compiled traces, so the next compile takes these up again.
+        // The reason goes in as text alone: the console's inspection of an error can throw, and close must go on.
+        console.warn(
+          `[agentos] souledAgent: the memory wiki compile on close failed (${messageOf(err)}); ` +
+            'the conversation traces stay in the store for the next compile.',
+        );
+      }
     } finally {
       await memory.close();
     }
+    if (closeFailed) throw closeError;
   };
 
   // Expose the store so callers can fold conversation into the wiki mid-session
