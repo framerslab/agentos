@@ -716,6 +716,81 @@ describe('the run owner', () => {
     }
   });
 
+  it('answers false while a write of a run kept in memory alone is still in flight at the ten seconds', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
+    const store = new MemoryKeyValueStore();
+    const realSet = store.set.bind(store);
+    try {
+      store.set = async () => { throw new Error('refused'); };
+      const own = owner(store, memoryLocks(), bus());
+      const entered = deferred();
+      const stuck = deferred();
+      const started = await own.start(countingJob(2, [async () => { entered.resolve(); await stuck.promise; }, async () => undefined]));
+      const id = 'id' in started ? started.id : '';
+      await entered.promise;
+      expect(own.snapshot().unavailable).toBe(true);
+      let answer: unknown = null;
+      void own.stopAccount('removal').then((result) => { answer = result; });
+      await vi.advanceTimersByTimeAsync(9_000);
+      expect(answer).toBeNull();
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(answer).toEqual({ complete: false }); // the write that holds no record lock had not returned
+      stuck.resolve();
+      expect((await own.whenIdle()).get(id)?.ended).toBe('fenced');
+      own.close();
+    } finally {
+      store.set = realSet;
+      vi.useRealTimers();
+    }
+  });
+
+  it("fences a start made while the sign-out runs though the stop ends before the start's lock is granted", async () => {
+    const store = new MemoryKeyValueStore();
+    const locks = memoryLocks();
+    const taking = deferred();
+    let slow = false;
+    const own = owner(store, { ...locks, hold: async (name) => { if (slow) await taking.promise; return locks.hold(name); } }, bus());
+    const realKeys = store.keys.bind(store);
+    const entered = deferred();
+    const reading = deferred();
+    try {
+      let calls = 0;
+      // The stop's last read of the rows, past its wait for the starts in flight, waits until the next start has begun.
+      store.keys = async (prefix) => {
+        calls += 1;
+        const keys = await realKeys(prefix);
+        if (calls === 3) {
+          entered.resolve();
+          await reading.promise;
+        }
+        return keys;
+      };
+      const stopping = own.stopAccount('signout');
+      await entered.promise;
+      slow = true;
+      let wrote = false;
+      const starting = own.start({
+        ...countingJob(1, []),
+        async run(context) {
+          const done = await context.write(async () => { wrote = true; return true; });
+          return { ended: typeof done === 'object' ? 'fenced' : 'finished', counts: context.record().counts };
+        },
+      });
+      reading.resolve();
+      expect(await stopping).toEqual({ complete: true });
+      taking.resolve();
+      const started = await starting;
+      const id = 'id' in started ? started.id : '';
+      expect((await own.whenIdle()).get(id)?.ended).toBe('fenced');
+      expect(wrote).toBe(false);
+      store.keys = realKeys;
+      expect((await store.get<RunRecord>(`lib/j/${id}`))?.cut).toBe('signout');
+    } finally {
+      store.keys = realKeys;
+      own.close();
+    }
+  });
+
   it.each(['removal', 'signout'] as const)("stops a run that another owner's %s reached when no channel joins them, though the run waits offline", async (cut) => {
     const locks = memoryLocks();
     const store = new MemoryKeyValueStore();
