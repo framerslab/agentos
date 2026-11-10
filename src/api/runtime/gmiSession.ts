@@ -46,6 +46,14 @@ function abortReasonError(signal: AbortSignal): Error {
   return reason instanceof Error ? reason : new Error(String(reason));
 }
 
+/**
+ * `source`'s chunks, then `keep` called with its return value once it ends. A consumer that stops early stops
+ * `source` too (`yield*` hands `return()` and `throw()` on), and `keep` is not called.
+ */
+async function* withReturn<T, R>(source: AsyncGenerator<T, R, undefined>, keep: (value: R) => void): AsyncGenerator<T, void, undefined> {
+  keep(yield* source);
+}
+
 /** Serialises turns: `acquire()` resolves with a release function once every earlier holder released. */
 export class TurnLock {
   private tail: Promise<void> = Promise.resolve();
@@ -175,6 +183,12 @@ export interface GmiSessionDeps {
   providerUserId?: string;
   /** False when cognitive memory supplies the memory context, and on a seat session: `memoryProvider.getContext` is then skipped. */
   useMemoryProviderContext: boolean;
+  /**
+   * The `tokenBudget` handed to `memoryProvider.getContext`: `memory.recall.budget.totalTokens` on an agent whose
+   * cognitive memory is off, when `memoryProviderOptions.tokenBudget` is unset. Undefined keeps
+   * `memoryProviderOptions.tokenBudget`, else `DEFAULT_MEMORY_TOKEN_BUDGET`.
+   */
+  providerTokenBudget?: number;
   /** False on a seat session: the turn calls no `memoryProvider.observe`, which would file a team turn's text in the agent's long-term store. Default true. */
   observeMemoryProvider?: boolean;
   /** The session store, or null when the turn keeps no history. */
@@ -190,11 +204,12 @@ export interface GmiSessionDeps {
 }
 
 /** `memoryProvider.getContext` for the turn, within its timeout; undefined when there is none or it fails. */
-async function memoryProviderContext(opts: AgentOptions, userText: string): Promise<string | undefined> {
+async function memoryProviderContext(deps: GmiSessionDeps, userText: string): Promise<string | undefined> {
+  const { opts } = deps;
   const provider = opts.memoryProvider;
   if (!provider?.getContext) return undefined;
   const timeoutMs = opts.memoryProviderOptions?.timeoutMs ?? MEMORY_TIMEOUT_MS;
-  const tokenBudget = opts.memoryProviderOptions?.tokenBudget ?? DEFAULT_MEMORY_TOKEN_BUDGET;
+  const tokenBudget = deps.providerTokenBudget ?? opts.memoryProviderOptions?.tokenBudget ?? DEFAULT_MEMORY_TOKEN_BUDGET;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let timedOut = false;
   try {
@@ -379,7 +394,7 @@ export async function* runGmiTurn(
     const gmi = served.gmi;
     const memoryScope = served.memoryScope ?? deps.memoryScope;
     gmi.replaceHistory?.(transcriptToConversation(priorMessages));
-    const memoryContext = deps.useMemoryProviderContext ? await memoryProviderContext(deps.opts, userText) : undefined;
+    const memoryContext = deps.useMemoryProviderContext ? await memoryProviderContext(deps, userText) : undefined;
     // When the model call in progress started: the turn's start, the end of the
     // tool round before it, or the failure of the attempt it replaces.
     let callStartedAt = Date.now();
@@ -437,7 +452,8 @@ export async function* runGmiTurn(
     };
 
     let stepCalls: ToolCallRequest[] = [];
-    for await (const chunk of gmi.processTurnStream(turnInput)) {
+    // The GMI's output, the generator's return value, carries the turn's recall capture to the result.
+    for await (const chunk of withReturn(gmi.processTurnStream(turnInput), (output) => folder.finish(output))) {
       folder.push(chunk);
       switch (chunk.type) {
         case GMIOutputChunkType.TOOL_CALL_REQUEST:

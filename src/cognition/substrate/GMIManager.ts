@@ -612,7 +612,7 @@ export class GMIManager {
    * session opens, that session names a turn's scope ids by the session's own form, with no learner, and its recorder
    * and guard try the open; once one opens, every call reaches it. The GMI's memory manager goes to the learner
    * session, so the layer re-files its Brain, hydrates the learner's scopes into it and reaches it in `forgetUser`.
-   * Without a layer the result is empty, and the GMI is built as before the layer existed.
+   * Without a layer the GMI is given the persona's traits alone, when it has any, and renders their paragraph itself.
    *
    * @param effectivePersona - The persona the GMI is initialized with: the registry persona, overlay applied.
    * @param runtimeContext - The GMI's id, its session and the user it is created for.
@@ -626,11 +626,15 @@ export class GMIManager {
     memory?: ICognitiveMemoryManager,
   ): Promise<Pick<GMIBaseConfig, 'learning' | 'personaTraits'>> {
     const layer = this.config.learningLayer;
-    if (!layer || !source) return {};
-    const authored = normalizeHexacoTraits(source.registryPersona.personalityTraits);
+    const registryPersona = source?.registryPersona ?? effectivePersona;
+    const authored = normalizeHexacoTraits(registryPersona.personalityTraits);
     // The registry traits as written: an alias the persona writes itself beside its canonical key is no patch.
-    const overlay = traitOverlayPatch(source.registryPersona.personalityTraits, effectivePersona.personalityTraits);
+    const overlay = source ? traitOverlayPatch(source.registryPersona.personalityTraits, effectivePersona.personalityTraits) : undefined;
     const personaTraits = { authored, ...(overlay ? { overlay } : {}) };
+    if (!layer || !source) {
+      // With no layer the GMI renders the persona's traits itself; a persona with none gets nothing, as before.
+      return Object.keys(authored).length > 0 || overlay ? { personaTraits } : {};
+    }
     const context: LearnerContext = {
       sessionId: runtimeContext.sessionId,
       personaId: source.registryPersona.id,

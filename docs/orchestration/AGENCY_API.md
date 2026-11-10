@@ -455,7 +455,7 @@ Per call, a pooled agency rejects `model`, `provider`, `apiKey`, `baseUrl`,
 `AgencyConfigError`, since each would move every seat off its seating. Under
 `panel` a call accepts only `temperature`, `topP`, `frequencyPenalty`,
 `presencePenalty`, `maxTokens`, `thinking`, `effort`, `requestTimeout`,
-`cache`, `promptCacheKey`, `promptCacheRetention`, `serviceTier`,
+`cache`, `promptCacheKey`, `promptCacheRetention`, `serviceTier`, `store`,
 `cacheDiagnostics`, `sessionId`, `usageLedger`, `source`, `toolChoice`,
 `chainOfThought`, `planning`, `onAfterGeneration`, `onBeforeToolExecution`,
 `customModelParams` (without `model`, `models`, `system`, `messages`, `tools`,

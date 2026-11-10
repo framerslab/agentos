@@ -46,6 +46,7 @@ import {
 } from '../core/llm/routing/UncensoredModelCatalog.js';
 import { checkContextFit } from './runtime/contextWindowFit.js';
 import { responseFormatCarriesSchema } from './runtime/responseFormatForProvider.js';
+import { splitHardLimits } from './runtime/hardLimitsSystem.js';
 import {
   asSpendBudget,
   costOfUsageUSD,
@@ -440,6 +441,8 @@ export interface SystemContentBlock {
    * `cacheBreakpoint: true`.
    */
   cacheTtl?: '5m' | '1h';
+  /** @internal Set by agent() on the hard-limits block it appends, so a schema instruction is sent before it. */
+  _hardLimits?: boolean;
 }
 
 export interface GenerateTextOptions {
@@ -591,6 +594,23 @@ export interface GenerateTextOptions {
    * is deliberately not implemented.
    */
   serviceTier?: 'auto' | 'default' | 'flex' | 'priority';
+  /**
+   * Sent to OpenAI as `store` on the request, on `/v1/chat/completions` and
+   * `/v1/responses` alike. Left out, a chat completion sends no `store` key
+   * and a Responses request sends `store: false`, as before. Other providers
+   * ignore it, except those built on the OpenAI provider (Groq, xAI,
+   * Together, Mistral, LiteLLM, MiniMax), which send it to their own
+   * endpoint.
+   *
+   * OpenAI keeps output unless a request says otherwise: "Responses are
+   * stored by default. Chat completions are stored by default for new
+   * accounts. To disable storage when using either API, set store: false."
+   * (https://developers.openai.com/api/docs/guides/migrate-to-responses).
+   * Every request the call makes carries it, on `generateText()` and
+   * `streamText()` alike: each step of the tool loop, the planning request,
+   * the prompt-tool loop's requests and a fallback leg.
+   */
+  store?: boolean;
   /**
    * Per-call prompt-cache control, forwarded to cache-capable providers
    * (Anthropic directly and on `anthropic/*` slugs through OpenRouter;
@@ -988,6 +1008,11 @@ export interface GenerateTextOptions {
    */
   _schemaInstruction?: string;
   /**
+   * @internal The exact text of the hard-limits block a string `system` ends with, set by agent() beside it: a call
+   * that sends schema instructions sends them before that block, which stays the last system text.
+   */
+  _hardLimitsText?: string;
+  /**
    * INTERNAL (sessions): how many TRAILING entries of `messages` belong to
    * THIS call's transcript delta rather than prior history. Sessions that
    * carry a non-string user turn inside `messages` set 1 so the delta
@@ -1107,6 +1132,15 @@ export interface GenerateTextResult {
    * the `verifyCitations` options.
    */
   grounding?: import('../cognition/rag/citation/types.js').VerifiedResponse;
+  /**
+   * On a `gmi()` or `agent({ runtime: 'gmi' })` session's turn with cognitive
+   * memory: the recall capture of the turn's memory assembly (every candidate
+   * with its ranks, scores and outcome, the legs, the reranker, the budget and
+   * the timings; never a memory's text or the query's). `undefined` when the
+   * turn assembled no memory block or the manager's `recall.capture` is
+   * `'off'`.
+   */
+  memoryRecall?: import('../cognition/memory/retrieval/recall/capture.js').MemoryRecallCapture;
   /**
    * Per-hop provider fallback trail. `fired` is true when any non-primary
    * provider produced — or was tried for — the result, so callers can flag a
@@ -1283,8 +1317,9 @@ function planningModelParams(params: Record<string, unknown> | undefined): Recor
  * @param toolNames - Names of available tools (informational context for the planner).
  * @param config - Optional planning configuration overrides, the call's abort signal, which the planning request
  *   is handed as it is handed `requestTimeout`, the call's `customModelParams`, of which the planning request
- *   takes the routing keys (`PLANNING_INHERITED_PARAM_KEYS`), and `onUsageReport`, called when the planning
- *   response reports usage (streamText passes its call's `__onUsageReport` there).
+ *   takes the routing keys (`PLANNING_INHERITED_PARAM_KEYS`), `onUsageReport`, called when the planning
+ *   response reports usage (streamText passes its call's `__onUsageReport` there), and `store`, OpenAI's `store`
+ *   for the planning request (generateText passes its call's).
  * @param totalUsage - Mutable usage aggregator: the planning call's tokens are added here.
  * @param spend - The run's spend budget, the provider the planning call is sent to, and what to call the call in the
  *   budget's records: the planning call is checked against the budget before it is made and recorded after it.
@@ -1304,6 +1339,7 @@ export async function createPlan(
         maxAttempts?: number;
         onAttempt?: (outcome: AttemptOutcome) => void;
         onUsageReport?: () => void;
+        store?: boolean;
       })
     | undefined,
   totalUsage: TokenUsage,
@@ -1358,6 +1394,8 @@ export async function createPlan(
     // Of the caller's provider-specific fields, the routing ones (OpenRouter's
     // provider preferences and plugins) apply to the planning call too.
     ...(inheritedParams ? { customModelParams: inheritedParams } : {}),
+    // OpenAI's `store`: the planning request carries the caller's messages.
+    ...(typeof config?.store === 'boolean' ? { store: config.store } : {}),
   }));
 
   spend?.budget.record(costOfUsageUSD(spend.providerId, modelId, response.usage), response.usage?.totalTokens ?? 0, spend.what);
@@ -2630,19 +2668,30 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       const cotInstruction = resolveChainOfThought(opts.chainOfThought);
       const hasTools = tools.length > 0;
 
-      if (typeof opts.system === 'string' || !opts.system) {
+      // A structured call whose payload carries no schema sends the schema instructions as a system message. When the
+      // system prompt closes with a hard-limits block, the instructions go before that block, which is sent as the
+      // last system message, so the limits stay the last system text of the call.
+      const schemaInstruction =
+        opts._schemaInstruction && !responseFormatCarriesSchema(responseFormat as Record<string, unknown> | undefined)
+          ? opts._schemaInstruction
+          : undefined;
+      const { head: systemHead, limits: closingLimits } = schemaInstruction
+        ? splitHardLimits(opts.system, opts._hardLimitsText)
+        : { head: opts.system, limits: undefined };
+
+      if (typeof systemHead === 'string' || !systemHead) {
         // Plain string system prompt (existing behavior)
         if (cotInstruction && hasTools) {
-          const systemContent = opts.system
-            ? `${cotInstruction}\n\n${opts.system}`
+          const systemContent = systemHead
+            ? `${cotInstruction}\n\n${systemHead}`
            : cotInstruction;
           messages.push({ role: 'system', content: systemContent });
-        } else if (opts.system) {
-          messages.push({ role: 'system', content: opts.system });
+        } else if (systemHead) {
+          messages.push({ role: 'system', content: systemHead });
         }
       } else {
         // Structured SystemContentBlock[]: convert to content parts with cache_control
-        const blocks = opts.system as SystemContentBlock[];
+        const blocks = systemHead;
         const parts = blocks.map(block => ({
           type: 'text' as const,
           text: block.text,
@@ -2659,11 +2708,10 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         messages.push({ role: 'system', content: parts });
       }
 
-      // A structured call whose payload carries no schema sends it after the
-      // system prompt, so the model sees what it has to answer in.
-      if (opts._schemaInstruction && !responseFormatCarriesSchema(responseFormat as Record<string, unknown> | undefined)) {
-        messages.push({ role: 'system', content: opts._schemaInstruction });
-      }
+      // The schema instructions follow the system prompt, so the model sees what it has to answer in; a closing
+      // hard-limits block split off above follows them.
+      if (schemaInstruction) messages.push({ role: 'system', content: schemaInstruction });
+      if (closingLimits !== undefined) messages.push({ role: 'system', content: closingLimits });
 
       // Everything above is built from opts (system prompt, chain-of-thought
       // instruction, schema instructions); a failover continuation rebuilds
@@ -2788,6 +2836,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             ...(opts.maxAttempts !== undefined ? { maxAttempts: opts.maxAttempts } : {}),
             ...(opts.onAttempt ? { onAttempt: opts.onAttempt } : {}),
             ...(opts.customModelParams !== undefined ? { customModelParams: opts.customModelParams } : {}),
+            // The planning request carries the caller's messages, so it takes the call's `store` too.
+            ...(typeof opts.store === 'boolean' ? { store: opts.store } : {}),
           },
           totalUsage,
           budget ? { budget, providerId: resolved.providerId, what: 'generate_text.plan' } : undefined,
@@ -2878,6 +2928,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
                 : {}),
               ...(opts.promptCacheRetention !== undefined ? { promptCacheRetention: opts.promptCacheRetention } : {}),
               ...(opts.serviceTier !== undefined ? { serviceTier: opts.serviceTier } : {}),
+              // OpenAI's `store`; other providers ignore it.
+              ...(typeof opts.store === 'boolean' ? { store: opts.store } : {}),
               // Forward provider-specific top-level payload params (e.g.
               // OpenRouter provider-routing preferences) on the shim path too.
               ...(opts.customModelParams !== undefined
@@ -3080,6 +3132,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
                 : {}),
               ...(opts.promptCacheRetention !== undefined ? { promptCacheRetention: opts.promptCacheRetention } : {}),
               ...(opts.serviceTier !== undefined ? { serviceTier: opts.serviceTier } : {}),
+              // OpenAI's `store`; other providers ignore it.
+              ...(typeof opts.store === 'boolean' ? { store: opts.store } : {}),
                 // Cache diagnostics: thread the previous step's message id so
                 // the API explains any prefix divergence between loop steps.
                 ...(opts.cacheDiagnostics

@@ -38,8 +38,10 @@ import { maskStreamMembers } from './runtime/pool/maskedOutput.js';
 import type { HostLLMPolicy } from './runtime/hostPolicy.js';
 import type { IModelRouter } from '../core/llm/routing/IModelRouter.js';
 import type { SkillEntry } from '../cognition/skills/types.js';
-import { loadSoulSync, parseSoul } from '../cognition/substrate/personas/SoulLoader.js';
+import { loadSoulSync, parseSoul, SoulLoadError, type LoadedSoul } from '../cognition/substrate/personas/SoulLoader.js';
 import { renderPersonalitySection } from '../cognition/substrate/personas/personalityPrompt.js';
+import { hardLimitsBlock } from '../cognition/substrate/personas/hardLimits.js';
+import { withHardLimitsLast } from './runtime/hardLimitsSystem.js';
 import type { ForgetReport, ImportReport, LearnedStateDocument, LearningConfig, LedgerEntry, LoopManifest } from '../cognition/learning/types.js';
 import type { HexacoTraitValues } from '../cognition/substrate/personas/hexaco.js';
 import type { AgencyLaunchOptions } from './runtime/agencyLaunch/types.js';
@@ -62,6 +64,8 @@ import {
   type ExportAgentConfigOptions,
 } from './agentExportCore.js';
 import { applyMemoryProvider, type MemoryProviderHookOptions } from './runtime/memoryProviderHooks.js';
+import { resolveRecallOptions } from './runtime/recallOptions.js';
+import { recallLog } from '../cognition/memory/retrieval/recall/log.js';
 import { observeWithoutWaiting } from './runtime/memoryObserveFailures.js';
 import { warnSoulBesideSystemBlocks, warnSoulLoadFailed } from './runtime/soulLoadWarning.js';
 import { asSpendBudget, type SpendBudget, type SpendBudgetOptions } from './runtime/spendBudget.js';
@@ -248,9 +252,9 @@ export interface AgentOptions extends BaseAgentConfig {
    */
   responseSchema?: import('zod').ZodType;
   /**
-   * Pre-generation hook, called before each LLM step. On the GMI path with `learning` on, its `system` is the
-   * persona's base prompt, which holds no personality section; the system text in `messages` holds the section after
-   * the base prompt.
+   * Pre-generation hook, called before each LLM step. On the GMI path with `learning` on, or with traits (the
+   * `personality` option or a soul's `hexaco`), its `system` is the persona's base prompt, which holds no personality
+   * section; the system text in `messages` holds the section after the base prompt.
    */
   onBeforeGeneration?: (context: GenerationHookContext) => Promise<GenerationHookContext | void>;
   /** Post-generation hook, called after each LLM step. */
@@ -282,10 +286,12 @@ export interface AgentOptions extends BaseAgentConfig {
   skills?: SkillEntry[];
   /**
    * Structured system prompt blocks with cache breakpoints.
-   * When provided, they replace the assembled prompt whole: the `soul` is not
-   * read (no SOUL.md prose, STYLE.md or memory index, and no warning when it
-   * would fail to load), and `instructions`, `name`, `personality` and
-   * `skills` are not added.
+   * When provided, they replace the assembled prompt whole: the soul's SOUL.md
+   * prose, STYLE.md and memory index are not added, and neither are
+   * `instructions`, `name`, `personality` and `skills`. The `soul` is still
+   * loaded at build: its hard limits close the prompt as one more block after
+   * yours, and a soul that fails to load throws `SoulLoadError` unless it is
+   * given as `{ path, optional: true }`.
    * Use this for prompt caching support with Anthropic.
    */
   systemBlocks?: import('./generateText.js').SystemContentBlock[];
@@ -339,17 +345,22 @@ export interface AgentOptions extends BaseAgentConfig {
    * replace the assembled prompt, the soul's prose with it), `agent()` reads
    * the soul and joins its prose into one system prompt, first the SOUL.md body, then a
    * `## Style` section from STYLE.md, then the `memory/index.md` catalog, before
-   * `instructions`, `name`, `personality` and `skills`. The front matter's
-   * structured fields (HEXACO traits, voice, mood, hard limits) are not applied
-   * here: they live on the persona (`personaDefinition`) that `loadSoul()`
-   * returns, which the full runtime takes. A soul that fails to load logs a
-   * warning, and the agent is built without it.
+   * `instructions`, `name`, `personality` and `skills`. The front matter applies
+   * too: the hard limits close the system prompt as a block of their own, after
+   * `systemBlocks` as well; the `hexaco` scores render as the trait paragraph when
+   * `personality` is unset; and the soul's `name` is the name line when `name` is
+   * unset. Mood, voice, avatar and reasoning-trace limits have no renderer on this
+   * runtime; `runtime: 'gmi'` applies mood and the trace limits through its
+   * persona. A soul that fails to load, or whose
+   * front matter has a field of the wrong type, throws `SoulLoadError` when the
+   * agent is built. `optional: true` on the object forms runs the agent without
+   * it and writes one `soul.load_failed` log line.
    *
    * @see `loadSoul` in `@framers/agentos/cognition/substrate/personas/SoulLoader`
    * for the loader implementation and full SOUL.md format spec.
    * @see https://github.com/aaronjmars/soul.md for the cross-framework convention.
    */
-  soul?: string | { content: string } | { path: string };
+  soul?: string | { content: string; optional?: boolean } | { path: string; optional?: boolean };
   /**
    * Which engine serves this agent. `'legacy'` (the default) calls the model through
    * generateText and streamText; `'gmi'` serves every session with a Generalized Mind
@@ -679,17 +690,33 @@ async function loadRecordedAgentOSUsage(
   return getRecordedAgentOSUsage(options);
 }
 
-export function buildSystemPrompt(opts: AgentOptions): string | undefined {
+/**
+ * The system prompt `agent()` assembles from its options: the soul's prose, `instructions`, the name line, the
+ * personality text and skills. An option set in code wins over the soul's file: the name line is `name`, else the
+ * soul's `name`; the personality text renders `personality`, else the soul's `hexaco`. The soul's hard limits are not
+ * part of it: `agent()` closes the prompt with them (`withHardLimitsLast`).
+ *
+ * @param opts - The agent's options.
+ * @param soul - The soul the caller loaded from `opts.soul`; `null` for none. Not passed, `opts.soul` is loaded here.
+ * @param parts - `personality: false` renders no personality text, for a GMI that renders its own.
+ * @throws {SoulLoadError} When the soul is loaded here, fails to load and is not optional.
+ */
+export function buildSystemPrompt(
+  opts: AgentOptions,
+  soul?: LoadedSoul | null,
+  parts?: { personality?: false },
+): string | undefined {
   const sections: string[] = [];
 
   // SOUL.md content first — the agent's identity comes before everything else.
   // See `loadSoul` in cognition/substrate/personas/SoulLoader.
-  if (opts.soul) {
-    const loaded = loadSoulFromOption(opts.soul);
-    if (loaded?.soulContent) {
+  // The soul the caller loaded; a caller that passes none has it loaded here.
+  const loaded = soul === undefined ? (opts.soul ? loadSoulFromOption(opts.soul) : null) : soul;
+  if (loaded) {
+    if (loaded.soulContent) {
       sections.push(loaded.soulContent);
     }
-    if (loaded?.styleContent) {
+    if (loaded.styleContent) {
       sections.push(`## Style\n\n${loaded.styleContent}`);
     }
     // The memory wiki's index.md catalog. The agent reads it to know what it
@@ -697,7 +724,7 @@ export function buildSystemPrompt(opts: AgentOptions): string | undefined {
     // empty catalog (a bare "# Memory Index") so agents with no memory yet keep
     // a clean prompt.
     // The loader leaves out the end marker of text migrated from a legacy MEMORY.md, the wiki's own bookkeeping.
-    const wikiIndex = loaded?.wikiIndex ?? '';
+    const wikiIndex = loaded.wikiIndex ?? '';
     if (wikiIndex && wikiIndex !== '# Memory Index') {
       sections.push(
         '## Long-Term Memory (index)\n\n' +
@@ -712,12 +739,15 @@ export function buildSystemPrompt(opts: AgentOptions): string | undefined {
     sections.push(opts.instructions.trim());
   }
 
-  if (opts.name?.trim()) {
-    sections.push(`Assistant name: ${opts.name.trim()}.`);
+  // An option set in code wins over the soul's file for the name and the traits.
+  const name = opts.name?.trim() || loaded?.frontmatter.name?.trim();
+  if (name) {
+    sections.push(`Assistant name: ${name}.`);
   }
 
-  if (opts.personality) {
-    const desc = renderPersonalitySection(opts.personality);
+  const traits = parts?.personality === false ? undefined : (opts.personality ?? loaded?.frontmatter.hexaco);
+  if (traits) {
+    const desc = renderPersonalitySection(traits);
     if (desc) {
       sections.push(desc);
     }
@@ -778,30 +808,31 @@ function maskStreamResult(result: StreamTextResult, mask: (error: unknown) => un
 }
 
 /**
- * Resolve an `AgentOptions.soul` value (string path | { content } | { path })
- * into a `LoadedSoul`. Returns null on failure so the agent can still boot
- * (the soul is additive, not load-blocking), and warns with `console.warn` in
- * every environment that the agent boots without it; the loads of one agent
- * build warn once (`withOneSoulWarning`).
+ * Loads an `AgentOptions.soul` value (a path, `{ content }` or `{ path }`).
+ *
+ * @returns The loaded soul; `null` only for a soul given `optional: true` that failed to load, after one
+ *   `soul.load_failed` line (once per `withOneSoulWarning` scope).
+ * @throws {SoulLoadError} When the soul fails to load and is not optional: a missing or unread SOUL.md, a front matter
+ *   field of the wrong type, or a value that is none of the three forms.
  */
 export function loadSoulFromOption(
   soul: NonNullable<AgentOptions['soul']>,
-): import('../cognition/substrate/personas/SoulLoader.js').LoadedSoul | null {
+): LoadedSoul | null {
+  const given = soul as unknown;
+  const asObject = typeof given === 'object' && given !== null ? (given as { content?: unknown; path?: unknown; optional?: unknown }) : undefined;
+  const source = typeof given === 'string' ? given : typeof asObject?.path === 'string' ? asObject.path : 'inline soul';
   try {
-    if (typeof soul === 'string') {
-      return loadSoulSync({ source: soul });
-    }
-    if ('content' in soul) {
-      return parseSoul(soul.content);
-    }
-    if ('path' in soul) {
-      return loadSoulSync({ source: soul.path });
-    }
-    return null;
+    if (typeof given === 'string') return loadSoulSync({ source: given });
+    if (typeof asObject?.content === 'string') return parseSoul(asObject.content);
+    if (typeof asObject?.path === 'string') return loadSoulSync({ source: asObject.path });
+    throw new SoulLoadError(source, 'the soul option must be a path, { content } or { path }');
   } catch (err) {
-    // Non-fatal: the agent boots without the soul, and says so in every environment.
-    warnSoulLoadFailed(typeof soul === 'string' ? soul : 'path' in soul ? String(soul.path) : 'inline soul', err);
-    return null;
+    if (asObject?.optional === true) {
+      warnSoulLoadFailed(source, err);
+      return null;
+    }
+    if (err instanceof SoulLoadError) throw err;
+    throw new SoulLoadError(source, err instanceof Error ? err.message : String(err), { cause: err });
   }
 }
 
@@ -950,8 +981,30 @@ export function agent(opts: AgentOptions): Agent {
   if (opts.agencies?.launch === true) {
     throw new Error("agent(): agencies.launch runs on the GMI path; set runtime: 'gmi' or use gmi().");
   }
+  // memory.recall on the default runtime: its budget is the memory provider's tokenBudget when that is unset; two
+  // different budgets, and capture, which needs the cognitive assembler, are refused; a budget no provider reads is
+  // reported in one line.
+  const recallSetting = typeof opts.memory === 'object' && opts.memory !== null ? opts.memory.recall : undefined;
+  const resolvedRecall = resolveRecallOptions({
+    recall: recallSetting,
+    cognitiveMemory: false,
+    providerTokenBudget: opts.memoryProviderOptions?.tokenBudget,
+    providerContext: Boolean(opts.memoryProvider?.getContext),
+    where: 'agent()',
+  });
+  for (const option of resolvedRecall.ignored) recallLog.warn('memory.recall.option_ignored', { option });
+  const providerBudget = resolvedRecall.providerTokenBudget;
+  const memoryProviderOptions: MemoryProviderHookOptions | undefined =
+    providerBudget === undefined ? opts.memoryProviderOptions : { ...opts.memoryProviderOptions, tokenBudget: providerBudget };
   // The GMI path warns in gmi(), so an agent on it warns once.
   warnSoulBesideSystemBlocks(opts);
+  // Loaded once, at build: a soul that fails to load throws here unless it is optional.
+  const loadedSoul = opts.soul ? loadSoulFromOption(opts.soul) : null;
+  const hardLimits = loadedSoul?.frontmatter.hardLimits;
+  // The soul's hard limits close the system prompt, after systemBlocks too.
+  const agentSystem = withHardLimitsLast(opts.systemBlocks ?? buildSystemPrompt(opts, loadedSoul), hardLimits);
+  // A string prompt carries no mark, so the block's text goes beside it for generateText's split.
+  const hardLimitsText = hardLimitsBlock(hardLimits) ?? undefined;
   const sessionBuffers = new Map<string, SessionHistoryBuffer | null>();
   // In-memory usage tally per session and per agent. Populated synchronously
   // after every generate/send/stream call so `agent.usage()` and
@@ -997,7 +1050,8 @@ export function agent(opts: AgentOptions): Agent {
   const baseOpts: Partial<GenerateTextOptions> = {
     provider: opts.provider,
     model: opts.model,
-    system: opts.systemBlocks ?? buildSystemPrompt(opts),
+    system: agentSystem,
+    ...(hardLimitsText ? { _hardLimitsText: hardLimitsText } : {}),
     tools: opts.tools,
     maxSteps: opts.maxSteps ?? 5,
     // Per-call completion-token cap applied to every generate /
@@ -1071,7 +1125,9 @@ export function agent(opts: AgentOptions): Agent {
    * own, and that provider's from the environment otherwise.
    */
   const callOptions = (extra: Partial<GenerateTextOptions> | undefined): Partial<GenerateTextOptions> => {
-    let merged = { ...baseOpts, ...extra };
+    // A call's own system prompt replaces the agent's, and the hard limits close it too.
+    // A call that sets `system`, even to undefined, still closes with the limits.
+    let merged = { ...baseOpts, ...extra, ...(extra && 'system' in extra ? { system: withHardLimitsLast(extra.system, hardLimits) } : {}) };
     if (!extra || (extra.provider === undefined && extra.model === undefined)) return merged;
     if (
       extra.provider === undefined &&
@@ -1115,7 +1171,7 @@ export function agent(opts: AgentOptions): Agent {
           opts.controls?.maxValidationRetries ?? 1,
           true,
           (attempt) => accumulateUsage(agentUsageTally, attempt.usage),
-          { provider: opts.memoryProvider, userText, options: opts.memoryProviderOptions },
+          { provider: opts.memoryProvider, userText, options: memoryProviderOptions },
         );
         if (opts.responseSchema) result.parsed = object;
         if (opts.verifyCitations) {
@@ -1146,7 +1202,7 @@ export function agent(opts: AgentOptions): Agent {
         },
         opts.memoryProvider,
         userText,
-        opts.memoryProviderOptions,
+        memoryProviderOptions,
       );
       if (typeof prompt === 'string') {
         streamOpts.prompt = prompt;
@@ -1315,7 +1371,7 @@ export function agent(opts: AgentOptions): Agent {
               accumulateUsage(sessionUsageTally, attempt.usage);
               accumulateUsage(agentUsageTally, attempt.usage);
             },
-            { provider: opts.memoryProvider, userText: textForMemory, options: opts.memoryProviderOptions },
+            { provider: opts.memoryProvider, userText: textForMemory, options: memoryProviderOptions },
           );
           if (retried) {
             result.transcriptDelta = [
@@ -1372,7 +1428,7 @@ export function agent(opts: AgentOptions): Agent {
             },
             opts.memoryProvider,
             textForMemory,
-            opts.memoryProviderOptions,
+            memoryProviderOptions,
           );
 
           const result = streamText(wrappedOpts as GenerateTextOptions);
