@@ -221,7 +221,7 @@ describe('schema validation retries', () => {
     ]);
   });
 
-  it.each(['generate', 'send'] as const)('observes only the accepted %s exchange while recall and caller hooks run on every attempt', async (method) => {
+  it.each(['generate', 'send'] as const)('observes only the accepted %s exchange; recall runs once and its text and the caller hooks reach every attempt', async (method) => {
     hoisted.generateCompletion
       .mockResolvedValueOnce(completion('{"count":"invalid"}'))
       .mockResolvedValueOnce(completion('{"count":1}'));
@@ -247,11 +247,11 @@ describe('schema validation retries', () => {
       ['user', 'Count records.', expect.objectContaining({ sessionId: expect.any(String) })],
       ['assistant', '{"count":2}', expect.objectContaining({ sessionId: expect.any(String) })],
     ]);
-    expect(getContext).toHaveBeenCalledTimes(2);
+    expect(getContext).toHaveBeenCalledTimes(1);
+    expect(getContext).toHaveBeenCalledWith('Count records.', expect.any(Object));
     expect(onBeforeGeneration).toHaveBeenCalledTimes(2);
     expect(onAfterGeneration).toHaveBeenCalledTimes(2);
     for (const index of [0, 1]) {
-      expect(getContext).toHaveBeenNthCalledWith(index + 1, 'Count records.', expect.any(Object));
       expect(systemAt(index)).toContain('Remember the count.');
     }
   });
@@ -275,7 +275,7 @@ describe('schema validation retries', () => {
       : session.send('Count records.', { responseSchema: schema, maxValidationRetries: 1 });
     await expect(result).rejects.toBeInstanceOf(ObjectGenerationError);
     expect(observe).not.toHaveBeenCalled();
-    expect(getContext).toHaveBeenCalledTimes(2);
+    expect(getContext).toHaveBeenCalledTimes(1);
     expect(onBeforeGeneration).toHaveBeenCalledTimes(2);
     expect(onAfterGeneration).toHaveBeenCalledTimes(2);
     expect(session.messages()).toEqual([]);

@@ -6,8 +6,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
 import pino from 'pino';
+import { z } from 'zod';
 import { agent, type AgentMemoryProvider, type AgentOptions, type MemoryHookContext } from '../agent';
 import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory';
+import { ObjectGenerationError } from '../generateObject';
 import { reply, script } from './helpers/stubProviders';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 
@@ -127,5 +129,79 @@ describe('one session is one user on the default runtime', () => {
     expect(() => a.session('s2', { userId: 'ana' })).toThrow("agent(): session 's2' already runs as user 's2'; close it to open it for another user.");
     await a.close();
     expect(a.session('s2', { userId: 'ana' }).id).toBe('s2');
+  });
+});
+
+const lookup = { name: 'lookup', description: 'Look up.', inputSchema: { type: 'object', properties: { q: { type: 'string' } } }, execute: async () => ({ found: true }) };
+
+describe('how often the memory hooks run on the default runtime', () => {
+  it('a turn with two tool steps recalls once and observes twice: the user text, and the reply the caller receives', async () => {
+    const k = key();
+    const s = script('openai', k, {
+      whole: true,
+      replies: [reply.tools([{ id: 'c1', name: 'lookup', args: { q: 'x' } }]), reply.tools([{ id: 'c2', name: 'lookup', args: { q: 'y' } }]), reply.text('Found both.')],
+    });
+    // A recalled text with no whitespace, so this case reads the same once recalled text is datamarked.
+    const { provider, calls, observed } = recorder({ contextText: 'RECALL-likes-tea' });
+    const r = await agent(stubbed(k, { tools: [lookup], memoryProvider: provider })).session('s1').send('Find x and y.');
+    expect(r.text).toBe('Found both.');
+    await vi.waitFor(() => expect(observed()).toHaveLength(2));
+    expect(s.seen).toHaveLength(3);
+    expect(calls.filter((call) => call.hook === 'getContext')).toHaveLength(1);
+    expect(observed().map((call) => [call.role, call.text])).toEqual([['user', 'Find x and y.'], ['assistant', 'Found both.']]);
+    // The one recall is in every step's request.
+    for (const call of s.seen) expect(JSON.stringify(call.messages)).toContain('RECALL-likes-tea');
+  });
+
+  it('a structured send recalls once across its attempts and observes only the accepted result', async () => {
+    const k = key();
+    const schema = z.object({ count: z.number() });
+    script('openai', k, { whole: true, replies: [reply.text('{"count":"two"}'), reply.text('{"count":2}'), reply.text('{"count":"three"}')] });
+    const { provider, calls, observed } = recorder();
+    const a = agent(stubbed(k, { memoryProvider: provider }));
+    const r = await a.session('s1').send('Count.', { responseSchema: schema, maxValidationRetries: 1 });
+    expect(r.object).toEqual({ count: 2 });
+    await vi.waitFor(() => expect(observed()).toHaveLength(2));
+    expect(calls.filter((call) => call.hook === 'getContext')).toHaveLength(1);
+    expect(observed().map((call) => [call.role, call.text])).toEqual([['user', 'Count.'], ['assistant', '{"count":2}']]);
+    await expect(a.session('s2').send('Count again.', { responseSchema: schema })).rejects.toBeInstanceOf(ObjectGenerationError);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(observed()).toHaveLength(2);
+  });
+
+  it('a session stream observes once its text has settled', async () => {
+    const k = key();
+    script('openai', k, { whole: true, replies: [reply.text('Streamed.')] });
+    const { provider, observed } = recorder();
+    const result = agent(stubbed(k, { memoryProvider: provider })).session('s1').stream('Hi.');
+    for await (const _part of result.textStream) { /* drain */ }
+    expect(await result.text).toBe('Streamed.');
+    expect(observed().map((call) => [call.role, call.text])).toEqual([['user', 'Hi.'], ['assistant', 'Streamed.']]);
+  });
+});
+
+describe('a memory hook that fails on the default runtime', () => {
+  it('leaves the turn as it is and writes memory.hook_failed with no message: a throw, a timeout, and observe sparsely', async () => {
+    const k = key();
+    script('openai', k, { whole: true, replies: Array.from({ length: 7 }, (_, i) => reply.text(`Answer ${i}.`)) });
+    const throwing: AgentMemoryProvider = { getContext: async () => { throw Object.assign(new Error('store down for ana'), { code: 'ECONNREFUSED' }); } };
+    expect((await agent(stubbed(k, { memoryProvider: throwing })).generate('Hi.')).text).toBe('Answer 0.');
+    const slow: AgentMemoryProvider = { getContext: () => new Promise(() => undefined) };
+    expect((await agent(stubbed(k, { memoryProvider: slow, memoryProviderOptions: { timeoutMs: 20 } })).generate('Hi.')).text).toBe('Answer 1.');
+    expect(events('memory.hook_failed')).toEqual([
+      expect.objectContaining({ hook: 'getContext', type: 'Error', code: 'ECONNREFUSED' }),
+      expect.objectContaining({ hook: 'getContext', type: 'TimeoutError', code: 'MEMORY_HOOK_TIMEOUT' }),
+    ]);
+
+    logged.length = 0;
+    let failures = 0;
+    const failing: AgentMemoryProvider = { observe: async () => { failures += 1; throw new Error('store down for ana'); } };
+    const a = agent(stubbed(k, { memoryProvider: failing }));
+    for (let i = 0; i < 5; i++) await a.generate(`turn ${i}`);
+    await vi.waitFor(() => expect(failures).toBe(10));
+    // The first failure and the tenth.
+    await vi.waitFor(() => expect(events('memory.hook_failed')).toHaveLength(2));
+    for (const line of events('memory.hook_failed')) expect(line).toMatchObject({ hook: 'observe', type: 'Error' });
+    expect(JSON.stringify(logged)).not.toContain('store down');
   });
 });
