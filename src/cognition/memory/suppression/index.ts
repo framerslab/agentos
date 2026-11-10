@@ -5,3 +5,4 @@
  */
 export { ForgottenLedger, ForgottenLedgerError, FORGOTTEN_DDL, COPY_MARKER, KEY_MARKER_PREFIX } from './ForgottenLedger.js';
 export type { ForgottenLedgerOptions, SuppressionSubject, TombstoneKey } from './ForgottenLedger.js';
+export { openForgottenCopy } from './forgottenCopy.js';

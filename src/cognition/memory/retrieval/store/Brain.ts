@@ -928,6 +928,11 @@ export class Brain {
    * Open a Brain backed by SQLite. Tries adapters in order:
    * better-sqlite3 (Node native) -> sql.js (WASM) -> indexeddb (browser).
    *
+   * The file is opened with `PRAGMA secure_delete = ON`, so the bytes of a
+   * deleted row are overwritten in the file. There is no option to turn it
+   * off. A Brain on an adapter the caller opened ({@link Brain.openWithAdapter})
+   * keeps the setting the caller gave the adapter.
+   *
    * @param dbPath - File path. Use `:memory:` for in-process testing.
    * @param opts.brainId - Optional explicit brainId; defaults to file basename
    *   (or `'default'` for `:memory:`).
@@ -968,7 +973,7 @@ export class Brain {
         ? internCoordinationToken(identity)
         : coordinationTokenForAdapter(adapter, brainId));
     rememberAdapterCoordinationToken(adapter, brainId, coordinationToken);
-    return Brain._initialize(adapter, brainId, coordinationToken);
+    return Brain._initialize(adapter, brainId, coordinationToken, 'by-path');
   }
 
   /**
@@ -1080,16 +1085,19 @@ export class Brain {
    * 1. Build platform-aware feature bundle.
    * 2. Set WAL mode (dialect.pragma returns null on Postgres).
    * 3. Enable foreign key enforcement (dialect.pragma returns null on Postgres).
-   * 4. Run the pending schema migrations (idempotent; no-op for fresh DBs and the latest schema).
-   * 5. Apply full DDL via _initSchema().
-   * 6. File the brain's traces that hold `scope_id` `''` while their metadata names a scope id (`fillScopeIds`).
-   * 7. Seed brain_meta defaults.
-   * 8. Repair the full-text index (SQLite).
+   * 4. Turn `secure_delete` on for a database this class opened from a file path (`opened` is `'by-path'`), so a
+   *    deleted row's bytes are overwritten. An adapter the caller opened is left as the caller set it.
+   * 5. Run the pending schema migrations (idempotent; no-op for fresh DBs and the latest schema).
+   * 6. Apply full DDL via _initSchema().
+   * 7. File the brain's traces that hold `scope_id` `''` while their metadata names a scope id (`fillScopeIds`).
+   * 8. Seed brain_meta defaults.
+   * 9. Repair the full-text index (SQLite).
    */
   private static async _initialize(
     adapter: StorageAdapter,
     brainId: string,
     coordinationToken: object,
+    opened: 'by-path' | 'by-adapter' = 'by-adapter',
   ): Promise<Brain> {
     const features = createStorageFeatures(adapter);
     const brain = new Brain(adapter, features, brainId, coordinationToken);
@@ -1099,6 +1107,11 @@ export class Brain {
 
     const fkPragma = features.dialect.pragma('foreign_keys', 'ON');
     if (fkPragma) await adapter.exec(fkPragma);
+
+    if (opened === 'by-path') {
+      const secure = features.dialect.pragma('secure_delete', 'ON');
+      if (secure) await adapter.exec(secure);
+    }
 
     await MigrationRunner.runPending(adapter, features, brainId, MIGRATIONS);
     await brain._initSchema();

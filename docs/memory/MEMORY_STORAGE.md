@@ -131,6 +131,8 @@ The brain has no re-embedding method. After a change of embedding model, stored 
 
 Forgotten subjects are recorded in one ledger, the table `agentos_learning_forgotten`, which the memory store and the learning layer share. A row holds a hash of a subject (SHA-256 over the canonical JSON `[namespace, kind, id]`, or HMAC-SHA-256 under a key the host supplies) and the time, never an id or any text. `ForgottenLedger` keeps a second copy of the table outside the store's database and copies it back at every open, so a store restored from a backup taken before a deletion still knows the deletion. A store whose tombstones are keyed does not open without the key, and a store whose copy is missing does not open.
 
+Every SQLite memory store the library opens from a file path (`Memory.createSqlite`, `Brain.openSqlite`, the `souledAgent()` store, a `gmi()` `memory.store` path) and the tombstone copy are opened with `PRAGMA secure_delete = ON`, so a deleted row's bytes are overwritten in the file. There is no option to turn it off. A store on an adapter you pass (`Memory.createWithAdapter`) is opened by you: set the pragma yourself. On PostgreSQL a deleted row stays in the table file until `VACUUM` removes it; the schedule is yours. `openForgottenCopy(filePath)` opens a tombstone copy's file this way, making it when missing, and returns its adapter for `ForgottenLedger.open({ primary, copy })`.
+
 ---
 
 ## Export and backup
