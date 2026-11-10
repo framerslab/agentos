@@ -146,10 +146,11 @@ function soleRequest(): Received {
 }
 
 describe('OpenAIProvider sends store on the request', () => {
-  // `store` is read from the call's options; the cast keeps this file's cases
-  // the same whether the options type names the field or not.
-  const withStore = (store: boolean | undefined, extra: Partial<ModelCompletionOptions> = {}): ModelCompletionOptions =>
-    ({ ...extra, ...(store === undefined ? {} : { store }) }) as ModelCompletionOptions;
+  /** The call's options, with `store` only when the case sets it. */
+  const withStore = (store: boolean | undefined, extra: ModelCompletionOptions = {}): ModelCompletionOptions => ({
+    ...extra,
+    ...(store === undefined ? {} : { store }),
+  });
 
   it.each([
     { store: true, expected: true },

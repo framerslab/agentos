@@ -209,6 +209,17 @@ const totals = await getRecordedAgentOSUsage({ enabled: true, sessionId: 'demo-s
 console.log(totals.totalTokens);
 ```
 
+### OpenAI response storage
+
+```ts
+import { generateObject, generateText } from '@framers/agentos';
+
+await generateText({ provider: 'openai', prompt: 'Summarize this call.', store: false });
+await generateObject({ provider: 'openai', schema, prompt: transcript, store: false });
+```
+
+`store` is sent to OpenAI as `store` on the request body, on `/v1/chat/completions` and `/v1/responses` alike. OpenAI's [migration guide](https://developers.openai.com/api/docs/guides/migrate-to-responses) says "Responses are stored by default. Chat completions are stored by default for new accounts. To disable storage when using either API, set `store: false`." Every request the call makes carries the option: each step of the tool loop, the planning request, each attempt of `generateObject()` and a fallback leg to OpenAI. Left out, a chat completion sends no `store` key and a Responses request sends `store: false`. The providers built on the OpenAI provider (Groq, xAI, Together, Mistral, LiteLLM, MiniMax) send it to their own endpoint too; the other providers ignore it. `ModelCompletionOptions.store` sets it on a direct `generateCompletion()` call.
+
 ## `streamText()`
 
 ```ts

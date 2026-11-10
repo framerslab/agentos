@@ -592,6 +592,22 @@ export interface GenerateTextOptions {
    */
   serviceTier?: 'auto' | 'default' | 'flex' | 'priority';
   /**
+   * Sent to OpenAI as `store` on the request, on `/v1/chat/completions` and
+   * `/v1/responses` alike. Left out, a chat completion sends no `store` key
+   * and a Responses request sends `store: false`, as before. Other providers
+   * ignore it, except those built on the OpenAI provider (Groq, xAI,
+   * Together, Mistral, LiteLLM, MiniMax), which send it to their own
+   * endpoint.
+   *
+   * OpenAI keeps output unless a request says otherwise: "Responses are
+   * stored by default. Chat completions are stored by default for new
+   * accounts. To disable storage when using either API, set store: false."
+   * (https://developers.openai.com/api/docs/guides/migrate-to-responses).
+   * Every request the call makes carries it: each step of the tool loop, the
+   * planning request, the prompt-tool loop's requests and a fallback leg.
+   */
+  store?: boolean;
+  /**
    * Per-call prompt-cache control, forwarded to cache-capable providers
    * (Anthropic directly and on `anthropic/*` slugs through OpenRouter;
    * `false` also suppresses OpenAI's session-derived `prompt_cache_key`).
@@ -1292,8 +1308,9 @@ function planningModelParams(params: Record<string, unknown> | undefined): Recor
  * @param toolNames - Names of available tools (informational context for the planner).
  * @param config - Optional planning configuration overrides, the call's abort signal, which the planning request
  *   is handed as it is handed `requestTimeout`, the call's `customModelParams`, of which the planning request
- *   takes the routing keys (`PLANNING_INHERITED_PARAM_KEYS`), and `onUsageReport`, called when the planning
- *   response reports usage (streamText passes its call's `__onUsageReport` there).
+ *   takes the routing keys (`PLANNING_INHERITED_PARAM_KEYS`), `onUsageReport`, called when the planning
+ *   response reports usage (streamText passes its call's `__onUsageReport` there), and `store`, OpenAI's `store`
+ *   for the planning request (generateText passes its call's).
  * @param totalUsage - Mutable usage aggregator: the planning call's tokens are added here.
  * @param spend - The run's spend budget, the provider the planning call is sent to, and what to call the call in the
  *   budget's records: the planning call is checked against the budget before it is made and recorded after it.
@@ -1313,6 +1330,7 @@ export async function createPlan(
         maxAttempts?: number;
         onAttempt?: (outcome: AttemptOutcome) => void;
         onUsageReport?: () => void;
+        store?: boolean;
       })
     | undefined,
   totalUsage: TokenUsage,
@@ -1367,6 +1385,8 @@ export async function createPlan(
     // Of the caller's provider-specific fields, the routing ones (OpenRouter's
     // provider preferences and plugins) apply to the planning call too.
     ...(inheritedParams ? { customModelParams: inheritedParams } : {}),
+    // OpenAI's `store`: the planning request carries the caller's messages.
+    ...(typeof config?.store === 'boolean' ? { store: config.store } : {}),
   }));
 
   spend?.budget.record(costOfUsageUSD(spend.providerId, modelId, response.usage), response.usage?.totalTokens ?? 0, spend.what);
@@ -2797,6 +2817,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             ...(opts.maxAttempts !== undefined ? { maxAttempts: opts.maxAttempts } : {}),
             ...(opts.onAttempt ? { onAttempt: opts.onAttempt } : {}),
             ...(opts.customModelParams !== undefined ? { customModelParams: opts.customModelParams } : {}),
+            // The planning request carries the caller's messages, so it takes the call's `store` too.
+            ...(typeof opts.store === 'boolean' ? { store: opts.store } : {}),
           },
           totalUsage,
           budget ? { budget, providerId: resolved.providerId, what: 'generate_text.plan' } : undefined,
@@ -2887,6 +2909,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
                 : {}),
               ...(opts.promptCacheRetention !== undefined ? { promptCacheRetention: opts.promptCacheRetention } : {}),
               ...(opts.serviceTier !== undefined ? { serviceTier: opts.serviceTier } : {}),
+              // OpenAI's `store`; other providers ignore it.
+              ...(typeof opts.store === 'boolean' ? { store: opts.store } : {}),
               // Forward provider-specific top-level payload params (e.g.
               // OpenRouter provider-routing preferences) on the shim path too.
               ...(opts.customModelParams !== undefined
@@ -3089,6 +3113,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
                 : {}),
               ...(opts.promptCacheRetention !== undefined ? { promptCacheRetention: opts.promptCacheRetention } : {}),
               ...(opts.serviceTier !== undefined ? { serviceTier: opts.serviceTier } : {}),
+              // OpenAI's `store`; other providers ignore it.
+              ...(typeof opts.store === 'boolean' ? { store: opts.store } : {}),
                 // Cache diagnostics: thread the previous step's message id so
                 // the API explains any prefix divergence between loop steps.
                 ...(opts.cacheDiagnostics

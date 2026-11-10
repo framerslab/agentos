@@ -74,6 +74,7 @@ When the reply does not parse or does not validate, the reply (shortened) and a 
 | `cache`, `schemaCacheTtl` | Prompt caching: `cache: false` marks nothing, `cache: { tail: false }` keeps the system and schema markers and puts none on the messages, and `schemaCacheTtl: '1h'` gives the schema block a one-hour cache marker ([Prompt Caching](../features/PROMPT_CACHING.md#per-call-controls)) |
 | `sessionId` | Sent to OpenRouter as `session_id` for sticky routing; other providers ignore it |
 | `serviceTier` | OpenAI's service tier (`'auto'`, `'default'`, `'flex'` or `'priority'`), sent as `service_tier` on every attempt; other providers ignore it ([OpenAI typed cache options](../features/PROMPT_CACHING.md#openai-typed-cache-options)) |
+| `store` | Whether OpenAI keeps the output, sent as `store` on every attempt, on Chat Completions and Responses alike; left out, a chat completion sends no `store` key and a Responses request sends `store: false` ([OpenAI response storage](../getting-started/HIGH_LEVEL_API.md#openai-response-storage)) |
 | `customModelParams` | Provider-specific request fields spread onto every attempt's request body, as on `generateText()`; a fallback leg gets them minus the fields only another vendor accepts ([Fallback Behavior](../features/LLM_PROVIDERS.md#fallback-behavior)) |
 | `source` | A label passed to the usage observer |
 | `accountIdOf` | Names the account on the usage observer's events when `budget` names none ([The usage observer](../observability/OBSERVABILITY.md#the-usage-observer)); `streamObject()` takes it too |

@@ -156,9 +156,6 @@ const baseUrl = (): string => `${origin}/v1`;
 
 const Planet = z.object({ planet: z.string() });
 
-/** The call's `store` option. */
-const storeOption = (store: boolean): object => ({ store });
-
 const pingTool = {
   ping: {
     description: 'Ping the service.',
@@ -178,7 +175,7 @@ describe('generateObject sends store to OpenAI', () => {
       baseUrl: baseUrl(),
       schema: Planet,
       prompt: 'x',
-      ...storeOption(false),
+      store: false,
       fallbackProviders: [],
     });
 
@@ -217,7 +214,7 @@ describe('generateObject sends store to OpenAI', () => {
       schema: Planet,
       prompt: 'x',
       maxRetries: 1,
-      ...storeOption(false),
+      store: false,
       fallbackProviders: [],
     });
 
@@ -237,7 +234,7 @@ describe('generateText sends store to OpenAI', () => {
       apiKey: 'test',
       baseUrl: baseUrl(),
       prompt: 'x',
-      ...storeOption(false),
+      store: false,
       fallbackProviders: [],
     });
 
@@ -255,7 +252,7 @@ describe('generateText sends store to OpenAI', () => {
       baseUrl: baseUrl(),
       prompt: 'Ping with x="ok".',
       tools: pingTool,
-      ...storeOption(true),
+      store: true,
       fallbackProviders: [],
     });
     const without = await generateText({
@@ -285,7 +282,7 @@ describe('generateText sends store to OpenAI', () => {
       baseUrl: baseUrl(),
       prompt: 'x',
       planning: true,
-      ...storeOption(false),
+      store: false,
       fallbackProviders: [],
     });
 
