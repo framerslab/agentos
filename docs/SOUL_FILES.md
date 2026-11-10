@@ -300,7 +300,7 @@ The exceptions:
 - One-shot `generate()` and `stream()` on a GMI run the light profile, so they use the memory provider's recall, the wiki store's on a souled agent, even when sessions run with cognitive memory on.
 - A seat of a launched team uses neither memory hook (no recall from the provider, nothing stored with it) and is refused the memory tools, `read_memory_page` among them.
 - Hard limits are a block of prompt text a GMI renders from the persona, not a check that enforces them.
-- On the full runtime, the trait paragraph from the `hexaco:` scores reaches the prompt only with a learning layer ([GMI.md](./GMI.md#learning)).
+- On the full runtime, the trait paragraph from the `hexaco:` scores reaches the prompt with or without a learning layer; with one, the layer prepares it each turn ([GMI.md](./GMI.md#learning)).
 
 ## Loading Order at Agent Boot
 
@@ -315,7 +315,7 @@ The exceptions:
 
 The `hexaco:` block in SOUL.md frontmatter maps directly to AgentOS's existing
 [HEXACO personality model](./memory/HEXACO_PERSONALITY.md). The scores land in
-`personaDefinition.personalityTraits`. On the full runtime they are the GMI's traits; their trait paragraph reaches the prompt only with a learning layer ([GMI.md](./GMI.md#learning)):
+`personaDefinition.personalityTraits`. On the full runtime they are the GMI's traits, and their trait paragraph is part of its system prompt:
 
 - [`AdaptPersonalityTool`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts): with `emergentConfig.selfImprovement.enabled`, changes a trait for the session's GMI within a per-session budget
 - [`PersonalityMutationStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/PersonalityMutationStore.ts): records those changes when a storage adapter is configured
