@@ -1969,6 +1969,10 @@ export class OpenAIProvider implements IProvider {
     }
     if (options.stopSequences !== undefined) payload.stop = options.stopSequences;
     if (options.userId !== undefined) payload.user = options.userId;
+    // Chat completions are stored by default for new accounts; the call's
+    // `store` goes out as given, and a call without it sends no key, as before.
+    // https://developers.openai.com/api/docs/guides/migrate-to-responses
+    if (typeof options.store === 'boolean') payload.store = options.store;
     if (options.tools !== undefined) payload.tools = options.tools;
     if (options.toolChoice !== undefined) payload.tool_choice = options.toolChoice;
     // Coerce to an OpenAI-valid response_format, or drop it. agentos builds a
@@ -2075,6 +2079,8 @@ export class OpenAIProvider implements IProvider {
    *     event.
    *   - A chat-style `reasoning_effort` in `customModelParams` moves to
    *     `reasoning.effort`, because Responses rejects the top-level key.
+   *   - `store` is the call's `store` option, and `false` when the call sets
+   *     none, since Responses stores a response by default.
    *
    * Live-probed 2026-07-08; block-content path live-probed 2026-09-12.
    *
@@ -2134,7 +2140,13 @@ export class OpenAIProvider implements IProvider {
       input.push({ role: m.role, content: text });
     }
 
-    const payload: Record<string, unknown> = { model: modelId, input, store: false };
+    // Responses are stored by default; a call that does not set `store` keeps
+    // sending `store: false`.
+    const payload: Record<string, unknown> = {
+      model: modelId,
+      input,
+      store: typeof options.store === 'boolean' ? options.store : false,
+    };
     // A Responses-only model can be called without tools, and a
     // `reasoning: {}` or `tools: undefined` key has no meaning on the wire.
     if (requestHasFunctionTools(options.tools)) payload.tools = this.toResponsesTools(options.tools);

@@ -29,6 +29,8 @@ const PANEL_DECISION: Record<keyof GenerateTextOptions, 'allow' | 'deny'> = {
   accountIdOf: 'allow',
   // Added later, and denied: agent() sets it beside its own system prompt; a panel call would change what every seat's prompt ends with.
   _hardLimitsText: 'deny',
+  // Added later, and allowed: store says whether OpenAI keeps each seat's output; it moves no seat off its seating.
+  store: 'allow',
 };
 
 describe('the pooled guard (deny list, presence not value)', () => {
