@@ -211,7 +211,7 @@ describe('agency() seats served by GMIs', () => {
     await withProvider.session('own', { userId: 'u1' }).send('Own words.');
     // The provider is wired: the member's own turn reaches it, for its context and to observe it.
     expect(getContext).toHaveBeenCalledWith('Own words.', expect.objectContaining({ tokenBudget: expect.any(Number) }));
-    await vi.waitFor(() => expect(observe).toHaveBeenCalledWith('user', 'Own words.'));
+    await vi.waitFor(() => expect(observe).toHaveBeenCalledWith('user', 'Own words.', expect.objectContaining({ sessionId: 'own', userId: 'u1' })));
     expect(getContext.mock.calls.some(([text]) => text.includes('CANARY-THREE'))).toBe(false);
     expect(observe.mock.calls.some(([, text]) => text.includes('CANARY-THREE'))).toBe(false);
   });

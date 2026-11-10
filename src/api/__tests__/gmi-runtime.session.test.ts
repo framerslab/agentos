@@ -709,7 +709,10 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
     expect(getContext).toHaveBeenCalledTimes(1);
     expect(s.seen[0].messages.filter((m) => m.role === 'system').map((m) => m.content)).toEqual(['Be brief.', 'RECALL: likes tea']);
     await vi.waitFor(() => expect(observe).toHaveBeenCalledTimes(2));
-    expect(observe.mock.calls).toEqual([['user', 'hi'], ['assistant', 'Done.']]);
+    expect(observe.mock.calls).toEqual([
+      ['user', 'hi', expect.objectContaining({ sessionId: 's' })],
+      ['assistant', 'Done.', expect.objectContaining({ sessionId: 's' })],
+    ]);
   });
 
   it('onFallback hears the move to a fallback hop, and one that throws does not fail that hop', async () => {
@@ -843,6 +846,19 @@ describe("agent({ runtime: 'gmi' }) resolves the model and builds memory on firs
     await a.session('carol-1').close();
     await a.session('carol-2', { userId: 'carol' }).send(QUESTION);
     expect(JSON.stringify(s.seen[3].messages)).toContain('vault');
+    await a.close();
+  });
+
+  it('two sessions opened with an anonymous user id share no memory: an anonymous id names no user', async () => {
+    const k = key(); const emb = key();
+    const s = script('openai', k, { replies: [reply.text('Noted.'), reply.text('No idea.')] });
+    script('openai', emb);
+    vi.stubEnv('OPENAI_API_KEY', emb);
+    const a = agent(base(k, plainMemory()));
+
+    await a.session('kiosk-a', { userId: 'anonymous' }).send(FACT);
+    await a.session('kiosk-b', { userId: 'anonymous' }).send(QUESTION);
+    expect(JSON.stringify(s.seen[1].messages)).not.toContain('vault');
     await a.close();
   });
 

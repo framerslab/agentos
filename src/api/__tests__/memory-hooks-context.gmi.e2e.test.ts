@@ -18,7 +18,7 @@ const key = () => `k-memory-hooks-${++n}`;
 const stubbed = (apiKey: string, extra: Record<string, unknown> = {}) =>
   ({ provider: 'openai', model: 'stub-model', apiKey, fallbackProviders: [], ...extra }) as unknown as AgentOptions;
 /** The runtimes each case runs on. */
-const runtimes: Array<[string, Record<string, unknown>]> = [['the default runtime', {}]];
+const runtimes: Array<[string, Record<string, unknown>]> = [['the default runtime', {}], ["runtime: 'gmi'", { runtime: 'gmi' }]];
 
 const logged: Record<string, unknown>[] = [];
 beforeEach(() => {
@@ -84,6 +84,7 @@ describe.each(runtimes)('who the memory hooks are told a turn serves, on %s', (_
     for (const call of calls) expect(call.context).toMatchObject({ userId: 's1', subject: { kind: 'session', id: 's1' } });
     const lines = events('memory.anonymous_user');
     expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({ path: runtime.runtime === 'gmi' ? 'gmi' : 'plain' });
     expect(JSON.stringify(lines[0])).not.toContain('s1');
   });
 
@@ -202,6 +203,17 @@ describe('a memory hook that fails on the default runtime', () => {
     // The first failure and the tenth.
     await vi.waitFor(() => expect(events('memory.hook_failed')).toHaveLength(2));
     for (const line of events('memory.hook_failed')) expect(line).toMatchObject({ hook: 'observe', type: 'Error' });
+    expect(JSON.stringify(logged)).not.toContain('store down');
+  });
+});
+
+describe("a memory hook that fails on runtime: 'gmi'", () => {
+  it('leaves the turn as it is and writes memory.hook_failed for a getContext that throws', async () => {
+    const k = key();
+    script('openai', k, { replies: [reply.text('Done.')] });
+    const throwing: AgentMemoryProvider = { getContext: async () => { throw new Error('store down for ana'); } };
+    expect((await agent(stubbed(k, { runtime: 'gmi', memoryProvider: throwing })).session('s').send('hi')).text).toBe('Done.');
+    expect(events('memory.hook_failed')).toEqual([expect.objectContaining({ hook: 'getContext', type: 'Error' })]);
     expect(JSON.stringify(logged)).not.toContain('store down');
   });
 });
