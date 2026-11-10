@@ -471,6 +471,13 @@ describe('LocalCrossEncoderReranker', () => {
       }
     });
 
+    it('keeps a character outside the Basic Multilingual Plane whole, even at pieceMaxChars 1', async () => {
+      const split = new LocalCrossEncoderReranker({ providerId: 'local', pieceMaxChars: 1 });
+      await split.rerank({ query: 'q', documents: [{ id: 'a', content: 'a\u{1F600}b' }] }, config);
+
+      expect(pairsByPass()).toEqual([['a', '\u{1F600}', 'b']]);
+    });
+
     it("scores every piece of every document in the same batches and gives a document its best piece's score", async () => {
       const best = 'The answer sits right here.';
       logitsFor = (piece) => [piece === best ? 5 : piece === 'short note' ? 1 : -3];
@@ -544,6 +551,47 @@ describe('LocalCrossEncoderReranker', () => {
       const result = await reranker.rerank(input, config);
       expect(result.results).toHaveLength(1);
       expect(modelStub.dispose).toHaveBeenCalledTimes(2);
+    });
+
+    it('rejects as soon as the tokenizer fails, and disposes the model when its load ends later', async () => {
+      const tokenizerError = new Error('tokenizer.json could not be fetched');
+      tokenizerFromPretrained.mockRejectedValueOnce(tokenizerError);
+      // The model's download stalls until the test lets it finish.
+      let finishModelLoad!: () => void;
+      const modelLoaded = new Promise<void>((resolve) => (finishModelLoad = resolve));
+      loadModel = async () => {
+        await modelLoaded;
+        return defaultLoadModel();
+      };
+
+      const outcome = await Promise.race([
+        reranker.rerank(input, config).then(() => 'scored', (error: unknown) => error),
+        new Promise((resolve) => setTimeout(() => resolve('still waiting for the model'), 200)),
+      ]);
+      expect(outcome).toBe(tokenizerError);
+      expect(modelStub.dispose).not.toHaveBeenCalled();
+
+      finishModelLoad();
+      await vi.waitFor(() => expect(modelStub.dispose).toHaveBeenCalledTimes(1));
+    });
+
+    it("keeps the tokenizer's error when disposing the model throws or rejects", async () => {
+      const tokenizerError = new Error('tokenizer.json could not be fetched');
+      const failures: Array<() => unknown> = [
+        () => {
+          throw new Error('release failed at once');
+        },
+        async () => {
+          throw new Error('release failed later');
+        },
+      ];
+      for (const [k, failure] of failures.entries()) {
+        tokenizerFromPretrained.mockRejectedValueOnce(tokenizerError);
+        modelStub.dispose.mockImplementationOnce(failure);
+
+        await expect(reranker.rerank(input, config)).rejects.toBe(tokenizerError);
+        await vi.waitFor(() => expect(modelStub.dispose).toHaveBeenCalledTimes(k + 1));
+      }
     });
 
     it("passes the model's error on when the model fails and the tokenizer loads", async () => {
