@@ -121,7 +121,7 @@ new LlmJudgeReranker({
 
 - The judge names no model and calls no provider. It hands `scoringModel` to `llmCallFn` on each scoring call and `rankingModel` on the ranking call, and `undefined` when one is not set, so `llmCallFn` decides. Any provider `generateText` serves fits: `PROVIDER_DEFAULTS` holds a `cheap` model for each (`gpt-4o-mini` for `openai`, `claude-haiku-4-5-20251001` for `anthropic`, `gemini-2.5-flash-lite` for `gemini`, `llama3.2` for `ollama`, among others). The request's `modelId` and `params` are not read, so a chain stage's `model` does not reach the judge.
 - `isAvailable()` answers whether `llmCallFn` is a function. It is not built from a config entry: register it with `registerProvider()`.
-- The answer carries no `diagnostics`.
+- The answer's `diagnostics` name the provider (`llm-judge`), the model (`rankingModel`, else `''`, since `llmCallFn` then picks the ranking call's model), the latency and the passages it scored (`documentsProcessed`); no token count, since `llmCallFn` returns text alone.
 
 `LlmJudgeReranker.rerank(input, config)` scores the first `maxPointwiseDocuments` passages, has the ranking call order the `pointwiseTopK` best of them, and answers every passage it scored: the ones the ranking names, in its order, each once (an id the ranking repeats counts once, and an id it was not given is passed over), then the rest by score, a tie in the order the passages came. A request's `topN` cuts the answer to that many, past `pointwiseTopK` too; without one, the answer holds every scored passage, and the passages past `maxPointwiseDocuments` are left out. An answer's `relevanceScore` is `1 - i / n` for its place `i`, from 0, among the `n` it answers.
 

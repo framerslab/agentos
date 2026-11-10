@@ -709,6 +709,12 @@ The preamble appears when the budget has room for it and 100 more tokens. `assem
 
 Token estimation uses ~4 chars per token heuristic.
 
+### Upgrading from 0.15.123 or earlier
+
+- The GMI's reasoning-trace entry "Cognitive memory context assembled." no longer lists `includedMemoryIds`. It carries `tokensUsed`, `candidates`, `included`, `leftOut`, `retrieval`, `reranker` and `legsAbsent`, and lists the ids again with `recall: { traceIds: true }` on the memory manager's configuration. See [Recall Capture](#recall-capture).
+- `assembleForPrompt()` returns a recall capture on `capture` unless the manager's `recall.capture` is `'off'`, and a GMI turn carries it as `GMIOutput.memoryRecall` and on a session's `send()` result as `memoryRecall`. The fields are optional, so a memory manager or an `IGMI` that sets none compiles unchanged. The runtime stream carries the record only under `'metadata+stream'`, so a stream consumer sees nothing new by default. The block is the same byte for byte with any capture setting.
+- `LlmJudgeReranker` answers with `diagnostics` (`providerId: 'llm-judge'`, its `rankingModel` or `''`, latency, the passages it scored), so the capture names it `llm`. A manager's memory recall passes `maxDocuments: 100` on its rerank call, the limit `RerankerService` applied when the call named none.
+
 ### Upgrading from 0.15.122 or earlier
 
 - A memory line that does not fit whole in what is left of its section is left out and its room goes to the next line that fits; no memory line carries ` …[cut]` (the persistent-memory text keeps its own `<!-- truncated -->` marker). The rule covers a retrieved trace, a graph association and the involuntary memory, for every caller of `assembleMemoryContext()` and `assembleForPrompt()`. In 0.15.121 and 0.15.122 such a line was cut at a word boundary to fit and ended with `…[cut]`, so a block that held a cut line now holds one memory fewer, or a shorter one that fits in its place. A block whose memories all fit is unchanged. See [Overflow: whole memories only](#overflow-whole-memories-only).
@@ -737,6 +743,81 @@ What callers see differently in the memory block and its formatters:
 - A `tokenBudget` share of exactly 0 turns its section off. With the budget other sections leave unused flowing to the sections with content, a 0 share would otherwise still render its section. The default allocation has no zero share, so a host that sets none sees no change.
 - Each line carries the UTC date the trace was stored after its age, and an age from a week on reads `N days ago`. Through 0.15.120 a line carried no date and an age from a week on read `Nw ago`. Ages of a day or more count UTC calendar days between the stored date and the turn's date, so the age and the date agree: a trace stored at 23:00 UTC on 2026-10-12 reads `27 days ago, 2026-10-12` at 00:30 UTC on 2026-11-08, one more than the whole 24-hour periods between them.
 - The returned `allocation` holds the shares the assembly used, not the configured ones.
+
+## Recall Capture
+
+Every `assembleForPrompt()` returns, beside the block, a record of what the assembly recalled and what became of each candidate: `context.capture`, a [`MemoryRecallCapture`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/recall/capture.ts) of version `memory-recall-capture/1`.
+
+```typescript
+const context = await manager.assembleForPrompt('which locker holds the stove?', 1600, mood, { scopes });
+
+context.capture;
+// {
+//   version: 'memory-recall-capture/1',
+//   retrieval: 'dense',
+//   budget: { requested: 1600, effective: 1600 },
+//   tokensUsed: 412,
+//   allocation: { workingMemory: 0.15, semanticRecall: 0.4, ... },
+//   legs: [{ leg: 'dense', ran: true, candidates: 6, ineligible: 0, ms: 3 }],
+//   lexicalBackend: 'none',
+//   reranker: { provider: 'none', reason: 'none_configured' },
+//   memoryQuestionReserve: { fired: false, added: 0 },
+//   candidates: [
+//     { id: 'mt_7', ranks: { dense: 1 }, fusedScore: 0.71, outcome: 'included', tokens: 38, section: 'semanticRecall' },
+//     { id: 'mt_2', ranks: { dense: 2 }, fusedScore: 0.64, outcome: 'left_out', reason: 'section_full', tokens: 126, section: 'semanticRecall' },
+//     ...
+//   ],
+//   timings: { legsMs: 4, fuseMs: 0, dedupeMs: 0, rerankMs: 0, assembleMs: 1, totalMs: 5 },
+// }
+```
+
+Each candidate is a memory the recall returned, in the order it ranked them:
+
+| Field | Value |
+|-------|-------|
+| `id` | The trace's id |
+| `ranks` | Its 1-based rank in each leg that returned it: `{ dense: n }`, the rank the vector recall's cognitive scores gave it, before any rerank |
+| `fusedScore` | The score the candidates were ordered by: the trace's retrieval score, after the `rerankerService` blend when the manager has one |
+| `rerankScore` | The score the reranker gave it before the blend; set only for a candidate a rerank scored |
+| `outcome` | `included` when the block shows it, `left_out` otherwise |
+| `reason` | Set only for a candidate left out: `section_full` when its line did not fit whole in what its section was offered, `budget` when its section was offered no tokens (or no section had a line for it) |
+| `tokens` | Tokens of its line, about 4 characters a token: as rendered when included, as it would render whole when left out |
+| `section` | The section of the block its line belongs to, as in [`lineOutcomes`](#overflow-whole-memories-only) |
+
+The included candidates are every memory the block shows. A memory the block shows that the recall did not return (a trace reached only through its graph association) comes after the ranked ones, with empty `ranks` and a `fusedScore` of 0.
+
+The rest of the record:
+
+| Field | Value |
+|-------|-------|
+| `retrieval` | `dense`: the vector recall `assembleForPrompt()` runs |
+| `budget` | `requested` and `effective`: the token budget the block was asked for and assembled in |
+| `tokensUsed`, `allocation` | As on the assembled context |
+| `legs` | Each recall leg: whether it ran, why not, how many candidates it returned and how long it took. The vector recall is one leg, `dense`; its time covers the query's embedding, the vector search, the scoring and the memory graph's activation, not the rerank |
+| `lexicalBackend` | The full-text backend an exact-words leg read: `none`, as the vector recall reads none |
+| `reranker` | The reranker that scored the candidates: `{ provider: 'none', reason: 'none_configured' }` without a `rerankerService`; with one, `local` (the cross-encoder), `llm` (the LLM judge) or `other` (any other provider, Cohere's API among them, which received the query and the candidates' texts), with the `model` it reported, the `candidates` it was sent (the provider's own count, else at most 100: the manager sends the dense leg's first 100) and its `ms`; `{ provider: 'none', reason: 'error' }` when the rerank failed and the cognitive scores stood |
+| `memoryQuestionReserve` | `{ fired: false, added: 0 }` |
+| `timings` | Milliseconds of each stage, rounded: `legsMs` (recall, the persistent-memory read and the prospective check, which run together), `rerankMs`, `assembleMs` (the graph walk and the assembler), `totalMs` |
+
+The type also holds `embedder`, `suppliedRejected` and `delivery`, which this recall leaves unset.
+
+**What it holds.** Ids, ranks, scores, counts and timings, never a memory's text or the query's. Ids and scores can concern memories of other scopes the turn reads (an organization's, a persona's), so the host decides who sees a capture, under its logging allow-list. Whether ids and scores alone expose anything across those scopes is not established; evidence that they do turns the default to `'off'`.
+
+**Where it goes.** The manager's `recall` setting decides:
+
+| `recall.capture` | `AssembledMemoryContext.capture` | GMI turn: `GMIOutput.memoryRecall`, a session's `send()` result `memoryRecall` | Runtime stream: `METADATA_UPDATE` with `memorySources`, `FINAL_RESPONSE.memoryRecall` |
+|---|---|---|---|
+| `'metadata'` (default) | Set | Set | Not sent |
+| `'metadata+stream'` | Set | Set | Sent, the update before the reply's text; a turn that stops for the host's tool calls ends, after the host's results, with a `FINAL_RESPONSE` that carries the capture the turn announced |
+| `'off'` | Unset | Unset | Not sent |
+
+```typescript
+await manager.initialize({ ...config, recall: { capture: 'metadata+stream' } });
+```
+
+The setting is read at each `assembleForPrompt()`, so a change to a built manager's configuration applies from its next turn. The block is the same byte for byte whatever it says.
+
+**The reasoning trace.** With a memory block assembled, the GMI's reasoning trace gets the entry "Cognitive memory context assembled." with `tokensUsed`, `candidates`, `included`, `leftOut`, `retrieval`, `reranker` (the provider) and `legsAbsent` (each leg that did not run, with its reason). `recall: { traceIds: true }` adds `includedMemoryIds`. The entry never holds text.
 
 ---
 
@@ -808,6 +889,7 @@ interface CognitiveMemoryConfig {
   enableGraphActivation?: boolean;
   brain?: Brain;
   persistAccessState?: boolean;                // Default: true (see Access state across restarts)
+  recall?: { capture?: 'metadata' | 'metadata+stream' | 'off'; traceIds?: boolean }; // See Recall Capture
 }
 ```
 
