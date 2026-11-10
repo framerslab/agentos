@@ -282,13 +282,13 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     return work;
   };
   /**
-   * A stream is settled once its usage is known, which is after its observe hook has run. On the default runtime a
-   * stream runs only once a consumer reads it, so one whose `signal` aborts before anything was read from it would
-   * never settle: its entry is released on that abort instead. An abort after the first read ends the stream on either
-   * runtime, which settles its usage.
+   * A stream is settled once its usage and its text are known; its text settles after its observation has started.
+   * On the default runtime a stream runs only once a consumer reads it, so one whose `signal` aborts before anything
+   * was read from it would never settle: its entry is released on that abort instead. An abort after the first read
+   * ends the stream on either runtime, which settles its usage.
    */
   const awaitStreamOnClose = (result: StreamTextResult, signal: AbortSignal | undefined): StreamTextResult => {
-    const settled = result.usage.then(() => undefined, () => undefined);
+    const settled = Promise.allSettled([result.usage, result.text]).then(() => undefined);
     if (!signal) {
       awaitedOnClose(settled);
       return result;

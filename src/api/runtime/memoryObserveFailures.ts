@@ -4,13 +4,16 @@
  * turn waiting for it, and logs a failure to record the turn.
  *
  * A turn is answered before its memory provider records it, so a store that
- * fails never changes the turn's result. The failure is logged on a provider's
- * first failure and then at its 10th, 100th, 1000th and so on, so a broken
- * store cannot flood the log.
+ * fails never changes the turn's result. The failure is a `memory.hook_failed`
+ * event with the error's type and code, never its message, written on a
+ * provider's first failure and then at its 10th, 100th, 1000th and so on, so a
+ * broken store cannot flood the log.
  *
  * @module api/runtime/memoryObserveFailures
  */
 import type { AgentMemoryProvider, MemoryHookContext } from '../agent.js';
+import { errorFields } from '../../core/logging/events.js';
+import { memoryLog } from '../../cognition/memory/log.js';
 
 /** How many times each provider's `observe` has failed, keyed by the provider object. */
 const failureCounts = new WeakMap<object, number>();
@@ -39,8 +42,9 @@ export function messageOf(error: unknown): string {
 }
 
 /**
- * Count one failure of `provider.observe` and log it when it is the provider's
- * first failure or its 10th, 100th, 1000th and so on.
+ * Count one failure of `provider.observe` and write a `memory.hook_failed`
+ * event when it is the provider's first failure or its 10th, 100th, 1000th and
+ * so on.
  *
  * @param provider - The memory provider whose `observe` failed.
  * @param error - What it threw or rejected with.
@@ -49,10 +53,8 @@ export function reportObserveFailure(provider: AgentMemoryProvider, error: unkno
   const count = (failureCounts.get(provider) ?? 0) + 1;
   failureCounts.set(provider, count);
   if (!isLoggedFailure(count)) return;
-  const which = count === 1 ? '' : ` (failure ${count} of this provider; logged at the 1st, 10th, 100th and so on)`;
-  // The reason goes in as text alone: the console's inspection of an error can throw, and this runs in the handler
-  // of a promise no one waits for.
-  console.warn(`[agentos] The turn was answered, but the memory provider failed to record it${which}: ${messageOf(error)}`);
+  // The error's type and code alone: its message can hold what the turn said, and reading them never throws.
+  memoryLog.warn('memory.hook_failed', { hook: 'observe', ...errorFields(error) });
 }
 
 /**

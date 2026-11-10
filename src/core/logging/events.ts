@@ -98,6 +98,8 @@ export const AGENTOS_EVENTS = {
   'soul.id_fallback': { reason: { enum: ['old_slug_learner'] } },
   // A session was opened with an anonymous id as its user id; the session is the memory subject.
   'memory.anonymous_user': { path: { enum: ['plain', 'gmi'] } },
+  // A host's memory hook threw, rejected or timed out; the turn went on without it.
+  'memory.hook_failed': { hook: { enum: ['getContext', 'observe', 'memoryPolicy', 'screen'] }, type: 'word', code: 'word' },
 } as const satisfies EventMap;
 
 /** The type of {@link AGENTOS_EVENTS}, which `lazyLogger`'s handles are typed over. */

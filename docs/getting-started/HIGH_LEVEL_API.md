@@ -831,13 +831,14 @@ These retry options apply to the default runtime.
 
 For schema calls, `memoryProvider.observe` records the original user input once
 and only the accepted answer, after caller hooks and validation. Failed attempts
-and exhausted retries record nothing. Memory retrieval and caller generation
-hooks remain active on every attempt.
+and exhausted retries record nothing. Memory retrieval runs once for the call and
+its recall reaches every attempt; caller generation hooks run on every attempt.
 
 A turn never waits for `memoryProvider.observe`, and an `observe` that throws or
-rejects leaves the turn's result as it is. The failure is logged with
-`console.warn`, naming the error, on the provider's first failure and then at
-its 10th, 100th, 1000th and so on, on the default runtime and on `runtime: 'gmi'`.
+rejects leaves the turn's result as it is. The failure is logged as a
+`memory.hook_failed` event, with the error's type and code and never its
+message, on the provider's first failure and then at its 10th, 100th, 1000th and
+so on, on the default runtime and on `runtime: 'gmi'`.
 
 ### Working-memory block
 

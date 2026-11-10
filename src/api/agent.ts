@@ -106,8 +106,8 @@ export interface MemoryHookContext {
 /**
  * Provider hook interface consumed by `agent()` for memory integration.
  *
- * When provided on the agent config, `getContext` is called before each
- * LLM generation to retrieve memory for the turn, and
+ * When provided on the agent config, `getContext` is called once per turn,
+ * before its first model call, to retrieve memory for the turn, and
  * `observe` is called after each turn to encode the exchange for future
  * recall. Both hooks are optional — implementations may choose to provide
  * read-only or write-only memory behavior.
@@ -140,8 +140,8 @@ export interface AgentMemoryProvider {
    * Invoked once per side of a turn that was answered (`role: 'user'` with
    * the input, then `role: 'assistant'` with the reply) as fire-and-forget:
    * the turn never waits for it, and a throw or a rejection never changes the
-   * turn's result. A failure is logged with `console.warn` on the provider's
-   * first failure and then at its 10th, 100th, 1000th and so on.
+   * turn's result. A failure is logged as a `memory.hook_failed` event on the
+   * provider's first failure and then at its 10th, 100th, 1000th and so on.
    *
    * @param role - Whether the content came from the user or assistant.
    * @param text - Plain text content of the turn.
@@ -902,6 +902,24 @@ function observeValidatedExchange(
   }
 }
 
+/**
+ * Observes a stream's exchange once its text has settled, unless the stream ended in an error. The `text` of the
+ * returned result settles after the observation has started, so a caller that awaits it finds the turn handed over.
+ */
+function observeStreamWhenDone(
+  result: StreamTextResult,
+  provider: AgentMemoryProvider | undefined,
+  turn: MemoryTurn,
+): StreamTextResult {
+  if (!provider?.observe) return result;
+  const text = Promise.all([result.text, result.finishReason]).then(([replyText, finishReason]) => {
+    if (finishReason !== 'error') observeValidatedExchange(provider, turn, replyText);
+    return replyText;
+  });
+  void text.catch(() => undefined);
+  return { ...result, text };
+}
+
 /** Generate a reply with optional JSON validation and bounded repair turns. */
 async function generateWithValidation(
   options: GenerateTextOptions,
@@ -914,16 +932,16 @@ async function generateWithValidation(
   if (schema && (!Number.isInteger(maxRetries) || maxRetries < 0)) {
     throw new RangeError('maxValidationRetries must be a non-negative integer');
   }
-  // Schema attempts retain recall and caller hooks, but only an accepted
-  // result may write to memory. Bind recall to preserve provider instances.
-  const attemptMemory = schema && memory.provider
-    ? { getContext: memory.provider.getContext?.bind(memory.provider) }
-    : memory.provider;
-  let request = applyMemoryProvider(options, attemptMemory, memory.turn, memory.options) as GenerateTextOptions;
+  // One recall for the call, which every attempt sends; only the result the caller receives is observed.
+  let request = applyMemoryProvider(options, memory.provider, memory.turn, memory.options) as GenerateTextOptions;
   for (let attempt = 0; ; attempt++) {
     const result = await generateText(request);
     onResult(result);
-    if (!schema) return { result, object: undefined, retried: false };
+    if (!schema) {
+      // The call's one observation: the user's text, and the reply the caller receives.
+      observeValidatedExchange(memory.provider, memory.turn, result.text);
+      return { result, object: undefined, retried: false };
+    }
 
     let failure: ObjectGenerationError;
     try {
@@ -1237,7 +1255,7 @@ export function agent(opts: AgentOptions): Agent {
       } else {
         streamOpts.messages = [...(streamOpts.messages ?? []), { role: 'user', content: prompt }];
       }
-      const result = streamText(streamOpts as GenerateTextOptions);
+      const result = observeStreamWhenDone(streamText(streamOpts as GenerateTextOptions), opts.memoryProvider, turn);
       void result.usage
         .then((usage) => accumulateUsage(agentUsageTally, usage))
         .catch(() => { /* stream errored; usage tally unchanged */ });
@@ -1451,6 +1469,7 @@ export function agent(opts: AgentOptions): Agent {
           const textForMemory = typeof input === 'string' ? input : extractTextFromContent(input);
           const userMessage: Message = { role: 'user', content: input };
 
+          const turn = turnOf(textForMemory);
           const wrappedOpts = applyMemoryProvider(
             {
               ...baseOpts,
@@ -1468,11 +1487,11 @@ export function agent(opts: AgentOptions): Agent {
               ...(streamOpts?.budget !== undefined ? { budget: streamOpts.budget } : {}),
             },
             opts.memoryProvider,
-            turnOf(textForMemory),
+            turn,
             opts.memoryProviderOptions,
           );
 
-          const result = streamText(wrappedOpts as GenerateTextOptions);
+          const result = observeStreamWhenDone(streamText(wrappedOpts as GenerateTextOptions), opts.memoryProvider, turn);
           if (opts.verifyCitations) {
             const verification = opts.verifyCitations;
             result.grounding = result.text.then(
@@ -1487,9 +1506,8 @@ export function agent(opts: AgentOptions): Agent {
             })
             .catch(() => { /* stream errored; usage tally unchanged */ });
 
-          // Capture text for history when done. Memory observe runs inside
-          // applyMemoryProvider's onAfterGeneration wrapper so it's not
-          // re-fired here.
+          // Capture text for history when done. Memory observe has started by
+          // the time `result.text` settles (`observeStreamWhenDone`).
           if (historyBuffer) {
             // Streaming has no lossless delta yet (v1 limitation, documented):
             // append the minimal user/assistant text pair, epoch-guarded so a
