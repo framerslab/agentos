@@ -14,8 +14,12 @@ export interface ResolvedRecallOptions {
   managerRecall: MemoryRecallConfig | undefined;
   /** The `tokenBudget` for `memoryProvider.getContext`; undefined keeps `memoryProviderOptions.tokenBudget`, else `DEFAULT_MEMORY_TOKEN_BUDGET`. */
   providerTokenBudget: number | undefined;
-  /** Options that were set and are applied nowhere; the caller writes one `memory.recall.option_ignored` line for each. */
-  ignored: Array<'token_budget'>;
+  /**
+   * Options that were set and are applied nowhere; the caller writes one `memory.recall.option_ignored` line for each.
+   * `token_budget`: `memoryProviderOptions.tokenBudget` beside cognitive memory with no `memoryProvider.getContext`.
+   * `recall_budget`: `memory.recall.budget.totalTokens` with neither cognitive memory nor a `memoryProvider.getContext`.
+   */
+  ignored: Array<'token_budget' | 'recall_budget'>;
 }
 
 /** What {@link resolveRecallOptions} reads. */
@@ -44,8 +48,9 @@ export interface RecallOptionsInput {
  *   `memoryProvider.getContext` reads it (with one, `generate()` and `stream()` still hand it to the provider).
  * - Without it (the default runtime, or a GMI agent whose memory is off), `budget.totalTokens` is the provider's
  *   `tokenBudget` when `memoryProviderOptions.tokenBudget` is unset, two different values are refused (`conflict`), and
- *   `capture` is refused (`unsupported_runtime`): no cognitive assembler runs.
- * - Either way, a value of the wrong kind is refused (`invalid_value`).
+ *   `capture` is refused (`unsupported_runtime`): no cognitive assembler runs. With no `memoryProvider.getContext` to
+ *   read it, a set `budget.totalTokens` is reported in `ignored` (`recall_budget`).
+ * - Either way, a value of the wrong kind, or a setting or a budget that is not an object, is refused (`invalid_value`).
  *
  * @throws {RecallOptionError} Naming the field, after one `memory.recall.option_rejected` line.
  */
@@ -74,5 +79,9 @@ export function resolveRecallOptions(o: RecallOptionsInput): ResolvedRecallOptio
       `${o.where}: memory.recall.budget.totalTokens (${total}) and memoryProviderOptions.tokenBudget (${o.providerTokenBudget}) are both set and differ; set one.`,
     );
   }
-  return { managerRecall: undefined, providerTokenBudget: total ?? o.providerTokenBudget, ignored: [] };
+  return {
+    managerRecall: undefined,
+    providerTokenBudget: total ?? o.providerTokenBudget,
+    ignored: total !== undefined && !o.providerContext ? ['recall_budget'] : [],
+  };
 }

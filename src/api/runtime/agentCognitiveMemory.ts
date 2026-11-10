@@ -25,6 +25,7 @@
  * opens the Brain ({@link openAgentMemoryBrain}) and closes it once the manager has closed.
  */
 import { CognitiveMemoryManager } from '../../cognition/memory/CognitiveMemoryManager.js';
+import { assertRecallConfig } from '../../cognition/memory/retrieval/recall/budget.js';
 import type { CognitiveMemoryConfig, CognitiveMemoryPersonaConfig, HexacoTraits, ManagerRecallConfig, PADState } from '../../cognition/memory/core/config.js';
 import type { CognitiveMechanismsConfig } from '../../cognition/memory/mechanisms/types.js';
 import { SqlStorageMemoryArchive } from '../../cognition/memory/archive/SqlStorageMemoryArchive.js';
@@ -432,13 +433,18 @@ async function buildEmbeddingManager(memory: MemoryConfig): Promise<BuiltEmbeddi
 
 /**
  * The manager's recall settings: the persona's `cognitiveMemoryConfig.recall`, under the agent's own `memory.recall`
- * (a field either leaves out or sets to `undefined` or `null` keeps the other's), with the embedding model's label for
- * the capture record. `{}` when there is nothing to set.
+ * field by field, `budget.totalTokens` included (a field either leaves out or sets to `undefined` or `null` keeps the
+ * other's), with the embedding model's label for the capture record. `{}` when there is nothing to set. Both settings
+ * are checked first ({@link assertRecallConfig}), so neither is merged unless it is an object.
  */
 function recallFor(opts: AgentCognitiveMemoryOptions, embedder: BuiltEmbedding['label']): { recall?: ManagerRecallConfig } {
+  const persona = opts.persona.cognitiveMemoryConfig?.recall;
+  const own = opts.memory.recall;
+  const budget = { ...definedEntries(persona?.budget), ...definedEntries(own?.budget) };
   const recall: ManagerRecallConfig = {
-    ...definedEntries(opts.persona.cognitiveMemoryConfig?.recall),
-    ...definedEntries(opts.memory.recall),
+    ...definedEntries(persona),
+    ...definedEntries(own),
+    ...(Object.keys(budget).length > 0 ? { budget } : {}),
     ...(embedder ? { embedder } : {}),
   };
   return Object.keys(recall).length > 0 ? { recall } : {};
@@ -453,8 +459,13 @@ function recallFor(opts: AgentCognitiveMemoryOptions, embedder: BuiltEmbedding['
  *   when its provider has no credentials or fails to start, when a test embedding through it
  *   fails or returns another size than memory expects (skipped for an embedding manager the
  *   caller passes), or when the manager fails to initialise.
+ * @throws {RecallOptionError} When the persona's `cognitiveMemoryConfig.recall` or `memory.recall` holds a value of
+ *   the wrong kind, before anything is built.
  */
 export async function createAgentCognitiveMemory(opts: AgentCognitiveMemoryOptions): Promise<AgentCognitiveMemory> {
+  // The recall settings are checked before anything starts: a refused value leaves nothing to close.
+  assertRecallConfig(opts.persona.cognitiveMemoryConfig?.recall, 'createAgentCognitiveMemory');
+  assertRecallConfig(opts.memory.recall, 'createAgentCognitiveMemory');
   // The archive shares the Brain's adapter and its brain id, as a Brain-backed archive does. Its tables are made first,
   // so a store that cannot take them fails the build before anything else starts.
   const archive = opts.brain ? new SqlStorageMemoryArchive(opts.brain.adapter, opts.brain.features, opts.brain.brainId) : undefined;

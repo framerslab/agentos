@@ -63,6 +63,7 @@ import {
 } from './agentExportCore.js';
 import { applyMemoryProvider, type MemoryProviderHookOptions } from './runtime/memoryProviderHooks.js';
 import { resolveRecallOptions } from './runtime/recallOptions.js';
+import { recallLog } from '../cognition/memory/retrieval/recall/log.js';
 import { observeWithoutWaiting } from './runtime/memoryObserveFailures.js';
 import { warnSoulBesideSystemBlocks, warnSoulLoadFailed } from './runtime/soulLoadWarning.js';
 import { asSpendBudget, type SpendBudget, type SpendBudgetOptions } from './runtime/spendBudget.js';
@@ -952,15 +953,18 @@ export function agent(opts: AgentOptions): Agent {
     throw new Error("agent(): agencies.launch runs on the GMI path; set runtime: 'gmi' or use gmi().");
   }
   // memory.recall on the default runtime: its budget is the memory provider's tokenBudget when that is unset; two
-  // different budgets, and capture, which needs the cognitive assembler, are refused.
+  // different budgets, and capture, which needs the cognitive assembler, are refused; a budget no provider reads is
+  // reported in one line.
   const recallSetting = typeof opts.memory === 'object' && opts.memory !== null ? opts.memory.recall : undefined;
-  const providerBudget = resolveRecallOptions({
+  const resolvedRecall = resolveRecallOptions({
     recall: recallSetting,
     cognitiveMemory: false,
     providerTokenBudget: opts.memoryProviderOptions?.tokenBudget,
     providerContext: Boolean(opts.memoryProvider?.getContext),
     where: 'agent()',
-  }).providerTokenBudget;
+  });
+  for (const option of resolvedRecall.ignored) recallLog.warn('memory.recall.option_ignored', { option });
+  const providerBudget = resolvedRecall.providerTokenBudget;
   const memoryProviderOptions: MemoryProviderHookOptions | undefined =
     providerBudget === undefined ? opts.memoryProviderOptions : { ...opts.memoryProviderOptions, tokenBudget: providerBudget };
   // The GMI path warns in gmi(), so an agent on it warns once.

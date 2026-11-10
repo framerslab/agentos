@@ -96,8 +96,8 @@ export const AGENTOS_EVENTS = {
   'memory.recall.rerank_unavailable': { provider: { enum: ['local'] }, reason: { enum: ['missing_dependency', 'load_failed'] } },
   'memory.recall.budget_clamped': { requested: 'int', effective: 'int', hop: 'int', reason: { enum: ['prompt_share', 'zero_remaining', 'invalid'] } },
   'memory.recall.allocation_exhausted': { requested: 'int', candidates: 'int' },
-  // A recall-related option that was set and is applied nowhere (`token_budget`: memoryProviderOptions.tokenBudget on a GMI agent whose cognitive memory supplies the block).
-  'memory.recall.option_ignored': { option: { enum: ['token_budget', 'remote_provider'] } },
+  // A recall-related option that was set and is applied nowhere (`token_budget`: memoryProviderOptions.tokenBudget on a GMI agent whose cognitive memory supplies the block; `recall_budget`: memory.recall.budget.totalTokens with neither cognitive memory nor a memoryProvider.getContext).
+  'memory.recall.option_ignored': { option: { enum: ['token_budget', 'recall_budget', 'remote_provider'] } },
   // A `memory.recall` setting refused at construction, before the throw; `option` is the field under `memory.recall`.
   'memory.recall.option_rejected': { option: 'word', reason: { enum: ['conflict', 'unsupported_provider', 'unsupported_runtime', 'invalid_value'] } },
   'memory.recall.reserve_fired': { added: 'int' },

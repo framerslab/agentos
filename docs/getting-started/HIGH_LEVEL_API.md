@@ -888,13 +888,13 @@ const tutor = agent({
 | Field | Default | What it does |
 |---|---|---|
 | `budget.totalTokens` | 1600 | The budget of the whole memory block a turn sends, its preamble included, in tokens of about four characters. An integer of at least 0; at 0 the turn sends no block. |
-| `capture` | `'metadata'` | What a turn records of its recall: `'metadata'` puts the record on a session's `send()` result (`memoryRecall`) and on its `stream()` result (a `memoryRecall` promise), `'metadata+stream'` also sends it on the runtime stream, `'off'` records nothing. The record holds ids, ranks, scores, counts and timings, never a memory's text ([Recall Capture](../memory/COGNITIVE_MEMORY.md#recall-capture)). |
+| `capture` | `'metadata'` | What a turn records of its recall: `'metadata'` puts the record on a session's `send()` result (`memoryRecall`) and on its `stream()` result (a `memoryRecall` promise, which also settles with the record when the turn fails after its memory assembly), `'metadata+stream'` also sends it on the runtime stream, `'off'` records nothing. The record holds ids, ranks, scores, counts and timings, never a memory's text ([Recall Capture](../memory/COGNITIVE_MEMORY.md#recall-capture)). |
 
 The construction rules:
 
 - With `runtime: 'gmi'` and memory on, both fields go to the agent's memory manager, and `memoryProviderOptions.tokenBudget` does not size the block. When it is set and no `memoryProvider.getContext` reads it, the agent writes one `memory.recall.option_ignored` line at construction (`generate()` and `stream()` run without cognitive memory and still pass it to a provider's `getContext`).
-- Without `runtime: 'gmi'`, or with memory off, `budget.totalTokens` is the `tokenBudget` handed to `memoryProvider.getContext` when `memoryProviderOptions.tokenBudget` is unset; the two set to different values throw at construction naming both, and `capture` throws: no cognitive memory runs to record anything.
-- A `budget.totalTokens` that is not an integer of at least 0, or a `capture` outside its three values, throws a `RecallOptionError` at construction naming the field.
+- Without `runtime: 'gmi'`, or with memory off, `budget.totalTokens` is the `tokenBudget` handed to `memoryProvider.getContext` when `memoryProviderOptions.tokenBudget` is unset; the two set to different values throw at construction naming both, and `capture` throws: no cognitive memory runs to record anything. With no `memoryProvider.getContext` to read it, a set `budget.totalTokens` is applied nowhere, and the agent writes one `memory.recall.option_ignored` line at construction (`option: 'recall_budget'`).
+- A `budget.totalTokens` that is not an integer of at least 0, a `capture` outside its three values, or a `recall` or `budget` that is not an object (`recall: 'off'`, `budget: 2400`), throws a `RecallOptionError` at construction naming the field.
 
 Each refusal writes one `memory.recall.option_rejected` line before the throw.
 
