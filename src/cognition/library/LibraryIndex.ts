@@ -199,8 +199,8 @@ export interface LibraryGroupSearch {
   cursor?: string;
   /**
    * Stops the search: checked before each group and between the store's statements. Once it has aborted, the store
-   * is asked nothing more, and the group being read and every group after it answer `incomplete` with no hit. The
-   * search does not reject on it.
+   * is asked nothing more, and the group being read and every group after it answer `incomplete` with no hit; a group
+   * with no item is complete either way. The search does not reject on it.
    */
   signal?: AbortSignal;
 }
@@ -242,8 +242,9 @@ export interface LibraryGroupResult {
   /** How many distinct items match every word, whatever the page; in a listing, how many hold a passage. */
   total: number;
   /**
-   * True when a word had more stored words one edit away than `expansionMax`, the hits then matching the most
-   * frequent of them, or when the signal stopped the search, the group then holding no hit.
+   * True when a word had more stored words one edit away than `expansionMax`, on the page that read them and on every
+   * page after it, the hits then matching the ones kept; or when the signal stopped the search, the group then
+   * holding no hit.
    */
   incomplete: boolean;
   /** What the next page takes as `cursor`, or null after the last. */
@@ -427,6 +428,8 @@ interface LibraryCursor {
   words: string[];
   /** For each word, the stored words one edit away that the first page found. */
   expansion: string[][];
+  /** Whether the first page left stored words out: a word had more of them one edit away than the limit. */
+  over: boolean;
   /** The last item's place in the page's order: its rank and source id, after its date under the date order. */
   key: Array<string | null>;
 }
@@ -552,7 +555,7 @@ function cursorDecode(cursor: unknown): LibraryCursor {
     throw refused();
   }
   if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) throw refused();
-  const { v, groupId, fingerprint, sig, words, expansion, key } = payload as Record<string, unknown>;
+  const { v, groupId, fingerprint, sig, words, expansion, over, key } = payload as Record<string, unknown>;
   const texts = (value: unknown): value is string[] => Array.isArray(value) && value.every((item) => typeof item === 'string');
   if (
     v !== 1 ||
@@ -562,12 +565,13 @@ function cursorDecode(cursor: unknown): LibraryCursor {
     !texts(words) ||
     !Array.isArray(expansion) ||
     !expansion.every((list) => texts(list)) ||
+    typeof over !== 'boolean' ||
     !Array.isArray(key) ||
     !key.every((part) => part === null || typeof part === 'string')
   ) {
     throw refused();
   }
-  return { v: 1, groupId, fingerprint, sig, words, expansion: expansion as string[][], key: key as Array<string | null> };
+  return { v: 1, groupId, fingerprint, sig, words, expansion: expansion as string[][], over, key: key as Array<string | null> };
 }
 
 /**
@@ -882,18 +886,18 @@ export class LibraryIndex {
     if (carried.fingerprint !== group.fingerprint) {
       return { groups: [{ id: group.id, state: 'restart', total: 0, incomplete: false, cursor: null, hits: [], anyWord: [] }] };
     }
-    return { groups: [await this.searchGroup(search, group, { expansion: carried.expansion, after })] };
+    return { groups: [await this.searchGroup(search, group, { expansion: carried.expansion, over: carried.over, after })] };
   }
 
   /**
    * One group of a grouped search: the store's answer for the group's items under the scope, each row checked and
-   * read into a hit, and the cursor of the next page. `page` is where a later page starts and the stored words its
-   * first page found; without it, the first page.
+   * read into a hit, and the cursor of the next page. `page` is where a later page starts, the stored words its first
+   * page found and whether that page left any out; without it, the first page.
    */
   private async searchGroup(
     search: CheckedGroupSearch,
     group: CheckedGroup,
-    page: { expansion: string[][]; after: LexicalGroupKey } | undefined,
+    page: { expansion: string[][]; over: boolean; after: LexicalGroupKey } | undefined,
   ): Promise<LibraryGroupResult> {
     const nothing: LibraryGroupResult = { id: group.id, state: 'ok', total: 0, incomplete: false, cursor: null, hits: [], anyWord: [] };
     // An empty list is empty, never unrestricted: the store is asked nothing.
@@ -951,6 +955,8 @@ export class LibraryIndex {
     };
     const hits = answered.rows.map((row) => hitOf(row, false));
     const anyWord = answered.anyWord.map((row) => hitOf(row, true));
+    // A later page matches the stored words its first page kept, so what that page left out is left out of it too.
+    const incomplete = answered.incomplete || page?.over === true;
     const last = answered.rows[answered.rows.length - 1];
     let cursor: string | null = null;
     if (answered.more && last !== undefined) {
@@ -963,9 +969,10 @@ export class LibraryIndex {
         sig: signatureOf(search, group),
         words,
         expansion: answered.expansion,
+        over: incomplete,
         key: dated ? [group.dates.get(last.sourceId) ?? null, last.rank, last.sourceId] : [last.rank, last.sourceId],
       });
     }
-    return { id: group.id, state: 'ok', total: answered.total, incomplete: answered.incomplete, cursor, hits, anyWord };
+    return { id: group.id, state: 'ok', total: answered.total, incomplete, cursor, hits, anyWord };
   }
 }

@@ -9,6 +9,7 @@ import { createPostgresAdapter } from '@framers/sql-storage-adapter';
 import pg from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
+import type { IVectorStore, LexicalGroupRow, LexicalGroupSearchResult } from '../../../core/vector-store/IVectorStore.js';
 import { InMemoryVectorStore } from '../../rag/vector_stores/InMemoryVectorStore.js';
 import { PostgresVectorStore, type PgPoolLike } from '../../rag/vector_stores/PostgresVectorStore.js';
 import {
@@ -395,6 +396,11 @@ describe.skipIf(!URL)('LibraryIndex.searchGroups over PostgresVectorStore on Pos
     const every = DOCUMENTS.map((source) => source.sourceId);
     // Ten documents hold the word in their text, level in rank, so the id decides.
     expect(await allPages({ text: 'quarterly', groups: [documents], pageSize: 3 })).toEqual([every.slice(0, 3), every.slice(3, 6), every.slice(6, 9), every.slice(9)]);
+    // The page size is the caller's on every page: the cursor of a page of three answers the next five.
+    const [three] = await run({ text: 'quarterly', groups: [documents], pageSize: 3 });
+    const [five] = await run({ text: 'quarterly', groups: [documents], pageSize: 5, cursor: three.cursor as string });
+    expect(five.total).toBe(10);
+    expect(ids(five)).toEqual(every.slice(3, 8));
     // The same through a typo: the first page reads the stored words, and its cursor carries what it found.
     seen.length = 0;
     const [first] = await run({ text: 'quartrely', typo: 'one-edit', groups: [documents], pageSize: 3 });
@@ -645,6 +651,10 @@ describe.skipIf(!URL)('LibraryIndex.searchGroups over PostgresVectorStore on Pos
     expect(cut).toMatchObject({ total: 3, incomplete: true });
     expect(ids(cut)).toEqual(['inc:0', 'inc:1']);
     expect(decode(cut.cursor as string).expansion).toEqual([['planex', 'planey', 'planez']]);
+    // The next page matches the three kept words and reads none again, so it leaves out what the first page did.
+    const [rest] = await run({ text: 'planet', typo: 'one-edit', expansionMax: 3, scope, groups: [group], pageSize: 2, cursor: cut.cursor as string });
+    expect(rest).toMatchObject({ total: 3, incomplete: true, cursor: null });
+    expect(ids(rest)).toEqual(['inc:2']);
     const [four] = await run({ text: 'planet', typo: 'one-edit', expansionMax: 4, scope, groups: [group] });
     expect(four).toMatchObject({ total: 4, incomplete: true });
     // Room for all five: nothing was left out.
@@ -857,6 +867,8 @@ describe.skipIf(!URL)('LibraryIndex.searchGroups over PostgresVectorStore on Pos
     await expect(run({ ...base, expansionMax: 0 })).rejects.toThrow(/expansionMax/);
     await expect(run({ ...base, profile: { fields: { title: 100 }, fallback: 'text' } })).rejects.toThrow(/fallback/);
     await expect(run({ ...base, profile: { fields: { text: 0 }, fallback: 'text' } })).rejects.toThrow(/weight/);
+    await expect(run({ ...base, groups: [{ ...documents, fingerprint: '' }] })).rejects.toThrow(/fingerprint/);
+    await expect(run({ ...base, groups: [{ ...documents, partKinds: ['notes' as LibraryPartKind] }] })).rejects.toThrow(/partKinds/);
     const bare = new LibraryIndex({ store: new InMemoryVectorStore(), collection: 'library', embed });
     await expect(run(base, bare)).rejects.toThrow('LibraryIndex: the store has no lexicalGroupSearch.');
     // An empty list is empty, never unrestricted: nothing is asked of the store.
@@ -864,5 +876,40 @@ describe.skipIf(!URL)('LibraryIndex.searchGroups over PostgresVectorStore on Pos
     const [empty] = await run({ ...base, groups: [{ ...documents, items: [] }] });
     expect(empty).toEqual({ id: 'documents', state: 'ok', total: 0, incomplete: false, cursor: null, hits: [], anyWord: [] });
     expect(seen).toEqual([]);
+  });
+
+  it('fails the search when the store answers a passage outside the scope, the items or the part kinds', async () => {
+    // A store that answers whatever row it is given, as one whose statements dropped a condition would.
+    const answering = (metadata: Record<string, string | number | string[]>, sourceId = 'document:d00'): LibraryIndex => {
+      const row: LexicalGroupRow = {
+        sourceId,
+        rank: '1',
+        field: 'text',
+        kinds: ['same'],
+        held: ['same'],
+        document: { id: `${sourceId}#0`, embedding: [], similarityScore: 1, textContent: 'The budget.', metadata },
+      };
+      const answer: LexicalGroupSearchResult = { total: 1, incomplete: false, expansion: [[]], rows: [row], anyWord: [], more: false };
+      return new LibraryIndex({ store: { lexicalGroupSearch: async () => answer } as unknown as IVectorStore, collection: 'library', embed });
+    };
+    const own = { tenantId: ORG, aclGroups: [TEAM], status: 'active', sourceId: 'document:d00', kind: 'document', index: 0, tags: [] };
+    const base = { text: 'budget', groups: [groupOf('documents', DOCUMENTS)] };
+    const outside = /outside the scope, the items or the part kinds/;
+    // The passage the search may read is answered as a hit.
+    const [found] = await run(base, answering(own));
+    expect(found).toMatchObject({ total: 1, hits: [{ sourceId: 'document:d00', marks: [{ start: 4, end: 10 }] }] });
+    // Another tenant's, one no group of ann's may see, and one that is not active.
+    await expect(run(base, answering({ ...own, tenantId: 'org2' }))).rejects.toThrow(outside);
+    await expect(run(base, answering({ ...own, aclGroups: ['acct:bob'] }))).rejects.toThrow(outside);
+    await expect(run(base, answering({ ...own, status: 'archived' }))).rejects.toThrow(outside);
+    // An item the group does not hand, and a row whose passage is another item's.
+    await expect(run(base, answering({ ...own, sourceId: 'document:zz' }, 'document:zz'))).rejects.toThrow(outside);
+    await expect(run(base, answering({ ...own, sourceId: 'document:d01' }))).rejects.toThrow(outside);
+    // A passage of another part kind than the group narrows to, and one with none.
+    const summaries = { ...base, groups: [groupOf('documents', DOCUMENTS, {}, { partKinds: ['summary'] })] };
+    await expect(run(summaries, answering({ ...own, partKind: 'transcript' }))).rejects.toThrow(outside);
+    await expect(run(summaries, answering(own))).rejects.toThrow(outside);
+    const [summary] = await run(summaries, answering({ ...own, partKind: 'summary' }));
+    expect(summary.hits.map((hit) => hit.partKind)).toEqual(['summary']);
   });
 });
