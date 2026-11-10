@@ -228,6 +228,12 @@ export class Memory {
   /** HNSW sidecar index for O(log n) vector search alongside SQLite. */
   private _hnswSidecar: import('../../retrieval/store/HnswSidecar.js').HnswSidecar | null = null;
 
+  /**
+   * The vector index's work, one step after another ({@link _onVectorIndex}): an add, a remove, a rebuild and a
+   * rewrite never interleave, so a rewrite that read the traces writes them with nothing added or removed between.
+   */
+  private _vectorIndexWork: Promise<unknown> = Promise.resolve();
+
   /** Optional embedding function for vector search (set via config.embed). */
   private readonly _embed: ((text: string) => Promise<number[]>) | null;
 
@@ -587,32 +593,37 @@ export class Memory {
     // The embedding is stored in the memory_traces table; if it's non-null,
     // also index it in the HNSW sidecar for fast ANN recall. The sidecar is
     // this brain's: its threshold counts this brain's traces and its rebuild
-    // reads this brain's embeddings.
-    if (this._hnswSidecar) {
-      const row = await this._brain.get<{ embedding: Buffer | null }>(
-        'SELECT embedding FROM memory_traces WHERE brain_id = ? AND id = ?',
-        [this._brain.brainId, id],
-      );
-      if (row?.embedding && row.embedding.length > 0) {
-        const { blobCodec } = this._brain.features;
-        const isLegacy = typeof row.embedding === 'string' ||
-          (row.embedding && row.embedding[0] === 0x5b); // '[' character = JSON array
-        const vec = isLegacy
-          ? JSON.parse(row.embedding as unknown as string) as number[]
-          : blobCodec.decode(row.embedding);
-        const countRow = await this._brain.get<{ c: number }>(
-          'SELECT COUNT(*) as c FROM memory_traces WHERE brain_id = ? AND deleted = 0',
-          [this._brain.brainId],
+    // reads this brain's embeddings. The row is written first and the index
+    // step runs after any rewrite already asked for, so a rewrite that read the
+    // traces before this row existed does not drop it from the index.
+    const sidecar = this._hnswSidecar;
+    if (sidecar) {
+      await this._onVectorIndex(async () => {
+        const row = await this._brain.get<{ embedding: Buffer | null }>(
+          'SELECT embedding FROM memory_traces WHERE brain_id = ? AND id = ?',
+          [this._brain.brainId, id],
         );
-        const count = countRow?.c ?? 0;
+        if (row?.embedding && row.embedding.length > 0) {
+          const { blobCodec } = this._brain.features;
+          const isLegacy = typeof row.embedding === 'string' ||
+            (row.embedding && row.embedding[0] === 0x5b); // '[' character = JSON array
+          const vec = isLegacy
+            ? JSON.parse(row.embedding as unknown as string) as number[]
+            : blobCodec.decode(row.embedding);
+          const countRow = await this._brain.get<{ c: number }>(
+            'SELECT COUNT(*) as c FROM memory_traces WHERE brain_id = ? AND deleted = 0',
+            [this._brain.brainId],
+          );
+          const count = countRow?.c ?? 0;
 
-        if (!this._hnswSidecar.isActive && count >= 1000) {
-          // Threshold crossed — rebuild the index from this brain's embeddings.
-          await this._hnswSidecar.rebuildFromData(await this._ownEmbeddedTraces());
-        } else {
-          await this._hnswSidecar.add(id, vec, count);
+          if (!sidecar.isActive && count >= 1000) {
+            // Threshold crossed — rebuild the index from this brain's embeddings.
+            await sidecar.rebuildFromData(await this._ownEmbeddedTraces());
+          } else {
+            await sidecar.add(id, vec, count);
+          }
         }
-      }
+      });
     }
 
     // Build a MemoryTrace-shaped return value.
@@ -975,7 +986,13 @@ export class Memory {
       } catch {
         // A node whose delete fails stays, holding no words of the trace; its trace is gone.
       }
-      this._hnswSidecar?.remove(id);
+    }
+    // After a rewrite already running, so the index it writes does not keep the vectors as live.
+    const sidecar = this._hnswSidecar;
+    if (sidecar) {
+      await this._onVectorIndex(async () => {
+        for (const id of ids) sidecar.remove(id);
+      });
     }
     // Postgres keeps the index in each row's own column, which went with the row.
     if (this._brain.features.dialect.name !== 'postgres') await this._rebuildFtsIndex();
@@ -1049,14 +1066,28 @@ export class Memory {
    * delete only marks a vector in the index, so the numbers of a deleted trace stay in the index files until this
    * runs: call it after deleting for good.
    *
+   * It runs after the vector index's other work and reads the traces inside its own step: a trace deleted while an
+   * earlier rewrite runs is not written back by this one, and a trace remembered while it runs is indexed after it.
+   *
    * @returns How many vectors the index holds afterwards: 0 for a store with no file path, and where `hnswlib-node`
    *   is not installed (no index file is written there).
    * @throws When an index file cannot be removed, or when the rebuilt index did not save.
    */
   async rebuildVectorIndex(): Promise<{ vectors: number }> {
     await this._initPromise;
-    if (!this._hnswSidecar) return { vectors: 0 };
-    return this._hnswSidecar.rewrite(await this._ownEmbeddedTraces());
+    const sidecar = this._hnswSidecar;
+    if (!sidecar) return { vectors: 0 };
+    return this._onVectorIndex(async () => sidecar.rewrite(await this._ownEmbeddedTraces()));
+  }
+
+  /**
+   * Runs one step of the vector index's work once every step asked for before it has settled. A step that throws
+   * rejects its own caller and does not stop the steps after it.
+   */
+  private _onVectorIndex<T>(work: () => Promise<T>): Promise<T> {
+    const step = this._vectorIndexWork.then(work);
+    this._vectorIndexWork = step.catch(() => undefined);
+    return step;
   }
 
   /**
@@ -1955,6 +1986,8 @@ export class Memory {
    */
   async close(): Promise<void> {
     await this._initPromise;
+    // A rewrite of the vector index reads the traces through the Brain: it finishes before the Brain closes.
+    await this._vectorIndexWork;
     await this._brain.close();
   }
 
@@ -2286,13 +2319,14 @@ export class Memory {
    * into the ANN sidecar explicitly to keep hybrid recall accurate.
    */
   private async _rebuildHnswIndex(): Promise<void> {
-    if (!this._hnswSidecar) return;
+    const sidecar = this._hnswSidecar;
+    if (!sidecar) return;
 
     try {
-      const items = await this._ownEmbeddedTraces();
-      if (items.length > 0) {
-        await this._hnswSidecar.rebuildFromData(items);
-      }
+      await this._onVectorIndex(async () => {
+        const items = await this._ownEmbeddedTraces();
+        if (items.length > 0) await sidecar.rebuildFromData(items);
+      });
     } catch {
       // Best-effort; import should still succeed even if HNSW rebuild fails.
     }
