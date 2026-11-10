@@ -6,9 +6,20 @@ import { format, inspect } from 'node:util';
 
 // Spy on the real `agent` factory so we can inspect what souledAgent passes it,
 // while keeping loadSoulFromOption (and the rest of agent.js) real.
-const { agentSpy } = vi.hoisted(() => ({
-  agentSpy: vi.fn((o: unknown) => ({ __agentOpts: o, generate: async () => ({ text: '' }), close: async () => {} })),
-}));
+const { agentSpy, fakeAgent } = vi.hoisted(() => {
+  // A stand-in with the whole Agent surface souledAgent wraps: generate, stream, session and close.
+  const fakeAgent = (o: unknown, close: () => Promise<void> = async () => {}) => {
+    const stream = () => ({ usage: Promise.resolve({ promptTokens: 0, completionTokens: 0, totalTokens: 0 }) });
+    return {
+      __agentOpts: o,
+      generate: async () => ({ text: '' }),
+      stream,
+      session: () => ({ id: 's', send: async () => ({ text: '' }), stream, close: async () => {} }),
+      close,
+    };
+  };
+  return { fakeAgent, agentSpy: vi.fn((o: unknown) => fakeAgent(o)) };
+});
 vi.mock('../agent.js', async (orig) => {
   const actual = await (orig as () => Promise<Record<string, unknown>>)();
   return { ...actual, agent: agentSpy };
@@ -71,7 +82,7 @@ describe('souledAgent', () => {
 
   it('warns when the compile on close fails, and still closes the agent and the store', async () => {
     const agentClose = vi.fn(async () => {});
-    agentSpy.mockImplementationOnce((o: unknown) => ({ __agentOpts: o, generate: async () => ({ text: '' }), close: agentClose }));
+    agentSpy.mockImplementationOnce((o: unknown) => fakeAgent(o, agentClose));
     const compile = vi.spyOn(Memory.prototype, 'compileWiki').mockRejectedValue(new Error('disk full'));
     const storeClose = vi.spyOn(Memory.prototype, 'close');
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
@@ -96,7 +107,7 @@ describe('souledAgent', () => {
 
   it('warns and still closes when the compile on close fails with a value that cannot be turned into text', async () => {
     const agentClose = vi.fn(async () => {});
-    agentSpy.mockImplementationOnce((o: unknown) => ({ __agentOpts: o, generate: async () => ({ text: '' }), close: agentClose }));
+    agentSpy.mockImplementationOnce((o: unknown) => fakeAgent(o, agentClose));
     // An object with no prototype has no toString: String() of it throws.
     const compile = vi.spyOn(Memory.prototype, 'compileWiki').mockRejectedValue(Object.create(null));
     const storeClose = vi.spyOn(Memory.prototype, 'close');
@@ -121,7 +132,7 @@ describe('souledAgent', () => {
 
   it('warns and still closes when the compile on close fails with an error that cannot be inspected', async () => {
     const agentClose = vi.fn(async () => {});
-    agentSpy.mockImplementationOnce((o: unknown) => ({ __agentOpts: o, generate: async () => ({ text: '' }), close: agentClose }));
+    agentSpy.mockImplementationOnce((o: unknown) => fakeAgent(o, agentClose));
     const error = new Error('disk full');
     Object.defineProperty(error, inspect.custom, { value: () => { throw new Error('cannot inspect'); } });
     const compile = vi.spyOn(Memory.prototype, 'compileWiki').mockRejectedValue(error);

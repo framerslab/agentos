@@ -63,7 +63,7 @@ import {
 } from './agentExportCore.js';
 import { applyMemoryProvider, type MemoryProviderHookOptions } from './runtime/memoryProviderHooks.js';
 import { observeWithoutWaiting } from './runtime/memoryObserveFailures.js';
-import { warnSoulLoadFailed } from './runtime/soulLoadWarning.js';
+import { warnSoulBesideSystemBlocks, warnSoulLoadFailed } from './runtime/soulLoadWarning.js';
 import { asSpendBudget, type SpendBudget, type SpendBudgetOptions } from './runtime/spendBudget.js';
 import type { LlmUsageAccountResolver } from './observers.js';
 import {
@@ -950,6 +950,8 @@ export function agent(opts: AgentOptions): Agent {
   if (opts.agencies?.launch === true) {
     throw new Error("agent(): agencies.launch runs on the GMI path; set runtime: 'gmi' or use gmi().");
   }
+  // The GMI path warns in gmi(), so an agent on it warns once.
+  warnSoulBesideSystemBlocks(opts);
   const sessionBuffers = new Map<string, SessionHistoryBuffer | null>();
   // In-memory usage tally per session and per agent. Populated synchronously
   // after every generate/send/stream call so `agent.usage()` and

@@ -103,7 +103,10 @@ export class WikiCompiler {
         await this.opts.store.writePage({
           id: a.pageId,
           type,
-          summary: current?.summary ?? facts[0].slice(0, 120),
+          // A page that has a summary keeps it, whoever wrote it. A new page's summary is named from its id alone:
+          // the catalog line it becomes joins the system prompt of every agent built from the soul, so it never
+          // carries what was said in a conversation.
+          summary: current?.summary ?? summaryForNewPage(a.pageId),
           updated: now(),
           sources: newSources,
           body: mergedBody,
@@ -121,6 +124,21 @@ export class WikiCompiler {
     }
     return result;
   }
+}
+
+/**
+ * The summary a page the compiler creates is given: a fixed label made from its page id alone, never from the traces
+ * merged into it. `concepts/notes` is `Notes compiled from conversations`; any other page is named by the last
+ * segment of its id, as `Notes on johnny compiled from conversations` for `entities/johnny`.
+ *
+ * @param pageId - The new page's id, already checked by `assertWikiPageId`.
+ * @returns The label.
+ */
+function summaryForNewPage(pageId: string): string {
+  if (pageId === 'concepts/notes') return 'Notes compiled from conversations';
+  const name = pageId.slice(pageId.lastIndexOf('/') + 1);
+  if (pageId.startsWith('log/')) return `Log ${name} compiled from conversations`;
+  return `Notes on ${name} compiled from conversations`;
 }
 
 function inferType(pageId: string): WikiPageType {
