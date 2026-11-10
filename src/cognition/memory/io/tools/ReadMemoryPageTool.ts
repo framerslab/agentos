@@ -66,18 +66,18 @@ const INVALID_ARGS_ERROR =
 /**
  * The asker of a tool call, from the context the runtime built; never from the call's arguments.
  *
- * The user is `context.userContext.userId`. An id that names nobody (`''`, `anonymous_user`, `anonymous`, `system`,
- * `guest`), or no id at all, is nobody: the result has no subject. Any other id is a subject: the one the runtime put
- * in `context.userContext.memorySubject` when it holds a kind of `user` or `session` and a non-empty id, and otherwise
- * the user of that id, so a context that names a user and no subject is never read as nobody.
+ * The subject the runtime put in `context.userContext.memorySubject`, when it holds a kind of `user` or `session` and
+ * a non-empty id, is the asker, whatever `context.userContext.userId` holds: the subject is the key the turn's memory
+ * is filed under, so a session whose id, or whose user id, is one of the anonymous words reads its own pages and is
+ * never read as nobody. With no such subject the user is `context.userContext.userId`: an id that names nobody (`''`,
+ * `anonymous_user`, `anonymous`, `system`, `guest`), or no id at all, is nobody, and the result has no subject; any
+ * other id is the user of that id, so a context that names a user and no subject is never read as nobody.
  *
  * @param context - The execution context the tool was called with.
  */
 export function memoryAskerOf(context: ToolExecutionContext | undefined): ReadMemoryPageAsker {
   const given: unknown = context?.userContext;
   const userContext = given !== null && typeof given === 'object' ? (given as Record<string, unknown>) : undefined;
-  const userId = typeof userContext?.userId === 'string' ? userContext.userId : '';
-  if (DEFAULT_ANONYMOUS_USER_IDS.includes(userId)) return {};
   const subject = userContext?.memorySubject;
   if (subject !== null && typeof subject === 'object') {
     const { kind, id } = subject as { kind?: unknown; id?: unknown };
@@ -85,6 +85,8 @@ export function memoryAskerOf(context: ToolExecutionContext | undefined): ReadMe
       return { subject: { kind, id } };
     }
   }
+  const userId = typeof userContext?.userId === 'string' ? userContext.userId : '';
+  if (DEFAULT_ANONYMOUS_USER_IDS.includes(userId)) return {};
   return { subject: { kind: 'user', id: userId } };
 }
 
