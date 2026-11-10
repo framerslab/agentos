@@ -4972,7 +4972,9 @@ describe('the learning option and its fields, on gmi() and the full runtime', ()
     try {
       unsetSystem = await turn(unset);
       expect(unsetSystem).toContain('You teach networking.');
-      expect(unsetSystem).not.toContain(PERSONALITY_HEADING);
+      // With no learning layer the GMI renders the persona's own trait paragraph.
+      expect(unsetSystem).toContain(PERSONALITY_HEADING);
+      expect(unset.getLearningLayer()).toBeUndefined();
     } finally {
       await unset.shutdown();
     }
