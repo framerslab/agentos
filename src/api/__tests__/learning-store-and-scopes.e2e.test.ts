@@ -12199,7 +12199,7 @@ describe('the docs a host reads about it', () => {
     );
     expect(gmiDoc).toContain('a memory that does not open fails the call before the tombstone is written');
     const guide = doc('docs/getting-started/HIGH_LEVEL_API.md');
-    expect(guide).toContain('Of the `MemoryConfig` fields, this path reads `embedding`, `consolidation`, `persistAccessState` and `store`');
+    expect(guide).toContain('Of the `MemoryConfig` fields, this path reads `embedding`, `consolidation`, `persistAccessState`, `store` and `recall`');
     expect(guide).toContain("`memory.store` (`{ path }`, a SQLite file, or `{ adapter, brainId? }`, a host's storage adapter) keeps the agent's memory and its learning store there");
   });
 

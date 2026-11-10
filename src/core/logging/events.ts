@@ -100,6 +100,19 @@ export const AGENTOS_EVENTS = {
   'memory.anonymous_user': { path: { enum: ['plain', 'gmi'] } },
   // A host's memory hook threw, rejected or timed out; the turn went on without it.
   'memory.hook_failed': { hook: { enum: ['getContext', 'observe', 'memoryPolicy', 'screen'] }, type: 'word', code: 'word' },
+  // Cognitive memory's recall (src/cognition/memory/retrieval/recall). No memory text, query text or id is ever a field.
+  'memory.recall.leg_absent': { leg: { enum: ['dense', 'exact_words', 'recency'] }, reason: { enum: ['no_store', 'no_embedder', 'no_index', 'no_scope_filter', 'query_error', 'disabled'] } },
+  'memory.recall.rerank_skipped': { provider: { enum: ['local', 'llm'] }, reason: { enum: ['loading', 'timeout', 'error', 'backoff'] } },
+  'memory.recall.rerank_unavailable': { provider: { enum: ['local'] }, reason: { enum: ['missing_dependency', 'load_failed'] } },
+  'memory.recall.budget_clamped': { requested: 'int', effective: 'int', hop: 'int', reason: { enum: ['prompt_share', 'zero_remaining', 'invalid'] } },
+  'memory.recall.allocation_exhausted': { requested: 'int', candidates: 'int' },
+  // A recall-related option that was set and is applied nowhere (`token_budget`: memoryProviderOptions.tokenBudget on a GMI agent whose cognitive memory supplies the block; `recall_budget`: memory.recall.budget.totalTokens with neither cognitive memory nor a memoryProvider.getContext).
+  'memory.recall.option_ignored': { option: { enum: ['token_budget', 'recall_budget', 'remote_provider'] } },
+  // A `memory.recall` setting refused at construction, before the throw; `option` is the field under `memory.recall`.
+  'memory.recall.option_rejected': { option: 'word', reason: { enum: ['conflict', 'unsupported_provider', 'unsupported_runtime', 'invalid_value'] } },
+  'memory.recall.reserve_fired': { added: 'int' },
+  'memory.recall.supplied_rejected': { out_of_scope: 'int', ineligible: 'int' },
+  'memory.recall.rerank_failed_scoring': { provider: { enum: ['local', 'llm'] }, failures: 'int' },
 } as const satisfies EventMap;
 
 /** The type of {@link AGENTOS_EVENTS}, which `lazyLogger`'s handles are typed over. */

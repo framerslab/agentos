@@ -231,7 +231,7 @@ export interface ConsolidationConfig {
  * read from JSON writes an unset key. A host that builds its manager from a persona
  * itself (`gmiManagerConfig.cognitiveMemoryFactory`) gets the persona so
  * normalized, and passes the fields the same way. `agent({ runtime: 'gmi' })` and `gmi()` build their persona from
- * their options, which set no `cognitiveMemoryConfig`.
+ * their options, which set only `cognitiveMemoryConfig.recall`, from `memory.recall`.
  */
 export interface CognitiveMemoryPersonaConfig {
   /**
@@ -256,10 +256,16 @@ export interface CognitiveMemoryPersonaConfig {
    * builds its manager from a persona itself
    * (`gmiManagerConfig.cognitiveMemoryFactory`) passes it the same way.
    * `agent({ runtime: 'gmi' })` and `gmi()` build their persona from their
-   * options, which set no `cognitiveMemoryConfig`, so their memory runs on the
-   * default shares.
+   * options, which set only `cognitiveMemoryConfig.recall`, so their memory
+   * runs on the default shares.
    */
   tokenBudget?: Partial<MemoryBudgetAllocation>;
+  /**
+   * Recall settings ({@link CognitiveMemoryConfig.recall}): the memory block's
+   * budget and the capture. `createAgentCognitiveMemory` passes them to the
+   * manager it builds, under the agent's own `memory.recall`.
+   */
+  recall?: MemoryRecallConfig;
   /** Encoding config overrides ({@link CognitiveMemoryConfig.encoding}). */
   encoding?: Partial<EncodingConfig>;
   /** Decay config overrides ({@link CognitiveMemoryConfig.decay}). */
@@ -451,19 +457,35 @@ export interface CognitiveMemoryConfig {
   typedNetwork?: TypedNetworkRuntimeConfig;
 
   /**
-   * What the manager records of each memory assembly. Read at every
+   * The manager's recall settings: the memory block's budget on a GMI turn and
+   * what the manager records of each memory assembly. Read at every
    * `assembleForPrompt()`, so a change to a built manager's configuration
-   * applies from its next turn.
+   * applies from its next turn; `initialize()` checks the values. A host of
+   * `AgentOS.create` sets it on the manager its
+   * `gmiManagerConfig.cognitiveMemoryFactory` builds; `agent()` and `gmi()`
+   * set it from `memory.recall`.
    *
-   * @default undefined (capture `'metadata'`, no ids in the reasoning trace)
+   * @default undefined (a 1600-token block, capture `'metadata'`, no ids in the reasoning trace)
    */
   recall?: ManagerRecallConfig;
 }
 
 /**
- * The manager's recall settings: what it records of each memory assembly.
+ * The recall settings of `memory.recall` on `agent()` and `gmi()`, of a
+ * persona's `cognitiveMemoryConfig.recall`, and of a manager's `recall`.
  */
-export interface ManagerRecallConfig {
+export interface MemoryRecallConfig {
+  /**
+   * `totalTokens`: the budget of the whole memory block a GMI turn sends, its
+   * preamble included, in tokens of about 4 characters. An integer of at least
+   * 0; at 0 the turn sends no block and records every candidate left out for
+   * the budget. On `agent()` without `runtime: 'gmi'` it is the `tokenBudget`
+   * handed to `memoryProvider.getContext` when
+   * `memoryProviderOptions.tokenBudget` is unset.
+   *
+   * @default { totalTokens: 1600 }
+   */
+  budget?: { totalTokens?: number };
   /**
    * `'metadata'` returns a capture record (`MemoryRecallCapture`) with every assembled
    * context (`AssembledMemoryContext.capture`) and on a GMI turn's result;
@@ -477,6 +499,13 @@ export interface ManagerRecallConfig {
    * @default 'metadata'
    */
   capture?: RecallCaptureMode;
+}
+
+/**
+ * A manager's recall settings: the public ones plus what a host or a bench
+ * sets below the `agent()` and `gmi()` options.
+ */
+export interface ManagerRecallConfig extends MemoryRecallConfig {
   /**
    * Lists the ids of the memories the block shows (`includedMemoryIds`) in
    * the GMI's reasoning-trace entry "Cognitive memory context assembled.",
@@ -485,6 +514,13 @@ export interface ManagerRecallConfig {
    * @default false
    */
   traceIds?: boolean;
+  /**
+   * The embedding provider and model the memory was built with, copied to the
+   * capture record's `embedder`. A label only: the manager embeds through its
+   * `embeddingManager`. `agent()` and `gmi()` set it from the model their
+   * memory resolved.
+   */
+  embedder?: { provider: string; model: string };
 }
 
 /**

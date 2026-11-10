@@ -1525,6 +1525,9 @@ export class GMI implements IGMI {
     const aggregatedUiCommands: UICommand[] = [];
     const aggregatedUsage: CostAggregator = { totalTokens: 0, promptTokens: 0, completionTokens: 0, breakdown: [] };
       let lastErrorForOutput: GMIOutput['error'] = undefined;
+    // The recall capture of the turn's memory assembly, for the turn's output: the error output carries it too, so a
+    // turn that fails after its memory was assembled still reports what that assembly recalled.
+    let turnMemoryRecall: MemoryRecallCapture | undefined;
 
     // The turn's stop. The caller's abort signal (a session's close()) and this
     // GMI's shutdown() both abort it; the model call in progress then ends with
@@ -1669,8 +1672,6 @@ export class GMI implements IGMI {
           : (this.activePersona.defaultModelCompletionOptions as Record<string, unknown> | undefined)?.cacheDiagnostics,
       );
       let lastRagSources: import('../rag/IRetrievalAugmentor.js').RagRetrievedChunk[] | undefined;
-      // The recall capture of the turn's memory assembly, for the turn's output.
-      let turnMemoryRecall: MemoryRecallCapture | undefined;
       // A structured turn (ProcessingOptions.structuredReply): the schema the reply must match, resolved once. Its
       // instruction joins the system prompt, its Zod schema reaches the gateway, no delta streams before the check
       // unless asked, and a reply that does not match is asked for again inside the turn.
@@ -2472,6 +2473,7 @@ export class GMI implements IGMI {
         responseText: null,
         error: lastErrorForOutput,
         usage: aggregatedUsage, // Could be partial
+        ...(turnMemoryRecall ? { memoryRecall: turnMemoryRecall } : {}),
       };
     } finally {
       // The turn's work is done: shutdown() stops waiting for it, and the

@@ -584,8 +584,9 @@ export interface GMIOutput {
     ragSources?: import('../rag/IRetrievalAugmentor.js').RagRetrievedChunk[];
     /**
      * The recall capture of the turn's memory assembly, when the GMI assembled
-     * a memory block and the memory manager's `recall.capture` is not `'off'`.
-     * A tool continuation assembles none and carries none.
+     * a memory block and the memory manager's `recall.capture` is not `'off'`,
+     * on a turn that fails after the assembly as on one that completes. A tool
+     * continuation assembles none and carries none.
      */
     memoryRecall?: import('../memory/retrieval/recall/capture.js').MemoryRecallCapture;
     /** On a structured turn: the parsed value and its check (see `api/runtime/structuredReply`). */

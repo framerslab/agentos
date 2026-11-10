@@ -279,6 +279,16 @@ export interface StreamTextResult {
    */
   fallback?: Promise<FallbackSignal | undefined>;
   /**
+   * On a `gmi()` or `agent({ runtime: 'gmi' })` session's `stream()` with
+   * cognitive memory: the recall capture of the turn's memory assembly, as
+   * `GenerateTextResult.memoryRecall` carries it on `send()`. Resolves when the
+   * stream ends, also when the turn fails after its memory assembly (the
+   * record is that assembly's), to `undefined` when the turn assembled no
+   * memory block or `memory.recall.capture` is `'off'`. Unset on
+   * `streamText()` and on the default runtime.
+   */
+  memoryRecall?: Promise<import('../cognition/memory/retrieval/recall/capture.js').MemoryRecallCapture | undefined>;
+  /**
    * Resolves to the reason the FINAL model step stopped emitting, on the
    * same cadence as {@link usage} (when the stream completes):
    *
@@ -833,6 +843,8 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             ...(opts.customModelParams !== undefined ? { customModelParams: opts.customModelParams } : {}),
             // The planning call's usage report counts into `usage` too.
             ...(opts.__onUsageReport ? { onUsageReport: opts.__onUsageReport } : {}),
+            // The planning request carries the caller's messages, so it takes the call's `store` too.
+            ...(typeof opts.store === 'boolean' ? { store: opts.store } : {}),
           },
           usage,
           budget ? { budget, providerId: resolved.providerId, what: 'stream_text.plan' } : undefined,
@@ -932,6 +944,8 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               : {}),
             ...(opts.promptCacheRetention !== undefined ? { promptCacheRetention: opts.promptCacheRetention } : {}),
             ...(opts.serviceTier !== undefined ? { serviceTier: opts.serviceTier } : {}),
+            // OpenAI's `store`; other providers ignore it.
+            ...(typeof opts.store === 'boolean' ? { store: opts.store } : {}),
               // Forward provider-specific top-level payload params (e.g.
               // OpenRouter provider-routing preferences) on the shim path too.
               ...(opts.customModelParams !== undefined
@@ -1100,6 +1114,8 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               : {}),
             ...(opts.promptCacheRetention !== undefined ? { promptCacheRetention: opts.promptCacheRetention } : {}),
             ...(opts.serviceTier !== undefined ? { serviceTier: opts.serviceTier } : {}),
+            // OpenAI's `store`; other providers ignore it.
+            ...(typeof opts.store === 'boolean' ? { store: opts.store } : {}),
             // Cache-diagnostics opt-in (Anthropic beta): thread the previous
             // request's message id — the caller's seed on step 1, the prior
             // step's id after — so the verdict names any prefix divergence.

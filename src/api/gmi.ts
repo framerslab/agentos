@@ -76,6 +76,8 @@ import {
   type AgentMemoryBrain,
 } from './runtime/agentCognitiveMemory.js';
 import { sendGmiTurn, streamGmiTurn, TurnLock, type GmiForTurn, type GmiSessionDeps, type GmiTurnContext, type GmiTurnOptions } from './runtime/gmiSession.js';
+import { resolveRecallOptions } from './runtime/recallOptions.js';
+import { recallLog } from '../cognition/memory/retrieval/recall/log.js';
 import { endSessionGeneration, readSessionGeneration, sessionGenerationKey, type SessionGeneration } from './runtime/sessionGenerations.js';
 import { transcriptToConversation } from './runtime/gmiTranscript.js';
 import { SessionHistoryBuffer, SESSION_HISTORY_DEFAULTS } from './sessionHistory.js';
@@ -561,6 +563,21 @@ export function gmi(opts: GmiOptions): GmiHandle {
     if (soul?.frontmatter[field]) soulLog.warn('soul.field_ignored', { field });
   }
   const cognition = resolveCognition(opts);
+  // memory.recall: with cognitive memory on it goes to the memory manager (through the persona and
+  // createAgentCognitiveMemory); with memory off its budget is the memory provider's tokenBudget, as on the default
+  // runtime. Checked before anything is built.
+  const resolvedRecall = resolveRecallOptions({
+    recall: cognition.memory
+      ? cognition.memory.recall
+      : typeof opts.memory === 'object' && opts.memory !== null
+        ? opts.memory.recall
+        : undefined,
+    cognitiveMemory: cognition.memory !== false,
+    providerTokenBudget: opts.memoryProviderOptions?.tokenBudget,
+    providerContext: Boolean(opts.memoryProvider?.getContext),
+    where: 'gmi()',
+  });
+  for (const option of resolvedRecall.ignored) recallLog.warn('memory.recall.option_ignored', { option });
   // generate() and stream() run the light profile, under the agent's own learning option.
   const lightCognition = resolveCognition({ cognition: 'light', learning: opts.learning });
   const learningConfig = typeof opts.learning === 'object' && opts.learning !== null ? opts.learning : undefined;
@@ -1006,6 +1023,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
       opts,
       userId: callId,
       useMemoryProviderContext: true,
+      providerTokenBudget: resolvedRecall.providerTokenBudget,
       history: null,
       ledger: mergeLedger(ledger, extra?.usageLedger, { source: extra?.usageLedger?.source ?? source }),
       onUsage: (u) => accumulateUsage(agentTally, u),
@@ -1202,6 +1220,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
         ledger: mergeLedger(ledger, { sessionId, source: seat ? (ledger?.source ?? source) : source }),
         // A seat session's turn takes no context from the memory provider and files nothing with it.
         useMemoryProviderContext: !cognition.memory && !seat,
+        providerTokenBudget: resolvedRecall.providerTokenBudget,
         observeMemoryProvider: !seat,
         gmiFor: gmiFor(closing !== undefined),
         onUsage: (u) => {

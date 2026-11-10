@@ -65,6 +65,8 @@ import {
 } from './agentExportCore.js';
 import { applyMemoryProvider, type MemoryProviderHookOptions, type MemoryTurn } from './runtime/memoryProviderHooks.js';
 import { memoryHookContextOf, namedSessionUser } from './runtime/memorySubject.js';
+import { resolveRecallOptions } from './runtime/recallOptions.js';
+import { recallLog } from '../cognition/memory/retrieval/recall/log.js';
 import { observeWithoutWaiting } from './runtime/memoryObserveFailures.js';
 import type { MemoryRecallItem } from './runtime/memoryDataBlock.js';
 import { warnSoulBesideSystemBlocks, warnSoulLoadFailed } from './runtime/soulLoadWarning.js';
@@ -1028,6 +1030,21 @@ export function agent(opts: AgentOptions): Agent {
   if (opts.agencies?.launch === true) {
     throw new Error("agent(): agencies.launch runs on the GMI path; set runtime: 'gmi' or use gmi().");
   }
+  // memory.recall on the default runtime: its budget is the memory provider's tokenBudget when that is unset; two
+  // different budgets, and capture, which needs the cognitive assembler, are refused; a budget no provider reads is
+  // reported in one line.
+  const recallSetting = typeof opts.memory === 'object' && opts.memory !== null ? opts.memory.recall : undefined;
+  const resolvedRecall = resolveRecallOptions({
+    recall: recallSetting,
+    cognitiveMemory: false,
+    providerTokenBudget: opts.memoryProviderOptions?.tokenBudget,
+    providerContext: Boolean(opts.memoryProvider?.getContext),
+    where: 'agent()',
+  });
+  for (const option of resolvedRecall.ignored) recallLog.warn('memory.recall.option_ignored', { option });
+  const providerBudget = resolvedRecall.providerTokenBudget;
+  const memoryProviderOptions: MemoryProviderHookOptions | undefined =
+    providerBudget === undefined ? opts.memoryProviderOptions : { ...opts.memoryProviderOptions, tokenBudget: providerBudget };
   // The GMI path warns in gmi(), so an agent on it warns once.
   warnSoulBesideSystemBlocks(opts);
   // Loaded once, at build: a soul that fails to load throws here unless it is optional.
@@ -1212,7 +1229,7 @@ export function agent(opts: AgentOptions): Agent {
           opts.controls?.maxValidationRetries ?? 1,
           true,
           (attempt) => accumulateUsage(agentUsageTally, attempt.usage),
-          { provider: opts.memoryProvider, turn, options: opts.memoryProviderOptions },
+          { provider: opts.memoryProvider, turn, options: memoryProviderOptions },
         );
         if (opts.responseSchema) result.parsed = object;
         if (opts.verifyCitations) {
@@ -1248,7 +1265,7 @@ export function agent(opts: AgentOptions): Agent {
         },
         opts.memoryProvider,
         turn,
-        opts.memoryProviderOptions,
+        memoryProviderOptions,
       );
       if (typeof prompt === 'string') {
         streamOpts.prompt = prompt;
@@ -1430,7 +1447,7 @@ export function agent(opts: AgentOptions): Agent {
               accumulateUsage(sessionUsageTally, attempt.usage);
               accumulateUsage(agentUsageTally, attempt.usage);
             },
-            { provider: opts.memoryProvider, turn: turnOf(textForMemory), options: opts.memoryProviderOptions },
+            { provider: opts.memoryProvider, turn: turnOf(textForMemory), options: memoryProviderOptions },
           );
           if (retried) {
             result.transcriptDelta = [
@@ -1488,7 +1505,7 @@ export function agent(opts: AgentOptions): Agent {
             },
             opts.memoryProvider,
             turn,
-            opts.memoryProviderOptions,
+            memoryProviderOptions,
           );
 
           const result = observeStreamWhenDone(streamText(wrappedOpts as GenerateTextOptions), opts.memoryProvider, turn);
