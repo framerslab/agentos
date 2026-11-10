@@ -121,4 +121,25 @@ describe('personaFromAgentOptions with a soul', () => {
     expect(agentStableIdOf({ name: 'Ops' }, null)).toBe('ops');
     expect(agentStableIdOf({ name: 'Ops' }, soul)).toBe('aria-1');
   });
+
+  it('names a soul that gives no id by learning.agentKey when one is set, so editing its text keeps the id', () => {
+    const bare = parseSoul('---\nrole: helper\n---\nBe kind.');
+    const edited = parseSoul('---\nrole: helper\n---\nBe kind and brief.');
+    const keyed = { ...base, learning: { agentKey: ' k ' } };
+    expect(personaFromAgentOptions(keyed, resolveCognition({}), [], bare).id).toBe('k');
+    expect(personaFromAgentOptions(keyed, resolveCognition({}), [], edited).id).toBe('k');
+    // A blank key names nothing: the id is derived from the text, as with no key.
+    expect(personaFromAgentOptions({ ...base, learning: { agentKey: '  ' } }, resolveCognition({}), [], bare).id).toBe(derivedSoulPersonaId(bare));
+    expect(personaFromAgentOptions({ ...base, learning: true }, resolveCognition({}), [], bare).id).toBe(derivedSoulPersonaId(bare));
+    // The soul's id, else the agent's name, still names the persona before the key does.
+    expect(personaFromAgentOptions(keyed, resolveCognition({}), [], soul).id).toBe('aria-1');
+    expect(personaFromAgentOptions({ ...keyed, name: 'Ops' }, resolveCognition({}), [], bare).id).toBe('ops');
+  });
+
+  it('names an unnamed agent with no soul by learning.agentKey when one is set', () => {
+    const keyed = { ...base, learning: { agentKey: 'k' } };
+    expect(personaFromAgentOptions(keyed, resolveCognition({}), []).id).toBe('k');
+    expect(personaFromAgentOptions(keyed, resolveCognition({}), []).id).toBe('k');
+    expect(personaFromAgentOptions({ ...keyed, name: 'Ops' }, resolveCognition({}), []).id).toBe('ops');
+  });
 });

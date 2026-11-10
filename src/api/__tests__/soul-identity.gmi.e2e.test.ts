@@ -23,6 +23,7 @@ import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory'
 import { reply, script, type ProviderScript } from './helpers/stubProviders';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 import { Brain } from '../../cognition/memory/retrieval/store/Brain';
+import { CognitiveMemoryManager } from '../../cognition/memory/CognitiveMemoryManager';
 import { InMemoryLearningStore } from '../../cognition/learning/store/InMemoryLearningStore';
 import { stableIdOfName } from '../../cognition/substrate/personas/stableId';
 
@@ -379,6 +380,43 @@ describe("the soul's id as the agent's key", () => {
     expect(build).toThrow("set agentId in SOUL.md's front matter, and the soul's id names the brain.");
     // Without a soul the error is the one it was: it ends where it ended.
     expect(() => gmi(stubbed(key(), { memory: { store: { path: path.join(dir, 'y.sqlite') } }, learning: { mode: 'off' } }))).toThrow(/one agent to the learning layer\.$/);
+  });
+
+  it('gmi() with memory.store and learning.agentKey files the memory of an inline soul that gives no id under that key, before and after its text is edited', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const built = vi.spyOn(CognitiveMemoryManager.prototype, 'initialize');
+    const embeddingKey = key();
+    script('openai', embeddingKey, { replies: [] });
+    vi.stubEnv('OPENAI_API_KEY', embeddingKey);
+    const memory = { store: { path: path.join(dir, 'kept.sqlite') }, embedding: { provider: 'openai', model: 'text-embedding-3-small' } };
+    for (const body of ['Be kind.', 'Be kind and brief.']) {
+      const k = key();
+      script('openai', k, { replies: [reply.text('Noted.')] });
+      const a = gmi(stubbed(k, { soul: { content: `---\nrole: helper\n---\n${body}` }, memory, learning: { agentKey: 'k', mode: 'off' } }));
+      try {
+        await a.session('s').send('The deploy key lives in the vault.');
+      } finally {
+        await a.close();
+      }
+    }
+    // The memory's owner, which files its own traces and the persona scopes, is the host's key on both builds.
+    const owners = built.mock.calls.map(([config]) => config.agentId);
+    expect(owners.length).toBeGreaterThanOrEqual(2);
+    expect(new Set(owners)).toEqual(new Set(['k']));
+  });
+});
+
+describe('what the docs say about the id of a soul that gives none', () => {
+  const PACKAGE_ROOT = fileURLToPath(new URL('../../../', import.meta.url));
+  const doc = (file: string) => fs.readFileSync(path.join(PACKAGE_ROOT, file), 'utf8');
+
+  it('name learning.agentKey before the id derived from the text, and say an edit moves the derived one', () => {
+    const gmiDoc = doc('docs/GMI.md');
+    expect(gmiDoc).toContain(
+      "else `learning.agentKey`, else an id derived from the soul's text, which changes when that text changes, so an agent that keeps memory gives its soul an `agentId` or sets `learning.agentKey`",
+    );
+    expect(gmiDoc).toContain("under the persona's id, which with a soul is the soul's id, else `learning.agentKey`");
   });
 });
 
