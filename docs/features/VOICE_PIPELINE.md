@@ -820,6 +820,8 @@ Deepgram opens with the language `sttLanguageOptions()` gives its entry ([Hosted
 
 Deepgram's `usageIntervalMs` defaults to zero for one final report; a positive value adds cumulative reports while the connection is open. Its final report is emitted once across explicit close, remote close and failed upgrade cleanup. Configure `mipOptOut: true` to send `mip_opt_out=true`; a per-session false value cannot undo that setting. These changes preserve the general-purpose library's existing opt-out and failover defaults. Hosts that require those policies set them explicitly.
 
+Deepgram's Aura text-to-speech providers take the same opt-out. `DeepgramAuraBatchTTS` and `DeepgramAuraStreamingTTS` with `mipOptOut: true` send `mip_opt_out=true` on every `/v1/speak` request: each chunk of a batch narration over 2000 characters, and each socket a streaming session opens. Without it, `providerOptions.mip_opt_out: true` opts out one `synthesize()` call or one `startSession()`; a request's or session's `false` does not undo the provider's `true`. Both default to `false`. Deepgram's [Model Improvement Program](https://developers.deepgram.com/docs/the-deepgram-model-improvement-partnership-program) page names the parameter for "all API requests that you want to be excluded from the Model Improvement Program" and gives `https://api.deepgram.com/v1/speak?model=aura-2-thalia-en&mip_opt_out=true` as its text-to-speech example. `createVoiceProvidersFromEnv()` builds `DeepgramAuraStreamingTTS` without the option, so a host that opts out constructs the provider itself.
+
 ## Supplier usage evidence
 
 ```typescript
