@@ -1044,6 +1044,90 @@ describe('the run owner', () => {
     b.close();
   });
 
+  it("resumes a cut run from its record as stored, not from the copy this owner read before another tab's finish moved it on", async () => {
+    const store = new MemoryKeyValueStore();
+    await store.set('lib/j/r6', { id: 'r6', key: KEY, account: ACCOUNT, kind: 'library', way: null, unit: 'sessions', chosen: null, counts: { total: 5, pending: 5, applied: 0, skipped: 0, failed: 0 }, items: [], state: 'running', cut: 'session', phase: null, began: 1, progressed: 2 });
+    const locks = memoryLocks();
+    // On channels of their own, so the first owner keeps the copy it read.
+    const a = owner(store, locks, bus());
+    const b = owner(store, locks, bus());
+    try {
+      await a.records();
+      expect(a.snapshot().runs[0]?.status).toBe('cut');
+      const moved = await b.finish('r6', {
+        ...countingJob(5, []),
+        async run(context) {
+          context.counts({ applied: 2, pending: 3 });
+          context.item(0, 'added');
+          context.item(1, 'added');
+          await context.cut('session');
+          return { ended: 'finished', counts: context.record().counts };
+        },
+      });
+      expect(moved).toEqual({ id: 'r6' });
+      await b.whenIdle();
+      expect((await store.get<RunRecord>('lib/j/r6'))?.counts).toMatchObject({ applied: 2, pending: 3 });
+      const resumedWith: RunRecord[] = [];
+      const resumed = await a.finish('r6', {
+        ...countingJob(5, []),
+        async run(context) {
+          resumedWith.push(context.record());
+          return { ended: 'finished', counts: context.record().counts };
+        },
+      });
+      expect(resumed).toEqual({ id: 'r6' });
+      await a.whenIdle();
+      expect(resumedWith[0]?.counts).toMatchObject({ applied: 2, pending: 3 });
+      expect(resumedWith[0]?.items).toEqual([{ index: 0, state: 'added' }, { index: 1, state: 'added' }]);
+    } finally {
+      a.close();
+      b.close();
+    }
+  });
+
+  it("draws a cut run that another tab finishes as running again, and counts its finish", async () => {
+    const store = new MemoryKeyValueStore();
+    const locks = memoryLocks();
+    const made = bus();
+    const watcher = owner(store, locks, made);
+    const first = owner(store, locks, made);
+    const second = owner(store, locks, made);
+    const ends: string[] = [];
+    watcher.subscribeEnds((_read, ended) => { ends.push(ended); });
+    const mid = deferred();
+    try {
+      const started = await first.start({
+        ...countingJob(2, []),
+        async run(context) {
+          await context.write(async () => true);
+          await context.cut('session');
+          return { ended: 'finished', counts: context.record().counts };
+        },
+      });
+      const id = 'id' in started ? started.id : '';
+      await first.whenIdle();
+      await vi.waitFor(() => expect(ends).toEqual(['cut']));
+      expect(await second.finish(id, {
+        ...countingJob(2, []),
+        async run(context) {
+          await mid.promise;
+          context.counts({ applied: 2, pending: 0 });
+          return { ended: 'finished', counts: context.record().counts };
+        },
+      })).toEqual({ id });
+      await vi.waitFor(() => expect(watcher.snapshot().runs.find((run) => run.record.id === id)).toMatchObject({ status: 'watched', ended: null }));
+      mid.resolve();
+      await second.whenIdle();
+      await vi.waitFor(() => expect(ends).toEqual(['cut', 'finished']));
+      expect(watcher.snapshot().ended.finished).toBe(1);
+    } finally {
+      mid.resolve();
+      watcher.close();
+      first.close();
+      second.close();
+    }
+  });
+
   it("holds the run's lock while it deletes another tab's failed record once shown, so a finish meanwhile is refused", async () => {
     const store = new MemoryKeyValueStore();
     await store.set('lib/j/r5', { id: 'r5', key: KEY, account: ACCOUNT, kind: 'library', way: null, unit: 'sessions', chosen: null, counts: { total: 3, pending: 2, applied: 0, skipped: 0, failed: 1 }, items: [{ index: 0, state: 'failed', name: 'a.txt' }], state: 'failed', cut: null, phase: null, began: 1, progressed: 2 });
