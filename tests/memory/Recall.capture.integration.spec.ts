@@ -22,6 +22,9 @@ import { InMemoryVectorStore } from '../../src/cognition/rag/vector_stores/InMem
 import { RerankerService } from '../../src/cognition/rag/reranking/RerankerService.js';
 import { LlmJudgeReranker } from '../../src/cognition/rag/reranking/providers/LlmJudgeReranker.js';
 import type { IRerankerProvider, RerankerInput, RerankerOutput } from '../../src/cognition/rag/reranking/IRerankerService.js';
+import type { ICognitiveMemoryManager } from '../../src/cognition/memory/CognitiveMemoryManager.js';
+import { CognitiveMemoryBridge } from '../../src/cognition/substrate/CognitiveMemoryBridge.js';
+import { GMIMood } from '../../src/cognition/substrate/IGMI.js';
 
 const NEUTRAL: PADState = { valence: 0, arousal: 0, dominance: 0 };
 const SCOPES = [{ scope: 'user' as const, scopeId: 'u1' }];
@@ -329,5 +332,72 @@ describe('the recall capture of a memory assembly', () => {
     const c = (await manager.assembleForPrompt(QUERY, 1600, NEUTRAL, { scopes: SCOPES })).capture!;
     expect(c.legs[0].ms).toBeGreaterThanOrEqual(140);
     expect(c.legs[0].ms).toBeLessThan(400);
+  });
+});
+
+describe("recall capture 'off'", () => {
+  /**
+   * A GMI's bridge over `manager`, its user `u1`, with each assembly asked at `budget` tokens instead of the bridge's
+   * 1600; returns the details of each "Cognitive memory context assembled." entry the bridge traces.
+   */
+  function bridgeOver(manager: CognitiveMemoryManager, budget: number) {
+    const entries: Array<Record<string, unknown>> = [];
+    const atBudget = {
+      getConfig: () => manager.getConfig(),
+      assembleForPrompt: (query: string, _budget: number, mood: PADState, options: unknown) =>
+        manager.assembleForPrompt(query, budget, mood, options as never),
+    } as unknown as ICognitiveMemoryManager;
+    const bridge = new CognitiveMemoryBridge(
+      atBudget,
+      () => GMIMood.NEUTRAL,
+      () => ({ userId: 'u1' }) as never,
+      () => 'capture-persona',
+      () => 'capture-gmi',
+      (_type, message, details) => {
+        if (message === 'Cognitive memory context assembled.') entries.push(details ?? {});
+      },
+    );
+    return { bridge, entries };
+  }
+
+  it("the bridge's trace entry counts the lines the block left out, as it does with the capture on", async () => {
+    const off = await managerWith({ recall: { capture: 'off' } } as Partial<CognitiveMemoryConfig>);
+    const on = await managerWith({ recall: { capture: 'metadata' } } as Partial<CognitiveMemoryConfig>);
+    const offBridge = bridgeOver(off, 220);
+    const onBridge = bridgeOver(on, 220);
+    const offContext = await offBridge.bridge.assembleContext(QUERY);
+    const onContext = await onBridge.bridge.assembleContext(QUERY);
+    expect(offContext?.capture).toBeUndefined();
+    expect(offContext?.contextText).toBe(onContext?.contextText);
+
+    const lines = offContext!.lineOutcomes ?? [];
+    const leftOutLines = lines.filter((line) => line.outcome === 'left_out').length;
+    expect(leftOutLines).toBeGreaterThan(0);
+    expect(offBridge.entries).toHaveLength(1);
+    const entry = offBridge.entries[0];
+    expect(entry.candidates).toBe(lines.length);
+    expect(entry.included).toBe(offContext!.includedMemoryIds.length);
+    expect(entry.leftOut).toBe(leftOutLines);
+    expect((entry.included as number) + (entry.leftOut as number)).toBe(entry.candidates);
+    // The same counts the capture gives the entry when it is on.
+    const onEntry = onBridge.entries[0];
+    expect({ candidates: entry.candidates, included: entry.included, leftOut: entry.leftOut }).toEqual({
+      candidates: onEntry.candidates,
+      included: onEntry.included,
+      leftOut: onEntry.leftOut,
+    });
+  });
+
+  it('a retrieval builds no recall report and no rerank record, and the rerank still orders the traces', async () => {
+    const on = await managerWith({ recall: { capture: 'metadata' }, rerankerService: serviceOf(lastFirstReranker('cohere')) } as Partial<CognitiveMemoryConfig>);
+    const off = await managerWith({ recall: { capture: 'off' }, rerankerService: serviceOf(lastFirstReranker('cohere')) } as Partial<CognitiveMemoryConfig>);
+    const a = await on.retrieve(QUERY, NEUTRAL, { scopes: SCOPES });
+    const b = await off.retrieve(QUERY, NEUTRAL, { scopes: SCOPES });
+    expect(a.diagnostics.recall).toBeDefined();
+    expect(a.diagnostics.reranker).toBeDefined();
+    expect(b.retrieved.length).toBeGreaterThan(2);
+    expect(b.retrieved.map((trace) => trace.id)).toEqual(a.retrieved.map((trace) => trace.id));
+    expect(b.diagnostics.recall).toBeUndefined();
+    expect(b.diagnostics.reranker).toBeUndefined();
   });
 });

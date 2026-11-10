@@ -709,7 +709,7 @@ The preamble appears when the budget has room for it and 100 more tokens. `assem
 
 Token estimation uses ~4 chars per token heuristic.
 
-### Upgrading from 0.15.123 or earlier
+### Upgrading from 0.15.124 or earlier
 
 - The GMI's reasoning-trace entry "Cognitive memory context assembled." no longer lists `includedMemoryIds`. It carries `tokensUsed`, `candidates`, `included`, `leftOut`, `retrieval`, `reranker` and `legsAbsent`, and lists the ids again with `recall: { traceIds: true }` on the memory manager's configuration. See [Recall Capture](#recall-capture).
 - `assembleForPrompt()` returns a recall capture on `capture` unless the manager's `recall.capture` is `'off'`, and a GMI turn carries it as `GMIOutput.memoryRecall` and on a session's `send()` result as `memoryRecall`. The fields are optional, so a memory manager or an `IGMI` that sets none compiles unchanged. The runtime stream carries the record only under `'metadata+stream'`, so a stream consumer sees nothing new by default. The block is the same byte for byte with any capture setting.
@@ -815,9 +815,9 @@ The type also holds `embedder`, `suppliedRejected` and `delivery`, which this re
 await manager.initialize({ ...config, recall: { capture: 'metadata+stream' } });
 ```
 
-The setting is read at each `assembleForPrompt()`, so a change to a built manager's configuration applies from its next turn. The block is the same byte for byte whatever it says.
+The setting is read at each `assembleForPrompt()` and `retrieve()`, so a change to a built manager's configuration applies from its next turn. The block is the same byte for byte whatever it says. Under `'off'` the manager builds no part of the record: a `retrieve()` result carries neither `diagnostics.recall` (the dense ranks, the reranker's scores, the dense leg's time) nor `diagnostics.reranker`, and the assembly takes no timings. A configured reranker still orders the traces.
 
-**The reasoning trace.** With a memory block assembled, the GMI's reasoning trace gets the entry "Cognitive memory context assembled." with `tokensUsed`, `candidates`, `included`, `leftOut`, `retrieval`, `reranker` (the provider) and `legsAbsent` (each leg that did not run, with its reason). `recall: { traceIds: true }` adds `includedMemoryIds`. The entry never holds text.
+**The reasoning trace.** With a memory block assembled, the GMI's reasoning trace gets the entry "Cognitive memory context assembled." with `tokensUsed`, `candidates`, `included`, `leftOut`, `retrieval`, `reranker` (the provider) and `legsAbsent` (each leg that did not run, with its reason). `recall: { traceIds: true }` adds `includedMemoryIds`. With the capture `'off'` the counts come from the block's `lineOutcomes`, so `leftOut` still counts the memories the block left out. The entry never holds text.
 
 ---
 
