@@ -21,6 +21,7 @@ import { SCHEMA_INSTRUCTION_LEAD } from '../runtime/structuredReply';
 import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory';
 import { reply, script, type ProviderScript } from './helpers/stubProviders';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
+import { Brain } from '../../cognition/memory/retrieval/store/Brain';
 
 let n = 0;
 const key = () => `k-soul-identity-${++n}`;
@@ -284,5 +285,72 @@ describe("a soul's identity on the GMI path", () => {
       expect(systemOf(call).trimEnd().endsWith(BLOCK)).toBe(true);
       expect(systemOf(call)).toContain(renderPersonalitySection({ honestyHumility: 0.9 })!);
     }
+  });
+});
+
+describe("the soul's id as the agent's key", () => {
+  it.each([['the default runtime', {}], ["runtime: 'gmi'", { runtime: 'gmi' }]] as const)(
+    'souledAgent() on %s files its turns under the soul agentId, whatever the agent is named',
+    async (_name, extra) => {
+      writeSoul(FULL);
+      const k = key();
+      script('openai', k, { whole: true, replies: [reply.text('Lisbon it is.'), reply.text('Notes.'), reply.text('Notes.'), reply.text('Notes.')] });
+      const a = await souledAgent({ ...stubbed(k, { ...extra, name: 'Support' }), soul: dir } as never);
+      try {
+        await a.session('s').send('I moved to Lisbon.');
+        await vi.waitFor(async () => expect((await a.memory!.recall('Lisbon', { scope: 'persona', scopeId: 'aria-1' })).length).toBe(2));
+        expect(await a.memory!.recall('Lisbon', { scope: 'persona', scopeId: 'Support' })).toEqual([]);
+      } finally {
+        await a.close();
+      }
+    },
+  );
+
+  it('files under the slug of the soul name when the soul has no agentId', async () => {
+    writeSoul('name: Aria Stone');
+    const k = key();
+    script('openai', k, { whole: true, replies: [reply.text('Lisbon it is.'), reply.text('Notes.')] });
+    const a = await souledAgent({ ...stubbed(k), soul: dir } as never);
+    try {
+      await a.session('s').send('I moved to Lisbon.');
+      await vi.waitFor(async () => expect((await a.memory!.recall('Lisbon', { scope: 'persona', scopeId: 'aria-stone' })).length).toBe(2));
+    } finally {
+      await a.close();
+    }
+  });
+
+  it('souledAgent() rejects a soul that gives no id on an agent with no name, and makes no store', async () => {
+    writeSoul('hardLimits:\n  - Never guess.', 'You are terse.');
+    await expect(souledAgent({ ...stubbed(key()), soul: dir } as never)).rejects.toThrow(
+      "souledAgent: the soul has no agentId and no name, and the agent has no name; set agentId in SOUL.md's front matter so the agent's memory has one stable id",
+    );
+    expect(fs.existsSync(path.join(dir, 'memory', '.store'))).toBe(false);
+  });
+
+  it('gmi() with memory.store opens its brain under the soul id with no learning.agentKey, and under learning.agentKey when one is set', async () => {
+    writeSoul(FULL);
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const open = vi.spyOn(Brain, 'openSqlite');
+    const first = path.join(dir, 'first.sqlite');
+    const a = gmi(stubbed(key(), { soul: dir, memory: { store: { path: first } }, learning: { mode: 'off' } }));
+    // Opening a session reads its generation from the store, which opens the brain.
+    a.session('s');
+    await vi.waitFor(() => expect(open).toHaveBeenCalledWith(first, { brainId: 'aria-1' }));
+    await a.close();
+
+    const second = path.join(dir, 'second.sqlite');
+    const b = gmi(stubbed(key(), { soul: dir, memory: { store: { path: second } }, learning: { mode: 'off', agentKey: 'kept' } }));
+    b.session('s');
+    await vi.waitFor(() => expect(open).toHaveBeenCalledWith(second, { brainId: 'kept' }));
+    await b.close();
+  });
+
+  it('gmi() with memory.store refuses a soul that gives no id, telling the host to set agentId', () => {
+    writeSoul('hardLimits:\n  - Never guess.', 'You are terse.');
+    const build = () => gmi(stubbed(key(), { soul: dir, memory: { store: { path: path.join(dir, 'x.sqlite') } }, learning: { mode: 'off' } }));
+    expect(build).toThrow('gmi(): memory.store needs learning.agentKey');
+    expect(build).toThrow("set agentId in SOUL.md's front matter, and the soul's id names the brain.");
+    // Without a soul the error is the one it was: it ends where it ended.
+    expect(() => gmi(stubbed(key(), { memory: { store: { path: path.join(dir, 'y.sqlite') } }, learning: { mode: 'off' } }))).toThrow(/one agent to the learning layer\.$/);
   });
 });
