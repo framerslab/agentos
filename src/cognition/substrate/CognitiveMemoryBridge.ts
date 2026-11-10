@@ -347,13 +347,16 @@ export class CognitiveMemoryBridge {
       );
       if (context.contextText.trim()) {
         // Counts, the retrieval, the reranker and the absent legs; the ids only on the host's ask, the text never.
+        // With the capture off, the counts come from the assembler's line report, one entry a trace.
         const capture = context.capture;
-        const included = capture ? capture.candidates.filter((c) => c.outcome === 'included').length : context.includedMemoryIds.length;
+        const counted: ReadonlyArray<{ outcome: 'included' | 'left_out' }> | undefined = capture?.candidates ?? context.lineOutcomes;
+        const included = counted ? counted.filter((c) => c.outcome === 'included').length : context.includedMemoryIds.length;
+        const candidates = counted ? counted.length : included;
         this.addTraceEntry('DEBUG', 'Cognitive memory context assembled.', {
           tokensUsed: context.tokensUsed,
-          candidates: capture ? capture.candidates.length : included,
+          candidates,
           included,
-          leftOut: capture ? capture.candidates.length - included : 0,
+          leftOut: candidates - included,
           retrieval: capture?.retrieval ?? 'dense',
           reranker: capture?.reranker.provider ?? 'none',
           legsAbsent: capture ? capture.legs.filter((leg) => !leg.ran).map((leg) => ({ leg: leg.leg, ...(leg.reason ? { reason: leg.reason } : {}) })) : [],
