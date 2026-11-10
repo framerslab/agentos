@@ -20,6 +20,8 @@
  */
 import { randomUUID } from 'node:crypto';
 import type { Agent, AgentLearning, AgentOptions, AgentSession, AgentSessionOptions, SessionSendOptions } from './agent.js';
+// agent.ts imports this module back; each side calls the other only inside functions.
+import { loadSoulFromOption } from './agent.js';
 import { extractTextFromContent, resolveChainOfThought, type GenerateTextOptions, type GenerateTextResult, type Message, type MessageContent, type TokenUsage } from './generateText.js';
 import type { StreamTextResult } from './streamText.js';
 import { GMI } from '../cognition/substrate/GMI.js';
@@ -536,6 +538,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
     console.warn(`[AgentOS] gmi() accepted config it does not enforce yet: ${deferred.join(', ')}.`);
   }
   warnSoulBesideSystemBlocks(opts);
+  // Loaded once, at build: a soul that fails to load throws here unless it is optional.
+  const soul = opts.soul ? loadSoulFromOption(opts.soul) : null;
   const cognition = resolveCognition(opts);
   // generate() and stream() run the light profile, under the agent's own learning option.
   const lightCognition = resolveCognition({ cognition: 'light', learning: opts.learning });
@@ -636,10 +640,10 @@ export function gmi(opts: GmiOptions): GmiHandle {
 
   const shared = retryingOnce<Shared>(async () => {
     // Throws, as generateText throws, when no provider or model resolves.
-    // Both personas load the soul: a soul that fails to load warns once for the pair.
+    // Both personas take the soul loaded at build.
     const [persona, lightPersona] = withOneSoulWarning(() => [
-      personaFromAgentOptions(opts, cognition, tools),
-      personaFromAgentOptions(opts, lightCognition, tools),
+      personaFromAgentOptions(opts, cognition, tools, soul),
+      personaFromAgentOptions(opts, lightCognition, tools, soul),
     ] as const);
     const promptEngine = new PromptEngine();
     await promptEngine.initialize(GMI_PROMPT_ENGINE_CONFIG);
@@ -962,7 +966,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
           extra?.provider ??
           (extra?.model && opts.provider && modelNamesAnotherProvider(opts.provider, extra.model) ? undefined : opts.provider);
         const persona = extra && (extra.model || extra.provider)
-          ? personaFromAgentOptions({ ...opts, model: extra.model ?? opts.model, provider: callProvider }, lightCognition, tools)
+          ? personaFromAgentOptions({ ...opts, model: extra.model ?? opts.model, provider: callProvider }, lightCognition, tools, soul)
           : s.lightPersona;
         // A call has no user of its own, so no learner; with learning on its GMI sends the personality section.
         const learner = await learnerSessionFor(callId, persona.id, undefined);

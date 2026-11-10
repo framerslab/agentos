@@ -38,7 +38,7 @@ import { maskStreamMembers } from './runtime/pool/maskedOutput.js';
 import type { HostLLMPolicy } from './runtime/hostPolicy.js';
 import type { IModelRouter } from '../core/llm/routing/IModelRouter.js';
 import type { SkillEntry } from '../cognition/skills/types.js';
-import { loadSoulSync, parseSoul } from '../cognition/substrate/personas/SoulLoader.js';
+import { loadSoulSync, parseSoul, SoulLoadError, type LoadedSoul } from '../cognition/substrate/personas/SoulLoader.js';
 import { renderPersonalitySection } from '../cognition/substrate/personas/personalityPrompt.js';
 import type { ForgetReport, ImportReport, LearnedStateDocument, LearningConfig, LedgerEntry, LoopManifest } from '../cognition/learning/types.js';
 import type { HexacoTraitValues } from '../cognition/substrate/personas/hexaco.js';
@@ -342,14 +342,16 @@ export interface AgentOptions extends BaseAgentConfig {
    * `instructions`, `name`, `personality` and `skills`. The front matter's
    * structured fields (HEXACO traits, voice, mood, hard limits) are not applied
    * here: they live on the persona (`personaDefinition`) that `loadSoul()`
-   * returns, which the full runtime takes. A soul that fails to load logs a
-   * warning, and the agent is built without it.
+   * returns, which the full runtime takes. A soul that fails to load, or whose
+   * front matter has a field of the wrong type, throws `SoulLoadError` when the
+   * agent is built. `optional: true` on the object forms runs the agent without
+   * it and writes one `soul.load_failed` log line.
    *
    * @see `loadSoul` in `@framers/agentos/cognition/substrate/personas/SoulLoader`
    * for the loader implementation and full SOUL.md format spec.
    * @see https://github.com/aaronjmars/soul.md for the cross-framework convention.
    */
-  soul?: string | { content: string } | { path: string };
+  soul?: string | { content: string; optional?: boolean } | { path: string; optional?: boolean };
   /**
    * Which engine serves this agent. `'legacy'` (the default) calls the model through
    * generateText and streamText; `'gmi'` serves every session with a Generalized Mind
@@ -679,17 +681,26 @@ async function loadRecordedAgentOSUsage(
   return getRecordedAgentOSUsage(options);
 }
 
-export function buildSystemPrompt(opts: AgentOptions): string | undefined {
+/**
+ * The system prompt `agent()` assembles from its options: the soul's prose, `instructions`, the name line, the
+ * personality text and skills.
+ *
+ * @param opts - The agent's options.
+ * @param soul - The soul the caller loaded from `opts.soul`; `null` for none. Not passed, `opts.soul` is loaded here.
+ * @throws {SoulLoadError} When the soul is loaded here, fails to load and is not optional.
+ */
+export function buildSystemPrompt(opts: AgentOptions, soul?: LoadedSoul | null): string | undefined {
   const sections: string[] = [];
 
   // SOUL.md content first — the agent's identity comes before everything else.
   // See `loadSoul` in cognition/substrate/personas/SoulLoader.
-  if (opts.soul) {
-    const loaded = loadSoulFromOption(opts.soul);
-    if (loaded?.soulContent) {
+  // The soul the caller loaded; a caller that passes none has it loaded here.
+  const loaded = soul === undefined ? (opts.soul ? loadSoulFromOption(opts.soul) : null) : soul;
+  if (loaded) {
+    if (loaded.soulContent) {
       sections.push(loaded.soulContent);
     }
-    if (loaded?.styleContent) {
+    if (loaded.styleContent) {
       sections.push(`## Style\n\n${loaded.styleContent}`);
     }
     // The memory wiki's index.md catalog. The agent reads it to know what it
@@ -697,7 +708,7 @@ export function buildSystemPrompt(opts: AgentOptions): string | undefined {
     // empty catalog (a bare "# Memory Index") so agents with no memory yet keep
     // a clean prompt.
     // The loader leaves out the end marker of text migrated from a legacy MEMORY.md, the wiki's own bookkeeping.
-    const wikiIndex = loaded?.wikiIndex ?? '';
+    const wikiIndex = loaded.wikiIndex ?? '';
     if (wikiIndex && wikiIndex !== '# Memory Index') {
       sections.push(
         '## Long-Term Memory (index)\n\n' +
@@ -778,30 +789,31 @@ function maskStreamResult(result: StreamTextResult, mask: (error: unknown) => un
 }
 
 /**
- * Resolve an `AgentOptions.soul` value (string path | { content } | { path })
- * into a `LoadedSoul`. Returns null on failure so the agent can still boot
- * (the soul is additive, not load-blocking), and warns with `console.warn` in
- * every environment that the agent boots without it; the loads of one agent
- * build warn once (`withOneSoulWarning`).
+ * Loads an `AgentOptions.soul` value (a path, `{ content }` or `{ path }`).
+ *
+ * @returns The loaded soul; `null` only for a soul given `optional: true` that failed to load, after one
+ *   `soul.load_failed` line (once per `withOneSoulWarning` scope).
+ * @throws {SoulLoadError} When the soul fails to load and is not optional: a missing or unread SOUL.md, a front matter
+ *   field of the wrong type, or a value that is none of the three forms.
  */
 export function loadSoulFromOption(
   soul: NonNullable<AgentOptions['soul']>,
-): import('../cognition/substrate/personas/SoulLoader.js').LoadedSoul | null {
+): LoadedSoul | null {
+  const given = soul as unknown;
+  const asObject = typeof given === 'object' && given !== null ? (given as { content?: unknown; path?: unknown; optional?: unknown }) : undefined;
+  const source = typeof given === 'string' ? given : typeof asObject?.path === 'string' ? asObject.path : 'inline soul';
   try {
-    if (typeof soul === 'string') {
-      return loadSoulSync({ source: soul });
-    }
-    if ('content' in soul) {
-      return parseSoul(soul.content);
-    }
-    if ('path' in soul) {
-      return loadSoulSync({ source: soul.path });
-    }
-    return null;
+    if (typeof given === 'string') return loadSoulSync({ source: given });
+    if (typeof asObject?.content === 'string') return parseSoul(asObject.content);
+    if (typeof asObject?.path === 'string') return loadSoulSync({ source: asObject.path });
+    throw new SoulLoadError(source, 'the soul option must be a path, { content } or { path }');
   } catch (err) {
-    // Non-fatal: the agent boots without the soul, and says so in every environment.
-    warnSoulLoadFailed(typeof soul === 'string' ? soul : 'path' in soul ? String(soul.path) : 'inline soul', err);
-    return null;
+    if (asObject?.optional === true) {
+      warnSoulLoadFailed(source, err);
+      return null;
+    }
+    if (err instanceof SoulLoadError) throw err;
+    throw new SoulLoadError(source, err instanceof Error ? err.message : String(err), { cause: err });
   }
 }
 
@@ -952,6 +964,8 @@ export function agent(opts: AgentOptions): Agent {
   }
   // The GMI path warns in gmi(), so an agent on it warns once.
   warnSoulBesideSystemBlocks(opts);
+  // Loaded once, at build: a soul that fails to load throws here unless it is optional.
+  const loadedSoul = opts.soul ? loadSoulFromOption(opts.soul) : null;
   const sessionBuffers = new Map<string, SessionHistoryBuffer | null>();
   // In-memory usage tally per session and per agent. Populated synchronously
   // after every generate/send/stream call so `agent.usage()` and
@@ -997,7 +1011,7 @@ export function agent(opts: AgentOptions): Agent {
   const baseOpts: Partial<GenerateTextOptions> = {
     provider: opts.provider,
     model: opts.model,
-    system: opts.systemBlocks ?? buildSystemPrompt(opts),
+    system: opts.systemBlocks ?? buildSystemPrompt(opts, loadedSoul),
     tools: opts.tools,
     maxSteps: opts.maxSteps ?? 5,
     // Per-call completion-token cap applied to every generate /

@@ -876,7 +876,7 @@ With `runtime: 'gmi'` (or [`gmi()`](https://github.com/framerslab/agentos/blob/m
 
 ### Per-agent identity via SOUL.md
 
-Pass a `soul:` option to give an agent its identity from a SOUL.md workspace. `agent()` builds its system prompt from the SOUL.md body first, then a `## Style` section from STYLE.md, then the `memory/index.md` catalog, then `instructions`, `name`, `personality` and skills. A soul that fails to load logs a warning, and the agent starts without it.
+Pass a `soul:` option to give an agent its identity from a SOUL.md workspace. `agent()` builds its system prompt from the SOUL.md body first, then a `## Style` section from STYLE.md, then the `memory/index.md` catalog, then `instructions`, `name`, `personality` and skills. A soul that fails to load throws `SoulLoadError` when the agent is built; pass `soul: { path, optional: true }` to run without it.
 
 ```ts
 // Workspace path: SOUL.md, STYLE.md and memory/index.md shape the prompt

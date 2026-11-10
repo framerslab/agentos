@@ -15,12 +15,13 @@
  * persona's `metaPrompts`.
  */
 import { randomUUID } from 'node:crypto';
-import { buildSystemPrompt, type AgentOptions } from '../agent.js';
+import { buildSystemPrompt, loadSoulFromOption, type AgentOptions } from '../agent.js';
 import { resolveModelOption } from '../model.js';
 import { normalizeHexacoTraits } from '../../cognition/substrate/personas/hexaco.js';
 import { stableIdOfName } from '../../cognition/substrate/personas/stableId.js';
 import { normalizePersonaDefinition } from '../../cognition/substrate/personas/personaNormalization.js';
 import type { IPersonaDefinition, SentimentTrackingConfig } from '../../cognition/substrate/personas/IPersonaDefinition.js';
+import type { LoadedSoul } from '../../cognition/substrate/personas/SoulLoader.js';
 import type { ITool } from '../../core/tools/ITool.js';
 import type { ModelCompletionOptions } from '../../core/llm/providers/IProvider.js';
 import type { ResolvedCognition } from './gmiCognition.js';
@@ -63,10 +64,12 @@ function completionOptionsOf(opts: AgentOptions): Partial<ModelCompletionOptions
 /**
  * The persona's base prompt. With learning on, the personality section stays out of it, so the section the GMI
  * sends each turn appears once; `systemBlocks` never carry one.
+ *
+ * @param soul - The soul loaded from `opts.soul`, or `null` for none.
  */
-function basePrompt(opts: AgentOptions, learningOn: boolean): string {
+function basePrompt(opts: AgentOptions, learningOn: boolean, soul: LoadedSoul | null): string {
   if (opts.systemBlocks) return opts.systemBlocks.map((block) => block.text).filter(Boolean).join('\n\n');
-  return buildSystemPrompt(learningOn ? { ...opts, personality: undefined } : opts) ?? '';
+  return buildSystemPrompt(learningOn ? { ...opts, personality: undefined } : opts, soul) ?? '';
 }
 
 /**
@@ -75,12 +78,20 @@ function basePrompt(opts: AgentOptions, learningOn: boolean): string {
  * @param opts - The agent's options.
  * @param cognition - The resolved profile ({@link resolveCognition}): sentiment tracking, metaprompts, and whether learning is on.
  * @param tools - The agent's tools, adapted: they decide the persona's capabilities.
+ * @param soul - The soul the caller loaded from `opts.soul`, `null` for none; not passed, `opts.soul` is loaded here.
  * @returns The persona. With `cognition.learning` set its base prompt has no personality section: a GMI built from it
  *   sends the section only when it is given a learner session (`GMIBaseConfig.learning`) or the persona's traits
  *   (`GMIBaseConfig.personaTraits`), as `gmi()` gives it.
  * @throws {Error} When no provider or model can be resolved, as `generateText` throws.
+ * @throws {SoulLoadError} When the soul is loaded here, fails to load and is not optional.
  */
-export function personaFromAgentOptions(opts: AgentOptions, cognition: ResolvedCognition, tools: ITool[]): IPersonaDefinition {
+export function personaFromAgentOptions(
+  opts: AgentOptions,
+  cognition: ResolvedCognition,
+  tools: ITool[],
+  soul?: LoadedSoul | null,
+): IPersonaDefinition {
+  const loaded = soul === undefined ? (opts.soul ? loadSoulFromOption(opts.soul) : null) : soul;
   const { providerId, modelId } = resolveModelOption({ provider: opts.provider, model: opts.model, baseUrl: opts.baseUrl }, 'text');
   const name = opts.name?.trim() || 'Agent';
   const firstLine = opts.instructions?.split('\n').map((line) => line.trim()).find(Boolean);
@@ -91,7 +102,7 @@ export function personaFromAgentOptions(opts: AgentOptions, cognition: ResolvedC
     name,
     description: firstLine ?? name,
     version: '1.0.0',
-    baseSystemPrompt: basePrompt(opts, cognition.learning !== undefined),
+    baseSystemPrompt: basePrompt(opts, cognition.learning !== undefined, loaded),
     ...(opts.personality ? { personalityTraits: normalizeHexacoTraits(opts.personality) } : {}),
     defaultProviderId: providerId,
     defaultModelId: modelId,

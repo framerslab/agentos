@@ -35,7 +35,7 @@ The cognitive-memory mechanisms layered on top (decay, retrieval-induced forgett
 
 | File | What it holds | What AgentOS does with it |
 |---|---|---|
-| **SOUL.md** | Personality, values, tone, behavioral boundaries | The body opens the system prompt; the frontmatter becomes `personaDefinition`. Without it, `loadSoul()` throws and `agent({ soul })` boots without a soul. |
+| **SOUL.md** | Personality, values, tone, behavioral boundaries | The body opens the system prompt; the frontmatter becomes `personaDefinition`. Without it, `loadSoul()` throws, and so does building an agent on it: `agent()` and `gmi()` throw `SoulLoadError`, and `souledAgent()` rejects with it. A front matter field of the wrong type throws the same error, naming the field. `soul: { path, optional: true }` runs the agent without the soul and writes one `soul.load_failed` log line. |
 | **STYLE.md** | Voice patterns, vocabulary, register | Appended to the system prompt as a `## Style` section. |
 | **IDENTITY.md** | Display card: name, role, agent-ID, avatar | Returned as `identityContent`; nothing in the runtime reads it. |
 | **AGENTS.md** | Procedural rules, session-start checks, workflow steps | Returned as `agentsContent`; nothing in the runtime reads or runs it. |
