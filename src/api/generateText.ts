@@ -46,6 +46,7 @@ import {
 } from '../core/llm/routing/UncensoredModelCatalog.js';
 import { checkContextFit } from './runtime/contextWindowFit.js';
 import { responseFormatCarriesSchema } from './runtime/responseFormatForProvider.js';
+import { splitHardLimits } from './runtime/hardLimitsSystem.js';
 import {
   asSpendBudget,
   costOfUsageUSD,
@@ -440,6 +441,8 @@ export interface SystemContentBlock {
    * `cacheBreakpoint: true`.
    */
   cacheTtl?: '5m' | '1h';
+  /** @internal Set by agent() on the hard-limits block it appends, so a schema instruction is sent before it. */
+  _hardLimits?: boolean;
 }
 
 export interface GenerateTextOptions {
@@ -987,6 +990,11 @@ export interface GenerateTextOptions {
    * own system prompt and leaves it unset.
    */
   _schemaInstruction?: string;
+  /**
+   * @internal The exact text of the hard-limits block a string `system` ends with, set by agent() beside it: a call
+   * that sends schema instructions sends them before that block, which stays the last system text.
+   */
+  _hardLimitsText?: string;
   /**
    * INTERNAL (sessions): how many TRAILING entries of `messages` belong to
    * THIS call's transcript delta rather than prior history. Sessions that
@@ -2639,19 +2647,30 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       const cotInstruction = resolveChainOfThought(opts.chainOfThought);
       const hasTools = tools.length > 0;
 
-      if (typeof opts.system === 'string' || !opts.system) {
+      // A structured call whose payload carries no schema sends the schema instructions as a system message. When the
+      // system prompt closes with a hard-limits block, the instructions go before that block, which is sent as the
+      // last system message, so the limits stay the last system text of the call.
+      const schemaInstruction =
+        opts._schemaInstruction && !responseFormatCarriesSchema(responseFormat as Record<string, unknown> | undefined)
+          ? opts._schemaInstruction
+          : undefined;
+      const { head: systemHead, limits: closingLimits } = schemaInstruction
+        ? splitHardLimits(opts.system, opts._hardLimitsText)
+        : { head: opts.system, limits: undefined };
+
+      if (typeof systemHead === 'string' || !systemHead) {
         // Plain string system prompt (existing behavior)
         if (cotInstruction && hasTools) {
-          const systemContent = opts.system
-            ? `${cotInstruction}\n\n${opts.system}`
+          const systemContent = systemHead
+            ? `${cotInstruction}\n\n${systemHead}`
            : cotInstruction;
           messages.push({ role: 'system', content: systemContent });
-        } else if (opts.system) {
-          messages.push({ role: 'system', content: opts.system });
+        } else if (systemHead) {
+          messages.push({ role: 'system', content: systemHead });
         }
       } else {
         // Structured SystemContentBlock[]: convert to content parts with cache_control
-        const blocks = opts.system as SystemContentBlock[];
+        const blocks = systemHead;
         const parts = blocks.map(block => ({
           type: 'text' as const,
           text: block.text,
@@ -2668,11 +2687,10 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         messages.push({ role: 'system', content: parts });
       }
 
-      // A structured call whose payload carries no schema sends it after the
-      // system prompt, so the model sees what it has to answer in.
-      if (opts._schemaInstruction && !responseFormatCarriesSchema(responseFormat as Record<string, unknown> | undefined)) {
-        messages.push({ role: 'system', content: opts._schemaInstruction });
-      }
+      // The schema instructions follow the system prompt, so the model sees what it has to answer in; a closing
+      // hard-limits block split off above follows them.
+      if (schemaInstruction) messages.push({ role: 'system', content: schemaInstruction });
+      if (closingLimits !== undefined) messages.push({ role: 'system', content: closingLimits });
 
       // Everything above is built from opts (system prompt, chain-of-thought
       // instruction, schema instructions); a failover continuation rebuilds

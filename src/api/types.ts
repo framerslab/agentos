@@ -114,13 +114,15 @@ export interface MemoryConfig {
   /**
    * Durable memory on the GMI path (`gmi()`, `agent({ runtime: 'gmi' })`): a SQLite file agentos opens, or a host's
    * storage adapter, which agentos never closes. The agent's memory files into a Brain there, under the brain id
-   * `brainId` or `learning.agentKey`, an archive over the same adapter keeps a gist's original, and the agent's
+   * `brainId`, else `learning.agentKey`, else the soul's id, an archive over the same adapter keeps a gist's original, and the agent's
    * learning store runs on the same adapter. A file is closed by `agent.close()` and opened again by the next session
    * or host call that needs it. One process serves a SQLite file; several processes share a Postgres database, each
    * through an adapter of its own, opened with `typeParsers: { int8: 'number' }`: the store refuses a PostgreSQL adapter
    * that reads BIGINT as text, since a trace's counts and times would load as strings.
-   * Needs the learning option on and `learning.agentKey`, which names the agent's brain and its learners; for durable
-   * memory without learning, set `learning: { agentKey, mode: 'off' }`. Without it, memory lives in the process.
+   * Needs the learning option on and a key that names the agent's brain: `learning.agentKey`, or, with a soul, the
+   * soul's id (its `agentId`, else the slug of its `name`). A `learning.agentKey` you set wins. For durable memory
+   * without learning, set `learning: { mode: 'off' }` with a soul that has an id, or `learning: { agentKey, mode: 'off' }`.
+   * Without it, memory lives in the process.
    */
   store?: { path: string } | { adapter: StorageAdapter; brainId?: string };
   /**

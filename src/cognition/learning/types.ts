@@ -126,6 +126,12 @@ export interface LearningConfig {
   /** Names the agent its learners belong to. Unset: the id of the registered persona, or of a named `gmi()` agent. */
   agentKey?: string;
   /**
+   * `gmi()` only: the key the agent's learners are filed under when `agentKey` is unset. Unset: the soul's id when the
+   * agent has one (learners already filed under the slug of the agent's `name` stay there, with one log line), else
+   * the slug of the agent's `name`. It never names the brain of `memory.store`.
+   */
+  learnerKey?: string;
+  /**
    * The organization of a `gmi()` agent's learners, fixed for the agent. The full runtime takes each turn's resolved
    * organization and refuses this field.
    */
