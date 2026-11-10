@@ -6,3 +6,5 @@
 export { ForgottenLedger, ForgottenLedgerError, FORGOTTEN_DDL, COPY_MARKER, KEY_MARKER_PREFIX } from './ForgottenLedger.js';
 export type { ForgottenLedgerOptions, SuppressionSubject, TombstoneKey } from './ForgottenLedger.js';
 export { openForgottenCopy } from './forgottenCopy.js';
+export { learnerTombstones, shareForgottenLedger, sharedForgottenLedgerOf } from './learnerTombstones.js';
+export type { LearnerTombstones, NamespacedUser } from './learnerTombstones.js';

@@ -34,6 +34,7 @@ import type { FreezeTarget } from './hostCalls.js';
 import { tombstoneHash, type DecideResult, type Ledger, type ProposeResult } from './ledger/Ledger.js';
 import { learnerScopeIds, sessionScopeIds } from './scopes.js';
 import type { LearningStore } from './store/LearningStore.js';
+import type { LearnerTombstones } from '../memory/suppression/learnerTombstones.js';
 import { loadLearnerTraits, type TraitLoad } from './traitLoad.js';
 import { renderedTraits } from './traitState.js';
 import type {
@@ -69,6 +70,8 @@ export interface LearnerSessionHost {
   readonly chains: WriteChains;
   /** The candidates whose write this process is making now; a crash's recovery leaves them to their writer. */
   readonly inFlight: Set<string>;
+  /** The layer's route to the forgotten-user ledger: its own tombstone row, and the agent's shared ledger where it has one. */
+  readonly tombstones: LearnerTombstones;
   /** Whether a user id names no user: blank, or one of the anonymous ids. */
   isAnonymous(userId: string): boolean;
   /** The namespace of a turn whose own is `''`: `learning.namespace` on `gmi()`, else `''`. */
@@ -422,7 +425,7 @@ export class LearnerSession implements ILearnerSession {
     const storage = await this.host.storage();
     if (!storage) return false;
     try {
-      return await storage.store.isForgotten(await tombstoneHash(key.namespace, key.userId));
+      return await this.host.tombstones.has(storage.store, { namespace: key.namespace, userId: key.userId });
     } catch {
       return false;
     }
@@ -526,6 +529,8 @@ export class LearnerSession implements ILearnerSession {
   private async noteSession(store: LearningStore, write: WriteTarget, brainId: string | undefined): Promise<'noted' | 'forgotten'> {
     const user = write.user;
     if (!user) return 'noted';
+    // The agent's shared ledger is read here, outside the transaction, which reads the layer's own row itself.
+    if (await this.host.tombstones.sharedHas(user)) return 'forgotten';
     const tomb = await tombstoneHash(user.namespace, user.userId);
     const agentKey = user.kind === 'learner' ? this.key!.agentKey : this.agentKey;
     const sessionId = this.context.sessionId;
@@ -554,7 +559,7 @@ export class LearnerSession implements ILearnerSession {
       });
       if (outcome === 'forgotten') return outcome;
       if (outcome === 'held') return 'noted';
-      if (await store.isForgotten(tomb)) {
+      if (await this.host.tombstones.has(store, user)) {
         await this.host.purgeUserRows(user.namespace, user.userId);
         return 'forgotten';
       }
@@ -588,7 +593,7 @@ export class LearnerSession implements ILearnerSession {
   private async tombstoneAfter(store: LearningStore, write: WriteTarget): Promise<'clear' | 'forgotten' | 'unreadable'> {
     if (!write.user) return 'clear';
     try {
-      return (await store.isForgotten(await tombstoneHash(write.user.namespace, write.user.userId))) ? 'forgotten' : 'clear';
+      return (await this.host.tombstones.has(store, write.user)) ? 'forgotten' : 'clear';
     } catch {
       return 'unreadable';
     }
