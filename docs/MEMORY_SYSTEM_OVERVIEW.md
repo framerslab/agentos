@@ -1,11 +1,11 @@
 ---
 title: 'Memory System Overview'
 sidebar_position: 1
-description: 'How AgentOS memory works end-to-end — classifier-driven dispatch, BM25 + dense + Cohere rerank, Ebbinghaus decay, consolidation — and how each piece earned its place on the 85.6% LongMemEval-S / 70.2% LongMemEval-M result.'
+description: 'How AgentOS memory works end-to-end — classifier-driven dispatch, BM25 + dense + an optional reranker (a local cross-encoder, Cohere or an LLM judge), Ebbinghaus decay, consolidation — and how each piece earned its place on the 85.6% LongMemEval-S / 70.2% LongMemEval-M result.'
 keywords: [agentos memory, llm memory architecture, longmemeval, cognitive memory, bm25 dense rerank, cohere rerank, ebbinghaus decay, sql storage adapter, agent memory benchmark, hybrid retrieval]
 ---
 
-> A study-grade walkthrough of the AgentOS memory stack: ingest, recall, read, decay, consolidation, multimodal, the classifier-driven dispatch pipeline, the Cohere neural rerank, the LLM-as-judge orchestration tiers, and the path from "embed everything" to **85.6% on LongMemEval-S at $0.0090 per correct** with full provenance.
+> A study-grade walkthrough of the AgentOS memory stack: ingest, recall, read, decay, consolidation, multimodal, the classifier-driven dispatch pipeline, the optional rerank pass (a local cross-encoder, Cohere or an LLM judge; Cohere rerank-v3.5 in the benchmark runs), the LLM-as-judge orchestration tiers, and the path from "embed everything" to **85.6% on LongMemEval-S at $0.0090 per correct** with full provenance.
 
 ## TL;DR
 
