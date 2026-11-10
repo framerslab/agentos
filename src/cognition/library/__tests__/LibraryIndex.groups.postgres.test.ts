@@ -428,6 +428,31 @@ describe.skipIf(!URL)('LibraryIndex.searchGroups over PostgresVectorStore on Pos
     await expect(run({ text: 'quartrely', typo: 'one-edit', groups: [documents], pageSize: 3, cursor: forged })).rejects.toMatchObject({ name: 'LibraryCursorError' });
   });
 
+  it('carries the stored words it handed a later page into the next cursor, whatever lists the store answers: a store answering empty lists on page 2 never drops an item held only by a word one edit away from page 3', async () => {
+    const documents = groupOf('documents', DOCUMENTS);
+    const every = DOCUMENTS.map((source) => source.sourceId);
+    // The real store, except that on a later page it answers an empty list for each word instead of the lists it was
+    // handed, as a store reading "empty without oneEdit" of a later page would.
+    const emptyOnLater = {
+      lexicalGroupSearch: async (...args: Parameters<NonNullable<IVectorStore['lexicalGroupSearch']>>): Promise<LexicalGroupSearchResult> => {
+        const answer = await store.lexicalGroupSearch('library', args[1]);
+        return args[1].expansion !== undefined ? { ...answer, expansion: answer.expansion.map(() => []) } : answer;
+      },
+    } as unknown as IVectorStore;
+    const echoless = new LibraryIndex({ store: emptyOnLater, collection: 'library', embed });
+    // Every document holds `quarterly` and none `quartrely`, so each item is held only by the word one edit away.
+    const query = { text: 'quartrely', typo: 'one-edit' as const, groups: [documents], pageSize: 3 };
+    const [first] = await run(query, echoless);
+    expect(ids(first)).toEqual(every.slice(0, 3));
+    const [second] = await run({ ...query, cursor: first.cursor as string }, echoless);
+    expect(ids(second)).toEqual(every.slice(3, 6));
+    expect(decode(second.cursor as string)).toMatchObject({ expansion: [['quarterly']], over: false });
+    const [third] = await run({ ...query, cursor: second.cursor as string }, echoless);
+    expect(third).toMatchObject({ total: 10, incomplete: false });
+    expect(ids(third)).toEqual(every.slice(6, 9));
+    expect(await allPages({ ...query, cursor: first.cursor as string })).toEqual([every.slice(3, 6), every.slice(6, 9), every.slice(9)]);
+  });
+
   it('answers restart when a later page carries another fingerprint than the one handed', async () => {
     const documents = groupOf('documents', DOCUMENTS);
     const [first] = await run({ text: 'quarterly', groups: [documents], pageSize: 3 });
