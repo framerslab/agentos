@@ -1,9 +1,10 @@
 /**
  * @file generateObject.store.http.test.ts
- * `store` on generateObject and generateText, through the public API, the real
- * provider manager and the real OpenAIProvider, against a local server that
- * answers as OpenAI's API does (`GET /v1/models`, `POST /v1/chat/completions`,
- * `POST /v1/responses`). Every request outside the server fails the case.
+ * `store` on generateObject, generateText and streamText, through the public
+ * API, the real provider manager and the real OpenAIProvider, against a local
+ * server that answers as OpenAI's API does (`GET /v1/models`,
+ * `POST /v1/chat/completions`, `POST /v1/responses`, streamed or not). Every
+ * request outside the server fails the case.
  *
  * OpenAI keeps a request's output unless the request says `store: false`:
  * "Responses are stored by default. Chat completions are stored by default for
@@ -21,6 +22,7 @@ import { z } from 'zod';
 
 import { generateObject } from '../generateObject.js';
 import { generateText } from '../generateText.js';
+import { streamText } from '../streamText.js';
 import { shutdownProviderManagers } from '../model.js';
 import { globalLLMProviderHealth } from '../../../core/safety/LLMProviderHealthRegistry.js';
 
@@ -47,6 +49,50 @@ function sendJson(res: http.ServerResponse, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
+function sendEvents(res: http.ServerResponse, text: string): void {
+  res.writeHead(200, { 'content-type': 'text/event-stream' });
+  res.end(text);
+}
+
+/** A streamed chat completion whose message text is `content`, in Chat Completions' SSE framing. */
+function chatStream(content: string): string {
+  const chunk = (choices: unknown[], extra: Record<string, unknown> = {}) =>
+    `data: ${JSON.stringify({ id: 'chatcmpl-store', object: 'chat.completion.chunk', created: 1700000000, model: MODEL, choices, ...extra })}\n\n`;
+  return (
+    chunk([{ index: 0, delta: { role: 'assistant', content }, finish_reason: null }]) +
+    chunk([{ index: 0, delta: {}, finish_reason: 'stop' }]) +
+    chunk([], { usage: { prompt_tokens: 20, completion_tokens: 8, total_tokens: 28 } }) +
+    'data: [DONE]\n\n'
+  );
+}
+
+/** The assistant message a Responses answer carries. */
+const RESPONSES_MESSAGE = {
+  type: 'message',
+  id: 'msg_1',
+  role: 'assistant',
+  status: 'completed',
+  content: [{ type: 'output_text', text: 'pong', annotations: [] }],
+};
+const RESPONSES_USAGE = {
+  input_tokens: 40,
+  input_tokens_details: { cached_tokens: 0 },
+  output_tokens: 2,
+  output_tokens_details: { reasoning_tokens: 0 },
+  total_tokens: 42,
+};
+const RESPONSES_META = { id: 'resp_store', object: 'response', created_at: 1700000000, model: MODEL };
+
+/** A streamed Responses answer, in the Responses SSE framing: an `event:` line and a `data:` line per event. */
+function responsesStream(): string {
+  const events = [
+    { type: 'response.created', response: { ...RESPONSES_META, status: 'in_progress', output: [], usage: null } },
+    { type: 'response.output_text.delta', output_index: 0, item_id: 'msg_1', content_index: 0, delta: 'pong' },
+    { type: 'response.completed', response: { ...RESPONSES_META, status: 'completed', output: [RESPONSES_MESSAGE], usage: RESPONSES_USAGE } },
+  ];
+  return events.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join('');
+}
+
 beforeAll(async () => {
   server = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
@@ -62,6 +108,10 @@ beforeAll(async () => {
       }
       if (req.method === 'POST' && url.pathname === '/v1/chat/completions') {
         const content = chatReplies.length > 1 ? chatReplies.shift()! : (chatReplies[0] ?? 'ok');
+        if (body.stream === true) {
+          sendEvents(res, chatStream(content));
+          return;
+        }
         sendJson(res, {
           id: 'chatcmpl-store',
           object: 'chat.completion',
@@ -73,29 +123,11 @@ beforeAll(async () => {
         return;
       }
       if (req.method === 'POST' && url.pathname === '/v1/responses') {
-        sendJson(res, {
-          id: 'resp_store',
-          object: 'response',
-          created_at: 1700000000,
-          model: MODEL,
-          status: 'completed',
-          output: [
-            {
-              type: 'message',
-              id: 'msg_1',
-              role: 'assistant',
-              status: 'completed',
-              content: [{ type: 'output_text', text: 'pong', annotations: [] }],
-            },
-          ],
-          usage: {
-            input_tokens: 40,
-            input_tokens_details: { cached_tokens: 0 },
-            output_tokens: 2,
-            output_tokens_details: { reasoning_tokens: 0 },
-            total_tokens: 42,
-          },
-        });
+        if (body.stream === true) {
+          sendEvents(res, responsesStream());
+          return;
+        }
+        sendJson(res, { ...RESPONSES_META, status: 'completed', output: [RESPONSES_MESSAGE], usage: RESPONSES_USAGE });
         return;
       }
       unexpected.push(`${req.method} ${url.pathname}`);
@@ -155,6 +187,13 @@ const posts = (): Received[] => received.filter((r) => r.method === 'POST');
 const baseUrl = (): string => `${origin}/v1`;
 
 const Planet = z.object({ planet: z.string() });
+
+/** Reads a text stream to its end and returns what it carried. */
+async function drain(stream: AsyncIterable<string>): Promise<string> {
+  let text = '';
+  for await (const delta of stream) text += delta;
+  return text;
+}
 
 const pingTool = {
   ping: {
@@ -287,6 +326,68 @@ describe('generateText sends store to OpenAI', () => {
     });
 
     expect(result.text).toBe('Jupiter');
+    expect(posts()).toHaveLength(2);
+    for (const request of posts()) {
+      expect(request.path.endsWith('/chat/completions')).toBe(true);
+      expect(request.body.store).toBe(false);
+    }
+  });
+});
+
+describe('streamText sends store to OpenAI', () => {
+  it('store: false reaches the streamed chat completion as store: false', async () => {
+    chatReplies = ['Jupiter'];
+
+    const result = streamText({
+      provider: 'openai',
+      model: MODEL,
+      apiKey: 'test',
+      baseUrl: baseUrl(),
+      prompt: 'x',
+      store: false,
+      fallbackProviders: [],
+    });
+
+    expect(await drain(result.textStream)).toBe('Jupiter');
+    expect(posts()).toHaveLength(1);
+    expect(posts()[0].path.endsWith('/chat/completions')).toBe(true);
+    expect(posts()[0].body.stream).toBe(true);
+    expect(posts()[0].body.store).toBe(false);
+  });
+
+  it('a streamed GPT-6 tool call goes to Responses with store: true when the call sets it', async () => {
+    const result = streamText({
+      provider: 'openai',
+      model: MODEL,
+      apiKey: 'test',
+      baseUrl: baseUrl(),
+      prompt: 'Ping with x="ok".',
+      tools: pingTool,
+      store: true,
+      fallbackProviders: [],
+    });
+
+    expect(await drain(result.textStream)).toBe('pong');
+    expect(posts().map((p) => p.path)).toEqual(['/v1/responses']);
+    expect(posts()[0].body.stream).toBe(true);
+    expect(posts()[0].body.store).toBe(true);
+  });
+
+  it("the planning request carries the call's store: false as the streamed turn's request does", async () => {
+    chatReplies = ['{"steps":[{"description":"Answer.","tool":null,"reasoning":"No tool is needed."}]}', 'Jupiter'];
+
+    const result = streamText({
+      provider: 'openai',
+      model: MODEL,
+      apiKey: 'test',
+      baseUrl: baseUrl(),
+      prompt: 'x',
+      planning: true,
+      store: false,
+      fallbackProviders: [],
+    });
+
+    expect(await drain(result.textStream)).toBe('Jupiter');
     expect(posts()).toHaveLength(2);
     for (const request of posts()) {
       expect(request.path.endsWith('/chat/completions')).toBe(true);
