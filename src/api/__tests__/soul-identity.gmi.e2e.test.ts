@@ -10,11 +10,14 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import pino from 'pino';
+import { z } from 'zod';
 import { agent, type Agent, type AgentOptions } from '../agent';
 import { gmi } from '../gmi';
 import { souledAgent } from '../souledAgent';
 import { SoulLoadError } from '../../cognition/substrate/personas/SoulLoader';
 import { hardLimitsBlock } from '../../cognition/substrate/personas/hardLimits';
+import { PERSONALITY_SECTION_HEADING, renderPersonalitySection } from '../../cognition/substrate/personas/personalityPrompt';
+import { SCHEMA_INSTRUCTION_LEAD } from '../runtime/structuredReply';
 import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory';
 import { reply, script, type ProviderScript } from './helpers/stubProviders';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
@@ -116,5 +119,105 @@ describe('a soul that fails to load', () => {
     // The line names no path and carries no message.
     expect(JSON.stringify(lines[0])).not.toContain('nowhere');
     expect(lines[0]).not.toHaveProperty('msg');
+  });
+});
+
+/** The agent built on the soul folder by each way that runs on the default runtime. */
+const plainPaths = [
+  ['agent({ soul })', async (k: string, extra: Record<string, unknown> = {}) => agent(stubbed(k, { soul: dir, ...extra }))],
+  ['souledAgent()', async (k: string, extra: Record<string, unknown> = {}) => souledAgent({ ...stubbed(k, extra), soul: dir } as never)],
+] as const;
+
+describe("a soul's hard limits, traits and name on the default runtime", () => {
+  // One turn on a new store: the wiki's recall block is still a system message, so a turn that recalled something
+  // would have that block after the limits until recalled text leaves the system role.
+  it.each(plainPaths)('%s: the last system text of the model call is the hard-limits block', async (_name, build) => {
+    writeSoul(FULL);
+    const k = key();
+    const s = script('openai', k, { whole: true, replies: [reply.text('Hello.'), reply.text('Notes.')] });
+    const a = await build(k);
+    try {
+      await a.session('s').send('Hi.');
+    } finally {
+      await a.close();
+    }
+    const [turn] = turnCalls(s);
+    expect(systemTexts(turn).join('\n\n').endsWith(BLOCK)).toBe(true);
+    expect(systemOf(turn).indexOf('You are Aria.')).toBeLessThan(systemOf(turn).indexOf(BLOCK));
+    expect(systemOf(turn).split(BLOCK)).toHaveLength(2);
+  });
+
+  it("with systemBlocks, the limits are one more block after the host's, and the cache breakpoint stays on the host's block", async () => {
+    writeSoul(FULL);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const k = key();
+    const s = script('openai', k, { whole: true, replies: [reply.text('Hello.')] });
+    await agent(stubbed(k, { soul: dir, systemBlocks: [{ text: 'Host block.', cacheBreakpoint: true }] })).generate('Hi.');
+    const system = s.seen[0].messages.filter((m) => m.role === 'system');
+    expect(system).toHaveLength(1);
+    const parts = system[0].content as unknown as Array<{ text: string; cache_control?: unknown }>;
+    expect(parts.map((part) => part.text)).toEqual(['Host block.', BLOCK]);
+    expect(parts[0].cache_control).toEqual({ type: 'ephemeral' });
+    expect(parts[1].cache_control).toBeUndefined();
+  });
+
+  it("renders the soul's hexaco paragraph when no personality is set, once, and the personality option wins over it", async () => {
+    writeSoul(FULL);
+    const k = key();
+    const s = script('openai', k, { whole: true, replies: [reply.text('A.'), reply.text('B.')] });
+    await agent(stubbed(k, { soul: dir })).generate('Hi.');
+    await agent(stubbed(k, { soul: dir, personality: { openness: 0.9 } })).generate('Hi.');
+    expect(systemOf(s.seen[0])).toContain(renderPersonalitySection({ honestyHumility: 0.9, extraversion: 0.8 })!);
+    expect(systemOf(s.seen[0]).split(PERSONALITY_SECTION_HEADING)).toHaveLength(2);
+    expect(systemOf(s.seen[1])).toContain(renderPersonalitySection({ openness: 0.9 })!);
+    expect(systemOf(s.seen[1])).not.toContain(renderPersonalitySection({ honestyHumility: 0.9, extraversion: 0.8 })!);
+    // The limits still close both prompts.
+    for (const call of s.seen) expect(systemOf(call).endsWith(BLOCK)).toBe(true);
+  });
+
+  it("names the agent by the name option, else by the soul's name", async () => {
+    writeSoul(FULL);
+    const k = key();
+    const s = script('openai', k, { whole: true, replies: [reply.text('A.'), reply.text('B.')] });
+    await agent(stubbed(k, { soul: dir, name: 'Support' })).generate('Hi.');
+    await agent(stubbed(k, { soul: dir })).generate('Hi.');
+    expect(systemOf(s.seen[0])).toContain('Assistant name: Support.');
+    expect(systemOf(s.seen[0])).not.toContain('Assistant name: Aria.');
+    expect(systemOf(s.seen[1])).toContain('Assistant name: Aria.');
+  });
+
+  it('a structured send whose payload carries no schema has the schema instruction right before the limits, which stay last', async () => {
+    writeSoul(FULL);
+    const k = key();
+    const s = script('openai', k, { whole: true, replies: [reply.text('{"city":"Lyon","scores":{"a":1}}')] });
+    // A record schema is outside OpenAI's strict JSON schema, so the schema rides the prompt.
+    const schema = z.object({ city: z.string(), scores: z.record(z.string(), z.number()) });
+    const r = await agent(stubbed(k, { soul: dir })).session('s').send('Where?', { responseSchema: schema });
+    expect(r.object).toEqual({ city: 'Lyon', scores: { a: 1 } });
+    const texts = systemTexts(s.seen[0]);
+    expect(texts.at(-1)).toBe(BLOCK);
+    expect(texts.at(-2)).toContain(SCHEMA_INSTRUCTION_LEAD);
+    expect(texts.slice(0, -2).join('\n\n')).toContain('You are Aria.');
+    expect(texts.slice(0, -2).join('\n\n')).not.toContain(BLOCK);
+  });
+
+  it('keeps the limits last under a working-memory block and under a per-call system prompt', async () => {
+    writeSoul(FULL);
+    const k = key();
+    const s = script('openai', k, { whole: true, replies: [reply.text('A.'), reply.text('B.')] });
+    const a = agent(stubbed(k, { soul: dir, memory: { working: async () => 'WORKING NOTES' } }));
+    await a.session('s').send('Hi.');
+    await a.generate('Hi.', { system: 'Answer in one word.' } as never);
+    expect(systemOf(s.seen[0]).startsWith('WORKING NOTES')).toBe(true);
+    expect(systemOf(s.seen[0]).endsWith(BLOCK)).toBe(true);
+    expect(systemOf(s.seen[1])).toBe(`Answer in one word.\n\n${BLOCK}`);
+  });
+
+  it('adds no block for a soul with no hard limits', async () => {
+    writeSoul('name: Aria\nagentId: aria-1');
+    const k = key();
+    const s = script('openai', k, { whole: true, replies: [reply.text('A.')] });
+    await agent(stubbed(k, { soul: dir })).generate('Hi.');
+    expect(systemOf(s.seen[0])).not.toContain('## Hard limits');
   });
 });
