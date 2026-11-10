@@ -2,7 +2,8 @@
  * souledAgent() and agent({ soul }) end to end over the real agent, generateText, provider manager, Memory store and
  * wiki; only the OpenAI provider class is stubbed (helpers/stubProviders.ts), at its module boundary.
  *
- * - A soul that fails to load warns once per agent build, in production too.
+ * - A soul given `optional: true` that fails to load writes one `soul.load_failed` line per agent build, in production
+ *   too.
  * - The recall block a souled agent adds to a turn keeps to the turn's memory token budget.
  * - Text migrated from a legacy MEMORY.md stays in memory/index.md, and so in the system prompt, after the wiki
  *   writes its catalog, even when it holds the end marker itself.
@@ -12,11 +13,13 @@ vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => (
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import pino from 'pino';
 import { agent, buildSystemPrompt, type AgentOptions } from '../agent';
 import { souledAgent } from '../souledAgent';
 import { reply, script, type ProviderScript } from './helpers/stubProviders';
 import { loadSoulSync } from '../../cognition/substrate/personas/SoulLoader';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
+import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory';
 
 let n = 0;
 const key = () => `k-souled-${++n}`;
@@ -35,36 +38,38 @@ afterEach(() => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-/** Every console.warn line, its arguments joined. */
-const linesOf = (warn: { mock: { calls: unknown[][] } }) => warn.mock.calls.map((call) => call.map(String).join(' '));
-
 /** The text of every system message one model call was sent. */
 const systemTexts = (call: ProviderScript['seen'][number]) =>
   call.messages.filter((m) => m.role === 'system').map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content)));
 
-describe('a soul that fails to load', () => {
-  it('warns once for agent() and once for souledAgent(), with NODE_ENV=production', async () => {
+describe('a soul given optional: true that fails to load', () => {
+  const logged: Record<string, unknown>[] = [];
+  const loadFailures = () => logged.filter((line) => line.event === 'soul.load_failed');
+  beforeEach(() => {
+    logged.length = 0;
+    setLogger(pino({ level: 'debug', base: undefined }, { write(line: string) { logged.push(JSON.parse(line)); } }));
+  });
+  afterEach(() => resetLoggerFactory());
+
+  it('writes one line for agent() and one for souledAgent(), with NODE_ENV=production', async () => {
     vi.stubEnv('NODE_ENV', 'production');
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    const soulWarnings = () => linesOf(warn).filter((line) => line.includes('/no/such/soul'));
 
-    agent({ provider: 'openai', model: 'gpt-4o', soul: '/no/such/soul' });
-    expect(soulWarnings()).toHaveLength(1);
-    expect(soulWarnings()[0]).toMatch(/soul/i);
+    agent({ provider: 'openai', model: 'gpt-4o', soul: { path: '/no/such/soul', optional: true } });
+    expect(loadFailures()).toHaveLength(1);
+    expect(JSON.stringify(loadFailures()[0])).not.toContain('/no/such/soul');
 
-    warn.mockClear();
-    await souledAgent({ provider: 'openai', model: 'gpt-4o', soul: '/no/such/soul' });
-    expect(soulWarnings()).toHaveLength(1);
+    logged.length = 0;
+    await souledAgent({ provider: 'openai', model: 'gpt-4o', soul: { path: '/no/such/soul', optional: true } });
+    expect(loadFailures()).toHaveLength(1);
   });
 
-  it("warns once for an agent on runtime: 'gmi' that answers a turn", async () => {
+  it("writes one line for an agent on runtime: 'gmi' that answers a turn", async () => {
     vi.stubEnv('NODE_ENV', 'production');
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const k = key();
     script('openai', k, { replies: [reply.text('Hello.')] });
-    const session = agent(stubbed(k, { runtime: 'gmi', soul: '/no/such/soul-gmi' } as Partial<AgentOptions>)).session('s');
+    const session = agent(stubbed(k, { runtime: 'gmi', soul: { path: '/no/such/soul-gmi', optional: true } } as Partial<AgentOptions>)).session('s');
     expect((await session.send('hi')).text).toBe('Hello.');
-    expect(linesOf(warn).filter((line) => line.includes('/no/such/soul-gmi'))).toHaveLength(1);
+    expect(loadFailures()).toHaveLength(1);
   });
 });
 
