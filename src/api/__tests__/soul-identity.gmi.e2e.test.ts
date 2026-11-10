@@ -221,3 +221,68 @@ describe("a soul's hard limits, traits and name on the default runtime", () => {
     expect(systemOf(s.seen[0])).not.toContain('## Hard limits');
   });
 });
+
+describe("a soul's identity on the GMI path", () => {
+  it.each([
+    ["agent({ runtime: 'gmi', soul })", async (k: string) => agent(stubbed(k, { runtime: 'gmi', soul: dir }))],
+    ["souledAgent({ runtime: 'gmi' })", async (k: string) => souledAgent({ ...stubbed(k, { runtime: 'gmi' }), soul: dir } as never)],
+  ] as const)('%s: the system text of every model call ends with the hard-limits block, and holds the trait paragraph once', async (_name, build) => {
+    writeSoul(FULL);
+    const k = key();
+    // More replies than calls: the compile on close answers from them, and an unexpected call would throw.
+    const s = script('openai', k, { whole: true, replies: [reply.text('Hello.'), reply.text('Notes.'), reply.text('Notes.'), reply.text('Notes.')] });
+    const a = await build(k);
+    try {
+      await a.session('s').send('Hi.');
+    } finally {
+      await a.close();
+    }
+    const [turn] = turnCalls(s);
+    expect(systemOf(turn).trimEnd().endsWith(BLOCK)).toBe(true);
+    expect(systemOf(turn)).toContain('You are Aria.');
+    expect(systemOf(turn).split(PERSONALITY_SECTION_HEADING)).toHaveLength(2);
+    expect(systemOf(turn)).toContain(renderPersonalitySection({ honestyHumility: 0.9, extraversion: 0.8 })!);
+  });
+
+  it('closes the prompt with the limits after systemBlocks text too', async () => {
+    writeSoul(FULL);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const k = key();
+    const s = script('openai', k, { replies: [reply.text('Hello.')] });
+    await gmi(stubbed(k, { soul: dir, systemBlocks: [{ text: 'Host block.', cacheBreakpoint: true }] })).session('s').send('Hi.');
+    expect(systemOf(s.seen[0])).toContain('Host block.');
+    expect(systemOf(s.seen[0]).trimEnd().endsWith(BLOCK)).toBe(true);
+  });
+
+  it('lets the personality option win over hexaco, and names the agent by the name option', async () => {
+    writeSoul(FULL);
+    const k = key();
+    const s = script('openai', k, { replies: [reply.text('Hello.')] });
+    await gmi(stubbed(k, { soul: dir, name: 'Support', personality: { openness: 0.9 } })).session('s').send('Hi.');
+    expect(systemOf(s.seen[0])).toContain(renderPersonalitySection({ openness: 0.9 })!);
+    expect(systemOf(s.seen[0]).split(PERSONALITY_SECTION_HEADING)).toHaveLength(2);
+    expect(systemOf(s.seen[0])).toContain('Assistant name: Support.');
+    expect(systemOf(s.seen[0])).not.toContain('Assistant name: Aria.');
+  });
+
+  it('writes one soul.field_ignored line for a front matter voice, and the turn runs', async () => {
+    writeSoul(`${FULL}\nvoice:\n  provider: elevenlabs\n  voiceId: rachel`);
+    const k = key();
+    script('openai', k, { replies: [reply.text('Hello.')] });
+    const a = gmi(stubbed(k, { soul: dir }));
+    expect((await a.session('s').send('Hi.')).text).toBe('Hello.');
+    expect(events('soul.field_ignored')).toEqual([expect.objectContaining({ field: 'voice' })]);
+  });
+
+  it('runs a soul with no agentId and no name, on an agent with no name, with its limits last and its traits', async () => {
+    writeSoul(['hexaco:', '  honestyHumility: 0.9', 'hardLimits:', ...LIMITS.map((limit) => `  - ${limit}`)].join('\n'), 'You are terse.');
+    const k = key();
+    const s = script('openai', k, { whole: true, replies: [reply.text('A.'), reply.text('B.')] });
+    await gmi(stubbed(k, { soul: dir })).session('s').send('Hi.');
+    await agent(stubbed(k, { soul: dir })).generate('Hi.');
+    for (const call of s.seen) {
+      expect(systemOf(call).trimEnd().endsWith(BLOCK)).toBe(true);
+      expect(systemOf(call)).toContain(renderPersonalitySection({ honestyHumility: 0.9 })!);
+    }
+  });
+});
