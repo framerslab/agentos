@@ -646,6 +646,54 @@ describe.skipIf(!URL)('LibraryIndex.searchGroups over PostgresVectorStore on Pos
     ]);
   });
 
+  it("refuses, before any statement, a cursor's rank past what a Postgres numeric holds and a carried stored word past what a tsquery holds, and follows one at either limit", async () => {
+    const sessions = groupOf('sessions', SESSIONS, SESSION_DATES);
+    const cursorRefused = async (query: Parameters<typeof run>[0], what: string): Promise<void> => {
+      seen.length = 0;
+      await expect(run(query), what).rejects.toMatchObject({ name: 'LibraryCursorError' });
+      expect(seen, what).toEqual([]);
+    };
+    const firstOf = async (query: Parameters<typeof run>[0]): Promise<Record<string, unknown>> => {
+      const [page] = await run(query);
+      expect(page.cursor).not.toBeNull();
+      return decode(page.cursor as string);
+    };
+    // A numeric holds 131072 digits before the point, leading zeros aside, and 16383 after it
+    // (https://www.postgresql.org/docs/16/datatype-numeric.html); one more of either overflows it.
+    const tooBig = ['1' + '0'.repeat(131072), '1.' + '0'.repeat(16384)];
+    const atLimit = ['9'.repeat(131072), '0'.repeat(1000) + '1', '0.' + '0'.repeat(16382) + '1'];
+    for (const [order, query] of [
+      ['rank', { text: 'budget', groups: [sessions], pageSize: 1 }],
+      ['date', { text: 'budget', groups: [sessions], order: 'date' as const, pageSize: 1 }],
+    ] as const) {
+      const carried = await firstOf(query);
+      const key = carried.key as Array<string | null>;
+      const withRank = (rank: string): Array<string | null> => (key.length === 3 ? [key[0], rank, key[2]] : [rank, key[1]]);
+      for (const rank of tooBig) await cursorRefused({ ...query, cursor: encode({ ...carried, key: withRank(rank) }) }, `${order}: ${rank.length}`);
+      for (const rank of atLimit) {
+        const [page] = await run({ ...query, cursor: encode({ ...carried, key: withRank(rank) }) });
+        expect(page.state, `${order}: ${rank.length}`).toBe('ok');
+      }
+    }
+    // A tsquery's word holds 2047 bytes (MAXSTRLEN in src/include/tsearch/ts_type.h); a word begun by the query word
+    // reaches it, so the bound is held apart from the reach, in bytes of UTF-8 and not in letters.
+    const typo = { text: 'budget', typo: 'one-edit' as const, groups: [sessions], pageSize: 1 };
+    const carried = await firstOf(typo);
+    expect(carried.expansion).toHaveLength(1);
+    for (const word of ['budget' + 'a'.repeat(2042), 'budget' + 'é'.repeat(1021)]) {
+      await cursorRefused({ ...typo, cursor: encode({ ...carried, expansion: [[word]] }) }, `stored word of ${word.length} letters`);
+    }
+    const [atWordLimit] = await run({ ...typo, cursor: encode({ ...carried, expansion: [['budget' + 'a'.repeat(2041)]] }) });
+    expect(atWordLimit.state).toBe('ok');
+    // The carried words of every query word are one tsquery's, whose words together hold under a mebibyte
+    // (MAXSTRPOS, the same header): 520 words of 2047 bytes, each within the limit, are refused together.
+    const wide = { ...typo, expansionMax: 600 };
+    const wideCarried = await firstOf(wide);
+    const many = Array.from({ length: 520 }, (_, at) => `budget${String(at).padStart(3, '0')}${'a'.repeat(2038)}`);
+    expect(new Set(many.map((word) => word.length))).toEqual(new Set([2047]));
+    await cursorRefused({ ...wide, cursor: encode({ ...wideCarried, expansion: [many] }) }, '520 stored words');
+  });
+
   it("ranks an item's title read from its passages' metadata where the profile takes the title from there, the title above the text, and widens a word of the title too", async () => {
     const threads = groupOf('threads', THREADS);
     const shown = (result: LibraryGroupResult) => result.hits.map((hit) => [hit.sourceId, hit.passage.score, hit.field, hit.matchKind]);
