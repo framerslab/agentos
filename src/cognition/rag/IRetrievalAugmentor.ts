@@ -281,7 +281,7 @@ export interface RagRetrievalOptions {
     enabled?: boolean;
     /** Reranker model ID (e.g., 'rerank-v3.5', 'cross-encoder/ms-marco-MiniLM-L-6-v2') */
     modelId?: string;
-    /** Provider ID ('cohere', 'local') */
+    /** Provider ID: 'local', 'cohere', 'llm-judge' or the id of a provider the host registered */
     providerId?: string;
     /** Number of top results to return after reranking */
     topN?: number;
@@ -289,7 +289,7 @@ export interface RagRetrievalOptions {
     maxDocuments?: number;
     /**
      * Request timeout in ms. Unset, the reranker provider settings' `defaultTimeoutMs` applies, else the provider's
-     * own default: 30000 for Cohere.
+     * own default: 30000 for Cohere and the LLM judge; the local cross-encoder sets no timeout.
      */
     timeoutMs?: number;
     /** Provider-specific parameters */

@@ -404,7 +404,12 @@ export interface CognitiveMemoryConfig {
    * weighting to preserve cognitive signals while boosting semantically
    * relevant results.
    *
-   * Recommended: Cohere rerank-v3.5 primary, LLM-Judge fallback.
+   * The manager calls `rerankerService.rerank()` without a provider id, so
+   * the service's `defaultProviderId` picks the provider. Any registered
+   * provider works: `local` (a cross-encoder run in process through
+   * Transformers.js), `cohere` (Cohere's rerank API) or `llm-judge` (a
+   * model you call through `llmCallFn`). A remote provider receives the
+   * query and the candidate texts. See docs/text/RERANKING.md.
    *
    * @default undefined (no reranking)
    */

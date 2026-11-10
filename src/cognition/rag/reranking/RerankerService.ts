@@ -1,6 +1,6 @@
 /**
- * @fileoverview Provider-agnostic reranker service that orchestrates cross-encoder
- * reranking operations. Supports multiple backend providers (local models, cloud APIs).
+ * @fileoverview Provider-agnostic reranker service. It holds the registered providers (the
+ * local cross-encoder, Cohere's API, the LLM judge, or a host's own) and calls the one a request names.
  *
  * @module backend/agentos/rag/reranking/RerankerService
  */
@@ -30,9 +30,10 @@ export interface RerankerServiceOptions {
 /**
  * Provider-agnostic reranker service.
  *
- * Orchestrates cross-encoder reranking across multiple providers (local models,
- * cloud APIs) with a unified interface. Handles provider selection, request
- * routing, and result mapping back to RAG chunk format.
+ * Calls the provider a request names (`providerId`), else `defaultProviderId`, through
+ * one interface, whatever the provider runs: a local cross-encoder, a remote API or an
+ * LLM judge. Handles provider selection, request routing, and result mapping back to
+ * RAG chunk format.
  *
  * @example
  * ```typescript

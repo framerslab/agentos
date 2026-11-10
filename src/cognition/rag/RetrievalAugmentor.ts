@@ -197,26 +197,31 @@ export class RetrievalAugmentor implements IRetrievalAugmentor {
   /**
    * Register a reranker provider with the RerankerService.
    *
-   * Call this after initialization to add reranker providers (e.g., CohereReranker,
-   * LocalCrossEncoderReranker) that will be available for reranking operations.
+   * Call this after initialization to add reranker providers that will be available for
+   * reranking operations. `initialize()` registers `cohere` and `local` from the config on its
+   * own; `LlmJudgeReranker` takes an `llmCallFn`, so it is always registered here, as is any
+   * provider of your own.
    *
    * @param provider - A reranker provider instance implementing IRerankerProvider
    * @throws {GMIError} If RerankerService is not configured
    *
    * @example
    * ```typescript
-   * import { CohereReranker, LocalCrossEncoderReranker } from '@framers/agentos/cognition/rag/reranking';
+   * import { LlmJudgeReranker, LocalCrossEncoderReranker, CohereReranker } from '@framers/agentos/cognition/rag/reranking';
    *
    * // After initialization
+   * augmentor.registerRerankerProvider(new LocalCrossEncoderReranker({
+   *   providerId: 'local',
+   *   defaultModelId: 'cross-encoder/ms-marco-MiniLM-L-6-v2'
+   * }));
+   *
    * augmentor.registerRerankerProvider(new CohereReranker({
    *   providerId: 'cohere',
    *   apiKey: process.env.COHERE_API_KEY!
    * }));
    *
-   * augmentor.registerRerankerProvider(new LocalCrossEncoderReranker({
-   *   providerId: 'local',
-   *   defaultModelId: 'cross-encoder/ms-marco-MiniLM-L-6-v2'
-   * }));
+   * // myLlmCall: (system, user, model?) => Promise<string>
+   * augmentor.registerRerankerProvider(new LlmJudgeReranker({ llmCallFn: myLlmCall }));
    * ```
    */
   public registerRerankerProvider(provider: import('./reranking/IRerankerService').IRerankerProvider): void {

@@ -1,9 +1,11 @@
 /**
- * Cross-encoder reranking module for the AgentOS RAG pipeline.
+ * Reranking module for the AgentOS RAG pipeline.
  *
- * This module provides pluggable reranking capabilities using cross-encoder models
- * to improve retrieval relevance. Supports both local models (via transformers.js)
- * and cloud APIs (Cohere).
+ * `RerankerService` holds any number of providers and calls the one a request names. Three ship
+ * with the package: `local` (`LocalCrossEncoderReranker`, a cross-encoder run in process through
+ * Transformers.js), `cohere` (`CohereReranker`, Cohere's rerank API) and `llm-judge`
+ * (`LlmJudgeReranker`, a model you call through your own `llmCallFn`). A remote provider receives
+ * the query and the candidate texts. See docs/text/RERANKING.md.
  *
  * @module @framers/agentos/cognition/rag/reranking
  *
@@ -46,6 +48,25 @@
  *   modelId: 'rerank-v3.5',
  *   topN: 5
  * });
+ * ```
+ *
+ * @example Using an LLM as the judge
+ * ```typescript
+ * import { generateText } from '@framers/agentos';
+ * import { RerankerService, LlmJudgeReranker } from '@framers/agentos/cognition/rag/reranking';
+ *
+ * const service = new RerankerService({
+ *   config: { providers: [{ providerId: 'llm-judge' }], defaultProviderId: 'llm-judge' }
+ * });
+ *
+ * service.registerProvider(new LlmJudgeReranker({
+ *   // The judge passes scoringModel or rankingModel as `model`; it has no model of its own.
+ *   llmCallFn: async (system, prompt, model) => (await generateText({ provider: 'gemini', model, system, prompt })).text,
+ *   scoringModel: 'gemini-2.5-flash-lite',
+ *   rankingModel: 'gemini-2.5-flash-lite'
+ * }));
+ *
+ * const reranked = await service.rerankChunks(query, chunks, { topN: 5 });
  * ```
  */
 

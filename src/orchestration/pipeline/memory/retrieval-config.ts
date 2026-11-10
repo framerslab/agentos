@@ -48,9 +48,10 @@ import type { MemoryQueryCategory } from './routing-tables.js';
  * agentos-bench CLI; consumers building outside the bench wire each
  * variant to a different retrieval pipeline.
  *
- * - `canonical`: BM25 + dense + Cohere rerank-v3.5 + reader-top-k 20
- *   (baseline; matches the existing MemoryRouter `canonical-hybrid`
- *   backend's default config).
+ * - `canonical`: BM25 + dense + rerank + reader-top-k 20 (baseline;
+ *   matches the existing MemoryRouter `canonical-hybrid` backend's
+ *   default config; the shipped presets were calibrated with Cohere
+ *   rerank-v3.5, and the executor may use any reranker).
  * - `hyde`: canonical + HyDE hypothetical-document embedding.
  * - `topk50`: canonical + reader-top-k 50.
  * - `topk50-mult5`: canonical + reader-top-k 50 +
@@ -81,7 +82,7 @@ export interface RetrievalConfigSpec {
   id: RetrievalConfigId;
   /** Enable HyDE (hypothetical-document embedding). Default false. */
   hyde: boolean;
-  /** Cohere rerank candidate multiplier. Default 3 (matches `--rerank-candidate-multiplier 3`). */
+  /** Rerank candidate multiplier. Default 3 (matches `--rerank-candidate-multiplier 3`). */
   rerankCandidateMultiplier: number;
   /** Reader-side top-K cutoff after rerank. Default 20 (matches `--reader-top-k 20`). */
   readerTopK: number;

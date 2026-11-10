@@ -960,8 +960,9 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     }
 
     // --- Optional neural reranking ---
-    // Blends Cohere/LLM-Judge cross-encoder scores with the existing
-    // cognitive composite. Weight: 0.7 cognitive + 0.3 neural reranker.
+    // Blends the scores of the service's default provider (local
+    // cross-encoder, Cohere, LLM judge or one of the host's) with the
+    // existing cognitive composite. Weight: 0.7 cognitive + 0.3 neural reranker.
     // This preserves decay, mood congruence, and graph activation signals
     // while boosting semantically relevant results the bi-encoder missed.
     if (this.rerankerService && scored.length > 0) {
