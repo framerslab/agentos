@@ -304,9 +304,11 @@ export type {
   AgentSessionOptions,
   AgentOptions,
   AgentMemoryProvider,
+  MemoryHookContext,
   SessionSendOptions,
   SessionSendStructuredResult,
 } from './api/agent.js';
+export type { MemoryRecallItem } from './api/runtime/memoryDataBlock.js';
 export { gmi, createGmi } from './api/gmi.js';
 export type { GmiOptions, GmiHandle } from './api/gmi.js';
 export { resolveCognition } from './api/runtime/gmiCognition.js';

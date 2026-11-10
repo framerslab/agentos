@@ -63,6 +63,7 @@ import {
 } from './agentExportCore.js';
 import { applyMemoryProvider, type MemoryProviderHookOptions } from './runtime/memoryProviderHooks.js';
 import { observeWithoutWaiting } from './runtime/memoryObserveFailures.js';
+import type { MemoryRecallItem } from './runtime/memoryDataBlock.js';
 import { warnSoulBesideSystemBlocks, warnSoulLoadFailed } from './runtime/soulLoadWarning.js';
 import { asSpendBudget, type SpendBudget, type SpendBudgetOptions } from './runtime/spendBudget.js';
 import type { LlmUsageAccountResolver } from './observers.js';
@@ -79,11 +80,30 @@ import { gmi } from './gmi.js';
 import type { VoiceSessionFactory, StartVoiceSession, ManagedVoiceSession } from '../io/voice-platform/VoiceSessionFactory.js';
 import type { VoiceAgent } from '../io/voice-platform/contracts/index.js';
 
+/** Who a memory hook serves: filled by the runtime on every call of `getContext` and `observe`. */
+export interface MemoryHookContext {
+  /** The session the caller opened; for a one-shot `generate()` or `stream()`, the call's own id. */
+  readonly sessionId: string;
+  /** The session's user: `AgentSessionOptions.userId`, else `sessionId`. Never `'system'` or another anonymous id. */
+  readonly userId: string;
+  /**
+   * The subject memory is keyed by: `{ kind: 'user', id: userId }` when the session named a user, else
+   * `{ kind: 'session', id: sessionId }`. Two kinds, two keys: a user and a session of the same name never share memory.
+   */
+  readonly subject: { kind: 'user' | 'session'; id: string };
+  /** The user id the caller passed; undefined when none was passed. */
+  readonly providerUserId?: string;
+  /** The agent's stable id: its soul's id, else a named agent's id; undefined when the agent has none. */
+  readonly agentId?: string;
+  /** `'session'` for a session turn, `'one-shot'` for `generate()` and `stream()`. */
+  readonly call: 'session' | 'one-shot';
+}
+
 /**
  * Provider hook interface consumed by `agent()` for memory integration.
  *
  * When provided on the agent config, `getContext` is called before each
- * LLM generation to inject retrieved memory into the system prompt, and
+ * LLM generation to retrieve memory for the turn, and
  * `observe` is called after each turn to encode the exchange for future
  * recall. Both hooks are optional — implementations may choose to provide
  * read-only or write-only memory behavior.
@@ -94,34 +114,39 @@ import type { VoiceAgent } from '../io/voice-platform/contracts/index.js';
  */
 export interface AgentMemoryProvider {
   /**
-   * Retrieve a memory context block to prepend to the system prompt.
+   * Retrieve the memory recalled for a turn. It is called once per turn.
    *
    * @param text - The user input for the current turn.
-   * @param opts - Retrieval options. `tokenBudget` caps the memory block size.
-   * @returns An object whose `contextText` (when present) is injected as a
-   *   system message before the LLM call. Returning `null` or an object
-   *   without `contextText` skips injection.
+   * @param opts - Retrieval options. `tokenBudget` caps the memory block size;
+   *   `context` says which session, user and agent the turn serves.
+   * @returns The recall, which is sent to the model as a block of data in a
+   *   user-role message before the turn's message, not as instructions.
+   *   `items` is the recalled entries as records; a provider that returns
+   *   `contextText` alone has that text sent as one record. Returning `null`,
+   *   or neither, skips the block.
    */
   getContext?: (
     text: string,
-    opts?: { tokenBudget?: number },
-  ) => Promise<{ contextText?: string } | null>;
+    opts?: { tokenBudget?: number; context?: MemoryHookContext },
+  ) => Promise<{ contextText?: string; items?: MemoryRecallItem[] } | null>;
 
   /**
    * Record an observation of a turn exchange.
    *
-   * Invoked twice per turn (`role: 'user'` with the input, then
-   * `role: 'assistant'` with the reply) as fire-and-forget: the turn never
-   * waits for it, and a throw or a rejection never changes the turn's result.
-   * A failure is logged with `console.warn` on the provider's first failure
-   * and then at its 10th, 100th, 1000th and so on.
+   * Invoked once per side of a turn that was answered (`role: 'user'` with
+   * the input, then `role: 'assistant'` with the reply) as fire-and-forget:
+   * the turn never waits for it, and a throw or a rejection never changes the
+   * turn's result. A failure is logged with `console.warn` on the provider's
+   * first failure and then at its 10th, 100th, 1000th and so on.
    *
    * @param role - Whether the content came from the user or assistant.
    * @param text - Plain text content of the turn.
+   * @param context - Which session, user and agent the turn serves.
    */
   observe?: (
     role: 'user' | 'assistant',
     text: string,
+    context?: MemoryHookContext,
   ) => Promise<void>;
 }
 
