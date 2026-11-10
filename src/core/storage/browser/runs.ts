@@ -157,7 +157,8 @@ export interface RunOwner {
    * owner's starts in flight; the whole stop answers within ten seconds. Answers `{ complete: true }` once the store
    * listed the records and every record of the account was deleted or marked, and `{ complete: false }` when the store
    * refused a listing, a read, a deletion or a mark, or a listing had not answered by the ten seconds, or a write or a
-   * start was still in flight then (that record is deleted or marked once the write returns): call it again. The last
+   * start was still in flight then (that record is deleted or marked once the write returns), a write of a run kept in
+   * memory alone among them: call it again. The last
    * read of the rows after a sign-out or a session's end redraws them and leaves the answer as it is.
    */
   stopAccount(cut: 'removal' | 'signout' | 'session'): Promise<{ complete: boolean }>;
@@ -579,6 +580,8 @@ class BrowserRunOwner implements RunOwner {
   private readonly starting = new Set<Promise<boolean>>();
   /** How many of this owner's fences of a start's record, or of its own records on a heard stop, the store refused. */
   private fenceFailures = 0;
+  /** The writes in flight that hold no record lock (a run kept in memory alone, a record lock that failed). */
+  private readonly loneWrites = new Set<Promise<void>>();
   private readonly onPageHide = (): void => this.flush();
   private readonly onVisibility = (): void => {
     if (page().document?.visibilityState === 'hidden') this.flush();
@@ -762,11 +765,14 @@ class BrowserRunOwner implements RunOwner {
     // once it is written; the stop waits for it in what is left of the ten seconds.
     const starts = [...this.starting];
     const started = starts.length === 0 ? [] : await within(Promise.all(starts), deadline - Date.now());
+    // A write that holds no record lock is not held back by the fences above; the stop waits for those in flight.
+    const lone = [...this.loneWrites];
+    const loneReturned = lone.length === 0 ? [] : await within(Promise.all(lone), deadline - Date.now());
     // The rows are read again for the marks, inside the ten seconds as well; a read past them goes on alone. This read
     // redraws the rows and deletes or marks nothing, so it leaves the answer as it is.
     if (cut !== 'removal') await within(this.records(), deadline - Date.now());
     this.touch();
-    const settled = started !== null && !started.includes(false) && this.fenceFailures === failuresBefore;
+    const settled = started !== null && !started.includes(false) && this.fenceFailures === failuresBefore && loneReturned !== null;
     return { complete: first.complete && second.complete && settled };
   }
 
@@ -978,6 +984,8 @@ class BrowserRunOwner implements RunOwner {
     this.starting.add(settled);
     try {
       const stopsBefore = this.stopCuts.length;
+      // A stop running now fences this start even when it ends before the start's lock is granted.
+      const stopsRunning = [...this.runningStops];
       let release = from.lock;
       if (!release) {
         // A finish holds the cut run's own lock too, so one tab alone finishes it whatever key its new pick makes.
@@ -1006,7 +1014,7 @@ class BrowserRunOwner implements RunOwner {
       this.ends.delete(id);
       // The account stopped while this start waited for its lock (here or in another tab), or is stopping now: the run is
       // fenced from its start, a removal among those stops winning over a sign-out or a session's end.
-      const cuts = [...this.stopCuts.slice(stopsBefore), ...this.runningStops];
+      const cuts = [...stopsRunning, ...this.stopCuts.slice(stopsBefore), ...this.runningStops];
       if (cuts.length > 0) {
         held.stopCut = cuts.includes('removal') ? 'removal' : cuts[cuts.length - 1];
         held.controller.abort();
@@ -1204,7 +1212,7 @@ class BrowserRunOwner implements RunOwner {
    * memory (the account's stop, a dismissal, its own cut) and the next write reads the record again.
    */
   private async gate<T>(held: Held, work: () => Promise<T>): Promise<T | { fenced: true }> {
-    if (held.memoryOnly) return this.isFenced(held) ? { fenced: true as const } : work();
+    if (held.memoryOnly) return this.isFenced(held) ? { fenced: true as const } : this.lone(work);
     const key = this.keyPrefix + held.record.id;
     let outcome = 'refused' as 'refused' | 'ran' | 'threw' | 'lockless';
     let value: T | undefined;
@@ -1240,9 +1248,26 @@ class BrowserRunOwner implements RunOwner {
     if (outcome === 'ran') return value as T;
     if (outcome === 'lockless' && !this.isFenced(held)) {
       this.markUnavailable();
-      return work();
+      return this.lone(work);
     }
     return { fenced: true as const };
+  }
+
+  /** Runs a write that holds no record lock, kept in `loneWrites` until it returns, so the account's stop can wait for it. */
+  private lone<T>(work: () => Promise<T>): Promise<T> {
+    let running: Promise<T>;
+    try {
+      running = work();
+    } catch (error) {
+      running = Promise.reject(error);
+    }
+    const returned = running.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.loneWrites.add(returned);
+    void returned.then(() => this.loneWrites.delete(returned));
+    return running;
   }
 
   /** Pauses a run while the page is offline, written and told at once, until it is back online or the run is aborted. */
