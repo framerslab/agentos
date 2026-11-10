@@ -1900,6 +1900,10 @@ export class AgentOS implements IAgentOS {
     if (namespace !== undefined && namespace !== null) {
       refuse("learning.namespace is read by gmi() only; the runtime takes each turn's resolved organizationId.");
     }
+    const learnerKey = option === true ? undefined : (option as { learnerKey?: unknown }).learnerKey;
+    if (learnerKey !== undefined && learnerKey !== null) {
+      refuse("learning.learnerKey is read by gmi() only; the runtime keys learners by the registered persona's id.");
+    }
     try {
       resolveLearningConfig(option === true ? {} : option, 'custom');
     } catch (error) {

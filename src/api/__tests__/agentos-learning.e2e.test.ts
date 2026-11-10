@@ -1,7 +1,7 @@
 /**
  * @file agentos-learning.e2e.test.ts
- * The full runtime with the learning flag off and on. Off (unset or false): no layer, and the runtime's GMIs send
- * no personality section, as before. On: every GMI sends its persona's section after the base prompt, in the words
+ * The full runtime with the learning flag off and on. Off (unset or false): no layer, and each of the runtime's GMIs
+ * renders its persona's own personality section. On: every GMI sends its persona's section after the base prompt, in the words
  * agent() sends; each session is bound to the user and the resolved organization of its first turn; and
  * getLearningLayer() returns the layer, built from `learning` or passed in `gmiManagerConfig`. AgentOS.create() over
  * inline personas; only the OpenAI provider class is stubbed, at its module boundary.
@@ -79,11 +79,12 @@ afterEach(async () => {
 });
 
 describe('the full runtime with the learning flag off', () => {
-  it('sends no personality section with learning unset, the same system text with learning false, and has no learning layer', async () => {
+  it("sends the persona's own personality section with learning unset, the same system text with learning false, and has no learning layer", async () => {
     booted = await boot();
     const unset = await send(booted, { userId: 'u', sessionId: 's-1', selectedPersonaId: 'tutor' });
     expect(unset).toContain('You teach networking.');
-    expect(unset).not.toContain(HEADING);
+    expect(unset).toContain(renderPersonalitySection(TRAITS)!);
+    expect(unset.split(HEADING)).toHaveLength(2);
     expect(booted.getLearningLayer()).toBeUndefined();
     await booted.shutdown();
     booted = await boot({ learning: false });

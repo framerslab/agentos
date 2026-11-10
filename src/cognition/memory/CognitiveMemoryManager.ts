@@ -44,8 +44,10 @@ import {
   candidatesFrom,
   rerankerRecordOf,
   type MemoryRecallReranker,
+  type RecallCaptureMode,
   type RetrievalRecallReport,
 } from './retrieval/recall/capture.js';
+import { assertRecallConfig } from './retrieval/recall/budget.js';
 import { CognitiveWorkingMemory } from './core/working/CognitiveWorkingMemory.js';
 import {
   assembleMemoryContext,
@@ -379,6 +381,14 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
   private typedNetworkVariant: 'minimal' | 'full' | null = null;
   private typedNetworkExtractAtEncode = false;
 
+  /**
+   * Builds the manager's resources from `config`.
+   *
+   * @throws {RecallOptionError} When `config.recall` holds a value of the wrong kind (a `budget.totalTokens` that is
+   *   not an integer of at least 0, an unknown `capture`), naming the field, after one `memory.recall.option_rejected`
+   *   line; nothing is built.
+   * @throws {Error} When the manager is already initialized, or a resource fails to start.
+   */
   async initialize(config: CognitiveMemoryConfig): Promise<void> {
     const request = ++this.lifecycleRequest;
     this.lifecycleState = 'initializing';
@@ -388,6 +398,8 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
         if (this.initialized) {
           throw new Error('CognitiveMemoryManager is already initialized');
         }
+        // The recall settings are checked before anything is built, so a refused value leaves nothing to clean up.
+        assertRecallConfig(config.recall, 'CognitiveMemoryManager');
         initializationStarted = true;
         await this.initializeResources(config);
       } catch (error) {
@@ -863,8 +875,11 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     this.ensureInitialized();
 
     const startTime = Date.now();
+    // The recall capture's report (dense ranks, rerank scores and record, the dense leg's time) is built only when the
+    // manager records a capture; under `recall.capture: 'off'` none of it is computed.
+    const capturing = this.recallCaptureMode() !== 'off';
     // The dense leg's time for the recall capture: the query's embedding (and HyDE), the vector search and the scoring.
-    const denseStartedAt = performance.now();
+    const denseStartedAt = capturing ? performance.now() : 0;
     const resolvedPolicy = options.policy ? resolveMemoryRetrievalPolicy(options.policy) : null;
     const effectiveTopK = options.topK ?? resolvedPolicy?.topK;
     const effectiveHyde = options.hyde ?? (resolvedPolicy?.hyde === 'always');
@@ -915,13 +930,13 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
       scored.length = 0;
       scored.push(...allowed);
     }
-    let denseMs = performance.now() - denseStartedAt;
+    let denseMs = capturing ? performance.now() - denseStartedAt : 0;
 
     // --- Batch 2: Spreading activation ---
     if (this.graph && scored.length > 0) {
       const seedIds = scored.slice(0, 5).map((t) => t.id);
       // The activation orders the dense ranks, so its time is the dense leg's; the co-activation write after is not.
-      const graphStartedAt = performance.now();
+      const graphStartedAt = capturing ? performance.now() : 0;
       let graphRankedAt: number | undefined;
       try {
         const activated = await this.graph.spreadingActivation(seedIds, {
@@ -961,7 +976,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
 
         // Re-sort after graph activation adjustment
         scored.sort((a, b) => b.retrievalScore - a.retrievalScore);
-        graphRankedAt = performance.now();
+        if (capturing) graphRankedAt = performance.now();
 
         // Record co-activation for Hebbian learning
         const retrievedIds = scored.slice(0, 5).map((t) => t.id);
@@ -972,7 +987,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
       } catch {
         // Graph operations are non-critical
       }
-      denseMs += (graphRankedAt ?? performance.now()) - graphStartedAt;
+      if (capturing) denseMs += (graphRankedAt ?? performance.now()) - graphStartedAt;
     }
 
     // --- Optional neural reranking ---
@@ -985,12 +1000,14 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     let rerankerRecord: MemoryRecallReranker | undefined;
     let rerankScores: Record<string, number> | undefined;
     // Each trace's rank in the dense leg, before a rerank reorders them: the capture reports it beside the final order.
-    const denseRanks: Record<string, number> = Object.fromEntries(scored.map((trace, i) => [trace.id, i + 1]));
-    if (this.rerankerService && scored.length === 0) {
+    const denseRanks: Record<string, number> | undefined = capturing
+      ? Object.fromEntries(scored.map((trace, i) => [trace.id, i + 1]))
+      : undefined;
+    if (capturing && this.rerankerService && scored.length === 0) {
       rerankerRecord = { provider: 'none', candidates: 0, ms: 0 };
     }
     if (this.rerankerService && scored.length > 0) {
-      const rerankStartedAt = performance.now();
+      const rerankStartedAt = capturing ? performance.now() : 0;
       // The service sends at most this many, the dense leg's first; the capture counts what it sent.
       const sent = Math.min(scored.length, MEMORY_RERANK_MAX_DOCUMENTS);
       try {
@@ -1006,7 +1023,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
         const rerankedScores = new Map(
           rerankerOutput.results.map((r) => [r.id, r.relevanceScore])
         );
-        rerankScores = Object.fromEntries(rerankedScores);
+        if (capturing) rerankScores = Object.fromEntries(rerankedScores);
 
         for (const trace of scored) {
           const neuralScore = rerankedScores.get(trace.id);
@@ -1016,19 +1033,25 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
         }
 
         scored.sort((a, b) => b.retrievalScore - a.retrievalScore);
-        rerankerRecord = rerankerRecordOf(
-          rerankerOutput.diagnostics?.providerId,
-          rerankerOutput.diagnostics?.modelId,
-          rerankerOutput.diagnostics?.documentsProcessed ?? sent,
-          performance.now() - rerankStartedAt,
-        );
+        if (capturing) {
+          rerankerRecord = rerankerRecordOf(
+            rerankerOutput.diagnostics?.providerId,
+            rerankerOutput.diagnostics?.modelId,
+            rerankerOutput.diagnostics?.documentsProcessed ?? sent,
+            performance.now() - rerankStartedAt,
+          );
+        }
       } catch {
         // Reranking is non-critical — use cognitive scores as-is
         rerankScores = undefined;
-        rerankerRecord = { provider: 'none', reason: 'error', candidates: sent, ms: Math.round(performance.now() - rerankStartedAt) };
+        if (capturing) {
+          rerankerRecord = { provider: 'none', reason: 'error', candidates: sent, ms: Math.round(performance.now() - rerankStartedAt) };
+        }
       }
     }
-    const recallReport: RetrievalRecallReport = { denseRanks, denseMs, ...(rerankScores ? { rerankScores } : {}) };
+    const recallReport: RetrievalRecallReport | undefined = denseRanks
+      ? { denseRanks, denseMs, ...(rerankScores ? { rerankScores } : {}) }
+      : undefined;
 
     const confidence = evaluateRetrievalConfidence(scored, {
       adaptive: resolvedPolicy?.adaptive ?? false,
@@ -1051,7 +1074,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
           confidence,
           escalations: [],
           ...(rerankerRecord ? { reranker: rerankerRecord } : {}),
-          recall: recallReport,
+          ...(recallReport ? { recall: recallReport } : {}),
         },
       };
     }
@@ -1117,7 +1140,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
         escalations: resolvedPolicy ? [] : undefined,
         retrievedTypedTraces,
         ...(rerankerRecord ? { reranker: rerankerRecord } : {}),
-        recall: recallReport,
+        ...(recallReport ? { recall: recallReport } : {}),
       },
     };
   }
@@ -1155,7 +1178,9 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     options: CognitiveRetrievalOptions = {}
   ): Promise<AssembledMemoryContext> {
     this.ensureInitialized();
-    const startedAt = performance.now();
+    // Under `recall.capture: 'off'` the assembly takes no timings and builds no capture.
+    const capturing = this.recallCaptureMode() !== 'off';
+    const startedAt = capturing ? performance.now() : 0;
 
     // The three pre-assembly stages that hit a backend — retrieval (vector
     // search + rerank), the persistent-memory read, and the prospective
@@ -1213,7 +1238,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
       persistentPromise,
       prospectivePromise,
     ]);
-    const recalledAt = performance.now();
+    const recalledAt = capturing ? performance.now() : 0;
 
     // Get working memory state (sync; after retrieval so it reflects the
     // focus/decay updates retrieval just applied — same order as before).
@@ -1266,8 +1291,8 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     };
 
     const context = assembleMemoryContext(input);
-    const assembledAt = performance.now();
-    if ((this.config.recall?.capture ?? 'metadata') !== 'off') {
+    if (capturing) {
+      const assembledAt = performance.now();
       const recall = result.diagnostics.recall;
       context.capture = {
         version: MEMORY_RECALL_CAPTURE_VERSION,
@@ -1277,6 +1302,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
         allocation: context.allocation,
         legs: [{ leg: 'dense', ran: true, candidates: result.retrieved.length, ineligible: 0, ms: Math.round(recall?.denseMs ?? result.diagnostics.totalTimeMs) }],
         lexicalBackend: 'none',
+        ...(this.config.recall?.embedder ? { embedder: { ...this.config.recall.embedder } } : {}),
         reranker: result.diagnostics.reranker ?? { provider: 'none', reason: 'none_configured' },
         memoryQuestionReserve: { fired: false, added: 0 },
         candidates: candidatesFrom(
@@ -1762,6 +1788,11 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
 
   getConfig(): CognitiveMemoryConfig {
     return this.config;
+  }
+
+  /** The manager's `recall.capture`, `'metadata'` when unset (or before a config is set); read at each retrieval and assembly. */
+  private recallCaptureMode(): RecallCaptureMode {
+    return this.config?.recall?.capture ?? 'metadata';
   }
 
   getGraph(): IMemoryGraph | null {

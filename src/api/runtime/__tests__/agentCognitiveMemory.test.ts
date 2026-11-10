@@ -207,13 +207,19 @@ describe('createAgentCognitiveMemory', () => {
   });
 
   describe("the persona's cognitiveMemoryConfig", () => {
-    /** The config the manager's initialize receives when createAgentCognitiveMemory is given a persona with `cognitiveMemoryConfig`. */
-    async function configFor(cognitiveMemoryConfig: CognitiveMemoryPersonaConfig): Promise<CognitiveMemoryConfig> {
+    /**
+     * The config the manager's initialize receives when createAgentCognitiveMemory is given a persona with
+     * `cognitiveMemoryConfig`, and the agent's `memory` (none by default).
+     */
+    async function configFor(
+      cognitiveMemoryConfig: CognitiveMemoryPersonaConfig,
+      memory: Parameters<typeof createAgentCognitiveMemory>[0]['memory'] = {},
+    ): Promise<CognitiveMemoryConfig> {
       const initialize = vi.spyOn(CognitiveMemoryManager.prototype, 'initialize');
       try {
         const mem = await createAgentCognitiveMemory({
           persona: { ...(persona as object), cognitiveMemoryConfig } as never,
-          memory: {},
+          memory,
           embeddingManager: makeEmbedder() as never,
         });
         await mem.close();
@@ -280,6 +286,19 @@ describe('createAgentCognitiveMemory', () => {
       expect(keys.decay).toEqual({ recencyHalfLifeMs: 3_600_000 });
       expect(keys.graph).toEqual({ backend: 'knowledge-graph', maxDepth: 2 });
       expect(keys.tokenBudget).toEqual({ recentEpisodic: 0 });
+    });
+
+    it("puts the agent's memory.recall over the persona's recall field by field, the budget's totalTokens included", async () => {
+      // An agent budget that leaves totalTokens unset keeps the persona's.
+      const kept = await configFor({ recall: { budget: { totalTokens: 900 }, capture: 'off' } }, { recall: { budget: {}, capture: 'metadata' } });
+      expect(kept.recall).toEqual({ budget: { totalTokens: 900 }, capture: 'metadata' });
+      const unset = await configFor({ recall: { budget: { totalTokens: 900 } } }, { recall: { budget: { totalTokens: undefined } } });
+      expect(unset.recall).toEqual({ budget: { totalTokens: 900 } });
+      // JSON has no undefined: an agent's setting read from a file writes an unset total as null.
+      const fromJson = await configFor({ recall: { budget: { totalTokens: 900 } } }, { recall: { budget: { totalTokens: null } } } as never);
+      expect(fromJson.recall).toEqual({ budget: { totalTokens: 900 } });
+      const own = await configFor({ recall: { budget: { totalTokens: 900 }, capture: 'off' } }, { recall: { budget: { totalTokens: 2400 } } });
+      expect(own.recall).toEqual({ budget: { totalTokens: 2400 }, capture: 'off' });
     });
   });
 
