@@ -47,7 +47,7 @@ The module is `@framers/agentos/cognition/rag/reranking`; the package root does 
 | Latency class | In process: one model inference per passage, one after another, plus the model's load on the first call | One network round trip | Several model round trips, one after another: the slowest of the three |
 | Pick it when | The passages must not leave the machine, the host runs offline, or you want no per-call bill | You want a strong hosted reranker in one call and may send the passages to Cohere | You already pay for a model provider, want the ranking judged by a language model, and can wait for several calls |
 
-A remote provider (`cohere`, or `llm-judge` on a hosted model) receives the query and the candidate texts. The LLM judge on a local model (Ollama, for example, through `generateText`) keeps them on the machine.
+A remote provider (`cohere`, or `llm-judge` on a hosted model) receives the query and the candidate texts. The LLM judge keeps them on the machine only when its `llmCallFn` calls a local model and nothing else: `generateText` on a retryable failure falls back to the other providers whose keys are in the environment, unless the call passes `fallbackProviders: []`.
 
 ## Providers
 
@@ -98,7 +98,10 @@ import { generateText, PROVIDER_DEFAULTS } from '@framers/agentos';
 
 new LlmJudgeReranker({
   // Your function: (system, user, model?) => the model's text. It picks the provider.
-  llmCallFn: async (system, prompt, model) => (await generateText({ provider: 'gemini', model, system, prompt })).text,
+  // fallbackProviders: [] keeps every call on Gemini; without it generateText falls back to the other
+  // providers whose keys are in the environment, and they receive the passages too.
+  llmCallFn: async (system, prompt, model) =>
+    (await generateText({ provider: 'gemini', model, system, prompt, fallbackProviders: [] })).text,
   scoringModel: PROVIDER_DEFAULTS.gemini.cheap, // 'gemini-2.5-flash-lite'; passed to llmCallFn as `model`
   rankingModel: PROVIDER_DEFAULTS.gemini.cheap, // passed to llmCallFn as `model` for the ranking call
   maxPointwiseDocuments: 100,                   // the default

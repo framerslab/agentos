@@ -17,7 +17,7 @@
 // RERANK_JUDGE_PROVIDER to a provider generateText() serves (gemini, openai, anthropic, groq,
 // mistral, openrouter, ...) and that provider's key, and llmCallFn calls generateText() on the
 // provider's cheap model from PROVIDER_DEFAULTS (for gemini, gemini-2.5-flash-lite), or on
-// RERANK_JUDGE_MODEL when it is set.
+// RERANK_JUDGE_MODEL when it is set, with no fallback to other providers.
 //
 // Usage (no API key):
 //   pnpm install && pnpm run build
@@ -53,7 +53,10 @@ let model;
 if (provider) {
   const { generateText, PROVIDER_DEFAULTS } = await import('@framers/agentos');
   model = process.env.RERANK_JUDGE_MODEL ?? PROVIDER_DEFAULTS[provider]?.cheap;
-  llmCallFn = async (system, prompt, callModel) => (await generateText({ provider, model: callModel, system, prompt })).text;
+  // fallbackProviders: [] keeps every call on the named provider; without it generateText falls back to the
+  // other providers whose keys are in the environment, and they receive the passages too.
+  llmCallFn = async (system, prompt, callModel) =>
+    (await generateText({ provider, model: callModel, system, prompt, fallbackProviders: [] })).text;
 }
 
 // Record each call the judge makes.

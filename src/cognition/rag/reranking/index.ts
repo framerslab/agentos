@@ -61,7 +61,9 @@
  *
  * service.registerProvider(new LlmJudgeReranker({
  *   // The judge passes scoringModel or rankingModel as `model`; it has no model of its own.
- *   llmCallFn: async (system, prompt, model) => (await generateText({ provider: 'gemini', model, system, prompt })).text,
+ *   // fallbackProviders: [] keeps every call on Gemini instead of falling back to other configured providers.
+ *   llmCallFn: async (system, prompt, model) =>
+ *     (await generateText({ provider: 'gemini', model, system, prompt, fallbackProviders: [] })).text,
  *   scoringModel: 'gemini-2.5-flash-lite',
  *   rankingModel: 'gemini-2.5-flash-lite'
  * }));
