@@ -12158,7 +12158,9 @@ describe('the docs a host reads about it', () => {
   it("describe memory.store on gmi(), the learning store on its adapter, and agent.learning's host calls", () => {
     const gmiDoc = doc('docs/GMI.md');
     expect(gmiDoc).toContain('- **`memory.store`.** Durable memory: `{ path }`, a SQLite file agentos opens, or `{ adapter, brainId? }`');
-    expect(gmiDoc).toContain('It needs the learning option and `learning.agentKey`, which names the brain and the learners');
+    expect(gmiDoc).toContain(
+      "It needs the learning option and a key that names the brain: `learning.agentKey`, or, with a soul, the soul's id (`agentId`, else the slug of its `name`).",
+    );
     expect(gmiDoc).toContain("A store that does not open fails the session's first send naming `memory.store`, before any model call, and the next send tries again.");
     expect(gmiDoc).toContain('One process serves a SQLite file; several processes share a Postgres database instead, each through an adapter of its own.');
     expect(gmiDoc).toContain('The manifest\'s `memory_store` loop names the store.');
