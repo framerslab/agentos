@@ -573,7 +573,7 @@ describe('the run owner', () => {
       const stuck = deferred();
       const started = await own.start(countingJob(2, [() => stuck.promise, async () => undefined]));
       const id = 'id' in started ? started.id : '';
-      let answer: { complete: boolean } | null = null;
+      let answer: unknown = null;
       void own.stopAccount('removal').then((result) => { answer = result; });
       await vi.advanceTimersByTimeAsync(9_000);
       expect(answer).toBeNull();
