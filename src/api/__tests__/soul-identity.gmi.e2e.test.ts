@@ -22,6 +22,7 @@ import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory'
 import { reply, script, type ProviderScript } from './helpers/stubProviders';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 import { Brain } from '../../cognition/memory/retrieval/store/Brain';
+import { InMemoryLearningStore } from '../../cognition/learning/store/InMemoryLearningStore';
 
 let n = 0;
 const key = () => `k-soul-identity-${++n}`;
@@ -352,5 +353,63 @@ describe("the soul's id as the agent's key", () => {
     expect(build).toThrow("set agentId in SOUL.md's front matter, and the soul's id names the brain.");
     // Without a soul the error is the one it was: it ends where it ended.
     expect(() => gmi(stubbed(key(), { memory: { store: { path: path.join(dir, 'y.sqlite') } }, learning: { mode: 'off' } }))).toThrow(/one agent to the learning layer\.$/);
+  });
+});
+
+describe('learners filed under the slug of the agent name before the soul had an id', () => {
+  const learning = (store: InMemoryLearningStore, extra: Record<string, unknown> = {}) =>
+    ({ runtime: 'gmi', name: 'Aria', personality: { openness: 0.9 }, learning: { store, traits: true, ...extra } });
+  /** The agent keys of one user's session rows. */
+  const keysOf = async (store: InMemoryLearningStore, userId: string) => new Set((await store.sessionRowsOf('', userId)).map((row) => row.agentKey));
+
+  it('stay under it by one logged fallback, and forgetUser reaches them', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const store = new InMemoryLearningStore();
+    const k = key();
+    script('openai', k, { replies: [reply.text('One.'), reply.text('Two.'), reply.text('Three.')] });
+    const before = agent(stubbed(k, learning(store)));
+    await before.session('s1', { userId: 'ana' }).send('Hello.');
+    await before.close();
+    expect(await keysOf(store, 'ana')).toEqual(new Set(['aria']));
+
+    writeSoul(FULL);
+    const after = agent(stubbed(k, { ...learning(store), soul: dir }));
+    await after.session('s2', { userId: 'ana' }).send('Hello again.');
+    await after.session('s3', { userId: 'ana' }).send('And again.');
+    expect(events('soul.id_fallback')).toEqual([expect.objectContaining({ reason: 'old_slug_learner' })]);
+    expect(await keysOf(store, 'ana')).toEqual(new Set(['aria']));
+    await after.learning!.forgetUser('ana');
+    expect(await store.sessionRowsOf('', 'ana')).toEqual([]);
+    await after.close();
+  });
+
+  it('are left where they are, with no line, when learning.learnerKey names the key', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const store = new InMemoryLearningStore();
+    const k = key();
+    script('openai', k, { replies: [reply.text('One.'), reply.text('Two.')] });
+    const before = agent(stubbed(k, learning(store)));
+    await before.session('s1', { userId: 'ben' }).send('Hello.');
+    await before.close();
+
+    writeSoul(FULL);
+    const chosen = agent(stubbed(k, { ...learning(store, { learnerKey: 'aria-1' }), soul: dir }));
+    await chosen.session('s2', { userId: 'ben' }).send('Hello again.');
+    await chosen.close();
+    expect(events('soul.id_fallback')).toEqual([]);
+    expect(await keysOf(store, 'ben')).toEqual(new Set(['aria', 'aria-1']));
+  });
+
+  it('files a new agent under the soul id with no line', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    writeSoul(FULL);
+    const store = new InMemoryLearningStore();
+    const k = key();
+    script('openai', k, { replies: [reply.text('One.')] });
+    const fresh = agent(stubbed(k, { ...learning(store), soul: dir }));
+    await fresh.session('s1', { userId: 'cy' }).send('Hello.');
+    await fresh.close();
+    expect(events('soul.id_fallback')).toEqual([]);
+    expect(await keysOf(store, 'cy')).toEqual(new Set(['aria-1']));
   });
 });

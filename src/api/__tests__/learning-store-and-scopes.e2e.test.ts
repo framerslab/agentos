@@ -3276,6 +3276,19 @@ function learningStoreCases(name: string, open: () => Promise<OpenedLearningStor
       expect(await store.sessionRow('A', 'tutor', 's-1', '42', 'visitor')).toBeUndefined();
     });
 
+    it('answers whether an agent key has learner rows in a namespace', async () => {
+      const { store } = await fresh();
+      await store.putSessionRow(sessionOf({ sessionId: 's1', namespace: 'n1', agentKey: 'aria', userId: 'ana' }));
+      // A learner's chain head counts; the agent's own chain head (no user) does not.
+      await store.insertHead({ chainKey: 'u|n1|coach|7', namespace: 'n1', agentKey: 'coach', userId: '7', lastId: 'c-1', lastHash: 'hash-c-1', seq: 1, forgotten: false });
+      await store.insertHead({ chainKey: 'a|n1|ops', namespace: 'n1', agentKey: 'ops', userId: null, lastId: 'a-1', lastHash: 'hash-a-1', seq: 1, forgotten: false });
+      expect(await store.agentHasLearners!('n1', 'aria')).toBe(true);
+      expect(await store.agentHasLearners!('n1', 'coach')).toBe(true);
+      expect(await store.agentHasLearners!('n1', 'aria-1')).toBe(false);
+      expect(await store.agentHasLearners!('n2', 'aria')).toBe(false);
+      expect(await store.agentHasLearners!('n1', 'ops')).toBe(false);
+    });
+
     it("forgets a user in one namespace: marks the user's heads, deletes every row of theirs and counts them, and keeps the tombstone and every other user's and tenant's rows", async () => {
       const made = await fresh();
       const { store } = made;
