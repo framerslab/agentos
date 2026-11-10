@@ -226,6 +226,7 @@ function recording(pool: pg.Pool, seen: Statement[], hook: { after?: (sql: strin
 
 describe.skipIf(!URL)('LibraryIndex.searchGroups over PostgresVectorStore on Postgres', () => {
   let pool: pg.Pool;
+  let store: PostgresVectorStore;
   let index: LibraryIndex;
   const seen: Statement[] = [];
   const hook: { after?: (sql: string) => void } = {};
@@ -262,7 +263,7 @@ describe.skipIf(!URL)('LibraryIndex.searchGroups over PostgresVectorStore on Pos
     for (const statement of PostgresVectorStore.schemaSql('library', 4, { tablePrefix: PREFIX, textSearchConfig: 'simple' })) {
       await pool.query(statement);
     }
-    const store = new PostgresVectorStore({
+    store = new PostgresVectorStore({
       id: 'pg-library-groups',
       type: 'postgres',
       pool: recording(pool, seen, hook),
@@ -692,29 +693,113 @@ describe.skipIf(!URL)('LibraryIndex.searchGroups over PostgresVectorStore on Pos
     await cursorRefused({ ...typo, cursor: encode({ ...carried, expansion: [['budgte', 'budgte']] }) }, 'a stored word twice');
     const [oneEdit] = await run({ ...typo, cursor: encode({ ...carried, expansion: [['budgte']] }) });
     expect(oneEdit.state).toBe('ok');
-    // The carried words of every query word are one tsquery's, whose words together hold under a mebibyte
-    // (MAXSTRPOS, the same header): 520 words of 2046 bytes, each within the limit, are refused together; and so are
-    // 512 of 2046 bytes and one of 510, a mebibyte to the byte, as the search's own words take room in it too.
-    const wide = { ...typo, expansionMax: 600 };
-    const wideCarried = await firstOf(wide);
-    const many = Array.from({ length: 520 }, (_, at) => `budget${String(at).padStart(3, '0')}${'a'.repeat(2037)}`);
-    expect(new Set(many.map((word) => word.length))).toEqual(new Set([2046]));
-    await cursorRefused({ ...wide, cursor: encode({ ...wideCarried, expansion: [many] }) }, '520 stored words');
-    const brim = [...many.slice(0, 512), 'budget' + 'b'.repeat(504)];
-    expect(brim.reduce((bytes, word) => bytes + Buffer.byteLength(word) + 1, 0)).toBe(1048575);
-    await cursorRefused({ ...wide, cursor: encode({ ...wideCarried, expansion: [brim] }) }, 'a mebibyte of stored words');
+    // What the carried words hold together, under the cap of 64 a word, is the next two cases'.
+  });
+
+  it('caps the stored words one edit away at 64 a word: a search asking for more is refused, and so is a cursor carrying more; the largest cursor the checks admit runs on Postgres', async () => {
+    const sessions = groupOf('sessions', SESSIONS, SESSION_DATES);
+    const typo = { text: 'budget', typo: 'one-edit' as const, groups: [sessions], pageSize: 1 };
+    const noStatement = async (call: () => Promise<unknown>, what: string, error: RegExp | { name: string }): Promise<void> => {
+      seen.length = 0;
+      if (error instanceof RegExp) {
+        const thrown = await call().then(
+          () => null,
+          (failure: unknown) => failure,
+        );
+        expect(thrown, what).toBeInstanceOf(Error);
+        expect((thrown as Error).name, what).not.toBe('LibraryCursorError');
+        expect((thrown as Error).message, what).toMatch(error);
+      } else {
+        await expect(call(), what).rejects.toMatchObject(error);
+      }
+      expect(seen, what).toEqual([]);
+    };
+    // The index: a limit past 64 is the search's own error, before any statement.
+    for (const expansionMax of [65, 114000, Number.MAX_SAFE_INTEGER]) {
+      await noStatement(() => run({ ...typo, expansionMax }), `expansionMax ${expansionMax}`, /expansionMax must be a whole number from 1 to 64/);
+    }
+    const [first] = await run({ ...typo, expansionMax: 64 });
+    expect(first.cursor).not.toBeNull();
+    const carried = decode(first.cursor as string);
+    // The store, asked directly: a limit or a carried list past 64 is refused before any statement.
+    const items = sessions.items;
+    const asked = { words: ['budget'], group: { items }, profile: PROFILE, order: 'rank' as const, pageSize: 1 };
+    await noStatement(() => store.lexicalGroupSearch('library', { ...asked, oneEdit: { minLength: 4, max: 65 } }), 'oneEdit.max 65', /oneEdit\.max/);
+    // Stored words one edit from "budget": a letter changed, six places and 25 other letters each.
+    const letters = 'abcdefghijklmnopqrstuvwxyz';
+    const changed = Array.from('budget').flatMap((letter, at) =>
+      Array.from(letters.replace(letter, ''), (other) => 'budget'.slice(0, at) + other + 'budget'.slice(at + 1)),
+    );
+    expect(new Set(changed).size).toBe(150);
+    await noStatement(() => store.lexicalGroupSearch('library', { ...asked, expansion: [changed.slice(0, 65)] }), 'a carried list of 65', /expansion/);
+    // A cursor carrying more than 64 for a word is not one this index made: 65 such words, and 114,000 (each letter
+    // of "budget" in turn changed to a CJK letter from U+4E00 on, 1,026,000 bytes with their ends, under the room).
+    const cjk = Array.from({ length: 114000 }, (_, n) => {
+      const at = n % 6;
+      return 'budget'.slice(0, at) + String.fromCodePoint(0x4e00 + Math.floor(n / 6)) + 'budget'.slice(at + 1);
+    });
+    expect(new Set(cjk).size).toBe(114000);
+    expect(cjk.reduce((bytes, word) => bytes + Buffer.byteLength(word) + 1, 0)).toBe(1026000);
+    for (const [list, what] of [
+      [changed.slice(0, 65), '65 carried words'],
+      [cjk, '114,000 carried words'],
+    ] as const) {
+      await noStatement(() => run({ ...typo, expansionMax: 64, cursor: encode({ ...carried, expansion: [list] }) }), what, { name: 'LibraryCursorError' });
+    }
+    const [sixtyFour] = await run({ ...typo, expansionMax: 64, cursor: encode({ ...carried, expansion: [changed.slice(0, 64)] }) });
+    expect(sixtyFour.state).toBe('ok');
+
+    // The largest cursor the checks admit: the most words a search holds (32), each with 64 carried words, each as long
+    // as the room lets them be. 32 words of 494 bytes and 64 of 495 a word take 1,047,488 bytes with their ends, under
+    // 1,048,575; at 495 and 496 they take 1,049,600 and are refused. So one bound closes every cursor: 2,048 carried
+    // words and the search's own 64 is the longest tsquery a statement ever reads.
+    const scope: LibraryScope = { tenantId: 'org-cap', aclGroups: [TEAM] };
+    const wordsOf = (lead: string, bytes: number): string[] =>
+      Array.from({ length: 32 }, (_, at) => lead + letters[1 + (at >> 3)] + letters[1 + (at & 7)] + 'a'.repeat(bytes - 3));
+    const nearOf = (word: string): string[] => Array.from({ length: 64 }, (_, at) => word.slice(0, 3 + at) + 'x' + word.slice(3 + at));
+    const caseOf = async (lead: string, bytes: number) => {
+      const words = wordsOf(lead, bytes);
+      const sources: LibrarySource[] = [0, 1, 2].map((at) => ({
+        sourceId: `cap:${lead}${at}`,
+        kind: 'document' as const,
+        tenantId: 'org-cap',
+        aclGroups: [TEAM],
+        passages: [{ text: words.join(' ') }],
+      }));
+      for (const source of sources) await index.indexSource(source);
+      const search = { text: words.join(' '), typo: 'one-edit' as const, expansionMax: 64, scope, groups: [groupOf(`cap-${lead}`, sources)], pageSize: 1 };
+      const [page] = await run(search);
+      expect(page, `${lead}: first page`).toMatchObject({ state: 'ok', total: 3, incomplete: false });
+      expect(page.cursor).not.toBeNull();
+      const expansion = words.map(nearOf);
+      expect(new Set(expansion.flat()).size).toBe(2048);
+      expect(new Set(expansion.flat().map((stored) => Buffer.byteLength(stored)))).toEqual(new Set([bytes + 1]));
+      const taken = words.reduce((sum, word) => sum + 2 * (Buffer.byteLength(word) + 1), 0) + expansion.flat().reduce((sum, stored) => sum + Buffer.byteLength(stored) + 1, 0);
+      return { search, cursor: encode({ ...decode(page.cursor as string), expansion }), taken };
+    };
+    const largest = await caseOf('q', 494);
+    expect(largest.taken).toBe(1047488);
+    const [second] = await run({ ...largest.search, cursor: largest.cursor });
+    expect(second).toMatchObject({ state: 'ok', total: 3, incomplete: false });
+    expect(ids(second)).toHaveLength(1);
+    const past = await caseOf('r', 495);
+    expect(past.taken).toBe(1049600);
+    await noStatement(() => run({ ...past.search, cursor: past.cursor }), 'a cursor past the room', { name: 'LibraryCursorError' });
   });
 
   it("keeps the stored words one edit away to what one tsquery holds beside the search's own words, marks the rest left out, and refuses a cursor carrying more", async () => {
-    // A query word of 2045 bytes, and 512 stored words one edit from it (an x added), 2046 bytes each: together a
-    // mebibyte and a little more with the query word's own two places in the tsquery (itself and as a prefix).
-    const word = 'budget' + 'a'.repeat(2039);
-    const near = Array.from({ length: 512 }, (_, at) => word.slice(0, 6 + at) + 'x' + word.slice(6 + at));
+    // Eight query words of 2045 bytes, and 64 stored words one edit from each (an x added), 2046 bytes each: 512 in
+    // all, the cap a word, and together a mebibyte and a little more with the query words' own two places in the
+    // tsquery (each itself and as a prefix).
+    const words = Array.from('bcdefghi', (letter) => 'budget' + letter + 'a'.repeat(2038));
+    const nearOf = (word: string): string[] => Array.from({ length: 64 }, (_, at) => word.slice(0, 7 + at) + 'x' + word.slice(7 + at));
+    const near = words.flatMap(nearOf);
     expect(new Set(near).size).toBe(512);
+    expect(new Set(words.map((word) => Buffer.byteLength(word)))).toEqual(new Set([2045]));
     expect(new Set(near.map((stored) => Buffer.byteLength(stored)))).toEqual(new Set([2046]));
     const room: LibraryScope = { tenantId: 'org-room', aclGroups: [TEAM] };
     const sources: LibrarySource[] = [
-      ...[0, 1].map((at) => ({ sourceId: `room:w${at}`, kind: 'document' as const, tenantId: 'org-room', aclGroups: [TEAM], passages: [{ text: word }] })),
+      ...[0, 1].map((at) => ({ sourceId: `room:w${at}`, kind: 'document' as const, tenantId: 'org-room', aclGroups: [TEAM], passages: [{ text: words.join(' ') }] })),
       ...Array.from({ length: 16 }, (_, at) => ({
         sourceId: `room:n${at}`,
         kind: 'document' as const,
@@ -724,24 +809,32 @@ describe.skipIf(!URL)('LibraryIndex.searchGroups over PostgresVectorStore on Pos
       })),
     ];
     for (const source of sources) await index.indexSource(source);
-    const search = { text: word, typo: 'one-edit' as const, expansionMax: 600, scope: room, groups: [groupOf('room', sources)], pageSize: 1 };
-    // 510 of them fit beside the query word's 4,092 bytes; the 511th would not, so it and the last are left out.
+    const search = { text: words.join(' '), typo: 'one-edit' as const, expansionMax: 64, scope: room, groups: [groupOf('room', sources)], pageSize: 1 };
+    // 496 of them fit beside the query words' 32,736 bytes (1,015,839 left, 2,047 a word); the rest are left out.
     const [first] = await run(search);
     expect(first).toMatchObject({ state: 'ok', incomplete: true });
     expect(first.cursor).not.toBeNull();
     const carried = decode(first.cursor as string);
-    const kept = (carried.expansion as string[][])[0];
-    expect(kept).toHaveLength(510);
-    expect(kept.every((stored) => near.includes(stored))).toBe(true);
+    const kept = carried.expansion as string[][];
+    expect(kept).toHaveLength(8);
+    expect(kept.flat()).toHaveLength(496);
+    kept.forEach((list, at) => {
+      expect(list.length).toBeLessThanOrEqual(64);
+      expect(list.every((stored) => nearOf(words[at]).includes(stored))).toBe(true);
+    });
     const [second] = await run({ ...search, cursor: first.cursor as string });
     expect(second).toMatchObject({ state: 'ok', incomplete: true });
-    // A cursor carrying 511 or all 512 is refused before any statement.
-    for (const count of [511, 512]) {
+    // A cursor carrying one more than was kept, or all 512, is refused before any statement: each list within the
+    // cap, the words past the room.
+    const short = kept.findIndex((list) => list.length < 64);
+    const oneMore = kept.map((list, at) => (at === short ? [...list, nearOf(words[at]).find((stored) => !list.includes(stored)) as string] : list));
+    for (const [expansion, what] of [
+      [oneMore, '497 stored words'],
+      [words.map(nearOf), '512 stored words'],
+    ] as const) {
       seen.length = 0;
-      await expect(run({ ...search, cursor: encode({ ...carried, expansion: [near.slice(0, count)] }) }), `${count} stored words`).rejects.toMatchObject({
-        name: 'LibraryCursorError',
-      });
-      expect(seen, `${count} stored words`).toEqual([]);
+      await expect(run({ ...search, cursor: encode({ ...carried, expansion }) }), what).rejects.toMatchObject({ name: 'LibraryCursorError' });
+      expect(seen, what).toEqual([]);
     }
   });
 
