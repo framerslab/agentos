@@ -26,10 +26,10 @@
  * or a sign-out lands before a write, which is then refused, or after it, never between the check and the write; then
  * it stops the account's runs here and, through the channel, in every other tab, and waits for their locks. A second
  * listing after the message fences a record another tab wrote between the first listing and the message, and a tab
- * that hears the stop fences its own runs' records too. The waits for the records' locks and the runs' locks share ten
- * seconds, and the stop answers whether every record was deleted or marked. With no channel, each owner reads the records once a second and stops a run of its own whose record
- * another owner's stop deleted or marked. A start still waiting for its lock when the account stops, or made while
- * the stop runs, is fenced from its start.
+ * that hears the stop fences its own runs' records too. The whole stop answers within ten seconds, and answers whether
+ * every record was deleted or marked, the records of this owner's starts in flight among them. With no channel, each
+ * owner reads the records once a second and stops a run of its own whose record another owner's stop deleted or marked.
+ * A start still waiting for its lock when the account stops, or made while the stop runs, is fenced from its start.
  * @module agentos/core/storage/browser/runs
  */
 import type { KeyValueStore } from '@framers/sql-storage-adapter/kv';
@@ -153,11 +153,11 @@ export interface RunOwner {
   saved(id: string): Promise<void>;
   /**
    * Deletes (a removal) or marks (a sign-out, a session's end) every record, stops the account's runs in every tab and
-   * waits for their locks, then lists the records again for a run another tab started meanwhile; the waits for the
-   * records' locks and the runs' locks share ten seconds. Answers
-   * `{ complete: true }` once the store listed the records and every record of the account was deleted or marked, and
-   * `{ complete: false }` when the store refused the listing, a read, a deletion or a mark, or a write in flight still
-   * held a record's lock at the ten seconds (that record is deleted or marked once the write returns): call it again.
+   * waits for their locks, then lists the records again for a run another tab started meanwhile, and waits for this
+   * owner's starts in flight; the whole stop answers within ten seconds. Answers `{ complete: true }` once the store
+   * listed the records and every record of the account was deleted or marked, and `{ complete: false }` when the store
+   * refused a listing, a read, a deletion or a mark, or had not answered by the ten seconds, or a write or a start was
+   * still in flight then (that record is deleted or marked once the write returns): call it again.
    */
   stopAccount(cut: 'removal' | 'signout' | 'session'): Promise<{ complete: boolean }>;
   /**
@@ -574,6 +574,8 @@ class BrowserRunOwner implements RunOwner {
   private readonly stopCuts: AccountStop[] = [];
   /** This owner's account stops running now: a start that gets its lock while one runs fences itself too. */
   private readonly runningStops: AccountStop[] = [];
+  /** The starts in flight, each settling once its record is written and fenced where a stop reached it. */
+  private readonly starting = new Set<Promise<boolean>>();
   private readonly onPageHide = (): void => this.flush();
   private readonly onVisibility = (): void => {
     if (page().document?.visibilityState === 'hidden') this.flush();
@@ -729,7 +731,7 @@ class BrowserRunOwner implements RunOwner {
 
   /** The records fenced under their locks, this owner's runs stopped, the other tabs told, their locks awaited, and the records listed again. */
   private async stopEverything(cut: AccountStop): Promise<{ complete: boolean }> {
-    // The waits for the records' locks and for the runs' locks share the stop's ten seconds.
+    // The listings, the waits for the records' and the runs' locks, the starts in flight and the last read share the stop's ten seconds.
     const deadline = Date.now() + STOP_WAIT;
     const names = new Set<string>();
     const first = await this.fenceListed(cut, deadline, names, new Set());
@@ -743,9 +745,14 @@ class BrowserRunOwner implements RunOwner {
     const found = new Set<string>();
     const second = await this.fenceListed(cut, deadline, found, new Set(first.keys));
     await this.waitRuns(found, deadline);
-    if (cut !== 'removal') await this.records().catch(() => []);
+    // A start of this owner still taking its lock or writing its record when the stop began fences that record itself
+    // once it is written; the stop waits for it in what is left of the ten seconds.
+    const starts = [...this.starting];
+    const started = starts.length === 0 ? [] : await within(Promise.all(starts), deadline - Date.now());
+    // The rows are read again for the marks, inside the ten seconds as well; a read past them goes on alone.
+    if (cut !== 'removal') await within(this.records(), deadline - Date.now());
     this.touch();
-    return { complete: first.complete && second.complete };
+    return { complete: first.complete && second.complete && started !== null && !started.includes(false) };
   }
 
   /**
@@ -754,13 +761,15 @@ class BrowserRunOwner implements RunOwner {
    * every fence landed in time, with the keys it listed.
    */
   private async fenceListed(cut: AccountStop, deadline: number, names: Set<string>, skip: ReadonlySet<string>): Promise<{ complete: boolean; keys: string[] }> {
-    let keys: string[];
+    let listing: Promise<string[]>;
     try {
-      keys = await this.store.keys(this.keyPrefix);
+      listing = this.store.keys(this.keyPrefix);
     } catch {
-      // The store refused the list: the stops still end every run in memory.
       return { complete: false, keys: [] };
     }
+    const keys = await within(listing, deadline - Date.now());
+    // The store refused the list or had not answered by the deadline: the stops still end every run in memory.
+    if (keys === null) return { complete: false, keys: [] };
     // A write in flight holds its record's lock until it returns, so its record's fence waits for it; one still waiting
     // at the deadline stays asked for and lands once the write returns, while the stop goes on.
     const fences = keys
@@ -944,71 +953,88 @@ class BrowserRunOwner implements RunOwner {
       from.lock?.();
       throw new TypeError('openRunOwner: the run record fails its check (a key of 64 lowercase hexadecimal characters, a chosen the given check allows, the known kinds of every field); nothing was started');
     }
-    const stopsBefore = this.stopCuts.length;
-    let release = from.lock;
-    if (!release) {
-      // A finish holds the cut run's own lock too, so one tab alone finishes it whatever key its new pick makes.
-      const names = from.resume && from.resume.key !== job.key ? [from.resume.key, job.key] : [job.key];
-      const releases: Array<() => void> = [];
-      for (const name of names) {
-        const one = await this.hold(name);
-        if (!one) {
-          for (const letGo of releases) letGo();
-          return { refused: 'another-tab' };
-        }
-        releases.push(one);
-      }
-      release = () => {
-        for (const letGo of releases) letGo();
-      };
-    }
-    const id = record.id;
-    const held: Held = {
-      record, job, controller: new AbortController(), release, memoryOnly: false, written: false, ended: null, stopCut: null, dropped: false, cutSelf: null,
-      lastWrite: now, dirty: false, paceTimer: null, lastPost: 0, postTimer: null, done: null,
-    };
-    this.held.set(id, held);
-    this.seen.delete(id);
-    this.hidden.delete(id);
-    this.ends.delete(id);
-    // The account stopped while this start waited for its lock (here or in another tab), or is stopping now: the run is
-    // fenced from its start, a removal among those stops winning over a sign-out or a session's end.
-    const cuts = [...this.stopCuts.slice(stopsBefore), ...this.runningStops];
-    if (cuts.length > 0) {
-      held.stopCut = cuts.includes('removal') ? 'removal' : cuts[cuts.length - 1];
-      held.controller.abort();
-    }
-    const key = this.keyPrefix + id;
-    let gone = false as boolean;
+    // A stop answers for the starts still in flight when it ends: each settles once its record is written and, when the
+    // account's stop reached it meanwhile, deleted or marked, and settles false when that fence failed.
+    let fenced = true;
+    let settle: (ok: boolean) => void = () => undefined;
+    const settled = new Promise<boolean>((resolve) => {
+      settle = resolve;
+    });
+    this.starting.add(settled);
     try {
-      await this.locks.request(this.lockName(key), async () => {
-        if (from.resume) {
-          // A finish never brings back a record another tab removed or dismissed meanwhile.
-          const current = await this.store.get<unknown>(key);
-          if (!isPlain(current) || current.id !== id) {
-            gone = true;
-            return;
+      const stopsBefore = this.stopCuts.length;
+      let release = from.lock;
+      if (!release) {
+        // A finish holds the cut run's own lock too, so one tab alone finishes it whatever key its new pick makes.
+        const names = from.resume && from.resume.key !== job.key ? [from.resume.key, job.key] : [job.key];
+        const releases: Array<() => void> = [];
+        for (const name of names) {
+          const one = await this.hold(name);
+          if (!one) {
+            for (const letGo of releases) letGo();
+            return { refused: 'another-tab' };
           }
+          releases.push(one);
         }
-        await this.store.set(key, copyRecord(record));
-        held.written = true;
-      });
-      held.lastWrite = this.now();
-    } catch {
-      this.toMemory(held);
-    }
-    if (gone) {
-      this.drop(held);
+        release = () => {
+          for (const letGo of releases) letGo();
+        };
+      }
+      const id = record.id;
+      const held: Held = {
+        record, job, controller: new AbortController(), release, memoryOnly: false, written: false, ended: null, stopCut: null, dropped: false, cutSelf: null,
+        lastWrite: now, dirty: false, paceTimer: null, lastPost: 0, postTimer: null, done: null,
+      };
+      this.held.set(id, held);
+      this.seen.delete(id);
+      this.hidden.delete(id);
+      this.ends.delete(id);
+      // The account stopped while this start waited for its lock (here or in another tab), or is stopping now: the run is
+      // fenced from its start, a removal among those stops winning over a sign-out or a session's end.
+      const cuts = [...this.stopCuts.slice(stopsBefore), ...this.runningStops];
+      if (cuts.length > 0) {
+        held.stopCut = cuts.includes('removal') ? 'removal' : cuts[cuts.length - 1];
+        held.controller.abort();
+      }
+      const key = this.keyPrefix + id;
+      let gone = false as boolean;
+      try {
+        await this.locks.request(this.lockName(key), async () => {
+          if (from.resume) {
+            // A finish never brings back a record another tab removed or dismissed meanwhile.
+            const current = await this.store.get<unknown>(key);
+            if (!isPlain(current) || current.id !== id) {
+              gone = true;
+              return;
+            }
+          }
+          await this.store.set(key, copyRecord(record));
+          held.written = true;
+        });
+        held.lastWrite = this.now();
+      } catch {
+        this.toMemory(held);
+      }
+      if (gone) {
+        this.drop(held);
+        this.touch();
+        return { refused: 'another-tab' };
+      }
+      // The account's stop came while the record was written: the record it could not see is fenced now.
+      if (held.stopCut !== null && !held.memoryOnly) {
+        await this.fenceRecord(key, held.stopCut).catch(() => {
+          fenced = false;
+        });
+      }
+      if (held.stopCut === null) this.post(held);
+      held.done = this.runJob(held);
+      this.ensureTimers();
       this.touch();
-      return { refused: 'another-tab' };
+      return { id };
+    } finally {
+      this.starting.delete(settled);
+      settle(fenced);
     }
-    // The account's stop came while the record was written: the record it could not see is fenced now.
-    if (held.stopCut !== null && !held.memoryOnly) await this.fenceRecord(key, held.stopCut).catch(() => undefined);
-    if (held.stopCut === null) this.post(held);
-    held.done = this.runJob(held);
-    this.ensureTimers();
-    this.touch();
-    return { id };
   }
 
   /** Holds the run lock of a job's key, or answers null at once when it is held. */

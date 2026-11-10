@@ -498,9 +498,11 @@ describe('the run owner', () => {
       },
     };
     const starting = own.start(writing);
-    await own.stopAccount('removal');
+    const removal = own.stopAccount('removal');
+    await new Promise((resolve) => setTimeout(resolve, 20)); // the stop has listed the records while the start still waits
     opened.resolve();
     const started = await starting;
+    expect(await removal).toEqual({ complete: true }); // it waited for the start's record to be deleted
     const ends = await own.whenIdle();
     expect(wrote).toBe(false);
     expect(await store.keys('lib/j/')).toEqual([]);
