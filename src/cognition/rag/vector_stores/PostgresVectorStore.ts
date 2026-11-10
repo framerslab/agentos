@@ -51,6 +51,9 @@ import { sha256Hex } from '../../../core/utils/sha256.js';
 import {
   LEXICAL_GROUP_WORDS_MAX as GROUP_WORDS_MAX,
   isLexicalGroupExpansion as isExpansion,
+  lexicalGroupExpansionRoom as expansionRoom,
+  lexicalGroupWordBytes as wordBytes,
+  LEXICAL_GROUP_STORED_WORD_BYTES_MAX as STORED_WORD_BYTES_MAX,
   isLexicalGroupInstant as isInstant,
   isLexicalGroupRank as isRank,
   isLexicalGroupSourceId as isSourceId,
@@ -253,9 +256,9 @@ function groupSearchOf(options: LexicalGroupSearchOptions): GroupSearch {
     throw refused(`the words must be at most ${GROUP_WORDS_MAX}, each a letter or a digit followed by letters, digits and combining marks`);
   }
   if (new Set(words).size !== words.length) throw refused('a word is given twice');
-  if (expansion !== undefined && !(isExpansion(expansion) && expansion.length === words.length)) {
+  if (expansion !== undefined && !isExpansion(expansion, words)) {
     throw refused(
-      'the expansion must hold one list of stored words for each word, each word a text that is not empty, holds no NUL and is at most 2046 bytes of UTF-8, and all of them at most what one tsquery holds',
+      "the expansion must hold one list of stored words for each word, each word a text that is not empty, holds no NUL and is at most 2046 bytes of UTF-8, and all of them at most what one tsquery holds beside the search's own words",
     );
   }
   if (oneEdit !== undefined && !(whole(oneEdit.minLength) && whole(oneEdit.max))) {
@@ -1039,8 +1042,9 @@ export class PostgresVectorStore implements IVectorStore {
    *   away, summed over the words, in exact decimal arithmetic. `ts_rank` is not read.
    * - **The stored words one edit away** come from `ts_stat` over the same passages: every stored word within one
    *   letter of a query word's length, read 1,000 at a time through a cursor in a transaction, held to one edit in
-   *   process, the most frequent `oneEdit.max` kept for each word. A page after the first takes them as `expansion`
-   *   and reads none.
+   *   process, the most frequent `oneEdit.max` kept for each word while one tsquery holds them beside the query's
+   *   words (each at most 2046 bytes, all of them with the query's words at most 1048575); a word past either is left
+   *   out and marks the answer incomplete. A page after the first takes them as `expansion` and reads none.
    * - **The page** is ordered by rank, or by the caller's dates with an undated item last, then by the source id in
    *   byte order, and starts after `after`. The count, the page and each item's passage come from one statement, so
    *   they describe one state of the table.
@@ -1123,9 +1127,12 @@ export class PostgresVectorStore implements IVectorStore {
    * counted against the limit. `ts_stat` takes its query as text, so that text is built by Postgres's own `format()`,
    * the table through `%I` and every value through `%L`; no value is written into SQL here. Every stored word within
    * one letter of a query word's length comes back, the most frequent first, with no limit before the edit check: a
-   * limit there would let frequent words of the right length crowd out the one word that is one edit away.
+   * limit there would let frequent words of the right length crowd out the one word that is one edit away. A word is
+   * kept only while the statement's one tsquery has room for it beside the search's own words, and only at 2046 bytes
+   * of UTF-8 or fewer (`lexicalGroupExpansionRoom`); one left out marks its query word as `max` does.
    *
-   * @returns Each word's stored words and whether more than `max` were found, or null when the signal stopped the read.
+   * @returns Each word's stored words and whether more than `max` were found or one was left out for room, or null
+   *   when the signal stopped the read.
    */
   private async _storedWordsOneEdit(
     collectionName: string,
@@ -1137,6 +1144,9 @@ export class PostgresVectorStore implements IVectorStore {
     const { words } = search;
     const kept = words.map((): string[] => []);
     const overflowed = words.map(() => false);
+    // A word left out as the tsquery has no room for it: too long for one, or past what the words kept already leave.
+    const leftOut = words.map(() => false);
+    let room = expansionRoom(words);
     // A letter is a code point, as Postgres's length() counts a character.
     const letters = words.map((word) => Array.from(word).length);
     const widened = letters.map((count) => count >= oneEdit.minLength);
@@ -1182,15 +1192,24 @@ export class PostgresVectorStore implements IVectorStore {
             if (!widened[at] || overflowed[at] || count < oneEdit.minLength || Math.abs(count - letters[at]) > 1) continue;
             // The word itself and a word it begins match as such, and take no place among the words one edit away.
             if (stored === words[at] || stored.startsWith(words[at]) || !withinOneEdit(words[at], stored)) continue;
-            if (kept[at].length < oneEdit.max) kept[at].push(stored);
-            else overflowed[at] = true;
+            if (kept[at].length >= oneEdit.max) {
+              overflowed[at] = true;
+              continue;
+            }
+            const bytes = wordBytes(stored);
+            if (bytes > STORED_WORD_BYTES_MAX || bytes + 1 > room) {
+              leftOut[at] = true;
+              continue;
+            }
+            kept[at].push(stored);
+            room -= bytes + 1;
           }
         }
         // The last batch is a short one; and once every word has more than its limit, the rest changes nothing.
         if (batch.rows.length < STORED_WORDS_BATCH || widened.every((wide, at) => !wide || overflowed[at])) break;
       }
       await client.query(`CLOSE ${cursor}`);
-      return stopped ? null : { expansion: kept, overflowed };
+      return stopped ? null : { expansion: kept, overflowed: overflowed.map((over, at) => over || leftOut[at]) };
     });
   }
 

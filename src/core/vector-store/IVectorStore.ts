@@ -300,15 +300,16 @@ export interface LexicalGroupSearchOptions {
   /**
    * For each word, in order, the stored words one edit away that an earlier page of this search matched. With it the
    * store reads no stored word again and `oneEdit` is not read; a search hands back what the first page answered.
-   * Each stored word is at most 2046 bytes of UTF-8 and all of them, each with one byte more, at most 1048575 bytes,
-   * as one tsquery holds them.
+   * Each stored word is at most 2046 bytes of UTF-8 and all of them, each with one byte more, at most 1048575 bytes
+   * less the query's words, each counted twice with one byte more, as one tsquery holds them beside those words.
    */
   expansion?: string[][];
   /**
    * Without `expansion`: widens each word of `minLength` letters or more to the stored words of the group's passages
    * that are one edit away (a letter added, dropped or changed, or two side by side swapped) and hold `minLength`
-   * letters or more, the most frequent first, at most `max` a word. A word that more than `max` stored words are one
-   * edit from marks the answer incomplete.
+   * letters or more, the most frequent first, at most `max` a word, and only as many as `expansion` holds. A word that
+   * more than `max` stored words are one edit from, or one whose stored word `expansion` has no room for, marks the
+   * answer incomplete.
    */
   oneEdit?: { minLength: number; max: number };
   /**

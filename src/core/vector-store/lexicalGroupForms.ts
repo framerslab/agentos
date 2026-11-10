@@ -34,10 +34,28 @@ const NUMERIC_FRACTION_DIGITS_MAX = 16383;
  * either fails to parse. Releases before https://github.com/postgres/postgres/commit/1fc1b82b2f refuse a word of
  * MAXSTRLEN bytes itself (`lenval >= MAXSTRLEN`), so a word is held to 2046 bytes, which every release reads.
  */
-const TSQUERY_WORD_BYTES_MAX = 2046;
+export const LEXICAL_GROUP_STORED_WORD_BYTES_MAX = 2046;
 const TSQUERY_WORDS_BYTES_MAX = 1048575;
 
 const utf8 = new TextEncoder();
+
+/** The bytes of a word in UTF-8, as a tsquery holds it. */
+export function lexicalGroupWordBytes(word: string): number {
+  return utf8.encode(word).length;
+}
+
+/**
+ * The bytes a grouped search's stored words one edit away have in its tsquery: what one tsquery holds, less the
+ * search's own words, each written twice (itself and as a prefix, `word | word:*`), each with the byte that ends it.
+ * The store joins the stored words and those words into one tsquery with `||`, and Postgres refuses a joined
+ * tsquery in which a word starts past MAXSTRPOS ("tsquery is too large", since
+ * https://github.com/postgres/postgres/commit/84b6a7a061); holding all of them to MAXSTRPOS keeps every word under it.
+ * A word is counted at its own length: a text search configuration whose dictionaries write a word longer than it
+ * is read is past this bound.
+ */
+export function lexicalGroupExpansionRoom(words: readonly string[]): number {
+  return words.reduce((room, word) => room - 2 * (lexicalGroupWordBytes(word) + 1), TSQUERY_WORDS_BYTES_MAX);
+}
 
 /** The most hours a date's zone stands from UTC: the zones in use run from 12 hours behind to 14 ahead. */
 const ZONE_HOURS_MAX = 14;
@@ -94,23 +112,23 @@ export function isLexicalGroupRank(value: unknown): value is string {
 }
 
 /**
- * Whether a value is a list for each query word of the stored words to widen it to that one tsquery holds: each word
- * a text that is not empty, holds no NUL and is at most 2046 bytes of UTF-8, and all of them together, each with one
- * byte more, at most 1048575 bytes. A tsvector holds a word of 2047 bytes, which a release before Postgres's commit
- * 1fc1b82b2f will not read in a tsquery; a cursor carrying one is refused. The lists' number and their reach are the
- * caller's to check.
+ * Whether a value is a list for each of `words`, in order, of the stored words to widen it to that one tsquery holds
+ * beside them: each stored word a text that is not empty, holds no NUL and is at most 2046 bytes of UTF-8, and all of
+ * them together, each with one byte more, at most {@link lexicalGroupExpansionRoom}. A tsvector holds a word of 2047
+ * bytes, which a release before Postgres's commit 1fc1b82b2f will not read in a tsquery; a cursor carrying one is
+ * refused. Which stored words a word reaches is the caller's to check.
  */
-export function isLexicalGroupExpansion(value: unknown): value is string[][] {
-  if (!Array.isArray(value)) return false;
-  let bytes = 0;
+export function isLexicalGroupExpansion(value: unknown, words: readonly string[]): value is string[][] {
+  if (!Array.isArray(value) || value.length !== words.length) return false;
+  let room = lexicalGroupExpansionRoom(words);
   for (const list of value) {
     if (!Array.isArray(list)) return false;
     for (const word of list) {
       if (typeof word !== 'string' || word === '' || word.includes('\u0000')) return false;
-      const length = utf8.encode(word).length;
-      if (length > TSQUERY_WORD_BYTES_MAX) return false;
-      bytes += length + 1;
-      if (bytes > TSQUERY_WORDS_BYTES_MAX) return false;
+      const length = lexicalGroupWordBytes(word);
+      if (length > LEXICAL_GROUP_STORED_WORD_BYTES_MAX) return false;
+      room -= length + 1;
+      if (room < 0) return false;
     }
   }
   return true;

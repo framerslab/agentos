@@ -197,7 +197,8 @@ export interface LibraryGroupSearch {
   typo?: 'one-edit' | 'none';
   /**
    * The most stored words one edit away that a word is widened to, the most frequent kept: a whole number, 1 or
-   * more. A word with more marks its group `incomplete`. @default 64
+   * more. A word with more marks its group `incomplete`, and so does a stored word the store's query has no room for
+   * beside the search's words (on `PostgresVectorStore`, one tsquery of a mebibyte). @default 64
    */
   expansionMax?: number;
   /** The most hits a group answers on a page: a whole number, 1 or more, that JavaScript holds exactly. */
@@ -253,9 +254,9 @@ export interface LibraryGroupResult {
   /** How many distinct items match every word, whatever the page; in a listing, how many hold a passage. */
   total: number;
   /**
-   * True when a word had more stored words one edit away than `expansionMax`, on the page that read them and on every
-   * page after it, the hits then matching the ones kept; or when the signal stopped the search, the group then
-   * holding no hit.
+   * True when a word had more stored words one edit away than `expansionMax`, or than the store's query holds, on the
+   * page that read them and on every page after it, the hits then matching the ones kept; or when the signal stopped
+   * the search, the group then holding no hit.
    */
   incomplete: boolean;
   /** What the next page takes as `cursor`, or null after the last. */
@@ -591,24 +592,26 @@ function cursorDecode(cursor: unknown): LibraryCursor {
 }
 
 /**
- * Whether the stored words a cursor carries are words its search reaches: one list a word, at most `expansionMax`
- * long, and none at all without the one-edit rule; each stored word the same as its query word, begun by it, or one
- * edit from it where both hold four letters or more. A cursor therefore adds no word to a search. The words are held
- * first to what one tsquery holds (each at most 2046 bytes, all of them under a mebibyte), as a word begun by its query
- * word reaches it at any length.
+ * Whether the stored words a cursor carries are words its search reaches, as the store draws them: one list a word,
+ * at most `expansionMax` long, each stored word once, and none at all without the one-edit rule; each stored word one
+ * edit from its query word where both hold four letters or more, and neither that word nor a word it begins, which
+ * match as such and are never drawn. The words are held first to what one tsquery holds beside the search's own words
+ * (each at most 2046 bytes, all of them under a mebibyte with those words), so a cursor adds no word to a search and
+ * never carries more than its statement can write.
  */
 function reachesEveryWord(search: CheckedGroupSearch, expansion: string[][]): boolean {
-  if (expansion.length !== search.words.length || !isExpansion(expansion)) return false;
+  if (!isExpansion(expansion, search.words)) return false;
   return expansion.every((list, at) => {
     if (list.length === 0) return true;
-    if (search.typo !== 'one-edit' || list.length > search.expansionMax) return false;
+    if (search.typo !== 'one-edit' || list.length > search.expansionMax || new Set(list).size !== list.length) return false;
     const word = search.words[at];
-    const letters = Array.from(word).length;
+    if (Array.from(word).length < EDIT_MIN_LETTERS) return false;
     return list.every(
       (stored) =>
-        stored === word ||
-        stored.startsWith(word) ||
-        (letters >= EDIT_MIN_LETTERS && Array.from(stored).length >= EDIT_MIN_LETTERS && withinOneEdit(word, stored)),
+        stored !== word &&
+        !stored.startsWith(word) &&
+        Array.from(stored).length >= EDIT_MIN_LETTERS &&
+        withinOneEdit(word, stored),
     );
   });
 }
