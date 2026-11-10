@@ -440,6 +440,17 @@ class SqlTx implements LearningStoreTx {
       .sort((a, b) => compareText(a.userId, b.userId) || compareText(a.kind, b.kind));
   }
 
+  async agentHasLearners(namespace: string, agentKey: string): Promise<boolean> {
+    if (holdsLoneSurrogate(namespace, agentKey)) return this.none(false);
+    const session = await this.db.all<Row>('SELECT 1 AS found FROM agentos_learning_sessions WHERE namespace = ? AND agent_key = ? LIMIT 1', [namespace, agentKey]);
+    if (session.length > 0) return true;
+    const head = await this.db.all<Row>(
+      'SELECT 1 AS found FROM agentos_learning_heads WHERE namespace = ? AND agent_key = ? AND user_id IS NOT NULL LIMIT 1',
+      [namespace, agentKey],
+    );
+    return head.length > 0;
+  }
+
   async isForgotten(hash: string): Promise<boolean> {
     if (holdsLoneSurrogate(hash)) return this.none(false);
     return Boolean(await this.db.get<Row>('SELECT hash FROM agentos_learning_forgotten WHERE hash = ?', [hash]));
@@ -523,6 +534,10 @@ export class SqlLearningStore extends TransactionalLearningStore {
 
   sessionRowsIn(namespace: string, agentKey: string, sessionId: string): Promise<SessionRow[]> {
     return this.transaction((tx) => tx.sessionRowsIn!(namespace, agentKey, sessionId));
+  }
+
+  agentHasLearners(namespace: string, agentKey: string): Promise<boolean> {
+    return this.transaction((tx) => tx.agentHasLearners!(namespace, agentKey));
   }
 
   /** Leaves the adapter open: it is the host's. */
