@@ -754,9 +754,10 @@ describe.skipIf(!URL)('LibraryIndex.searchGroups over PostgresVectorStore on Pos
     // 1,048,575; at 495 and 496 they take 1,049,600 and are refused. So one bound closes every cursor: 2,048 carried
     // words and the search's own 64 is the longest tsquery a statement ever reads.
     const scope: LibraryScope = { tenantId: 'org-cap', aclGroups: [TEAM] };
+    // Each word doubles both its letters, so no two of them are one edit apart and none is drawn for another.
     const wordsOf = (lead: string, bytes: number): string[] =>
-      Array.from({ length: 32 }, (_, at) => lead + letters[1 + (at >> 3)] + letters[1 + (at & 7)] + 'a'.repeat(bytes - 3));
-    const nearOf = (word: string): string[] => Array.from({ length: 64 }, (_, at) => word.slice(0, 3 + at) + 'x' + word.slice(3 + at));
+      Array.from({ length: 32 }, (_, at) => lead + letters[1 + (at >> 3)].repeat(2) + letters[1 + (at & 7)].repeat(2) + 'a'.repeat(bytes - 5));
+    const nearOf = (word: string): string[] => Array.from({ length: 64 }, (_, at) => word.slice(0, 5 + at) + 'x' + word.slice(5 + at));
     const caseOf = async (lead: string, bytes: number) => {
       const words = wordsOf(lead, bytes);
       const sources: LibrarySource[] = [0, 1, 2].map((at) => ({
@@ -771,6 +772,7 @@ describe.skipIf(!URL)('LibraryIndex.searchGroups over PostgresVectorStore on Pos
       const [page] = await run(search);
       expect(page, `${lead}: first page`).toMatchObject({ state: 'ok', total: 3, incomplete: false });
       expect(page.cursor).not.toBeNull();
+      expect(decode(page.cursor as string).expansion).toEqual(words.map(() => []));
       const expansion = words.map(nearOf);
       expect(new Set(expansion.flat()).size).toBe(2048);
       expect(new Set(expansion.flat().map((stored) => Buffer.byteLength(stored)))).toEqual(new Set([bytes + 1]));
@@ -791,8 +793,9 @@ describe.skipIf(!URL)('LibraryIndex.searchGroups over PostgresVectorStore on Pos
     // Eight query words of 2045 bytes, and 64 stored words one edit from each (an x added), 2046 bytes each: 512 in
     // all, the cap a word, and together a mebibyte and a little more with the query words' own two places in the
     // tsquery (each itself and as a prefix).
-    const words = Array.from('bcdefghi', (letter) => 'budget' + letter + 'a'.repeat(2038));
-    const nearOf = (word: string): string[] => Array.from({ length: 64 }, (_, at) => word.slice(0, 7 + at) + 'x' + word.slice(7 + at));
+    // Each word doubles its own letter, so no two of them are one edit apart and none is drawn for another.
+    const words = Array.from('bcdefghi', (letter) => 'budget' + letter + letter + 'a'.repeat(2037));
+    const nearOf = (word: string): string[] => Array.from({ length: 64 }, (_, at) => word.slice(0, 8 + at) + 'x' + word.slice(8 + at));
     const near = words.flatMap(nearOf);
     expect(new Set(near).size).toBe(512);
     expect(new Set(words.map((word) => Buffer.byteLength(word)))).toEqual(new Set([2045]));
