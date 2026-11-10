@@ -300,7 +300,7 @@ export interface LexicalGroupSearchOptions {
   /**
    * For each word, in order, the stored words one edit away that an earlier page of this search matched. With it the
    * store reads no stored word again and `oneEdit` is not read; a search hands back what the first page answered.
-   * Each stored word is at most 2047 bytes of UTF-8 and all of them, each with one byte more, at most 1048575 bytes,
+   * Each stored word is at most 2046 bytes of UTF-8 and all of them, each with one byte more, at most 1048575 bytes,
    * as one tsquery holds them.
    */
   expansion?: string[][];

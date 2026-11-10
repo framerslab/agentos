@@ -29,11 +29,12 @@ const NUMERIC_FRACTION_DIGITS_MAX = 16383;
 
 /**
  * The most bytes of a word of a tsquery, and the most bytes its words hold together, each with the one byte that
- * ends it: MAXSTRLEN and MAXSTRPOS in Postgres's src/include/tsearch/ts_type.h
+ * ends it, by MAXSTRLEN (2047) and MAXSTRPOS (1048575) in Postgres's src/include/tsearch/ts_type.h
  * (https://github.com/postgres/postgres/blob/REL_16_STABLE/src/include/tsearch/ts_type.h). A tsquery's text past
- * either fails to parse.
+ * either fails to parse. Releases before https://github.com/postgres/postgres/commit/1fc1b82b2f refuse a word of
+ * MAXSTRLEN bytes itself (`lenval >= MAXSTRLEN`), so a word is held to 2046 bytes, which every release reads.
  */
-const TSQUERY_WORD_BYTES_MAX = 2047;
+const TSQUERY_WORD_BYTES_MAX = 2046;
 const TSQUERY_WORDS_BYTES_MAX = 1048575;
 
 const utf8 = new TextEncoder();
@@ -94,9 +95,10 @@ export function isLexicalGroupRank(value: unknown): value is string {
 
 /**
  * Whether a value is a list for each query word of the stored words to widen it to that one tsquery holds: each word
- * a text that is not empty, holds no NUL and is at most 2047 bytes of UTF-8, and all of them together, each with one
- * byte more, at most 1048575 bytes. Every stored word of a passage is within the first bound, as a tsvector's words
- * have the same limit. The lists' number and their reach are the caller's to check.
+ * a text that is not empty, holds no NUL and is at most 2046 bytes of UTF-8, and all of them together, each with one
+ * byte more, at most 1048575 bytes. A tsvector holds a word of 2047 bytes, which a release before Postgres's commit
+ * 1fc1b82b2f will not read in a tsquery; a cursor carrying one is refused. The lists' number and their reach are the
+ * caller's to check.
  */
 export function isLexicalGroupExpansion(value: unknown): value is string[][] {
   if (!Array.isArray(value)) return false;

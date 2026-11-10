@@ -594,7 +594,7 @@ function cursorDecode(cursor: unknown): LibraryCursor {
  * Whether the stored words a cursor carries are words its search reaches: one list a word, at most `expansionMax`
  * long, and none at all without the one-edit rule; each stored word the same as its query word, begun by it, or one
  * edit from it where both hold four letters or more. A cursor therefore adds no word to a search. The words are held
- * first to what one tsquery holds (each at most 2047 bytes, all of them under a mebibyte), as a word begun by its query
+ * first to what one tsquery holds (each at most 2046 bytes, all of them under a mebibyte), as a word begun by its query
  * word reaches it at any length.
  */
 function reachesEveryWord(search: CheckedGroupSearch, expansion: string[][]): boolean {

@@ -676,22 +676,23 @@ describe.skipIf(!URL)('LibraryIndex.searchGroups over PostgresVectorStore on Pos
         expect(page.state, `${order}: ${rank.length}`).toBe('ok');
       }
     }
-    // A tsquery's word holds 2047 bytes (MAXSTRLEN in src/include/tsearch/ts_type.h); a word begun by the query word
-    // reaches it, so the bound is held apart from the reach, in bytes of UTF-8 and not in letters.
+    // A tsquery's word holds under MAXSTRLEN (2047, src/include/tsearch/ts_type.h) bytes on the Postgres CI runs, a
+    // release before commit 1fc1b82b2f; a word begun by the query word reaches it, so the bound is held apart from the
+    // reach, in bytes of UTF-8 and not in letters.
     const typo = { text: 'budget', typo: 'one-edit' as const, groups: [sessions], pageSize: 1 };
     const carried = await firstOf(typo);
     expect(carried.expansion).toHaveLength(1);
-    for (const word of ['budget' + 'a'.repeat(2042), 'budget' + 'é'.repeat(1021)]) {
+    for (const word of ['budget' + 'a'.repeat(2041), 'budget' + 'a'.repeat(2042), 'budget' + 'é'.repeat(1021)]) {
       await cursorRefused({ ...typo, cursor: encode({ ...carried, expansion: [[word]] }) }, `stored word of ${word.length} letters`);
     }
-    const [atWordLimit] = await run({ ...typo, cursor: encode({ ...carried, expansion: [['budget' + 'a'.repeat(2041)]] }) });
+    const [atWordLimit] = await run({ ...typo, cursor: encode({ ...carried, expansion: [['budget' + 'a'.repeat(2040)]] }) });
     expect(atWordLimit.state).toBe('ok');
     // The carried words of every query word are one tsquery's, whose words together hold under a mebibyte
-    // (MAXSTRPOS, the same header): 520 words of 2047 bytes, each within the limit, are refused together.
+    // (MAXSTRPOS, the same header): 520 words of 2046 bytes, each within the limit, are refused together.
     const wide = { ...typo, expansionMax: 600 };
     const wideCarried = await firstOf(wide);
-    const many = Array.from({ length: 520 }, (_, at) => `budget${String(at).padStart(3, '0')}${'a'.repeat(2038)}`);
-    expect(new Set(many.map((word) => word.length))).toEqual(new Set([2047]));
+    const many = Array.from({ length: 520 }, (_, at) => `budget${String(at).padStart(3, '0')}${'a'.repeat(2037)}`);
+    expect(new Set(many.map((word) => word.length))).toEqual(new Set([2046]));
     await cursorRefused({ ...wide, cursor: encode({ ...wideCarried, expansion: [many] }) }, '520 stored words');
   });
 

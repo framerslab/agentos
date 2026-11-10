@@ -255,7 +255,7 @@ function groupSearchOf(options: LexicalGroupSearchOptions): GroupSearch {
   if (new Set(words).size !== words.length) throw refused('a word is given twice');
   if (expansion !== undefined && !(isExpansion(expansion) && expansion.length === words.length)) {
     throw refused(
-      'the expansion must hold one list of stored words for each word, each word a text that is not empty, holds no NUL and is at most 2047 bytes of UTF-8, and all of them at most what one tsquery holds',
+      'the expansion must hold one list of stored words for each word, each word a text that is not empty, holds no NUL and is at most 2046 bytes of UTF-8, and all of them at most what one tsquery holds',
     );
   }
   if (oneEdit !== undefined && !(whole(oneEdit.minLength) && whole(oneEdit.max))) {
