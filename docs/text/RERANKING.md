@@ -14,6 +14,7 @@ import {
   LlmJudgeReranker,
 } from '@framers/agentos/cognition/rag/reranking';
 
+// chunks: RagRetrievedChunk[]; myLlmCall: (system, user, model?) => Promise<string>
 const service = new RerankerService({
   config: { providers: [{ providerId: 'local' }], defaultProviderId: 'local' },
 });
