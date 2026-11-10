@@ -30,9 +30,10 @@ import type {
   VectorDocument,
 } from '../../core/vector-store/IVectorStore.js';
 import {
-  LEXICAL_GROUP_INSTANT_FORM as INSTANT_FORM,
   LEXICAL_GROUP_RANK_FORM as RANK_FORM,
   LEXICAL_GROUP_WORDS_MAX as GROUP_WORDS_MAX,
+  isLexicalGroupInstant as isInstant,
+  isLexicalGroupSourceId as isSourceId,
 } from '../../core/vector-store/lexicalGroupForms.js';
 import { reciprocalRankFusion } from '../memory/retrieval/hybrid/reciprocalRankFusion.js';
 import { withinOneEdit } from '../rag/search/FuzzyIndex.js';
@@ -132,7 +133,10 @@ export interface LibrarySearch {
 export interface LibraryGroupItem {
   /** The source's id, as `indexSource` took it. */
   sourceId: string;
-  /** An ISO 8601 instant with its zone (`2026-03-01T09:30:00.000Z`), or null for an item with no date. */
+  /**
+   * An ISO 8601 instant with its zone (`2026-03-01T09:30:00.000Z`) that names a real day and time, to the microsecond
+   * at most, or null for an item with no date.
+   */
   date: string | null;
 }
 
@@ -470,13 +474,15 @@ function groupSearchOf(query: LibraryGroupSearch): CheckedGroupSearch {
     if (!Array.isArray(group.items)) throw refused(`the group ${group.id} needs its items`);
     const dates = new Map<string, string | null>();
     for (const item of group.items) {
-      if (item === null || typeof item !== 'object' || typeof item.sourceId !== 'string' || item.sourceId === '') {
-        throw refused(`each item of the group ${group.id} needs its sourceId`);
+      if (item === null || typeof item !== 'object' || !isSourceId(item.sourceId)) {
+        throw refused(`each item of the group ${group.id} needs its sourceId, a text that is not empty and holds no NUL`);
       }
       if (dates.has(item.sourceId)) throw refused(`the item ${item.sourceId} of the group ${group.id} is listed twice`);
       const date = item.date ?? null;
-      if (date !== null && !(typeof date === 'string' && INSTANT_FORM.test(date))) {
-        throw refused(`the date of the item ${item.sourceId} must be an ISO 8601 instant with its zone, or null`);
+      if (date !== null && !isInstant(date)) {
+        throw refused(
+          `the date of the item ${item.sourceId} must be an ISO 8601 instant with its zone that names a real day and time, to the microsecond at most, or null`,
+        );
       }
       dates.set(item.sourceId, date);
     }
@@ -608,15 +614,16 @@ function reachesEveryWord(search: CheckedGroupSearch, expansion: string[][]): bo
 
 /**
  * The place a cursor's key names in a page's order, or null when the key is not in the order's form: a rank and a
- * source id, after a date or null under the date order.
+ * source id that holds no NUL, after a date or null under the date order, the date a real instant as an item's must
+ * be. A key out of the form is refused here and never reaches a statement, which would fail on it.
  */
 function placeOf(key: Array<string | null>, dated: boolean): LexicalGroupKey | null {
   const [date, rank, sourceId] = dated ? key : [null, ...key];
-  if (key.length !== (dated ? 3 : 2) || typeof rank !== 'string' || !RANK_FORM.test(rank) || typeof sourceId !== 'string' || sourceId === '') {
+  if (key.length !== (dated ? 3 : 2) || typeof rank !== 'string' || !RANK_FORM.test(rank) || !isSourceId(sourceId)) {
     return null;
   }
   if (!dated) return { rank, sourceId };
-  return date === null || INSTANT_FORM.test(date) ? { date, rank, sourceId } : null;
+  return date === null || isInstant(date) ? { date, rank, sourceId } : null;
 }
 
 /**
@@ -865,8 +872,9 @@ export class LibraryIndex {
    * @throws When the scope has no tenant or no group, when no group is handed, when a part of the search is not in
    *   the form {@link LibraryGroupSearch} gives it, when the store has no `lexicalGroupSearch`, and a
    *   {@link LibraryCursorError} for a cursor the index did not make or that was made for another search: one whose
-   *   group is not handed, whose words, order, profile, part kinds, typo rule or expansion limit differ, or that
-   *   carries a stored word no word of the search reaches.
+   *   group is not handed, whose words, order, profile, part kinds, typo rule or expansion limit differ, that carries
+   *   a stored word no word of the search reaches, or whose key names no place in the order (a date that is not a real
+   *   instant, a source id holding NUL).
    */
   async searchGroups(query: LibraryGroupSearch): Promise<LibraryGroupAnswer> {
     const search = groupSearchOf(query);

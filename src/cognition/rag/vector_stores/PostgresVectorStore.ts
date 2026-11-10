@@ -49,9 +49,10 @@ import type {
 } from '../IVectorStore.js';
 import { sha256Hex } from '../../../core/utils/sha256.js';
 import {
-  LEXICAL_GROUP_INSTANT_FORM as INSTANT_FORM,
   LEXICAL_GROUP_RANK_FORM as RANK_FORM,
   LEXICAL_GROUP_WORDS_MAX as GROUP_WORDS_MAX,
+  isLexicalGroupInstant as isInstant,
+  isLexicalGroupSourceId as isSourceId,
 } from '../../../core/vector-store/lexicalGroupForms.js';
 import { withinOneEdit } from '../search/FuzzyIndex.js';
 
@@ -246,7 +247,6 @@ interface GroupSqlRow {
 function groupSearchOf(options: LexicalGroupSearchOptions): GroupSearch {
   const refused = (what: string): Error => new Error(`PostgresVectorStore.lexicalGroupSearch: ${what}.`);
   const whole = (value: unknown): boolean => typeof value === 'number' && Number.isSafeInteger(value) && value >= 1;
-  const instant = (value: unknown): boolean => typeof value === 'string' && INSTANT_FORM.test(value);
   const { words, expansion, oneEdit, group, profile, order, pageSize, after } = options;
   if (!Array.isArray(words) || words.length > GROUP_WORDS_MAX || words.some((word) => typeof word !== 'string' || !GROUP_WORD.test(word))) {
     throw refused(`the words must be at most ${GROUP_WORDS_MAX}, each a letter or a digit followed by letters, digits and combining marks`);
@@ -267,10 +267,12 @@ function groupSearchOf(options: LexicalGroupSearchOptions): GroupSearch {
   }
   if (!Array.isArray(group?.items)) throw refused('the group needs its items');
   const ids = group.items.map((item) => item.sourceId);
-  if (ids.some((id) => typeof id !== 'string' || id === '')) throw refused("an item's sourceId must be a text that is not empty");
+  if (ids.some((id) => !isSourceId(id))) throw refused("an item's sourceId must be a text that is not empty and holds no NUL");
   if (new Set(ids).size !== ids.length) throw refused('an item is listed twice');
   const dates = group.items.map((item) => item.date ?? null);
-  if (dates.some((date) => date !== null && !instant(date))) throw refused("an item's date must be an ISO 8601 instant with its zone, or null");
+  if (dates.some((date) => date !== null && !isInstant(date))) {
+    throw refused("an item's date must be an ISO 8601 instant with its zone that names a real day and time, to the microsecond at most, or null");
+  }
   if (group.partKinds !== undefined && !(Array.isArray(group.partKinds) && group.partKinds.every((kind) => typeof kind === 'string'))) {
     throw refused('partKinds must be a list of texts');
   }
@@ -286,11 +288,11 @@ function groupSearchOf(options: LexicalGroupSearchOptions): GroupSearch {
   if (order !== 'rank' && order !== 'date') throw refused("the order must be 'rank' or 'date'");
   if (!whole(pageSize)) throw refused(`pageSize must be a whole number from 1 to ${Number.MAX_SAFE_INTEGER}`);
   if (after !== undefined) {
-    if (typeof after.rank !== 'string' || !RANK_FORM.test(after.rank) || typeof after.sourceId !== 'string') {
-      throw refused("the key to start after needs a rank in decimal digits and a sourceId");
+    if (typeof after.rank !== 'string' || !RANK_FORM.test(after.rank) || !isSourceId(after.sourceId)) {
+      throw refused('the key to start after needs a rank in decimal digits and a sourceId that is not empty and holds no NUL');
     }
-    if (after.date !== undefined && after.date !== null && !instant(after.date)) {
-      throw refused("the date of the key to start after must be an ISO 8601 instant with its zone, or null");
+    if (after.date !== undefined && after.date !== null && !isInstant(after.date)) {
+      throw refused('the date of the key to start after must be an ISO 8601 instant with its zone that names a real day and time, or null');
     }
   }
   return {

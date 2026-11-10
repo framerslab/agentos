@@ -266,9 +266,12 @@ export type LexicalMatchKind = 'same' | 'start' | 'edit';
 
 /** One item of a group: the caller's source id and the instant the caller orders it by, or null. */
 export interface LexicalGroupItem {
-  /** The value of the passages' `sourceId` metadata key. */
+  /** The value of the passages' `sourceId` metadata key: a text that is not empty and holds no NUL. */
   sourceId: string;
-  /** An ISO 8601 instant with its zone (`2026-03-01T09:30:00.000Z`), or null for an item with no date. */
+  /**
+   * An ISO 8601 instant with its zone (`2026-03-01T09:30:00.000Z`) that names a real day and time, to the
+   * microsecond at most, or null for an item with no date.
+   */
   date: string | null;
 }
 
