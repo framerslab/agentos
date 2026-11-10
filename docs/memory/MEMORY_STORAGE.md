@@ -36,11 +36,12 @@ const tmp = await Memory.createSqlite();                  // brain-<random>.sqli
 
 ## Tables
 
-`Brain` creates 14 tables and the full-text index. Every table has a `brain_id` column, and the primary keys include it:
+`Brain` creates 15 tables and the full-text index. Every table has a `brain_id` column, and the primary keys include it:
 
 | Category | Tables |
 |---|---|
 | Memory traces | `memory_traces` · `memory_traces_fts` (FTS5 index) |
+| Conversation scopes | `memory_scopes` |
 | Knowledge graph | `knowledge_nodes` · `knowledge_edges` |
 | Documents | `documents` · `document_chunks` · `document_images` |
 | Conversations | `conversations` · `messages` |
@@ -121,9 +122,49 @@ The brain has no re-embedding method. After a change of embedding model, stored 
 
 ---
 
+## Conversation scopes
+
+The `'conversation'` scope holds what was said between one agent and one subject: a named user, a session that names no user, or the operator's own pages. A trace of the scope is filed under a key that `conversationScopeKey(agentId, subject)` builds:
+
+| Subject | Call | Key |
+|---|---|---|
+| The user `bob` | `conversationScopeKey('aria', { kind: 'user', id: 'bob' })` | `c1:u:4:aria:3:bob;` |
+| The session `bob` | `conversationScopeKey('aria', { kind: 'session', id: 'bob' })` | `c1:s:4:aria:3:bob;` |
+| The operator | `conversationScopeKey('aria', { kind: 'operator' })` | `c1:o:4:aria:0:;` |
+
+The form is `c1:<k>:<n>:<agentId>:<m>:<subjectId>;`. `c1` is the key's version, `<k>` is `u`, `s` or `o`, `<n>` and `<m>` are the lengths of the two ids in UTF-16 code units, and `;` closes the key. The ids are kept as given, with no encoding, case folding or Unicode normalisation, so `Alice` and `alice` are two subjects, and a user and a session of one id are two subjects. The lengths give every pair of ids one key, and no key is the start of another, whatever characters the ids hold. `parseConversationScopeKey(key)` returns `{ agentId, subject }` for a key the encoder wrote and `undefined` for any other string. An empty agent id, user id or session id is refused with a `TypeError`.
+
+A key is matched by equality only. `recall(query, { scope, scopeId })` and `recentTraces(sinceMs, { scope, scopeId })` select the scope id on the `scope_id` column, which the index `idx_memory_traces_brain_scope_id` serves, never by a prefix or a pattern and never by the metadata JSON.
+
+`remember(content, { scope: 'conversation', scopeId })` refuses a scope id that is not such a key with a `TypeError` and stores nothing. The input schemas of the model-facing tools `memory_add` and `memory_search` do not list the scope.
+
+### `memory_scopes`
+
+```sql
+CREATE TABLE IF NOT EXISTS memory_scopes (
+  brain_id        TEXT   NOT NULL,
+  scope           TEXT   NOT NULL,   -- 'conversation'
+  scope_id        TEXT   NOT NULL,   -- the key conversationScopeKey() built
+  kind            TEXT   NOT NULL,   -- user | session | operator, read from the key
+  agent_id        TEXT   NOT NULL,   -- the agent id, read from the key
+  created_at      BIGINT NOT NULL,   -- Unix ms: the scope's first trace
+  compiled_at     BIGINT,            -- Unix ms: the scope's last wiki compile; NULL before the first
+  rebuild_sources TEXT,              -- reserved
+  PRIMARY KEY (brain_id, scope, scope_id)
+);
+```
+
+Each conversation scope has one row, written with the scope's first trace: in one transaction with the trace where the adapter has transactions, and before the trace where it has none. So `remember()` never stores a conversation trace under a scope the table does not name, and a subject's scopes are found by their rows without reading the traces. A scope of any other kind (`user`, `thread`, `persona`, `organization`) has no row.
+
+`Memory.listScopes({ kind? })` returns the rows by scope id as `{ scopeId, kind, agentId, createdAt, compiledAt }`. An open, and an import that wrote traces, register each conversation scope that holds traces under a key and has no row, with the time of its oldest trace as `created_at`; traces filed under the scope with an id that is no key get no row. `Memory.deleteScope('conversation', key)` deletes the scope's row after its traces.
+
+The table's columns are `TEXT` and `BIGINT`, so SQLite and Postgres hold it alike.
+
+---
+
 ## Deleting and restoring traces
 
-`Memory.deleteScope(scope, scopeId, { turnUserId? })` and `Memory.deleteTraces(traceIds)` delete traces for good. The rows that name a trace go first, as the foreign keys require: its `retrieval_feedback` rows are deleted, and a `document_chunks` row it was filed from lets go of it (`trace_id` set to NULL) and keeps its text, which belongs to its document. The trace's knowledge-graph copy goes before its row: a graph that cannot delete the copies fails the call with every row kept, so a later call deletes them. Then the trace's row goes, with its memory-graph node and that node's edges, whichever facade on the Brain wrote them, a relation a host made to the node (`addRelation`) included. On SQLite the full-text index is rebuilt from the rows that remain. `deleteScope` takes every row filed under the scope (`scope_id`), soft-deleted rows included, and every knowledge-graph copy filed under it, a copy whose trace is already gone included (a graph that cannot delete those fails the call too, once the rows are gone, so a second call deletes the copies); with `turnUserId` it takes only the rows whose metadata names that user (`metadata.turnUserId`: a second user's trace on another user's session) and leaves the scope's other rows and copies. Before it reads, it files the brain's rows that hold `''` while their metadata names a scope id, as an open does, so a row a release older than the column wrote after the facade opened goes too. An empty scope id or `turnUserId` is refused with a `TypeError`, so a caller's missing id never deletes the traces filed under no scope id or widens a user's delete to the whole scope. Both return `{ deleted }`, the number of rows deleted, so a call made again counts none. A cognitive `MemoryStore` over the same Brain stops recalling a deleted trace at its next read of the rows, and its cache keeps the trace's words until its own `deleteScope` or `deleteTraces` runs.
+`Memory.deleteScope(scope, scopeId, { turnUserId? })` and `Memory.deleteTraces(traceIds)` delete traces for good. The rows that name a trace go first, as the foreign keys require: its `retrieval_feedback` rows are deleted, and a `document_chunks` row it was filed from lets go of it (`trace_id` set to NULL) and keeps its text, which belongs to its document. The trace's knowledge-graph copy goes before its row: a graph that cannot delete the copies fails the call with every row kept, so a later call deletes them. Then the trace's row goes, with its memory-graph node and that node's edges, whichever facade on the Brain wrote them, a relation a host made to the node (`addRelation`) included. On SQLite the full-text index is rebuilt from the rows that remain. `deleteScope` takes every row filed under the scope (`scope_id`), soft-deleted rows included, and every knowledge-graph copy filed under it, a copy whose trace is already gone included (a graph that cannot delete those fails the call too, once the rows are gone, so a second call deletes the copies); with `turnUserId` it takes only the rows whose metadata names that user (`metadata.turnUserId`: a second user's trace on another user's session) and leaves the scope's other rows and copies. `deleteScope('conversation', key)` also deletes the scope's row of `memory_scopes`; with `turnUserId` the row stays. Before it reads, it files the brain's rows that hold `''` while their metadata names a scope id, as an open does, so a row a release older than the column wrote after the facade opened goes too. An empty scope id or `turnUserId` is refused with a `TypeError`, so a caller's missing id never deletes the traces filed under no scope id or widens a user's delete to the whole scope. Both return `{ deleted }`, the number of rows deleted, so a call made again counts none. A cognitive `MemoryStore` over the same Brain stops recalling a deleted trace at its next read of the rows, and its cache keeps the trace's words until its own `deleteScope` or `deleteTraces` runs.
 
 `Memory.restoreTrace(traceId, snapshot)` writes back the row a snapshot holds, live again: content, tags, scope, scope id and metadata. `readTraceSnapshot(brain, brainId, traceId)` in `tracePersistence.ts`, exported with its `TraceSnapshot` type from the package root and `@framers/agentos/cognition/memory`, reads one, every column but the embedding, with the form its row was read in (`scopeIdForm`: `'encoded'` once a learning layer re-filed the brain, else `'plain'`); it reads the brain's record before and after the row, and reads the row again when a re-file committed between them. A snapshot read before the re-file is written under the encoded id, as the re-file wrote the row, since in a re-filed brain the plain form of an id that holds a `/` names a namespaced user (`team/ana` is user `ana` of namespace `team`); a snapshot of a row whose `scope_id` holds `''` while its metadata names a scope id (a release older than the column wrote it) is written under the encoded form of the metadata's id, in the column and the metadata, as the re-file files and moves such a row. On Postgres the restore of such a snapshot reads the brain's record under the lock a re-file takes, so a re-file another process makes meanwhile comes before it or after it. A row that still holds the snapshot's content keeps its embedding, so a `forget` taken back is recalled as before; a row that holds other content is written with no embedding, and the trace gets one when it is next written. The full-text index follows the restored words: SQLite rebuilds it, and Postgres re-indexes the restored row alone. A restore writes the row only, so a trace deleted for good gets back its row, not the memory-graph node or the HNSW entry its delete removed. `Memory.brainId` names the brain the facade reads and writes.
 
@@ -162,8 +203,9 @@ setInterval(async () => {
 3. Runs pending schema migrations.
 4. Creates the tables, then the full-text index (skipped when FTS5 is missing).
 5. Files the brain's traces that hold `scope_id` `''` while their metadata names a scope id, the rows a release older than the column wrote.
-6. Seeds `brain_meta` with `schema_version` and `created_at` when absent.
-7. Repairs the full-text index on SQLite when it is out of step with `memory_traces`.
+6. Registers each [conversation scope](#conversation-scopes) that holds traces and has no row in `memory_scopes`.
+7. Seeds `brain_meta` with `schema_version` and `created_at` when absent.
+8. Repairs the full-text index on SQLite when it is out of step with `memory_traces`.
 
 ```ts
 import { Brain } from '@framers/agentos';

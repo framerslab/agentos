@@ -300,7 +300,7 @@ export interface RememberOptions {
 
   /**
    * Visibility scope of the trace.
-   * @example 'thread' | 'user' | 'persona' | 'organization'
+   * @example 'thread' | 'user' | 'persona' | 'organization' | 'conversation'
    */
   scope?: string;
 
@@ -309,7 +309,9 @@ export interface RememberOptions {
    * under it, in the `scope_id` column and in its metadata, and a trace of the
    * same text, type and scope counts as its duplicate only under the same
    * scope id. A call that names none files the trace under `''`, whatever its
-   * `scope`.
+   * `scope`. Under the `'conversation'` scope it must be a key
+   * `conversationScopeKey` built: any other id is refused and nothing is
+   * stored.
    */
   scopeId?: string;
 
@@ -371,7 +373,8 @@ export interface RecallOptions {
   scope?: string;
 
   /**
-   * Filter by scope ID.
+   * Filter by scope ID: equality on the trace's `scope_id` column, never a
+   * prefix or a pattern.
    */
   scopeId?: string;
 

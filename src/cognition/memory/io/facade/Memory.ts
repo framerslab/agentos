@@ -37,6 +37,7 @@ async function _getOs(): Promise<typeof import('node:os')> {
   return import('node:os');
 }
 
+import type { StorageAdapter } from '@framers/sql-storage-adapter';
 import type { MemoryTrace } from '../../core/types.js';
 import type { CompileResult } from '../../../substrate/memory/wiki/types.js';
 import type { ITool } from '../../../../core/tools/ITool.js';
@@ -78,6 +79,8 @@ import {
   type TraceSnapshot,
 } from '../../retrieval/store/tracePersistence.js';
 import { fillScopeIds } from '../../retrieval/store/migrations/v2-to-v3.js';
+import { CONVERSATION_SCOPE, parseConversationScopeKey } from '../../retrieval/store/conversationScopeKey.js';
+import { ensureScopeRow, registerUnregisteredConversationScopes } from '../../retrieval/store/conversationScopes.js';
 import { refileBrainScopeIds, snapshotInEncodedForm, takeScopeIdFormLock } from '../../retrieval/store/scopeIdForm.js';
 import { SqlKnowledgeGraph } from '../../retrieval/store/SqlKnowledgeGraph.js';
 import { SqlMemoryGraph } from '../../retrieval/store/SqlMemoryGraph.js';
@@ -115,6 +118,37 @@ export interface ScoredTrace {
   trace: MemoryTrace;
   /** Composite relevance score; higher is better. */
   score: number;
+}
+
+/** One registered scope, as {@link Memory.listScopes} returns it. */
+export interface MemoryScopeRow {
+  /** The scope's id: for a conversation scope, the key `conversationScopeKey` built. */
+  scopeId: string;
+  /** The kind of subject the key names: `'user'`, `'session'` or `'operator'`. */
+  kind: string;
+  /** The agent id the key names. */
+  agentId: string;
+  /** When the scope's first trace was written, in Unix milliseconds. */
+  createdAt: number;
+  /** When the scope was last compiled into wiki pages, in Unix milliseconds; null before its first compile. */
+  compiledAt: number | null;
+}
+
+/** One new trace row: the values `Memory._insertTraceRow` writes. */
+interface NewTraceRow {
+  id: string;
+  type: string;
+  scope: string;
+  scopeId: string;
+  content: string;
+  /** The encoded vector, or null for a trace stored without one. */
+  embedding: Uint8Array | null;
+  strength: number;
+  createdAt: number;
+  /** The tags as JSON text. */
+  tags: string;
+  /** The metadata as JSON text. */
+  metadata: string;
 }
 
 /**
@@ -474,21 +508,35 @@ export class Memory {
    * hash for deduplication, and optional type/scope/tags metadata. If the
    * memory graph is available the trace is also added as a graph node.
    *
+   * A trace of the `'conversation'` scope is filed under a key `conversationScopeKey` built, and the scope's row
+   * of `memory_scopes` is written with its first trace: in one transaction where the adapter has them, and before
+   * the trace where it has none, so no conversation trace is stored under a scope the registry does not name.
+   *
    * @param content - The text content to remember.
    * @param options - Optional metadata (type, scope, tags, importance, etc.).
    * @returns The created MemoryTrace-like object.
+   * @throws TypeError when `options.scope` is `'conversation'` and `options.scopeId` is not a key
+   *   `conversationScopeKey` built; nothing is stored.
    */
   async remember(content: string, options?: RememberOptions): Promise<MemoryTrace> {
-    await this._initPromise;
-
-    const contentHash = await sha256(content);
     const type = options?.type ?? 'episodic';
     const scope = options?.scope ?? 'user';
     const scopeId = options?.scopeId ?? '';
+    const conversation = scope === CONVERSATION_SCOPE;
+    if (conversation && !parseConversationScopeKey(scopeId)) {
+      throw new TypeError(
+        "Memory.remember: a trace of the 'conversation' scope needs a scope id conversationScopeKey() built",
+      );
+    }
+    await this._initPromise;
+
+    const contentHash = await sha256(content);
     const declaredUser = options?.metadata?.turnUserId;
     const turnUserId = typeof declaredUser === 'string' ? declaredUser : '';
     const existing = await this._findExistingTraceByHash(contentHash, type, scope, scopeId, turnUserId);
     if (existing) {
+      // The text is stored already; its scope's registry row is written when it is missing.
+      if (conversation) await ensureScopeRow(this._brain, this._brain.brainId, scopeId, Date.now());
       return this._buildTrace(existing);
     }
 
@@ -514,27 +562,33 @@ export class Memory {
       }
     }
 
-    // Insert into memory_traces.
-    await this._brain.run(
-      `INSERT INTO memory_traces
-         (brain_id, id, type, scope, content, embedding, strength, created_at,
-          last_accessed, retrieval_count, tags, emotions, metadata, deleted, scope_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, ?, ?, ?, 0, ?)`,
-      [
-        this._brain.brainId,
-        id,
-        type,
-        scope,
-        content,
-        embeddingBlob, // Binary blob or null
-        importance,
-        now,
-        JSON.stringify(tags),
-        JSON.stringify({}),
-        metadata,
-        scopeId,
-      ],
-    );
+    // Insert into memory_traces: a conversation trace with its scope's registry row.
+    const newRow: NewTraceRow = {
+      id,
+      type,
+      scope,
+      scopeId,
+      content,
+      embedding: embeddingBlob,
+      strength: importance,
+      createdAt: now,
+      tags: JSON.stringify(tags),
+      metadata,
+    };
+    if (!conversation) {
+      await this._insertTraceRow(this._brain, newRow);
+    } else if (this._brain.adapter.capabilities?.has?.('transactions')) {
+      const brainId = this._brain.brainId;
+      await this._brain.transaction(async (trx) => {
+        await ensureScopeRow(trx, brainId, scopeId, now);
+        await this._insertTraceRow(trx, newRow);
+      });
+    } else {
+      // No transaction to hold the two: the registry row first, so a failure between them leaves a row with no
+      // trace and never a trace with no row.
+      await ensureScopeRow(this._brain, this._brain.brainId, scopeId, now);
+      await this._insertTraceRow(this._brain, newRow);
+    }
 
     // Sync FTS index. The external-content FTS table needs explicit insert.
     const { fts } = this._brain.features;
@@ -654,8 +708,8 @@ export class Memory {
       params.push(options.scope);
     }
     if (options?.scopeId) {
-      const { dialect } = this._brain.features;
-      conditions.push(`${dialect.jsonExtract('t.metadata', '$.scopeId')} = ?`);
+      // Equality on the trace's `scope_id` column, which its index serves; never a pattern or a prefix.
+      conditions.push('t.scope_id = ?');
       params.push(options.scopeId);
     }
     if (minStrength > 0) {
@@ -882,7 +936,8 @@ export class Memory {
    * Deletes every trace of one scope for good: the rows, their memory-graph nodes and knowledge-graph copies, and
    * the full-text index entries. With `turnUserId`, only the scope's traces whose metadata names that user, as the
    * second user a memory write on another user's session records, or among the contributors of a summary the
-   * rolling-summary sink filed. Account deletion calls it.
+   * rolling-summary sink filed. Account deletion calls it. A whole `'conversation'` scope loses its row of
+   * `memory_scopes` with its traces; a delete of one user's traces in it (`turnUserId`) keeps the row.
    *
    * It reads the rows by their `scope_id` column, after filing the brain's rows that hold `''` there while their
    * metadata names a scope id: a release older than the column writes those, to a Brain this facade holds open too.
@@ -913,6 +968,14 @@ export class Memory {
     // The per-trace deletes above took each trace's own copy. A copy filed under the scope whose trace is gone holds
     // the trace's words with no row to find them by: a graph that cannot delete it fails the call.
     if (only === undefined) await this._knowledgeGraph.deleteMemories({ scopes: [{ scope, scopeId }] });
+    // The scope holds nothing now: its registry row goes last, so a call that failed above is made again and finds it.
+    if (only === undefined && scope === CONVERSATION_SCOPE) {
+      await this._brain.run('DELETE FROM memory_scopes WHERE brain_id = ? AND scope = ? AND scope_id = ?', [
+        this._brain.brainId,
+        scope,
+        scopeId,
+      ]);
+    }
     return result;
   }
 
@@ -1019,6 +1082,47 @@ export class Memory {
   }
 
   /**
+   * The registered scopes of this facade's Brain, by scope id: each conversation scope gets its row of
+   * `memory_scopes` with its first trace ({@link remember}), and loses it when the scope is deleted
+   * ({@link deleteScope}).
+   *
+   * @param filter.scope - The scope to list. Defaults to `'conversation'`, the one scope that is registered.
+   * @param filter.kind - Only the scopes of one kind of subject: `'user'`, `'session'` or `'operator'`.
+   * @returns Each scope's id, the kind and agent id its key holds, when it was first written (Unix ms) and when it
+   *   was last compiled into wiki pages (Unix ms; null before its first compile).
+   */
+  async listScopes(filter?: { scope?: string; kind?: string }): Promise<MemoryScopeRow[]> {
+    await this._initPromise;
+    const conditions = ['brain_id = ?', 'scope = ?'];
+    const params: unknown[] = [this._brain.brainId, filter?.scope ?? CONVERSATION_SCOPE];
+    if (filter?.kind) {
+      conditions.push('kind = ?');
+      params.push(filter.kind);
+    }
+    const rows = await this._brain.all<{
+      scope_id: string;
+      kind: string;
+      agent_id: string;
+      created_at: number | string;
+      compiled_at: number | string | null;
+    }>(
+      `SELECT scope_id, kind, agent_id, created_at, compiled_at
+         FROM memory_scopes
+        WHERE ${conditions.join(' AND ')}
+        ORDER BY scope_id`,
+      params,
+    );
+    // A BIGINT column can come back as text (Postgres): every number is read through Number().
+    return rows.map((row) => ({
+      scopeId: row.scope_id,
+      kind: row.kind,
+      agentId: row.agent_id,
+      createdAt: Number(row.created_at),
+      compiledAt: row.compiled_at === null || row.compiled_at === undefined ? null : Number(row.compiled_at),
+    }));
+  }
+
+  /**
    * List traces created strictly after `sinceMs` (Unix-ms). Newest-first by
    * default; pass `order: 'asc'` for oldest-first (used by the wiki compiler to
    * drain the window in chronological batches).
@@ -1027,11 +1131,12 @@ export class Memory {
    * used by the wiki compiler to fold recent activity into pages.
    *
    * @param sinceMs - Exclusive lower bound on `created_at` (Unix ms). Use 0 for "all".
-   * @param options - Optional scope filter, result cap (default 200), and sort order.
+   * @param options - Optional scope filter, scope id filter (equality on the `scope_id` column), result cap
+   *   (default 200), and sort order.
    */
   async recentTraces(
     sinceMs: number,
-    options?: { limit?: number; scope?: string; order?: 'asc' | 'desc' },
+    options?: { limit?: number; scope?: string; scopeId?: string; order?: 'asc' | 'desc' },
   ): Promise<MemoryTrace[]> {
     await this._initPromise;
     const limit = options?.limit ?? 200;
@@ -1042,6 +1147,10 @@ export class Memory {
     if (options?.scope) {
       conditions.push('scope = ?');
       params.push(options.scope);
+    }
+    if (options?.scopeId) {
+      conditions.push('scope_id = ?');
+      params.push(options.scopeId);
     }
     params.push(limit);
 
@@ -1598,6 +1707,8 @@ export class Memory {
         await this._rebuildFtsIndex();
       }
       await this._rebuildHnswIndex();
+      // An importer writes trace rows itself: a conversation scope it filed gets its registry row here.
+      await registerUnregisteredConversationScopes(this._brain, this._brain.brainId);
     }
 
     return result;
@@ -1633,6 +1744,8 @@ export class Memory {
     if (result.imported > 0) {
       await this._rebuildFtsIndex();
       await this._rebuildHnswIndex();
+      // An importer writes trace rows itself: a conversation scope it filed gets its registry row here.
+      await registerUnregisteredConversationScopes(this._brain, this._brain.brainId);
     }
 
     return result;
@@ -1878,6 +1991,33 @@ export class Memory {
       updatedAt: row.created_at,
       isActive: row.deleted === 0,
     };
+  }
+
+  /**
+   * Inserts one trace row, live and never recalled, through `db`: the Brain, or the transaction that holds the
+   * row's other writes.
+   */
+  private async _insertTraceRow(db: Pick<StorageAdapter, 'run'>, row: NewTraceRow): Promise<void> {
+    await db.run(
+      `INSERT INTO memory_traces
+         (brain_id, id, type, scope, content, embedding, strength, created_at,
+          last_accessed, retrieval_count, tags, emotions, metadata, deleted, scope_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, ?, ?, ?, 0, ?)`,
+      [
+        this._brain.brainId,
+        row.id,
+        row.type,
+        row.scope,
+        row.content,
+        row.embedding, // Binary blob or null
+        row.strength,
+        row.createdAt,
+        row.tags,
+        JSON.stringify({}),
+        row.metadata,
+        row.scopeId,
+      ],
+    );
   }
 
   /**

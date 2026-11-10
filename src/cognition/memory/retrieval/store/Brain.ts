@@ -49,6 +49,7 @@ import {
 import { MigrationRunner, MIGRATIONS, LATEST_SCHEMA_VERSION } from './migrations/index.js';
 import { ensureScopeIdColumn, fillScopeIds, postgresIndexExists } from './migrations/v2-to-v3.js';
 import { retryLostCreate } from './migrations/lost-create.js';
+import { registerUnregisteredConversationScopes } from './conversationScopes.js';
 import { PORTABLE_TABLES, PORTABLE_TABLE_PRIMARY_KEYS } from './portable-tables.js';
 import { redactPostgresPassword } from './postgresPasswordRedaction.js';
 import { keyTraceCopies } from './SqlKnowledgeGraph.js';
@@ -554,6 +555,29 @@ CREATE INDEX IF NOT EXISTS idx_memory_traces_brain_type
   ON memory_traces (brain_id, type, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_memory_traces_brain_scope
   ON memory_traces (brain_id, scope);
+`;
+
+/**
+ * The registry of conversation scopes: one row a scope, written with the scope's first trace.
+ *
+ * Column notes:
+ * - `scope` is `'conversation'`; `scope_id` is the key `conversationScopeKey` built.
+ * - `kind` is `'user'`, `'session'` or `'operator'`, and `agent_id` the agent's id, both read from the key.
+ * - `created_at` and `compiled_at` are Unix milliseconds; `compiled_at` is NULL until the scope's first wiki compile.
+ * - `rebuild_sources` is a JSON array of trace ids, or NULL.
+ */
+const DDL_MEMORY_SCOPES = `
+CREATE TABLE IF NOT EXISTS memory_scopes (
+  brain_id        TEXT   NOT NULL,
+  scope           TEXT   NOT NULL,
+  scope_id        TEXT   NOT NULL,
+  kind            TEXT   NOT NULL,
+  agent_id        TEXT   NOT NULL,
+  created_at      BIGINT NOT NULL,
+  compiled_at     BIGINT,
+  rebuild_sources TEXT,
+  PRIMARY KEY (brain_id, scope, scope_id)
+);
 `;
 
 // FTS index DDL is now generated dynamically by features.fts.createIndex()
@@ -1083,8 +1107,9 @@ export class Brain {
    * 4. Run the pending schema migrations (idempotent; no-op for fresh DBs and the latest schema).
    * 5. Apply full DDL via _initSchema().
    * 6. File the brain's traces that hold `scope_id` `''` while their metadata names a scope id (`fillScopeIds`).
-   * 7. Seed brain_meta defaults.
-   * 8. Repair the full-text index (SQLite).
+   * 7. Register each conversation scope that holds traces and has no row in `memory_scopes`.
+   * 8. Seed brain_meta defaults.
+   * 9. Repair the full-text index (SQLite).
    */
   private static async _initialize(
     adapter: StorageAdapter,
@@ -1105,6 +1130,9 @@ export class Brain {
     // A release older than `scope_id` writes the column's default, '', to a brain at version 3 too, whose migration
     // never runs again.
     await fillScopeIds(adapter, brainId);
+    // A conversation trace another writer filed with no registry row (an import, an older file copied in) gets its
+    // scope's row here, so no scope holds traces the registry does not name.
+    await registerUnregisteredConversationScopes(adapter, brainId);
     await brain._seedMeta();
     await brain._repairFullTextIndex();
 
@@ -1203,6 +1231,7 @@ export class Brain {
     const ddlStatements = [
       DDL_BRAIN_META,
       DDL_MEMORY_TRACES,
+      DDL_MEMORY_SCOPES,
       DDL_KNOWLEDGE_NODES,
       DDL_KNOWLEDGE_EDGES,
       DDL_DOCUMENTS,

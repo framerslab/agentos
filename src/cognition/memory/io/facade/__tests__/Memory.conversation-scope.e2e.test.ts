@@ -13,7 +13,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { Memory } from '../Memory.js';
 import type { Brain } from '../../../retrieval/store/Brain.js';
-import type { MemoryTrace } from '../../../core/types.js';
 import { PORTABLE_TABLES } from '../../../retrieval/store/portable-tables.js';
 import { conversationScopeKey } from '../../../retrieval/store/conversationScopeKey.js';
 
@@ -22,17 +21,6 @@ const POSTGRES_URL = process.env.AGENTOS_TEST_POSTGRES_URL;
 type Store = 'sqlite' | 'postgres';
 const STORES: Store[] = POSTGRES_URL ? ['sqlite', 'postgres'] : ['sqlite'];
 
-/** The members this change adds to the facade, reached structurally until they exist. */
-interface ScopedMemory {
-  listScopes(filter?: { scope?: string; kind?: string }): Promise<
-    Array<{ scopeId: string; kind: string; agentId: string; createdAt: number; compiledAt: number | null }>
-  >;
-  recentTraces(
-    sinceMs: number,
-    options?: { limit?: number; scope?: string; scopeId?: string; order?: 'asc' | 'desc' },
-  ): Promise<MemoryTrace[]>;
-}
-const scoped = (memory: Memory): ScopedMemory => memory as unknown as ScopedMemory;
 const brainOf = (memory: Memory): Brain => (memory as unknown as { _brain: Brain })._brain;
 
 const dirs: string[] = [];
@@ -116,7 +104,7 @@ describe.each(STORES)('conversation scopes on %s', (store) => {
       ].sort((a, b) => (a.scope_id < b.scope_id ? -1 : 1)),
     );
 
-    const listed = await scoped(memory).listScopes();
+    const listed = await memory.listScopes();
     expect(listed.map((row) => row.scopeId).sort()).toEqual([A, B].sort());
     for (const row of listed) {
       expect(row.kind).toBe('user');
@@ -125,7 +113,7 @@ describe.each(STORES)('conversation scopes on %s', (store) => {
       expect(row.createdAt).toBeGreaterThan(0);
       expect(row.compiledAt).toBeNull();
     }
-    expect(await scoped(memory).listScopes({ kind: 'session' })).toEqual([]);
+    expect(await memory.listScopes({ kind: 'session' })).toEqual([]);
   });
 
   it('refuses a conversation trace whose scope id is not a key, and stores nothing', async () => {
@@ -161,15 +149,15 @@ describe.each(STORES)('conversation scopes on %s', (store) => {
     const recalled = await memory.recall('Zorblat', { scope: 'conversation', scopeId: A });
     expect(recalled.map((result) => result.trace.content)).toEqual(['Zorblat is my cat']);
 
-    const listed = await scoped(memory).recentTraces(0, { scope: 'conversation', scopeId: B });
+    const listed = await memory.recentTraces(0, { scope: 'conversation', scopeId: B });
     expect(contentsOf(listed)).toEqual(['Zorblat is my dog']);
 
     // One character away from alice's key: equality, never a prefix or a pattern.
     const near = conversationScopeKey('aria-1', { kind: 'user', id: 'alicf' });
     expect(await memory.recall('Zorblat', { scope: 'conversation', scopeId: near })).toEqual([]);
-    expect(await scoped(memory).recentTraces(0, { scope: 'conversation', scopeId: near })).toEqual([]);
+    expect(await memory.recentTraces(0, { scope: 'conversation', scopeId: near })).toEqual([]);
     expect(await memory.recall('Zorblat', { scope: 'conversation', scopeId: A.slice(0, -1) })).toEqual([]);
-    expect(await scoped(memory).recentTraces(0, { scope: 'conversation', scopeId: A.slice(0, -1) })).toEqual([]);
+    expect(await memory.recentTraces(0, { scope: 'conversation', scopeId: A.slice(0, -1) })).toEqual([]);
   });
 
   it('recalls by the column, not by the metadata', async () => {
@@ -194,7 +182,7 @@ describe.each(STORES)('conversation scopes on %s', (store) => {
     expect(await count(brain, 'SELECT count(*) AS n FROM memory_traces WHERE brain_id = ? AND scope_id = ?', [A])).toBe(0);
     expect((await scopeRows(brain)).map((row) => row.scope_id)).toEqual([B]);
     expect(await count(brain, 'SELECT count(*) AS n FROM memory_traces WHERE brain_id = ? AND scope_id = ?', [B])).toBe(1);
-    expect(contentsOf(await scoped(memory).recentTraces(0, { scope: 'conversation', scopeId: B }))).toEqual([
+    expect(contentsOf(await memory.recentTraces(0, { scope: 'conversation', scopeId: B }))).toEqual([
       'Bob plays cello.',
     ]);
   });
@@ -239,7 +227,7 @@ describe.each(STORES)('conversation scopes on %s', (store) => {
       expect(await scopeRows(second.brain)).toEqual([
         { scope_id: carol, kind: 'user', agent_id: 'aria-1', compiled_at: null },
       ]);
-      const listed = await scoped(second.memory).listScopes();
+      const listed = await second.memory.listScopes();
       expect(listed).toEqual([
         { scopeId: carol, kind: 'user', agentId: 'aria-1', createdAt: 1_700_000_000_000, compiledAt: null },
       ]);
