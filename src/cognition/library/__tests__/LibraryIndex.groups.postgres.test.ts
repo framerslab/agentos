@@ -11,76 +11,21 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { InMemoryVectorStore } from '../../rag/vector_stores/InMemoryVectorStore.js';
 import { PostgresVectorStore, type PgPoolLike } from '../../rag/vector_stores/PostgresVectorStore.js';
-import { LibraryIndex, type LibraryPassage, type LibraryScope, type LibrarySource } from '../LibraryIndex.js';
+import {
+  LibraryIndex,
+  type LibraryGroup,
+  type LibraryGroupItem,
+  type LibraryGroupResult,
+  type LibraryGroupSearch,
+  type LibraryPartKind,
+  type LibraryRankProfile,
+  type LibraryScope,
+  type LibrarySource,
+} from '../LibraryIndex.js';
 
 const URL = process.env.AGENTOS_TEST_POSTGRES_URL;
 const PREFIX = `lg${Date.now().toString(36)}_`;
 const TABLE = `${PREFIX}library`;
-
-/** One item of a group: the caller's source id and the date the caller orders by, or null. */
-interface LibraryGroupItem {
-  sourceId: string;
-  date: string | null;
-}
-/** The kinds a session's part passages carry in `partKind`. */
-type LibraryPartKind = 'transcript' | 'summary' | 'decisions' | 'action_items' | 'next_steps';
-/** One group the caller hands. */
-interface LibraryGroup {
-  id: string;
-  items: LibraryGroupItem[];
-  fingerprint: string;
-  partKinds?: LibraryPartKind[];
-}
-/** How an item ranks. */
-interface LibraryRankProfile {
-  fields: Record<string, number>;
-  fallback: string;
-  title?: 'passage' | 'metadata';
-}
-/** A grouped search. */
-interface LibraryGroupSearch {
-  text: string;
-  scope: LibraryScope;
-  groups: LibraryGroup[];
-  profile: LibraryRankProfile;
-  order?: 'rank' | 'date';
-  typo?: 'one-edit' | 'none';
-  expansionMax?: number;
-  pageSize: number;
-  cursor?: string;
-  signal?: AbortSignal;
-}
-/** One hit. */
-interface LibraryGroupHit {
-  passage: LibraryPassage;
-  sourceId: string;
-  field: string;
-  matchKind: 'same' | 'start' | 'edit' | 'none';
-  marks: Array<{ start: number; end: number }>;
-  at: number;
-  partKind: LibraryPartKind | null;
-  date: string | null;
-  anyWord: boolean;
-}
-/** One group's answer. */
-interface LibraryGroupResult {
-  id: string;
-  state: 'ok' | 'restart';
-  total: number;
-  incomplete: boolean;
-  cursor: string | null;
-  hits: LibraryGroupHit[];
-  anyWord: LibraryGroupHit[];
-}
-/** A grouped search's answer. */
-interface LibraryGroupAnswer {
-  groups: LibraryGroupResult[];
-}
-
-/** Runs a grouped search on an index. */
-function searchGroups(on: LibraryIndex, query: LibraryGroupSearch): Promise<LibraryGroupAnswer> {
-  return (on as unknown as { searchGroups(query: LibraryGroupSearch): Promise<LibraryGroupAnswer> }).searchGroups(query);
-}
 
 /** Three topic words and a constant, as the index's other suites embed. */
 async function embed(texts: string[]): Promise<number[][]> {
@@ -289,7 +234,7 @@ describe.skipIf(!URL)('LibraryIndex.searchGroups over PostgresVectorStore on Pos
     query: Partial<LibraryGroupSearch> & Pick<LibraryGroupSearch, 'text' | 'groups'>,
     on: LibraryIndex = index,
   ): Promise<LibraryGroupResult[]> {
-    return (await searchGroups(on, { scope: ANN, profile: PROFILE, pageSize: 10, ...query })).groups;
+    return (await on.searchGroups({ scope: ANN, profile: PROFILE, pageSize: 10, ...query })).groups;
   }
 
   /** Every page of one group's search, as the ids of each page's hits, following the cursor to its end. */
@@ -820,19 +765,21 @@ describe.skipIf(!URL)('LibraryIndex.searchGroups over PostgresVectorStore on Pos
 
     for (const group of [one, five]) {
       const size = group.items.length;
-      const typed = await measured(`${size} items, "lex2014" with one edit, first page`, { text: 'lex2014', typo: 'one-edit', groups: [group] });
+      // Ten a page: the smaller group holds seventeen items one edit from the word, the larger ninety-two.
+      const typed = await measured(`${size} items, "lex2014" with one edit, first page`, { text: 'lex2014', typo: 'one-edit', groups: [group], pageSize: 10 });
       const [found] = typed.groups;
       const expected = holders(group);
+      expect(expected.length).toBe(group === five ? 92 : 17);
       expect(found).toMatchObject({ total: expected.length, incomplete: false });
       // Level in rank, half a point each, so the ids decide, compared unit by unit.
-      expect(ids(found)).toEqual(expected.slice(0, 20));
+      expect(ids(found)).toEqual(expected.slice(0, 10));
       expect(found.hits.every((hit) => hit.matchKind === 'edit' && hit.passage.score === 0.5)).toBe(true);
       // The largest group's rare word stands after two thousand more frequent ones: every batch of them was read.
       const stored = group === five ? [...storedNear(group), 'lex2041'] : storedNear(group);
       expect(decode(found.cursor as string).expansion).toEqual([stored]);
       expect(typed.read.reduce((sum, statement) => sum + statement.rows, 0)).toBe(group === five ? 2001 : 2000);
-      const next = await measured(`${size} items, "lex2014" with one edit, second page`, { text: 'lex2014', typo: 'one-edit', groups: [group], cursor: found.cursor as string });
-      expect(ids(next.groups[0])).toEqual(expected.slice(20, 40));
+      const next = await measured(`${size} items, "lex2014" with one edit, second page`, { text: 'lex2014', typo: 'one-edit', groups: [group], pageSize: 10, cursor: found.cursor as string });
+      expect(ids(next.groups[0])).toEqual(expected.slice(10, 20));
       expect(next.read).toEqual([]);
       const listed = await measured(`${size} items, no word, first page`, { text: '', groups: [group] });
       expect(listed.groups[0].total).toBe(size);

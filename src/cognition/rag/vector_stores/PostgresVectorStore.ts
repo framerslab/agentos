@@ -1243,8 +1243,8 @@ export class PostgresVectorStore implements IVectorStore {
     const weights = bind(JSON.stringify(search.fields), 'jsonb');
     const fallback = bind(search.fallback, 'text');
     const limit = bind(search.pageSize + 1, 'int');
-    // Any word, by any of its three queries: what a passage must hold to count at all.
-    const anyStart = `to_tsquery(${config}, ${bind(starts.join(' | '), 'text')})`;
+    // Any word, by any of its three queries, each written as `q` writes it: what a passage must hold to count at all.
+    const anyStart = `to_tsquery(${config}, ${bind([...search.words, ...starts].join(' | '), 'text')})`;
     const allEdits = edits.filter((text) => text !== '').join(' | ');
     const anyWord = allEdits === '' ? anyStart : `(${anyStart} || ${bind(allEdits, 'tsquery')})`;
     const titled = search.titleField !== null;
