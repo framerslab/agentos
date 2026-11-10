@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -42,6 +42,7 @@ function fakeMemory() {
       return { id: `t${++n}` };
     },
     forget: async () => {},
+    deleteTraces: async () => ({ deleted: 0 }),
     attachWiki: (wiki: any) => {
       attached = wiki;
     },
@@ -214,12 +215,13 @@ describe('a compile goes on past a page the file system will not take', () => {
     }
   });
 
-  it('indexes a page whose file was written before the catalog failed', async () => {
+  it('indexes no page a compile wrote into the folder, whether or not its catalog write failed', async () => {
     const memory = await Memory.createSqlite(path.join(root, 'memory.sqlite'), {
       graph: false,
       selfImprove: false,
       decay: false,
     });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     try {
       // A folder where the catalog, index.md, goes: the page's file is written, then refreshing the catalog fails.
       fs.rmSync(path.join(memoryDir, 'index.md'));
@@ -240,10 +242,17 @@ describe('a compile goes on past a page the file system will not take', () => {
       expect(result.pagesWritten).toEqual([]);
       expect(result.conflicts).toEqual([{ pageId: 'concepts/kept', note: expect.stringContaining('write failed') }]);
       expect(fs.readFileSync(path.join(memoryDir, 'concepts', 'kept.md'), 'utf8')).toContain('Merged facts.');
-      // The page on disk is indexed all the same.
+      // The page on disk lists the traces it was compiled from, so it is no operator page: it is not indexed for
+      // recall. The operator's own page is.
       const traces = await memory.recentTraces(0, { limit: 50 });
-      expect(traces.some((t) => t.tags.includes('page:concepts/kept') && t.content.includes('Merged facts.'))).toBe(true);
+      expect(traces.some((t) => t.tags.includes('page:concepts/kept'))).toBe(false);
+      expect(traces.some((t) => t.content.includes('Merged facts.'))).toBe(false);
+      expect(traces.some((t) => t.tags.includes('page:page') && t.content.includes('Inside the wiki.'))).toBe(true);
+      // The attach went on past an index.md it could not refresh, and said so once.
+      const refused = warn.mock.calls.map((call) => String(call[0])).filter((line) => line.includes('index.md could not be refreshed'));
+      expect(refused).toHaveLength(1);
     } finally {
+      warn.mockRestore();
       await memory.close();
     }
   });

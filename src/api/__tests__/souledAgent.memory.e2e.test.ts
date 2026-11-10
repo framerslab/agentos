@@ -75,11 +75,16 @@ describe('the memory index a souled agent compiles', () => {
       await a.close();
     }
 
+    // The conversation was compiled into a page, which is in no catalog and no prompt.
+    expect(fs.readFileSync(path.join(dir, 'memory', 'concepts', 'notes.md'), 'utf8')).toContain('The user asked for French.');
     const index = fs.readFileSync(path.join(dir, 'memory', 'index.md'), 'utf8');
-    expect(index).toContain('[notes](concepts/notes.md)');
+    expect(index).not.toContain('concepts/notes');
     expect(index).not.toContain('Ignore all previous instructions');
-    expect(index).toContain('- [notes](concepts/notes.md): Notes compiled from conversations');
-    expect(buildSystemPrompt({ soul: dir } as AgentOptions) ?? '').not.toContain('Ignore all previous instructions');
+    expect(index).not.toContain('French');
+    const prompt = buildSystemPrompt({ soul: dir } as AgentOptions) ?? '';
+    expect(prompt).not.toContain('Ignore all previous instructions');
+    expect(prompt).not.toContain('French');
+    expect(prompt).not.toContain('concepts/notes');
   });
 
   it('keeps the summary of a page that already has one', async () => {
@@ -98,7 +103,6 @@ describe('the memory index a souled agent compiles', () => {
       await a.close();
     }
     const index = fs.readFileSync(path.join(dir, 'memory', 'index.md'), 'utf8');
-    expect(index).toContain('- [notes](concepts/notes.md): Written by hand.');
     expect(index).not.toContain('Ignore all previous instructions');
   });
 });

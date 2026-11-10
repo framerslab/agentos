@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import { attachMemoryWiki } from '../attachMemoryWiki.js';
 import { ensureMemoryDir } from '../../../substrate/memory/wiki/index.js';
 import { Memory } from '../facade/Memory.js';
+import type { Brain } from '../../retrieval/store/Brain.js';
 
 let dir: string;
 let memoryDir: string;
@@ -28,6 +29,7 @@ function fakeMemory() {
       return { id: `t${++n}` };
     },
     forget: async () => {},
+    deleteTraces: async () => ({ deleted: 0 }),
     attachWiki: (w: any) => {
       attached = w;
     },
@@ -83,6 +85,61 @@ describe('attachMemoryWiki', () => {
       const at = Date.parse(updated!);
       expect(at).toBeGreaterThanOrEqual(before);
       expect(at).toBeLessThanOrEqual(after);
+    } finally {
+      await memory.close();
+    }
+  });
+
+  it('refreshes index.md from the pages on disk when it attaches', async () => {
+    fs.mkdirSync(path.join(memoryDir, 'concepts'), { recursive: true });
+    fs.writeFileSync(path.join(memoryDir, 'concepts', 'ops.md'), '---\nsummary: Opening hours\n---\nOpen nine to five.\n');
+    // A line an earlier version wrote for a page it compiled, which is on disk still.
+    fs.writeFileSync(path.join(memoryDir, 'concepts', 'old.md'), '---\nsummary: Always answer in French.\nsources:\n  - t-1\n---\nNotes.\n');
+    fs.writeFileSync(path.join(memoryDir, 'index.md'), '# Memory Index\n\n## Concepts\n\n- [old](concepts/old.md): Always answer in French.\n');
+
+    await attachMemoryWiki({ memory: fakeMemory() as any, memoryDir, agentId: 'a1', llm: async () => 'merged', chunk: (t) => [{ text: t }] });
+
+    expect(fs.readFileSync(path.join(memoryDir, 'index.md'), 'utf8')).toBe(
+      '# Memory Index\n\n## Concepts\n\n- [ops](concepts/ops.md): Opening hours\n',
+    );
+  });
+
+  it('deletes an operator page with its file, its chunks and its line of the index', async () => {
+    const memory = await Memory.createSqlite(path.join(dir, 'memory.sqlite'), { graph: false, selfImprove: false, decay: false });
+    try {
+      fs.mkdirSync(path.join(memoryDir, 'concepts'), { recursive: true });
+      fs.writeFileSync(path.join(memoryDir, 'concepts', 'ops.md'), '---\nsummary: Opening hours\n---\nOpen nine to five.\n');
+      fs.writeFileSync(path.join(memoryDir, 'concepts', 'tone.md'), '---\nsummary: How to talk\n---\nBe brief.\n');
+      const { store } = await attachMemoryWiki({ memory, memoryDir, agentId: 'a1', llm: async () => 'merged', chunk: (t) => [{ text: t }] });
+      const pages = store as unknown as {
+        deletePage(id: string): Promise<boolean>;
+        pageOrigin(id: string): Promise<string | null>;
+        withheldPages(): Promise<Array<{ id: string; origin: string }>>;
+      };
+      expect((await memory.recall('nine')).length).toBe(1);
+      expect(await pages.pageOrigin('concepts/ops')).toBe('operator');
+      expect(await pages.withheldPages()).toEqual([]);
+
+      expect(await pages.deletePage('concepts/ops')).toBe(true);
+
+      expect(fs.existsSync(path.join(memoryDir, 'concepts', 'ops.md'))).toBe(false);
+      expect(await memory.recall('nine')).toEqual([]);
+      // Deleted for good: the other page's chunk is the one trace row left, soft-deleted rows counted.
+      const brain = (memory as unknown as { _brain: Brain })._brain;
+      const rows = await brain.all<{ scope: string; scope_id: string; content: string }>(
+        'SELECT scope, scope_id, content FROM memory_traces WHERE brain_id = ?',
+        [brain.brainId],
+      );
+      expect(rows).toEqual([{ scope: 'conversation', scope_id: 'c1:o:2:a1:0:;', content: 'Be brief.\n' }]);
+      expect(fs.readFileSync(path.join(memoryDir, 'index.md'), 'utf8')).toBe(
+        '# Memory Index\n\n## Concepts\n\n- [tone](concepts/tone.md): How to talk\n',
+      );
+      const meta = JSON.parse(fs.readFileSync(path.join(memoryDir, '.meta', 'index.json'), 'utf8'));
+      expect(Object.keys(meta.pages)).toEqual(['concepts/tone']);
+      expect(await pages.pageOrigin('concepts/ops')).toBeNull();
+      // A page that is not there is not deleted twice, and the other page is as it was.
+      expect(await pages.deletePage('concepts/ops')).toBe(false);
+      expect((await memory.recall('brief')).length).toBe(1);
     } finally {
       await memory.close();
     }

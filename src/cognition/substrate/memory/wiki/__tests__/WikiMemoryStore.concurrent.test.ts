@@ -30,6 +30,7 @@ import { ensureMemoryDir } from '../migrateMemoryMd.js';
 const noopPort = {
   remember: async () => ({ id: 'x' }),
   forget: async () => {},
+  deleteTraces: async () => ({ deleted: 0 }),
   chunk: (t: string) => [{ text: t }],
 };
 const page = (id: string, summary: string) => ({ id, type: 'concept' as const, summary, updated: '', sources: [], body: 'b', links: [] });
