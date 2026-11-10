@@ -186,10 +186,15 @@ export function validateSoulFrontmatter(data: Record<string, unknown>, source = 
   for (const field of OBJECT_FIELDS) {
     if (out[field] !== undefined && !isMapping(out[field])) refuse(field, 'an object');
   }
-  const trace = out.reasoningTrace as Record<string, unknown> | undefined;
-  for (const member of ['maxEntries', 'maxMessageLength']) {
-    const value = trace?.[member];
-    if (value !== undefined && value !== null && typeof value !== 'number') refuse(`reasoningTrace.${member}`, 'a number');
+  if (isMapping(out.reasoningTrace)) {
+    // A member set to null (an empty YAML value) counts as not set, as a declared field does.
+    const trace: Record<string, unknown> = { ...out.reasoningTrace };
+    for (const member of ['maxEntries', 'maxMessageLength']) {
+      const value = trace[member];
+      if (value === null) delete trace[member];
+      else if (value !== undefined && !(typeof value === 'number' && Number.isFinite(value))) refuse(`reasoningTrace.${member}`, 'a finite number');
+    }
+    out.reasoningTrace = trace;
   }
   const hexaco = out.hexaco;
   if (hexaco !== undefined) {
