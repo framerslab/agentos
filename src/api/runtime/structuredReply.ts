@@ -165,10 +165,12 @@ export function resolveStructuredReply(spec: StructuredReplySpec | undefined | n
 }
 
 function checkWithZod(value: unknown, schema: ZodType): StructuredCheck {
-  let parsed = schema.safeParse(value);
+  // A strict json_schema hop makes every optional property nullable, so the model writes `null` for one it leaves out.
+  const candidate = dropNullsForOptionalFields(value, schema);
+  let parsed = schema.safeParse(candidate);
   if (!parsed.success) {
-    const repaired = repairStringEncodedContainers(value, parsed.error);
-    if (repaired.repaired) parsed = schema.safeParse(repaired.value);
+    const repaired = repairStringEncodedContainers(candidate, parsed.error);
+    if (repaired.repaired) parsed = schema.safeParse(dropNullsForOptionalFields(repaired.value, schema));
   }
   if (parsed.success) return { ok: true, value: parsed.data };
   return { ok: false, issues: summarizeZodErrors(parsed.error).split('\n'), value };
@@ -467,6 +469,152 @@ export function repairEnumCasing(
     }
   }
   return { value: root, repaired: true };
+}
+
+/** Deepest schema nesting {@link dropNullsForOptionalFields} walks; a deeper value is left as it is. */
+const MAX_NULL_DROP_DEPTH = 64;
+
+/** A Zod schema's definition: `_zod.def` in Zod 4, `_def` otherwise. */
+function zodDefinition(schema: unknown): Record<string, unknown> | undefined {
+  const node = schema as { _zod?: { def?: Record<string, unknown> }; _def?: Record<string, unknown> } | null | undefined;
+  return node?._zod?.def ?? node?._def;
+}
+
+/** `schema.safeParse(value).success`, false when the parse throws (an async refinement, say). */
+function parsesAs(schema: ZodType, value: unknown): boolean {
+  try {
+    return schema.safeParse(value).success;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Removes every `null` the schema would refuse where it takes the property's absence: a property whose schema is
+ * optional (`.optional()`, `.default()`, `.prefault()`) and does not accept `null`. Returns the value itself when
+ * nothing is removed, else a copy with the removals; the input is never changed.
+ *
+ * OpenAI's strict structured outputs (and OpenRouter's, which forwards them) take no optional property: every property
+ * of every object must be required. `makeStrictJsonSchema` makes each optional property nullable to fit, so a model
+ * writes `null` for a property the caller's schema leaves out, and the caller's schema refuses that `null`
+ * (`expected string, received null`). Read before the schema checks a reply, on every path whose payload the strict
+ * builder can make: generateObject (its primary and each fallback leg), `session.send` on both runtimes and the GMI's
+ * structured turn over the completion gateway. A `null` the schema accepts (a `.nullable()` property, optional or not)
+ * stays, as does every key the schema does not name.
+ *
+ * Walks objects, arrays, tuples, records, intersections and the wrappers that read the same JSON value as their inner
+ * schema. For a union, a value one member takes as it stands is left alone; otherwise the first member that takes the
+ * value with its nulls removed decides.
+ *
+ * @param value - The parsed reply.
+ * @param schema - The caller's Zod schema.
+ * @returns The reply with those nulls removed.
+ */
+export function dropNullsForOptionalFields(value: unknown, schema: ZodType): unknown {
+  return dropNullsAt(value, schema, 0);
+}
+
+function dropNullsAt(value: unknown, schema: ZodType, depth: number): unknown {
+  if (value === null || typeof value !== 'object' || depth > MAX_NULL_DROP_DEPTH) return value;
+  const def = zodDefinition(schema);
+  if (!def) return value;
+  const next = depth + 1;
+  switch (def.type) {
+    case 'optional':
+    case 'nullable':
+    case 'default':
+    case 'prefault':
+    case 'readonly':
+    case 'catch':
+    case 'nonoptional':
+      return dropNullsAt(value, def.innerType as ZodType, next);
+    case 'pipe':
+      // The reply is checked against the pipe's input schema first.
+      return dropNullsAt(value, def.in as ZodType, next);
+    case 'lazy':
+      return typeof def.getter === 'function' ? dropNullsAt(value, (def.getter as () => ZodType)(), next) : value;
+    case 'object': {
+      const shape = def.shape as Record<string, ZodType> | undefined;
+      if (Array.isArray(value) || !shape || typeof shape !== 'object') return value;
+      const source = value as Record<string, unknown>;
+      let out: Record<string, unknown> | undefined;
+      for (const key of Object.keys(source)) {
+        if (!Object.prototype.hasOwnProperty.call(shape, key)) continue;
+        const field = shape[key];
+        const current = source[key];
+        if (current === null) {
+          if (parsesAs(field, undefined) && !parsesAs(field, null)) {
+            out ??= { ...source };
+            delete out[key];
+          }
+          continue;
+        }
+        const cleaned = dropNullsAt(current, field, next);
+        if (cleaned !== current) {
+          out ??= { ...source };
+          setOwn(out, key, cleaned);
+        }
+      }
+      return out ?? value;
+    }
+    case 'array': {
+      if (!Array.isArray(value)) return value;
+      return mapChanged(value, (item) => dropNullsAt(item, def.element as ZodType, next));
+    }
+    case 'tuple': {
+      if (!Array.isArray(value)) return value;
+      const items = (def.items as ZodType[] | undefined) ?? [];
+      const rest = def.rest as ZodType | undefined;
+      return mapChanged(value, (item, i) => {
+        const member = i < items.length ? items[i] : rest;
+        return member ? dropNullsAt(item, member, next) : item;
+      });
+    }
+    case 'record': {
+      if (Array.isArray(value)) return value;
+      const source = value as Record<string, unknown>;
+      let out: Record<string, unknown> | undefined;
+      for (const key of Object.keys(source)) {
+        const cleaned = dropNullsAt(source[key], def.valueType as ZodType, next);
+        if (cleaned !== source[key]) {
+          out ??= { ...source };
+          setOwn(out, key, cleaned);
+        }
+      }
+      return out ?? value;
+    }
+    case 'intersection':
+      return dropNullsAt(dropNullsAt(value, def.left as ZodType, next), def.right as ZodType, next);
+    case 'union': {
+      const options = (def.options as ZodType[] | undefined) ?? [];
+      if (options.some((option) => parsesAs(option, value))) return value;
+      for (const option of options) {
+        const cleaned = dropNullsAt(value, option, next);
+        if (cleaned !== value && parsesAs(option, cleaned)) return cleaned;
+      }
+      return value;
+    }
+    default:
+      return value;
+  }
+}
+
+/** Sets an own data property, so a `__proto__` key from `JSON.parse` stays a key and never reaches the prototype. */
+function setOwn(target: Record<string, unknown>, key: string, value: unknown): void {
+  Object.defineProperty(target, key, { value, enumerable: true, writable: true, configurable: true });
+}
+
+/** The array itself when `map` returns every item unchanged, else a copy with the changed items. */
+function mapChanged(items: unknown[], map: (item: unknown, index: number) => unknown): unknown[] {
+  let out: unknown[] | undefined;
+  items.forEach((item, i) => {
+    const mapped = map(item, i);
+    if (mapped !== item) {
+      out ??= [...items];
+      out[i] = mapped;
+    }
+  });
+  return out ?? items;
 }
 
 export const MAX_FEEDBACK_BAD_RESPONSE_CHARS = 500;

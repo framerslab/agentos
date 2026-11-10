@@ -1,7 +1,8 @@
 /**
  * @fileoverview Defines the contracts for pluggable reranker providers in AgentOS.
- * Rerankers use cross-encoder models to re-score retrieved documents for improved
- * relevance ranking after initial bi-encoder retrieval.
+ * A reranker re-scores retrieved documents against the query after the first retrieval.
+ * The built-in providers are a local cross-encoder (`local`), Cohere's rerank API (`cohere`)
+ * and an LLM judge (`llm-judge`); a host can register its own.
  *
  * @module backend/agentos/rag/reranking/IRerankerService
  */
@@ -118,9 +119,10 @@ export interface RerankerProviderConfig {
 /**
  * Contract for reranker provider implementations.
  *
- * Rerankers take a query and a set of documents, then use a cross-encoder
- * model to produce relevance scores that typically outperform bi-encoder
- * similarity scores for ranking quality.
+ * A provider takes a query and a set of documents and answers them with
+ * relevance scores, best first. How it scores is its own: a cross-encoder
+ * model (`LocalCrossEncoderReranker`, `CohereReranker`), a language model
+ * (`LlmJudgeReranker`) or anything a host writes.
  *
  * @example
  * ```typescript

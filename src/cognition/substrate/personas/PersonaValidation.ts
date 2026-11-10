@@ -9,9 +9,15 @@
  *  - Surface softer warnings (overly long system prompt, voice config without audio modality).
  *  - Offer proactive suggestions that improve quality (e.g., recommend cost strategy if omitted).
  *  - Remain side-effect free and pure: callers can run in CI, authoring tools, or runtime gates.
+ *
+ * Limit: `invalid_metaprompts` for a `metaPrompts` the sentiment presets replaced at load is read from a module
+ * record keyed by the normalized definition's object identity (`replacedMetaPromptsShape`). A normalized persona
+ * that went through a JSON round trip or a spread before `validatePersona` is a new object without that record, so
+ * it is not reported. Validate the raw input in that case, or copy definitions with `clonePersonaDefinition`.
  */
 import { REASONING_TRACE_MAX_ENTRIES_CEILING, REASONING_TRACE_MAX_MESSAGE_LENGTH_CEILING, REASONING_TRACE_MIN_ENTRIES, toJsonSafe } from '../reasoningTraceLimits';
 import { IPersonaDefinition } from './IPersonaDefinition';
+import { replacedMetaPromptsShape } from './personaNormalization';
 import { GMIEventType } from '../GMIEvent.js';
 
 /** Classification of validation issue severity. */
@@ -252,6 +258,25 @@ export async function validatePersona(persona: IPersonaDefinition, opts: Persona
         add('warning', 'rag_summarization_method_missing', 'RAG ingestion summarization enabled but no method provided.', 'memoryConfig.ragConfig.ingestionProcessing.summarization.method');
       }
     }
+  }
+
+  // Sentiment presets. Only an array is merged into the metaprompts, so any
+  // other value, `null` included, loads without its presets.
+  const sentimentPresets = persona.sentimentTracking?.presets as unknown;
+  if (sentimentPresets !== undefined && !Array.isArray(sentimentPresets)) {
+    const shown = sentimentPresets === null ? 'null' : typeof sentimentPresets;
+    add('warning', 'invalid_sentiment_presets', `Field 'sentimentTracking.presets' is ${shown}; it must be an array of preset names, so no preset metaprompts are merged.`, 'sentimentTracking.presets');
+  }
+
+  // A non-array `metaPrompts` is reported whether it is still on the persona or the sentiment presets replaced it at
+  // load, so strict mode can block a persona whose own metaprompt was dropped.
+  const replacedShape = replacedMetaPromptsShape(persona);
+  if (persona.metaPrompts !== undefined && !Array.isArray(persona.metaPrompts)) {
+    const value = persona.metaPrompts as unknown;
+    const shown = value === null ? 'null' : typeof value;
+    add('warning', 'invalid_metaprompts', `Field 'metaPrompts' is ${shown}; it must be an array of metaprompt definitions.`, 'metaPrompts');
+  } else if (replacedShape !== undefined) {
+    add('warning', 'invalid_metaprompts', `Field 'metaPrompts' was ${replacedShape} as supplied; it must be an array of metaprompt definitions, so it was dropped and only the sentiment preset metaprompts were loaded.`, 'metaPrompts');
   }
 
   // Metaprompt triggers. Persona JSON is cast rather than type-checked, so a

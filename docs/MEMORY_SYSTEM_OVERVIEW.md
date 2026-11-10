@@ -1,17 +1,17 @@
 ---
 title: 'Memory System Overview'
 sidebar_position: 1
-description: 'How AgentOS memory works end-to-end — classifier-driven dispatch, BM25 + dense + Cohere rerank, Ebbinghaus decay, consolidation — and how each piece earned its place on the 85.6% LongMemEval-S / 70.2% LongMemEval-M result.'
+description: 'How AgentOS memory works end-to-end — classifier-driven dispatch, BM25 + dense + an optional reranker (a local cross-encoder, Cohere or an LLM judge), Ebbinghaus decay, consolidation — and how each piece earned its place on the 85.6% LongMemEval-S / 70.2% LongMemEval-M result.'
 keywords: [agentos memory, llm memory architecture, longmemeval, cognitive memory, bm25 dense rerank, cohere rerank, ebbinghaus decay, sql storage adapter, agent memory benchmark, hybrid retrieval]
 ---
 
-> A study-grade walkthrough of the AgentOS memory stack: ingest, recall, read, decay, consolidation, multimodal, the classifier-driven dispatch pipeline, the Cohere neural rerank, the LLM-as-judge orchestration tiers, and the path from "embed everything" to **85.6% on LongMemEval-S at $0.0090 per correct** with full provenance.
+> A study-grade walkthrough of the AgentOS memory stack: ingest, recall, read, decay, consolidation, multimodal, the classifier-driven dispatch pipeline, the optional rerank pass (a local cross-encoder, Cohere or an LLM judge; Cohere rerank-v3.5 in the benchmark runs), the LLM-as-judge orchestration tiers, and the path from "embed everything" to **85.6% on LongMemEval-S at $0.0090 per correct** with full provenance.
 
 ## TL;DR
 
 AgentOS memory composes six operations per turn, and the central design decision is *which* of them run on a given query.
 
-Up to three classifier calls per query: the QueryClassifier gate when the host runs it, the MemoryRouter's and the ReadRouter's. A hybrid retrieval pipeline: BM25 + dense retrieval, fused by rank, with an optional reranker (Cohere rerank-v3.5 in the benchmark runs). A six-signal cognitive composite score on every dense hit. Ebbinghaus decay applied whenever a trace's strength is read. A consolidation pass that prunes, merges, and re-strengthens traces. Underneath, a portable SQL brain — [`@framers/sql-storage-adapter`](https://www.npmjs.com/package/@framers/sql-storage-adapter) — that runs on SQLite (better-sqlite3), Postgres (pg + pgvector), IndexedDB (sql.js, browser/PWA), Capacitor SQLite (iOS/Android), Electron IPC, or in-memory, without a callsite change.
+Up to three classifier calls per query: the QueryClassifier gate when the host runs it, the MemoryRouter's and the ReadRouter's. A hybrid retrieval pipeline: BM25 + dense retrieval, fused by rank, with an optional reranker: a local cross-encoder, Cohere or an LLM judge ([Reranking](./text/RERANKING.md)); the benchmark runs used Cohere rerank-v3.5. A six-signal cognitive composite score on every dense hit. Ebbinghaus decay applied whenever a trace's strength is read. A consolidation pass that prunes, merges, and re-strengthens traces. Underneath, a portable SQL brain — [`@framers/sql-storage-adapter`](https://www.npmjs.com/package/@framers/sql-storage-adapter) — that runs on SQLite (better-sqlite3), Postgres (pg + pgvector), IndexedDB (sql.js, browser/PWA), Capacitor SQLite (iOS/Android), Electron IPC, or in-memory, without a callsite change.
 
 Same code on every storage backend, one set of benchmarks: **85.6% on LongMemEval-S at $0.0090 per correct**, **70.2% on LongMemEval-M**.
 
@@ -46,7 +46,7 @@ If a term in the doc below sounds new, here's where it plugs in:
 |---|---|---|
 | **BM25** | lexical leg of canonical-hybrid | `HybridRetriever`'s own in-memory `BM25Index`, which the caller fills (`hybrid.bm25.addDocument()`) |
 | **FTS5 / tsvector** | the SQL brain's full-text index over `memory_traces` | the adapter's `IFullTextSearch`; the `memory_search` tool queries it, and the add, update and merge paths keep it in sync |
-| **Cohere rerank-v3.5** | cross-encoder rerank pass after RRF merge | the retrieval signal that moved accuracy most in the benchmark runs; v4.0-pro tested and dropped |
+| **Cohere rerank-v3.5** | the cross-encoder the benchmark runs used for the rerank pass after RRF merge; the pass takes any [reranker provider](./text/RERANKING.md) | the retrieval signal that moved accuracy most in the benchmark runs; v4.0-pro tested and dropped |
 | **HyDE** | hypothesis-then-embed retrieval mode | optional retrieval augmentation; on for M, off for S |
 | **Six-signal composite** | the cognitive memory layer's scorer on top of similarity | encoding strength, recency, mood, graph, importance, similarity |
 | **Ebbinghaus decay** | the forgetting curve that ages every trace | runs at retrieve time; consolidation prunes traces below threshold |
@@ -387,7 +387,7 @@ Query
 ### Why each retrieval signal earns its place
 
 - **BM25 + dense embedding fusion**: BM25 catches rare terms and exact matches that dense embeddings miss; dense embeddings catch paraphrase-rich and multi-hop bridges that BM25 misses. RRF (Reciprocal Rank Fusion) merges the two ranked lists by rank, so their score scales need not match.
-- **Cohere rerank-v3.5 cross-encoder**: the cross-encoder reads (query, candidate) jointly and reranks the merged candidate pool. In the benchmark runs it moved accuracy more than any other signal: without it, top-K from BM25+dense alone misses bridge sessions and gets diluted by topically adjacent but irrelevant chunks. **rerank-v4.0-pro was tested at full N=500 and regresses 1.0 pp at point estimate while costing more per call** (see Negative Findings below).
+- **Cross-encoder rerank (Cohere rerank-v3.5 in the benchmark runs)**: the cross-encoder reads (query, candidate) jointly and reranks the merged candidate pool. The retriever takes a `RerankerService`, so the same pass runs on the local Transformers.js cross-encoder, Cohere or an LLM judge ([Reranking](./text/RERANKING.md#choosing-a-provider)). In the benchmark runs it moved accuracy more than any other signal: without it, top-K from BM25+dense alone misses bridge sessions and gets diluted by topically adjacent but irrelevant chunks. **rerank-v4.0-pro was tested at full N=500 and regresses 1.0 pp at point estimate while costing more per call** (see Negative Findings below).
 - **Six-signal composite**: the dense side scores each hit on five signals besides similarity. Strength is the trace's encoding strength after Ebbinghaus decay. Recency favors traces accessed within about a day. Emotional congruence favors traces whose valence matches the current mood. Graph activation comes from spreading activation over the memory graph (0 without one). Importance is the trace's provenance confidence, scaled to 0.5–1.
 
 The composite's weights are fixed defaults ([Six-signal retrieval scoring](#six-signal-retrieval-scoring)); a recall's `scoringWeights` option replaces them for that call. Personality does not change them.
@@ -762,7 +762,7 @@ For readers who want to trace the architecture into code:
 | Eight cognitive mechanisms | `src/cognition/memory/mechanisms/` |
 | Consolidation (`Memory` facade, `CognitiveMemoryManager`) | `src/cognition/memory/pipeline/consolidation/ConsolidationLoop.ts`, `src/cognition/memory/pipeline/consolidation/ConsolidationPipeline.ts` |
 | Verbatim archive | `src/cognition/memory/archive/SqlStorageMemoryArchive.ts` |
-| Hybrid retriever (BM25 + dense + Cohere) | `src/cognition/memory/retrieval/hybrid/HybridRetriever.ts` |
+| Hybrid retriever (BM25 + dense + optional reranker) | `src/cognition/memory/retrieval/hybrid/HybridRetriever.ts` |
 | HyDE retriever | `src/cognition/rag/HydeRetriever.ts` |
 | Multimodal indexer | `src/cognition/rag/multimodal/MultimodalIndexer.ts` |
 | Ingest router (`IngestRouter.ts`) | `src/orchestration/pipeline/ingest/` |

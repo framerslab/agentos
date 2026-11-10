@@ -217,24 +217,74 @@ export interface ConsolidationConfig {
 // Per-persona cognitive memory overrides
 // ---------------------------------------------------------------------------
 
+/**
+ * A persona's cognitive memory settings. `createAgentCognitiveMemory` passes
+ * each field but `featureDetectionStrategy` to the manager it builds, under
+ * the same name in {@link CognitiveMemoryConfig}; a field or key left out, or
+ * set to `undefined`, keeps the default. The type lists no `null`, and a
+ * loaded persona holds none: `normalizePersonaDefinition`, which the
+ * file-system `PersonaLoader` and `InMemoryPersonaLoader` run and `GMIManager`
+ * runs again on every definition any loader returns (a host's own
+ * `IPersonaLoader` included), drops a field set to `null`, a key set to `null`
+ * inside a field, and a `cognitiveMemoryConfig` set to `null`, as a persona
+ * read from JSON writes an unset key. A host that builds its manager from a persona
+ * itself (`gmiManagerConfig.cognitiveMemoryFactory`) gets the persona so
+ * normalized, and passes the fields the same way. `agent({ runtime: 'gmi' })` and `gmi()` build their persona from
+ * their options, which set no `cognitiveMemoryConfig`.
+ */
 export interface CognitiveMemoryPersonaConfig {
-  /** Feature detection strategy. @default 'keyword' */
+  /**
+   * Feature detection strategy. Nothing in agentos reads it yet:
+   * `createAgentCognitiveMemory` runs `'keyword'`, as it has no LLM invoker for
+   * `'llm'` or `'hybrid'`.
+   *
+   * @default 'keyword'
+   */
   featureDetectionStrategy?: 'keyword' | 'llm' | 'hybrid';
-  /** Working memory slot capacity override. */
+  /** Working memory slot capacity override ({@link CognitiveMemoryConfig.workingMemoryCapacity}). */
   workingMemoryCapacity?: number;
-  /** Token budget allocation percentages override. */
+  /**
+   * Token budget share overrides (fractions of the block's budget; shares
+   * adding up to more than 1 are scaled down, and a share that is not a
+   * finite positive number counts as 0). Unused budget flows to the sections
+   * that still have content. A share of exactly 0 turns its section off: it
+   * gets no grant and no unused budget. A key left out or set to `undefined`
+   * keeps its default share (a persona loader drops a key a JSON file sets to
+   * `null`). `createAgentCognitiveMemory` passes it to the
+   * manager it builds as {@link CognitiveMemoryConfig.tokenBudget}; a host that
+   * builds its manager from a persona itself
+   * (`gmiManagerConfig.cognitiveMemoryFactory`) passes it the same way.
+   * `agent({ runtime: 'gmi' })` and `gmi()` build their persona from their
+   * options, which set no `cognitiveMemoryConfig`, so their memory runs on the
+   * default shares.
+   */
   tokenBudget?: Partial<MemoryBudgetAllocation>;
-  /** Encoding config overrides. */
+  /** Encoding config overrides ({@link CognitiveMemoryConfig.encoding}). */
   encoding?: Partial<EncodingConfig>;
-  /** Decay config overrides. */
+  /** Decay config overrides ({@link CognitiveMemoryConfig.decay}). */
   decay?: Partial<DecayConfig>;
-  /** Observer config (Batch 2). */
+  /**
+   * Observer config (Batch 2; {@link CognitiveMemoryConfig.observer}). The
+   * manager runs an observer only when the config carries an `llmInvoker`.
+   */
   observer?: Partial<ObserverConfig>;
-  /** Reflector config (Batch 2). */
+  /**
+   * Reflector config (Batch 2; {@link CognitiveMemoryConfig.reflector}). The
+   * manager runs a reflector only when the config carries an `llmInvoker`.
+   */
   reflector?: Partial<ReflectorConfig>;
-  /** Memory graph config (Batch 2). */
+  /**
+   * Memory graph config (Batch 2; {@link CognitiveMemoryConfig.graph}).
+   * `createAgentCognitiveMemory` lays it over its `{ backend: 'knowledge-graph' }`;
+   * the `'graphology'` backend needs graphology, an optional peer dependency.
+   */
   graph?: Partial<MemoryGraphConfig>;
-  /** Infinite context config (Batch 3). */
+  /**
+   * Infinite context config (Batch 3; {@link CognitiveMemoryConfig.infiniteContext}).
+   * The manager runs infinite context only with
+   * {@link CognitiveMemoryConfig.maxContextTokens}, which
+   * `createAgentCognitiveMemory` does not set, so on that path it has no effect yet.
+   */
   infiniteContext?: Partial<InfiniteContextConfig>;
 }
 
@@ -266,6 +316,11 @@ export interface CognitiveMemoryConfig {
   decay?: Partial<DecayConfig>;
   /** @default 7 (Miller's number) */
   workingMemoryCapacity?: number;
+  /**
+   * Section shares of the memory block's budget, over
+   * {@link DEFAULT_BUDGET_ALLOCATION}. A share of exactly 0 turns its section
+   * off; a key left out or set to `undefined` or `null` keeps its default.
+   */
   tokenBudget?: Partial<MemoryBudgetAllocation>;
 
   // --- Batch 2 (optional, no-op when absent) ---
@@ -349,7 +404,14 @@ export interface CognitiveMemoryConfig {
    * weighting to preserve cognitive signals while boosting semantically
    * relevant results.
    *
-   * Recommended: Cohere rerank-v3.5 primary, LLM-Judge fallback.
+   * The manager calls `rerankerService.rerank()` without a provider id, so
+   * the service's `defaultProviderId` picks the provider; without one the
+   * call throws and retrieval keeps the cognitive scores, with no log line.
+   * Any registered
+   * provider works: `local` (a cross-encoder run in process through
+   * Transformers.js), `cohere` (Cohere's rerank API) or `llm-judge` (a
+   * model you call through `llmCallFn`). A remote provider receives the
+   * query and the candidate texts. See docs/text/RERANKING.md.
    *
    * @default undefined (no reranking)
    */
@@ -444,6 +506,14 @@ export const DEFAULT_DECAY_CONFIG: DecayConfig = {
   interferenceThreshold: 0.7,
 };
 
+/**
+ * Each section's default share of the memory block's budget (after the
+ * preamble). A share is the least a section with content gets: what an empty
+ * or under-filled section leaves flows to the sections that still have
+ * content, in `MEMORY_BUDGET_SPILL_ORDER` (Semantic Recall, Recent Episodic,
+ * then the block's order), so a store holding only episodic traces can fill
+ * the whole budget with them.
+ */
 export const DEFAULT_BUDGET_ALLOCATION: MemoryBudgetAllocation = {
   workingMemory: 0.15,
   semanticRecall: 0.40,

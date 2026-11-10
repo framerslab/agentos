@@ -103,6 +103,8 @@ vi.mock('../../../core/llm/providers/implementations/OllamaProvider', () => ({ O
 vi.mock('../../../core/llm/providers/implementations/GeminiProvider', () => ({ GeminiProvider: fixtures.GeminiProvider }));
 
 import { assertEmbeddingAvailable, createAgentCognitiveMemory } from '../agentCognitiveMemory.js';
+import { CognitiveMemoryManager } from '../../../cognition/memory/CognitiveMemoryManager.js';
+import type { CognitiveMemoryConfig, CognitiveMemoryPersonaConfig } from '../../../cognition/memory/core/config.js';
 import { clearDefaultProvider, setDefaultProvider } from '../global-default.js';
 
 const DIM = 64;
@@ -202,6 +204,83 @@ describe('createAgentCognitiveMemory', () => {
     expect(textOfAlicesMemoryIn(`${listing}\n\n## Related Context (connected memories — use for depth)\n- [associated, activation=0.25] ${ALICES_MEMORY}`)).toEqual([ALICES_MEMORY, 'door code', '4471']);
     // The code written beside an id, outside it, is still hers.
     expect(textOfAlicesMemoryIn('- [weak] mt_377f1b30-f9f5-4471-a0d6-9040d2bdd969 4471')).toEqual(['4471']);
+  });
+
+  describe("the persona's cognitiveMemoryConfig", () => {
+    /** The config the manager's initialize receives when createAgentCognitiveMemory is given a persona with `cognitiveMemoryConfig`. */
+    async function configFor(cognitiveMemoryConfig: CognitiveMemoryPersonaConfig): Promise<CognitiveMemoryConfig> {
+      const initialize = vi.spyOn(CognitiveMemoryManager.prototype, 'initialize');
+      try {
+        const mem = await createAgentCognitiveMemory({
+          persona: { ...(persona as object), cognitiveMemoryConfig } as never,
+          memory: {},
+          embeddingManager: makeEmbedder() as never,
+        });
+        await mem.close();
+        expect(initialize).toHaveBeenCalledTimes(1);
+        return initialize.mock.calls[0][0];
+      } finally {
+        initialize.mockRestore();
+      }
+    }
+
+    it.each([
+      ['encoding', { baseStrength: 0.65 }, { baseStrength: 0.65 }],
+      ['decay', { pruningThreshold: 0.02 }, { pruningThreshold: 0.02 }],
+      ['workingMemoryCapacity', 5, 5],
+      ['observer', { activationThresholdTokens: 1234 }, { activationThresholdTokens: 1234 }],
+      ['reflector', { activationThresholdTokens: 4321 }, { activationThresholdTokens: 4321 }],
+      ['infiniteContext', { strategy: 'hierarchical', compactionThreshold: 0.6 }, { strategy: 'hierarchical', compactionThreshold: 0.6 }],
+      // The persona's graph settings go over the in-tree backend this builder sets.
+      ['graph', { maxDepth: 2 }, { backend: 'knowledge-graph', maxDepth: 2 }],
+    ] as const)('passes the persona\'s %s to the manager it builds', async (field, value, expected) => {
+      const config = await configFor({ [field]: value } as CognitiveMemoryPersonaConfig);
+      expect(config[field]).toEqual(expected);
+    });
+
+    it('keeps the default for a field or key the persona leaves undefined', async () => {
+      const config = await configFor({
+        workingMemoryCapacity: undefined,
+        decay: { pruningThreshold: undefined, recencyHalfLifeMs: 3_600_000 },
+        graph: { backend: undefined, maxDepth: 2 },
+      });
+      expect('workingMemoryCapacity' in config).toBe(false);
+      expect(config.decay).toEqual({ recencyHalfLifeMs: 3_600_000 });
+      expect(config.graph).toEqual({ backend: 'knowledge-graph', maxDepth: 2 });
+
+      const none = await configFor({});
+      for (const field of ['encoding', 'decay', 'workingMemoryCapacity', 'observer', 'reflector', 'infiniteContext', 'tokenBudget'] as const) {
+        expect(field in none, field).toBe(false);
+      }
+      expect(none.graph).toEqual({ backend: 'knowledge-graph' });
+    });
+
+    it('keeps the default for a field or key a JSON persona sets to null', async () => {
+      // JSON has no undefined: a persona read from a file writes an unset field as null.
+      const fields = await configFor({
+        encoding: null,
+        decay: null,
+        workingMemoryCapacity: null,
+        observer: null,
+        reflector: null,
+        graph: null,
+        infiniteContext: null,
+        tokenBudget: null,
+      } as unknown as CognitiveMemoryPersonaConfig);
+      for (const field of ['encoding', 'decay', 'workingMemoryCapacity', 'observer', 'reflector', 'infiniteContext', 'tokenBudget'] as const) {
+        expect(field in fields, field).toBe(false);
+      }
+      expect(fields.graph).toEqual({ backend: 'knowledge-graph' });
+
+      const keys = await configFor({
+        decay: { pruningThreshold: null, recencyHalfLifeMs: 3_600_000 },
+        graph: { backend: null, maxDepth: 2 },
+        tokenBudget: { semanticRecall: null, recentEpisodic: 0 },
+      } as unknown as CognitiveMemoryPersonaConfig);
+      expect(keys.decay).toEqual({ recencyHalfLifeMs: 3_600_000 });
+      expect(keys.graph).toEqual({ backend: 'knowledge-graph', maxDepth: 2 });
+      expect(keys.tokenBudget).toEqual({ recentEpisodic: 0 });
+    });
   });
 
   it('close shuts the manager down once and leaves an embedding manager it was given running', async () => {

@@ -25,7 +25,7 @@ import {
 import { addModelUsage, extractTextFromContent, type GenerateTextResult, type MessageContent, type TokenUsage } from '../generateText.js';
 import { normalizeStreamFinishReason, type StreamTextResult } from '../streamText.js';
 import { ObjectGenerationError } from '../generateObject.js';
-import { parseJsonWithDistinctKeys } from './structuredReply.js';
+import { dropNullsForOptionalFields, parseJsonWithDistinctKeys } from './structuredReply.js';
 import { fireLlmUsageObserver, type LlmUsageAccountResolver, type LlmUsageAccountSource, type LlmUsageEvent } from '../observers.js';
 import type { SessionHistoryBuffer, SessionTurnWriter } from '../sessionHistory.js';
 import type { SessionTranscriptMessage } from '../sessionTranscript.js';
@@ -38,6 +38,7 @@ import type { ApprovalGateFn } from './approval-gate.js';
 import type { AgencyLaunchFrame, ToolCallHook } from './agencyLaunch/types.js';
 import { GmiTurnFolder, streamFromGmiTurn } from './gmiResults.js';
 import { stepToTranscript, transcriptToConversation } from './gmiTranscript.js';
+import { observeWithoutWaiting } from './memoryObserveFailures.js';
 
 /** A signal's reason as an error, as streamText reports a stop: the reason itself when it is an Error. */
 function abortReasonError(signal: AbortSignal): Error {
@@ -220,14 +221,11 @@ async function memoryProviderContext(opts: AgentOptions, userText: string): Prom
  * `memoryProvider.observe` for one side of a finished turn. It is called on the
  * provider, as `agent()` calls it, because a provider built from a class reads
  * `this`; and it is never the turn's error: the turn has been answered and
- * stored, and a memory store that fails to record it does not undo that.
+ * stored, and a memory store that fails to record it does not undo that. The
+ * failure is logged sparsely (`observeWithoutWaiting`).
  */
 function observeTurn(provider: AgentMemoryProvider, role: 'user' | 'assistant', text: string): void {
-  try {
-    void Promise.resolve(provider.observe?.(role, text)).catch(() => undefined);
-  } catch (observeError) {
-    console.warn('[agentos] memoryProvider.observe failed:', observeError);
-  }
+  observeWithoutWaiting(provider, role, text);
 }
 
 /**
@@ -581,7 +579,8 @@ function parseStructured(folder: GmiTurnFolder, schema: ZodType, maxTokens?: num
       );
     }
   }
-  const safe = schema.safeParse(raw);
+  // A strict json_schema payload makes every optional property nullable: a `null` there means absent.
+  const safe = schema.safeParse(dropNullsForOptionalFields(raw, schema));
   if (cutOff) {
     throw new ObjectGenerationError(
       safe.success

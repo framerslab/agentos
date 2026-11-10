@@ -21,6 +21,44 @@ afterEach(() => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+describe('WikiMemoryStore index.md and the text migrated from MEMORY.md', () => {
+  const page = (id: string, summary: string) => ({ id, type: 'concept' as const, summary, updated: '', sources: [], body: 'b', links: [] });
+
+  it('keeps an index written before the end marker existed, and gives it its end marker on the first refresh', async () => {
+    // What ensureMemoryDir wrote before the migrated text had an end marker, the catalog not yet written.
+    fs.writeFileSync(
+      path.join(memoryDir, 'index.md'),
+      '# Memory Index\n\n<!-- migrated from MEMORY.md -->\n\n# Facts\n\nThe user prefers concise answers.\n',
+    );
+    const store = new WikiMemoryStore({ memoryDir, port: noopPort, agentId: 'a1' });
+    await store.writePage(page('concepts/billing', 'How billing works.'));
+    await store.writePage(page('concepts/tone', 'How to talk.'));
+
+    expect(fs.readFileSync(path.join(memoryDir, 'index.md'), 'utf8')).toBe(
+      '# Memory Index\n\n<!-- migrated from MEMORY.md -->\n\n# Facts\n\nThe user prefers concise answers.\n\n<!-- end of MEMORY.md -->\n\n' +
+        '## Concepts\n\n- [billing](concepts/billing.md): How billing works.\n- [tone](concepts/tone.md): How to talk.\n',
+    );
+  });
+
+  // A file its owner may write and not read; the superuser reads it all the same, and Windows has no such mode.
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'leaves an index.md it cannot read as it is, and fails the write',
+    async () => {
+      const index = path.join(memoryDir, 'index.md');
+      fs.writeFileSync(index, '# Memory Index\n\n<!-- migrated from MEMORY.md -->\n\nThe user prefers concise answers.\n\n<!-- end of MEMORY.md -->\n');
+      const before = fs.readFileSync(index, 'utf8');
+      const store = new WikiMemoryStore({ memoryDir, port: noopPort, agentId: 'a1' });
+      fs.chmodSync(index, 0o200);
+      try {
+        await expect(store.writePage(page('concepts/billing', 'How billing works.'))).rejects.toThrow();
+      } finally {
+        fs.chmodSync(index, 0o644);
+      }
+      expect(fs.readFileSync(index, 'utf8')).toBe(before);
+    },
+  );
+});
+
 describe('WikiMemoryStore filesystem', () => {
   it('writePage then readPage round-trips and updates index.md', async () => {
     const store = new WikiMemoryStore({ memoryDir, port: noopPort, agentId: 'a1' });

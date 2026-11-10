@@ -460,7 +460,11 @@ export interface IPersonaDefinition {
 
   /** Memory subsystem tuning (retention horizons, summarization cadence, pinning rules). */
   memoryConfig?: PersonaMemoryConfig;
-  /** Cognitive memory system per-persona overrides (encoding, decay, working memory capacity, etc.). */
+  /**
+   * Cognitive memory system per-persona overrides (encoding, decay, working memory capacity, etc.).
+   * `createAgentCognitiveMemory` passes every field but `featureDetectionStrategy` to the manager it builds; a host
+   * that builds its manager from the persona passes them the same way.
+   */
   cognitiveMemoryConfig?: import('../../memory/core/config.js').CognitiveMemoryPersonaConfig;
   /** Conversation context override strategy (message importance heuristics, summarization triggers). */
   conversationContextConfig?: PersonaConversationContextConfig;

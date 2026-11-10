@@ -204,7 +204,7 @@ This keeps the base retrieval system consistent while still allowing richer moda
 
 - Robertson, S., & Zaragoza, H. (2009). [*The probabilistic relevance framework: BM25 and beyond.*](https://doi.org/10.1561/1500000019) *Foundations and Trends in Information Retrieval*, 3(4), 333–389. — BM25 reference (the sparse arm of hybrid retrieval).
 - Cormack, G. V., Clarke, C. L. A., & Buettcher, S. (2009). [*Reciprocal rank fusion outperforms Condorcet and individual rank learning methods.*](https://dl.acm.org/doi/10.1145/1571941.1572114) SIGIR 2009. — RRF for fusing dense + sparse rankings.
-- Nogueira, R., & Cho, K. (2019). [*Passage re-ranking with BERT.*](https://arxiv.org/abs/1901.04704) arXiv preprint. — Cross-encoder reranking principle behind the Cohere / Transformers.js rerank stage.
+- Nogueira, R., & Cho, K. (2019). [*Passage re-ranking with BERT.*](https://arxiv.org/abs/1901.04704) arXiv preprint. — Cross-encoder reranking principle behind the local Transformers.js and Cohere rerankers ([Reranking](../text/RERANKING.md) compares them with the LLM judge).
 
 ### Hypothetical document expansion
 

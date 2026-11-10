@@ -210,9 +210,8 @@ export class CapabilityDiscoveryEngine implements ICapabilityDiscoveryEngine {
 
     const newDescriptors = this.index.normalizeSources(fullSources);
 
-    for (const desc of newDescriptors) {
-      await this.index.upsertCapability(desc);
-    }
+    // One embeddings call for the whole refresh; the embedding manager sends it in batches.
+    await this.index.upsertCapabilities(newDescriptors);
 
     // Rebuild graph with all capabilities (async — graphology loaded lazily)
     const allCapabilities = this.index.getAllCapabilities();
@@ -269,9 +268,7 @@ export class CapabilityDiscoveryEngine implements ICapabilityDiscoveryEngine {
       },
     }));
 
-    for (const desc of descriptors) {
-      await this.index.upsertCapability(desc);
-    }
+    await this.index.upsertCapabilities(descriptors);
 
     // Rebuild graph to include new emergent-tool nodes
     const allCapabilities = this.index.getAllCapabilities();
@@ -429,7 +426,14 @@ export class CapabilityDiscoveryEngine implements ICapabilityDiscoveryEngine {
    * The import is dynamic and non-fatal: if `@framers/agentos-extensions-registry`
    * is not installed, the method silently returns zero.
    *
-   * @returns The number of catalog entries injected into the index.
+   * The entries are embedded with one embeddings call, which the embedding manager
+   * sends in batches (32 texts a request unless configured): a catalog of 119
+   * entries costs 4 requests, not 119. This runs inside {@link initialize}, so an
+   * agent's boot stays inside a provider or proxy limit on calls per minute.
+   *
+   * @returns The number of catalog entries added to the index. Each one is listed and
+   *   readable by id; an entry whose embedding or store write failed has no vector, so
+   *   semantic search does not return it.
    */
   async hydrateFromCapabilityCatalog(): Promise<number> {
     let catalog: Array<{
@@ -461,7 +465,7 @@ export class CapabilityDiscoveryEngine implements ICapabilityDiscoveryEngine {
     }
 
     const existingIds = new Set(this.index.listIds());
-    let injected = 0;
+    const pending: CapabilityDescriptor[] = [];
 
     for (const entry of catalog) {
       // Skip entries already registered from explicit sources
@@ -488,11 +492,14 @@ export class CapabilityDiscoveryEngine implements ICapabilityDiscoveryEngine {
         },
       };
 
-      await this.index.upsertCapability(descriptor);
-      injected++;
+      pending.push(descriptor);
     }
 
-    return injected;
+    if (pending.length > 0) {
+      await this.index.upsertCapabilities(pending);
+    }
+
+    return pending.length;
   }
 
   // ============================================================================

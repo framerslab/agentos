@@ -44,7 +44,7 @@ export interface AttachMemoryWikiOptions {
   chunk: (text: string) => Array<{ text: string }>;
   /** Existing agent tools to augment; read_memory_page is appended. */
   tools?: unknown[];
-  /** ISO timestamp provider (injected for determinism). */
+  /** The clock that dates compiled pages, as an ISO 8601 timestamp. Defaults to the current time. */
   now?: () => string;
   /** Override the default by-entity heuristic clusterer. */
   cluster?: (traces: TraceLike[]) => Promise<ClusterAssignment[]>;

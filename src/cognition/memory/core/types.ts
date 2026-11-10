@@ -552,6 +552,11 @@ export interface CognitiveRetrievalResult {
 // Prompt assembly types
 // ---------------------------------------------------------------------------
 
+/**
+ * Each memory-block section's share of the budget, as a fraction. A share is
+ * a floor for a section with content, not a ceiling: budget other sections
+ * leave unused flows to it (see `assembleMemoryContext`).
+ */
 export interface MemoryBudgetAllocation {
   workingMemory: number;
   semanticRecall: number;
@@ -562,11 +567,66 @@ export interface MemoryBudgetAllocation {
   persistentMemory: number;
 }
 
+/**
+ * What became of one line of the memory block that shows a memory: a
+ * retrieved trace's line, a graph association that carries the id of the
+ * trace it leads to, or the involuntary memory. Such a line renders whole or
+ * not at all.
+ */
+export interface AssembledLineOutcome {
+  /** The id of the trace the line shows, or leads to. */
+  id: string;
+  /**
+   * The section the line belongs to: the one that shows it, or, for a line
+   * left out, the first section in the block's order that had a line for its
+   * trace. `involuntary` is the involuntary memory's own section.
+   */
+  section: keyof MemoryBudgetAllocation | 'involuntary';
+  /** Whether the block shows the line. */
+  outcome: 'included' | 'left_out';
+  /**
+   * Set for a line left out, and only then: `budget` when its section was
+   * offered no tokens at all (its share is 0, or the budget had none for it),
+   * `section_full` when the whole line did not fit what the section was
+   * offered.
+   */
+  reason?: 'budget' | 'section_full';
+  /**
+   * Tokens of the line with its newline, about 4 characters a token: as
+   * rendered when included, as it would render whole when left out.
+   */
+  tokens: number;
+}
+
 export interface AssembledMemoryContext {
   contextText: string;
+  /** Estimated tokens of `contextText` (about 4 characters a token), headers included; never above the budget. */
   tokensUsed: number;
+  /**
+   * The shares the sections were granted from: the configured shares over the
+   * defaults, 0 for a share that is 0 or not a finite positive number, scaled
+   * down when they add up to more than 1.
+   */
   allocation: MemoryBudgetAllocation;
+  /**
+   * The ids of the retrieved traces rendered in Relevant Memories and Recent
+   * Experiences, then the involuntary memory's when the block shows one. A
+   * trace the block shows only through its graph association is not listed
+   * here; `lineOutcomes` reports it as included under `graphAssociations`.
+   */
   includedMemoryIds: string[];
+  /**
+   * What became of each line that shows a memory, one entry a trace, in the
+   * block's order: the retrieved traces of Relevant Memories and Recent
+   * Experiences, the graph associations that carry a trace id, then the
+   * involuntary memory. A trace is reported under the section that shows it,
+   * so one shown through its association is reported once, under
+   * `graphAssociations`, and an association left out because the block
+   * already holds its trace adds no entry. `assembleMemoryContext` always
+   * sets it; a memory manager that builds its context another way may leave
+   * it out.
+   */
+  lineOutcomes?: AssembledLineOutcome[];
 }
 
 // ---------------------------------------------------------------------------

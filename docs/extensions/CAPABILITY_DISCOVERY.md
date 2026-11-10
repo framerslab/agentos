@@ -429,6 +429,7 @@ const result = await engine.discover("search the web", {
 ## Cost
 
 - `initialize()` embeds every indexed capability once; `refreshIndex()` embeds and upserts the capabilities it is given, then rebuilds the graph.
+- Indexing sends the embedding texts in batches: one embeddings request per 32 capabilities, or per the embedding manager's `defaultBatchSize` or the model's `providerSpecificArgs.batchSize`. `initialize()` embeds the explicit sources in one set of batches and the registry catalog's entries in another, so a catalog of 119 entries (the size of `@framers/agentos-extensions-registry` 0.18.17's) costs 4 requests. `refreshIndex()` and `indexEmergentTools()` batch the same way. A capability whose embedding text is empty is not sent and gets no vector.
 - Each `discover()` embeds the query once, searches the vector store and re-ranks over the in-memory graph.
 - The prompt context is held to the tier budgets: at most 3,000 tokens at the defaults, counted at four characters a token. The `discover_capabilities` schema adds one tool to the tool list.
 

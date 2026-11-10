@@ -65,7 +65,64 @@ Pages are markdown with YAML frontmatter and `[[wikilinks]]`. The agent reads
 The LLM folds new conversation into pages when memory consolidates: a
 [`souledAgent`](getting-started/HIGH_LEVEL_API.md) runs this on the agent's `close()`,
 and `agent.memory.compileWiki()` triggers it mid-session. Merges integrate new facts
-rather than clobbering human edits. The runtime does not version the pages.
+rather than clobbering human edits, and each page written is dated with the time
+of the compile. The runtime does not version the pages.
+
+The traces a `souledAgent`'s own observer stores carry no entities, so the default
+clusterer merges them into the page `concepts/notes`. Entity pages come from traces
+stored with entities through `agent.memory.remember()`, or from a clusterer passed
+to `attachMemoryWiki()`.
+
+Each trace the observer stores records who spoke it in the trace's metadata
+(`speaker: 'user'` or `speaker: 'assistant'`), outside its text and its tags, which
+the store's full-text search reads, so recall never matches a trace by who spoke it.
+The recall block a souled agent adds to a turn gives each trace one line that opens
+with its speaker and the date it was stored, in the wording the memory block uses:
+`[user, 26 days ago, 2026-10-14] I moved to Lisbon`. A chunk of a wiki page is
+labelled `note` and its page id (`[note concepts/notes, 2d ago, 2026-11-07]`), and a
+trace stored before speakers were recorded carries the date alone. A line break in a
+trace's text is rendered as a space, so what someone said can never open a line of
+the block with a label of its own. The block keeps to the turn's memory token budget,
+whole lines first; when even the first line's label is larger than the budget, the
+line is the trace's text alone.
+
+A page the compiler creates gets a summary named from its page id, never copied from
+a trace: `concepts/notes` is `Notes compiled from conversations`, and
+`entities/johnny` is `Notes on johnny compiled from conversations`. That summary is
+the page's line in `index.md`, and `index.md` joins the system prompt of every agent
+built from the soul, so no sentence someone says in a conversation becomes a standing
+line of that prompt. A page's id can still carry a name taken from the conversation:
+the default clusterer names an entity page after the entity it found (`entities/johnny`),
+and a custom clusterer may derive an id from a trace, so such a name stands in the
+index, and in the prompt, as a page id. A page that has a summary
+keeps it, whoever wrote it, and a compile rewrites no existing summary. An
+`index.md` written by an earlier version may still carry a summary taken from the
+first message folded into a page: open the page's file (`memory/concepts/notes.md`
+for the notes page), set its `summary:` front matter to the line you want, and the
+next compile writes that line into the catalog; or edit the line in `index.md`
+directly, which the next catalog write replaces with the page's summary.
+
+`souledAgent()`'s `close()` runs in this order: the agent's own close (with
+`runtime: 'gmi'` it stops the session turns still running; the default runtime's
+lets them run on); one wait, up to 5 seconds (`pendingWritesTimeoutMs` sets it, 0
+waits for none, `Infinity` for all of them), first for the turns still running (a
+`generate()`, a `stream()`, a session's `send()` or `stream()`, on either runtime),
+then for the memory writes of its turns; the compile; then the store's close. A turn
+never waits for its memory writes; only `close()` does. When the wait ends with turns
+or writes still pending, the compile takes what is stored and one `console.warn`
+line gives the number still pending; a turn or a write that ends after that is not
+folded into the wiki, and a write that reaches the store once it is closed is not
+stored. A stream whose `abortSignal` aborts before anything was read from it is not
+waited for; on the default runtime a stream runs only once it is read, so one nobody
+reads and nobody aborts keeps the wait until the deadline: read or abort each stream
+before `close()`.
+The compile's model calls go on the agent's route with its fallback settings (`fallbackProviders`,
+`onFallback`, `router`, `policyTier`), carry the agent's completion cap (`maxTokens`,
+or `controls.maxTotalTokens`; the budget's check estimates a call without one at 4,096
+output tokens), are checked against and charged to the agent's `budget` like its own
+calls, and are written to its usage ledger under the source `souledAgent.compileWiki`. A call the budget refuses fails the compile, which
+`close()` logs as any failed compile; the watermark stays where it was, so the next
+compile takes the same traces up again.
 
 A page's id is its path under `memory/` without `.md`, with `/` between folders:
 `entities/johnny` is `memory/entities/johnny.md`. An id is one or more names joined
@@ -103,7 +160,30 @@ into the system prompt and starts the folder, follows no link: see
 [Loading a Soul](#loading-a-soul).
 
 A legacy single-file `MEMORY.md` auto-migrates into `memory/index.md` on first load
-and is left untouched on disk.
+and is left untouched on disk. The copied text sits between the markers
+`<!-- migrated from MEMORY.md -->` and `<!-- end of MEMORY.md -->`, right under
+the index's `# Memory Index` heading. An end marker that `MEMORY.md` itself
+holds is copied as `<!-- end of MEMORY.md (quoted) -->`, so it closes no block.
+When the wiki writes its catalog into `index.md`, it keeps that block and writes the catalog after it, so the text
+stays in the system prompt. An `index.md` with the start marker and no end marker
+(as earlier versions wrote it) is read as a block that runs to the end of the
+file, and gets its end marker on the first catalog write. A start marker anywhere
+else, such as in a page summary, opens no block, and an
+`index.md` with no block is replaced by the catalog. The end marker itself stays
+out of the system prompt, and out of the `wikiIndex` that `loadSoul()` and
+`loadSoulSync()` return.
+
+When the wiki refreshes its catalog, it reads `index.md` never through a symbolic
+link and writes it whole, through a new file beside it and a rename, so a catalog
+written by another agent on the same workspace at the same moment never finds it
+half written. (`WikiMemoryStore.getCatalog()` is a plain read of `index.md` and
+follows a link.) Where the platform refuses the new file or the rename (`EACCES`,
+`EPERM`, `EBUSY`), the catalog is written into `index.md` in place instead, and a
+refresh running at that moment can then read it half written. A symbolic link at
+`index.md` is not read: the refresh replaces the link with the catalog file and
+leaves the link's target as it is. An `index.md` the wiki cannot read for any
+other reason is left as it is: the page write that would refresh it fails, and so
+does the compile, which takes the same traces up again the next time.
 
 ## SOUL.md Format
 
@@ -199,6 +279,29 @@ Both file forms create `memory/` beside SOUL.md (seeding `memory/index.md` from 
 
 The loader reads the soul's files (SOUL.md, STYLE.md, IDENTITY.md, AGENTS.md, MEMORY.md and `memory/index.md`) never through a symbolic link at the soul's folder or below it, never waiting, and only when each is a regular file. A file that is a link, or a named pipe or anything else that is not a regular file, is skipped with a warning; a skipped SOUL.md throws as a missing one does, unless `requireSoul` is `false`. The soul's folder itself may not be a link; the folder that holds it may. When the loader starts `memory/`, it makes `memory/` and `memory/.meta/` one folder at a time and `memory/index.md` and `memory/.meta/index.json` only where nothing is, so it writes through no link and opens no file already there. A link or anything else that is not a folder in the place of `memory/` or `memory/.meta/`, or a link or anything else that is not a regular file in the place of `memory/index.md`, `memory/.meta/index.json` or `MEMORY.md`, is left as it is, with a warning, and nothing is made through it or in it.
 
+## What Applies on Each Path
+
+What a soul gives an agent depends on how it is loaded:
+
+| Path | Soul prose and style in the prompt | Memory index in the prompt | Front matter applied (traits, mood, hard limits, `agentId`) | A recall block each turn | `read_memory_page` tool | Wiki compiled |
+|---|---|---|---|---|---|---|
+| `agent({ soul })` | Yes | Yes | No | No (only from a `memoryProvider` you pass) | No | No |
+| `souledAgent()` | Yes | Yes | `agentId` only, which scopes the wiki's traces | Yes, from the wiki's store | Yes | Yes, on `close()` and by `agent.memory.compileWiki()` |
+| `agent({ runtime: 'gmi', soul })`, `gmi({ soul })` | Yes | Yes | No | With cognitive memory on, from cognitive memory; off, only from a `memoryProvider` you pass | No | No |
+| `souledAgent({ runtime: 'gmi' })`, cognitive memory off | Yes | Yes | `agentId` only | Yes, from the wiki's store | Yes | Yes |
+| `souledAgent({ runtime: 'gmi' })`, cognitive memory on | Yes | Yes | `agentId` only | From cognitive memory; the wiki store's recall is skipped, with a warning, and its turns are still stored | Yes | Yes |
+| The full runtime given `loadSoul().personaDefinition` | Yes (the persona's `baseSystemPrompt`) | No | Yes | From the runtime's own memory, when configured; not from the wiki | No | No |
+
+The exceptions:
+
+- `systemBlocks` replace the prompt the agent assembles, so an agent given a soul and `systemBlocks` has none of the soul's prose, style or memory index in its prompt; the build says so in one `console.warn` line. A souled agent in that state still records its turns into the wiki.
+- A named tool map (an object, not an array) is passed through as given, without `read_memory_page`.
+- An inline soul (`{ content }`) has no workspace folder: `souledAgent()` builds a plain `agent()` with no wiki memory, no `read_memory_page` tool and no compile, and says so in one `console.warn` line.
+- One-shot `generate()` and `stream()` on a GMI run the light profile, so they use the memory provider's recall, the wiki store's on a souled agent, even when sessions run with cognitive memory on.
+- A seat of a launched team uses neither memory hook (no recall from the provider, nothing stored with it) and is refused the memory tools, `read_memory_page` among them.
+- Hard limits are a block of prompt text a GMI renders from the persona, not a check that enforces them.
+- On the full runtime, the trait paragraph from the `hexaco:` scores reaches the prompt only with a learning layer ([GMI.md](./GMI.md#learning)).
+
 ## Loading Order at Agent Boot
 
 1. **SOUL.md** → the first section of the system prompt (the "character sheet")
@@ -212,7 +315,7 @@ The loader reads the soul's files (SOUL.md, STYLE.md, IDENTITY.md, AGENTS.md, ME
 
 The `hexaco:` block in SOUL.md frontmatter maps directly to AgentOS's existing
 [HEXACO personality model](./memory/HEXACO_PERSONALITY.md). The scores land in
-`personaDefinition.personalityTraits`. On the full runtime they are the GMI's traits:
+`personaDefinition.personalityTraits`. On the full runtime they are the GMI's traits; their trait paragraph reaches the prompt only with a learning layer ([GMI.md](./GMI.md#learning)):
 
 - [`AdaptPersonalityTool`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts): with `emergentConfig.selfImprovement.enabled`, changes a trait for the session's GMI within a per-session budget
 - [`PersonalityMutationStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/PersonalityMutationStore.ts): records those changes when a storage adapter is configured

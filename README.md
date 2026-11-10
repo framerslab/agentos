@@ -17,8 +17,6 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.4+-3178c6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![License](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fregistry.npmjs.org%2F%40framers%2Fagentos%2Flatest&query=%24.license&label=license&color=blue&style=flat-square)](https://github.com/framerslab/agentos/blob/master/LICENSE)
 [![NVIDIA Inception](https://img.shields.io/badge/NVIDIA_Inception-Member-76B900?style=flat-square&logo=nvidia&logoColor=white)](https://www.nvidia.com/en-us/startups/)
-[![LongMemEval-S](https://img.shields.io/badge/LongMemEval--S-85.6%25-2ea043?style=flat-square)](https://docs.agentos.sh/blog/2026/04/27/longmemeval-s-83-with-semantic-embedder)
-[![LongMemEval-M](https://img.shields.io/badge/LongMemEval--M-70.2%25-2ea043?style=flat-square)](https://docs.agentos.sh/blog/2026/04/29/longmemeval-m-70-with-topk5)
 [![agentos-bench](https://img.shields.io/badge/bench-public-blue?style=flat-square)](https://github.com/framerslab/agentos-bench)
 [![Discord](https://img.shields.io/badge/Discord-Join%20Us-5865F2?style=flat-square&logo=discord)](https://wilds.ai/discord)
 
@@ -30,7 +28,7 @@
 
 AgentOS is an open-source TypeScript framework for AI agents that **remember, adapt, and write their own tools**.
 
-- **Top open-source memory benchmarks:** [85.6% on LongMemEval-S](https://github.com/framerslab/agentos-bench/blob/master/results/LEADERBOARD.md) at $0.0090/correct (`gpt-4o` and `gpt-5-mini` readers, routed per question type), and 70.2% on LongMemEval-M, the only open-source library above 65% on M with reproducible methodology.
+- **Public memory benchmarks:** the LongMemEval-S and LongMemEval-M results are being re-run without a remote reranker, in the public [agentos-bench](https://github.com/framerslab/agentos-bench) harness.
 - **Runtime tool forging.** An agent writes a JavaScript function with JSON Schemas for its input and output, the declared test cases run it, an LLM judge reviews the result, and on approval the tool joins the session's tool list. Forged code runs in an in-process `node:vm` context or, with `QuickJSExecutor`, in a QuickJS WebAssembly instance of its own for each call.
 - **Persistent [cognitive memory](https://docs.agentos.sh/features/cognitive-memory)** with Ebbinghaus decay and 8 neuroscience-backed mechanisms, among them retrieval-induced forgetting, reconsolidation and source-confidence decay.
 - **Optional [HEXACO personality](https://docs.agentos.sh/features/hexaco-personality)**, [7 orchestration strategies](https://docs.agentos.sh/features/agency-collaboration), [guardrails](https://docs.agentos.sh/features/guardrails-architecture), and [voice](https://docs.agentos.sh/features/voice-pipeline) across **13 LLM providers**; 100+ extensions and 88 skills ship as separate packages with registries that load them.
@@ -137,12 +135,9 @@ await session.send('Explain recursion with an analogy.');
 
 ## Memory Benchmarks
 
-Both headline results use a per-category reader router (`gpt-4o` answers temporal-reasoning and single-session-user questions, `gpt-5-mini` the other four types), with the `gpt-4o-2024-08-06` judge, full N=500, single-CLI reproduction with bootstrap 95% CIs and per-benchmark judge-FPR probes.
+The LongMemEval-S and LongMemEval-M results are being re-run without a remote reranker. New figures appear here when those runs finish. The harness and its methodology are public in [agentos-bench](https://github.com/framerslab/agentos-bench).
 
-- **LongMemEval-S: 85.6%** at $0.0090/correct, 3,558 ms p50. With `gpt-4o` reading every question, the same retrieval scores 84.2%, level with Mastra OM with a `gpt-4o` actor (84.23%; Mastra uses `gemini-2.5-flash` as its observer and reflector); Mastra OM reports 94.87% with a `gpt-5-mini` actor. Full table and methodology: [LEADERBOARD.md](https://github.com/framerslab/agentos-bench/blob/master/results/LEADERBOARD.md).
-- **LongMemEval-M: 70.2%** (1.5M-token haystacks, 500 sessions): the only open-source library above 65% on M with reproducible methodology.
-
-[Full leaderboard ->](https://github.com/framerslab/agentos-bench/blob/master/results/LEADERBOARD.md) * [Transparency audit ->](https://agentos.sh/en/blog/memory-benchmark-transparency-audit/) * [LongMemEval paper](https://arxiv.org/abs/2410.10813) (Wu et al., ICLR 2025)
+[Transparency audit ->](https://agentos.sh/en/blog/memory-benchmark-transparency-audit/) * [LongMemEval paper](https://arxiv.org/abs/2410.10813) (Wu et al., ICLR 2025)
 
 ---
 
@@ -152,7 +147,7 @@ Both headline results use a per-category reader router (`gpt-4o` answers tempora
 |---|---|
 | **LangChain / LangGraph** | Cognitive memory ([8 neuroscience-backed mechanisms](https://docs.agentos.sh/features/cognitive-memory)), HEXACO personality, runtime tool forging |
 | **Vercel AI SDK** | Multi-agent teams (7 strategies), 7 vector backends, [guardrails](https://docs.agentos.sh/features/guardrails-architecture), voice/telephony, [zero-config prompt caching](https://docs.agentos.sh/features/prompt-caching) |
-| **CrewAI / Mastra** | Unified orchestration (DAGs + graphs + missions), personality-driven routing, **published reproducible numbers on LongMemEval-S (85.6%) and LongMemEval-M (70.2%) with full methodology disclosure** |
+| **CrewAI / Mastra** | Unified orchestration (DAGs + graphs + missions), personality-driven routing, **a public LongMemEval benchmark harness with full methodology disclosure** |
 
 [Full framework comparison ->](https://docs.agentos.sh/blog/2026/02/20/agentos-vs-langgraph-vs-crewai)
 
@@ -167,7 +162,7 @@ Both headline results use a per-category reader router (`gpt-4o` answers tempora
 | **Cognitive Memory** | 8 mechanisms: reconsolidation, retrieval-induced forgetting, involuntary recall, FOK, gist extraction, schema encoding, source decay, emotion regulation |
 | **HEXACO Personality** | 6 traits modulate memory, retrieval bias, response style |
 | **GMI Runtime** | Per-session persona, mood and reasoning trace * sentiment-triggered metaprompts (opt-in per persona) * mood-weighted memory bridge * bounded `adapt_personality` trait changes (opt-in) |
-| **RAG Pipeline** | 7 vector backends * 4 retrieval strategies * GraphRAG * HyDE * Cohere rerank-v3.5 |
+| **RAG Pipeline** | 7 vector backends * 4 retrieval strategies * GraphRAG * HyDE * [reranking](https://docs.agentos.sh/text/reranking): a local cross-encoder, Cohere or an LLM judge on any model |
 | **Multi-Agent Teams** | 7 coordination strategies * manager delegation and specialist spawning * model pools with seating policies and strict per-seat credentials * a panel strategy with a provider and vendor quorum * HITL approval gates |
 | **Orchestration** | `workflow()` DAGs * `AgentGraph` router, personality and discovery edges * `mission()` graphs from plan templates * checkpointing in memory or in SQLite and Postgres (`SqlCheckpointStore`) |
 | **Guardrails** | 6 packs (PII, ML classifiers, topicality, code safety, grounding, content policy) |
@@ -247,6 +242,7 @@ Provider fallback is on by default for `generateText()`, `streamText()`, `agent(
 - **[Document Ingestion](https://docs.agentos.sh/features/memory-document-ingestion)**: PDF, Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, HTML and Markdown read to text, with bounds on what a Word or office archive inflates to
 - **[Library Index](https://docs.agentos.sh/features/library-index)**: sources over any vector store, and a browser entry for a page's own search and records, transcript files from other notetakers (SubRip, WebVTT, Otter, Fireflies, Word) read to turns with the speakers kept apart, and the plan of an archive's entries
 - **[Text Processing & Search](https://docs.agentos.sh/text)**: tokenizers and stemming, BM25, fuzzy and hybrid search, text statistics, chunking, reranking
+- **[Reranking](https://docs.agentos.sh/text/reranking)**: one `RerankerService` over a local Transformers.js cross-encoder (scoring stays in the process), Cohere's rerank API, an LLM judge on any model your function calls, or a provider of your own
 - **[Guardrails](https://docs.agentos.sh/features/guardrails-architecture)**: two-phase dispatcher, four verdicts, fail-open and fail-closed guards
 - **[Voice Pipeline](https://docs.agentos.sh/features/voice-pipeline)**: TTS, STT, telephony
 - **[Blog](https://docs.agentos.sh/blog)**: engineering posts, benchmark publications, transparency audits

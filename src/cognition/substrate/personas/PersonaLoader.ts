@@ -16,7 +16,7 @@ import { uuidv4 } from '../../../core/utils/uuid';
 import { IPersonaDefinition } from './IPersonaDefinition';
 import { IPersonaLoader, PersonaLoaderConfig } from './IPersonaLoader';
 import { GMIError, GMIErrorCode } from '../../../core/utils/errors.js';
-import { normalizePersonaDefinition } from './personaNormalization';
+import { clonePersonaDefinition, normalizePersonaDefinition } from './personaNormalization';
 
 /**
  * Configuration specific to the FileSystemPersonaLoader.
@@ -159,12 +159,13 @@ export class PersonaLoader implements IPersonaLoader {
       console.warn(`PersonaLoader (ID: ${this.loaderId}): Persona with ID '${personaId}' not found in cache.`);
       return undefined;
     }
-    return JSON.parse(JSON.stringify(persona));
+    // A copy that keeps the normalizer's record of a replaced `metaPrompts`, which a JSON round trip would drop.
+    return clonePersonaDefinition(persona);
   }
 
   public async loadAllPersonaDefinitions(): Promise<IPersonaDefinition[]> {
     this.ensureInitialized();
-    return Array.from(this.loadedPersonas.values()).map(p => JSON.parse(JSON.stringify(p)));
+    return Array.from(this.loadedPersonas.values(), (persona) => clonePersonaDefinition(persona));
   }
 
   public async refreshPersonas(): Promise<void> {
@@ -197,7 +198,7 @@ export class PersonaLoader implements IPersonaLoader {
         }
 
         const normalized = normalizePersonaDefinition(personaDefinition);
-        if (normalized !== personaDefinition) {
+        if (normalized.metaPrompts !== personaDefinition.metaPrompts) {
           console.log(`PersonaLoader (ID: ${this.loaderId}): Merged ${normalized.metaPrompts?.length ?? 0} metaprompts for persona '${normalized.id}' from sentimentTracking.presets.`);
         }
 

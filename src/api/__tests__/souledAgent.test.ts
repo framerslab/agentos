@@ -2,12 +2,24 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { format, inspect } from 'node:util';
 
 // Spy on the real `agent` factory so we can inspect what souledAgent passes it,
 // while keeping loadSoulFromOption (and the rest of agent.js) real.
-const { agentSpy } = vi.hoisted(() => ({
-  agentSpy: vi.fn((o: unknown) => ({ __agentOpts: o, generate: async () => ({ text: '' }), close: async () => {} })),
-}));
+const { agentSpy, fakeAgent } = vi.hoisted(() => {
+  // A stand-in with the whole Agent surface souledAgent wraps: generate, stream, session and close.
+  const fakeAgent = (o: unknown, close: () => Promise<void> = async () => {}) => {
+    const stream = () => ({ usage: Promise.resolve({ promptTokens: 0, completionTokens: 0, totalTokens: 0 }) });
+    return {
+      __agentOpts: o,
+      generate: async () => ({ text: '' }),
+      stream,
+      session: () => ({ id: 's', send: async () => ({ text: '' }), stream, close: async () => {} }),
+      close,
+    };
+  };
+  return { fakeAgent, agentSpy: vi.fn((o: unknown) => fakeAgent(o)) };
+});
 vi.mock('../agent.js', async (orig) => {
   const actual = await (orig as () => Promise<Record<string, unknown>>)();
   return { ...actual, agent: agentSpy };
@@ -66,6 +78,84 @@ describe('souledAgent', () => {
     await a.close();
     expect(compileSpy).toHaveBeenCalled();
     compileSpy.mockRestore();
+  });
+
+  it('warns when the compile on close fails, and still closes the agent and the store', async () => {
+    const agentClose = vi.fn(async () => {});
+    agentSpy.mockImplementationOnce((o: unknown) => fakeAgent(o, agentClose));
+    const compile = vi.spyOn(Memory.prototype, 'compileWiki').mockRejectedValue(new Error('disk full'));
+    const storeClose = vi.spyOn(Memory.prototype, 'close');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const a = (await souledAgent({ provider: 'openai', model: 'gpt-4o', soul: dir } as any)) as any;
+      warn.mockClear();
+      await expect(a.close()).resolves.toBeUndefined();
+
+      expect(compile).toHaveBeenCalled();
+      const lines = warn.mock.calls.map((call) => call.map(String).join(' '));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('disk full');
+      expect(lines[0]).toMatch(/traces stay in the store/);
+      expect(agentClose).toHaveBeenCalledTimes(1);
+      expect(storeClose).toHaveBeenCalled();
+    } finally {
+      compile.mockRestore();
+      storeClose.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  it('warns and still closes when the compile on close fails with a value that cannot be turned into text', async () => {
+    const agentClose = vi.fn(async () => {});
+    agentSpy.mockImplementationOnce((o: unknown) => fakeAgent(o, agentClose));
+    // An object with no prototype has no toString: String() of it throws.
+    const compile = vi.spyOn(Memory.prototype, 'compileWiki').mockRejectedValue(Object.create(null));
+    const storeClose = vi.spyOn(Memory.prototype, 'close');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const a = (await souledAgent({ provider: 'openai', model: 'gpt-4o', soul: dir } as any)) as any;
+      warn.mockClear();
+      await expect(a.close()).resolves.toBeUndefined();
+
+      // The arguments are read as given: String() of the reason throws.
+      const lines = warn.mock.calls.filter((call) => typeof call[0] === 'string' && call[0].includes('compile on close failed'));
+      expect(lines).toHaveLength(1);
+      expect(lines[0][0]).toMatch(/traces stay in the store/);
+      expect(agentClose).toHaveBeenCalledTimes(1);
+      expect(storeClose).toHaveBeenCalled();
+    } finally {
+      compile.mockRestore();
+      storeClose.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  it('warns and still closes when the compile on close fails with an error that cannot be inspected', async () => {
+    const agentClose = vi.fn(async () => {});
+    agentSpy.mockImplementationOnce((o: unknown) => fakeAgent(o, agentClose));
+    const error = new Error('disk full');
+    Object.defineProperty(error, inspect.custom, { value: () => { throw new Error('cannot inspect'); } });
+    const compile = vi.spyOn(Memory.prototype, 'compileWiki').mockRejectedValue(error);
+    const storeClose = vi.spyOn(Memory.prototype, 'close');
+    // Formats its arguments as the console does, so an argument that cannot be inspected throws here as it would there.
+    const warn = vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+      format(...args);
+    });
+    try {
+      const a = (await souledAgent({ provider: 'openai', model: 'gpt-4o', soul: dir } as any)) as any;
+      warn.mockClear();
+      await expect(a.close()).resolves.toBeUndefined();
+
+      const lines = warn.mock.calls.filter((call) => typeof call[0] === 'string' && call[0].includes('compile on close failed'));
+      expect(lines).toHaveLength(1);
+      expect(lines[0][0]).toContain('disk full');
+      expect(agentClose).toHaveBeenCalledTimes(1);
+      expect(storeClose).toHaveBeenCalled();
+    } finally {
+      compile.mockRestore();
+      storeClose.mockRestore();
+      warn.mockRestore();
+    }
   });
 
   it('starts with pages named after members every object has, and finds their index entries on the next start', async () => {

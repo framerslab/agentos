@@ -27,7 +27,10 @@ export interface WikiCompilerOptions {
   llm: (prompt: string) => Promise<string>;
   /** Group traces into target pages. Injected (LLM- or heuristic-backed). */
   cluster: (traces: TraceLike[]) => Promise<ClusterAssignment[]>;
-  /** Current ISO timestamp provider (injected for determinism in tests). */
+  /**
+   * The clock that dates each written page's `updated` field, as an ISO 8601 timestamp. Defaults to the current
+   * time; pass one for a fixed date, as tests do.
+   */
   now?: () => string;
 }
 
@@ -75,7 +78,7 @@ export class WikiCompiler {
 
     const assignments = await this.opts.cluster(traces);
     const byId = new Map(traces.map((t) => [t.id, t]));
-    const now = this.opts.now ?? (() => new Date(0).toISOString());
+    const now = this.opts.now ?? (() => new Date().toISOString());
 
     for (const a of assignments) {
       const facts = a.traceIds.map((id) => byId.get(id)?.content).filter((c): c is string => !!c);
@@ -100,7 +103,10 @@ export class WikiCompiler {
         await this.opts.store.writePage({
           id: a.pageId,
           type,
-          summary: current?.summary ?? facts[0].slice(0, 120),
+          // A page that has a summary keeps it, whoever wrote it. A new page's summary is named from its id alone:
+          // the catalog line it becomes joins the system prompt of every agent built from the soul, so it never
+          // carries what was said in a conversation.
+          summary: current?.summary ?? summaryForNewPage(a.pageId),
           updated: now(),
           sources: newSources,
           body: mergedBody,
@@ -118,6 +124,21 @@ export class WikiCompiler {
     }
     return result;
   }
+}
+
+/**
+ * The summary a page the compiler creates is given: a fixed label made from its page id alone, never from the traces
+ * merged into it. `concepts/notes` is `Notes compiled from conversations`; any other page is named by the last
+ * segment of its id, as `Notes on johnny compiled from conversations` for `entities/johnny`.
+ *
+ * @param pageId - The new page's id, already checked by `assertWikiPageId`.
+ * @returns The label.
+ */
+function summaryForNewPage(pageId: string): string {
+  if (pageId === 'concepts/notes') return 'Notes compiled from conversations';
+  const name = pageId.slice(pageId.lastIndexOf('/') + 1);
+  if (pageId.startsWith('log/')) return `Log ${name} compiled from conversations`;
+  return `Notes on ${name} compiled from conversations`;
 }
 
 function inferType(pageId: string): WikiPageType {

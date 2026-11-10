@@ -588,9 +588,26 @@ interface ConsolidationResult {
 
 Source: `src/cognition/memory/core/prompt/MemoryPromptAssembler.ts`
 
-Assembles memory context into a single formatted string within a token budget, split across seven sections with overflow redistribution.
+Assembles memory context into a single formatted string within a token budget, split across seven sections with overflow redistribution. The preamble's tokens come off the budget first; each section is granted its share of the rest. `tokensUsed` counts the headers and blank lines too, and never exceeds the budget.
 
 ### Default Budget Allocation
+
+A share is the least a section with content gets, not a cap (see [Overflow Redistribution](#overflow-redistribution)). Shares set through `tokenBudget` that add up to more than 1 are scaled down, and a share that is not a finite positive number counts as 0. A share set to exactly 0 turns its section off: it gets no grant, takes none of the budget other sections leave unused, and is left out of the block. A key left out of `tokenBudget`, or set to `undefined` or `null`, keeps its default share. The `allocation` the assembly returns holds the shares it used: the defaults with the configured shares over them, 0 for the ones that count as 0, scaled down when they add up to more than 1.
+
+```typescript
+// Never show recent episodic memories; every other section keeps its default share.
+await memory.initialize({ ...deps, tokenBudget: { recentEpisodic: 0 } });
+```
+
+A persona sets the same shares in `cognitiveMemoryConfig.tokenBudget`. [`createAgentCognitiveMemory`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/agentCognitiveMemory.ts) passes the shares of the persona it is given to the manager it builds as `tokenBudget`, and the persona's `encoding`, `decay`, `workingMemoryCapacity`, `observer`, `reflector`, `graph` and `infiniteContext` under the same names. A host that builds its manager from a persona itself, in `gmiManagerConfig.cognitiveMemoryFactory`, passes `persona.cognitiveMemoryConfig?.tokenBudget` the same way. `agent({ runtime: 'gmi' })` and `gmi()` build their persona from their options, which set no `cognitiveMemoryConfig`, so their memory runs on the default shares.
+
+```typescript
+const persona: IPersonaDefinition = {
+  ...basePersona,
+  cognitiveMemoryConfig: { tokenBudget: { recentEpisodic: 0 } },
+};
+const { manager } = await createAgentCognitiveMemory({ persona, memory: { embedding: { provider: 'openai' } } });
+```
 
 | Section | Budget % | Content |
 |---------|---------|---------|
@@ -604,7 +621,48 @@ Assembles memory context into a single formatted string within a token budget, s
 
 ### Overflow Redistribution
 
-The budget working memory leaves unused flows to Semantic Recall, and so do the budgets of empty Batch 2 sections (no prospective alerts, no graph context, no observation notes).
+Budget a section leaves unused (it is empty, or its content is shorter than its share) flows to the sections that still have content, in `MEMORY_BUDGET_SPILL_ORDER`: Semantic Recall, Recent Episodic, Persistent Memory, Working Memory, Prospective Alerts, Graph Associations, Observation Notes. Each section in that order renders with its own share plus whatever the sections before it left unspent. A second pass in the same order gives what is still unspent (for example the share of a working memory too long for it) to the sections that still have content left out, so the block can fill the whole budget. The second pass only adds to the block. It adds a later line that now fits whole, at its place in the order, adds lines to a section that rendered none, and lengthens the persistent-memory text when the first pass cut it. Every line the first pass rendered stays, in its section and its order. A store that holds only episodic traces, assembled with the 1600 tokens the GMI's memory bridge asks for, fills the block with episodic traces rather than stopping at their 25%. Sections still appear in the block in the order shown under [Output Sections](#output-sections). When a host passes the mechanisms engine, the involuntary memory is chosen first, from the traces the turn did not retrieve, and a tenth of the budget after the preamble is set aside for it before the sections are granted theirs. A memory that does not fit that tenth whole is tried again on what the sections leave unspent, and is left out when it does not fit that whole either.
+
+### Overflow: whole memories only
+
+A line that shows a memory renders whole or not at all: a retrieved trace in Relevant Memories or Recent Experiences, a graph association in Related Context, and the involuntary memory. One that does not fit whole in what is left of its section is left out, never cut, and the lines after it in the section's order are still tried, so its room goes to the next line that fits. What drops when the block overflows is whole memories, the ones that find no room. No memory line carries `…[cut]`.
+
+A section with 200 characters left and two traces to place, the first with a 500-character line and the second with a 150-character line, leaves the first out and shows the second whole:
+
+```typescript
+const context = assembleMemoryContext({ totalTokenBudget, traits, retrievedTraces: [long, short] });
+
+context.includedMemoryIds; // ['short']
+context.lineOutcomes;
+// [
+//   { id: 'long',  section: 'semanticRecall', outcome: 'left_out', reason: 'section_full', tokens: 126 },
+//   { id: 'short', section: 'semanticRecall', outcome: 'included', tokens: 38 },
+// ]
+```
+
+`lineOutcomes` reports what became of each such line, one entry a trace, in the block's order: the retrieved traces of Relevant Memories and Recent Experiences, the graph associations that carry a trace id, then the involuntary memory. Each entry is an [`AssembledLineOutcome`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/types.ts):
+
+| Field | Value |
+|-------|-------|
+| `id` | The id of the trace the line shows, or leads to |
+| `section` | `semanticRecall`, `recentEpisodic`, `graphAssociations` or `involuntary`: the section that shows the trace, or, for a trace left out, the first section in the block's order that had a line for it |
+| `outcome` | `included` or `left_out` |
+| `reason` | Set only for a line left out. `section_full`: the whole line did not fit what its section was offered. `budget`: its section was offered no tokens at all (its share is 0, or the budget had none for it) |
+| `tokens` | Tokens of the line with its newline, about 4 characters a token: as rendered when included, as it would render whole when left out |
+
+A trace is reported once, under the section that shows it. A trace the block shows only through its graph association is reported as included under `graphAssociations` and is not listed in `includedMemoryIds`, which holds the traces rendered in their own sections and the involuntary memory. An association left out because the block already holds its trace adds no entry. `assembleForPrompt()` returns `lineOutcomes` with every block it assembles; a memory manager that builds its context another way may leave the field out.
+
+The persistent-memory section is the exception. Its text is one document, not a ranked memory: when it does not fit it is cut to fit and ends with `<!-- truncated -->`.
+
+### Trace Lines
+
+A trace's content is rendered whole. A trace that does not fit whole in what is left of its section is left out, and the traces after it are still tried, in order, while the section has room (see [Overflow: whole memories only](#overflow-whole-memories-only)). Graph associations follow the same rule. Lines of the other sections are whole or skipped too; only the persistent-memory text is cut to fit. An association that leads to a trace the block already holds, in Relevant Memories, Recent Experiences or the involuntary memory, is left out of Related Context, and the associations after it take its room: spreading activation leaves out only the top three retrieved traces, so a fourth can come back as an association of the first, and it then appears once, in its own section. In the second pass a trace section leaves out a trace that Related Context already shows through its association, so the trace still appears once and the room goes to the lines after it. As the second pass drops no line, a trace whose association was left out stays in the block. `assembleMemoryContext()` takes a graph association as `{ traceId, text }` (`MemoryGraphAssociation`) for this; a plain string line carries no id and is never left out for it. Persistent memory's text, when cut to fit, is never cut inside a surrogate pair, so an emoji is kept or dropped whole. Working memory keeps its leading slots when the whole list does not fit: its slots are sorted by activation, so the first slot that does not fit ends the section and no lower slot takes its place.
+
+Every line carries the trace's age and the UTC date it was stored (`createdAt`): `just now`, `Nm ago` and `Nh ago` under a day; from a day on, the number of UTC calendar days between the stored date and the turn's date, as `Nd ago` under a week and `N days ago` from a week on; then `, YYYY-MM-DD`. Counted in calendar days, the age always agrees with the date: a trace stored at 23:00 UTC on 2026-10-12 reads `27 days ago, 2026-10-12` at 00:30 UTC on 2026-11-08, though fewer than 27 whole 24-hour periods have passed. A trace stored 26 days before the turn reads:
+
+```
+- [episodic] user: which locker did we pick? ... (26 days ago, 2026-10-13 | moderate confidence | relevance: 0.62)
+```
 
 ### Personality -> Formatting Style
 
@@ -647,9 +705,38 @@ The assembler selects a formatting style by comparing conscientiousness, opennes
 [spontaneous memory] ...
 ```
 
-The preamble appears when the budget has room for it and 100 more tokens. `assembleForPrompt()` never fills the last two sections: it passes no observer notes (their 5% flows to Semantic Recall), and it passes neither the mechanisms engine nor the trace pool that the involuntary-recall section needs. Both sections appear only when a host calls `assembleMemoryContext()` (from `@framers/agentos/cognition/memory`) itself, with `observationNotes`, or with `mechanismsEngine` and `allTraces`. How each trace line reads depends on the formatting style.
+The preamble appears when the budget has room for it and 100 more tokens. `assembleForPrompt()` never fills the last two sections: it passes no observer notes (their 5% flows to the sections with content), and it passes neither the mechanisms engine nor the trace pool that the involuntary-recall section needs. Both sections appear only when a host calls `assembleMemoryContext()` (from `@framers/agentos/cognition/memory`) itself, with `observationNotes`, or with `mechanismsEngine` and `allTraces`. How each trace line reads depends on the formatting style.
 
 Token estimation uses ~4 chars per token heuristic.
+
+### Upgrading from 0.15.122 or earlier
+
+- A memory line that does not fit whole in what is left of its section is left out and its room goes to the next line that fits; no memory line carries ` …[cut]` (the persistent-memory text keeps its own `<!-- truncated -->` marker). The rule covers a retrieved trace, a graph association and the involuntary memory, for every caller of `assembleMemoryContext()` and `assembleForPrompt()`. In 0.15.121 and 0.15.122 such a line was cut at a word boundary to fit and ended with `…[cut]`, so a block that held a cut line now holds one memory fewer, or a shorter one that fits in its place. A block whose memories all fit is unchanged. See [Overflow: whole memories only](#overflow-whole-memories-only).
+- The assembled context carries `lineOutcomes`: for each trace the block was given a line for, whether the block shows it (`included`) or not (`left_out`, with the reason `section_full` or `budget`), and the line's tokens. The field is optional on `AssembledMemoryContext`, so a memory manager that returns its own context compiles unchanged.
+
+### Upgrading from 0.15.121 or earlier
+
+- A graph association that leads to a trace the block already holds (a retrieved trace past the three that seed the graph walk, or the involuntary memory) is left out of Related Context, so the trace appears once and the next association takes its room. In 0.15.121 such a trace appeared in its own section and again, whole, in Related Context; through 0.15.120 the repeat was cut to 150 characters.
+- The second pass, which spends the budget the first pass left unspent, only adds to the block: every line the first pass rendered stays, in its section and its order. In 0.15.121 the second pass rendered a section again from the start on its larger room, and a long item the first pass skipped could be cut to fit and push out a shorter line the first pass showed (a Related Context line, or a recalled trace).
+- `MemoryAssemblerInput.graphContext`, which `assembleMemoryContext()` takes, is `(string | MemoryGraphAssociation)[]`: an entry is a plain line or `{ traceId, text }`. Through 0.15.121 it was `string[]`. Code that reads its elements as strings no longer type-checks; narrow each one first:
+
+  ```typescript
+  const lines = (input.graphContext ?? []).map((item) => (typeof item === 'string' ? item : item.text));
+  ```
+
+- `createAgentCognitiveMemory` passes the `cognitiveMemoryConfig` of the persona it is given to the manager it builds: `tokenBudget`, `encoding`, `decay`, `workingMemoryCapacity`, `observer`, `reflector`, `graph` (laid over its `{ backend: 'knowledge-graph' }`) and `infiniteContext`, a field or key set to `undefined` or `null` keeping the default. The persona loaders drop the `null` values a persona read from JSON holds inside `cognitiveMemoryConfig` (a field, a key inside a field, or the whole config set to `null`), so a host's `cognitiveMemoryFactory` gets a persona that matches `CognitiveMemoryPersonaConfig`. Through 0.15.121 the fields were declared and nothing read them, so the manager ran on the default shares and settings. `featureDetectionStrategy` is still not read: `createAgentCognitiveMemory` runs `'keyword'`. `infiniteContext` takes effect only with `maxContextTokens`, which `createAgentCognitiveMemory` does not set.
+
+### Upgrading from 0.15.120 or earlier
+
+What callers see differently in the memory block and its formatters:
+
+- `assembleForPrompt()` renders each recalled trace whole. A trace that does not fit what is left of its section is left out (in 0.15.121 and 0.15.122 it was cut at a word boundary and ended with `…[cut]`; see [Upgrading from 0.15.122 or earlier](#upgrading-from-015122-or-earlier)), and budget a section leaves unused flows to the sections with content (see [Overflow Redistribution](#overflow-redistribution)), so a section can hold more than its share. Through 0.15.120 each trace was cut to about 300 characters (350 in the narrative style), and only Semantic Recall took budget other sections left unused.
+- `formatMemoryTrace` and `formatMemoryTraces` (exported from `@framers/agentos/cognition/memory`) return the whole content of a trace when called without `maxChars`. Through 0.15.120 they cut it to about 300 characters (350 in the narrative style). A caller that needs a bound passes `formatMemoryTrace(trace, style, { maxChars })`.
+- `assembleForPrompt()` puts a graph association's whole content in Related Context, and leaves the association out when it does not fit what is left of the section (in 0.15.121 and 0.15.122 it was cut to fit). Through 0.15.120 every association was cut to 150 characters.
+- The involuntary memory is chosen from the traces the turn did not retrieve: every retrieved trace is left out of its pool, including one that did not fit the block. Through 0.15.120 only the traces that made it into the block were left out.
+- A `tokenBudget` share of exactly 0 turns its section off. With the budget other sections leave unused flowing to the sections with content, a 0 share would otherwise still render its section. The default allocation has no zero share, so a host that sets none sees no change.
+- Each line carries the UTC date the trace was stored after its age, and an age from a week on reads `N days ago`. Through 0.15.120 a line carried no date and an age from a week on read `Nw ago`. Ages of a day or more count UTC calendar days between the stored date and the turn's date, so the age and the date agree: a trace stored at 23:00 UTC on 2026-10-12 reads `27 days ago, 2026-10-12` at 00:30 UTC on 2026-11-08, one more than the whole 24-hour periods between them.
+- The returned `allocation` holds the shares the assembly used, not the configured ones.
 
 ---
 

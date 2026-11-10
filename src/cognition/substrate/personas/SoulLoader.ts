@@ -60,7 +60,7 @@ import {
   readFileOutsideLinksSync,
   type OpenRefusal,
 } from '../../../core/utils/linkFreeWrite.js';
-import { ensureMemoryDir } from '../memory/wiki/migrateMemoryMd.js';
+import { ensureMemoryDir, withoutMigratedEndMarker } from '../memory/wiki/migrateMemoryMd.js';
 import type { IPersonaDefinition } from './IPersonaDefinition.js';
 import { normalizeHexacoTraits } from './hexaco.js';
 
@@ -85,7 +85,10 @@ export interface LoadedSoul {
   memoryContent?: string;
   /** Absolute path to the memory/ wiki dir (created/migrated on load). */
   memoryDir?: string;
-  /** Contents of memory/index.md, for system-prelude injection. */
+  /**
+   * Contents of memory/index.md, trimmed, for system-prelude injection. The end marker that closes text migrated from
+   * a legacy MEMORY.md (`<!-- end of MEMORY.md -->`) is the wiki's own bookkeeping and is left out.
+   */
   wikiIndex?: string;
   /** Path to the agent's workspace dir. */
   workspaceDir: string;
@@ -113,8 +116,9 @@ export interface SoulFrontmatter {
   /** Allowed mood transitions. Subset of agentos GMI moods. */
   allowedMoods?: string[];
   /**
-   * Hard behavioral limits. Each entry becomes a "Never X" rule appended
-   * to the system prompt and a guardrail check in PersonaOverlayManager.
+   * Hard behavioral limits, carried on the persona (`personaDefinition.hardLimits`). A GMI renders them as the
+   * closing "Hard limits" block of its system prompt. `agent()` and `gmi()` do not apply a soul's front matter, so
+   * there they reach no prompt. They are words for the model: PersonaOverlayManager runs no guardrail check on them.
    */
   hardLimits?: string[];
   /** Avatar config for visual surfaces. Maps to PersonaAvatarConfig. */
@@ -239,7 +243,7 @@ export async function loadSoul(options: SoulLoaderOptions): Promise<LoadedSoul> 
 
   // Resolve the markdown wiki memory dir (idempotent migration of legacy MEMORY.md).
   const memoryDir = ensureMemoryDir(workspaceDir);
-  const wikiIndex = trimmedText(await readSoulFile(folder, path.join('memory', 'index.md')));
+  const wikiIndex = indexText(await readSoulFile(folder, path.join('memory', 'index.md')));
 
   // Build IPersonaDefinition from frontmatter + soul body
   const personaDefinition = frontmatterToPersona(frontmatter, soulContent, styleContent);
@@ -301,7 +305,7 @@ export function loadSoulSync(options: SoulLoaderOptions): LoadedSoul {
 
   // Resolve the markdown wiki memory dir (idempotent migration of legacy MEMORY.md).
   const memoryDir = ensureMemoryDir(workspaceDir);
-  const wikiIndex = trimmedText(readSoulFileSync(folder, path.join('memory', 'index.md')));
+  const wikiIndex = indexText(readSoulFileSync(folder, path.join('memory', 'index.md')));
 
   const personaDefinition = frontmatterToPersona(frontmatter, soulContent, styleContent);
 
@@ -588,6 +592,12 @@ function soulText(soulPath: string, read: SoulFileRead, requireSoul: boolean): s
 /** An optional file's text, trimmed, or undefined when it gave none. */
 function trimmedText(read: SoulFileRead): string | undefined {
   return read !== null && 'text' in read ? read.text.trim() : undefined;
+}
+
+/** The text of memory/index.md that {@link LoadedSoul.wikiIndex} holds: trimmed, without the migrated block's end marker. */
+function indexText(read: SoulFileRead): string | undefined {
+  const text = trimmedText(read);
+  return text === undefined ? undefined : withoutMigratedEndMarker(text);
 }
 
 /** An error's message, or the value as text when it is not an Error. */

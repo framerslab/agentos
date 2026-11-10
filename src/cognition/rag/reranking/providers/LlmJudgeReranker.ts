@@ -1,10 +1,14 @@
 /**
  * @fileoverview LLM-as-Judge Reranker — two-phase hybrid reranking using LLM calls.
  *
- * Phase 1: Batch pointwise scoring with a cheap model (gpt-4o-mini, haiku).
- *          Groups documents into batches of 10, asks LLM to score 0-10.
- * Phase 2: Listwise final ranking with a synthesis model.
- *          Takes the `pointwiseTopK` best-scored documents from phase 1, asks LLM to rank them by relevance.
+ * Phase 1: Batch pointwise scoring: one `llmCallFn` call per batch of `batchSize` (10) documents,
+ *          with `scoringModel` as the `model` argument, asks the model to score each 0-10.
+ * Phase 2: Listwise final ranking: one `llmCallFn` call with `rankingModel` as the `model` argument
+ *          takes the `pointwiseTopK` best-scored documents from phase 1 and asks the model to rank them.
+ *
+ * The reranker names no model and calls no provider itself: `llmCallFn` decides which model and provider
+ * answer, and receives `undefined` as `model` when `scoringModel` or `rankingModel` is not set. The request's
+ * `modelId` and `params` are not read. Each call sends the query and the first 200 characters of each document.
  *
  * The answer holds every scored document: the ones the ranking names, in its order, then the rest by their phase 1
  * score, cut to the request's `topN` when it sets one.

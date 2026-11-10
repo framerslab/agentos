@@ -1,6 +1,6 @@
 /**
- * @fileoverview Provider-agnostic reranker service that orchestrates cross-encoder
- * reranking operations. Supports multiple backend providers (local models, cloud APIs).
+ * @fileoverview Provider-agnostic reranker service. It holds the registered providers (the
+ * local cross-encoder, Cohere's API, the LLM judge, or a host's own) and calls the one a request names.
  *
  * @module backend/agentos/rag/reranking/RerankerService
  */
@@ -30,9 +30,10 @@ export interface RerankerServiceOptions {
 /**
  * Provider-agnostic reranker service.
  *
- * Orchestrates cross-encoder reranking across multiple providers (local models,
- * cloud APIs) with a unified interface. Handles provider selection, request
- * routing, and result mapping back to RAG chunk format.
+ * Calls the provider a request names (`providerId`), else `defaultProviderId`, through
+ * one interface, whatever the provider runs: a local cross-encoder, a remote API or an
+ * LLM judge. Handles provider selection, request routing, and result mapping back to
+ * RAG chunk format.
  *
  * @example
  * ```typescript
@@ -40,18 +41,21 @@ export interface RerankerServiceOptions {
  *   config: {
  *     providers: [
  *       { providerId: 'local', defaultModelId: 'cross-encoder/ms-marco-MiniLM-L-6-v2' },
- *       { providerId: 'cohere', apiKey: process.env.COHERE_API_KEY }
+ *       { providerId: 'cohere', apiKey: process.env.COHERE_API_KEY },
+ *       { providerId: 'llm-judge' }
  *     ],
  *     defaultProviderId: 'local'
  *   }
  * });
  *
- * // Register provider implementations
+ * // Register provider implementations: the config entries create none.
  * service.registerProvider(new LocalCrossEncoderReranker(...));
  * service.registerProvider(new CohereReranker(...));
+ * service.registerProvider(new LlmJudgeReranker({ llmCallFn: myLlmCall }));
  *
- * // Rerank chunks
- * const reranked = await service.rerankChunks(query, chunks, { providerId: 'local' });
+ * // Rerank chunks with the default provider, or name one per request
+ * const reranked = await service.rerankChunks(query, chunks);
+ * const judged = await service.rerankChunks(query, chunks, { providerId: 'llm-judge', topN: 5 });
  * ```
  */
 export class RerankerService {

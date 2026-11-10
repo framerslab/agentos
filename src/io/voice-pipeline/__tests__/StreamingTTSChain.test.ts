@@ -1130,6 +1130,37 @@ describe('StreamingTTSChain: a backup that fails as it takes over, and flush acr
     });
   });
 
+  describe('the class a switch reports for a spent credit or a timeout', () => {
+    /** A TTS provider's 402 answer once its credit is spent: the status, then the first 200 characters of the body. */
+    const spentCredit =
+      'TTS failed: 402 {"error_code":"quota_exceeded","message":"Please upgrade your subscription at https://example.com/subscription to increase your credit limit or enable overages for your account.","title":"Model c';
+    const timeout = (): Error => new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+
+    it.each<[string, () => Error, string]>([
+      ['a spent-credit 402', () => new Error(spentCredit), 'quota'],
+      ['a request timeout', timeout, 'network'],
+    ])('reports %s as the failover reason and the failed opening class', async (_name, failure, expected) => {
+      const a = pushSession();
+      const second = provider('b', 20, pushSession());
+      second.startSession.mockRejectedValue(failure());
+      const c = pushSession();
+      const failover = vi.fn();
+      const onProviderFailed = vi.fn();
+      const chain = new StreamingTTSChain([provider('a', 10, a).tts, second.tts, provider('c', 30, c).tts], {
+        enableMidSynthesisFailover: true,
+        onProviderFailed,
+        onProviderFailover: failover,
+      });
+      const session = await chain.startSession();
+      session.pushTokens('Hi.');
+      a.emit('error', failure());
+      await vi.waitFor(() => expect(failover).toHaveBeenCalledOnce());
+      expect(failover.mock.calls[0]![0]).toMatchObject({ from: 'a', to: 'c', reason: expected });
+      expect(onProviderFailed.mock.calls.map(([event]) => event)).toEqual([expect.objectContaining({ providerId: 'b', errorClass: expected })]);
+      session.close();
+    });
+  });
+
   describe('a session that throws as the switch lets it go', () => {
     it('goes on to the backup, closes the failed session and keeps the failure when cancel() of the failed session throws', async () => {
       const a = pushSession();

@@ -47,8 +47,9 @@
  * ## Expected lift
  *
  * Anthropic's published numbers: −49% retrieval failure with contextual
- * embeddings alone, −67% when combined with reranking. We already have
- * Cohere rerank-v3.5 wired, so the upper bound applies. Our Phase A
+ * embeddings alone, −67% when combined with reranking. The bench runs
+ * with a reranker wired (Cohere rerank-v3.5 in those runs), so the
+ * upper bound applies. Our Phase A
  * multi-session ceiling of 50% is the main target; expected lift
  * +8–15pp on multi-session categories across LongMemEval and LOCOMO.
  *

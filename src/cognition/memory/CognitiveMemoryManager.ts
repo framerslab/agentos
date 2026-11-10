@@ -42,6 +42,7 @@ import { CognitiveWorkingMemory } from './core/working/CognitiveWorkingMemory.js
 import {
   assembleMemoryContext,
   type MemoryAssemblerInput,
+  type MemoryGraphAssociation,
 } from './core/prompt/MemoryPromptAssembler.js';
 
 // Batch 2 imports
@@ -959,8 +960,9 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     }
 
     // --- Optional neural reranking ---
-    // Blends Cohere/LLM-Judge cross-encoder scores with the existing
-    // cognitive composite. Weight: 0.7 cognitive + 0.3 neural reranker.
+    // Blends the scores of the service's default provider (local
+    // cross-encoder, Cohere, LLM judge or one of the host's) with the
+    // existing cognitive composite. Weight: 0.7 cognitive + 0.3 neural reranker.
     // This preserves decay, mood congruence, and graph activation signals
     // while boosting semantically relevant results the bi-encoder missed.
     if (this.rerankerService && scored.length > 0) {
@@ -1175,7 +1177,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     const wmText = workingMemory.formatForPrompt();
 
     // --- Batch 2: Graph associations ---
-    const graphContext: string[] = [];
+    const graphContext: MemoryGraphAssociation[] = [];
     if (this.graph && result.retrieved.length > 0) {
       const seedIds = result.retrieved.slice(0, 3).map((t) => t.id);
       try {
@@ -1194,9 +1196,13 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
             recallableIds.has(node.memoryId) &&
             !this.store.isDeleted(node.memoryId)
           ) {
-            graphContext.push(
-              `[associated, activation=${node.activation.toFixed(2)}] ${trace.content.substring(0, 150)}`
-            );
+            // Whole: the assembler shows an association whole or leaves it out when it does not fit its section, and
+            // leaves it out when the block already holds its trace (a retrieved trace past the three seeds may be
+            // associated).
+            graphContext.push({
+              traceId: node.memoryId,
+              text: `[associated, activation=${node.activation.toFixed(2)}] ${trace.content}`,
+            });
           }
         }
       } catch {

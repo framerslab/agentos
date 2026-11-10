@@ -27,8 +27,8 @@
  * │ canonical-      │  │ observational-  │  │ observational-      │
  * │ hybrid          │  │ memory-v10      │  │ memory-v11          │
  * │ (BM25 + dense   │  │ (synth obs log  │  │ (v10 + verbatim     │
- * │  + Cohere       │  │  + dyn router)  │  │  citation for       │
- * │  rerank)        │  │                 │  │  KU/SSU)            │
+ * │  + any          │  │  + dyn router)  │  │  citation for       │
+ * │  reranker)      │  │                 │  │  KU/SSU)            │
  * └─────────────────┘  └─────────────────┘  └─────────────────────┘
  * ```
  *

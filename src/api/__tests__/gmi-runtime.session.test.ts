@@ -204,6 +204,23 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
     expect(s.seen[0].options.responseFormat).toBeTruthy();
   });
 
+  it('a structured send on OpenAI is sent its optional fields required and nullable, and reads the nulls the model writes for them as absent', async () => {
+    const answer = '{"text":"Hello","speaker":null,"imageUrl":null,"transition":null}';
+    const k = key(); const s = script('openai', k, { replies: [reply.text(answer)] });
+    const schema = z.object({
+      text: z.string().min(1),
+      speaker: z.string().min(1).optional(),
+      imageUrl: z.string().min(1).optional(),
+      transition: z.object({ kind: z.enum(['cut', 'fade']), durationMs: z.number().min(150) }).optional(),
+    });
+    const r = await agent(base(k)).session('s').send('frame?', { responseSchema: schema, schemaName: 'frame' });
+    expect(r.object).toEqual({ text: 'Hello' });
+    const strict = (s.seen[0].options.responseFormat as { json_schema: { schema: any } }).json_schema.schema;
+    expect(strict.required).toEqual(['text', 'speaker', 'imageUrl', 'transition']);
+    expect(strict.properties.speaker).toEqual({ type: ['string', 'null'] });
+    expect(strict.properties.transition.anyOf[1]).toEqual({ type: 'null' });
+  });
+
   it('a structured send on an Anthropic model that takes a forced tool: the schema tool call becomes the object; preamble text stays text', async () => {
     const k = key(); const s = script('anthropic', k, { replies: [reply.schemaTool('answer', { city: 'Lyon' }, 'Here you go.')] });
     const session = agent({ ...base(k), provider: 'anthropic', model: 'claude-x' }).session('s');

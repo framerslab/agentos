@@ -8,7 +8,10 @@
  * has stricter requirements than the looser `json_object` mode:
  *
  *  - Every object must declare `additionalProperties: false`.
- *  - Every property of every object must appear in the `required` array.
+ *  - Every property of every object must appear in the `required` array, so
+ *    a property the source schema leaves optional is made nullable instead:
+ *    the model writes `null` for it, and the reply readers drop that `null`
+ *    before validating (`dropNullsForOptionalFields` in `structuredReply.ts`).
  *  - Unsupported keywords (`format`, `pattern`, `minLength`, etc.) are stripped.
  *
  * This module wraps a lowered JSON Schema (from {@link lowerZodToJsonSchema})
@@ -85,6 +88,13 @@ function isStrictCompatibleNode(node: unknown): boolean {
  * Recursively prepares a JSON Schema for OpenAI strict mode:
  *  - On every object node, sets `additionalProperties: false` and lifts every
  *    declared property name into `required`.
+ *  - Makes every property the node's own `required` leaves out (every
+ *    property, when the node has no `required`) accept `null`: strict mode
+ *    has no optional property, so a model under constrained decoding must
+ *    write each one. Without `null` it wrote a placeholder that fails the
+ *    caller's own checks (`""` under a `.min(1)`, `0` under a `.min(5)`), or
+ *    an invented value that passes them. A property that already accepts
+ *    `null` is left as it is.
  *  - Walks into `properties` and `items` so nested arrays-of-objects are
  *    handled correctly (the most common reason callers hit this code path).
  *  - Returns a fresh object; does not mutate the input.
@@ -96,10 +106,14 @@ export function makeStrictJsonSchema(node: unknown): unknown {
 
   if (out.type === 'object' && out.properties && typeof out.properties === 'object') {
     const props = out.properties as Record<string, unknown>;
+    const declaredRequired = new Set(
+      Array.isArray(obj.required) ? (obj.required as unknown[]).filter((k): k is string => typeof k === 'string') : [],
+    );
     const newProps: Record<string, unknown> = {};
     const required: string[] = [];
     for (const key of Object.keys(props)) {
-      newProps[key] = makeStrictJsonSchema(props[key]);
+      const strict = makeStrictJsonSchema(props[key]);
+      newProps[key] = declaredRequired.has(key) ? strict : withNull(strict);
       required.push(key);
     }
     out.properties = newProps;
@@ -124,6 +138,42 @@ export function makeStrictJsonSchema(node: unknown): unknown {
   }
 
   return out;
+}
+
+/** True when a JSON Schema node already accepts `null`. */
+function acceptsNull(node: unknown): boolean {
+  if (!node || typeof node !== 'object') return false;
+  const obj = node as Record<string, unknown>;
+  if (obj.type === 'null') return true;
+  if (Array.isArray(obj.type) && obj.type.includes('null')) return true;
+  if (Array.isArray(obj.enum) && obj.enum.includes(null)) return true;
+  if ('const' in obj && obj.const === null) return true;
+  if (Array.isArray(obj.anyOf) && obj.anyOf.some((v) => acceptsNull(v))) return true;
+  if (Array.isArray(obj.oneOf) && obj.oneOf.some((v) => acceptsNull(v))) return true;
+  return false;
+}
+
+/**
+ * The node widened to accept `null`, as the lowering writes a `.nullable()`:
+ * a bare primitive type becomes a type array (`['string', 'null']`); any other
+ * node (an object, an array, an enum) becomes an `anyOf` with `{ type: 'null' }`,
+ * and a union's own `anyOf` takes `{ type: 'null' }` as one more member. A node
+ * that accepts `null` already is returned as it is.
+ */
+function withNull(node: unknown): unknown {
+  if (!node || typeof node !== 'object' || acceptsNull(node)) return node;
+  const obj = node as Record<string, unknown>;
+  const primitive = obj.type === 'string' || obj.type === 'number' || obj.type === 'integer' || obj.type === 'boolean';
+  if (primitive && !('enum' in obj) && !('const' in obj)) {
+    return { ...obj, type: [obj.type, 'null'] };
+  }
+  if (Array.isArray(obj.type) && obj.type.every((t) => typeof t === 'string') && !('enum' in obj) && !('const' in obj)) {
+    return { ...obj, type: [...obj.type, 'null'] };
+  }
+  if (Array.isArray(obj.anyOf) && Object.keys(obj).every((k) => k === 'anyOf' || k === 'description')) {
+    return { ...obj, anyOf: [...obj.anyOf, { type: 'null' }] };
+  }
+  return { anyOf: [node, { type: 'null' }] };
 }
 
 /**

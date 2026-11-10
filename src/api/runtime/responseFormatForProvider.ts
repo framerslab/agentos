@@ -20,6 +20,7 @@ import {
   buildResponseFormat,
   type AnthropicStructuredOutputMarker,
 } from '../../core/llm/providers/structuredOutputFormat.js';
+import { strictSchemasWithinLimits } from '../../core/llm/providers/model-strict-tool-use.js';
 
 /**
  * Providers whose chat API accepts `response_format: { type: 'json_object' }`
@@ -73,7 +74,12 @@ export interface BuildResponseFormatForProviderInputs {
  *   in practice and this builder says so honestly.
  * - `openrouter` — OpenAI-shaped strict `json_schema` (forwarded upstream
  *   with `require_parameters` routing) when strict-compatible, else
- *   `json_object`.
+ *   `json_object`. On a Claude model (`anthropic/...`) OpenRouter sends the
+ *   strict schema on to Anthropic's JSON output format, which refuses a
+ *   request over its limits (16 union-typed, 24 optional parameters); the
+ *   strict schema makes every optional property nullable, so each counts as
+ *   union-typed, and a strict schema over those limits is sent as
+ *   `json_object` instead.
  * - any other {@link JSON_MODE_PROVIDERS} member — `json_object`.
  * - unknown providers — `undefined`.
  */
@@ -114,9 +120,19 @@ export function buildResponseFormatForProvider(
     return undefined;
   }
   if (providerId === 'openrouter') {
-    return canUseStrictJsonSchema(jsonSchema)
-      ? buildOpenAIJsonSchemaResponseFormat(jsonSchema, schemaName)
-      : { type: 'json_object' as const };
+    if (!canUseStrictJsonSchema(jsonSchema)) return { type: 'json_object' as const };
+    const strict = buildOpenAIJsonSchemaResponseFormat(jsonSchema, schemaName);
+    // A Claude model's strict schema reaches Anthropic's JSON output format,
+    // which answers a schema over its limits with a 400 no fallback walks
+    // ("Schemas contains too many parameters with union types (17 parameters
+    // with type arrays or anyOf) ... limit: 16 parameters with unions",
+    // OpenRouter's Claude endpoints, 2026-11-08). JSON mode keeps the call:
+    // the schema rides the prompt and the caller's schema checks the reply.
+    if (isClaudeSlug(modelId)) {
+      const schema = (strict.json_schema as { schema?: unknown } | undefined)?.schema;
+      if (!strictSchemasWithinLimits([schema])) return { type: 'json_object' as const };
+    }
+    return strict;
   }
   if (JSON_MODE_PROVIDERS.has(providerId)) {
     return { type: 'json_object' as const };
@@ -124,6 +140,11 @@ export function buildResponseFormatForProvider(
   // Unknown provider: no provider-native enforcement; the schema already
   // rides the system prompt and caller-side Zod validation still runs.
   return undefined;
+}
+
+/** True for an OpenRouter model id that names a Claude model (`anthropic/...`). */
+function isClaudeSlug(modelId: string): boolean {
+  return modelId.toLowerCase().startsWith('anthropic/');
 }
 
 /**

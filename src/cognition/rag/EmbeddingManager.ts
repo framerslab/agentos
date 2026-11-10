@@ -38,6 +38,18 @@ import { createContentSafeConsole } from '../../core/logging/contentSafeConsole.
 const console = createContentSafeConsole('embedding_manager');
 
 /**
+ * Texts sent in one provider request when neither the model's `providerSpecificArgs.batchSize`
+ * nor the manager's `defaultBatchSize` sets a batch.
+ *
+ * OpenAI's embeddings endpoint takes up to 2,048 inputs in one request, at most 8,192 tokens
+ * each, and at most 300,000 tokens summed across the request's inputs
+ * (https://developers.openai.com/api/reference/resources/embeddings/methods/create, `input`).
+ * 32 inputs stay under both limits even when every input is at the 8,192-token maximum
+ * (262,144 tokens).
+ */
+const DEFAULT_EMBEDDING_BATCH_SIZE = 32;
+
+/**
  * Represents a cached embedding entry.
  * @internal
  */
@@ -304,7 +316,8 @@ export class EmbeddingManager implements IEmbeddingManager {
     let cumulativeTotalTokens = 0;
     let cumulativeCostUSD = 0;
 
-    const batchSize = selectedModelConfig.providerSpecificArgs?.batchSize ?? this.config.defaultBatchSize ?? 32;
+    const batchSize =
+      selectedModelConfig.providerSpecificArgs?.batchSize ?? this.config.defaultBatchSize ?? DEFAULT_EMBEDDING_BATCH_SIZE;
 
     for (let i = 0; i < textsToEmbed.length; i += batchSize) {
       const batchTexts = textsToEmbed.slice(i, i + batchSize);

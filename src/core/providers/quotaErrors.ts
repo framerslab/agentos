@@ -12,8 +12,11 @@
  * rotation. `retryAfterMs()` normalizes a Retry-After header.
  */
 
-const QUOTA_STATUS_CODES = new Set([429, 402, 456]);
-const QUOTA_BODY_SIGNALS = [
+/** The HTTP statuses of a throttle or a spent quota or credit: 429, 402 and 456. */
+export const QUOTA_STATUS_CODES: ReadonlySet<number> = new Set([429, 402, 456]);
+
+/** The words the providers' quota and throttle answers carry in their bodies, lowercase. */
+export const QUOTA_BODY_SIGNALS: readonly string[] = [
   'quota_exceeded',
   'rate_limit_exceeded',
   'insufficient_quota',
@@ -23,15 +26,23 @@ const QUOTA_BODY_SIGNALS = [
 ];
 
 /**
+ * Whether a text (a response body, or an error message that quotes one)
+ * names one of the providers' quota signals, in any case.
+ */
+export function hasQuotaBodySignal(text: string): boolean {
+  if (!text) return false;
+  const lower = text.toLowerCase();
+  return QUOTA_BODY_SIGNALS.some((signal) => lower.includes(signal));
+}
+
+/**
  * Whether an HTTP response signals a quota or billing exhaustion that a key
  * pool should treat as "rest this key": 429, 402 or 456, or a body naming one
  * of the providers' quota signals.
  */
 export function isQuotaError(status: number, body: string): boolean {
   if (QUOTA_STATUS_CODES.has(status)) return true;
-  if (!body) return false;
-  const lower = body.toLowerCase();
-  return QUOTA_BODY_SIGNALS.some((signal) => lower.includes(signal));
+  return hasQuotaBodySignal(body);
 }
 
 /** The kinds of failure a key can cause: a throttle or spent quota, a bad or revoked key, an unpaid account. */

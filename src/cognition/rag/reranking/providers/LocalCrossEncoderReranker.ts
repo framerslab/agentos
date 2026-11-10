@@ -24,10 +24,13 @@ export interface LocalCrossEncoderConfig extends RerankerProviderConfig {
    */
   defaultModelId?: string;
   /**
-   * Device to run inference on.
-   * - 'cpu': Use CPU (default, most compatible)
-   * - 'gpu': Use GPU if available (requires CUDA/WebGPU)
-   * - 'auto': Automatically select best available
+   * Device hint, reported in the diagnostics. Default 'cpu'. No value
+   * selects a GPU: the pipeline is created without a device option, so
+   * Transformers.js picks the backend.
+   * - 'gpu' sets Transformers.js's ONNX WASM backend to one thread
+   *   (`env.backends.onnx.wasm.numThreads = 1`), a process-wide setting
+   *   that every Transformers.js pipeline in the process shares.
+   * - 'cpu' and 'auto' change nothing.
    */
   device?: 'cpu' | 'gpu' | 'auto';
   /**
@@ -63,13 +66,14 @@ export type LocalRerankerModel = (typeof LOCAL_RERANKER_MODELS)[number];
 /**
  * Local cross-encoder reranker.
  *
- * Runs cross-encoder models locally using transformers.js for Node.js/browser
- * or ONNX runtime. No API calls, fully offline capable.
+ * Runs cross-encoder models in process through Transformers.js
+ * (`@huggingface/transformers`, else `@xenova/transformers`). Scoring sends
+ * nothing over the network: the query and documents stay in the process.
  *
- * **Performance**: ~200-500ms for 50 documents on CPU (varies by model/hardware)
- *
- * **Note**: First run downloads the model (~100-500MB depending on model).
- * Subsequent runs use cached model.
+ * **Note**: Transformers.js fetches the model's files on first load and
+ * reads them from its cache (`cacheDir`) after that. The pipeline loads once,
+ * for the model of the first `rerank()` or `initialize()`; call
+ * `initialize(modelId)` to load another.
  *
  * @example
  * ```typescript

@@ -1,4 +1,7 @@
 import { describe, it, expect } from 'vitest';
+import { z } from 'zod';
+import { lowerZodToJsonSchema } from '../../../orchestration/compiler/SchemaLowering.js';
+import { buildResponseFormatForProvider } from '../responseFormatForProvider.js';
 import {
   canUseStrictJsonSchema,
   makeStrictJsonSchema,
@@ -50,8 +53,10 @@ describe('makeStrictJsonSchema', () => {
         outer: {
           type: 'object',
           properties: { inner: { type: 'string' } },
+          required: ['inner'],
         },
       },
+      required: ['outer'],
     }) as any;
     expect(out.additionalProperties).toBe(false);
     expect(out.properties.outer.additionalProperties).toBe(false);
@@ -67,9 +72,11 @@ describe('makeStrictJsonSchema', () => {
           items: {
             type: 'object',
             properties: { name: { type: 'string' }, amount: { type: 'string' } },
+            required: ['name', 'amount'],
           },
         },
       },
+      required: ['ingredients'],
     }) as any;
     expect(out.properties.ingredients.items.additionalProperties).toBe(false);
     expect(out.properties.ingredients.items.required).toEqual(['name', 'amount']);
@@ -216,5 +223,127 @@ describe('makeStrictJsonSchema — union recursion (discriminatedUnion 400 fix)'
     }) as any;
     expect(out.oneOf[0].additionalProperties).toBe(false);
     expect(out.oneOf[1].additionalProperties).toBe(false);
+  });
+});
+
+describe('makeStrictJsonSchema — an optional property is required and nullable', () => {
+  // Strict mode takes no optional property. Without null a model under
+  // constrained decoding wrote a placeholder ("" under a .min(1), 0 under a
+  // .min(5)) for every property the caller left optional.
+  it('makes a property the node leaves out of required accept null, and leaves a required one as it is', () => {
+    const out = makeStrictJsonSchema({
+      type: 'object',
+      properties: { text: { type: 'string' }, speaker: { type: 'string' }, durationSec: { type: 'number' } },
+      required: ['text'],
+    }) as any;
+    expect(out.required).toEqual(['text', 'speaker', 'durationSec']);
+    expect(out.properties.text).toEqual({ type: 'string' });
+    expect(out.properties.speaker).toEqual({ type: ['string', 'null'] });
+    expect(out.properties.durationSec).toEqual({ type: ['number', 'null'] });
+  });
+
+  it('reads a node with no required as one whose every property is optional', () => {
+    const out = makeStrictJsonSchema({ type: 'object', properties: { a: { type: 'string' }, b: { type: 'boolean' } } }) as any;
+    expect(out.required).toEqual(['a', 'b']);
+    expect(out.properties.a).toEqual({ type: ['string', 'null'] });
+    expect(out.properties.b).toEqual({ type: ['boolean', 'null'] });
+  });
+
+  it('makes an optional nested object nullable through anyOf, its own optional properties too', () => {
+    const out = makeStrictJsonSchema({
+      type: 'object',
+      properties: {
+        transition: {
+          type: 'object',
+          properties: { kind: { enum: ['cut', 'fade'] }, durationMs: { type: 'number' } },
+          required: ['kind'],
+        },
+      },
+    }) as any;
+    expect(out.required).toEqual(['transition']);
+    expect(out.properties.transition).toEqual({
+      anyOf: [
+        {
+          type: 'object',
+          properties: { kind: { enum: ['cut', 'fade'] }, durationMs: { type: ['number', 'null'] } },
+          required: ['kind', 'durationMs'],
+          additionalProperties: false,
+        },
+        { type: 'null' },
+      ],
+    });
+  });
+
+  it('reaches the optional properties of objects inside an array', () => {
+    const out = makeStrictJsonSchema({
+      type: 'object',
+      properties: {
+        frames: {
+          type: 'array',
+          items: { type: 'object', properties: { text: { type: 'string' }, imageUrl: { type: 'string' } }, required: ['text'] },
+        },
+      },
+      required: ['frames'],
+    }) as any;
+    expect(out.properties.frames.type).toBe('array');
+    expect(out.properties.frames.items.required).toEqual(['text', 'imageUrl']);
+    expect(out.properties.frames.items.properties.text).toEqual({ type: 'string' });
+    expect(out.properties.frames.items.properties.imageUrl).toEqual({ type: ['string', 'null'] });
+    expect(out.properties.frames.items.additionalProperties).toBe(false);
+  });
+
+  it('makes an optional enum nullable through anyOf, and adds null to an optional union once', () => {
+    const out = makeStrictJsonSchema({
+      type: 'object',
+      properties: {
+        mood: { enum: ['calm', 'tense'] },
+        value: { anyOf: [{ type: 'string' }, { type: 'number' }] },
+      },
+    }) as any;
+    expect(out.properties.mood).toEqual({ anyOf: [{ enum: ['calm', 'tense'] }, { type: 'null' }] });
+    expect(out.properties.value).toEqual({ anyOf: [{ type: 'string' }, { type: 'number' }, { type: 'null' }] });
+  });
+
+  it('leaves an optional property that accepts null already as it is', () => {
+    const out = makeStrictJsonSchema({
+      type: 'object',
+      properties: {
+        note: { type: ['string', 'null'] },
+        meta: { anyOf: [{ type: 'object', properties: { a: { type: 'string' } }, required: ['a'] }, { type: 'null' }] },
+      },
+    }) as any;
+    expect(out.properties.note).toEqual({ type: ['string', 'null'] });
+    expect(out.properties.meta.anyOf).toHaveLength(2);
+    expect(out.properties.meta.anyOf[1]).toEqual({ type: 'null' });
+  });
+
+  it('gives OpenAI and OpenRouter a strict payload whose optional Zod fields are required and nullable', () => {
+    const schema = z.object({
+      id: z.string(),
+      frames: z.array(
+        z.object({
+          text: z.string().min(1),
+          imageUrl: z.string().min(1).optional(),
+          clipDurationSec: z.number().min(5).optional(),
+          transition: z.object({ kind: z.enum(['cut', 'fade']), durationMs: z.number().min(150) }).optional(),
+        }),
+      ),
+      note: z.string().nullable().optional(),
+    });
+    const jsonSchema = lowerZodToJsonSchema(schema);
+    for (const providerId of ['openai', 'openrouter']) {
+      const payload = buildResponseFormatForProvider({ providerId, modelId: 'gpt-4o-mini', jsonSchema, effectiveSchema: schema, schemaName: 'scene' }) as any;
+      expect(payload.type).toBe('json_schema');
+      const root = payload.json_schema.schema;
+      expect(root.required).toEqual(['id', 'frames', 'note']);
+      expect(root.properties.note).toEqual({ type: ['string', 'null'] });
+      const frame = root.properties.frames.items;
+      expect(frame.required).toEqual(['text', 'imageUrl', 'clipDurationSec', 'transition']);
+      expect(frame.properties.text).toEqual({ type: 'string' });
+      expect(frame.properties.imageUrl).toEqual({ type: ['string', 'null'] });
+      expect(frame.properties.clipDurationSec).toEqual({ type: ['number', 'null'] });
+      expect(frame.properties.transition.anyOf[1]).toEqual({ type: 'null' });
+      expect(frame.properties.transition.anyOf[0].required).toEqual(['kind', 'durationMs']);
+    }
   });
 });

@@ -108,17 +108,23 @@ export interface RetrievalAugmentorServiceConfig {
    * cross-encoder models. Reranking is disabled by default and must be
    * explicitly enabled per-request via `rerankerConfig.enabled: true`.
    *
+   * `initialize()` registers the `cohere` provider (when its entry has an
+   * `apiKey`) and the `local` provider for the entries this list names. The
+   * `llm-judge` provider and any provider of your own are registered with
+   * `RetrievalAugmentor.registerRerankerProvider()`.
+   *
    * @see RerankerServiceConfig for provider configuration details
    */
   rerankerServiceConfig?: RerankerServiceConfig;
   /**
    * Default reranker provider ID when reranking is enabled but no provider specified.
-   * Common values: 'cohere', 'local'
+   * Built-in values: 'local', 'cohere', 'llm-judge'; or the id of a provider the host registered.
    */
   defaultRerankerProviderId?: string;
   /**
    * Default reranker model ID when reranking is enabled but no model specified.
-   * Examples: 'rerank-v3.5' (Cohere), 'cross-encoder/ms-marco-MiniLM-L-6-v2' (local)
+   * Examples: 'cross-encoder/ms-marco-MiniLM-L-6-v2' (local), 'rerank-v3.5' (Cohere). The LLM judge
+   * ignores it and calls `llmCallFn` with its own `scoringModel` and `rankingModel`.
    */
   defaultRerankerModelId?: string;
 }
