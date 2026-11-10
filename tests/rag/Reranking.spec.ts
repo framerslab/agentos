@@ -17,54 +17,30 @@ import type { RagRetrievedChunk } from '../../src/cognition/rag/IRetrievalAugmen
 const mockFetch = vi.fn();
 global.fetch = mockFetch;
 
-// Mock transformers.js for local model tests
-vi.mock('@huggingface/transformers', () => {
-  // Create mock model that returns relevance scores
-  const mockModel = vi.fn().mockImplementation(async () => ({
-    logits: { data: new Float32Array([0.9, 0.7, 0.5, 0.3, 0.1]), dims: [5, 1] },
+// Stub transformers.js for the local provider: the tokenizer hands each pair's
+// document on, and one model call scores the whole batch from the documents'
+// lengths (one logit per pair), so the order is known and the scores differ.
+const { transformersStub } = vi.hoisted(() => ({ transformersStub: () => {
+  const tokenizer = vi.fn((_queries: string[], options: { text_pair: string[] }) => ({
+    documents: options.text_pair,
   }));
-
+  const model: any = vi.fn(async (inputs: { documents: string[] }) => ({
+    logits: {
+      data: Float32Array.from(inputs.documents.map((doc) => doc.length / 10 - 3)),
+      dims: [inputs.documents.length, 1],
+    },
+  }));
+  model.config = { id2label: { '0': 'LABEL_0' } };
+  model.dispose = vi.fn(async () => {});
   return {
-    pipeline: vi.fn().mockResolvedValue(mockModel),
-    AutoTokenizer: {
-      from_pretrained: vi.fn().mockResolvedValue({
-        encode: vi.fn().mockReturnValue({ input_ids: { data: [1, 2, 3] } }),
-      }),
-    },
-    AutoModelForSequenceClassification: {
-      from_pretrained: vi.fn().mockResolvedValue({
-        forward: vi.fn().mockResolvedValue({
-          logits: { data: new Float32Array([0.9, 0.7, 0.5, 0.3, 0.1]), dims: [5, 1] },
-        }),
-      }),
-    },
+    AutoTokenizer: { from_pretrained: vi.fn().mockResolvedValue(tokenizer) },
+    AutoModelForSequenceClassification: { from_pretrained: vi.fn().mockResolvedValue(model) },
     env: { allowLocalModels: true, useBrowserCache: false },
   };
-});
+} }));
 
-vi.mock('@xenova/transformers', () => {
-  // Create mock model that returns relevance scores
-  const mockModel = vi.fn().mockImplementation(async () => ({
-    logits: { data: new Float32Array([0.9, 0.7, 0.5, 0.3, 0.1]), dims: [5, 1] },
-  }));
-
-  return {
-    pipeline: vi.fn().mockResolvedValue(mockModel),
-    AutoTokenizer: {
-      from_pretrained: vi.fn().mockResolvedValue({
-        encode: vi.fn().mockReturnValue({ input_ids: { data: [1, 2, 3] } }),
-      }),
-    },
-    AutoModelForSequenceClassification: {
-      from_pretrained: vi.fn().mockResolvedValue({
-        forward: vi.fn().mockResolvedValue({
-          logits: { data: new Float32Array([0.9, 0.7, 0.5, 0.3, 0.1]), dims: [5, 1] },
-        }),
-      }),
-    },
-    env: { allowLocalModels: true, useBrowserCache: false },
-  };
-});
+vi.mock('@huggingface/transformers', () => transformersStub());
+vi.mock('@xenova/transformers', () => transformersStub());
 
 describe('Reranking Integration', () => {
   describe('RerankerService with Multiple Providers', () => {

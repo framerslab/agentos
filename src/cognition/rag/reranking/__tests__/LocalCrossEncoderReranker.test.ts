@@ -1,229 +1,393 @@
 /**
- * @fileoverview Unit tests for LocalCrossEncoderReranker provider
+ * @fileoverview Unit tests for LocalCrossEncoderReranker with a stubbed tokenizer and model.
+ *
+ * The stubs stand in for Transformers.js's AutoTokenizer and
+ * AutoModelForSequenceClassification. They check what the provider asks of
+ * them (the pairs it tokenizes, one forward pass per batch, the weights file it
+ * loads) and how it turns logits into scores. The real model runs in
+ * LocalCrossEncoderReranker.model.test.ts.
+ *
  * @module backend/agentos/rag/reranking/tests/LocalCrossEncoderReranker.test
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { LocalCrossEncoderReranker, LOCAL_RERANKER_MODELS } from '../providers/LocalCrossEncoderReranker';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import {
+  LocalCrossEncoderReranker,
+  LOCAL_RERANKER_MODELS,
+  LOCAL_RERANKER_DEFAULT_WEIGHTS,
+} from '../providers/LocalCrossEncoderReranker';
 import type { RerankerInput, RerankerRequestConfig } from '../IRerankerService';
 
-// Mock Transformers.js (preferred: @huggingface/transformers, fallback: @xenova/transformers)
-const pipelineInstanceMock = vi.fn();
-const pipelineMock = vi.fn();
-const envMock: any = {
-  cacheDir: undefined,
-  backends: { onnx: { wasm: { numThreads: 1 } } },
+/** The logits the stub model returns for a document: a number per class. */
+let logitsFor: (doc: string) => number[] = () => [0];
+/** The `id2label` of the stub model's config. */
+let id2label: Record<string, string> = { '0': 'LABEL_0' };
+
+const tokenizerCalls: Array<{ texts: string[]; options: Record<string, unknown> }> = [];
+const forwardCalls: Array<{ documents: string[] }> = [];
+
+/** A tokenizer stub: records the call and hands the documents on to the model stub. */
+const tokenizerStub = vi.fn((texts: string[], options: { text_pair: string[] } & Record<string, unknown>) => {
+  tokenizerCalls.push({ texts, options });
+  return { __documents: options.text_pair };
+});
+
+/** A model stub: one call is one forward pass over every pair it is given. */
+const modelStub: any = vi.fn(async (inputs: { __documents: string[] }) => {
+  forwardCalls.push({ documents: inputs.__documents });
+  const rows = inputs.__documents.map((doc) => logitsFor(doc));
+  const classes = rows[0]?.length ?? 1;
+  return { logits: { dims: [rows.length, classes], data: Float32Array.from(rows.flat()) } };
+});
+modelStub.dispose = vi.fn(async () => {});
+
+const tokenizerFromPretrained = vi.fn(async () => tokenizerStub);
+/** The model a load returns; a test that needs one model per id replaces it. */
+const defaultLoadModel = async (): Promise<any> => {
+  modelStub.config = { id2label };
+  return modelStub;
 };
+let loadModel: (modelId: string) => Promise<any> = defaultLoadModel;
+const modelFromPretrained = vi.fn(async (...args: any[]) => loadModel(args[0]));
 
 vi.mock('@huggingface/transformers', () => ({
-  pipeline: pipelineMock,
-  env: envMock,
+  env: {},
+  AutoTokenizer: { from_pretrained: tokenizerFromPretrained },
+  AutoModelForSequenceClassification: { from_pretrained: modelFromPretrained },
 }));
 
 vi.mock('@xenova/transformers', () => ({
-  pipeline: pipelineMock,
-  env: envMock,
+  env: {},
+  AutoTokenizer: { from_pretrained: tokenizerFromPretrained },
+  AutoModelForSequenceClassification: { from_pretrained: modelFromPretrained },
 }));
+
+const sigmoid = (x: number) => 1 / (1 + Math.exp(-x));
 
 describe('LocalCrossEncoderReranker', () => {
   let reranker: LocalCrossEncoderReranker;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    pipelineMock.mockResolvedValue(pipelineInstanceMock);
-    pipelineInstanceMock.mockResolvedValue([{ label: 'LABEL_1', score: 0.8 }]);
-    reranker = new LocalCrossEncoderReranker({
-      providerId: 'local',
-      defaultModelId: 'cross-encoder/ms-marco-MiniLM-L-6-v2',
-    });
+    tokenizerCalls.length = 0;
+    forwardCalls.length = 0;
+    id2label = { '0': 'LABEL_0' };
+    logitsFor = (doc) => [doc.length / 10];
+    loadModel = defaultLoadModel;
+    reranker = new LocalCrossEncoderReranker({ providerId: 'local' });
   });
 
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
-  describe('Initialization', () => {
-    it('should create instance with correct providerId', () => {
+  describe('initialization', () => {
+    it('has providerId local and loads nothing before the first use', () => {
       expect(reranker.providerId).toBe('local');
+      expect(modelFromPretrained).not.toHaveBeenCalled();
     });
 
-    it('should not load model until first use (lazy initialization)', () => {
-      // Model loading happens on first rerank call, not at construction
-      expect(pipelineMock).not.toHaveBeenCalled();
+    it('isAvailable() is true when Transformers.js imports', async () => {
+      expect(await reranker.isAvailable()).toBe(true);
     });
-  });
 
-  describe('isAvailable', () => {
-    it('should return true (local model always available)', async () => {
-      const isAvailable = await reranker.isAvailable();
-      expect(isAvailable).toBe(true);
+    it('lists the supported models', () => {
+      expect(reranker.getSupportedModels()).toEqual([...LOCAL_RERANKER_MODELS]);
     });
   });
 
-  describe('getSupportedModels', () => {
-    it('should return list of supported local models', () => {
-      const models = reranker.getSupportedModels();
-      expect(models).toEqual(LOCAL_RERANKER_MODELS);
-      expect(models).toContain('cross-encoder/ms-marco-MiniLM-L-6-v2');
-      expect(models).toContain('BAAI/bge-reranker-base');
-    });
-  });
+  describe('weights file', () => {
+    it("loads the default model's quantized file, named, at fp32 so no dtype suffix is added", async () => {
+      await reranker.initialize();
 
-  describe('rerank', () => {
-    const sampleInput: RerankerInput = {
-      query: 'What is machine learning?',
-      documents: [
-        { id: 'doc-1', content: 'Machine learning is a subset of AI.', originalScore: 0.8 },
-        { id: 'doc-2', content: 'Deep learning uses neural networks.', originalScore: 0.7 },
-        { id: 'doc-3', content: 'Python is a programming language.', originalScore: 0.6 },
-      ],
-    };
-
-    const sampleConfig: RerankerRequestConfig = {
-      providerId: 'local',
-      modelId: 'cross-encoder/ms-marco-MiniLM-L-6-v2',
-      topN: 2,
-    };
-
-    it('should initialize model on first rerank call', async () => {
-      await reranker.rerank(sampleInput, sampleConfig);
-
-      expect(pipelineMock).toHaveBeenCalledWith(
-        'text-classification',
+      expect(LOCAL_RERANKER_DEFAULT_WEIGHTS['cross-encoder/ms-marco-MiniLM-L-6-v2']).toBe('model_quint8_avx2');
+      expect(modelFromPretrained).toHaveBeenCalledWith(
         'cross-encoder/ms-marco-MiniLM-L-6-v2',
-        expect.objectContaining({ quantized: true }),
+        expect.objectContaining({ model_file_name: 'model_quint8_avx2', dtype: 'fp32', quantized: false }),
+      );
+      expect(tokenizerFromPretrained).toHaveBeenCalledWith('cross-encoder/ms-marco-MiniLM-L-6-v2', expect.anything());
+    });
+
+    it('loads onnx/model.onnx at fp32 for a model with no listed quantized file', async () => {
+      await reranker.initialize('BAAI/bge-reranker-base');
+
+      expect(modelFromPretrained).toHaveBeenCalledWith(
+        'BAAI/bge-reranker-base',
+        expect.objectContaining({ model_file_name: 'model', dtype: 'fp32' }),
       );
     });
 
-    it('should return reranked documents with scores', async () => {
-      const result = await reranker.rerank(sampleInput, sampleConfig);
-
-      expect(result.results).toBeDefined();
-      expect(result.results.length).toBeGreaterThan(0);
-      result.results.forEach((doc) => {
-        expect(doc).toHaveProperty('id');
-        expect(doc).toHaveProperty('content');
-        expect(doc).toHaveProperty('relevanceScore');
-        expect(typeof doc.relevanceScore).toBe('number');
+    it('takes modelFileName and dtype from the config over the default', async () => {
+      const custom = new LocalCrossEncoderReranker({
+        providerId: 'local',
+        modelFileName: 'model_qint8_arm64',
+        cacheDir: '/tmp/models',
       });
+      await custom.initialize();
+
+      expect(modelFromPretrained).toHaveBeenCalledWith(
+        'cross-encoder/ms-marco-MiniLM-L-6-v2',
+        expect.objectContaining({ model_file_name: 'model_qint8_arm64', dtype: 'fp32', cache_dir: '/tmp/models' }),
+      );
+
+      vi.clearAllMocks();
+      const q8 = new LocalCrossEncoderReranker({ providerId: 'local', dtype: 'q8' });
+      await q8.initialize();
+      expect(modelFromPretrained).toHaveBeenCalledWith(
+        'cross-encoder/ms-marco-MiniLM-L-6-v2',
+        expect.objectContaining({ model_file_name: 'model', dtype: 'q8', quantized: true }),
+      );
     });
 
-    it('should sort results by relevance score descending', async () => {
-      const result = await reranker.rerank(sampleInput, sampleConfig);
+    it('loads the model once for repeated reranks', async () => {
+      const input: RerankerInput = { query: 'q', documents: [{ id: 'a', content: 'aa' }] };
+      await reranker.rerank(input, { providerId: 'local', modelId: '' });
+      await reranker.rerank(input, { providerId: 'local', modelId: '' });
+      expect(modelFromPretrained).toHaveBeenCalledTimes(1);
+      expect(tokenizerFromPretrained).toHaveBeenCalledTimes(1);
+    });
+  });
 
-      for (let i = 1; i < result.results.length; i++) {
-        expect(result.results[i - 1].relevanceScore).toBeGreaterThanOrEqual(
-          result.results[i].relevanceScore,
-        );
+  describe('batching', () => {
+    const docs = (n: number) =>
+      Array.from({ length: n }, (_, i) => ({ id: `d${i}`, content: `document number ${i}` }));
+    const config: RerankerRequestConfig = { providerId: 'local', modelId: 'cross-encoder/ms-marco-MiniLM-L-6-v2' };
+
+    it('scores N pairs up to batchSize in one forward pass, as (query, document) pairs', async () => {
+      await reranker.rerank({ query: 'the query', documents: docs(20) }, config);
+
+      expect(forwardCalls).toHaveLength(1);
+      expect(forwardCalls[0].documents).toHaveLength(20);
+      expect(tokenizerCalls).toHaveLength(1);
+      const { texts, options } = tokenizerCalls[0];
+      expect(texts).toEqual(new Array(20).fill('the query'));
+      expect(options).toMatchObject({
+        text_pair: docs(20).map((d) => d.content),
+        padding: true,
+        truncation: true,
+        max_length: 512,
+      });
+      expect(texts.some((t) => t.includes('[SEP]'))).toBe(false);
+    });
+
+    it('runs one forward pass per batch of batchSize', async () => {
+      const small = new LocalCrossEncoderReranker({ providerId: 'local', batchSize: 8, maxSequenceLength: 128 });
+      const result = await small.rerank({ query: 'q', documents: docs(20) }, config);
+
+      expect(forwardCalls.map((c) => c.documents.length)).toEqual([8, 8, 4]);
+      expect(tokenizerCalls.every((c) => c.options.max_length === 128)).toBe(true);
+      expect(result.results).toHaveLength(20);
+      expect(result.diagnostics?.providerMetrics).toMatchObject({ batchSize: 8, forwardPasses: 3 });
+    });
+
+    it('falls back to batches of 32 for a batchSize that is not a positive number', async () => {
+      for (const batchSize of [0, Number.NaN, -4]) {
+        forwardCalls.length = 0;
+        const odd = new LocalCrossEncoderReranker({ providerId: 'local', batchSize });
+        const result = await odd.rerank({ query: 'q', documents: docs(40) }, config);
+        expect(forwardCalls.map((c) => c.documents.length)).toEqual([32, 8]);
+        expect(result.results.every((r) => typeof r.relevanceScore === 'number')).toBe(true);
       }
     });
 
-    it('should include diagnostics in response', async () => {
-      const result = await reranker.rerank(sampleInput, sampleConfig);
+    it('returns no results and runs no forward pass for no documents', async () => {
+      const result = await reranker.rerank({ query: 'q', documents: [] }, config);
+      expect(result.results).toEqual([]);
+      expect(forwardCalls).toHaveLength(0);
+    });
+  });
 
-      expect(result.diagnostics).toBeDefined();
-      expect(result.diagnostics?.providerId).toBe('local');
-      expect(result.diagnostics?.modelId).toBe('cross-encoder/ms-marco-MiniLM-L-6-v2');
-      expect(result.diagnostics?.documentsProcessed).toBe(3);
+  describe('scores', () => {
+    const config: RerankerRequestConfig = { providerId: 'local', modelId: 'cross-encoder/ms-marco-MiniLM-L-6-v2' };
+
+    it('one-logit model: the score is the sigmoid of the raw logit, and the order follows the logits', async () => {
+      const logits: Record<string, number> = { low: -9.3, answer: 6.68, mid: -1.2 };
+      logitsFor = (doc) => [logits[doc]];
+      const result = await reranker.rerank(
+        {
+          query: 'q',
+          documents: [
+            { id: 'low', content: 'low', originalScore: 0.9, metadata: { source: 'wiki' } },
+            { id: 'answer', content: 'answer', originalScore: 0.1 },
+            { id: 'mid', content: 'mid' },
+          ],
+        },
+        config,
+      );
+
+      expect(result.results.map((r) => r.id)).toEqual(['answer', 'mid', 'low']);
+      for (const r of result.results) {
+        expect(r.relevanceScore).toBeCloseTo(sigmoid(logits[r.id]), 6);
+        expect(r.relevanceScore).toBeGreaterThan(0);
+        expect(r.relevanceScore).toBeLessThan(1);
+      }
+      expect(result.results.find((r) => r.id === 'low')?.originalScore).toBe(0.9);
+      expect(result.results.find((r) => r.id === 'low')?.metadata).toEqual({ source: 'wiki' });
+    });
+
+    it("two-logit model: the score is the positive class's softmax probability", async () => {
+      id2label = { '0': 'LABEL_0', '1': 'LABEL_1' };
+      const logits: Record<string, [number, number]> = { yes: [-2, 3], no: [4, -1] };
+      logitsFor = (doc) => logits[doc];
+      const result = await reranker.rerank(
+        { query: 'q', documents: [{ id: 'no', content: 'no' }, { id: 'yes', content: 'yes' }] },
+        config,
+      );
+
+      const softmaxPositive = ([a, b]: [number, number]) => Math.exp(b) / (Math.exp(a) + Math.exp(b));
+      expect(result.results.map((r) => r.id)).toEqual(['yes', 'no']);
+      expect(result.results[0].relevanceScore).toBeCloseTo(softmaxPositive(logits.yes), 6);
+      expect(result.results[1].relevanceScore).toBeCloseTo(softmaxPositive(logits.no), 6);
+    });
+
+    it('two-logit model whose labels name the positive class first reads that class', async () => {
+      id2label = { '0': 'relevant', '1': 'irrelevant' };
+      logitsFor = (doc) => (doc === 'yes' ? [3, -2] : [-1, 4]);
+      const result = await reranker.rerank(
+        { query: 'q', documents: [{ id: 'no', content: 'no' }, { id: 'yes', content: 'yes' }] },
+        config,
+      );
+      expect(result.results.map((r) => r.id)).toEqual(['yes', 'no']);
+    });
+
+    it('applies topN and reports diagnostics', async () => {
+      const result = await reranker.rerank(
+        {
+          query: 'q',
+          documents: [
+            { id: 'a', content: 'a' },
+            { id: 'bbbbbb', content: 'bbbbbb' },
+            { id: 'ccc', content: 'ccc' },
+          ],
+        },
+        { ...config, topN: 2 },
+      );
+
+      expect(result.results.map((r) => r.id)).toEqual(['bbbbbb', 'ccc']);
+      expect(result.diagnostics).toMatchObject({
+        providerId: 'local',
+        modelId: 'cross-encoder/ms-marco-MiniLM-L-6-v2',
+        documentsProcessed: 3,
+      });
       expect(result.diagnostics?.latencyMs).toBeGreaterThanOrEqual(0);
     });
 
-    it('should preserve original scores', async () => {
-      const result = await reranker.rerank(sampleInput, sampleConfig);
-
-      const doc1 = result.results.find((r) => r.id === 'doc-1');
-      expect(doc1?.originalScore).toBe(0.8);
-    });
-
-    it('should preserve document metadata', async () => {
-      const inputWithMetadata: RerankerInput = {
-        query: 'test',
-        documents: [
-          {
-            id: 'doc-1',
-            content: 'Test content',
-            metadata: { source: 'wiki', page: 42 },
-          },
-        ],
-      };
-
-      const result = await reranker.rerank(inputWithMetadata, sampleConfig);
-
-      expect(result.results[0].metadata).toEqual({ source: 'wiki', page: 42 });
-    });
-
-    it('should use default model when not specified', async () => {
-      await reranker.rerank(sampleInput, {
-        providerId: 'local',
-        modelId: '',
-      });
-
-      expect(pipelineMock).toHaveBeenCalledWith(
-        'text-classification',
-        'cross-encoder/ms-marco-MiniLM-L-6-v2',
-        expect.anything(),
-      );
-    });
-
-    it('should handle empty documents array', async () => {
-      const emptyInput: RerankerInput = {
-        query: 'test',
-        documents: [],
-      };
-
-      const result = await reranker.rerank(emptyInput, sampleConfig);
-
-      expect(result.results).toEqual([]);
-    });
-
-    it('should reuse loaded model for subsequent calls', async () => {
-      await reranker.rerank(sampleInput, sampleConfig);
-      await reranker.rerank(sampleInput, sampleConfig);
-
-      // Model should only be loaded once
-      expect(pipelineMock).toHaveBeenCalledTimes(1);
+    it('throws when the model returns fewer scores than pairs', async () => {
+      modelStub.mockImplementationOnce(async () => ({ logits: { dims: [1, 1], data: Float32Array.from([1]) } }));
+      await expect(
+        reranker.rerank(
+          { query: 'q', documents: [{ id: 'a', content: 'a' }, { id: 'b', content: 'b' }] },
+          config,
+        ),
+      ).rejects.toThrow(/logits/);
     });
   });
 
-  describe('Batch Processing', () => {
-    it('should process documents in batches for large inputs', async () => {
-      const rerankerWithSmallBatch = new LocalCrossEncoderReranker({
-        providerId: 'local',
-        defaultModelId: 'cross-encoder/ms-marco-MiniLM-L-6-v2',
-        batchSize: 2,
-      });
+  describe('non-finite logits', () => {
+    const config: RerankerRequestConfig = { providerId: 'local', modelId: 'cross-encoder/ms-marco-MiniLM-L-6-v2' };
+    const input: RerankerInput = { query: 'q', documents: [{ id: 'a', content: 'a' }, { id: 'b', content: 'b' }] };
 
-      const manyDocs: RerankerInput = {
-        query: 'test',
-        documents: Array.from({ length: 5 }, (_, i) => ({
-          id: `doc-${i}`,
-          content: `Document ${i}`,
-        })),
-      };
+    it('one-logit model: a NaN or infinite logit throws instead of returning a NaN score', async () => {
+      for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+        logitsFor = (doc) => [doc === 'b' ? bad : 1];
+        await expect(reranker.rerank(input, config)).rejects.toThrow(/non-finite logit .* pair 1 of 2/);
+      }
+    });
 
-      const result = await rerankerWithSmallBatch.rerank(manyDocs, {
-        providerId: 'local',
-        modelId: 'cross-encoder/ms-marco-MiniLM-L-6-v2',
-      });
-
-      expect(result.results).toHaveLength(5);
+    it('two-logit model: a NaN or infinite logit throws', async () => {
+      id2label = { '0': 'LABEL_0', '1': 'LABEL_1' };
+      for (const bad of [Number.NaN, Number.POSITIVE_INFINITY]) {
+        const r = new LocalCrossEncoderReranker({ providerId: 'local' });
+        logitsFor = (doc) => (doc === 'a' ? [0, bad] : [0, 1]);
+        await expect(r.rerank(input, config)).rejects.toThrow(/non-finite logit .* pair 0 of 2/);
+      }
     });
   });
 
-  describe('Score Normalization', () => {
-    it('should normalize scores to 0-1 range using sigmoid', async () => {
+  describe('concurrent loads and reranks', () => {
+    /** A model stub of its own whose logit is `logit` for every pair; `gate` holds its forward passes. */
+    const makeModel = (logit: number) => {
+      const passes: number[] = [];
+      let gate: Promise<void> = Promise.resolve();
+      const model: any = vi.fn(async (inputs: { __documents: string[] }) => {
+        passes.push(inputs.__documents.length);
+        await gate;
+        const n = inputs.__documents.length;
+        return { logits: { dims: [n, 1], data: Float32Array.from(new Array(n).fill(logit)) } };
+      });
+      model.dispose = vi.fn(async () => {});
+      model.config = { id2label: { '0': 'LABEL_0' } };
+      model.passes = passes;
+      model.hold = () => {
+        let release!: () => void;
+        gate = new Promise<void>((resolve) => (release = resolve));
+        return () => release();
+      };
+      return model;
+    };
+
+    it('loads one model at a time, in the order asked, and leaves the last one loaded', async () => {
+      const models: Record<string, any> = { A: makeModel(1), B: makeModel(2), C: makeModel(3) };
+      let loading = 0;
+      let mostAtOnce = 0;
+      const order: string[] = [];
+      loadModel = async (id) => {
+        loading++;
+        mostAtOnce = Math.max(mostAtOnce, loading);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        loading--;
+        order.push(id);
+        return models[id];
+      };
+
+      // B and C are asked for while A is still loading.
+      await Promise.all([reranker.initialize('A'), reranker.initialize('B'), reranker.initialize('C')]);
+
+      expect(mostAtOnce).toBe(1);
+      expect(order).toEqual(['A', 'B', 'C']);
       const result = await reranker.rerank(
-        {
-          query: 'test',
-          documents: [{ id: 'doc-1', content: 'test content' }],
-        },
-        { providerId: 'local', modelId: 'cross-encoder/ms-marco-MiniLM-L-6-v2' },
+        { query: 'q', documents: [{ id: 'a', content: 'a' }] },
+        { providerId: 'local', modelId: 'A' },
       );
+      expect(result.diagnostics?.modelId).toBe('C');
+      expect(result.results[0].relevanceScore).toBeCloseTo(sigmoid(3), 6);
+      expect(models.A.dispose).toHaveBeenCalledTimes(1);
+      expect(models.B.dispose).toHaveBeenCalledTimes(1);
+      expect(models.C.dispose).not.toHaveBeenCalled();
+    });
 
-      result.results.forEach((doc) => {
-        expect(doc.relevanceScore).toBeGreaterThanOrEqual(0);
-        expect(doc.relevanceScore).toBeLessThanOrEqual(1);
-      });
+    it('a rerank keeps scoring with its model while another loads, and the old model is disposed after it', async () => {
+      const models: Record<string, any> = { A: makeModel(1), B: makeModel(-1) };
+      loadModel = async (id) => models[id];
+      const r = new LocalCrossEncoderReranker({ providerId: 'local', defaultModelId: 'A', batchSize: 8 });
+      await r.initialize();
+
+      const release = models.A.hold();
+      const docs = Array.from({ length: 16 }, (_, i) => ({ id: `d${i}`, content: `doc ${i}` }));
+      const running = r.rerank({ query: 'q', documents: docs }, { providerId: 'local', modelId: 'A' });
+      await vi.waitFor(() => expect(models.A.passes).toHaveLength(1));
+
+      await r.initialize('B');
+      expect(models.A.dispose).not.toHaveBeenCalled();
+
+      release();
+      const result = await running;
+      expect(models.A.passes).toEqual([8, 8]);
+      expect(models.B.passes).toEqual([]);
+      expect(result.diagnostics?.modelId).toBe('A');
+      for (const doc of result.results) expect(doc.relevanceScore).toBeCloseTo(sigmoid(1), 6);
+      expect(models.A.dispose).toHaveBeenCalledTimes(1);
+
+      const next = await r.rerank({ query: 'q', documents: docs.slice(0, 2) }, { providerId: 'local', modelId: 'A' });
+      expect(next.diagnostics?.modelId).toBe('B');
+      expect(next.results[0].relevanceScore).toBeCloseTo(sigmoid(-1), 6);
+    });
+  });
+
+  describe('dispose', () => {
+    it('disposes the model and loads it again on the next use', async () => {
+      await reranker.initialize();
+      await reranker.dispose();
+      expect(modelStub.dispose).toHaveBeenCalledTimes(1);
+
+      await reranker.initialize();
+      expect(modelFromPretrained).toHaveBeenCalledTimes(2);
     });
   });
 });

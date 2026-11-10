@@ -101,7 +101,9 @@ export {
   LocalCrossEncoderReranker,
   type LocalCrossEncoderConfig,
   LOCAL_RERANKER_MODELS,
+  LOCAL_RERANKER_DEFAULT_WEIGHTS,
   type LocalRerankerModel,
+  type LocalCrossEncoderDtype,
 } from './providers/LocalCrossEncoderReranker';
 
 export {
