@@ -153,7 +153,7 @@ describe('the recall capture on the runtime stream', () => {
 
     const updates = memorySourceUpdates(chunks);
     expect(updates).toHaveLength(1);
-    const streamed = (updates[0] as { updates: { memorySources: Record<string, any> } }).updates.memorySources;
+    const streamed = (updates[0] as unknown as { updates: { memorySources: Record<string, any> } }).updates.memorySources;
     expect(streamed.version).toBe('memory-recall-capture/1');
     expect(streamed.candidates.length).toBeGreaterThan(0);
     // The update arrives before the reply's text.
