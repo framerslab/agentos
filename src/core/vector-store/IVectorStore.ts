@@ -389,16 +389,18 @@ export interface LexicalGroupSearchResult {
   incomplete: boolean;
   /**
    * For each word, in order, the stored words one edit away the search matched: found on a first page, the caller's
-   * own otherwise. `LibraryIndex` carries these lists in its cursor and holds a later page's lists to the same rule,
-   * so a store answers only lists that keep it:
-   * - a list for each word, empty for a word under `oneEdit.minLength` letters or without `oneEdit`;
+   * own `expansion` echoed on a later page. `LibraryIndex` carries a first page's lists in its cursor and holds them
+   * to the same rule when a later page hands them back; a later page's cursor carries the lists the index handed that
+   * page, never the store's answer, so a store answers only lists that keep the rule:
+   * - a list for each word: on a first page, empty for a word under `oneEdit.minLength` letters, and empty for every
+   *   word without `oneEdit`; on a later page, the list handed in `expansion` for that word;
    * - each stored word one edit from its word (a letter added, dropped or changed, or two side by side swapped) and
    *   `oneEdit.minLength` letters or more, and never the word itself or a word that begins with it, which match as
    *   such;
    * - each stored word once in its list, and at most `oneEdit.max` (64 at most) a word;
    * - each at most 2046 bytes of UTF-8, and all of them within the room `expansion` states beside the query's words.
-   * A word the store left out for room or past `max` marks the answer `incomplete`. A list outside the rule, such as
-   * `[['budgets', 'budgte']]` for `budget`, makes the index refuse the cursor of its own next page.
+   * A word the store left out for room or past `max` marks the answer `incomplete`. A first page's list outside the rule,
+   * such as `[['budgets', 'budgte']]` for `budget`, makes the index refuse the cursor of its own next page.
    */
   expansion: string[][];
   /** The page's items, in order. */

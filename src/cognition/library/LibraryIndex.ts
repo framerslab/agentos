@@ -998,7 +998,9 @@ export class LibraryIndex {
         scope: scopeMarkOf(scope),
         sig: signatureOf(search, group),
         words,
-        expansion: answered.expansion,
+        // A later page carries the lists it was handed, never the store's echo of them: a store that answered other
+        // lists, empty ones among them, would otherwise drop from the pages after it the items those words hold.
+        expansion: page !== undefined ? page.expansion : answered.expansion,
         over: incomplete,
         key: dated ? [group.dates.get(last.sourceId) ?? null, last.rank, last.sourceId] : [last.rank, last.sourceId],
       });
