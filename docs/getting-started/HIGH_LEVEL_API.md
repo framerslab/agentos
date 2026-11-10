@@ -889,7 +889,7 @@ agent({ provider: 'openai', soul: './personas/aria.soul.md' });
 agent({ provider: 'openai', soul: { content: SOUL_MARKDOWN_STRING } });
 ```
 
-`agent({ soul })` uses the prose only. The frontmatter's structured fields (HEXACO scores, voice, mood, hard limits) land on the `personaDefinition` that `loadSoul()` returns, which the full runtime takes as a persona; give an `agent()` a trait paragraph with `personality`. See [SOUL_FILES.md](../SOUL_FILES.md) for the workspace files.
+`agent({ soul })` applies the front matter it has a renderer for: the `hardLimits` close the system prompt as a "Hard limits" block, after `systemBlocks` too, the `hexaco` scores render as the trait paragraph when no `personality` is set, and the soul's `name` is the name line when no `name` is set. An option set in code wins over the file. Mood, voice, avatar and the reasoning-trace limits have no renderer on this path. See [SOUL_FILES.md](../SOUL_FILES.md) for the workspace files.
 
 ### `souledAgent()`: soul plus a `memory/` wiki
 

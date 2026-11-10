@@ -40,6 +40,8 @@ import type { IModelRouter } from '../core/llm/routing/IModelRouter.js';
 import type { SkillEntry } from '../cognition/skills/types.js';
 import { loadSoulSync, parseSoul, SoulLoadError, type LoadedSoul } from '../cognition/substrate/personas/SoulLoader.js';
 import { renderPersonalitySection } from '../cognition/substrate/personas/personalityPrompt.js';
+import { hardLimitsBlock } from '../cognition/substrate/personas/hardLimits.js';
+import { withHardLimitsLast } from './runtime/hardLimitsSystem.js';
 import type { ForgetReport, ImportReport, LearnedStateDocument, LearningConfig, LedgerEntry, LoopManifest } from '../cognition/learning/types.js';
 import type { HexacoTraitValues } from '../cognition/substrate/personas/hexaco.js';
 import type { AgencyLaunchOptions } from './runtime/agencyLaunch/types.js';
@@ -683,13 +685,20 @@ async function loadRecordedAgentOSUsage(
 
 /**
  * The system prompt `agent()` assembles from its options: the soul's prose, `instructions`, the name line, the
- * personality text and skills.
+ * personality text and skills. An option set in code wins over the soul's file: the name line is `name`, else the
+ * soul's `name`; the personality text renders `personality`, else the soul's `hexaco`. The soul's hard limits are not
+ * part of it: `agent()` closes the prompt with them (`withHardLimitsLast`).
  *
  * @param opts - The agent's options.
  * @param soul - The soul the caller loaded from `opts.soul`; `null` for none. Not passed, `opts.soul` is loaded here.
+ * @param parts - `personality: false` renders no personality text, for a GMI that renders its own.
  * @throws {SoulLoadError} When the soul is loaded here, fails to load and is not optional.
  */
-export function buildSystemPrompt(opts: AgentOptions, soul?: LoadedSoul | null): string | undefined {
+export function buildSystemPrompt(
+  opts: AgentOptions,
+  soul?: LoadedSoul | null,
+  parts?: { personality?: false },
+): string | undefined {
   const sections: string[] = [];
 
   // SOUL.md content first — the agent's identity comes before everything else.
@@ -723,12 +732,15 @@ export function buildSystemPrompt(opts: AgentOptions, soul?: LoadedSoul | null):
     sections.push(opts.instructions.trim());
   }
 
-  if (opts.name?.trim()) {
-    sections.push(`Assistant name: ${opts.name.trim()}.`);
+  // An option set in code wins over the soul's file for the name and the traits.
+  const name = opts.name?.trim() || loaded?.frontmatter.name?.trim();
+  if (name) {
+    sections.push(`Assistant name: ${name}.`);
   }
 
-  if (opts.personality) {
-    const desc = renderPersonalitySection(opts.personality);
+  const traits = parts?.personality === false ? undefined : (opts.personality ?? loaded?.frontmatter.hexaco);
+  if (traits) {
+    const desc = renderPersonalitySection(traits);
     if (desc) {
       sections.push(desc);
     }
@@ -966,6 +978,11 @@ export function agent(opts: AgentOptions): Agent {
   warnSoulBesideSystemBlocks(opts);
   // Loaded once, at build: a soul that fails to load throws here unless it is optional.
   const loadedSoul = opts.soul ? loadSoulFromOption(opts.soul) : null;
+  const hardLimits = loadedSoul?.frontmatter.hardLimits;
+  // The soul's hard limits close the system prompt, after systemBlocks too.
+  const agentSystem = withHardLimitsLast(opts.systemBlocks ?? buildSystemPrompt(opts, loadedSoul), hardLimits);
+  // A string prompt carries no mark, so the block's text goes beside it for generateText's split.
+  const hardLimitsText = hardLimitsBlock(hardLimits) ?? undefined;
   const sessionBuffers = new Map<string, SessionHistoryBuffer | null>();
   // In-memory usage tally per session and per agent. Populated synchronously
   // after every generate/send/stream call so `agent.usage()` and
@@ -1011,7 +1028,8 @@ export function agent(opts: AgentOptions): Agent {
   const baseOpts: Partial<GenerateTextOptions> = {
     provider: opts.provider,
     model: opts.model,
-    system: opts.systemBlocks ?? buildSystemPrompt(opts, loadedSoul),
+    system: agentSystem,
+    ...(hardLimitsText ? { _hardLimitsText: hardLimitsText } : {}),
     tools: opts.tools,
     maxSteps: opts.maxSteps ?? 5,
     // Per-call completion-token cap applied to every generate /
@@ -1085,7 +1103,8 @@ export function agent(opts: AgentOptions): Agent {
    * own, and that provider's from the environment otherwise.
    */
   const callOptions = (extra: Partial<GenerateTextOptions> | undefined): Partial<GenerateTextOptions> => {
-    let merged = { ...baseOpts, ...extra };
+    // A call's own system prompt replaces the agent's, and the hard limits close it too.
+    let merged = { ...baseOpts, ...extra, ...(extra?.system !== undefined ? { system: withHardLimitsLast(extra.system, hardLimits) } : {}) };
     if (!extra || (extra.provider === undefined && extra.model === undefined)) return merged;
     if (
       extra.provider === undefined &&

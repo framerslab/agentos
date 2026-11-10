@@ -149,11 +149,11 @@ describe('text migrated from a legacy MEMORY.md', () => {
     fs.writeFileSync(path.join(dir, 'MEMORY.md'), `${sentence}\n`);
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
 
-    // A plain agent that writes no page gets the prompt it always got.
+    // A plain agent that writes no page gets the soul's prose, the migrated index and the soul's name.
     expect(buildSystemPrompt({ soul: dir } as AgentOptions)).toBe(
       'You are Aria.\n\n## Long-Term Memory (index)\n\n' +
         'You maintain a memory wiki. This is its index. Use the `read_memory_page` tool to open any page by id.\n\n' +
-        `# Memory Index\n\n<!-- migrated from MEMORY.md -->\n\n${sentence}`,
+        `# Memory Index\n\n<!-- migrated from MEMORY.md -->\n\n${sentence}\n\nAssistant name: Aria.`,
     );
 
     const k = key();

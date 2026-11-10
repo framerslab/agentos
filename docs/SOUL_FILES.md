@@ -321,7 +321,7 @@ The `hexaco:` block in SOUL.md frontmatter maps directly to AgentOS's existing
 - [`PersonalityMutationStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/PersonalityMutationStore.ts): records those changes when a storage adapter is configured
 - [`PersonaOverlayManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/persona_overlays/PersonaOverlayManager.ts): patches traits and mood when a workflow agency's persona evolution rules fire
 
-`agent({ soul })` does not read the scores; pass `personality` for its trait paragraph. `PersonaDriftMechanism` works from the traits a cognitive memory manager is configured with.
+`agent({ soul })` renders the scores as its trait paragraph unless `personality` is set, which wins. `PersonaDriftMechanism` works from the traits a cognitive memory manager is configured with.
 
 Loaded personas store Honesty-Humility as `personalityTraits.honesty`, the key
 that `agent({ personality })`, `AdaptPersonalityTool`, and the memory system read.
