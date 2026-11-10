@@ -744,6 +744,52 @@ describe('the run owner', () => {
     }
   });
 
+  it("fences a start another tab makes after it heard the removal, while the stop's second listing has already read the records", async () => {
+    const store = new MemoryKeyValueStore();
+    const locks = memoryLocks();
+    const made = bus();
+    const stopper = owner(store, locks, made);
+    const other = owner(store, locks, made);
+    const realKeys = store.keys.bind(store);
+    const read = deferred();
+    const answering = deferred();
+    try {
+      let calls = 0;
+      // The stop's second listing reads the records, then waits until the other tab's start has run.
+      store.keys = async (prefix) => {
+        calls += 1;
+        const keys = await realKeys(prefix);
+        if (calls === 2) {
+          read.resolve();
+          await answering.promise;
+        }
+        return keys;
+      };
+      const stopping = stopper.stopAccount('removal');
+      await read.promise;
+      let wrote = false;
+      const started = await other.start({
+        ...countingJob(1, []),
+        async run(context) {
+          const done = await context.write(async () => { wrote = true; return true; });
+          return { ended: typeof done === 'object' ? 'fenced' : 'finished', counts: context.record().counts };
+        },
+      });
+      const id = 'id' in started ? started.id : '';
+      expect((await other.whenIdle()).get(id)?.ended).toBe('fenced');
+      expect(wrote).toBe(false);
+      answering.resolve();
+      expect(await stopping).toEqual({ complete: true });
+      store.keys = realKeys;
+      await vi.waitFor(async () => expect(await store.keys('lib/j/')).toEqual([]));
+    } finally {
+      store.keys = realKeys;
+      answering.resolve();
+      stopper.close();
+      other.close();
+    }
+  });
+
   it("fences a start made while the sign-out runs though the stop ends before the start's lock is granted", async () => {
     const store = new MemoryKeyValueStore();
     const locks = memoryLocks();
