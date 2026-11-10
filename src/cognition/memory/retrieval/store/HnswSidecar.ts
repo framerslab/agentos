@@ -12,7 +12,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { existsSync, unlinkSync } from 'node:fs';
+import { existsSync, rmSync, unlinkSync } from 'node:fs';
 import { basename, join, dirname } from 'node:path';
 import { HnswIndexSidecar } from '../../../rag/vector-search/HnswIndexSidecar.js';
 
@@ -61,8 +61,10 @@ export interface HnswQueryResult {
  * separator; the database file name is repeated in front, with characters
  * outside `[A-Za-z0-9._-]` replaced, so a reader can tell which file an index
  * belongs to.
+ *
+ * @internal
  */
-function hnswIndexPath(config: Pick<HnswSidecarConfig, 'sqlitePath' | 'brainId'>): string {
+export function hnswIndexPath(config: Pick<HnswSidecarConfig, 'sqlitePath' | 'brainId'>): string {
   const directory = dirname(config.sqlitePath);
   if (config.brainId === undefined) return join(directory, 'brain.hnsw');
   const databaseFile = basename(config.sqlitePath);
@@ -85,7 +87,7 @@ function hnswIndexPath(config: Pick<HnswSidecarConfig, 'sqlitePath' | 'brainId'>
  * shared RAG implementation.
  */
 export class HnswSidecar {
-  private readonly _delegate: HnswIndexSidecar;
+  private _delegate: HnswIndexSidecar;
   private readonly _indexPath: string;
   private readonly _mapPath: string;
   private readonly _config: Required<Omit<HnswSidecarConfig, 'brainId'>>;
@@ -213,6 +215,31 @@ export class HnswSidecar {
     const dim = this._config.dimensions;
     const filtered = data.filter(item => item.embedding.length === dim);
     await this._delegate.rebuildFromData(filtered);
+  }
+
+  /**
+   * Writes the index again from the vectors given, and from nothing else: the index held in memory is dropped
+   * unsaved and the index files are removed first, so a vector that is not in `data` is in no file afterwards. A
+   * delete only marks a vector in the index, which keeps its numbers until the index is written again. With no
+   * vector left the files stay removed.
+   *
+   * Vectors of another dimension than the configured one are left out, as {@link rebuildFromData} leaves them out.
+   *
+   * @param data - Every vector the index is to hold.
+   * @returns How many vectors the index holds: 0 where `hnswlib-node` is not installed, and then no file is written.
+   * @throws When an index file cannot be removed, or when the rebuilt index did not save.
+   */
+  async rewrite(data: { id: string; embedding: number[] }[]): Promise<{ vectors: number }> {
+    const dim = this._config.dimensions;
+    const filtered = data.filter((item) => item.embedding.length === dim);
+    this._delegate = new HnswIndexSidecar();
+    rmSync(this._indexPath, { force: true });
+    rmSync(this._mapPath, { force: true });
+    await this.init();
+    if (filtered.length === 0) return { vectors: 0 };
+    await this._delegate.rebuildFromData(filtered);
+    if (this._delegate.hasUnsavedChanges()) throw new Error('HnswSidecar: the rebuilt vector index did not save');
+    return { vectors: this._delegate.getStats().vectorCount };
   }
 
   /**

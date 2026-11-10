@@ -112,6 +112,11 @@ export class HnswIndexSidecar {
     return this.hnswAvailable;
   }
 
+  /** Whether the index holds changes its last save did not write. */
+  hasUnsavedChanges(): boolean {
+    return this.dirty;
+  }
+
   /** Get statistics about the sidecar. */
   getStats(): HnswSidecarStats {
     return {
@@ -276,12 +281,17 @@ export class HnswIndexSidecar {
 
   /* ---- Persistence ----------------------------------------------- */
 
-  /** Save the HNSW index and label map to disk. */
+  /**
+   * Save the HNSW index and label map to disk. A write that fails is logged and
+   * leaves the changes unsaved: {@link hasUnsavedChanges} then answers true.
+   */
   async save(): Promise<void> {
     if (!this.index || !this.dirty) return;
 
     try {
-      this.index.writeIndex(this.config.indexPath);
+      // The index write returns a promise: awaited, a write that fails is caught
+      // below and the changes stay marked as unsaved.
+      await this.index.writeIndex(this.config.indexPath);
 
       const mapData = {
         nextLabel: this.nextLabel,

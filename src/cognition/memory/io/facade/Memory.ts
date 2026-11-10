@@ -78,6 +78,7 @@ import {
   type TraceSnapshot,
 } from '../../retrieval/store/tracePersistence.js';
 import { fillScopeIds } from '../../retrieval/store/migrations/v2-to-v3.js';
+import { ForgottenLedger, type SuppressionSubject } from '../../suppression/ForgottenLedger.js';
 import { refileBrainScopeIds, snapshotInEncodedForm, takeScopeIdFormLock } from '../../retrieval/store/scopeIdForm.js';
 import { SqlKnowledgeGraph } from '../../retrieval/store/SqlKnowledgeGraph.js';
 import { SqlMemoryGraph } from '../../retrieval/store/SqlMemoryGraph.js';
@@ -230,6 +231,9 @@ export class Memory {
   /** Optional embedding function for vector search (set via config.embed). */
   private readonly _embed: ((text: string) => Promise<number[]>) | null;
 
+  /** The forgotten-user ledger the store was opened with, if any (config.forgotten). */
+  private readonly _forgotten: ForgottenLedger | undefined;
+
   // -------------------------------------------------------------------
   // Constructor (private — use Memory.create() instead)
   // -------------------------------------------------------------------
@@ -241,9 +245,11 @@ export class Memory {
   private constructor(
     brain: Brain,
     config: Required<Pick<MemoryConfig, 'store' | 'graph' | 'selfImprove' | 'decay'>> & MemoryConfig,
+    forgotten?: ForgottenLedger,
   ) {
     this._brain = brain;
     this._config = config;
+    this._forgotten = forgotten;
 
     // Store the optional embedding function for vector search.
     this._embed = config.embed ?? null;
@@ -420,7 +426,10 @@ export class Memory {
 
   /**
    * Internal common initialization path for all three factories.
-   * Wires the Memory facade around an already-opened Brain.
+   * Wires the Memory facade around an already-opened Brain, and opens the
+   * forgotten-user ledger over the Brain's adapter when the config asks for one.
+   *
+   * @throws {ForgottenLedgerError} When the ledger does not open; the Brain is closed first.
    */
   private static async _initialize(
     brain: Brain,
@@ -445,7 +454,21 @@ export class Memory {
       );
     }
 
-    return new Memory(brain, merged);
+    // The ledger's table lives beside the traces, on the store's own adapter, which exists only now.
+    let forgotten: ForgottenLedger | undefined;
+    if (config.forgotten instanceof ForgottenLedger) {
+      forgotten = config.forgotten;
+    } else if (config.forgotten) {
+      try {
+        forgotten = await ForgottenLedger.open({ ...config.forgotten, primary: brain.adapter });
+      } catch (error) {
+        // A store whose ledger does not open is not served, and the refused open leaves no handle behind.
+        await brain.close();
+        throw error;
+      }
+    }
+
+    return new Memory(brain, merged, forgotten);
   }
 
   /**
@@ -923,16 +946,28 @@ export class Memory {
    * on the Brain wrote them, a relation a host made to the node ({@link addRelation}) included. Each trace's
    * knowledge-graph copy goes before its row. Unknown ids are skipped.
    *
+   * With `documentChunks: 'delete'` the document chunks the traces were filed from are deleted with their text, the
+   * pictures of those chunks, and each document left with no chunk: a person's deletion and the retention sweep pass
+   * it.
+   *
+   * A delete only marks a trace's vector in the vector index, which keeps the numbers in its files until it is
+   * written again: {@link rebuildVectorIndex} writes it from the traces that are left.
+   *
    * @returns How many trace rows it deleted, so a call made again counts none.
    * @throws When the knowledge graph cannot delete the copies: no row is deleted, so a later call deletes them.
    */
-  async deleteTraces(traceIds: readonly string[]): Promise<{ deleted: number }> {
+  async deleteTraces(
+    traceIds: readonly string[],
+    options: { documentChunks?: 'delete' } = {},
+  ): Promise<{ deleted: number }> {
     await this._initPromise;
     const ids = [...new Set(traceIds)];
     if (ids.length === 0) return { deleted: 0 };
     // A trace's knowledge-graph copy holds its full text, and once the row is gone nothing finds the copy again: the
     // copies go first, and a failure fails the call with every row kept, so a later call deletes them.
     await this._knowledgeGraph.deleteMemories({ traceIds: ids });
+    // The chunks go while their rows still name the traces: once a trace is gone its chunk names nothing.
+    if (options.documentChunks === 'delete') await this._deleteDocumentChunksOf(ids);
     const deleted = await deleteTraceRows(this._brain, this._brain.brainId, ids);
     for (const id of ids) {
       try {
@@ -945,6 +980,108 @@ export class Memory {
     // Postgres keeps the index in each row's own column, which went with the row.
     if (this._brain.features.dialect.name !== 'postgres') await this._rebuildFtsIndex();
     return { deleted };
+  }
+
+  /**
+   * Deletes the document chunks the given traces were filed from, with their text: first the pictures of those
+   * chunks, as the foreign key of `document_images` on `document_chunks` requires, then the chunks, 400 ids a
+   * statement. A document left with no chunk is deleted with the pictures filed under it; a document that still has
+   * a chunk stays.
+   */
+  private async _deleteDocumentChunksOf(traceIds: readonly string[]): Promise<void> {
+    const brainId = this._brain.brainId;
+    const documentIds = new Set<string>();
+    const chunkIds: string[] = [];
+    for (let offset = 0; offset < traceIds.length; offset += 400) {
+      const slice = traceIds.slice(offset, offset + 400);
+      const chunks = await this._brain.all<{ id: string; document_id: string }>(
+        `SELECT id, document_id FROM document_chunks WHERE brain_id = ? AND trace_id IN (${slice.map(() => '?').join(', ')})`,
+        [brainId, ...slice],
+      );
+      for (const chunk of chunks) {
+        chunkIds.push(chunk.id);
+        documentIds.add(chunk.document_id);
+      }
+    }
+    for (let offset = 0; offset < chunkIds.length; offset += 400) {
+      const slice = chunkIds.slice(offset, offset + 400);
+      const placeholders = slice.map(() => '?').join(', ');
+      const params = [brainId, ...slice];
+      await this._brain.run(`DELETE FROM document_images WHERE brain_id = ? AND chunk_id IN (${placeholders})`, params);
+      await this._brain.run(`DELETE FROM document_chunks WHERE brain_id = ? AND id IN (${placeholders})`, params);
+    }
+    for (const documentId of documentIds) {
+      const left = await this._brain.get<{ n: number | string }>(
+        'SELECT count(*) AS n FROM document_chunks WHERE brain_id = ? AND document_id = ?',
+        [brainId, documentId],
+      );
+      if (Number(left?.n ?? 0) > 0) continue;
+      await this._brain.run('DELETE FROM document_images WHERE brain_id = ? AND document_id = ?', [brainId, documentId]);
+      await this._brain.run('DELETE FROM documents WHERE brain_id = ? AND id = ?', [brainId, documentId]);
+    }
+  }
+
+  /**
+   * Deletes for good every trace whose metadata names the user as `turnUserId`, under any scope and under none, live
+   * or soft-deleted, with the document chunks those traces were filed from ({@link deleteTraces} with
+   * `documentChunks: 'delete'`). A person's deletion calls it for what they said on someone else's session.
+   *
+   * @returns How many trace rows it deleted.
+   * @throws TypeError when `userId` is not a non-empty string.
+   */
+  async deleteTracesNamingUser(userId: string): Promise<{ deleted: number }> {
+    if (typeof userId !== 'string' || userId === '') {
+      throw new TypeError('Memory.deleteTracesNamingUser: userId must be a non-empty string');
+    }
+    await this._initPromise;
+    const rows = await this._brain.all<{ id: string }>(
+      `SELECT id FROM memory_traces WHERE brain_id = ? AND ${this._brain.features.dialect.jsonExtract('metadata', '$.turnUserId')} = ?`,
+      [this._brain.brainId, userId],
+    );
+    return this.deleteTraces(
+      rows.map((row) => row.id),
+      { documentChunks: 'delete' },
+    );
+  }
+
+  /**
+   * Writes the vector index again from the live traces that are left, or removes its files when none is left. A
+   * delete only marks a vector in the index, so the numbers of a deleted trace stay in the index files until this
+   * runs: call it after deleting for good.
+   *
+   * @returns How many vectors the index holds afterwards: 0 for a store with no file path, and where `hnswlib-node`
+   *   is not installed (no index file is written there).
+   * @throws When an index file cannot be removed, or when the rebuilt index did not save.
+   */
+  async rebuildVectorIndex(): Promise<{ vectors: number }> {
+    await this._initPromise;
+    if (!this._hnswSidecar) return { vectors: 0 };
+    return this._hnswSidecar.rewrite(await this._ownEmbeddedTraces());
+  }
+
+  /**
+   * Records a subject as forgotten in this store's ledger: its copy first, then the store.
+   *
+   * @throws When the store was opened without a ledger (`forgotten` in its config), or when either write fails.
+   */
+  async markForgotten(subject: SuppressionSubject): Promise<{ form: 'keyed' | 'unkeyed'; written: boolean }> {
+    if (!this._forgotten) throw new Error('Memory.markForgotten: this store was opened without a forgotten-user ledger');
+    return this._forgotten.markForgotten(subject);
+  }
+
+  /**
+   * Whether this store's ledger holds a tombstone of the subject, in any form.
+   *
+   * @throws When the store was opened without a ledger (`forgotten` in its config).
+   */
+  async isForgotten(subject: SuppressionSubject): Promise<boolean> {
+    if (!this._forgotten) throw new Error('Memory.isForgotten: this store was opened without a forgotten-user ledger');
+    return this._forgotten.isForgotten(subject);
+  }
+
+  /** The ledger the store was opened with; undefined for a store opened without one. */
+  get forgotten(): ForgottenLedger | undefined {
+    return this._forgotten;
   }
 
   /**
