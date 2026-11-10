@@ -378,7 +378,7 @@ describe('learners filed under the slug of the agent name before the soul had an
     await after.session('s3', { userId: 'ana' }).send('And again.');
     expect(events('soul.id_fallback')).toEqual([expect.objectContaining({ reason: 'old_slug_learner' })]);
     expect(await keysOf(store, 'ana')).toEqual(new Set(['aria']));
-    await after.learning!.forgetUser('ana');
+    await after.learning!.forgetUser!('ana');
     expect(await store.sessionRowsOf('', 'ana')).toEqual([]);
     await after.close();
   });
