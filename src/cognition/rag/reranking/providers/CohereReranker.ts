@@ -59,10 +59,10 @@ export type CohereRerankerModel = (typeof COHERE_RERANKER_MODELS)[number];
 /**
  * Cohere Rerank API provider.
  *
- * Cloud-based cross-encoder reranking using Cohere's Rerank models.
- * Provides high-quality relevance scoring with low latency (~100ms for 50 docs).
- *
- * **Pricing**: ~$0.10 per 1,000 search queries (as of 2024)
+ * Cloud-based cross-encoder reranking using Cohere's Rerank models. Each `rerank()` is one
+ * POST to `${baseUrl}/v1/rerank` carrying the query and the full text of every document;
+ * the request's `params` are merged into its body. Cohere bills it; the diagnostics carry
+ * the billed search units the response reports (`tokensUsed`).
  *
  * @example
  * ```typescript

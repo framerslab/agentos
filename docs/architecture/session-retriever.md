@@ -47,7 +47,7 @@ const result = await retriever.retrieve(
 2. **Stage 2**: a single `memoryStore.query(query, topK=K*M*3)` over-fetches candidates so post-filtering has enough per-session representatives. M is `chunksPerSession`, default 3 (`defaultChunksPerSession`).
 3. **Post-filter**: keep only traces whose `bench-session:<id>` tag (configurable via `sessionTagPrefix`) matches a Stage-1 session.
 4. **Group by session**, take top-M chunks per session (already sorted by cognitive score).
-5. **Optional rerank** over the merged pool via an injected [`RerankerService`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/reranking/RerankerService.ts) (0.7 cognitive + 0.3 neural blend, matching `CognitiveMemoryManager.retrieve`), then a sort by the blended score. Without a reranker the pool is sorted by cognitive score; when the reranker throws, the pool keeps its session-by-session order.
+5. **Optional rerank** over the merged pool via an injected [`RerankerService`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/reranking/RerankerService.ts) (its default provider: a local cross-encoder, Cohere, an LLM judge or your own, see [Reranking](../text/RERANKING.md); 0.7 cognitive + 0.3 rerank blend, matching `CognitiveMemoryManager.retrieve`), then a sort by the blended score. Without a reranker the pool is sorted by cognitive score; when the reranker throws, the pool keeps its session-by-session order.
 6. **Truncate** to `recallTopK` (default 10).
 
 ## Fallbacks

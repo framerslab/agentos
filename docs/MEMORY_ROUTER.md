@@ -49,7 +49,7 @@ The taxonomy is calibrated from LongMemEval-S. Each category captures a distinct
 
 ```ts
 type MemoryBackendId =
-  | 'canonical-hybrid'              // BM25 + dense + Cohere rerank-v3.5
+  | 'canonical-hybrid'              // BM25 + dense + a reranker (presets calibrated with Cohere rerank-v3.5)
   | 'observational-memory-v10'      // synthesized observation log + dynamic OM router
   | 'observational-memory-v11';     // v10 + conditional verbatim citation rule
 ```

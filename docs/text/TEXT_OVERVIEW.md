@@ -49,11 +49,11 @@ flowchart LR
 | `BM25Index`, `HybridSearcher`, `SemanticChunker` | `@framers/agentos/cognition/rag` | Node | `HybridSearcher` calls the embedder you give it |
 | `reciprocalRankFusion` | `@framers/agentos/cognition/memory` | Node | No |
 | `fuseRanked` | `@framers/agentos/cognition/rag` | Node | No |
-| Rerankers | `@framers/agentos/cognition/rag/reranking` | Node or a browser: no reranking module imports a Node module. Cohere sends its requests with the global `fetch`, and the local cross-encoder imports Transformers.js on its first call | The local cross-encoder runs a model in-process; Cohere and the LLM judge call out |
+| Rerankers | `@framers/agentos/cognition/rag/reranking` | Node or a browser: no reranking module imports a Node module. Cohere sends its requests with the global `fetch`, and the local cross-encoder imports Transformers.js on its first call | The local cross-encoder scores in process (it downloads its model once); Cohere sends the query and passages to Cohere; the LLM judge calls the model your `llmCallFn` calls |
 
 ## Examples
 
-Four examples in the repository's `examples/` folder run with no API key:
+Five examples in the repository's `examples/` folder run with no API key:
 
 | File | What it shows |
 |---|---|
@@ -61,8 +61,9 @@ Four examples in the repository's `examples/` folder run with no API key:
 | [`text-statistics.mjs`](../../examples/text-statistics.mjs) | `StatisticalUtilityAI`'s measures over one text |
 | [`text-search-bm25.mjs`](../../examples/text-search-bm25.mjs) | `BM25Index` with any, all and prefix matching, saved as JSON and restored; a stemming pipeline; `LexicalIndex` with snippets |
 | [`text-hybrid-search.mjs`](../../examples/text-hybrid-search.mjs) | `HybridSearcher` over an in-memory vector store, with a stand-in embedder written in the example, and each result's ranks |
+| [`rerank-llm-judge.mjs`](../../examples/rerank-llm-judge.mjs) | `LlmJudgeReranker` through `RerankerService`, with a stand-in judge written in the example; with `RERANK_JUDGE_PROVIDER` set it calls that provider's cheap model |
 
-They import the package by its name, which resolves to the build through the package's `exports` map, and CI runs all four against each build. From a clone:
+They import the package by its name, which resolves to the build through the package's `exports` map, and CI runs all five against each build. [Reranking](./RERANKING.md#examples) lists the local cross-encoder and Cohere examples too. From a clone:
 
 ```bash
 pnpm install && pnpm run build

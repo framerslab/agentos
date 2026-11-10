@@ -12,7 +12,7 @@ AgentOS provides three levels of memory API:
 
 `ragConfig` makes AgentOS build a [`RetrievalAugmentor`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/RetrievalAugmentor.ts). [`UnifiedRetriever`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/unified/UnifiedRetriever.ts) runs only where a host wires it in.
 
-![AgentOS RAG memory pipeline: ingestion lane feeds five swappable storage backends; retrieval lane runs hybrid dense plus sparse search, RRF fusion, optional Cohere rerank, and Top-K context into prompt assembly](/img/diagrams/rag-memory-pipeline.svg)
+![AgentOS RAG memory pipeline: ingestion lane feeds five swappable storage backends; retrieval lane runs hybrid dense plus sparse search, RRF fusion, an optional rerank, and Top-K context into prompt assembly](/img/diagrams/rag-memory-pipeline.svg)
 
 ## Standalone Memory Facade
 
@@ -602,17 +602,19 @@ Notes:
 
 ## Reranking and the Reranker Chain {#reranker-chain}
 
-If `RetrievalAugmentorServiceConfig.rerankerServiceConfig` is provided, the augmentor builds a [`RerankerService`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/reranking/RerankerService.ts) and registers the built-in providers its `providers` list names: `cohere` (needs `apiKey`) and `local` (an offline cross-encoder through Transformers.js: `@huggingface/transformers`, or `@xenova/transformers`). Reranking is opt-in per request: with `RagRetrievalOptions.rerankerConfig.enabled: true`, or, on a request without `rerankerConfig`, with a `policy` whose `reranker` is `'always'`.
+If `RetrievalAugmentorServiceConfig.rerankerServiceConfig` is provided, the augmentor builds a [`RerankerService`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/reranking/RerankerService.ts) and registers the built-in providers its `providers` list names: `local` (a cross-encoder run in process through Transformers.js: `@huggingface/transformers`, or `@xenova/transformers`) and `cohere` (needs `apiKey`). The `llm-judge` provider takes your `llmCallFn`, so register it, and any provider of your own, with `registerRerankerProvider()`. A request picks its provider with `rerankerConfig.providerId`, else `defaultRerankerProviderId`. Reranking is opt-in per request: with `RagRetrievalOptions.rerankerConfig.enabled: true`, or, on a request without `rerankerConfig`, with a `policy` whose `reranker` is `'always'`.
 
 `RerankerService.rerankChain(query, chunks, stages)` runs several providers one after another, each stage keeping its `topK`. A stage asks for its `model`, else the provider's `defaultModelId` in the service config, else the service's `defaultModelId`, else the provider's own default. The caller passes the stages; no config file or research depth sets a chain.
 
 ### Providers
 
+[Reranking](../text/RERANKING.md#choosing-a-provider) compares the three: what each sends where, its cost and latency, and when to pick it. A remote provider receives the query and the candidate texts.
+
 | Provider id | Class | What it does |
 |---|---|---|
-| `local` | `LocalCrossEncoderReranker` | Transformers.js cross-encoder; default model `cross-encoder/ms-marco-MiniLM-L-6-v2` (`LOCAL_RERANKER_MODELS` lists the others) |
-| `cohere` | `CohereReranker` | Cohere's rerank API with the `apiKey` in its config; `COHERE_RERANKER_MODELS` lists the model ids, `rerank-v4.0-pro`, `rerank-v4.0-fast` and `rerank-v3.5` among them |
-| `llm-judge` | `LlmJudgeReranker` | Your `llmCallFn(system, user, model?)`: phase 1 scores up to 100 documents 0-10 in batches of 10 with `scoringModel`; phase 2 ranks the best 20 with `rankingModel`, falling back to the phase-1 order when it fails or runs past `timeoutMs`. It answers every scored document, the ranked ones first and each once, unless the request's `topN` (a stage's `topK`) cuts it ([The LLM judge](../text/RERANKING.md#the-llm-judge)) |
+| `local` | `LocalCrossEncoderReranker` | A cross-encoder run in process through Transformers.js; scoring sends nothing over the network. Default model `cross-encoder/ms-marco-MiniLM-L-6-v2` (`LOCAL_RERANKER_MODELS` lists five model ids) |
+| `cohere` | `CohereReranker` | Cohere's rerank API with the `apiKey` in its config: one POST per request carrying the query and the full text of every passage. Default model `rerank-v3.5` (`COHERE_RERANKER_MODELS` lists seven model ids) |
+| `llm-judge` | `LlmJudgeReranker` | Your `llmCallFn(system, user, model?)`, on whatever model it calls; each call carries the query and the first 200 characters of each passage. Phase 1 scores up to `maxPointwiseDocuments` (100) documents 0-10 in batches of `batchSize` (10) with `scoringModel`; phase 2 ranks the best `pointwiseTopK` (20) with `rankingModel`, falling back to the phase-1 order when it fails or runs past `timeoutMs`. It answers every scored document, the ranked ones first and each once, unless the request's `topN` (a stage's `topK`) cuts it ([`llm-judge`](../text/RERANKING.md#llm-judge-an-llm-as-the-judge)) |
 
 ### Skipped stages
 
@@ -643,21 +645,17 @@ const results = await service.rerankChain('quantum computing', chunks, [
 
 ### Memory retrieval reranking
 
-When a [`RerankerService`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/reranking/RerankerService.ts) is passed to [`CognitiveMemoryManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/CognitiveMemoryManager.ts) in the `rerankerService` config field (see [Cognitive Memory](./COGNITIVE_MEMORY.md)), retrieval reranks the scored traces with the service's default provider after the cognitive scoring. The service's constructor only records the provider configs; register each provider:
+When a [`RerankerService`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/reranking/RerankerService.ts) is passed to [`CognitiveMemoryManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/CognitiveMemoryManager.ts) in the `rerankerService` config field (see [Cognitive Memory](./COGNITIVE_MEMORY.md)), retrieval reranks the scored traces with the service's default provider after the cognitive scoring. Any provider works: `local`, `cohere`, `llm-judge` or your own ([Reranking](../text/RERANKING.md#choosing-a-provider)). The service's constructor only records the provider configs; register each provider:
 
 ```typescript
 import { CognitiveMemoryManager } from '@framers/agentos';
-import { RerankerService, CohereReranker } from '@framers/agentos/cognition/rag/reranking';
+import { RerankerService, LocalCrossEncoderReranker } from '@framers/agentos/cognition/rag/reranking';
 
 const rerankerService = new RerankerService({
-  config: {
-    providers: [{ providerId: 'cohere', defaultModelId: 'rerank-v3.5' }],
-    defaultProviderId: 'cohere',
-  },
+  // defaultProviderId picks the provider: the manager names none.
+  config: { providers: [{ providerId: 'local' }], defaultProviderId: 'local' },
 });
-rerankerService.registerProvider(
-  new CohereReranker({ providerId: 'cohere', apiKey: process.env.COHERE_API_KEY! }),
-);
+rerankerService.registerProvider(new LocalCrossEncoderReranker({ providerId: 'local' }));
 
 const manager = new CognitiveMemoryManager();
 await manager.initialize({

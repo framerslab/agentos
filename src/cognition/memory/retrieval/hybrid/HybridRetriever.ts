@@ -25,9 +25,9 @@
  *
  * Per the Step 2 post-mortem (rerank-skip was the root cause of
  * that step's RED verdict), Step 3 threads rerank from day 1 when
- * the bench is configured with `--rerank cohere`. Callers outside
- * the bench can pass `undefined` for `rerankerService` to skip
- * rerank explicitly.
+ * the bench is configured with a reranker. `rerankerService` takes a
+ * `RerankerService` with any provider (local cross-encoder, Cohere,
+ * LLM judge); pass `undefined` to skip rerank explicitly.
  *
  * ## Sparse-only documents are skipped in MVP
  *
