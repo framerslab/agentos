@@ -1778,9 +1778,9 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     return this.config;
   }
 
-  /** The manager's `recall.capture`, `'metadata'` when unset; read at each retrieval and assembly. */
+  /** The manager's `recall.capture`, `'metadata'` when unset (or before a config is set); read at each retrieval and assembly. */
   private recallCaptureMode(): RecallCaptureMode {
-    return this.config.recall?.capture ?? 'metadata';
+    return this.config?.recall?.capture ?? 'metadata';
   }
 
   getGraph(): IMemoryGraph | null {
