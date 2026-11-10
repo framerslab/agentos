@@ -239,7 +239,12 @@ function cutWord(word: string, maxChars: number): string[] {
   return parts;
 }
 
-/** Dispose `model` if it has a `dispose()`, swallowing a throw or a rejection. */
+/**
+ * Dispose `model` if it has a `dispose()`, swallowing a throw or a rejection.
+ * It runs for a model whose load already failed: the caller holds that load's
+ * error, the provider has no logger, and a session that fails to release is
+ * nothing the caller can act on, so a disposal error is dropped on purpose.
+ */
 const disposeQuietly = (model: any): Promise<void> =>
   Promise.resolve()
     .then(() => (typeof model?.dispose === 'function' ? model.dispose() : undefined))
@@ -293,6 +298,21 @@ function splitIntoPieces(text: string, maxChars: number): string[] {
   flush();
   // A text of whitespace alone has no words; it is still one (empty) piece.
   return pieces.length > 0 ? pieces : [''];
+}
+
+/**
+ * The (document index, text) pairs to score, in order: one per document, or
+ * one per piece of it with `pieceMaxChars`. Made one document at a time, so
+ * no more than one document's pieces exist before they are scored.
+ */
+function* pairsOf(
+  documents: ReadonlyArray<{ content: string }>,
+  pieceMaxChars: number | undefined,
+): Generator<{ owner: number; text: string }> {
+  for (let owner = 0; owner < documents.length; owner++) {
+    const content = documents[owner].content;
+    for (const text of pieceMaxChars ? splitIntoPieces(content, pieceMaxChars) : [content]) yield { owner, text };
+  }
 }
 
 /** A loaded model with its tokenizer, and the reranks using it. */
@@ -652,29 +672,32 @@ export class LocalCrossEncoderReranker implements IRerankerProvider {
 
     const batchSize = this.config.batchSize!;
     const pieceMaxChars = this.config.pieceMaxChars;
-    // One (query, text) pair per document, or one per piece of it with pieceMaxChars; owners[k] is pair k's document.
-    const texts: string[] = [];
-    const owners: number[] = [];
-    input.documents.forEach((doc, index) => {
-      for (const text of pieceMaxChars ? splitIntoPieces(doc.content, pieceMaxChars) : [doc.content]) {
-        texts.push(text);
-        owners.push(index);
-      }
-    });
-
     // A document's score is the best of its pairs' scores; every document has at least one pair.
     const scores: number[] = new Array(input.documents.length).fill(Number.NEGATIVE_INFINITY);
     let forwardPasses = 0;
+    let pairsScored = 0;
+    // The batch being filled: pair k's text and the index of its document. Pairs are made as batches fill,
+    // so a long document's pieces never all sit in memory with every other document's.
+    let texts: string[] = [];
+    let owners: number[] = [];
+    const scorePending = async (): Promise<void> => {
+      const batchScores = await this.scoreBatch(loaded, input.query, texts);
+      batchScores.forEach((score, j) => {
+        if (score > scores[owners[j]]) scores[owners[j]] = score;
+      });
+      forwardPasses++;
+      pairsScored += texts.length;
+      texts = [];
+      owners = [];
+    };
     loaded.active++;
     try {
-      for (let i = 0; i < texts.length; i += batchSize) {
-        const batchScores = await this.scoreBatch(loaded, input.query, texts.slice(i, i + batchSize));
-        batchScores.forEach((score, j) => {
-          const owner = owners[i + j];
-          if (score > scores[owner]) scores[owner] = score;
-        });
-        forwardPasses++;
+      for (const { owner, text } of pairsOf(input.documents, pieceMaxChars)) {
+        texts.push(text);
+        owners.push(owner);
+        if (texts.length === batchSize) await scorePending();
       }
+      if (texts.length > 0) await scorePending();
     } finally {
       loaded.active--;
       if (loaded.retired && loaded.active === 0) {
@@ -708,7 +731,7 @@ export class LocalCrossEncoderReranker implements IRerankerProvider {
         providerMetrics: {
           batchSize,
           forwardPasses,
-          pairsScored: texts.length,
+          pairsScored,
           ...(pieceMaxChars ? { pieceMaxChars } : {}),
           modelFile: loaded.modelFile,
           device: this.config.device,
