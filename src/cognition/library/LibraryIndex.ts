@@ -190,11 +190,12 @@ export interface LibraryGroupSearch {
    * more. A word with more marks its group `incomplete`. @default 64
    */
   expansionMax?: number;
-  /** The most hits a group answers on a page: a whole number, 1 or more. */
+  /** The most hits a group answers on a page: a whole number, 1 or more, that JavaScript holds exactly. */
   pageSize: number;
   /**
    * A later page of one group: the `cursor` an earlier page of the same search answered for it. The answer then
-   * holds that group alone. A cursor made for another search throws a {@link LibraryCursorError}.
+   * holds that group alone. A cursor made for another search throws a {@link LibraryCursorError}, and so does any
+   * value but a cursor's text: the `null` a group answers after its last page is not read as a first page.
    */
   cursor?: string;
   /**
@@ -235,8 +236,8 @@ export interface LibraryGroupHit {
 export interface LibraryGroupResult {
   id: string;
   /**
-   * `restart` when the cursor was made under another fingerprint than the group's: the list changed between two
-   * pages, nothing is answered, and the caller searches again from the first page.
+   * `restart` when the cursor was made under another fingerprint than the group's, or under another scope: what the
+   * search may read changed between two pages, nothing is answered, and the caller searches again from the first page.
    */
   state: 'ok' | 'restart';
   /** How many distinct items match every word, whatever the page; in a listing, how many hold a passage. */
@@ -418,11 +419,13 @@ interface CheckedGroupSearch {
   signal: AbortSignal | undefined;
 }
 
-/** What a cursor carries: the group, the fingerprint and the search its page was made under, and where the page ended. */
+/** What a cursor carries: the group, the fingerprint, the scope and the search its page was made under, and where the page ended. */
 interface LibraryCursor {
   v: 1;
   groupId: string;
   fingerprint: string;
+  /** The scope the page was read under ({@link scopeMarkOf}). */
+  scope: string;
   /** The signature of the search ({@link signatureOf}). */
   sig: string;
   words: string[];
@@ -442,7 +445,7 @@ interface LibraryCursor {
  */
 function groupSearchOf(query: LibraryGroupSearch): CheckedGroupSearch {
   const refused = (what: string): Error => new Error(`LibraryIndex.searchGroups: ${what}.`);
-  const whole = (value: unknown): value is number => typeof value === 'number' && Number.isInteger(value) && value >= 1;
+  const whole = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 1;
   if (!query.scope?.tenantId || !Array.isArray(query.scope.aclGroups) || query.scope.aclGroups.length === 0) {
     throw new Error('LibraryIndex.searchGroups needs a tenant and at least one access group.');
   }
@@ -459,8 +462,8 @@ function groupSearchOf(query: LibraryGroupSearch): CheckedGroupSearch {
   if (title !== undefined && title !== 'passage' && title !== 'metadata') throw refused("the profile's title must be 'passage' or 'metadata'");
   if (query.order !== undefined && query.order !== 'rank' && query.order !== 'date') throw refused("the order must be 'rank' or 'date'");
   if (query.typo !== undefined && query.typo !== 'one-edit' && query.typo !== 'none') throw refused("the typo rule must be 'one-edit' or 'none'");
-  if (query.expansionMax !== undefined && !whole(query.expansionMax)) throw refused('expansionMax must be a whole number of 1 or more');
-  if (!whole(query.pageSize)) throw refused('pageSize must be a whole number of 1 or more');
+  if (query.expansionMax !== undefined && !whole(query.expansionMax)) throw refused(`expansionMax must be a whole number from 1 to ${Number.MAX_SAFE_INTEGER}`);
+  if (!whole(query.pageSize)) throw refused(`pageSize must be a whole number from 1 to ${Number.MAX_SAFE_INTEGER}`);
 
   const handed = new Set<string>();
   const groups = query.groups.map((group): CheckedGroup => {
@@ -530,6 +533,15 @@ function signatureOf(search: CheckedGroupSearch, group: CheckedGroup): string {
   );
 }
 
+/**
+ * A scope as a cursor keeps it: the SHA-256, in hex, of the tenant and the access groups, each group once and in
+ * order, so the same groups handed in another order are the same scope. A page is ranked over what one scope may
+ * read, and a later page asked under another has nothing to continue.
+ */
+function scopeMarkOf(scope: LibraryScope): string {
+  return sha256Hex(JSON.stringify([scope.tenantId, [...new Set(scope.aclGroups)].sort()]));
+}
+
 /** A cursor as the text a caller keeps: its JSON in UTF-8, in base64url without padding. */
 function cursorEncode(cursor: LibraryCursor): string {
   let binary = '';
@@ -555,12 +567,13 @@ function cursorDecode(cursor: unknown): LibraryCursor {
     throw refused();
   }
   if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) throw refused();
-  const { v, groupId, fingerprint, sig, words, expansion, over, key } = payload as Record<string, unknown>;
+  const { v, groupId, fingerprint, scope, sig, words, expansion, over, key } = payload as Record<string, unknown>;
   const texts = (value: unknown): value is string[] => Array.isArray(value) && value.every((item) => typeof item === 'string');
   if (
     v !== 1 ||
     typeof groupId !== 'string' ||
     typeof fingerprint !== 'string' ||
+    typeof scope !== 'string' ||
     typeof sig !== 'string' ||
     !texts(words) ||
     !Array.isArray(expansion) ||
@@ -571,7 +584,7 @@ function cursorDecode(cursor: unknown): LibraryCursor {
   ) {
     throw refused();
   }
-  return { v: 1, groupId, fingerprint, sig, words, expansion: expansion as string[][], over, key: key as Array<string | null> };
+  return { v: 1, groupId, fingerprint, scope, sig, words, expansion: expansion as string[][], over, key: key as Array<string | null> };
 }
 
 /**
@@ -841,8 +854,9 @@ export class LibraryIndex {
    * - `hits`: a page of those items, each by its best passage, in the order of `order`, with the words marked.
    * - `cursor`: what the next page takes. It is bound to the words, the order, the profile, the part kinds, the typo
    *   rule and its limit, the group and the stored words the first page found, which a later page matches again and
-   *   never reads anew, and it keeps the group's fingerprint: a later page handed another fingerprint answers
-   *   `restart`, so that every item is listed once across the pages of one unchanged list.
+   *   never reads anew, and it keeps the group's fingerprint and the scope: a later page handed another fingerprint,
+   *   or asked under another tenant or other access groups, answers `restart`, so that every item is listed once
+   *   across the pages of one unchanged list.
    * - `anyWord`: on a first page of two words or more with no item that holds them all, the items that hold some.
    * - `incomplete`: whether a word had more stored words one edit away than the limit, or the signal stopped the read.
    *
@@ -881,9 +895,10 @@ export class LibraryIndex {
     if (!reachesEveryWord(search, carried.expansion)) throw refused('carries a stored word that no word of the search reaches');
     const after = placeOf(carried.key, search.order === 'date' || search.words.length === 0);
     if (after === null) throw refused("names no place in the page's order");
-    // The list the cursor's page was made under is not the list handed now: nothing computed under the old one is
-    // answered, and the caller searches again from the first page.
-    if (carried.fingerprint !== group.fingerprint) {
+    // The list the cursor's page was made under is not the list handed now, or the scope it was read under is not
+    // the scope that asks now: nothing computed under the old one is answered, and the caller searches again from the
+    // first page.
+    if (carried.fingerprint !== group.fingerprint || carried.scope !== scopeMarkOf(search.scope)) {
       return { groups: [{ id: group.id, state: 'restart', total: 0, incomplete: false, cursor: null, hits: [], anyWord: [] }] };
     }
     return { groups: [await this.searchGroup(search, group, { expansion: carried.expansion, over: carried.over, after })] };
@@ -966,6 +981,7 @@ export class LibraryIndex {
         v: 1,
         groupId: group.id,
         fingerprint: group.fingerprint,
+        scope: scopeMarkOf(scope),
         sig: signatureOf(search, group),
         words,
         expansion: answered.expansion,

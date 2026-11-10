@@ -170,7 +170,7 @@ if (sessions.cursor) {
 | `order` | `'rank'` (the default) or `'date'` ([the order](#the-order-and-the-callers-dates)). |
 | `typo` | `'one-edit'` or `'none'` (the default) ([one edit](#one-edit)). |
 | `expansionMax` | The most stored words one edit away that a word is widened to: 64 unless given. |
-| `pageSize` | The most hits a group answers on a page. |
+| `pageSize` | The most hits a group answers on a page: a whole number, 1 or more. |
 | `cursor` | A later page of one group ([pages](#pages-and-the-cursor)). |
 | `signal` | Stops the search between the store's statements ([what is left out](#what-is-left-out)). |
 
@@ -216,9 +216,11 @@ With `typo: 'one-edit'` each word of four letters or more is widened to the stor
 
 A group with more items than the page answers a `cursor`, and the same search with that cursor answers the next page of that group alone. A cursor is opaque. It is bound to the words, the order, the profile, the part kinds, the typo rule, the expansion limit and the group, and it carries the stored words the first page found, so a later page matches the same words and reads none again. The page size is not part of it: a later page may ask for more or fewer.
 
-A cursor also keeps the fingerprint of the list its page was made under. A later page whose group carries another fingerprint answers `{ state: 'restart', total: 0, hits: [], cursor: null }` and reads nothing: the list changed between the pages, and the caller searches again from the first one. The index compares fingerprints and never computes one, so the fingerprint must change whenever the list, an item's date or what the index holds for an item changes; under one fingerprint, every item is listed once across the pages and none is skipped.
+A cursor also keeps the fingerprint of the list its page was made under, and the scope it was read under. A later page whose group carries another fingerprint, or that is asked under another tenant or other access groups, answers `{ state: 'restart', total: 0, hits: [], cursor: null }` and reads nothing: what the search may read changed between the pages, and the caller searches again from the first one. The same groups handed in another order are the same scope. The index compares fingerprints and never computes one, so the fingerprint must change whenever the list, an item's date or what the index holds for an item changes; under one fingerprint and one scope, every item is listed once across the pages and none is skipped.
 
-`searchGroups` throws a `LibraryCursorError` for a cursor it refuses: a text the index did not make, a cursor of a group the search does not hand, one made under other words, another order, profile, `partKinds`, typo rule or expansion limit, and one that carries a stored word no word of the search reaches (each carried word is held again to being the same as its query word, begun by it or one edit from it), so a cursor never adds a word to a search.
+`searchGroups` throws a `LibraryCursorError` for a cursor it refuses: a text the index did not make, a cursor of a group the search does not hand, one made under other words, another order, profile, `partKinds`, typo rule or expansion limit, and one that carries a stored word no word of the search reaches (each carried word is held again to being the same as its query word, begun by it or one edit from it), so a cursor never adds a word to a search. Any value but a cursor's text is refused the same way: the `null` a group answers after its last page is not read as a first page, which would start a pager over.
+
+A cursor is not signed, and the index holds no secret to sign one with. A caller that edits its own cursor can move where its next page starts or drop stored words the first page found, and so lose items from its own later pages; it reads nothing a first page of the same search under the same scope and items would not read. A product that must hold a person to the pages it served keeps the cursor on its side or signs it there.
 
 ### A listing with no word
 

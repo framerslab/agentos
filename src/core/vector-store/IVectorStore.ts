@@ -320,7 +320,7 @@ export interface LexicalGroupSearchOptions {
   profile: { fields: Record<string, number>; fallback: string; title?: 'passage' | 'metadata' };
   /** `rank`: the highest rank first. `date`: the newest of the caller's dates first, an undated item after every dated one. */
   order: 'rank' | 'date';
-  /** The most items a page answers: a whole number, 1 or more. */
+  /** The most items a page answers: a whole number, 1 or more, that JavaScript holds exactly. */
   pageSize: number;
   /** The last item of the page before this one; without it, the first page. */
   after?: LexicalGroupKey;

@@ -253,7 +253,7 @@ interface GroupSqlRow {
  */
 function groupSearchOf(options: LexicalGroupSearchOptions): GroupSearch {
   const refused = (what: string): Error => new Error(`PostgresVectorStore.lexicalGroupSearch: ${what}.`);
-  const whole = (value: unknown): boolean => typeof value === 'number' && Number.isInteger(value) && value >= 1;
+  const whole = (value: unknown): boolean => typeof value === 'number' && Number.isSafeInteger(value) && value >= 1;
   const instant = (value: unknown): boolean => typeof value === 'string' && INSTANT_FORM.test(value);
   const { words, expansion, oneEdit, group, profile, order, pageSize, after } = options;
   if (!Array.isArray(words) || words.length > GROUP_WORDS_MAX || words.some((word) => typeof word !== 'string' || !GROUP_WORD.test(word))) {
@@ -271,7 +271,7 @@ function groupSearchOf(options: LexicalGroupSearchOptions): GroupSearch {
     throw refused('the expansion must hold one list of stored words for each word');
   }
   if (oneEdit !== undefined && !(whole(oneEdit.minLength) && whole(oneEdit.max))) {
-    throw refused('oneEdit.minLength and oneEdit.max must be whole numbers of 1 or more');
+    throw refused(`oneEdit.minLength and oneEdit.max must be whole numbers from 1 to ${Number.MAX_SAFE_INTEGER}`);
   }
   if (!Array.isArray(group?.items)) throw refused('the group needs its items');
   const ids = group.items.map((item) => item.sourceId);
@@ -292,7 +292,7 @@ function groupSearchOf(options: LexicalGroupSearchOptions): GroupSearch {
     throw refused("the profile's title must be 'passage' or 'metadata'");
   }
   if (order !== 'rank' && order !== 'date') throw refused("the order must be 'rank' or 'date'");
-  if (!whole(pageSize)) throw refused('pageSize must be a whole number of 1 or more');
+  if (!whole(pageSize)) throw refused(`pageSize must be a whole number from 1 to ${Number.MAX_SAFE_INTEGER}`);
   if (after !== undefined) {
     if (typeof after.rank !== 'string' || !RANK_FORM.test(after.rank) || typeof after.sourceId !== 'string') {
       throw refused("the key to start after needs a rank in decimal digits and a sourceId");
@@ -1242,7 +1242,8 @@ export class PostgresVectorStore implements IVectorStore {
     const kinds = bind(search.partKinds, 'text[]');
     const weights = bind(JSON.stringify(search.fields), 'jsonb');
     const fallback = bind(search.fallback, 'text');
-    const limit = bind(search.pageSize + 1, 'int');
+    // One row more than the page says whether an item follows it. row_number() is a bigint, and so is the bound.
+    const limit = bind(search.pageSize + 1, 'bigint');
     // Any word, by any of its three queries, each written as `q` writes it: what a passage must hold to count at all.
     const anyStart = `to_tsquery(${config}, ${bind([...search.words, ...starts].join(' | '), 'text')})`;
     const allEdits = edits.filter((text) => text !== '').join(' | ');
@@ -1254,7 +1255,7 @@ export class PostgresVectorStore implements IVectorStore {
     const after = this._groupAfterSql(search, bind);
     // The items that match some of the words are read on a first page alone, and only where two words or more could differ.
     const others = search.after === undefined && search.words.length > 1;
-    const pageSize = others ? bind(search.pageSize, 'int') : '';
+    const pageSize = others ? bind(search.pageSize, 'bigint') : '';
     const { clause, filterParams } = filter ? this._buildMetadataFilter(filter, params.length + 1) : { clause: '', filterParams: [] };
     params.push(...filterParams);
     const kindOf = (tsv: string): string =>
@@ -1389,7 +1390,7 @@ export class PostgresVectorStore implements IVectorStore {
     const kinds = bind(search.partKinds, 'text[]');
     const weights = bind(JSON.stringify(search.fields), 'jsonb');
     const fallback = bind(search.fallback, 'text');
-    const limit = bind(search.pageSize + 1, 'int');
+    const limit = bind(search.pageSize + 1, 'bigint');
     // No word ranks an item, so every item's rank is 0 and the date decides under either order.
     const after = this._groupAfterSql({ ...search, order: 'date' }, bind);
     const { clause, filterParams } = filter ? this._buildMetadataFilter(filter, params.length + 1) : { clause: '', filterParams: [] };
