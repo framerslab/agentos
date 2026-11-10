@@ -306,7 +306,7 @@ describe.skipIf(!CACHE_DIR)(`LocalCrossEncoderReranker on the real ${MODEL_ID}`,
       expect(reranked[0].id).toBe(ANSWER_ID);
       expect(reranked[0].content).toBe(answerNote);
       expect(reranked[0].relevanceScore).toBeGreaterThan(0.5);
-      expect(reranked[1].relevanceScore).toBeLessThan(reranked[0].relevanceScore);
+      expect(reranked[1].relevanceScore).toBeLessThan(reranked[0].relevanceScore!);
       for (const c of reranked) {
         expect(c.relevanceScore).toBeGreaterThan(0);
         expect(c.relevanceScore).toBeLessThan(1);
