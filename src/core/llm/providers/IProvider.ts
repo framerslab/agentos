@@ -306,10 +306,12 @@ export interface ModelCompletionOptions {
    * completions are stored by default for new accounts. To disable storage
    * when using either API, set store: false."
    * (https://developers.openai.com/api/docs/guides/migrate-to-responses).
-   * The providers built on the OpenAI provider (Groq, xAI, Together,
-   * Mistral, LiteLLM, MiniMax) send it to their own endpoint too; the other
-   * providers ignore it. A `store` key in `customModelParams` replaces it, as
-   * the passthrough does for every typed field.
+   * Other providers ignore it, those built on the OpenAI provider (Groq, xAI,
+   * Together, Mistral, LiteLLM, MiniMax) included: they leave it out of the
+   * request to their own endpoint, which can refuse a field outside its
+   * schema (Mistral answers "Extra inputs are not permitted"). A `store` key
+   * in `customModelParams` replaces it, as the passthrough does for every
+   * typed field, and reaches those endpoints too.
    */
   store?: boolean;
   /**

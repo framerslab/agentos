@@ -6,6 +6,7 @@ import type {
   ProviderEmbeddingResponse,
 } from '../IProvider';
 import { OpenAIProvider, OpenAIProviderConfig } from './OpenAIProvider';
+import { withoutOpenAiStore } from './openaiGatewayOptions';
 import { keyPoolStrategyFromEnv } from '../../../providers/ApiKeyPool';
 
 /** Configuration for MiniMax's OpenAI-compatible Chat Completions transport. */
@@ -93,7 +94,7 @@ export class MiniMaxProvider extends OpenAIProvider {
     options: ModelCompletionOptions,
     stream: boolean,
   ): Record<string, unknown> {
-    const payload = super.buildChatCompletionPayload(modelId, messages, options, stream);
+    const payload = super.buildChatCompletionPayload(modelId, messages, withoutOpenAiStore(options), stream);
     const wireMessages = payload.messages as Record<string, unknown>[];
     // Raw custom messages retain their own fields through the existing escape hatch.
     if (!options.customModelParams?.messages) {
