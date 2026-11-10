@@ -63,6 +63,7 @@ import {
 import { ensureMemoryDir, withoutMigratedEndMarker } from '../memory/wiki/migrateMemoryMd.js';
 import type { IPersonaDefinition } from './IPersonaDefinition.js';
 import { normalizeHexacoTraits } from './hexaco.js';
+import { stableIdOfName } from './stableId.js';
 
 /**
  * Result of loading a soul workspace. The `personaDefinition` is suitable for
@@ -127,6 +128,71 @@ export interface SoulFrontmatter {
   metadata?: Record<string, unknown>;
   /** Reasoning-trace limits; maps to `IPersonaDefinition.reasoningTraceConfig`. */
   reasoningTrace?: { maxEntries?: number; maxMessageLength?: number };
+}
+
+/** Thrown when a soul cannot be loaded: its file is missing or was not read, or its front matter has a field of the wrong type. */
+export class SoulLoadError extends Error {
+  readonly code = 'SOUL_LOAD_FAILED' as const;
+  /** What names the soul: its path as given, or `inline soul` for inline content. */
+  readonly source: string;
+  /** The error this one wraps, when the failure came from another error. */
+  readonly cause?: unknown;
+
+  /**
+   * @param source - What names the soul: its path as given, or `inline soul`.
+   * @param reason - Why it failed; the message ends with it.
+   * @param options - `cause`: the error this one wraps.
+   */
+  constructor(source: string, reason: string, options?: { cause?: unknown }) {
+    super(`The soul failed to load (${source}): ${reason}`);
+    this.name = 'SoulLoadError';
+    this.source = source;
+    if (options?.cause !== undefined) this.cause = options.cause;
+  }
+}
+
+const STRING_FIELDS = ['name', 'agentId', 'role', 'defaultMood'] as const;
+const STRING_LIST_FIELDS = ['allowedMoods', 'hardLimits'] as const;
+const OBJECT_FIELDS = ['voice', 'avatar', 'reasoningTrace', 'metadata'] as const;
+const DECLARED_FIELDS: readonly string[] = [...STRING_FIELDS, ...STRING_LIST_FIELDS, ...OBJECT_FIELDS, 'hexaco'];
+
+/** True for a value YAML reads as a mapping: an object that is not a list and not a date. */
+function isMapping(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) && !(value instanceof Date);
+}
+
+/**
+ * Checks the declared fields of a soul's front matter and returns it. A declared field set to `null` (an empty YAML
+ * value) counts as not set and is left out; keys the loader does not declare are kept as they are.
+ *
+ * @param data - The front matter as parsed.
+ * @param source - What names the soul in the error: its path, or `inline soul`.
+ * @throws {SoulLoadError} Naming the field, when a declared field has a value of the wrong type.
+ */
+export function validateSoulFrontmatter(data: Record<string, unknown>, source = 'inline soul'): SoulFrontmatter {
+  const out: Record<string, unknown> = { ...data };
+  for (const field of DECLARED_FIELDS) if (out[field] === null) delete out[field];
+  const refuse = (field: string, expected: string): never => {
+    throw new SoulLoadError(source, `front matter field '${field}' must be ${expected}`);
+  };
+  for (const field of STRING_FIELDS) {
+    if (out[field] !== undefined && typeof out[field] !== 'string') refuse(field, 'a string');
+  }
+  for (const field of STRING_LIST_FIELDS) {
+    const value = out[field];
+    if (value !== undefined && !(Array.isArray(value) && value.every((entry) => typeof entry === 'string'))) refuse(field, 'a list of strings');
+  }
+  for (const field of OBJECT_FIELDS) {
+    if (out[field] !== undefined && !isMapping(out[field])) refuse(field, 'an object');
+  }
+  const hexaco = out.hexaco;
+  if (hexaco !== undefined) {
+    const scores = isMapping(hexaco) ? Object.values(hexaco) : undefined;
+    if (!scores || scores.some((score) => typeof score !== 'number' || !Number.isFinite(score) || score < 0 || score > 1)) {
+      refuse('hexaco', 'an object of numbers between 0 and 1');
+    }
+  }
+  return out as SoulFrontmatter;
 }
 
 /**
@@ -232,7 +298,7 @@ export async function loadSoul(options: SoulLoaderOptions): Promise<LoadedSoul> 
 
   // Parse frontmatter + body. The frontmatter is read as data, never evaluated.
   const parsed = soulRaw ? readFrontMatter(soulRaw) : { data: {}, content: '' };
-  const frontmatter = parsed.data as SoulFrontmatter;
+  const frontmatter = validateSoulFrontmatter(parsed.data as Record<string, unknown>, options.source);
   const soulContent = parsed.content.trim();
 
   // Read optional companion files
@@ -295,7 +361,7 @@ export function loadSoulSync(options: SoulLoaderOptions): LoadedSoul {
   const soulRaw = soulText(soulPath, readSoulFileSync(folder, path.basename(soulPath)), requireSoul);
 
   const parsed = soulRaw ? readFrontMatter(soulRaw) : { data: {}, content: '' };
-  const frontmatter = parsed.data as SoulFrontmatter;
+  const frontmatter = validateSoulFrontmatter(parsed.data as Record<string, unknown>, options.source);
   const soulContent = parsed.content.trim();
 
   const styleContent = trimmedText(readSoulFileSync(folder, 'STYLE.md'));
@@ -332,7 +398,7 @@ export function loadSoulSync(options: SoulLoaderOptions): LoadedSoul {
  */
 export function parseSoul(soulMarkdown: string): LoadedSoul {
   const parsed = readFrontMatter(soulMarkdown);
-  const frontmatter = parsed.data as SoulFrontmatter;
+  const frontmatter = validateSoulFrontmatter(parsed.data as Record<string, unknown>);
   const soulContent = parsed.content.trim();
   return {
     personaDefinition: frontmatterToPersona(frontmatter, soulContent),
@@ -342,34 +408,22 @@ export function parseSoul(soulMarkdown: string): LoadedSoul {
   };
 }
 
-/**
- * Convert SoulFrontmatter + markdown body into an IPersonaDefinition that
- * the existing PersonaOverlayManager and persona overlays can consume.
- */
-export function frontmatterToPersona(
-  frontmatter: SoulFrontmatter,
-  soulBody: string,
-  styleBody?: string,
-): IPersonaDefinition {
-  const baseSystemPrompt = [soulBody, styleBody && `## Style\n\n${styleBody}`]
-    .filter(Boolean)
-    .join('\n\n')
-    .trim();
+/** The persona fields a soul's front matter sets, with no prompt: the one mapping every path consumes. */
+export type SoulPersonaFields = Pick<
+  IPersonaDefinition,
+  'id' | 'name' | 'description' | 'personalityTraits' | 'reasoningTraceConfig' | 'moodAdaptation' | 'voiceConfig' | 'avatarConfig' | 'hardLimits'
+> & { metadata?: Record<string, unknown> };
 
-  const definition: IPersonaDefinition = {
+/** The persona fields of a soul's front matter: id, name, role, traits, reasoning-trace limits, mood, voice, avatar, hard limits and metadata. */
+export function personaFieldsOf(frontmatter: SoulFrontmatter): SoulPersonaFields {
+  return {
     id: frontmatter.agentId ?? slugify(frontmatter.name ?? 'unnamed-agent'),
     name: frontmatter.name ?? 'Unnamed Agent',
     description: frontmatter.role ?? '',
-    version: '1.0.0',
-    baseSystemPrompt,
     // Runtime readers key Honesty-Humility as `honesty`; the frontmatter may
     // use either spelling.
     personalityTraits: frontmatter.hexaco ? normalizeHexacoTraits(frontmatter.hexaco) : undefined,
-    // Kept as given (an object is copied; anything else passes through) so PersonaValidation can report a malformed value.
-    reasoningTraceConfig:
-      frontmatter.reasoningTrace && typeof frontmatter.reasoningTrace === 'object' && !Array.isArray(frontmatter.reasoningTrace)
-        ? { ...frontmatter.reasoningTrace }
-        : (frontmatter.reasoningTrace as IPersonaDefinition['reasoningTraceConfig']),
+    reasoningTraceConfig: frontmatter.reasoningTrace ? { ...frontmatter.reasoningTrace } : undefined,
     moodAdaptation: frontmatter.defaultMood
       ? {
           enabled: true,
@@ -393,9 +447,38 @@ export function frontmatterToPersona(
       : undefined,
     hardLimits: frontmatter.hardLimits,
     metadata: frontmatter.metadata,
-  } as IPersonaDefinition;
+  } as SoulPersonaFields;
+}
 
-  return definition;
+/**
+ * The one stable id of a soul: `agentId` as given, else the slug of the soul's `name`, else an id from the agent
+ * option's `name`; undefined when the soul has neither and the agent has no name. Never a random id.
+ *
+ * @param frontmatter - The soul's front matter.
+ * @param agentName - The agent's `name` option, used only when the soul names no id and no name.
+ */
+export function soulAgentIdOf(frontmatter: SoulFrontmatter, agentName?: string): string | undefined {
+  if (typeof frontmatter.agentId === 'string' && frontmatter.agentId.trim() !== '') return frontmatter.agentId;
+  const fromSoulName = typeof frontmatter.name === 'string' ? slugify(frontmatter.name) : '';
+  if (fromSoulName) return fromSoulName;
+  const name = agentName?.trim();
+  return name ? stableIdOfName(name) : undefined;
+}
+
+/**
+ * Convert SoulFrontmatter + markdown body into an IPersonaDefinition that
+ * the existing PersonaOverlayManager and persona overlays can consume.
+ */
+export function frontmatterToPersona(
+  frontmatter: SoulFrontmatter,
+  soulBody: string,
+  styleBody?: string,
+): IPersonaDefinition {
+  const baseSystemPrompt = [soulBody, styleBody && `## Style\n\n${styleBody}`]
+    .filter(Boolean)
+    .join('\n\n')
+    .trim();
+  return { ...personaFieldsOf(frontmatter), version: '1.0.0', baseSystemPrompt } as IPersonaDefinition;
 }
 
 /**

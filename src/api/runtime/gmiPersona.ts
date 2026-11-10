@@ -14,10 +14,11 @@
  * metaprompts, as the persona loaders expand them, because the GMI runs only the
  * persona's `metaPrompts`.
  */
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { buildSystemPrompt, type AgentOptions } from '../agent.js';
 import { resolveModelOption } from '../model.js';
 import { normalizeHexacoTraits } from '../../cognition/substrate/personas/hexaco.js';
+import { stableIdOfName } from '../../cognition/substrate/personas/stableId.js';
 import { normalizePersonaDefinition } from '../../cognition/substrate/personas/personaNormalization.js';
 import type { IPersonaDefinition, SentimentTrackingConfig } from '../../cognition/substrate/personas/IPersonaDefinition.js';
 import type { ITool } from '../../core/tools/ITool.js';
@@ -28,27 +29,13 @@ import type { ResolvedCognition } from './gmiCognition.js';
 export const GMI_SESSION_MAX_HISTORY_MESSAGES = 100_000;
 
 /**
- * A stable persona id from the agent's name: a lowercase ASCII slug, or, for a
- * name with no Latin letters or digits, `agent-` and a hash of the name.
- */
-function personaIdFor(name: string): string {
-  const slug = name
-    .normalize('NFKD')
-    .replace(/[̀-ͯ]/g, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-  return slug || `agent-${createHash('sha256').update(name).digest('hex').slice(0, 12)}`;
-}
-
-/**
  * The persona id of a named agent, which is the same at every build (the slug of its name); `undefined` for an agent
  * with no name, whose persona id is new at each build. `gmi()` names the agent's learners by it when `learning.agentKey`
  * is unset.
  */
 export function stablePersonaIdOf(opts: Pick<AgentOptions, 'name'>): string | undefined {
   const name = opts.name?.trim();
-  return name ? personaIdFor(name) : undefined;
+  return name ? stableIdOfName(name) : undefined;
 }
 
 /**
