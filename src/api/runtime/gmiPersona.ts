@@ -86,11 +86,13 @@ function basePrompt(opts: AgentOptions, learningOn: boolean): string {
  * Builds the persona of a GMI from agent options.
  *
  * @param opts - The agent's options.
- * @param cognition - The resolved profile ({@link resolveCognition}): sentiment tracking, metaprompts, and whether learning is on.
+ * @param cognition - The resolved profile ({@link resolveCognition}): sentiment tracking, metaprompts, the memory
+ *   config and whether learning is on.
  * @param tools - The agent's tools, adapted: they decide the persona's capabilities.
  * @returns The persona. With `cognition.learning` set its base prompt has no personality section: a GMI built from it
  *   sends the section only when it is given a learner session (`GMIBaseConfig.learning`) or the persona's traits
- *   (`GMIBaseConfig.personaTraits`), as `gmi()` gives it.
+ *   (`GMIBaseConfig.personaTraits`), as `gmi()` gives it. With memory on and `memory.recall` set, its
+ *   `cognitiveMemoryConfig` holds `recall` and nothing else.
  * @throws {Error} When no provider or model can be resolved, as `generateText` throws.
  */
 export function personaFromAgentOptions(opts: AgentOptions, cognition: ResolvedCognition, tools: ITool[]): IPersonaDefinition {
@@ -113,6 +115,8 @@ export function personaFromAgentOptions(opts: AgentOptions, cognition: ResolvedC
     conversationContextConfig: { maxMessages: GMI_SESSION_MAX_HISTORY_MESSAGES },
     sentimentTracking: cognition.sentiment ? { enabled: true, presets } : { enabled: false },
     ...(cognition.metaprompts === false ? { metaPrompts: [] } : {}),
+    // The memory's recall settings (memory.recall): the only memory setting the persona carries.
+    ...(cognition.memory && cognition.memory.recall ? { cognitiveMemoryConfig: { recall: cognition.memory.recall } } : {}),
   };
   return normalizePersonaDefinition(persona);
 }

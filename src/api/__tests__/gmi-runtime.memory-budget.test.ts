@@ -3,8 +3,8 @@
  * `capture` sets what the turn records of its recall, read from the request the provider received and from the turn's
  * result. The real provider manager, completion gateway, GMI, prompt engine, memory bridge and cognitive memory manager
  * run; only the provider classes are stubbed (helpers/stubProviders.ts), and the OpenAI stub embeds with a
- * deterministic word hash, so texts that share words recall each other. Trace ids and the clock are fixed, so two
- * agents fed the same statements send the same block. The construction rules are read from what `agent()` throws and
+ * deterministic word hash, so texts that share words recall each other. Trace ids, the clock and the persona id (a
+ * named agent's) are fixed, so two agents fed the same statements send the same block. The construction rules are read from what `agent()` throws and
  * from the `memory.recall.*` lines it writes, on the GMI path and on the default runtime.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -79,10 +79,14 @@ const STATEMENTS = Array.from(
 const QUESTION = 'Which pier does the island harbor ferry leave from?';
 
 type Recall = { budget?: { totalTokens?: number }; capture?: 'off' | 'metadata' | 'metadata+stream' };
-/** An agent whose sessions share cognitive memory (no mechanisms) that embeds through OpenAI, with the given recall setting. */
+/**
+ * An agent whose sessions share cognitive memory (no mechanisms) that embeds through OpenAI, with the given recall
+ * setting. Named, so its persona id, which each memory line's tags carry, is the same for every agent built here.
+ */
 const withRecall = (apiKey: string, recall?: Recall) =>
   agent({
     runtime: 'gmi',
+    name: 'Harbor',
     provider: 'openai',
     model: 'stub-model',
     apiKey,

@@ -150,6 +150,11 @@ export class GmiTurnFolder {
     this.memoryRecall = output?.memoryRecall;
   }
 
+  /** The recall capture of the GMI's output that ended the turn; undefined before the turn ended, or when it carried none. */
+  recall(): MemoryRecallCapture | undefined {
+    return this.memoryRecall;
+  }
+
   /** Marks the turn failed by a thrown error (the turn's generator itself threw). An ERROR chunk already seen wins. */
   fail(error: unknown): void {
     if (this.failure !== undefined) return;
@@ -342,7 +347,9 @@ export interface GmiStreamOptions {
  * `tool-result` and ERROR (or a thrown error) to a final `error` part, whose
  * error is `options.stoppedBy`'s when it gives one. `text`
  * is the latest step's text; after an error it is the text the failed step
- * delivered, as streamText resolves it.
+ * delivered, as streamText resolves it. `memoryRecall` is the recall capture of
+ * the GMI's output that ended the turn (`GmiTurnFolder.finish`), undefined when
+ * the turn stopped before it returned one.
  *
  * @param turn - The turn's chunks.
  * @param options - A caller-owned folder; see {@link GmiStreamOptions}.
@@ -381,6 +388,7 @@ export function streamFromGmiTurn(turn: AsyncIterable<GMIOutputChunk>, options: 
     serviceTier: deferred<string | undefined>(),
     cacheDiagnostics: deferred<Awaited<StreamTextResult['cacheDiagnostics']>>(),
     providerMessageId: deferred<string | null>(),
+    memoryRecall: deferred<MemoryRecallCapture | undefined>(),
   };
   // Provider and model resolve once the turn's model call is routed, as streamText's do.
   folder.onRoute(({ providerId, modelId }) => {
@@ -437,6 +445,8 @@ export function streamFromGmiTurn(turn: AsyncIterable<GMIOutputChunk>, options: 
       p.serviceTier.resolve(last?.serviceTier);
       p.cacheDiagnostics.resolve((last?.cacheDiagnostics as Awaited<StreamTextResult['cacheDiagnostics']> | undefined) ?? null);
       p.providerMessageId.resolve(folder.providerMessageId());
+      // The GMI's output reaches the folder when its generator returns, before the turn's chunks end.
+      p.memoryRecall.resolve(folder.recall());
       done = true;
       wake();
     }
@@ -477,5 +487,6 @@ export function streamFromGmiTurn(turn: AsyncIterable<GMIOutputChunk>, options: 
     serviceTier: p.serviceTier.promise,
     cacheDiagnostics: p.cacheDiagnostics.promise,
     providerMessageId: p.providerMessageId.promise,
+    memoryRecall: p.memoryRecall.promise,
   };
 }

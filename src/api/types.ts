@@ -11,6 +11,9 @@ import type { AdaptableToolInput } from './runtime/toolAdapter.js';
 import type { FallbackProviderEntry, FallbackSignal } from './generateText.js';
 import type { CognitionConfig, CognitionProfile } from './runtime/gmiCognition.js';
 import type { StorageAdapter } from '@framers/sql-storage-adapter';
+import type { MemoryRecallConfig } from '../cognition/memory/core/config.js';
+
+export type { MemoryRecallConfig };
 
 // ---------------------------------------------------------------------------
 // Scalar union literals
@@ -131,6 +134,15 @@ export interface MemoryConfig {
    * before-and-after measurement.
    */
   persistAccessState?: boolean;
+  /**
+   * Recall settings for cognitive memory on the GMI path (`gmi()`, `agent({ runtime: 'gmi' })`):
+   * `budget.totalTokens` sizes the memory block (default 1600, preamble included) and `capture` sets what a turn
+   * records about its recall (default `'metadata'`). On the GMI path `memoryProviderOptions.tokenBudget` does not
+   * size the block. On the default runtime, and on the GMI path with memory off, only `budget.totalTokens` is read:
+   * it is the `tokenBudget` handed to `memoryProvider.getContext` when `memoryProviderOptions.tokenBudget` is unset;
+   * two different values, or `capture`, are refused at construction.
+   */
+  recall?: MemoryRecallConfig;
 }
 
 /**
@@ -1567,11 +1579,12 @@ export interface BaseAgentConfig {
    */
   customModelParams?: Record<string, unknown>;
   /**
-   * Memory configuration. `agent()` reads it only with `runtime: 'gmi'`, where `true`
-   * or a `MemoryConfig` turns on cognitive memory for the agent's sessions (its
-   * `embedding` and `consolidation` fields are read) and `false` keeps it off, also
-   * under `cognition: 'full'`. A session's message history is set by `history`, not
-   * by this field.
+   * Memory configuration. With `runtime: 'gmi'`, `true` or a `MemoryConfig` turns
+   * on cognitive memory for the agent's sessions (its `embedding`, `consolidation`,
+   * `persistAccessState`, `store` and `recall` fields are read) and `false` keeps it
+   * off, also under `cognition: 'full'`. Without it, `agent()` reads the `working`
+   * callback and `recall.budget.totalTokens` (see {@link MemoryConfig.recall}). A
+   * session's message history is set by `history`, not by this field.
    */
   memory?: boolean | MemoryConfig;
   /** Retrieval-Augmented Generation configuration. */

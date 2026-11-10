@@ -53,6 +53,8 @@ export type {
   RetrievalRecallReport,
 } from './retrieval/recall/index.js';
 export { MEMORY_RECALL_CAPTURE_VERSION, MEMORY_RERANK_MAX_DOCUMENTS, candidatesFrom, rerankerRecordOf } from './retrieval/recall/index.js';
+export { DEFAULT_RECALL_BUDGET_TOKENS, RecallOptionError } from './retrieval/recall/index.js';
+export type { RecallOptionRejection } from './retrieval/recall/index.js';
 
 // --- Configuration ---
 export type {
@@ -66,6 +68,7 @@ export type {
   ReflectorConfig,
   MemoryGraphConfig,
   ConsolidationConfig,
+  MemoryRecallConfig,
   ManagerRecallConfig,
 } from './core/config.js';
 export {

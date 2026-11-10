@@ -279,6 +279,15 @@ export interface StreamTextResult {
    */
   fallback?: Promise<FallbackSignal | undefined>;
   /**
+   * On a `gmi()` or `agent({ runtime: 'gmi' })` session's `stream()` with
+   * cognitive memory: the recall capture of the turn's memory assembly, as
+   * `GenerateTextResult.memoryRecall` carries it on `send()`. Resolves when the
+   * stream ends, to `undefined` when the turn assembled no memory block or
+   * `memory.recall.capture` is `'off'`. Unset on `streamText()` and on the
+   * default runtime.
+   */
+  memoryRecall?: Promise<import('../cognition/memory/retrieval/recall/capture.js').MemoryRecallCapture | undefined>;
+  /**
    * Resolves to the reason the FINAL model step stopped emitting, on the
    * same cadence as {@link usage} (when the stream completes):
    *

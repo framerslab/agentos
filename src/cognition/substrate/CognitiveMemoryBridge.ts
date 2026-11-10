@@ -14,6 +14,7 @@
 import type { ICognitiveMemoryManager } from '../memory/CognitiveMemoryManager.js';
 import type { ManagerRecallConfig, PADState } from '../memory/core/config.js';
 import type { RecallCaptureMode } from '../memory/retrieval/recall/capture.js';
+import { recallBudgetTokens } from '../memory/retrieval/recall/budget.js';
 import type {
   AssembledMemoryContext,
   MemoryScope,
@@ -311,7 +312,8 @@ export class CognitiveMemoryBridge {
    * Assembles a cognitive memory context suitable for injection into the LLM prompt.
    *
    * Queries the memory store for relevant traces, assembles them into a text
-   * block with token budget constraints, and returns the assembled context.
+   * block within the manager's `recall.budget.totalTokens` (1600 tokens when
+   * unset, the preamble included), and returns the assembled context.
    * Retrieval is limited to the scopes returned by
    * {@link CognitiveMemoryBridge.buildRetrievalScopes}, so a memory backend
    * shared by several sessions never surfaces another user's or another
@@ -336,9 +338,10 @@ export class CognitiveMemoryBridge {
       if (scopes.length === 0) {
         return null;
       }
+      // The manager's recall.budget.totalTokens, 1600 when unset: the whole block, its preamble included.
       const context = await this.cognitiveMemory.assembleForPrompt(
         query,
-        1600,
+        recallBudgetTokens(this.recallConfig()),
         this.getPadState(),
         { scopes },
       );
