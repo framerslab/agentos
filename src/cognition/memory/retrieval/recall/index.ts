@@ -1,5 +1,6 @@
 /**
- * @fileoverview The recall capture record and its helpers.
+ * @fileoverview The recall capture record and its helpers, the memory block's budget and the recall settings' checks,
+ * and the recall module's event handle.
  * @module agentos/memory/retrieval/recall
  */
 
@@ -20,3 +21,12 @@ export type {
   RankedRecallCandidate,
   RetrievalRecallReport,
 } from './capture.js';
+export {
+  DEFAULT_RECALL_BUDGET_TOKENS,
+  RecallOptionError,
+  assertRecallConfig,
+  rejectRecallOption,
+  recallBudgetTokens,
+} from './budget.js';
+export type { RecallOptionRejection } from './budget.js';
+export { recallLog } from './log.js';

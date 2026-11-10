@@ -100,14 +100,16 @@ function basePrompt(opts: AgentOptions, leaveOutPersonality: boolean, soul: Load
  * Builds the persona of a GMI from agent options.
  *
  * @param opts - The agent's options.
- * @param cognition - The resolved profile ({@link resolveCognition}): sentiment tracking, metaprompts, and whether learning is on.
+ * @param cognition - The resolved profile ({@link resolveCognition}): sentiment tracking, metaprompts, the memory
+ *   config and whether learning is on.
  * @param tools - The agent's tools, adapted: they decide the persona's capabilities.
  * @param soul - The soul the caller loaded from `opts.soul`, `null` for none; not passed, `opts.soul` is loaded here.
  * @returns The persona. With `cognition.learning` set, or when the persona has traits, its base prompt has no
  *   personality section: a GMI built from it sends the section only when it is given a learner session
  *   (`GMIBaseConfig.learning`) or the persona's traits (`GMIBaseConfig.personaTraits`), as `gmi()` gives it. With a
  *   soul the persona carries the soul's id, role, traits, mood, reasoning-trace limits, hard limits and metadata, and
- *   never its voice or avatar.
+ *   never its voice or avatar. With memory on and `memory.recall` set, its `cognitiveMemoryConfig` holds `recall` and
+ *   nothing else.
  * @throws {Error} When no provider or model can be resolved, as `generateText` throws.
  * @throws {SoulLoadError} When the soul is loaded here, fails to load and is not optional.
  */
@@ -149,6 +151,8 @@ export function personaFromAgentOptions(
     conversationContextConfig: { maxMessages: GMI_SESSION_MAX_HISTORY_MESSAGES },
     sentimentTracking: cognition.sentiment ? { enabled: true, presets } : { enabled: false },
     ...(cognition.metaprompts === false ? { metaPrompts: [] } : {}),
+    // The memory's recall settings (memory.recall): the only memory setting the persona carries.
+    ...(cognition.memory && cognition.memory.recall ? { cognitiveMemoryConfig: { recall: cognition.memory.recall } } : {}),
   } as IPersonaDefinition;
   return normalizePersonaDefinition(persona);
 }

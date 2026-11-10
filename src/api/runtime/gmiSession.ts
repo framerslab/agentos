@@ -183,6 +183,12 @@ export interface GmiSessionDeps {
   providerUserId?: string;
   /** False when cognitive memory supplies the memory context, and on a seat session: `memoryProvider.getContext` is then skipped. */
   useMemoryProviderContext: boolean;
+  /**
+   * The `tokenBudget` handed to `memoryProvider.getContext`: `memory.recall.budget.totalTokens` on an agent whose
+   * cognitive memory is off, when `memoryProviderOptions.tokenBudget` is unset. Undefined keeps
+   * `memoryProviderOptions.tokenBudget`, else `DEFAULT_MEMORY_TOKEN_BUDGET`.
+   */
+  providerTokenBudget?: number;
   /** False on a seat session: the turn calls no `memoryProvider.observe`, which would file a team turn's text in the agent's long-term store. Default true. */
   observeMemoryProvider?: boolean;
   /** The session store, or null when the turn keeps no history. */
@@ -198,11 +204,12 @@ export interface GmiSessionDeps {
 }
 
 /** `memoryProvider.getContext` for the turn, within its timeout; undefined when there is none or it fails. */
-async function memoryProviderContext(opts: AgentOptions, userText: string): Promise<string | undefined> {
+async function memoryProviderContext(deps: GmiSessionDeps, userText: string): Promise<string | undefined> {
+  const { opts } = deps;
   const provider = opts.memoryProvider;
   if (!provider?.getContext) return undefined;
   const timeoutMs = opts.memoryProviderOptions?.timeoutMs ?? MEMORY_TIMEOUT_MS;
-  const tokenBudget = opts.memoryProviderOptions?.tokenBudget ?? DEFAULT_MEMORY_TOKEN_BUDGET;
+  const tokenBudget = deps.providerTokenBudget ?? opts.memoryProviderOptions?.tokenBudget ?? DEFAULT_MEMORY_TOKEN_BUDGET;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let timedOut = false;
   try {
@@ -387,7 +394,7 @@ export async function* runGmiTurn(
     const gmi = served.gmi;
     const memoryScope = served.memoryScope ?? deps.memoryScope;
     gmi.replaceHistory?.(transcriptToConversation(priorMessages));
-    const memoryContext = deps.useMemoryProviderContext ? await memoryProviderContext(deps.opts, userText) : undefined;
+    const memoryContext = deps.useMemoryProviderContext ? await memoryProviderContext(deps, userText) : undefined;
     // When the model call in progress started: the turn's start, the end of the
     // tool round before it, or the failure of the attempt it replaces.
     let callStartedAt = Date.now();

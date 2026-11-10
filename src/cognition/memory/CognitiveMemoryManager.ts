@@ -47,6 +47,7 @@ import {
   type RecallCaptureMode,
   type RetrievalRecallReport,
 } from './retrieval/recall/capture.js';
+import { assertRecallConfig } from './retrieval/recall/budget.js';
 import { CognitiveWorkingMemory } from './core/working/CognitiveWorkingMemory.js';
 import {
   assembleMemoryContext,
@@ -380,6 +381,14 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
   private typedNetworkVariant: 'minimal' | 'full' | null = null;
   private typedNetworkExtractAtEncode = false;
 
+  /**
+   * Builds the manager's resources from `config`.
+   *
+   * @throws {RecallOptionError} When `config.recall` holds a value of the wrong kind (a `budget.totalTokens` that is
+   *   not an integer of at least 0, an unknown `capture`), naming the field, after one `memory.recall.option_rejected`
+   *   line; nothing is built.
+   * @throws {Error} When the manager is already initialized, or a resource fails to start.
+   */
   async initialize(config: CognitiveMemoryConfig): Promise<void> {
     const request = ++this.lifecycleRequest;
     this.lifecycleState = 'initializing';
@@ -389,6 +398,8 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
         if (this.initialized) {
           throw new Error('CognitiveMemoryManager is already initialized');
         }
+        // The recall settings are checked before anything is built, so a refused value leaves nothing to clean up.
+        assertRecallConfig(config.recall, 'CognitiveMemoryManager');
         initializationStarted = true;
         await this.initializeResources(config);
       } catch (error) {
@@ -1291,6 +1302,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
         allocation: context.allocation,
         legs: [{ leg: 'dense', ran: true, candidates: result.retrieved.length, ineligible: 0, ms: Math.round(recall?.denseMs ?? result.diagnostics.totalTimeMs) }],
         lexicalBackend: 'none',
+        ...(this.config.recall?.embedder ? { embedder: { ...this.config.recall.embedder } } : {}),
         reranker: result.diagnostics.reranker ?? { provider: 'none', reason: 'none_configured' },
         memoryQuestionReserve: { fired: false, added: 0 },
         candidates: candidatesFrom(

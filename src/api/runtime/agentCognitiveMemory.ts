@@ -5,8 +5,8 @@
  * in-memory knowledge graph, an embedding manager for `memory.embedding`, a
  * working memory of its own, the persona's HEXACO traits and the persona's
  * memory settings (`cognitiveMemoryConfig`: the memory block's section shares,
- * encoding, decay, working-memory capacity, observer, reflector, graph and
- * infinite context).
+ * encoding, decay, working-memory capacity, observer, reflector, graph,
+ * infinite context and recall) and the agent's own `memory.recall`.
  *
  * One manager serves every session of an agent, and each session's GMI is given
  * `manager.forSession()`: the shared store with a working memory of its own, so
@@ -25,7 +25,8 @@
  * opens the Brain ({@link openAgentMemoryBrain}) and closes it once the manager has closed.
  */
 import { CognitiveMemoryManager } from '../../cognition/memory/CognitiveMemoryManager.js';
-import type { CognitiveMemoryConfig, CognitiveMemoryPersonaConfig, HexacoTraits, PADState } from '../../cognition/memory/core/config.js';
+import { assertRecallConfig } from '../../cognition/memory/retrieval/recall/budget.js';
+import type { CognitiveMemoryConfig, CognitiveMemoryPersonaConfig, HexacoTraits, ManagerRecallConfig, PADState } from '../../cognition/memory/core/config.js';
 import type { CognitiveMechanismsConfig } from '../../cognition/memory/mechanisms/types.js';
 import { SqlStorageMemoryArchive } from '../../cognition/memory/archive/SqlStorageMemoryArchive.js';
 import { KnowledgeGraph } from '../../cognition/memory/retrieval/graph/knowledge/KnowledgeGraph.js';
@@ -307,8 +308,9 @@ export interface AgentCognitiveMemoryOptions {
   /**
    * The agent's persona: its id is the memory's owner (`agentId`), its traits shape encoding, and its
    * `cognitiveMemoryConfig` tunes the manager: `tokenBudget` sets the memory block's section shares (a 0 share turns
-   * its section off), and `encoding`, `decay`, `workingMemoryCapacity`, `observer`, `reflector`, `graph` and
-   * `infiniteContext` reach the manager's config under the same names.
+   * its section off), and `encoding`, `decay`, `workingMemoryCapacity`, `observer`, `reflector`, `graph`,
+   * `infiniteContext` and `recall` reach the manager's config under the same names (`recall` under the agent's own
+   * `memory.recall`).
    */
   persona: IPersonaDefinition;
   memory: MemoryConfig;
@@ -393,7 +395,15 @@ async function probeEmbeddingModel(
   }
 }
 
-async function buildEmbeddingManager(memory: MemoryConfig): Promise<{ manager: IEmbeddingManager; dimension: number }> {
+/** The embedding manager built for `memory.embedding`, its vectors' size, and the provider and model it embeds with. */
+interface BuiltEmbedding {
+  manager: IEmbeddingManager;
+  dimension: number;
+  /** What the manager embeds with; absent for an embedding manager the caller passed, which names none. */
+  label?: { provider: string; model: string };
+}
+
+async function buildEmbeddingManager(memory: MemoryConfig): Promise<BuiltEmbedding> {
   const target = resolveEmbeddingTarget(memory, process.env);
   let resolved: ResolvedProvider;
   let providerManager: AIModelProviderManager;
@@ -421,7 +431,26 @@ async function buildEmbeddingManager(memory: MemoryConfig): Promise<{ manager: I
     },
     providerManager,
   );
-  return { manager, dimension: target.dimension };
+  return { manager, dimension: target.dimension, label: { provider: resolved.providerId, model: resolved.modelId } };
+}
+
+/**
+ * The manager's recall settings: the persona's `cognitiveMemoryConfig.recall`, under the agent's own `memory.recall`
+ * field by field, `budget.totalTokens` included (a field either leaves out or sets to `undefined` or `null` keeps the
+ * other's), with the embedding model's label for the capture record. `{}` when there is nothing to set. Both settings
+ * are checked first ({@link assertRecallConfig}), so neither is merged unless it is an object.
+ */
+function recallFor(opts: AgentCognitiveMemoryOptions, embedder: BuiltEmbedding['label']): { recall?: ManagerRecallConfig } {
+  const persona = opts.persona.cognitiveMemoryConfig?.recall;
+  const own = opts.memory.recall;
+  const budget = { ...definedEntries(persona?.budget), ...definedEntries(own?.budget) };
+  const recall: ManagerRecallConfig = {
+    ...definedEntries(persona),
+    ...definedEntries(own),
+    ...(Object.keys(budget).length > 0 ? { budget } : {}),
+    ...(embedder ? { embedder } : {}),
+  };
+  return Object.keys(recall).length > 0 ? { recall } : {};
 }
 
 /**
@@ -433,14 +462,19 @@ async function buildEmbeddingManager(memory: MemoryConfig): Promise<{ manager: I
  *   when its provider has no credentials or fails to start, when a test embedding through it
  *   fails or returns another size than memory expects (skipped for an embedding manager the
  *   caller passes), or when the manager fails to initialise.
+ * @throws {RecallOptionError} When the persona's `cognitiveMemoryConfig.recall` or `memory.recall` holds a value of
+ *   the wrong kind, before anything is built.
  */
 export async function createAgentCognitiveMemory(opts: AgentCognitiveMemoryOptions): Promise<AgentCognitiveMemory> {
+  // The recall settings are checked before anything starts: a refused value leaves nothing to close.
+  assertRecallConfig(opts.persona.cognitiveMemoryConfig?.recall, 'createAgentCognitiveMemory');
+  assertRecallConfig(opts.memory.recall, 'createAgentCognitiveMemory');
   // The archive shares the Brain's adapter and its brain id, as a Brain-backed archive does. Its tables are made first,
   // so a store that cannot take them fails the build before anything else starts.
   const archive = opts.brain ? new SqlStorageMemoryArchive(opts.brain.adapter, opts.brain.features, opts.brain.brainId) : undefined;
   await archive?.initialize();
   const owned = opts.embeddingManager === undefined;
-  const embedding = opts.embeddingManager
+  const embedding: BuiltEmbedding = opts.embeddingManager
     ? { manager: opts.embeddingManager, dimension: await opts.embeddingManager.getEmbeddingDimension() }
     : await buildEmbeddingManager(opts.memory);
 
@@ -497,6 +531,8 @@ export async function createAgentCognitiveMemory(opts: AgentCognitiveMemoryOptio
     consolidation: { enabled: consolidationEnabled },
     ...(opts.brain ? { brain: opts.brain, archive } : {}),
     ...(opts.memory.persistAccessState === false ? { persistAccessState: false } : {}),
+    // The block's budget and the capture (memory.recall), checked again by the manager's initialize().
+    ...recallFor(opts, embedding.label),
   };
   const manager = new CognitiveMemoryManager();
   await manager.initialize(config);
