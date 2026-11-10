@@ -12176,6 +12176,13 @@ describe('the docs a host reads about it', () => {
     expect(gmiDoc).toContain(
       "It needs the learning option and a key that names the brain: `learning.agentKey`, or, with a soul, the soul's id (`agentId`, else the slug of its `name`).",
     );
+    // The persona id keys the memory's own traces and the persona scopes, so a soul that moves it moves what they recall.
+    expect(gmiDoc).toContain(
+      "The memory files its own traces and the `persona` scopes (the agent's, and each user's) under the persona's id, which with a soul is the soul's id.",
+    );
+    expect(gmiDoc).toContain(
+      "A brain whose persona id was the slug of the agent's `name` keeps those traces under the slug, and an agent whose soul gives another id does not recall them; each user's `user` scope it still recalls. To keep recalling them, set the soul's `agentId` to that slug.",
+    );
     expect(gmiDoc).toContain("A store that does not open fails the session's first send naming `memory.store`, before any model call, and the next send tries again.");
     expect(gmiDoc).toContain('One process serves a SQLite file; several processes share a Postgres database instead, each through an adapter of its own.');
     expect(gmiDoc).toContain('The manifest\'s `memory_store` loop names the store.');
