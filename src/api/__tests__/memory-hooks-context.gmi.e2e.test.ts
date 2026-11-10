@@ -217,3 +217,54 @@ describe("a memory hook that fails on runtime: 'gmi'", () => {
     expect(JSON.stringify(logged)).not.toContain('store down');
   });
 });
+
+/** A tool that records the context of each call it gets. */
+const whoami = () => {
+  const seen: Array<Record<string, any>> = [];
+  const tool = {
+    name: 'whoami', description: 'Says who is asking.', inputSchema: { type: 'object', properties: {} },
+    execute: async (_args: unknown, context: Record<string, any>) => {
+      seen.push(context);
+      return { ok: true };
+    },
+  };
+  return { seen, tool };
+};
+const askTwice = () => [reply.tools([{ id: 'c1', name: 'whoami', args: {} }]), reply.text('Done.'), reply.tools([{ id: 'c2', name: 'whoami', args: {} }]), reply.text('Done.')];
+
+describe.each(runtimes)('what a tool is told about its caller, on %s', (_name, runtime) => {
+  it("gets the session's user and its memory subject, and the user id the caller passed", async () => {
+    const k = key();
+    script('openai', k, { whole: true, replies: askTwice() });
+    const { seen, tool } = whoami();
+    const a = agent(stubbed(k, { ...runtime, tools: [tool] }));
+    await a.session('s1', { userId: 'ana' }).send('Who am I?');
+    await a.session('s2').send('Who am I?');
+    expect(seen).toHaveLength(2);
+    expect(seen[0].userContext).toMatchObject({ userId: 'ana', memorySubject: { kind: 'user', id: 'ana' } });
+    expect(seen[0].callerTurn?.providerUserId).toBe('ana');
+    expect(seen[1].userContext).toMatchObject({ userId: 's2', memorySubject: { kind: 'session', id: 's2' } });
+    expect(seen[1].callerTurn?.providerUserId).toBeUndefined();
+  });
+});
+
+describe('what a tool is told about its caller on the default runtime', () => {
+  it('gets the session id, on a stream too, and the call id of a one-shot; never system', async () => {
+    const k = key();
+    script('openai', k, { whole: true, replies: [...askTwice(), ...askTwice().slice(0, 2)] });
+    const { seen, tool } = whoami();
+    const a = agent(stubbed(k, { tools: [tool] }));
+    await a.session('s1', { userId: 'ana' }).send('Who am I?');
+    const streamed = a.session('s1').stream('And now?');
+    for await (const _part of streamed.textStream) { /* drain */ }
+    await streamed.text;
+    await a.generate('Who am I?');
+    expect(seen).toHaveLength(3);
+    expect(seen[0].sessionData.sessionId).toBe('s1');
+    expect(seen[1].userContext).toMatchObject({ userId: 'ana', memorySubject: { kind: 'user', id: 'ana' } });
+    expect(seen[1].sessionData.sessionId).toBe('s1');
+    expect(seen[2].userContext.userId).toMatch(/^generate-/);
+    expect(seen[2].userContext.memorySubject).toEqual({ kind: 'session', id: seen[2].userContext.userId });
+    for (const context of seen) expect(context.userContext.userId).not.toBe('system');
+  });
+});
