@@ -349,6 +349,37 @@ export interface RememberOptions {
 }
 
 // ---------------------------------------------------------------------------
+// Wiki page rows
+// ---------------------------------------------------------------------------
+
+/**
+ * One wiki page of one conversation scope, as a row of `memory_pages`: what `Memory.readPageRow()` and
+ * `Memory.listPageRows()` return.
+ */
+export interface MemoryPageRow {
+  /** The page's id within its scope, e.g. `'concepts/notes'`. */
+  pageId: string;
+  /** The page as a page file holds it: front matter (`summary`, `updated`, `sources`), then the body. */
+  content: string;
+  /** The SHA-256 of the page's body, in hex. */
+  contentHash: string;
+  /** The ids of the page's chunks in `memory_traces`. */
+  chunkIds: string[];
+  /** When the row was last written, in Unix milliseconds. */
+  updatedAt: number;
+}
+
+/** One chunk of a wiki page's body, as `Memory.writePageRow()` files it. */
+export interface MemoryPageChunk {
+  /** The chunk's text. */
+  text: string;
+  /** The trace type the chunk is stored as. */
+  type: 'episodic' | 'semantic';
+  /** The entities the chunk's trace names. */
+  entities?: readonly string[];
+}
+
+// ---------------------------------------------------------------------------
 // recall() options
 // ---------------------------------------------------------------------------
 

@@ -580,6 +580,30 @@ CREATE TABLE IF NOT EXISTS memory_scopes (
 );
 `;
 
+/**
+ * One subject's wiki pages: a row a page, in the store's own adapter.
+ *
+ * Column notes:
+ * - `scope` is `'conversation'`; `scope_id` is the subject's key (`conversationScopeKey`), kept as given.
+ * - `content` is the page as a page file holds it: front matter (`summary`, `updated`, `sources`), then the body.
+ * - `content_hash` is the SHA-256 of the body, in hex.
+ * - `chunk_ids` is a JSON array of the ids of the page's chunks in `memory_traces`.
+ * - `updated_at` is Unix milliseconds.
+ */
+const DDL_MEMORY_PAGES = `
+CREATE TABLE IF NOT EXISTS memory_pages (
+  brain_id     TEXT   NOT NULL,
+  scope        TEXT   NOT NULL,
+  scope_id     TEXT   NOT NULL,
+  page_id      TEXT   NOT NULL,
+  content      TEXT   NOT NULL,
+  content_hash TEXT   NOT NULL,
+  chunk_ids    TEXT   NOT NULL,
+  updated_at   BIGINT NOT NULL,
+  PRIMARY KEY (brain_id, scope, scope_id, page_id)
+);
+`;
+
 // FTS index DDL is now generated dynamically by features.fts.createIndex()
 // to support both SQLite FTS5 and Postgres tsvector/GIN.
 
@@ -1232,6 +1256,7 @@ export class Brain {
       DDL_BRAIN_META,
       DDL_MEMORY_TRACES,
       DDL_MEMORY_SCOPES,
+      DDL_MEMORY_PAGES,
       DDL_KNOWLEDGE_NODES,
       DDL_KNOWLEDGE_EDGES,
       DDL_DOCUMENTS,

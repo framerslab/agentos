@@ -22,7 +22,7 @@ import { PORTABLE_TABLES } from '../../../retrieval/store/portable-tables.js';
 import { conversationScopeKey } from '../../../retrieval/store/conversationScopeKey.js';
 import { resolveStorageAdapter } from '@framers/sql-storage-adapter';
 import type { StorageAdapter } from '@framers/sql-storage-adapter';
-import { InvalidWikiPageIdError } from '../../../../substrate/memory/wiki/index.js';
+import { InvalidWikiPageIdError, UserWikiStore } from '../../../../substrate/memory/wiki/index.js';
 import type { WikiPage } from '../../../../substrate/memory/wiki/index.js';
 
 const POSTGRES_URL = process.env.AGENTOS_TEST_POSTGRES_URL;
@@ -244,24 +244,6 @@ describe.each(STORES)('conversation scopes on %s', (store) => {
   }
 });
 
-/** The per-user page store this change adds, loaded by path until the module exists. */
-interface PageStore {
-  readPage(id: string): Promise<WikiPage | null>;
-  writePage(page: WikiPage): Promise<void>;
-  listPages(): Promise<WikiPage[]>;
-  index(opts?: { force?: boolean }): Promise<{ indexed: string[]; skipped: string[]; removed: string[] }>;
-  deletePage(id: string): Promise<boolean>;
-  deleteAll(): Promise<{ pages: number; chunks: number }>;
-}
-type PageStoreClass = new (opts: {
-  scopeId: string;
-  pages: unknown;
-  chunk: (text: string) => Array<{ text: string }>;
-}) => PageStore;
-const loadUserWikiStore = async (): Promise<PageStoreClass> =>
-  ((await import('../../../../substrate/memory/wiki/UserWikiStore.js' as string)) as { UserWikiStore: PageStoreClass })
-    .UserWikiStore;
-
 const chunk = (text: string): Array<{ text: string }> => text.split('\n\n').map((part) => ({ text: part }));
 const P = (body: string, sources: string[] = []): WikiPage => ({
   id: 'concepts/notes',
@@ -296,7 +278,6 @@ const bodyOf = (page: WikiPage | null): string | undefined => page?.body.trim();
 describe.each(STORES)('per-user pages on %s', (store) => {
   it("writes a subject's page as one row with its chunks under the subject's key", async () => {
     const { memory, brain } = await open(store);
-    const UserWikiStore = await loadUserWikiStore();
     const pages = new UserWikiStore({ scopeId: A, pages: memory, chunk });
 
     await pages.writePage(P('Alice likes tea.\n\nAlice has a cat.', ['t1']));
@@ -322,7 +303,6 @@ describe.each(STORES)('per-user pages on %s', (store) => {
 
   it("keeps two subjects' pages of one id apart", async () => {
     const { memory, brain } = await open(store);
-    const UserWikiStore = await loadUserWikiStore();
     const alice = new UserWikiStore({ scopeId: A, pages: memory, chunk });
     const bob = new UserWikiStore({ scopeId: B, pages: memory, chunk });
     const carol = new UserWikiStore({
@@ -353,7 +333,6 @@ describe.each(STORES)('per-user pages on %s', (store) => {
 
   it('rewriting a page deletes its old chunks for good', async () => {
     const { memory, brain } = await open(store);
-    const UserWikiStore = await loadUserWikiStore();
     const pages = new UserWikiStore({ scopeId: A, pages: memory, chunk });
     await pages.writePage(P('Alice likes oolong.\n\nAlice has a parrot.'));
     const old = await traceIdsUnder(brain, A);
@@ -374,7 +353,6 @@ describe.each(STORES)('per-user pages on %s', (store) => {
 
   it('leaves the chunks of a page whose body did not change', async () => {
     const { memory, brain } = await open(store);
-    const UserWikiStore = await loadUserWikiStore();
     const pages = new UserWikiStore({ scopeId: A, pages: memory, chunk });
     await pages.writePage(P('Alice likes tea.\n\nAlice has a cat.', ['t1']));
     const first = chunkIdsOf((await pageRows(brain))[0]!);
@@ -398,7 +376,6 @@ describe.each(STORES)('per-user pages on %s', (store) => {
 
   it('keeps ids as given', async () => {
     const { memory, brain } = await open(store);
-    const UserWikiStore = await loadUserWikiStore();
     // Two cases of one name, the two Unicode forms of one letter, a dotted id and a long one.
     const ids = ['Alice', 'alice', '\u00e9', 'e\u0301', '..', 'x'.repeat(300)];
     const stores = ids.map(
@@ -415,7 +392,6 @@ describe.each(STORES)('per-user pages on %s', (store) => {
 
   it("refuses a refused page id and a key that is no subject's", async () => {
     const { memory, brain } = await open(store);
-    const UserWikiStore = await loadUserWikiStore();
     const pages = new UserWikiStore({ scopeId: A, pages: memory, chunk });
 
     await expect(pages.writePage({ ...P('x'), id: '../x' })).rejects.toThrow(InvalidWikiPageIdError);
@@ -432,8 +408,7 @@ describe.each(STORES)('per-user pages on %s', (store) => {
   if (store === 'sqlite') {
     it('a page is there after the store closes and reopens', async () => {
       const first = await open(store);
-      const UserWikiStore = await loadUserWikiStore();
-      await new UserWikiStore({ scopeId: A, pages: first.memory, chunk }).writePage(
+        await new UserWikiStore({ scopeId: A, pages: first.memory, chunk }).writePage(
         P('Alice likes tea.\n\nAlice has a cat.', ['t1']),
       );
       await closeNow(first.memory);
@@ -483,8 +458,7 @@ describe.each(STORES)('per-user pages on %s', (store) => {
       const memory = await Memory.createWithAdapter(wrapped, { graph: false, selfImprove: false });
       memories.push(memory);
       const brain = brainOf(memory);
-      const UserWikiStore = await loadUserWikiStore();
-      const pages = new UserWikiStore({ scopeId: A, pages: memory, chunk });
+        const pages = new UserWikiStore({ scopeId: A, pages: memory, chunk });
       await pages.writePage(P('Alice likes tea.\n\nAlice has a cat.'));
       const first = chunkIdsOf((await pageRows(brain))[0]!);
       expect(first.length).toBe(2);

@@ -160,6 +160,7 @@ export { isPublicAddress } from './cognition/memory';
 // Memory Wiki — markdown-first long-term memory for soul-file agents
 export {
   WikiMemoryStore,
+  UserWikiStore,
   WikiCompiler,
   ensureMemoryDir,
   parsePage,
@@ -182,6 +183,9 @@ export type {
   CompileResult as WikiCompileResult,
   MemoryIndexPort,
   WikiMemoryStoreOptions,
+  UserWikiStoreOptions,
+  UserWikiPagesPort,
+  WikiPageStorePort,
   WikiCompilerOptions,
   WikiCompilerStorePort,
 } from './cognition/substrate/memory/wiki/index.js';

@@ -13,6 +13,8 @@ export type { ScoredTrace, MemoryScopeRow } from './Memory.js';
 
 export type {
   MemoryConfig,
+  MemoryPageRow,
+  MemoryPageChunk,
   EmbeddingConfig,
   ExtendedConsolidationConfig,
   IngestionConfig,

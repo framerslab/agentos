@@ -43,6 +43,8 @@ import type { CompileResult } from '../../../substrate/memory/wiki/types.js';
 import type { ITool } from '../../../../core/tools/ITool.js';
 import type {
   MemoryConfig,
+  MemoryPageChunk,
+  MemoryPageRow,
   RememberOptions,
   RecallOptions,
   IngestOptions,
@@ -81,6 +83,7 @@ import {
 import { fillScopeIds } from '../../retrieval/store/migrations/v2-to-v3.js';
 import { CONVERSATION_SCOPE, parseConversationScopeKey } from '../../retrieval/store/conversationScopeKey.js';
 import { ensureScopeRow, registerUnregisteredConversationScopes } from '../../retrieval/store/conversationScopes.js';
+import { assertWikiPageId } from '../../../substrate/memory/wiki/WikiPageId.js';
 import { refileBrainScopeIds, snapshotInEncodedForm, takeScopeIdFormLock } from '../../retrieval/store/scopeIdForm.js';
 import { SqlKnowledgeGraph } from '../../retrieval/store/SqlKnowledgeGraph.js';
 import { SqlMemoryGraph } from '../../retrieval/store/SqlMemoryGraph.js';
@@ -150,6 +153,51 @@ interface NewTraceRow {
   /** The metadata as JSON text. */
   metadata: string;
 }
+
+/** One row of `memory_pages` as the adapter returns it. */
+interface PageRowRecord {
+  page_id: string;
+  content: string;
+  content_hash: string;
+  chunk_ids: string;
+  updated_at: number | string;
+}
+
+/** A page row as the facade returns it: the chunk ids read from their JSON, the time as a number. */
+function pageRowOf(row: PageRowRecord): MemoryPageRow {
+  let chunkIds: string[] = [];
+  try {
+    const parsed: unknown = JSON.parse(row.chunk_ids);
+    if (Array.isArray(parsed)) chunkIds = parsed.filter((id): id is string => typeof id === 'string');
+  } catch {
+    // A list that does not parse names no chunk.
+  }
+  return {
+    pageId: row.page_id,
+    content: row.content,
+    contentHash: row.content_hash,
+    chunkIds,
+    updatedAt: Number(row.updated_at),
+  };
+}
+
+/** Throws unless `scopeId` is the conversation key of a user or of a session: the two kinds of subject that own pages. */
+function assertPageOwnerKey(scopeId: string): void {
+  const kind = parseConversationScopeKey(scopeId)?.subject.kind;
+  if (kind !== 'user' && kind !== 'session') {
+    throw new TypeError('Memory: a page belongs to a user or a session conversation key');
+  }
+}
+
+/** Writes one page row, or replaces the row the scope holds under that page id. */
+const UPSERT_PAGE_ROW = `INSERT INTO memory_pages
+       (brain_id, scope, scope_id, page_id, content, content_hash, chunk_ids, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT (brain_id, scope, scope_id, page_id) DO UPDATE SET
+       content = excluded.content,
+       content_hash = excluded.content_hash,
+       chunk_ids = excluded.chunk_ids,
+       updated_at = excluded.updated_at`;
 
 /**
  * Standalone recall paths produce backend-specific ranking signals
@@ -551,16 +599,7 @@ export class Memory {
     );
 
     // Generate embedding if embed function is available.
-    let embeddingBlob: Uint8Array | null = null;
-    if (this._embed) {
-      try {
-        const vec = await this._embed(content);
-        embeddingBlob = this._brain.features.blobCodec.encode(vec);
-      } catch {
-        // Embedding generation failed — continue without vector.
-        embeddingBlob = null;
-      }
-    }
+    const embeddingBlob = await this._embeddingBlobOf(content);
 
     // Insert into memory_traces: a conversation trace with its scope's registry row.
     const newRow: NewTraceRow = {
@@ -590,61 +629,8 @@ export class Memory {
       await this._insertTraceRow(this._brain, newRow);
     }
 
-    // Sync FTS index. The external-content FTS table needs explicit insert.
-    const { fts } = this._brain.features;
-    try {
-      await this._brain.run(
-        fts.syncInsert('memory_traces_fts', '(SELECT rowid FROM memory_traces WHERE id = ?)', ['content', 'tags']),
-        [id, content, JSON.stringify(tags)],
-      );
-    } catch (error) {
-      if (!isFtsUnavailableError(error)) {
-        throw error;
-      }
-    }
-
-    // Add to memory graph if available.
-    if (this._config.graph) {
-      await this._memoryGraph.addNode(id, {
-        type: type as 'episodic' | 'semantic' | 'procedural',
-        scope: scope as 'session' | 'user' | 'global',
-        scopeId,
-        strength: importance,
-        createdAt: now,
-      });
-    }
-
-    // Add to HNSW sidecar if embeddings exist for this trace.
-    // The embedding is stored in the memory_traces table; if it's non-null,
-    // also index it in the HNSW sidecar for fast ANN recall. The sidecar is
-    // this brain's: its threshold counts this brain's traces and its rebuild
-    // reads this brain's embeddings.
-    if (this._hnswSidecar) {
-      const row = await this._brain.get<{ embedding: Buffer | null }>(
-        'SELECT embedding FROM memory_traces WHERE brain_id = ? AND id = ?',
-        [this._brain.brainId, id],
-      );
-      if (row?.embedding && row.embedding.length > 0) {
-        const { blobCodec } = this._brain.features;
-        const isLegacy = typeof row.embedding === 'string' ||
-          (row.embedding && row.embedding[0] === 0x5b); // '[' character = JSON array
-        const vec = isLegacy
-          ? JSON.parse(row.embedding as unknown as string) as number[]
-          : blobCodec.decode(row.embedding);
-        const countRow = await this._brain.get<{ c: number }>(
-          'SELECT COUNT(*) as c FROM memory_traces WHERE brain_id = ? AND deleted = 0',
-          [this._brain.brainId],
-        );
-        const count = countRow?.c ?? 0;
-
-        if (!this._hnswSidecar.isActive && count >= 1000) {
-          // Threshold crossed — rebuild the index from this brain's embeddings.
-          await this._hnswSidecar.rebuildFromData(await this._ownEmbeddedTraces());
-        } else {
-          await this._hnswSidecar.add(id, vec, count);
-        }
-      }
-    }
+    // The full-text entry, the memory-graph node and the vector index entry.
+    await this._afterTraceInsert(newRow);
 
     // Build a MemoryTrace-shaped return value.
     return this._buildTrace({
@@ -1120,6 +1106,164 @@ export class Memory {
       createdAt: Number(row.created_at),
       compiledAt: row.compiled_at === null || row.compiled_at === undefined ? null : Number(row.compiled_at),
     }));
+  }
+
+  /**
+   * One wiki page row of one conversation scope; null when the scope holds no page of that id.
+   *
+   * @param scopeId - The scope's key, matched by equality.
+   * @throws InvalidWikiPageIdError for a refused page id; nothing is read.
+   */
+  async readPageRow(scopeId: string, pageId: string): Promise<MemoryPageRow | null> {
+    assertWikiPageId(pageId);
+    await this._initPromise;
+    const row = await this._brain.get<PageRowRecord>(
+      `SELECT page_id, content, content_hash, chunk_ids, updated_at
+         FROM memory_pages
+        WHERE brain_id = ? AND scope = ? AND scope_id = ? AND page_id = ?`,
+      [this._brain.brainId, CONVERSATION_SCOPE, scopeId, pageId],
+    );
+    return row ? pageRowOf(row) : null;
+  }
+
+  /** Every wiki page row of one conversation scope, by page id. The scope's key is matched by equality. */
+  async listPageRows(scopeId: string): Promise<MemoryPageRow[]> {
+    await this._initPromise;
+    const rows = await this._brain.all<PageRowRecord>(
+      `SELECT page_id, content, content_hash, chunk_ids, updated_at
+         FROM memory_pages
+        WHERE brain_id = ? AND scope = ? AND scope_id = ?`,
+      [this._brain.brainId, CONVERSATION_SCOPE, scopeId],
+    );
+    // Ordered here, by code unit, so every database lists one order whatever its collation.
+    return rows.map(pageRowOf).sort((a, b) => (a.pageId < b.pageId ? -1 : a.pageId > b.pageId ? 1 : 0));
+  }
+
+  /**
+   * Writes one wiki page row of a user's or a session's conversation scope, with its chunks. With `chunks`, the
+   * page's old chunks are deleted for good, the new ones are filed as traces under the scope's key with the tags
+   * `wiki` and `page:<id>`, and the row lists them; without, the row's content is replaced and its chunks are kept.
+   * The scope's registry row, the new chunks, the page row and the delete of the old chunks are one transaction
+   * where the adapter has them; where it has none they run in that order, so the row never lists a chunk that is
+   * not stored.
+   *
+   * @returns The ids of the chunks the row lists.
+   * @throws TypeError when `scopeId` is not the conversation key of a user or of a session.
+   * @throws InvalidWikiPageIdError for a refused page id.
+   * @throws When the knowledge graph cannot delete the old chunks' copies: nothing is changed.
+   */
+  async writePageRow(
+    scopeId: string,
+    page: { pageId: string; content: string; contentHash: string; chunks?: ReadonlyArray<MemoryPageChunk> },
+  ): Promise<{ chunkIds: string[] }> {
+    assertPageOwnerKey(scopeId);
+    assertWikiPageId(page.pageId);
+    await this._initPromise;
+    const brainId = this._brain.brainId;
+    const now = Date.now();
+    const old = (await this.readPageRow(scopeId, page.pageId))?.chunkIds ?? [];
+    const transactions = this._brain.adapter.capabilities?.has?.('transactions') === true;
+    const upsert = (db: Pick<StorageAdapter, 'run'>, chunkIds: readonly string[]) =>
+      db.run(UPSERT_PAGE_ROW, [
+        brainId,
+        CONVERSATION_SCOPE,
+        scopeId,
+        page.pageId,
+        page.content,
+        page.contentHash,
+        JSON.stringify(chunkIds),
+        now,
+      ]);
+
+    if (page.chunks === undefined) {
+      const keep = async (db: Pick<StorageAdapter, 'run'>): Promise<void> => {
+        await ensureScopeRow(db, brainId, scopeId, now);
+        await upsert(db, old);
+      };
+      if (transactions) await this._brain.transaction(keep);
+      else await keep(this._brain);
+      return { chunkIds: old };
+    }
+
+    const tags = JSON.stringify(['wiki', `page:${page.pageId}`]);
+    const rows: NewTraceRow[] = [];
+    for (const chunk of page.chunks) {
+      rows.push({
+        id: nextTraceId(),
+        type: chunk.type,
+        scope: CONVERSATION_SCOPE,
+        scopeId,
+        content: chunk.text,
+        embedding: await this._embeddingBlobOf(chunk.text),
+        strength: 1.0,
+        createdAt: now,
+        tags,
+        metadata: JSON.stringify(
+          buildInitialTraceMetadata(
+            {},
+            { contentHash: await sha256(chunk.text), entities: [...(chunk.entities ?? [])], scopeId },
+          ),
+        ),
+      });
+    }
+    const chunkIds = rows.map((row) => row.id);
+    // An old chunk's knowledge-graph copy holds its text and is found by the chunk's id alone: the copies go first,
+    // and a graph that cannot delete them fails the call with every row as it was.
+    if (old.length > 0) await this._knowledgeGraph.deleteMemories({ traceIds: old });
+    const write = async (db: Pick<StorageAdapter, 'run'>): Promise<void> => {
+      await ensureScopeRow(db, brainId, scopeId, now);
+      for (const row of rows) await this._insertTraceRow(db, row);
+      await upsert(db, chunkIds);
+      await deleteTraceRows(db, brainId, old);
+    };
+    if (transactions) await this._brain.transaction(write);
+    else await write(this._brain);
+
+    for (const row of rows) await this._afterTraceInsert(row);
+    for (const id of old) {
+      try {
+        await this._memoryGraph.removeNode(id);
+      } catch {
+        // A node whose delete fails stays, holding no words of the chunk; its trace is gone.
+      }
+      this._hnswSidecar?.remove(id);
+    }
+    // Postgres keeps the index in each row's own column, which went with the row.
+    if (old.length > 0 && this._brain.features.dialect.name !== 'postgres') await this._rebuildFtsIndex();
+    return { chunkIds };
+  }
+
+  /**
+   * Deletes one wiki page row of a user's or a session's conversation scope, or every page row of the scope, for
+   * good: the pages' chunks first ({@link deleteTraces}), then the rows. Another scope's pages are never touched.
+   *
+   * @param pageId - The one page to delete; every page of the scope when left out.
+   * @returns How many page rows and how many chunk traces it deleted.
+   * @throws TypeError when `scopeId` is not the conversation key of a user or of a session.
+   * @throws InvalidWikiPageIdError for a refused page id.
+   * @throws When the knowledge graph cannot delete the chunks' copies: no row is deleted.
+   */
+  async deletePageRows(scopeId: string, pageId?: string): Promise<{ pages: number; chunks: number }> {
+    assertPageOwnerKey(scopeId);
+    if (pageId !== undefined) assertWikiPageId(pageId);
+    await this._initPromise;
+    let rows: MemoryPageRow[];
+    if (pageId === undefined) {
+      rows = await this.listPageRows(scopeId);
+    } else {
+      const row = await this.readPageRow(scopeId, pageId);
+      rows = row ? [row] : [];
+    }
+    if (rows.length === 0) return { pages: 0, chunks: 0 };
+    const { deleted } = await this.deleteTraces(rows.flatMap((row) => row.chunkIds));
+    const params: unknown[] = [this._brain.brainId, CONVERSATION_SCOPE, scopeId];
+    if (pageId !== undefined) params.push(pageId);
+    await this._brain.run(
+      `DELETE FROM memory_pages
+        WHERE brain_id = ? AND scope = ? AND scope_id = ?${pageId === undefined ? '' : ' AND page_id = ?'}`,
+      params,
+    );
+    return { pages: rows.length, chunks: deleted };
   }
 
   /**
@@ -1991,6 +2135,82 @@ export class Memory {
       updatedAt: row.created_at,
       isActive: row.deleted === 0,
     };
+  }
+
+  /**
+   * The encoded vector of `content`, or null with no embedder or when the embedder fails: the trace is then stored
+   * without one.
+   */
+  private async _embeddingBlobOf(content: string): Promise<Uint8Array | null> {
+    if (!this._embed) return null;
+    try {
+      return this._brain.features.blobCodec.encode(await this._embed(content));
+    } catch {
+      // Embedding generation failed: continue without a vector.
+      return null;
+    }
+  }
+
+  /**
+   * What follows a trace row's insert, outside any transaction: the row's full-text entry, its memory-graph node
+   * where the graph is on, and its vector in the HNSW sidecar when the row holds one.
+   */
+  private async _afterTraceInsert(row: NewTraceRow): Promise<void> {
+    // Sync FTS index. The external-content FTS table needs explicit insert.
+    const { fts } = this._brain.features;
+    try {
+      await this._brain.run(
+        fts.syncInsert('memory_traces_fts', '(SELECT rowid FROM memory_traces WHERE id = ?)', ['content', 'tags']),
+        [row.id, row.content, row.tags],
+      );
+    } catch (error) {
+      if (!isFtsUnavailableError(error)) {
+        throw error;
+      }
+    }
+
+    // Add to memory graph if available.
+    if (this._config.graph) {
+      await this._memoryGraph.addNode(row.id, {
+        type: row.type as 'episodic' | 'semantic' | 'procedural',
+        scope: row.scope as 'session' | 'user' | 'global',
+        scopeId: row.scopeId,
+        strength: row.strength,
+        createdAt: row.createdAt,
+      });
+    }
+
+    // Add to HNSW sidecar if embeddings exist for this trace.
+    // The embedding is stored in the memory_traces table; if it's non-null,
+    // also index it in the HNSW sidecar for fast ANN recall. The sidecar is
+    // this brain's: its threshold counts this brain's traces and its rebuild
+    // reads this brain's embeddings.
+    if (this._hnswSidecar) {
+      const stored = await this._brain.get<{ embedding: Buffer | null }>(
+        'SELECT embedding FROM memory_traces WHERE brain_id = ? AND id = ?',
+        [this._brain.brainId, row.id],
+      );
+      if (stored?.embedding && stored.embedding.length > 0) {
+        const { blobCodec } = this._brain.features;
+        const isLegacy = typeof stored.embedding === 'string' ||
+          (stored.embedding && stored.embedding[0] === 0x5b); // '[' character = JSON array
+        const vec = isLegacy
+          ? JSON.parse(stored.embedding as unknown as string) as number[]
+          : blobCodec.decode(stored.embedding);
+        const countRow = await this._brain.get<{ c: number }>(
+          'SELECT COUNT(*) as c FROM memory_traces WHERE brain_id = ? AND deleted = 0',
+          [this._brain.brainId],
+        );
+        const count = countRow?.c ?? 0;
+
+        if (!this._hnswSidecar.isActive && count >= 1000) {
+          // Threshold crossed — rebuild the index from this brain's embeddings.
+          await this._hnswSidecar.rebuildFromData(await this._ownEmbeddedTraces());
+        } else {
+          await this._hnswSidecar.add(row.id, vec, count);
+        }
+      }
+    }
   }
 
   /**

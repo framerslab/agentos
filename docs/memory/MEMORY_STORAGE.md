@@ -36,12 +36,12 @@ const tmp = await Memory.createSqlite();                  // brain-<random>.sqli
 
 ## Tables
 
-`Brain` creates 15 tables and the full-text index. Every table has a `brain_id` column, and the primary keys include it:
+`Brain` creates 16 tables and the full-text index. Every table has a `brain_id` column, and the primary keys include it:
 
 | Category | Tables |
 |---|---|
 | Memory traces | `memory_traces` · `memory_traces_fts` (FTS5 index) |
-| Conversation scopes | `memory_scopes` |
+| Conversation scopes | `memory_scopes` · `memory_pages` |
 | Knowledge graph | `knowledge_nodes` · `knowledge_edges` |
 | Documents | `documents` · `document_chunks` · `document_images` |
 | Conversations | `conversations` · `messages` |
@@ -158,7 +158,34 @@ Each conversation scope has one row, written with the scope's first trace: in on
 
 `Memory.listScopes({ kind? })` returns the rows by scope id as `{ scopeId, kind, agentId, createdAt, compiledAt }`. An open, and an import that wrote traces, register each conversation scope that holds traces under a key and has no row, with the time of its oldest trace as `created_at`; traces filed under the scope with an id that is no key get no row. `Memory.deleteScope('conversation', key)` deletes the scope's row after its traces.
 
-The table's columns are `TEXT` and `BIGINT`, so SQLite and Postgres hold it alike.
+### `memory_pages`
+
+```sql
+CREATE TABLE IF NOT EXISTS memory_pages (
+  brain_id     TEXT   NOT NULL,
+  scope        TEXT   NOT NULL,   -- 'conversation'
+  scope_id     TEXT   NOT NULL,   -- the subject's key, kept as given
+  page_id      TEXT   NOT NULL,   -- e.g. concepts/notes
+  content      TEXT   NOT NULL,   -- the page: front matter (summary, updated, sources), then the body
+  content_hash TEXT   NOT NULL,   -- SHA-256 of the body, hex
+  chunk_ids    TEXT   NOT NULL,   -- JSON array: the ids of the page's chunks in memory_traces
+  updated_at   BIGINT NOT NULL,   -- Unix ms
+  PRIMARY KEY (brain_id, scope, scope_id, page_id)
+);
+```
+
+A wiki page that belongs to one subject (a user, or a session) is a row here, never a file: two subjects' pages of one id are two rows, and each is read by its subject's key alone. `UserWikiStore`, built with `{ scopeId, pages: memory, chunk }`, reads and writes one subject's pages over the facade's row members:
+
+| Member | Does |
+|---|---|
+| `Memory.readPageRow(scopeId, pageId)` | Returns the row as `{ pageId, content, contentHash, chunkIds, updatedAt }`, or `null` |
+| `Memory.listPageRows(scopeId)` | Returns the scope's rows by page id |
+| `Memory.writePageRow(scopeId, { pageId, content, contentHash, chunks? })` | Writes the row. With `chunks`, files each chunk as a trace under the scope's key with the tags `wiki` and `page:<id>`, lists the new chunk ids in the row, and deletes the page's old chunks for good; without, replaces the content and keeps the chunks |
+| `Memory.deletePageRows(scopeId, pageId?)` | Deletes one page row or every page row of the scope, the chunks first, for good; returns `{ pages, chunks }` |
+
+`writePageRow` writes the scope's registry row, the new chunks, the page row and the delete of the old chunks in one transaction where the adapter has them, so a write that fails leaves the page and its chunks as they were. Where the adapter has none, the statements run in that order, and the row never lists a chunk that is not stored. `writePageRow` and `deletePageRows` take the key of a user or of a session and refuse any other scope id with a `TypeError`; every member refuses a page id that is not a wiki page id (`isWikiPageId`). `UserWikiStore.writePage(page)` keeps the chunks of a page whose body did not change, and `UserWikiStore.deleteAll()` deletes one subject's pages and chunks and nothing else. `Memory.deleteScope('conversation', key)` deletes the scope's traces, the chunks of its pages among them, and leaves the page rows: delete a subject's pages with `deleteAll()` first.
+
+Both tables' columns are `TEXT` and `BIGINT`, so SQLite and Postgres hold them alike. SQLite compares a key byte for byte. Postgres compares it under the column's collation: a [deterministic collation](https://www.postgresql.org/docs/current/collation.html#COLLATION-NONDETERMINISTIC), which every predefined collation is, holds two strings equal only when their bytes are, so leave these columns on the database's default collation and give them no nondeterministic one.
 
 ---
 

@@ -44,6 +44,18 @@ export interface IndexResult {
   removed: string[];
 }
 
+/** What a wiki page store answers, whatever holds its pages: the operator's files, or one subject's rows. */
+export interface WikiPageStorePort {
+  /** The page of that id, or null when the store has none. */
+  readPage(id: string): Promise<WikiPage | null>;
+  /** Writes a page, replacing the one of its id. */
+  writePage(page: WikiPage): Promise<void>;
+  /** Files the pages' chunks for recall; with `force`, every page's again. */
+  index(opts?: { force?: boolean }): Promise<IndexResult>;
+  /** Deletes a page with its chunks; true when the store had it. */
+  deletePage(id: string): Promise<boolean>;
+}
+
 export interface CompileResult {
   pagesWritten: string[];
   tracesConsumed: number;
