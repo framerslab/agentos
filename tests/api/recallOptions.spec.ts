@@ -77,6 +77,33 @@ describe('resolveRecallOptions', () => {
     }
   });
 
+  it('refuses a setting or a budget that is not an object with the reason invalid_value, on either path, naming it', () => {
+    const cases: Array<[unknown, string, string]> = [
+      ['off', 'recall', 'memory.recall must be an object'],
+      [2400, 'recall', 'memory.recall must be an object'],
+      [[{ budget: { totalTokens: 900 } }], 'recall', 'memory.recall must be an object'],
+      [{ budget: 2400 }, 'budget', 'memory.recall.budget must be an object'],
+      [{ budget: [2400] }, 'budget', 'memory.recall.budget must be an object'],
+      [{ budget: 'small' }, 'budget', 'memory.recall.budget must be an object'],
+    ];
+    for (const cognitiveMemory of [true, false]) {
+      for (const [recall, option, message] of cases) {
+        const error = thrown(() => resolveRecallOptions({ recall: recall as never, cognitiveMemory, providerTokenBudget: undefined, providerContext: true, where: 'gmi()' }));
+        expect(error, JSON.stringify(recall)).toBeInstanceOf(RecallOptionError);
+        expect(error, JSON.stringify(recall)).toMatchObject({ option, reason: 'invalid_value' });
+        expect((error as Error).message, JSON.stringify(recall)).toContain(`gmi(): ${message}`);
+      }
+    }
+  });
+
+  it('without cognitive memory, a budget that no memoryProvider.getContext reads is reported as recall_budget not applied', () => {
+    expect(resolveRecallOptions({ recall: { budget: { totalTokens: 900 } }, cognitiveMemory: false, providerTokenBudget: undefined, providerContext: false, where: 'agent()' }).ignored).toEqual(['recall_budget']);
+    expect(resolveRecallOptions({ recall: { budget: { totalTokens: 0 } }, cognitiveMemory: false, providerTokenBudget: undefined, providerContext: false, where: 'agent()' }).ignored).toEqual(['recall_budget']);
+    expect(resolveRecallOptions({ recall: { budget: { totalTokens: 900 } }, cognitiveMemory: false, providerTokenBudget: undefined, providerContext: true, where: 'agent()' }).ignored).toEqual([]);
+    expect(resolveRecallOptions({ recall: { budget: {} }, cognitiveMemory: false, providerTokenBudget: undefined, providerContext: false, where: 'agent()' }).ignored).toEqual([]);
+    expect(resolveRecallOptions({ recall: undefined, cognitiveMemory: false, providerTokenBudget: 700, providerContext: false, where: 'agent()' }).ignored).toEqual([]);
+  });
+
   it('a null recall (a JSON persona) is unset, and a budget of 0 is a budget', () => {
     expect(resolveRecallOptions({ recall: null, cognitiveMemory: true, providerTokenBudget: undefined, providerContext: false, where: 'gmi()' }).managerRecall).toBeUndefined();
     expect(resolveRecallOptions({ recall: { budget: { totalTokens: 0 } }, cognitiveMemory: false, providerTokenBudget: undefined, providerContext: true, where: 'agent()' }).providerTokenBudget).toBe(0);

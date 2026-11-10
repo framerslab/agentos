@@ -97,11 +97,12 @@ const withRecall = (apiKey: string, recall?: Recall) =>
 /**
  * Files the statements through the session's own sends, clears the history, asks (through `send()`, or `stream()`),
  * and returns the last request's memory block ('' when it carries none), the turn's text and its recall record.
+ * `answer` is what the model replies to the question: a reply, or an error the provider throws.
  */
-async function ask(recall?: Recall, via: 'send' | 'stream' = 'send') {
+async function ask(recall?: Recall, via: 'send' | 'stream' = 'send', answer: ProviderScript['replies'][number] = reply.text('Pier 3.')) {
   ids.next = 0;
   const k = key(); const emb = key();
-  const s = script('openai', k, { replies: [...STATEMENTS.map(() => reply.text('Noted.')), reply.text('Pier 3.')] });
+  const s = script('openai', k, { replies: [...STATEMENTS.map(() => reply.text('Noted.')), answer] });
   script('openai', emb, { replies: [] });
   vi.stubEnv('OPENAI_API_KEY', emb);
   const a = withRecall(k, recall);
@@ -186,6 +187,17 @@ describe("agent({ runtime: 'gmi' }) memory.recall.budget and capture", () => {
     expect(off.block).toBe(on.block);
   });
 
+  it('stream(): a turn whose model call fails after its memory assembly still settles memoryRecall with the record', async () => {
+    const failed = await ask({ capture: 'metadata' }, 'stream', Object.assign(new Error('bad request'), { httpStatus: 400 }));
+    expect(failed.block).toContain(PREAMBLE_HEADING);
+    expect(failed.text).toBe('');
+    expect(failed.memoryRecall?.version).toBe('memory-recall-capture/1');
+    expect(failed.memoryRecall?.budget.requested).toBe(1600);
+    expect(failed.memoryRecall?.candidates.length).toBeGreaterThan(0);
+    const off = await ask({ capture: 'off' }, 'stream', Object.assign(new Error('bad request'), { httpStatus: 400 }));
+    expect(off.memoryRecall).toBeUndefined();
+  });
+
   it('the record names the embedding model the memory was built with', async () => {
     const turn = await ask();
     expect(turn.memoryRecall?.embedder).toEqual({ provider: 'openai', model: expect.any(String) });
@@ -198,9 +210,23 @@ describe("agent({ runtime: 'gmi' }) memory.recall.budget and capture", () => {
     [{ budget: { totalTokens: 12.5 } }, 'memory.recall.budget.totalTokens'],
     [{ budget: { totalTokens: Number.POSITIVE_INFINITY } }, 'memory.recall.budget.totalTokens'],
     [{ capture: 'everything' }, 'memory.recall.capture'],
+    // A JavaScript caller's setting of the wrong shape: the setting itself, or its budget, not an object.
+    ['off', 'memory.recall must be an object'],
+    [{ budget: 2400 }, 'memory.recall.budget must be an object'],
   ])('rejects %j at construction, naming the field', (recall, field) => {
-    expect(() => withRecall(key(), recall as Recall)).toThrow(field);
+    expect(() => withRecall(key(), recall as unknown as Recall)).toThrow(field);
     expect(events('memory.recall.option_rejected')).toEqual([expect.objectContaining({ reason: 'invalid_value' })]);
+  });
+
+  it('with cognitive memory off and no memoryProvider.getContext, memory.recall.budget.totalTokens is applied nowhere: one option_ignored line', async () => {
+    const k = key();
+    script('openai', k, { replies: [] });
+    const a = agent({
+      runtime: 'gmi', provider: 'openai', model: 'stub-model', apiKey: k, fallbackProviders: [],
+      memory: { recall: { budget: { totalTokens: 700 } } }, cognition: { memory: false },
+    } as unknown as AgentOptions);
+    expect(events('memory.recall.option_ignored')).toEqual([expect.objectContaining({ option: 'recall_budget' })]);
+    await a.close();
   });
 
   it('memoryProviderOptions.tokenBudget is not applied when cognitive memory supplies the block: one option_ignored line', async () => {
@@ -258,6 +284,12 @@ describe('agent() on the default runtime', () => {
     expect(seen).toEqual([900]);
     const warned = warn.mock.calls.map((args) => args.map(String).join(' '));
     expect(warned.filter((line) => line.includes('memory settings'))).toEqual([]);
+    expect(events('memory.recall.option_ignored')).toEqual([]);
+  });
+
+  it('memory.recall.budget.totalTokens with no memoryProvider.getContext to read it is applied nowhere: one option_ignored line', () => {
+    agent({ provider: 'openai', model: 'stub-model', apiKey: key(), memory: { recall: { budget: { totalTokens: 900 } } } } as unknown as AgentOptions);
+    expect(events('memory.recall.option_ignored')).toEqual([expect.objectContaining({ option: 'recall_budget' })]);
   });
 
   it('two different budgets are rejected at construction, naming both', () => {
