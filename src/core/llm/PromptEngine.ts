@@ -275,14 +275,26 @@ export class PromptEngine implements IPromptEngine {
       const timerIdBudget = 'tokenBudgeting';
       const budgetStart = Date.now();
       this.startPerformanceTimer(timerIdBudget);
-      const { optimizedComponents, modifications } = await this.applyTokenBudget(
+      const { optimizedComponents, modifications, contextTokens } = await this.applyTokenBudget(
         augmentedComponents,
         modelTargetInfo,
         result.issues || []
       );
       result.wasTruncatedOrSummarized = modifications.wasModified;
       result.modificationDetails = modifications.details;
+      result.metadata.contextTokens = contextTokens;
       this.recordPerformanceTimer(timerIdBudget, Date.now() - budgetStart);
+
+      // The memory block goes before the other retrieved context, as the GMI joined them before PromptEngine took the
+      // block on its own, so a prompt nothing was reduced in is the same byte for byte.
+      if (optimizedComponents.memoryContextText) {
+        const memory = optimizedComponents.memoryContextText;
+        const other = optimizedComponents.retrievedContext;
+        optimizedComponents.retrievedContext = Array.isArray(other)
+          ? [{ source: 'cognitive_memory', content: memory }, ...other]
+          : [memory, other].filter(Boolean).join('\n\n---\n\n');
+      }
+      delete optimizedComponents.memoryContextText;
 
 
       const timerIdTemplate = 'templateApplication';
@@ -794,12 +806,19 @@ export class PromptEngine implements IPromptEngine {
     components: PromptComponents,
     modelInfo: Readonly<ModelTargetInfo>,
     issues: PromptEngineResult['issues']
-  ): Promise<{ optimizedComponents: PromptComponents; modifications: { wasModified: boolean; details: PromptEngineResult['modificationDetails'] } }> {
+  ): Promise<{
+    optimizedComponents: PromptComponents;
+    modifications: { wasModified: boolean; details: PromptEngineResult['modificationDetails'] };
+    contextTokens: { memory: number; otherBefore: number; otherAfter: number };
+  }> {
     /**
      * Enforces token budget across prompt sections (system, userInput, history, RAG context, tools).
      * Allocation Heuristics (percentages of overall budget):
      *  - system: 20%, user: 15%, history: 35%, rag: 20%, tools: 10%
      * Summarization: Uses UtilityAI if available & trigger ratio exceeded; else truncation fallback.
+     * Memory: `memoryContextText` counts toward the prompt and the rag share and is never reduced; the rag share's
+     *  reduction falls on `retrievedContext` alone, to what the share leaves beside the memory block (less the
+     *  prompt's overrun), and a target of 0 removes it.
      * Failure Handling: On summarization errors pushes warning issue & falls back to truncation.
      * Returns cloned optimized components plus modification descriptors for telemetry.
      */
@@ -888,48 +907,59 @@ export class PromptEngine implements IPromptEngine {
       }
     }
 
+    // The memory block counts against the rag share and is never reduced: what the share must lose comes from the
+    // other retrieved context alone.
+    const memoryTokens = optimized.memoryContextText ? await this.estimateTokenCount(optimized.memoryContextText, modelInfo.modelId) : 0;
+    let otherBefore = 0;
+    let otherAfter = 0;
     if (optimized.retrievedContext) {
       const contextStr = typeof optimized.retrievedContext === 'string' ? optimized.retrievedContext : optimized.retrievedContext.map(r => r.content).join('\n');
       let ragTokens = await this.estimateTokenCount(contextStr, modelInfo.modelId);
-      if (ragTokens > budgets.rag || currentTokens > budget) {
-        if (this.utilityAI) {
+      otherBefore = ragTokens;
+      if (ragTokens + memoryTokens > budgets.rag || currentTokens > budget) {
+        // What the other context may keep: the share less the memory block, less the overrun when the prompt is over
+        // its budget.
+        const target = Math.max(0, Math.floor(budgets.rag - memoryTokens - Math.max(0, currentTokens - budget)));
+        const truncate = (): void => {
+          optimized.retrievedContext = ragTokens > 0 ? contextStr.substring(0, Math.floor(contextStr.length * (target / ragTokens))) : '';
+          modifications.details!.truncatedComponents!.push('retrievedContext');
+        };
+        if (target === 0) {
+          optimized.retrievedContext = '';
+          modifications.details!.removedComponents!.push('retrievedContext');
+        } else if (this.utilityAI) {
           try {
-            const { summary, finalTokenCount } = await this.utilityAI.summarizeRAGContext(
+            const { summary } = await this.utilityAI.summarizeRAGContext(
               optimized.retrievedContext,
-              (currentTokens > budget) ? budgets.rag - (currentTokens - budget) : budgets.rag,
+              target,
               modelInfo,
               this.config.contextManagement.preserveSourceAttributionInSummary
             );
             optimized.retrievedContext = summary;
             modifications.details!.summarizedComponents!.push('retrievedContext');
-            modifications.wasModified = true;
-            currentTokens = currentTokens - ragTokens + finalTokenCount;
-            ragTokens = finalTokenCount;
           } catch(e){
             issues?.push({type: 'warning', code: 'RAG_SUMMARIZATION_FAILED', message: `RAG summarization failed: ${e instanceof Error ? e.message : String(e)}`});
-            optimized.retrievedContext = contextStr.substring(0, Math.floor(contextStr.length * (budgets.rag / ragTokens)));
-            modifications.details!.truncatedComponents!.push('retrievedContext');
-            modifications.wasModified = true;
-            const newRagTokens = await this.estimateTokenCount(optimized.retrievedContext as string, modelInfo.modelId);
-            currentTokens = currentTokens - ragTokens + newRagTokens;
-            ragTokens = newRagTokens;
+            truncate();
           }
         } else {
-          optimized.retrievedContext = contextStr.substring(0, Math.floor(contextStr.length * (budgets.rag / ragTokens)));
-          modifications.details!.truncatedComponents!.push('retrievedContext');
-          modifications.wasModified = true;
-          const newRagTokens = await this.estimateTokenCount(optimized.retrievedContext as string, modelInfo.modelId);
-          currentTokens = currentTokens - ragTokens + newRagTokens;
-          ragTokens = newRagTokens;
+          truncate();
         }
+        modifications.wasModified = true;
+        const reduced = optimized.retrievedContext;
+        const newRagTokens = reduced
+          ? await this.estimateTokenCount(typeof reduced === 'string' ? reduced : reduced.map(r => r.content).join('\n'), modelInfo.modelId)
+          : 0;
+        currentTokens = currentTokens - ragTokens + newRagTokens;
+        ragTokens = newRagTokens;
       }
+      otherAfter = ragTokens;
     }
 
     if (currentTokens > budget && issues) {
       issues.push({ type: 'warning', code: 'TOKEN_BUDGET_EXCEEDED_POST_OPT', message: `Prompt still exceeds budget (${currentTokens}/${budget}) after initial optimizations. Quality may be affected.`});
     }
 
-    return { optimizedComponents: optimized, modifications };
+    return { optimizedComponents: optimized, modifications, contextTokens: { memory: memoryTokens, otherBefore, otherAfter } };
   }
 
   private async calculateTotalTokens(
@@ -940,6 +970,7 @@ export class PromptEngine implements IPromptEngine {
     let total = 0;
     if(components.systemPrompts) total += (await Promise.all(components.systemPrompts.map(sp => this.estimateTokenCount(sp.content, modelId)))).reduce((a,b) => a+b, 0);
     if(components.userInput) total += await this.estimateTokenCount(components.userInput, modelId);
+    if(components.memoryContextText) total += await this.estimateTokenCount(components.memoryContextText, modelId);
     if(components.conversationHistory) total += await this.calculateTokensForMessages(components.conversationHistory, modelId, sendsThinking);
     if(components.retrievedContext) {
       const contextStr = typeof components.retrievedContext === 'string' ? components.retrievedContext : components.retrievedContext.map(r => r.content).join('\n');

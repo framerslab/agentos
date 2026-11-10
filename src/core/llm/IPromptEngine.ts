@@ -149,7 +149,14 @@ export interface PromptComponents {
   retrievedContext?:
     | string
     | Array<{ source: string; content: string; relevance?: number; type?: string }>;
-  /** Assembled cognitive memory context (personality-affected, token-budgeted). Merged with retrievedContext by the prompt template. */
+  /**
+   * The turn's cognitive memory block, set by the GMI: the text of the rendering the serving model's budget allows.
+   * PromptEngine counts it into the prompt's tokens and never summarises or truncates it; when the prompt must be
+   * reduced, only `retrievedContext` is. After the budget step it is placed before `retrievedContext`, joined to it
+   * with `\n\n---\n\n` (as the first entry, with `source: 'cognitive_memory'`, when `retrievedContext` is a list).
+   */
+  memoryContextText?: string;
+  /** Assembled cognitive memory context (personality-affected, token-budgeted). Not read by PromptEngine: the GMI passes its text as `memoryContextText`. */
   assembledMemoryContext?: import('../../cognition/memory/core/types.js').AssembledMemoryContext;
   /** Task-specific data or parameters that need to be included in the prompt. */
   taskSpecificData?: Record<string, unknown>;
@@ -275,6 +282,11 @@ export interface PromptEngineResult {
     totalSystemPromptsApplied: number;
     historyMessagesIncluded: number;
     ragContextTokensUsed?: number; // Tokens from retrievedContext
+    /**
+     * PromptEngine's own counts, by its token estimate: the memory block (`memoryContextText`, never reduced) and the
+     * other retrieved context (`retrievedContext`) before and after the budget step.
+     */
+    contextTokens?: { memory: number; otherBefore: number; otherAfter: number };
     [key: string]: unknown; // For other arbitrary metadata
   };
   /** An optional cache key if the result was retrieved from or stored in a cache. */

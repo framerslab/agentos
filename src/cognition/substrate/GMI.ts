@@ -70,8 +70,9 @@ import { GMIError, GMIErrorCode, createGMIErrorFromError } from '../../core/util
 import type { ICognitiveMemoryManager } from '../memory/CognitiveMemoryManager.js';
 import type { AssembledMemoryContext } from '../memory/core/types.js';
 import type { MemoryRecallCapture } from '../memory/retrieval/recall/capture.js';
+import { effectiveRecallBudget, estimateMemoryTokens } from '../memory/retrieval/recall/budget.js';
 import { ConversationHistoryManager } from './ConversationHistoryManager';
-import { CognitiveMemoryBridge, type CognitiveMemoryTurnLearning, type CognitiveMemoryTurnScope } from './CognitiveMemoryBridge';
+import { CognitiveMemoryBridge, captureWithoutBlock, type CognitiveMemoryTurnLearning, type CognitiveMemoryTurnScope } from './CognitiveMemoryBridge';
 import { SentimentTracker } from './SentimentTracker';
 import { MetapromptExecutor } from './MetapromptExecutor';
 import { feedbackTraceMessage, type NormalizedUserFeedback } from './userFeedback';
@@ -1827,12 +1828,9 @@ export class GMI implements IGMI {
           conversationHistory: promptConversation.conversationHistory,
           currentTurnMessageCount: promptConversation.currentTurnMessageCount,
           userInput: promptConversation.userInput,
-          retrievedContext: [
-            assembledMemoryContext?.contextText,
-            augmentedContextFromRAG,
-            injectedLongTermMemoryContext,
-          ].filter(Boolean).join("\n\n---\n\n"),
-          assembledMemoryContext: assembledMemoryContext ?? undefined,
+          // The RAG text and the long-term-memory text. The memory block goes to PromptEngine on its own, per model hop
+          // (`memoryContextText`), so that a reduction of the prompt never cuts or summarises it.
+          retrievedContext: [augmentedContextFromRAG, injectedLongTermMemoryContext].filter(Boolean).join("\n\n---\n\n"),
           // tools: this.activePersona.embeddedTools, // If ITool[] and PromptComponents.tools takes ITool[]
         };
 
@@ -2008,9 +2006,59 @@ export class GMI implements IGMI {
               }
             : await this.legacyModelTargetInfo(modelIdToUse, providerIdForModel);
 
+          // The memory block for this hop's model: the turn's first rendering where the model's share of the prompt
+          // holds it, else the block rendered again at what the share leaves after the RAG and long-term-memory text
+          // (no second recall). Later calls of the turn (tool continuations) assembled nothing and send no block.
+          let hopMemoryContext: AssembledMemoryContext | null = assembledMemoryContext;
+          let hopCapture: MemoryRecallCapture | undefined = assembledMemoryContext?.capture;
+          const ragTokens = estimateMemoryTokens(augmentedContextFromRAG);
+          const longTermMemoryTokens = estimateMemoryTokens(injectedLongTermMemoryContext);
+          if (assembledMemoryContext && this.memoryBridge) {
+            const hop = resolution?.hop ?? 0;
+            const hopBudget = effectiveRecallBudget({
+              totalTokens: this.memoryBridge.budgetTokens(),
+              contextTokens: modelTargetInfo.optimalContextTokens || modelTargetInfo.maxContextTokens,
+              otherContextTokens: ragTokens + longTermMemoryTokens,
+            });
+            hopMemoryContext = await this.memoryBridge.contextForHop(assembledMemoryContext, hopBudget, hop);
+            hopCapture = hopMemoryContext
+              ? hopMemoryContext.capture
+              : assembledMemoryContext.capture && captureWithoutBlock(assembledMemoryContext.capture, hopBudget, hop);
+          }
+          const hopComponents: PromptComponents = {
+            ...promptComponents,
+            ...(hopMemoryContext?.contextText ? { memoryContextText: hopMemoryContext.contextText } : {}),
+            ...(hopMemoryContext ? { assembledMemoryContext: hopMemoryContext } : {}),
+          };
+
           const promptEngineResult: PromptEngineResult = await this.promptEngine.constructPrompt(
-            promptComponents, modelTargetInfo, promptExecContext
+            hopComponents, modelTargetInfo, promptExecContext
           );
+          if (hopCapture) {
+            // What reached this hop's model: PromptEngine's own count of the block, and of the other context after it
+            // reduced the prompt (the block is never reduced), with the reduction named.
+            const counts = promptEngineResult.metadata?.contextTokens;
+            const details = promptEngineResult.modificationDetails;
+            const cutBy = details?.summarizedComponents?.includes('retrievedContext')
+              ? ('prompt_engine_summarize' as const)
+              : details?.truncatedComponents?.includes('retrievedContext') || details?.removedComponents?.includes('retrievedContext')
+                ? ('prompt_engine_truncate' as const)
+                : undefined;
+            const issueCodes = (promptEngineResult.issues ?? [])
+              .map((issue) => issue.code)
+              .filter((code) => code === 'RAG_SUMMARIZATION_FAILED' || code === 'TOKEN_BUDGET_EXCEEDED_POST_OPT');
+            // A fresh object for each hop (contextForHop copies), so the turn's first rendering is never written.
+            turnMemoryRecall = {
+              ...hopCapture,
+              delivery: {
+                memoryBlockTokens: counts?.memory ?? 0,
+                ...(ragTokens + longTermMemoryTokens > 0
+                  ? { otherContext: { ragTokens, longTermMemoryTokens, deliveredTokens: counts?.otherAfter ?? 0, ...(cutBy ? { cutBy } : {}) } }
+                  : {}),
+                ...(issueCodes.length > 0 ? { issueCodes } : {}),
+              },
+            };
+          }
 
           promptEngineResult.issues?.forEach(issue => this.addTraceEntry(ReasoningEntryType.WARNING, `Prompt Engine Issue: ${issue.message}`, issue as any));
           // A failed template leaves the prompt empty, and every provider takes
