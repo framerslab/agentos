@@ -42,8 +42,11 @@ export interface LocalCrossEncoderConfig extends RerankerProviderConfig {
    */
   device?: 'cpu' | 'gpu' | 'auto';
   /**
-   * Maximum tokens per (query, document) pair; the tokenizer cuts the end of
-   * a longer pair, which is the document's tail.
+   * Maximum tokens per (query, document) pair. The tokenizer cuts a longer
+   * pair at this many tokens, so it loses the end of the document and its
+   * closing separator token (Transformers.js truncates every pair's token
+   * arrays to the length). An answer late in a long document is then never
+   * read: score such documents in pieces with `pieceMaxChars`.
    * Default: 512
    */
   maxSequenceLength?: number;
@@ -60,9 +63,12 @@ export interface LocalCrossEncoderConfig extends RerankerProviderConfig {
   cacheDir?: string;
   /**
    * The ONNX weights file to load from the model repository's `onnx/`
-   * folder, without `.onnx`, for example `'model'` (full precision) or
-   * `'model_qint8_arm64'`. Transformers.js 3.x appends the `dtype` suffix to
-   * it (none for `fp32`).
+   * folder, for example `'model'` (full precision) or `'model_qint8_arm64'`.
+   * A path in that folder or a name with the extension names the same file:
+   * `'onnx/model_qint8_arm64.onnx'` and `'model_qint8_arm64.onnx'` load
+   * `onnx/model_qint8_arm64.onnx` (a leading `onnx/` and a trailing `.onnx`
+   * are dropped). Transformers.js 3.x appends the `dtype` suffix to it (none
+   * for `fp32`).
    *
    * Default: the model's entry in {@link LOCAL_RERANKER_DEFAULT_WEIGHTS}
    * (for `cross-encoder/ms-marco-MiniLM-L-6-v2`, `'model_quint8_avx2'`), else
@@ -74,14 +80,70 @@ export interface LocalCrossEncoderConfig extends RerankerProviderConfig {
    * the file loaded. `'q8'` loads `onnx/<modelFileName>_quantized.onnx`, a
    * file the `cross-encoder/*` repositories do not hold: name their
    * quantized files with `modelFileName` instead.
+   *
+   * The provider always passes a dtype (`'fp32'` unless set). In a browser,
+   * where Transformers.js 3.x would otherwise default the WASM backend to
+   * `'q8'`, the file loaded is still `onnx/<modelFileName>.onnx` unless
+   * `dtype` says otherwise. Transformers.js 2.x reads no dtype: it loads
+   * `onnx/<modelFileName>_quantized.onnx` for `'q8'` and
+   * `onnx/<modelFileName>.onnx` for any other value.
    * Default: 'fp32' (no suffix)
    */
   dtype?: LocalCrossEncoderDtype;
-  /** Threads onnxruntime runs one operator on. */
+  /**
+   * Threads onnxruntime runs one operator on, passed to the ONNX session as
+   * `session_options.intraOpNumThreads`. A host on a CPU limit (a container's
+   * cpuset or CPU quota, a share of a host other processes use) sets it to
+   * the number of cores it may use; `1` runs each operator on the calling
+   * thread.
+   *
+   * Unset, the session gets no thread count and onnxruntime sizes its pool
+   * itself: onnxruntime-node 1.21 sizes it to the physical cores of the
+   * whole machine (on Linux pinning a thread to each core), whatever CPU
+   * limit the process runs under, so inside a limit its threads contend for
+   * the few cores the process has. Read by onnxruntime-node (Transformers.js
+   * 3.x on Node); onnxruntime-web and Transformers.js 2.x do not read it.
+   *
+   * A whole number from 1 (a fraction is rounded down); any other value
+   * leaves the count to onnxruntime.
+   * Default: unset
+   */
   intraOpNumThreads?: number;
-  /** Threads onnxruntime runs independent operators on. */
+  /**
+   * Threads onnxruntime may run independent operators on at once, passed to
+   * the ONNX session as `session_options.interOpNumThreads`. onnxruntime
+   * creates this pool only in its parallel execution mode, and the sessions
+   * Transformers.js creates run in the default sequential mode, so the value
+   * reaches the session without changing how it runs; set
+   * `intraOpNumThreads` to bound the threads.
+   *
+   * A whole number from 1 (a fraction is rounded down); any other value
+   * leaves it unset.
+   * Default: unset
+   */
   interOpNumThreads?: number;
-  /** Longest piece of a document scored on its own, in characters. */
+  /**
+   * Best-piece scoring, off unless set: the longest piece of a document, in
+   * characters, scored as a pair of its own.
+   *
+   * A document longer than this is split into pieces of at most this many
+   * characters: its sentences in order (a sentence ends at `.`, `!` or `?`
+   * before a space, and at a line break), packed together while they fit and
+   * joined by one space. A sentence longer than a piece is split between
+   * words, and only a word longer than a piece is cut. A document of this
+   * length or shorter is one piece, as given.
+   *
+   * Every piece of every document is a (query, piece) pair, scored in the
+   * same batches of `batchSize` pairs, and a document's score is its best
+   * piece's. The result's `content` is the whole document. Pick a length at
+   * which a piece and the query fit in `maxSequenceLength` tokens; each
+   * piece is a pair, so a 1,024-character document at 300 is four pairs or
+   * more.
+   *
+   * A whole number from 1 (a fraction is rounded down); 0 or any other value
+   * leaves scoring whole documents.
+   * Default: unset (each document is one pair)
+   */
   pieceMaxChars?: number;
 }
 
@@ -108,9 +170,10 @@ export type LocalRerankerModel = (typeof LOCAL_RERANKER_MODELS)[number];
  * dynamically quantized `onnx/model_quint8_avx2.onnx` (22 MB, against 87 MB
  * for `onnx/model.onnx`). It ranks as the full-precision file does on a
  * query with one answering text in 20, and scores a batch in about half the
- * time on a 2-vCPU x86 host. The repository also holds
- * `onnx/model_qint8_arm64.onnx` (the same bytes as `model_qint8_avx512`) for
- * ARM hosts; name it with `modelFileName`.
+ * time on a 2-vCPU x86 host. It loads and runs on ARM hosts too; the
+ * repository's `onnx/model_qint8_arm64.onnx` (the same bytes as
+ * `model_qint8_avx512`) is the file quantized for ARM, which
+ * `modelFileName` can name.
  */
 export const LOCAL_RERANKER_DEFAULT_WEIGHTS: Readonly<Record<string, string>> = Object.freeze({
   'cross-encoder/ms-marco-MiniLM-L-6-v2': 'model_quint8_avx2',
@@ -133,6 +196,81 @@ const DTYPE_SUFFIX: Record<LocalCrossEncoderDtype, string> = {
 };
 
 const sigmoid = (x: number): number => 1 / (1 + Math.exp(-x));
+
+/** `value` rounded down when it is a finite number of at least 1, else `undefined`. */
+const positiveInteger = (value: number | undefined): number | undefined =>
+  typeof value === 'number' && Number.isFinite(value) && value >= 1 ? Math.floor(value) : undefined;
+
+/** A weights file name as Transformers.js takes it: no leading `onnx/` folder and no `.onnx` extension. */
+const bareWeightsName = (name: string): string => name.replace(/^(?:\.\/)?onnx\//, '').replace(/\.onnx$/i, '');
+
+/**
+ * A sentence's end: `.`, `!` or `?` (with any closing quotes or brackets after
+ * it) and the spaces that follow. A line break ends a sentence too.
+ */
+const SENTENCE_END = /([.!?]["'\u2019\u201D)\]]*)\s+/g;
+
+/** `text` split into its sentences, at each sentence end and line break. */
+const sentencesOf = (text: string): string[] => text.replace(SENTENCE_END, '$1\n').split(/[\r\n]+/);
+
+/** `word` cut into parts of at most `maxChars` UTF-16 units, never inside a surrogate pair when a part can hold it. */
+function cutWord(word: string, maxChars: number): string[] {
+  const parts: string[] = [];
+  for (let start = 0; start < word.length; ) {
+    let end = Math.min(start + maxChars, word.length);
+    const last = word.charCodeAt(end - 1);
+    if (end < word.length && end - start > 1 && last >= 0xd800 && last <= 0xdbff) end--;
+    parts.push(word.slice(start, end));
+    start = end;
+  }
+  return parts;
+}
+
+/**
+ * The pieces `pieceMaxChars` scores: `text` itself when it has at most
+ * `maxChars` characters, else its sentences packed in order into pieces of at
+ * most `maxChars` characters, joined by one space. A sentence longer than a
+ * piece is packed word by word, and a word longer than a piece is cut.
+ */
+function splitIntoPieces(text: string, maxChars: number): string[] {
+  if (text.length <= maxChars) return [text];
+  const pieces: string[] = [];
+  let current = '';
+  const flush = (): void => {
+    if (current) pieces.push(current);
+    current = '';
+  };
+  const append = (unit: string): void => {
+    if (current && current.length + 1 + unit.length <= maxChars) {
+      current += ` ${unit}`;
+    } else {
+      flush();
+      current = unit;
+    }
+  };
+  for (const sentence of sentencesOf(text)) {
+    const words = sentence.split(/\s+/).filter((word) => word.length > 0);
+    if (words.length === 0) continue;
+    const joined = words.join(' ');
+    if (joined.length <= maxChars) {
+      append(joined);
+      continue;
+    }
+    for (const word of words) {
+      if (word.length <= maxChars) {
+        append(word);
+        continue;
+      }
+      flush();
+      const parts = cutWord(word, maxChars);
+      pieces.push(...parts.slice(0, -1));
+      current = parts[parts.length - 1];
+    }
+  }
+  flush();
+  // A text of whitespace alone has no words; it is still one (empty) piece.
+  return pieces.length > 0 ? pieces : [''];
+}
 
 /** A loaded model with its tokenizer, and the reranks using it. */
 interface LoadedCrossEncoder {
@@ -160,7 +298,9 @@ interface LoadedCrossEncoder {
  *
  * Each batch of up to `batchSize` documents is tokenized as (query,
  * document) pairs, padded and truncated to `maxSequenceLength`, and scored in
- * one forward pass. A model with one logit (the `cross-encoder/*` and
+ * one forward pass. With `pieceMaxChars`, a long document is split into
+ * pieces, every piece is a pair in those batches, and the document scores its
+ * best piece's score. A model with one logit (the `cross-encoder/*` and
  * `BAAI/bge-reranker-*` models) scores a pair with the sigmoid of that
  * logit; a model with two or more logits scores it with the softmax
  * probability of its relevant class (a label `LABEL_1`, `POSITIVE`,
@@ -174,7 +314,9 @@ interface LoadedCrossEncoder {
  * the others; see {@link LOCAL_RERANKER_DEFAULT_WEIGHTS}). Transformers.js
  * fetches them on the first load and reads them from its cache (`cacheDir`)
  * after that. The model loads once, for the model of the first `rerank()` or
- * `initialize()`; call `initialize(modelId)` to load another.
+ * `initialize()`; call `initialize(modelId)` to load another. The ONNX
+ * session gets `intraOpNumThreads` and `interOpNumThreads` when they are set;
+ * a host on a CPU limit sets `intraOpNumThreads` to its cores.
  *
  * @example
  * ```typescript
@@ -208,7 +350,11 @@ export class LocalCrossEncoderReranker implements IRerankerProvider {
       device: config.device ?? 'cpu',
       maxSequenceLength: config.maxSequenceLength ?? 512,
       // A batch size that is not a positive number (0, NaN) falls back to the default.
-      batchSize: Number.isFinite(config.batchSize) && config.batchSize! >= 1 ? Math.floor(config.batchSize!) : 32,
+      batchSize: positiveInteger(config.batchSize) ?? 32,
+      // A thread count or piece length that is not a positive number is left unset.
+      intraOpNumThreads: positiveInteger(config.intraOpNumThreads),
+      interOpNumThreads: positiveInteger(config.interOpNumThreads),
+      pieceMaxChars: positiveInteger(config.pieceMaxChars),
     };
   }
 
@@ -216,6 +362,14 @@ export class LocalCrossEncoderReranker implements IRerankerProvider {
    * Load the tokenizer and model.
    * Call this before first use or let rerank() load them on its first call.
    * With a `modelId` other than the loaded one, loads that model instead.
+   * With no `modelId`, the model is `defaultModelId`: a reranker holding
+   * another model (from `initialize(otherModelId)` or the `modelId` of its
+   * first `rerank()`) loads the default model in its place.
+   *
+   * A load that fails throws and leaves the model that was loaded before it,
+   * if any. When the tokenizer fails and the model loads, the model is
+   * disposed before the load throws. A failed load is not remembered: the
+   * next `rerank()` with no model loaded tries again.
    *
    * Loads run one at a time, in the order they were asked for, so concurrent
    * calls for different models never load at once and the last call's model
@@ -262,13 +416,18 @@ export class LocalCrossEncoderReranker implements IRerankerProvider {
   /** The weights file and dtype for `modelId`: the config's, else the model's default. */
   private weightsFor(modelId: string): { modelFileName: string; dtype: LocalCrossEncoderDtype } {
     if (this.config.modelFileName !== undefined || this.config.dtype !== undefined) {
-      return { modelFileName: this.config.modelFileName ?? 'model', dtype: this.config.dtype ?? 'fp32' };
+      return {
+        modelFileName: bareWeightsName(this.config.modelFileName ?? 'model'),
+        dtype: this.config.dtype ?? 'fp32',
+      };
     }
     return { modelFileName: LOCAL_RERANKER_DEFAULT_WEIGHTS[modelId] ?? 'model', dtype: 'fp32' };
   }
 
   private async _doInitialize(modelId: string): Promise<void> {
     let transformers: any;
+    /** Transformers.js 2.x (`@xenova/transformers`), which reads `quantized` and not `dtype`. */
+    let version2 = false;
     try {
       // Dynamic import to avoid bundling issues and allow optional dependency.
       // Prefer `@huggingface/transformers` (Transformers.js v3+) but support `@xenova/transformers` for back-compat.
@@ -276,6 +435,7 @@ export class LocalCrossEncoderReranker implements IRerankerProvider {
         try {
           return await import('@huggingface/transformers');
         } catch {
+          version2 = true;
           return await import('@xenova/transformers');
         }
       })();
@@ -303,7 +463,13 @@ export class LocalCrossEncoderReranker implements IRerankerProvider {
     const { modelFileName, dtype } = this.weightsFor(modelId);
     const cacheOptions = this.config.cacheDir ? { cache_dir: this.config.cacheDir } : {};
 
-    const [tokenizer, model] = await Promise.all([
+    // onnxruntime-node reads these session options; left out, onnxruntime sizes its thread pool for the machine.
+    const sessionOptions: { intraOpNumThreads?: number; interOpNumThreads?: number } = {};
+    if (this.config.intraOpNumThreads !== undefined) sessionOptions.intraOpNumThreads = this.config.intraOpNumThreads;
+    if (this.config.interOpNumThreads !== undefined) sessionOptions.interOpNumThreads = this.config.interOpNumThreads;
+
+    // Both halves settle before either is used, so a half that loaded while the other failed can be disposed.
+    const [tokenizerLoad, modelLoad] = await Promise.allSettled([
       AutoTokenizer.from_pretrained(modelId, cacheOptions),
       AutoModelForSequenceClassification.from_pretrained(modelId, {
         ...cacheOptions,
@@ -312,13 +478,26 @@ export class LocalCrossEncoderReranker implements IRerankerProvider {
         dtype,
         // Transformers.js 2.x (@xenova/transformers) reads `quantized` instead of `dtype`.
         quantized: dtype === 'q8',
+        ...(Object.keys(sessionOptions).length > 0 ? { session_options: sessionOptions } : {}),
       }),
     ]);
+    if (tokenizerLoad.status === 'rejected' || modelLoad.status === 'rejected') {
+      if (modelLoad.status === 'fulfilled' && typeof modelLoad.value?.dispose === 'function') {
+        // The load's own error is the one the caller gets; a failure to free the session does not replace it.
+        await Promise.resolve(modelLoad.value.dispose()).catch(() => undefined);
+      }
+      throw tokenizerLoad.status === 'rejected' ? tokenizerLoad.reason : (modelLoad as PromiseRejectedResult).reason;
+    }
+    const tokenizer = tokenizerLoad.value;
+    const model = modelLoad.value;
 
     const previous = this.loaded;
     this.loaded = {
       modelId,
-      modelFile: `onnx/${modelFileName}${DTYPE_SUFFIX[dtype] ?? ''}.onnx`,
+      // The file the installed Transformers.js loads by its own naming rule: 2.x adds `_quantized` or nothing.
+      modelFile: version2
+        ? `onnx/${modelFileName}${dtype === 'q8' ? '_quantized' : ''}.onnx`
+        : `onnx/${modelFileName}${DTYPE_SUFFIX[dtype] ?? ''}.onnx`,
       tokenizer,
       model,
       positiveIndex: this.findPositiveIndex(model?.config?.id2label),
@@ -425,6 +604,10 @@ export class LocalCrossEncoderReranker implements IRerankerProvider {
    *
    * Every batch of one call is scored by the model loaded when the call
    * began, even if `initialize()` loads another model meanwhile.
+   *
+   * With `pieceMaxChars`, each document longer than it is scored as its
+   * pieces: every piece of every document is a pair in the same batches, and
+   * a document's `relevanceScore` is its best piece's score.
    */
   public async rerank(
     input: RerankerInput,
@@ -443,13 +626,28 @@ export class LocalCrossEncoderReranker implements IRerankerProvider {
     const modelId = loaded.modelId;
 
     const batchSize = this.config.batchSize!;
-    const scores: number[] = [];
+    const pieceMaxChars = this.config.pieceMaxChars;
+    // One (query, text) pair per document, or one per piece of it with pieceMaxChars; owners[k] is pair k's document.
+    const texts: string[] = [];
+    const owners: number[] = [];
+    input.documents.forEach((doc, index) => {
+      for (const text of pieceMaxChars ? splitIntoPieces(doc.content, pieceMaxChars) : [doc.content]) {
+        texts.push(text);
+        owners.push(index);
+      }
+    });
+
+    // A document's score is the best of its pairs' scores; every document has at least one pair.
+    const scores: number[] = new Array(input.documents.length).fill(Number.NEGATIVE_INFINITY);
     let forwardPasses = 0;
     loaded.active++;
     try {
-      for (let i = 0; i < input.documents.length; i += batchSize) {
-        const batch = input.documents.slice(i, i + batchSize).map((doc) => doc.content);
-        scores.push(...(await this.scoreBatch(loaded, input.query, batch)));
+      for (let i = 0; i < texts.length; i += batchSize) {
+        const batchScores = await this.scoreBatch(loaded, input.query, texts.slice(i, i + batchSize));
+        batchScores.forEach((score, j) => {
+          const owner = owners[i + j];
+          if (score > scores[owner]) scores[owner] = score;
+        });
         forwardPasses++;
       }
     } finally {
@@ -485,6 +683,8 @@ export class LocalCrossEncoderReranker implements IRerankerProvider {
         providerMetrics: {
           batchSize,
           forwardPasses,
+          pairsScored: texts.length,
+          ...(pieceMaxChars ? { pieceMaxChars } : {}),
           modelFile: loaded.modelFile,
           device: this.config.device,
         },
