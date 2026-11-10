@@ -266,6 +266,59 @@ describe.skipIf(!CACHE_DIR)(`LocalCrossEncoderReranker on the real ${MODEL_ID}`,
     }
   });
 
+  it('through RerankerService.rerankChunks with intraOpNumThreads 1 and pieceMaxChars 300: the long note that answers ranks first', async () => {
+    const fromTransformers = createRequire(createRequire(import.meta.url).resolve('@huggingface/transformers'));
+    const { InferenceSession } = fromTransformers('onnxruntime-node');
+    const create = InferenceSession.create;
+    const sessionOptions: unknown[] = [];
+    InferenceSession.create = function (this: unknown, ...args: unknown[]) {
+      sessionOptions.push(args[1]);
+      return create.apply(this, args);
+    };
+
+    // The same 1,024-character notes as above: the answering sentence starts past a 128-token window.
+    const answerNote = `${fill(OFF_TOPIC, 0, 1024 - TEXTS[ANSWER_INDEX].length - 1)} ${TEXTS[ANSWER_INDEX]}`;
+    const notes = TEXTS.map((_, i) => (i === ANSWER_INDEX ? answerNote : fill(NEAR_TOPIC, i, 1024)));
+    // The vector store's order: the answering note sits 14th with a low similarity score.
+    const chunks: RagRetrievedChunk[] = notes.map((content, i) => {
+      const id = i === ANSWER_INDEX ? ANSWER_ID : `n${i}`;
+      return { id, content, originalDocumentId: id, relevanceScore: 0.9 - i * 0.01 };
+    });
+
+    const localConfig: LocalCrossEncoderConfig = {
+      providerId: 'local',
+      defaultModelId: MODEL_ID,
+      cacheDir: CACHE_DIR,
+      maxSequenceLength: 128,
+      intraOpNumThreads: 1,
+      pieceMaxChars: 300,
+    };
+    const service = new RerankerService({ config: { providers: [localConfig], defaultProviderId: 'local' } });
+    const reranker = new LocalCrossEncoderReranker(localConfig);
+    service.registerProvider(reranker);
+    try {
+      const reranked = await service.rerankChunks(QUERY, chunks);
+
+      expect(sessionOptions).toHaveLength(1);
+      expect(sessionOptions[0]).toMatchObject({ intraOpNumThreads: 1 });
+      expect(reranked).toHaveLength(20);
+      expect(new Set(reranked.map((c) => c.id)).size).toBe(20);
+      expect(reranked[0].id).toBe(ANSWER_ID);
+      expect(reranked[0].content).toBe(answerNote);
+      expect(reranked[0].relevanceScore).toBeGreaterThan(0.5);
+      expect(reranked[1].relevanceScore).toBeLessThan(reranked[0].relevanceScore);
+      for (const c of reranked) {
+        expect(c.relevanceScore).toBeGreaterThan(0);
+        expect(c.relevanceScore).toBeLessThan(1);
+      }
+      expect(reranked[0].metadata?._rerankerProviderId).toBe('local');
+      expect(reranked[0].metadata?._rerankerOriginalScore).toBeCloseTo(0.9 - ANSWER_INDEX * 0.01, 10);
+    } finally {
+      InferenceSession.create = create;
+      await reranker.dispose();
+    }
+  });
+
   it('through RetrievalAugmentor.retrieveContext with rerank on: the auto-registered local provider puts the answer first', async () => {
     // Embeddings and the vector store are stand-ins: they hand the augmentor the 20
     // texts in a fixed similarity order with the answer 14th. The rerank stage is real.
