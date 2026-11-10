@@ -8,7 +8,7 @@ markdown files inside a per-agent workspace directory. The loader parses YAML fr
 
 The `memory/` directory is the agent's **LLM wiki**: a markdown knowledge base the agent reads and rewrites itself (the "LLM keeps a wiki" pattern). Markdown is the source of truth and the vector/graph index is rebuilt from it; [`souledAgent()`](https://docs.agentos.sh/getting-started/high-level-api) wires it end to end. Full detail in [The `memory/` Wiki](#the-memory-wiki) below.
 
-![Soul file anatomy: six-file workspace (SOUL.md required, STYLE/IDENTITY/AGENTS/MEMORY/examples optional) loads at boot into structured persona fields and a prose system prelude, resolving per-turn to a persona card, behavioral rules, persistent memory, and output calibration](/img/diagrams/soul-files-anatomy.svg)
+![Soul file anatomy: a six-entry workspace (SOUL.md required; STYLE.md, IDENTITY.md, AGENTS.md and examples/ optional; the auto-managed memory/ wiki) that the loader reads when the agent is built, splitting SOUL.md into persona fields and the prose that opens the system prompt; the built agent gets a persona card, its hard limits as the last block of prompt text, memory/index.md in the prompt, and AGENTS.md and IDENTITY.md returned to the host, while examples/ is not read](/img/diagrams/soul-files-anatomy.svg)
 
 ## Prior art & references
 
