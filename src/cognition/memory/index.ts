@@ -40,6 +40,19 @@ export type {
 } from './core/types.js';
 export { DEFAULT_TRUST_POLICY_BY_SOURCE, canUseFor } from './core/types.js';
 
+// --- Recall capture (the record of each memory assembly) ---
+export type {
+  RecallLeg,
+  LegAbsentReason,
+  RerankSkipReason,
+  RecallCaptureMode,
+  MemoryRecallCandidate,
+  MemoryRecallReranker,
+  MemoryRecallCapture,
+  RankedRecallCandidate,
+} from './retrieval/recall/index.js';
+export { MEMORY_RECALL_CAPTURE_VERSION, candidatesFrom, rerankerRecordOf } from './retrieval/recall/index.js';
+
 // --- Configuration ---
 export type {
   CognitiveMemoryConfig,
@@ -52,6 +65,7 @@ export type {
   ReflectorConfig,
   MemoryGraphConfig,
   ConsolidationConfig,
+  ManagerRecallConfig,
 } from './core/config.js';
 export {
   DEFAULT_ENCODING_CONFIG,

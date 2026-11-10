@@ -545,6 +545,13 @@ export interface CognitiveRetrievalResult {
      * merged ranking. See `2026-04-26-hindsight-4network-observer-design.md`.
      */
     retrievedTypedTraces?: ScoredMemoryTrace[];
+    /**
+     * The rerank of this retrieval, when the manager holds a
+     * `rerankerService`: its provider and model with the candidates and the
+     * time it took, or `provider: 'none'` with the reason when no scores were
+     * applied. Absent when the manager holds no reranker.
+     */
+    reranker?: import('../retrieval/recall/capture.js').MemoryRecallReranker;
   };
 }
 
@@ -627,6 +634,14 @@ export interface AssembledMemoryContext {
    * it out.
    */
   lineOutcomes?: AssembledLineOutcome[];
+  /**
+   * The recall capture of this assembly: every candidate with its ranks,
+   * scores and outcome, the legs, the reranker, the budget and the timings,
+   * with no memory text and no query text. `CognitiveMemoryManager` sets it
+   * unless its `recall.capture` is `'off'`; a memory manager that builds its
+   * context another way may leave it out.
+   */
+  capture?: import('../retrieval/recall/capture.js').MemoryRecallCapture;
 }
 
 // ---------------------------------------------------------------------------
