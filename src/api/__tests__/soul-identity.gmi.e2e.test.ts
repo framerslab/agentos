@@ -9,6 +9,7 @@ vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => (
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import pino from 'pino';
 import { z } from 'zod';
 import { agent, type Agent, type AgentOptions } from '../agent';
@@ -23,6 +24,7 @@ import { reply, script, type ProviderScript } from './helpers/stubProviders';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 import { Brain } from '../../cognition/memory/retrieval/store/Brain';
 import { InMemoryLearningStore } from '../../cognition/learning/store/InMemoryLearningStore';
+import { stableIdOfName } from '../../cognition/substrate/personas/stableId';
 
 let n = 0;
 const key = () => `k-soul-identity-${++n}`;
@@ -215,6 +217,14 @@ describe("a soul's hard limits, traits and name on the default runtime", () => {
     expect(systemOf(s.seen[1])).toBe(`Answer in one word.\n\n${BLOCK}`);
   });
 
+  it('closes a call whose own system prompt is set to undefined with the limits', async () => {
+    writeSoul(FULL);
+    const k = key();
+    const s = script('openai', k, { whole: true, replies: [reply.text('A.')] });
+    await agent(stubbed(k, { soul: dir })).generate('Hi.', { system: undefined } as never);
+    expect(systemTexts(s.seen[0]).join('\n\n').endsWith(BLOCK)).toBe(true);
+  });
+
   it('adds no block for a soul with no hard limits', async () => {
     writeSoul('name: Aria\nagentId: aria-1');
     const k = key();
@@ -320,6 +330,22 @@ describe("the soul's id as the agent's key", () => {
     }
   });
 
+  it.each([['an agent with no name', {}], ["an agent named 'Support'", { name: 'Support' }]] as const)(
+    'files under a stable id of a soul name with no Latin letters, on %s',
+    async (_name, extra) => {
+      writeSoul('name: アリア');
+      const k = key();
+      script('openai', k, { whole: true, replies: [reply.text('Lisbon it is.'), reply.text('Notes.')] });
+      const a = await souledAgent({ ...stubbed(k, extra), soul: dir } as never);
+      try {
+        await a.session('s').send('I moved to Lisbon.');
+        await vi.waitFor(async () => expect((await a.memory!.recall('Lisbon', { scope: 'persona', scopeId: stableIdOfName('アリア') })).length).toBe(2));
+      } finally {
+        await a.close();
+      }
+    },
+  );
+
   it('souledAgent() rejects a soul that gives no id on an agent with no name, and makes no store', async () => {
     writeSoul('hardLimits:\n  - Never guess.', 'You are terse.');
     await expect(souledAgent({ ...stubbed(key()), soul: dir } as never)).rejects.toThrow(
@@ -383,6 +409,27 @@ describe('learners filed under the slug of the agent name before the soul had an
     await after.close();
   });
 
+  it('stay under it when the store fails its first open: the key is asked again once the store answers', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const store = new InMemoryLearningStore();
+    const k = key();
+    script('openai', k, { replies: [reply.text('One.'), reply.text('Two.'), reply.text('Three.')] });
+    const before = agent(stubbed(k, learning(store)));
+    await before.session('s1', { userId: 'dee' }).send('Hello.');
+    await before.close();
+    expect(await keysOf(store, 'dee')).toEqual(new Set(['aria']));
+
+    writeSoul(FULL);
+    vi.spyOn(store, 'freezeRows').mockRejectedValueOnce(new Error('store unavailable'));
+    const after = agent(stubbed(k, { ...learning(store), soul: dir }));
+    await after.session('s2', { userId: 'dee' }).send('Hello again.');
+    await after.session('s3', { userId: 'dee' }).send('And again.');
+    await after.close();
+    expect(events('soul.id_fallback')).toEqual([expect.objectContaining({ reason: 'old_slug_learner' })]);
+    expect(await keysOf(store, 'dee')).toEqual(new Set(['aria']));
+  });
+
   it('are left where they are, with no line, when learning.learnerKey names the key', async () => {
     vi.spyOn(console, 'log').mockImplementation(() => undefined);
     const store = new InMemoryLearningStore();
@@ -411,5 +458,17 @@ describe('learners filed under the slug of the agent name before the soul had an
     await fresh.close();
     expect(events('soul.id_fallback')).toEqual([]);
     expect(await keysOf(store, 'cy')).toEqual(new Set(['aria-1']));
+  });
+});
+
+describe('what the docs say about the limits closing the prompt', () => {
+  const PACKAGE_ROOT = fileURLToPath(new URL('../../../', import.meta.url));
+  const doc = (file: string) => fs.readFileSync(path.join(PACKAGE_ROOT, file), 'utf8');
+
+  it('name the system messages a turn can add after the limits', () => {
+    const exception = "on a turn where a memory provider's `getContext` returns text (the wiki's recall on a souled agent), that text is a system message after the limits, and so is the plan of a call with `planning` on";
+    expect(doc('docs/SOUL_FILES.md')).toContain(exception);
+    expect(doc('docs/safety/GUARDRAILS_USAGE.md')).toContain(exception);
+    expect(doc('README.md')).not.toContain('Identity, voice, hard limits, and HEXACO scores');
   });
 });

@@ -34,6 +34,12 @@ describe('personaFieldsOf', () => {
   it('keeps the id of a soul with a name and no agentId as the slug of the name', () => {
     expect(personaFieldsOf({ name: 'Aria Stone' }).id).toBe('aria-stone');
   });
+  it('gives the id soulAgentIdOf gives: a blank agentId reads as unset, a padded one is trimmed, a name with no Latin letters is hashed', () => {
+    expect(personaFieldsOf({ agentId: '', name: 'Aria' }).id).toBe('aria');
+    expect(personaFieldsOf({ agentId: ' aria-1 ', name: 'Aria' }).id).toBe('aria-1');
+    expect(personaFieldsOf({ name: 'アリア' }).id).toBe(stableIdOfName('アリア'));
+    expect(personaFieldsOf({}).id).toBe('unnamed-agent');
+  });
 });
 
 describe('soulAgentIdOf', () => {
@@ -46,6 +52,18 @@ describe('soulAgentIdOf', () => {
   it("takes the agent's name when the soul has neither, by the rule a named agent's id follows", () => {
     expect(soulAgentIdOf({}, 'Support Desk')).toBe('support-desk');
     expect(soulAgentIdOf({}, 'Zoë')).toBe(stableIdOfName('Zoë'));
+  });
+  it('trims a padded agentId', () => {
+    expect(soulAgentIdOf({ agentId: ' aria-1 ', name: 'Aria' })).toBe('aria-1');
+  });
+  it('gives a soul name with no Latin letters or digits a stable id of its own, whatever the agent is named', () => {
+    const id = stableIdOfName('アリア');
+    expect(id).toMatch(/^agent-[0-9a-f]{12}$/);
+    expect(soulAgentIdOf({ name: 'アリア' })).toBe(id);
+    expect(soulAgentIdOf({ name: 'アリア' }, 'Support')).toBe(id);
+  });
+  it('keeps the slug a Latin soul name had, so an existing id does not move', () => {
+    expect(soulAgentIdOf({ name: 'Zoë' })).toBe('zo');
   });
   it('is undefined when the soul has neither and the agent has no name, and for blank values', () => {
     expect(soulAgentIdOf({})).toBeUndefined();
@@ -84,6 +102,14 @@ describe('validateSoulFrontmatter', () => {
     expect(thrown).toBeInstanceOf(SoulLoadError);
     expect(thrown).toMatchObject({ name: 'SoulLoadError', code: 'SOUL_LOAD_FAILED', source: '/souls/aria' });
     expect((thrown as Error).message).toBe(`The soul failed to load (/souls/aria): front matter field '${field}' must be ${expected}`);
+  });
+  it.each([
+    ['maxEntries', 'many'],
+    ['maxMessageLength', '300'],
+  ])('refuses reasoningTrace.%s that is not a number, naming the field', (member, value) => {
+    expect(() => validateSoulFrontmatter({ reasoningTrace: { [member]: value } }, '/souls/aria')).toThrow(
+      new SoulLoadError('/souls/aria', `front matter field 'reasoningTrace.${member}' must be a number`),
+    );
   });
   it('is what parseSoul runs, with the inline source', () => {
     expect(() => parseSoul("---\nhardLimits: never\n---\nYou are Aria.")).toThrow("The soul failed to load (inline soul): front matter field 'hardLimits' must be a list of strings");
