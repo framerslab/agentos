@@ -5,6 +5,7 @@
  * of the table in a database a restore of the store does not replace, and copies it back on request, so a store
  * restored from before a deletion still knows the deletion. With a key the hash is an HMAC and the store records which
  * key wrote it; such a store does not open without every key it has used. A store whose copy is gone does not open.
+ * The copy's file is opened with `secure_delete` on, so a row deleted from it is overwritten in the file.
  *
  * Every case runs on SQLite files in a folder of its own. The first case also runs with the store on Postgres and the
  * copy on a SQLite file when `AGENTOS_TEST_POSTGRES_URL` names a database (CI's Test & Lint job sets it); its tables go
@@ -20,6 +21,7 @@ import { canonicalJson } from '../../../learning/ledger/canonical.js';
 import { tombstoneHash } from '../../../learning/ledger/Ledger.js';
 import * as root from '../../../../index.js';
 import { ForgottenLedger, ForgottenLedgerError, type SuppressionSubject } from '../ForgottenLedger.js';
+import { openForgottenCopy } from '../forgottenCopy.js';
 
 const POSTGRES_URL = process.env.AGENTOS_TEST_POSTGRES_URL;
 /** This run's own mark, in the names of the schemas its Postgres cases make and drop. */
@@ -125,6 +127,7 @@ describe('the forgotten-user ledger', () => {
   it('is exported from the package root', () => {
     expect(root.ForgottenLedger).toBe(ForgottenLedger);
     expect(root.ForgottenLedgerError).toBe(ForgottenLedgerError);
+    expect(root.openForgottenCopy).toBe(openForgottenCopy);
   });
 
   it('writes one unkeyed row for a user and finds it again', async () => {
@@ -374,6 +377,33 @@ describe('the forgotten-user ledger', () => {
     await expect(ledger.isForgotten({ kind: 'user', id: '' })).rejects.toThrow(TypeError);
     await expect(ledger.markForgotten({ kind: 'operator', id: 'x' } as unknown as SuppressionSubject)).rejects.toThrow(TypeError);
     expect(await rowsOf(primary)).toEqual([]);
+  });
+});
+
+describe("the tombstone copy's file", () => {
+  it('opens the copy file with secure_delete on, and says whether it was there', async () => {
+    const file = path.join(folder(), 'forgotten.sqlite');
+
+    const first = await openForgottenCopy(file);
+    adapters.push(first.adapter);
+    expect(first.existed).toBe(false);
+    expect(fs.existsSync(file)).toBe(true);
+    // The setting is the connection's, so it is read through the adapter the opener returned.
+    const setting = await first.adapter.get<Record<string, number>>('PRAGMA secure_delete');
+    expect(Object.values(setting!)[0]).toBe(1);
+
+    // It is a ledger's copy: a tombstone written through it is in the file after a close.
+    const primary = await sqliteAt(path.join(path.dirname(file), 'memory.sqlite'));
+    await (await ForgottenLedger.open({ primary, copy: first.adapter })).markForgotten(ALICE);
+    await first.adapter.close();
+
+    const second = await openForgottenCopy(file);
+    adapters.push(second.adapter);
+    expect(second.existed).toBe(true);
+    expect(Object.values((await second.adapter.get<Record<string, number>>('PRAGMA secure_delete'))!)[0]).toBe(1);
+    expect(await tombstonesOf(second.adapter)).toEqual([{ hash: await ForgottenLedger.hash('', ALICE), namespace: '' }]);
+    // A closed copy is one file: no write-ahead log beside it.
+    expect(fs.existsSync(`${file}-wal`)).toBe(false);
   });
 });
 
