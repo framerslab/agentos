@@ -27,6 +27,8 @@ const PANEL_DECISION: Record<keyof GenerateTextOptions, 'allow' | 'deny'> = {
   __onUsageReport: 'deny',
   // Added later, and allowed: accountIdOf names the account a usage event reports; it changes nothing a seat sends.
   accountIdOf: 'allow',
+  // Added later, and denied: agent() sets it on its own calls to name the caller their tools run for; a host's call does not carry it.
+  _callerUser: 'deny',
 };
 
 describe('the pooled guard (deny list, presence not value)', () => {
