@@ -8,6 +8,8 @@
  * ## Deepgram Aura WebSocket protocol
  *
  * - **Endpoint:** `wss://api.deepgram.com/v1/speak?model={voice}&encoding={enc}`
+ *   (plus `mip_opt_out=true` when the provider or the session opts out of
+ *   Deepgram's Model Improvement Program).
  * - **Authentication:** `Authorization: Token {apiKey}` header (same as REST).
  * - **Inbound (client to Deepgram):** JSON control frames:
  *   `{ "type": "Speak", "text": "..." }`, `{ "type": "Flush" }`, `{ "type": "Clear" }`.
@@ -147,6 +149,17 @@ export interface DeepgramAuraStreamingTTSConfig {
   apiKey: string;
   /** Base WS URL. @default 'wss://api.deepgram.com/v1/speak' */
   baseUrl?: string;
+  /**
+   * Opt every session out of Deepgram's Model Improvement Program by sending
+   * `mip_opt_out=true`: Deepgram keeps an opted-out request's data only for
+   * the duration necessary to process the request. Off by default: Deepgram's
+   * API reference asks callers to refer to its docs for pricing impacts before
+   * setting it. A single session can opt out with
+   * `providerOptions.mip_opt_out: true`; a session's `false` does not undo
+   * this option.
+   * @default false
+   */
+  mipOptOut?: boolean;
   /** Default Aura voice model. @default 'aura-2-thalia-en' */
   voice?: string;
   /** Chain priority. Lower values are tried first. @default 5 */
@@ -278,6 +291,7 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
   private readonly encoding: string;
   private readonly container: 'wav' | 'raw';
   private readonly sampleRate: number;
+  private readonly mipOptOut: boolean;
 
   constructor(
     private readonly config: DeepgramAuraStreamingTTSConfig,
@@ -289,6 +303,7 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
     this.encoding = mapped.encoding;
     this.container = mapped.container;
     this.sampleRate = sessionConfig.sampleRate ?? DEFAULT_SAMPLE_RATE;
+    this.mipOptOut = config.mipOptOut === true || sessionConfig.providerOptions?.mip_opt_out === true;
     this.segments = new SegmentSynthesisQueue({
       start: (segment, signal) => this.speak(segment, signal),
       // A segment arriving while the one in flight waits for a Flush slot is spoken now and completed with it.
@@ -327,6 +342,7 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
     const params = new URLSearchParams({ model: this.voice, encoding: this.encoding });
     // linear16 (raw PCM) requires an explicit sample_rate; container formats infer it.
     if (this.encoding === 'linear16') params.set('sample_rate', String(this.sampleRate));
+    if (this.mipOptOut) params.set('mip_opt_out', 'true');
     const url = `${wsBase}?${params.toString()}`;
 
     return new Promise<WebSocket>((resolve, reject) => {
