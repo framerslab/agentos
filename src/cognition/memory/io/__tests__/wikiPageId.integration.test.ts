@@ -43,6 +43,12 @@ function fakeMemory() {
     },
     forget: async () => {},
     deleteTraces: async () => ({ deleted: 0 }),
+    // No subject has a page in this stand-in: the tool reads the operator's folder alone.
+    readPageRow: async () => null,
+    listPageRows: async () => [],
+    writePageRow: async () => ({ chunkIds: [] }),
+    deletePageRows: async () => ({ pages: 0, chunks: 0 }),
+    pageExistsOutside: async () => false,
     attachWiki: (wiki: any) => {
       attached = wiki;
     },
@@ -79,8 +85,7 @@ describe('wiki page ids stay inside the memory folder', () => {
 
     const read = await tool.execute({ id: 'page' }, {} as any);
     expect(read.success).toBe(true);
-    expect(read.output?.id).toBe('page');
-    expect(read.output?.body).toContain('Inside the wiki.');
+    expect(read.output).toMatchObject({ id: 'page', body: 'Inside the wiki.\n' });
 
     for (const id of ['../outside', '../../outside', 'entities/../../outside', '..\\outside']) {
       const res = await tool.execute({ id }, {} as any);
