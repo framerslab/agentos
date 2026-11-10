@@ -59,18 +59,24 @@ A provider implements [`IRerankerProvider`](../../src/cognition/rag/reranking/IR
 new LocalCrossEncoderReranker({
   providerId: 'local',
   defaultModelId: 'cross-encoder/ms-marco-MiniLM-L-6-v2', // the default
-  batchSize: 32,                                          // the default
-  maxSequenceLength: 512,                                 // tokens, the default
+  batchSize: 32,                                          // pairs per forward pass, the default
+  maxSequenceLength: 512,                                 // tokens per pair, the default
+  modelFileName: 'model',                                 // onnx/model.onnx; unset: the model's default file
   cacheDir: '/var/cache/agentos-models',                  // Transformers.js's own cache when unset
   device: 'cpu',                                          // the default
 });
 ```
 
-- Needs Transformers.js: `@huggingface/transformers`, an optional dependency of the package, else `@xenova/transformers`. `isAvailable()` answers whether one of them imports; `rerank()` throws when neither does.
+- Needs Transformers.js: `@huggingface/transformers` 3.x, an optional dependency of the package, else `@xenova/transformers` 2.x. `isAvailable()` answers whether one of them imports; `rerank()` throws when neither does.
 - `LOCAL_RERANKER_MODELS` lists five Hugging Face model ids: `cross-encoder/ms-marco-MiniLM-L-6-v2`, `cross-encoder/ms-marco-MiniLM-L-12-v2`, `BAAI/bge-reranker-base`, `BAAI/bge-reranker-large` and `sentence-transformers/ce-ms-marco-TinyBERT-L-4`.
-- The model loads on the first `rerank()` (or `initialize(modelId)`), quantized, as a `text-classification` pipeline, and serves every later request. A request's `modelId` picks the model only on that first load; `initialize(otherModelId)` loads another. `dispose()` unloads it.
-- Each passage is scored as `"<query> [SEP] <passage>"`, truncated to `maxSequenceLength`. The score is the `LABEL_1`, `POSITIVE` or `1` label's score, else the first label's. A passage whose scoring throws scores 0 and logs a warning.
-- No `device` value selects a GPU: the pipeline is created without a device option, so Transformers.js picks the backend. `'gpu'` sets Transformers.js's ONNX WASM backend to one thread, a process-wide setting every Transformers.js pipeline in the process shares; `'cpu'` and `'auto'` change nothing.
+- The model loads on the first `rerank()` (or `initialize(modelId)`) as a tokenizer (`AutoTokenizer`) and a sequence-classification model (`AutoModelForSequenceClassification`), and serves every later request. A request's `modelId` picks the model only on that first load; `initialize(otherModelId)` loads another. `dispose()` unloads it.
+- What loads: the model's `config.json`, `tokenizer.json` and `tokenizer_config.json`, and one ONNX file from its `onnx/` folder, `onnx/<modelFileName><dtype suffix>.onnx`. With neither `modelFileName` nor `dtype` set, a model listed in `LOCAL_RERANKER_DEFAULT_WEIGHTS` loads the file named there and any other model loads `onnx/model.onnx` (full precision). The default model loads `onnx/model_quint8_avx2.onnx`, the repository's 8-bit dynamically quantized file (22 MB, against 87 MB for `onnx/model.onnx`): it ranks as the full-precision file does and scores a batch in about half the time on a 2-vCPU x86 host. On an ARM host, name `model_qint8_arm64`; for full precision, name `model`.
+- `dtype` (Transformers.js 3.x) adds a suffix to the file name: `'fp32'` (the default) none, `'q8'` `_quantized`, `'fp16'` `_fp16`, `'int8'` `_int8`, `'uint8'` `_uint8`, `'q4'` `_q4`. The `cross-encoder/*` repositories hold no `onnx/model_quantized.onnx`, so `dtype: 'q8'` fails to load there; name their quantized files with `modelFileName`.
+- Each batch of up to `batchSize` passages is tokenized as (query, passage) pairs, padded and cut to `maxSequenceLength` tokens (a long pair loses the end of its passage), and scored in one forward pass: 20 passages at the default `batchSize` are one pass.
+- Scores: a model with one logit (the `cross-encoder/*` and `BAAI/bge-reranker-*` models) scores a passage with the sigmoid of its raw logit; a model with two or more logits, with the softmax probability of its relevant class (a `LABEL_1`, `POSITIVE`, `relevant` or similar label in the model's `id2label`, else class 1). Scores sit between 0 and 1 and keep the logits' order; they compare passages within one model, not across models.
+- A failed load or forward pass throws, so `rerankChain()` and `RetrievalAugmentor` keep the order they had.
+- `diagnostics.providerMetrics` reports `batchSize`, `forwardPasses`, `modelFile` (the ONNX file loaded) and `device`.
+- No `device` value selects a GPU: the model is loaded without a device option, so Transformers.js picks the backend. `'gpu'` sets Transformers.js's ONNX WASM backend to one thread, a process-wide setting every Transformers.js model in the process shares; `'cpu'` and `'auto'` change nothing.
 - It reads no `timeoutMs` and no `params`.
 
 ### `cohere`: Cohere's rerank API
@@ -175,7 +181,7 @@ const { results } = await service.rerank(
 | Where | What happens |
 |---|---|
 | `RerankerService.rerank()`, `rerankChunks()` | Throws: no provider named and no default, a provider not registered, or the provider's own error |
-| `LocalCrossEncoderReranker` | Throws when Transformers.js cannot be loaded; a passage whose scoring throws scores 0 |
+| `LocalCrossEncoderReranker` | Throws when Transformers.js or the model cannot be loaded, and when a forward pass fails |
 | `CohereReranker` | Throws without an `apiKey`, on a status that is not 2xx and when no response arrives within the timeout |
 | `LlmJudgeReranker` | Does not throw for a model's failure: a failed scoring batch scores 0, a failed ranking call leaves the order to the scores |
 | `rerankChain()` | Skips the stage and keeps the order it was given |
