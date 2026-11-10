@@ -135,7 +135,7 @@ describe('GMI memory block on a small model', () => {
     mem = await ferryMemory();
     const { provider, received } = scriptedProvider([textReply('Pier 3.')]);
     const { gmi } = await createScriptedGmi({ provider, config: { cognitiveMemory: mem.manager.forSession(), llmProviderManager: smallWindowManager(provider, 128_000) } });
-    const reassemble = vi.spyOn(mem.manager, 'reassembleForBudget' as never);
+    const reassemble = vi.spyOn(mem.manager as unknown as { reassembleForBudget: (...args: unknown[]) => unknown }, 'reassembleForBudget');
     const { output } = await runTurn(gmi, textTurn('t1', 'Which pier does the island ferry leave from?'));
     const capture = output.memoryRecall as MemoryRecallCapture;
     expect(reassemble).not.toHaveBeenCalled();
