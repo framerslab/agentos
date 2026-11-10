@@ -48,6 +48,11 @@ import type {
   LexicalMatchKind,
 } from '../IVectorStore.js';
 import { sha256Hex } from '../../../core/utils/sha256.js';
+import {
+  LEXICAL_GROUP_INSTANT_FORM as INSTANT_FORM,
+  LEXICAL_GROUP_RANK_FORM as RANK_FORM,
+  LEXICAL_GROUP_WORDS_MAX as GROUP_WORDS_MAX,
+} from '../../../core/vector-store/lexicalGroupForms.js';
 import { withinOneEdit } from '../search/FuzzyIndex.js';
 
 // ---------------------------------------------------------------------------
@@ -189,21 +194,8 @@ function adapterExecutor(adapter: StorageAdapter): VectorSqlExecutor {
 /** How many stored words one FETCH reads from the cursor over a group's stored words. */
 const STORED_WORDS_BATCH = 1000;
 
-/** The most words a grouped search takes, as `lexicalSearch` reads at most 32 words of a query. */
-const GROUP_WORDS_MAX = 32;
-
 /** A word of a grouped search: a letter or a digit, then letters, digits and combining marks, so no part of it is a tsquery operator. */
 const GROUP_WORD = /^[\p{L}\p{N}][\p{L}\p{N}\p{M}]*$/u;
-
-/**
- * The form of an item's date: an ISO 8601 instant with its zone. Postgres reads other texts as dates too
- * (`yesterday`, `infinity`), so a date reaches a statement only in this form, and Postgres refuses one that names no
- * real day or time.
- */
-const INSTANT_FORM = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})$/;
-
-/** A rank as an earlier page answered it: decimal digits, with or without a fraction. */
-const RANK_FORM = /^\d+(?:\.\d+)?$/;
 
 /** The kinds of match by the number the grouped search's statement answers. */
 const MATCH_KINDS: Record<string, LexicalMatchKind> = { '3': 'same', '2': 'start', '1': 'edit' };
@@ -1155,7 +1147,7 @@ export class PostgresVectorStore implements IVectorStore {
       .sort((a, b) => a - b);
     if (lengths.length === 0) return { expansion: kept, overflowed };
 
-    const { clause, filterParams } = filter ? this._buildMetadataFilter(filter, 1) : { clause: '', filterParams: [] };
+    const { clause, filterParams } = filter ? this._buildMetadataFilter(filter, 1, true) : { clause: '', filterParams: [] };
     // The filter's $n become format()'s %n$L, after the table, the items and the part kinds; a % of the clause's own
     // would be read as a format specifier, so it is doubled first.
     const admitted = clause
@@ -1165,7 +1157,7 @@ export class PostgresVectorStore implements IVectorStore {
       ? 'tsv'
       : `tsv || to_tsvector('${this.textConfig}'::regconfig, COALESCE(metadata_json->>'title', ''))`;
     const passages =
-      `SELECT ${tsv} FROM %1$I WHERE metadata_json->>'sourceId' = ANY(%2$L::text[])` +
+      `SELECT ${tsv} FROM %1$I WHERE jsonb_typeof(metadata_json->'sourceId') = 'string' AND metadata_json->>'sourceId' = ANY(%2$L::text[])` +
       ` AND (%3$L::text[] IS NULL OR metadata_json->>'partKind' = ANY(%3$L::text[]))${admitted}`;
     const values: unknown[] = [`${this.prefix}${collectionName}`, search.ids, search.partKinds, ...filterParams];
     // format() takes its values as text: pg writes an array as an array literal, which %L quotes and the clause casts.
@@ -1256,7 +1248,7 @@ export class PostgresVectorStore implements IVectorStore {
     // The items that match some of the words are read on a first page alone, and only where two words or more could differ.
     const others = search.after === undefined && search.words.length > 1;
     const pageSize = others ? bind(search.pageSize, 'bigint') : '';
-    const { clause, filterParams } = filter ? this._buildMetadataFilter(filter, params.length + 1) : { clause: '', filterParams: [] };
+    const { clause, filterParams } = filter ? this._buildMetadataFilter(filter, params.length + 1, true) : { clause: '', filterParams: [] };
     params.push(...filterParams);
     const kindOf = (tsv: string): string =>
       `CASE WHEN ${tsv} @@ q.same THEN 3 WHEN ${tsv} @@ q.start THEN 2 WHEN ${tsv} @@ q.edit THEN 1 END`;
@@ -1279,7 +1271,7 @@ export class PostgresVectorStore implements IVectorStore {
                t.tsv${titled ? ', y.title' : ''}
         FROM ${table} t
         ${titled ? `CROSS JOIN LATERAL (SELECT to_tsvector(${config}, COALESCE(t.metadata_json->>'title', '')) AS title) y` : ''}
-        WHERE t.metadata_json->>'sourceId' = ANY(${ids})
+        WHERE jsonb_typeof(t.metadata_json->'sourceId') = 'string' AND t.metadata_json->>'sourceId' = ANY(${ids})
           AND (${kinds} IS NULL OR t.metadata_json->>'partKind' = ANY(${kinds}))
           AND ${titled ? '(t.tsv @@ (SELECT x.words FROM x) OR y.title @@ (SELECT x.words FROM x))' : 't.tsv @@ (SELECT x.words FROM x)'}
           ${clause ? `AND (${clause})` : ''}
@@ -1393,7 +1385,7 @@ export class PostgresVectorStore implements IVectorStore {
     const limit = bind(search.pageSize + 1, 'bigint');
     // No word ranks an item, so every item's rank is 0 and the date decides under either order.
     const after = this._groupAfterSql({ ...search, order: 'date' }, bind);
-    const { clause, filterParams } = filter ? this._buildMetadataFilter(filter, params.length + 1) : { clause: '', filterParams: [] };
+    const { clause, filterParams } = filter ? this._buildMetadataFilter(filter, params.length + 1, true) : { clause: '', filterParams: [] };
     params.push(...filterParams);
     const sql = `
       WITH p AS MATERIALIZED (
@@ -1401,7 +1393,7 @@ export class PostgresVectorStore implements IVectorStore {
                CASE WHEN jsonb_exists(${weights}, t.metadata_json->>'field') THEN t.metadata_json->>'field' ELSE ${fallback} END AS field,
                CASE WHEN jsonb_typeof(t.metadata_json->'index') = 'number' THEN (t.metadata_json->>'index')::numeric END AS idx
         FROM ${table} t
-        WHERE t.metadata_json->>'sourceId' = ANY(${ids})
+        WHERE jsonb_typeof(t.metadata_json->'sourceId') = 'string' AND t.metadata_json->>'sourceId' = ANY(${ids})
           AND (${kinds} IS NULL OR t.metadata_json->>'partKind' = ANY(${kinds}))
           ${clause ? `AND (${clause})` : ''}
       ),
@@ -1703,11 +1695,13 @@ export class PostgresVectorStore implements IVectorStore {
    * Build JSONB metadata filter SQL clauses. `$in`, `$nin`, `$all` and `$contains` also read a field that holds an
    * array, comparing its elements as JSON values, so a number matches a number and not its text: `$in` matches
    * when the array holds a value in the list, `$nin` when it holds none, `$all` when it holds every value, and
-   * `$contains` when it holds the value. A field that holds a single value is compared as text. `$textSearch`
-   * matches a string value that contains the text, in any case.
+   * `$contains` when it holds the value. A field that holds a single value is compared as text, unless `typed`.
+   * `$textSearch` matches a string value that contains the text, in any case.
    *
    * @param filter   - MetadataFilter to translate.
    * @param startIdx - Starting parameter index ($N).
+   * @param typed    - Compare a field that holds a single value as a JSON value too, under a plain value, `$eq`,
+   *   `$ne`, `$in` and `$nin`: the number 7 then matches 7 and not the text "7", as `LibraryIndex` checks a scope.
    * @returns SQL WHERE clause and parameter values.
    * @throws When a key is not letters, digits, underscore, dot or hyphen, or when a key's condition holds an
    *   operator the store does not know, `$in`, `$nin` or `$all` without an array, or no operator at all. A
@@ -1716,6 +1710,7 @@ export class PostgresVectorStore implements IVectorStore {
   private _buildMetadataFilter(
     filter: MetadataFilter,
     startIdx: number,
+    typed = false,
   ): { clause: string; filterParams: unknown[] } {
     const conditions: string[] = [];
     const params: unknown[] = [];
@@ -1725,12 +1720,19 @@ export class PostgresVectorStore implements IVectorStore {
       const key = this._field(field);
       const path = `metadata_json->>'${key}'`;
       const json = `metadata_json->'${key}'`;
+      // A single value, compared as a JSON value (`typed`) or as text.
+      const single = (operator: '=' | '!=', value: unknown): void => {
+        conditions.push(typed ? `${json} ${operator} $${idx}::jsonb` : `${path} ${operator} $${idx}`);
+        params.push(typed ? JSON.stringify(value) : String(value));
+        idx++;
+      };
+      // How `$in` and `$nin` compare a field that holds a single value with their list, and the list as they bind it.
+      const inList = (place: number): string => (typed ? `${json} = ANY($${place}::jsonb[])` : `${path} = ANY($${place}::text[])`);
+      const listed = (values: unknown[]): string[] => values.map((value) => (typed ? JSON.stringify(value) : String(value)));
 
       // Direct scalar match (implicit $eq).
       if (typeof condition !== 'object' || condition === null) {
-        conditions.push(`${path} = $${idx}`);
-        params.push(String(condition));
-        idx++;
+        single('=', condition);
         continue;
       }
 
@@ -1746,16 +1748,8 @@ export class PostgresVectorStore implements IVectorStore {
       }
       const first = conditions.length;
 
-      if (cond.$eq !== undefined) {
-        conditions.push(`${path} = $${idx}`);
-        params.push(String(cond.$eq));
-        idx++;
-      }
-      if (cond.$ne !== undefined) {
-        conditions.push(`${path} != $${idx}`);
-        params.push(String(cond.$ne));
-        idx++;
-      }
+      if (cond.$eq !== undefined) single('=', cond.$eq);
+      if (cond.$ne !== undefined) single('!=', cond.$ne);
       if (cond.$gt !== undefined) {
         conditions.push(typeof cond.$gt === 'number' ? `(${path})::numeric > $${idx}` : `${path} > $${idx}`);
         params.push(typeof cond.$gt === 'number' ? cond.$gt : String(cond.$gt));
@@ -1777,13 +1771,13 @@ export class PostgresVectorStore implements IVectorStore {
         idx++;
       }
       if (cond.$in !== undefined && Array.isArray(cond.$in)) {
-        conditions.push(`(CASE WHEN jsonb_typeof(${json}) = 'array' THEN ${json} @> ANY($${idx + 1}::jsonb[]) ELSE ${path} = ANY($${idx}::text[]) END)`);
-        params.push(cond.$in.map(String), cond.$in.map((value) => JSON.stringify([value])));
+        conditions.push(`(CASE WHEN jsonb_typeof(${json}) = 'array' THEN ${json} @> ANY($${idx + 1}::jsonb[]) ELSE ${inList(idx)} END)`);
+        params.push(listed(cond.$in), cond.$in.map((value) => JSON.stringify([value])));
         idx += 2;
       }
       if (cond.$nin !== undefined && Array.isArray(cond.$nin)) {
-        conditions.push(`(${json} IS NOT NULL AND NOT (CASE WHEN jsonb_typeof(${json}) = 'array' THEN ${json} @> ANY($${idx + 1}::jsonb[]) ELSE ${path} = ANY($${idx}::text[]) END))`);
-        params.push(cond.$nin.map(String), cond.$nin.map((value) => JSON.stringify([value])));
+        conditions.push(`(${json} IS NOT NULL AND NOT (CASE WHEN jsonb_typeof(${json}) = 'array' THEN ${json} @> ANY($${idx + 1}::jsonb[]) ELSE ${inList(idx)} END))`);
+        params.push(listed(cond.$nin), cond.$nin.map((value) => JSON.stringify([value])));
         idx += 2;
       }
       if (cond.$all !== undefined && Array.isArray(cond.$all)) {

@@ -29,6 +29,11 @@ import type {
   RetrievedVectorDocument,
   VectorDocument,
 } from '../../core/vector-store/IVectorStore.js';
+import {
+  LEXICAL_GROUP_INSTANT_FORM as INSTANT_FORM,
+  LEXICAL_GROUP_RANK_FORM as RANK_FORM,
+  LEXICAL_GROUP_WORDS_MAX as GROUP_WORDS_MAX,
+} from '../../core/vector-store/lexicalGroupForms.js';
 import { reciprocalRankFusion } from '../memory/retrieval/hybrid/reciprocalRankFusion.js';
 import { withinOneEdit } from '../rag/search/FuzzyIndex.js';
 import { mergeMetadataFilters, scopeToMetadataFilter } from '../rag/scopeFilter.js';
@@ -376,20 +381,11 @@ function passageOf(doc: RetrievedVectorDocument, score: number): LibraryPassage 
 /** The part kinds a group may narrow to. */
 const PART_KINDS: readonly LibraryPartKind[] = ['transcript', 'summary', 'decisions', 'action_items', 'next_steps'];
 
-/** The most words a grouped search reads of its text, as the store's lexical search reads at most 32. */
-const GROUP_WORDS_MAX = 32;
-
 /** The most stored words one edit away a word is widened to, unless the search says otherwise. */
 const EXPANSION_MAX = 64;
 
 /** The fewest letters a query word and a stored word each need to match one edit apart. */
 const EDIT_MIN_LETTERS = 4;
-
-/** The form of an item's date: an ISO 8601 instant with its zone. */
-const INSTANT_FORM = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})$/;
-
-/** A rank as a page answered it: decimal digits, with or without a fraction. */
-const RANK_FORM = /^\d+(?:\.\d+)?$/;
 
 /** The words of a passage's text by the word rule, for the marks of a hit; `matchAll` reads a copy of it. */
 const PASSAGE_WORDS = new RegExp(WORD_PATTERN, 'gu');

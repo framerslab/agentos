@@ -307,8 +307,8 @@ export interface LexicalGroupSearchOptions {
    */
   oneEdit?: { minLength: number; max: number };
   /**
-   * The items to read, which the search never leaves: a passage counts only when its `sourceId` is one of them and
-   * `filter` admits it. `partKinds` keeps the passages whose `partKind` metadata key is one of these; an empty list
+   * The items to read, which the search never leaves: a passage counts only when its `sourceId` is one of them, a
+   * text and not a number of the same digits, and `filter` admits it. `partKinds` keeps the passages whose `partKind` metadata key is one of these; an empty list
    * narrows nothing. An item is listed once.
    */
   group: { items: LexicalGroupItem[]; partKinds?: string[] };
@@ -324,7 +324,11 @@ export interface LexicalGroupSearchOptions {
   pageSize: number;
   /** The last item of the page before this one; without it, the first page. */
   after?: LexicalGroupKey;
-  /** What else a passage must meet: the caller's scope. */
+  /**
+   * What else a passage must meet: the caller's scope. A plain value, `$eq`, `$ne`, `$in` and `$nin` compare a key that
+   * holds one value by its JSON type as well, so `{ tenantId: '7' }` never admits a passage whose `tenantId` is the
+   * number 7, as `LibraryIndex` checks the passages a store answers.
+   */
   filter?: MetadataFilter;
   /**
    * Checked between the store's statements: once it has aborted the store starts no further statement of the search
