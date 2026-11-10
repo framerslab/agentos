@@ -640,7 +640,7 @@ context.lineOutcomes;
 // ]
 ```
 
-`lineOutcomes` reports what became of each such line, one entry a trace, in the block's order: the retrieved traces of Relevant Memories and Recent Experiences, the graph associations that carry a trace id, then the involuntary memory. Each entry is an `AssembledLineOutcome`:
+`lineOutcomes` reports what became of each such line, one entry a trace, in the block's order: the retrieved traces of Relevant Memories and Recent Experiences, the graph associations that carry a trace id, then the involuntary memory. Each entry is an [`AssembledLineOutcome`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/types.ts):
 
 | Field | Value |
 |-------|-------|
@@ -709,10 +709,13 @@ The preamble appears when the budget has room for it and 100 more tokens. `assem
 
 Token estimation uses ~4 chars per token heuristic.
 
+### Upgrading from 0.15.122 or earlier
+
+- A memory line that does not fit whole in what is left of its section is left out and its room goes to the next line that fits; no memory line carries ` …[cut]` (the persistent-memory text keeps its own `<!-- truncated -->` marker). The rule covers a retrieved trace, a graph association and the involuntary memory, for every caller of `assembleMemoryContext()` and `assembleForPrompt()`. In 0.15.121 and 0.15.122 such a line was cut at a word boundary to fit and ended with `…[cut]`, so a block that held a cut line now holds one memory fewer, or a shorter one that fits in its place. A block whose memories all fit is unchanged. See [Overflow: whole memories only](#overflow-whole-memories-only).
+- The assembled context carries `lineOutcomes`: for each trace the block was given a line for, whether the block shows it (`included`) or not (`left_out`, with the reason `section_full` or `budget`), and the line's tokens. The field is optional on `AssembledMemoryContext`, so a memory manager that returns its own context compiles unchanged.
+
 ### Upgrading from 0.15.121 or earlier
 
-- A memory line that does not fit whole in what is left of its section is left out and its room goes to the next line that fits; no memory line carries ` …[cut]` (the persistent-memory text keeps its own `<!-- truncated -->` marker). The rule covers a retrieved trace, a graph association and the involuntary memory, for every caller of `assembleMemoryContext()` and `assembleForPrompt()`. Through 0.15.121 such a line was cut at a word boundary to fit and ended with `…[cut]`, so a block that held a cut line now holds one memory fewer, or a shorter one that fits in its place. A block whose memories all fit is unchanged. See [Overflow: whole memories only](#overflow-whole-memories-only).
-- The assembled context carries `lineOutcomes`: for each trace the block was given a line for, whether the block shows it (`included`) or not (`left_out`, with the reason `section_full` or `budget`), and the line's tokens. The field is optional on `AssembledMemoryContext`, so a memory manager that returns its own context compiles unchanged.
 - A graph association that leads to a trace the block already holds (a retrieved trace past the three that seed the graph walk, or the involuntary memory) is left out of Related Context, so the trace appears once and the next association takes its room. In 0.15.121 such a trace appeared in its own section and again, whole, in Related Context; through 0.15.120 the repeat was cut to 150 characters.
 - The second pass, which spends the budget the first pass left unspent, only adds to the block: every line the first pass rendered stays, in its section and its order. In 0.15.121 the second pass rendered a section again from the start on its larger room, and a long item the first pass skipped could be cut to fit and push out a shorter line the first pass showed (a Related Context line, or a recalled trace).
 - `MemoryAssemblerInput.graphContext`, which `assembleMemoryContext()` takes, is `(string | MemoryGraphAssociation)[]`: an entry is a plain line or `{ traceId, text }`. Through 0.15.121 it was `string[]`. Code that reads its elements as strings no longer type-checks; narrow each one first:
@@ -727,9 +730,9 @@ Token estimation uses ~4 chars per token heuristic.
 
 What callers see differently in the memory block and its formatters:
 
-- `assembleForPrompt()` renders each recalled trace whole. A trace that does not fit what is left of its section is left out (in 0.15.121 it was cut at a word boundary and ended with `…[cut]`; see [Upgrading from 0.15.121 or earlier](#upgrading-from-015121-or-earlier)), and budget a section leaves unused flows to the sections with content (see [Overflow Redistribution](#overflow-redistribution)), so a section can hold more than its share. Through 0.15.120 each trace was cut to about 300 characters (350 in the narrative style), and only Semantic Recall took budget other sections left unused.
+- `assembleForPrompt()` renders each recalled trace whole. A trace that does not fit what is left of its section is left out (in 0.15.121 and 0.15.122 it was cut at a word boundary and ended with `…[cut]`; see [Upgrading from 0.15.122 or earlier](#upgrading-from-015122-or-earlier)), and budget a section leaves unused flows to the sections with content (see [Overflow Redistribution](#overflow-redistribution)), so a section can hold more than its share. Through 0.15.120 each trace was cut to about 300 characters (350 in the narrative style), and only Semantic Recall took budget other sections left unused.
 - `formatMemoryTrace` and `formatMemoryTraces` (exported from `@framers/agentos/cognition/memory`) return the whole content of a trace when called without `maxChars`. Through 0.15.120 they cut it to about 300 characters (350 in the narrative style). A caller that needs a bound passes `formatMemoryTrace(trace, style, { maxChars })`.
-- `assembleForPrompt()` puts a graph association's whole content in Related Context, and leaves the association out when it does not fit what is left of the section (in 0.15.121 it was cut to fit). Through 0.15.120 every association was cut to 150 characters.
+- `assembleForPrompt()` puts a graph association's whole content in Related Context, and leaves the association out when it does not fit what is left of the section (in 0.15.121 and 0.15.122 it was cut to fit). Through 0.15.120 every association was cut to 150 characters.
 - The involuntary memory is chosen from the traces the turn did not retrieve: every retrieved trace is left out of its pool, including one that did not fit the block. Through 0.15.120 only the traces that made it into the block were left out.
 - A `tokenBudget` share of exactly 0 turns its section off. With the budget other sections leave unused flowing to the sections with content, a 0 share would otherwise still render its section. The default allocation has no zero share, so a host that sets none sees no change.
 - Each line carries the UTC date the trace was stored after its age, and an age from a week on reads `N days ago`. Through 0.15.120 a line carried no date and an age from a week on read `Nw ago`. Ages of a day or more count UTC calendar days between the stored date and the turn's date, so the age and the date agree: a trace stored at 23:00 UTC on 2026-10-12 reads `27 days ago, 2026-10-12` at 00:30 UTC on 2026-11-08, one more than the whole 24-hour periods between them.
