@@ -662,10 +662,11 @@ describe.skipIf(!URL)('LibraryIndex.searchGroups over PostgresVectorStore on Pos
     // (https://www.postgresql.org/docs/16/datatype-numeric.html); one more of either overflows it.
     const tooBig = ['1' + '0'.repeat(131072), '1.' + '0'.repeat(16384)];
     const atLimit = ['9'.repeat(131072), '0'.repeat(1000) + '1', '0.' + '0'.repeat(16382) + '1'];
-    for (const [order, query] of [
+    const orders: Array<[string, Parameters<typeof run>[0]]> = [
       ['rank', { text: 'budget', groups: [sessions], pageSize: 1 }],
-      ['date', { text: 'budget', groups: [sessions], order: 'date' as const, pageSize: 1 }],
-    ] as const) {
+      ['date', { text: 'budget', groups: [sessions], order: 'date', pageSize: 1 }],
+    ];
+    for (const [order, query] of orders) {
       const carried = await firstOf(query);
       const key = carried.key as Array<string | null>;
       const withRank = (rank: string): Array<string | null> => (key.length === 3 ? [key[0], rank, key[2]] : [rank, key[1]]);
