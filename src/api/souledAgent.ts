@@ -217,8 +217,9 @@ export type SouledAgent = Agent & { memory?: Memory };
  *
  * `close()` first closes the agent (with `runtime: 'gmi'` that stops its session turns), then waits, within one
  * deadline (see {@link SouledAgentOptions.pendingWritesTimeoutMs}), for the turns still running (a `generate()`, a
- * `stream()`, a session's `send()` or `stream()`, on either runtime; a stream nobody reads keeps the wait until the
- * deadline) and for the memory writes of its turns, then compiles the wiki, then closes the store. A turn or a write
+ * `stream()`, a session's `send()` or `stream()`, on either runtime; a stream whose signal aborted before anything was
+ * read from it is not waited for, and on the default runtime a stream nobody reads and nobody aborts keeps the wait
+ * until the deadline) and for the memory writes of its turns, then compiles the wiki, then closes the store. A turn or a write
  * still pending when the deadline passes is left out of the compile, and a write that reaches the store after it is
  * closed is not stored.
  *
@@ -273,9 +274,46 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     void work.then(settle, settle);
     return work;
   };
-  /** A stream is settled once its usage is known, which is after its observe hook has run. */
-  const awaitStreamOnClose = (result: StreamTextResult): StreamTextResult => {
-    awaitedOnClose(result.usage.then(() => undefined, () => undefined));
+  /**
+   * A stream is settled once its usage is known, which is after its observe hook has run. On the default runtime a
+   * stream runs only once a consumer reads it, so one whose `signal` aborts before anything was read from it would
+   * never settle: its entry is released on that abort instead. An abort after the first read ends the stream on either
+   * runtime, which settles its usage.
+   */
+  const awaitStreamOnClose = (result: StreamTextResult, signal: AbortSignal | undefined): StreamTextResult => {
+    const settled = result.usage.then(() => undefined, () => undefined);
+    if (!signal) {
+      awaitedOnClose(settled);
+      return result;
+    }
+    let read = false;
+    const abortedUnread = new Promise<void>((resolve) => {
+      const onAbort = () => {
+        if (!read) resolve();
+      };
+      if (signal.aborted) {
+        onAbort();
+      } else {
+        signal.addEventListener('abort', onAbort, { once: true });
+        void settled.then(() => signal.removeEventListener('abort', onAbort));
+      }
+    });
+    awaitedOnClose(Promise.race([settled, abortedUnread]));
+    const onRead = <T>(iterable: AsyncIterable<T>): AsyncIterable<T> => ({
+      [Symbol.asyncIterator](): AsyncIterator<T> {
+        const inner = iterable[Symbol.asyncIterator]();
+        return {
+          next: (...args: [] | [undefined]) => {
+            read = true;
+            return inner.next(...args);
+          },
+          ...(inner.return ? { return: inner.return.bind(inner) } : {}),
+          ...(inner.throw ? { throw: inner.throw.bind(inner) } : {}),
+        };
+      },
+    });
+    result.textStream = onRead(result.textStream);
+    result.fullStream = onRead(result.fullStream);
     return result;
   };
 
@@ -360,7 +398,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   const generateTurn = built.generate.bind(built);
   built.generate = (prompt, extra) => awaitedOnClose(generateTurn(prompt, extra));
   const streamTurn = built.stream.bind(built);
-  built.stream = (prompt, extra) => awaitStreamOnClose(streamTurn(prompt, extra));
+  built.stream = (prompt, extra) => awaitStreamOnClose(streamTurn(prompt, extra), extra?.abortSignal);
   const openSession = built.session.bind(built);
   const trackedSessions = new WeakSet<AgentSession>();
   built.session = (id, sessionOptions) => {
@@ -371,7 +409,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       const send = session.send.bind(session) as (...args: unknown[]) => Promise<unknown>;
       session.send = ((...args: unknown[]) => awaitedOnClose(send(...args))) as AgentSession['send'];
       const streamSession = session.stream.bind(session);
-      session.stream = (input, streamOpts) => awaitStreamOnClose(streamSession(input, streamOpts));
+      session.stream = (input, streamOpts) => awaitStreamOnClose(streamSession(input, streamOpts), streamOpts?.abortSignal);
     }
     return session;
   };

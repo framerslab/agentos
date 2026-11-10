@@ -2,8 +2,9 @@
  * souledAgent() memory end to end over the real agent, GMI, generateText, provider manager, Memory store and wiki;
  * only the OpenAI provider class is stubbed (helpers/stubProviders.ts), at its module boundary.
  *
- * - A page the wiki compiler creates takes its summary from its page id, never from conversation text, so what a
- *   user says never becomes a standing line of the memory index and of the system prompt.
+ * - A page the wiki compiler creates takes its summary from its page id, never copied from a trace, so no sentence a
+ *   user says becomes a standing line of the memory index and of the system prompt.
+ * - A stream aborted before anything was read from it is not waited for on close().
  * - close() lets the agent's own close finish, then waits, within one deadline, for the turns still running and for the
  *   turns' memory writes before it compiles.
  * - The compile's model calls are held to the agent's spend budget and written to its usage ledger.

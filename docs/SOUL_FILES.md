@@ -86,12 +86,15 @@ the block with a label of its own. The block keeps to the turn's memory token bu
 whole lines first; when even the first line's label is larger than the budget, the
 line is the trace's text alone.
 
-A page the compiler creates gets a summary named from its page id alone, never from
-the conversation folded into it: `concepts/notes` is `Notes compiled from
-conversations`, and `entities/johnny` is `Notes on johnny compiled from
-conversations`. That summary is the page's line in `index.md`, and `index.md` joins
-the system prompt of every agent built from the soul, so what someone says in a
-conversation never becomes a standing line of that prompt. A page that has a summary
+A page the compiler creates gets a summary named from its page id, never copied from
+a trace: `concepts/notes` is `Notes compiled from conversations`, and
+`entities/johnny` is `Notes on johnny compiled from conversations`. That summary is
+the page's line in `index.md`, and `index.md` joins the system prompt of every agent
+built from the soul, so no sentence someone says in a conversation becomes a standing
+line of that prompt. A page's id can still carry a name taken from the conversation:
+the default clusterer names an entity page after the entity it found (`entities/johnny`),
+and a custom clusterer may derive an id from a trace, so such a name stands in the
+index, and in the prompt, as a page id. A page that has a summary
 keeps it, whoever wrote it, and a compile rewrites no existing summary. An
 `index.md` written by an earlier version may still carry a summary taken from the
 first message folded into a page: open the page's file (`memory/concepts/notes.md`
@@ -109,8 +112,10 @@ never waits for its memory writes; only `close()` does. When the wait ends with 
 or writes still pending, the compile takes what is stored and one `console.warn`
 line gives the number still pending; a turn or a write that ends after that is not
 folded into the wiki, and a write that reaches the store once it is closed is not
-stored. A stream nobody reads keeps the wait until the deadline, so read or abort
-each stream before `close()`.
+stored. A stream whose `abortSignal` aborts before anything was read from it is not
+waited for; on the default runtime a stream runs only once it is read, so one nobody
+reads and nobody aborts keeps the wait until the deadline: read or abort each stream
+before `close()`.
 The compile's model calls go on the agent's route with its fallback settings (`fallbackProviders`,
 `onFallback`, `router`, `policyTier`), carry the agent's completion cap (`maxTokens`,
 or `controls.maxTotalTokens`; the budget's check estimates a call without one at 4,096
