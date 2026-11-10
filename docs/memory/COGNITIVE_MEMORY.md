@@ -599,7 +599,7 @@ A share is the least a section with content gets, not a cap (see [Overflow Redis
 await memory.initialize({ ...deps, tokenBudget: { recentEpisodic: 0 } });
 ```
 
-A persona sets the same shares in `cognitiveMemoryConfig.tokenBudget`. [`createAgentCognitiveMemory`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/agentCognitiveMemory.ts) passes the shares of the persona it is given to the manager it builds as `tokenBudget`, and the persona's `encoding`, `decay`, `workingMemoryCapacity`, `observer`, `reflector`, `graph` and `infiniteContext` under the same names. A host that builds its manager from a persona itself, in `gmiManagerConfig.cognitiveMemoryFactory`, passes `persona.cognitiveMemoryConfig?.tokenBudget` the same way. `agent({ runtime: 'gmi' })` and `gmi()` build their persona from their options, which set no `cognitiveMemoryConfig`, so their memory runs on the default shares.
+A persona sets the same shares in `cognitiveMemoryConfig.tokenBudget`. [`createAgentCognitiveMemory`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/agentCognitiveMemory.ts) passes the shares of the persona it is given to the manager it builds as `tokenBudget`, and the persona's `encoding`, `decay`, `workingMemoryCapacity`, `observer`, `reflector`, `graph` and `infiniteContext` under the same names. A host that builds its manager from a persona itself, in `gmiManagerConfig.cognitiveMemoryFactory`, passes `persona.cognitiveMemoryConfig?.tokenBudget` the same way. `agent({ runtime: 'gmi' })` and `gmi()` build their persona from their options, which set only `cognitiveMemoryConfig.recall` (from `memory.recall`) and no shares, so their memory runs on the default shares.
 
 ```typescript
 const persona: IPersonaDefinition = {
