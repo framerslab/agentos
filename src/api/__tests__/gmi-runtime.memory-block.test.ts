@@ -45,6 +45,8 @@ const assemblies = vi.hoisted(
       includedMemoryIds: string[];
       /** The content of each trace the assembler was given a line for (retrieved, or led to by an association), by id. */
       contents: Map<string, string>;
+      /** The ids of the retrieved traces, in the order recall ranked them. */
+      rank: string[];
     }[],
 );
 vi.mock('../../cognition/memory/core/prompt/MemoryPromptAssembler', async (importOriginal) => {
@@ -67,6 +69,7 @@ vi.mock('../../cognition/memory/core/prompt/MemoryPromptAssembler', async (impor
         lineOutcomes: result.lineOutcomes ?? [],
         includedMemoryIds: result.includedMemoryIds,
         contents,
+        rank: (input.retrievedTraces ?? []).map((trace) => trace.id),
       });
       return result;
     },
@@ -274,6 +277,66 @@ describe("agent({ runtime: 'gmi' }) memory block in the model request", () => {
       const includedEpisodic = lineOutcomes.filter((line) => line.outcome === 'included' && line.section === 'recentEpisodic');
       expect(includedEpisodic, JSON.stringify(lineOutcomes)).toHaveLength(SHORT_STATEMENTS.length);
       for (const line of includedEpisodic) expect(line).not.toHaveProperty('reason');
+    } finally {
+      await a.close();
+    }
+  });
+
+  it('a statement recall ranks first but that does not fit whole is passed over, and the statements ranked below it take its room, whole', async () => {
+    // The question repeats the long statement's sentence, so recall ranks the long statement above the two short ones,
+    // which share only a few of its words. Forty such sentences are more than the 1600-token block holds.
+    const LONG_START = 'Inventory line 1 of the camping trip:';
+    const SENTENCE =
+      'of the camping trip: the stove parcel waits in a locker at the downtown parcel station, ' +
+      'with the receipt, the trip checklist and a spare fuel canister.';
+    const LONG_STATEMENT = Array.from({ length: 40 }, (_, i) => `Inventory line ${i + 1} ${SENTENCE}`).join(' ');
+    const SHORT_STATEMENTS = ['The parcel locker for the camping stove is number 14.', 'The code of the camping stove parcel locker is 5832.'];
+    expect(LONG_STATEMENT.length).toBeGreaterThan(1600 * 4);
+    const k = key(); const emb = key();
+    const s = script('openai', k, { replies: [reply.text('Noted.'), reply.text('Okay.'), reply.text('Sure.'), reply.text('Locker 14.')] });
+    script('openai', emb, { replies: [] });
+    vi.stubEnv('OPENAI_API_KEY', emb);
+    const a = withMemory(k);
+    try {
+      const session = a.session('s');
+      await session.send(LONG_STATEMENT);
+      for (const statement of SHORT_STATEMENTS) await session.send(statement);
+      session.clear();
+      assemblies.length = 0;
+      await session.send(`Inventory line ${SENTENCE} Which locker, and what is its code?`);
+
+      const block = memoryBlockOf(s, 3);
+      expect(assemblies.length, 'assemblies on the last turn').toBeGreaterThan(0);
+      const { block: assembled, lineOutcomes, contents, rank } = assemblies[assemblies.length - 1];
+      expect(block.startsWith(assembled.trimEnd()), "the request's block is the assembled one").toBe(true);
+
+      // The fixture: recall returned the three statements, the long one ranked above both short ones.
+      const idOf = (text: string) => {
+        const ids = [...contents.entries()].filter(([, content]) => content.includes(text)).map(([id]) => id);
+        expect(ids, `traces holding ${JSON.stringify(text.slice(0, 40))}`).toHaveLength(1);
+        return ids[0];
+      };
+      const longId = idOf(LONG_START);
+      const shortIds = SHORT_STATEMENTS.map(idOf);
+      const where = `rank ${JSON.stringify(rank)}; long ${longId}; short ${JSON.stringify(shortIds)}\noutcomes ${JSON.stringify(lineOutcomes)}\nrequest block:\n${block}`;
+      expect(rank.indexOf(longId), where).toBeGreaterThanOrEqual(0);
+      for (const id of shortIds) expect(rank.indexOf(id), where).toBeGreaterThan(rank.indexOf(longId));
+
+      // Recent Experiences reports its lines in rank order: the long statement left out for want of room, and both short
+      // statements after it included, whole and once in the request's block. Nothing in the request is cut.
+      const episodic = lineOutcomes.filter((line) => line.section === 'recentEpisodic');
+      const longAt = episodic.findIndex((line) => line.id === longId);
+      expect(episodic[longAt], where).toMatchObject({ outcome: 'left_out', reason: 'section_full' });
+      expect(episodic[longAt].tokens, where).toBeGreaterThan(1600);
+      for (const [index, id] of shortIds.entries()) {
+        const at = episodic.findIndex((line) => line.id === id);
+        expect(at, where).toBeGreaterThan(longAt);
+        expect(episodic[at], where).toMatchObject({ outcome: 'included' });
+        expect(sectionLines(block, EPISODIC_HEADER).filter((line) => line.includes(SHORT_STATEMENTS[index])), where).toHaveLength(1);
+      }
+      expect(block, where).not.toContain(MEMORY_CUT_MARKER);
+      expect(requestTextOf(s, 3), where).not.toContain(LONG_START);
+      expect(tokensOf(block)).toBeLessThanOrEqual(1600);
     } finally {
       await a.close();
     }
