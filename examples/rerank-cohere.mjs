@@ -2,7 +2,8 @@
 // Example: reranking with Cohere's rerank API (CohereReranker, provider id 'cohere').
 //
 // Each rerank() is one POST to https://api.cohere.ai/v1/rerank (or the baseUrl you set) that
-// carries the query and the full text of every document. Cohere bills the request.
+// carries the query and the full text of every document. Cohere bills it, and the response
+// reports its billed search units.
 // Docs: docs/text/RERANKING.md.
 //
 // This script demonstrates:

@@ -61,7 +61,8 @@ export type CohereRerankerModel = (typeof COHERE_RERANKER_MODELS)[number];
  *
  * Cloud-based cross-encoder reranking using Cohere's Rerank models. Each `rerank()` is one
  * POST to `${baseUrl}/v1/rerank` carrying the query and the full text of every document;
- * the request's `params` are merged into its body. Cohere bills the request.
+ * the request's `params` are merged into its body. Cohere bills it; the diagnostics carry
+ * the billed search units the response reports (`tokensUsed`).
  *
  * @example
  * ```typescript
