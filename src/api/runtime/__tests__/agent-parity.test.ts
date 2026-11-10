@@ -216,7 +216,8 @@ describe('schema validation retries', () => {
     expect(repairOptions.tools).toBeUndefined();
     expect(repairOptions.toolChoice).toBeUndefined();
     expect(observe.mock.calls).toEqual([
-      ['user', 'Write records.'], ['assistant', '{"count":2}'],
+      ['user', 'Write records.', expect.objectContaining({ sessionId: expect.any(String) })],
+      ['assistant', '{"count":2}', expect.objectContaining({ sessionId: expect.any(String) })],
     ]);
   });
 
@@ -243,7 +244,8 @@ describe('schema validation retries', () => {
       : await subject.session().send('Count records.', { responseSchema: schema, maxValidationRetries: 1 });
     expect(result.text).toBe('{"count":2}');
     expect(observe.mock.calls).toEqual([
-      ['user', 'Count records.'], ['assistant', '{"count":2}'],
+      ['user', 'Count records.', expect.objectContaining({ sessionId: expect.any(String) })],
+      ['assistant', '{"count":2}', expect.objectContaining({ sessionId: expect.any(String) })],
     ]);
     expect(getContext).toHaveBeenCalledTimes(2);
     expect(onBeforeGeneration).toHaveBeenCalledTimes(2);

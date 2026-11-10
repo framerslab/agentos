@@ -13,6 +13,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { applyMemoryProvider, MEMORY_TIMEOUT_MS } from '../memoryProviderHooks';
 import type { AgentMemoryProvider } from '../../agent';
 
+const CONTEXT = { sessionId: 's1', userId: 's1', subject: { kind: 'session', id: 's1' }, call: 'session' } as const;
+
 function createMockProvider(
   overrides: Partial<AgentMemoryProvider> = {},
 ): AgentMemoryProvider {
@@ -26,20 +28,20 @@ function createMockProvider(
 describe('applyMemoryProvider', () => {
   it('returns opts unchanged when provider is undefined', () => {
     const baseOpts = { provider: 'openai', model: 'gpt-4o' };
-    const result = applyMemoryProvider(baseOpts as any, undefined, 'user text');
+    const result = applyMemoryProvider(baseOpts as any, undefined, { userText: 'user text', context: CONTEXT });
     expect(result).toBe(baseOpts);
   });
 
   it('returns opts unchanged when provider has neither getContext nor observe', () => {
     const baseOpts = { provider: 'openai', model: 'gpt-4o' };
-    const result = applyMemoryProvider(baseOpts as any, {}, 'user text');
+    const result = applyMemoryProvider(baseOpts as any, {}, { userText: 'user text', context: CONTEXT });
     expect(result).toBe(baseOpts);
   });
 
   it('wraps onBeforeGeneration when getContext is defined', async () => {
     const provider = createMockProvider();
     const baseOpts = { provider: 'openai', model: 'gpt-4o' };
-    const result = applyMemoryProvider(baseOpts as any, provider, 'hello');
+    const result = applyMemoryProvider(baseOpts as any, provider, { userText: 'hello', context: CONTEXT });
 
     expect(result.onBeforeGeneration).toBeDefined();
     const ctx = { messages: [{ role: 'user', content: 'hello' }] };
@@ -47,7 +49,7 @@ describe('applyMemoryProvider', () => {
 
     expect(provider.getContext).toHaveBeenCalledWith(
       'hello',
-      expect.objectContaining({ tokenBudget: expect.any(Number) }),
+      expect.objectContaining({ tokenBudget: expect.any(Number), context: CONTEXT }),
     );
     expect((next as any).messages[0]).toEqual({
       role: 'system',
@@ -58,7 +60,7 @@ describe('applyMemoryProvider', () => {
   it('inserts memory context AFTER a leading system message so cached prefixes stay stable', async () => {
     const provider = createMockProvider();
     const baseOpts = { provider: 'anthropic', model: 'claude-sonnet-4-6' };
-    const result = applyMemoryProvider(baseOpts as any, provider, 'hello');
+    const result = applyMemoryProvider(baseOpts as any, provider, { userText: 'hello', context: CONTEXT });
 
     // The caller's system content carries a cache breakpoint on its stable
     // prefix. Recall text must land AFTER it — a prepend at index 0 rewrites
@@ -87,7 +89,7 @@ describe('applyMemoryProvider', () => {
   it('inserts memory context after ALL consecutive leading system messages', async () => {
     const provider = createMockProvider();
     const baseOpts = { provider: 'anthropic', model: 'claude-sonnet-4-6' };
-    const result = applyMemoryProvider(baseOpts as any, provider, 'hello');
+    const result = applyMemoryProvider(baseOpts as any, provider, { userText: 'hello', context: CONTEXT });
 
     const ctx = {
       messages: [
@@ -113,7 +115,7 @@ describe('applyMemoryProvider', () => {
       getContext: vi.fn().mockResolvedValue(null),
     });
     const baseOpts = { provider: 'openai', model: 'gpt-4o' };
-    const result = applyMemoryProvider(baseOpts as any, provider, 'hello');
+    const result = applyMemoryProvider(baseOpts as any, provider, { userText: 'hello', context: CONTEXT });
 
     const ctx = { messages: [{ role: 'user', content: 'hello' }] };
     const next = await result.onBeforeGeneration!(ctx as any);
@@ -127,7 +129,7 @@ describe('applyMemoryProvider', () => {
       getContext: vi.fn().mockResolvedValue({ contextText: '' }),
     });
     const baseOpts = { provider: 'openai', model: 'gpt-4o' };
-    const result = applyMemoryProvider(baseOpts as any, provider, 'hello');
+    const result = applyMemoryProvider(baseOpts as any, provider, { userText: 'hello', context: CONTEXT });
 
     const ctx = { messages: [{ role: 'user', content: 'hello' }] };
     const next = await result.onBeforeGeneration!(ctx as any);
@@ -142,7 +144,7 @@ describe('applyMemoryProvider', () => {
         getContext: vi.fn().mockImplementation(() => new Promise(() => {})),
       });
       const baseOpts = { provider: 'openai', model: 'gpt-4o' };
-      const result = applyMemoryProvider(baseOpts as any, slowProvider, 'hello');
+      const result = applyMemoryProvider(baseOpts as any, slowProvider, { userText: 'hello', context: CONTEXT });
       const ctx = { messages: [{ role: 'user', content: 'hello' }] };
 
       const next = result.onBeforeGeneration!(ctx as any);
@@ -158,7 +160,7 @@ describe('applyMemoryProvider', () => {
   it('wraps onAfterGeneration when observe is defined and fires both observes', async () => {
     const provider = createMockProvider();
     const baseOpts = { provider: 'openai', model: 'gpt-4o' };
-    const result = applyMemoryProvider(baseOpts as any, provider, 'hello');
+    const result = applyMemoryProvider(baseOpts as any, provider, { userText: 'hello', context: CONTEXT });
 
     expect(result.onAfterGeneration).toBeDefined();
     await result.onAfterGeneration!({
@@ -168,8 +170,8 @@ describe('applyMemoryProvider', () => {
 
     // Fire-and-forget: wait a tick for the async void promises
     await new Promise((resolve) => setImmediate(resolve));
-    expect(provider.observe).toHaveBeenCalledWith('user', 'hello');
-    expect(provider.observe).toHaveBeenCalledWith('assistant', 'world');
+    expect(provider.observe).toHaveBeenCalledWith('user', 'hello', CONTEXT);
+    expect(provider.observe).toHaveBeenCalledWith('assistant', 'world', CONTEXT);
   });
 
   it('does not reject onAfterGeneration when observe rejects', async () => {
@@ -177,7 +179,7 @@ describe('applyMemoryProvider', () => {
       observe: vi.fn().mockRejectedValue(new Error('observe failed')),
     });
     const baseOpts = { provider: 'openai', model: 'gpt-4o' };
-    const result = applyMemoryProvider(baseOpts as any, provider, 'hello');
+    const result = applyMemoryProvider(baseOpts as any, provider, { userText: 'hello', context: CONTEXT });
 
     await expect(
       result.onAfterGeneration!({
@@ -198,7 +200,7 @@ describe('applyMemoryProvider', () => {
       model: 'gpt-4o',
       onBeforeGeneration: userHook,
     };
-    const result = applyMemoryProvider(baseOpts as any, provider, 'hello');
+    const result = applyMemoryProvider(baseOpts as any, provider, { userText: 'hello', context: CONTEXT });
 
     const ctx = { messages: [{ role: 'user', content: 'hello' }] };
     const next = await result.onBeforeGeneration!(ctx as any);
@@ -222,7 +224,7 @@ describe('applyMemoryProvider', () => {
       model: 'gpt-4o',
       onAfterGeneration: userHook,
     };
-    const result = applyMemoryProvider(baseOpts as any, provider, 'hello');
+    const result = applyMemoryProvider(baseOpts as any, provider, { userText: 'hello', context: CONTEXT });
 
     const final = await result.onAfterGeneration!({
       text: 'world',

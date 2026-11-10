@@ -144,8 +144,8 @@ describe('agent() PromptEngine/Memory/Skills integration', () => {
 
       await session.send('hello');
 
-      expect(memory.observe).toHaveBeenCalledWith('user', 'hello');
-      expect(memory.observe).toHaveBeenCalledWith('assistant', 'agent response');
+      expect(memory.observe).toHaveBeenCalledWith('user', 'hello', expect.objectContaining({ sessionId: expect.any(String) }));
+      expect(memory.observe).toHaveBeenCalledWith('assistant', 'agent response', expect.objectContaining({ sessionId: expect.any(String) }));
     });
 
     it('prepends memory context to system prompt', async () => {
@@ -208,8 +208,8 @@ describe('agent() PromptEngine/Memory/Skills integration', () => {
       await a.generate('hello from direct');
       await new Promise((resolve) => setImmediate(resolve));
 
-      expect(memory.observe).toHaveBeenCalledWith('user', 'hello from direct');
-      expect(memory.observe).toHaveBeenCalledWith('assistant', 'agent response');
+      expect(memory.observe).toHaveBeenCalledWith('user', 'hello from direct', expect.objectContaining({ sessionId: expect.any(String) }));
+      expect(memory.observe).toHaveBeenCalledWith('assistant', 'agent response', expect.objectContaining({ sessionId: expect.any(String) }));
     });
 
     it('prepends memory context to direct agent.generate() system prompt (new in 0.2.0)', async () => {
@@ -256,8 +256,8 @@ describe('agent() PromptEngine/Memory/Skills integration', () => {
       await streamResult.text;
       await new Promise((resolve) => setImmediate(resolve));
 
-      expect(memory.observe).toHaveBeenCalledWith('user', 'hello from stream');
-      expect(memory.observe).toHaveBeenCalledWith('assistant', 'streamed');
+      expect(memory.observe).toHaveBeenCalledWith('user', 'hello from stream', expect.objectContaining({ sessionId: expect.any(String) }));
+      expect(memory.observe).toHaveBeenCalledWith('assistant', 'streamed', expect.objectContaining({ sessionId: expect.any(String) }));
     });
   });
 
@@ -283,7 +283,7 @@ describe('agent() PromptEngine/Memory/Skills integration', () => {
       await session.send('hello');
 
       expect(memory.getContext).toHaveBeenCalled();
-      expect(memory.observe).toHaveBeenCalledWith('user', 'hello');
+      expect(memory.observe).toHaveBeenCalledWith('user', 'hello', expect.objectContaining({ sessionId: expect.any(String) }));
       // System prompt should contain both skill content and memory
       const callArgs = mockGenerateCompletion.mock.calls[0];
       const messages = callArgs[1];
