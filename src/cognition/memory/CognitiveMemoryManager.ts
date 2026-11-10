@@ -38,6 +38,12 @@ import {
 } from './core/encoding/ContentFeatureDetector.js';
 import { computeCurrentStrength } from './core/decay/DecayModel.js';
 import { MemoryStore } from './retrieval/store/MemoryStore.js';
+import {
+  MEMORY_RECALL_CAPTURE_VERSION,
+  candidatesFrom,
+  rerankerRecordOf,
+  type MemoryRecallReranker,
+} from './retrieval/recall/capture.js';
 import { CognitiveWorkingMemory } from './core/working/CognitiveWorkingMemory.js';
 import {
   assembleMemoryContext,
@@ -965,7 +971,13 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     // existing cognitive composite. Weight: 0.7 cognitive + 0.3 neural reranker.
     // This preserves decay, mood congruence, and graph activation signals
     // while boosting semantically relevant results the bi-encoder missed.
+    // What the turn's recall capture says of the rerank: absent with no reranker.
+    let rerankerRecord: MemoryRecallReranker | undefined;
+    if (this.rerankerService && scored.length === 0) {
+      rerankerRecord = { provider: 'none', candidates: 0, ms: 0 };
+    }
     if (this.rerankerService && scored.length > 0) {
+      const rerankStartedAt = performance.now();
       try {
         const rerankerOutput = await this.rerankerService.rerank({
           query,
@@ -988,8 +1000,15 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
         }
 
         scored.sort((a, b) => b.retrievalScore - a.retrievalScore);
+        rerankerRecord = rerankerRecordOf(
+          rerankerOutput.diagnostics?.providerId,
+          rerankerOutput.diagnostics?.modelId,
+          scored.length,
+          performance.now() - rerankStartedAt,
+        );
       } catch {
         // Reranking is non-critical — use cognitive scores as-is
+        rerankerRecord = { provider: 'none', reason: 'error', candidates: scored.length, ms: Math.round(performance.now() - rerankStartedAt) };
       }
     }
 
@@ -1013,6 +1032,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
           suppressed: 'weak_hits',
           confidence,
           escalations: [],
+          ...(rerankerRecord ? { reranker: rerankerRecord } : {}),
         },
       };
     }
@@ -1077,6 +1097,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
         confidence: resolvedPolicy ? confidence : undefined,
         escalations: resolvedPolicy ? [] : undefined,
         retrievedTypedTraces,
+        ...(rerankerRecord ? { reranker: rerankerRecord } : {}),
       },
     };
   }
@@ -1114,6 +1135,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     options: CognitiveRetrievalOptions = {}
   ): Promise<AssembledMemoryContext> {
     this.ensureInitialized();
+    const startedAt = performance.now();
 
     // The three pre-assembly stages that hit a backend — retrieval (vector
     // search + rerank), the persistent-memory read, and the prospective
@@ -1171,6 +1193,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
       persistentPromise,
       prospectivePromise,
     ]);
+    const recalledAt = performance.now();
 
     // Get working memory state (sync; after retrieval so it reflects the
     // focus/decay updates retrieval just applied — same order as before).
@@ -1222,7 +1245,34 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
       observationNotes: [], // Filled externally by the GMI turn loop
     };
 
-    return assembleMemoryContext(input);
+    const context = assembleMemoryContext(input);
+    const assembledAt = performance.now();
+    if ((this.config.recall?.capture ?? 'metadata') !== 'off') {
+      context.capture = {
+        version: MEMORY_RECALL_CAPTURE_VERSION,
+        retrieval: 'dense',
+        budget: { requested: tokenBudget, effective: tokenBudget },
+        tokensUsed: context.tokensUsed,
+        allocation: context.allocation,
+        legs: [{ leg: 'dense', ran: true, candidates: result.retrieved.length, ineligible: 0, ms: Math.round(result.diagnostics.totalTimeMs) }],
+        lexicalBackend: 'none',
+        reranker: result.diagnostics.reranker ?? { provider: 'none', reason: 'none_configured' },
+        memoryQuestionReserve: { fired: false, added: 0 },
+        candidates: candidatesFrom(
+          result.retrieved.map((trace, i) => ({ id: trace.id, ranks: { dense: i + 1 }, fusedScore: trace.retrievalScore })),
+          context.lineOutcomes ?? [],
+        ),
+        timings: {
+          legsMs: Math.round(recalledAt - startedAt),
+          fuseMs: 0,
+          dedupeMs: 0,
+          rerankMs: result.diagnostics.reranker?.ms ?? 0,
+          assembleMs: Math.round(assembledAt - recalledAt),
+          totalMs: Math.round(assembledAt - startedAt),
+        },
+      };
+    }
+    return context;
   }
 
   // =========================================================================

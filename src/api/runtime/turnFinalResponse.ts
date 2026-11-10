@@ -89,6 +89,22 @@ export function finalResponseFieldsOf(output: GMIOutput): FinalResponseOutputFie
 }
 
 /**
+ * The `FINAL_RESPONSE`'s `memoryRecall`: the output's recall capture when the stream announced it (a
+ * `METADATA_UPDATE` with `memorySources`, sent only when the memory manager's `recall.capture` is
+ * `'metadata+stream'`), and nothing otherwise, so a host that did not ask for the capture on the stream finds it on
+ * neither.
+ *
+ * @param output - The GMI's output that ends the turn.
+ * @param stream - The turn's stream, which records whether it announced the capture.
+ */
+export function memoryRecallFieldOf(
+  output: GMIOutput,
+  stream: { memorySourcesStreamed?: boolean },
+): Pick<AgentOSFinalResponseChunk, 'memoryRecall'> {
+  return stream.memorySourcesStreamed && output.memoryRecall ? { memoryRecall: output.memoryRecall } : {};
+}
+
+/**
  * Adds the reply of the output that ends a turn or a continuation to the conversation, as the assistant's message,
  * when the output has one. The calls the output lists are never added: the GMI ran them, or the tool-call gate refused
  * them, in its own tool rounds, and their results live in the GMI's history alone, so a message naming them would

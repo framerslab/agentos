@@ -70,7 +70,7 @@ import { GMIChunkTransformer } from './GMIChunkTransformer';
 import { TurnExecutionPipeline } from './TurnExecutionPipeline';
 import { gmiToolCallGateFor } from './toolCallGate';
 import { externalToolPauseCalls, streamedRequestForPause, streamsActionableToolCalls } from './externalToolPause';
-import { addReplyToConversation, finalResponseFieldsOf } from './turnFinalResponse';
+import { addReplyToConversation, finalResponseFieldsOf, memoryRecallFieldOf } from './turnFinalResponse';
 
 // Public config types extracted to types/OrchestratorConfig.ts
 export type {
@@ -224,6 +224,8 @@ interface ActiveStreamContext {
   languageNegotiation?: any; // multilingual negotiation metadata
   /** The sources the stream's turn retrieved, as the stream announced them; a continuation of the turn reads them. */
   ragSources?: import('../../cognition/rag/IRetrievalAugmentor.js').RagRetrievedChunk[];
+  /** True once the stream announced the turn's recall capture; its FINAL_RESPONSE then carries `memoryRecall`. */
+  memorySourcesStreamed?: boolean;
   // Iterator is managed within the orchestrateTurn method directly
 }
 
@@ -1137,6 +1139,7 @@ export class AgentOSOrchestrator {
         {
           // built from the output as a continuation's final response is
           ...finalResponseFieldsOf(finalGMIStateForResponse),
+          ...memoryRecallFieldOf(finalGMIStateForResponse, streamContext),
           updatedConversationContext: conversationContext
             ? conversationContext.toJSON()
             : undefined,

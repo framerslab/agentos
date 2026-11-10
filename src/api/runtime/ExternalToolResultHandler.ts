@@ -74,6 +74,8 @@ export interface ActiveStreamContext {
    * unset while it announced none. A continuation of the turn gives them to a GMI that does not hold them.
    */
   ragSources?: RagRetrievedChunk[];
+  /** True once the stream announced its turn's recall capture (`METADATA_UPDATE.updates.memorySources`). */
+  memorySourcesStreamed?: boolean;
   /**
    * The GMI's own history of the paused turn's conversation, with the pause's calls, read when the turn (or a
    * continuation) stopped for the host: the GMI's whole history while it held that conversation alone, and otherwise

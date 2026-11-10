@@ -111,6 +111,8 @@ export interface PipelineStreamContext {
    * continuation of the stream given no gate of its own is judged with it.
    */
   toolCallGate?: GuardrailToolCallGate;
+  /** True once the stream announced the turn's recall capture; its FINAL_RESPONSE then carries `memoryRecall`. */
+  memorySourcesStreamed?: boolean;
 }
 
 /**
