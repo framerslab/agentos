@@ -79,7 +79,7 @@ export function derivedSoulPersonaId(soul: Pick<LoadedSoul, 'frontmatter' | 'sou
  * The agent's stable id: with a soul, the soul's id rule (`soulAgentIdOf`); with none, a named agent's id. Undefined
  * for an agent that has neither.
  */
-export function agentStableIdOf(opts: Pick<AgentOptions, 'name'>, soul: LoadedSoul | null | undefined): string | undefined {
+export function agentStableIdOf(opts: Partial<AgentOptions>, soul: LoadedSoul | null | undefined): string | undefined {
   return soul ? soulAgentIdOf(soul.frontmatter, opts.name) : stablePersonaIdOf(opts);
 }
 
