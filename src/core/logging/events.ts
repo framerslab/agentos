@@ -90,6 +90,12 @@ export const AGENTOS_EVENTS = {
   'language.detector_unsupported': { detector: 'word' },
   // A detection provider threw; LanguageService goes on with the others.
   'language.detection_failed': { detector: 'word', type: 'word', code: 'word' },
+  // A soul given `optional: true` failed to load; the agent runs without it.
+  'soul.load_failed': { optional: { enum: ['yes'] }, type: 'word', code: 'word' },
+  // gmi() left out a front matter field that path cannot apply.
+  'soul.field_ignored': { field: { enum: ['voice', 'avatar'] } },
+  // A gmi() agent's learners stay under the slug of its name: the learning store holds learner rows under it and none under the soul's id.
+  'soul.id_fallback': { reason: { enum: ['old_slug_learner'] } },
   // Cognitive memory's recall (src/cognition/memory/retrieval/recall). No memory text, query text or id is ever a field.
   'memory.recall.leg_absent': { leg: { enum: ['dense', 'exact_words', 'recency'] }, reason: { enum: ['no_store', 'no_embedder', 'no_index', 'no_scope_filter', 'query_error', 'disabled'] } },
   'memory.recall.rerank_skipped': { provider: { enum: ['local', 'llm'] }, reason: { enum: ['loading', 'timeout', 'error', 'backoff'] } },

@@ -24,6 +24,7 @@
  */
 
 import { statSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { LocalCrossEncoderReranker, type LocalCrossEncoderConfig } from '../providers/LocalCrossEncoderReranker';
@@ -82,6 +83,18 @@ const TEXTS = [
 const ANSWER_INDEX = 13;
 const DOCUMENTS = TEXTS.map((content, i) => ({ id: i === ANSWER_INDEX ? ANSWER_ID : `t${i}`, content }));
 
+/** The texts that mention no dog, clinic or vaccine: the filler in front of the answer in the long note. */
+const OFF_TOPIC = [3, 4, 5, 7, 8, 9, 10, 11, 12, 14, 15, 16, 17, 18, 19].map((i) => TEXTS[i]);
+/** Every text but the answer: the long notes that do not answer, some about a dog or a hospital. */
+const NEAR_TOPIC = TEXTS.filter((_, i) => i !== ANSWER_INDEX);
+
+/** `texts` from index `start` on, joined by spaces and repeated as needed, cut to `length` characters. */
+function fill(texts: string[], start: number, length: number): string {
+  let text = '';
+  for (let k = 0; text.length < length; k++) text += (text ? ' ' : '') + texts[(start + k) % texts.length];
+  return text.slice(0, length);
+}
+
 describe.skipIf(!CACHE_DIR)(`LocalCrossEncoderReranker on the real ${MODEL_ID}`, () => {
   let transformersEnv: { allowRemoteModels: boolean } | undefined;
   let allowRemoteBefore = true;
@@ -99,9 +112,10 @@ describe.skipIf(!CACHE_DIR)(`LocalCrossEncoderReranker on the real ${MODEL_ID}`,
     if (transformersEnv) transformersEnv.allowRemoteModels = allowRemoteBefore;
   });
 
-  const cases: Array<{ name: string; modelFileName?: string; batchSize?: number }> = [
-    { name: 'default weights (onnx/model_quint8_avx2.onnx)' },
-    { name: 'full precision (onnx/model.onnx), batches of 8', modelFileName: 'model', batchSize: 8 },
+  const cases: Array<{ name: string; modelFileName?: string; batchSize?: number; loads: string }> = [
+    { name: 'default weights (onnx/model_quint8_avx2.onnx)', loads: 'model_quint8_avx2' },
+    { name: 'full precision (onnx/model.onnx), batches of 8', modelFileName: 'model', batchSize: 8, loads: 'model' },
+    { name: "the weights named as a path ('onnx/model_quint8_avx2.onnx')", modelFileName: 'onnx/model_quint8_avx2.onnx', loads: 'model_quint8_avx2' },
   ];
 
   for (const c of cases) {
@@ -130,13 +144,86 @@ describe.skipIf(!CACHE_DIR)(`LocalCrossEncoderReranker on the real ${MODEL_ID}`,
         expect(result.results[0].relevanceScore).toBeGreaterThan(0.5);
         expect(result.diagnostics?.providerMetrics).toMatchObject({
           forwardPasses: Math.ceil(20 / (c.batchSize ?? 32)),
-          modelFile: `onnx/${c.modelFileName ?? 'model_quint8_avx2'}.onnx`,
+          modelFile: `onnx/${c.loads}.onnx`,
         });
       } finally {
         await reranker.dispose();
       }
     });
   }
+
+  it('with intraOpNumThreads 1 and interOpNumThreads 1: onnxruntime gets both and the answer ranks first', async () => {
+    // Transformers.js creates its sessions with onnxruntime-node's InferenceSession.create; this records the options.
+    const fromTransformers = createRequire(createRequire(import.meta.url).resolve('@huggingface/transformers'));
+    const { InferenceSession } = fromTransformers('onnxruntime-node');
+    const create = InferenceSession.create;
+    const sessionOptions: unknown[] = [];
+    InferenceSession.create = function (this: unknown, ...args: unknown[]) {
+      sessionOptions.push(args[1]);
+      return create.apply(this, args);
+    };
+    const reranker = new LocalCrossEncoderReranker({
+      providerId: 'local',
+      cacheDir: CACHE_DIR,
+      intraOpNumThreads: 1,
+      interOpNumThreads: 1,
+    });
+    try {
+      const result = await reranker.rerank({ query: QUERY, documents: DOCUMENTS }, { providerId: 'local', modelId: MODEL_ID });
+
+      expect(sessionOptions).toHaveLength(1);
+      expect(sessionOptions[0]).toMatchObject({ intraOpNumThreads: 1, interOpNumThreads: 1 });
+      expectAnswerFirstWithDistinctScores(
+        result.results.map((r) => r.id),
+        result.results.map((r) => r.relevanceScore),
+      );
+    } finally {
+      InferenceSession.create = create;
+      await reranker.dispose();
+    }
+  });
+
+  it('a 1,024-character note whose answer sits past a 128-token window: low with whole notes, first with pieceMaxChars 300', async () => {
+    const answerNote = `${fill(OFF_TOPIC, 0, 1024 - TEXTS[ANSWER_INDEX].length - 1)} ${TEXTS[ANSWER_INDEX]}`;
+    expect(answerNote).toHaveLength(1024);
+    const notes = TEXTS.map((_, i) =>
+      i === ANSWER_INDEX ? { id: ANSWER_ID, content: answerNote } : { id: `n${i}`, content: fill(NEAR_TOPIC, i, 1024) },
+    );
+    for (const note of notes) expect(note.content).toHaveLength(1024);
+
+    const whole = new LocalCrossEncoderReranker({ providerId: 'local', cacheDir: CACHE_DIR, maxSequenceLength: 128 });
+    const pieces = new LocalCrossEncoderReranker({
+      providerId: 'local',
+      cacheDir: CACHE_DIR,
+      maxSequenceLength: 128,
+      pieceMaxChars: 300,
+    });
+    try {
+      // The tokenizer keeps the first 128 tokens of each pair, which end long before the answer.
+      const cut = await whole.rerank({ query: QUERY, documents: notes }, { providerId: 'local', modelId: MODEL_ID });
+      const cutAnswer = cut.results.find((r) => r.id === ANSWER_ID)!;
+      expect(cut.results[0].id).not.toBe(ANSWER_ID);
+      expect(cutAnswer.relevanceScore).toBeLessThan(0.5);
+
+      // Notes cut from the same rotation of texts can share their best piece, so scores may tie.
+      const split = await pieces.rerank({ query: QUERY, documents: notes }, { providerId: 'local', modelId: MODEL_ID });
+      expect(split.results).toHaveLength(20);
+      expect(split.results[0].id).toBe(ANSWER_ID);
+      expect(split.results[0].relevanceScore).toBeGreaterThan(0.5);
+      expect(split.results[1].relevanceScore).toBeLessThan(split.results[0].relevanceScore);
+      for (const r of split.results) {
+        expect(r.relevanceScore).toBeGreaterThan(0);
+        expect(r.relevanceScore).toBeLessThan(1);
+      }
+      expect(split.results[0].content).toBe(answerNote);
+      const metrics = split.diagnostics?.providerMetrics as { pairsScored: number; forwardPasses: number };
+      expect(metrics.pairsScored).toBeGreaterThanOrEqual(20 * Math.ceil(1024 / 300));
+      expect(metrics.forwardPasses).toBe(Math.ceil(metrics.pairsScored / 32));
+    } finally {
+      await whole.dispose();
+      await pieces.dispose();
+    }
+  });
 
   /** Asserts the answer leads and the 20 scores are distinct, in 0..1 and descending. */
   function expectAnswerFirstWithDistinctScores(ids: string[], scores: Array<number | undefined>): void {
@@ -175,6 +262,59 @@ describe.skipIf(!CACHE_DIR)(`LocalCrossEncoderReranker on the real ${MODEL_ID}`,
       expect(reranked[0].metadata?._rerankerProviderId).toBe('local');
       expect(reranked[0].metadata?._rerankerOriginalScore).toBeCloseTo(0.9 - ANSWER_INDEX * 0.01, 10);
     } finally {
+      await reranker.dispose();
+    }
+  });
+
+  it('through RerankerService.rerankChunks with intraOpNumThreads 1 and pieceMaxChars 300: the long note that answers ranks first', async () => {
+    const fromTransformers = createRequire(createRequire(import.meta.url).resolve('@huggingface/transformers'));
+    const { InferenceSession } = fromTransformers('onnxruntime-node');
+    const create = InferenceSession.create;
+    const sessionOptions: unknown[] = [];
+    InferenceSession.create = function (this: unknown, ...args: unknown[]) {
+      sessionOptions.push(args[1]);
+      return create.apply(this, args);
+    };
+
+    // The same 1,024-character notes as above: the answering sentence starts past a 128-token window.
+    const answerNote = `${fill(OFF_TOPIC, 0, 1024 - TEXTS[ANSWER_INDEX].length - 1)} ${TEXTS[ANSWER_INDEX]}`;
+    const notes = TEXTS.map((_, i) => (i === ANSWER_INDEX ? answerNote : fill(NEAR_TOPIC, i, 1024)));
+    // The vector store's order: the answering note sits 14th with a low similarity score.
+    const chunks: RagRetrievedChunk[] = notes.map((content, i) => {
+      const id = i === ANSWER_INDEX ? ANSWER_ID : `n${i}`;
+      return { id, content, originalDocumentId: id, relevanceScore: 0.9 - i * 0.01 };
+    });
+
+    const localConfig: LocalCrossEncoderConfig = {
+      providerId: 'local',
+      defaultModelId: MODEL_ID,
+      cacheDir: CACHE_DIR,
+      maxSequenceLength: 128,
+      intraOpNumThreads: 1,
+      pieceMaxChars: 300,
+    };
+    const service = new RerankerService({ config: { providers: [localConfig], defaultProviderId: 'local' } });
+    const reranker = new LocalCrossEncoderReranker(localConfig);
+    service.registerProvider(reranker);
+    try {
+      const reranked = await service.rerankChunks(QUERY, chunks);
+
+      expect(sessionOptions).toHaveLength(1);
+      expect(sessionOptions[0]).toMatchObject({ intraOpNumThreads: 1 });
+      expect(reranked).toHaveLength(20);
+      expect(new Set(reranked.map((c) => c.id)).size).toBe(20);
+      expect(reranked[0].id).toBe(ANSWER_ID);
+      expect(reranked[0].content).toBe(answerNote);
+      expect(reranked[0].relevanceScore).toBeGreaterThan(0.5);
+      expect(reranked[1].relevanceScore).toBeLessThan(reranked[0].relevanceScore!);
+      for (const c of reranked) {
+        expect(c.relevanceScore).toBeGreaterThan(0);
+        expect(c.relevanceScore).toBeLessThan(1);
+      }
+      expect(reranked[0].metadata?._rerankerProviderId).toBe('local');
+      expect(reranked[0].metadata?._rerankerOriginalScore).toBeCloseTo(0.9 - ANSWER_INDEX * 0.01, 10);
+    } finally {
+      InferenceSession.create = create;
       await reranker.dispose();
     }
   });

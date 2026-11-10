@@ -227,14 +227,16 @@ export function assertEmbeddingConfig(memory: MemoryConfig): void {
 
 /**
  * Checks `memory.store` at construction: `{ path }` with a non-blank path, or `{ adapter, brainId? }` with a storage
- * adapter and a non-blank brain id when it names one; the learning option on; and `learning.agentKey`.
+ * adapter and a non-blank brain id when it names one; the learning option on; and a key that names the brain,
+ * `learning.agentKey`, else the soul's id.
  *
  * @param store - `memory.store` as the agent's options give it.
  * @param learningOn - Whether the agent's `learning` option is on.
- * @param agentKey - `learning.agentKey`.
+ * @param agentKey - `learning.agentKey`, else the soul's id.
+ * @param hasSoul - Whether the agent has a soul: the missing-key error then tells the host to set the soul's `agentId`.
  * @throws {Error} Naming the option.
  */
-export function assertMemoryStore(store: unknown, learningOn: boolean, agentKey: string | null | undefined): void {
+export function assertMemoryStore(store: unknown, learningOn: boolean, agentKey: string | null | undefined, hasSoul = false): void {
   const isObject = !!store && typeof store === 'object';
   const hasPath = isObject && 'path' in (store as object);
   const hasAdapter = isObject && 'adapter' in (store as object);
@@ -257,7 +259,8 @@ export function assertMemoryStore(store: unknown, learningOn: boolean, agentKey:
   }
   if (typeof agentKey !== 'string' || agentKey.trim() === '') {
     throw new Error(
-      "gmi(): memory.store needs learning.agentKey, the stable id of the agent's brain and its learners; two agents on one store would otherwise be one agent to the learning layer.",
+      "gmi(): memory.store needs learning.agentKey, the stable id of the agent's brain and its learners; two agents on one store would otherwise be one agent to the learning layer." +
+        (hasSoul ? " This agent's soul has no agentId and no name: set agentId in SOUL.md's front matter, and the soul's id names the brain." : ''),
     );
   }
 }
@@ -277,7 +280,7 @@ export interface AgentMemoryBrain {
  * as strings and an access appends to the count. One that reads BIGINT as text is refused before the Brain opens.
  *
  * @param store - `memory.store`, checked by {@link assertMemoryStore}.
- * @param agentKey - `learning.agentKey`.
+ * @param agentKey - `learning.agentKey`, else the soul's id.
  * @throws {Error} Naming `memory.store`, when the store does not open or its PostgreSQL adapter reads BIGINT as text.
  */
 export async function openAgentMemoryBrain(store: NonNullable<MemoryConfig['store']>, agentKey: string): Promise<AgentMemoryBrain> {
