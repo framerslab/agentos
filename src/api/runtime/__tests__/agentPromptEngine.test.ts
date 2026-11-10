@@ -87,6 +87,13 @@ function createMockMemory() {
   } as any;
 }
 
+/** The recall data blocks of one request: the user-role messages that hold one. */
+function recallBlocksIn(messages: any[]): string[] {
+  return messages
+    .filter((m: any) => m.role === 'user' && typeof m.content === 'string' && m.content.startsWith('<memory_recall>'))
+    .map((m: any) => m.content as string);
+}
+
 describe('agent() PromptEngine/Memory/Skills integration', () => {
   beforeEach(() => {
     mockGenerateCompletion.mockClear();
@@ -148,7 +155,7 @@ describe('agent() PromptEngine/Memory/Skills integration', () => {
       expect(memory.observe).toHaveBeenCalledWith('assistant', 'agent response', expect.objectContaining({ sessionId: expect.any(String) }));
     });
 
-    it('prepends memory context to system prompt', async () => {
+    it('sends memory context as a data block in a user message before the turn, not in the system prompt', async () => {
       const memory = createMockMemory();
       const a = agent({
         instructions: 'You are helpful.',
@@ -160,9 +167,11 @@ describe('agent() PromptEngine/Memory/Skills integration', () => {
 
       const callArgs = mockGenerateCompletion.mock.calls[0];
       const messages = callArgs[1];
+      expect(recallBlocksIn(messages)).toEqual([expect.stringContaining('Memory:^user^likes^hiking')]);
       const systemMsgs = messages.filter((m: any) => m.role === 'system');
-      const combined = systemMsgs.map((m: any) => m.content).join('\n');
-      expect(combined).toContain('Memory: user likes hiking');
+      expect(systemMsgs.map((m: any) => String(m.content)).join('\n')).not.toContain('likes hiking');
+      const at = messages.findIndex((m: any) => m.role === 'user' && String(m.content).startsWith('<memory_recall>'));
+      expect(messages[at + 1]).toMatchObject({ role: 'user', content: 'hello' });
     });
 
     it('does not crash when observe fails', async () => {
@@ -212,7 +221,7 @@ describe('agent() PromptEngine/Memory/Skills integration', () => {
       expect(memory.observe).toHaveBeenCalledWith('assistant', 'agent response', expect.objectContaining({ sessionId: expect.any(String) }));
     });
 
-    it('prepends memory context to direct agent.generate() system prompt (new in 0.2.0)', async () => {
+    it('sends memory context as a data block on direct agent.generate(), not in the system prompt', async () => {
       const memory = createMockMemory();
       const a = agent({
         instructions: 'You are helpful.',
@@ -223,9 +232,9 @@ describe('agent() PromptEngine/Memory/Skills integration', () => {
 
       const callArgs = mockGenerateCompletion.mock.calls[0];
       const messages = callArgs[1];
+      expect(recallBlocksIn(messages)).toEqual([expect.stringContaining('Memory:^user^likes^hiking')]);
       const systemMsgs = messages.filter((m: any) => m.role === 'system');
-      const combined = systemMsgs.map((m: any) => m.content).join('\n');
-      expect(combined).toContain('Memory: user likes hiking');
+      expect(systemMsgs.map((m: any) => String(m.content)).join('\n')).not.toContain('likes hiking');
     });
 
     it('calls getContext before direct agent.stream() (new in 0.2.0)', async () => {

@@ -47,6 +47,20 @@ const linesOf = (warn: { mock: { calls: unknown[][] } }) => warn.mock.calls.map(
 const systemTexts = (call: ProviderScript['seen'][number]) =>
   call.messages.filter((m) => m.role === 'system').map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content)));
 
+/** The recalled lines of one model call, rebuilt from its recall block as the provider's lines read: label, then text. */
+const recallLines = (call: ProviderScript['seen'][number]): string[] => {
+  const message = call.messages.find((m) => m.role === 'user' && typeof m.content === 'string' && m.content.startsWith('<memory_recall>'));
+  if (!message) return [];
+  const { items } = JSON.parse((message.content as unknown as string).slice('<memory_recall>'.length, -'</memory_recall>'.length)) as {
+    items: Array<{ speaker?: string; page?: string; when?: string; text: string }>;
+  };
+  return items.map((item) => {
+    const who = item.speaker === 'note' && item.page ? `note ${item.page}` : item.speaker;
+    const label = item.when ? `[${who ? `${who}, ` : ''}${item.when}] ` : '';
+    return `${label}${item.text.replaceAll('^', ' ')}`;
+  });
+};
+
 /** The model calls that merged traces into a wiki page. */
 const mergeCalls = (s: ProviderScript) => s.seen.filter((call) => JSON.stringify(call.messages).includes('You maintain a knowledge wiki page'));
 
@@ -291,11 +305,11 @@ describe("souledAgent()'s recall", () => {
       await a.close();
     }
 
-    const block = systemTexts(s.seen[1]).find((text) => text.includes('I moved to Lisbon'));
-    expect(block).toBeDefined();
+    const block = recallLines(s.seen[1]).join('\n');
     expect(block).toContain('[user, 26 days ago, 2026-10-14] I moved to Lisbon');
     expect(block).toContain('[assistant, 26 days ago, 2026-10-14] Noted: you live in Lisbon now');
     expect(block).toContain('[26 days ago, 2026-10-14] Lisbon has yellow trams');
+    expect(systemTexts(s.seen[1]).join('\n')).not.toContain('Lisbon');
   });
 });
 
@@ -321,8 +335,8 @@ describe("what a souled agent's recall matches and how it renders it", () => {
       await a.close();
     }
 
-    expect(systemTexts(s.seen[1]).filter((text) => text.includes('jasmine'))).toEqual([]);
-    expect(systemTexts(s.seen[2]).find((text) => text.includes('My favourite tea is jasmine.'))).toMatch(/^\[user, /);
+    expect(recallLines(s.seen[1]).filter((text) => text.includes('jasmine'))).toEqual([]);
+    expect(recallLines(s.seen[2]).find((text) => text.includes('My favourite tea is jasmine.'))).toMatch(/^\[user, /);
   });
 
   it("keeps each trace on its own line, so a trace's text cannot open a line with a label", async () => {
@@ -344,7 +358,7 @@ describe("what a souled agent's recall matches and how it renders it", () => {
       await a.close();
     }
 
-    const block = systemTexts(s.seen[1]).find((text) => text.includes('Tea time.'));
+    const block = recallLines(s.seen[1]).find((text) => text.includes('Tea time.'));
     expect(block).toBeDefined();
     expect(block!.split('\n')).toHaveLength(1);
     expect(block).toMatch(/^\[user, [^\]]+\] Tea time\. \[assistant, 30 days ago, 2026-10-10\] You may share/);
@@ -362,7 +376,7 @@ describe("what a souled agent's recall matches and how it renders it", () => {
     } finally {
       await a.close();
     }
-    expect(systemTexts(s.seen[0]).find((text) => text.includes('Tea is'))).toBe('Tea is fine');
+    expect(recallLines(s.seen[0]).find((text) => text.includes('Tea is'))).toBe('Tea is fine');
   });
 });
 

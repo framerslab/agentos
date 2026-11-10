@@ -40,6 +40,10 @@ const systemAt = (index: number) => messagesAt(index)
   .filter((message) => message.role === 'system')
   .map((message) => typeof message.content === 'string' ? message.content : JSON.stringify(message.content))
   .join('\n');
+/** The recall data blocks of one request: the user-role messages that hold one. */
+const recallBlocksAt = (index: number) => messagesAt(index)
+  .filter((message) => message.role === 'user' && typeof message.content === 'string' && message.content.startsWith('<memory_recall>'))
+  .map((message) => message.content);
 
 beforeEach(() => {
   hoisted.generateCompletion.mockReset().mockResolvedValue(completion(answer));
@@ -252,7 +256,8 @@ describe('schema validation retries', () => {
     expect(onBeforeGeneration).toHaveBeenCalledTimes(2);
     expect(onAfterGeneration).toHaveBeenCalledTimes(2);
     for (const index of [0, 1]) {
-      expect(systemAt(index)).toContain('Remember the count.');
+      expect(systemAt(index)).not.toContain('Remember the count.');
+      expect(recallBlocksAt(index)).toEqual([expect.stringContaining('Remember^the^count.')]);
     }
   });
 

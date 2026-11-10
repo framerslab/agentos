@@ -3,7 +3,8 @@
  * Unit tests for applyMemoryProvider helper.
  *
  * Contract: the helper wraps onBeforeGeneration with one memory.getContext
- * recall for the call, inserted on every step. Chains any user-provided
+ * recall for the call, inserted on every step as a data block in a user-role
+ * message right before the turn's own user message. Chains any user-provided
  * onBeforeGeneration AFTER the memory wiring. observe is not the wrapper's:
  * agent() observes after the answered turn. Returns baseOpts unchanged when
  * the provider has no getContext.
@@ -12,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import pino from 'pino';
 
 import { applyMemoryProvider, MEMORY_TIMEOUT_MS } from '../memoryProviderHooks';
+import { renderMemoryRecallBlock } from '../memoryDataBlock';
 import type { AgentMemoryProvider } from '../../agent';
 import { resetLoggerFactory, setLogger } from '../../../core/logging/loggerFactory';
 
@@ -23,6 +25,8 @@ beforeEach(() => {
 afterEach(() => resetLoggerFactory());
 
 const CONTEXT = { sessionId: 's1', userId: 's1', subject: { kind: 'session', id: 's1' }, call: 'session' } as const;
+/** The data block the mock provider's recall is sent as. */
+const BLOCK = { role: 'user', content: renderMemoryRecallBlock([{ text: 'Memory block' }]) };
 
 function createMockProvider(
   overrides: Partial<AgentMemoryProvider> = {},
@@ -60,20 +64,17 @@ describe('applyMemoryProvider', () => {
       'hello',
       expect.objectContaining({ tokenBudget: expect.any(Number), context: CONTEXT }),
     );
-    expect((next as any).messages[0]).toEqual({
-      role: 'system',
-      content: 'Memory block',
-    });
+    expect((next as any).messages).toEqual([BLOCK, { role: 'user', content: 'hello' }]);
   });
 
-  it('inserts memory context AFTER a leading system message so cached prefixes stay stable', async () => {
+  it('inserts memory context as a user message right before the turn, leaving the system messages as they are', async () => {
     const provider = createMockProvider();
     const baseOpts = { provider: 'anthropic', model: 'claude-sonnet-4-6' };
     const result = applyMemoryProvider(baseOpts as any, provider, { userText: 'hello', context: CONTEXT });
 
     // The caller's system content carries a cache breakpoint on its stable
-    // prefix. Recall text must land AFTER it — a prepend at index 0 rewrites
-    // the provider-side cache prefix every turn (write every call, read 0).
+    // prefix. Recall text is never a system message: the prefix, the system
+    // messages and the earlier turns are sent as they were.
     const systemMsg = {
       role: 'system',
       content: [
@@ -88,14 +89,11 @@ describe('applyMemoryProvider', () => {
 
     expect((next as any).messages).toHaveLength(3);
     expect((next as any).messages[0]).toBe(systemMsg);
-    expect((next as any).messages[1]).toEqual({
-      role: 'system',
-      content: 'Memory block',
-    });
+    expect((next as any).messages[1]).toEqual(BLOCK);
     expect((next as any).messages[2]).toEqual({ role: 'user', content: 'hello' });
   });
 
-  it('inserts memory context after ALL consecutive leading system messages', async () => {
+  it('inserts memory context after the history, before the last user message, with every system message untouched', async () => {
     const provider = createMockProvider();
     const baseOpts = { provider: 'anthropic', model: 'claude-sonnet-4-6' };
     const result = applyMemoryProvider(baseOpts as any, provider, { userText: 'hello', context: CONTEXT });
@@ -104,19 +102,21 @@ describe('applyMemoryProvider', () => {
       messages: [
         { role: 'system', content: 'Primary instructions' },
         { role: 'system', content: 'Secondary instructions' },
+        { role: 'user', content: 'earlier' },
+        { role: 'assistant', content: 'earlier reply' },
         { role: 'user', content: 'hello' },
       ],
     };
     const next = await result.onBeforeGeneration!(ctx as any);
 
-    expect((next as any).messages).toHaveLength(4);
-    expect((next as any).messages[0].content).toBe('Primary instructions');
-    expect((next as any).messages[1].content).toBe('Secondary instructions');
-    expect((next as any).messages[2]).toEqual({
-      role: 'system',
-      content: 'Memory block',
-    });
-    expect((next as any).messages[3].role).toBe('user');
+    expect((next as any).messages).toEqual([
+      { role: 'system', content: 'Primary instructions' },
+      { role: 'system', content: 'Secondary instructions' },
+      { role: 'user', content: 'earlier' },
+      { role: 'assistant', content: 'earlier reply' },
+      BLOCK,
+      { role: 'user', content: 'hello' },
+    ]);
   });
 
   it('skips prepend when getContext returns null', async () => {
@@ -155,7 +155,7 @@ describe('applyMemoryProvider', () => {
 
     expect(provider.getContext).toHaveBeenCalledTimes(1);
     for (const next of [first, second]) {
-      expect(JSON.stringify((next as any).messages)).toContain('Memory block');
+      expect((next as any).messages).toEqual([BLOCK, { role: 'user', content: 'hello' }]);
     }
   });
 
@@ -208,9 +208,6 @@ describe('applyMemoryProvider', () => {
 
     expect(userHook).toHaveBeenCalled();
     expect((next as any).extraFlag).toBe(true);
-    expect((next as any).messages[0]).toEqual({
-      role: 'system',
-      content: 'Memory block',
-    });
+    expect((next as any).messages[0]).toEqual(BLOCK);
   });
 });
