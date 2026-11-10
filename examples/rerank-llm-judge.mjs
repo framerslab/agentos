@@ -14,17 +14,18 @@
 //
 // With no environment variable set, llmCallFn is a stand-in written below: it counts the
 // query's words in each passage, so the script runs with no API key and no network. Set
-// RERANK_JUDGE_PROVIDER to a provider generateText() serves (gemini, openai, anthropic, groq,
-// mistral, openrouter, ...) and that provider's key, and llmCallFn calls generateText() on the
-// provider's cheap model from PROVIDER_DEFAULTS (for gemini, gemini-2.5-flash-lite), or on
-// RERANK_JUDGE_MODEL when it is set, with no fallback to other providers.
+// RERANK_JUDGE_PROVIDER to a provider generateText() serves (openai, anthropic, gemini, ollama,
+// groq, mistral, openrouter, ...) and that provider's key, and llmCallFn calls generateText() on
+// the provider's cheap model from PROVIDER_DEFAULTS, or on RERANK_JUDGE_MODEL when it is set,
+// with no fallback to other providers.
 //
 // Usage (no API key):
 //   pnpm install && pnpm run build
 //   node examples/rerank-llm-judge.mjs
 //
-// Usage (a real model):
-//   GEMINI_API_KEY=... RERANK_JUDGE_PROVIDER=gemini node examples/rerank-llm-judge.mjs
+// Usage (a real model; any provider generateText() serves, with its key):
+//   RERANK_JUDGE_PROVIDER=openai OPENAI_API_KEY=... node examples/rerank-llm-judge.mjs
+//   RERANK_JUDGE_PROVIDER=anthropic ANTHROPIC_API_KEY=... node examples/rerank-llm-judge.mjs
 
 import { lexicalTokens } from '@framers/agentos/cognition/library';
 import { LlmJudgeReranker, RerankerService } from '@framers/agentos/cognition/rag/reranking';

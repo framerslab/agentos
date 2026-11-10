@@ -202,6 +202,6 @@ One runnable file per provider, each through `RerankerService`:
 |---|---|---|
 | [`examples/rerank-local-cross-encoder.mjs`](../../examples/rerank-local-cross-encoder.mjs) | `local` | Transformers.js; the network once, for the model's first download |
 | [`examples/rerank-cohere.mjs`](../../examples/rerank-cohere.mjs) | `cohere` | `COHERE_API_KEY` |
-| [`examples/rerank-llm-judge.mjs`](../../examples/rerank-llm-judge.mjs) | `llm-judge` | Nothing: a stand-in judge runs by default. With `RERANK_JUDGE_PROVIDER` (`gemini`, `openai`, ...) and that provider's key, it calls the provider's cheap model through `generateText` |
+| [`examples/rerank-llm-judge.mjs`](../../examples/rerank-llm-judge.mjs) | `llm-judge` | Nothing: a stand-in judge runs by default. With `RERANK_JUDGE_PROVIDER` (`openai`, `anthropic`, `gemini`, `ollama`, ...) and that provider's key, it calls the provider's cheap model through `generateText` |
 
 [`examples/query-router-host-hooks.mjs`](../../examples/query-router-host-hooks.mjs) passes a host's own rerank hook to the `QueryRouter`.

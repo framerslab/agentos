@@ -41,18 +41,21 @@ export interface RerankerServiceOptions {
  *   config: {
  *     providers: [
  *       { providerId: 'local', defaultModelId: 'cross-encoder/ms-marco-MiniLM-L-6-v2' },
- *       { providerId: 'cohere', apiKey: process.env.COHERE_API_KEY }
+ *       { providerId: 'cohere', apiKey: process.env.COHERE_API_KEY },
+ *       { providerId: 'llm-judge' }
  *     ],
  *     defaultProviderId: 'local'
  *   }
  * });
  *
- * // Register provider implementations
+ * // Register provider implementations: the config entries create none.
  * service.registerProvider(new LocalCrossEncoderReranker(...));
  * service.registerProvider(new CohereReranker(...));
+ * service.registerProvider(new LlmJudgeReranker({ llmCallFn: myLlmCall }));
  *
- * // Rerank chunks
- * const reranked = await service.rerankChunks(query, chunks, { providerId: 'local' });
+ * // Rerank chunks with the default provider, or name one per request
+ * const reranked = await service.rerankChunks(query, chunks);
+ * const judged = await service.rerankChunks(query, chunks, { providerId: 'llm-judge', topN: 5 });
  * ```
  */
 export class RerankerService {

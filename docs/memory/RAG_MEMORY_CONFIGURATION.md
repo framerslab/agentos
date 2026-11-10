@@ -612,9 +612,9 @@ If `RetrievalAugmentorServiceConfig.rerankerServiceConfig` is provided, the augm
 
 | Provider id | Class | What it does |
 |---|---|---|
-| `local` | `LocalCrossEncoderReranker` | Transformers.js cross-encoder; default model `cross-encoder/ms-marco-MiniLM-L-6-v2` (`LOCAL_RERANKER_MODELS` lists the others) |
-| `cohere` | `CohereReranker` | Cohere's rerank API with the `apiKey` in its config; `COHERE_RERANKER_MODELS` lists the model ids, `rerank-v4.0-pro`, `rerank-v4.0-fast` and `rerank-v3.5` among them |
-| `llm-judge` | `LlmJudgeReranker` | Your `llmCallFn(system, user, model?)`: phase 1 scores up to 100 documents 0-10 in batches of 10 with `scoringModel`; phase 2 ranks the best 20 with `rankingModel`, falling back to the phase-1 order when it fails or runs past `timeoutMs`. It answers every scored document, the ranked ones first and each once, unless the request's `topN` (a stage's `topK`) cuts it ([The LLM judge](../text/RERANKING.md#the-llm-judge)) |
+| `local` | `LocalCrossEncoderReranker` | A cross-encoder run in process through Transformers.js; scoring sends nothing over the network. Default model `cross-encoder/ms-marco-MiniLM-L-6-v2` (`LOCAL_RERANKER_MODELS` lists five model ids) |
+| `cohere` | `CohereReranker` | Cohere's rerank API with the `apiKey` in its config: one POST per request carrying the query and the full text of every passage. Default model `rerank-v3.5` (`COHERE_RERANKER_MODELS` lists seven model ids) |
+| `llm-judge` | `LlmJudgeReranker` | Your `llmCallFn(system, user, model?)`, on whatever model it calls; each call carries the query and the first 200 characters of each passage. Phase 1 scores up to `maxPointwiseDocuments` (100) documents 0-10 in batches of `batchSize` (10) with `scoringModel`; phase 2 ranks the best `pointwiseTopK` (20) with `rankingModel`, falling back to the phase-1 order when it fails or runs past `timeoutMs`. It answers every scored document, the ranked ones first and each once, unless the request's `topN` (a stage's `topK`) cuts it ([`llm-judge`](../text/RERANKING.md#llm-judge-an-llm-as-the-judge)) |
 
 ### Skipped stages
 
