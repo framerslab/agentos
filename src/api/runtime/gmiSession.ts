@@ -417,6 +417,8 @@ export async function* runGmiTurn(
       interactionId: `turn-${randomUUID()}`,
       userId: deps.userId,
       sessionId: deps.sessionId,
+      // The turn's tools are told the subject its memory is keyed by; a seat session is told none.
+      ...(deps.observeMemoryProvider === false ? {} : { userContextOverride: { memorySubject: deps.memoryHook.subject } }),
       type: typeof input === 'string' ? GMIInteractionType.TEXT : GMIInteractionType.MULTIMODAL_CONTENT,
       content: input as GMITurnInput['content'],
       metadata: {

@@ -780,6 +780,10 @@ console.log(await session.usage());
 `agent({ tools })` accepts the same three forms as `generateText({ tools })`
 and `streamText({ tools })`: named tool maps, [`ExternalToolRegistry`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/externalToolRegistry.ts)
 (`Record`, `Map`, or iterable), and prompt-only `ToolDefinitionForLLM[]`.
+A tool an agent calls receives the session's user in `context.userContext.userId`
+(the session id when the session named none, the call's own id on `generate()`
+and `stream()`) and the subject its memory is keyed by in
+`context.userContext.memorySubject`; a direct `generateText()` call passes `system`.
 
 ### Citation verification
 

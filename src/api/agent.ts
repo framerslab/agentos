@@ -904,6 +904,16 @@ function observeValidatedExchange(
   }
 }
 
+/** The caller a call's tools run for, from the turn's memory context. */
+function callerUserOf(context: MemoryHookContext): NonNullable<GenerateTextOptions['_callerUser']> {
+  return {
+    userId: context.userId,
+    sessionId: context.sessionId,
+    subject: context.subject,
+    ...(context.providerUserId !== undefined ? { providerUserId: context.providerUserId } : {}),
+  };
+}
+
 /**
  * Observes a stream's exchange once its text has settled, unless the stream ended in an error. The `text` of the
  * returned result settles after the observation has started, so a caller that awaits it finds the turn handed over.
@@ -1214,6 +1224,8 @@ export function agent(opts: AgentOptions): Agent {
           usageLedger: mergeUsageLedgerOptions(baseOpts.usageLedger, extra?.usageLedger, {
             source: extra?.usageLedger?.source ?? 'agent.generate',
           }),
+          // The call's tools run for its own id.
+          _callerUser: callerUserOf(turn.context),
         };
         if (typeof prompt === 'string') {
           genOpts.prompt = prompt;
@@ -1262,6 +1274,8 @@ export function agent(opts: AgentOptions): Agent {
           usageLedger: mergeUsageLedgerOptions(baseOpts.usageLedger, extra?.usageLedger, {
             source: extra?.usageLedger?.source ?? 'agent.stream',
           }),
+          // The call's tools run for its own id.
+          _callerUser: callerUserOf(turn.context),
         },
         opts.memoryProvider,
         turn,
@@ -1321,6 +1335,8 @@ export function agent(opts: AgentOptions): Agent {
           sendOpts?: SessionSendOptions<ZodType>,
         ): Promise<GenerateTextResult | SessionSendStructuredResult<unknown>> {
           const textForMemory = typeof input === 'string' ? input : extractTextFromContent(input);
+          // Who the turn serves, for its memory hooks and its tools.
+          const turn = turnOf(textForMemory);
           const userMessage: Message = { role: 'user', content: input };
           // History epoch at entry: a reseed() during this send makes the
           // append below a stale no-op (the caller still gets its result).
@@ -1436,6 +1452,8 @@ export function agent(opts: AgentOptions): Agent {
               ? { _responseFormatBuilder: responseFormatBuilder }
               : {}),
             ...(schemaInstruction ? { _schemaInstruction: schemaInstruction } : {}),
+            // The turn's tools run for the session's user.
+            _callerUser: callerUserOf(turn.context),
           };
 
           const { result, object, retried } = await generateWithValidation(
@@ -1447,7 +1465,7 @@ export function agent(opts: AgentOptions): Agent {
               accumulateUsage(sessionUsageTally, attempt.usage);
               accumulateUsage(agentUsageTally, attempt.usage);
             },
-            { provider: opts.memoryProvider, turn: turnOf(textForMemory), options: memoryProviderOptions },
+            { provider: opts.memoryProvider, turn, options: memoryProviderOptions },
           );
           if (retried) {
             result.transcriptDelta = [
@@ -1502,6 +1520,8 @@ export function agent(opts: AgentOptions): Agent {
               ...(streamOpts?.abortSignal ? { abortSignal: streamOpts.abortSignal } : {}),
               // A stream's own budget takes the agent's place; without one the agent's applies.
               ...(streamOpts?.budget !== undefined ? { budget: streamOpts.budget } : {}),
+              // The turn's tools run for the session's user.
+              _callerUser: callerUserOf(turn.context),
             },
             opts.memoryProvider,
             turn,
