@@ -24,8 +24,11 @@
  * record and runs `work` inside that lock only when the record exists and carries no cut mark: the write gate. The
  * account's stop (`stopAccount`) deletes or marks every record of the account under the same lock first, so a removal
  * or a sign-out lands before a write, which is then refused, or after it, never between the check and the write; then
- * it stops the account's runs here and, through the channel, in every other tab, and waits for their locks. A start
- * still waiting for its lock when the account stops, or made while the stop runs, is fenced from its start.
+ * it stops the account's runs here and, through the channel, in every other tab, and waits for their locks. The waits
+ * for the records' locks and the runs' locks share ten seconds, and the stop answers whether every record was deleted
+ * or marked. With no channel, each owner reads the records once a second and stops a run of its own whose record
+ * another owner's stop deleted or marked. A start still waiting for its lock when the account stops, or made while
+ * the stop runs, is fenced from its start.
  * @module agentos/core/storage/browser/runs
  */
 import type { KeyValueStore } from '@framers/sql-storage-adapter/kv';
@@ -147,9 +150,19 @@ export interface RunOwner {
   shown(id: string): Promise<void>;
   /** An unsaved export was saved: its record goes and its lock is let go. */
   saved(id: string): Promise<void>;
-  /** Deletes (a removal) or marks (a sign-out, a session's end) every record, stops the account's runs in every tab and waits for their locks, ten seconds at most. */
-  stopAccount(cut: 'removal' | 'signout' | 'session'): Promise<void>;
-  /** Reads every record under the prefix, with the runs this owner holds. */
+  /**
+   * Deletes (a removal) or marks (a sign-out, a session's end) every record, stops the account's runs in every tab and
+   * waits for their locks; the waits for the records' locks and the runs' locks share ten seconds. Answers
+   * `{ complete: true }` once the store listed the records and every record of the account was deleted or marked, and
+   * `{ complete: false }` when the store refused the listing, a read, a deletion or a mark, or a write in flight still
+   * held a record's lock at the ten seconds (that record is deleted or marked once the write returns): call it again.
+   */
+  stopAccount(cut: 'removal' | 'signout' | 'session'): Promise<{ complete: boolean }>;
+  /**
+   * Reads every record under the prefix that the store lets it read, with the runs this owner holds whether their
+   * records remain or not; a listing or a read the store refuses leaves its records out, so this is no check that a
+   * removal deleted them (`stopAccount`'s answer is).
+   */
   records(): Promise<RunRead[]>;
   /** The runs as drawn; the same object until something changes. */
   snapshot(): RunsSnapshot;
@@ -269,6 +282,23 @@ function later(work: () => void, ms: number): Timer {
   const timer = setTimeout(work, Math.max(0, ms));
   (timer as unknown as { unref?: () => void }).unref?.();
   return timer;
+}
+
+/** What `promise` gives within `ms`, or null once `ms` has passed or when it rejects. */
+function within<T>(promise: Promise<T>, ms: number): Promise<T | null> {
+  return new Promise<T | null>((resolve) => {
+    const timer = later(() => resolve(null), ms);
+    void promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      () => {
+        clearTimeout(timer);
+        resolve(null);
+      },
+    );
+  });
 }
 
 /** An interval that never keeps a Node process alive. */
@@ -476,6 +506,8 @@ interface Held {
   release: (() => void) | null;
   /** The store refused the record: the run goes on in memory, fenced by the flags below alone. */
   memoryOnly: boolean;
+  /** The run's first record was written, so a listing that lacks it read the record after another owner removed it. */
+  written: boolean;
   ended: Ended | null;
   /** The account's stop reached the run, here or from another tab. */
   stopCut: AccountStop | null;
@@ -654,9 +686,12 @@ class BrowserRunOwner implements RunOwner {
     const held = this.held.get(id);
     if (held) {
       if (held.ended === null || held.ended === 'unsaved' || held.release === null) return;
-      await this.deleteRecord(id);
-      held.release?.();
+      // Marked let go before the deletion, so no read takes the record's absence for another owner's removal; the lock
+      // itself goes once the record has.
+      const release = held.release;
       held.release = null;
+      await this.deleteRecord(id);
+      release();
     } else {
       const seen = this.seen.get(id);
       if (!seen || seen.read.status !== 'failed' || seen.local || !(await this.lockFree(seen.read.record.key))) return;
@@ -671,52 +706,62 @@ class BrowserRunOwner implements RunOwner {
   async saved(id: string): Promise<void> {
     const held = this.held.get(id);
     if (!held || held.ended !== 'unsaved' || held.release === null) return;
-    await this.deleteRecord(id);
-    held.release?.();
+    const release = held.release;
     held.release = null;
+    await this.deleteRecord(id);
+    release();
     this.ensureTimers();
     this.touch();
   }
 
   /** Logs the stop for the starts still waiting for their locks, then stops everything of the account. */
-  async stopAccount(cut: AccountStop): Promise<void> {
+  async stopAccount(cut: AccountStop): Promise<{ complete: boolean }> {
     this.stopCuts.push(cut);
     this.runningStops.push(cut);
     try {
-      await this.stopEverything(cut);
+      return await this.stopEverything(cut);
     } finally {
       this.runningStops.splice(this.runningStops.indexOf(cut), 1);
     }
   }
 
   /** The records fenced under their locks, this owner's runs stopped, the other tabs told, and their locks awaited. */
-  private async stopEverything(cut: AccountStop): Promise<void> {
+  private async stopEverything(cut: AccountStop): Promise<{ complete: boolean }> {
+    // The waits for the records' locks and for the runs' locks share the stop's ten seconds.
+    const deadline = Date.now() + STOP_WAIT;
     const names = new Set<string>();
+    let complete = true;
     let keys: string[] = [];
     try {
       keys = await this.store.keys(this.keyPrefix);
     } catch {
       // The store refused the list: the stops below still end every run in memory.
+      complete = false;
     }
-    for (const key of keys) {
-      try {
-        await this.locks.request(this.lockName(key), async () => {
+    // A write in flight holds its record's lock until it returns, so its record's fence waits for it; one still waiting
+    // at the ten seconds stays asked for and lands once the write returns, while the stops below go on.
+    const fences = keys.map((key) =>
+      this.locks
+        .request(this.lockName(key), async () => {
           const current = await this.store.get<unknown>(key);
           // Another account's record under the same prefix is that account's to stop.
           if (isPlain(current) && typeof current.account === 'string' && current.account !== this.account) return;
           if (isPlain(current) && typeof current.key === 'string') names.add(this.runName(current.key));
           if (cut === 'removal') await this.store.delete(key);
           else if (isPlain(current) && LIVE.includes(current.state as RunState) && current.cut === null) await this.store.set(key, { ...current, cut });
-        });
-      } catch {
-        // This record could not be reached: the stops below still end its run.
-      }
-    }
+        })
+        .then(
+          () => true,
+          // This record could not be reached: the stops below still end its run.
+          () => false,
+        ),
+    );
+    const fenced = await within(Promise.all(fences), deadline - Date.now());
+    if (fenced === null || fenced.includes(false)) complete = false;
     for (const held of this.held.values()) if (held.release !== null) names.add(this.runName(held.job.key));
     // A BroadcastChannel never delivers to its sender, so this owner's own runs are stopped here, directly.
     this.stopHeld(cut);
     this.channel?.post({ account: this.account, stop: cut });
-    const deadline = Date.now() + STOP_WAIT;
     for (const name of names) {
       const left = deadline - Date.now();
       if (left <= 0) break;
@@ -728,13 +773,21 @@ class BrowserRunOwner implements RunOwner {
     }
     if (cut !== 'removal') await this.records().catch(() => []);
     this.touch();
+    return { complete };
   }
 
-  /** Reads every record of the account under the prefix, with the runs this owner holds. */
+  /**
+   * Reads every record of the account under the prefix that the store lets it read, with the runs this owner holds.
+   * With no channel, a run this owner holds whose record another owner's account stop deleted or marked is stopped
+   * here, as a heard stop stops it.
+   */
   async records(): Promise<RunRead[]> {
     const before = this.seenSignature();
     const reads: RunRead[] = [];
     const present = new Set<string>();
+    const stops: Array<[Held, AccountStop]> = [];
+    // The runs whose records were written before the listing, so a listing that lacks one read it after its removal.
+    const written = [...this.held.values()].filter((held) => held.written && held.release !== null);
     let unreadable = 0;
     let keys: string[] | null = null;
     try {
@@ -756,10 +809,20 @@ class BrowserRunOwner implements RunOwner {
       }
       if (value.account !== this.account) continue;
       present.add(value.id);
-      if (this.held.has(value.id)) continue;
+      const mine = this.held.get(value.id);
+      if (mine) {
+        // A mark this owner did not make is another owner's sign-out or session's end.
+        if (this.channel === null && (value.cut === 'signout' || value.cut === 'session') && mine.cutSelf === null) stops.push([mine, value.cut]);
+        continue;
+      }
       const read = await this.classify(value);
       if (!this.held.has(value.id)) reads.push(this.see(read).read);
     }
+    if (keys !== null && this.channel === null) {
+      const listed = new Set(keys);
+      for (const held of written) if (held.release !== null && !listed.has(this.keyPrefix + held.record.id)) stops.push([held, 'removal']);
+    }
+    for (const [held, cut] of stops) this.stopFromRecord(held, cut);
     for (const held of this.held.values()) reads.push(this.heldRead(held));
     if (keys !== null) {
       this.unreadable = unreadable;
@@ -771,7 +834,7 @@ class BrowserRunOwner implements RunOwner {
     }
     this.ensureTimers();
     // A read that changed nothing notifies no one, so the once-a-second read with no channel draws nothing new.
-    if (this.seenSignature() !== before) this.touch();
+    if (stops.length > 0 || this.seenSignature() !== before) this.touch();
     return reads.map((read) => ({ ...read, record: copyRecord(read.record) }));
   }
 
@@ -877,7 +940,7 @@ class BrowserRunOwner implements RunOwner {
     }
     const id = record.id;
     const held: Held = {
-      record, job, controller: new AbortController(), release, memoryOnly: false, ended: null, stopCut: null, dropped: false, cutSelf: null,
+      record, job, controller: new AbortController(), release, memoryOnly: false, written: false, ended: null, stopCut: null, dropped: false, cutSelf: null,
       lastWrite: now, dirty: false, paceTimer: null, lastPost: 0, postTimer: null, done: null,
     };
     this.held.set(id, held);
@@ -904,6 +967,7 @@ class BrowserRunOwner implements RunOwner {
           }
         }
         await this.store.set(key, copyRecord(record));
+        held.written = true;
       });
       held.lastWrite = this.now();
     } catch {
@@ -1263,6 +1327,14 @@ class BrowserRunOwner implements RunOwner {
     }
     this.ensureTimers();
     this.touch();
+  }
+
+  /** With no channel, another owner's account stop read in this run's record: the run is stopped as a heard stop stops it. */
+  private stopFromRecord(held: Held, cut: AccountStop): void {
+    if (this.held.get(held.record.id) !== held || held.stopCut !== null) return;
+    held.stopCut = cut;
+    held.controller.abort();
+    if (held.ended !== null) this.drop(held);
   }
 
   /** A run this owner holds, as read. */
