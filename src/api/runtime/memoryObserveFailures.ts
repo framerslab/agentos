@@ -72,7 +72,9 @@ export function observeWithoutWaiting(
   context?: MemoryHookContext,
 ): void {
   try {
-    void Promise.resolve(provider.observe?.(role, text, context)).catch((error: unknown) => reportObserveFailure(provider, error));
+    // A call with no context passes two arguments, as before contexts existed.
+    const observed = context === undefined ? provider.observe?.(role, text) : provider.observe?.(role, text, context);
+    void Promise.resolve(observed).catch((error: unknown) => reportObserveFailure(provider, error));
   } catch (error) {
     reportObserveFailure(provider, error);
   }
