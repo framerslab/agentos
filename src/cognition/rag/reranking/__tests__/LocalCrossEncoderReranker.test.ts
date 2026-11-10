@@ -575,6 +575,32 @@ describe('LocalCrossEncoderReranker', () => {
       await vi.waitFor(() => expect(modelStub.dispose).toHaveBeenCalledTimes(1));
     });
 
+    it('starts the next load only after a model that loads after its tokenizer failed has been disposed', async () => {
+      const tokenizerError = new Error('tokenizer.json could not be fetched');
+      tokenizerFromPretrained.mockRejectedValueOnce(tokenizerError);
+      let finishModelLoad!: () => void;
+      const modelLoaded = new Promise<void>((resolve) => (finishModelLoad = resolve));
+      loadModel = async () => {
+        await modelLoaded;
+        return defaultLoadModel();
+      };
+
+      await expect(reranker.rerank(input, config)).rejects.toBe(tokenizerError);
+      // The retry is asked for while the first model is still loading: it waits, so two loads never overlap.
+      const retry = reranker.rerank(input, config);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(modelFromPretrained).toHaveBeenCalledTimes(1);
+
+      finishModelLoad();
+      const result = await retry;
+      expect(result.results).toHaveLength(1);
+      expect(modelFromPretrained).toHaveBeenCalledTimes(2);
+      expect(modelStub.dispose).toHaveBeenCalledTimes(1);
+      expect(modelStub.dispose.mock.invocationCallOrder[0]).toBeLessThan(
+        modelFromPretrained.mock.invocationCallOrder[1],
+      );
+    });
+
     it("keeps the tokenizer's error when disposing the model throws or rejects", async () => {
       const tokenizerError = new Error('tokenizer.json could not be fetched');
       const failures: Array<() => unknown> = [
