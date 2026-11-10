@@ -12178,7 +12178,7 @@ describe('the docs a host reads about it', () => {
     );
     // The persona id keys the memory's own traces and the persona scopes, so a soul that moves it moves what they recall.
     expect(gmiDoc).toContain(
-      "The memory files its own traces and the `persona` scopes (the agent's, and each user's) under the persona's id, which with a soul is the soul's id.",
+      "The memory files its own traces and the `persona` scopes (the agent's, and each user's) under the persona's id, which with a soul is the soul's id, else `learning.agentKey`.",
     );
     expect(gmiDoc).toContain(
       "A brain whose persona id was the slug of the agent's `name` keeps those traces under the slug, and an agent whose soul gives another id does not recall them; each user's `user` scope it still recalls. To keep recalling them, set the soul's `agentId` to that slug.",
