@@ -299,10 +299,35 @@ describe('the recall capture of a memory assembly', () => {
     }
   });
 
-  it('a RerankerService over the LLM judge is recorded as llm, with the ranking model', async () => {
+  it('a RerankerService over the LLM judge is recorded as llm, with the ranking model, and with no model when it names no ranking model', async () => {
     const judge = new LlmJudgeReranker({ llmCallFn: async () => '[]', scoringModel: 'judge-scorer', rankingModel: 'judge-ranker' });
     const manager = await managerWith({ rerankerService: serviceOf(judge) } as Partial<CognitiveMemoryConfig>);
     const c = (await manager.assembleForPrompt(QUERY, 1600, NEUTRAL, { scopes: SCOPES })).capture!;
     expect(c.reranker).toEqual({ provider: 'llm', model: 'judge-ranker', candidates: c.candidates.length, ms: expect.any(Number) });
+
+    // The ranking call then runs on whatever model llmCallFn picks, which the judge cannot name.
+    const scorerOnly = new LlmJudgeReranker({ llmCallFn: async () => '[]', scoringModel: 'judge-scorer' });
+    const other = await managerWith({ rerankerService: serviceOf(scorerOnly) } as Partial<CognitiveMemoryConfig>);
+    const d = (await other.assembleForPrompt(QUERY, 1600, NEUTRAL, { scopes: SCOPES })).capture!;
+    expect(d.reranker).toEqual({ provider: 'llm', candidates: d.candidates.length, ms: expect.any(Number) });
+  });
+
+  it("the dense leg's time takes in the graph's activation, which orders the dense ranks, and not the co-activation it records after", async () => {
+    vi.useRealTimers();
+    const manager = await managerWith();
+    const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+    // A memory graph whose activation takes 150 ms and whose co-activation write takes 300 ms.
+    (manager as unknown as { graph: unknown }).graph = {
+      spreadingActivation: async () => {
+        await wait(150);
+        return [];
+      },
+      recordCoActivation: async () => {
+        await wait(300);
+      },
+    };
+    const c = (await manager.assembleForPrompt(QUERY, 1600, NEUTRAL, { scopes: SCOPES })).capture!;
+    expect(c.legs[0].ms).toBeGreaterThanOrEqual(140);
+    expect(c.legs[0].ms).toBeLessThan(400);
   });
 });
