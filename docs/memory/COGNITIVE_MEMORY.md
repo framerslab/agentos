@@ -713,7 +713,7 @@ Token estimation uses ~4 chars per token heuristic.
 
 - The GMI's reasoning-trace entry "Cognitive memory context assembled." no longer lists `includedMemoryIds`. It carries `tokensUsed`, `candidates`, `included`, `leftOut`, `retrieval`, `reranker` and `legsAbsent`, and lists the ids again with `recall: { traceIds: true }` on the memory manager's configuration. See [Recall Capture](#recall-capture).
 - `assembleForPrompt()` returns a recall capture on `capture` unless the manager's `recall.capture` is `'off'`, and a GMI turn carries it as `GMIOutput.memoryRecall` and on a session's `send()` result as `memoryRecall`. The fields are optional, so a memory manager or an `IGMI` that sets none compiles unchanged. The runtime stream carries the record only under `'metadata+stream'`, so a stream consumer sees nothing new by default. The block is the same byte for byte with any capture setting.
-- `LlmJudgeReranker` answers with `diagnostics` (`providerId: 'llm-judge'`, its ranking model, latency, the passages it scored), so the capture names it `llm`. A manager's memory recall passes `maxDocuments: 100` on its rerank call, the limit `RerankerService` applied when the call named none.
+- `LlmJudgeReranker` answers with `diagnostics` (`providerId: 'llm-judge'`, its `rankingModel` or `''`, latency, the passages it scored), so the capture names it `llm`. A manager's memory recall passes `maxDocuments: 100` on its rerank call, the limit `RerankerService` applied when the call named none.
 
 ### Upgrading from 0.15.122 or earlier
 
@@ -793,7 +793,7 @@ The rest of the record:
 | `retrieval` | `dense`: the vector recall `assembleForPrompt()` runs |
 | `budget` | `requested` and `effective`: the token budget the block was asked for and assembled in |
 | `tokensUsed`, `allocation` | As on the assembled context |
-| `legs` | Each recall leg: whether it ran, why not, how many candidates it returned and how long it took. The vector recall is one leg, `dense`; its time covers the query's embedding, the vector search and the scoring, not the rerank |
+| `legs` | Each recall leg: whether it ran, why not, how many candidates it returned and how long it took. The vector recall is one leg, `dense`; its time covers the query's embedding, the vector search, the scoring and the memory graph's activation, not the rerank |
 | `lexicalBackend` | The full-text backend an exact-words leg read: `none`, as the vector recall reads none |
 | `reranker` | The reranker that scored the candidates: `{ provider: 'none', reason: 'none_configured' }` without a `rerankerService`; with one, `local` (the cross-encoder), `llm` (the LLM judge) or `other` (any other provider, Cohere's API among them, which received the query and the candidates' texts), with the `model` it reported, the `candidates` it was sent (the provider's own count, else at most 100: the manager sends the dense leg's first 100) and its `ms`; `{ provider: 'none', reason: 'error' }` when the rerank failed and the cognitive scores stood |
 | `memoryQuestionReserve` | `{ fired: false, added: 0 }` |

@@ -149,7 +149,8 @@ export interface RetrievalRecallReport {
   denseRanks: Record<string, number>;
   /**
    * Milliseconds of the dense leg: the query's embedding (and its HyDE
-   * hypothesis, when one is asked for), the vector search and the scoring.
+   * hypothesis, when one is asked for), the vector search, the scoring and
+   * the graph's activation, not the co-activation the graph records after.
    */
   denseMs: number;
   /** Each trace the reranker scored, with the score it gave before the blend. Absent when no rerank answered. */

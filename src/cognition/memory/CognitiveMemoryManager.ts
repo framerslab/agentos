@@ -915,11 +915,14 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
       scored.length = 0;
       scored.push(...allowed);
     }
-    const denseMs = performance.now() - denseStartedAt;
+    let denseMs = performance.now() - denseStartedAt;
 
     // --- Batch 2: Spreading activation ---
     if (this.graph && scored.length > 0) {
       const seedIds = scored.slice(0, 5).map((t) => t.id);
+      // The activation orders the dense ranks, so its time is the dense leg's; the co-activation write after is not.
+      const graphStartedAt = performance.now();
+      let graphRankedAt: number | undefined;
       try {
         const activated = await this.graph.spreadingActivation(seedIds, {
           maxDepth: this.config.graph?.maxDepth,
@@ -958,6 +961,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
 
         // Re-sort after graph activation adjustment
         scored.sort((a, b) => b.retrievalScore - a.retrievalScore);
+        graphRankedAt = performance.now();
 
         // Record co-activation for Hebbian learning
         const retrievedIds = scored.slice(0, 5).map((t) => t.id);
@@ -968,6 +972,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
       } catch {
         // Graph operations are non-critical
       }
+      denseMs += (graphRankedAt ?? performance.now()) - graphStartedAt;
     }
 
     // --- Optional neural reranking ---
