@@ -10,11 +10,14 @@
  * `recall.capture: 'metadata+stream'` the stream carries one `METADATA_UPDATE`
  * with `memorySources` and the final response its `memoryRecall`; with
  * `recall.traceIds` the entry lists the ids. Only the OpenAI provider class is
- * stubbed.
+ * stubbed; every turn is served (no error chunk, the stub's reply as the final
+ * text), so the first turn's words are filed before the second recalls them.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', () => {
+  // The providers' streamed shapes, as helpers/stubProviders.ts writes them.
+  const base = { id: 'stub', object: 'chat.completion.chunk', created: 0 };
   class OpenAIProvider {
     readonly providerId = 'openai';
     isInitialized = false;
@@ -22,9 +25,10 @@ vi.mock('../../core/llm/providers/implementations/OpenAIProvider', () => {
     async generateCompletion() {
       return { choices: [{ message: { role: 'assistant', content: 'ok' }, finishReason: 'stop' }], responseText: 'ok' };
     }
-    async *generateCompletionStream() {
-      yield { responseTextDelta: 'Noted.' };
-      yield { isFinal: true, choices: [{ message: { role: 'assistant', content: 'Noted.' }, finishReason: 'stop' }] };
+    async *generateCompletionStream(modelId: string) {
+      yield { ...base, modelId, choices: [], responseTextDelta: 'Noted.' };
+      yield { ...base, modelId, isFinal: true, choices: [{ index: 0, message: { role: 'assistant', content: 'Noted.' }, finishReason: 'stop' }] };
+      yield { ...base, modelId, isFinal: true, choices: [], usage: { promptTokens: 12, completionTokens: 2, totalTokens: 14 } };
     }
     async generateEmbeddings() { return { embeddings: [] }; }
     async listAvailableModels() { return []; }
@@ -45,6 +49,8 @@ import type { IPersonaDefinition } from '../../cognition/substrate/personas/IPer
 
 const persona: IPersonaDefinition = {
   id: 'capture-tutor', name: 'Capture Tutor', description: 'Recalls what it was told.', version: '1.0.0', baseSystemPrompt: 'You are terse.',
+  // A turn with no model to call errors after its memory assembly and files nothing.
+  defaultProviderId: 'openai', defaultModelId: 'gpt-4o-mini',
 };
 const NEUTRAL = { valence: 0, arousal: 0, dominance: 0 };
 const ENTRY = 'Cognitive memory context assembled.';
@@ -105,11 +111,18 @@ async function boot(recall?: ManagerRecallConfig): Promise<AgentOS> {
   return booted;
 }
 
+/** One served turn: its chunks, after checking it ended with the stub's reply and no error. */
 async function turn(agentos: AgentOS, sessionId: string, textInput: string): Promise<AgentOSResponse[]> {
   const chunks: AgentOSResponse[] = [];
   for await (const chunk of agentos.processRequest({ userId: 'user-1', sessionId, selectedPersonaId: persona.id, textInput } as any)) {
     chunks.push(chunk as AgentOSResponse);
   }
+  const errors = chunks
+    .filter((c) => c.type === AgentOSResponseChunkType.ERROR)
+    .map((c) => (c as unknown as { code?: string; message?: string }))
+    .map(({ code, message }) => ({ code, message }));
+  expect(errors).toEqual([]);
+  expect(finalOf(chunks)?.finalResponseText).toBe('Noted.');
   return chunks;
 }
 
