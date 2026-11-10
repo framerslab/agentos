@@ -62,7 +62,8 @@ import { withMembers } from './runtime/withMembers.js';
 import { LAUNCH_AGENCY_TOOL_NAME, MIN_LAUNCH_TOKENS, resolveLaunchLimits, type AgencyLaunchFrame, type CallerTurnContext, type ToolCallHook } from './runtime/agencyLaunch/types.js';
 import { createGmiLaunchTool } from './runtime/agencyLaunch/gmiLaunchTool.js';
 import { resolveCognition, type ResolvedCognition } from './runtime/gmiCognition.js';
-import { personaFromAgentOptions, stablePersonaIdOf } from './runtime/gmiPersona.js';
+import { agentStableIdOf, personaFromAgentOptions, stablePersonaIdOf } from './runtime/gmiPersona.js';
+import { memoryHookContextOf, namedSessionUser } from './runtime/memorySubject.js';
 import { warnSoulBesideSystemBlocks, withOneSoulWarning } from './runtime/soulLoadWarning.js';
 import { soulLog } from '../cognition/substrate/personas/soulLog.js';
 import { soulAgentIdOf } from '../cognition/substrate/personas/SoulLoader.js';
@@ -583,6 +584,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
   const learningConfig = typeof opts.learning === 'object' && opts.learning !== null ? opts.learning : undefined;
   /** The soul's one stable id; undefined with no soul, or a soul that gives none on an agent with no name. */
   const soulId = soul ? soulAgentIdOf(soul.frontmatter, opts.name) : undefined;
+  // The agent's stable id, which the memory hooks are told: its soul's id, else a named agent's id.
+  const agentStableId = agentStableIdOf(opts, soul);
   /** The key of the brain behind memory.store: `learning.agentKey`, else the soul's id. */
   const brainKey = learningConfig?.agentKey?.trim() || soulId;
   const memoryStore = cognition.memory ? cognition.memory.store : undefined;
@@ -1024,6 +1027,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
       userId: callId,
       useMemoryProviderContext: true,
       providerTokenBudget: resolvedRecall.providerTokenBudget,
+      // A one-shot call is its own session and its own memory subject.
+      memoryHook: memoryHookContextOf({ sessionId: callId, agentId: agentStableId, call: 'one-shot' }),
       history: null,
       ledger: mergeLedger(ledger, extra?.usageLedger, { source: extra?.usageLedger?.source ?? source }),
       onUsage: (u) => accumulateUsage(agentTally, u),
@@ -1101,6 +1106,9 @@ export function gmi(opts: GmiOptions): GmiHandle {
         }
         return existing.session;
       }
+      // The user the session's memory serves: the user id the caller named, unless it is an anonymous id, which names
+      // no user. A seat names none: its memory is a scope of its own.
+      const hookUser = seat ? undefined : namedSessionUser(sessionOptions?.userId, 'gmi');
       // Each session's memory scope is its own unless the caller names the user:
       // sessions are often different people, and one person's facts must not
       // reach another's replies. With memory.store a session id's memory
@@ -1178,7 +1186,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
       // scope too, so nothing it is told is filed under the user it runs as.
       const turnMemoryScope = (memoryScopeId: string): { sessionId: string; userId: string } => ({
         sessionId: memoryScopeId,
-        userId: seat?.memoryScope === 'session' ? memoryScopeId : (sessionOptions?.userId ?? memoryScopeId),
+        userId: seat?.memoryScope === 'session' ? memoryScopeId : (hookUser ?? memoryScopeId),
       });
 
       // A send made after close() fails; one made before it runs, and close() waits for it. The turn's memory scope
@@ -1222,6 +1230,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
         useMemoryProviderContext: !cognition.memory && !seat,
         providerTokenBudget: resolvedRecall.providerTokenBudget,
         observeMemoryProvider: !seat,
+        // Who the turn's memory hooks are told it serves.
+        memoryHook: memoryHookContextOf({ sessionId, namedUser: hookUser, agentId: agentStableId, call: 'session' }),
         gmiFor: gmiFor(closing !== undefined),
         onUsage: (u) => {
           accumulateUsage(tally, u);

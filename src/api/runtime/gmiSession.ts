@@ -29,8 +29,8 @@ import { dropNullsForOptionalFields, parseJsonWithDistinctKeys } from './structu
 import { fireLlmUsageObserver, type LlmUsageAccountResolver, type LlmUsageAccountSource, type LlmUsageEvent } from '../observers.js';
 import type { SessionHistoryBuffer, SessionTurnWriter } from '../sessionHistory.js';
 import type { SessionTranscriptMessage } from '../sessionTranscript.js';
-import type { AgentMemoryProvider, AgentOptions } from '../agent.js';
-import { DEFAULT_MEMORY_TOKEN_BUDGET, MEMORY_TIMEOUT_MS } from './memoryProviderHooks.js';
+import type { AgentMemoryProvider, AgentOptions, MemoryHookContext } from '../agent.js';
+import { recallForTurn } from './memoryProviderHooks.js';
 import type { AgentOSUsageLedgerOptions } from './usageLedger.js';
 import type { LateAttemptUsage } from './completionGateway.js';
 import { costOfUsageUSD, type SpendBudget } from './spendBudget.js';
@@ -191,6 +191,8 @@ export interface GmiSessionDeps {
   providerTokenBudget?: number;
   /** False on a seat session: the turn calls no `memoryProvider.observe`, which would file a team turn's text in the agent's long-term store. Default true. */
   observeMemoryProvider?: boolean;
+  /** Who the turn's memory hooks are told it serves. */
+  memoryHook: MemoryHookContext;
   /** The session store, or null when the turn keeps no history. */
   history: SessionHistoryBuffer | null;
   /** Usage ledger options for this turn's events (session id and source included). */
@@ -203,35 +205,6 @@ export interface GmiSessionDeps {
   lock: TurnLock;
 }
 
-/** `memoryProvider.getContext` for the turn, within its timeout; undefined when there is none or it fails. */
-async function memoryProviderContext(deps: GmiSessionDeps, userText: string): Promise<string | undefined> {
-  const { opts } = deps;
-  const provider = opts.memoryProvider;
-  if (!provider?.getContext) return undefined;
-  const timeoutMs = opts.memoryProviderOptions?.timeoutMs ?? MEMORY_TIMEOUT_MS;
-  const tokenBudget = deps.providerTokenBudget ?? opts.memoryProviderOptions?.tokenBudget ?? DEFAULT_MEMORY_TOKEN_BUDGET;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let timedOut = false;
-  try {
-    const result = await Promise.race([
-      provider.getContext(userText, { tokenBudget }),
-      new Promise<null>((resolve) => {
-        timer = setTimeout(() => {
-          timedOut = true;
-          resolve(null);
-        }, timeoutMs);
-      }),
-    ]);
-    if (timedOut) console.warn(`[agentos] memoryProvider.getContext exceeded ${timeoutMs}ms; continuing without memory context.`);
-    return result?.contextText || undefined;
-  } catch (error) {
-    console.warn('[agentos] memoryProvider.getContext failed; continuing without memory context.', error);
-    return undefined;
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-}
-
 /**
  * `memoryProvider.observe` for one side of a finished turn. It is called on the
  * provider, as `agent()` calls it, because a provider built from a class reads
@@ -239,8 +212,8 @@ async function memoryProviderContext(deps: GmiSessionDeps, userText: string): Pr
  * stored, and a memory store that fails to record it does not undo that. The
  * failure is logged sparsely (`observeWithoutWaiting`).
  */
-function observeTurn(provider: AgentMemoryProvider, role: 'user' | 'assistant', text: string): void {
-  observeWithoutWaiting(provider, role, text);
+function observeTurn(provider: AgentMemoryProvider, role: 'user' | 'assistant', text: string, context: MemoryHookContext): void {
+  observeWithoutWaiting(provider, role, text, context);
 }
 
 /**
@@ -394,7 +367,15 @@ export async function* runGmiTurn(
     const gmi = served.gmi;
     const memoryScope = served.memoryScope ?? deps.memoryScope;
     gmi.replaceHistory?.(transcriptToConversation(priorMessages));
-    const memoryContext = deps.useMemoryProviderContext ? await memoryProviderContext(deps, userText) : undefined;
+    // One recall for the turn, within its timeout; a failure or a timeout is a memory.hook_failed line.
+    const recallProvider = deps.opts.memoryProvider;
+    const recalled = deps.useMemoryProviderContext && recallProvider
+      ? await recallForTurn(recallProvider, { userText, context: deps.memoryHook }, {
+          ...deps.opts.memoryProviderOptions,
+          ...(deps.providerTokenBudget !== undefined ? { tokenBudget: deps.providerTokenBudget } : {}),
+        })
+      : null;
+    const memoryContext = recalled?.contextText || undefined;
     // When the model call in progress started: the turn's start, the end of the
     // tool round before it, or the failure of the attempt it replaces.
     let callStartedAt = Date.now();
@@ -527,9 +508,9 @@ export async function* runGmiTurn(
       writer?.commit();
       const memoryProvider = deps.observeMemoryProvider === false ? undefined : deps.opts.memoryProvider;
       if (memoryProvider?.observe) {
-        observeTurn(memoryProvider, 'user', userText);
+        observeTurn(memoryProvider, 'user', userText, deps.memoryHook);
         const reply = folder.text();
-        if (reply) observeTurn(memoryProvider, 'assistant', reply);
+        if (reply) observeTurn(memoryProvider, 'assistant', reply, deps.memoryHook);
       }
     }
     return recorded;
