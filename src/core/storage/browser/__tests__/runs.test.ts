@@ -650,6 +650,72 @@ describe('the run owner', () => {
     }
   });
 
+  it("answers false when a start's record could not be deleted though that start settled before the stop's second listing answered", async () => {
+    const store = new MemoryKeyValueStore();
+    const locks = memoryLocks();
+    const taking = deferred();
+    const listed = deferred();
+    const own = owner(store, { ...locks, hold: async (name) => { await taking.promise; return locks.hold(name); } }, bus());
+    const realKeys = store.keys.bind(store);
+    const realDelete = store.delete.bind(store);
+    try {
+      let calls = 0;
+      // The stop's second listing reads the records before the start writes its record, and answers only once the start has settled.
+      store.keys = async (prefix) => {
+        calls += 1;
+        const keys = await realKeys(prefix);
+        if (calls === 2) await listed.promise;
+        return keys;
+      };
+      const starting = own.start(untilStopped());
+      let answer: unknown = null;
+      const stopping = own.stopAccount('removal').then((result) => { answer = result; });
+      await vi.waitFor(() => expect(calls).toBe(2));
+      store.delete = async () => { throw new Error('refused'); };
+      taking.resolve();
+      const started = await starting;
+      const id = 'id' in started ? started.id : '';
+      await own.whenIdle();
+      listed.resolve();
+      await stopping;
+      expect(answer).toEqual({ complete: false });
+      store.keys = realKeys;
+      expect(await store.keys('lib/j/')).toEqual([`lib/j/${id}`]);
+    } finally {
+      store.keys = realKeys;
+      store.delete = realDelete;
+      own.close();
+    }
+  });
+
+  it("answers the sign-out complete within its ten seconds though the last read of the rows never answers, since that read redraws and deletes or marks nothing", async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
+    const store = new MemoryKeyValueStore();
+    const realKeys = store.keys.bind(store);
+    try {
+      await store.set('lib/j/r8', { id: 'r8', key: KEY, account: ACCOUNT, kind: 'library', way: null, unit: 'sessions', chosen: null, counts: { total: 2, pending: 1, applied: 1, skipped: 0, failed: 0 }, items: [], state: 'running', cut: null, phase: null, began: 1, progressed: 2 });
+      const own = owner(store, memoryLocks(), bus());
+      let calls = 0;
+      // The stop's two listings answer; the read of the rows after them never does.
+      store.keys = (prefix) => {
+        calls += 1;
+        return calls <= 2 ? realKeys(prefix) : new Promise<string[]>(() => undefined);
+      };
+      let answer: unknown = null;
+      void own.stopAccount('signout').then((result) => { answer = result; });
+      await vi.advanceTimersByTimeAsync(9_000);
+      expect(answer).toBeNull();
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(answer).toEqual({ complete: true });
+      store.keys = realKeys;
+      expect((await store.get<RunRecord>('lib/j/r8'))?.cut).toBe('signout');
+      own.close();
+    } finally {
+      store.keys = realKeys;
+      vi.useRealTimers();
+    }
+  });
+
   it.each(['removal', 'signout'] as const)("stops a run that another owner's %s reached when no channel joins them, though the run waits offline", async (cut) => {
     const locks = memoryLocks();
     const store = new MemoryKeyValueStore();
@@ -901,6 +967,43 @@ describe('the run owner', () => {
     await b.whenIdle();
     a.close();
     b.close();
+  });
+
+  it("holds the run's lock while it deletes another tab's failed record once shown, so a finish meanwhile is refused", async () => {
+    const store = new MemoryKeyValueStore();
+    await store.set('lib/j/r5', { id: 'r5', key: KEY, account: ACCOUNT, kind: 'library', way: null, unit: 'sessions', chosen: null, counts: { total: 3, pending: 2, applied: 0, skipped: 0, failed: 1 }, items: [{ index: 0, state: 'failed', name: 'a.txt' }], state: 'failed', cut: null, phase: null, began: 1, progressed: 2 });
+    const locks = memoryLocks();
+    const asked = deferred();
+    const late = deferred();
+    let lag = false;
+    // Once the test lags it, the showing owner reads (or takes) the run's lock, then waits while the other owner tries to finish the run.
+    const lagging: RunLocks = {
+      ...locks,
+      free: async (name) => { const answer = await locks.free(name); if (lag) { asked.resolve(); await late.promise; } return answer; },
+      hold: async (name) => { const grant = await locks.hold(name); if (lag) { asked.resolve(); await late.promise; } return grant; },
+    };
+    const a = owner(store, lagging, bus());
+    const b = owner(store, locks, bus());
+    const blocked = deferred();
+    try {
+      await a.records();
+      expect(a.snapshot().runs[0]?.status).toBe('failed');
+      lag = true;
+      const showing = a.shown('r5');
+      await asked.promise;
+      lag = false;
+      const finished = await b.finish('r5', countingJob(2, [() => blocked.promise]));
+      late.resolve();
+      await showing;
+      expect(finished).toEqual({ refused: 'another-tab' });
+      expect(await store.keys('lib/j/')).toEqual([]);
+    } finally {
+      late.resolve();
+      blocked.resolve();
+      await b.whenIdle();
+      a.close();
+      b.close();
+    }
   });
 
   it("marks its own record cut for the session, refuses the writes after it, lets its lock go and reads as cut with the session's mark", async () => {
