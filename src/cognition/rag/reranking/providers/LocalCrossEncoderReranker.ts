@@ -600,8 +600,11 @@ export class LocalCrossEncoderReranker implements IRerankerProvider {
    * Rerank documents using a local cross-encoder model.
    *
    * Throws when Transformers.js or the model cannot be loaded, a forward
-   * pass fails, or the model returns a NaN or infinite logit;
-   * `RerankerService` callers then keep the order they had.
+   * pass fails, or the model returns a NaN or infinite logit.
+   * `RerankerService.rerankChain()` and `RetrievalAugmentor` then keep the
+   * order they had; `RerankerService.rerank()` and `rerankChunks()` log the
+   * error and throw it on, so their caller keeps its order only if it
+   * catches.
    *
    * Every batch of one call is scored by the model loaded when the call
    * began, even if `initialize()` loads another model meanwhile.
