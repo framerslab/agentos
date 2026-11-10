@@ -94,12 +94,19 @@ export interface MemoryRecallCapture {
   retrieval: 'dense' | 'hybrid';
   /** The budget the block was assembled in: the one asked for, and the one used. */
   budget: {
+    /** The configured budget of the block (`recall.budget.totalTokens`, or the caller's). */
     requested: number;
+    /** The budget the block was rendered in. */
     effective: number;
+    /** Set when a model's share of the prompt held less than `requested`: `zero_remaining` when nothing was left. */
     clampReason?: 'prompt_share' | 'zero_remaining';
+    /** The serving model's retrieved-context share, in tokens (a GMI turn's record). */
     promptShareTokens?: number;
+    /** The turn's RAG and long-term-memory text, in tokens, which the share holds first (a GMI turn's record). */
     otherContextTokens?: number;
+    /** The model hop the record is for, 0 for the route's primary (a GMI turn's record). */
     hop?: number;
+    /** True when the block was rendered again at `effective` from the turn's recall, with no second retrieval. */
     reassembled?: boolean;
   };
   /** Estimated tokens of the block, headers included. */
@@ -121,7 +128,13 @@ export interface MemoryRecallCapture {
   candidates: MemoryRecallCandidate[];
   /** Milliseconds of each stage, rounded. */
   timings: { legsMs: number; fuseMs: number; dedupeMs: number; rerankMs: number; assembleMs: number; totalMs: number };
-  /** What reached the model, once the prompt was built. */
+  /**
+   * What reached the model, once the prompt was built (a GMI turn's record): PromptEngine's count of the memory block,
+   * which it never reduces; the other retrieved context the turn had (`ragTokens`, `longTermMemoryTokens`, by the
+   * assembler's estimate) and what of it was sent (`deliveredTokens`, by PromptEngine's), with `cutBy` when PromptEngine
+   * reduced it; and the codes of PromptEngine's issues about the context (`RAG_SUMMARIZATION_FAILED`,
+   * `TOKEN_BUDGET_EXCEEDED_POST_OPT`).
+   */
   delivery?: {
     memoryBlockTokens: number;
     otherContext?: { ragTokens: number; longTermMemoryTokens: number; deliveredTokens: number; cutBy?: 'prompt_engine_truncate' | 'prompt_engine_summarize' };
