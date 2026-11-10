@@ -438,6 +438,16 @@ describe.skipIf(!URL)('LibraryIndex.searchGroups over PostgresVectorStore on Pos
     const [next] = await run({ text: 'quarterly', groups: [documents], pageSize: 3, cursor: first.cursor as string });
     expect(next.state).toBe('ok');
     expect(ids(next)).toEqual(['document:d03', 'document:d04', 'document:d05']);
+    // The page was made for one principal. Asked under other access groups or another tenant, the same list with the
+    // same fingerprint restarts too: what the first page ranked is not what this scope may read.
+    for (const scope of [{ tenantId: ORG, aclGroups: [TEAM] }, { tenantId: ORG, aclGroups: ['acct:ann', TEAM, 'acct:bob'] }, { tenantId: 'org2', aclGroups: ['acct:ann', TEAM] }]) {
+      const [other] = await run({ text: 'quarterly', groups: [documents], pageSize: 3, cursor: first.cursor as string, scope });
+      expect(other, JSON.stringify(scope)).toEqual({ id: 'documents', state: 'restart', total: 0, incomplete: false, cursor: null, hits: [], anyWord: [] });
+    }
+    // The same groups handed in another order, or one of them twice, are the same scope.
+    const [reordered] = await run({ text: 'quarterly', groups: [documents], pageSize: 3, cursor: first.cursor as string, scope: { tenantId: ORG, aclGroups: [TEAM, 'acct:ann', TEAM] } });
+    expect(reordered.state).toBe('ok');
+    expect(ids(reordered)).toEqual(['document:d03', 'document:d04', 'document:d05']);
   });
 
   it("orders by the caller's dates under order date, undated items last in rank order, and reads no date from a passage", async () => {
@@ -552,6 +562,8 @@ describe.skipIf(!URL)('LibraryIndex.searchGroups over PostgresVectorStore on Pos
     // Not a cursor of this search at all.
     const broken = ['', 'not a cursor', encode('text'), encode({ v: 2 }), encode({ ...decode(cursor), key: [1, 2, 3, 4] }), encode({ ...decode(cursor), expansion: 'quarterly' })];
     for (const not of broken) await refused({ ...base, cursor: not });
+    // Nor is the null a group answers after its last page: handed back, it is refused, never read as a first page.
+    await refused({ ...base, cursor: null as unknown as string });
     // The same request with its own cursor: the next page.
     const [next] = await run({ ...base, cursor });
     expect(ids(next)).toEqual(['document:d03', 'document:d04', 'document:d05']);
@@ -864,6 +876,15 @@ describe.skipIf(!URL)('LibraryIndex.searchGroups over PostgresVectorStore on Pos
     await expect(run({ ...base, groups: [{ ...documents, items: [...documents.items, documents.items[0]] }] })).rejects.toThrow(/twice/);
     await expect(run({ ...base, groups: [{ ...documents, items: [{ sourceId: 'document:d00', date: 'yesterday' }] }] })).rejects.toThrow(/date/);
     await expect(run({ ...base, pageSize: 0 })).rejects.toThrow(/pageSize/);
+    await expect(run({ ...base, pageSize: 2 ** 53 })).rejects.toThrow(/pageSize/);
+    // Every page size the search admits is answered: the largest a Postgres integer holds, and the largest whole number.
+    for (const pageSize of [2 ** 31 - 1, Number.MAX_SAFE_INTEGER]) {
+      const [whole] = await run({ ...base, pageSize });
+      expect(whole, String(pageSize)).toMatchObject({ total: 2, cursor: null });
+      expect(ids(whole)).toEqual(['document:d00', 'document:d01']);
+      const [listed] = await run({ text: '', groups: [documents], pageSize });
+      expect(listed, String(pageSize)).toMatchObject({ total: 10, cursor: null });
+    }
     await expect(run({ ...base, expansionMax: 0 })).rejects.toThrow(/expansionMax/);
     await expect(run({ ...base, profile: { fields: { title: 100 }, fallback: 'text' } })).rejects.toThrow(/fallback/);
     await expect(run({ ...base, profile: { fields: { text: 0 }, fallback: 'text' } })).rejects.toThrow(/weight/);
