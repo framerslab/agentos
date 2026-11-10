@@ -8,6 +8,16 @@
 export const LEXICAL_GROUP_WORDS_MAX = 32;
 
 /**
+ * The most stored words one edit away a word of a grouped search is widened to. The store writes every word's stored
+ * words into one tsquery, one `|` after another, which Postgres reads, joins and matches by recursion over its tree
+ * (`findoprnd_recurse`, `QT2QTN`, `TS_execute_recurse` in src/backend/utils/adt, https://github.com/postgres/postgres/tree/REL_16_STABLE/src/backend/utils/adt), each step held by `check_stack_depth`
+ * against `max_stack_depth` (2 MB by default, https://www.postgresql.org/docs/current/runtime-config-resource.html).
+ * With this cap a tsquery holds at most 32 words of the search's own, each twice, and 2,048 stored words, whatever a
+ * cursor carries, so no expansion reaches that limit.
+ */
+export const LEXICAL_GROUP_EXPANSION_MAX = 64;
+
+/**
  * The form of an item's date: an ISO 8601 instant with its zone, to the microsecond at most. Postgres reads other
  * texts as dates too (`yesterday`, `infinity`), so a date reaches a statement only in this form; and Postgres keeps a
  * timestamp to the microsecond (https://www.postgresql.org/docs/current/datatype-datetime.html), so a seventh digit
@@ -113,8 +123,9 @@ export function isLexicalGroupRank(value: unknown): value is string {
 
 /**
  * Whether a value is a list for each of `words`, in order, of the stored words to widen it to that one tsquery holds
- * beside them: each stored word a text that is not empty, holds no NUL and is at most 2046 bytes of UTF-8, and all of
- * them together, each with one byte more, at most {@link lexicalGroupExpansionRoom}. A tsvector holds a word of 2047
+ * beside them: at most {@link LEXICAL_GROUP_EXPANSION_MAX} a word, each stored word a text that is not empty, holds no
+ * NUL and is at most 2046 bytes of UTF-8, and all of them together, each with one byte more, at most
+ * {@link lexicalGroupExpansionRoom}. A tsvector holds a word of 2047
  * bytes, which a release before Postgres's commit 1fc1b82b2f will not read in a tsquery; a cursor carrying one is
  * refused. Which stored words a word reaches is the caller's to check.
  */
@@ -122,7 +133,7 @@ export function isLexicalGroupExpansion(value: unknown, words: readonly string[]
   if (!Array.isArray(value) || value.length !== words.length) return false;
   let room = lexicalGroupExpansionRoom(words);
   for (const list of value) {
-    if (!Array.isArray(list)) return false;
+    if (!Array.isArray(list) || list.length > LEXICAL_GROUP_EXPANSION_MAX) return false;
     for (const word of list) {
       if (typeof word !== 'string' || word === '' || word.includes('\u0000')) return false;
       const length = lexicalGroupWordBytes(word);

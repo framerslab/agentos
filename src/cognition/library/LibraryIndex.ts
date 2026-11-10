@@ -30,6 +30,7 @@ import type {
   VectorDocument,
 } from '../../core/vector-store/IVectorStore.js';
 import {
+  LEXICAL_GROUP_EXPANSION_MAX,
   LEXICAL_GROUP_WORDS_MAX as GROUP_WORDS_MAX,
   isLexicalGroupExpansion as isExpansion,
   isLexicalGroupInstant as isInstant,
@@ -196,9 +197,11 @@ export interface LibraryGroupSearch {
    */
   typo?: 'one-edit' | 'none';
   /**
-   * The most stored words one edit away that a word is widened to, the most frequent kept: a whole number, 1 or
-   * more. A word with more marks its group `incomplete`, and so does a stored word the store's query has no room for
-   * beside the search's words (on `PostgresVectorStore`, one tsquery of a mebibyte). @default 64
+   * The most stored words one edit away that a word is widened to, the most frequent kept: a whole number from 1 to
+   * 64; a search asking for more is refused before the store is asked anything, as one tsquery holding more than 64 a
+   * word for 32 words would pass what Postgres reads. A word with more marks its group `incomplete`, and so does a
+   * stored word the store's query has no room for beside the search's words (on `PostgresVectorStore`, one tsquery of
+   * a mebibyte). @default 64
    */
   expansionMax?: number;
   /** The most hits a group answers on a page: a whole number, 1 or more, that JavaScript holds exactly. */
@@ -387,8 +390,8 @@ function passageOf(doc: RetrievedVectorDocument, score: number): LibraryPassage 
 /** The part kinds a group may narrow to. */
 const PART_KINDS: readonly LibraryPartKind[] = ['transcript', 'summary', 'decisions', 'action_items', 'next_steps'];
 
-/** The most stored words one edit away a word is widened to, unless the search says otherwise. */
-const EXPANSION_MAX = 64;
+/** The most stored words one edit away a word is widened to, unless the search asks for fewer; the most it may ask for. */
+const EXPANSION_MAX = LEXICAL_GROUP_EXPANSION_MAX;
 
 /** The fewest letters a query word and a stored word each need to match one edit apart. */
 const EDIT_MIN_LETTERS = 4;
@@ -464,7 +467,9 @@ function groupSearchOf(query: LibraryGroupSearch): CheckedGroupSearch {
   if (title !== undefined && title !== 'passage' && title !== 'metadata') throw refused("the profile's title must be 'passage' or 'metadata'");
   if (query.order !== undefined && query.order !== 'rank' && query.order !== 'date') throw refused("the order must be 'rank' or 'date'");
   if (query.typo !== undefined && query.typo !== 'one-edit' && query.typo !== 'none') throw refused("the typo rule must be 'one-edit' or 'none'");
-  if (query.expansionMax !== undefined && !whole(query.expansionMax)) throw refused(`expansionMax must be a whole number from 1 to ${Number.MAX_SAFE_INTEGER}`);
+  if (query.expansionMax !== undefined && !(whole(query.expansionMax) && query.expansionMax <= EXPANSION_MAX)) {
+    throw refused(`expansionMax must be a whole number from 1 to ${EXPANSION_MAX}`);
+  }
   if (!whole(query.pageSize)) throw refused(`pageSize must be a whole number from 1 to ${Number.MAX_SAFE_INTEGER}`);
 
   const handed = new Set<string>();
@@ -593,7 +598,7 @@ function cursorDecode(cursor: unknown): LibraryCursor {
 
 /**
  * Whether the stored words a cursor carries are words its search reaches, as the store draws them: one list a word,
- * at most `expansionMax` long, each stored word once, and none at all without the one-edit rule; each stored word one
+ * at most `expansionMax` long (64 at most), each stored word once, and none at all without the one-edit rule; each stored word one
  * edit from its query word where both hold four letters or more, and neither that word nor a word it begins, which
  * match as such and are never drawn. The words are held first to what one tsquery holds beside the search's own words
  * (each at most 2046 bytes, all of them under a mebibyte with those words), so a cursor adds no word to a search and

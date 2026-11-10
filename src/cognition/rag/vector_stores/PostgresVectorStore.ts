@@ -49,6 +49,7 @@ import type {
 } from '../IVectorStore.js';
 import { sha256Hex } from '../../../core/utils/sha256.js';
 import {
+  LEXICAL_GROUP_EXPANSION_MAX as EXPANSION_MAX,
   LEXICAL_GROUP_WORDS_MAX as GROUP_WORDS_MAX,
   isLexicalGroupExpansion as isExpansion,
   lexicalGroupExpansionRoom as expansionRoom,
@@ -258,11 +259,11 @@ function groupSearchOf(options: LexicalGroupSearchOptions): GroupSearch {
   if (new Set(words).size !== words.length) throw refused('a word is given twice');
   if (expansion !== undefined && !isExpansion(expansion, words)) {
     throw refused(
-      "the expansion must hold one list of stored words for each word, each word a text that is not empty, holds no NUL and is at most 2046 bytes of UTF-8, and all of them at most what one tsquery holds beside the search's own words",
+      `the expansion must hold one list of at most ${EXPANSION_MAX} stored words for each word, each word a text that is not empty, holds no NUL and is at most 2046 bytes of UTF-8, and all of them at most what one tsquery holds beside the search's own words`,
     );
   }
-  if (oneEdit !== undefined && !(whole(oneEdit.minLength) && whole(oneEdit.max))) {
-    throw refused(`oneEdit.minLength and oneEdit.max must be whole numbers from 1 to ${Number.MAX_SAFE_INTEGER}`);
+  if (oneEdit !== undefined && !(whole(oneEdit.minLength) && whole(oneEdit.max) && oneEdit.max <= EXPANSION_MAX)) {
+    throw refused(`oneEdit.minLength must be a whole number from 1 to ${Number.MAX_SAFE_INTEGER}, and oneEdit.max one from 1 to ${EXPANSION_MAX}`);
   }
   if (!Array.isArray(group?.items)) throw refused('the group needs its items');
   const ids = group.items.map((item) => item.sourceId);
@@ -1042,7 +1043,7 @@ export class PostgresVectorStore implements IVectorStore {
    *   away, summed over the words, in exact decimal arithmetic. `ts_rank` is not read.
    * - **The stored words one edit away** come from `ts_stat` over the same passages: every stored word within one
    *   letter of a query word's length, read 1,000 at a time through a cursor in a transaction, held to one edit in
-   *   process, the most frequent `oneEdit.max` kept for each word while one tsquery holds them beside the query's
+   *   process, the most frequent `oneEdit.max` (64 at most) kept for each word while one tsquery holds them beside the query's
    *   words (each at most 2046 bytes, all of them with the query's words at most 1048575); a word past either is left
    *   out and marks the answer incomplete. A page after the first takes them as `expansion` and reads none.
    * - **The page** is ordered by rank, or by the caller's dates with an undated item last, then by the source id in

@@ -300,16 +300,18 @@ export interface LexicalGroupSearchOptions {
   /**
    * For each word, in order, the stored words one edit away that an earlier page of this search matched. With it the
    * store reads no stored word again and `oneEdit` is not read; a search hands back what the first page answered.
-   * Each stored word is at most 2046 bytes of UTF-8 and all of them, each with one byte more, at most 1048575 bytes
-   * less the query's words, each counted twice with one byte more, as one tsquery holds them beside those words.
+   * At most 64 a word; each stored word is at most 2046 bytes of UTF-8 and all of them, each with one byte more, at
+   * most 1048575 bytes less the query's words, each counted twice with one byte more, as one tsquery holds them
+   * beside those words.
    */
   expansion?: string[][];
   /**
    * Without `expansion`: widens each word of `minLength` letters or more to the stored words of the group's passages
    * that are one edit away (a letter added, dropped or changed, or two side by side swapped) and hold `minLength`
-   * letters or more, the most frequent first, at most `max` a word, and only as many as `expansion` holds. A word that
-   * more than `max` stored words are one edit from, or one whose stored word `expansion` has no room for, marks the
-   * answer incomplete.
+   * letters or more, the most frequent first, at most `max` a word, and only as many as `expansion` holds. `max` is a
+   * whole number from 1 to 64. A word that more than `max` stored words are one edit from, or one whose stored word
+   * `expansion` has no room for, marks the answer incomplete. The words drawn follow the rule the answer's
+   * `expansion` states.
    */
   oneEdit?: { minLength: number; max: number };
   /**
@@ -380,10 +382,24 @@ export interface LexicalGroupSearchResult {
   total: number;
   /**
    * True when a word had more stored words one edit away than `oneEdit.max`, in which case the most frequent `max` are
-   * matched and the items are answered, or when the signal stopped the search, in which case no item is.
+   * matched and the items are answered; when a stored word one edit away was left out as the tsquery had no room for
+   * it (past 2046 bytes, or past the room `expansion` states), in which case the words kept are matched and the items
+   * are answered; or when the signal stopped the search, in which case no item is.
    */
   incomplete: boolean;
-  /** For each word, in order, the stored words one edit away the search matched: found on a first page, the caller's own otherwise. */
+  /**
+   * For each word, in order, the stored words one edit away the search matched: found on a first page, the caller's
+   * own otherwise. `LibraryIndex` carries these lists in its cursor and holds a later page's lists to the same rule,
+   * so a store answers only lists that keep it:
+   * - a list for each word, empty for a word under `oneEdit.minLength` letters or without `oneEdit`;
+   * - each stored word one edit from its word (a letter added, dropped or changed, or two side by side swapped) and
+   *   `oneEdit.minLength` letters or more, and never the word itself or a word that begins with it, which match as
+   *   such;
+   * - each stored word once in its list, and at most `oneEdit.max` (64 at most) a word;
+   * - each at most 2046 bytes of UTF-8, and all of them within the room `expansion` states beside the query's words.
+   * A word the store left out for room or past `max` marks the answer `incomplete`. A list outside the rule, such as
+   * `[['budgets', 'budgte']]` for `budget`, makes the index refuse the cursor of its own next page.
+   */
   expansion: string[][];
   /** The page's items, in order. */
   rows: LexicalGroupRow[];
