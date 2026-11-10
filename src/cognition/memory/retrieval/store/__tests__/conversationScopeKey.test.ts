@@ -5,28 +5,22 @@
  * key as a prefix whatever their ids contain, that the parser reads back every key the encoder writes and reads no
  * other string as one, and that an empty id is refused.
  */
-import { beforeAll, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
+import {
+  CONVERSATION_SCOPE,
+  conversationScopeKey,
+  parseConversationScopeKey,
+  type ConversationSubject,
+} from '../conversationScopeKey.js';
 
-type Subject = { kind: 'user'; id: string } | { kind: 'session'; id: string } | { kind: 'operator' };
-
-interface KeyModule {
-  CONVERSATION_SCOPE: string;
-  conversationScopeKey(agentId: string, subject: Subject): string;
-  parseConversationScopeKey(scopeId: string): { agentId: string; subject: Subject } | undefined;
-}
-
-let mod: KeyModule;
-
-beforeAll(async () => {
-  mod = (await import('../conversationScopeKey.js' as string)) as KeyModule;
-});
+type Subject = ConversationSubject;
 
 describe('conversationScopeKey', () => {
   it('writes the three forms', () => {
-    expect(mod.CONVERSATION_SCOPE).toBe('conversation');
-    expect(mod.conversationScopeKey('aria', { kind: 'user', id: 'bob' })).toBe('c1:u:4:aria:3:bob;');
-    expect(mod.conversationScopeKey('aria', { kind: 'session', id: 'bob' })).toBe('c1:s:4:aria:3:bob;');
-    expect(mod.conversationScopeKey('aria', { kind: 'operator' })).toBe('c1:o:4:aria:0:;');
+    expect(CONVERSATION_SCOPE).toBe('conversation');
+    expect(conversationScopeKey('aria', { kind: 'user', id: 'bob' })).toBe('c1:u:4:aria:3:bob;');
+    expect(conversationScopeKey('aria', { kind: 'session', id: 'bob' })).toBe('c1:s:4:aria:3:bob;');
+    expect(conversationScopeKey('aria', { kind: 'operator' })).toBe('c1:o:4:aria:0:;');
   });
 
   it('gives two keys for two subjects whatever their ids hold', () => {
@@ -58,8 +52,8 @@ describe('conversationScopeKey', () => {
       ],
     ];
     for (const [[agentA, subjectA], [agentB, subjectB]] of pairs) {
-      const a = mod.conversationScopeKey(agentA, subjectA);
-      const b = mod.conversationScopeKey(agentB, subjectB);
+      const a = conversationScopeKey(agentA, subjectA);
+      const b = conversationScopeKey(agentB, subjectB);
       expect(a).not.toBe(b);
       expect(a.startsWith(b)).toBe(false);
       expect(b.startsWith(a)).toBe(false);
@@ -71,14 +65,14 @@ describe('conversationScopeKey', () => {
     const subjectIds = ['bob', 'a::b', '..', '%2F', ';', 'x'.repeat(300), '\u{1F600}'];
     for (const agentId of agentIds) {
       const operator: Subject = { kind: 'operator' };
-      expect(mod.parseConversationScopeKey(mod.conversationScopeKey(agentId, operator))).toEqual({
+      expect(parseConversationScopeKey(conversationScopeKey(agentId, operator))).toEqual({
         agentId,
         subject: operator,
       });
       for (const id of subjectIds) {
         for (const kind of ['user', 'session'] as const) {
           const subject: Subject = { kind, id };
-          expect(mod.parseConversationScopeKey(mod.conversationScopeKey(agentId, subject))).toEqual({
+          expect(parseConversationScopeKey(conversationScopeKey(agentId, subject))).toEqual({
             agentId,
             subject,
           });
@@ -103,13 +97,13 @@ describe('conversationScopeKey', () => {
       'c1:u:0::3:bob;',
     ];
     for (const text of notKeys) {
-      expect(mod.parseConversationScopeKey(text), JSON.stringify(text)).toBeUndefined();
+      expect(parseConversationScopeKey(text), JSON.stringify(text)).toBeUndefined();
     }
   });
 
   it('refuses an empty id', () => {
-    expect(() => mod.conversationScopeKey('', { kind: 'user', id: 'bob' })).toThrow(TypeError);
-    expect(() => mod.conversationScopeKey('aria', { kind: 'user', id: '' })).toThrow(TypeError);
-    expect(() => mod.conversationScopeKey('aria', { kind: 'session', id: '' })).toThrow(TypeError);
+    expect(() => conversationScopeKey('', { kind: 'user', id: 'bob' })).toThrow(TypeError);
+    expect(() => conversationScopeKey('aria', { kind: 'user', id: '' })).toThrow(TypeError);
+    expect(() => conversationScopeKey('aria', { kind: 'session', id: '' })).toThrow(TypeError);
   });
 });

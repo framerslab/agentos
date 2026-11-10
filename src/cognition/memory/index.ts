@@ -129,6 +129,12 @@ export type { MemoryStoreConfig } from './retrieval/store/MemoryStore.js';
 
 // --- SQLite Storage ---
 export { Brain } from './retrieval/store/Brain.js';
+export {
+  CONVERSATION_SCOPE,
+  conversationScopeKey,
+  parseConversationScopeKey,
+  type ConversationSubject,
+} from './retrieval/store/conversationScopeKey.js';
 export { SqlKnowledgeGraph } from './retrieval/store/SqlKnowledgeGraph.js';
 export { HnswSidecar, type HnswSidecarConfig, type HnswQueryResult } from './retrieval/store/HnswSidecar.js';
 export { SqlMemoryGraph } from './retrieval/store/SqlMemoryGraph.js';

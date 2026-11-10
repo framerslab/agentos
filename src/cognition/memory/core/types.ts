@@ -24,8 +24,11 @@ import type {
 /** Long-term memory subtypes (Tulving's taxonomy + extensions). */
 export type MemoryType = 'episodic' | 'semantic' | 'procedural' | 'prospective' | 'relational';
 
-/** Visibility / ownership scope for a memory trace. */
-export type MemoryScope = 'thread' | 'user' | 'persona' | 'organization';
+/**
+ * Visibility / ownership scope for a memory trace. `conversation` holds one subject's conversation traces and wiki
+ * page chunks with one agent, under a scope id `conversationScopeKey()` builds.
+ */
+export type MemoryScope = 'thread' | 'user' | 'persona' | 'organization' | 'conversation';
 
 /**
  * How the content of this memory was originally produced.
