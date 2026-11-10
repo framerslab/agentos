@@ -207,8 +207,9 @@ export class RerankerService {
    * @param config - Request configuration
    * @returns Reranked chunks sorted by relevance
    * @throws The provider's error, after logging it to the service's logger when the service has one, as
-   * `rerank()` does. A caller that wants its order on a failure catches it, for example
-   * `await service.rerankChunks(query, chunks).catch(() => chunks)`; `rerankChain()` does this for each stage.
+   * `rerank()` does; also an error of its own, which it does not log: no provider named and no default, a
+   * provider not registered, or a result id that is not among the chunks. A caller that wants its order on a
+   * failure catches the error, records it and returns `chunks`; `rerankChain()` does this for each stage.
    */
   public async rerankChunks(
     query: string,

@@ -411,9 +411,12 @@ export class LocalCrossEncoderReranker implements IRerankerProvider {
    *
    * A load that fails throws as soon as the tokenizer or the model fails,
    * and leaves the model that was loaded before it, if any. A model that
-   * loads after its tokenizer failed finishes loading in the background and
-   * is disposed then, so a failed load holds no ONNX session. A failed load
-   * is not remembered: the next `rerank()` with no model loaded tries again.
+   * loads after its tokenizer failed finishes loading in the background, and
+   * the provider then calls its `dispose()`, dropping any error the disposal
+   * throws. A failed load is not remembered: with no model loaded, the next
+   * `rerank()` tries the load once more. When `initialize(otherModelId)`
+   * fails while a model is loaded, reranks go on with the loaded model;
+   * call `initialize(otherModelId)` again to retry the replacement.
    *
    * Loads run one at a time, in the order they were asked for, so concurrent
    * calls for different models never load at once and the last call's model
@@ -527,8 +530,8 @@ export class LocalCrossEncoderReranker implements IRerankerProvider {
     try {
       [tokenizer, model] = await Promise.all([tokenizerLoad, modelLoad]);
     } catch (error) {
-      // The load fails as soon as either half fails. A model that loaded, or loads later, is disposed when its load
-      // ends, so a failed load holds no ONNX session; the caller gets the load's error, whatever the disposal does.
+      // The load fails as soon as either half fails. A model that loaded, or loads later, has its dispose() called
+      // when its load ends; the caller gets the load's error, whatever the disposal does.
       void modelLoad.then(disposeQuietly, () => undefined);
       throw error;
     }
