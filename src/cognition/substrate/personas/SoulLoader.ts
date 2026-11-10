@@ -117,9 +117,9 @@ export interface SoulFrontmatter {
   /** Allowed mood transitions. Subset of agentos GMI moods. */
   allowedMoods?: string[];
   /**
-   * Hard behavioral limits, carried on the persona (`personaDefinition.hardLimits`). A GMI renders them as the
-   * closing "Hard limits" block of its system prompt. `agent()` and `gmi()` do not apply a soul's front matter, so
-   * there they reach no prompt. They are words for the model: PersonaOverlayManager runs no guardrail check on them.
+   * Hard behavioral limits, carried on the persona (`personaDefinition.hardLimits`). Every path renders them as the
+   * closing "Hard limits" block of the system prompt: a GMI from its persona, `agent()` and `souledAgent()` after their
+   * own prompt. They are words for the model: PersonaOverlayManager runs no guardrail check on them.
    */
   hardLimits?: string[];
   /** Avatar config for visual surfaces. Maps to PersonaAvatarConfig. */

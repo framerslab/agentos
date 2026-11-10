@@ -251,7 +251,7 @@ const reply = await aria.session('customer-42').send('I need help with my invoic
 console.log(reply.text);
 ```
 
-`agent()` uses the prose; the structured fields (HEXACO scores, voice, mood, hard limits) live on the `personaDefinition` that `loadSoul()` returns, which the full runtime takes as a persona:
+Every path applies the front matter through one mapping. `agent()` and `souledAgent()` render the hard limits, the `hexaco` trait paragraph and the name; `gmi()` builds its persona from the id, name, role, traits, mood, reasoning-trace limits and hard limits; and the full runtime takes the whole `personaDefinition` that `loadSoul()` returns:
 
 ```ts
 import { loadSoul } from '@framers/agentos/cognition/substrate/personas/SoulLoader';
@@ -285,21 +285,24 @@ What a soul gives an agent depends on how it is loaded:
 
 | Path | Soul prose and style in the prompt | Memory index in the prompt | Front matter applied (traits, mood, hard limits, `agentId`) | A recall block each turn | `read_memory_page` tool | Wiki compiled |
 |---|---|---|---|---|---|---|
-| `agent({ soul })` | Yes | Yes | No | No (only from a `memoryProvider` you pass) | No | No |
-| `souledAgent()` | Yes | Yes | `agentId` only, which scopes the wiki's traces | Yes, from the wiki's store | Yes | Yes, on `close()` and by `agent.memory.compileWiki()` |
-| `agent({ runtime: 'gmi', soul })`, `gmi({ soul })` | Yes | Yes | No | With cognitive memory on, from cognitive memory; off, only from a `memoryProvider` you pass | No | No |
-| `souledAgent({ runtime: 'gmi' })`, cognitive memory off | Yes | Yes | `agentId` only | Yes, from the wiki's store | Yes | Yes |
-| `souledAgent({ runtime: 'gmi' })`, cognitive memory on | Yes | Yes | `agentId` only | From cognitive memory; the wiki store's recall is skipped, with a warning, and its turns are still stored | Yes | Yes |
-| The full runtime given `loadSoul().personaDefinition` | Yes (the persona's `baseSystemPrompt`) | No | Yes | From the runtime's own memory, when configured; not from the wiki | No | No |
+| `agent({ soul })` | Yes | Yes | Hard limits as the last block of the system prompt; the `hexaco` paragraph unless `personality` is set; the soul's `name` unless `name` is set. Mood, voice, avatar and reasoning-trace limits have no renderer here | No (only from a `memoryProvider` you pass) | No | No |
+| `souledAgent()` | Yes | Yes | As `agent({ soul })`; the soul's id (`agentId`, else the slug of its `name`, else the agent's `name`) scopes the wiki's traces, and a soul with none of the three is rejected | Yes, from the wiki's store | Yes | Yes, on `close()` and by `agent.memory.compileWiki()` |
+| `agent({ runtime: 'gmi', soul })`, `gmi({ soul })` | Yes | Yes | The persona's id, name, role, traits, mood, reasoning-trace limits and hard limits, the limits as the last block; `voice` and `avatar` are left out with one log line | With cognitive memory on, from cognitive memory; off, only from a `memoryProvider` you pass | No | No |
+| `souledAgent({ runtime: 'gmi' })`, cognitive memory off | Yes | Yes | As `gmi({ soul })`; one id for the persona and the wiki | Yes, from the wiki's store | Yes | Yes |
+| `souledAgent({ runtime: 'gmi' })`, cognitive memory on | Yes | Yes | As the row above | From cognitive memory; the wiki store's recall is skipped, with a warning, and its turns are still stored | Yes | Yes |
+| The full runtime given `loadSoul().personaDefinition` | Yes (the persona's `baseSystemPrompt`) | No | Yes, every field | From the runtime's own memory, when configured; not from the wiki | No | No |
 
 The exceptions:
 
-- `systemBlocks` replace the prompt the agent assembles, so an agent given a soul and `systemBlocks` has none of the soul's prose, style or memory index in its prompt; the build says so in one `console.warn` line. A souled agent in that state still records its turns into the wiki.
+- `systemBlocks` replace the prompt the agent assembles, so an agent given a soul and `systemBlocks` has none of the soul's prose, style or memory index in its prompt; the build says so in one `console.warn` line. The hard limits still close the prompt, as one more block after yours with no cache breakpoint of its own. A souled agent in that state still records its turns into the wiki.
 - A named tool map (an object, not an array) is passed through as given, without `read_memory_page`.
 - An inline soul (`{ content }`) has no workspace folder: `souledAgent()` builds a plain `agent()` with no wiki memory, no `read_memory_page` tool and no compile, and says so in one `console.warn` line.
 - One-shot `generate()` and `stream()` on a GMI run the light profile, so they use the memory provider's recall, the wiki store's on a souled agent, even when sessions run with cognitive memory on.
 - A seat of a launched team uses neither memory hook (no recall from the provider, nothing stored with it) and is refused the memory tools, `read_memory_page` among them.
-- Hard limits are a block of prompt text a GMI renders from the persona, not a check that enforces them.
+- Hard limits are a block of prompt text every path renders last, after `systemBlocks` too. It tells the model; it is not a check that enforces the limits.
+- A `personality` or `name` option set in code wins over the soul's `hexaco` and `name`. The id is the exception: the soul's `agentId` wins over the agent's `name`, since the id keys the agent's memory and must not move when the agent is renamed.
+- `gmi()` accepts guardrails, RAG and approval settings without applying them, and says so in one warning line at construction.
+- A soul that fails to load throws `SoulLoadError` when the agent is built, unless it is given as `{ path, optional: true }` or `{ content, optional: true }`.
 - On the full runtime, the trait paragraph from the `hexaco:` scores reaches the prompt with or without a learning layer; with one, the layer prepares it each turn ([GMI.md](./GMI.md#learning)).
 
 ## Loading Order at Agent Boot

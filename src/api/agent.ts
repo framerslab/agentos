@@ -341,10 +341,13 @@ export interface AgentOptions extends BaseAgentConfig {
    * replace the assembled prompt, the soul's prose with it), `agent()` reads
    * the soul and joins its prose into one system prompt, first the SOUL.md body, then a
    * `## Style` section from STYLE.md, then the `memory/index.md` catalog, before
-   * `instructions`, `name`, `personality` and `skills`. The front matter's
-   * structured fields (HEXACO traits, voice, mood, hard limits) are not applied
-   * here: they live on the persona (`personaDefinition`) that `loadSoul()`
-   * returns, which the full runtime takes. A soul that fails to load, or whose
+   * `instructions`, `name`, `personality` and `skills`. The front matter applies
+   * too: the hard limits close the system prompt as a block of their own, after
+   * `systemBlocks` as well; the `hexaco` scores render as the trait paragraph when
+   * `personality` is unset; and the soul's `name` is the name line when `name` is
+   * unset. Mood, voice, avatar and reasoning-trace limits have no renderer on this
+   * runtime; `runtime: 'gmi'` applies mood and the trace limits through its
+   * persona. A soul that fails to load, or whose
    * front matter has a field of the wrong type, throws `SoulLoadError` when the
    * agent is built. `optional: true` on the object forms runs the agent without
    * it and writes one `soul.load_failed` log line.
