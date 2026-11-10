@@ -48,6 +48,7 @@
 
 - [**Guardrails System**](./safety/GUARDRAILS_USAGE.md) — Two-phase guardrail dispatch, the six built-in packs (PII redaction, ML classifiers, topicality, code safety, grounding guard, content policy rewriter), and the folder-level file permissions that Wunderland adds on top of AgentOS
 - [**Safety Primitives**](./safety/SAFETY_PRIMITIVES.md) — Circuit breakers, cost guards, stuck detection, and tool execution guards
+- [**Your Duties as the Controller**](./safety/MEMORY_HOST_DUTIES.md) — What the library does with per-user memory and what your product must do itself: deletion, backups, retention, consent, notices
 
 #### Memory & Storage
 
