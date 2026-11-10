@@ -77,6 +77,12 @@ export interface LocalCrossEncoderConfig extends RerankerProviderConfig {
    * Default: 'fp32' (no suffix)
    */
   dtype?: LocalCrossEncoderDtype;
+  /** Threads onnxruntime runs one operator on. */
+  intraOpNumThreads?: number;
+  /** Threads onnxruntime runs independent operators on. */
+  interOpNumThreads?: number;
+  /** Longest piece of a document scored on its own, in characters. */
+  pieceMaxChars?: number;
 }
 
 /**
