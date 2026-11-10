@@ -96,6 +96,8 @@ export const AGENTOS_EVENTS = {
   'soul.field_ignored': { field: { enum: ['voice', 'avatar'] } },
   // A gmi() agent's learners stay under the slug of its name: the learning store holds learner rows under it and none under the soul's id.
   'soul.id_fallback': { reason: { enum: ['old_slug_learner'] } },
+  // A session was opened with an anonymous id as its user id; the session is the memory subject.
+  'memory.anonymous_user': { path: { enum: ['plain', 'gmi'] } },
 } as const satisfies EventMap;
 
 /** The type of {@link AGENTOS_EVENTS}, which `lazyLogger`'s handles are typed over. */

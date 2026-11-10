@@ -63,7 +63,8 @@ import {
   type AgentExportConfig,
   type ExportAgentConfigOptions,
 } from './agentExportCore.js';
-import { applyMemoryProvider, type MemoryProviderHookOptions } from './runtime/memoryProviderHooks.js';
+import { applyMemoryProvider, type MemoryProviderHookOptions, type MemoryTurn } from './runtime/memoryProviderHooks.js';
+import { memoryHookContextOf, namedSessionUser } from './runtime/memorySubject.js';
 import { observeWithoutWaiting } from './runtime/memoryObserveFailures.js';
 import type { MemoryRecallItem } from './runtime/memoryDataBlock.js';
 import { warnSoulBesideSystemBlocks, warnSoulLoadFailed } from './runtime/soulLoadWarning.js';
@@ -79,6 +80,7 @@ import type { SessionTranscriptMessage } from './sessionTranscript.js';
 import type { CognitionConfig, CognitionProfile } from './runtime/gmiCognition.js';
 // gmi.ts imports this module back (through gmiPersona.ts); each side calls the other only inside functions.
 import { gmi } from './gmi.js';
+import { agentStableIdOf } from './runtime/gmiPersona.js';
 import type { VoiceSessionFactory, StartVoiceSession, ManagedVoiceSession } from '../io/voice-platform/VoiceSessionFactory.js';
 import type { VoiceAgent } from '../io/voice-platform/contracts/index.js';
 
@@ -624,13 +626,17 @@ export interface AgentSession {
  */
 export interface AgentSessionOptions {
   /**
-   * The user the session serves. With `runtime: 'gmi'` it scopes the session's
-   * cognitive memory: sessions opened with the same user id recall each other's
-   * facts, and a session opened without one has a scope of its own, its session
-   * id. The GMI also sends it with each model request as the end user's id
-   * (OpenAI's `user` or `safety_identifier`), so pass an opaque or hashed id,
-   * not an email address; a session opened without one sends none. Asking for an
-   * open session with another user id throws. The legacy runtime ignores it.
+   * The user the session serves. On both runtimes it is who the memory hooks
+   * and the tools are told the turn is for: sessions opened with the same user
+   * id share that user's memory, and a session opened without one is a subject
+   * of its own, its session id. An anonymous id (`system`, `anonymous`, `guest`
+   * and the like) counts as none. With `runtime: 'gmi'` it also scopes the
+   * session's cognitive memory, and the GMI sends it with each model request as
+   * the end user's id (OpenAI's `user` or `safety_identifier`), so pass an
+   * opaque or hashed id, not an email address; a session opened without one
+   * sends none, and the default runtime sends none. Asking for an open session
+   * with another user id throws on both runtimes. One session is one user: for
+   * a conversation several people share, pass one id for the group.
    */
   userId?: string;
 }
@@ -886,13 +892,13 @@ function pickSendGenerationOverrides(
  */
 function observeValidatedExchange(
   provider: AgentMemoryProvider | undefined,
-  userText: string,
+  turn: MemoryTurn,
   replyText: string,
 ): void {
   if (!provider?.observe) return;
-  for (const [role, text] of [['user', userText], ['assistant', replyText]] as const) {
+  for (const [role, text] of [['user', turn.userText], ['assistant', replyText]] as const) {
     if (role === 'assistant' && !text) continue;
-    observeWithoutWaiting(provider, role, text);
+    observeWithoutWaiting(provider, role, text, turn.context);
   }
 }
 
@@ -903,7 +909,7 @@ async function generateWithValidation(
   maxRetries: number,
   extract: boolean,
   onResult: (result: GenerateTextResult) => void,
-  memory: { provider?: AgentMemoryProvider; userText: string; options?: MemoryProviderHookOptions },
+  memory: { provider?: AgentMemoryProvider; turn: MemoryTurn; options?: MemoryProviderHookOptions },
 ): Promise<{ result: GenerateTextResult; object: unknown; retried: boolean }> {
   if (schema && (!Number.isInteger(maxRetries) || maxRetries < 0)) {
     throw new RangeError('maxValidationRetries must be a non-negative integer');
@@ -913,7 +919,7 @@ async function generateWithValidation(
   const attemptMemory = schema && memory.provider
     ? { getContext: memory.provider.getContext?.bind(memory.provider) }
     : memory.provider;
-  let request = applyMemoryProvider(options, attemptMemory, memory.userText, memory.options) as GenerateTextOptions;
+  let request = applyMemoryProvider(options, attemptMemory, memory.turn, memory.options) as GenerateTextOptions;
   for (let attempt = 0; ; attempt++) {
     const result = await generateText(request);
     onResult(result);
@@ -925,7 +931,7 @@ async function generateWithValidation(
       // A strict json_schema payload makes every optional property nullable: a `null` there means absent.
       const safe = schema.safeParse(dropNullsForOptionalFields(parsed, schema));
       if (safe.success) {
-        observeValidatedExchange(memory.provider, memory.userText, result.text);
+        observeValidatedExchange(memory.provider, memory.turn, result.text);
         return { result, object: safe.data, retried: attempt > 0 };
       }
       failure = new ObjectGenerationError('Response failed Zod validation', result.text, safe.error);
@@ -1013,7 +1019,11 @@ export function agent(opts: AgentOptions): Agent {
   const agentSystem = withHardLimitsLast(opts.systemBlocks ?? buildSystemPrompt(opts, loadedSoul), hardLimits);
   // A string prompt carries no mark, so the block's text goes beside it for generateText's split.
   const hardLimitsText = hardLimitsBlock(hardLimits) ?? undefined;
+  // The agent's stable id, which the memory hooks are told: its soul's id, else a named agent's id.
+  const agentId = agentStableIdOf(opts, loadedSoul);
   const sessionBuffers = new Map<string, SessionHistoryBuffer | null>();
+  // The user each open session was opened with, `undefined` for none: one session is one user.
+  const sessionUsers = new Map<string, string | undefined>();
   // In-memory usage tally per session and per agent. Populated synchronously
   // after every generate/send/stream call so `agent.usage()` and
   // `session.usage()` work even when the persisted ledger is disabled (the
@@ -1157,6 +1167,11 @@ export function agent(opts: AgentOptions): Agent {
     ): Promise<GenerateTextResult> {
       try {
         const userText = typeof prompt === 'string' ? prompt : extractTextFromContent(prompt);
+        // A one-shot call is its own session and its own memory subject.
+        const turn: MemoryTurn = {
+          userText,
+          context: memoryHookContextOf({ sessionId: `generate-${crypto.randomUUID()}`, agentId, call: 'one-shot' }),
+        };
         const genOpts: Partial<GenerateTextOptions> = {
           ...callOptions(extra),
           // Settings become one budget here, so the call's validation retries are charged to the same one.
@@ -1179,7 +1194,7 @@ export function agent(opts: AgentOptions): Agent {
           opts.controls?.maxValidationRetries ?? 1,
           true,
           (attempt) => accumulateUsage(agentUsageTally, attempt.usage),
-          { provider: opts.memoryProvider, userText, options: opts.memoryProviderOptions },
+          { provider: opts.memoryProvider, turn, options: opts.memoryProviderOptions },
         );
         if (opts.responseSchema) result.parsed = object;
         if (opts.verifyCitations) {
@@ -1201,6 +1216,11 @@ export function agent(opts: AgentOptions): Agent {
 
     stream(prompt: MessageContent, extra?: Partial<GenerateTextOptions>): StreamTextResult {
       const userText = typeof prompt === 'string' ? prompt : extractTextFromContent(prompt);
+      // A one-shot call is its own session and its own memory subject.
+      const turn: MemoryTurn = {
+        userText,
+        context: memoryHookContextOf({ sessionId: `stream-${crypto.randomUUID()}`, agentId, call: 'one-shot' }),
+      };
       const streamOpts: Partial<GenerateTextOptions> = applyMemoryProvider(
         {
           ...callOptions(extra),
@@ -1209,7 +1229,7 @@ export function agent(opts: AgentOptions): Agent {
           }),
         },
         opts.memoryProvider,
-        userText,
+        turn,
         opts.memoryProviderOptions,
       );
       if (typeof prompt === 'string') {
@@ -1226,9 +1246,16 @@ export function agent(opts: AgentOptions): Agent {
       return maskError ? maskStreamResult(result, maskError) : result;
     },
 
-    session(id?: string): AgentSession {
+    session(id?: string, options?: AgentSessionOptions): AgentSession {
       const sessionId = id ?? crypto.randomUUID();
-      if (!sessionBuffers.has(sessionId)) {
+      const namedUser = namedSessionUser(options?.userId, 'plain');
+      if (sessionBuffers.has(sessionId)) {
+        // One session is one user: an open session is opened again only for the user it runs as.
+        const current = sessionUsers.get(sessionId) ?? sessionId;
+        if (namedUser !== undefined && namedUser !== current) {
+          throw new Error(`agent(): session '${sessionId}' already runs as user '${current}'; close it to open it for another user.`);
+        }
+      } else {
         // History is independent of the memory subsystem: every
         // session keeps a lossless transcript unless the agent opts out via
         // `history: false`. Bounded by default — unbounded growth was the
@@ -1238,12 +1265,18 @@ export function agent(opts: AgentOptions): Agent {
             ? null
             : { ...SESSION_HISTORY_DEFAULTS, ...(opts.history ?? {}) };
         sessionBuffers.set(sessionId, historyCfg ? new SessionHistoryBuffer(historyCfg) : null);
+        sessionUsers.set(sessionId, namedUser);
       }
       if (!sessionUsageTallies.has(sessionId)) {
         sessionUsageTallies.set(sessionId, createEmptyUsageAggregate(sessionId));
       }
       const historyBuffer = sessionBuffers.get(sessionId)!;
       const sessionUsageTally = sessionUsageTallies.get(sessionId)!;
+      // A turn as the memory hooks see it: its text, and the session's user, else the session.
+      const turnOf = (userText: string): MemoryTurn => ({
+        userText,
+        context: memoryHookContextOf({ sessionId, namedUser: sessionUsers.get(sessionId), agentId, call: 'session' }),
+      });
 
       const session = {
         id: sessionId,
@@ -1379,7 +1412,7 @@ export function agent(opts: AgentOptions): Agent {
               accumulateUsage(sessionUsageTally, attempt.usage);
               accumulateUsage(agentUsageTally, attempt.usage);
             },
-            { provider: opts.memoryProvider, userText: textForMemory, options: opts.memoryProviderOptions },
+            { provider: opts.memoryProvider, turn: turnOf(textForMemory), options: opts.memoryProviderOptions },
           );
           if (retried) {
             result.transcriptDelta = [
@@ -1435,7 +1468,7 @@ export function agent(opts: AgentOptions): Agent {
               ...(streamOpts?.budget !== undefined ? { budget: streamOpts.budget } : {}),
             },
             opts.memoryProvider,
-            textForMemory,
+            turnOf(textForMemory),
             opts.memoryProviderOptions,
           );
 
@@ -1536,7 +1569,10 @@ export function agent(opts: AgentOptions): Agent {
           // append; the next session(id) builds a new buffer. The usage tally
           // stays, as agent.close() keeps it, so agent.usage(id) still counts.
           historyBuffer?.reseed([]);
-          if (sessionBuffers.get(sessionId) === historyBuffer) sessionBuffers.delete(sessionId);
+          if (sessionBuffers.get(sessionId) === historyBuffer) {
+            sessionBuffers.delete(sessionId);
+            sessionUsers.delete(sessionId);
+          }
         },
       };
       // The send() implementation returns a union (GenerateTextResult |
@@ -1566,6 +1602,7 @@ export function agent(opts: AgentOptions): Agent {
 
     async close() {
       sessionBuffers.clear();
+      sessionUsers.clear();
     },
 
     /**

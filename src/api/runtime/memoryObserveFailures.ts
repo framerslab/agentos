@@ -10,7 +10,7 @@
  *
  * @module api/runtime/memoryObserveFailures
  */
-import type { AgentMemoryProvider } from '../agent.js';
+import type { AgentMemoryProvider, MemoryHookContext } from '../agent.js';
 
 /** How many times each provider's `observe` has failed, keyed by the provider object. */
 const failureCounts = new WeakMap<object, number>();
@@ -56,17 +56,23 @@ export function reportObserveFailure(provider: AgentMemoryProvider, error: unkno
 }
 
 /**
- * Call `provider.observe(role, text)` on the provider, so a provider built from
- * a class reads `this`, without waiting for it. A synchronous throw or a
- * rejection is reported through {@link reportObserveFailure}, never thrown.
+ * Call `provider.observe(role, text, context)` on the provider, so a provider
+ * built from a class reads `this`, without waiting for it. A synchronous throw
+ * or a rejection is reported through {@link reportObserveFailure}, never thrown.
  *
  * @param provider - The memory provider.
  * @param role - Which side of the turn `text` is.
  * @param text - The turn's text for that side.
+ * @param context - Which session, user and agent the turn serves.
  */
-export function observeWithoutWaiting(provider: AgentMemoryProvider, role: 'user' | 'assistant', text: string): void {
+export function observeWithoutWaiting(
+  provider: AgentMemoryProvider,
+  role: 'user' | 'assistant',
+  text: string,
+  context?: MemoryHookContext,
+): void {
   try {
-    void Promise.resolve(provider.observe?.(role, text)).catch((error: unknown) => reportObserveFailure(provider, error));
+    void Promise.resolve(provider.observe?.(role, text, context)).catch((error: unknown) => reportObserveFailure(provider, error));
   } catch (error) {
     reportObserveFailure(provider, error);
   }

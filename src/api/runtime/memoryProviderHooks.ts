@@ -17,7 +17,7 @@ import type {
   GenerationHookContext,
   GenerationHookResult,
 } from '../generateText.js';
-import type { AgentMemoryProvider } from '../agent.js';
+import type { AgentMemoryProvider, MemoryHookContext } from '../agent.js';
 import { observeWithoutWaiting } from './memoryObserveFailures.js';
 
 /** Timeout applied to memory.getContext calls to prevent hangs. */
@@ -45,14 +45,20 @@ export interface MemoryProviderHookOptions {
   tokenBudget?: number;
 }
 
+/** One turn as the memory hooks see it: the user's text and who the turn serves. */
+export interface MemoryTurn {
+  userText: string;
+  context: MemoryHookContext;
+}
+
 /**
  * Apply memory-provider hooks to an options object.
  *
  * @param baseOpts - The GenerateTextOptions object to wrap.
  * @param provider - Memory provider. When undefined or lacking both
  *   `getContext` and `observe`, returns baseOpts unchanged.
- * @param userText - The user input text for this turn; passed to
- *   getContext and observe('user', ...).
+ * @param turn - The user input text for this turn, passed to getContext and
+ *   observe('user', ...), and who the turn serves, passed to both hooks.
  * @param hookOptions - Optional overrides for the getContext timeout and
  *   token budget. Defaults to {@link MEMORY_TIMEOUT_MS} and
  *   {@link DEFAULT_MEMORY_TOKEN_BUDGET} when omitted.
@@ -64,7 +70,7 @@ export interface MemoryProviderHookOptions {
 export function applyMemoryProvider(
   baseOpts: Partial<GenerateTextOptions>,
   provider: AgentMemoryProvider | undefined,
-  userText: string,
+  turn: MemoryTurn,
   hookOptions?: MemoryProviderHookOptions,
 ): Partial<GenerateTextOptions> {
   const hasContext = Boolean(provider?.getContext);
@@ -85,7 +91,7 @@ export function applyMemoryProvider(
       try {
         let timedOut = false;
         const memCtx = await Promise.race([
-          provider!.getContext!(userText, { tokenBudget }),
+          provider!.getContext!(turn.userText, { tokenBudget, context: turn.context }),
           new Promise<null>((resolve) =>
             setTimeout(() => {
               timedOut = true;
@@ -148,9 +154,9 @@ export function applyMemoryProvider(
   ): Promise<GenerationHookResult | void> => {
     if (hasObserve) {
       // The turn is answered: it never waits for the provider, and a failure to record it is logged sparsely.
-      observeWithoutWaiting(provider!, 'user', userText);
+      observeWithoutWaiting(provider!, 'user', turn.userText, turn.context);
       if (result.text) {
-        observeWithoutWaiting(provider!, 'assistant', result.text);
+        observeWithoutWaiting(provider!, 'assistant', result.text, turn.context);
       }
     }
     if (userOnAfter) {
