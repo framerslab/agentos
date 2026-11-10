@@ -88,7 +88,7 @@ new CohereReranker({
 - `isAvailable()` answers whether `apiKey` is not empty; `rerank()` without a key throws.
 - `COHERE_RERANKER_MODELS` lists seven model ids: `rerank-v4.0-pro`, `rerank-v4.0-fast`, `rerank-v3.5`, `rerank-english-v3.0`, `rerank-multilingual-v3.0`, `rerank-english-v2.0` and `rerank-multilingual-v2.0`.
 - The request body is `{ model, query, documents, top_n, return_documents: false }` with the request's `params` merged in; `top_n` is the request's `topN`, else the number of passages. The headers carry `Authorization: Bearer <apiKey>` and `X-Client-Name: agentos`.
-- A response that is not 2xx throws `Cohere API error (<status>): <body>`. A request past its timeout is aborted and throws `CohereReranker: Request timed out after <ms>ms`.
+- A response that is not 2xx throws `Cohere API error (<status>): <body>`. The timeout covers the wait for the response's headers: a request with no response by then is aborted and throws `CohereReranker: Request timed out after <ms>ms`. The timer is cleared once the response arrives, so reading its body has no limit.
 - The diagnostics carry the model, the latency, Cohere's billed search units (`tokensUsed`), its request id and its API version.
 
 ### `llm-judge`: an LLM as the judge
@@ -176,7 +176,7 @@ const { results } = await service.rerank(
 |---|---|
 | `RerankerService.rerank()`, `rerankChunks()` | Throws: no provider named and no default, a provider not registered, or the provider's own error |
 | `LocalCrossEncoderReranker` | Throws when Transformers.js cannot be loaded; a passage whose scoring throws scores 0 |
-| `CohereReranker` | Throws without an `apiKey`, on a status that is not 2xx and on a timeout |
+| `CohereReranker` | Throws without an `apiKey`, on a status that is not 2xx and when no response arrives within the timeout |
 | `LlmJudgeReranker` | Does not throw for a model's failure: a failed scoring batch scores 0, a failed ranking call leaves the order to the scores |
 | `rerankChain()` | Skips the stage and keeps the order it was given |
 | `RetrievalAugmentor` | Returns the chunks without reranking and adds the error to `diagnostics.messages` |
