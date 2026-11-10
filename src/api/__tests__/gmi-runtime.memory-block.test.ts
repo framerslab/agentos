@@ -36,7 +36,17 @@ vi.mock('../runtime/gmiPersona', async (importOriginal) => {
 // Each assembly also renders its first pass on the same input, so a case can check the block the model receives
 // against it, and keeps what the assembly reports of each memory line. The returned block is the real one: the
 // wrapper hands back what assembleMemoryContext returns.
-const assemblies = vi.hoisted(() => [] as { firstPass: string; block: string; lineOutcomes: AssembledLineOutcome[] }[]);
+const assemblies = vi.hoisted(
+  () =>
+    [] as {
+      firstPass: string;
+      block: string;
+      lineOutcomes: AssembledLineOutcome[];
+      includedMemoryIds: string[];
+      /** The content of each trace the assembler was given a line for (retrieved, or led to by an association), by id. */
+      contents: Map<string, string>;
+    }[],
+);
 vi.mock('../../cognition/memory/core/prompt/MemoryPromptAssembler', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../cognition/memory/core/prompt/MemoryPromptAssembler')>();
   return {
@@ -44,7 +54,20 @@ vi.mock('../../cognition/memory/core/prompt/MemoryPromptAssembler', async (impor
     assembleMemoryContext: (input: Parameters<typeof actual.assembleMemoryContext>[0]) => {
       const firstPass = actual.assembleMemoryContextFirstPass(input);
       const result = actual.assembleMemoryContext(input);
-      assemblies.push({ firstPass: firstPass.contextText, block: result.contextText, lineOutcomes: result.lineOutcomes ?? [] });
+      const contents = new Map<string, string>();
+      for (const trace of input.retrievedTraces ?? []) contents.set(trace.id, trace.content);
+      for (const item of input.graphContext ?? []) {
+        if (typeof item !== 'string' && item.traceId && !contents.has(item.traceId)) {
+          contents.set(item.traceId, item.text.replace(/^\[[^\]\n]*\]\s/, ''));
+        }
+      }
+      assemblies.push({
+        firstPass: firstPass.contextText,
+        block: result.contextText,
+        lineOutcomes: result.lineOutcomes ?? [],
+        includedMemoryIds: result.includedMemoryIds,
+        contents,
+      });
       return result;
     },
   };
@@ -147,6 +170,20 @@ function blockSections(block: string): Map<string, string[]> {
   }
   return sections;
 }
+
+/** The header each memory-line section of the block starts with, by the section `lineOutcomes` names. */
+const OUTCOME_HEADERS: Record<AssembledLineOutcome['section'], string | undefined> = {
+  semanticRecall: '## Relevant Memories',
+  recentEpisodic: '## Recent Experiences',
+  graphAssociations: '## Related Context',
+  involuntary: '## Something This Reminds Me Of',
+  workingMemory: undefined,
+  prospectiveAlerts: undefined,
+  observationNotes: undefined,
+  persistentMemory: undefined,
+};
+/** The sections whose lines show a memory. */
+const MEMORY_LINE_HEADERS = ['## Relevant Memories', '## Recent Experiences', '## Related Context', '## Something This Reminds Me Of'];
 
 beforeEach(() => globalLLMProviderHealth.reset());
 afterEach(() => {
@@ -337,10 +374,38 @@ describe("agent({ runtime: 'gmi' }) memory block in the model request", () => {
         await session.send('What did we write in the trail journal about the hiking day and the view?');
 
         expect(assemblies.length, `${label}: assemblies on the last turn`).toBeGreaterThan(0);
-        const { firstPass, block: assembled } = assemblies[assemblies.length - 1];
+        const { firstPass, block: assembled, lineOutcomes, includedMemoryIds, contents } = assemblies[assemblies.length - 1];
         const block = memoryBlockOf(s, places.length);
         // The request carries the block the assembler returned.
         expect(block.startsWith(assembled.trimEnd()), `${label}: the request's block is the assembled one`).toBe(true);
+        expect(block, `${label}: no memory line is cut`).not.toContain(MEMORY_CUT_MARKER);
+
+        // What the assembly reports of each memory line matches the request the model received: a hiking note reported
+        // included is whole in the section named, one reported left out is in no memory section of the request.
+        const outcomeIds = lineOutcomes.map((line) => line.id);
+        expect(new Set(outcomeIds).size, `${label}: one outcome a trace`).toBe(outcomeIds.length);
+        const includedIds = new Set(lineOutcomes.filter((line) => line.outcome === 'included').map((line) => line.id));
+        for (const id of includedMemoryIds) expect(includedIds.has(id), `${label}: ${id} is in includedMemoryIds`).toBe(true);
+        const hikes = lineOutcomes.filter((line) => (contents.get(line.id) ?? '').includes('Hiking day'));
+        expect(hikes.filter((line) => line.outcome === 'included').length, `${label}: hiking notes included`).toBeGreaterThan(0);
+        expect(hikes.filter((line) => line.outcome === 'left_out').length, `${label}: hiking notes left out`).toBeGreaterThan(0);
+        for (const line of hikes) {
+          const content = contents.get(line.id)!;
+          const where = `${label}: ${line.outcome} ${line.section} ${JSON.stringify(content.slice(0, 40))}\nrequest block:\n${block}`;
+          expect(line.tokens, where).toBeGreaterThanOrEqual(Math.ceil(content.length / 4));
+          if (line.outcome === 'included') {
+            expect(line, where).not.toHaveProperty('reason');
+            const header = OUTCOME_HEADERS[line.section];
+            expect(header, where).toBeDefined();
+            expect(sectionLines(block, header!).filter((shown) => shown.includes(content)), where).toHaveLength(1);
+          } else {
+            expect(['budget', 'section_full'], where).toContain(line.reason);
+            for (const header of MEMORY_LINE_HEADERS) {
+              const at = content.indexOf('Hiking day');
+              expect(sectionLines(block, header).some((shown) => shown.includes(content.slice(at, at + 60))), `${where}\n(in ${header})`).toBe(false);
+            }
+          }
+        }
 
         const sent = blockSections(block);
         const firstSections = blockSections(firstPass);
@@ -402,6 +467,47 @@ describe("agent({ runtime: 'gmi' }) memory block in the model request", () => {
         } else {
           expect(block, 'default share').toContain(EPISODIC_HEADER);
           expect(sectionLines(block, EPISODIC_HEADER).join('\n')).toContain(FACT);
+        }
+      } finally {
+        await a.close();
+      }
+    }
+  });
+
+  it("a memory whose sections a persona turned off is reported left out for the budget, and no memory section of the request shows it", async () => {
+    // Recent Experiences and Related Context off: the statement (an episodic trace) has a line only in sections offered
+    // no tokens, so the assembly reports it left out with reason budget. With the default shares it is included.
+    for (const off of [false, true]) {
+      personaMemory.config = off ? { tokenBudget: { recentEpisodic: 0, graphAssociations: 0 } } : undefined;
+      const k = key(); const emb = key();
+      const s = script('openai', k, { replies: [reply.text('Noted.'), reply.text('Locker 14.')] });
+      script('openai', emb, { replies: [] });
+      vi.stubEnv('OPENAI_API_KEY', emb);
+      const a = withMemory(k);
+      try {
+        const session = a.session('s');
+        await session.send(STATEMENT);
+        session.clear();
+        assemblies.length = 0;
+        await session.send('Which parcel locker code did we set for the camping stove?');
+        const block = memoryBlockOf(s, 1);
+        expect(assemblies.length, 'assemblies on the last turn').toBeGreaterThan(0);
+        const { block: assembled, lineOutcomes, contents } = assemblies[assemblies.length - 1];
+        expect(block.startsWith(assembled.trimEnd()), "the request's block is the assembled one").toBe(true);
+        const statementIds = [...contents.entries()].filter(([, content]) => content.includes(FACT)).map(([id]) => id);
+        expect(statementIds, `traces holding the statement: ${JSON.stringify([...contents.values()])}`).toHaveLength(1);
+        const outcome = lineOutcomes.find((line) => line.id === statementIds[0]);
+        const where = `${off ? 'sections off' : 'default shares'}: ${JSON.stringify(lineOutcomes)}\nrequest block:\n${block}`;
+        if (off) {
+          expect(outcome, where).toMatchObject({ section: 'recentEpisodic', outcome: 'left_out', reason: 'budget' });
+          expect(outcome!.tokens, where).toBeGreaterThan(Math.ceil(STATEMENT.length / 4) - 1);
+          for (const header of MEMORY_LINE_HEADERS) {
+            expect(sectionLines(block, header).some((line) => line.includes(FACT)), `${where}\n(in ${header})`).toBe(false);
+          }
+        } else {
+          expect(outcome, where).toMatchObject({ section: 'recentEpisodic', outcome: 'included' });
+          expect(outcome, where).not.toHaveProperty('reason');
+          expect(sectionLines(block, EPISODIC_HEADER).filter((line) => line.includes(FACT)), where).toHaveLength(1);
         }
       } finally {
         await a.close();
