@@ -192,6 +192,9 @@ export type {
   WikiAttachableMemory,
 } from './cognition/memory/io/attachMemoryWiki.js';
 export { ReadMemoryPageTool } from './cognition/memory/io/tools/ReadMemoryPageTool.js';
+// The forgotten-user ledger: who a store was told to forget, kept as hashes, with a copy outside the store
+export { ForgottenLedger, ForgottenLedgerError } from './cognition/memory/suppression/index.js';
+export type { ForgottenLedgerOptions, SuppressionSubject, TombstoneKey } from './cognition/memory/suppression/index.js';
 // Query Router (classification, retrieval dispatch, grounded answer generation)
 export {
   QueryClassifier,

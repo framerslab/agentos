@@ -129,6 +129,8 @@ The brain has no re-embedding method. After a change of embedding model, stored 
 
 `remember(content, { metadata })` merges extra keys into the trace's stored metadata, under the keys the facade sets itself (`scopeId`, `content_hash`, `entities`, `decay`), which win. A trace whose metadata names a `turnUserId` is no duplicate of the same words filed under the same scope with another `turnUserId` or none: each user's words stay a trace of their own, so a delete of one user's traces leaves the other's. An import keeps them apart the same way, and a Markdown or Obsidian export writes the user into each such note's front matter, so the import files the note as that user's trace.
 
+Forgotten subjects are recorded in one ledger, the table `agentos_learning_forgotten`, which the memory store and the learning layer share. A row holds a hash of a subject (SHA-256 over the canonical JSON `[namespace, kind, id]`, or HMAC-SHA-256 under a key the host supplies) and the time, never an id or any text. `ForgottenLedger` keeps a second copy of the table outside the store's database and copies it back at every open, so a store restored from a backup taken before a deletion still knows the deletion. A store whose tombstones are keyed does not open without the key, and a store whose copy is missing does not open.
+
 ---
 
 ## Export and backup
