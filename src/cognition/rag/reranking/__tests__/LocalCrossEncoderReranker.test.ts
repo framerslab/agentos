@@ -42,10 +42,13 @@ const modelStub: any = vi.fn(async (inputs: { __documents: string[] }) => {
 modelStub.dispose = vi.fn(async () => {});
 
 const tokenizerFromPretrained = vi.fn(async () => tokenizerStub);
-const modelFromPretrained = vi.fn(async () => {
+/** The model a load returns; a test that needs one model per id replaces it. */
+const defaultLoadModel = async (): Promise<any> => {
   modelStub.config = { id2label };
   return modelStub;
-});
+};
+let loadModel: (modelId: string) => Promise<any> = defaultLoadModel;
+const modelFromPretrained = vi.fn(async (...args: any[]) => loadModel(args[0]));
 
 vi.mock('@huggingface/transformers', () => ({
   env: {},
@@ -70,6 +73,7 @@ describe('LocalCrossEncoderReranker', () => {
     forwardCalls.length = 0;
     id2label = { '0': 'LABEL_0' };
     logitsFor = (doc) => [doc.length / 10];
+    loadModel = defaultLoadModel;
     reranker = new LocalCrossEncoderReranker({ providerId: 'local' });
   });
 
@@ -272,6 +276,107 @@ describe('LocalCrossEncoderReranker', () => {
           config,
         ),
       ).rejects.toThrow(/logits/);
+    });
+  });
+
+  describe('non-finite logits', () => {
+    const config: RerankerRequestConfig = { providerId: 'local', modelId: 'cross-encoder/ms-marco-MiniLM-L-6-v2' };
+    const input: RerankerInput = { query: 'q', documents: [{ id: 'a', content: 'a' }, { id: 'b', content: 'b' }] };
+
+    it('one-logit model: a NaN or infinite logit throws instead of returning a NaN score', async () => {
+      for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+        logitsFor = (doc) => [doc === 'b' ? bad : 1];
+        await expect(reranker.rerank(input, config)).rejects.toThrow(/non-finite logit .* pair 1 of 2/);
+      }
+    });
+
+    it('two-logit model: a NaN or infinite logit throws', async () => {
+      id2label = { '0': 'LABEL_0', '1': 'LABEL_1' };
+      for (const bad of [Number.NaN, Number.POSITIVE_INFINITY]) {
+        const r = new LocalCrossEncoderReranker({ providerId: 'local' });
+        logitsFor = (doc) => (doc === 'a' ? [0, bad] : [0, 1]);
+        await expect(r.rerank(input, config)).rejects.toThrow(/non-finite logit .* pair 0 of 2/);
+      }
+    });
+  });
+
+  describe('concurrent loads and reranks', () => {
+    /** A model stub of its own whose logit is `logit` for every pair; `gate` holds its forward passes. */
+    const makeModel = (logit: number) => {
+      const passes: number[] = [];
+      let gate: Promise<void> = Promise.resolve();
+      const model: any = vi.fn(async (inputs: { __documents: string[] }) => {
+        passes.push(inputs.__documents.length);
+        await gate;
+        const n = inputs.__documents.length;
+        return { logits: { dims: [n, 1], data: Float32Array.from(new Array(n).fill(logit)) } };
+      });
+      model.dispose = vi.fn(async () => {});
+      model.config = { id2label: { '0': 'LABEL_0' } };
+      model.passes = passes;
+      model.hold = () => {
+        let release!: () => void;
+        gate = new Promise<void>((resolve) => (release = resolve));
+        return () => release();
+      };
+      return model;
+    };
+
+    it('loads one model at a time, in the order asked, and leaves the last one loaded', async () => {
+      const models: Record<string, any> = { A: makeModel(1), B: makeModel(2), C: makeModel(3) };
+      let loading = 0;
+      let mostAtOnce = 0;
+      const order: string[] = [];
+      loadModel = async (id) => {
+        loading++;
+        mostAtOnce = Math.max(mostAtOnce, loading);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        loading--;
+        order.push(id);
+        return models[id];
+      };
+
+      // B and C are asked for while A is still loading.
+      await Promise.all([reranker.initialize('A'), reranker.initialize('B'), reranker.initialize('C')]);
+
+      expect(mostAtOnce).toBe(1);
+      expect(order).toEqual(['A', 'B', 'C']);
+      const result = await reranker.rerank(
+        { query: 'q', documents: [{ id: 'a', content: 'a' }] },
+        { providerId: 'local', modelId: 'A' },
+      );
+      expect(result.diagnostics?.modelId).toBe('C');
+      expect(result.results[0].relevanceScore).toBeCloseTo(sigmoid(3), 6);
+      expect(models.A.dispose).toHaveBeenCalledTimes(1);
+      expect(models.B.dispose).toHaveBeenCalledTimes(1);
+      expect(models.C.dispose).not.toHaveBeenCalled();
+    });
+
+    it('a rerank keeps scoring with its model while another loads, and the old model is disposed after it', async () => {
+      const models: Record<string, any> = { A: makeModel(1), B: makeModel(-1) };
+      loadModel = async (id) => models[id];
+      const r = new LocalCrossEncoderReranker({ providerId: 'local', defaultModelId: 'A', batchSize: 8 });
+      await r.initialize();
+
+      const release = models.A.hold();
+      const docs = Array.from({ length: 16 }, (_, i) => ({ id: `d${i}`, content: `doc ${i}` }));
+      const running = r.rerank({ query: 'q', documents: docs }, { providerId: 'local', modelId: 'A' });
+      await vi.waitFor(() => expect(models.A.passes).toHaveLength(1));
+
+      await r.initialize('B');
+      expect(models.A.dispose).not.toHaveBeenCalled();
+
+      release();
+      const result = await running;
+      expect(models.A.passes).toEqual([8, 8]);
+      expect(models.B.passes).toEqual([]);
+      expect(result.diagnostics?.modelId).toBe('A');
+      for (const doc of result.results) expect(doc.relevanceScore).toBeCloseTo(sigmoid(1), 6);
+      expect(models.A.dispose).toHaveBeenCalledTimes(1);
+
+      const next = await r.rerank({ query: 'q', documents: docs.slice(0, 2) }, { providerId: 'local', modelId: 'A' });
+      expect(next.diagnostics?.modelId).toBe('B');
+      expect(next.results[0].relevanceScore).toBeCloseTo(sigmoid(-1), 6);
     });
   });
 
