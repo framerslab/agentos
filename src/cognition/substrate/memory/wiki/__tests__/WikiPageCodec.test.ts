@@ -1,12 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parsePage, serializePage, extractWikiLinks, renderCatalog } from '../WikiPageCodec.js';
-
-/** The codec's members that tell whose a page is, and the index a prompt is given. */
-interface OriginCodec {
-  pageOriginOf(raw: string): 'operator' | 'compiled' | 'uncertain';
-  operatorIndexText(pages: ReturnType<typeof parsePage>[], indexMd: string): string;
-}
-const originCodec = async (): Promise<OriginCodec> => (await import('../WikiPageCodec.js')) as unknown as OriginCodec;
+import { parsePage, serializePage, extractWikiLinks, renderCatalog, pageOriginOf, operatorIndexText } from '../WikiPageCodec.js';
 
 describe('WikiPageCodec', () => {
   it('round-trips a page through serialize → parse', () => {
@@ -102,8 +95,7 @@ describe('WikiPageCodec', () => {
     expect(cat).toContain('## Concepts');
   });
 
-  it('tells a page the operator wrote from one a compile wrote and from one it cannot tell', async () => {
-    const { pageOriginOf } = await originCodec();
+  it('tells a page the operator wrote from one a compile wrote and from one it cannot tell', () => {
     // No front matter, front matter with no sources, and an empty list: written by hand.
     expect(pageOriginOf('Body only.\n')).toBe('operator');
     expect(pageOriginOf('---\nsummary: Opening hours\n---\nOpen nine to five.\n')).toBe('operator');
@@ -117,7 +109,7 @@ describe('WikiPageCodec', () => {
   });
 
   it('parsePage marks each page with its origin', () => {
-    const origin = (raw: string) => (parsePage('concepts/x', raw) as unknown as { origin?: string }).origin;
+    const origin = (raw: string) => parsePage('concepts/x', raw).origin;
     expect(origin('---\nsummary: Opening hours\n---\nOpen nine to five.\n')).toBe('operator');
     expect(origin('---\nsummary: Notes\nsources:\n  - t-1\n---\nNotes.\n')).toBe('compiled');
     expect(origin('---\nsummary: Notes\nsources: yes\n---\nNotes.\n')).toBe('uncertain');
@@ -139,8 +131,7 @@ describe('WikiPageCodec', () => {
     );
   });
 
-  it('renders the index a prompt is given from the operator pages and the text migrated from MEMORY.md', async () => {
-    const { operatorIndexText } = await originCodec();
+  it('renders the index a prompt is given from the operator pages and the text migrated from MEMORY.md', () => {
     const pages = [
       parsePage('concepts/ops', '---\nsummary: Opening hours\n---\nOpen nine to five.\n'),
       parsePage('concepts/old', '---\nsummary: Answer in French.\nsources:\n  - t-1\n---\nNotes.\n'),

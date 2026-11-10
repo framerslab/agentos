@@ -166,6 +166,8 @@ export {
   parsePage,
   serializePage,
   renderCatalog,
+  pageOriginOf,
+  operatorIndexText,
   extractWikiLinks,
   WIKI_PAGE_TYPES,
   isWikiPageType,
@@ -176,6 +178,7 @@ export {
 } from './cognition/substrate/memory/wiki/index.js';
 export type {
   WikiPage,
+  WikiPageOrigin,
   WikiPageType,
   WikiPageIdProblem,
   MetaIndex,

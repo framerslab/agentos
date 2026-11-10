@@ -7,6 +7,12 @@ export function isWikiPageType(v: unknown): v is WikiPageType {
   return typeof v === 'string' && (WIKI_PAGE_TYPES as readonly string[]).includes(v);
 }
 
+/**
+ * Where a page file under memory/ came from: the operator wrote it, a compile wrote it from traces, or it cannot be
+ * told. Only an operator page is listed in the index, shown in a prompt and indexed for recall.
+ */
+export type WikiPageOrigin = 'operator' | 'compiled' | 'uncertain';
+
 /** A single wiki page: parsed frontmatter + markdown body. */
 export interface WikiPage {
   /**
@@ -25,6 +31,11 @@ export interface WikiPage {
   body: string;
   /** Parsed `[[wikilink]]` targets found in the body. */
   links: string[];
+  /**
+   * Where the page came from, as its front matter tells it (see `pageOriginOf`). Set by `parsePage`; a page built in
+   * code has none and is read by its `sources`: compiled when it lists any, the operator's otherwise.
+   */
+  origin?: WikiPageOrigin;
 }
 
 /** Persisted in `.meta/index.json`. */
@@ -33,6 +44,12 @@ export interface MetaIndex {
   lastCompiledAt: string | null;
   /** pageId → { hash, traceIds } so re-index only touches changed pages. */
   pages: Record<string, { hash: string; traceIds: string[] }>;
+  /**
+   * The version of the key the pages' chunks are filed under: `'c1'` once they are filed under the operator's
+   * conversation key. An index without it was written before that key existed, and its page entries name chunks
+   * filed under the agent's plain scope: they are not used, and the next index replaces them.
+   */
+  keyVersion?: string;
 }
 
 export interface IndexResult {
@@ -40,7 +57,7 @@ export interface IndexResult {
   indexed: string[];
   /** Unchanged page ids. */
   skipped: string[];
-  /** Trace ids forgotten. */
+  /** Trace ids deleted. */
   removed: string[];
 }
 

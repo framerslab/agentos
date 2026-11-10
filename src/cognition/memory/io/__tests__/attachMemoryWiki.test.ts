@@ -110,12 +110,7 @@ describe('attachMemoryWiki', () => {
       fs.mkdirSync(path.join(memoryDir, 'concepts'), { recursive: true });
       fs.writeFileSync(path.join(memoryDir, 'concepts', 'ops.md'), '---\nsummary: Opening hours\n---\nOpen nine to five.\n');
       fs.writeFileSync(path.join(memoryDir, 'concepts', 'tone.md'), '---\nsummary: How to talk\n---\nBe brief.\n');
-      const { store } = await attachMemoryWiki({ memory, memoryDir, agentId: 'a1', llm: async () => 'merged', chunk: (t) => [{ text: t }] });
-      const pages = store as unknown as {
-        deletePage(id: string): Promise<boolean>;
-        pageOrigin(id: string): Promise<string | null>;
-        withheldPages(): Promise<Array<{ id: string; origin: string }>>;
-      };
+      const { store: pages } = await attachMemoryWiki({ memory, memoryDir, agentId: 'a1', llm: async () => 'merged', chunk: (t) => [{ text: t }] });
       expect((await memory.recall('nine')).length).toBe(1);
       expect(await pages.pageOrigin('concepts/ops')).toBe('operator');
       expect(await pages.withheldPages()).toEqual([]);

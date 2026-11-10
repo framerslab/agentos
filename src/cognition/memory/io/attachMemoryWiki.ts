@@ -1,6 +1,8 @@
 /** @fileoverview Wire a markdown memory wiki onto a Memory facade + soul workspace. */
+import { messageOf } from '../../../api/runtime/memoryObserveFailures.js';
 import { WikiMemoryStore, WikiCompiler } from '../../substrate/memory/wiki/index.js';
 import type { CompileResult } from '../../substrate/memory/wiki/index.js';
+import { memoryLog } from './memoryLog.js';
 import { ReadMemoryPageTool } from './tools/ReadMemoryPageTool.js';
 
 interface TraceLike {
@@ -19,6 +21,8 @@ interface ClusterAssignment {
 export interface WikiAttachableMemory {
   remember(content: string, options?: Record<string, unknown>): Promise<{ id: string }>;
   forget(traceId: string): Promise<void>;
+  /** Deletes traces for good: the chunks of an operator page that was edited, removed or deleted. */
+  deleteTraces(ids: readonly string[]): Promise<unknown>;
   attachWiki(wiki: {
     store: {
       index: (o?: { force?: boolean }) => Promise<unknown>;
@@ -85,6 +89,12 @@ async function defaultCluster(traces: TraceLike[]): Promise<ClusterAssignment[]>
  * the write-back loop to the Memory facade, boot-index the markdown into the
  * store, and append the read_memory_page tool to the agent's tool list.
  *
+ * The pages under memory/ are the operator's. At attach, `index.md` is written again from them, so a line an earlier
+ * version wrote for a page it compiled is gone from it; a failure to write it is a warning, and the attach goes on,
+ * since the prompt's index is rendered from the pages and not read from that file. The operator's pages are then
+ * indexed for recall under the operator's conversation key of the agent. Page files that are not the operator's
+ * (see `WikiMemoryStore.withheldPages`) are counted in one `memory.legacy_pages` log line.
+ *
  * Call this from the layer that owns the Memory facade and the loaded soul: the
  * agent factory consumes an AgentMemoryProvider hook, not the facade itself, so
  * the wiring lives one level up.
@@ -98,6 +108,7 @@ export async function attachMemoryWiki(opts: AttachMemoryWikiOptions): Promise<A
     port: {
       remember: (content, options) => opts.memory.remember(content, options),
       forget: (id) => opts.memory.forget(id),
+      deleteTraces: (ids) => opts.memory.deleteTraces(ids),
       chunk: opts.chunk,
     },
   });
@@ -118,8 +129,23 @@ export async function attachMemoryWiki(opts: AttachMemoryWikiOptions): Promise<A
     compiler,
   });
 
-  // Boot sync: markdown is the source of truth → index it into the store.
+  // index.md lists the operator's pages alone, whatever an earlier version wrote into it.
+  try {
+    await store.refreshCatalog();
+  } catch (err) {
+    console.warn(
+      '[agentos] attachMemoryWiki: memory/index.md could not be refreshed (' +
+        messageOf(err) +
+        '); the prompt index is rendered from the pages and is not affected.',
+    );
+  }
+
+  // Boot sync: the operator's markdown is the source of truth → index it into the store.
   await store.index();
+
+  // Pages a compile of an earlier version wrote, and pages that cannot be read, are left as they are and counted.
+  const withheld = await store.withheldPages();
+  if (withheld.length > 0) memoryLog.warn('memory.legacy_pages', { count: withheld.length });
 
   const tools = [...(opts.tools ?? []), new ReadMemoryPageTool({ readPage: (id) => store.readPage(id) })];
   return { store, tools };

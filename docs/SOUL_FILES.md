@@ -61,7 +61,7 @@ source of truth, and the vector and graph index is rebuilt from it.
 ```
 
 Pages are markdown with YAML frontmatter and `[[wikilinks]]`. The agent reads
-`index.md` from its prelude, then opens any page with the `read_memory_page` tool.
+the index from its prelude, then opens any page with the `read_memory_page` tool.
 The LLM folds new conversation into pages when memory consolidates: a
 [`souledAgent`](getting-started/HIGH_LEVEL_API.md) runs this on the agent's `close()`,
 and `agent.memory.compileWiki()` triggers it mid-session. Merges integrate new facts
@@ -88,19 +88,44 @@ line is the trace's text alone.
 
 A page the compiler creates gets a summary named from its page id, never copied from
 a trace: `concepts/notes` is `Notes compiled from conversations`, and
-`entities/johnny` is `Notes on johnny compiled from conversations`. That summary is
-the page's line in `index.md`, and `index.md` joins the system prompt of every agent
-built from the soul, so no sentence someone says in a conversation becomes a standing
-line of that prompt. A page's id can still carry a name taken from the conversation:
-the default clusterer names an entity page after the entity it found (`entities/johnny`),
-and a custom clusterer may derive an id from a trace, so such a name stands in the
-index, and in the prompt, as a page id. A page that has a summary
-keeps it, whoever wrote it, and a compile rewrites no existing summary. An
-`index.md` written by an earlier version may still carry a summary taken from the
-first message folded into a page: open the page's file (`memory/concepts/notes.md`
-for the notes page), set its `summary:` front matter to the line you want, and the
-next compile writes that line into the catalog; or edit the line in `index.md`
-directly, which the next catalog write replaces with the page's summary.
+`entities/johnny` is `Notes on johnny compiled from conversations`. A page that has a
+summary keeps it, whoever wrote it, and a compile rewrites no existing summary.
+
+The pages `index.md` lists are the operator's: markdown files written by hand under
+`memory/`, shared by everyone the agent talks with. The wiki tells whose a page file
+is by its front matter. A compile lists the traces a page was made from in `sources`,
+and a page written by hand lists none, so:
+
+- a page with no `sources`, or an empty list, is an operator page;
+- a page whose `sources` holds an entry is a page a compile wrote;
+- a page whose front matter does not parse, or whose `sources` is there and is not a
+  list, cannot be told.
+
+Only an operator page is listed in `index.md`, shown in the system prompt and indexed
+for recall. A page file of the other two kinds stays on disk exactly as it is: it has
+no line in `index.md`, its summary and its id reach no prompt, and its text is not
+indexed for recall. This is the rule for pages an earlier version compiled into the
+folder, whose summary or body could carry what one person said into the prompt of
+every agent built from the soul. When a souled agent starts and the folder holds such
+files, one `memory.legacy_pages` log line gives their count.
+
+The memory index in the system prompt is rendered from the operator's page files and
+the text migrated from `MEMORY.md` (below), not read from `index.md`; `loadSoul()` and
+`loadSoulSync()` return it as `wikiIndex`. A line written by hand into `index.md`
+outside the migrated block does not reach the prompt, and the next catalog write
+replaces it. To put a line in the index, write a page: its `summary:` front matter is
+its line.
+
+A souled agent writes `index.md` again from the operator's pages when it starts (a
+failure to write it is a warning, and the start goes on), then indexes those pages for
+recall under a key of their own, the operator's conversation scope of the agent
+(`conversationScopeKey(agentId, { kind: 'operator' })`). `.meta/index.json` records
+the version of that key as `keyVersion`. A folder an earlier version indexed has no
+`keyVersion`: its operator pages are indexed again under the operator key at the first
+start, and the chunks the earlier version filed under the agent's plain scope are left
+in the store. When an operator page is edited, its old chunks are deleted from the
+store for good and the page is indexed again; the chunks of a page whose file is gone
+are deleted the same way.
 
 `souledAgent()`'s `close()` runs in this order: the agent's own close (with
 `runtime: 'gmi'` it stops the session turns still running; the default runtime's
@@ -155,9 +180,9 @@ can add one. Let only people and tools you trust as much as the agent's own proc
 write to `memory/`, and check a `memory/` folder you did not make for links before an
 agent uses it. A check on where links lead would refuse every link that points
 outside the folder, which a wiki that links shared notes in on purpose relies on, so
-the store does not check where links lead. The soul loader, which reads `index.md`
-into the system prompt and starts the folder, follows no link: see
-[Loading a Soul](#loading-a-soul).
+the store does not check where links lead. The soul loader, which renders the memory
+index of the system prompt from `index.md` and the page files and starts the folder,
+follows no link: see [Loading a Soul](#loading-a-soul).
 
 A legacy single-file `MEMORY.md` auto-migrates into `memory/index.md` on first load
 and is left untouched on disk. The copied text sits between the markers
@@ -244,7 +269,7 @@ A starter template ships at [`src/cognition/substrate/personas/SOUL.template.md`
 import { agent } from '@framers/agentos';
 
 // agent() loads the workspace: SOUL.md opens the system prompt, STYLE.md and
-// memory/index.md follow it.
+// the memory index follow it.
 const aria = agent({ provider: 'anthropic', soul: '~/.agentos/agents/aria' });
 
 const reply = await aria.session('customer-42').send('I need help with my invoice.');
@@ -277,7 +302,7 @@ const inline = parseSoul(`---\nname: Tester\n---\nYou are a test agent.`);
 
 Both file forms create `memory/` beside SOUL.md (seeding `memory/index.md` from a legacy `MEMORY.md`) when it does not exist.
 
-The loader reads the soul's files (SOUL.md, STYLE.md, IDENTITY.md, AGENTS.md, MEMORY.md and `memory/index.md`) never through a symbolic link at the soul's folder or below it, never waiting, and only when each is a regular file. A file that is a link, or a named pipe or anything else that is not a regular file, is skipped with a warning; a skipped SOUL.md throws as a missing one does, unless `requireSoul` is `false`. The soul's folder itself may not be a link; the folder that holds it may. When the loader starts `memory/`, it makes `memory/` and `memory/.meta/` one folder at a time and `memory/index.md` and `memory/.meta/index.json` only where nothing is, so it writes through no link and opens no file already there. A link or anything else that is not a folder in the place of `memory/` or `memory/.meta/`, or a link or anything else that is not a regular file in the place of `memory/index.md`, `memory/.meta/index.json` or `MEMORY.md`, is left as it is, with a warning, and nothing is made through it or in it.
+The loader reads the soul's files (SOUL.md, STYLE.md, IDENTITY.md, AGENTS.md, MEMORY.md, `memory/index.md` and each page file under `memory/`, which it reads to render the memory index) never through a symbolic link at the soul's folder or below it, never waiting, and only when each is a regular file. A file that is a link, or a named pipe or anything else that is not a regular file, is skipped with a warning; a skipped SOUL.md throws as a missing one does, unless `requireSoul` is `false`. The soul's folder itself may not be a link; the folder that holds it may. When the loader starts `memory/`, it makes `memory/` and `memory/.meta/` one folder at a time and `memory/index.md` and `memory/.meta/index.json` only where nothing is, so it writes through no link and opens no file already there. A link or anything else that is not a folder in the place of `memory/` or `memory/.meta/`, or a link or anything else that is not a regular file in the place of `memory/index.md`, `memory/.meta/index.json` or `MEMORY.md`, is left as it is, with a warning, and nothing is made through it or in it.
 
 ## What Applies on Each Path
 
