@@ -7,7 +7,8 @@
  * provider classes are stubbed (helpers/stubProviders.ts), and the OpenAI
  * stub embeds with a deterministic word hash, so texts that share words
  * recall each other. The memory assembler runs unchanged; a wrapper records
- * its first pass on the same input beside the block it returns.
+ * its first pass on the same input beside the block it returns and what it
+ * reports of each memory line.
  *
  * Each case clears the session's history before the turn it reads, so what it
  * finds in the block reached the prompt through recall, not through history.
@@ -19,6 +20,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CognitiveMemoryPersonaConfig } from '../../cognition/memory/core/config';
+import type { AssembledLineOutcome } from '../../cognition/memory/core/types';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
 const personaMemory = vi.hoisted(() => ({ config: undefined as CognitiveMemoryPersonaConfig | undefined }));
 vi.mock('../runtime/gmiPersona', async (importOriginal) => {
@@ -32,8 +34,9 @@ vi.mock('../runtime/gmiPersona', async (importOriginal) => {
   };
 });
 // Each assembly also renders its first pass on the same input, so a case can check the block the model receives
-// against it. The returned block is the real one: the wrapper hands back what assembleMemoryContext returns.
-const assemblies = vi.hoisted(() => [] as { firstPass: string; block: string }[]);
+// against it, and keeps what the assembly reports of each memory line. The returned block is the real one: the
+// wrapper hands back what assembleMemoryContext returns.
+const assemblies = vi.hoisted(() => [] as { firstPass: string; block: string; lineOutcomes: AssembledLineOutcome[] }[]);
 vi.mock('../../cognition/memory/core/prompt/MemoryPromptAssembler', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../cognition/memory/core/prompt/MemoryPromptAssembler')>();
   return {
@@ -41,7 +44,7 @@ vi.mock('../../cognition/memory/core/prompt/MemoryPromptAssembler', async (impor
     assembleMemoryContext: (input: Parameters<typeof actual.assembleMemoryContext>[0]) => {
       const firstPass = actual.assembleMemoryContextFirstPass(input);
       const result = actual.assembleMemoryContext(input);
-      assemblies.push({ firstPass: firstPass.contextText, block: result.contextText });
+      assemblies.push({ firstPass: firstPass.contextText, block: result.contextText, lineOutcomes: result.lineOutcomes ?? [] });
       return result;
     },
   };
@@ -145,13 +148,6 @@ function blockSections(block: string): Map<string, string[]> {
   return sections;
 }
 
-/** Whether `later` is `line`, or `line` lengthened: a cut line's text before its marker starts `later`. */
-function keepsLine(line: string, later: string): boolean {
-  if (later === line) return true;
-  const at = line.lastIndexOf(MEMORY_CUT_MARKER);
-  return at > 0 && later.length > line.length - MEMORY_CUT_MARKER.length && later.startsWith(line.slice(0, at));
-}
-
 beforeEach(() => globalLLMProviderHealth.reset());
 afterEach(() => {
   personaMemory.config = undefined;
@@ -213,6 +209,7 @@ describe("agent({ runtime: 'gmi' }) memory block in the model request", () => {
       await session.send(LONG_STATEMENT);
       for (const statement of SHORT_STATEMENTS) await session.send(statement);
       session.clear();
+      assemblies.length = 0;
       await session.send('Which parcel locker holds the camping stove, and what is its code?');
 
       const block = memoryBlockOf(s, 3);
@@ -226,6 +223,20 @@ describe("agent({ runtime: 'gmi' }) memory block in the model request", () => {
         expect(experiences.filter((line) => line.includes(statement)), `${statement}\nin the block:\n${block}`).toHaveLength(1);
       }
       expect(tokensOf(block)).toBeLessThanOrEqual(1600);
+
+      // The assembly behind that request reports what became of each memory line. The three statements are the
+      // episodic traces: the long one left out because its whole line does not fit the room Recent Experiences was
+      // offered (it is more tokens than the whole block), the two short ones included.
+      expect(assemblies.length, 'assemblies on the last turn').toBeGreaterThan(0);
+      const { block: assembled, lineOutcomes } = assemblies[assemblies.length - 1];
+      expect(block.startsWith(assembled.trimEnd()), "the request's block is the assembled one").toBe(true);
+      const leftOut = lineOutcomes.filter((line) => line.outcome === 'left_out');
+      expect(leftOut, JSON.stringify(lineOutcomes)).toHaveLength(1);
+      expect(leftOut[0]).toMatchObject({ section: 'recentEpisodic', reason: 'section_full' });
+      expect(leftOut[0].tokens).toBeGreaterThan(1600);
+      const includedEpisodic = lineOutcomes.filter((line) => line.outcome === 'included' && line.section === 'recentEpisodic');
+      expect(includedEpisodic, JSON.stringify(lineOutcomes)).toHaveLength(SHORT_STATEMENTS.length);
+      for (const line of includedEpisodic) expect(line).not.toHaveProperty('reason');
     } finally {
       await a.close();
     }
@@ -338,7 +349,8 @@ describe("agent({ runtime: 'gmi' }) memory block in the model request", () => {
           const later = sent.get(header) ?? [];
           let at = 0;
           for (const line of lines) {
-            while (at < later.length && !keepsLine(line, later[at])) at++;
+            // A line is whole in both blocks: nothing in them is cut (these agents have no persistent memory text).
+            while (at < later.length && later[at] !== line) at++;
             expect(
               at < later.length,
               `${label} ${header}: the first pass's line ${JSON.stringify(line.slice(0, 100))} is not in the request\n` +
@@ -354,7 +366,7 @@ describe("agent({ runtime: 'gmi' }) memory block in the model request", () => {
           const added = [...blockSections(assembled).entries()].flatMap(([header, lines]) =>
             lines.filter((line) => !placed.has(line)).map((line) => ({ header, line })),
           );
-          expect(added.length, `${label}: lines the second pass added or lengthened`).toBeGreaterThan(0);
+          expect(added.length, `${label}: lines the second pass added`).toBeGreaterThan(0);
           for (const { header, line } of added) {
             expect(sent.get(header) ?? [], `${label} ${header}: a line the second pass placed, in the request`).toContain(line);
           }

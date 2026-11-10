@@ -1195,8 +1195,9 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
             recallableIds.has(node.memoryId) &&
             !this.store.isDeleted(node.memoryId)
           ) {
-            // Whole: the assembler cuts an association to fit what is left of its section, and leaves it out when
-            // the block already holds its trace (a retrieved trace past the three seeds may be associated).
+            // Whole: the assembler shows an association whole or leaves it out when it does not fit its section, and
+            // leaves it out when the block already holds its trace (a retrieved trace past the three seeds may be
+            // associated).
             graphContext.push({
               traceId: node.memoryId,
               text: `[associated, activation=${node.activation.toFixed(2)}] ${trace.content}`,

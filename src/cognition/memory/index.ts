@@ -34,6 +34,7 @@ export type {
   PartiallyRetrievedTrace,
   CognitiveRetrievalResult,
   MemoryBudgetAllocation,
+  AssembledLineOutcome,
   AssembledMemoryContext,
   MemoryHealthReport,
 } from './core/types.js';

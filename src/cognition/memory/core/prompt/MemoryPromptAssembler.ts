@@ -15,16 +15,22 @@
  * section leaves unused (it is empty, or its content is shorter than its
  * share) flows to the sections that still have content, in
  * {@link MEMORY_BUDGET_SPILL_ORDER}. A share set to exactly 0 turns its
- * section off. Traces and graph associations are rendered whole; one that
- * does not fit what is left of its section is cut to fit, at a word boundary,
- * with a visible marker, and an item that does not fit at all is skipped for
- * the later ones. Working memory keeps a run of its leading slots.
+ * section off. A line that shows a memory (a retrieved trace, a graph
+ * association, the involuntary memory) is rendered whole or not at all: one
+ * that does not fit whole in what is left of its section is left out, never
+ * cut, and the lines after it are still tried, so its room goes to the next
+ * line that fits. Only persistent memory's text, one document and not a ranked
+ * memory, is cut to fit, with its own marker. Working memory keeps a run of
+ * its leading slots. The assembled context's `lineOutcomes` reports, for
+ * every trace the block was given a line for, whether the block shows it and
+ * why not when it does not.
  *
  * A first pass fills each section on its share and what the sections before
  * it left unspent. A second pass spends what is still unspent and only adds to
- * the block: it lengthens a line the first pass cut and adds items the first
- * pass skipped, so every line the first pass rendered stays, in its section and
- * its order. A trace appears once: a graph association that leads to a trace
+ * the block: it adds lines the first pass left out that now fit whole (and
+ * lengthens persistent memory's text when the first pass cut it), so every
+ * line the first pass rendered stays, in its section and its order. A trace
+ * appears once: a graph association that leads to a trace
  * the block already holds (in Relevant Memories, Recent Experiences or the
  * involuntary memory) is left out of Related Context and its room goes to the
  * next association, and a trace section does not take a trace Related Context
@@ -35,6 +41,7 @@
 
 import type {
   MemoryBudgetAllocation,
+  AssembledLineOutcome,
   AssembledMemoryContext,
   MemoryTrace,
   ScoredMemoryTrace,
@@ -42,7 +49,6 @@ import type {
 import type { HexacoTraits } from '../config.js';
 import { DEFAULT_BUDGET_ALLOCATION } from '../config.js';
 import {
-  cutMemoryContent,
   formatMemoryTrace,
   memoryTraceLineLength,
   sliceWholeCodePoints,
@@ -126,6 +132,8 @@ ${styleGuidance}`;
 // ---------------------------------------------------------------------------
 // Assembler
 // ---------------------------------------------------------------------------
+
+export type { AssembledLineOutcome } from '../types.js';
 
 /** A graph association with the id of the trace it leads to. */
 export interface MemoryGraphAssociation {
@@ -247,14 +255,17 @@ interface Candidate {
   length: number;
   /** The whole line. */
   whole(): string;
-  /** The line shortened to fit `maxChars`, or `''` when no useful cut fits; absent for a line shown whole or not at all. */
+  /**
+   * The line shortened to fit `maxChars`, or `''` when no useful cut fits. Only persistent memory's text has one: a
+   * line that shows a memory, like every other line, is shown whole or not at all.
+   */
   cut?(maxChars: number): string;
 }
 
 /** A line a section shows. */
 interface ShownLine {
   text: string;
-  /** Whether `text` is the whole line. A cut line can be lengthened in the second pass. */
+  /** Whether `text` is the whole line. Persistent memory's text, shown cut, can be lengthened in the second pass. */
   whole: boolean;
 }
 
@@ -269,11 +280,17 @@ interface Section {
    * sorted by activation, highest first). Otherwise such a line is skipped for the later ones.
    */
   leadingOnly: boolean;
+  /**
+   * The most tokens the section was offered, its header and separator included; 0 for a section that was never
+   * offered any (it is off, or the budget had none for it). A line left out of a section offered nothing is left out
+   * for the budget; one left out of a section offered some did not fit whole in it.
+   */
+  offered: number;
 }
 
 /** A section that shows none of `candidates` yet. */
 function createSection(header: string, candidates: readonly Candidate[], leadingOnly = false): Section {
-  return { header, candidates, shown: candidates.map(() => undefined), leadingOnly };
+  return { header, candidates, shown: candidates.map(() => undefined), leadingOnly, offered: 0 };
 }
 
 /** Characters `section` takes as shown, its separator and header included; 0 when it shows no line. */
@@ -300,6 +317,14 @@ function shownIds(section: Section): string[] {
   );
 }
 
+/** The sections whose lines show a memory (a retrieved trace, or the trace a graph association leads to), in the block's order. */
+const MEMORY_LINE_SECTIONS = ['semanticRecall', 'recentEpisodic', 'graphAssociations'] as const;
+
+/** Tokens of a line of `chars` characters with its newline, about 4 characters a token. */
+function lineTokens(chars: number): number {
+  return Math.ceil((1 + chars) / 4);
+}
+
 /** The section's text: its header, then the lines it shows in rank order; `''` when it shows none. */
 function sectionText(section: Section): string {
   const lines = section.shown.flatMap((line) => (line ? [line.text] : []));
@@ -308,12 +333,14 @@ function sectionText(section: Section): string {
 
 /**
  * Spends up to `budgetTokens` on `section`, counting what it already shows, in rank order, and keeps every line it
- * shows. A candidate it does not show is added whole when it fits what is left, otherwise cut to fit (when it can be
- * cut); one that still does not fit is skipped for the later ones, or ends the section with `leadingOnly`. A candidate
- * `skip` names is passed over. A line shown cut is lengthened, whole when it fits. The first pass fills each section
- * from nothing; the second pass fills it again on more room, so it only adds to what the first pass rendered.
+ * shows. A candidate it does not show is added whole when it fits what is left; one that does not fit is cut to fit
+ * when it has a cut form (persistent memory's text alone), and otherwise skipped for the later ones, or ends the
+ * section with `leadingOnly`. A candidate `skip` names is passed over. A line shown cut is lengthened, whole when it
+ * fits. The first pass fills each section from nothing; the second pass fills it again on more room, so it only adds
+ * to what the first pass rendered.
  */
 function fillSection(section: Section, budgetTokens: number, skip?: (candidate: Candidate) => boolean): void {
+  section.offered = Math.max(section.offered, budgetTokens);
   const maxChars = budgetTokens * 4;
   let chars = SECTION_SEPARATOR_CHARS + section.header.length;
   for (const line of section.shown) if (line) chars += 1 + line.text.length;
@@ -329,7 +356,7 @@ function fillSection(section: Section, budgetTokens: number, skip?: (candidate: 
       if (section.leadingOnly) break;
       continue;
     }
-    // A blank line fits whole like any other; only a line too long for the room is cut or passed over.
+    // A blank line fits whole like any other; a line too long for the room is passed over, or cut when it has a cut form.
     const fits = candidate.length <= room;
     const text = fits ? candidate.whole() : candidate.cut ? candidate.cut(room) : '';
     if (shown) {
@@ -348,34 +375,15 @@ function fillSection(section: Section, budgetTokens: number, skip?: (candidate: 
   }
 }
 
-/** A leading `[tag] ` on a graph association, kept whole when the association is cut. */
-const LEADING_TAG = /^- \[[^\]\n]*\]\s/;
-
-/**
- * A graph-association line cut at a word boundary to fit `maxChars`, its
- * bullet and leading `[tag]` whole and its text ending with the cut marker;
- * `''` when too little of the text would remain.
- */
-function cutAssociationLine(line: string, maxChars: number): string {
-  const prefix = LEADING_TAG.exec(line)?.[0] ?? '- ';
-  const text = cutMemoryContent(line.slice(prefix.length), maxChars - prefix.length);
-  return text ? `${prefix}${text}` : '';
-}
-
 /** A line shown whole or not at all. */
 function wholeLine(line: string): Candidate {
   return { length: line.length, whole: () => line };
 }
 
-/** A graph association's line: whole, or cut at a word boundary with its bullet and tag whole. */
+/** A graph association's line, shown whole or not at all, with the id of the trace it leads to when it carries one. */
 function associationLine(item: { traceId?: string; text: string }): Candidate {
   const line = `- ${item.text}`;
-  return {
-    id: item.traceId,
-    length: line.length,
-    whole: () => line,
-    cut: (maxChars) => cutAssociationLine(line, maxChars),
-  };
+  return { id: item.traceId, length: line.length, whole: () => line };
 }
 
 /** Persistent memory's text: whole, or cut to fit and ended with `<!-- truncated -->`. */
@@ -397,8 +405,8 @@ function persistentLine(text: string): Candidate {
 /**
  * The share of the budget (after the preamble) set aside for an involuntary
  * memory before the sections are granted theirs, so a block full of recalled
- * traces still has room for one. A memory that does not fit it whole also
- * takes what the sections leave unspent.
+ * traces still has room for one. A memory that does not fit it whole is
+ * tried again, whole, on what the sections leave unspent.
  */
 const INVOLUNTARY_MAX_SHARE = 0.1;
 
@@ -411,7 +419,7 @@ interface InvoluntarySection {
   id: string;
 }
 
-/** The involuntary-recall section for `trace` within `budgetTokens`, or null when no useful line fits. */
+/** The involuntary-recall section for `trace` within `budgetTokens`, its line whole, or null when the whole line does not fit. */
 function renderInvoluntary(
   trace: MemoryTrace,
   style: FormattingStyle,
@@ -419,8 +427,8 @@ function renderInvoluntary(
   budgetTokens: number,
 ): InvoluntarySection | null {
   const roomChars = budgetTokens * 4 - INVOLUNTARY_OVERHEAD_CHARS;
-  const line = roomChars > 0 ? formatMemoryTrace(trace, style, { now, maxChars: roomChars }) : '';
-  if (!line) return null;
+  if (roomChars <= 0 || memoryTraceLineLength(trace, style, { now }) > roomChars) return null;
+  const line = formatMemoryTrace(trace, style, { now });
   const text = `${INVOLUNTARY_HEADER}\n${INVOLUNTARY_PREFIX}${line}`;
   return { text, tokens: Math.ceil((SECTION_SEPARATOR_CHARS + text.length) / 4), id: trace.id };
 }
@@ -444,12 +452,25 @@ function renderInvoluntary(
  * left unallocated). The second pass, in the same order, gives what is still
  * unspent (a section that could not use its grant, such as working memory too
  * long for it) to the sections with content left out, so the block can fill
- * the whole budget. The second pass only adds to the block: it lengthens a
- * line the first pass cut, adds items the first pass skipped at their rank,
- * whole or cut to fit, and adds lines to a section that rendered none. Every
- * line the first pass rendered stays, in its section and its order, whole if
- * it was whole. An involuntary memory that did not fit its tenth whole then
- * takes what is still unspent.
+ * the whole budget. The second pass only adds to the block: it adds items
+ * the first pass left out at their rank, when they now fit whole, adds lines
+ * to a section that rendered none, and lengthens persistent memory's text
+ * when the first pass cut it. Every line the first pass rendered stays, in
+ * its section and its order, whole if it was whole. An involuntary memory
+ * that did not fit its tenth then takes what is still unspent, when it fits
+ * that whole.
+ *
+ * A line that shows a memory renders whole or not at all. A retrieved trace,
+ * a graph association or the involuntary memory that does not fit whole in
+ * what is left of its section is left out, never cut, and the lines after it
+ * in that section's order are still tried, so what drops is whole memories:
+ * the ones that find no room. Only persistent memory's text is cut to fit,
+ * ending with `<!-- truncated -->`. `lineOutcomes` reports each trace the
+ * block was given a line for, once: `included`, under the section that shows
+ * it, or `left_out` with its reason, under the first section, in the block's
+ * order, that had a line for it. The reason is `budget` when that section was
+ * offered no tokens at all (it is off, or the budget had none) and
+ * `section_full` when the line did not fit whole in what it was offered.
  *
  * A trace appears once. A graph association that carries the id of a trace
  * the block already holds (rendered in Relevant Memories or Recent
@@ -522,11 +543,14 @@ function assemble(input: MemoryAssemblerInput, secondPass: boolean): AssembledMe
   // Chosen from the traces this turn did not retrieve, and set aside first.
   let involuntaryTrace: MemoryTrace | null = null;
   let involuntary: InvoluntarySection | null = null;
+  /** The most tokens the involuntary memory was offered: its tenth, or what the sections left unspent. */
+  let involuntaryOffered = 0;
   if (input.mechanismsEngine && input.allTraces) {
     const retrievedSet = new Set((input.retrievedTraces ?? []).map((trace) => trace.id));
     involuntaryTrace = input.mechanismsEngine.onPromptAssembly(input.allTraces, retrievedSet).involuntaryMemory;
     if (involuntaryTrace) {
-      involuntary = renderInvoluntary(involuntaryTrace, style, now, Math.floor(afterPreamble * INVOLUNTARY_MAX_SHARE));
+      involuntaryOffered = Math.floor(afterPreamble * INVOLUNTARY_MAX_SHARE);
+      involuntary = renderInvoluntary(involuntaryTrace, style, now, involuntaryOffered);
     }
   }
   const available = afterPreamble - (involuntary?.tokens ?? 0);
@@ -577,12 +601,11 @@ function assemble(input: MemoryAssemblerInput, secondPass: boolean): AssembledMe
     granted += grant[key];
   }
 
-  /** A retrieved trace's line in `style`: whole, or cut at a word boundary with the cut marker. */
+  /** A retrieved trace's line in `style`, shown whole or not at all. */
   const traceLine = (trace: ScoredMemoryTrace): Candidate => ({
     id: trace.id,
     length: memoryTraceLineLength(trace, style, { now }),
     whole: () => formatMemoryTrace(trace, style, { now }),
-    cut: (maxChars) => formatMemoryTrace(trace, style, { now, maxChars }),
   });
   const sections: Record<SectionKey, Section> = {
     persistentMemory: createSection(HEADERS.persistentMemory, pmText ? [persistentLine(pmText)] : []),
@@ -632,20 +655,23 @@ function assemble(input: MemoryAssemblerInput, secondPass: boolean): AssembledMe
 
   if (secondPass) {
     // --- Pass 2, same order: what is still unspent goes to the sections with content left out ---
-    // Each section keeps every line it shows and may only lengthen a cut line or add lines, so no room comes back and
-    // one pass through the order spends all a section can take.
+    // Each section keeps every line it shows and may only add lines (or lengthen persistent memory's cut text), so no
+    // room comes back and one pass through the order spends all a section can take.
     for (const key of MEMORY_BUDGET_SPILL_ORDER) {
       if (spare <= 0) break;
       spare -= grow(key, spare);
     }
 
-    // --- An involuntary memory left out of its tenth, or cut to it, takes what is still unspent ---
-    // The sections hold `available - spare` tokens, so the memory may grow to its own tokens plus `spare`.
+    // --- An involuntary memory its tenth did not hold takes what is still unspent, when it fits that whole ---
     // One that Related Context already shows stays out, so the trace appears once.
-    if (involuntaryTrace && spare > 0 && !shownIds(sections.graphAssociations).includes(involuntaryTrace.id)) {
-      const held = involuntary?.tokens ?? 0;
-      const wider = renderInvoluntary(involuntaryTrace, style, now, held + spare);
-      if (wider && wider.tokens > held) involuntary = wider;
+    if (
+      involuntaryTrace &&
+      !involuntary &&
+      spare > 0 &&
+      !shownIds(sections.graphAssociations).includes(involuntaryTrace.id)
+    ) {
+      involuntaryOffered = Math.max(involuntaryOffered, spare);
+      involuntary = renderInvoluntary(involuntaryTrace, style, now, spare);
     }
   }
 
@@ -664,10 +690,52 @@ function assemble(input: MemoryAssemblerInput, secondPass: boolean): AssembledMe
     includedIds.push(involuntary.id);
   }
 
+  // --- What became of each line that shows a memory ---
+  // One entry a trace, in the block's order: under the section that shows it, else under the first section that had
+  // a line for it. A trace shown through its association, or a trace an association was left out for, is not
+  // reported again under the section that passed it over.
+  const shownSomewhere = new Set<string>(MEMORY_LINE_SECTIONS.flatMap((key) => shownIds(sections[key])));
+  if (involuntary) shownSomewhere.add(involuntary.id);
+  const lineOutcomes: AssembledLineOutcome[] = [];
+  const reported = new Set<string>();
+  for (const key of MEMORY_LINE_SECTIONS) {
+    const section = sections[key];
+    for (const [index, candidate] of section.candidates.entries()) {
+      const id = candidate.id;
+      if (id === undefined || reported.has(id)) continue;
+      const shown = section.shown[index] !== undefined;
+      // A trace a later line shows is reported there.
+      if (!shown && shownSomewhere.has(id)) continue;
+      reported.add(id);
+      // A memory line is shown whole, so its tokens are the same shown or left out.
+      const tokens = lineTokens(candidate.length);
+      lineOutcomes.push(
+        shown
+          ? { id, section: key, outcome: 'included', tokens }
+          : { id, section: key, outcome: 'left_out', reason: section.offered === 0 ? 'budget' : 'section_full', tokens },
+      );
+    }
+  }
+  if (involuntaryTrace && !reported.has(involuntaryTrace.id)) {
+    const tokens = lineTokens(INVOLUNTARY_PREFIX.length + memoryTraceLineLength(involuntaryTrace, style, { now }));
+    lineOutcomes.push(
+      involuntary
+        ? { id: involuntaryTrace.id, section: 'involuntary', outcome: 'included', tokens }
+        : {
+            id: involuntaryTrace.id,
+            section: 'involuntary',
+            outcome: 'left_out',
+            reason: involuntaryOffered === 0 ? 'budget' : 'section_full',
+            tokens,
+          },
+    );
+  }
+
   return {
     contextText: blocks.join('\n\n'),
     tokensUsed: totalTokens,
     allocation: effective,
     includedMemoryIds: includedIds,
+    lineOutcomes,
   };
 }
