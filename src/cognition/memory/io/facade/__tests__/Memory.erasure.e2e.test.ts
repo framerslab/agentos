@@ -28,7 +28,7 @@ import path from 'node:path';
 import { resolveStorageAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
 import { Memory } from '../Memory.js';
 import { Brain } from '../../../retrieval/store/Brain.js';
-import { hnswIndexPath } from '../../../retrieval/store/HnswSidecar.js';
+import { HnswSidecar, hnswIndexPath } from '../../../retrieval/store/HnswSidecar.js';
 import { PORTABLE_TABLES } from '../../../retrieval/store/portable-tables.js';
 import { ForgottenLedger, type SuppressionSubject } from '../../../suppression/ForgottenLedger.js';
 import { openForgottenCopy } from '../../../suppression/forgottenCopy.js';
@@ -357,6 +357,73 @@ describe('the vector index after a delete', () => {
 
     await expect(memory.rebuildVectorIndex()).rejects.toThrow();
     expect(fs.existsSync(path.join(indexFile, 'held'))).toBe(true);
+  });
+
+  /** Waits the time given. */
+  const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+  /**
+   * Holds the first start of an index after this call until `release()`, as a slow disk holds a rewrite once it has
+   * read its traces; every later start runs at once.
+   */
+  function holdFirstIndexStart(): { reached: Promise<void>; release: () => void } {
+    const start = HnswSidecar.prototype.init;
+    let reach!: () => void;
+    let release!: () => void;
+    const reached = new Promise<void>((resolve) => (reach = resolve));
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let starts = 0;
+    vi.spyOn(HnswSidecar.prototype, 'init').mockImplementation(async function (this: HnswSidecar) {
+      if (starts++ === 0) {
+        reach();
+        await held;
+      }
+      return start.call(this);
+    });
+    return { reached, release };
+  }
+
+  it('keeps a deleted trace out of the files when a rewrite that read it is still running', async () => {
+    const { memory, brain, indexFile, mapFile } = await embeddingFacade();
+    const bees = await memory.remember('Ana keeps bees.');
+    const cello = await memory.remember('Bo plays cello.');
+
+    // A first rewrite reads both traces, then waits before it writes.
+    const hold = holdFirstIndexStart();
+    const first = memory.rebuildVectorIndex();
+    await hold.reached;
+
+    // Meanwhile one trace is deleted for good and a second rewrite is asked for, as a second person's deletion asks.
+    const deleted = memory.deleteTraces([cello.id]);
+    const rowOf = () => brain.get('SELECT id FROM memory_traces WHERE brain_id = ? AND id = ?', [brain.brainId, cello.id]);
+    for (let polls = 0; (await rowOf()) != null && polls < 200; polls += 1) await delay(10);
+    expect(await rowOf()).toBeFalsy();
+    const second = memory.rebuildVectorIndex();
+    // Time enough for the second rewrite to finish, if nothing holds it behind the first.
+    await Promise.race([second, delay(200)]);
+    hold.release();
+    await Promise.all([first, deleted, second]);
+
+    // The files hold the trace that is left; the deleted trace's vector is in neither.
+    expect(idsIn(mapFile)).toEqual([bees.id]);
+    expect(vectorsIn(indexFile)).not.toContainEqual(vectorOf('cello'));
+  });
+
+  it('indexes a trace remembered while a rewrite is running', async () => {
+    const { memory } = await embeddingFacade();
+    await memory.remember('Ana keeps bees.');
+
+    // A rewrite reads the one trace, then waits before it writes; a second trace is remembered meanwhile.
+    const hold = holdFirstIndexStart();
+    const rewrite = memory.rebuildVectorIndex();
+    await hold.reached;
+    const chess = memory.remember('Cy teaches chess.');
+    await Promise.race([chess, delay(200)]);
+    hold.release();
+    await Promise.all([rewrite, chess]);
+
+    // Both traces are in the index the store recalls from.
+    expect((memory as unknown as { _hnswSidecar: HnswSidecar })._hnswSidecar.size).toBe(2);
   });
 
   it('fails when the rebuilt index does not save', async () => {
