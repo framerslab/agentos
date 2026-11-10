@@ -171,6 +171,34 @@ describe('read_memory_page and who asks', () => {
     }
   });
 
+  it('a subject the runtime names is the asker even when the user id is an anonymous word', async () => {
+    // A session named with one of the anonymous words, whose user id is its session id, and a session opened with an
+    // anonymous user id whose runtime kept that id beside the session subject: each is a subject, never nobody.
+    const askers: Array<[string, Subject]> = [
+      ['guest', { kind: 'session', id: 'guest' }],
+      ['system', { kind: 'session', id: 'system' }],
+      ['anonymous', { kind: 'session', id: 'v1' }],
+    ];
+    for (const [userId, subject] of askers) {
+      await new UserWikiStore({ scopeId: keyOf(subject), pages: memory, chunk }).writePage(
+        P(`Visitor ${subject.id} likes juice.`, ['t3']),
+      );
+      events.length = 0;
+      const own = await call({ id: 'concepts/notes' }, ctx(userId, subject));
+      expect(own.output).toMatchObject({ body: `Visitor ${subject.id} likes juice.\n` });
+      expect(refusals()).toEqual([]);
+
+      // A page an earlier version compiled may hold what someone else said: a subject is never served it.
+      expect(await call({ id: 'concepts/old' }, ctx(userId, subject))).toEqual(notFound('concepts/old'));
+      expect(refusals()).toEqual(['legacy']);
+
+      expect((await call({ list: true }, ctx(userId, subject))).output?.pages).toEqual([
+        { id: 'concepts/notes', summary: 'Notes compiled from conversations', owner: 'own' },
+        { id: 'concepts/ops', summary: 'Opening hours', owner: 'operator' },
+      ]);
+    }
+  });
+
   it('refuses a call that carries a scope or user argument, and reads nothing', async () => {
     const calls: Array<Record<string, unknown>> = [
       { id: 'concepts/notes', scopeId: keyOf(ALICE) },
