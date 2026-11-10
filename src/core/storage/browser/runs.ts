@@ -1030,6 +1030,13 @@ class BrowserRunOwner implements RunOwner {
               gone = true;
               return;
             }
+            // The stored progress wins over the copy read earlier, which another tab's finish and cut may have moved on.
+            if (isRunRecord(current, this.isChosen) && current.account === this.account) {
+              record.counts = { ...current.counts };
+              record.items = current.items.map((item) => ({ ...item }));
+              record.phase = current.phase;
+              record.began = current.began;
+            }
           }
           await this.store.set(key, copyRecord(record));
           held.written = true;
@@ -1518,7 +1525,12 @@ class BrowserRunOwner implements RunOwner {
   /** A watched run's counts and state from its holder's message. */
   private apply(seen: Seen, message: Progress): void {
     const record = seen.read.record;
-    seen.read = { record: { ...record, counts: { ...message.counts }, state: message.state, phase: message.phase, progressed: message.at }, status: 'watched', cut: record.cut };
+    // A run drawn as ended that runs again under its id (another tab's finish of a cut run) is a new attempt: its end is
+    // drawn and counted afresh.
+    const again = message.ended === undefined && seen.ended !== null && LIVE.includes(message.state);
+    if (again) seen.ended = null;
+    const cut = again ? null : record.cut;
+    seen.read = { record: { ...record, counts: { ...message.counts }, state: message.state, phase: message.phase, progressed: message.at, cut }, status: 'watched', cut };
     seen.heard = this.now();
     seen.local = false;
     if (message.ended !== undefined && seen.ended === null) {
