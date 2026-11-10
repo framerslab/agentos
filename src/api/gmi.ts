@@ -63,6 +63,7 @@ import { createGmiLaunchTool } from './runtime/agencyLaunch/gmiLaunchTool.js';
 import { resolveCognition, type ResolvedCognition } from './runtime/gmiCognition.js';
 import { personaFromAgentOptions, stablePersonaIdOf } from './runtime/gmiPersona.js';
 import { warnSoulBesideSystemBlocks, withOneSoulWarning } from './runtime/soulLoadWarning.js';
+import { soulLog } from '../cognition/substrate/personas/soulLog.js';
 import { modelNamesAnotherProvider } from './runtime/credentialOwner.js';
 import {
   assertEmbeddingConfig,
@@ -540,6 +541,10 @@ export function gmi(opts: GmiOptions): GmiHandle {
   warnSoulBesideSystemBlocks(opts);
   // Loaded once, at build: a soul that fails to load throws here unless it is optional.
   const soul = opts.soul ? loadSoulFromOption(opts.soul) : null;
+  // gmi() refuses the voice and avatar options, so a front matter that sets them is named and left out.
+  for (const field of ['voice', 'avatar'] as const) {
+    if (soul?.frontmatter[field]) soulLog.warn('soul.field_ignored', { field });
+  }
   const cognition = resolveCognition(opts);
   // generate() and stream() run the light profile, under the agent's own learning option.
   const lightCognition = resolveCognition({ cognition: 'light', learning: opts.learning });
@@ -587,8 +592,9 @@ export function gmi(opts: GmiOptions): GmiHandle {
           : {}),
       })
     : undefined;
-  /** The traits the agent was given, as the layer and a GMI's own render read them. */
-  const authoredTraits = normalizeHexacoTraits(opts.personality);
+  /** The traits the agent was given, by option or by its soul, as the layer and a GMI's own render read them. */
+  const authoredTraits = normalizeHexacoTraits(opts.personality ?? soul?.frontmatter.hexaco);
+  const hasTraits = Object.keys(authoredTraits).length > 0;
   if (cognition.memory) assertEmbeddingConfig(cognition.memory);
   if (cognition.memory && opts.memoryProvider?.getContext) {
     console.warn('[agentos] gmi(): cognitive memory supplies the memory context; memoryProvider.getContext is skipped (observe still runs).');
@@ -773,9 +779,13 @@ export function gmi(opts: GmiOptions): GmiHandle {
       // another's memories. `GMI.shutdown()` shuts down the memory it was given;
       // on the view that does nothing, and `agent.close()` closes the manager.
       ...(mem ? { cognitiveMemory: mem.manager.forSession() } : {}),
-      // With learning on: the learner session, which prepares the personality section each turn, and the agent's
-      // traits, which the GMI renders itself when that session does not answer.
-      ...(layer ? { ...(learner ? { learning: learner } : {}), personaTraits: { authored: authoredTraits } } : {}),
+      // The agent's traits, which the GMI renders itself: with learning on, on a turn its learner session does not
+      // prepare; with learning off, on every turn, since the base prompt then holds no personality section.
+      ...(layer
+        ? { ...(learner ? { learning: learner } : {}), personaTraits: { authored: authoredTraits } }
+        : hasTraits
+          ? { personaTraits: { authored: authoredTraits } }
+          : {}),
       // The usage a provider reports for a call after the call was stopped goes
       // to the turn that made the call, which meters and counts it.
       completionGateway: {
