@@ -250,9 +250,9 @@ export interface AgentOptions extends BaseAgentConfig {
    */
   responseSchema?: import('zod').ZodType;
   /**
-   * Pre-generation hook, called before each LLM step. On the GMI path with `learning` on, its `system` is the
-   * persona's base prompt, which holds no personality section; the system text in `messages` holds the section after
-   * the base prompt.
+   * Pre-generation hook, called before each LLM step. On the GMI path with `learning` on, or with traits (the
+   * `personality` option or a soul's `hexaco`), its `system` is the persona's base prompt, which holds no personality
+   * section; the system text in `messages` holds the section after the base prompt.
    */
   onBeforeGeneration?: (context: GenerationHookContext) => Promise<GenerationHookContext | void>;
   /** Post-generation hook, called after each LLM step. */
@@ -284,10 +284,12 @@ export interface AgentOptions extends BaseAgentConfig {
   skills?: SkillEntry[];
   /**
    * Structured system prompt blocks with cache breakpoints.
-   * When provided, they replace the assembled prompt whole: the `soul` is not
-   * read (no SOUL.md prose, STYLE.md or memory index, and no warning when it
-   * would fail to load), and `instructions`, `name`, `personality` and
-   * `skills` are not added.
+   * When provided, they replace the assembled prompt whole: the soul's SOUL.md
+   * prose, STYLE.md and memory index are not added, and neither are
+   * `instructions`, `name`, `personality` and `skills`. The `soul` is still
+   * loaded at build: its hard limits close the prompt as one more block after
+   * yours, and a soul that fails to load throws `SoulLoadError` unless it is
+   * given as `{ path, optional: true }`.
    * Use this for prompt caching support with Anthropic.
    */
   systemBlocks?: import('./generateText.js').SystemContentBlock[];
@@ -1107,7 +1109,8 @@ export function agent(opts: AgentOptions): Agent {
    */
   const callOptions = (extra: Partial<GenerateTextOptions> | undefined): Partial<GenerateTextOptions> => {
     // A call's own system prompt replaces the agent's, and the hard limits close it too.
-    let merged = { ...baseOpts, ...extra, ...(extra?.system !== undefined ? { system: withHardLimitsLast(extra.system, hardLimits) } : {}) };
+    // A call that sets `system`, even to undefined, still closes with the limits.
+    let merged = { ...baseOpts, ...extra, ...(extra && 'system' in extra ? { system: withHardLimitsLast(extra.system, hardLimits) } : {}) };
     if (!extra || (extra.provider === undefined && extra.model === undefined)) return merged;
     if (
       extra.provider === undefined &&

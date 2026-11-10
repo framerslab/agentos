@@ -69,7 +69,9 @@ function completionOptionsOf(opts: AgentOptions): Partial<ModelCompletionOptions
 /**
  * The persona id of a soul that gives no id (no `agentId`, no `name`, on an agent with no name): `soul-` and the first
  * 16 hex characters of SHA-256 over the canonical JSON of its front matter and body. The same at every build of the
- * same soul; it changes with the soul's text, so it names the persona alone and is never a memory, learner or brain key.
+ * same soul; it changes with the soul's text. It is never a learner or brain key (`memory.store` refuses such a soul),
+ * but in-process cognitive memory files the persona and owner scopes under the persona id, so editing such a soul
+ * starts those scopes afresh; set `agentId` to keep them.
  */
 export function derivedSoulPersonaId(soul: Pick<LoadedSoul, 'frontmatter' | 'soulContent'>): string {
   return `soul-${createHash('sha256').update(canonicalJson([soul.frontmatter, soul.soulContent])).digest('hex').slice(0, 16)}`;

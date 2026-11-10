@@ -119,7 +119,8 @@ export interface SoulFrontmatter {
   /**
    * Hard behavioral limits, carried on the persona (`personaDefinition.hardLimits`). Every path renders them as the
    * closing "Hard limits" block of the system prompt: a GMI from its persona, `agent()` and `souledAgent()` after their
-   * own prompt. They are words for the model: PersonaOverlayManager runs no guardrail check on them.
+   * own prompt. A memory provider's recall and a planned call's plan are system messages after the block. They are
+   * words for the model: PersonaOverlayManager runs no guardrail check on them.
    */
   hardLimits?: string[];
   /** Avatar config for visual surfaces. Maps to PersonaAvatarConfig. */
@@ -184,6 +185,11 @@ export function validateSoulFrontmatter(data: Record<string, unknown>, source = 
   }
   for (const field of OBJECT_FIELDS) {
     if (out[field] !== undefined && !isMapping(out[field])) refuse(field, 'an object');
+  }
+  const trace = out.reasoningTrace as Record<string, unknown> | undefined;
+  for (const member of ['maxEntries', 'maxMessageLength']) {
+    const value = trace?.[member];
+    if (value !== undefined && value !== null && typeof value !== 'number') refuse(`reasoningTrace.${member}`, 'a number');
   }
   const hexaco = out.hexaco;
   if (hexaco !== undefined) {
@@ -417,7 +423,7 @@ export type SoulPersonaFields = Pick<
 /** The persona fields of a soul's front matter: id, name, role, traits, reasoning-trace limits, mood, voice, avatar, hard limits and metadata. */
 export function personaFieldsOf(frontmatter: SoulFrontmatter): SoulPersonaFields {
   return {
-    id: frontmatter.agentId ?? slugify(frontmatter.name ?? 'unnamed-agent'),
+    id: soulAgentIdOf(frontmatter) ?? 'unnamed-agent',
     name: frontmatter.name ?? 'Unnamed Agent',
     description: frontmatter.role ?? '',
     // Runtime readers key Honesty-Humility as `honesty`; the frontmatter may
@@ -451,16 +457,19 @@ export function personaFieldsOf(frontmatter: SoulFrontmatter): SoulPersonaFields
 }
 
 /**
- * The one stable id of a soul: `agentId` as given, else the slug of the soul's `name`, else an id from the agent
- * option's `name`; undefined when the soul has neither and the agent has no name. Never a random id.
+ * The one stable id of a soul: `agentId` trimmed, else the slug of the soul's `name` (for a name with no Latin letters
+ * or digits, `agent-` and a hash of the name), else an id from the agent option's `name`; undefined when the soul has
+ * neither and the agent has no name. Never a random id.
  *
  * @param frontmatter - The soul's front matter.
  * @param agentName - The agent's `name` option, used only when the soul names no id and no name.
  */
 export function soulAgentIdOf(frontmatter: SoulFrontmatter, agentName?: string): string | undefined {
-  if (typeof frontmatter.agentId === 'string' && frontmatter.agentId.trim() !== '') return frontmatter.agentId;
-  const fromSoulName = typeof frontmatter.name === 'string' ? slugify(frontmatter.name) : '';
-  if (fromSoulName) return fromSoulName;
+  const agentId = typeof frontmatter.agentId === 'string' ? frontmatter.agentId.trim() : '';
+  if (agentId) return agentId;
+  // The loader's slug first, so the id a Latin name had does not move; a name it leaves empty is hashed.
+  const soulName = typeof frontmatter.name === 'string' ? frontmatter.name.trim() : '';
+  if (soulName) return slugify(soulName) || stableIdOfName(soulName);
   const name = agentName?.trim();
   return name ? stableIdOfName(name) : undefined;
 }

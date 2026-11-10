@@ -444,7 +444,7 @@ phraseMatches(entries, 'Now in beta').map((e) => e.ruleId); // ['stage']
 
 ### Hard limits in the persona
 
-`IPersonaDefinition.hardLimits` (and `hardLimits:` in a SOUL file's front matter) renders as the last block of the system prompt on every path: every GMI turn for that persona, and every model call of `agent({ soul })` and `souledAgent()`, after `systemBlocks` too, under the heading "Hard limits", after everything the turn added and after every fragment of the persona's own prompt whatever priority it carries. The guards hold the same rules in code; the block tells the model.
+`IPersonaDefinition.hardLimits` (and `hardLimits:` in a SOUL file's front matter) renders as the last block of the system prompt on every path: every GMI turn for that persona, and every model call of `agent({ soul })` and `souledAgent()`, after `systemBlocks` too, under the heading "Hard limits", after everything the turn added and after every fragment of the persona's own prompt whatever priority it carries. The exception: on a turn where a memory provider's `getContext` returns text (the wiki's recall on a souled agent), that text is a system message after the limits, and so is the plan of a call with `planning` on. The guards hold the same rules in code; the block tells the model.
 
 A GMI built by `agent({ runtime: 'gmi' })` or `gmi()` has the block when its `soul` sets `hardLimits`: [`personaFromAgentOptions()`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/gmiPersona.ts) takes them from the soul's front matter ([GMIs from agent()](../GMI.md#gmis-from-agent)). An agent with no soul has none.
 

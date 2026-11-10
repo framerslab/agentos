@@ -613,7 +613,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
    * The key the agent's learners are filed under when `learning.agentKey` is unset (the layer lets that one win):
    * `learning.learnerKey`; else the soul's id, unless the learning store holds learner rows under the slug of the
    * agent's name and none under the soul's id, which keeps the slug and says so once; else the slug of the name, or
-   * none for an agent with no name. Resolved at first use, since the store opens then.
+   * none for an agent with no name. Resolved at first use, since the store opens then. A store that does not open
+   * rejects the lookup rather than reading as holding no learners, so the next open asks again.
    */
   const learnersKey = retryingOnce<string>(async () => {
     const chosen = learningConfig?.learnerKey?.trim();
