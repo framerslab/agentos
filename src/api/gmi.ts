@@ -13,7 +13,8 @@
  * set resolves them on its first call; a build that fails is not kept, and the
  * next call builds again.
  *
- * With `memory.store` (which needs the learning option and `learning.agentKey`)
+ * With `memory.store` (which needs the learning option and a key for its brain,
+ * `learning.agentKey` or the soul's id)
  * the agent's memory and its learning store share one Brain's adapter, opened on
  * first use, and the Brain keeps each session id's generation, so an id that
  * session.close() ended stays ended across a restart.
@@ -64,6 +65,7 @@ import { resolveCognition, type ResolvedCognition } from './runtime/gmiCognition
 import { personaFromAgentOptions, stablePersonaIdOf } from './runtime/gmiPersona.js';
 import { warnSoulBesideSystemBlocks, withOneSoulWarning } from './runtime/soulLoadWarning.js';
 import { soulLog } from '../cognition/substrate/personas/soulLog.js';
+import { soulAgentIdOf } from '../cognition/substrate/personas/SoulLoader.js';
 import { modelNamesAnotherProvider } from './runtime/credentialOwner.js';
 import {
   assertEmbeddingConfig,
@@ -549,11 +551,15 @@ export function gmi(opts: GmiOptions): GmiHandle {
   // generate() and stream() run the light profile, under the agent's own learning option.
   const lightCognition = resolveCognition({ cognition: 'light', learning: opts.learning });
   const learningConfig = typeof opts.learning === 'object' && opts.learning !== null ? opts.learning : undefined;
-  /** The agent's key: `learning.agentKey`, else a named agent's persona id; none for an unnamed agent with no key. */
-  const agentKey = learningConfig?.agentKey?.trim() || stablePersonaIdOf(opts);
+  /** The soul's one stable id; undefined with no soul, or a soul that gives none on an agent with no name. */
+  const soulId = soul ? soulAgentIdOf(soul.frontmatter, opts.name) : undefined;
+  /** The key of the brain behind memory.store: `learning.agentKey`, else the soul's id. */
+  const brainKey = learningConfig?.agentKey?.trim() || soulId;
+  /** The agent's key: `learning.agentKey`, else the soul's id, else a named agent's persona id; none for an unnamed agent with neither. */
+  const agentKey = brainKey || stablePersonaIdOf(opts);
   const memoryStore = cognition.memory ? cognition.memory.store : undefined;
-  // A durable store needs the learning flag and the agent's key, which names its brain and its learners.
-  if (memoryStore !== undefined) assertMemoryStore(memoryStore, cognition.learning !== undefined, learningConfig?.agentKey);
+  // A durable store needs the learning flag and a key that names its brain: learning.agentKey, or the soul's id.
+  if (memoryStore !== undefined) assertMemoryStore(memoryStore, cognition.learning !== undefined, brainKey, soul !== null);
   if (cognition.learning && learningConfig?.store?.kind === 'sql' && !learningConfig.agentKey?.trim()) {
     throw new Error(
       "gmi(): a SQL learning.store needs learning.agentKey, the stable id of the agent's learners; two agents on one store would otherwise be one agent to the learning layer.",
@@ -564,7 +570,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
    * memory generation: `agent.close()` closes it, and the next use opens the file again. A host's adapter keeps one
    * Brain for the agent's life, never closed.
    */
-  const openStoreBrain = () => retryingOnce<AgentMemoryBrain>(() => openAgentMemoryBrain(memoryStore!, learningConfig!.agentKey!.trim()));
+  const openStoreBrain = () => retryingOnce<AgentMemoryBrain>(() => openAgentMemoryBrain(memoryStore!, brainKey!));
   let storeBrain = memoryStore ? openStoreBrain() : undefined;
   /** The host calls of `agent.learning` still running: `agent.close()` lets them finish before it closes what they use. */
   const runningHostCalls = new Set<Promise<unknown>>();
