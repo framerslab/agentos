@@ -385,6 +385,8 @@ export class LocalCrossEncoderReranker implements IRerankerProvider {
   private loaded: LoadedCrossEncoder | null = null;
   /** The tail of the queue that loads and unloads run in, one at a time. */
   private loadQueue: Promise<void> | null = null;
+  /** The disposal of a model that a failed load left loading; the next queued task waits for it. */
+  private lateModelCleanup: Promise<void> | null = null;
 
   constructor(config: LocalCrossEncoderConfig) {
     this.config = {
@@ -413,7 +415,8 @@ export class LocalCrossEncoderReranker implements IRerankerProvider {
    * and leaves the model that was loaded before it, if any. A model that
    * loads after its tokenizer failed finishes loading in the background, and
    * the provider then calls its `dispose()`, dropping any error the disposal
-   * throws. A failed load is not remembered: with no model loaded, the next
+   * throws; the next load, unload or retry waits for that, so two loads never
+   * overlap. A failed load is not remembered: with no model loaded, the next
    * `rerank()` tries the load once more. When `initialize(otherModelId)`
    * fails while a model is loaded, reranks go on with the loaded model;
    * call `initialize(otherModelId)` again to retry the replacement.
@@ -435,14 +438,25 @@ export class LocalCrossEncoderReranker implements IRerankerProvider {
     });
   }
 
-  /** Run `task` after every load or unload queued before it; a failed task does not stop the next. */
+  /**
+   * Run `task` after every load or unload queued before it; a failed task does not stop the next. The caller
+   * gets the task's own outcome at once, but the next task waits, too, for the disposal of any model the
+   * task's failed load left loading, so two model loads never overlap.
+   */
   private enqueue(task: () => Promise<void>): Promise<void> {
     const run = (this.loadQueue ?? Promise.resolve()).catch(() => undefined).then(task);
-    this.loadQueue = run;
+    const tail: Promise<void> = run
+      .catch(() => undefined)
+      .then(() => {
+        const cleanup = this.lateModelCleanup;
+        this.lateModelCleanup = null;
+        return cleanup ?? undefined;
+      });
+    this.loadQueue = tail;
     const clear = (): void => {
-      if (this.loadQueue === run) this.loadQueue = null;
+      if (this.loadQueue === tail) this.loadQueue = null;
     };
-    run.then(clear, clear);
+    tail.then(clear, clear);
     return run;
   }
 
@@ -531,8 +545,9 @@ export class LocalCrossEncoderReranker implements IRerankerProvider {
       [tokenizer, model] = await Promise.all([tokenizerLoad, modelLoad]);
     } catch (error) {
       // The load fails as soon as either half fails. A model that loaded, or loads later, has its dispose() called
-      // when its load ends; the caller gets the load's error, whatever the disposal does.
-      void modelLoad.then(disposeQuietly, () => undefined);
+      // when its load ends, and the next queued load waits for that (see enqueue); the caller gets the load's
+      // error now, whatever the disposal does.
+      this.lateModelCleanup = modelLoad.then(disposeQuietly, () => undefined);
       throw error;
     }
 
