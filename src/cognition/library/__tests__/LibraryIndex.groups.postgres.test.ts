@@ -933,4 +933,47 @@ describe.skipIf(!URL)('LibraryIndex.searchGroups over PostgresVectorStore on Pos
     const [summary] = await run(summaries, answering({ ...own, partKind: 'summary' }));
     expect(summary.hits.map((hit) => hit.partKind)).toEqual(['summary']);
   });
+
+  it('reads a passage only where its tenant, its groups and its source id hold the texts the search names: a number of the same digits is another value', async () => {
+    // Passages a writer put into the table past the index, with numbers where the index writes texts. The index reads
+    // the tenant 7 as another tenant than "7", so the store's statements must read it so too: such a passage is never
+    // matched, counted, ranked, widened to or listed, and the search answers what the rest hold.
+    const row = (id: string, metadata: Record<string, unknown>, text: string): Promise<unknown> =>
+      pool.query(`INSERT INTO "${TABLE}" (id, embedding, metadata_json, text_content) VALUES ($1, '[0,0,0,0.1]'::vector, $2::jsonb, $3)`, [
+        id,
+        JSON.stringify({ status: 'active', kind: 'document', tags: [], field: 'text', ...metadata }),
+        text,
+      ]);
+    await row('typed:a#0', { tenantId: '7', aclGroups: ['70'], sourceId: 'typed:a', index: 0 }, 'The alpha plan.');
+    await row('typed:a#1', { tenantId: 7, aclGroups: ['70'], sourceId: 'typed:a', index: 1 }, 'The bravo plan.');
+    await row('typed:b#0', { tenantId: '7', aclGroups: ['70'], sourceId: 'typed:b', index: 0 }, 'The alpha draft.');
+    await row('typed:b#1', { tenantId: '7', aclGroups: 70, sourceId: 'typed:b', index: 1 }, 'The bravo draft.');
+    await row('8#0', { tenantId: '7', aclGroups: ['70'], sourceId: 8, index: 0 }, 'The bravo memo.');
+    const typed: LibraryGroup = {
+      id: 'typed',
+      fingerprint: 'fp:typed',
+      items: [{ sourceId: 'typed:a', date: null }, { sourceId: 'typed:b', date: null }, { sourceId: '8', date: null }],
+    };
+    const scope: LibraryScope = { tenantId: '7', aclGroups: ['70'] };
+    const passageIds = (hits: LibraryGroupResult['hits']): string[] => hits.map((hit) => hit.passage.id);
+
+    // The passages written with texts are read as any other.
+    const [alpha] = await run({ text: 'alpha', groups: [typed], scope });
+    expect(alpha).toMatchObject({ state: 'ok', total: 2, incomplete: false, cursor: null, anyWord: [] });
+    expect(passageIds(alpha.hits)).toEqual(['typed:a#0', 'typed:b#0']);
+    // "bravo" is held by the three passages with a number alone.
+    const [bravo] = await run({ text: 'bravo', groups: [typed], scope });
+    expect(bravo).toMatchObject({ state: 'ok', total: 0, hits: [], anyWord: [] });
+    // No item holds both words in the passages the search may read; each holds "alpha" there, and is shown by it.
+    const [both] = await run({ text: 'alpha bravo', groups: [typed], scope });
+    expect(both).toMatchObject({ total: 0, hits: [] });
+    expect(passageIds(both.anyWord)).toEqual(['typed:a#0', 'typed:b#0']);
+    // "bravo" is no stored word of the passages the search may read, so "bravx" widens to nothing.
+    const [widened] = await run({ text: 'bravx', groups: [typed], scope, typo: 'one-edit' });
+    expect(widened).toMatchObject({ total: 0, incomplete: false, hits: [], anyWord: [] });
+    // With no word, the items that hold a passage the search may read: "8" holds none.
+    const [listed] = await run({ text: '', groups: [typed], scope });
+    expect(listed).toMatchObject({ total: 2, cursor: null });
+    expect(passageIds(listed.hits)).toEqual(['typed:a#0', 'typed:b#0']);
+  });
 });
