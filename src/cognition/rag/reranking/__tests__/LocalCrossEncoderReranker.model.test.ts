@@ -5,7 +5,12 @@
  * weights and the provider reranks 20 texts, one of which answers the query.
  * The answer must come first and the 20 scores must differ, for the default
  * weights (the repository's onnx/model_quint8_avx2.onnx) and for the
- * full-precision onnx/model.onnx.
+ * full-precision onnx/model.onnx. Two more cases take the paths a host
+ * uses: RerankerService.rerankChunks with the provider registered, and
+ * RetrievalAugmentor.retrieveContext with rerank on, where the augmentor
+ * registers the local provider from its rerankerServiceConfig (its
+ * embeddings and vector store are stand-ins; the rerank stage is the real
+ * model).
  *
  * It runs when AGENTOS_TEST_CROSS_ENCODER_CACHE names a Transformers.js cache
  * folder holding the model's files at
@@ -21,7 +26,12 @@
 import { statSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { LocalCrossEncoderReranker } from '../providers/LocalCrossEncoderReranker';
+import { LocalCrossEncoderReranker, type LocalCrossEncoderConfig } from '../providers/LocalCrossEncoderReranker';
+import { RerankerService } from '../RerankerService';
+import { RetrievalAugmentor } from '../../RetrievalAugmentor';
+import type { RagRetrievedChunk } from '../../IRetrievalAugmentor';
+import type { IEmbeddingManager } from '../../IEmbeddingManager';
+import type { IVectorStoreManager } from '../../IVectorStoreManager';
 
 const CACHE_DIR = process.env.AGENTOS_TEST_CROSS_ENCODER_CACHE ?? '';
 const MODEL_ID = 'cross-encoder/ms-marco-MiniLM-L-6-v2';
@@ -127,4 +137,114 @@ describe.skipIf(!CACHE_DIR)(`LocalCrossEncoderReranker on the real ${MODEL_ID}`,
       }
     });
   }
+
+  /** Asserts the answer leads and the 20 scores are distinct, in 0..1 and descending. */
+  function expectAnswerFirstWithDistinctScores(ids: string[], scores: Array<number | undefined>): void {
+    expect(ids).toHaveLength(20);
+    expect(ids[0]).toBe(ANSWER_ID);
+    expect(new Set(ids).size).toBe(20);
+    expect(new Set(scores).size).toBe(20);
+    for (const s of scores) {
+      expect(typeof s).toBe('number');
+      expect(s).toBeGreaterThan(0);
+      expect(s).toBeLessThan(1);
+    }
+    for (let i = 1; i < scores.length; i++) expect(scores[i - 1]!).toBeGreaterThan(scores[i]!);
+  }
+
+  it('through RerankerService.rerankChunks (the host path): the answering chunk ranks first of 20 with distinct scores', async () => {
+    const localConfig: LocalCrossEncoderConfig = { providerId: 'local', defaultModelId: MODEL_ID, cacheDir: CACHE_DIR };
+    const service = new RerankerService({ config: { providers: [localConfig], defaultProviderId: 'local' } });
+    const reranker = new LocalCrossEncoderReranker(localConfig);
+    service.registerProvider(reranker);
+    // The vector store's order: the answer sits 14th with a low similarity score.
+    const chunks: RagRetrievedChunk[] = DOCUMENTS.map((d, i) => ({
+      id: d.id,
+      content: d.content,
+      originalDocumentId: d.id,
+      relevanceScore: 0.9 - i * 0.01,
+    }));
+    try {
+      const reranked = await service.rerankChunks(QUERY, chunks);
+
+      expectAnswerFirstWithDistinctScores(
+        reranked.map((c) => c.id),
+        reranked.map((c) => c.relevanceScore),
+      );
+      expect(reranked[0].relevanceScore).toBeGreaterThan(0.5);
+      expect(reranked[0].metadata?._rerankerProviderId).toBe('local');
+      expect(reranked[0].metadata?._rerankerOriginalScore).toBeCloseTo(0.9 - ANSWER_INDEX * 0.01, 10);
+    } finally {
+      await reranker.dispose();
+    }
+  });
+
+  it('through RetrievalAugmentor.retrieveContext with rerank on: the auto-registered local provider puts the answer first', async () => {
+    // Embeddings and the vector store are stand-ins: they hand the augmentor the 20
+    // texts in a fixed similarity order with the answer 14th. The rerank stage is real.
+    const embeddingManager = {
+      initialize: async () => undefined,
+      generateEmbeddings: async () => ({
+        embeddings: [[0.1, 0.2, 0.3]],
+        modelId: 'stand-in-embedding',
+        providerId: 'stand-in',
+        usage: { totalTokens: 1 },
+      }),
+      getEmbeddingModelInfo: async () => ({ modelId: 'stand-in-embedding', providerId: 'stand-in', dimension: 3 }),
+      getEmbeddingDimension: async () => 3,
+      checkHealth: async () => ({ isHealthy: true }),
+      shutdown: async () => undefined,
+    } as unknown as IEmbeddingManager;
+    const store = {
+      query: async () => ({
+        documents: DOCUMENTS.map((d, i) => ({
+          id: d.id,
+          embedding: [0.1, 0.2, 0.3],
+          similarityScore: 0.9 - i * 0.01,
+          textContent: d.content,
+          metadata: { originalDocumentId: d.id },
+        })),
+      }),
+    };
+    const vectorStoreManager = {
+      initialize: async () => undefined,
+      getStoreForDataSource: async () => ({ store, collectionName: 'notes', dimension: 3 }),
+      listDataSourceIds: () => ['notes'],
+      checkHealth: async () => ({ isOverallHealthy: true }),
+      shutdownAllProviders: async () => undefined,
+    } as unknown as IVectorStoreManager;
+
+    const localConfig: LocalCrossEncoderConfig = { providerId: 'local', defaultModelId: MODEL_ID, cacheDir: CACHE_DIR };
+    const augmentor = new RetrievalAugmentor();
+    await augmentor.initialize(
+      {
+        defaultQueryEmbeddingModelId: 'stand-in-embedding',
+        categoryBehaviors: [],
+        rerankerServiceConfig: { providers: [localConfig], defaultProviderId: 'local' },
+        defaultRerankerProviderId: 'local',
+      },
+      embeddingManager,
+      vectorStoreManager,
+    );
+    try {
+      const result = await augmentor.retrieveContext(QUERY, {
+        targetDataSourceIds: ['notes'],
+        topK: 20,
+        rerankerConfig: { enabled: true },
+      });
+
+      const messages = result.diagnostics?.messages ?? [];
+      expect(messages.some((m) => m.includes('Reranking failed'))).toBe(false);
+      expect(messages.some((m) => m.includes("Reranking applied with provider 'local'"))).toBe(true);
+      expectAnswerFirstWithDistinctScores(
+        result.retrievedChunks.map((c) => c.id),
+        result.retrievedChunks.map((c) => c.relevanceScore),
+      );
+      expect(result.augmentedContext.startsWith(TEXTS[ANSWER_INDEX])).toBe(true);
+    } finally {
+      const provider = (augmentor as any).rerankerService?.getProvider('local') as LocalCrossEncoderReranker | undefined;
+      await provider?.dispose();
+      await augmentor.shutdown();
+    }
+  });
 });
