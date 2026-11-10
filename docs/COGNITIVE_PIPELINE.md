@@ -77,7 +77,7 @@ Imagine a user types: *"What's my current job title?"*
 1. **Recall stage** receives the query.
    - The [`MemoryRouter`](https://github.com/framerslab/agentos/blob/master/src/orchestration/pipeline/memory/MemoryRouter.ts)'s classifier (`gpt-5-mini`, ~$0.0002 per call) reads the query and emits `knowledge-update` (because "current X" with a state-evolution implication).
    - The routing table for the `minimize-cost` preset says `knowledge-update → canonical-hybrid` — because Phase B measurements show canonical wins on this category.
-   - The dispatcher invokes the canonical-hybrid backend (BM25 + dense + Cohere rerank). Returns top-K retrieved traces.
+   - The dispatcher invokes the canonical-hybrid backend (BM25 + dense + the reranker the host wires: [local, Cohere or LLM judge](./text/RERANKING.md)). Returns top-K retrieved traces.
 
 2. **Read stage** receives the query + traces.
    - The [`ReadRouter`](https://github.com/framerslab/agentos/blob/master/src/orchestration/pipeline/read/ReadRouter.ts)'s classifier reads them and emits `precise-fact` intent.

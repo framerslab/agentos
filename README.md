@@ -162,7 +162,7 @@ The LongMemEval-S and LongMemEval-M results are being re-run without a remote re
 | **Cognitive Memory** | 8 mechanisms: reconsolidation, retrieval-induced forgetting, involuntary recall, FOK, gist extraction, schema encoding, source decay, emotion regulation |
 | **HEXACO Personality** | 6 traits modulate memory, retrieval bias, response style |
 | **GMI Runtime** | Per-session persona, mood and reasoning trace * sentiment-triggered metaprompts (opt-in per persona) * mood-weighted memory bridge * bounded `adapt_personality` trait changes (opt-in) |
-| **RAG Pipeline** | 7 vector backends * 4 retrieval strategies * GraphRAG * HyDE * Cohere rerank-v3.5 |
+| **RAG Pipeline** | 7 vector backends * 4 retrieval strategies * GraphRAG * HyDE * [reranking](https://docs.agentos.sh/text/reranking): a local cross-encoder, Cohere or an LLM judge on any model |
 | **Multi-Agent Teams** | 7 coordination strategies * manager delegation and specialist spawning * model pools with seating policies and strict per-seat credentials * a panel strategy with a provider and vendor quorum * HITL approval gates |
 | **Orchestration** | `workflow()` DAGs * `AgentGraph` router, personality and discovery edges * `mission()` graphs from plan templates * checkpointing in memory or in SQLite and Postgres (`SqlCheckpointStore`) |
 | **Guardrails** | 6 packs (PII, ML classifiers, topicality, code safety, grounding, content policy) |
@@ -242,6 +242,7 @@ Provider fallback is on by default for `generateText()`, `streamText()`, `agent(
 - **[Document Ingestion](https://docs.agentos.sh/features/memory-document-ingestion)**: PDF, Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, HTML and Markdown read to text, with bounds on what a Word or office archive inflates to
 - **[Library Index](https://docs.agentos.sh/features/library-index)**: sources over any vector store, and a browser entry for a page's own search and records, transcript files from other notetakers (SubRip, WebVTT, Otter, Fireflies, Word) read to turns with the speakers kept apart, and the plan of an archive's entries
 - **[Text Processing & Search](https://docs.agentos.sh/text)**: tokenizers and stemming, BM25, fuzzy and hybrid search, text statistics, chunking, reranking
+- **[Reranking](https://docs.agentos.sh/text/reranking)**: one `RerankerService` over a local Transformers.js cross-encoder (scoring stays in the process), Cohere's rerank API, an LLM judge on any model your function calls, or a provider of your own
 - **[Guardrails](https://docs.agentos.sh/features/guardrails-architecture)**: two-phase dispatcher, four verdicts, fail-open and fail-closed guards
 - **[Voice Pipeline](https://docs.agentos.sh/features/voice-pipeline)**: TTS, STT, telephony
 - **[Blog](https://docs.agentos.sh/blog)**: engineering posts, benchmark publications, transparency audits

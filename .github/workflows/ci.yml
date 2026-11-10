@@ -258,7 +258,7 @@ jobs:
       - name: The text processing and search examples run from the built package
         run: |
           set -euo pipefail
-          for example in text-processing-pipeline text-search-bm25 text-hybrid-search text-statistics; do
+          for example in text-processing-pipeline text-search-bm25 text-hybrid-search text-statistics rerank-llm-judge; do
             echo "::group::examples/$example.mjs"
             node "examples/$example.mjs"
             echo "::endgroup::"

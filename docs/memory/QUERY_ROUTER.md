@@ -30,7 +30,7 @@ You can replace the built-in heuristic branches without forking [`QueryRouter`](
 by passing host-provided callbacks in the constructor:
 
 - `graphExpand(seedChunks)` for GraphRAG or relationship expansion
-- `rerank(query, chunks, topN)` for provider-backed reranking
+- `rerank(query, chunks, topN)` for provider-backed reranking: the hook can call a `RerankerService` with the local cross-encoder, Cohere or the LLM judge ([Reranking](../text/RERANKING.md))
 - `deepResearch(query, sources)` for real multi-source research
 
 When these hooks are supplied, `router.getCorpusStats()` reports the
