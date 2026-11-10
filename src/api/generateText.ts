@@ -1116,6 +1116,15 @@ export interface GenerateTextResult {
    */
   grounding?: import('../cognition/rag/citation/types.js').VerifiedResponse;
   /**
+   * On a `gmi()` or `agent({ runtime: 'gmi' })` session's turn with cognitive
+   * memory: the recall capture of the turn's memory assembly (every candidate
+   * with its ranks, scores and outcome, the legs, the reranker, the budget and
+   * the timings; never a memory's text or the query's). `undefined` when the
+   * turn assembled no memory block or the manager's `recall.capture` is
+   * `'off'`.
+   */
+  memoryRecall?: import('../cognition/memory/retrieval/recall/capture.js').MemoryRecallCapture;
+  /**
    * Per-hop provider fallback trail. `fired` is true when any non-primary
    * provider produced — or was tried for — the result, so callers can flag a
    * degraded run even when the final attempt recovered on the primary.

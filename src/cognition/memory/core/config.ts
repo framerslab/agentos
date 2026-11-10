@@ -8,6 +8,7 @@ import type { IKnowledgeGraph } from '../retrieval/graph/knowledge/IKnowledgeGra
 import type { IVectorStore } from '../../../core/vector-store/IVectorStore.js';
 import type { IEmbeddingManager } from '../../../core/embeddings/IEmbeddingManager.js';
 import type { MemoryBudgetAllocation } from './types.js';
+import type { RecallCaptureMode } from '../retrieval/recall/capture.js';
 import type { InfiniteContextConfig } from '../pipeline/context/types.js';
 
 // ---------------------------------------------------------------------------
@@ -448,6 +449,42 @@ export interface CognitiveMemoryConfig {
    * @see `packages/agentos-bench/docs/specs/2026-04-26-hindsight-4network-observer-design.md`
    */
   typedNetwork?: TypedNetworkRuntimeConfig;
+
+  /**
+   * What the manager records of each memory assembly. Read at every
+   * `assembleForPrompt()`, so a change to a built manager's configuration
+   * applies from its next turn.
+   *
+   * @default undefined (capture `'metadata'`, no ids in the reasoning trace)
+   */
+  recall?: ManagerRecallConfig;
+}
+
+/**
+ * The manager's recall settings: what it records of each memory assembly.
+ */
+export interface ManagerRecallConfig {
+  /**
+   * `'metadata'` returns a capture record (`MemoryRecallCapture`) with every assembled
+   * context (`AssembledMemoryContext.capture`) and on a GMI turn's result;
+   * `'metadata+stream'` also sends it on the runtime stream (a
+   * `METADATA_UPDATE` carrying `memorySources`, and `memoryRecall` on the
+   * `FINAL_RESPONSE`); `'off'` records nothing. The record holds ids, ranks,
+   * scores, counts and timings, never a memory's text or the query's; ids and
+   * scores can concern memories of the other scopes a turn reads (the
+   * organization's, the persona's), so the host decides who sees a capture.
+   *
+   * @default 'metadata'
+   */
+  capture?: RecallCaptureMode;
+  /**
+   * Lists the ids of the memories the block shows (`includedMemoryIds`) in
+   * the GMI's reasoning-trace entry "Cognitive memory context assembled.",
+   * which otherwise carries counts only.
+   *
+   * @default false
+   */
+  traceIds?: boolean;
 }
 
 /**

@@ -38,6 +38,14 @@ import {
 } from './core/encoding/ContentFeatureDetector.js';
 import { computeCurrentStrength } from './core/decay/DecayModel.js';
 import { MemoryStore } from './retrieval/store/MemoryStore.js';
+import {
+  MEMORY_RECALL_CAPTURE_VERSION,
+  MEMORY_RERANK_MAX_DOCUMENTS,
+  candidatesFrom,
+  rerankerRecordOf,
+  type MemoryRecallReranker,
+  type RetrievalRecallReport,
+} from './retrieval/recall/capture.js';
 import { CognitiveWorkingMemory } from './core/working/CognitiveWorkingMemory.js';
 import {
   assembleMemoryContext,
@@ -855,6 +863,8 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     this.ensureInitialized();
 
     const startTime = Date.now();
+    // The dense leg's time for the recall capture: the query's embedding (and HyDE), the vector search and the scoring.
+    const denseStartedAt = performance.now();
     const resolvedPolicy = options.policy ? resolveMemoryRetrievalPolicy(options.policy) : null;
     const effectiveTopK = options.topK ?? resolvedPolicy?.topK;
     const effectiveHyde = options.hyde ?? (resolvedPolicy?.hyde === 'always');
@@ -905,10 +915,14 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
       scored.length = 0;
       scored.push(...allowed);
     }
+    let denseMs = performance.now() - denseStartedAt;
 
     // --- Batch 2: Spreading activation ---
     if (this.graph && scored.length > 0) {
       const seedIds = scored.slice(0, 5).map((t) => t.id);
+      // The activation orders the dense ranks, so its time is the dense leg's; the co-activation write after is not.
+      const graphStartedAt = performance.now();
+      let graphRankedAt: number | undefined;
       try {
         const activated = await this.graph.spreadingActivation(seedIds, {
           maxDepth: this.config.graph?.maxDepth,
@@ -947,6 +961,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
 
         // Re-sort after graph activation adjustment
         scored.sort((a, b) => b.retrievalScore - a.retrievalScore);
+        graphRankedAt = performance.now();
 
         // Record co-activation for Hebbian learning
         const retrievedIds = scored.slice(0, 5).map((t) => t.id);
@@ -957,6 +972,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
       } catch {
         // Graph operations are non-critical
       }
+      denseMs += (graphRankedAt ?? performance.now()) - graphStartedAt;
     }
 
     // --- Optional neural reranking ---
@@ -965,7 +981,18 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     // existing cognitive composite. Weight: 0.7 cognitive + 0.3 neural reranker.
     // This preserves decay, mood congruence, and graph activation signals
     // while boosting semantically relevant results the bi-encoder missed.
+    // What the turn's recall capture says of the rerank: absent with no reranker.
+    let rerankerRecord: MemoryRecallReranker | undefined;
+    let rerankScores: Record<string, number> | undefined;
+    // Each trace's rank in the dense leg, before a rerank reorders them: the capture reports it beside the final order.
+    const denseRanks: Record<string, number> = Object.fromEntries(scored.map((trace, i) => [trace.id, i + 1]));
+    if (this.rerankerService && scored.length === 0) {
+      rerankerRecord = { provider: 'none', candidates: 0, ms: 0 };
+    }
     if (this.rerankerService && scored.length > 0) {
+      const rerankStartedAt = performance.now();
+      // The service sends at most this many, the dense leg's first; the capture counts what it sent.
+      const sent = Math.min(scored.length, MEMORY_RERANK_MAX_DOCUMENTS);
       try {
         const rerankerOutput = await this.rerankerService.rerank({
           query,
@@ -974,11 +1001,12 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
             content: t.content,
             originalScore: t.retrievalScore,
           })),
-        }, { topN: effectiveTopK });
+        }, { topN: effectiveTopK, maxDocuments: MEMORY_RERANK_MAX_DOCUMENTS });
 
         const rerankedScores = new Map(
           rerankerOutput.results.map((r) => [r.id, r.relevanceScore])
         );
+        rerankScores = Object.fromEntries(rerankedScores);
 
         for (const trace of scored) {
           const neuralScore = rerankedScores.get(trace.id);
@@ -988,10 +1016,19 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
         }
 
         scored.sort((a, b) => b.retrievalScore - a.retrievalScore);
+        rerankerRecord = rerankerRecordOf(
+          rerankerOutput.diagnostics?.providerId,
+          rerankerOutput.diagnostics?.modelId,
+          rerankerOutput.diagnostics?.documentsProcessed ?? sent,
+          performance.now() - rerankStartedAt,
+        );
       } catch {
         // Reranking is non-critical — use cognitive scores as-is
+        rerankScores = undefined;
+        rerankerRecord = { provider: 'none', reason: 'error', candidates: sent, ms: Math.round(performance.now() - rerankStartedAt) };
       }
     }
+    const recallReport: RetrievalRecallReport = { denseRanks, denseMs, ...(rerankScores ? { rerankScores } : {}) };
 
     const confidence = evaluateRetrievalConfidence(scored, {
       adaptive: resolvedPolicy?.adaptive ?? false,
@@ -1013,6 +1050,8 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
           suppressed: 'weak_hits',
           confidence,
           escalations: [],
+          ...(rerankerRecord ? { reranker: rerankerRecord } : {}),
+          recall: recallReport,
         },
       };
     }
@@ -1077,6 +1116,8 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
         confidence: resolvedPolicy ? confidence : undefined,
         escalations: resolvedPolicy ? [] : undefined,
         retrievedTypedTraces,
+        ...(rerankerRecord ? { reranker: rerankerRecord } : {}),
+        recall: recallReport,
       },
     };
   }
@@ -1114,6 +1155,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     options: CognitiveRetrievalOptions = {}
   ): Promise<AssembledMemoryContext> {
     this.ensureInitialized();
+    const startedAt = performance.now();
 
     // The three pre-assembly stages that hit a backend — retrieval (vector
     // search + rerank), the persistent-memory read, and the prospective
@@ -1171,6 +1213,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
       persistentPromise,
       prospectivePromise,
     ]);
+    const recalledAt = performance.now();
 
     // Get working memory state (sync; after retrieval so it reflects the
     // focus/decay updates retrieval just applied — same order as before).
@@ -1222,7 +1265,44 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
       observationNotes: [], // Filled externally by the GMI turn loop
     };
 
-    return assembleMemoryContext(input);
+    const context = assembleMemoryContext(input);
+    const assembledAt = performance.now();
+    if ((this.config.recall?.capture ?? 'metadata') !== 'off') {
+      const recall = result.diagnostics.recall;
+      context.capture = {
+        version: MEMORY_RECALL_CAPTURE_VERSION,
+        retrieval: 'dense',
+        budget: { requested: tokenBudget, effective: tokenBudget },
+        tokensUsed: context.tokensUsed,
+        allocation: context.allocation,
+        legs: [{ leg: 'dense', ran: true, candidates: result.retrieved.length, ineligible: 0, ms: Math.round(recall?.denseMs ?? result.diagnostics.totalTimeMs) }],
+        lexicalBackend: 'none',
+        reranker: result.diagnostics.reranker ?? { provider: 'none', reason: 'none_configured' },
+        memoryQuestionReserve: { fired: false, added: 0 },
+        candidates: candidatesFrom(
+          result.retrieved.map((trace, i) => {
+            const dense = recall?.denseRanks[trace.id];
+            const rerankScore = recall?.rerankScores?.[trace.id];
+            return {
+              id: trace.id,
+              ranks: { dense: typeof dense === 'number' ? dense : i + 1 },
+              fusedScore: trace.retrievalScore,
+              ...(typeof rerankScore === 'number' ? { rerankScore } : {}),
+            };
+          }),
+          context.lineOutcomes ?? [],
+        ),
+        timings: {
+          legsMs: Math.round(recalledAt - startedAt),
+          fuseMs: 0,
+          dedupeMs: 0,
+          rerankMs: result.diagnostics.reranker?.ms ?? 0,
+          assembleMs: Math.round(assembledAt - recalledAt),
+          totalMs: Math.round(assembledAt - startedAt),
+        },
+      };
+    }
+    return context;
   }
 
   // =========================================================================
