@@ -545,6 +545,79 @@ describe('the run owner', () => {
     own.close();
   });
 
+  it('answers whether the account stop deleted or marked every record, and false while the store refuses the listing or a deletion', async () => {
+    const store = new MemoryKeyValueStore();
+    await store.set('lib/j/r9', { id: 'r9', key: KEY, account: ACCOUNT, kind: 'library', way: null, unit: 'sessions', chosen: null, counts: { total: 2, pending: 1, applied: 1, skipped: 0, failed: 0 }, items: [], state: 'running', cut: null, phase: null, began: 1, progressed: 2 });
+    const own = owner(store, memoryLocks(), bus());
+    const realDelete = store.delete.bind(store);
+    store.delete = async () => { throw new Error('refused'); };
+    expect(await own.stopAccount('removal')).toEqual({ complete: false });
+    expect(await store.keys('lib/j/')).toEqual(['lib/j/r9']);
+    store.delete = realDelete;
+    expect(await own.stopAccount('signout')).toEqual({ complete: true });
+    expect((await store.get<RunRecord>('lib/j/r9'))?.cut).toBe('signout');
+    expect(await own.stopAccount('removal')).toEqual({ complete: true });
+    expect(await store.keys('lib/j/')).toEqual([]);
+    const realKeys = store.keys.bind(store);
+    store.keys = async () => { throw new Error('refused'); };
+    expect(await own.stopAccount('removal')).toEqual({ complete: false });
+    store.keys = realKeys;
+    own.close();
+  });
+
+  it('ends the account stop within its ten seconds while a write in flight holds its record lock, answers false, and deletes the record once the write returns', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
+    try {
+      const store = new MemoryKeyValueStore();
+      const own = owner(store, memoryLocks(), bus());
+      const stuck = deferred();
+      const started = await own.start(countingJob(2, [() => stuck.promise, async () => undefined]));
+      const id = 'id' in started ? started.id : '';
+      let answer: { complete: boolean } | null = null;
+      void own.stopAccount('removal').then((result) => { answer = result; });
+      await vi.advanceTimersByTimeAsync(9_000);
+      expect(answer).toBeNull();
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(answer).toEqual({ complete: false });
+      expect(await store.keys('lib/j/')).toEqual([`lib/j/${id}`]); // the deletion still waits for the write in flight
+      stuck.resolve();
+      expect((await own.whenIdle()).get(id)?.ended).toBe('fenced');
+      await vi.waitFor(async () => expect(await store.keys('lib/j/')).toEqual([]));
+      own.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(['removal', 'signout'] as const)("stops a run that another owner's %s reached when no channel joins them, though the run waits offline", async (cut) => {
+    const locks = memoryLocks();
+    const store = new MemoryKeyValueStore();
+    const holder = owner(store, locks, () => null, { online: { now: () => false, subscribe: () => () => undefined } });
+    const stopper = owner(store, locks, () => null);
+    try {
+      let wrote = false;
+      const started = await holder.start({
+        ...countingJob(1, []), way: 'drive', unit: 'files', network: true,
+        async run(context) {
+          await context.waitOnline();
+          if (context.signal.aborted) return { ended: 'stopped', counts: context.record().counts };
+          await context.write(async () => { wrote = true; return true; });
+          return { ended: 'finished', counts: context.record().counts };
+        },
+      });
+      const id = 'id' in started ? started.id : '';
+      await vi.waitFor(async () => expect((await store.get<RunRecord>(`lib/j/${id}`))?.state).toBe('paused'));
+      const before = Date.now();
+      await stopper.stopAccount(cut);
+      expect(Date.now() - before).toBeLessThan(5_000); // the holder's once-a-second read stopped its run, so its lock went well inside the ten seconds
+      expect((await holder.whenIdle()).get(id)?.ended).toBe('fenced');
+      expect(wrote).toBe(false);
+    } finally {
+      holder.close();
+      stopper.close();
+    }
+  }, 15_000);
+
   it('finds a run another owner starts later when no channel reaches it', async () => {
     const locks = memoryLocks();
     const store = new MemoryKeyValueStore();
