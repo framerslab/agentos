@@ -603,6 +603,51 @@ describe('the run owner', () => {
     }
   });
 
+  it('answers the account stop within its ten seconds while the store never answers its listing', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
+    try {
+      const store = new MemoryKeyValueStore();
+      const own = owner(store, memoryLocks(), bus());
+      store.keys = () => new Promise<string[]>(() => undefined);
+      let answer: unknown = null;
+      void own.stopAccount('signout').then((result) => { answer = result; });
+      await vi.advanceTimersByTimeAsync(9_000);
+      expect(answer).toBeNull();
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(answer).toEqual({ complete: false });
+      own.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(['deleted', 'refused'] as const)("waits for a start still taking its run lock when the removal began, and answers by whether that start's record was %s", async (outcome) => {
+    const store = new MemoryKeyValueStore();
+    const locks = memoryLocks();
+    const taking = deferred();
+    // The start's run lock is granted only once the test lets it, after the stop has listed the records.
+    const own = owner(store, { ...locks, hold: async (name) => { await taking.promise; return locks.hold(name); } }, bus());
+    const realDelete = store.delete.bind(store);
+    try {
+      const starting = own.start(untilStopped());
+      let answer: unknown = null;
+      const stopping = own.stopAccount('removal').then((result) => { answer = result; });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(answer).toBeNull(); // the start has written nothing yet, so the stop cannot answer for its record
+      if (outcome === 'refused') store.delete = async () => { throw new Error('refused'); };
+      taking.resolve();
+      const started = await starting;
+      const id = 'id' in started ? started.id : '';
+      await stopping;
+      expect(answer).toEqual({ complete: outcome === 'deleted' });
+      expect(await store.keys('lib/j/')).toEqual(outcome === 'deleted' ? [] : [`lib/j/${id}`]);
+      expect((await own.whenIdle()).get(id)?.ended).toBe('fenced');
+    } finally {
+      store.delete = realDelete;
+      own.close();
+    }
+  });
+
   it.each(['removal', 'signout'] as const)("stops a run that another owner's %s reached when no channel joins them, though the run waits offline", async (cut) => {
     const locks = memoryLocks();
     const store = new MemoryKeyValueStore();
