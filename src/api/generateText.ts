@@ -603,8 +603,9 @@ export interface GenerateTextOptions {
    * stored by default. Chat completions are stored by default for new
    * accounts. To disable storage when using either API, set store: false."
    * (https://developers.openai.com/api/docs/guides/migrate-to-responses).
-   * Every request the call makes carries it: each step of the tool loop, the
-   * planning request, the prompt-tool loop's requests and a fallback leg.
+   * Every request the call makes carries it, on `generateText()` and
+   * `streamText()` alike: each step of the tool loop, the planning request,
+   * the prompt-tool loop's requests and a fallback leg.
    */
   store?: boolean;
   /**

@@ -829,6 +829,8 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             ...(opts.customModelParams !== undefined ? { customModelParams: opts.customModelParams } : {}),
             // The planning call's usage report counts into `usage` too.
             ...(opts.__onUsageReport ? { onUsageReport: opts.__onUsageReport } : {}),
+            // The planning request carries the caller's messages, so it takes the call's `store` too.
+            ...(typeof opts.store === 'boolean' ? { store: opts.store } : {}),
           },
           usage,
           budget ? { budget, providerId: resolved.providerId, what: 'stream_text.plan' } : undefined,
@@ -928,6 +930,8 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               : {}),
             ...(opts.promptCacheRetention !== undefined ? { promptCacheRetention: opts.promptCacheRetention } : {}),
             ...(opts.serviceTier !== undefined ? { serviceTier: opts.serviceTier } : {}),
+            // OpenAI's `store`; other providers ignore it.
+            ...(typeof opts.store === 'boolean' ? { store: opts.store } : {}),
               // Forward provider-specific top-level payload params (e.g.
               // OpenRouter provider-routing preferences) on the shim path too.
               ...(opts.customModelParams !== undefined
@@ -1096,6 +1100,8 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               : {}),
             ...(opts.promptCacheRetention !== undefined ? { promptCacheRetention: opts.promptCacheRetention } : {}),
             ...(opts.serviceTier !== undefined ? { serviceTier: opts.serviceTier } : {}),
+            // OpenAI's `store`; other providers ignore it.
+            ...(typeof opts.store === 'boolean' ? { store: opts.store } : {}),
             // Cache-diagnostics opt-in (Anthropic beta): thread the previous
             // request's message id — the caller's seed on step 1, the prior
             // step's id after — so the verdict names any prefix divergence.
