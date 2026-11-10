@@ -172,6 +172,16 @@ describe('LocalCrossEncoderReranker', () => {
       expect(result.diagnostics?.providerMetrics).toMatchObject({ batchSize: 8, forwardPasses: 3 });
     });
 
+    it('falls back to batches of 32 for a batchSize that is not a positive number', async () => {
+      for (const batchSize of [0, Number.NaN, -4]) {
+        forwardCalls.length = 0;
+        const odd = new LocalCrossEncoderReranker({ providerId: 'local', batchSize });
+        const result = await odd.rerank({ query: 'q', documents: docs(40) }, config);
+        expect(forwardCalls.map((c) => c.documents.length)).toEqual([32, 8]);
+        expect(result.results.every((r) => typeof r.relevanceScore === 'number')).toBe(true);
+      }
+    });
+
     it('returns no results and runs no forward pass for no documents', async () => {
       const result = await reranker.rerank({ query: 'q', documents: [] }, config);
       expect(result.results).toEqual([]);

@@ -188,7 +188,8 @@ export class LocalCrossEncoderReranker implements IRerankerProvider {
       defaultModelId: config.defaultModelId ?? 'cross-encoder/ms-marco-MiniLM-L-6-v2',
       device: config.device ?? 'cpu',
       maxSequenceLength: config.maxSequenceLength ?? 512,
-      batchSize: Math.max(1, Math.floor(config.batchSize ?? 32)),
+      // A batch size that is not a positive number (0, NaN) falls back to the default.
+      batchSize: Number.isFinite(config.batchSize) && config.batchSize! >= 1 ? Math.floor(config.batchSize!) : 32,
     };
   }
 
