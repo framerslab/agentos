@@ -49,9 +49,10 @@ import type {
 } from '../IVectorStore.js';
 import { sha256Hex } from '../../../core/utils/sha256.js';
 import {
-  LEXICAL_GROUP_RANK_FORM as RANK_FORM,
   LEXICAL_GROUP_WORDS_MAX as GROUP_WORDS_MAX,
+  isLexicalGroupExpansion as isExpansion,
   isLexicalGroupInstant as isInstant,
+  isLexicalGroupRank as isRank,
   isLexicalGroupSourceId as isSourceId,
 } from '../../../core/vector-store/lexicalGroupForms.js';
 import { withinOneEdit } from '../search/FuzzyIndex.js';
@@ -252,15 +253,10 @@ function groupSearchOf(options: LexicalGroupSearchOptions): GroupSearch {
     throw refused(`the words must be at most ${GROUP_WORDS_MAX}, each a letter or a digit followed by letters, digits and combining marks`);
   }
   if (new Set(words).size !== words.length) throw refused('a word is given twice');
-  if (
-    expansion !== undefined &&
-    !(
-      Array.isArray(expansion) &&
-      expansion.length === words.length &&
-      expansion.every((list) => Array.isArray(list) && list.every((word) => typeof word === 'string' && word !== '' && !word.includes('\u0000')))
-    )
-  ) {
-    throw refused('the expansion must hold one list of stored words for each word');
+  if (expansion !== undefined && !(isExpansion(expansion) && expansion.length === words.length)) {
+    throw refused(
+      'the expansion must hold one list of stored words for each word, each word a text that is not empty, holds no NUL and is at most 2047 bytes of UTF-8, and all of them at most what one tsquery holds',
+    );
   }
   if (oneEdit !== undefined && !(whole(oneEdit.minLength) && whole(oneEdit.max))) {
     throw refused(`oneEdit.minLength and oneEdit.max must be whole numbers from 1 to ${Number.MAX_SAFE_INTEGER}`);
@@ -288,8 +284,8 @@ function groupSearchOf(options: LexicalGroupSearchOptions): GroupSearch {
   if (order !== 'rank' && order !== 'date') throw refused("the order must be 'rank' or 'date'");
   if (!whole(pageSize)) throw refused(`pageSize must be a whole number from 1 to ${Number.MAX_SAFE_INTEGER}`);
   if (after !== undefined) {
-    if (typeof after.rank !== 'string' || !RANK_FORM.test(after.rank) || !isSourceId(after.sourceId)) {
-      throw refused('the key to start after needs a rank in decimal digits and a sourceId that is not empty and holds no NUL');
+    if (!isRank(after.rank) || !isSourceId(after.sourceId)) {
+      throw refused('the key to start after needs a rank in decimal digits that a Postgres numeric holds and a sourceId that is not empty and holds no NUL');
     }
     if (after.date !== undefined && after.date !== null && !isInstant(after.date)) {
       throw refused('the date of the key to start after must be an ISO 8601 instant with its zone that names a real day and time, or null');

@@ -18,7 +18,25 @@ export const LEXICAL_GROUP_INSTANT_FORM =
   /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,6})?)?(?:Z|[+-](\d{2}):(\d{2}))$/;
 
 /** A rank as an earlier page answered it: decimal digits, with or without a fraction. */
-export const LEXICAL_GROUP_RANK_FORM = /^\d+(?:\.\d+)?$/;
+const RANK_FORM = /^(\d+)(?:\.(\d+))?$/;
+
+/**
+ * The most digits a Postgres numeric holds before its point, leading zeros aside, and after it: 131072 and 16383
+ * (https://www.postgresql.org/docs/16/datatype-numeric.html). A text past either overflows the numeric it is cast to.
+ */
+const NUMERIC_WHOLE_DIGITS_MAX = 131072;
+const NUMERIC_FRACTION_DIGITS_MAX = 16383;
+
+/**
+ * The most bytes of a word of a tsquery, and the most bytes its words hold together, each with the one byte that
+ * ends it: MAXSTRLEN and MAXSTRPOS in Postgres's src/include/tsearch/ts_type.h
+ * (https://github.com/postgres/postgres/blob/REL_16_STABLE/src/include/tsearch/ts_type.h). A tsquery's text past
+ * either fails to parse.
+ */
+const TSQUERY_WORD_BYTES_MAX = 2047;
+const TSQUERY_WORDS_BYTES_MAX = 1048575;
+
+const utf8 = new TextEncoder();
 
 /** The most hours a date's zone stands from UTC: the zones in use run from 12 hours behind to 14 ahead. */
 const ZONE_HOURS_MAX = 14;
@@ -60,4 +78,38 @@ export function isLexicalGroupInstant(value: unknown): value is string {
  */
 export function isLexicalGroupSourceId(value: unknown): value is string {
   return typeof value === 'string' && value !== '' && !value.includes('\u0000');
+}
+
+/**
+ * Whether a value is a rank a grouped search can start after: decimal digits, with or without a fraction, that a
+ * Postgres numeric holds, so at most 131072 digits before the point, leading zeros aside, and 16383 after it. Every
+ * rank a page answers is such a text, as Postgres computed it as a numeric.
+ */
+export function isLexicalGroupRank(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const parts = RANK_FORM.exec(value);
+  if (parts === null) return false;
+  return parts[1].replace(/^0+/, '').length <= NUMERIC_WHOLE_DIGITS_MAX && (parts[2] ?? '').length <= NUMERIC_FRACTION_DIGITS_MAX;
+}
+
+/**
+ * Whether a value is a list for each query word of the stored words to widen it to that one tsquery holds: each word
+ * a text that is not empty, holds no NUL and is at most 2047 bytes of UTF-8, and all of them together, each with one
+ * byte more, at most 1048575 bytes. Every stored word of a passage is within the first bound, as a tsvector's words
+ * have the same limit. The lists' number and their reach are the caller's to check.
+ */
+export function isLexicalGroupExpansion(value: unknown): value is string[][] {
+  if (!Array.isArray(value)) return false;
+  let bytes = 0;
+  for (const list of value) {
+    if (!Array.isArray(list)) return false;
+    for (const word of list) {
+      if (typeof word !== 'string' || word === '' || word.includes('\u0000')) return false;
+      const length = utf8.encode(word).length;
+      if (length > TSQUERY_WORD_BYTES_MAX) return false;
+      bytes += length + 1;
+      if (bytes > TSQUERY_WORDS_BYTES_MAX) return false;
+    }
+  }
+  return true;
 }

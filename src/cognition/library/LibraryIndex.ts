@@ -30,9 +30,10 @@ import type {
   VectorDocument,
 } from '../../core/vector-store/IVectorStore.js';
 import {
-  LEXICAL_GROUP_RANK_FORM as RANK_FORM,
   LEXICAL_GROUP_WORDS_MAX as GROUP_WORDS_MAX,
+  isLexicalGroupExpansion as isExpansion,
   isLexicalGroupInstant as isInstant,
+  isLexicalGroupRank as isRank,
   isLexicalGroupSourceId as isSourceId,
 } from '../../core/vector-store/lexicalGroupForms.js';
 import { reciprocalRankFusion } from '../memory/retrieval/hybrid/reciprocalRankFusion.js';
@@ -592,10 +593,12 @@ function cursorDecode(cursor: unknown): LibraryCursor {
 /**
  * Whether the stored words a cursor carries are words its search reaches: one list a word, at most `expansionMax`
  * long, and none at all without the one-edit rule; each stored word the same as its query word, begun by it, or one
- * edit from it where both hold four letters or more. A cursor therefore adds no word to a search.
+ * edit from it where both hold four letters or more. A cursor therefore adds no word to a search. The words are held
+ * first to what one tsquery holds (each at most 2047 bytes, all of them under a mebibyte), as a word begun by its query
+ * word reaches it at any length.
  */
 function reachesEveryWord(search: CheckedGroupSearch, expansion: string[][]): boolean {
-  if (expansion.length !== search.words.length) return false;
+  if (expansion.length !== search.words.length || !isExpansion(expansion)) return false;
   return expansion.every((list, at) => {
     if (list.length === 0) return true;
     if (search.typo !== 'one-edit' || list.length > search.expansionMax) return false;
@@ -603,23 +606,21 @@ function reachesEveryWord(search: CheckedGroupSearch, expansion: string[][]): bo
     const letters = Array.from(word).length;
     return list.every(
       (stored) =>
-        stored !== '' &&
-        !stored.includes('\u0000') &&
-        (stored === word ||
-          stored.startsWith(word) ||
-          (letters >= EDIT_MIN_LETTERS && Array.from(stored).length >= EDIT_MIN_LETTERS && withinOneEdit(word, stored))),
+        stored === word ||
+        stored.startsWith(word) ||
+        (letters >= EDIT_MIN_LETTERS && Array.from(stored).length >= EDIT_MIN_LETTERS && withinOneEdit(word, stored)),
     );
   });
 }
 
 /**
- * The place a cursor's key names in a page's order, or null when the key is not in the order's form: a rank and a
- * source id that holds no NUL, after a date or null under the date order, the date a real instant as an item's must
- * be. A key out of the form is refused here and never reaches a statement, which would fail on it.
+ * The place a cursor's key names in a page's order, or null when the key is not in the order's form: a rank a Postgres
+ * numeric holds and a source id that holds no NUL, after a date or null under the date order, the date a real instant
+ * as an item's must be. A key out of the form is refused here and never reaches a statement, which would fail on it.
  */
 function placeOf(key: Array<string | null>, dated: boolean): LexicalGroupKey | null {
   const [date, rank, sourceId] = dated ? key : [null, ...key];
-  if (key.length !== (dated ? 3 : 2) || typeof rank !== 'string' || !RANK_FORM.test(rank) || !isSourceId(sourceId)) {
+  if (key.length !== (dated ? 3 : 2) || !isRank(rank) || !isSourceId(sourceId)) {
     return null;
   }
   if (!dated) return { rank, sourceId };
@@ -873,8 +874,9 @@ export class LibraryIndex {
    *   the form {@link LibraryGroupSearch} gives it, when the store has no `lexicalGroupSearch`, and a
    *   {@link LibraryCursorError} for a cursor the index did not make or that was made for another search: one whose
    *   group is not handed, whose words, order, profile, part kinds, typo rule or expansion limit differ, that carries
-   *   a stored word no word of the search reaches, or whose key names no place in the order (a date that is not a real
-   *   instant, a source id holding NUL).
+   *   a stored word no word of the search reaches or more stored words than one tsquery holds, or whose key names no
+   *   place in the order (a rank past what a Postgres numeric holds, a date that is not a real instant, a source id
+   *   holding NUL).
    */
   async searchGroups(query: LibraryGroupSearch): Promise<LibraryGroupAnswer> {
     const search = groupSearchOf(query);

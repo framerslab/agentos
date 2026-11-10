@@ -279,7 +279,7 @@ export interface LexicalGroupItem {
 export interface LexicalGroupKey {
   /** The item's date as the caller handed it, or null. Read only under the date order and by a listing with no word. */
   date?: string | null;
-  /** The item's rank, the decimal text an earlier page answered. */
+  /** The item's rank, the decimal text an earlier page answered: at most 131072 digits before the point, leading zeros aside, and 16383 after it, as a Postgres numeric holds. */
   rank: string;
   /** The item's source id. */
   sourceId: string;
@@ -300,6 +300,8 @@ export interface LexicalGroupSearchOptions {
   /**
    * For each word, in order, the stored words one edit away that an earlier page of this search matched. With it the
    * store reads no stored word again and `oneEdit` is not read; a search hands back what the first page answered.
+   * Each stored word is at most 2047 bytes of UTF-8 and all of them, each with one byte more, at most 1048575 bytes,
+   * as one tsquery holds them.
    */
   expansion?: string[][];
   /**
