@@ -127,7 +127,9 @@ export interface LocalCrossEncoderConfig extends RerankerProviderConfig {
    * characters, scored as a pair of its own.
    *
    * A document longer than this is split into pieces of at most this many
-   * characters: its sentences in order (a sentence ends at `.`, `!` or `?`
+   * characters (UTF-16 units, as `String.length` counts them; a character
+   * outside the Basic Multilingual Plane is never split, so at 1 it is a
+   * piece of 2): its sentences in order (a sentence ends at `.`, `!` or `?`
    * before a space, and at a line break), packed together while they fit and
    * joined by one space. A sentence longer than a piece is split between
    * words, and only a word longer than a piece is cut. A document of this
@@ -136,9 +138,11 @@ export interface LocalCrossEncoderConfig extends RerankerProviderConfig {
    * Every piece of every document is a (query, piece) pair, scored in the
    * same batches of `batchSize` pairs, and a document's score is its best
    * piece's. The result's `content` is the whole document. Pick a length at
-   * which a piece and the query fit in `maxSequenceLength` tokens; each
-   * piece is a pair, so a 1,024-character document at 300 is four pairs or
-   * more.
+   * which a piece and the query fit in `maxSequenceLength` tokens. Each
+   * piece is a pair, so pairs grow with a document's length: a
+   * 1,024-character document at 300 is four pairs or more, a
+   * 100,000-character one 334 or more. Cut documents that can run that long
+   * before reranking them.
    *
    * A whole number from 1 (a fraction is rounded down); 0 or any other value
    * leaves scoring whole documents.
@@ -213,18 +217,36 @@ const SENTENCE_END = /([.!?]["'\u2019\u201D)\]]*)\s+/g;
 /** `text` split into its sentences, at each sentence end and line break. */
 const sentencesOf = (text: string): string[] => text.replace(SENTENCE_END, '$1\n').split(/[\r\n]+/);
 
-/** `word` cut into parts of at most `maxChars` UTF-16 units, never inside a surrogate pair when a part can hold it. */
+const isHighSurrogate = (code: number): boolean => code >= 0xd800 && code <= 0xdbff;
+const isLowSurrogate = (code: number): boolean => code >= 0xdc00 && code <= 0xdfff;
+
+/**
+ * `word` cut into parts of at most `maxChars` UTF-16 units, never inside a
+ * surrogate pair (a character outside the Basic Multilingual Plane): a cut
+ * that would split one moves before it, or, when the part holds only the
+ * pair's first half (`maxChars` 1), after it.
+ */
 function cutWord(word: string, maxChars: number): string[] {
   const parts: string[] = [];
   for (let start = 0; start < word.length; ) {
     let end = Math.min(start + maxChars, word.length);
-    const last = word.charCodeAt(end - 1);
-    if (end < word.length && end - start > 1 && last >= 0xd800 && last <= 0xdbff) end--;
+    if (end < word.length && isHighSurrogate(word.charCodeAt(end - 1)) && isLowSurrogate(word.charCodeAt(end))) {
+      end = end - start > 1 ? end - 1 : end + 1;
+    }
     parts.push(word.slice(start, end));
     start = end;
   }
   return parts;
 }
+
+/** Dispose `model` if it has a `dispose()`, swallowing a throw or a rejection. */
+const disposeQuietly = (model: any): Promise<void> =>
+  Promise.resolve()
+    .then(() => (typeof model?.dispose === 'function' ? model.dispose() : undefined))
+    .then(
+      () => undefined,
+      () => undefined,
+    );
 
 /**
  * The pieces `pieceMaxChars` scores: `text` itself when it has at most
@@ -367,10 +389,11 @@ export class LocalCrossEncoderReranker implements IRerankerProvider {
    * another model (from `initialize(otherModelId)` or the `modelId` of its
    * first `rerank()`) loads the default model in its place.
    *
-   * A load that fails throws and leaves the model that was loaded before it,
-   * if any. When the tokenizer fails and the model loads, the model is
-   * disposed before the load throws. A failed load is not remembered: the
-   * next `rerank()` with no model loaded tries again.
+   * A load that fails throws as soon as the tokenizer or the model fails,
+   * and leaves the model that was loaded before it, if any. A model that
+   * loads after its tokenizer failed finishes loading in the background and
+   * is disposed then, so a failed load holds no ONNX session. A failed load
+   * is not remembered: the next `rerank()` with no model loaded tries again.
    *
    * Loads run one at a time, in the order they were asked for, so concurrent
    * calls for different models never load at once and the last call's model
@@ -469,28 +492,26 @@ export class LocalCrossEncoderReranker implements IRerankerProvider {
     if (this.config.intraOpNumThreads !== undefined) sessionOptions.intraOpNumThreads = this.config.intraOpNumThreads;
     if (this.config.interOpNumThreads !== undefined) sessionOptions.interOpNumThreads = this.config.interOpNumThreads;
 
-    // Both halves settle before either is used, so a half that loaded while the other failed can be disposed.
-    const [tokenizerLoad, modelLoad] = await Promise.allSettled([
-      AutoTokenizer.from_pretrained(modelId, cacheOptions),
-      AutoModelForSequenceClassification.from_pretrained(modelId, {
-        ...cacheOptions,
-        // Transformers.js 3.x: the file is onnx/<model_file_name><dtype suffix>.onnx.
-        model_file_name: modelFileName,
-        dtype,
-        // Transformers.js 2.x (@xenova/transformers) reads `quantized` instead of `dtype`.
-        quantized: dtype === 'q8',
-        ...(Object.keys(sessionOptions).length > 0 ? { session_options: sessionOptions } : {}),
-      }),
-    ]);
-    if (tokenizerLoad.status === 'rejected' || modelLoad.status === 'rejected') {
-      if (modelLoad.status === 'fulfilled' && typeof modelLoad.value?.dispose === 'function') {
-        // The load's own error is the one the caller gets; a failure to free the session does not replace it.
-        await Promise.resolve(modelLoad.value.dispose()).catch(() => undefined);
-      }
-      throw tokenizerLoad.status === 'rejected' ? tokenizerLoad.reason : (modelLoad as PromiseRejectedResult).reason;
+    const tokenizerLoad: Promise<any> = AutoTokenizer.from_pretrained(modelId, cacheOptions);
+    const modelLoad: Promise<any> = AutoModelForSequenceClassification.from_pretrained(modelId, {
+      ...cacheOptions,
+      // Transformers.js 3.x: the file is onnx/<model_file_name><dtype suffix>.onnx.
+      model_file_name: modelFileName,
+      dtype,
+      // Transformers.js 2.x (@xenova/transformers) reads `quantized` instead of `dtype`.
+      quantized: dtype === 'q8',
+      ...(Object.keys(sessionOptions).length > 0 ? { session_options: sessionOptions } : {}),
+    });
+    let tokenizer: any;
+    let model: any;
+    try {
+      [tokenizer, model] = await Promise.all([tokenizerLoad, modelLoad]);
+    } catch (error) {
+      // The load fails as soon as either half fails. A model that loaded, or loads later, is disposed when its load
+      // ends, so a failed load holds no ONNX session; the caller gets the load's error, whatever the disposal does.
+      void modelLoad.then(disposeQuietly, () => undefined);
+      throw error;
     }
-    const tokenizer = tokenizerLoad.value;
-    const model = modelLoad.value;
 
     const previous = this.loaded;
     this.loaded = {

@@ -206,9 +206,9 @@ export class RerankerService {
    * @param chunks - Retrieved chunks to rerank
    * @param config - Request configuration
    * @returns Reranked chunks sorted by relevance
-   * @throws The provider's error, after logging it to the service's logger, as `rerank()` does. A caller that
-   * wants its order on a failure catches: `await service.rerankChunks(query, chunks).catch(() => chunks)`;
-   * `rerankChain()` does this for each stage.
+   * @throws The provider's error, after logging it to the service's logger when the service has one, as
+   * `rerank()` does. A caller that wants its order on a failure catches it, for example
+   * `await service.rerankChunks(query, chunks).catch(() => chunks)`; `rerankChain()` does this for each stage.
    */
   public async rerankChunks(
     query: string,
