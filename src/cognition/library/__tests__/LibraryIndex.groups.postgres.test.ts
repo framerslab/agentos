@@ -677,23 +677,72 @@ describe.skipIf(!URL)('LibraryIndex.searchGroups over PostgresVectorStore on Pos
       }
     }
     // A tsquery's word holds under MAXSTRLEN (2047, src/include/tsearch/ts_type.h) bytes on the Postgres CI runs, a
-    // release before commit 1fc1b82b2f; a word begun by the query word reaches it, so the bound is held apart from the
-    // reach, in bytes of UTF-8 and not in letters.
+    // release before commit 1fc1b82b2f, held in bytes of UTF-8 and not in letters. A carried word reaches its query
+    // word only as the store draws one, one edit away: the word itself and a word it begins match as such and are
+    // never carried, so a cursor carrying one is refused at any length.
     const typo = { text: 'budget', typo: 'one-edit' as const, groups: [sessions], pageSize: 1 };
     const carried = await firstOf(typo);
     expect(carried.expansion).toHaveLength(1);
     for (const word of ['budget' + 'a'.repeat(2041), 'budget' + 'a'.repeat(2042), 'budget' + 'é'.repeat(1021)]) {
       await cursorRefused({ ...typo, cursor: encode({ ...carried, expansion: [[word]] }) }, `stored word of ${word.length} letters`);
     }
-    const [atWordLimit] = await run({ ...typo, cursor: encode({ ...carried, expansion: [['budget' + 'a'.repeat(2040)]] }) });
-    expect(atWordLimit.state).toBe('ok');
+    for (const word of ['budget', 'budgets', 'budget' + 'a'.repeat(2040)]) {
+      await cursorRefused({ ...typo, cursor: encode({ ...carried, expansion: [[word]] }) }, `${word.length} letters begun by the word`);
+    }
+    await cursorRefused({ ...typo, cursor: encode({ ...carried, expansion: [['budgte', 'budgte']] }) }, 'a stored word twice');
+    const [oneEdit] = await run({ ...typo, cursor: encode({ ...carried, expansion: [['budgte']] }) });
+    expect(oneEdit.state).toBe('ok');
     // The carried words of every query word are one tsquery's, whose words together hold under a mebibyte
-    // (MAXSTRPOS, the same header): 520 words of 2046 bytes, each within the limit, are refused together.
+    // (MAXSTRPOS, the same header): 520 words of 2046 bytes, each within the limit, are refused together; and so are
+    // 512 of 2046 bytes and one of 510, a mebibyte to the byte, as the search's own words take room in it too.
     const wide = { ...typo, expansionMax: 600 };
     const wideCarried = await firstOf(wide);
     const many = Array.from({ length: 520 }, (_, at) => `budget${String(at).padStart(3, '0')}${'a'.repeat(2037)}`);
     expect(new Set(many.map((word) => word.length))).toEqual(new Set([2046]));
     await cursorRefused({ ...wide, cursor: encode({ ...wideCarried, expansion: [many] }) }, '520 stored words');
+    const brim = [...many.slice(0, 512), 'budget' + 'b'.repeat(504)];
+    expect(brim.reduce((bytes, word) => bytes + Buffer.byteLength(word) + 1, 0)).toBe(1048575);
+    await cursorRefused({ ...wide, cursor: encode({ ...wideCarried, expansion: [brim] }) }, 'a mebibyte of stored words');
+  });
+
+  it("keeps the stored words one edit away to what one tsquery holds beside the search's own words, marks the rest left out, and refuses a cursor carrying more", async () => {
+    // A query word of 2045 bytes, and 512 stored words one edit from it (an x added), 2046 bytes each: together a
+    // mebibyte and a little more with the query word's own two places in the tsquery (itself and as a prefix).
+    const word = 'budget' + 'a'.repeat(2039);
+    const near = Array.from({ length: 512 }, (_, at) => word.slice(0, 6 + at) + 'x' + word.slice(6 + at));
+    expect(new Set(near).size).toBe(512);
+    expect(new Set(near.map((stored) => Buffer.byteLength(stored)))).toEqual(new Set([2046]));
+    const room: LibraryScope = { tenantId: 'org-room', aclGroups: [TEAM] };
+    const sources: LibrarySource[] = [
+      ...[0, 1].map((at) => ({ sourceId: `room:w${at}`, kind: 'document' as const, tenantId: 'org-room', aclGroups: [TEAM], passages: [{ text: word }] })),
+      ...Array.from({ length: 16 }, (_, at) => ({
+        sourceId: `room:n${at}`,
+        kind: 'document' as const,
+        tenantId: 'org-room',
+        aclGroups: [TEAM],
+        passages: [{ text: near.slice(at * 32, at * 32 + 32).join(' ') }],
+      })),
+    ];
+    for (const source of sources) await index.indexSource(source);
+    const search = { text: word, typo: 'one-edit' as const, expansionMax: 600, scope: room, groups: [groupOf('room', sources)], pageSize: 1 };
+    // 510 of them fit beside the query word's 4,092 bytes; the 511th would not, so it and the last are left out.
+    const [first] = await run(search);
+    expect(first).toMatchObject({ state: 'ok', incomplete: true });
+    expect(first.cursor).not.toBeNull();
+    const carried = decode(first.cursor as string);
+    const kept = (carried.expansion as string[][])[0];
+    expect(kept).toHaveLength(510);
+    expect(kept.every((stored) => near.includes(stored))).toBe(true);
+    const [second] = await run({ ...search, cursor: first.cursor as string });
+    expect(second).toMatchObject({ state: 'ok', incomplete: true });
+    // A cursor carrying 511 or all 512 is refused before any statement.
+    for (const count of [511, 512]) {
+      seen.length = 0;
+      await expect(run({ ...search, cursor: encode({ ...carried, expansion: [near.slice(0, count)] }) }), `${count} stored words`).rejects.toMatchObject({
+        name: 'LibraryCursorError',
+      });
+      expect(seen, `${count} stored words`).toEqual([]);
+    }
   });
 
   it("ranks an item's title read from its passages' metadata where the profile takes the title from there, the title above the text, and widens a word of the title too", async () => {
