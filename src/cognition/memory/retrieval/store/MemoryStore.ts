@@ -1491,11 +1491,12 @@ export class MemoryStore {
    * its newest rows). Without a Brain they come from the cache. With one, every id is checked against its row first,
    * as a vector query checks its hits: a trace whose row is gone or deleted, by this process or another, is left out
    * (and fenced in every store on the Brain), and a cached trace whose row a move filed under another scope id is left
-   * out until this store follows the move. A cached trace is answered from the cache, with the trust policy its row
-   * holds when the row names one (another process may have stored the trace again); a live row with a usable
-   * embedding is filed in the cache and the vector index as the store's hydration files one; a row without one is
-   * returned for this call only and not cached, since the store holds no vector for it, and is read again when a
-   * delete or a move ran after the first read. A trace that is inactive, tombstoned or delete-pending is left out.
+   * out until this store follows the move. A cached trace is answered from the cache; when its row names another
+   * trust policy (another process stored the trace again), it takes the row's policy and provenance. A live row with
+   * a usable embedding is filed in the cache and the vector index as the store's hydration files one; a row without
+   * one is returned for this call only and not cached, since the store holds no vector for it, and is read again
+   * when a delete or a move ran after the first read. A trace that is inactive, tombstoned or delete-pending is left
+   * out.
    *
    * Never throws: when the Brain cannot be read, no trace is returned and `unread` counts the ids.
    *
@@ -1535,9 +1536,15 @@ export class MemoryStore {
       const cached = served(id);
       if (cached) {
         if (rowFiledElsewhere(row, cached.scope, cached.scopeId)) continue;
-        // The row's trust policy is the trace's: another process may have stored the trace again under another one.
-        const { policy } = parseTraceMetadata(row.metadata);
-        if (isTrustPolicy(policy) && !sameTrustPolicy(policy, cached.policy)) cached.policy = { ...policy };
+        // A row whose trust policy differs was stored again elsewhere: its policy and the provenance it is checked
+        // against (the verification time) are the trace's now, so a verification of the earlier copy cannot extend it.
+        const { policy, provenance } = parseTraceMetadata(row.metadata);
+        if (isTrustPolicy(policy) && !sameTrustPolicy(policy, cached.policy)) {
+          cached.policy = { ...policy };
+          if (isJsonObject(provenance) && typeof provenance.sourceTimestamp === 'number') {
+            cached.provenance = { ...(provenance as unknown as MemoryTrace['provenance']) };
+          }
+        }
         traces.set(id, cached);
         continue;
       }
