@@ -2,7 +2,8 @@
  * @module guardrails/contentModeration
  *
  * One call for content people send each other: text and images judged by a host's guards, every guard closed unless
- * its config says otherwise, and a decision that carries codes, ids and scores and none of the content.
+ * its config says otherwise, and a decision that carries codes, ids and scores and none of the content, except the
+ * text a sanitizer rewrote (`sanitizedText`) and whatever a host's guard writes into its own `metadata`.
  */
 import type { AgentOSInput } from '../../api/types/AgentOSInput';
 import type { VisionInputData } from '../../cognition/substrate/IGMI';
@@ -11,6 +12,7 @@ import { GuardrailAction, type GuardrailContext, type GuardrailEvaluationResult,
 import { isGuardrailHold, toModerationEvaluation, type ModerationEvaluation } from './guardrailDispatcher';
 import { ParallelGuardrailDispatcher } from './ParallelGuardrailDispatcher';
 import { assertModerationContext } from './ModerationContext';
+import { isMarkedGuardFailure } from './guardFailure';
 import { namedGuard, withModerationPosture } from './requiredGuardrails';
 import { guardrailLog } from './log.js';
 
@@ -53,16 +55,24 @@ export interface ModerationDecision {
   evaluations: ModerationEvaluation[];
   /** Set when the outcome, or `wouldBe`, is `hold`. */
   hold?: GuardrailHold;
-  /** In `enforce`: the text as the sanitizers left it, when a guard with `canSanitize` changed it, whatever the outcome. Never set in a dry run. */
+  /**
+   * In `enforce`: the text as the sanitizers left it, when a guard with `canSanitize` changed it, whatever the outcome;
+   * `''` when one removed it (`modifiedText: null`). It is the person's text, so a host keeps it out of its logs. Never
+   * set in a dry run.
+   */
   sanitizedText?: string;
 }
 
 /** The reason codes the dispatcher and the posture wrapper make themselves for a closed guard's failure. */
 const MADE_BY_THE_LIBRARY: ReadonlySet<string> = new Set(['GUARDRAIL_ERROR', 'GUARDRAIL_MALFORMED']);
 
-/** Whether an evaluation is a closed guard's failure: a BLOCK whose `metadata.failClosed` is true. */
+/**
+ * Whether an evaluation is a closed guard's failure: a BLOCK the library made for a guard that threw, ran late or
+ * answered no recognised action. A guard that writes `metadata.failClosed` or a library code into its own answer
+ * gives a rule's refusal, not a failure: the library marks its own BLOCK outside the answer.
+ */
 export function isGuardFailure(evaluation: GuardrailEvaluationResult): boolean {
-  return evaluation.action === GuardrailAction.BLOCK && evaluation.metadata?.failClosed === true;
+  return evaluation.action === GuardrailAction.BLOCK && isMarkedGuardFailure(evaluation);
 }
 
 /** What a list of evaluations amounts to for a moderation entry point, and the evaluation that decided. */
@@ -91,7 +101,8 @@ export function pickModerationOutcome(evaluations: readonly GuardrailEvaluationR
 
 /**
  * One `guardrail.verdict` line. `code` is the evaluation's reason code, or a hold's review code, and is written only
- * when the guard that answered lists it in `config.reasonCodes` or the library made it; `unknown` otherwise.
+ * when the guard that answered lists it in `config.reasonCodes`, or the library made the evaluation for a closed guard's
+ * failure and the code is the library's own; `unknown` otherwise.
  */
 export function writeVerdictLine(verdict: {
   evaluation: GuardrailEvaluationResult;
@@ -107,7 +118,7 @@ export function writeVerdictLine(verdict: {
   const guardrailId = typeof stamped === 'string' ? stamped : undefined;
   const guard = guardrailId === undefined ? undefined : verdict.guards.find((svc) => svc.id === guardrailId);
   const given = verdict.action === 'hold' ? verdict.evaluation.hold?.reviewCode : verdict.evaluation.reasonCode;
-  const listed = typeof given === 'string' && (MADE_BY_THE_LIBRARY.has(given) || guard?.config?.reasonCodes?.includes(given) === true);
+  const listed = typeof given === 'string' && ((MADE_BY_THE_LIBRARY.has(given) && isGuardFailure(verdict.evaluation)) || guard?.config?.reasonCodes?.includes(given) === true);
   guardrailLog.info('guardrail.verdict', {
     guardrailId: safeWord(guardrailId),
     stage: verdict.stage,
@@ -177,7 +188,8 @@ export async function moderateContent(content: ContentUnderReview, options: Mode
   const evaluations = result.evaluations ?? [];
   const pick = pickModerationOutcome(evaluations);
   const after = result.sanitizedInput.textInput;
-  const sanitizedText = typeof after === 'string' && after !== text ? after : undefined;
+  // a sanitizer that removed the whole text (`modifiedText: null`) gives '', so `sanitizedText ?? text` cannot restore it
+  const sanitizedText = typeof after === 'string' ? (after !== text ? after : undefined) : text !== null ? '' : undefined;
   const surface = options.context.moderation?.surface;
 
   if (pick.evaluation) {

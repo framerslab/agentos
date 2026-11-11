@@ -410,7 +410,7 @@ Guardrails with `canSanitize: true` run **one at a time in registration order**.
 
 A **BLOCK** in Phase 1 short-circuits immediately -- Phase 2 never runs.
 
-A guardrail with `sequential: true` joins Phase 1 without sanitizing: a screen that must judge the content before any guardrail that calls a vendor sees it, such as a local list of banned phrases. Its BLOCK ends the evaluation like a sanitizer's, in enforcement and in a dry run. A SANITIZE it returns is downgraded to FLAG (with a `guardrail.sanitize_downgraded` line) unless it also sets `canSanitize`. `sequential` orders guardrails; it does not stop one from calling out, so a screen that calls a model is not a local screen.
+A guardrail with `sequential: true` joins Phase 1 without sanitizing: a screen that must judge the content before any Phase 2 guardrail that calls a vendor sees it, such as a local list of banned phrases. Phase 1 runs in registration order, so register the screen ahead of any sanitizer that calls a vendor. Its BLOCK ends the evaluation like a sanitizer's, in enforcement and in a dry run. On a tool call, the guardrails that set `evaluateToolCalls` and `sequential` answer before the others, and a BLOCK among them ends that evaluation. A SANITIZE it returns is downgraded to FLAG (with a `guardrail.sanitize_downgraded` line) unless it also sets `canSanitize`. `sequential` orders guardrails; it does not stop one from calling out, so a screen that calls a model is not a local screen.
 
 ### Phase 2: Parallel classifiers
 

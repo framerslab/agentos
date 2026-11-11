@@ -403,7 +403,9 @@ export interface GuardrailConfig {
 
   /**
    * Run this guard in phase 1, one at a time in registration order, though it does not sanitize. Its BLOCK ends the
-   * evaluation before any phase 2 guard is called, so content it refuses never reaches a guard that calls a vendor.
+   * evaluation before any phase 2 guard is called, so content it refuses never reaches a phase 2 guard that calls a
+   * vendor. A phase 1 guard registered before it still runs before it. On a tool call (`evaluateToolCalls`) the
+   * sequential guards answer before the other tool-call guards, and a BLOCK among them ends that evaluation too.
    * A SANITIZE it returns is applied only when `canSanitize` is also true; otherwise it is downgraded to FLAG.
    * @default false
    */

@@ -84,8 +84,9 @@ export interface PhraseListGuardrailOptions {
   /** The deadline for one evaluation, judge included. Default 8 seconds. */
   timeoutMs?: number;
   /**
-   * Run the list in phase 1, before any guard that calls a vendor: a text it blocks reaches none of them. A list with
-   * `judge` entries still calls its judge's model from inside the screen. Default false.
+   * Run the list in phase 1, before every phase 2 guard: a text it blocks reaches none of them. Phase 1 runs in
+   * registration order, so register the list ahead of any sanitizer that calls a vendor. A list with `judge` entries
+   * still calls its judge's model from inside the screen. Default false.
    */
   sequential?: boolean;
   /** Replaces the built-in normalisation. */

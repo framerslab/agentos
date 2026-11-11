@@ -12,6 +12,7 @@ import { GMIError, GMIErrorCode } from '../../core/utils/errors.js';
 import { safeWord } from '../../core/logging/events.js';
 import { GuardrailAction, type GuardrailEvaluationResult, type IGuardrailService } from './IGuardrailService';
 import { guardrailLog } from './log.js';
+import { carryGuardFailure, markGuardFailure } from './guardFailure';
 
 export type GuardrailStage = 'input' | 'output';
 
@@ -74,16 +75,16 @@ export function assertRequiredGuardrails(active: readonly ActiveGuardrail[], req
 const ACTIONS = new Set<string>(Object.values(GuardrailAction));
 
 /**
- * A well-formed answer as it came. An answer whose action is not one of {@link GuardrailAction} is written once as
- * `guardrail.failed` with cause `malformed`, then turned into a BLOCK when the guard runs closed, or dropped when it
- * runs open.
+ * A well-formed answer as it came. `null` is an allow. An answer whose action is not one of {@link GuardrailAction},
+ * `undefined` included (a guard that returned nothing), is written once as `guardrail.failed` with cause `malformed`,
+ * then turned into a BLOCK when the guard runs closed, or dropped when it runs open.
  */
 function settled(evaluation: GuardrailEvaluationResult | null, guardrailId: string | undefined, stage: GuardrailStage, closed: boolean): GuardrailEvaluationResult | null {
-  if (evaluation === null || evaluation === undefined) return null;
+  if (evaluation === null) return null;
   if (typeof evaluation === 'object' && ACTIONS.has(String((evaluation as GuardrailEvaluationResult).action))) return evaluation;
   guardrailLog.warn('guardrail.failed', { guardrailId: safeWord(guardrailId), stage, posture: closed ? 'closed' : 'open', cause: 'malformed' });
   if (!closed) return null;
-  return { action: GuardrailAction.BLOCK, reason: 'The guardrail answered with no recognised action.', reasonCode: 'GUARDRAIL_MALFORMED', metadata: { failClosed: true, cause: 'malformed' } };
+  return markGuardFailure({ action: GuardrailAction.BLOCK, reason: 'The guardrail answered with no recognised action.', reasonCode: 'GUARDRAIL_MALFORMED', metadata: { failClosed: true, cause: 'malformed' } });
 }
 
 /**
@@ -135,7 +136,7 @@ export function withModerationPosture(svc: IGuardrailService, options: Moderatio
   const finish = (evaluation: GuardrailEvaluationResult | null, stage: GuardrailStage): GuardrailEvaluationResult | null => {
     const answer = settled(evaluation, svc.id, stage, closed);
     if (answer === null || svc.id === undefined) return answer;
-    return { ...answer, metadata: { ...(answer.metadata ?? {}), guardrailId: svc.id } };
+    return carryGuardFailure(answer, { ...answer, metadata: { ...(answer.metadata ?? {}), guardrailId: svc.id } });
   };
   if (typeof svc.evaluateInput === 'function') wrapped.evaluateInput = async (payload) => finish(await svc.evaluateInput!(payload), 'input');
   if (typeof svc.evaluateOutput === 'function') wrapped.evaluateOutput = async (payload) => finish(await svc.evaluateOutput!(payload), 'output');
