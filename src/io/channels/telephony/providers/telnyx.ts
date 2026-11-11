@@ -203,7 +203,11 @@ const NO_PUBLIC_KEY_ERROR = 'No publicKey configured to verify Telnyx webhooks';
 /**
  * The `client_state` on a notify call's `speak`, base64 as Telnyx requires it.
  * Telnyx sends it back on the call's later webhooks, so the `call.speak.ended`
- * of that command can be told from the end of a `speak` the host sent.
+ * of that command can be told from the end of a `speak` the host sent before.
+ * A `call.speak.ended` carries no `command_id`, and `client_state` belongs to
+ * the call rather than the command: a `speak` the host sends, or a
+ * `client_state` it sets, while the message plays can end the call early or
+ * keep it from hanging up.
  */
 const NOTIFY_SPEAK_CLIENT_STATE = Buffer.from('agentos:notify').toString('base64');
 

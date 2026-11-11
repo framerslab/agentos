@@ -224,6 +224,10 @@ export class CallManager {
   /**
    * Hang up a call. Transitions to 'hangup-bot' terminal state.
    *
+   * The call ends before the carrier is asked to hang up, so a callback processed while that request is pending, such
+   * as the completion the hangup causes, finds the call ended: with `eventHandling: 'carrier'` it changes nothing and
+   * emits nothing. `call:ended` is emitted after the request returns.
+   *
    * A call persisted with {@link persistCall} or read by {@link processWebhookDurable} ends in its store: the
    * end, with any bot speech not yet committed, commits there before the carrier is asked to hang up, so the
    * completion callback the hangup causes, like any callback after the commit, finds the call ended and changes
@@ -242,9 +246,11 @@ export class CallManager {
       return;
     }
 
-    await this.requestCarrierHangup(this.getProvider(call.provider), call.providerCallId);
+    const provider = this.getProvider(call.provider);
+    const providerCallId = call.providerCallId;
     this.transitionState(call, 'hangup-bot');
     call.endedAt = Date.now();
+    await this.requestCarrierHangup(provider, providerCallId);
     this.finalizeCall(call);
     this.emit({ type: 'call:ended', callId, call });
   }
