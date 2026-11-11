@@ -128,6 +128,29 @@ describe.each(ENGINES)('loadTracesForRecall on %s', (_engine, open) => {
     await db.close();
   });
 
+  it("a cached trace stored again elsewhere takes the row's provenance with its policy, so a verification the row does not hold cannot extend it", async () => {
+    const db = await open();
+    const store = await storeOver(db.brain, new FlatEmbedder());
+    const everything = { usableForAuthorization: true, usableForPersonalization: true, usableForFactClaim: true };
+    const hourly = { ...everything, requiresReverificationAfterMs: 3_600_000 };
+    const fresh = { sourceType: 'user_statement' as const, sourceTimestamp: NOW - 172_800_000, confidence: 1, verificationCount: 1, lastVerifiedAt: NOW };
+    await store.store(trace('pass', 'The harbor pass number is 7781.', { policy: everything, provenance: fresh }));
+    const row = await db.brain.get<{ metadata: string }>('SELECT metadata FROM memory_traces WHERE brain_id = ? AND id = ?', [db.brain.brainId, 'pass']);
+    // Another process stores the trace again: a policy that asks for verification within the hour, last verified two days ago.
+    await db.brain.run('UPDATE memory_traces SET metadata = ? WHERE brain_id = ? AND id = ?', [
+      JSON.stringify({ ...JSON.parse(row!.metadata), policy: hourly, provenance: { ...fresh, lastVerifiedAt: NOW - 172_800_000 } }),
+      db.brain.brainId,
+      'pass',
+    ]);
+
+    const { traces } = await store.loadTracesForRecall(['pass']);
+    expect(traces.get('pass')!.policy).toEqual(hourly);
+    expect(traces.get('pass')!.provenance.lastVerifiedAt).toBe(NOW - 172_800_000);
+    expect(isEligibleForRecall(traces.get('pass')!, { scopes: U1, now: NOW, usableFor: ['authorization'] })).toBe(false);
+    store.dispose();
+    await db.close();
+  });
+
   it('a row with no vector that a move refiles between its read and its load is returned as the Brain holds it after the move', async () => {
     const db = await open();
     const store = await storeOver(db.brain, new FlatEmbedder());
