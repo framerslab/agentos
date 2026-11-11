@@ -955,6 +955,40 @@ describe('OpenAIRealtimeTranscriptionSTT: reconnects, failures, flush and close'
     session.close();
   });
 
+  it('keeps the commit a flush asked for when the connection that takes over is closing and nothing is held yet', async () => {
+    fakeClock();
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY, turnDetection: null });
+    const session = await stt.startSession();
+    const log = record(session);
+    const first = Sockets.instances[0];
+    session.pushAudio(frame(2_400)); // 100 ms, sent before the socket starts closing
+    first.readyState = 2; // CLOSING
+    let flushed = false;
+    const flushing = session.flush().then(() => {
+      flushed = true;
+    });
+    Sockets.nextBehavior = 'ack-then-closing';
+    first.drop();
+    await vi.advanceTimersByTimeAsync(100);
+    await settle();
+    const second = Sockets.instances[1];
+    expect(sentOfType(second, 'input_audio_buffer.commit')).toEqual([]);
+    session.pushAudio(frame(4_800)); // 200 ms the closing second socket does not take: held
+    second.drop();
+    await vi.advanceTimersByTimeAsync(2_000);
+    await settle();
+    const third = Sockets.instances[2];
+    expect(sentSamples(third).map((samples) => samples.length)).toEqual([4_800]);
+    expect(sentOfType(third, 'input_audio_buffer.commit')).toHaveLength(1);
+    expect(flushed).toBe(false);
+    third.serve({ type: 'input_audio_buffer.committed', item_id: 'item_E', previous_item_id: null });
+    third.serve({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'item_E', content_index: 0, transcript: 'Kept commit.' });
+    await flushing;
+    expect(log.transcripts.at(-1)).toMatchObject({ itemId: 'item_E', isFinal: true, text: 'Kept commit.' });
+    expect(log.errors).toEqual([]);
+    session.close();
+  });
+
   it('abandons a reconnect still connecting when the session closes, and leaves no timer behind', async () => {
     fakeClock();
     const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY });
