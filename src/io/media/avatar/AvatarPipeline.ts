@@ -548,8 +548,8 @@ export class AvatarPipeline {
     let attempts = 0;
     let verdict: AvatarAcceptanceVerdict | undefined;
 
-    // Every checked image is drawn at least once, so 0 means one draw, never none.
-    const maxAttempts = Math.max(1, driftConfig.maxRegenerationAttempts);
+    // Every checked image is drawn at least once, so 0 or NaN means one draw, never none.
+    const maxAttempts = Math.max(1, driftConfig.maxRegenerationAttempts || 1);
     while (attempts < maxAttempts) {
       attempts++;
       const options: ImageGeneratorOptions = { ...args.options, stage, label, attempt: attempts };
