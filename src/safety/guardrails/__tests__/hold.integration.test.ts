@@ -79,6 +79,19 @@ describe('a hold on a block, on input', () => {
     expect(first.outcome).toBe('flag');
     expect(lines.filter((line) => line.event === 'guardrail.hold_ignored')).toEqual([expect.objectContaining({ guardrailId: 'flagger', stage: 'input' })]);
   });
+
+  it('says so for each guard that has no id, though each is written as unknown', async () => {
+    const lines = capture();
+    const flagged: GuardrailEvaluationResult = { action: GuardrailAction.FLAG, hold: { reviewCode: 'REVIEW' } };
+    const unnamed = (): IGuardrailService => ({ config: {}, evaluateInput: async () => flagged });
+    const first = unnamed();
+    await ParallelGuardrailDispatcher.evaluateInput([first, unnamed()], input, context);
+    await ParallelGuardrailDispatcher.evaluateInput([first], input, context);
+    expect(lines.filter((line) => line.event === 'guardrail.hold_ignored')).toEqual([
+      expect.objectContaining({ guardrailId: 'unknown', stage: 'input' }),
+      expect.objectContaining({ guardrailId: 'unknown', stage: 'input' }),
+    ]);
+  });
 });
 
 describe('a hold on a block, on output and tool calls', () => {
