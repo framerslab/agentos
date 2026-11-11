@@ -8,10 +8,13 @@
  * @module agentos/core/logging/listedErrors
  */
 
-/** JavaScript's built-in error classes, the two the platform names for an abort and a timeout, and the library's own. */
+/**
+ * JavaScript's built-in error classes, the platform's names for an abort, a timeout and a value that cannot be cloned,
+ * and the library's own: each error class it declares and each name it sets on an error where it throws it.
+ */
 export const LISTED_ERROR_TYPES: ReadonlySet<string> = Object.freeze(new Set<string>([
   'Error', 'TypeError', 'RangeError', 'SyntaxError', 'ReferenceError', 'EvalError', 'URIError', 'AggregateError',
-  'AbortError', 'TimeoutError',
+  'AbortError', 'TimeoutError', 'DataCloneError',
   'AgencyConfigError', 'AgencyPanelError', 'AgencyQuorumError', 'AgencySeatingError', 'AgentCoreError',
   'AgentFactoryError', 'AgentOSServiceError', 'AggregateVoiceError', 'AnthropicProviderError', 'AppError',
   'AttemptBudgetExhaustedError', 'AuthenticationError', 'AvatarProviderError', 'CLISubprocessError',
@@ -39,9 +42,12 @@ export const LISTED_ERROR_TYPES: ReadonlySet<string> = Object.freeze(new Set<str
   'TranslationProviderError', 'UnpricedModelError', 'UnreadableAudioError', 'UnsupportedAudioFormatError',
   'UnsupportedIngestStrategyError', 'UnsupportedMemoryBackendError', 'UnsupportedReadStrategyError',
   'ValidationError', 'VoiceInterruptError', 'VoicePipelineError',
+  'CapabilityRefusal', 'DeepLHttpError', 'ImageToVideoNotSupportedError', 'LaunchDeadlineError', 'LaunchEndedError',
+  'MusicNotSupportedError', 'OAuthGrantRefused', 'PiecesFailed', 'ProviderStreamError', 'RefusedTraceName',
+  'SFXNotSupportedError', 'VoiceStoreConflict',
 ])) as ReadonlySet<string>;
 
-/** Every literal code the library's own source gives an error, and Node.js's network codes. */
+/** Every literal code the library's own source gives an error, in upper or lower case, and Node.js's network codes. */
 export const LISTED_ERROR_CODES: ReadonlySet<string> = Object.freeze(new Set<string>([
   'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'EPIPE', 'ABORT_ERR',
   'GUARDRAIL_BLOCKED', 'GUARDRAIL_HELD', 'GUARDRAIL_UNAVAILABLE',
@@ -89,4 +95,15 @@ export const LISTED_ERROR_CODES: ReadonlySet<string> = Object.freeze(new Set<str
   'TOOL_EXECUTION_FAILED', 'TOOL_NOT_FOUND', 'TOOL_PARSE_FAILED', 'TOOL_RESULT_LLM_PROCESSING_FAILED',
   'TRANSLATION_EMPTY_OUTPUT', 'TRANSLATION_INCOMPLETE', 'TRANSLATION_REQUEST_FAILED', 'TRANSLATION_TIMEOUT',
   'TRANSLATION_TRUNCATED', 'UNHANDLED_CONSTRUCTION_ERROR', 'UNKNOWN', 'VALIDATION_ERROR', 'VERSION_OUTDATED',
+  'IMAGE_LOCAL_FILE_REFUSED', 'IMAGE_URL_REFUSED',
+  // The lower-case codes of the library's own classes: a refused or cut capability call, a ceiling the engine cannot
+  // build, a content key, a Deepgram usage read and a segmentation request.
+  'aborted', 'audit_needs_storage', 'audit_unavailable', 'body_limit', 'call_ended', 'call_quota_exceeded', 'conflict',
+  'contract', 'cut_in_flight', 'duplicate', 'file_exists', 'file_left', 'file_too_large', 'host_not_allowed', 'http',
+  'incomplete', 'invalid', 'invalid_approval', 'invalid_audit', 'invalid_bound', 'invalid_domain', 'invalid_headers',
+  'invalid_mode', 'invalid_path', 'invalid_request', 'invalid_url', 'method_not_allowed', 'no_such_directory',
+  'no_such_file', 'not_a_file', 'page_limit', 'path_not_allowed', 'policy_denied', 'protected_path', 'provider_failed',
+  'request_too_large', 'response_too_large', 'revoked', 'root_not_absolute', 'scheme_not_allowed', 'sealed', 'shape',
+  'timed_out', 'timeout', 'too_many_redirects', 'transport', 'unavailable', 'unknown_capability', 'unstable',
+  'unsupported_body', 'unsupported_data',
 ])) as ReadonlySet<string>;
