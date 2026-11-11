@@ -57,7 +57,7 @@ describe('withRequiredPosture', () => {
     const context: GuardrailContext = { userId: 'user-1', sessionId: 'session-1' };
     const block = await required.evaluateInput!({ context, input: { userId: 'user-1', sessionId: 'session-1', textInput: 'a message' } as AgentOSInput });
     expect(block).toMatchObject({ action: GuardrailAction.BLOCK, reasonCode: 'GUARDRAIL_MALFORMED' });
-    expect(block?.metadata).toEqual({ failClosed: true, cause: 'malformed' });
+    expect(block?.metadata).toEqual({ failClosed: true, cause: 'malformed', guardrailId: 'safety-gate' });
     expect(lines.filter((line) => line.event === 'guardrail.failed')).toEqual([
       expect.objectContaining({ guardrailId: 'safety-gate', stage: 'input', posture: 'closed', cause: 'malformed' }),
     ]);
@@ -71,5 +71,14 @@ describe('withRequiredPosture', () => {
     expect(await required.evaluateInput!({ context, input })).toMatchObject({ action: GuardrailAction.BLOCK, reasonCode: 'GUARDRAIL_MALFORMED', metadata: { failClosed: true, cause: 'malformed' } });
     const quiet = withRequiredPosture('safety-gate', { evaluateInput: async () => null }, { id: 'safety-gate', stages: ['input'], timeoutMs: 1000 });
     expect(await quiet.evaluateInput!({ context, input })).toBeNull();
+  });
+
+  it('turns an action that only prints as one (a String object) into the same block', async () => {
+    const context: GuardrailContext = { userId: 'user-1', sessionId: 'session-1' };
+    const input = { userId: 'user-1', sessionId: 'session-1', textInput: 'a message' } as AgentOSInput;
+    // eslint-disable-next-line no-new-wrappers
+    const boxed: IGuardrailService = { evaluateInput: async () => ({ action: new String(GuardrailAction.BLOCK) } as unknown as GuardrailEvaluationResult) };
+    const required = withRequiredPosture('safety-gate', boxed, { id: 'safety-gate', stages: ['input'], timeoutMs: 1000 });
+    expect(await required.evaluateInput!({ context, input })).toMatchObject({ action: GuardrailAction.BLOCK, reasonCode: 'GUARDRAIL_MALFORMED', metadata: { cause: 'malformed', guardrailId: 'safety-gate' } });
   });
 });
