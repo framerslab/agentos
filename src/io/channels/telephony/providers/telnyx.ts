@@ -17,8 +17,8 @@
  *
  * ## Media streaming
  *
- * Carrier mode includes the configured media stream URL and bidirectional
- * PCMU RTP settings when dialing, and when answering an inbound call
+ * Carrier mode includes the configured media stream URL, a PCMU stream and
+ * bidirectional PCMU RTP settings when dialing, and when answering an inbound call
  * ({@link TelnyxVoiceProvider.answerCall}), so the stream starts with the
  * call and no `streaming_start` command is sent. Legacy mode leaves stream
  * startup, and answering, to the host.
@@ -258,15 +258,16 @@ function telnyxPublicKeyDer(publicKey: string): Buffer {
 
 /**
  * The stream settings a carrier-profile dial or answer carries for a media
- * stream URL: the URL, the inbound track, and bidirectional RTP with PCMU.
- * None without a URL.
+ * stream URL: the URL, the inbound track streamed as PCMU (`stream_codec`;
+ * Telnyx otherwise streams the call's own codec, which the carrier media
+ * parser refuses), and bidirectional RTP with PCMU. None without a URL.
  *
  * @param mediaStreamUrl - The media stream WebSocket URL, if any.
  * @returns The fields to add to the command's JSON body.
  */
 function telnyxStreamSettings(mediaStreamUrl: string | undefined): Record<string, string> {
   return mediaStreamUrl
-    ? { stream_url: mediaStreamUrl, stream_track: 'inbound_track', stream_bidirectional_mode: 'rtp', stream_bidirectional_codec: 'PCMU' }
+    ? { stream_url: mediaStreamUrl, stream_track: 'inbound_track', stream_codec: 'PCMU', stream_bidirectional_mode: 'rtp', stream_bidirectional_codec: 'PCMU' }
     : {};
 }
 
@@ -517,7 +518,8 @@ export class TelnyxVoiceProvider implements IVoiceCallProvider {
    *
    * POSTs to `/v2/calls` with a JSON body containing the `connection_id`,
    * phone numbers, and webhook URL. In carrier mode a `mediaStreamUrl` is
-   * sent as `stream_url` with the inbound track and bidirectional PCMU RTP.
+   * sent as `stream_url` with the inbound track streamed as PCMU and
+   * bidirectional PCMU RTP.
    * Legacy mode neither sends nor keeps it: the host starts a stream with
    * the `streaming_start` action after `call.answered`.
    *
@@ -554,8 +556,9 @@ export class TelnyxVoiceProvider implements IVoiceCallProvider {
    * In the carrier profile it POSTs to `/v2/calls/{id}/actions/answer` with a
    * `command_id` named after the call, so Telnyx ignores the command if it is
    * sent again for that call, and, given a media stream URL, the stream
-   * settings the dial request carries (`stream_url`, the inbound track,
-   * bidirectional RTP with PCMU), so the stream starts with the answer.
+   * settings the dial request carries (`stream_url`, the inbound track
+   * streamed as PCMU, bidirectional RTP with PCMU), so the stream starts with
+   * the answer.
    *
    * The legacy profile sends nothing: its host answers the call.
    *
@@ -582,11 +585,13 @@ export class TelnyxVoiceProvider implements IVoiceCallProvider {
    * Telnyx will terminate the call and fire a `call.hangup` webhook.
    *
    * @param input - Contains the Telnyx `call_control_id` to hang up.
+   * @throws In the carrier profile, when Telnyx answers the command with a
+   *   status outside 2xx; `CallManager` writes it to the console.
    */
   async hangupCall(input: HangupCallInput): Promise<void> {
     const url = `${this.baseUrl}/calls/${input.providerCallId}/actions/hangup`;
 
-    await this.fetch(url, {
+    const response = await this.fetch(url, {
       method: 'POST',
       headers: {
         Authorization: this.authHeader,
@@ -594,6 +599,7 @@ export class TelnyxVoiceProvider implements IVoiceCallProvider {
       },
       body: JSON.stringify({}),
     });
+    if (this.config.protocol === 'carrier' && !response.ok) throw new Error(`Telnyx hangup failed: ${response.status}`);
   }
 
   /**

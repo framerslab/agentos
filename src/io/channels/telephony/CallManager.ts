@@ -242,8 +242,9 @@ export class CallManager {
    * completion callback the hangup causes, like any callback after the commit, finds the call ended and changes
    * nothing, whichever manager processes it. `call:ended` is emitted after the carrier request returns. The carrier
    * is asked even when that commit fails, and the promise then rejects with the commit's error. A call the store
-   * already holds as ended keeps its stored outcome and emits nothing, and the carrier is still asked, so a hangup
-   * whose carrier request was lost after its commit (the worker stopped) can be repeated.
+   * already holds as ended, while the manager's record still reads it as live (another manager ended it), keeps its
+   * stored outcome and emits nothing; the carrier is still asked. A carrier request that fails is written to the
+   * console and is not retried: the call has ended here, and in its store.
    */
   async hangupCall(callId: CallId): Promise<void> {
     await this.hangUp(callId, true);
