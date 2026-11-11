@@ -2,8 +2,9 @@
  * @file agentos-factory-default-provider.e2e.test.ts
  * A persona that names no provider and no model, on the runtime `AgentOS.create()` builds from the environment:
  * with only `OPENROUTER_API_KEY` set, the turn runs on OpenRouter, the provider the factory makes the default, and on
- * that provider's default model. The provider classes are stubbed at their module boundary; the factory, the provider
- * manager, the GMI manager and the GMI turn are the real ones.
+ * that provider's default model. Given providers of its own (`modelProviderManagerConfig`), the runtime runs such a
+ * persona on the default one of those, unless the host names a GMI default. The provider classes are stubbed at their
+ * module boundary; the factory, the provider manager, the GMI manager and the GMI turn are the real ones.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -109,5 +110,59 @@ describe('AgentOS.create() with only OPENROUTER_API_KEY set', () => {
     // One default for OpenRouter: the GMI turn's model is the one generateText({ provider: 'openrouter' }) sends.
     expect(PROVIDER_DEFAULTS.openrouter?.text).toBe('openai/gpt-4o-mini');
     expect(resolveModelOption({ provider: 'openrouter' }, 'text')).toEqual({ providerId: 'openrouter', modelId: 'openai/gpt-4o-mini' });
+  });
+});
+
+describe('AgentOS.create() given providers of its own', () => {
+  let booted: AgentOS | undefined;
+
+  beforeEach(() => {
+    // No key in the environment: the factory's own provider list is the localhost Ollama entry alone.
+    vi.stubEnv('OPENAI_API_KEY', '');
+    vi.stubEnv('OPENROUTER_API_KEY', '');
+    vi.stubEnv('REQUESTY_API_KEY', '');
+    vi.stubEnv('MINIMAX_API_KEY', '');
+    vi.stubEnv('ENABLE_UTILITY_AI', 'false');
+    calls.streamed.length = 0;
+    booted = undefined;
+  });
+
+  afterEach(async () => {
+    if (booted) await booted.shutdown();
+    vi.unstubAllEnvs();
+  });
+
+  it('serves a persona that names no model on the default provider it was given, not on one the environment configures', async () => {
+    booted = await AgentOS.create({
+      modelProviderManagerConfig: { providers: [{ providerId: 'openrouter', enabled: true, isDefault: true, config: { apiKey: 'test-openrouter-key' } }] },
+      turnPlanning: { enabled: false },
+      personas: [persona],
+    } as any);
+    const chunks: any[] = [];
+    for await (const chunk of booted.processRequest({
+      userId: 'user-1', sessionId: 's-given-provider', selectedPersonaId: persona.id, textInput: 'Say hello.',
+    } as any)) {
+      chunks.push(chunk);
+    }
+
+    const error = chunks.find((c) => c.type === AgentOSResponseChunkType.ERROR);
+    expect(error, error ? `${error.code}: ${error.message}` : undefined).toBeUndefined();
+    expect(calls.streamed).toEqual([{ providerId: 'openrouter', modelId: 'openai/gpt-4o-mini' }]);
+  });
+
+  it('keeps a GMI default the host names', async () => {
+    booted = await AgentOS.create({
+      modelProviderManagerConfig: { providers: [{ providerId: 'openrouter', enabled: true, isDefault: true, config: { apiKey: 'test-openrouter-key' } }] },
+      gmiManagerConfig: {
+        defaultGMIBaseConfigDefaults: { defaultLlmProviderId: 'openrouter', defaultLlmModelId: 'anthropic/claude-haiku-4.5' },
+      },
+      turnPlanning: { enabled: false },
+      personas: [persona],
+    } as any);
+    for await (const _chunk of booted.processRequest({
+      userId: 'user-1', sessionId: 's-host-default', selectedPersonaId: persona.id, textInput: 'Say hello.',
+    } as any)) { /* drain */ }
+
+    expect(calls.streamed).toEqual([{ providerId: 'openrouter', modelId: 'anthropic/claude-haiku-4.5' }]);
   });
 });
