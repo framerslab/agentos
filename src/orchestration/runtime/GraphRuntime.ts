@@ -1067,24 +1067,6 @@ export class GraphRuntime {
               yield { type: 'edge_transition', sourceId: nodeId, targetId: target, edgeType };
             }
           }
-
-          // The node now counts as completed, so it saves the checkpoint a node
-          // saves after it runs: a run that stops before the next checkpoint
-          // resumes from here.
-          if (savesAfter(node, activeGraph)) {
-            const checkpointId = await this.saveCheckpoint(
-              activeGraph,
-              runId,
-              nodeId,
-              state,
-              nodeResults,
-              completedNodes,
-              skippedNodes,
-              this.resolvePendingEdgeIds(replayedEdges, replayedTargets),
-            );
-            state = this.attachCheckpointMetadata(state, checkpointId);
-            yield { type: 'checkpoint_saved', checkpointId, nodeId };
-          }
           continue;
         }
 

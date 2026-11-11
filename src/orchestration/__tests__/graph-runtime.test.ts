@@ -2981,7 +2981,6 @@ describe('GraphRuntime: the checkpoints a resumed run saves', () => {
       'run_start',
       'node_end:approve',
       'edge_transition:approve->send',
-      'checkpoint_saved:approve',
       'node_start:send',
       'node_end:send',
       'edge_transition:send->publish',
