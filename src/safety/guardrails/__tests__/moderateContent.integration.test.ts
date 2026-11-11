@@ -7,10 +7,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import pino from 'pino';
 import { moderateContent } from '../contentModeration';
-import { evaluateInputGuardrails, holdResult } from '../guardrailDispatcher';
+import { evaluateInputGuardrails, holdResult, wrapOutputGuardrails } from '../guardrailDispatcher';
 import { PhraseListGuardrail, StaticPhraseListSource } from '../builtin/PhraseListGuardrail';
 import { GuardrailAction, type GuardrailConfig, type GuardrailContext, type GuardrailEvaluationResult, type IGuardrailService } from '../IGuardrailService';
 import type { AgentOSInput } from '../../../api/types/AgentOSInput';
+import { AgentOSResponseChunkType, type AgentOSErrorChunk, type AgentOSFinalResponseChunk, type AgentOSResponse, type AgentOSTextDeltaChunk } from '../../../api/types/AgentOSResponse';
 import { resetLoggerFactory, setLogger } from '../../../core/logging/loggerFactory.js';
 
 type Line = Record<string, unknown>;
@@ -206,5 +207,56 @@ describe('moderateContent: typed context', () => {
     await expect(call).rejects.toThrow(/roomId/);
     await expect(call).rejects.not.toThrow(/r 1/);
     expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+describe('a screen that runs first, on the reply', () => {
+  const chunk = { streamId: 's1', gmiInstanceId: 'g1', personaId: 'p1', isFinal: false, timestamp: '2026-11-10T00:00:00.000Z' };
+  async function* reply(text: string, delta?: string): AsyncGenerator<AgentOSResponse, void, undefined> {
+    if (delta !== undefined) yield { ...chunk, type: AgentOSResponseChunkType.TEXT_DELTA, textDelta: delta } as AgentOSResponse;
+    yield { ...chunk, type: AgentOSResponseChunkType.FINAL_RESPONSE, isFinal: true, finalResponseText: text } as AgentOSResponse;
+  }
+  async function collect(stream: AsyncGenerator<AgentOSResponse, void, undefined>): Promise<AgentOSResponse[]> {
+    const out: AgentOSResponse[] = [];
+    for await (const item of stream) out.push(item);
+    return out;
+  }
+
+  it('a sequential list ends a refused reply before the guard behind it is called', async () => {
+    const spy = vi.fn(async () => null);
+    const vendor: IGuardrailService = { id: 'vendor', evaluateOutput: spy };
+    const refused = await collect(wrapOutputGuardrails([await hardBan(true), vendor], context, reply('a forbidden phrase here'), { streamId: 's1' }));
+    expect(refused).toHaveLength(1);
+    expect(refused[0].type).toBe(AgentOSResponseChunkType.ERROR);
+    expect((refused[0] as AgentOSErrorChunk).code).toBe('BAN_1');
+    expect(JSON.stringify(refused)).not.toContain('forbidden phrase here');
+    expect(spy).not.toHaveBeenCalled();
+
+    const passed = await collect(wrapOutputGuardrails([await hardBan(true), vendor], context, reply('an ordinary reply'), { streamId: 's1' }));
+    expect((passed.at(-1) as AgentOSFinalResponseChunk).finalResponseText).toBe('an ordinary reply');
+    expect(spy).toHaveBeenCalledTimes(1);
+
+    // without `sequential` the list runs beside the vendor guard, as it did before
+    await collect(wrapOutputGuardrails([await hardBan(false), vendor], context, reply('a forbidden phrase here'), { streamId: 's1' }));
+    expect(spy).toHaveBeenCalledTimes(2);
+  });
+
+  it('a guard that only asks to run first cannot rewrite the reply or a streamed delta: its SANITIZE is a FLAG', async () => {
+    const lines = capture();
+    const rewriter: IGuardrailService = {
+      id: 'rewriter', config: { sequential: true, evaluateStreamingChunks: true },
+      evaluateOutput: async () => ({ action: GuardrailAction.SANITIZE, modifiedText: 'changed' }),
+    };
+    const chunks = await collect(wrapOutputGuardrails([rewriter], context, reply('the reply', 'the delta'), { streamId: 's1' }));
+    const delta = chunks.find((item) => item.type === AgentOSResponseChunkType.TEXT_DELTA) as AgentOSTextDeltaChunk;
+    const final = chunks.find((item) => item.type === AgentOSResponseChunkType.FINAL_RESPONSE) as AgentOSFinalResponseChunk;
+    expect(delta.textDelta).toBe('the delta');
+    expect(final.finalResponseText).toBe('the reply');
+    expect(events(lines, 'guardrail.sanitize_downgraded').map((line) => [line.guardrailId, line.stage])).toEqual([['rewriter', 'output'], ['rewriter', 'output']]);
+
+    // the same answer from a guard that can sanitize rewrites the reply
+    const sanitizer: IGuardrailService = { ...rewriter, config: { sequential: true, canSanitize: true } };
+    const rewritten = await collect(wrapOutputGuardrails([sanitizer], context, reply('the reply'), { streamId: 's1' }));
+    expect((rewritten.at(-1) as AgentOSFinalResponseChunk).finalResponseText).toBe('changed');
   });
 });
