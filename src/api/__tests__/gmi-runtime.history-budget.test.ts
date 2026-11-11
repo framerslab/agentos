@@ -15,8 +15,6 @@ let n = 0;
 const key = () => `k-history-budget-${++n}`;
 const base = (apiKey: string) =>
   ({ runtime: 'gmi', provider: 'openai', model: 'stub-model', apiKey, fallbackProviders: [] }) as unknown as AgentOptions;
-/** What a result reports of the history its requests left out (read untyped, so the case compiles where the field is missing). */
-const omittedOf = (result: object): unknown => (result as { historyOmitted?: unknown }).historyOmitted;
 
 /**
  * The reported case: twelve messages of 20,000 characters, about 60,000 tokens
@@ -48,7 +46,7 @@ describe("agent({ runtime: 'gmi' }) history over the prompt budget", () => {
     // The request carried the newest eight messages and the turn's input: the four oldest left it.
     const sent = s.seen[0].messages.filter((m) => m.role !== 'system').map((m) => String(m.content).slice(0, 3));
     expect(sent).toEqual(['m4 ', 'm5 ', 'm6 ', 'm7 ', 'm8 ', 'm9 ', 'm10', 'm11', 'now']);
-    expect(omittedOf(r)).toEqual({ messages: 4, tokens: 4 * MESSAGE_TOKENS });
+    expect(r.historyOmitted).toEqual({ messages: 4, tokens: 4 * MESSAGE_TOKENS });
     expect(session.messages()).toHaveLength(14);
   });
 
@@ -58,17 +56,17 @@ describe("agent({ runtime: 'gmi' }) history over the prompt budget", () => {
     session.reseed(longHistory() as never);
     const r = session.stream('now');
     expect(await r.text).toBe('Streamed.');
-    expect(await omittedOf(r)).toEqual({ messages: 4, tokens: 4 * MESSAGE_TOKENS });
+    expect(await r.historyOmitted).toEqual({ messages: 4, tokens: 4 * MESSAGE_TOKENS });
   });
 
   it('a turn whose request carries the whole history reports nothing left out', async () => {
     const k = key(); const s = script('openai', k, { replies: [reply.text('One.'), reply.text('Two.')] });
     const session = agent(base(k)).session('s');
     const first = await session.send('first');
-    expect(omittedOf(first)).toBeUndefined();
+    expect(first.historyOmitted).toBeUndefined();
     const second = session.stream('second');
     expect(await second.text).toBe('Two.');
-    expect(await omittedOf(second)).toBeUndefined();
+    expect(await second.historyOmitted).toBeUndefined();
     expect(s.seen[1].messages.filter((m) => m.role !== 'system').map((m) => m.content)).toEqual(['first', 'One.', 'second']);
   });
 });
