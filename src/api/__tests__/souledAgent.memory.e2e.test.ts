@@ -19,6 +19,7 @@ import * as path from 'node:path';
 import { agent, buildSystemPrompt, type AgentOptions } from '../agent';
 import { souledAgent } from '../souledAgent';
 import { SpendBudget } from '../runtime/spendBudget';
+import { conversationScopeKey } from '../../cognition/memory/retrieval/store/conversationScopeKey';
 import { reply, script, type ProviderScript } from './helpers/stubProviders';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 
@@ -299,8 +300,12 @@ describe("souledAgent()'s recall", () => {
       const session = a.session('s');
       await session.send('I moved to Lisbon');
       await vi.waitFor(async () => expect((await a.memory!.recall('Lisbon')).length).toBe(2));
-      // A trace stored before speakers were recorded carries none.
-      await a.memory!.remember('Lisbon has yellow trams', { type: 'episodic', scope: 'persona', scopeId: 'aria-1' });
+      // A trace of the session with no speaker recorded carries none.
+      await a.memory!.remember('Lisbon has yellow trams', {
+        type: 'episodic',
+        scope: 'conversation',
+        scopeId: conversationScopeKey('aria-1', { kind: 'session', id: 's' }),
+      });
 
       vi.setSystemTime(new Date('2026-11-09T12:00:00Z'));
       session.clear();
@@ -372,10 +377,19 @@ describe("what a souled agent's recall matches and how it renders it", () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const k = key();
     const s = script('openai', k, { whole: true, replies: [reply.text('It is.'), reply.text('Notes.')] });
-    // 5 tokens are 20 characters: less than the label alone, more than the trace's text.
-    const a = await souledAgent({ ...stubbed(k, { memoryProviderOptions: { tokenBudget: 5 } }), soul: dir } as never);
+    // 5 tokens are 20 characters: less than the label alone, more than the trace's text. A one-shot call recalls a
+    // user's memory only on an agent that runs as one user.
+    const a = await souledAgent({
+      ...stubbed(k, { memoryProviderOptions: { tokenBudget: 5 } }),
+      soul: dir,
+      sharedMemory: { as: 'me', reason: 'one-persons-machine' },
+    } as never);
     try {
-      await a.memory!.remember('Tea is fine', { type: 'episodic', scope: 'persona', scopeId: 'aria-1' });
+      await a.memory!.remember('Tea is fine', {
+        type: 'episodic',
+        scope: 'conversation',
+        scopeId: conversationScopeKey('aria-1', { kind: 'user', id: 'me' }),
+      });
       await a.generate('Is the tea fine?');
     } finally {
       await a.close();

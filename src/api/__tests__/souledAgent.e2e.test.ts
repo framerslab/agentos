@@ -19,6 +19,7 @@ import { agent, buildSystemPrompt, type AgentOptions } from '../agent';
 import { souledAgent } from '../souledAgent';
 import { reply, script, type ProviderScript } from './helpers/stubProviders';
 import { loadSoulSync } from '../../cognition/substrate/personas/SoulLoader';
+import { conversationScopeKey } from '../../cognition/memory/retrieval/store/conversationScopeKey';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory';
 
@@ -96,10 +97,19 @@ describe("souledAgent()'s recall", () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const k = key();
     const s = script('openai', k, { whole: true, replies: [reply.text('Noted.'), reply.text('Tea notes.')] });
-    const a = await souledAgent({ ...stubbed(k, memoryProviderOptions ? { memoryProviderOptions } : {}), soul: dir } as never);
+    // A one-shot call recalls a user's memory only on an agent that runs as one user.
+    const a = await souledAgent({
+      ...stubbed(k, memoryProviderOptions ? { memoryProviderOptions } : {}),
+      soul: dir,
+      sharedMemory: { as: 'me', reason: 'one-persons-machine' },
+    } as never);
     try {
       for (const text of stored) {
-        await a.memory!.remember(text, { type: 'episodic', scope: 'persona', scopeId: 'aria-1' });
+        await a.memory!.remember(text, {
+          type: 'episodic',
+          scope: 'conversation',
+          scopeId: conversationScopeKey('aria-1', { kind: 'user', id: 'me' }),
+        });
       }
       await a.generate('What do I know about green tea?');
     } finally {

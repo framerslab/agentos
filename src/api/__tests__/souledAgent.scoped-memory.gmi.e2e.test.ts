@@ -11,6 +11,14 @@
  * - An operator page's chunks are filed under the operator's own conversation key, and an edited page's old chunks
  *   are deleted for good.
  * - A folder an earlier version indexed is indexed again under the operator key; its earlier chunks are left.
+ *
+ * Conversation memory is kept per subject, on the default runtime and on `runtime: 'gmi'`:
+ *
+ * - Each turn is filed under the key of its subject (the session's user, else the session), the user's message and
+ *   the reply alike, and a turn recalls its own subject's memory and the operator's pages, and nobody else's.
+ * - A one-shot `generate()` names no user: nothing is filed for it and it recalls the operator's pages alone.
+ * - `sharedMemory` runs every session that names no user, and every one-shot call, as one user.
+ * - Traces an earlier version filed under the agent's plain id are recalled for nobody and counted in one line.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
@@ -26,6 +34,7 @@ import type { Brain } from '../../cognition/memory/retrieval/store/Brain';
 import { conversationScopeKey } from '../../cognition/memory/retrieval/store/conversationScopeKey';
 import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
+import { reply, script, type ProviderScript } from './helpers/stubProviders';
 
 let n = 0;
 const key = () => `k-souled-scoped-${++n}`;
@@ -241,5 +250,409 @@ describe("the operator's pages in the store", () => {
     } finally {
       await a.close();
     }
+  });
+});
+
+/** The runtimes each case of the per-subject suites runs on. */
+const runtimes: Array<[string, Record<string, unknown>]> = [['the default runtime', {}], ["runtime: 'gmi'", { runtime: 'gmi' }]];
+
+type ModelCall = ProviderScript['seen'][number];
+
+/** A script that answers `first`, then `Noted.` to every later model call: more replies than any test needs. */
+const scripted = (k: string, first: string[] = []) =>
+  script('openai', k, { whole: true, replies: [...first, ...Array.from({ length: 30 }, () => 'Noted.')].map((text) => reply.text(text)) });
+
+/** Opens a souled agent on the test's folder, on `runtime`, with a script of its own. */
+async function opened(runtime: Record<string, unknown>, extra: Record<string, unknown> = {}, first: string[] = []) {
+  const k = key();
+  const s = scripted(k, first);
+  const a = await souledAgent({ ...stubbed(k, runtime as Partial<AgentOptions>), soul: dir, ...extra } as never);
+  return { a, s };
+}
+
+/** One turn of a session, opened for `user` when one is given. */
+const say = (a: Souled, who: { session: string; user?: string }, text: string) =>
+  a.session(who.session, who.user !== undefined ? { userId: who.user } : undefined).send(text);
+
+/** How many traces of exactly `text` the store holds. */
+async function tracesOf(a: Souled, text: string): Promise<number> {
+  const brain = brainOf(a);
+  const row = await brain.get<{ n: number | string }>(
+    'SELECT count(*) AS n FROM memory_traces WHERE brain_id = ? AND content = ?',
+    [brain.brainId, text],
+  );
+  return Number(row?.n ?? 0);
+}
+
+/** Waits until the store holds a trace of exactly `text`: a turn never waits for its memory writes. */
+const stored = (a: Souled, text: string) =>
+  vi.waitFor(async () => expect(await tracesOf(a, text)).toBeGreaterThanOrEqual(1), { timeout: 4_000 });
+
+/** True for a model call that merged traces into a wiki page. */
+const isMerge = (call: ModelCall) => JSON.stringify(call.messages).includes('You maintain a knowledge wiki page');
+
+/** The last model call of a turn: the last one that is not a wiki merge. */
+const lastCall = (s: ProviderScript): ModelCall => {
+  const turns = s.seen.filter((call) => !isMerge(call));
+  return turns[turns.length - 1];
+};
+
+/** Every text the recall block of one model call holds, its spaces restored; none when the call has no block. */
+const recalledIn = (call: ModelCall): string[] => {
+  const OPEN = '<memory_recall>';
+  const CLOSE = '</memory_recall>';
+  const message = call.messages.find((m) => m.role === 'user' && typeof m.content === 'string' && m.content.startsWith(OPEN));
+  if (!message) return [];
+  const { items } = JSON.parse((message.content as unknown as string).slice(OPEN.length, -CLOSE.length)) as { items: Array<{ text: string }> };
+  return items.map((item) => item.text.replaceAll('^', ' '));
+};
+
+/** The registered user and session scopes of an agent's store. */
+const subjectScopes = async (a: Souled) => (await a.memory!.listScopes()).filter((row) => row.kind !== 'operator');
+
+/** The user's key and the session's key under the soul every test loads. */
+const userKey = (id: string, agentId = 'aria-1') => conversationScopeKey(agentId, { kind: 'user', id });
+const sessionKey = (id: string, agentId = 'aria-1') => conversationScopeKey(agentId, { kind: 'session', id });
+
+const writeSoul = (agentId: string) =>
+  fs.writeFileSync(path.join(dir, 'SOUL.md'), `---\nname: Aria\nagentId: ${JSON.stringify(agentId)}\n---\nYou are Aria.`);
+
+describe.each(runtimes)('conversation memory per subject, on %s', (_name, runtime) => {
+  beforeEach(() => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  });
+
+  it('two sessions with no user recall nothing of each other', async () => {
+    const fact = 'My cat is named Zorblat.';
+    const { a, s } = await opened(runtime);
+    try {
+      await say(a, { session: 's1' }, fact);
+      await stored(a, fact);
+
+      await say(a, { session: 's2' }, 'What is the cat named Zorblat?');
+      expect(recalledIn(lastCall(s))).not.toContain(fact);
+
+      await say(a, { session: 's1' }, 'Tell me about Zorblat.');
+      expect(recalledIn(lastCall(s))).toContain(fact);
+
+      await stored(a, 'What is the cat named Zorblat?');
+      expect((await subjectScopes(a)).map((row) => [row.scopeId, row.kind])).toEqual([
+        [sessionKey('s1'), 'session'],
+        [sessionKey('s2'), 'session'],
+      ]);
+    } finally {
+      await a.close();
+    }
+  });
+
+  const long = 'u'.repeat(300);
+  it.each<[string, { session: string; user?: string }, { session: string; user?: string }]>([
+    ['one is the start of the other', { session: 'sa', user: 'alice' }, { session: 'sb', user: 'alice-corp' }],
+    ['a user and a session of one id', { session: 'sa', user: 'bob' }, { session: 'bob' }],
+    ['ids that differ by case', { session: 'sa', user: 'Alice' }, { session: 'sb', user: 'alice' }],
+    ['two Unicode forms of one letter', { session: 'sa', user: 'é' }, { session: 'sb', user: 'é' }],
+    ['ids made of dots', { session: 'sa', user: '..' }, { session: 'sb', user: '.' }],
+    ['a 300-character id and its first 299', { session: 'sa', user: long }, { session: 'sb', user: long.slice(0, 299) }],
+  ])('users whose ids overlap recall only their own: %s', async (_case, first, second) => {
+    const fact = 'My parrot is named Quorvex.';
+    const { a, s } = await opened(runtime);
+    try {
+      await say(a, first, fact);
+      await stored(a, fact);
+
+      await say(a, second, 'Who is Quorvex?');
+      expect(recalledIn(lastCall(s))).not.toContain(fact);
+
+      await say(a, first, 'Tell me about Quorvex.');
+      expect(recalledIn(lastCall(s))).toContain(fact);
+    } finally {
+      await a.close();
+    }
+  });
+
+  it('agent and user ids that hold the separator stay apart', async () => {
+    const fact = 'My boat is named Plimsoll.';
+    writeSoul(':b');
+    const first = await opened(runtime);
+    try {
+      await say(first.a, { session: 's1', user: 'a::b' }, fact);
+      await stored(first.a, fact);
+    } finally {
+      await first.a.close();
+    }
+
+    writeSoul('b::b');
+    const { a, s } = await opened(runtime);
+    try {
+      await say(a, { session: 's2', user: 'a' }, 'What is Plimsoll?');
+      expect(recalledIn(lastCall(s))).not.toContain(fact);
+      expect(await tracesOf(a, fact)).toBe(1);
+    } finally {
+      await a.close();
+    }
+  });
+
+  it('the same user under two agents in one store recalls per agent', async () => {
+    const fact = 'My horse is named Brindlewick.';
+    const first = await opened(runtime);
+    try {
+      await say(first.a, { session: 's1', user: 'u' }, fact);
+      await stored(first.a, fact);
+    } finally {
+      await first.a.close();
+    }
+
+    writeSoul('aria-2');
+    const { a, s } = await opened(runtime);
+    try {
+      await say(a, { session: 's2', user: 'u' }, 'What is Brindlewick?');
+      expect(recalledIn(lastCall(s))).not.toContain(fact);
+      await stored(a, 'What is Brindlewick?');
+      expect((await subjectScopes(a)).map((row) => [row.scopeId, row.agentId])).toEqual([
+        [userKey('u', 'aria-1'), 'aria-1'],
+        [userKey('u', 'aria-2'), 'aria-2'],
+      ]);
+    } finally {
+      await a.close();
+    }
+  });
+
+  it('a reply to one user is recalled for that user and never for another', async () => {
+    const answer = 'Your locker code is Quibble.';
+    const { a, s } = await opened(runtime, {}, [answer]);
+    try {
+      await say(a, { session: 'sa', user: 'alice' }, 'What is my locker code?');
+      await stored(a, answer);
+
+      await say(a, { session: 'sb', user: 'bob' }, 'What is Quibble?');
+      expect(recalledIn(lastCall(s))).not.toContain(answer);
+
+      await say(a, { session: 'sa', user: 'alice' }, 'Remind me of Quibble.');
+      expect(recalledIn(lastCall(s))).toContain(answer);
+    } finally {
+      await a.close();
+    }
+  });
+
+  it("every trace of a turn is filed under the subject's key with who spoke", async () => {
+    const asked = 'My kettle is named Thrumble.';
+    const answer = 'Thrumble is a fine kettle.';
+    const { a } = await opened(runtime, {}, [answer, 'A session reply.']);
+    try {
+      await say(a, { session: 'sa', user: 'alice' }, asked);
+      await stored(a, asked);
+      await stored(a, answer);
+      await say(a, { session: 's9' }, 'A session line.');
+      await stored(a, 'A session line.');
+      await stored(a, 'A session reply.');
+
+      const brain = brainOf(a);
+      /** The stored rows of the given texts, in the order the texts are given. */
+      const rowsOf = async (...texts: string[]) => {
+        const rows = await brain.all<{ content: string; scope: string; scope_id: string; metadata: string }>(
+          `SELECT content, scope, scope_id, metadata FROM memory_traces WHERE brain_id = ? AND content IN (${texts.map(() => '?').join(', ')})`,
+          [brain.brainId, ...texts],
+        );
+        expect(rows).toHaveLength(texts.length);
+        return texts.map((text) => {
+          const row = rows.find((candidate) => candidate.content === text)!;
+          return { ...row, metadata: JSON.parse(row.metadata) as Record<string, unknown> };
+        });
+      };
+
+      const alice = await rowsOf(asked, answer);
+      expect(userKey('alice')).toBe('c1:u:6:aria-1:5:alice;');
+      expect(alice.map((row) => [row.content, row.scope, row.scope_id])).toEqual([
+        [asked, 'conversation', 'c1:u:6:aria-1:5:alice;'],
+        [answer, 'conversation', 'c1:u:6:aria-1:5:alice;'],
+      ]);
+      expect(alice.map((row) => row.metadata.speaker)).toEqual(['user', 'assistant']);
+      for (const row of alice) {
+        expect(row.metadata.subject).toEqual({ kind: 'user', id: 'alice' });
+        expect(row.metadata.turnUserId).toBe('alice');
+      }
+
+      const session = await rowsOf('A session line.', 'A session reply.');
+      expect(session.map((row) => [row.scope, row.scope_id])).toEqual([
+        ['conversation', sessionKey('s9')],
+        ['conversation', sessionKey('s9')],
+      ]);
+      expect(session.map((row) => row.metadata.speaker)).toEqual(['user', 'assistant']);
+      for (const row of session) {
+        expect(row.metadata.subject).toEqual({ kind: 'session', id: 's9' });
+        expect(row.metadata).not.toHaveProperty('turnUserId');
+      }
+
+      const plain = await brain.get<{ n: number | string }>(
+        "SELECT count(*) AS n FROM memory_traces WHERE brain_id = ? AND scope = 'persona'",
+        [brain.brainId],
+      );
+      expect(Number(plain?.n)).toBe(0);
+    } finally {
+      await a.close();
+    }
+  });
+
+  it("a one-shot call that names no user files nothing and recalls the operator's pages alone, and says so once", async () => {
+    writePage('concepts/ops', OPS);
+    const fact = 'My lamp is named Vexley.';
+    const { a, s } = await opened(runtime);
+    try {
+      await say(a, { session: 's1' }, fact);
+      await stored(a, fact);
+
+      await a.generate('Is Vexley open from nine?');
+      const recalled = recalledIn(lastCall(s));
+      expect(recalled).toContain('Open nine to five.');
+      expect(recalled).not.toContain(fact);
+      await a.generate('And is Vexley open at ten?');
+
+      // A later session turn is stored; the two one-shot calls, made before it, never are.
+      await say(a, { session: 's1' }, 'A later line.');
+      await stored(a, 'A later line.');
+      expect(await tracesOf(a, 'Is Vexley open from nine?')).toBe(0);
+      expect(await tracesOf(a, 'And is Vexley open at ten?')).toBe(0);
+      expect((await subjectScopes(a)).map((row) => row.scopeId)).toEqual([sessionKey('s1')]);
+      expect(lines('memory.one_shot_unfiled')).toHaveLength(1);
+    } finally {
+      await a.close();
+    }
+  });
+
+  it('sharedMemory runs sessions without a user and one-shot calls as one user', async () => {
+    const fact = 'My bike is named Fennimore.';
+    const { a, s } = await opened(runtime, { sharedMemory: { as: 'me', reason: 'one-persons-machine' } });
+    try {
+      await say(a, { session: 's1' }, fact);
+      await stored(a, fact);
+
+      await a.generate('What is Fennimore?');
+      expect(recalledIn(lastCall(s))).toContain(fact);
+      await stored(a, 'What is Fennimore?');
+
+      expect(userKey('me')).toBe('c1:u:6:aria-1:2:me;');
+      expect((await subjectScopes(a)).map((row) => row.scopeId)).toEqual(['c1:u:6:aria-1:2:me;']);
+      expect(lines('memory.one_shot_unfiled')).toEqual([]);
+      expect(() => a.session('s2', { userId: 'bob' })).toThrow('sharedMemory runs every session as one user; this session named another');
+      // The one user by name, and an id that names nobody, are the same person.
+      expect(a.session('s3', { userId: 'me' }).id).toBe('s3');
+      expect(a.session('s4', { userId: 'guest' }).id).toBe('s4');
+    } finally {
+      await a.close();
+    }
+  });
+
+  it('sharedMemory is refused on a store that holds another subject', async () => {
+    const first = await opened(runtime);
+    try {
+      await say(first.a, { session: 's1', user: 'bob' }, 'My desk is named Corvane.');
+      await stored(first.a, 'My desk is named Corvane.');
+    } finally {
+      await first.a.close();
+    }
+
+    await expect(opened(runtime, { sharedMemory: { as: 'me', reason: 'one-persons-machine' } })).rejects.toThrow(
+      "souledAgent: sharedMemory runs one person's memory, and this store already holds memory of another user or session",
+    );
+
+    // The refused open closed the store: the folder opens again without the option.
+    const third = await opened(runtime);
+    try {
+      expect((await subjectScopes(third.a)).map((row) => row.scopeId)).toEqual([userKey('bob')]);
+    } finally {
+      await third.a.close();
+    }
+  });
+
+  it("traces under the agent's plain id are recalled for nobody, and counted once", async () => {
+    const old = 'Zanzibar is where the user lives.';
+    const storeDir = path.join(dir, 'memory', '.store');
+    fs.mkdirSync(storeDir, { recursive: true });
+    const earlier = await Memory.createSqlite(path.join(storeDir, 'memory.sqlite'), { graph: true, selfImprove: true });
+    await earlier.remember(old, { type: 'episodic', scope: 'persona', scopeId: 'aria-1', id: 'old-1' });
+    await earlier.close();
+    // A copy of the folder as the earlier version left it, for an agent that runs as one user.
+    const copy = `${dir}-copy`;
+    fs.cpSync(dir, copy, { recursive: true });
+
+    try {
+      const { a, s } = await opened(runtime);
+      try {
+        expect(lines('memory.legacy_traces')).toHaveLength(1);
+        expect(lines('memory.legacy_traces')[0]).toMatchObject({ count: 1 });
+
+        await say(a, { session: 'sa', user: 'alice' }, 'Where is Zanzibar?');
+        expect(recalledIn(lastCall(s))).not.toContain(old);
+        await say(a, { session: 's1' }, 'Where is Zanzibar again?');
+        expect(recalledIn(lastCall(s))).not.toContain(old);
+
+        expect(await tracesHolding(brainOf(a), 'Zanzibar is where')).toEqual([
+          { id: 'old-1', scope: 'persona', scope_id: 'aria-1', deleted: 0 },
+        ]);
+      } finally {
+        await a.close();
+      }
+
+      events.length = 0;
+      const k = key();
+      const shared = scripted(k);
+      const b = await souledAgent({
+        ...stubbed(k, runtime as Partial<AgentOptions>),
+        soul: copy,
+        sharedMemory: { as: 'me', reason: 'one-persons-machine' },
+      } as never);
+      try {
+        expect(lines('memory.legacy_traces')).toHaveLength(1);
+        expect(lines('memory.legacy_traces')[0]).toMatchObject({ count: 1 });
+        await b.session('s1').send('Where is Zanzibar?');
+        expect(recalledIn(lastCall(shared))).not.toContain(old);
+      } finally {
+        await b.close();
+      }
+    } finally {
+      fs.rmSync(copy, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('sharedMemory, as it is given', () => {
+  it.each([
+    ['no user id', { as: '', reason: 'one-persons-machine' }],
+    ['an id that names nobody', { as: 'guest', reason: 'one-persons-machine' }],
+    ['an id that is not text', { as: 7, reason: 'one-persons-machine' }],
+    ['a reason that is neither word', { as: 'me', reason: 'because' }],
+    ['no reason', { as: 'me' }],
+  ])('is refused at open with %s, and no store is made', async (_case, sharedMemory) => {
+    await expect(souledAgent({ ...stubbed(key()), soul: dir, sharedMemory } as never)).rejects.toThrow(
+      "souledAgent: sharedMemory needs { as: <a user id>, reason: 'one-persons-machine' | 'operators-notes' }",
+    );
+    expect(fs.existsSync(path.join(dir, 'memory', '.store'))).toBe(false);
+  });
+});
+
+describe("the folder a souled agent's store is kept in", () => {
+  it('is kept out of version control', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { a } = await opened({});
+    try {
+      await say(a, { session: 's1', user: 'alice' }, 'My pen is named Dravick.');
+      await stored(a, 'My pen is named Dravick.');
+    } finally {
+      await a.close();
+    }
+    const storeDir = path.join(dir, 'memory', '.store');
+    expect(fs.readFileSync(path.join(storeDir, '.gitignore'), 'utf8')).toBe('*\n');
+    const under = fs.readdirSync(storeDir, { recursive: true }) as string[];
+    expect(under.filter((name) => name.endsWith('.md'))).toEqual([]);
+  });
+
+  it('keeps a .gitignore that was already there as it is', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const storeDir = path.join(dir, 'memory', '.store');
+    fs.mkdirSync(storeDir, { recursive: true });
+    fs.writeFileSync(path.join(storeDir, '.gitignore'), '*.sqlite\n');
+    const { a } = await opened({});
+    await a.close();
+    expect(fs.readFileSync(path.join(storeDir, '.gitignore'), 'utf8')).toBe('*.sqlite\n');
   });
 });
