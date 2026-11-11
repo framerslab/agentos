@@ -966,7 +966,8 @@ export class AgentOS implements IAgentOS {
    * unless the host writes a `defaultGMIBaseConfigDefaults` of its own, which
    * is kept even when it names the pair the factory took from the environment.
    * A `gmiManagerConfig` spread from a `createAgentOSConfig()` result carries
-   * the factory's pair, so it takes the default from the providers given too.
+   * the factory's pair, so it takes the default from the providers given too,
+   * unless the host has set another provider or model on that pair.
    *
    * For fine-grained control, fall back to `new AgentOS()` +
    * `initialize(yourConfig)`.
@@ -1006,7 +1007,7 @@ export class AgentOS implements IAgentOS {
     // The factory's GMI default names the default provider of the environment's providers. With providers of the
     // host's own, a GMI default left as the factory set it (the host's gmiManagerConfig absent, or spread from a
     // factory-built config) would name a provider the runtime may not have, so it is taken from the providers given.
-    // A pair the host writes is kept, even one equal to the factory's.
+    // A pair the host writes is kept, even one equal to the factory's, and so is one it sets on the factory's object.
     const givenProviders = configOverrides.modelProviderManagerConfig?.providers;
     const mergedDefaults = mergedConfig.gmiManagerConfig?.defaultGMIBaseConfigDefaults;
     if (Array.isArray(givenProviders) && mergedDefaults && isFactoryGmiModelDefaults(mergedDefaults)) {

@@ -240,23 +240,33 @@ export function gmiModelDefaultsFor(
     : { defaultLlmProviderId: 'openai', defaultLlmModelId: 'gpt-4o' };
 }
 
+type GmiModelDefaults = { defaultLlmProviderId?: string; defaultLlmModelId?: string };
+
 /**
- * The `defaultGMIBaseConfigDefaults` objects {@link createAgentOSConfig} built from the environment's providers. A
- * host that spreads a factory-built `gmiManagerConfig` passes the same object on; a pair the host writes is another
- * object, even when its values are the factory's.
+ * The `defaultGMIBaseConfigDefaults` objects {@link createAgentOSConfig} built from the environment's providers, each
+ * with the pair it was built with. A host that spreads a factory-built `gmiManagerConfig` passes the same object on;
+ * a pair the host writes is another object, even when its values are the factory's, and a pair the host sets on the
+ * factory's object no longer matches the recorded one.
  */
-const factoryGmiModelDefaults = new WeakSet<object>();
+const factoryGmiModelDefaults = new WeakMap<object, GmiModelDefaults>();
 
 /**
  * Whether a `gmiManagerConfig.defaultGMIBaseConfigDefaults` is the one {@link createAgentOSConfig} took from the
- * environment's providers, rather than one a host wrote. `AgentOS.create()` given providers of the host's own takes
- * the GMI default from those providers only in that case.
+ * environment's providers, unchanged, rather than one a host wrote or set. `AgentOS.create()` given providers of the
+ * host's own takes the GMI default from those providers only in that case.
  *
  * @param defaults - A config's `gmiManagerConfig.defaultGMIBaseConfigDefaults`.
- * @returns `true` for the factory's own object.
+ * @returns `true` for the factory's own object still holding the provider and model the factory gave it.
  */
 export function isFactoryGmiModelDefaults(defaults: unknown): boolean {
-  return typeof defaults === 'object' && defaults !== null && factoryGmiModelDefaults.has(defaults);
+  if (typeof defaults !== 'object' || defaults === null) return false;
+  const built = factoryGmiModelDefaults.get(defaults);
+  const current = defaults as GmiModelDefaults;
+  return (
+    built !== undefined &&
+    current.defaultLlmProviderId === built.defaultLlmProviderId &&
+    current.defaultLlmModelId === built.defaultLlmModelId
+  );
 }
 
 /**
@@ -444,7 +454,7 @@ export async function createAgentOSConfig(
     const modelProviderManagerConfig = createModelProviderManagerConfig(env);
     // A persona that names no provider or model runs on the default provider entry and its default model.
     const defaultGMIBaseConfigDefaults = gmiModelDefaultsFor(modelProviderManagerConfig.providers);
-    factoryGmiModelDefaults.add(defaultGMIBaseConfigDefaults);
+    factoryGmiModelDefaults.set(defaultGMIBaseConfigDefaults, { ...defaultGMIBaseConfigDefaults });
 
     // Create individual component configurations
     const gmiManagerConfig: GMIManagerConfig = {
