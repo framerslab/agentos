@@ -1781,7 +1781,8 @@ describe('VoicePipelineOrchestrator', () => {
    * later speech end, so the turn waits for the second utterance's final and keeps both clauses (#390).
    */
   it("should hand the detector the item of each speech edge, so a delayed final answers only its own utterance's end", async () => {
-    const { turns } = await startWithDetector('It is booked.');
+    const { detector, turns } = await startWithDetector('It is booked.');
+    const edges = vi.spyOn(detector, 'pushVadEvent');
     sttSession.emit('speech_start', { itemId: 'item_A' });
     sttSession.emit('speech_end', { itemId: 'item_A' });
     await vi.advanceTimersByTimeAsync(300);
@@ -1795,6 +1796,12 @@ describe('VoicePipelineOrchestrator', () => {
     await vi.advanceTimersByTimeAsync(0);
 
     expect(turns()).toEqual(['Book a table for two. At seven tonight.']);
+    expect(edges.mock.calls.map(([event]) => [event.type, event.source, event.itemId])).toEqual([
+      ['speech_start', 'stt', 'item_A'],
+      ['speech_end', 'stt', 'item_A'],
+      ['speech_start', 'stt', 'item_B'],
+      ['speech_end', 'stt', 'item_B'],
+    ]);
   });
 
   it('should drop an item-keyed backchannel said while the agent speaks, whatever its trailing punctuation', async () => {

@@ -8,7 +8,7 @@
  */
 import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { IStreamTransport, ITranscriptInputSink, TranscriptEvent, TranscriptInput, TurnCompleteEvent } from '../types.js';
+import type { IStreamTransport, ITranscriptInputSink, TranscriptEvent, TranscriptInput, TurnCompleteEvent, VadEvent } from '../types.js';
 
 vi.mock('ws', () => {
   const { EventEmitter: EE } = require('node:events');
@@ -65,6 +65,13 @@ async function listen() {
   const late: string[] = [];
   detector.on('turn_complete', (event: TurnCompleteEvent) => turns.push(event.transcript));
   detector.on('late_final', (event: TranscriptEvent) => late.push(event.text));
+  // What the listen session tells the detector of each speech edge: its type and the item it names.
+  const edges: string[] = [];
+  const push = detector.pushVadEvent.bind(detector);
+  detector.pushVadEvent = (event: VadEvent) => {
+    edges.push(`${event.type} ${event.itemId ?? '-'}`);
+    push(event);
+  };
   const inputs: TranscriptInput[] = [];
   const sink: ITranscriptInputSink = {
     async append() {},
@@ -97,7 +104,12 @@ async function listen() {
   };
   const completed = (atMs: number, item: string, transcript: string) =>
     at(atMs, { type: 'conversation.item.input_audio_transcription.completed', item_id: item, transcript });
-  return { session, turns, late, started, stopped, completed, wait: (atMs: number) => vi.advanceTimersByTime(atMs - clock) };
+  /** Lets the session's clock run to `atMs` with nothing sent. */
+  const wait = (atMs: number): void => {
+    vi.advanceTimersByTime(atMs - clock);
+    clock = atMs;
+  };
+  return { session, turns, late, edges, started, stopped, completed, wait };
 }
 
 beforeEach(() => {
@@ -122,6 +134,7 @@ describe('item-keyed speech ends over the real OpenAI transcription handler (#39
 
     expect(run.turns).toEqual(['Book a table for two. At seven tonight.']);
     expect(run.late).toEqual([]);
+    expect(run.edges).toEqual(['speech_start item_A', 'speech_end item_A', 'speech_start item_B', 'speech_end item_B']);
     await run.session.close('purged');
   });
 
