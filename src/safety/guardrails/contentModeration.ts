@@ -70,8 +70,9 @@ export interface ModerationPick { outcome: ModerationOutcome; unavailable: boole
 
 /**
  * What decides, in this order: the first BLOCK a rule gave (no hold, not a closed guard's failure); else the first
- * hold; else the first closed guard's failure; else the first FLAG; else nothing. So one guard's outage never hides
- * another guard's refusal or hold.
+ * hold; else the first closed guard's failure; else the first FLAG; else nothing. So among the guards that ran, one
+ * guard's outage never hides another guard's refusal or hold. A sequential screen's failure is a BLOCK and ends phase 1
+ * as its refusal does, so the phase 2 guards never see the text and cannot hold it.
  *
  * @param evaluations - The evaluations, in registration order.
  * @returns The outcome, whether only an outage decided it, and the evaluation that decided.
@@ -129,10 +130,13 @@ export function writeVerdictLine(verdict: {
  * @param content - The text and the images.
  * @param options - The guards, the context, the mode, the deadline and the codes that stop further vendor requests.
  * @returns What the host does with the content.
- * @throws TypeError when a guard cannot judge input, or when `context.moderation` holds a field that is not a word or an id.
+ * @throws TypeError when a guard cannot judge input, when `mode` is neither `enforce` nor `dryRun`, or when
+ * `context.moderation` holds a field that is not a word or an id.
  */
 export async function moderateContent(content: ContentUnderReview, options: ModerateContentOptions): Promise<ModerationDecision> {
   const mode = options.mode ?? 'enforce';
+  // any other value would give enforced: false beside an enforced outcome, with sanitizedText dropped
+  if (mode !== 'enforce' && mode !== 'dryRun') throw new TypeError("moderateContent(): mode must be 'enforce' or 'dryRun'");
   if (options.context.moderation !== undefined) assertModerationContext(options.context.moderation);
 
   const named = options.guards.map((svc, index) => namedGuard(svc, index));
