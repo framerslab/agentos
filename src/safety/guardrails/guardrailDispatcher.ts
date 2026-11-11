@@ -125,6 +125,13 @@ export interface GuardrailOutputOptions {
 
   /** Called once with the final verdict on the reply: blocked, sanitized, flagged or allowed. A throw is logged and ignored. */
   onVerdict?: (verdict: GuardrailOutputVerdict) => void | Promise<void>;
+
+  /**
+   * Picks which of a phase's evaluations ends the reply, or answers undefined when none does. Called with every
+   * settled evaluation of a parallel phase, and with the one evaluation of a phase 1 guard that answered a BLOCK (that
+   * BLOCK ends the reply whatever the picker answers). Default: the first BLOCK without a hold, else the first hold.
+   */
+  pickBlock?: (evaluations: readonly GuardrailEvaluationResult[]) => GuardrailEvaluationResult | undefined;
 }
 
 /** The verdict on a reply, as {@link GuardrailOutputOptions.onVerdict} receives it. */

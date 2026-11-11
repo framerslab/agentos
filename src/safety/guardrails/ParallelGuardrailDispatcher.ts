@@ -307,7 +307,9 @@ async function evaluateToolCallGuards(
   context: GuardrailContext,
   chunk: AgentOSResponse,
   ragSources: GuardrailOutputPayload['ragSources'],
+  pickBlock?: GuardrailOutputOptions['pickBlock'],
 ): Promise<GuardrailToolCallVerdict> {
+  const pick = pickBlock ?? decidingBlock;
   const slots: (GuardrailEvaluationResult | null)[] = new Array(guards.length).fill(null);
   const settle = (j: number, result: PromiseSettledResult<GuardrailEvaluationResult | null>): GuardrailEvaluationResult | null => {
     const { svc } = guards[j];
@@ -332,7 +334,8 @@ async function evaluateToolCallGuards(
     const [result] = await Promise.allSettled([call(guards[j])]);
     const evaluation = settle(j, result);
     if (evaluation?.action === GuardrailAction.BLOCK) {
-      return { outcome: 'block', evaluation };
+      // a caller's picker is shown the screen's BLOCK too; it ends the evaluation whatever the picker answers
+      return { outcome: 'block', evaluation: pick([evaluation]) ?? evaluation };
     }
   }
 
@@ -341,8 +344,8 @@ async function evaluateToolCallGuards(
   results.forEach((result, k) => settle(rest[k].j, result));
 
   const evaluations = slots.filter(Boolean) as GuardrailEvaluationResult[];
-  // Every guard has answered: a refusal outranks a hold wherever it sits in registration order.
-  const block = decidingBlock(evaluations);
+  // Every guard has answered: a refusal outranks a hold wherever it sits in registration order, unless the caller picks.
+  const block = pick(evaluations);
   if (block) {
     return { outcome: 'block', evaluation: block };
   }
@@ -554,6 +557,8 @@ export class ParallelGuardrailDispatcher {
    * @param context    - Conversational context for policy decisions
    * @param chunk      - The tool-call chunk to evaluate
    * @param ragSources - RAG sources to pass to the guardrails, when the caller has them
+   * @param pickBlock  - Picks which evaluation blocks the call, as {@link GuardrailOutputOptions.pickBlock} does for
+   *                     a reply. Default: the first BLOCK without a hold, else the first hold.
    * @returns The blocking evaluation, or every evaluation of a chunk the guardrails pass
    */
   static async evaluateToolCall(
@@ -561,8 +566,9 @@ export class ParallelGuardrailDispatcher {
     context: GuardrailContext,
     chunk: AgentOSResponse,
     ragSources?: GuardrailOutputPayload['ragSources'],
+    pickBlock?: GuardrailOutputOptions['pickBlock'],
   ): Promise<GuardrailToolCallVerdict> {
-    return evaluateToolCallGuards(toolCallGuardsOf(services), context, chunk, ragSources);
+    return evaluateToolCallGuards(toolCallGuardsOf(services), context, chunk, ragSources, pickBlock);
   }
 
   // -----------------------------------------------------------------------
@@ -675,6 +681,9 @@ export class ParallelGuardrailDispatcher {
     const hold = options.holdUntilFinal === true;
     let held: AgentOSResponse[] = [];
 
+    // Which evaluation of a phase ends the reply: the caller's picker, else the first refusal, else the first hold.
+    const pick = options.pickBlock ?? decidingBlock;
+
     const notify = async (verdict: GuardrailOutputVerdict): Promise<void> => {
       if (!options.onVerdict) return;
       try {
@@ -721,9 +730,9 @@ export class ParallelGuardrailDispatcher {
         if (svc.config?.canSanitize !== true) evaluation = downgradePhase2Sanitize(evaluation, svc, 'output');
         outputEvaluations.push(evaluation);
 
-        // BLOCK terminates the stream
+        // BLOCK terminates the stream; a caller's picker is shown it
         if (evaluation.action === GuardrailAction.BLOCK) {
-          return { outcome: 'block', evaluation };
+          return { outcome: 'block', evaluation: pick([evaluation]) ?? evaluation };
         }
 
         // SANITIZE: modify every text field of the final response, or the textDelta
@@ -777,7 +786,7 @@ export class ParallelGuardrailDispatcher {
         }
 
         // A BLOCK terminates the stream: a refusal outranks a hold wherever it sits in registration order
-        const block = decidingBlock(phase);
+        const block = pick(phase);
         if (block) {
           return { outcome: 'block', evaluation: block };
         }
@@ -804,7 +813,7 @@ export class ParallelGuardrailDispatcher {
       | { outcome: 'block'; evaluation: GuardrailEvaluationResult }
       | { outcome: 'pass'; chunk: AgentOSResponse }
     > => {
-      const verdict = await evaluateToolCallGuards(toolCallGuards, context, chunkIn, currentRagSources);
+      const verdict = await evaluateToolCallGuards(toolCallGuards, context, chunkIn, currentRagSources, options.pickBlock);
       if (verdict.outcome === 'block') {
         return verdict;
       }
@@ -886,11 +895,12 @@ export class ParallelGuardrailDispatcher {
           if (svc.config?.canSanitize !== true) evaluation = downgradePhase2Sanitize(evaluation, svc, 'output');
           outputEvaluations.push(evaluation);
 
-          // BLOCK terminates the stream immediately
+          // BLOCK terminates the stream immediately; a caller's picker is shown it
           if (evaluation.action === GuardrailAction.BLOCK) {
+            const block = pick([evaluation]) ?? evaluation;
             held = [];
-            await notify({ streamId: options.streamId, ...blockVerdictOf(evaluation), finalText: evaluation.replacementText ?? null, originalText: null });
-            yield* blockedOutput(context, evaluation, options);
+            await notify({ streamId: options.streamId, ...blockVerdictOf(block), finalText: block.replacementText ?? null, originalText: null });
+            yield* blockedOutput(context, block, options);
             return;
           }
 
@@ -948,7 +958,7 @@ export class ParallelGuardrailDispatcher {
           }
 
           // A BLOCK terminates the stream immediately: a refusal outranks a hold wherever it sits in registration order
-          const block = decidingBlock(phase);
+          const block = pick(phase);
           if (block) {
             held = [];
             await notify({ streamId: options.streamId, ...blockVerdictOf(block), finalText: block.replacementText ?? null, originalText: null });
