@@ -70,7 +70,7 @@ import { GMIChunkTransformer } from './GMIChunkTransformer';
 import { TurnExecutionPipeline } from './TurnExecutionPipeline';
 import { gmiToolCallGateFor } from './toolCallGate';
 import { externalToolPauseCalls, streamedRequestForPause, streamsActionableToolCalls } from './externalToolPause';
-import { addReplyToConversation, finalResponseFieldsOf, memoryRecallFieldOf } from './turnFinalResponse';
+import { addReplyToConversation, finalResponseFieldsOf, keepPausedMemoryRecall, memoryRecallFieldOf } from './turnFinalResponse';
 
 // Public config types extracted to types/OrchestratorConfig.ts
 export type {
@@ -952,6 +952,8 @@ export class AgentOSOrchestrator {
       const pauseCalls = externalToolPauseCalls(finalGMIStateForResponse);
       if (pauseCalls) {
         keepStreamContextActive = true;
+        // The continuation's FINAL_RESPONSE carries the record of the hop that served this output.
+        keepPausedMemoryRecall(finalGMIStateForResponse, streamContext);
 
         if (conversationContext) {
           await this.toolResultHandler.persistPendingExternalToolRequest(

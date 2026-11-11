@@ -8,7 +8,8 @@
  * update and the final response no `memoryRecall`, and the GMI's reasoning-trace
  * entry "Cognitive memory context assembled." holds counts and no ids. With
  * `recall.capture: 'metadata+stream'` the stream carries one `METADATA_UPDATE`
- * with `memorySources` and the final response its `memoryRecall`; with
+ * with `memorySources` (the assembly's record) and the final response its
+ * `memoryRecall` (the same record with the serving hop's budget and delivery); with
  * `recall.traceIds` the entry lists the ids. Only the OpenAI provider class is
  * stubbed; every turn is served (no error chunk, the stub's reply as the final
  * text), so the first turn's words are filed before the second recalls them.
@@ -175,7 +176,16 @@ describe('the recall capture on the runtime stream', () => {
 
     const final = finalOf(chunks)!;
     expect((final.memoryRecall as Record<string, unknown> | undefined)?.version).toBe('memory-recall-capture/1');
-    expect(final.memoryRecall).toEqual(streamed);
+    // The update carries the assembly's record; the final response the record of the model hop that served the turn:
+    // the same candidates, with the hop's budget and what reached its model.
+    expect(streamed.budget).toEqual({ requested: 1600, effective: 1600 });
+    expect(streamed.delivery).toBeUndefined();
+    expect(final.memoryRecall).toEqual({
+      ...streamed,
+      budget: { requested: 1600, effective: 1600, promptShareTokens: expect.any(Number), otherContextTokens: 0, hop: 0 },
+      delivery: { memoryBlockTokens: expect.any(Number) },
+    });
+    expect((final.memoryRecall as { delivery: { memoryBlockTokens: number } }).delivery.memoryBlockTokens).toBeGreaterThan(0);
     const json = JSON.stringify(streamed);
     expect(json).not.toContain('5832');
     expect(json).not.toContain('Which parcel locker');
