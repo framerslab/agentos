@@ -393,3 +393,87 @@ describe.each(runtimes)('recalled text as data, on %s', (_name, runtime) => {
     }
   });
 });
+
+describe.each(runtimes)('an anonymous user id, on %s', (_name, runtime) => {
+  it('counts as none when an open session is opened again: it never names another user', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const a = agent(stubbed(key(), runtime));
+    a.session('s1');
+    expect(a.session('s1', { userId: 'anonymous' }).id).toBe('s1');
+    a.session('s2', { userId: 'anonymous' });
+    expect(a.session('s2', { userId: 'guest' }).id).toBe('s2');
+    expect(a.session('s2').id).toBe('s2');
+    expect(() => a.session('s2', { userId: 'ana' })).toThrow(/session 's2' already runs as user 's2'/);
+    await a.close();
+  });
+
+  it('tells a tool the session, sends no end-user id, and gives the tool no passed user id', async () => {
+    const k = key();
+    const s = script('openai', k, { whole: true, replies: askTwice().slice(0, 2) });
+    const { seen, tool } = whoami();
+    const a = agent(stubbed(k, { ...runtime, tools: [tool] }));
+    await a.session('s1', { userId: 'anonymous' }).send('Who am I?');
+    expect(seen).toHaveLength(1);
+    expect(seen[0].userContext).toMatchObject({ userId: 's1', memorySubject: { kind: 'session', id: 's1' } });
+    expect(seen[0].callerTurn?.providerUserId).toBeUndefined();
+    for (const call of s.seen) expect(call.options.userId).toBeUndefined();
+  });
+});
+
+describe.each(runtimes)("a session's stream, on %s", (_name, runtime) => {
+  it('tells both hooks the session, the user, the subject and the agent', async () => {
+    const k = key();
+    script('openai', k, { whole: true, replies: [reply.text('Streamed.')] });
+    const { provider, calls, observed } = recorder();
+    const result = agent(stubbed(k, { ...runtime, name: 'Aria', memoryProvider: provider })).session('s1', { userId: 'ana' }).stream('Hi.');
+    for await (const _part of result.textStream) { /* drain */ }
+    expect(await result.text).toBe('Streamed.');
+    await vi.waitFor(() => expect(observed()).toHaveLength(2));
+    expect(calls.map((call) => call.hook)).toEqual(['getContext', 'observe', 'observe']);
+    for (const call of calls) {
+      expect(call.context).toEqual({ sessionId: 's1', userId: 'ana', subject: { kind: 'user', id: 'ana' }, providerUserId: 'ana', agentId: 'aria', call: 'session' });
+    }
+  });
+});
+
+describe('a session stream that ends in an error on the default runtime', () => {
+  it('is not observed', async () => {
+    const k = key();
+    script('openai', k, { whole: true, replies: [reply.textThenThrow('Sure, here', new Error('connection dropped'))] });
+    const { provider, calls, observed } = recorder();
+    const result = agent(stubbed(k, { memoryProvider: provider })).session('s1').stream('Hi.');
+    try {
+      for await (const _part of result.textStream) { /* drain */ }
+    } catch { /* the stream's error */ }
+    await Promise.resolve(result.text).catch(() => undefined);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(calls.filter((call) => call.hook === 'getContext')).toHaveLength(1);
+    expect(observed()).toHaveLength(0);
+  });
+});
+
+describe.each(runtimes)('a recall that is not the shape a provider returns, on %s', (_name, runtime) => {
+  it('is a failing hook: one memory.hook_failed line, and the turn goes on without recall', async () => {
+    const k = key();
+    const s = script('openai', k, { whole: true, replies: [reply.text('Answered.')] });
+    const malformed = { getContext: async () => ({ items: 'x' }) } as unknown as AgentMemoryProvider;
+    const r = await agent(stubbed(k, { ...runtime, memoryProvider: malformed })).session('s1').send('Hi.');
+    expect(r.text).toBe('Answered.');
+    expect(recallOf(s.seen[0])).toBeUndefined();
+    expect(events('memory.hook_failed')).toEqual([expect.objectContaining({ hook: 'getContext', type: 'TypeError', code: 'MEMORY_HOOK_MALFORMED' })]);
+  });
+});
+
+describe.each(runtimes)("a structured send's repair attempt, on %s", (_name, runtime) => {
+  it("keeps the recall block right before the turn's own message", async () => {
+    const k = key();
+    const s = script('openai', k, { whole: true, replies: [reply.text('{"count":"two"}'), reply.text('{"count":2}')] });
+    const { provider } = recorder({ contextText: 'RECALL-likes-tea' });
+    const r = await agent(stubbed(k, { ...runtime, memoryProvider: provider })).session('s1').send('Count.', { responseSchema: z.object({ count: z.number() }), maxValidationRetries: 1 });
+    expect(r.object).toEqual({ count: 2 });
+    expect(s.seen).toHaveLength(2);
+    const turnMessageOf = (call: ProviderScript['seen'][number]) => call.messages[recallOf(call)!.index + 1];
+    expect(JSON.stringify(turnMessageOf(s.seen[0]).content)).toContain('Count.');
+    expect(turnMessageOf(s.seen[1])).toEqual(turnMessageOf(s.seen[0]));
+  });
+});

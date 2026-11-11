@@ -871,6 +871,23 @@ describe("agent({ runtime: 'gmi' }) resolves the model and builds memory on firs
     await a.close();
   });
 
+  it("an id the agent's learning.anonymousUserIds names is no user either: two sessions opened with it share no memory", async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const k = key(); const emb = key();
+    const s = script('openai', k, { replies: Array.from({ length: 6 }, () => reply.text('Noted.')) });
+    script('openai', emb);
+    vi.stubEnv('OPENAI_API_KEY', emb);
+    const a = agent(base(k, { ...plainMemory(), learning: { anonymousUserIds: ['kiosk'] } }));
+
+    await a.session('kiosk-a', { userId: 'kiosk' }).send(FACT);
+    const before = s.seen.length;
+    await a.session('kiosk-b', { userId: 'kiosk' }).send(QUESTION);
+    const asked = s.seen.slice(before).filter((call) => JSON.stringify(call.messages).includes(QUESTION));
+    expect(asked.length).toBeGreaterThan(0);
+    for (const call of asked) expect(JSON.stringify(call.messages)).not.toContain('vault');
+    await a.close();
+  });
+
   it('a session id opened again after close() starts empty for cognitive memory as for history; opened with a user id, it keeps that user\'s memory', async () => {
     const k = key(); const emb = key();
     const s = script('openai', k, { replies: ['Noted.', 'No idea.', 'Noted.', 'In the vault.'].map((text) => reply.text(text)) });
