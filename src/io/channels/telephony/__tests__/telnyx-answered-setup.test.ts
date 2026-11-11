@@ -16,6 +16,10 @@
  *   webhooks still apply.
  * - A legacy-profile provider sends no command: its host sends them, as the
  *   telephony guide says.
+ * - A notify call hangs up once, ending `hangup-bot`, when the
+ *   `call.speak.ended` webhook of its message's `speak` reports the message
+ *   spoken whole; a message cut short, a `speak` the provider did not send
+ *   and a legacy-profile provider hang nothing up.
  *
  * No network I/O is performed: the provider's fetch is a mock.
  */
@@ -37,14 +41,14 @@ const { publicKey, privateKey } = generateKeyPairSync('ed25519');
 /** The 32 raw key bytes, base64, as the Telnyx portal shows the public key. */
 const PORTAL_PUBLIC_KEY = publicKey.export({ format: 'der', type: 'spki' }).subarray(12).toString('base64');
 
-/** A Telnyx webhook signed the way Telnyx signs it: Ed25519 over `{timestamp}|{body}`. */
-function signedEvent(eventType: string, id: string): WebhookContext {
+/** A Telnyx webhook signed the way Telnyx signs it: Ed25519 over `{timestamp}|{body}`, with `payload` added to the event's payload. */
+function signedEvent(eventType: string, id: string, payload: Record<string, unknown> = {}): WebhookContext {
   const body = JSON.stringify({
     data: {
       event_type: eventType,
       id,
       occurred_at: '2026-11-11T08:00:00.000Z',
-      payload: { call_control_id: CALL_CONTROL_ID, call_session_id: 'session-answered-setup' },
+      payload: { call_control_id: CALL_CONTROL_ID, call_session_id: 'session-answered-setup', ...payload },
     },
   });
   const timestamp = String(Math.floor(Date.now() / 1000));
@@ -185,6 +189,110 @@ describe('a carrier-profile Telnyx call set up when it is answered', () => {
       expect(commands(fetchMock)).toEqual([]);
     } finally {
       manager.dispose();
+    }
+  });
+});
+
+/** The action names of the commands sent to the call, in order. */
+const actions = (fetchMock: ReturnType<typeof telnyxApi>): string[] => commands(fetchMock).map(({ action }) => action);
+
+/** The `client_state` a carrier-profile provider puts on a notify call's `speak`, which Telnyx echoes on the call's later webhooks. */
+async function notifySpeakClientState(): Promise<unknown> {
+  const fetchMock = telnyxApi();
+  const provider = new TelnyxVoiceProvider({ apiKey: 'KEY_answered_setup', connectionId: CONNECTION_ID, publicKey: PORTAL_PUBLIC_KEY, protocol: 'carrier', fetchImpl: fetchMock });
+  await provider.onCallAnswered({ callId: 'call-for-client-state', providerCallId: CALL_CONTROL_ID, direction: 'outbound', mode: 'notify', message: MESSAGE });
+  return commands(fetchMock)[0]?.body.client_state;
+}
+
+describe('a carrier-profile Telnyx notify call hung up after its message', () => {
+  it('hangs up once when the signed call.speak.ended webhook for the message commits to the store', async () => {
+    const { manager, fetchMock } = setUp();
+    const store = new InMemoryTelephonyCallStore();
+    const ended: string[] = [];
+    manager.on((event) => { if (event.type === 'call:ended') ended.push(event.call.state); });
+    try {
+      const call = await manager.initiateCall({ toNumber: '+15550000002', mode: 'notify', message: MESSAGE });
+      await manager.persistCall(call.callId, store);
+      await manager.processWebhookDurable('telnyx', signedEvent('call.answered', 'evt-answered'), store);
+      await vi.waitFor(() => expect(actions(fetchMock)).toEqual(['speak']));
+
+      // Telnyx sends call.speak.ended with the speak command's client_state when it has spoken the message.
+      const spoken = signedEvent('call.speak.ended', 'evt-speak-ended', { client_state: commands(fetchMock)[0]?.body.client_state, status: 'completed' });
+      const result = await manager.processWebhookDurable('telnyx', spoken, store);
+      await vi.waitFor(() => expect(actions(fetchMock)).toEqual(['speak', 'hangup']));
+      await vi.waitFor(() => expect(ended).toEqual(['hangup-bot']));
+      expect(result).toEqual({ accepted: true, applied: 1 });
+      expect(fetchMock.mock.calls.find(([input]) => String(input).endsWith('/actions/hangup'))?.[0]).toBe('https://api.telnyx.com/v2/calls/v3:call-control-answered/actions/hangup');
+      expect(manager.getCall(call.callId)?.state).toBe('hangup-bot');
+
+      // A retried call.speak.ended, and the call.hangup the hangup causes, change nothing and send nothing.
+      expect(await manager.processWebhookDurable('telnyx', spoken, store)).toEqual({ accepted: true, applied: 0 });
+      expect(await manager.processWebhookDurable('telnyx', signedEvent('call.hangup', 'evt-hangup', { hangup_cause: 'normal_clearing' }), store)).toEqual({ accepted: true, applied: 0 });
+      await settle();
+      expect(actions(fetchMock)).toEqual(['speak', 'hangup']);
+      expect(ended).toEqual(['hangup-bot']);
+      expect(manager.getCall(call.callId)?.state).toBe('hangup-bot');
+    } finally {
+      manager.dispose();
+    }
+  });
+
+  it.each(['carrier', 'legacy'] as const)('hangs up once through processWebhook with eventHandling %s', async (eventHandling) => {
+    const { manager, fetchMock } = setUp({ eventHandling });
+    try {
+      const call = await manager.initiateCall({ toNumber: '+15550000002', mode: 'notify', message: MESSAGE });
+      manager.processWebhook('telnyx', signedEvent('call.answered', 'evt-answered'));
+      await vi.waitFor(() => expect(actions(fetchMock)).toEqual(['speak']));
+      const spoken = signedEvent('call.speak.ended', 'evt-speak-ended', { client_state: commands(fetchMock)[0]?.body.client_state, status: 'completed' });
+      manager.processWebhook('telnyx', spoken);
+      manager.processWebhook('telnyx', spoken);
+      await vi.waitFor(() => expect(actions(fetchMock)).toEqual(['speak', 'hangup']));
+      await vi.waitFor(() => expect(manager.getCall(call.callId)?.state).toBe('hangup-bot'));
+      await settle();
+      expect(actions(fetchMock)).toEqual(['speak', 'hangup']);
+    } finally {
+      manager.dispose();
+    }
+  });
+
+  it.each(['call_hangup', 'cancelled_amd'])('hangs nothing up when the message ends with status %s', async (status) => {
+    const { manager, fetchMock } = setUp();
+    try {
+      const call = await manager.initiateCall({ toNumber: '+15550000002', mode: 'notify', message: MESSAGE });
+      manager.processWebhook('telnyx', signedEvent('call.answered', 'evt-answered'));
+      await vi.waitFor(() => expect(actions(fetchMock)).toEqual(['speak']));
+      manager.processWebhook('telnyx', signedEvent('call.speak.ended', 'evt-speak-ended', { client_state: commands(fetchMock)[0]?.body.client_state, status }));
+      await settle();
+      expect(actions(fetchMock)).toEqual(['speak']);
+      expect(manager.getCall(call.callId)?.state).toBe('answered');
+    } finally {
+      manager.dispose();
+    }
+  });
+
+  it('hangs nothing up for a speak the provider did not send, or with a legacy-profile provider', async () => {
+    const clientState = await notifySpeakClientState();
+
+    const carrier = setUp();
+    const legacy = setUp({ protocol: 'legacy' });
+    try {
+      // The host's own speak (TelnyxVoiceProvider.playTts) carries no client_state of the provider's.
+      const carrierCall = await carrier.manager.initiateCall({ toNumber: '+15550000002', mode: 'notify' });
+      carrier.manager.processWebhook('telnyx', signedEvent('call.answered', 'evt-answered'));
+      carrier.manager.processWebhook('telnyx', signedEvent('call.speak.ended', 'evt-speak-ended', { client_state: Buffer.from('host-state').toString('base64'), status: 'completed' }));
+
+      const legacyCall = await legacy.manager.initiateCall({ toNumber: '+15550000002', mode: 'notify', message: MESSAGE });
+      legacy.manager.processWebhook('telnyx', signedEvent('call.answered', 'evt-answered'));
+      legacy.manager.processWebhook('telnyx', signedEvent('call.speak.ended', 'evt-speak-ended', { client_state: clientState, status: 'completed' }));
+
+      await settle();
+      expect(actions(carrier.fetchMock)).toEqual([]);
+      expect(carrier.manager.getCall(carrierCall.callId)?.state).toBe('answered');
+      expect(actions(legacy.fetchMock)).toEqual([]);
+      expect(legacy.manager.getCall(legacyCall.callId)?.state).toBe('answered');
+    } finally {
+      carrier.manager.dispose();
+      legacy.manager.dispose();
     }
   });
 });
