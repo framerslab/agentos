@@ -20,6 +20,10 @@
  *   `call.speak.ended` webhook of its message's `speak` reports the message
  *   spoken whole; a message cut short, a `speak` the provider did not send
  *   and a legacy-profile provider hang nothing up.
+ * - An inbound call the host admits is answered with one `answer` command
+ *   carrying the media stream settings the dial uses, so the `call.answered`
+ *   that follows moves it to `listening` with no `streaming_start`; a refused
+ *   `answer` rejects, and a legacy-profile provider sends nothing.
  *
  * No network I/O is performed: the provider's fetch is a mock.
  */
@@ -84,14 +88,15 @@ function commands(fetchMock: ReturnType<typeof telnyxApi>): Array<{ action: stri
 /** Lets the manager's fire-and-forget setup reach the mock. */
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 
-function setUp(options: { protocol?: 'legacy' | 'carrier'; eventHandling?: VoiceCallConfig['eventHandling']; commandStatus?: number } = {}) {
+function setUp(options: { protocol?: 'legacy' | 'carrier'; eventHandling?: VoiceCallConfig['eventHandling']; commandStatus?: number; streaming?: boolean } = {}) {
   const fetchMock = telnyxApi(options.commandStatus);
   const manager = new CallManager({
     provider: { provider: 'telnyx', config: { apiKey: 'KEY_answered_setup', connectionId: CONNECTION_ID, publicKey: PORTAL_PUBLIC_KEY, fromNumber: '+15550000001' } },
     webhookBaseUrl: 'https://example.test',
-    streaming: { enabled: true },
+    streaming: { enabled: options.streaming ?? true },
     tts: { voice: VOICE },
     eventHandling: options.eventHandling,
+    inboundPolicy: 'open',
   });
   manager.registerProvider(new TelnyxVoiceProvider({
     apiKey: 'KEY_answered_setup',
@@ -405,6 +410,96 @@ describe('a carrier-profile Telnyx notify call hung up after its message', () =>
     } finally {
       carrier.manager.dispose();
       legacy.manager.dispose();
+    }
+  });
+});
+
+const CALLER = '+15550000003';
+const OUR_NUMBER = '+15550000001';
+
+/** The signed `call.initiated` webhook Telnyx posts for a call coming in to the application. */
+const inboundInitiated = (): WebhookContext => signedEvent('call.initiated', 'evt-inbound-initiated', { direction: 'incoming', from: CALLER, to: OUR_NUMBER, state: 'parked' });
+
+/** The stream settings a carrier-profile dial request carries, which the answer of an inbound call carries too. */
+const STREAM_SETTINGS = { stream_url: 'wss://example.test/voice/media-stream', stream_track: 'inbound_track', stream_bidirectional_mode: 'rtp', stream_bidirectional_codec: 'PCMU' };
+
+describe('a carrier-profile Telnyx inbound call answered by AgentOS', () => {
+  it('answers an admitted call once with the media stream settings, and its call.answered starts listening with no other command', async () => {
+    const { manager, fetchMock } = setUp();
+    const store = new InMemoryTelephonyCallStore();
+    try {
+      // The host's webhook route: admit the caller, persist the call, apply the webhook, answer.
+      const initiated = inboundInitiated();
+      const call = manager.handleInboundCall({ providerCallId: CALL_CONTROL_ID, provider: 'telnyx', fromNumber: CALLER, toNumber: OUR_NUMBER });
+      expect(call).not.toBeNull();
+      const callId = call!.callId;
+      await manager.persistCall(callId, store);
+      expect((await manager.processWebhookDurable('telnyx', initiated, store)).accepted).toBe(true);
+      await manager.answerInboundCall(callId);
+
+      expect(commands(fetchMock)).toEqual([{ action: 'answer', body: { command_id: `${callId}:answer`, ...STREAM_SETTINGS } }]);
+      expect(fetchMock.mock.calls.find(([input]) => String(input).endsWith('/actions/answer'))?.[0]).toBe('https://api.telnyx.com/v2/calls/v3:call-control-answered/actions/answer');
+
+      expect(await manager.processWebhookDurable('telnyx', signedEvent('call.answered', 'evt-inbound-answered'), store)).toEqual({ accepted: true, applied: 1 });
+      await settle();
+      expect(manager.getCall(callId)?.state).toBe('listening');
+
+      // An answered call is not answered again, and the stream needs no streaming_start.
+      await manager.answerInboundCall(callId);
+      await settle();
+      expect(actions(fetchMock)).toEqual(['answer']);
+    } finally {
+      manager.dispose();
+    }
+  });
+
+  it.each(['carrier', 'legacy'] as const)('answers an admitted call through processWebhook with eventHandling %s', async (eventHandling) => {
+    const { manager, fetchMock } = setUp({ eventHandling });
+    try {
+      const call = manager.handleInboundCall({ providerCallId: CALL_CONTROL_ID, provider: 'telnyx', fromNumber: CALLER, toNumber: OUR_NUMBER });
+      manager.processWebhook('telnyx', inboundInitiated());
+      await manager.answerInboundCall(call!.callId);
+      manager.processWebhook('telnyx', signedEvent('call.answered', 'evt-inbound-answered'));
+      await settle();
+      expect(commands(fetchMock)).toEqual([{ action: 'answer', body: { command_id: `${call!.callId}:answer`, ...STREAM_SETTINGS } }]);
+      expect(manager.getCall(call!.callId)?.state).toBe('listening');
+    } finally {
+      manager.dispose();
+    }
+  });
+
+  it('answers without stream settings when streaming is off', async () => {
+    const { manager, fetchMock } = setUp({ streaming: false });
+    try {
+      const call = manager.handleInboundCall({ providerCallId: CALL_CONTROL_ID, provider: 'telnyx', fromNumber: CALLER, toNumber: OUR_NUMBER });
+      await manager.answerInboundCall(call!.callId);
+      expect(commands(fetchMock)).toEqual([{ action: 'answer', body: { command_id: `${call!.callId}:answer` } }]);
+    } finally {
+      manager.dispose();
+    }
+  });
+
+  it('rejects when Telnyx refuses the answer, and for a call that is not an admitted inbound call', async () => {
+    const { manager } = setUp({ commandStatus: 422 });
+    try {
+      const call = manager.handleInboundCall({ providerCallId: CALL_CONTROL_ID, provider: 'telnyx', fromNumber: CALLER, toNumber: OUR_NUMBER });
+      await expect(manager.answerInboundCall(call!.callId)).rejects.toThrow('Telnyx answer failed: 422');
+      await expect(manager.answerInboundCall('no-such-call')).rejects.toThrow('no inbound call');
+      const outbound = await manager.initiateCall({ toNumber: '+15550000002', mode: 'conversation' });
+      await expect(manager.answerInboundCall(outbound.callId)).rejects.toThrow('no inbound call');
+    } finally {
+      manager.dispose();
+    }
+  });
+
+  it('sends nothing with a legacy-profile provider, whose host answers the call', async () => {
+    const { manager, fetchMock } = setUp({ protocol: 'legacy' });
+    try {
+      const call = manager.handleInboundCall({ providerCallId: CALL_CONTROL_ID, provider: 'telnyx', fromNumber: CALLER, toNumber: OUR_NUMBER });
+      await manager.answerInboundCall(call!.callId);
+      expect(commands(fetchMock)).toEqual([]);
+    } finally {
+      manager.dispose();
     }
   });
 });
