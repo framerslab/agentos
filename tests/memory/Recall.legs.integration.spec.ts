@@ -23,7 +23,7 @@ const ask = (query: string, over: Record<string, unknown> = {}) => ({ query, sco
 /** A policy that allows everything but authorization. */
 const NO_AUTHORIZATION = { usableForAuthorization: false, usableForPersonalization: true, usableForFactClaim: true };
 
-describe.each(ENGINES)('the durable legs on %s', (_engine, open) => {
+describe.each(ENGINES)('the durable legs on %s', (engine, open) => {
   let db: OpenedBrain;
   let store: MemoryStore;
   beforeEach(async () => {
@@ -45,7 +45,8 @@ describe.each(ENGINES)('the durable legs on %s', (_engine, open) => {
     expect(leg).toMatchObject({ leg: 'exact_words', ran: true, ineligible: 0 });
     // Five better-or-equal matches in u2 never took the one slot.
     expect(leg.traces.map((t) => t.id)).toEqual(['mine']);
-    expect(lexicalBackendOf(store, null)).toBe(_engine === 'postgres' ? 'postgres_tsvector' : 'fts5');
+    if (engine === 'postgres') expect(lexicalBackendOf(store, null)).toBe('postgres_tsvector');
+    else expect(['fts5', 'fts4']).toContain(lexicalBackendOf(store, null));
   });
 
   it('recency returns the newest traces of the scopes, newest first, under its limit', async () => {

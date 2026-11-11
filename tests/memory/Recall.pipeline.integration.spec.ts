@@ -19,10 +19,31 @@ import { U1, WordHashEmbedder, trace } from './helpers/recallFixtures';
 const NEUTRAL: PADState = { valence: 0, arousal: 0, dominance: 0 };
 
 /**
- * The ranking `retrieve()` returned at the commit before the recall pipeline, for the 25 trail notes below: each
- * trace's content prefix and its retrieval score to six places.
+ * The ranking `retrieve()` returned at the commit before the recall pipeline (read from that run's failure), for the
+ * 25 trail notes below: each trace's content prefix and its retrieval score to six places.
  */
-const RANKING_BEFORE_THE_PIPELINE: Array<[string, number]> = [];
+const RANKING_BEFORE_THE_PIPELINE: Array<[string, number]> = [
+  ['Trail note 15', 0.482209],
+  ['Trail note 16', 0.474071],
+  ['Trail note 11', 0.466319],
+  ['Trail note 12', 0.466319],
+  ['Trail note 13', 0.466319],
+  ['Trail note 18', 0.466319],
+  ['Trail note 19', 0.466319],
+  ['Trail note 20', 0.466319],
+  ['Trail note 21', 0.466319],
+  ['Trail note 8:', 0.464362],
+  ['Trail note 22', 0.464362],
+  ['Trail note 1:', 0.458398],
+  ['Trail note 0:', 0.455227],
+  ['Trail note 4:', 0.455227],
+  ['Trail note 5:', 0.455227],
+  ['Trail note 6:', 0.455227],
+  ['Trail note 7:', 0.455227],
+  ['Trail note 9:', 0.455227],
+  ['Trail note 10', 0.455227],
+  ['Trail note 14', 0.455227],
+];
 
 function knowledgeGraph() {
   return {
