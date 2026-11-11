@@ -2913,3 +2913,134 @@ describe('GraphRuntime: a resume from the checkpoint saved before an expansion',
     expect(executeMock.mock.calls.map(([node]) => node.id)).toEqual(['publish']);
   });
 });
+
+// ---------------------------------------------------------------------------
+// The checkpoints a resumed run saves
+// ---------------------------------------------------------------------------
+//
+// A resumed run saves checkpoints by the same rules as stream(): before a node
+// set to 'before' or 'both', and after a node set to 'after' or 'both' or after
+// every node under every_node. A resumed run that stops between nodes, because
+// the host stops reading or the process exits, then resumes from the last node
+// it finished, and a write or external node it ran does not run again.
+
+/** A tool node that sends the release announcement, external as toolNode() makes it. */
+function sendNode(overrides: Partial<GraphNode> = {}): GraphNode {
+  return { ...toolNode('send_announcement'), id: 'send', ...overrides };
+}
+
+/** A tool orchestrator whose tools always succeed, recording each call. */
+function steadyTools(output: unknown): NonNullable<NodeExecutorDeps['toolOrchestrator']> & { calls: string[] } {
+  const calls: string[] = [];
+  return {
+    calls,
+    async processToolCall({ toolCallRequest }) {
+      calls.push(toolCallRequest.toolName);
+      return { success: true, output };
+    },
+  };
+}
+
+/** Reads `stream` up to the first `node_start` of `nodeId`, then stops as `break` does. */
+async function readUntilNodeStarts(stream: AsyncIterable<GraphEvent>, nodeId: string): Promise<GraphEvent[]> {
+  const seen: GraphEvent[] = [];
+  for await (const event of stream) {
+    seen.push(event);
+    if (event.type === 'node_start' && event.nodeId === nodeId) break;
+  }
+  return seen;
+}
+
+describe('GraphRuntime: the checkpoints a resumed run saves', () => {
+  function runtimeWithTools(store: InMemoryCheckpointStore, tools: ReturnType<typeof steadyTools>) {
+    const model = scriptedModel({ [PUBLISH]: 'Published.' });
+    const runtime = new GraphRuntime({
+      checkpointStore: store,
+      nodeExecutor: new NodeExecutor({
+        loopController: new LoopController(),
+        providerCall: model.providerCall,
+        toolOrchestrator: tools,
+      }),
+    });
+    return { runtime, model };
+  }
+
+  it('saves after each node it runs under every_node, so a second resume does not send again', async () => {
+    const store = new InMemoryCheckpointStore();
+    const tools = steadyTools('Sent.');
+    const { runtime, model } = runtimeWithTools(store, tools);
+    const graph = makeLinearGraph('g-resume-every-node', [approveNode(), sendNode(), publishNode()], {
+      checkpointPolicy: 'every_node',
+    });
+
+    const runId = runIdOf(await readUntil(runtime.stream(graph, {}), 'interrupt'));
+
+    // The host stops reading the resumed run once publish starts.
+    const firstResume = await readUntilNodeStarts(runtime.streamResume(graph, runId), 'publish');
+    expect(trace(firstResume)).toEqual([
+      'run_start',
+      'node_end:approve',
+      'edge_transition:approve->send',
+      'node_start:send',
+      'node_end:send',
+      'edge_transition:send->publish',
+      'checkpoint_saved:send',
+      'node_start:publish',
+    ]);
+    expect(await store.latest(runId)).toMatchObject({
+      nodeId: 'send',
+      visitedNodes: ['approve', 'send'],
+      state: { artifacts: { send: 'Sent.' } },
+    });
+
+    const secondResume = await readAll(runtime.streamResume(graph, runId));
+    expect(trace(secondResume)).toEqual([
+      'run_start',
+      'node_start:publish',
+      'node_end:publish',
+      'checkpoint_saved:publish',
+      'run_end',
+    ]);
+    expect(tools.calls).toEqual(['send_announcement']);
+    expect(model.calls).toEqual([PUBLISH]);
+    expect(secondResume[secondResume.length - 1]).toMatchObject({
+      type: 'run_end',
+      finalOutput: { send: 'Sent.', publish: 'Published.' },
+    });
+  });
+
+  it("saves before a node set to 'before' and after a node set to 'after', as stream() does", async () => {
+    const store = new InMemoryCheckpointStore();
+    const tools = steadyTools('Sent.');
+    const { runtime } = runtimeWithTools(store, tools);
+    const graph = makeLinearGraph('g-resume-explicit', [
+      approveNode(),
+      sendNode({ checkpoint: 'before' }),
+      { ...publishNode(), checkpoint: 'after' },
+    ]);
+
+    const runId = runIdOf(await readUntil(runtime.stream(graph, {}), 'interrupt'));
+    const resumed = await readAll(runtime.streamResume(graph, runId));
+
+    expect(trace(resumed)).toEqual([
+      'run_start',
+      'node_end:approve',
+      'edge_transition:approve->send',
+      'checkpoint_saved:send',
+      'node_start:send',
+      'node_end:send',
+      'edge_transition:send->publish',
+      'node_start:publish',
+      'node_end:publish',
+      'checkpoint_saved:publish',
+      'run_end',
+    ]);
+    const [beforeSend, afterPublish] = resumed.filter(
+      (event): event is Extract<GraphEvent, { type: 'checkpoint_saved' }> => event.type === 'checkpoint_saved',
+    );
+    const before = await store.get(beforeSend!.checkpointId);
+    expect(before?.visitedNodes).toEqual(['approve']);
+    expect(before?.nodeResults).not.toHaveProperty('send');
+    expect((await store.get(afterPublish!.checkpointId))?.visitedNodes).toEqual(['approve', 'send', 'publish']);
+  });
+});
