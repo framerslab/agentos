@@ -76,15 +76,16 @@ to `attachMemoryWiki()`.
 Each trace the observer stores records who spoke it in the trace's metadata
 (`speaker: 'user'` or `speaker: 'assistant'`), outside its text and its tags, which
 the store's full-text search reads, so recall never matches a trace by who spoke it.
-The recall block a souled agent adds to a turn gives each trace one line that opens
-with its speaker and the date it was stored, in the wording the memory block uses:
-`[user, 26 days ago, 2026-10-14] I moved to Lisbon`. A chunk of a wiki page is
-labelled `note` and its page id (`[note concepts/notes, 2d ago, 2026-11-07]`), and a
-trace stored before speakers were recorded carries the date alone. A line break in a
-trace's text is rendered as a space, so what someone said can never open a line of
-the block with a label of its own. The block keeps to the turn's memory token budget,
-whole lines first; when even the first line's label is larger than the budget, the
-line is the trace's text alone.
+The recall a souled agent adds to a turn sends each trace as one record of the
+`<memory_recall>` data block, with its speaker and the date it was stored:
+`{"speaker":"user","when":"26 days ago, 2026-10-14","text":"I^moved^to^Lisbon"}`.
+A chunk of a wiki page has the speaker `note` and its page id
+(`"speaker":"note","page":"concepts/notes"`), and a trace stored before speakers were
+recorded carries the date alone. A trace's text is a JSON string with each run of
+whitespace, line breaks included, sent as `^`, so what someone said can never open a
+record of its own. The block keeps to the turn's memory token budget, whole traces
+first; when even the first trace's label is larger than the budget, its record is the
+trace's text alone.
 
 A page the compiler creates gets a summary named from its page id, never copied from
 a trace: `concepts/notes` is `Notes compiled from conversations`, and
