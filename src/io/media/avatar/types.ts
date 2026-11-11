@@ -130,7 +130,7 @@ export interface AvatarGenerationRequest {
     rejectBelowThreshold?: boolean;
     /**
      * Maximum attempts per image when its face drifts or the acceptance check
-     * refuses it: draws in all, the first included. Below 1 counts as 1.
+     * refuses it: draws in all, the first included. Below 1, or NaN, counts as 1.
      */
     maxRegenerationAttempts?: number;
   };
