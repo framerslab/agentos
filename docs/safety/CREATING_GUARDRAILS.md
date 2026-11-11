@@ -102,7 +102,7 @@ interface GuardrailConfig {
 }
 ```
 
-A guard that answers codes lists them all in `reasonCodes`, so a log line can name the code that decided: a code supplied from outside the list (a model's answer, a vendor's label) is written as `unknown`. `PhraseListGuardrail` lists the rule ids of the list it holds, and lists them again on each `reload()`.
+A guard that answers codes declares them all in `reasonCodes`, for the log lines that name the code that decided: such a line writes a code supplied from outside the list (a model's answer, a vendor's label) as `unknown`. No line of this release writes a guard's code yet, so the list is a declaration to make now. `PhraseListGuardrail` lists the rule ids of the list it holds, and lists them again on each `reload()`.
 
 ### evaluateInput(payload)
 
@@ -204,7 +204,7 @@ return holdResult('REVIEW_LINKS', { reasonCode: 'NEEDS_REVIEW' });
 // { action: GuardrailAction.BLOCK, reasonCode: 'NEEDS_REVIEW', hold: { reviewCode: 'REVIEW_LINKS' } }
 ```
 
-The dispatcher treats it as the `BLOCK` it is at every enforcement point, so nothing it keeps back is delivered. A refusal (a `BLOCK` without `hold`) from any other guard outranks it; it outranks every other action. The host stores the content and queues it under `reviewCode` (letters, digits and underscores, at most 64), and reads which it was from `GuardrailInputOutcome.outcome` or `guardrailOutcomeOf()`. A `hold` on `FLAG` or `SANITIZE` is ignored, and the dispatcher writes `guardrail.hold_ignored` once for that guard. List the review codes in `config.reasonCodes` beside the reason codes.
+The dispatcher treats it as the `BLOCK` it is at every enforcement point, so nothing it keeps back is delivered. A refusal (a `BLOCK` without `hold`) from any other guard of the same phase outranks it; it outranks every other action. Cross-agent guards are the exception: they stop at the first `BLOCK`, a hold included. The host stores the content and queues it under `reviewCode` (letters, digits and underscores, at most 64), and reads which it was from `GuardrailInputOutcome.outcome` or `guardrailOutcomeOf()`. A `hold` on `FLAG` or `SANITIZE` is ignored, and the dispatcher writes `guardrail.hold_ignored` once for that guard. List the review codes in `config.reasonCodes` beside the reason codes.
 
 ---
 
@@ -393,7 +393,7 @@ If a Phase 2 guardrail returns **SANITIZE**, the action is **downgraded to FLAG*
 
 After both phases complete, the dispatcher picks the single worst action:
 
-- **BLOCK** (severity 3) takes priority over everything. Among blocks, a refusal (no `hold`) decides over a hold, whatever the registration order; the dispatcher reads every guard of the phase before it picks.
+- **BLOCK** (severity 3) takes priority over everything. Among the blocks of phase 2 and of the tool-call guards, a refusal (no `hold`) decides over a hold, whatever the registration order; the dispatcher reads every guard of the phase before it picks. A `BLOCK` from a phase 1 sanitizer ends the evaluation, a hold included, and cross-agent guards stop at the first `BLOCK`.
 - **FLAG** (severity 2) takes priority over ALLOW.
 - **ALLOW** (severity 0) is the default when no guardrail triggers.
 

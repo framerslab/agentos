@@ -522,7 +522,7 @@ export class ParallelGuardrailDispatcher {
    * Evaluate one TOOL_CALL_REQUEST chunk with the guardrails that evaluate
    * tool calls (`config.evaluateToolCalls`), as {@link wrapOutput} evaluates
    * the tool-call chunks of a stream: in parallel, a SANITIZE applied as a
-   * BLOCK, the first BLOCK in registration order the verdict. Services without
+   * BLOCK, the first refusal in registration order the verdict, else the first hold. Services without
    * the flag are not called.
    *
    * @param services   - Array of guardrail services (already normalized)

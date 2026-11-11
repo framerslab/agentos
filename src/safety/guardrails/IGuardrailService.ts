@@ -392,9 +392,9 @@ export interface GuardrailConfig {
   streamingMode?: 'per-chunk' | 'sentence-buffered';
 
   /**
-   * Every reason code and review code this guard can answer: a closed list. A verdict line writes a code only when
-   * the deciding guard lists it here, or when the dispatcher made the code itself for a closed guard's failure, and
-   * `unknown` otherwise. A guard that lists none has its verdict lines written with `unknown`.
+   * Every reason code and review code this guard can answer: a closed list, declared for the lines that name the code
+   * that decided. Such a line takes a code from this list only, or one the dispatcher made itself for a closed guard's
+   * failure, and writes `unknown` otherwise. No line of this release writes a guard's code; declare the list now.
    * @default undefined
    */
   reasonCodes?: readonly string[];
