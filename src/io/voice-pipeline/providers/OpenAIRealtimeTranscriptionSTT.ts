@@ -737,16 +737,26 @@ class TranscriptionConnection {
   }
 
   /**
+   * Whether the connection takes audio and a commit now: it receives audio and
+   * its socket is open. A socket that is closing sends nothing before its close
+   * is reported, so the session treats it as it treats a reconnect.
+   */
+  takesAudio(): boolean {
+    return this.state === 'open' && this.ws?.readyState === WebSocket.OPEN;
+  }
+
+  /**
    * Commits the input buffer when audio was appended since the last commit
-   * (OpenAI refuses to commit an empty buffer). `endMs` is the session audio
-   * offset the buffer reaches.
+   * (OpenAI refuses to commit an empty buffer), and says whether the commit
+   * went out. `endMs` is the session audio offset the buffer reaches. A socket
+   * that does not send records no commit, so nothing waits for its `committed`.
    */
   commit(endMs: number): boolean {
     if (this.samplesSinceCommit === 0) return false;
+    const eventId = `commit_${this.index}_${this.commitCount + 1}`;
+    if (!this.send({ type: 'input_audio_buffer.commit', event_id: eventId })) return false;
     this.commitCount += 1;
-    const eventId = `commit_${this.index}_${this.commitCount}`;
     this.commits.push({ eventId, startMs: this.uncommittedFromMs ?? endMs, endMs });
-    this.send({ type: 'input_audio_buffer.commit', event_id: eventId });
     this.samplesSinceCommit = 0;
     this.uncommittedFromMs = undefined;
     return true;
@@ -954,7 +964,9 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
    * Ends the current turn: commits the buffer when turn detection is off (or
    * when speech is in progress under server turn detection), then resolves
    * once every committed item's final has arrived, or after `finalTimeoutMs`.
-   * During a reconnect it first waits for the connection that takes over;
+   * During a reconnect, or while the socket is closing and its close has not
+   * been reported, it first waits for the connection that takes over, which
+   * commits the audio held meanwhile;
    * with client commits, the first flush after the rollover age starts the
    * rollover. The session stays open: at its end, flush before `close()` so
    * the last turn gets its final. Under server turn detection, speech is in
@@ -964,9 +976,10 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
    */
   async flush(): Promise<void> {
     if (this.closed) return;
-    const lead = this.lead();
+    const lead = this.receiver();
     if (!lead) {
-      // No connection takes audio now (a reconnect): commit once one opens, and wait for it.
+      // No connection takes audio now (a reconnect, or a socket that is closing before its close is
+      // reported): commit once one takes over, and wait for it.
       if (this.settings.clientCommits) this.commitOnAdopt = true;
       await this.waitAdopted(this.settings.finalTimeoutMs);
       if (this.closed) return;
@@ -984,7 +997,7 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
    * one) or the session closes, or after `timeoutMs`.
    */
   private waitAdopted(timeoutMs: number): Promise<void> {
-    if (this.lead() || this.closed) return Promise.resolve();
+    if (this.receiver() || this.closed) return Promise.resolve();
     return new Promise<void>((resolve) => {
       const finish = (): void => {
         clearTimeout(timer);
@@ -1076,6 +1089,11 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
   /** The oldest connection still receiving audio: its speech events drive `speech_start` and `speech_end`. */
   private lead(): TranscriptionConnection | undefined {
     return this.connections.find((connection) => connection.state === 'open');
+  }
+
+  /** The oldest connection that takes audio and a commit now: a flush commits on it. */
+  private receiver(): TranscriptionConnection | undefined {
+    return this.connections.find((connection) => connection.takesAudio());
   }
 
   private hold(frame: EncodedFrame): void {
