@@ -469,7 +469,7 @@ describe.each(STORES)('per-user pages on %s', (store) => {
         priority: ['better-sqlite3', 'sqljs'],
         quiet: true,
       });
-      // Once armed, the page row's insert is refused inside the write's transaction.
+      // Once armed, the page row's write (its insert, or the update of a row read) is refused inside the transaction.
       let armed = false;
       const through = <T extends object>(target: T, overrides: Partial<Record<keyof T, unknown>>): T =>
         new Proxy(target, {
@@ -485,7 +485,8 @@ describe.each(STORES)('per-user pages on %s', (store) => {
             fn(
               through(trx, {
                 run: (sql: string, params?: unknown[]) => {
-                  if (armed && sql.trimStart().startsWith('INSERT INTO memory_pages')) {
+                  const statement = sql.trimStart();
+                  if (armed && (statement.startsWith('INSERT INTO memory_pages') || statement.startsWith('UPDATE memory_pages'))) {
                     return Promise.reject(new Error('the page row could not be written'));
                   }
                   return trx.run(sql, params);
@@ -1055,6 +1056,7 @@ describe.each(STORES)('scopes kept apart on every path, on %s', (store) => {
         readPageRow: (scopeId, pageId) => memory.readPageRow(scopeId, pageId),
         listPageRows: (scopeId) => memory.listPageRows(scopeId),
         writePageRow: (scopeId, page) => facade._writePageRow.call(memory, scopeId, page),
+        reindexPageRow: (scopeId, pageId, chunksOf) => memory.reindexPageRow(scopeId, pageId, chunksOf),
         deletePageRows: (scopeId, pageId) => memory.deletePageRows(scopeId, pageId),
       },
     });

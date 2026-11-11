@@ -531,6 +531,13 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
    * the compile read, so an earlier answer one session keeps never outlasts a later one.
    */
   const latestAnswers = new Map<string, TurnPolicy>();
+  /** How many times the host's policy has been asked for, in this process: each ask's place in that order. */
+  let asks = 0;
+  /**
+   * For each subject, the place of the ask whose answer {@link latestAnswers} and {@link served} hold: an answer asked
+   * for before it, which the host gives after it, decides its own turn and nothing for the subject.
+   */
+  const answeredAsk = new Map<string, number>();
   /** The sessions whose `off` policy has been said. */
   const offSaid = new Set<string>();
   /** For each scope a turn of this process served under a policy that keeps memory: the policy and the turn's context. */
@@ -567,11 +574,18 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     const session = context.call === 'session' ? context.sessionId : undefined;
     const closesBefore = session !== undefined ? (sessionCloses.get(session) ?? 0) : 0;
     const kept = session !== undefined ? sessionPolicies.get(session)?.get(scopeId) : undefined;
+    const ask = kept === undefined ? ++asks : 0;
     const policy = kept ?? (await askPolicy(hookContext));
-    if (kept === undefined) latestAnswers.set(scopeId, policy);
+    // The subject's answer is the one asked for last, whenever the host gives it: an answer to an earlier ask that
+    // comes after a later one's decides this turn alone.
+    const latest = kept === undefined && ask > (answeredAsk.get(scopeId) ?? 0);
+    if (latest) {
+      answeredAsk.set(scopeId, ask);
+      latestAnswers.set(scopeId, policy);
+    }
     if (policy === 'failed') {
       // A failed answer is the latest: no compile reads an earlier permission for the subject.
-      served.delete(scopeId);
+      if (latest) served.delete(scopeId);
       return policy;
     }
     // Kept only where a hook reads it later: the session's answer for its next turns, the scope's for its compile. An
@@ -582,8 +596,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       sessionPolicies.set(session, ofSession);
     }
     // The compile reads the host's latest answer for the subject: an `off` answer takes back an earlier permission,
-    // and an answer a session keeps from before is no new one.
-    if ((memoryPolicy || screen) && kept === undefined) {
+    // and neither an answer a session keeps from before nor one to an earlier ask is a new one.
+    if ((memoryPolicy || screen) && latest) {
       if (policy.longTerm === 'off') served.delete(scopeId);
       else served.set(scopeId, { policy, context: hookContext });
     }
@@ -691,7 +705,9 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
    * Asked before a scope's traces are compiled. Under a policy hook, a scope no turn of this process was served for,
    * or whose account keeps raw traces only, is not compiled. Under a screen hook, a scope with no turn of this process
    * has no context to screen with, and is not compiled; otherwise each trace's text goes through the hook again: what
-   * it returns is what is compiled, a trace it drops is left out, and a failure stops the scope's compile.
+   * it returns is what is compiled, a trace it drops is left out, and a failure stops the scope's compile. The
+   * account's latest answer is read again once the screen has answered, so an `off` answer given meanwhile stops the
+   * compile.
    */
   const beforeScopeCompile: NonNullable<AttachedWiki['beforeScopeCompile']> = async (scopeId, traces) => {
     const turn = served.get(scopeId);
@@ -709,6 +725,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       }
       kept.push(text === trace.content ? trace : { ...trace, content: text });
     }
+    // The host may have answered again while the screen ran: the compile goes on only under the latest answer.
+    if (memoryPolicy && served.get(scopeId)?.policy.longTerm !== 'compiled') return { skip: 'policy_raw' };
     if (dropped) memoryLog.warn('memory.write_refused', { reason: 'screened' });
     return { traces: kept };
   };

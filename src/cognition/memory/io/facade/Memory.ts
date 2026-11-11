@@ -235,15 +235,27 @@ function assertPageOwnerKey(scopeId: string): void {
   }
 }
 
-/** Writes one page row, or replaces the row the scope holds under that page id. */
-const UPSERT_PAGE_ROW = `INSERT INTO memory_pages
+/** Writes a page row the scope holds no row of that page id for; a row another writer added first is left as it is. */
+const INSERT_NEW_PAGE_ROW = `INSERT INTO memory_pages
        (brain_id, scope, scope_id, page_id, content, content_hash, chunk_ids, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT (brain_id, scope, scope_id, page_id) DO UPDATE SET
-       content = excluded.content,
-       content_hash = excluded.content_hash,
-       chunk_ids = excluded.chunk_ids,
-       updated_at = excluded.updated_at`;
+     ON CONFLICT (brain_id, scope, scope_id, page_id) DO NOTHING`;
+
+/** Replaces a page row only while it holds the text and the chunk list it was read with. */
+const REPLACE_READ_PAGE_ROW = `UPDATE memory_pages
+        SET content = ?, content_hash = ?, chunk_ids = ?, updated_at = ?
+      WHERE brain_id = ? AND scope = ? AND scope_id = ? AND page_id = ? AND content = ? AND chunk_ids = ?`;
+
+/** How many times a page write reads the row again when another writer changed it between the read and the write. */
+const PAGE_WRITE_ATTEMPTS = 5;
+
+/** Thrown inside a page write's transaction when the row is no longer the one read, so the transaction rolls back. */
+class PageRowChangedError extends Error {
+  constructor() {
+    super('the page row changed after it was read');
+    this.name = 'PageRowChangedError';
+  }
+}
 
 /**
  * Standalone recall paths produce backend-specific ranking signals
@@ -269,11 +281,13 @@ function standaloneRecallConfidence(score: number): number {
 
 /**
  * What every facade of one backing store in this process shares, by the Brain's coordination token: the page writes of
- * each conversation scope still running, and the compile's fence (when a compile read last began, the latest time a
- * conversation trace was stamped with, and the times of the traces stamped and not yet stored, with their counts).
+ * each conversation scope still running, the compiles and deletes of each scope still running, and the compile's fence
+ * (when a compile read last began, the latest time a conversation trace was stamped with, and the times of the traces
+ * stamped and not yet stored, with their counts).
  */
 interface SharedCoordination {
   pageWrites: Map<string, Promise<void>>;
+  scopeChanges: Map<string, Promise<void>>;
   compileReadAt: number;
   lastConversationStamp: number;
   unstored: Map<number, number>;
@@ -284,10 +298,35 @@ const sharedCoordination = new WeakMap<object, SharedCoordination>();
 function coordinationOf(token: object): SharedCoordination {
   let shared = sharedCoordination.get(token);
   if (!shared) {
-    shared = { pageWrites: new Map(), compileReadAt: 0, lastConversationStamp: 0, unstored: new Map() };
+    shared = { pageWrites: new Map(), scopeChanges: new Map(), compileReadAt: 0, lastConversationStamp: 0, unstored: new Map() };
     sharedCoordination.set(token, shared);
   }
   return shared;
+}
+
+/**
+ * Runs `work` once the work queued before it under `key` in `queue` has settled, failed or not, and queues it there
+ * for the work that comes next.
+ */
+function oneAtATime<T>(queue: Map<string, Promise<void>>, key: string, work: () => Promise<T>): Promise<T> {
+  const earlier = queue.get(key) ?? Promise.resolve();
+  const run = earlier.then(work, work);
+  const settled = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  queue.set(key, settled);
+  void settled.then(() => {
+    if (queue.get(key) === settled) queue.delete(key);
+  });
+  return run;
+}
+
+/** The error a page write throws when other writers changed the row under each of its attempts. */
+function pageChangedUnderEveryAttempt(): Error {
+  return new Error(
+    `Memory: the page row changed under each of ${PAGE_WRITE_ATTEMPTS} attempts to write it; nothing of this write is kept`,
+  );
 }
 
 /** True for a trace's tags (a JSON array in text) that mark it a chunk of a wiki page. */
@@ -721,6 +760,9 @@ export class Memory {
     } finally {
       unstored?.();
     }
+    // A delete of the scope that read its traces before this one was stored, and removed the registry row meanwhile,
+    // left the trace with no row: the row is written again, which a row already there leaves as it is.
+    if (conversation) await ensureScopeRow(this._brain, this._brain.brainId, scopeId, now);
 
     // The full-text entry, the memory-graph node and the vector index entry.
     await this._afterTraceInsert(newRow);
@@ -756,6 +798,10 @@ export class Memory {
    * @param query   - Natural-language search query.
    * @param options - Optional filters (limit, type, scope, scopeId, minStrength, after, before).
    * @returns Ranked array of {@link ScoredTrace} results.
+   * A call with no scope and no scope id reads the whole brain, every subject's conversation traces among them: the
+   * host's own read of its store. No turn, tool or prompt of a souled agent makes one; pass the scope and a key to read
+   * one subject.
+   *
    * @throws TypeError when `options.scope` is `'conversation'` and no `scopeId` is given: the conversation scope
    *   holds each subject's memory under a key of its own and is read one key at a time, never as a whole.
    */
@@ -1040,6 +1086,14 @@ export class Memory {
       throw new TypeError('Memory.deleteScope: turnUserId must be a non-empty string');
     }
     await this._initPromise;
+    // A conversation scope is deleted after a compile of it that is running, and a compile that comes after waits for
+    // the delete: no page is written from traces the delete took.
+    if (scope === CONVERSATION_SCOPE) return this._oneScopeChangeAtATime(scopeId, () => this._deleteScope(scope, scopeId, only));
+    return this._deleteScope(scope, scopeId, only);
+  }
+
+  /** {@link deleteScope}, its arguments checked. */
+  private async _deleteScope(scope: string, scopeId: string, only: string | undefined): Promise<{ deleted: number }> {
     await fillScopeIds(this._brain.adapter, this._brain.brainId);
     const rows = await this._brain.all<{ id: string; metadata: string | null }>(
       'SELECT id, metadata FROM memory_traces WHERE brain_id = ? AND scope = ? AND scope_id = ?',
@@ -1052,16 +1106,19 @@ export class Memory {
     // The per-trace deletes above took each trace's own copy. A copy filed under the scope whose trace is gone holds
     // the trace's words with no row to find them by: a graph that cannot delete it fails the call.
     if (only === undefined) await this._knowledgeGraph.deleteMemories({ scopes: [{ scope, scopeId }] });
-    // The scope holds no trace now: its registry row goes last, so a call that failed above is made again and finds
-    // it. A scope that still holds a wiki page keeps its row, so whoever walks the registry still finds the page;
-    // the row goes with the call made once the pages are deleted.
+    // The scope's registry row goes last, so a call that failed above is made again and finds it. A scope that still
+    // holds a wiki page keeps its row, so whoever walks the registry still finds the page; the row goes with the call
+    // made once the pages are deleted. A trace stored under the scope after the rows above were read keeps the row too.
     if (only === undefined && scope === CONVERSATION_SCOPE) {
       await this._brain.run(
         `DELETE FROM memory_scopes
           WHERE brain_id = ? AND scope = ? AND scope_id = ?
             AND NOT EXISTS (
               SELECT 1 FROM memory_pages p
-               WHERE p.brain_id = memory_scopes.brain_id AND p.scope = memory_scopes.scope AND p.scope_id = memory_scopes.scope_id)`,
+               WHERE p.brain_id = memory_scopes.brain_id AND p.scope = memory_scopes.scope AND p.scope_id = memory_scopes.scope_id)
+            AND NOT EXISTS (
+              SELECT 1 FROM memory_traces t
+               WHERE t.brain_id = memory_scopes.brain_id AND t.scope = memory_scopes.scope AND t.scope_id = memory_scopes.scope_id)`,
         [this._brain.brainId, scope, scopeId],
       );
     }
@@ -1247,17 +1304,18 @@ export class Memory {
    * page's old chunks are deleted for good, the new ones are filed as traces under the scope's key with the tags
    * `wiki` and `page:<id>`, and the row lists them; without, the row's content is replaced and its chunks are kept.
    * With `chunks` and `keepChunksIfUnchanged`, the stored row is compared once the scope's earlier page writes have
-   * settled: a row whose `contentHash` is the one given keeps its chunks, and any other row gets the new ones. With
-   * `ifContentHash`, nothing is written unless the stored row's `contentHash` is that one when the write runs; the
-   * result then says `skipped`.
+   * settled: a row whose `contentHash` is the one given keeps its chunks, and any other row gets the new ones.
    * The scope's registry row, the new chunks, the page row and the delete of the old chunks are one transaction
    * where the adapter has them; where it has none they run in that order, so the row never lists a chunk that is
-   * not stored.
+   * not stored. The row is replaced only while it holds the text and the chunks the write read: a writer in another
+   * process that changed it meanwhile makes the write read it again and start over, so no chunk that writer filed is
+   * left unlisted.
    *
    * @returns The ids of the chunks the row lists.
    * @throws TypeError when `scopeId` is not the conversation key of a user or of a session.
    * @throws InvalidWikiPageIdError for a refused page id.
    * @throws When the knowledge graph cannot delete the old chunks' copies: nothing is changed.
+   * @throws Error when other writers changed the row under each of the write's attempts.
    */
   async writePageRow(
     scopeId: string,
@@ -1267,9 +1325,8 @@ export class Memory {
       contentHash: string;
       chunks?: ReadonlyArray<MemoryPageChunk>;
       keepChunksIfUnchanged?: boolean;
-      ifContentHash?: string;
     },
-  ): Promise<{ chunkIds: string[]; skipped?: true }> {
+  ): Promise<{ chunkIds: string[] }> {
     assertPageOwnerKey(scopeId);
     assertWikiPageId(page.pageId);
     await this._initPromise;
@@ -1277,27 +1334,71 @@ export class Memory {
   }
 
   /**
-   * Runs `work` once every earlier page write or page delete of the same scope on this facade has settled, so two
-   * writes of one page made at once are made one after the other: the second reads the chunks the first wrote, and
-   * deletes them. Writers in other processes are not ordered by it.
+   * Files a page's chunks again from the text its row holds when the write runs, and keeps that text: a page another
+   * write changed after a caller listed it is chunked as it is now, and never written back as it was listed. The old
+   * chunks are deleted for good, as {@link writePageRow} deletes them.
+   *
+   * @param chunksOf - The chunks of a row's stored text; null when the text does not parse, which writes nothing.
+   * @returns The ids of the chunks the row lists and of the chunks it listed before; null when the scope holds no page
+   *   of that id or `chunksOf` answered null.
+   * @throws TypeError when `scopeId` is not the conversation key of a user or of a session.
+   * @throws InvalidWikiPageIdError for a refused page id.
    */
-  private _onePageWriteAtATime<T>(scopeId: string, work: () => Promise<T>): Promise<T> {
-    const pageWrites = coordinationOf(this._brain.coordinationToken).pageWrites;
-    const earlier = pageWrites.get(scopeId) ?? Promise.resolve();
-    const run = earlier.then(work, work);
-    const settled = run.then(
-      () => undefined,
-      () => undefined,
-    );
-    pageWrites.set(scopeId, settled);
-    void settled.then(() => {
-      if (pageWrites.get(scopeId) === settled) pageWrites.delete(scopeId);
+  async reindexPageRow(
+    scopeId: string,
+    pageId: string,
+    chunksOf: (content: string) => ReadonlyArray<MemoryPageChunk> | null,
+  ): Promise<{ chunkIds: string[]; removed: string[] } | null> {
+    assertPageOwnerKey(scopeId);
+    assertWikiPageId(pageId);
+    await this._initPromise;
+    return this._onePageWriteAtATime(scopeId, async () => {
+      for (let attempt = 1; ; attempt += 1) {
+        const prior = await this._readPageRecord(scopeId, pageId);
+        if (!prior) return null;
+        const chunks = chunksOf(prior.content);
+        if (!chunks) return null;
+        const written = await this._replacePageRow(
+          scopeId,
+          { pageId, content: prior.content, contentHash: prior.content_hash, chunks },
+          prior,
+        );
+        if (written) return { chunkIds: written.chunkIds, removed: pageRowOf(prior).chunkIds };
+        if (attempt >= PAGE_WRITE_ATTEMPTS) throw pageChangedUnderEveryAttempt();
+      }
     });
-    return run;
   }
 
+  /**
+   * Runs `work` once every earlier page write or page delete of the same scope on this facade has settled, so two
+   * writes of one page made at once are made one after the other: the second reads the chunks the first wrote, and
+   * deletes them. Writers in other processes are not ordered by it; a write's compare with the row it read is.
+   */
+  private _onePageWriteAtATime<T>(scopeId: string, work: () => Promise<T>): Promise<T> {
+    return oneAtATime(coordinationOf(this._brain.coordinationToken).pageWrites, scopeId, work);
+  }
 
-  /** {@link writePageRow}, once the scope's earlier page writes have settled. */
+  /**
+   * Runs `work` once every earlier compile, scope delete and page delete of the same scope on the facades of this store
+   * in this process has settled: a compile's page is never written from traces a delete took while it ran, and a delete
+   * made while a compile runs finds the page that compile writes. Writers in other processes are not ordered by it.
+   */
+  private _oneScopeChangeAtATime<T>(scopeId: string, work: () => Promise<T>): Promise<T> {
+    return oneAtATime(coordinationOf(this._brain.coordinationToken).scopeChanges, scopeId, work);
+  }
+
+  /** One page row as the database holds it, its chunk list as stored text; null when the scope holds no such page. */
+  private async _readPageRecord(scopeId: string, pageId: string): Promise<PageRowRecord | null> {
+    const row = await this._brain.get<PageRowRecord>(
+      `SELECT page_id, content, content_hash, chunk_ids, updated_at
+         FROM memory_pages
+        WHERE brain_id = ? AND scope = ? AND scope_id = ? AND page_id = ?`,
+      [this._brain.brainId, CONVERSATION_SCOPE, scopeId, pageId],
+    );
+    return row ?? null;
+  }
+
+  /** {@link writePageRow}, once the scope's earlier page writes have settled: read, write, and read again on a change. */
   private async _writePageRow(
     scopeId: string,
     page: {
@@ -1306,37 +1407,79 @@ export class Memory {
       contentHash: string;
       chunks?: ReadonlyArray<MemoryPageChunk>;
       keepChunksIfUnchanged?: boolean;
-      ifContentHash?: string;
     },
-  ): Promise<{ chunkIds: string[]; skipped?: true }> {
+  ): Promise<{ chunkIds: string[] }> {
+    for (let attempt = 1; ; attempt += 1) {
+      const prior = await this._readPageRecord(scopeId, page.pageId);
+      const written = await this._replacePageRow(scopeId, page, prior);
+      if (written) return written;
+      if (attempt >= PAGE_WRITE_ATTEMPTS) throw pageChangedUnderEveryAttempt();
+    }
+  }
+
+  /**
+   * One attempt of a page write over the row `prior` as it was read (null: no row). The row is written only while
+   * it still holds that text and that chunk list; when another writer changed it, nothing of this write is kept and
+   * the answer is null.
+   */
+  private async _replacePageRow(
+    scopeId: string,
+    page: {
+      pageId: string;
+      content: string;
+      contentHash: string;
+      chunks?: ReadonlyArray<MemoryPageChunk>;
+      keepChunksIfUnchanged?: boolean;
+    },
+    prior: PageRowRecord | null,
+  ): Promise<{ chunkIds: string[] } | null> {
     const brainId = this._brain.brainId;
     const now = Date.now();
-    const prior = await this.readPageRow(scopeId, page.pageId);
-    const old = prior?.chunkIds ?? [];
-    // A write made from a page read earlier is not made over a row another write changed since.
-    if (page.ifContentHash !== undefined && prior?.contentHash !== page.ifContentHash) return { chunkIds: old, skipped: true };
+    const old = prior ? pageRowOf(prior).chunkIds : [];
     const transactions = this._brain.adapter.capabilities?.has?.('transactions') === true;
-    const upsert = (db: Pick<StorageAdapter, 'run'>, chunkIds: readonly string[]) =>
-      db.run(UPSERT_PAGE_ROW, [
-        brainId,
-        CONVERSATION_SCOPE,
-        scopeId,
-        page.pageId,
-        page.content,
-        page.contentHash,
-        JSON.stringify(chunkIds),
-        now,
-      ]);
+    /** Writes the row over `prior`; throws {@link PageRowChangedError} when the row is no longer the one read. */
+    const replace = async (db: Pick<StorageAdapter, 'run'>, chunkIds: readonly string[]): Promise<void> => {
+      const listed = JSON.stringify(chunkIds);
+      const result = prior
+        ? await db.run(REPLACE_READ_PAGE_ROW, [
+            page.content,
+            page.contentHash,
+            listed,
+            now,
+            brainId,
+            CONVERSATION_SCOPE,
+            scopeId,
+            page.pageId,
+            prior.content,
+            prior.chunk_ids,
+          ])
+        : await db.run(INSERT_NEW_PAGE_ROW, [
+            brainId,
+            CONVERSATION_SCOPE,
+            scopeId,
+            page.pageId,
+            page.content,
+            page.contentHash,
+            listed,
+            now,
+          ]);
+      if (result.changes !== 1) throw new PageRowChangedError();
+    };
 
     // Read after the scope's earlier writes settled: a body the row holds now keeps the chunks the row lists.
-    const unchanged = page.keepChunksIfUnchanged === true && prior != null && prior.contentHash === page.contentHash;
+    const unchanged = page.keepChunksIfUnchanged === true && prior !== null && prior.content_hash === page.contentHash;
     if (page.chunks === undefined || unchanged) {
       const keep = async (db: Pick<StorageAdapter, 'run'>): Promise<void> => {
         await ensureScopeRow(db, brainId, scopeId, now);
-        await upsert(db, old);
+        await replace(db, old);
       };
-      if (transactions) await this._brain.transaction(keep);
-      else await keep(this._brain);
+      try {
+        if (transactions) await this._brain.transaction(keep);
+        else await keep(this._brain);
+      } catch (error) {
+        if (error instanceof PageRowChangedError) return null;
+        throw error;
+      }
       return { chunkIds: old };
     }
 
@@ -1368,11 +1511,19 @@ export class Memory {
     const write = async (db: Pick<StorageAdapter, 'run'>): Promise<void> => {
       await ensureScopeRow(db, brainId, scopeId, now);
       for (const row of rows) await this._insertTraceRow(db, row);
-      await upsert(db, chunkIds);
+      await replace(db, chunkIds);
       await deleteTraceRows(db, brainId, old);
     };
-    if (transactions) await this._brain.transaction(write);
-    else await write(this._brain);
+    try {
+      if (transactions) await this._brain.transaction(write);
+      else await write(this._brain);
+    } catch (error) {
+      if (!(error instanceof PageRowChangedError)) throw error;
+      // The row changed after it was read. A transaction took this attempt's chunks back with it; without one, they
+      // are deleted here, before the write reads the row again.
+      if (!transactions) await deleteTraceRows(this._brain, brainId, chunkIds);
+      return null;
+    }
 
     for (const row of rows) await this._afterTraceInsert(row);
     for (const id of old) {
@@ -1402,7 +1553,10 @@ export class Memory {
     assertPageOwnerKey(scopeId);
     if (pageId !== undefined) assertWikiPageId(pageId);
     await this._initPromise;
-    return this._onePageWriteAtATime(scopeId, () => this._deletePageRows(scopeId, pageId));
+    // After a compile of the scope that is running: the page it writes is one of the pages deleted.
+    return this._oneScopeChangeAtATime(scopeId, () =>
+      this._onePageWriteAtATime(scopeId, () => this._deletePageRows(scopeId, pageId)),
+    );
   }
 
   /** {@link deletePageRows}, once the scope's earlier page writes have settled. */
@@ -1544,7 +1698,7 @@ export class Memory {
     let failure: unknown;
     for (const target of await this._scopesToCompile(opts?.scopes)) {
       try {
-        const skip = await this._compileScope(wiki, target, reason, aggregate);
+        const skip = await this._oneScopeChangeAtATime(target.scopeId, () => this._compileScope(wiki, target, reason, aggregate));
         if (skip) skipped.add(skip);
       } catch (error) {
         const why = wiki.compileSkipReasonOf?.(error);

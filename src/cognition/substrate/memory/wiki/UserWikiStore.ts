@@ -30,10 +30,17 @@ export interface UserWikiPagesPort {
       chunks?: ReadonlyArray<PageChunk>;
       /** Keep the row's chunks when the stored body's hash is `contentHash`, compared at the write itself. */
       keepChunksIfUnchanged?: boolean;
-      /** Write nothing unless the stored row's hash is this one when the write runs. */
-      ifContentHash?: string;
     },
-  ): Promise<{ chunkIds: string[]; skipped?: true }>;
+  ): Promise<{ chunkIds: string[] }>;
+  /**
+   * File a page's chunks again from the text its row holds when the write runs, keeping that text; null when the
+   * scope holds no such page or `chunksOf` answers null.
+   */
+  reindexPageRow(
+    scopeId: string,
+    pageId: string,
+    chunksOf: (content: string) => ReadonlyArray<PageChunk> | null,
+  ): Promise<{ chunkIds: string[]; removed: string[] } | null>;
   deletePageRows(scopeId: string, pageId?: string): Promise<{ pages: number; chunks: number }>;
 }
 
@@ -118,8 +125,10 @@ export class UserWikiStore implements WikiPageStorePort {
 
   /**
    * A page's chunks are filed when the page is written, so a plain call indexes nothing and reports every page as
-   * skipped. With `force`, each page's chunks are written again from its body; `removed` lists the old chunk ids. A
-   * page another write changed after the listing keeps that write's text and chunks, and is listed as skipped.
+   * skipped. With `force`, each page's chunks are written again from the text its row holds when its write runs, and
+   * that text is kept: a page another write changed after the listing is chunked as that write left it, and never
+   * written back as it was listed. `removed` lists the old chunk ids. A page deleted after the listing, or whose text
+   * does not parse, is listed as skipped.
    */
   async index(opts?: { force?: boolean }): Promise<IndexResult> {
     const result: IndexResult = { indexed: [], skipped: [], removed: [] };
@@ -129,28 +138,19 @@ export class UserWikiStore implements WikiPageStorePort {
       return result;
     }
     for (const row of rows) {
-      let page: WikiPage;
-      try {
-        page = parsePage(row.pageId, row.content);
-      } catch {
-        result.skipped.push(row.pageId);
-        continue;
-      }
-      // Written only over the row as it was listed: a page another write changed since keeps that write's text and
-      // chunks, and is reported as skipped.
-      const written = await this.pages.writePageRow(this.scopeId, {
-        pageId: row.pageId,
-        content: row.content,
-        contentHash: row.contentHash,
-        chunks: this.chunksOf(page),
-        ifContentHash: row.contentHash,
+      const written = await this.pages.reindexPageRow(this.scopeId, row.pageId, (content) => {
+        try {
+          return this.chunksOf(parsePage(row.pageId, content));
+        } catch {
+          return null;
+        }
       });
-      if (written.skipped) {
+      if (!written) {
         result.skipped.push(row.pageId);
         continue;
       }
       result.indexed.push(row.pageId);
-      result.removed.push(...row.chunkIds);
+      result.removed.push(...written.removed);
     }
     return result;
   }

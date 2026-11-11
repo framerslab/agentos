@@ -51,6 +51,7 @@ function fakeMemory() {
     readPageRow: async () => null,
     listPageRows: async () => [],
     writePageRow: async () => ({ chunkIds: [] }),
+    reindexPageRow: async () => null,
     deletePageRows: async () => ({ pages: 0, chunks: 0 }),
     pageExistsOutside: async () => false,
     attachWiki: (wiki: any) => {
