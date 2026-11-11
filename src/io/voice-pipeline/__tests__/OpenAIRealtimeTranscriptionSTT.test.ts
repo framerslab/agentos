@@ -881,6 +881,37 @@ describe('OpenAIRealtimeTranscriptionSTT: reconnects, failures, flush and close'
     session.close();
   });
 
+  it('flush on a socket that is closing keeps the commit for the connection that takes over, and waits for its final', async () => {
+    fakeClock();
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY, turnDetection: null });
+    const session = await stt.startSession();
+    const log = record(session);
+    const first = Sockets.instances[0];
+    session.pushAudio(frame(2_400)); // 100 ms, sent
+    first.readyState = 2; // CLOSING: the server is ending the socket, and the close event has not come
+    session.pushAudio(frame(4_800)); // 200 ms the closing socket does not take: held
+    let flushed = false;
+    const flushing = session.flush().then(() => {
+      flushed = true;
+    });
+    expect(sentOfType(first, 'input_audio_buffer.commit')).toEqual([]);
+    first.drop();
+    await settle();
+    expect(flushed).toBe(false); // the close of the closing socket does not end the wait
+    await vi.advanceTimersByTimeAsync(100);
+    await settle();
+    const next = Sockets.instances[1];
+    expect(sentSamples(next).map((samples) => samples.length)).toEqual([4_800]);
+    expect(sentOfType(next, 'input_audio_buffer.commit')).toHaveLength(1);
+    expect(flushed).toBe(false);
+    next.serve({ type: 'input_audio_buffer.committed', item_id: 'item_C', previous_item_id: null });
+    next.serve({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'item_C', content_index: 0, transcript: 'Held words.' });
+    await flushing;
+    expect(log.transcripts.at(-1)).toMatchObject({ itemId: 'item_C', isFinal: true, text: 'Held words.' });
+    expect(log.errors).toEqual([]);
+    session.close();
+  });
+
   it('abandons a reconnect still connecting when the session closes, and leaves no timer behind', async () => {
     fakeClock();
     const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY });
