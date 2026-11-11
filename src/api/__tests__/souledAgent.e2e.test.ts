@@ -217,11 +217,12 @@ describe('text migrated from a legacy MEMORY.md', () => {
     script('openai', k, { whole: true, replies: [reply.text('Notes.'), reply.text('More notes.')] });
     const a = await souledAgent({ ...stubbed(k), soul: dir } as never);
     try {
-      // What the user said is folded into a page, whose summary is named from its id alone.
-      await a.memory!.remember(said, { type: 'episodic', scope: 'persona', scopeId: 'aria-1' });
+      // What the user said is folded into that user's page, which is a row of the store and in no catalog.
+      const user = conversationScopeKey('aria-1', { kind: 'user', id: 'u1' });
+      await a.memory!.remember(said, { type: 'episodic', scope: 'conversation', scopeId: user });
       expect((await a.memory!.compileWiki()).pagesWritten).toEqual(['concepts/notes']);
       await new Promise((resolve) => setTimeout(resolve, 5));
-      await a.memory!.remember('Johnny likes oolong too', { type: 'episodic', scope: 'persona', scopeId: 'aria-1' });
+      await a.memory!.remember('Johnny likes oolong too', { type: 'episodic', scope: 'conversation', scopeId: user });
       expect((await a.memory!.compileWiki()).pagesWritten).toEqual(['concepts/notes']);
     } finally {
       await a.close();

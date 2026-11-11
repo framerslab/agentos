@@ -5,7 +5,11 @@ import * as path from 'node:path';
 import { attachMemoryWiki } from '../attachMemoryWiki.js';
 import { Memory } from '../facade/Memory.js';
 import { ReadMemoryPageTool } from '../tools/ReadMemoryPageTool.js';
-import { ensureMemoryDir, InvalidWikiPageIdError, type WikiPage } from '../../../substrate/memory/wiki/index.js';
+import { ensureMemoryDir, InvalidWikiPageIdError, WikiCompiler, type WikiPage } from '../../../substrate/memory/wiki/index.js';
+import { conversationScopeKey } from '../../retrieval/store/conversationScopeKey.js';
+
+/** One user's scope under the agent every test wires. */
+const SUBJECT = conversationScopeKey('a1', { kind: 'user', id: 'johnny' });
 
 // The wiki is <root>/workspace/memory. A Markdown file sits one level above it, another two levels above.
 let root: string;
@@ -121,7 +125,10 @@ describe('wiki page ids stay inside the memory folder', () => {
 
   it('a compile skips a cluster assignment whose page id is refused and reports it', async () => {
     const prompts: string[] = [];
-    const { memory } = await wire({
+    const { store } = await wire();
+    // The compiler against the folder's own store: a refused id reaches no file.
+    const compiler = new WikiCompiler({
+      store,
       llm: async (prompt) => {
         prompts.push(prompt);
         return 'Merged facts.';
@@ -130,9 +137,10 @@ describe('wiki page ids stay inside the memory folder', () => {
         { pageId: '../stolen', traceIds: ['ta'] },
         { pageId: 'concepts/kept', traceIds: ['tb'] },
       ],
+      now: () => '2026-10-12T00:00:00.000Z',
     });
 
-    const result = await memory.attached().compiler.compile({
+    const result = await compiler.compile({
       traces: [
         { id: 'ta', content: 'Fact a.', tags: [], entities: [] },
         { id: 'tb', content: 'Fact b.', tags: [], entities: [] },
@@ -164,18 +172,61 @@ describe('wiki page ids stay inside the memory folder', () => {
 });
 
 describe('a compile goes on past a page the file system will not take', () => {
-  it('reports a name too long for a file and a page it cannot write, writes the rest and moves the watermark', async () => {
+  it('reports a name too long for a file and a page it cannot write, and writes the rest', async () => {
+    const { store } = await wire();
+    // A file where the folder of the page blocked/page would go, so that page cannot be written.
+    fs.writeFileSync(path.join(memoryDir, 'blocked'), 'Not a folder.\n');
+    const longId = `concepts/${'x'.repeat(300)}`;
+    const prompts: string[] = [];
+    // The compiler against the folder's own store, where a path can be refused by the file system.
+    const compiler = new WikiCompiler({
+      store,
+      llm: async (prompt) => {
+        prompts.push(prompt);
+        return 'Merged facts.';
+      },
+      cluster: async (traces) =>
+        traces.map((t) => ({
+          pageId: t.content.startsWith('Long') ? longId : t.content.startsWith('Blocked') ? 'blocked/page' : 'concepts/kept',
+          traceIds: [t.id],
+        })),
+      now: () => '2026-10-12T00:00:00.000Z',
+    });
+
+    const result = await compiler.compile({
+      traces: [
+        { id: 't1', content: 'Long fact.', tags: [], entities: [] },
+        { id: 't2', content: 'Blocked fact.', tags: [], entities: [] },
+        { id: 't3', content: 'Kept fact.', tags: [], entities: [] },
+      ],
+      reason: 'explicit',
+    });
+
+    expect(result.pagesWritten).toEqual(['concepts/kept']);
+    expect(result.tracesConsumed).toBe(1);
+    expect(result.conflicts).toHaveLength(2);
+    expect(result.conflicts).toEqual(
+      expect.arrayContaining([
+        { pageId: longId, note: expect.stringContaining('refused') },
+        { pageId: 'blocked/page', note: expect.stringContaining('write failed') },
+      ]),
+    );
+    // The long id is refused before its merge prompt; the blocked page is merged, then its write fails.
+    expect(prompts).toHaveLength(2);
+    expect(prompts.some((p) => p.includes('Long fact.'))).toBe(false);
+    expect(fs.readFileSync(path.join(memoryDir, 'concepts', 'kept.md'), 'utf8')).toContain('Merged facts.');
+  });
+
+  it("moves the scope's watermark past a batch that held a refused page, so the next compile does not meet it again", async () => {
     const memory = await Memory.createSqlite(path.join(root, 'memory.sqlite'), {
       graph: false,
       selfImprove: false,
       decay: false,
     });
     try {
-      // A file where the folder of the page blocked/page would go, so that page cannot be written.
-      fs.writeFileSync(path.join(memoryDir, 'blocked'), 'Not a folder.\n');
       const longId = `concepts/${'x'.repeat(300)}`;
       const prompts: string[] = [];
-      const { store } = await attachMemoryWiki({
+      await attachMemoryWiki({
         memory,
         memoryDir,
         agentId: 'a1',
@@ -186,41 +237,32 @@ describe('a compile goes on past a page the file system will not take', () => {
         chunk: (t) => [{ text: t }],
         now: () => '2026-10-12T00:00:00.000Z',
         cluster: async (traces) =>
-          traces.map((t) => ({
-            pageId: t.content.startsWith('Long') ? longId : t.content.startsWith('Blocked') ? 'blocked/page' : 'concepts/kept',
-            traceIds: [t.id],
-          })),
+          traces.map((t) => ({ pageId: t.content.startsWith('Long') ? longId : 'concepts/kept', traceIds: [t.id] })),
       });
-      await memory.remember('Long fact.');
-      await memory.remember('Blocked fact.');
-      await memory.remember('Kept fact.');
+      await memory.remember('Long fact.', { scope: 'conversation', scopeId: SUBJECT });
+      await memory.remember('Kept fact.', { scope: 'conversation', scopeId: SUBJECT });
 
       const result = await memory.compileWiki({ reason: 'explicit' });
 
       expect(result.pagesWritten).toEqual(['concepts/kept']);
       expect(result.tracesConsumed).toBe(1);
-      expect(result.conflicts).toHaveLength(2);
-      expect(result.conflicts).toEqual(
-        expect.arrayContaining([
-          { pageId: longId, note: expect.stringContaining('refused') },
-          { pageId: 'blocked/page', note: expect.stringContaining('write failed') },
-        ]),
-      );
-      // The long id is refused before its merge prompt; the blocked page is merged, then its write fails.
-      expect(prompts).toHaveLength(2);
-      expect(prompts.some((p) => p.includes('Long fact.'))).toBe(false);
-      expect(fs.readFileSync(path.join(memoryDir, 'concepts', 'kept.md'), 'utf8')).toContain('Merged facts.');
-      expect(await store.readMetaWatermark()).not.toBeNull();
+      expect(result.conflicts).toEqual([{ pageId: longId, note: expect.stringContaining('refused') }]);
+      expect(prompts).toHaveLength(1);
+      expect(prompts[0]).not.toContain('Long fact.');
+      // The page is a row of the subject's scope, never a file of the folder.
+      expect((await memory.readPageRow(SUBJECT, 'concepts/kept'))?.content).toContain('Merged facts.');
+      expect(fs.existsSync(path.join(memoryDir, 'concepts', 'kept.md'))).toBe(false);
+      // The watermark is the scope's own, in its registry row.
+      expect((await memory.listScopes()).find((row) => row.scopeId === SUBJECT)?.compiledAt).not.toBeNull();
 
-      // The watermark moved past the batch, so the next compile does not run into the same pages.
       expect(await memory.compileWiki({ reason: 'explicit' })).toEqual({ pagesWritten: [], tracesConsumed: 0, conflicts: [] });
-      expect(prompts).toHaveLength(2);
+      expect(prompts).toHaveLength(1);
     } finally {
       await memory.close();
     }
   });
 
-  it('indexes no page a compile wrote into the folder, whether or not its catalog write failed', async () => {
+  it('a page whose row was written is recalled after the compile, with no index.md to refresh', async () => {
     const memory = await Memory.createSqlite(path.join(root, 'memory.sqlite'), {
       graph: false,
       selfImprove: false,
@@ -228,7 +270,7 @@ describe('a compile goes on past a page the file system will not take', () => {
     });
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     try {
-      // A folder where the catalog, index.md, goes: the page's file is written, then refreshing the catalog fails.
+      // A folder where the catalog, index.md, goes: the attach cannot refresh it, and a subject's page needs none.
       fs.rmSync(path.join(memoryDir, 'index.md'));
       fs.mkdirSync(path.join(memoryDir, 'index.md'));
       await attachMemoryWiki({
@@ -240,19 +282,20 @@ describe('a compile goes on past a page the file system will not take', () => {
         now: () => '2026-10-12T00:00:00.000Z',
         cluster: async (traces) => [{ pageId: 'concepts/kept', traceIds: traces.map((t) => t.id) }],
       });
-      await memory.remember('Kept fact.');
+      await memory.remember('Kept fact.', { scope: 'conversation', scopeId: SUBJECT });
 
       const result = await memory.compileWiki({ reason: 'explicit' });
 
-      expect(result.pagesWritten).toEqual([]);
-      expect(result.conflicts).toEqual([{ pageId: 'concepts/kept', note: expect.stringContaining('write failed') }]);
-      expect(fs.readFileSync(path.join(memoryDir, 'concepts', 'kept.md'), 'utf8')).toContain('Merged facts.');
-      // The page on disk lists the traces it was compiled from, so it is no operator page: it is not indexed for
-      // recall. The operator's own page is.
-      const traces = await memory.recentTraces(0, { limit: 50 });
-      expect(traces.some((t) => t.tags.includes('page:concepts/kept'))).toBe(false);
-      expect(traces.some((t) => t.content.includes('Merged facts.'))).toBe(false);
-      expect(traces.some((t) => t.tags.includes('page:page') && t.content.includes('Inside the wiki.'))).toBe(true);
+      expect(result.pagesWritten).toEqual(['concepts/kept']);
+      expect(result.conflicts).toEqual([]);
+      expect(fs.existsSync(path.join(memoryDir, 'concepts', 'kept.md'))).toBe(false);
+      // The page's chunk is filed under the subject's key with the compile's write, and recalled there alone.
+      const recalled = await memory.recall('Merged', { scope: 'conversation', scopeId: SUBJECT });
+      expect(recalled.map((r) => [r.trace.content.trim(), r.trace.tags])).toEqual([['Merged facts.', ['wiki', 'page:concepts/kept']]]);
+      expect(await memory.recall('Merged', { scope: 'conversation', scopeId: conversationScopeKey('a1', { kind: 'operator' }) })).toEqual([]);
+      // The operator's own page is indexed under the operator's key.
+      const operator = await memory.recentTraces(0, { limit: 50, scope: 'conversation', scopeId: conversationScopeKey('a1', { kind: 'operator' }) });
+      expect(operator.some((t) => t.tags.includes('page:page') && t.content.includes('Inside the wiki.'))).toBe(true);
       // The attach went on past an index.md it could not refresh, and said so once.
       const refused = warn.mock.calls.map((call) => String(call[0])).filter((line) => line.includes('index.md could not be refreshed'));
       expect(refused).toHaveLength(1);

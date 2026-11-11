@@ -11,8 +11,14 @@
  * subject's key, two subjects' pages of one id stay apart, a rewritten page's old chunks are deleted for good, an
  * unchanged body keeps its chunks, ids are kept as given (case, Unicode form, dots, length), a refused page id or a
  * key that names no user or session is refused, a page outlives a close, and a page write that fails changes nothing.
+ *
+ * The wiki compile on the same stores: one compile a scope with new traces, into that scope's own rows, with a
+ * watermark a scope in its registry row; a scope whose only new traces are its own page chunks runs no call; the
+ * operator's scope is never compiled; `compileWiki({ scopes })` compiles the named scopes alone; a scope a spend
+ * budget refuses, or a hook skips, keeps its watermark while the others compile; any other failure rejects the call
+ * once every scope has run.
  */
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -22,8 +28,11 @@ import { PORTABLE_TABLES } from '../../../retrieval/store/portable-tables.js';
 import { conversationScopeKey } from '../../../retrieval/store/conversationScopeKey.js';
 import { resolveStorageAdapter } from '@framers/sql-storage-adapter';
 import type { StorageAdapter } from '@framers/sql-storage-adapter';
-import { InvalidWikiPageIdError, UserWikiStore } from '../../../../substrate/memory/wiki/index.js';
-import type { WikiPage } from '../../../../substrate/memory/wiki/index.js';
+import pino from 'pino';
+import { InvalidWikiPageIdError, UserWikiStore, WikiCompiler } from '../../../../substrate/memory/wiki/index.js';
+import type { CompileResult, WikiPage } from '../../../../substrate/memory/wiki/index.js';
+import type { MemoryTrace } from '../../../core/types.js';
+import { resetLoggerFactory, setLogger } from '../../../../../core/logging/loggerFactory.js';
 
 const POSTGRES_URL = process.env.AGENTOS_TEST_POSTGRES_URL;
 
@@ -501,4 +510,289 @@ describe.each(STORES)('per-user pages on %s', (store) => {
       expect(bodyOf(await pages.readPage('concepts/notes'))).toBe('Alice likes tea.\n\nAlice has a cat.');
     });
   }
+});
+
+const C = conversationScopeKey('aria-1', { kind: 'user', id: 'carol' });
+const OPERATOR = conversationScopeKey('aria-1', { kind: 'operator' });
+const NOTHING_COMPILED: CompileResult = { pagesWritten: [], tracesConsumed: 0, conflicts: [] };
+const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** The hooks a wiki may be attached with. */
+interface CompileHooks {
+  beforeScopeCompile?: (
+    scopeId: string,
+    traces: MemoryTrace[],
+  ) => Promise<{ traces: MemoryTrace[] } | { skip: 'policy_raw' | 'screen_failed' }>;
+  compileSkipReasonOf?: (error: unknown) => 'budget' | undefined;
+}
+
+/** The compile members of the facade, as a wiki kept per scope is attached and compiled. */
+interface Compiling {
+  attachWiki(
+    wiki: CompileHooks & {
+      storeFor(scopeId: string): UserWikiStore;
+      compiler: WikiCompiler;
+    },
+  ): void;
+  compileWiki(opts?: {
+    reason?: 'consolidation' | 'session-end' | 'explicit';
+    scopes?: readonly string[];
+  }): Promise<CompileResult>;
+}
+const compiling = (memory: Memory): Compiling => memory as unknown as Compiling;
+
+/**
+ * Attaches a wiki whose pages are rows of `memory`, one page (`concepts/notes`) a scope, and returns every merge
+ * prompt its compiles send, in order. `llm` answers a prompt; a prompt is recorded before it is answered.
+ */
+function attachRows(
+  memory: Memory,
+  extra: CompileHooks & { llm?: (prompt: string) => Promise<string> } = {},
+): string[] {
+  const prompts: string[] = [];
+  const { llm, ...hooks } = extra;
+  const compiler = new WikiCompiler({
+    llm: async (prompt: string) => {
+      prompts.push(prompt);
+      return llm ? llm(prompt) : 'Merged notes.';
+    },
+    cluster: async (traces: Array<{ id: string }>) => [{ pageId: 'concepts/notes', traceIds: traces.map((t) => t.id) }],
+  } as never);
+  compiling(memory).attachWiki({
+    storeFor: (scopeId) => new UserWikiStore({ scopeId, pages: memory, chunk }),
+    compiler,
+    ...hooks,
+  });
+  return prompts;
+}
+
+/** Each registered scope's compile watermark, by scope id. */
+const watermarks = async (memory: Memory): Promise<Map<string, number | null>> =>
+  new Map((await memory.listScopes()).map((row) => [row.scopeId, row.compiledAt]));
+
+/** When the newest trace of a scope was stored, its page chunks among them. */
+const newestTraceAt = async (brain: Brain, scopeId: string): Promise<number> =>
+  Number(
+    (
+      await brain.get<{ at: number | string }>(
+        `SELECT max(created_at) AS at FROM memory_traces WHERE brain_id = ? AND scope = 'conversation' AND scope_id = ?`,
+        [brain.brainId, scopeId],
+      )
+    )?.at,
+  );
+
+/** An error a spend budget's refusal throws, by its name. */
+const refusedByBudget = () => Object.assign(new Error('the budget allows no further call'), { name: 'CostCapExceededError' });
+const budgetReasonOf = (error: unknown): 'budget' | undefined =>
+  (error as { name?: unknown } | null)?.name === 'CostCapExceededError' ? 'budget' : undefined;
+
+describe.each(STORES)('the compile per scope on %s', (store) => {
+  /** Every line the library logged in the test, parsed. */
+  let events: Array<Record<string, unknown>>;
+  const lines = (event: string) => events.filter((line) => line.event === event);
+  beforeEach(() => {
+    events = [];
+    setLogger(
+      pino(
+        { level: 'debug', base: undefined },
+        {
+          write(line: string) {
+            events.push(JSON.parse(line));
+          },
+        },
+      ),
+    );
+  });
+  afterEach(() => resetLoggerFactory());
+
+  it('compiles each scope with new traces into its own rows, one call a scope', async () => {
+    const { memory, brain } = await open(store);
+    const prompts = attachRows(memory);
+    const a1 = await memory.remember('Alice likes tea.', { scope: 'conversation', scopeId: A });
+    const a2 = await memory.remember('Alice has a cat.', { scope: 'conversation', scopeId: A });
+    const b1 = await memory.remember('Bob plays cello.', { scope: 'conversation', scopeId: B });
+
+    const result = await compiling(memory).compileWiki();
+
+    expect(result.pagesWritten).toEqual(['concepts/notes', 'concepts/notes']);
+    expect(result.tracesConsumed).toBe(3);
+    expect(prompts).toHaveLength(2);
+    const ofAlice = prompts.find((prompt) => prompt.includes('Alice likes tea.'));
+    expect(ofAlice).toContain('Alice has a cat.');
+    expect(ofAlice).not.toContain('Bob plays cello.');
+    const ofBob = prompts.find((prompt) => prompt.includes('Bob plays cello.'));
+    expect(ofBob).toBeDefined();
+    expect(ofBob).not.toContain('Alice');
+
+    expect((await pageRows(brain)).map((row) => [row.scope_id, row.page_id]).sort()).toEqual(
+      [
+        [A, 'concepts/notes'],
+        [B, 'concepts/notes'],
+      ].sort(),
+    );
+    const compiledAt = await watermarks(memory);
+    expect(compiledAt.get(A)).toBe(Math.max(a1.createdAt, a2.createdAt));
+    expect(compiledAt.get(B)).toBe(b1.createdAt);
+  });
+
+  it('compiles nothing a second time, and only the scope with a new trace the third', async () => {
+    const { memory } = await open(store);
+    const prompts = attachRows(memory);
+    await memory.remember('Alice likes tea.', { scope: 'conversation', scopeId: A });
+    await memory.remember('Bob plays cello.', { scope: 'conversation', scopeId: B });
+    await compiling(memory).compileWiki();
+    expect(prompts).toHaveLength(2);
+
+    expect(await compiling(memory).compileWiki()).toEqual(NOTHING_COMPILED);
+    expect(prompts).toHaveLength(2);
+
+    await pause(5);
+    await memory.remember('Bob has a dog.', { scope: 'conversation', scopeId: B });
+    const third = await compiling(memory).compileWiki();
+
+    expect(third.pagesWritten).toEqual(['concepts/notes']);
+    expect(third.tracesConsumed).toBe(1);
+    expect(prompts).toHaveLength(3);
+    expect(prompts[2]).toContain('Bob has a dog.');
+    expect(prompts[2]).not.toContain('Alice');
+    // The merge starts from the page the scope already has.
+    expect(prompts[2]).toContain('Merged notes.');
+  });
+
+  it('a scope whose only new traces are its own page chunks runs no call and moves its watermark', async () => {
+    const { memory, brain } = await open(store);
+    const prompts = attachRows(memory);
+    const fact = await memory.remember('Alice likes tea.', { scope: 'conversation', scopeId: A });
+    await pause(5);
+    await compiling(memory).compileWiki();
+    expect(prompts).toHaveLength(1);
+    expect((await watermarks(memory)).get(A)).toBe(fact.createdAt);
+    // The page's chunks were stored after the trace the compile read.
+    const newest = await newestTraceAt(brain, A);
+    expect(newest).toBeGreaterThan(fact.createdAt);
+
+    expect(await compiling(memory).compileWiki()).toEqual(NOTHING_COMPILED);
+
+    expect(prompts).toHaveLength(1);
+    expect((await watermarks(memory)).get(A)).toBe(newest);
+  });
+
+  it('never compiles the operator scope', async () => {
+    const { memory, brain } = await open(store);
+    const prompts = attachRows(memory);
+    await memory.remember('Open nine to five.', { scope: 'conversation', scopeId: OPERATOR });
+
+    expect(await compiling(memory).compileWiki()).toEqual(NOTHING_COMPILED);
+    expect(await compiling(memory).compileWiki({ scopes: [OPERATOR] })).toEqual(NOTHING_COMPILED);
+
+    expect(prompts).toEqual([]);
+    expect(await pageRows(brain)).toEqual([]);
+    expect((await watermarks(memory)).get(OPERATOR)).toBeNull();
+  });
+
+  it('compileWiki({ scopes }) compiles the named scopes alone, and none for an empty list', async () => {
+    const { memory, brain } = await open(store);
+    const prompts = attachRows(memory);
+    await memory.remember('Alice likes tea.', { scope: 'conversation', scopeId: A });
+    await memory.remember('Bob plays cello.', { scope: 'conversation', scopeId: B });
+
+    expect(await compiling(memory).compileWiki({ scopes: [] })).toEqual(NOTHING_COMPILED);
+    expect(prompts).toEqual([]);
+
+    // A scope with no registry row is left out, and a scope named twice is compiled once.
+    const result = await compiling(memory).compileWiki({ scopes: [B, C, B] });
+
+    expect(result.pagesWritten).toEqual(['concepts/notes']);
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain('Bob plays cello.');
+    expect(prompts[0]).not.toContain('Alice');
+    expect((await pageRows(brain)).map((row) => row.scope_id)).toEqual([B]);
+    const compiledAt = await watermarks(memory);
+    expect(compiledAt.get(A)).toBeNull();
+    expect(compiledAt.get(B)).not.toBeNull();
+    expect(compiledAt.has(C)).toBe(false);
+  });
+
+  it('a refused scope keeps its watermark and the others compile', async () => {
+    const { memory, brain } = await open(store);
+    const prompts = attachRows(memory, {
+      llm: async (prompt) => {
+        if (prompt.includes('Alice likes tea.')) throw refusedByBudget();
+        return 'Merged notes.';
+      },
+      compileSkipReasonOf: budgetReasonOf,
+    });
+    await memory.remember('Alice likes tea.', { scope: 'conversation', scopeId: A });
+    await memory.remember('Bob plays cello.', { scope: 'conversation', scopeId: B });
+    await memory.remember('Carol keeps bees.', { scope: 'conversation', scopeId: C });
+
+    const result = await compiling(memory).compileWiki();
+
+    expect(result.pagesWritten).toEqual(['concepts/notes', 'concepts/notes']);
+    expect(prompts).toHaveLength(3);
+    expect((await pageRows(brain)).map((row) => row.scope_id).sort()).toEqual([B, C].sort());
+    const compiledAt = await watermarks(memory);
+    expect(compiledAt.get(A)).toBeNull();
+    expect(compiledAt.get(B)).not.toBeNull();
+    expect(compiledAt.get(C)).not.toBeNull();
+    expect(lines('memory.compile_skipped')).toHaveLength(1);
+    expect(lines('memory.compile_skipped')[0]).toMatchObject({ reason: 'budget' });
+    // The line names no scope.
+    expect(JSON.stringify(lines('memory.compile_skipped')[0])).not.toContain('alice');
+  });
+
+  it('a scope that fails for another reason keeps its watermark, the others compile, and the call rejects', async () => {
+    const { memory, brain } = await open(store);
+    const prompts = attachRows(memory, {
+      llm: async (prompt) => {
+        if (prompt.includes('Alice likes tea.')) throw new Error('the model answered nothing');
+        return 'Merged notes.';
+      },
+      compileSkipReasonOf: budgetReasonOf,
+    });
+    await memory.remember('Alice likes tea.', { scope: 'conversation', scopeId: A });
+    await memory.remember('Bob plays cello.', { scope: 'conversation', scopeId: B });
+    await memory.remember('Carol keeps bees.', { scope: 'conversation', scopeId: C });
+
+    await expect(compiling(memory).compileWiki()).rejects.toThrow('the model answered nothing');
+
+    expect(prompts).toHaveLength(3);
+    expect((await pageRows(brain)).map((row) => row.scope_id).sort()).toEqual([B, C].sort());
+    const compiledAt = await watermarks(memory);
+    expect(compiledAt.get(A)).toBeNull();
+    expect(compiledAt.get(B)).not.toBeNull();
+    expect(compiledAt.get(C)).not.toBeNull();
+    expect(lines('memory.compile_skipped')).toEqual([]);
+  });
+
+  it('beforeScopeCompile skips a scope or changes what is compiled', async () => {
+    const { memory, brain } = await open(store);
+    const asked: string[] = [];
+    const prompts = attachRows(memory, {
+      beforeScopeCompile: async (scopeId, traces) => {
+        asked.push(scopeId);
+        return scopeId === A ? { skip: 'policy_raw' } : { traces: traces.slice(0, 1) };
+      },
+    });
+    await memory.remember('Alice likes tea.', { scope: 'conversation', scopeId: A });
+    await memory.remember('Bob plays cello.', { scope: 'conversation', scopeId: B });
+    await pause(5);
+    const later = await memory.remember('Bob has a dog.', { scope: 'conversation', scopeId: B });
+
+    const result = await compiling(memory).compileWiki();
+
+    expect(asked.sort()).toEqual([A, B].sort());
+    expect(result.pagesWritten).toEqual(['concepts/notes']);
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain('Bob plays cello.');
+    expect(prompts[0]).not.toContain('Bob has a dog.');
+    expect(prompts[0]).not.toContain('Alice');
+    expect((await pageRows(brain)).map((row) => row.scope_id)).toEqual([B]);
+    const compiledAt = await watermarks(memory);
+    expect(compiledAt.get(A)).toBeNull();
+    // The watermark moves past the whole batch that was read, whatever the hook kept of it.
+    expect(compiledAt.get(B)).toBe(later.createdAt);
+    expect(lines('memory.compile_skipped')).toHaveLength(1);
+    expect(lines('memory.compile_skipped')[0]).toMatchObject({ reason: 'policy_raw' });
+  });
 });

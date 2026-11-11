@@ -3,9 +3,10 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { attachMemoryWiki } from '../attachMemoryWiki.js';
-import { ensureMemoryDir } from '../../../substrate/memory/wiki/index.js';
+import { ensureMemoryDir, type WikiPage } from '../../../substrate/memory/wiki/index.js';
 import { Memory } from '../facade/Memory.js';
 import type { Brain } from '../../retrieval/store/Brain.js';
+import { conversationScopeKey } from '../../retrieval/store/conversationScopeKey.js';
 
 let dir: string;
 let memoryDir: string;
@@ -56,8 +57,9 @@ describe('attachMemoryWiki', () => {
       now: () => '1970-01-01T00:00:00.000Z',
     });
 
-    // attachWiki received a store + compiler
+    // attachWiki received a page store per scope and a compiler
     expect(mem.attached()).toBeTruthy();
+    expect(typeof mem.attached().storeFor).toBe('function');
     expect(typeof mem.attached().compiler.compile).toBe('function');
     // boot index embedded the existing page body
     expect(mem.remembered.some((c) => c.includes('Founder of Frame.'))).toBe(true);
@@ -72,15 +74,21 @@ describe('attachMemoryWiki', () => {
     const memory = await Memory.createSqlite(path.join(dir, 'memory.sqlite'), { graph: false, selfImprove: false, decay: false });
     try {
       const agentId = 'a1';
-      await attachMemoryWiki({ memory, memoryDir, agentId, llm: async () => 'merged body', chunk: (t) => [{ text: t }] });
-      await memory.remember('Johnny likes green tea', { type: 'episodic', scope: 'persona', scopeId: agentId });
+      const subject = conversationScopeKey(agentId, { kind: 'user', id: 'johnny' });
+      const attached = await attachMemoryWiki({ memory, memoryDir, agentId, llm: async () => 'merged body', chunk: (t) => [{ text: t }] });
+      await memory.remember('Johnny likes green tea', { type: 'episodic', scope: 'conversation', scopeId: subject });
 
       const before = Date.now();
       await memory.compileWiki();
       const after = Date.now();
 
-      const page = fs.readFileSync(path.join(memoryDir, 'concepts', 'notes.md'), 'utf8');
-      const updated = /^updated: ['"]?([^'"\n]+)['"]?$/m.exec(page)?.[1];
+      // The page is the subject's own: a row of the store, read through the store of the subject's scope.
+      const { storeFor } = attached as unknown as { storeFor(scopeId: string): { readPage(id: string): Promise<WikiPage | null> } };
+      const page = await storeFor(subject).readPage('concepts/notes');
+      expect(page?.body.trim()).toBe('merged body');
+      expect(fs.existsSync(path.join(memoryDir, 'concepts', 'notes.md'))).toBe(false);
+      const row = await memory.readPageRow(subject, 'concepts/notes');
+      const updated = /^updated: ['"]?([^'"\n]+)['"]?$/m.exec(row!.content)?.[1];
       expect(updated).toBeDefined();
       const at = Date.parse(updated!);
       expect(at).toBeGreaterThanOrEqual(before);

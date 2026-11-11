@@ -19,6 +19,8 @@
  * - A one-shot `generate()` names no user: nothing is filed for it and it recalls the operator's pages alone.
  * - `sharedMemory` runs every session that names no user, and every one-shot call, as one user.
  * - Traces an earlier version filed under the agent's plain id are recalled for nobody and counted in one line.
+ * - The wiki is compiled once a subject, from that subject's records alone, into a page that is a row of the store
+ *   and never a file under memory/. close() compiles the subjects its turns wrote to.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
@@ -32,6 +34,7 @@ import { souledAgent } from '../souledAgent';
 import { Memory } from '../../cognition/memory/io/facade/Memory';
 import type { Brain } from '../../cognition/memory/retrieval/store/Brain';
 import { conversationScopeKey } from '../../cognition/memory/retrieval/store/conversationScopeKey';
+import { UserWikiStore } from '../../cognition/substrate/memory/wiki/UserWikiStore';
 import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 import { reply, script, type ProviderScript } from './helpers/stubProviders';
@@ -654,5 +657,123 @@ describe("the folder a souled agent's store is kept in", () => {
     const { a } = await opened({});
     await a.close();
     expect(fs.readFileSync(path.join(storeDir, '.gitignore'), 'utf8')).toBe('*.sqlite\n');
+  });
+});
+
+/** Opens the store of a soul folder once its agent has closed it, for reading its rows. */
+async function withStore<T>(read: (memory: Memory, brain: Brain) => Promise<T>, folder = dir): Promise<T> {
+  const memory = await Memory.createSqlite(path.join(folder, 'memory', '.store', 'memory.sqlite'), { graph: true, selfImprove: true });
+  try {
+    return await read(memory, (memory as unknown as { _brain: Brain })._brain);
+  } finally {
+    await memory.close();
+  }
+}
+
+/** The text of every model call that merged traces into a wiki page. */
+const mergesOf = (s: ProviderScript): string[] => s.seen.filter(isMerge).map((call) => JSON.stringify(call.messages));
+
+describe.each(runtimes)('the wiki compiled per subject, on %s', (_name, runtime) => {
+  beforeEach(() => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  });
+
+  it("two users' turns compile into one page each, from that user's records alone", async () => {
+    const { a, s } = await opened(runtime);
+    await say(a, { session: 'sa', user: 'alice' }, 'My owl is named Wexford.');
+    await say(a, { session: 'sb', user: 'bob' }, 'My crab is named Pellam.');
+    await a.close();
+
+    const merges = mergesOf(s);
+    expect(merges).toHaveLength(2);
+    const ofAlice = merges.find((merge) => merge.includes('Wexford'));
+    expect(ofAlice).toBeDefined();
+    expect(ofAlice).not.toContain('Pellam');
+    const ofBob = merges.find((merge) => merge.includes('Pellam'));
+    expect(ofBob).toBeDefined();
+    expect(ofBob).not.toContain('Wexford');
+
+    await withStore(async (memory, brain) => {
+      const rows = await brain.all<{ scope_id: string; page_id: string }>(
+        'SELECT scope_id, page_id FROM memory_pages WHERE brain_id = ?',
+        [brain.brainId],
+      );
+      expect(rows.map((row) => [row.scope_id, row.page_id]).sort()).toEqual(
+        [
+          [userKey('alice'), 'concepts/notes'],
+          [userKey('bob'), 'concepts/notes'],
+        ].sort(),
+      );
+      const scopes = (await memory.listScopes()).filter((row) => row.kind !== 'operator');
+      expect(scopes.map((row) => row.scopeId).sort()).toEqual([userKey('alice'), userKey('bob')].sort());
+      for (const row of scopes) expect(row.compiledAt).not.toBeNull();
+    });
+  });
+
+  it("a subject's page is a row and never a file", async () => {
+    const first = await opened(runtime);
+    await say(first.a, { session: 'sa', user: 'alice' }, 'My owl is named Wexford.');
+    await say(first.a, { session: 's1' }, 'My eel is named Tindle.');
+    await first.a.close();
+
+    expect(fs.existsSync(path.join(dir, 'memory', 'concepts', 'notes.md'))).toBe(false);
+    expect(fs.existsSync(path.join(dir, 'memory', 'concepts'))).toBe(false);
+    expect(readIndex()).not.toContain('notes');
+
+    await withStore(async (_memory, brain) => {
+      const row = await brain.get<{ chunk_ids: string }>(
+        "SELECT chunk_ids FROM memory_pages WHERE brain_id = ? AND scope = 'conversation' AND scope_id = ? AND page_id = 'concepts/notes'",
+        [brain.brainId, userKey('alice')],
+      );
+      const chunkIds = JSON.parse(row!.chunk_ids) as string[];
+      expect(chunkIds.length).toBeGreaterThan(0);
+      const traces = await brain.all<{ id: string; tags: string }>(
+        "SELECT id, tags FROM memory_traces WHERE brain_id = ? AND scope = 'conversation' AND scope_id = ?",
+        [brain.brainId, userKey('alice')],
+      );
+      const chunks = traces.filter((trace) => (JSON.parse(trace.tags) as string[]).includes('wiki'));
+      expect(chunks.map((chunk) => chunk.id).sort()).toEqual([...chunkIds].sort());
+      for (const chunk of chunks) expect(JSON.parse(chunk.tags)).toEqual(['wiki', 'page:concepts/notes']);
+    });
+
+    // Reopened, the page of the session that named no user is still there, under the session's key.
+    const { a } = await opened(runtime);
+    try {
+      const pages = new UserWikiStore({ scopeId: sessionKey('s1'), pages: a.memory!, chunk: (text) => [{ text }] });
+      expect((await pages.readPage('concepts/notes'))?.body).toContain('Noted.');
+      expect(await a.memory!.readPageRow(userKey('alice'), 'concepts/notes')).not.toBeNull();
+    } finally {
+      await a.close();
+    }
+  });
+
+  it('close() compiles what its turns wrote, and a trace stored by hand waits for compileWiki()', async () => {
+    const first = await opened(runtime);
+    await say(first.a, { session: 'sa', user: 'alice' }, 'My owl is named Wexford.');
+    await first.a.memory!.remember('Carol keeps bees.', { type: 'episodic', scope: 'conversation', scopeId: userKey('carol') });
+    await first.a.close();
+
+    const closing = mergesOf(first.s);
+    expect(closing).toHaveLength(1);
+    expect(closing[0]).toContain('Wexford');
+    expect(closing[0]).not.toContain('Carol keeps bees.');
+
+    const { a, s } = await opened(runtime);
+    try {
+      const compiledAt = new Map((await a.memory!.listScopes()).map((row) => [row.scopeId, row.compiledAt]));
+      expect(compiledAt.get(userKey('alice'))).not.toBeNull();
+      expect(compiledAt.get(userKey('carol'))).toBeNull();
+      expect(await a.memory!.readPageRow(userKey('carol'), 'concepts/notes')).toBeNull();
+
+      expect((await a.memory!.compileWiki()).pagesWritten).toEqual(['concepts/notes']);
+
+      const merges = mergesOf(s);
+      expect(merges).toHaveLength(1);
+      expect(merges[0]).toContain('Carol keeps bees.');
+      expect(merges[0]).not.toContain('Wexford');
+      expect(await a.memory!.readPageRow(userKey('carol'), 'concepts/notes')).not.toBeNull();
+    } finally {
+      await a.close();
+    }
   });
 });
