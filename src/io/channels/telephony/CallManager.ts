@@ -190,9 +190,7 @@ export class CallManager {
     const baseUrl = this.config.webhookBaseUrl || 'http://localhost:3000';
     const webhookUrl = `${baseUrl}/voice/webhook/${provider.name}`;
     const statusCallbackUrl = `${baseUrl}/voice/status/${provider.name}`;
-    const mediaStreamUrl = this.config.streaming?.enabled
-      ? `${baseUrl.replace('http', 'ws')}${this.config.streaming.wsPath || '/voice/media-stream'}`
-      : undefined;
+    const mediaStreamUrl = this.mediaStreamUrl();
 
     const input: InitiateCallInput = {
       callId,
@@ -785,6 +783,26 @@ export class CallManager {
     return call;
   }
 
+  /**
+   * Answer an inbound call the host has admitted with {@link handleInboundCall} and, for
+   * {@link processWebhookDurable}, persisted with {@link persistCall}, on a carrier that answers by command
+   * ({@link IVoiceCallProvider.answerCall}). A carrier-profile Telnyx provider sends `answer`, carrying the media stream
+   * URL when `streaming.enabled` is set, so the stream starts with the answer; the `call.answered` webhook that follows
+   * moves the call to `listening`. On a carrier the host's answer XML answers (Twilio, Plivo), and with a legacy-profile
+   * Telnyx provider, it sends nothing. A call that is no longer ringing (answered, or ended) is not answered again.
+   *
+   * @param callId - The id of the call {@link handleInboundCall} returned.
+   * @throws When the manager holds no inbound call with this id, or when the carrier refuses the answer.
+   */
+  async answerInboundCall(callId: CallId): Promise<void> {
+    const call = this.activeCalls.get(callId);
+    if (!call || call.direction !== 'inbound') throw new Error(`[CallManager] no inbound call ${callId}`);
+    if (call.state !== 'ringing' || !call.providerCallId) return;
+    const provider = this.getProvider(call.provider);
+    if (!provider?.answerCall) return;
+    await provider.answerCall({ callId, providerCallId: call.providerCallId, mediaStreamUrl: this.mediaStreamUrl(), mediaStreamToken: callId });
+  }
+
   // ── State Machine ──
 
   /**
@@ -846,6 +864,16 @@ export class CallManager {
     setTimeout(() => {
       this.activeCalls.delete(call.callId);
     }, 30_000);
+  }
+
+  /**
+   * The media stream URL a call is given when `streaming.enabled` is set: `webhookBaseUrl` (`http://localhost:3000`
+   * when unset) with `http` replaced by `ws`, plus `streaming.wsPath` (`/voice/media-stream` when unset).
+   */
+  private mediaStreamUrl(): string | undefined {
+    if (!this.config.streaming?.enabled) return undefined;
+    const baseUrl = this.config.webhookBaseUrl || 'http://localhost:3000';
+    return `${baseUrl.replace('http', 'ws')}${this.config.streaming.wsPath || '/voice/media-stream'}`;
   }
 
   /** Get the default "from" number from config. */

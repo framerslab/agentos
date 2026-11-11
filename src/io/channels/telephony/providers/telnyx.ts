@@ -9,8 +9,8 @@
  * |----------------|--------|------------------------------------------|-------------|
  * | Initiate call  | POST   | `/v2/calls`                              | JSON        |
  * | Hangup call    | POST   | `/v2/calls/{id}/actions/hangup`          | JSON        |
+ * | Answer call    | POST   | `/v2/calls/{id}/actions/answer`          | JSON        |
  * | Play TTS       | POST   | `/v2/calls/{id}/actions/speak`           | JSON        |
- * | Start stream   | POST   | `/v2/calls/{id}/actions/streaming_start` | JSON        |
  *
  * All requests use Bearer token authentication: `Authorization: Bearer {apiKey}`.
  * Request bodies are JSON (unlike Twilio's form-encoded convention).
@@ -18,8 +18,10 @@
  * ## Media streaming
  *
  * Carrier mode includes the configured media stream URL and bidirectional
- * PCMU RTP settings when dialing. Legacy mode leaves stream startup to the
- * host.
+ * PCMU RTP settings when dialing, and when answering an inbound call
+ * ({@link TelnyxVoiceProvider.answerCall}), so the stream starts with the
+ * call and no `streaming_start` command is sent. Legacy mode leaves stream
+ * startup, and answering, to the host.
  *
  * ## Answered calls
  *
@@ -84,6 +86,7 @@ import type {
   InitiateCallResult,
   HangupCallInput,
   CallAnsweredInput,
+  AnswerCallInput,
   PlayTtsInput,
 } from '../IVoiceCallProvider.js';
 
@@ -251,6 +254,20 @@ function warnUnverifiedWebhooks(logger: ILogger | undefined): void {
 function telnyxPublicKeyDer(publicKey: string): Buffer {
   const bytes = Buffer.from(publicKey, 'base64');
   return bytes.length === 32 ? Buffer.concat([ED25519_SPKI_PREFIX, bytes]) : bytes;
+}
+
+/**
+ * The stream settings a carrier-profile dial or answer carries for a media
+ * stream URL: the URL, the inbound track, and bidirectional RTP with PCMU.
+ * None without a URL.
+ *
+ * @param mediaStreamUrl - The media stream WebSocket URL, if any.
+ * @returns The fields to add to the command's JSON body.
+ */
+function telnyxStreamSettings(mediaStreamUrl: string | undefined): Record<string, string> {
+  return mediaStreamUrl
+    ? { stream_url: mediaStreamUrl, stream_track: 'inbound_track', stream_bidirectional_mode: 'rtp', stream_bidirectional_codec: 'PCMU' }
+    : {};
 }
 
 /**
@@ -518,7 +535,7 @@ export class TelnyxVoiceProvider implements IVoiceCallProvider {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ connection_id: this.config.connectionId, to: input.toNumber, from: input.fromNumber, webhook_url: input.webhookUrl,
-        ...(this.config.protocol === 'carrier' && input.mediaStreamUrl ? { stream_url: input.mediaStreamUrl, stream_track: 'inbound_track', stream_bidirectional_mode: 'rtp', stream_bidirectional_codec: 'PCMU' } : {}) }),
+        ...(this.config.protocol === 'carrier' ? telnyxStreamSettings(input.mediaStreamUrl) : {}) }),
     });
 
     if (!response.ok) {
@@ -528,6 +545,34 @@ export class TelnyxVoiceProvider implements IVoiceCallProvider {
 
     const data = (await response.json()) as { data: { call_control_id: string; call_session_id: string } };
     return { providerCallId: data.data.call_control_id, success: true };
+  }
+
+  /**
+   * Answer an inbound call. `CallManager.answerInboundCall` calls it once the
+   * host has admitted the call.
+   *
+   * In the carrier profile it POSTs to `/v2/calls/{id}/actions/answer` with a
+   * `command_id` named after the call, so Telnyx ignores the command if it is
+   * sent again for that call, and, given a media stream URL, the stream
+   * settings the dial request carries (`stream_url`, the inbound track,
+   * bidirectional RTP with PCMU), so the stream starts with the answer.
+   *
+   * The legacy profile sends nothing: its host answers the call.
+   *
+   * @param input - The inbound call and its media stream URL.
+   * @throws When Telnyx answers the command with a status outside 2xx.
+   */
+  async answerCall(input: AnswerCallInput): Promise<void> {
+    if (this.config.protocol !== 'carrier') return;
+    const response = await this.fetch(`${this.baseUrl}/calls/${telnyxPathSegment(input.providerCallId)}/actions/answer`, {
+      method: 'POST',
+      headers: {
+        Authorization: this.authHeader,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ command_id: `${input.callId}:answer`, ...telnyxStreamSettings(input.mediaStreamUrl) }),
+    });
+    if (!response.ok) throw new Error(`Telnyx answer failed: ${response.status}`);
   }
 
   /**
