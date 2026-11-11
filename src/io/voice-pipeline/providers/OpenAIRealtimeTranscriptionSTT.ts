@@ -898,8 +898,12 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
   private droppedSuccessor: RolloverClocks | undefined;
   /** The last connection is draining and the session closes after it: a drop starts no reconnect. */
   private ending = false;
-  /** A client commit asked for while no connection was open; sent once one opens. */
-  private commitOnAdopt = false;
+  /**
+   * Client commits asked for by flushes that found no connection taking audio, oldest first; sent once one
+   * takes audio. A commit whose flush is still waiting has no `endMs` and covers all the audio held then; a
+   * flush that stopped waiting set `endMs` to where the audio stood, so its commit covers nothing pushed later.
+   */
+  private deferredCommits: Array<{ endMs?: number }> = [];
   /** Waiters of {@link waitAdopted}: a flush that found no connection taking audio. */
   private adoptWaiters = new Set<() => void>();
   /** Connections still connecting (a reconnect's, or a rollover's next one): `close()` abandons them. */
@@ -980,9 +984,13 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
     if (!lead) {
       // No connection takes audio now (a reconnect, or a socket that is closing before its close is
       // reported): commit once one takes over, and wait for it.
-      if (this.settings.clientCommits) this.commitOnAdopt = true;
+      const deferred: { endMs?: number } | undefined = this.settings.clientCommits ? {} : undefined;
+      if (deferred) this.deferredCommits.push(deferred);
       await this.waitAdopted(this.settings.finalTimeoutMs);
       if (this.closed) return;
+      // Still deferred: no connection took over in time. Its commit stays for the one that does, and ends
+      // where the audio stands now, so audio pushed after this flush returns starts a turn of its own.
+      if (deferred && this.deferredCommits.includes(deferred)) deferred.endMs = this.sessionAudioMs;
     } else if (this.settings.clientCommits || lead.speaking) {
       lead.commit(this.sessionAudioMs);
       if (this.settings.clientCommits) this.maybeRollOver(lead, 'flush');
@@ -1037,6 +1045,7 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
     for (const finish of [...this.retryWaits]) finish();
     this.backlog = [];
     this.backlogMs = 0;
+    this.deferredCommits = [];
     this.emit('close');
   }
 
@@ -1071,9 +1080,11 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
   }
 
   /**
-   * Sends the held frames to a connection that takes audio, then the commit a flush asked for meanwhile.
-   * Frames its socket no longer takes (it began closing after the connection opened) stay held, and so
-   * does that commit, for the connection that replaces it, whether or not any frame was held.
+   * Sends the held frames to a connection that takes audio, with the commits flushes asked for meanwhile:
+   * a commit whose flush stopped waiting goes before the first frame pushed after that point, and the
+   * commit of a flush still waiting after every frame. Frames its socket no longer takes (it began closing
+   * after the connection opened) stay held, and so do the commits not yet sent, for the connection that
+   * replaces it, whether or not any frame was held.
    */
   private releaseBacklog(connection: TranscriptionConnection): void {
     const held = this.backlog;
@@ -1081,13 +1092,27 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
     this.backlogMs = 0;
     let refused = false;
     for (const frame of held) {
-      if (connection.sendAudio(frame)) continue;
+      if (!refused) {
+        this.sendDeferredCommits(connection, frame.startMs);
+        if (connection.sendAudio(frame)) continue;
+        refused = true;
+      }
       this.hold(frame);
-      refused = true;
     }
-    if (refused || !this.commitOnAdopt || !connection.takesAudio()) return;
-    this.commitOnAdopt = false;
-    connection.commit(this.sessionAudioMs);
+    if (!refused) this.sendDeferredCommits(connection, Infinity);
+  }
+
+  /**
+   * Sends, in order, the deferred commits that end at or before `beforeMs` (every one, with `Infinity`)
+   * while the connection takes audio. A commit with nothing appended since the last one sends nothing.
+   */
+  private sendDeferredCommits(connection: TranscriptionConnection, beforeMs: number): void {
+    while (this.deferredCommits.length > 0 && connection.takesAudio()) {
+      const { endMs } = this.deferredCommits[0];
+      if ((endMs ?? Infinity) > beforeMs) return;
+      this.deferredCommits.shift();
+      connection.commit(endMs ?? this.sessionAudioMs);
+    }
   }
 
   /** The oldest connection still receiving audio: its speech events drive `speech_start` and `speech_end`. */
