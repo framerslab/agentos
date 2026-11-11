@@ -13,8 +13,9 @@
 
 import type { ICognitiveMemoryManager } from '../memory/CognitiveMemoryManager.js';
 import type { ManagerRecallConfig, PADState } from '../memory/core/config.js';
-import type { RecallCaptureMode } from '../memory/retrieval/recall/capture.js';
-import { recallBudgetTokens } from '../memory/retrieval/recall/budget.js';
+import type { MemoryRecallCapture, RecallCaptureMode } from '../memory/retrieval/recall/capture.js';
+import { recallBudgetTokens, type EffectiveRecallBudget } from '../memory/retrieval/recall/budget.js';
+import { recallLog } from '../memory/retrieval/recall/log.js';
 import type {
   AssembledMemoryContext,
   MemoryScope,
@@ -70,6 +71,63 @@ function nonBlank(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
 }
 
+/** An integer for a log field: a count that is not finite is written as 0. */
+function safeInt(n: number): number {
+  return Number.isFinite(n) ? Math.round(n) : 0;
+}
+
+/**
+ * The capture of the memory block one model hop is sent: `capture` with that hop's budget (the requested and
+ * effective budget, the clamp's reason and inputs, the hop, and whether the block was rendered again for it).
+ *
+ * @param capture - The capture of the rendering the hop is sent.
+ * @param budget - The hop's budget (`effectiveRecallBudget`).
+ * @param hop - The hop's index on the turn's route; 0 for the primary.
+ * @param reassembled - Whether the block was rendered again at `budget.effective` for this hop.
+ * @returns A new capture; `capture` is not changed.
+ */
+export function captureForHop(capture: MemoryRecallCapture, budget: EffectiveRecallBudget, hop: number, reassembled: boolean): MemoryRecallCapture {
+  return {
+    ...capture,
+    budget: {
+      requested: budget.requested,
+      effective: budget.effective,
+      ...(budget.clampReason ? { clampReason: budget.clampReason } : {}),
+      ...(budget.promptShareTokens !== undefined ? { promptShareTokens: budget.promptShareTokens, otherContextTokens: budget.otherContextTokens } : {}),
+      hop,
+      ...(reassembled ? { reassembled: true } : {}),
+    },
+  };
+}
+
+/**
+ * The capture of a hop that was sent no memory block because rendering it again for the hop failed: the turn's
+ * candidates, each included one left out with the reason `render_failed`, no tokens used, and the budget marked
+ * `renderFailed` (never `reassembled`, since no block was rendered).
+ *
+ * @param capture - The capture of the turn's first rendering.
+ * @param budget - The hop's budget.
+ * @param hop - The hop's index on the turn's route.
+ * @returns A new capture; `capture` is not changed.
+ */
+export function captureWithoutBlock(capture: MemoryRecallCapture, budget: EffectiveRecallBudget, hop: number): MemoryRecallCapture {
+  const stamped = captureForHop(capture, budget, hop, false);
+  return {
+    ...stamped,
+    budget: { ...stamped.budget, renderFailed: true },
+    tokensUsed: 0,
+    candidates: capture.candidates.map((candidate) =>
+      candidate.outcome === 'included' ? { ...candidate, outcome: 'left_out' as const, reason: 'render_failed' as const } : candidate,
+    ),
+  };
+}
+
+/** The name of an error's class, for a trace entry: a manager's or a store's message can quote the query or a memory. */
+function errorNameOf(error: unknown): string {
+  const name = (error as { name?: unknown } | null | undefined)?.name;
+  return typeof name === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(name) ? name : 'Error';
+}
+
 /**
  * Options for encoding a piece of content into cognitive memory.
  */
@@ -103,6 +161,9 @@ export interface CognitiveMemoryEncodeOptions {
  * needing direct mutation access.
  */
 export class CognitiveMemoryBridge {
+  /** The query and scopes each context {@link assembleContext} returned was assembled for, so a hop can ask again. */
+  private readonly turns = new WeakMap<AssembledMemoryContext, { query: string; scopes: Array<{ scope: MemoryScope; scopeId: string }> }>();
+
   /**
    * Creates a new CognitiveMemoryBridge.
    *
@@ -363,11 +424,67 @@ export class CognitiveMemoryBridge {
           ...(this.recallConfig()?.traceIds === true ? { includedMemoryIds: context.includedMemoryIds } : {}),
         });
       }
+      this.turns.set(context, { query, scopes });
       return context;
-    } catch (error: any) {
-      this.addTraceEntry('WARNING', 'Cognitive memory assembly failed.', {
-        error: error?.message ?? String(error),
+    } catch (error: unknown) {
+      // The error's class name only: a manager's, a vector store's or a full-text error can quote the turn's words.
+      this.addTraceEntry('WARNING', 'Cognitive memory assembly failed.', { errorName: errorNameOf(error) });
+      return null;
+    }
+  }
+
+  /** The configured budget of the memory block: the manager's `recall.budget.totalTokens`, 1600 when unset. */
+  public budgetTokens(): number {
+    return recallBudgetTokens(this.recallConfig());
+  }
+
+  /**
+   * The memory block for one model hop of a turn. `context` is the turn's first rendering ({@link assembleContext}),
+   * which is never changed. A hop whose budget holds it gets a copy whose capture names the hop; a hop whose budget is
+   * smaller gets the block rendered again at `budget.effective`, through the manager's `reassembleForBudget` (no
+   * retrieval, no embedding call), else, for a manager without that method, through `assembleForPrompt` again at that
+   * budget with the turn's query and scopes. A `reassembleForBudget` that rejects is not followed by a second recall. A budget whose inputs were not valid leaves the block as it is, with one
+   * `memory.recall.budget_clamped` line (`invalid`); a clamp writes one (`prompt_share` or `zero_remaining`), and a
+   * budget of 0 also one `memory.recall.allocation_exhausted`.
+   *
+   * @param context - The turn's first rendering.
+   * @param budget - The hop's budget (`effectiveRecallBudget` over the hop's model).
+   * @param hop - The hop's index on the turn's route; 0 for the primary.
+   * @returns The hop's block, or null when rendering it again failed: the hop is then sent no block. Never throws.
+   */
+  public async contextForHop(
+    context: AssembledMemoryContext,
+    budget: EffectiveRecallBudget,
+    hop: number,
+  ): Promise<AssembledMemoryContext | null> {
+    const stamped = (c: AssembledMemoryContext, reassembled: boolean): AssembledMemoryContext =>
+      c.capture ? { ...c, capture: captureForHop(c.capture, budget, hop, reassembled) } : { ...c };
+    if (budget.invalid) {
+      recallLog.warn('memory.recall.budget_clamped', { requested: safeInt(budget.requested), effective: safeInt(budget.effective), hop: safeInt(hop), reason: 'invalid' });
+      return stamped(context, false);
+    }
+    if (budget.effective >= context.tokensUsed) return stamped(context, false);
+    recallLog.info('memory.recall.budget_clamped', { requested: safeInt(budget.requested), effective: safeInt(budget.effective), hop: safeInt(hop), reason: budget.clampReason ?? 'prompt_share' });
+    if (budget.effective === 0) {
+      recallLog.warn('memory.recall.allocation_exhausted', {
+        requested: safeInt(budget.requested),
+        candidates: context.capture?.candidates.length ?? context.lineOutcomes?.length ?? context.includedMemoryIds.length,
       });
+    }
+    try {
+      let next: AssembledMemoryContext;
+      if (typeof this.cognitiveMemory.reassembleForBudget === 'function') {
+        // A re-render that rejects sends the hop no block (the catch below): it never starts a second recall, which
+        // would embed and retrieve again and could change the hop's candidates.
+        next = await this.cognitiveMemory.reassembleForBudget(context, budget.effective);
+      } else {
+        const turn = this.turns.get(context);
+        if (!turn) return null;
+        next = await this.cognitiveMemory.assembleForPrompt(turn.query, budget.effective, this.getPadState(), { scopes: turn.scopes });
+      }
+      return stamped(next, true);
+    } catch (error: unknown) {
+      this.addTraceEntry('WARNING', 'Cognitive memory re-render for a model hop failed.', { errorName: errorNameOf(error) });
       return null;
     }
   }

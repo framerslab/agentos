@@ -439,7 +439,7 @@ function seatTurnOf(sendOpts: unknown): Pick<GmiTurnOptions, 'approvalGate' | 't
 /** What a gmi() agent's options say about the loops its GMIs run, for the learning layer's manifest. */
 function hostLoopsOf(cognition: ResolvedCognition): Partial<Record<HostLoopName, LoopState>> {
   const off = (detail: string): LoopState => ({ live: false, detail });
-  const memory = cognition.memory !== false;
+  const memory = Boolean(cognition.memory);
   const store = cognition.memory ? cognition.memory.store : undefined;
   // An empty preset list expands to no metaprompt, so none runs.
   const metaprompts = cognition.metaprompts === 'all' || (Array.isArray(cognition.metaprompts) && cognition.metaprompts.length > 0);
@@ -564,21 +564,25 @@ export function gmi(opts: GmiOptions): GmiHandle {
     if (soul?.frontmatter[field]) soulLog.warn('soul.field_ignored', { field });
   }
   const cognition = resolveCognition(opts);
+  const agentRecall = typeof opts.memory === 'object' && opts.memory !== null ? opts.memory.recall : undefined;
+  // Cognitive memory runs when the resolved memory config is set (an object); every check below reads it that way.
+  const cognitiveMemoryOn = Boolean(cognition.memory);
   // memory.recall: with cognitive memory on it goes to the memory manager (through the persona and
   // createAgentCognitiveMemory); with memory off its budget is the memory provider's tokenBudget, as on the default
   // runtime. Checked before anything is built.
   const resolvedRecall = resolveRecallOptions({
-    recall: cognition.memory
-      ? cognition.memory.recall
-      : typeof opts.memory === 'object' && opts.memory !== null
-        ? opts.memory.recall
-        : undefined,
-    cognitiveMemory: cognition.memory !== false,
+    recall: cognition.memory ? cognition.memory.recall : agentRecall,
+    cognitiveMemory: cognitiveMemoryOn,
     providerTokenBudget: opts.memoryProviderOptions?.tokenBudget,
     providerContext: Boolean(opts.memoryProvider?.getContext),
     where: 'gmi()',
   });
   for (const option of resolvedRecall.ignored) recallLog.warn('memory.recall.option_ignored', { option });
+  // A `cognition.memory` of its own replaces the agent's `memory` option for cognitive memory, its `recall` included:
+  // a `memory.recall` set beside it is applied nowhere, and says so.
+  if (cognition.memory && cognition.memory !== opts.memory && agentRecall != null) {
+    recallLog.warn('memory.recall.option_ignored', { option: 'memory_recall' });
+  }
   // generate() and stream() run the light profile, under the agent's own learning option.
   const lightCognition = resolveCognition({ cognition: 'light', learning: opts.learning });
   const learningConfig = typeof opts.learning === 'object' && opts.learning !== null ? opts.learning : undefined;

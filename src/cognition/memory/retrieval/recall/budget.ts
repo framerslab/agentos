@@ -79,3 +79,53 @@ export function assertRecallConfig(recall: ManagerRecallConfig | null | undefine
 export function recallBudgetTokens(recall: ManagerRecallConfig | null | undefined): number {
   return recall?.budget?.totalTokens ?? DEFAULT_RECALL_BUDGET_TOKENS;
 }
+
+/**
+ * The share of a model's context PromptEngine gives retrieved context (`applyTokenBudget`'s `rag` budget), which the
+ * memory block and the turn's other retrieved context (RAG, long-term-memory text) share. Fixed at 0.20.
+ */
+export const PROMPT_CONTEXT_SHARE = 0.2;
+
+/** The memory block's budget on one model: what was asked for, what the model's share leaves, and why they differ. */
+export interface EffectiveRecallBudget {
+  /** The configured budget (`recall.budget.totalTokens`). */
+  requested: number;
+  /** The budget the block is rendered in on this model: never above `requested`, never below 0. */
+  effective: number;
+  /** Set when `effective` is below `requested`: `zero_remaining` when nothing is left, `prompt_share` otherwise. */
+  clampReason?: 'prompt_share' | 'zero_remaining';
+  /** The model's retrieved-context share, in tokens. */
+  promptShareTokens?: number;
+  /** The turn's other retrieved context, in tokens, which the share holds first. */
+  otherContextTokens?: number;
+  /**
+   * An input was not a finite number of at least 0 (the context size: above 0), so the clamp was skipped and
+   * `effective` is `requested`.
+   */
+  invalid?: true;
+}
+
+/**
+ * The memory block's budget on one model: the smaller of the configured budget and what is left of the model's
+ * retrieved-context share ({@link PROMPT_CONTEXT_SHARE} of `contextTokens`, floored) after the turn's RAG and
+ * long-term-memory text. Never below 0.
+ *
+ * @param i.totalTokens - The configured budget.
+ * @param i.contextTokens - The model's context size as PromptEngine budgets it (`optimalContextTokens`, else `maxContextTokens`).
+ * @param i.otherContextTokens - The tokens of the turn's other retrieved context.
+ * @returns The budget, with `invalid` set when an input was not a finite number in range.
+ */
+export function effectiveRecallBudget(i: { totalTokens: number; contextTokens: number; otherContextTokens: number }): EffectiveRecallBudget {
+  const inRange = (n: number): boolean => typeof n === 'number' && Number.isFinite(n) && n >= 0;
+  if (!inRange(i.totalTokens) || !inRange(i.otherContextTokens) || !inRange(i.contextTokens) || i.contextTokens === 0) {
+    return { requested: i.totalTokens, effective: i.totalTokens, invalid: true };
+  }
+  const promptShareTokens = Math.floor(PROMPT_CONTEXT_SHARE * i.contextTokens);
+  const effective = Math.max(0, Math.min(i.totalTokens, promptShareTokens - i.otherContextTokens));
+  const budget: EffectiveRecallBudget = { requested: i.totalTokens, effective, promptShareTokens, otherContextTokens: i.otherContextTokens };
+  if (effective < i.totalTokens) budget.clampReason = effective === 0 ? 'zero_remaining' : 'prompt_share';
+  return budget;
+}
+
+/** The assembler's token estimate (about four characters a token), with which the GMI sizes the other context. */
+export { estimateMemoryTokens } from '../../core/prompt/MemoryPromptAssembler.js';

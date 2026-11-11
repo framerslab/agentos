@@ -42,7 +42,7 @@ import { refusedToolCallResult } from '../../cognition/substrate/toolCallGate';
 import type { GuardrailToolCallGate } from '../../safety/guardrails/guardrailDispatcher';
 import { gmiToolCallGateFor } from './toolCallGate';
 import { externalToolPauseCalls } from './externalToolPause';
-import { addReplyToConversation, finalResponseFieldsOf, memoryRecallFieldOf } from './turnFinalResponse';
+import { addReplyToConversation, finalResponseFieldsOf, keepPausedMemoryRecall, memoryRecallFieldOf } from './turnFinalResponse';
 import { GMIError, GMIErrorCode } from '../../core/utils/errors.js';
 import { snapshotPersonaDetails } from '../../orchestration/turn-planner/helpers';
 import {
@@ -791,6 +791,7 @@ export class ExternalToolResultHandler {
           // calls a final output lists, which the GMI ran or refused itself, end the turn with the final response.
           const pauseCalls = externalToolPauseCalls(gmiOutputAfterTool);
           if (pauseCalls) {
+            keepPausedMemoryRecall(gmiOutputAfterTool, streamContext);
             await this.persistPendingExternalToolRequest(
               agentOSStreamId,
               streamContext,

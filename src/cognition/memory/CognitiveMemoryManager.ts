@@ -43,6 +43,7 @@ import {
   MEMORY_RERANK_MAX_DOCUMENTS,
   candidatesFrom,
   rerankerRecordOf,
+  type MemoryRecallCapture,
   type MemoryRecallReranker,
   type RecallCaptureMode,
   type RetrievalRecallReport,
@@ -161,6 +162,16 @@ export interface ICognitiveMemoryManager {
     mood: PADState,
     options?: CognitiveRetrievalOptions
   ): Promise<AssembledMemoryContext>;
+
+  /**
+   * Renders again, at `tokenBudget`, a context this manager returned from `assembleForPrompt` (or from this method):
+   * the same candidates and sections through the assembler alone, with no retrieval, embedding or rerank call. A GMI
+   * calls it when a model's share of the prompt is smaller than the block it assembled for the turn. Optional: a
+   * caller without it asks `assembleForPrompt` again at the lower budget.
+   *
+   * @throws {Error} For a context this manager did not return.
+   */
+  reassembleForBudget?(context: AssembledMemoryContext, tokenBudget: number): Promise<AssembledMemoryContext>;
 
   /** Feed a message to the observer (Batch 2). Returns notes if threshold reached. */
   observe?(
@@ -359,6 +370,12 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
 
   // Optional neural reranker for post-retrieval quality improvement
   private rerankerService: import('../rag/reranking/RerankerService.js').RerankerService | null = null;
+
+  /**
+   * What each context `assembleWith` or `reassembleForBudget` returned was rendered from: the assembler's input, the
+   * budget the turn asked for and the context's capture. Keyed by the context object, so an entry goes with it.
+   */
+  private readonly rendered = new WeakMap<AssembledMemoryContext, { input: MemoryAssemblerInput; requested: number; capture?: MemoryRecallCapture }>();
 
   // Memory archive for write-ahead verbatim preservation
   private archive: import('./archive/IMemoryArchive.js').IMemoryArchive | null = null;
@@ -1328,7 +1345,38 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
         },
       };
     }
+    this.rendered.set(context, { input, requested: tokenBudget, ...(context.capture ? { capture: context.capture } : {}) });
     return context;
+  }
+
+  /** @inheritdoc */
+  async reassembleForBudget(context: AssembledMemoryContext, tokenBudget: number): Promise<AssembledMemoryContext> {
+    const kept = this.rendered.get(context);
+    if (!kept) throw new Error('reassembleForBudget: this memory manager did not return that context.');
+    const startedAt = performance.now();
+    const next = assembleMemoryContext({ ...kept.input, totalTokenBudget: tokenBudget });
+    if (kept.capture) {
+      next.capture = {
+        ...kept.capture,
+        budget: { requested: kept.requested, effective: tokenBudget, reassembled: true },
+        tokensUsed: next.tokensUsed,
+        allocation: next.allocation,
+        // The same candidates in the same order, with this rendering's outcomes: one no section had a line for is
+        // left out for the budget.
+        candidates: candidatesFrom(
+          kept.capture.candidates.map(({ id, ranks, fusedScore, rerankScore }) => ({
+            id,
+            ranks,
+            fusedScore,
+            ...(rerankScore !== undefined ? { rerankScore } : {}),
+          })),
+          next.lineOutcomes ?? [],
+        ),
+        timings: { ...kept.capture.timings, assembleMs: Math.round(performance.now() - startedAt) },
+      };
+    }
+    this.rendered.set(next, { ...kept, ...(next.capture ? { capture: next.capture } : {}) });
+    return next;
   }
 
   // =========================================================================

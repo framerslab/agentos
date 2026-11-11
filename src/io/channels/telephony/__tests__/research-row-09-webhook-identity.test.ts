@@ -45,7 +45,7 @@ it('requests Telnyx bidirectional PCMU only in carrier mode', async () => {
   const input = { callId: 'local', fromNumber: '+15550000001', toNumber: '+15550000002', mode: 'conversation' as const, webhookUrl: 'https://example.test/callback', mediaStreamUrl: 'wss://example.test/media' };
   const carrier = new TelnyxVoiceProvider({ apiKey: 'fixture', connectionId: 'connection', fetchImpl: fetcher, protocol: 'carrier' });
   await carrier.initiateCall(input);
-  expect(JSON.parse(String(fetcher.mock.calls[0]![1]!.body))).toMatchObject({ stream_url: input.mediaStreamUrl, stream_bidirectional_mode: 'rtp', stream_bidirectional_codec: 'PCMU' });
+  expect(JSON.parse(String(fetcher.mock.calls[0]![1]!.body))).toMatchObject({ stream_url: input.mediaStreamUrl, stream_codec: 'PCMU', stream_bidirectional_mode: 'rtp', stream_bidirectional_codec: 'PCMU' });
   expect(carrier.verifyWebhook(context('{}')).valid).toBe(false);
   const legacy = new TelnyxVoiceProvider({ apiKey: 'fixture', connectionId: 'connection', fetchImpl: fetcher, protocol: 'legacy' });
   await legacy.initiateCall(input); expect(JSON.parse(String(fetcher.mock.calls[1]![1]!.body))).not.toHaveProperty('stream_url');

@@ -91,6 +91,18 @@ export interface CallAnsweredInput {
   voice?: string;
 }
 
+/** An inbound call to answer, as {@link IVoiceCallProvider.answerCall} receives it. */
+export interface AnswerCallInput {
+  /** Internal call ID assigned by CallManager. */
+  callId: CallId;
+  /** Provider-assigned call ID of the inbound call. */
+  providerCallId: string;
+  /** Media stream WebSocket URL, when the manager's `streaming.enabled` is set. */
+  mediaStreamUrl?: string;
+  /** Host-issued stream credential, as for {@link InitiateCallInput.mediaStreamToken}. */
+  mediaStreamToken?: string;
+}
+
 /** Parameters for starting STT listening on a call. */
 export interface StartListeningInput {
   /** Provider-assigned call ID. */
@@ -183,6 +195,15 @@ export interface IVoiceCallProvider {
    * host's answer XML sets their calls up.
    */
   onCallAnswered?(input: CallAnsweredInput): Promise<void>;
+
+  /**
+   * Answer an inbound call the host has admitted, for a carrier that answers
+   * by command rather than by the answer XML the host serves (Telnyx Call
+   * Control). `CallManager.answerInboundCall` calls it and waits for it; a
+   * rejection reaches the host. Twilio and Plivo leave it unimplemented, since
+   * the host's answer XML answers their calls.
+   */
+  answerCall?(input: AnswerCallInput): Promise<void>;
 
   /**
    * Play TTS audio into an active call (non-streaming).
