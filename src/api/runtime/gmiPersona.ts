@@ -67,11 +67,24 @@ function completionOptionsOf(opts: AgentOptions): Partial<ModelCompletionOptions
 }
 
 /**
- * The persona id of a soul that gives no id (no `agentId`, no `name`, on an agent with no name): `soul-` and the first
- * 16 hex characters of SHA-256 over the canonical JSON of its front matter and body. The same at every build of the
- * same soul; it changes with the soul's text. It is never a learner or brain key (`memory.store` refuses such a soul),
- * but in-process cognitive memory files the persona and owner scopes under the persona id, so editing such a soul
- * starts those scopes afresh; set `agentId` to keep them.
+ * The `learning.agentKey` the host set, trimmed; undefined when `learning` is not a config or the key is unset or blank.
+ * It names the persona of an agent whose soul gives no id, and of an unnamed agent with no soul, so the memory that
+ * files under the persona id keeps the host's key across builds.
+ */
+function hostAgentKeyOf(opts: Pick<AgentOptions, 'learning'>): string | undefined {
+  const learning = opts.learning;
+  if (!learning || typeof learning !== 'object') return undefined;
+  const key = typeof learning.agentKey === 'string' ? learning.agentKey.trim() : '';
+  return key || undefined;
+}
+
+/**
+ * The persona id of a soul that gives no id (no `agentId`, no `name`, on an agent with no name and no
+ * `learning.agentKey`): `soul-` and the first 16 hex characters of SHA-256 over the canonical JSON of its front matter
+ * and body. The same at every build of the same soul; it changes with the soul's text. It is never a learner or brain
+ * key (`memory.store` refuses such a soul without `learning.agentKey`, and with one the key names the persona), but
+ * in-process cognitive memory files the persona and owner scopes under the persona id, so editing such a soul starts
+ * those scopes afresh; set `agentId` or `learning.agentKey` to keep them.
  */
 export function derivedSoulPersonaId(soul: Pick<LoadedSoul, 'frontmatter' | 'soulContent'>): string {
   return `soul-${createHash('sha256').update(canonicalJson([soul.frontmatter, soul.soulContent])).digest('hex').slice(0, 16)}`;
@@ -132,8 +145,8 @@ export function personaFromAgentOptions(
   const presets: SentimentTrackingConfig['presets'] = cognition.metaprompts === 'all' ? ['all'] : cognition.metaprompts || [];
   const persona = {
     id: loaded
-      ? (soulAgentIdOf(loaded.frontmatter, opts.name) ?? derivedSoulPersonaId(loaded))
-      : (stablePersonaIdOf(opts) ?? `agent-${randomUUID()}`),
+      ? (soulAgentIdOf(loaded.frontmatter, opts.name) ?? hostAgentKeyOf(opts) ?? derivedSoulPersonaId(loaded))
+      : (stablePersonaIdOf(opts) ?? hostAgentKeyOf(opts) ?? `agent-${randomUUID()}`),
     name,
     description: loaded?.frontmatter.role?.trim() || firstLine || name,
     version: '1.0.0',
