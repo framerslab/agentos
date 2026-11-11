@@ -267,6 +267,39 @@ function standaloneRecallConfidence(score: number): number {
 // Internal row types (matched to Brain DDL)
 // ---------------------------------------------------------------------------
 
+/**
+ * What every facade of one backing store in this process shares, by the Brain's coordination token: the page writes of
+ * each conversation scope still running, and the compile's fence (when a compile read last began, the latest time a
+ * conversation trace was stamped with, and the times of the traces stamped and not yet stored, with their counts).
+ */
+interface SharedCoordination {
+  pageWrites: Map<string, Promise<void>>;
+  compileReadAt: number;
+  lastConversationStamp: number;
+  unstored: Map<number, number>;
+}
+const sharedCoordination = new WeakMap<object, SharedCoordination>();
+
+/** The state the facades of the store behind `token` share in this process. */
+function coordinationOf(token: object): SharedCoordination {
+  let shared = sharedCoordination.get(token);
+  if (!shared) {
+    shared = { pageWrites: new Map(), compileReadAt: 0, lastConversationStamp: 0, unstored: new Map() };
+    sharedCoordination.set(token, shared);
+  }
+  return shared;
+}
+
+/** True for a trace's tags (a JSON array in text) that mark it a chunk of a wiki page. */
+function isPageChunkTags(tags: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(tags);
+    return Array.isArray(parsed) && parsed.includes('wiki');
+  } catch {
+    return false;
+  }
+}
+
 /** Raw row shape from the `memory_traces` table. */
 interface TraceRow {
   id: string;
@@ -640,8 +673,9 @@ export class Memory {
     const id = typeof options?.id === 'string' && options.id !== '' ? options.id : nextTraceId();
     // A conversation trace is stamped after the last compile read of this facade, and counted as not yet stored until
     // its row is in: a compile reads below it meanwhile, so no watermark moves past a trace a compile has not read.
-    const now = conversation ? Math.max(Date.now(), this._compileReadAt + 1) : Date.now();
-    if (conversation && now > this._lastConversationStamp) this._lastConversationStamp = now;
+    const fence = conversation ? coordinationOf(this._brain.coordinationToken) : undefined;
+    const now = fence ? Math.max(Date.now(), fence.compileReadAt + 1) : Date.now();
+    if (fence && now > fence.lastConversationStamp) fence.lastConversationStamp = now;
     const tags = options?.tags ?? [];
     const entities = options?.entities ?? [];
     const importance = options?.importance ?? 1.0;
@@ -1213,7 +1247,9 @@ export class Memory {
    * page's old chunks are deleted for good, the new ones are filed as traces under the scope's key with the tags
    * `wiki` and `page:<id>`, and the row lists them; without, the row's content is replaced and its chunks are kept.
    * With `chunks` and `keepChunksIfUnchanged`, the stored row is compared once the scope's earlier page writes have
-   * settled: a row whose `contentHash` is the one given keeps its chunks, and any other row gets the new ones.
+   * settled: a row whose `contentHash` is the one given keeps its chunks, and any other row gets the new ones. With
+   * `ifContentHash`, nothing is written unless the stored row's `contentHash` is that one when the write runs; the
+   * result then says `skipped`.
    * The scope's registry row, the new chunks, the page row and the delete of the old chunks are one transaction
    * where the adapter has them; where it has none they run in that order, so the row never lists a chunk that is
    * not stored.
@@ -1231,8 +1267,9 @@ export class Memory {
       contentHash: string;
       chunks?: ReadonlyArray<MemoryPageChunk>;
       keepChunksIfUnchanged?: boolean;
+      ifContentHash?: string;
     },
-  ): Promise<{ chunkIds: string[] }> {
+  ): Promise<{ chunkIds: string[]; skipped?: true }> {
     assertPageOwnerKey(scopeId);
     assertWikiPageId(page.pageId);
     await this._initPromise;
@@ -1245,21 +1282,20 @@ export class Memory {
    * deletes them. Writers in other processes are not ordered by it.
    */
   private _onePageWriteAtATime<T>(scopeId: string, work: () => Promise<T>): Promise<T> {
-    const earlier = this._pageWrites.get(scopeId) ?? Promise.resolve();
+    const pageWrites = coordinationOf(this._brain.coordinationToken).pageWrites;
+    const earlier = pageWrites.get(scopeId) ?? Promise.resolve();
     const run = earlier.then(work, work);
     const settled = run.then(
       () => undefined,
       () => undefined,
     );
-    this._pageWrites.set(scopeId, settled);
+    pageWrites.set(scopeId, settled);
     void settled.then(() => {
-      if (this._pageWrites.get(scopeId) === settled) this._pageWrites.delete(scopeId);
+      if (pageWrites.get(scopeId) === settled) pageWrites.delete(scopeId);
     });
     return run;
   }
 
-  /** The last page write or page delete of each scope still running on this facade. */
-  private readonly _pageWrites = new Map<string, Promise<void>>();
 
   /** {@link writePageRow}, once the scope's earlier page writes have settled. */
   private async _writePageRow(
@@ -1270,12 +1306,15 @@ export class Memory {
       contentHash: string;
       chunks?: ReadonlyArray<MemoryPageChunk>;
       keepChunksIfUnchanged?: boolean;
+      ifContentHash?: string;
     },
-  ): Promise<{ chunkIds: string[] }> {
+  ): Promise<{ chunkIds: string[]; skipped?: true }> {
     const brainId = this._brain.brainId;
     const now = Date.now();
     const prior = await this.readPageRow(scopeId, page.pageId);
     const old = prior?.chunkIds ?? [];
+    // A write made from a page read earlier is not made over a row another write changed since.
+    if (page.ifContentHash !== undefined && prior?.contentHash !== page.ifContentHash) return { chunkIds: old, skipped: true };
     const transactions = this._brain.adapter.capabilities?.has?.('transactions') === true;
     const upsert = (db: Pick<StorageAdapter, 'run'>, chunkIds: readonly string[]) =>
       db.run(UPSERT_PAGE_ROW, [
@@ -1558,40 +1597,30 @@ export class Memory {
     return targets;
   }
 
-  /**
-   * When this facade's last compile read began, in Unix milliseconds, never before a stamp this facade gave: a
-   * conversation trace is stamped after it.
-   */
-  private _compileReadAt = 0;
-
-  /** The latest time this facade stamped a conversation trace with. */
-  private _lastConversationStamp = 0;
-
-  /** The time of each conversation trace a `remember()` of this facade has stamped and not yet stored, with its count. */
-  private readonly _unstoredWrites = new Map<number, number>();
-
-  /** Counts a write stamped `at` as not yet stored, until the returned call. */
+  /** Counts a write stamped `at` as not yet stored, for every facade of this store, until the returned call. */
   private _holdUnstored(at: number): () => void {
-    this._unstoredWrites.set(at, (this._unstoredWrites.get(at) ?? 0) + 1);
+    const unstored = coordinationOf(this._brain.coordinationToken).unstored;
+    unstored.set(at, (unstored.get(at) ?? 0) + 1);
     let released = false;
     return () => {
       if (released) return;
       released = true;
-      const left = (this._unstoredWrites.get(at) ?? 1) - 1;
-      if (left > 0) this._unstoredWrites.set(at, left);
-      else this._unstoredWrites.delete(at);
+      const left = (unstored.get(at) ?? 1) - 1;
+      if (left > 0) unstored.set(at, left);
+      else unstored.delete(at);
     };
   }
 
   /**
-   * Marks a compile read as begun and returns the time it reads below: the earliest write of this facade stamped and
-   * not yet stored, or no bound. Every trace stamped before that time is stored, and every trace stamped from now on
-   * is later than any the read returns. Writers in other processes are not ordered by it.
+   * Marks a compile read as begun and returns the time it reads below: the earliest write of any facade of this store
+   * in this process stamped and not yet stored, or no bound. Every trace stamped before that time is stored, and every
+   * trace stamped from now on is later than any the read returns. Writers in other processes are not ordered by it.
    */
   private _beginCompileRead(): number {
-    this._compileReadAt = Math.max(Date.now(), this._compileReadAt, this._lastConversationStamp);
+    const fence = coordinationOf(this._brain.coordinationToken);
+    fence.compileReadAt = Math.max(Date.now(), fence.compileReadAt, fence.lastConversationStamp);
     let bound = Number.POSITIVE_INFINITY;
-    for (const at of this._unstoredWrites.keys()) if (at < bound) bound = at;
+    for (const at of fence.unstored.keys()) if (at < bound) bound = at;
     return bound;
   }
 
@@ -1672,11 +1701,26 @@ export class Memory {
         aggregate.conflicts.push(...result.conflicts);
       }
 
-      sinceMs = batch.reduce((newest, trace) => Math.max(newest, Number(trace.createdAt)), sinceMs);
-      await this._brain.run(
-        'UPDATE memory_scopes SET compiled_at = ? WHERE brain_id = ? AND scope = ? AND scope_id = ?',
-        [sinceMs, this._brain.brainId, CONVERSATION_SCOPE, scopeId],
+      // A trace stored meanwhile, by an import or another writer, under a time the batch spans is read next time: the
+      // watermark stops just before the oldest such trace.
+      const newest = batch.reduce((latest, trace) => Math.max(latest, Number(trace.createdAt)), sinceMs);
+      const read = new Set(batch.map((trace) => trace.id));
+      const stored = await this._brain.all<{ id: string; created_at: number | string; tags: string }>(
+        `SELECT id, created_at, tags FROM memory_traces
+          WHERE brain_id = ? AND deleted = 0 AND scope = ? AND scope_id = ? AND created_at > ? AND created_at <= ?`,
+        [this._brain.brainId, CONVERSATION_SCOPE, scopeId, sinceMs, newest],
       );
+      const unread = stored.filter((row) => !read.has(row.id) && !isPageChunkTags(row.tags)).map((row) => Number(row.created_at));
+      const watermark = unread.length > 0 ? Math.min(...unread) - 1 : newest;
+      // Moved only from the value this compile started from: an import that moved it back meanwhile keeps its value,
+      // and the compile of this scope stops here.
+      const moved = await this._brain.run(
+        `UPDATE memory_scopes SET compiled_at = ?
+          WHERE brain_id = ? AND scope = ? AND scope_id = ? AND COALESCE(compiled_at, 0) = ?`,
+        [watermark, this._brain.brainId, CONVERSATION_SCOPE, scopeId, sinceMs],
+      );
+      if (moved.changes === 0 || watermark < newest) break;
+      sinceMs = watermark;
 
       if (!full) break;
     }

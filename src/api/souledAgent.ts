@@ -46,6 +46,7 @@ import { isAnonymousUserId } from './runtime/memorySubject.js';
 import { asSpendBudget } from './runtime/spendBudget.js';
 import { credentialsGoWith, modelNamesAnotherProvider } from './runtime/credentialOwner.js';
 import { resolveCognition, type CognitionInputs } from './runtime/gmiCognition.js';
+import { resolveModelOption } from './model.js';
 import type { AgentOSUsageLedgerOptions } from './runtime/usageLedger.js';
 
 /** Characters a token is estimated at, as `estimateTokens` counts them. */
@@ -395,9 +396,9 @@ export type SouledAgent = Agent & { memory?: Memory };
  *   reasons; nothing is opened.
  * @throws Error when `sharedMemory` is set and the store already holds the memory of another user or session; the
  *   store is closed first.
- * @throws TypeError when `memoryPolicy` or `screen` is set on an agent whose cognitive memory is on (`runtime: 'gmi'`
- *   with `cognition.memory`, the `full` profile, or the `memory` option): the GMI keeps that memory in a store of its
- *   own, which neither hook reaches; nothing is opened.
+ * @throws TypeError when `memoryPolicy`, `screen` or `sharedMemory` is set on an agent whose cognitive memory is on
+ *   (`runtime: 'gmi'` with `cognition.memory`, the `full` profile, or the `memory` option): the GMI keeps that memory
+ *   in a store of its own, which none of them reaches; nothing is opened.
  */
 export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent> {
   const { pendingWritesTimeoutMs, sharedMemory, compile, memoryPolicy, screen, ...rest } = opts;
@@ -436,12 +437,12 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       "souledAgent: the soul has no agentId and no name, and the agent has no name; set agentId in SOUL.md's front matter so the agent's memory has one stable id",
     );
   }
-  // The two hooks act on this agent's own store. A GMI's cognitive memory files and recalls in a store of its own,
-  // which neither reaches, so an account the policy turns off would still be remembered there: the two are refused
-  // together.
-  if ((memoryPolicy || screen) && rest.runtime === 'gmi' && cognitiveMemoryOf(rest as CognitionInputs)) {
+  // The two hooks and sharedMemory act on this agent's own store. A GMI's cognitive memory files and recalls in a store
+  // of its own, which none of them reaches: an account the policy turns off would still be remembered there, and
+  // sessions sharedMemory runs as one user would not share it. They are refused together.
+  if ((memoryPolicy || screen || sharedMemory !== undefined) && rest.runtime === 'gmi' && cognitiveMemoryOf(rest as CognitionInputs)) {
     throw new TypeError(
-      "souledAgent: memoryPolicy and screen act on the souled agent's own memory, and cognitive memory (runtime: 'gmi' with cognition memory on) keeps a store neither of them reaches; turn cognitive memory off, or leave both hooks out",
+      "souledAgent: memoryPolicy, screen and sharedMemory act on the souled agent's own memory, and cognitive memory (runtime: 'gmi' with cognition memory on) keeps a store none of them reaches; turn cognitive memory off, or leave them out",
     );
   }
 
@@ -516,14 +517,19 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
    * the session closes: a session id opened again for another user never reads the answer given for the first.
    */
   const sessionPolicies = new Map<string, Map<string, MemoryPolicy>>();
-  /** What the turn of each subject of a session is in decided, from its first hook to its reply's write. */
-  const sessionTurns = new Map<string, Map<string, Promise<TurnPolicy>>>();
   /** How many times each session id has been closed: an answer asked for before a close is kept for nothing. */
   const sessionCloses = new Map<string, number>();
-  /** The latest decision of a turn for each subject this process served: what the page tool reads it by. */
-  const scopeDecisions = new Map<string, Promise<TurnPolicy>>();
-  /** The same for a one-shot call, by the context its hooks share. */
-  const oneShotTurns = new WeakMap<MemoryHookContext, Promise<TurnPolicy>>();
+  /**
+   * What each turn decided, from its first hook to its reply's write, by the context the turn's hooks share: a turn
+   * of the default runtime and a one-shot call have one of their own, and a GMI session one for its turns, which run
+   * one at a time. Two turns of one session that overlap never read each other's decision.
+   */
+  const turnDecisions = new WeakMap<MemoryHookContext, Promise<TurnPolicy>>();
+  /**
+   * The host's latest answer for each subject this process asked about, a failure among them: what the page tool and
+   * the compile read, so an earlier answer one session keeps never outlasts a later one.
+   */
+  const latestAnswers = new Map<string, TurnPolicy>();
   /** The sessions whose `off` policy has been said. */
   const offSaid = new Set<string>();
   /** For each scope a turn of this process served under a policy that keeps memory: the policy and the turn's context. */
@@ -561,7 +567,12 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     const closesBefore = session !== undefined ? (sessionCloses.get(session) ?? 0) : 0;
     const kept = session !== undefined ? sessionPolicies.get(session)?.get(scopeId) : undefined;
     const policy = kept ?? (await askPolicy(hookContext));
-    if (policy === 'failed') return policy;
+    if (kept === undefined) latestAnswers.set(scopeId, policy);
+    if (policy === 'failed') {
+      // A failed answer is the latest: no compile reads an earlier permission for the subject.
+      served.delete(scopeId);
+      return policy;
+    }
     // Kept only where a hook reads it later: the session's answer for its next turns, the scope's for its compile. An
     // answer that came after its session closed is not kept for the session's next opening.
     if (memoryPolicy && session !== undefined && (sessionCloses.get(session) ?? 0) === closesBefore) {
@@ -569,7 +580,12 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       ofSession.set(scopeId, policy);
       sessionPolicies.set(session, ofSession);
     }
-    if ((memoryPolicy || screen) && policy.longTerm !== 'off') served.set(scopeId, { policy, context: hookContext });
+    // The compile reads the host's latest answer for the subject: an `off` answer takes back an earlier permission,
+    // and an answer a session keeps from before is no new one.
+    if ((memoryPolicy || screen) && kept === undefined) {
+      if (policy.longTerm === 'off') served.delete(scopeId);
+      else served.set(scopeId, { policy, context: hookContext });
+    }
     return policy;
   };
   /**
@@ -582,34 +598,21 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     scopeId: string,
     at: 'recall' | 'user' | 'assistant',
   ): Promise<TurnPolicy> => {
-    if (context.call === 'one-shot') {
-      const open = at === 'recall' ? undefined : oneShotTurns.get(context);
-      const decision = open ?? decide(context, subject, scopeId);
-      oneShotTurns.set(context, decision);
-      scopeDecisions.set(scopeId, decision);
-      return decision;
-    }
-    const turns = sessionTurns.get(context.sessionId) ?? new Map<string, Promise<TurnPolicy>>();
-    const open = at === 'recall' ? undefined : turns.get(scopeId);
+    const open = at === 'recall' ? undefined : turnDecisions.get(context);
     const decision = open ?? decide(context, subject, scopeId);
-    if (at === 'assistant') turns.delete(scopeId);
-    else turns.set(scopeId, decision);
-    if (turns.size > 0) sessionTurns.set(context.sessionId, turns);
-    else sessionTurns.delete(context.sessionId);
-    scopeDecisions.set(scopeId, decision);
+    if (at === 'assistant') turnDecisions.delete(context);
+    else turnDecisions.set(context, decision);
     return decision;
   };
   /**
    * Whether the page tool serves a subject its own pages: always without a policy hook; under one, only when the
-   * latest turn this process served for the subject was given a policy that keeps memory. An `off` answer, a failed
-   * hook and a subject no turn of this process was served for read the operator's pages alone.
+   * host's latest answer for the subject keeps memory. An `off` answer, a failed hook and a subject this process has
+   * not asked about read the operator's pages alone.
    */
-  const ownPagesServed = async (scopeId: string): Promise<boolean> => {
+  const ownPagesServed = (scopeId: string): boolean => {
     if (!memoryPolicy) return true;
-    const decision = scopeDecisions.get(scopeId);
-    if (!decision) return false;
-    const policy = await decision;
-    return policy !== 'failed' && policy.longTerm !== 'off';
+    const answer = latestAnswers.get(scopeId);
+    return answer !== undefined && answer !== 'failed' && answer.longTerm !== 'off';
   };
   /**
    * `text` through the host's screen hook: the text to use, null when the hook drops it, or {@link SCREEN_FAILED}
@@ -847,7 +850,19 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
         (rest.provider !== undefined && target.model !== undefined && modelNamesAnotherProvider(rest.provider, target.model)
           ? undefined
           : rest.provider));
-  const compileModel = target?.model ?? rest.model;
+  // A target that names a provider alone runs on that provider's default model, unless it is the agent's own provider:
+  // the agent's model belongs to the agent's provider.
+  const agentProvider = (() => {
+    if (rest.provider !== undefined) return rest.provider;
+    if (rest.model === undefined) return undefined;
+    try {
+      return resolveModelOption({ model: rest.model }, 'text').providerId;
+    } catch {
+      return undefined;
+    }
+  })();
+  const compileModel =
+    target?.model ?? (target?.provider === undefined || target.provider === agentProvider ? rest.model : undefined);
   const agentCredentialsGo =
     target === undefined ||
     credentialsGoWith({ provider: rest.provider, model: rest.model }, { provider: compileProvider, model: compileModel });
@@ -933,7 +948,6 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       if (closeSession) {
         (session as { close: (...args: unknown[]) => Promise<unknown> }).close = (...args: unknown[]) => {
           sessionPolicies.delete(session.id);
-          sessionTurns.delete(session.id);
           offSaid.delete(session.id);
           sessionCloses.set(session.id, (sessionCloses.get(session.id) ?? 0) + 1);
           return closeSession(...args);

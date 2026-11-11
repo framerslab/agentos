@@ -30,8 +30,10 @@ export interface UserWikiPagesPort {
       chunks?: ReadonlyArray<PageChunk>;
       /** Keep the row's chunks when the stored body's hash is `contentHash`, compared at the write itself. */
       keepChunksIfUnchanged?: boolean;
+      /** Write nothing unless the stored row's hash is this one when the write runs. */
+      ifContentHash?: string;
     },
-  ): Promise<{ chunkIds: string[] }>;
+  ): Promise<{ chunkIds: string[]; skipped?: true }>;
   deletePageRows(scopeId: string, pageId?: string): Promise<{ pages: number; chunks: number }>;
 }
 
@@ -116,7 +118,8 @@ export class UserWikiStore implements WikiPageStorePort {
 
   /**
    * A page's chunks are filed when the page is written, so a plain call indexes nothing and reports every page as
-   * skipped. With `force`, each page's chunks are written again from its body; `removed` lists the old chunk ids.
+   * skipped. With `force`, each page's chunks are written again from its body; `removed` lists the old chunk ids. A
+   * page another write changed after the listing keeps that write's text and chunks, and is listed as skipped.
    */
   async index(opts?: { force?: boolean }): Promise<IndexResult> {
     const result: IndexResult = { indexed: [], skipped: [], removed: [] };
@@ -133,12 +136,19 @@ export class UserWikiStore implements WikiPageStorePort {
         result.skipped.push(row.pageId);
         continue;
       }
-      await this.pages.writePageRow(this.scopeId, {
+      // Written only over the row as it was listed: a page another write changed since keeps that write's text and
+      // chunks, and is reported as skipped.
+      const written = await this.pages.writePageRow(this.scopeId, {
         pageId: row.pageId,
         content: row.content,
         contentHash: row.contentHash,
         chunks: this.chunksOf(page),
+        ifContentHash: row.contentHash,
       });
+      if (written.skipped) {
+        result.skipped.push(row.pageId);
+        continue;
+      }
       result.indexed.push(row.pageId);
       result.removed.push(...row.chunkIds);
     }

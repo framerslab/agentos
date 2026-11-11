@@ -15,13 +15,14 @@ export type ConversationSubject =
 const LETTER = { user: 'u', session: 's', operator: 'o' } as const;
 
 /**
- * True when `text` holds a lone surrogate: a high surrogate with no low one after it, or a low one with no high one
- * before it. A store writes text as UTF-8, where each lone surrogate becomes U+FFFD, so such a string is stored, and
- * matched, as another string.
+ * True when `text` holds a lone surrogate or a NUL. A lone surrogate is a high surrogate with no low one after it, or
+ * a low one with no high one before it: a store writes text as UTF-8, where each becomes U+FFFD, so such a string is
+ * stored, and matched, as another string. Postgres stores no NUL in text, so a key that held one could not be stored.
  */
-function holdsLoneSurrogate(text: string): boolean {
+function holdsUnstorableCharacter(text: string): boolean {
   for (let i = 0; i < text.length; i += 1) {
     const code = text.charCodeAt(i);
+    if (code === 0) return true;
     if (code < 0xd800 || code > 0xdfff) continue;
     if (code <= 0xdbff) {
       const next = text.charCodeAt(i + 1);
@@ -40,17 +41,18 @@ function holdsLoneSurrogate(text: string): boolean {
  * `c1:<k>:<n>:<agentId>:<m>:<subjectId>;` where `<k>` is `u`, `s` or `o`, `<n>` and `<m>` are the lengths of the two
  * ids in UTF-16 code units, written in decimal, and `;` closes the key. The operator form has `<m>` = 0 and an empty
  * subject id. The ids are kept as given: no encoding, no case folding, no Unicode normalisation. An id that holds a
- * lone surrogate is refused: the store would write it as the id that holds U+FFFD in its place, another subject's.
+ * lone surrogate is refused: the store would write it as the id that holds U+FFFD in its place, another subject's. An
+ * id that holds a NUL is refused too: Postgres stores no NUL in text.
  *
- * @throws TypeError on an empty agent id, an empty user or session id, an id that holds a lone surrogate, or a kind
- *   that is none of the three.
+ * @throws TypeError on an empty agent id, an empty user or session id, an id that holds a lone surrogate or a NUL, or a
+ *   kind that is none of the three.
  */
 export function conversationScopeKey(agentId: string, subject: ConversationSubject): string {
   if (typeof agentId !== 'string' || agentId === '') {
     throw new TypeError('conversationScopeKey: agentId must be a non-empty string');
   }
-  if (holdsLoneSurrogate(agentId)) {
-    throw new TypeError('conversationScopeKey: agentId must be well-formed UTF-16 (it holds a lone surrogate)');
+  if (holdsUnstorableCharacter(agentId)) {
+    throw new TypeError('conversationScopeKey: agentId must be well-formed UTF-16 with no NUL (it holds a lone surrogate or a NUL)');
   }
   if (subject?.kind === 'operator') return `c1:o:${agentId.length}:${agentId}:0:;`;
   if (subject?.kind !== 'user' && subject?.kind !== 'session') {
@@ -59,22 +61,22 @@ export function conversationScopeKey(agentId: string, subject: ConversationSubje
   if (typeof subject.id !== 'string' || subject.id === '') {
     throw new TypeError('conversationScopeKey: a user or session subject needs a non-empty id');
   }
-  if (holdsLoneSurrogate(subject.id)) {
+  if (holdsUnstorableCharacter(subject.id)) {
     throw new TypeError(
-      'conversationScopeKey: a user or session id must be well-formed UTF-16 (it holds a lone surrogate)',
+      'conversationScopeKey: a user or session id must be well-formed UTF-16 with no NUL (it holds a lone surrogate or a NUL)',
     );
   }
   return `c1:${LETTER[subject.kind]}:${agentId.length}:${agentId}:${subject.id.length}:${subject.id};`;
 }
 
 /**
- * The parts of a key `conversationScopeKey` wrote; undefined for any other string, one that holds a lone surrogate
- * among them.
+ * The parts of a key `conversationScopeKey` wrote; undefined for any other string, one that holds a lone surrogate or
+ * a NUL among them.
  */
 export function parseConversationScopeKey(
   scopeId: string,
 ): { agentId: string; subject: ConversationSubject } | undefined {
-  if (typeof scopeId !== 'string' || !scopeId.startsWith('c1:') || holdsLoneSurrogate(scopeId)) return undefined;
+  if (typeof scopeId !== 'string' || !scopeId.startsWith('c1:') || holdsUnstorableCharacter(scopeId)) return undefined;
   const letter = scopeId.charAt(3);
   if ((letter !== 'u' && letter !== 's' && letter !== 'o') || scopeId.charAt(4) !== ':') return undefined;
   let at = 5;
