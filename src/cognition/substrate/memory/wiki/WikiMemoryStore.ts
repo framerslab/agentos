@@ -291,21 +291,24 @@ export class WikiMemoryStore implements WikiPageStorePort {
 
   /**
    * Delete page `id`: its file, then its chunks, for good, with its entry of `.meta/index.json`, then its line of
-   * index.md.
+   * index.md. A page whose file an earlier delete removed before its chunks could be deleted is finished here: its
+   * chunks and its entry go.
    *
-   * @returns True when the page had a file; false, with nothing changed, when it had none.
+   * @returns True when the page had a file or chunks left of it; false, with nothing changed, when it had neither.
    * @throws InvalidWikiPageIdError when the id is refused (see `isWikiPageId`); nothing is deleted.
    */
   async deletePage(id: string): Promise<boolean> {
     const file = this.pagePath(id);
+    let hadFile = true;
     try {
       await fs.rm(file);
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false;
-      throw err;
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      hadFile = false;
     }
     const meta = await this.readMeta();
     const entry = meta.keyVersion === META_KEY_VERSION ? meta.pages[id] : undefined;
+    if (!hadFile && !entry) return false;
     if (entry) {
       await this._port.deleteTraces(entry.traceIds);
       delete meta.pages[id];

@@ -57,3 +57,47 @@ export async function registerUnregisteredConversationScopes(
   }
   return added;
 }
+
+/** True for a trace's tags (a JSON array in text) that mark it a chunk of a wiki page. */
+function isPageChunk(tags: unknown): boolean {
+  if (typeof tags !== 'string') return false;
+  try {
+    const parsed: unknown = JSON.parse(tags);
+    return Array.isArray(parsed) && parsed.includes('wiki');
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Moves the compile watermark of each scope in `held` back to just before the oldest trace `stored` files under it,
+ * where the watermark is at or after that trace, so the scope's next compile reads a trace an import stored under a
+ * scope that was already compiled past its time. A page chunk moves nothing; a scope the import brought in with its
+ * own registry row keeps that row's watermark.
+ *
+ * @param held - The conversation scopes the brain registered before the import.
+ * @param stored - The rows the import wrote: their `scope`, `scope_id`, `created_at` and `tags`.
+ */
+export async function reopenCompiledScopes(
+  db: Pick<StorageAdapter, 'run'>,
+  brainId: string,
+  held: ReadonlySet<string>,
+  stored: Iterable<{ scope?: unknown; scope_id?: unknown; created_at?: unknown; tags?: unknown }>,
+): Promise<void> {
+  const oldest = new Map<string, number>();
+  for (const row of stored) {
+    if (row.scope !== CONVERSATION_SCOPE || typeof row.scope_id !== 'string' || !held.has(row.scope_id)) continue;
+    if (isPageChunk(row.tags)) continue;
+    const at = Number(row.created_at);
+    if (!Number.isFinite(at)) continue;
+    const seen = oldest.get(row.scope_id);
+    if (seen === undefined || at < seen) oldest.set(row.scope_id, at);
+  }
+  for (const [scopeId, at] of oldest) {
+    await db.run(
+      `UPDATE memory_scopes SET compiled_at = ?
+        WHERE brain_id = ? AND scope = ? AND scope_id = ? AND compiled_at IS NOT NULL AND compiled_at >= ?`,
+      [at - 1, brainId, CONVERSATION_SCOPE, scopeId, at],
+    );
+  }
+}

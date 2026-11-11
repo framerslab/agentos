@@ -109,6 +109,7 @@ import { fillScopeIds } from '../retrieval/store/migrations/v2-to-v3.js';
 import { keyTraceCopies, storedCopyTraceId } from '../retrieval/store/SqlKnowledgeGraph.js';
 import { parseTraceMetadata } from '../retrieval/store/tracePersistence.js';
 import { CONVERSATION_SCOPE, parseConversationScopeKey } from '../retrieval/store/conversationScopeKey.js';
+import { reopenCompiledScopes } from '../retrieval/store/conversationScopes.js';
 import {
   encodedCopyProperties,
   encodePlainScopeId,
@@ -285,18 +286,32 @@ export class SqliteImporter {
       // without the record keeps its plain form.
       const sourceEncoded = sourceRecord && holdsScopeIdsTheFormChanges(rows.traces ?? [], rows.nodes ?? []);
 
-      // The registry of conversation scopes and the wiki pages; a file older than the two tables holds neither.
-      const readOwn = async <T>(table: 'memory_scopes' | 'memory_pages'): Promise<T[]> => {
+      // The registry of conversation scopes and the wiki pages. A file older than the two tables holds neither; a
+      // table the file holds and that cannot be read stops the import before anything is written, so no page is
+      // left behind unsaid.
+      const readOwn = async <T>(table: 'memory_scopes' | 'memory_pages'): Promise<T[] | undefined> => {
+        let columns: Array<{ name: string }> = [];
+        try {
+          columns = await sourceAdapter.all<{ name: string }>(`PRAGMA table_info(${table})`);
+        } catch {
+          columns = [];
+        }
+        if (columns.length === 0) return [];
         try {
           return sourceBrainId !== undefined
             ? await sourceAdapter.all<T>(`SELECT * FROM ${table} WHERE brain_id = ?`, [sourceBrainId])
             : await sourceAdapter.all<T>(`SELECT * FROM ${table}`);
-        } catch {
-          return [];
+        } catch (err) {
+          result.errors.push(`Cannot read ${table} of the source SQLite (${String(err)}); nothing was imported.`);
+          return undefined;
         }
       };
-      const sourceScopes = await readOwn<ScopeRow>('memory_scopes');
-      const sourcePages = (await readOwn<PageRow>('memory_pages')).filter(
+      const ownScopes = await readOwn<ScopeRow>('memory_scopes');
+      if (ownScopes === undefined) return result;
+      const ownPages = await readOwn<PageRow>('memory_pages');
+      if (ownPages === undefined) return result;
+      const sourceScopes = ownScopes;
+      const sourcePages = ownPages.filter(
         (row) => row.scope === CONVERSATION_SCOPE && parseConversationScopeKey(row.scope_id) !== undefined,
       );
 
@@ -331,7 +346,7 @@ export class SqliteImporter {
           rows.traces && chunksLeftOut.size > 0 ? rows.traces.filter((row) => !chunksLeftOut.has(row.id)) : rows.traces;
         const merged = await this._mergeTraces(sourceTraces, result, trx, options, encodePlainIds, chunksIn);
         traces = merged;
-        await this._mergeScopesAndPages(sourceScopes, pagesIn, merged.written, result, trx);
+        await this._mergeScopesAndPages(sourceScopes, pagesIn, merged.written, result, trx, sourceTraces ?? []);
         const nodes = await this._mergeNodes(rows.nodes, result, trx, merged.unfiled, encodePlainIds);
         await this._mergeEdges(rows.edges, result, trx, nodes.skipped);
         // A trace's copy is found by its trace's key: one the file holds under another node id gets the key here.
@@ -374,6 +389,21 @@ export class SqliteImporter {
         if (row.brain_id != null) brainIds.add(row.brain_id);
       }
     }
+    // A brain's scope registry and pages name it too: a file of pages alone, of two brains, is a file of two brains.
+    for (const table of ['memory_scopes', 'memory_pages'] as const) {
+      let rows: { brain_id: string | null }[];
+      try {
+        const columns = await src.all<{ name: string }>(`PRAGMA table_info(${table})`);
+        if (!columns.some((column) => column.name === 'brain_id')) continue;
+        rows = await src.all<{ brain_id: string | null }>(`SELECT DISTINCT brain_id FROM ${table}`);
+      } catch {
+        // A table that cannot be read is refused when its rows are read.
+        continue;
+      }
+      for (const row of rows) {
+        if (row.brain_id != null) brainIds.add(row.brain_id);
+      }
+    }
     return { brainIds: [...brainIds].sort(), scoped };
   }
 
@@ -408,7 +438,7 @@ export class SqliteImporter {
   private async _mergeTraces(
     sourceRows: TraceRow[] | null,
     result: ImportResult,
-    trx: { run: Brain['run']; get: Brain['get'] },
+    trx: { run: Brain['run']; get: Brain['get']; all: Brain['all'] },
     options: Pick<ImportOptions, 'dedup'> | undefined,
     encodePlainIds: boolean,
     pageChunks: ReadonlySet<string> = new Set(),
@@ -423,11 +453,21 @@ export class SqliteImporter {
     if (!sourceRows) return { inserted, retagged, unfiled: unfiledOf(), written };
 
     const brainId = this.brain.brainId;
+    // A chunk of a wiki page is its page's: a message of the same text is not one with it, or the page's next rewrite,
+    // which deletes its chunks, would take what a person said. The tags are a JSON array in text, tested below.
     const checkSql = `SELECT id, created_at, tags
        FROM memory_traces
        WHERE brain_id = ? AND scope = ? AND scope_id = ?
          AND ${duplicateTraceCondition(this.brain)}
-       LIMIT 1`;
+       LIMIT 50`;
+    const tagsOf = (tags: string): string[] => {
+      try {
+        const parsed: unknown = JSON.parse(tags);
+        return Array.isArray(parsed) ? parsed.filter((tag): tag is string => typeof tag === 'string') : [];
+      } catch {
+        return [];
+      }
+    };
 
     const insertSql = `INSERT INTO memory_traces
          (brain_id, id, type, scope, content, embedding, strength, created_at, last_accessed,
@@ -454,9 +494,10 @@ export class SqliteImporter {
         // A chunk of a page that comes in is a row of its own: merged into a trace the brain holds, the page would
         // list a trace that is not its chunk, and its next rewrite would delete it.
         if ((options?.dedup ?? true) && !(row.id && pageChunks.has(row.id))) {
-          const existing = await trx.get<{ id: string; created_at: number; tags: string }>(
+          const candidates = await trx.all<{ id: string; created_at: number; tags: string }>(
             checkSql, [brainId, scope, scopeId, ...duplicateTraceParams(hash, row.content, importedTurnUserId(meta))],
           );
+          const existing = candidates.find((candidate) => !tagsOf(candidate.tags).includes('wiki'));
 
           if (existing) {
             const newerAt = Math.max(existing.created_at, row.created_at);
@@ -513,15 +554,34 @@ export class SqliteImporter {
    * @param scopes - The source's registry rows.
    * @param pages - The source's pages this brain does not hold.
    * @param written - For each source trace this import wrote, the id it was written under.
+   * @param sourceTraces - The source's traces the import read; those it wrote move back the watermark of a scope this
+   *   brain had compiled past their time.
    */
   private async _mergeScopesAndPages(
     scopes: ScopeRow[],
     pages: PageRow[],
     written: ReadonlyMap<string, string>,
     result: ImportResult,
-    trx: { run: Brain['run'] },
+    trx: { run: Brain['run']; all: Brain['all'] },
+    sourceTraces: readonly TraceRow[],
   ): Promise<void> {
     const brainId = this.brain.brainId;
+    // The scopes this brain registered before the import: a message stored under one of them older than its compile
+    // is read by its next compile.
+    const held = new Set(
+      (
+        await trx.all<{ scope_id: string }>('SELECT scope_id FROM memory_scopes WHERE brain_id = ? AND scope = ?', [
+          brainId,
+          CONVERSATION_SCOPE,
+        ])
+      ).map((row) => row.scope_id),
+    );
+    await reopenCompiledScopes(
+      trx,
+      brainId,
+      held,
+      sourceTraces.filter((row) => written.has(row.id)),
+    );
     for (const row of scopes) {
       // Only a key the key builder wrote names a scope; any other row is left out.
       const parsed = row.scope === CONVERSATION_SCOPE ? parseConversationScopeKey(row.scope_id) : undefined;

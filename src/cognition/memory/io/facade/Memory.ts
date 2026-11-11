@@ -638,7 +638,10 @@ export class Memory {
     }
 
     const id = typeof options?.id === 'string' && options.id !== '' ? options.id : nextTraceId();
-    const now = Date.now();
+    // A conversation trace is stamped after the last compile read of this facade, and counted as not yet stored until
+    // its row is in: a compile reads below it meanwhile, so no watermark moves past a trace a compile has not read.
+    const now = conversation ? Math.max(Date.now(), this._compileReadAt + 1) : Date.now();
+    if (conversation && now > this._lastConversationStamp) this._lastConversationStamp = now;
     const tags = options?.tags ?? [];
     const entities = options?.entities ?? [];
     const importance = options?.importance ?? 1.0;
@@ -647,35 +650,42 @@ export class Memory {
       buildInitialTraceMetadata({ ...(options?.metadata ?? {}) }, { contentHash, entities, scopeId }),
     );
 
-    // Generate embedding if embed function is available.
-    const embeddingBlob = await this._embeddingBlobOf(content);
+    const unstored = conversation ? this._holdUnstored(now) : undefined;
+    let newRow: NewTraceRow;
+    try {
+      // Generate embedding if embed function is available.
+      const embeddingBlob = await this._embeddingBlobOf(content);
 
-    // Insert into memory_traces: a conversation trace with its scope's registry row.
-    const newRow: NewTraceRow = {
-      id,
-      type,
-      scope,
-      scopeId,
-      content,
-      embedding: embeddingBlob,
-      strength: importance,
-      createdAt: now,
-      tags: JSON.stringify(tags),
-      metadata,
-    };
-    if (!conversation) {
-      await this._insertTraceRow(this._brain, newRow);
-    } else if (this._brain.adapter.capabilities?.has?.('transactions')) {
-      const brainId = this._brain.brainId;
-      await this._brain.transaction(async (trx) => {
-        await ensureScopeRow(trx, brainId, scopeId, now);
-        await this._insertTraceRow(trx, newRow);
-      });
-    } else {
-      // No transaction to hold the two: the registry row first, so a failure between them leaves a row with no
-      // trace and never a trace with no row.
-      await ensureScopeRow(this._brain, this._brain.brainId, scopeId, now);
-      await this._insertTraceRow(this._brain, newRow);
+      // Insert into memory_traces: a conversation trace with its scope's registry row.
+      newRow = {
+        id,
+        type,
+        scope,
+        scopeId,
+        content,
+        embedding: embeddingBlob,
+        strength: importance,
+        createdAt: now,
+        tags: JSON.stringify(tags),
+        metadata,
+      };
+      if (!conversation) {
+        await this._insertTraceRow(this._brain, newRow);
+      } else if (this._brain.adapter.capabilities?.has?.('transactions')) {
+        const brainId = this._brain.brainId;
+        const row = newRow;
+        await this._brain.transaction(async (trx) => {
+          await ensureScopeRow(trx, brainId, scopeId, now);
+          await this._insertTraceRow(trx, row);
+        });
+      } else {
+        // No transaction to hold the two: the registry row first, so a failure between them leaves a row with no
+        // trace and never a trace with no row.
+        await ensureScopeRow(this._brain, this._brain.brainId, scopeId, now);
+        await this._insertTraceRow(this._brain, newRow);
+      }
+    } finally {
+      unstored?.();
     }
 
     // The full-text entry, the memory-graph node and the vector index entry.
@@ -1202,6 +1212,8 @@ export class Memory {
    * Writes one wiki page row of a user's or a session's conversation scope, with its chunks. With `chunks`, the
    * page's old chunks are deleted for good, the new ones are filed as traces under the scope's key with the tags
    * `wiki` and `page:<id>`, and the row lists them; without, the row's content is replaced and its chunks are kept.
+   * With `chunks` and `keepChunksIfUnchanged`, the stored row is compared once the scope's earlier page writes have
+   * settled: a row whose `contentHash` is the one given keeps its chunks, and any other row gets the new ones.
    * The scope's registry row, the new chunks, the page row and the delete of the old chunks are one transaction
    * where the adapter has them; where it has none they run in that order, so the row never lists a chunk that is
    * not stored.
@@ -1213,7 +1225,13 @@ export class Memory {
    */
   async writePageRow(
     scopeId: string,
-    page: { pageId: string; content: string; contentHash: string; chunks?: ReadonlyArray<MemoryPageChunk> },
+    page: {
+      pageId: string;
+      content: string;
+      contentHash: string;
+      chunks?: ReadonlyArray<MemoryPageChunk>;
+      keepChunksIfUnchanged?: boolean;
+    },
   ): Promise<{ chunkIds: string[] }> {
     assertPageOwnerKey(scopeId);
     assertWikiPageId(page.pageId);
@@ -1246,11 +1264,18 @@ export class Memory {
   /** {@link writePageRow}, once the scope's earlier page writes have settled. */
   private async _writePageRow(
     scopeId: string,
-    page: { pageId: string; content: string; contentHash: string; chunks?: ReadonlyArray<MemoryPageChunk> },
+    page: {
+      pageId: string;
+      content: string;
+      contentHash: string;
+      chunks?: ReadonlyArray<MemoryPageChunk>;
+      keepChunksIfUnchanged?: boolean;
+    },
   ): Promise<{ chunkIds: string[] }> {
     const brainId = this._brain.brainId;
     const now = Date.now();
-    const old = (await this.readPageRow(scopeId, page.pageId))?.chunkIds ?? [];
+    const prior = await this.readPageRow(scopeId, page.pageId);
+    const old = prior?.chunkIds ?? [];
     const transactions = this._brain.adapter.capabilities?.has?.('transactions') === true;
     const upsert = (db: Pick<StorageAdapter, 'run'>, chunkIds: readonly string[]) =>
       db.run(UPSERT_PAGE_ROW, [
@@ -1264,7 +1289,9 @@ export class Memory {
         now,
       ]);
 
-    if (page.chunks === undefined) {
+    // Read after the scope's earlier writes settled: a body the row holds now keeps the chunks the row lists.
+    const unchanged = page.keepChunksIfUnchanged === true && prior != null && prior.contentHash === page.contentHash;
+    if (page.chunks === undefined || unchanged) {
       const keep = async (db: Pick<StorageAdapter, 'run'>): Promise<void> => {
         await ensureScopeRow(db, brainId, scopeId, now);
         await upsert(db, old);
@@ -1532,8 +1559,78 @@ export class Memory {
   }
 
   /**
+   * When this facade's last compile read began, in Unix milliseconds, never before a stamp this facade gave: a
+   * conversation trace is stamped after it.
+   */
+  private _compileReadAt = 0;
+
+  /** The latest time this facade stamped a conversation trace with. */
+  private _lastConversationStamp = 0;
+
+  /** The time of each conversation trace a `remember()` of this facade has stamped and not yet stored, with its count. */
+  private readonly _unstoredWrites = new Map<number, number>();
+
+  /** Counts a write stamped `at` as not yet stored, until the returned call. */
+  private _holdUnstored(at: number): () => void {
+    this._unstoredWrites.set(at, (this._unstoredWrites.get(at) ?? 0) + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const left = (this._unstoredWrites.get(at) ?? 1) - 1;
+      if (left > 0) this._unstoredWrites.set(at, left);
+      else this._unstoredWrites.delete(at);
+    };
+  }
+
+  /**
+   * Marks a compile read as begun and returns the time it reads below: the earliest write of this facade stamped and
+   * not yet stored, or no bound. Every trace stamped before that time is stored, and every trace stamped from now on
+   * is later than any the read returns. Writers in other processes are not ordered by it.
+   */
+  private _beginCompileRead(): number {
+    this._compileReadAt = Math.max(Date.now(), this._compileReadAt, this._lastConversationStamp);
+    let bound = Number.POSITIVE_INFINITY;
+    for (const at of this._unstoredWrites.keys()) if (at < bound) bound = at;
+    return bound;
+  }
+
+  /**
+   * The live traces of one conversation scope stamped after `sinceMs` and before `belowMs`, oldest first and in id
+   * order within one millisecond; at most `limit`, or every one stamped at `exactlyMs` when it is given.
+   */
+  private async _compileTraces(
+    scopeId: string,
+    range: { sinceMs: number; belowMs: number; limit: number } | { exactlyMs: number },
+  ): Promise<MemoryTrace[]> {
+    const select = `SELECT id, type, scope, content, embedding, strength, created_at,
+              last_accessed, retrieval_count, tags, emotions, metadata, deleted
+         FROM memory_traces
+        WHERE brain_id = ? AND deleted = 0 AND scope = ? AND scope_id = ?`;
+    const base = [this._brain.brainId, CONVERSATION_SCOPE, scopeId];
+    const rows =
+      'exactlyMs' in range
+        ? await this._brain.all<TraceRow>(`${select} AND created_at = ? ORDER BY id ASC`, [...base, range.exactlyMs])
+        : Number.isFinite(range.belowMs)
+          ? await this._brain.all<TraceRow>(
+              `${select} AND created_at > ? AND created_at < ? ORDER BY created_at ASC, id ASC LIMIT ?`,
+              [...base, range.sinceMs, range.belowMs, range.limit],
+            )
+          : await this._brain.all<TraceRow>(`${select} AND created_at > ? ORDER BY created_at ASC, id ASC LIMIT ?`, [
+              ...base,
+              range.sinceMs,
+              range.limit,
+            ]);
+    return rows.map((row) => this._buildTrace(row));
+  }
+
+  /**
    * Compiles one scope from its watermark on, adding what its compiles return to `aggregate`, and moves the
    * watermark past each batch it compiled.
+   *
+   * A batch never ends inside a millisecond: when the limit would cut one, the traces of that millisecond wait for
+   * the next batch, or, when the whole batch shares one, every trace of it is read. The read stops below any write
+   * of this facade still being stored, so the watermark never passes a trace that is stored after the read.
    *
    * @returns The reason the wiki's `beforeScopeCompile` skipped the scope for; undefined when it was not skipped.
    * @throws Whatever the hook, the compiler or the store throws; the watermark then stays where the last compiled
@@ -1549,11 +1646,17 @@ export class Memory {
     const { scopeId } = target;
     const store = wiki.storeFor(scopeId);
     let sinceMs = target.compiledAt;
-    // Oldest first in batches, the watermark moving to the newest created_at actually read: a trace beyond one batch
-    // is not dropped, and one stored between the read and the watermark's write is read by the next compile.
     for (;;) {
-      const batch = await this.recentTraces(sinceMs, { scope: CONVERSATION_SCOPE, scopeId, limit: BATCH, order: 'asc' });
-      if (batch.length === 0) break;
+      const belowMs = this._beginCompileRead();
+      const read = await this._compileTraces(scopeId, { sinceMs, belowMs, limit: BATCH });
+      if (read.length === 0) break;
+      const full = read.length === BATCH;
+      let batch = read;
+      if (full) {
+        const last = Number(read[read.length - 1].createdAt);
+        const before = read.filter((trace) => Number(trace.createdAt) < last);
+        batch = before.length > 0 ? before : await this._compileTraces(scopeId, { exactlyMs: last });
+      }
 
       // The scope's own page chunks are never compiled back into its pages.
       let traces = batch.filter((trace) => !trace.tags.includes('wiki'));
@@ -1569,13 +1672,13 @@ export class Memory {
         aggregate.conflicts.push(...result.conflicts);
       }
 
-      sinceMs = Math.max(...batch.map((trace) => Number(trace.createdAt)));
+      sinceMs = batch.reduce((newest, trace) => Math.max(newest, Number(trace.createdAt)), sinceMs);
       await this._brain.run(
         'UPDATE memory_scopes SET compiled_at = ? WHERE brain_id = ? AND scope = ? AND scope_id = ?',
         [sinceMs, this._brain.brainId, CONVERSATION_SCOPE, scopeId],
       );
 
-      if (batch.length < BATCH) break;
+      if (!full) break;
     }
     return undefined;
   }

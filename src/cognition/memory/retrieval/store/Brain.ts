@@ -49,7 +49,7 @@ import {
 import { MigrationRunner, MIGRATIONS, LATEST_SCHEMA_VERSION } from './migrations/index.js';
 import { ensureScopeIdColumn, fillScopeIds, postgresIndexExists } from './migrations/v2-to-v3.js';
 import { retryLostCreate } from './migrations/lost-create.js';
-import { registerUnregisteredConversationScopes } from './conversationScopes.js';
+import { registerUnregisteredConversationScopes, reopenCompiledScopes } from './conversationScopes.js';
 import { CONVERSATION_SCOPE_TABLES, PORTABLE_TABLES, PORTABLE_TABLE_PRIMARY_KEYS } from './portable-tables.js';
 import { redactPostgresPassword } from './postgresPasswordRedaction.js';
 import { keyTraceCopies } from './SqlKnowledgeGraph.js';
@@ -1874,6 +1874,32 @@ export class Brain {
       if (heldPages.has(pageKeyOf(row))) for (const id of chunkIdsOfPageRow(row)) chunksLeftOut.add(id);
     }
 
+    // A merge: the conversation scopes this brain registers and the conversation traces it holds before the copy. A
+    // trace the copy adds under one of those scopes, older than the scope's compile, is read by its next compile.
+    const heldScopeIds =
+      strategy === 'replace'
+        ? new Set<string>()
+        : new Set(
+            (
+              await trx.all<{ scope_id: string }>('SELECT scope_id FROM memory_scopes WHERE brain_id = ? AND scope = ?', [
+                this.#brainId,
+                'conversation',
+              ])
+            ).map((row) => String(row.scope_id)),
+          );
+    const heldTraceIds =
+      heldScopeIds.size === 0
+        ? new Set<string>()
+        : new Set(
+            (
+              await trx.all<{ id: string }>('SELECT id FROM memory_traces WHERE brain_id = ? AND scope = ?', [
+                this.#brainId,
+                'conversation',
+              ])
+            ).map((row) => String(row.id)),
+          );
+    let tracesAdded: Array<Record<string, unknown>> = [];
+
     const tablesImported: Record<string, number> = {};
     for (const table of PORTABLE_TABLES) {
       // Read every row in the source file regardless of its stored brainId
@@ -1899,6 +1925,9 @@ export class Brain {
             : rows;
       const copied = decision.action === 'encode' ? encodedSourceRows(table, kept) : kept;
       await this._bulkCopy(this, table, copied, this.#brainId, { upsert: true, db: trx });
+      if (table === 'memory_traces' && heldScopeIds.size > 0) {
+        tracesAdded = copied.filter((row) => !heldTraceIds.has(String(row.id)));
+      }
     }
     // The registry of conversation scopes: a scope this brain already registers keeps its own row and watermark; a
     // replace emptied the table, so every source row is copied. Then the pages.
@@ -1918,6 +1947,7 @@ export class Brain {
     await this._bulkCopy(this, 'memory_scopes', scopesToCopy, this.#brainId, { upsert: true, db: trx });
     tablesImported['memory_pages'] = pagesToCopy.length;
     await this._bulkCopy(this, 'memory_pages', pagesToCopy, this.#brainId, { upsert: true, db: trx });
+    await reopenCompiledScopes(trx, this.#brainId, heldScopeIds, tracesAdded);
     // This brain holds the encoded form once the copy is in when the handshake encoded the source, gave this brain the
     // source's record, or took an encoded source into an encoded brain; a replace deleted the record with this brain's
     // other brain_meta rows.

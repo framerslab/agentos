@@ -59,6 +59,12 @@ export interface AttachMemoryWikiOptions {
    */
   subjectOf?: (subject: { kind: 'user' | 'session'; id: string }) => { kind: 'user' | 'session'; id: string };
   /**
+   * Whether a subject is served its own pages, by the key they are filed under: false reads and lists the operator's
+   * pages alone for it, and its own pages answer as pages that do not exist. A host whose policy keeps no memory for
+   * an account answers false for it. Unset, every subject is served its own pages.
+   */
+  ownPagesServed?: (scopeKey: string) => boolean | Promise<boolean>;
+  /**
    * Asked once a batch of a scope's traces, before the compiler: the traces to compile (a host can screen their
    * text), or why this scope's compile does not run. A skipped scope keeps its watermark and is logged.
    */
@@ -219,7 +225,8 @@ function pagePortOf(opts: AttachMemoryWikiOptions, operatorStore: WikiMemoryStor
         return (await opts.memory.pageExistsOutside(null, id)) ? refused('no_user') : null;
       }
       const { key, own } = ownPages(asker.subject);
-      const page = await own.readPage(id);
+      const served = opts.ownPagesServed ? await opts.ownPagesServed(key) : true;
+      const page = served ? await own.readPage(id) : null;
       if (page) return page;
       // The folder's page is served only when the text just read is an operator page's.
       if (shared && originOfPage(shared) === 'operator') return shared;
@@ -234,9 +241,10 @@ function pagePortOf(opts: AttachMemoryWikiOptions, operatorStore: WikiMemoryStor
       if (!asker.subject) {
         return shared.map((page) => ({ id: page.id, summary: page.summary, owner: 'operator' as const }));
       }
-      const { own } = ownPages(asker.subject);
+      const { key, own } = ownPages(asker.subject);
+      const served = opts.ownPagesServed ? await opts.ownPagesServed(key) : true;
       return [
-        ...(await own.listPages()).map((page) => ({ id: page.id, summary: page.summary, owner: 'own' as const })),
+        ...(served ? await own.listPages() : []).map((page) => ({ id: page.id, summary: page.summary, owner: 'own' as const })),
         ...shared
           .filter((page) => originOfPage(page) === 'operator')
           .map((page) => ({ id: page.id, summary: page.summary, owner: 'operator' as const })),

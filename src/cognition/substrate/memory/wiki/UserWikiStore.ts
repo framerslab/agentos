@@ -23,7 +23,14 @@ export interface UserWikiPagesPort {
   ): Promise<Array<{ pageId: string; content: string; contentHash: string; chunkIds: string[] }>>;
   writePageRow(
     scopeId: string,
-    page: { pageId: string; content: string; contentHash: string; chunks?: ReadonlyArray<PageChunk> },
+    page: {
+      pageId: string;
+      content: string;
+      contentHash: string;
+      chunks?: ReadonlyArray<PageChunk>;
+      /** Keep the row's chunks when the stored body's hash is `contentHash`, compared at the write itself. */
+      keepChunksIfUnchanged?: boolean;
+    },
   ): Promise<{ chunkIds: string[] }>;
   deletePageRows(scopeId: string, pageId?: string): Promise<{ pages: number; chunks: number }>;
 }
@@ -83,12 +90,15 @@ export class UserWikiStore implements WikiPageStorePort {
     assertWikiPageId(page.id);
     const content = serializePage(page);
     const contentHash = await sha256(page.body);
-    const prior = await this.pages.readPageRow(this.scopeId, page.id);
-    if (prior && prior.contentHash === contentHash) {
-      await this.pages.writePageRow(this.scopeId, { pageId: page.id, content, contentHash });
-      return;
-    }
-    await this.pages.writePageRow(this.scopeId, { pageId: page.id, content, contentHash, chunks: this.chunksOf(page) });
+    // The facade compares the body with the stored row once the scope's earlier writes have settled, so a write made
+    // while another one changes the page never keeps the chunks of a body the row no longer holds.
+    await this.pages.writePageRow(this.scopeId, {
+      pageId: page.id,
+      content,
+      contentHash,
+      chunks: this.chunksOf(page),
+      keepChunksIfUnchanged: true,
+    });
   }
 
   /** Every page of this subject, by page id. A row whose text does not parse is left out. */
