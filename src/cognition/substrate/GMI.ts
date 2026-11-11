@@ -2115,6 +2115,10 @@ export class GMI implements IGMI {
               if (Array.isArray(replaced)) {
                 if (replaced.length > 0) {
                   sendMessages = replaced;
+                  // The record's counts are of the prompt PromptEngine built: say the host's hook replaced it.
+                  if (hopCapture && turnMemoryRecall?.delivery) {
+                    turnMemoryRecall = { ...turnMemoryRecall, delivery: { ...turnMemoryRecall.delivery, promptReplacedByHook: true } };
+                  }
                 } else {
                   this.addTraceEntry(ReasoningEntryType.WARNING, 'beforeModelCall returned no messages; the built prompt is sent.');
                 }

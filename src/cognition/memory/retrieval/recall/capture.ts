@@ -137,12 +137,15 @@ export interface MemoryRecallCapture {
    * which it never reduces; the other retrieved context the turn had (`ragTokens`, `longTermMemoryTokens`, by the
    * assembler's estimate) and what of it was sent (`deliveredTokens`, by PromptEngine's), with `cutBy` when PromptEngine
    * reduced it; and the codes of PromptEngine's issues about the context (`RAG_SUMMARIZATION_FAILED`,
-   * `TOKEN_BUDGET_EXCEEDED_POST_OPT`).
+   * `TOKEN_BUDGET_EXCEEDED_POST_OPT`). `promptReplacedByHook` is true when the host's `beforeModelCall` replaced the
+   * prompt for the hop: the counts are then of the prompt PromptEngine built, and what the model received is the
+   * hook's.
    */
   delivery?: {
     memoryBlockTokens: number;
     otherContext?: { ragTokens: number; longTermMemoryTokens: number; deliveredTokens: number; cutBy?: 'prompt_engine_truncate' | 'prompt_engine_summarize' };
     issueCodes?: string[];
+    promptReplacedByHook?: boolean;
   };
 }
 

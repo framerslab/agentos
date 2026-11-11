@@ -129,6 +129,19 @@ function memoryTextAsSent(memory: string, retrievedContext: PromptComponents['re
   return `Source: cognitive_memory\nContent: ${memory}${retrievedContext.length > 0 ? '\n\n' : ''}`;
 }
 
+/**
+ * Retrieved context as the templates send it: the text, or a list's entries with their `Source:` and `Content:` labels.
+ *
+ * @param retrievedContext - The retrieved context, the memory block already placed in it.
+ * @returns The text; '' when there is none.
+ */
+function retrievedContextAsText(retrievedContext: PromptComponents['retrievedContext']): string {
+  if (!retrievedContext) return '';
+  return typeof retrievedContext === 'string'
+    ? retrievedContext
+    : retrievedContext.map((r) => `Source: ${r.source}\nContent: ${r.content}`).join('\n\n');
+}
+
 export class PromptEngine implements IPromptEngine {
   /** PromptEngine reads `memoryContextText`: it counts the memory block and never reduces it. */
   public readonly acceptsMemoryContextText = true;
@@ -1343,6 +1356,17 @@ export class PromptEngine implements IPromptEngine {
       }
 
       const currentUserInputParts: MessageContentPart[] = []; // Use MessageContentPart
+      // The retrieved context (the memory block first, when one was given) goes in front of the query, as in the
+      // OpenAI chat template.
+      const ragContent = retrievedContextAsText(components.retrievedContext);
+      if (ragContent) {
+        currentUserInputParts.push({
+          type: 'text',
+          text: components.userInput
+            ? `Context:\n${ragContent}\n\nUser Query:`
+            : `Based on the following context:\n${ragContent}\n\nPlease respond to the implicit or explicit user query.`,
+        });
+      }
       if(components.userInput) currentUserInputParts.push({type: 'text', text: components.userInput});
       if(components.visionInputs && modelInfo.visionSupport?.supported){
         components.visionInputs.forEach(vis => {
@@ -1378,6 +1402,9 @@ export class PromptEngine implements IPromptEngine {
       if (components.conversationHistory) {
         promptString += components.conversationHistory.map(m => `${m.role}: ${typeof m.content === 'string' ? m.content : JSON.stringify(m.content)}`).join("\n") + "\n\n";
       }
+      // The retrieved context (the memory block first, when one was given) goes in front of the query.
+      const ragContent = retrievedContextAsText(components.retrievedContext);
+      if (ragContent) promptString += `Context:\n${ragContent}\n\n`;
       if (components.userInput) promptString += `user: ${components.userInput}\nassistant:`;
       return promptString;
     };
