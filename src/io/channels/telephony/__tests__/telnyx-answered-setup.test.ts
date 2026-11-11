@@ -255,6 +255,38 @@ describe('a carrier-profile Telnyx notify call hung up after its message', () =>
     }
   });
 
+  it('ends the call once, hangup-bot, when the call.hangup the hangup causes arrives before Telnyx answers the hangup command', async () => {
+    const { manager, fetchMock } = setUp({ eventHandling: 'carrier' });
+    let answerHangup: () => void = () => undefined;
+    const hangupAnswered = new Promise<void>((resolve) => { answerHangup = resolve; });
+    const respond = fetchMock.getMockImplementation();
+    fetchMock.mockImplementation(async (input, init) => {
+      if (String(input).endsWith('/actions/hangup')) await hangupAnswered;
+      return respond!(input, init);
+    });
+    const ended: string[] = [];
+    manager.on((event) => { if (event.type === 'call:ended') ended.push(event.call.state); });
+    try {
+      const call = await manager.initiateCall({ toNumber: '+15550000002', mode: 'notify', message: MESSAGE });
+      manager.processWebhook('telnyx', signedEvent('call.answered', 'evt-answered'));
+      await vi.waitFor(() => expect(actions(fetchMock)).toEqual(['speak']));
+      manager.processWebhook('telnyx', signedEvent('call.speak.ended', 'evt-speak-ended', { client_state: commands(fetchMock)[0]?.body.client_state, status: 'completed' }));
+      await vi.waitFor(() => expect(actions(fetchMock)).toEqual(['speak', 'hangup']));
+
+      // Telnyx posts the call.hangup the command causes while the command's own response is still on its way.
+      manager.processWebhook('telnyx', signedEvent('call.hangup', 'evt-hangup', { hangup_cause: 'normal_clearing' }));
+      answerHangup();
+      await vi.waitFor(() => expect(ended).not.toEqual([]));
+      await settle();
+      await settle();
+      expect(ended).toEqual(['hangup-bot']);
+      expect(manager.getCall(call.callId)?.state).toBe('hangup-bot');
+    } finally {
+      answerHangup();
+      manager.dispose();
+    }
+  });
+
   it.each(['call_hangup', 'cancelled_amd'])('hangs nothing up when the message ends with status %s', async (status) => {
     const { manager, fetchMock } = setUp();
     try {
