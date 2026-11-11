@@ -283,7 +283,7 @@ The loader reads the soul's files (SOUL.md, STYLE.md, IDENTITY.md, AGENTS.md, ME
 
 What a soul gives an agent depends on how it is loaded:
 
-| Path | Soul prose and style in the prompt | Memory index in the prompt | Front matter applied (traits, mood, hard limits, `agentId`) | A recall block each turn | `read_memory_page` tool | Wiki compiled |
+| Path | Soul prose and style in the prompt | Memory index in the prompt | Front matter applied (traits, mood, hard limits, `agentId`) | Recall each turn (a data block in a user-role message) | `read_memory_page` tool | Wiki compiled |
 |---|---|---|---|---|---|---|
 | `agent({ soul })` | Yes | Yes | Hard limits as the last block of the system prompt; the `hexaco` paragraph unless `personality` is set; the soul's `name` unless `name` is set. Mood, voice, avatar and reasoning-trace limits have no renderer here | No (only from a `memoryProvider` you pass) | No | No |
 | `souledAgent()` | Yes | Yes | As `agent({ soul })`; the soul's id (`agentId`, else the slug of its `name`, which for a name with no Latin letters or digits is `agent-` and a hash of the name, else the agent's `name`) scopes the wiki's traces, and a soul with none of the three is rejected | Yes, from the wiki's store | Yes | Yes, on `close()` and by `agent.memory.compileWiki()` |
@@ -299,6 +299,8 @@ The exceptions:
 - An inline soul (`{ content }`) has no workspace folder: `souledAgent()` builds a plain `agent()` with no wiki memory, no `read_memory_page` tool and no compile, and says so in one `console.warn` line.
 - One-shot `generate()` and `stream()` on a GMI run the light profile, so they use the memory provider's recall, the wiki store's on a souled agent, even when sessions run with cognitive memory on.
 - A seat of a launched team uses neither memory hook (no recall from the provider, nothing stored with it) and is refused the memory tools, `read_memory_page` among them.
+- A `memoryProvider`'s recall is sent as a `<memory_recall>` block of JSON in a user-role message before the turn's own, each text datamarked, with one static line of the system prompt that says it is data. It is never a system message, so the hard limits stay the last system text. The framing lowers the chance that a stored sentence is followed as an instruction; it does not remove it. Cognitive memory's own block is rendered by the GMI and is not this block.
+- `agent.session(id, { userId })` scopes what the hooks and the tools are told on both runtimes: the user id, else the session id (an anonymous id such as `system`, `anonymous` or `guest` counts as none). One session is one user; for a conversation several people share, pass one id for the group.
 - Hard limits are a block of prompt text every path renders last, after `systemBlocks` too, with one exception: the plan of a call with `planning` on is a system message after the limits. A memory provider's recall (the wiki's recall on a souled agent) is a data block in a user-role message, never a system message. It tells the model; it is not a check that enforces the limits.
 - A `personality` or `name` option set in code wins over the soul's `hexaco` and `name`. The id is the exception: the soul's `agentId` wins over the agent's `name`, since the id keys the agent's memory and must not move when the agent is renamed.
 - `gmi()` accepts guardrails, RAG and approval settings without applying them, and says so in one warning line at construction.
