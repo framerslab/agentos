@@ -45,6 +45,16 @@
  * - **knowledge_edges**: deduplicated by `source_id` + `target_id` + `type`.
  *   - New edges are inserted; existing edges are left unchanged.
  *
+ * - **memory_scopes** and **memory_pages**: the registry of conversation scopes
+ *   and each subject's wiki pages (a file older than them holds neither).
+ *   - A scope the brain already registers keeps its own row and compile
+ *     watermark; any other comes in with the source's.
+ *   - A page the brain already holds, by scope and page id, is kept: the
+ *     source's page is skipped, and so are its chunks, which no row here would
+ *     list. Any other page comes in with its chunks, which are written as
+ *     traces of their own, never merged into a trace the brain holds, and the
+ *     row lists the ids they were written under.
+ *
  * ## Full-text index
  * The brain's full-text index covers each trace's content and tags. Once the
  * import has committed, the importer rebuilds it, once, when the import
@@ -98,6 +108,7 @@ import {
 import { fillScopeIds } from '../retrieval/store/migrations/v2-to-v3.js';
 import { keyTraceCopies, storedCopyTraceId } from '../retrieval/store/SqlKnowledgeGraph.js';
 import { parseTraceMetadata } from '../retrieval/store/tracePersistence.js';
+import { CONVERSATION_SCOPE, parseConversationScopeKey } from '../retrieval/store/conversationScopeKey.js';
 import {
   encodedCopyProperties,
   encodePlainScopeId,
@@ -151,6 +162,37 @@ interface EdgeRow {
   bidirectional: number;
   metadata: string;
   created_at: number;
+}
+
+/** One row of the source's registry of conversation scopes. */
+interface ScopeRow {
+  scope: string;
+  scope_id: string;
+  kind: string;
+  agent_id: string;
+  created_at: number;
+  compiled_at: number | null;
+}
+
+/** One wiki page row of the source. */
+interface PageRow {
+  scope: string;
+  scope_id: string;
+  page_id: string;
+  content: string;
+  content_hash: string;
+  chunk_ids: string;
+  updated_at: number;
+}
+
+/** The ids of the chunk traces a page row lists; none when its list cannot be read. */
+function chunkIdsOf(row: PageRow): string[] {
+  try {
+    const ids: unknown = JSON.parse(row.chunk_ids);
+    return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === 'string') : [];
+  } catch {
+    return [];
+  }
 }
 
 /** The tables the importer reads. */
@@ -243,6 +285,21 @@ export class SqliteImporter {
       // without the record keeps its plain form.
       const sourceEncoded = sourceRecord && holdsScopeIdsTheFormChanges(rows.traces ?? [], rows.nodes ?? []);
 
+      // The registry of conversation scopes and the wiki pages; a file older than the two tables holds neither.
+      const readOwn = async <T>(table: 'memory_scopes' | 'memory_pages'): Promise<T[]> => {
+        try {
+          return sourceBrainId !== undefined
+            ? await sourceAdapter.all<T>(`SELECT * FROM ${table} WHERE brain_id = ?`, [sourceBrainId])
+            : await sourceAdapter.all<T>(`SELECT * FROM ${table}`);
+        } catch {
+          return [];
+        }
+      };
+      const sourceScopes = await readOwn<ScopeRow>('memory_scopes');
+      const sourcePages = (await readOwn<PageRow>('memory_pages')).filter(
+        (row) => row.scope === CONVERSATION_SCOPE && parseConversationScopeKey(row.scope_id) !== undefined,
+      );
+
       let traces = { inserted: 0, retagged: 0 };
       await this.brain.transaction(async (trx) => {
         // The Brain's form is read in the transaction the import writes in, so a re-file or another import that
@@ -256,8 +313,25 @@ export class SqliteImporter {
         const encodePlainIds = decision.action === 'encode';
         // A trace an older release wrote holds scope_id '': filed under its scope id first, it is matched there.
         if (options?.dedup ?? true) await fillScopeIds(trx, this.brain.brainId);
-        const merged = await this._mergeTraces(rows.traces, result, trx, options, encodePlainIds);
+        // A page this brain already holds is kept: the source's page of that scope and id is left out, its chunks
+        // with it. The chunks of a page that comes in are written as traces of their own.
+        const pagesIn: PageRow[] = [];
+        const chunksLeftOut = new Set<string>();
+        const chunksIn = new Set<string>();
+        for (const page of sourcePages) {
+          const held = await trx.get<{ page_id: string }>(
+            'SELECT page_id FROM memory_pages WHERE brain_id = ? AND scope = ? AND scope_id = ? AND page_id = ?',
+            [this.brain.brainId, page.scope, page.scope_id, page.page_id],
+          );
+          for (const id of chunkIdsOf(page)) (held ? chunksLeftOut : chunksIn).add(id);
+          if (held) result.skipped++;
+          else pagesIn.push(page);
+        }
+        const sourceTraces =
+          rows.traces && chunksLeftOut.size > 0 ? rows.traces.filter((row) => !chunksLeftOut.has(row.id)) : rows.traces;
+        const merged = await this._mergeTraces(sourceTraces, result, trx, options, encodePlainIds, chunksIn);
         traces = merged;
+        await this._mergeScopesAndPages(sourceScopes, pagesIn, merged.written, result, trx);
         const nodes = await this._mergeNodes(rows.nodes, result, trx, merged.unfiled, encodePlainIds);
         await this._mergeEdges(rows.edges, result, trx, nodes.skipped);
         // A trace's copy is found by its trace's key: one the file holds under another node id gets the key here.
@@ -337,13 +411,16 @@ export class SqliteImporter {
     trx: { run: Brain['run']; get: Brain['get'] },
     options: Pick<ImportOptions, 'dedup'> | undefined,
     encodePlainIds: boolean,
-  ): Promise<{ inserted: number; retagged: number; unfiled: Set<string> }> {
+    pageChunks: ReadonlySet<string> = new Set(),
+  ): Promise<{ inserted: number; retagged: number; unfiled: Set<string>; written: Map<string, string> }> {
     let inserted = 0;
     let retagged = 0;
     const seen = new Set<string>();
     const filed = new Set<string>();
+    /** For each source trace this import wrote: the id it was written under. */
+    const written = new Map<string, string>();
     const unfiledOf = (): Set<string> => new Set([...seen].filter((id) => !filed.has(id)));
-    if (!sourceRows) return { inserted, retagged, unfiled: unfiledOf() };
+    if (!sourceRows) return { inserted, retagged, unfiled: unfiledOf(), written };
 
     const brainId = this.brain.brainId;
     const checkSql = `SELECT id, created_at, tags
@@ -374,7 +451,9 @@ export class SqliteImporter {
           if (scopeId !== '') meta.scopeId = scopeId;
         }
 
-        if (options?.dedup ?? true) {
+        // A chunk of a page that comes in is a row of its own: merged into a trace the brain holds, the page would
+        // list a trace that is not its chunk, and its next rewrite would delete it.
+        if ((options?.dedup ?? true) && !(row.id && pageChunks.has(row.id))) {
           const existing = await trx.get<{ id: string; created_at: number; tags: string }>(
             checkSql, [brainId, scope, scopeId, ...duplicateTraceParams(hash, row.content, importedTurnUserId(meta))],
           );
@@ -417,13 +496,71 @@ export class SqliteImporter {
         ]);
 
         if (row.id && id === row.id) filed.add(row.id);
+        if (row.id) written.set(row.id, id);
         inserted++;
         result.imported++;
       } catch (err) {
         result.errors.push(`Trace merge error: ${String(err)}`);
       }
     }
-    return { inserted, retagged, unfiled: unfiledOf() };
+    return { inserted, retagged, unfiled: unfiledOf(), written };
+  }
+
+  /**
+   * Write the source's registry rows and the pages that come in. A scope this brain already registers keeps its row;
+   * a page row lists its chunks under the ids this import wrote them under.
+   *
+   * @param scopes - The source's registry rows.
+   * @param pages - The source's pages this brain does not hold.
+   * @param written - For each source trace this import wrote, the id it was written under.
+   */
+  private async _mergeScopesAndPages(
+    scopes: ScopeRow[],
+    pages: PageRow[],
+    written: ReadonlyMap<string, string>,
+    result: ImportResult,
+    trx: { run: Brain['run'] },
+  ): Promise<void> {
+    const brainId = this.brain.brainId;
+    for (const row of scopes) {
+      // Only a key the key builder wrote names a scope; any other row is left out.
+      const parsed = row.scope === CONVERSATION_SCOPE ? parseConversationScopeKey(row.scope_id) : undefined;
+      if (!parsed) continue;
+      try {
+        await trx.run(
+          `INSERT INTO memory_scopes (brain_id, scope, scope_id, kind, agent_id, created_at, compiled_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (brain_id, scope, scope_id) DO NOTHING`,
+          [brainId, CONVERSATION_SCOPE, row.scope_id, parsed.subject.kind, parsed.agentId, row.created_at ?? Date.now(), row.compiled_at ?? null],
+        );
+      } catch (err) {
+        result.errors.push(`Scope merge error: ${String(err)}`);
+      }
+    }
+    for (const page of pages) {
+      const parsed = parseConversationScopeKey(page.scope_id);
+      if (!parsed) continue;
+      try {
+        // The page's scope is registered even when the file's registry does not name it.
+        await trx.run(
+          `INSERT INTO memory_scopes (brain_id, scope, scope_id, kind, agent_id, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT (brain_id, scope, scope_id) DO NOTHING`,
+          [brainId, CONVERSATION_SCOPE, page.scope_id, parsed.subject.kind, parsed.agentId, page.updated_at ?? Date.now()],
+        );
+        const chunkIds = chunkIdsOf(page)
+          .map((id) => written.get(id))
+          .filter((id): id is string => id !== undefined);
+        await trx.run(
+          `INSERT INTO memory_pages (brain_id, scope, scope_id, page_id, content, content_hash, chunk_ids, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [brainId, CONVERSATION_SCOPE, page.scope_id, page.page_id, page.content, page.content_hash, JSON.stringify(chunkIds), page.updated_at ?? Date.now()],
+        );
+        result.imported++;
+      } catch (err) {
+        result.errors.push(`Page merge error: ${String(err)}`);
+      }
+    }
   }
 
   /**

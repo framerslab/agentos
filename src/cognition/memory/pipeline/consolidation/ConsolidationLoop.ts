@@ -30,6 +30,7 @@ import type { Brain } from '../../retrieval/store/Brain.js';
 import type { IMemoryGraph } from '../../retrieval/graph/IMemoryGraph.js';
 import type { PersonalityMutationStore } from '../../../emergent/PersonalityMutationStore.js';
 import { computeCurrentStrength } from '../../core/decay/DecayModel.js';
+import { CONVERSATION_SCOPE } from '../../retrieval/store/conversationScopeKey.js';
 import type { MemoryTrace, MemoryType, MemoryScope } from '../../core/types.js';
 import {
   buildInitialTraceMetadata,
@@ -91,6 +92,14 @@ const COMPACT_MIN_RETRIEVAL_COUNT = 3;
 // ConsolidationLoop
 // ---------------------------------------------------------------------------
 
+
+/**
+ * The condition that leaves the conversation scope out of a statement over `memory_traces`; it binds the scope's
+ * name. A conversation trace belongs to one subject (a user, a session, or the operator's pages): a cycle that
+ * pruned, merged, promoted or quoted traces across the whole brain would fold one subject's words into another's,
+ * so the loop never reads one. Each subject's own traces are consolidated by the wiki compile, one scope at a time.
+ */
+const OUTSIDE_CONVERSATIONS = 'scope <> ?';
 /**
  * Self-improving background consolidation loop with 6 ordered steps:
  * prune, merge, strengthen, derive, compact, re-index.
@@ -232,8 +241,8 @@ export class ConsolidationLoop {
       `SELECT id, type, scope, content, embedding, strength, created_at,
               last_accessed, retrieval_count, tags, emotions, metadata, deleted
        FROM memory_traces
-       WHERE brain_id = ? AND deleted = 0`,
-      [brainId],
+       WHERE brain_id = ? AND deleted = 0 AND ${OUTSIDE_CONVERSATIONS}`,
+      [brainId, CONVERSATION_SCOPE],
     );
 
     let pruned = 0;
@@ -277,8 +286,8 @@ export class ConsolidationLoop {
       `SELECT id, type, scope, content, embedding, strength, created_at,
               last_accessed, retrieval_count, tags, emotions, metadata, deleted
        FROM memory_traces
-       WHERE brain_id = ? AND deleted = 0`,
-      [this.brain.brainId],
+       WHERE brain_id = ? AND deleted = 0 AND ${OUTSIDE_CONVERSATIONS}`,
+      [this.brain.brainId, CONVERSATION_SCOPE],
     );
 
     if (rows.length < 2) return 0;
@@ -505,9 +514,10 @@ export class ConsolidationLoop {
       // Collect content from cluster member traces.
       const contents: string[] = [];
       for (const memberId of cluster.memberIds) {
+        // A conversation trace is one subject's: its words never go into an insight filed for everyone.
         const row = await this.brain.get<{ content: string }>(
-          `SELECT content FROM memory_traces WHERE brain_id = ? AND id = ? AND deleted = 0`,
-          [this.brain.brainId, memberId],
+          `SELECT content FROM memory_traces WHERE brain_id = ? AND id = ? AND deleted = 0 AND ${OUTSIDE_CONVERSATIONS}`,
+          [this.brain.brainId, memberId, CONVERSATION_SCOPE],
         );
         if (row) contents.push(row.content);
       }
@@ -579,8 +589,9 @@ export class ConsolidationLoop {
        WHERE brain_id = ? AND deleted = 0
          AND type = 'episodic'
          AND created_at < ?
-         AND retrieval_count >= ?`,
-      [brainId, cutoff, COMPACT_MIN_RETRIEVAL_COUNT],
+         AND retrieval_count >= ?
+         AND ${OUTSIDE_CONVERSATIONS}`,
+      [brainId, cutoff, COMPACT_MIN_RETRIEVAL_COUNT, CONVERSATION_SCOPE],
     );
 
     if (rows.length === 0) return 0;

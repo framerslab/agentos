@@ -23,6 +23,7 @@ import type { Brain } from '../../retrieval/store/Brain.js';
 import { bindingsFor, buildNaturalLanguageFtsQuery } from '../../retrieval/store/tracePersistence.js';
 import { namesScopeId } from '../../retrieval/store/migrations/v2-to-v3.js';
 import { memoryToolTurnOf, resolveMemoryToolScopeId } from './scopeContext.js';
+import { CONVERSATION_SCOPE } from '../../retrieval/store/conversationScopeKey.js';
 
 /**
  * Whether a full-text query failed as SQLite rejected it: better-sqlite3 marks the error with the
@@ -185,6 +186,7 @@ export class MemorySearchTool implements ITool<MemorySearchInput, MemorySearchOu
    * JOIN memory_traces mt ON mt.rowid = memory_traces_fts.rowid
    * WHERE memory_traces_fts MATCH ?
    *   AND mt.deleted = 0
+   *   AND mt.scope <> 'conversation'  -- always: a subject's conversation memory is never searched here
    *   [AND mt.type = ?]    -- when type filter provided
    *   [AND mt.scope = ?]   -- when scope filter provided
    *   [AND ((mt.scope = ? AND mt.scope_id = ?) OR ... OR (mt.scope_id = '' AND NOT (<metadata names a scope id>)))]
@@ -213,6 +215,16 @@ export class MemorySearchTool implements ITool<MemorySearchInput, MemorySearchOu
     context: ToolExecutionContext
   ): Promise<ToolExecutionResult<MemorySearchOutput>> {
     try {
+      // The conversation scope holds each subject's own memory under a key the runtime builds, and this tool knows
+      // no subject: a search that names the scope is refused, and no search reads a trace of it.
+      if ((args.scope as string | undefined) === CONVERSATION_SCOPE) {
+        return {
+          success: false,
+          error:
+            'memory_search does not read the conversation scope: conversation memory is recalled for the person a turn serves, and read page by page with read_memory_page.',
+        };
+      }
+
       const rawQuery = args.query.trim();
       if (!rawQuery) {
         return { success: true, output: { results: [] } };
@@ -222,9 +234,10 @@ export class MemorySearchTool implements ITool<MemorySearchInput, MemorySearchOu
 
       // Build WHERE clause additions for optional filters. A database can
       // hold several brains and the full-text index spans all of them, so a
-      // search always reads only this brain's traces.
-      const extraClauses: string[] = ['mt.brain_id = ?'];
-      const extraParams: unknown[] = [this.brain.brainId];
+      // search always reads only this brain's traces, and never one of the
+      // conversation scope.
+      const extraClauses: string[] = ['mt.brain_id = ?', 'mt.scope <> ?'];
+      const extraParams: unknown[] = [this.brain.brainId, CONVERSATION_SCOPE];
 
       if (args.type !== undefined) {
         extraClauses.push('mt.type = ?');

@@ -213,6 +213,20 @@ function pageRowOf(row: PageRowRecord): MemoryPageRow {
   };
 }
 
+/**
+ * Throws when a read names the conversation scope and no scope id: that scope holds each subject's memory under a
+ * key of its own, and a read of it as a whole would return every subject's traces at once.
+ *
+ * @param member - The facade member the read is, for the message.
+ */
+function assertConversationKeyGiven(member: 'recall' | 'recentTraces', scope: string | undefined, scopeId: string | undefined): void {
+  if (scope === CONVERSATION_SCOPE && (typeof scopeId !== 'string' || scopeId === '')) {
+    throw new TypeError(
+      `Memory.${member}: the 'conversation' scope is read one key at a time; pass the scopeId conversationScopeKey() built`,
+    );
+  }
+}
+
 /** Throws unless `scopeId` is the conversation key of a user or of a session: the two kinds of subject that own pages. */
 function assertPageOwnerKey(scopeId: string): void {
   const kind = parseConversationScopeKey(scopeId)?.subject.kind;
@@ -613,7 +627,10 @@ export class Memory {
     const contentHash = await sha256(content);
     const declaredUser = options?.metadata?.turnUserId;
     const turnUserId = typeof declaredUser === 'string' ? declaredUser : '';
-    const existing = await this._findExistingTraceByHash(contentHash, type, scope, scopeId, turnUserId);
+    // A chunk of a wiki page is its page's: a message of the same text is a trace of its own, so the page's next
+    // rewrite, which deletes its chunks, takes nothing a person said.
+    const asChunk = (options?.tags ?? []).includes('wiki');
+    const existing = await this._findExistingTraceByHash(contentHash, type, scope, scopeId, turnUserId, asChunk);
     if (existing) {
       // The text is stored already; its scope's registry row is written when it is missing.
       if (conversation) await ensureScopeRow(this._brain, this._brain.brainId, scopeId, Date.now());
@@ -695,8 +712,11 @@ export class Memory {
    * @param query   - Natural-language search query.
    * @param options - Optional filters (limit, type, scope, scopeId, minStrength, after, before).
    * @returns Ranked array of {@link ScoredTrace} results.
+   * @throws TypeError when `options.scope` is `'conversation'` and no `scopeId` is given: the conversation scope
+   *   holds each subject's memory under a key of its own and is read one key at a time, never as a whole.
    */
   async recall(query: string, options?: RecallOptions): Promise<ScoredTrace[]> {
+    assertConversationKeyGiven('recall', options?.scope, options?.scopeId);
     await this._initPromise;
 
     const ftsQuery = buildNaturalLanguageFtsQuery(query);
@@ -955,7 +975,9 @@ export class Memory {
    * the full-text index entries. With `turnUserId`, only the scope's traces whose metadata names that user, as the
    * second user a memory write on another user's session records, or among the contributors of a summary the
    * rolling-summary sink filed. Account deletion calls it. A whole `'conversation'` scope loses its row of
-   * `memory_scopes` with its traces; a delete of one user's traces in it (`turnUserId`) keeps the row.
+   * `memory_scopes` with its traces; a delete of one user's traces in it (`turnUserId`) keeps the row, and so does a
+   * scope that still holds a wiki page (`memory_pages`): this call deletes no page row, and the registry goes on
+   * naming the scope until its pages are deleted and the call is made again.
    *
    * It reads the rows by their `scope_id` column, after filing the brain's rows that hold `''` there while their
    * metadata names a scope id: a release older than the column writes those, to a Brain this facade holds open too.
@@ -986,13 +1008,18 @@ export class Memory {
     // The per-trace deletes above took each trace's own copy. A copy filed under the scope whose trace is gone holds
     // the trace's words with no row to find them by: a graph that cannot delete it fails the call.
     if (only === undefined) await this._knowledgeGraph.deleteMemories({ scopes: [{ scope, scopeId }] });
-    // The scope holds nothing now: its registry row goes last, so a call that failed above is made again and finds it.
+    // The scope holds no trace now: its registry row goes last, so a call that failed above is made again and finds
+    // it. A scope that still holds a wiki page keeps its row, so whoever walks the registry still finds the page;
+    // the row goes with the call made once the pages are deleted.
     if (only === undefined && scope === CONVERSATION_SCOPE) {
-      await this._brain.run('DELETE FROM memory_scopes WHERE brain_id = ? AND scope = ? AND scope_id = ?', [
-        this._brain.brainId,
-        scope,
-        scopeId,
-      ]);
+      await this._brain.run(
+        `DELETE FROM memory_scopes
+          WHERE brain_id = ? AND scope = ? AND scope_id = ?
+            AND NOT EXISTS (
+              SELECT 1 FROM memory_pages p
+               WHERE p.brain_id = memory_scopes.brain_id AND p.scope = memory_scopes.scope AND p.scope_id = memory_scopes.scope_id)`,
+        [this._brain.brainId, scope, scopeId],
+      );
     }
     return result;
   }
@@ -1191,6 +1218,36 @@ export class Memory {
     assertPageOwnerKey(scopeId);
     assertWikiPageId(page.pageId);
     await this._initPromise;
+    return this._onePageWriteAtATime(scopeId, () => this._writePageRow(scopeId, page));
+  }
+
+  /**
+   * Runs `work` once every earlier page write or page delete of the same scope on this facade has settled, so two
+   * writes of one page made at once are made one after the other: the second reads the chunks the first wrote, and
+   * deletes them. Writers in other processes are not ordered by it.
+   */
+  private _onePageWriteAtATime<T>(scopeId: string, work: () => Promise<T>): Promise<T> {
+    const earlier = this._pageWrites.get(scopeId) ?? Promise.resolve();
+    const run = earlier.then(work, work);
+    const settled = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    this._pageWrites.set(scopeId, settled);
+    void settled.then(() => {
+      if (this._pageWrites.get(scopeId) === settled) this._pageWrites.delete(scopeId);
+    });
+    return run;
+  }
+
+  /** The last page write or page delete of each scope still running on this facade. */
+  private readonly _pageWrites = new Map<string, Promise<void>>();
+
+  /** {@link writePageRow}, once the scope's earlier page writes have settled. */
+  private async _writePageRow(
+    scopeId: string,
+    page: { pageId: string; content: string; contentHash: string; chunks?: ReadonlyArray<MemoryPageChunk> },
+  ): Promise<{ chunkIds: string[] }> {
     const brainId = this._brain.brainId;
     const now = Date.now();
     const old = (await this.readPageRow(scopeId, page.pageId))?.chunkIds ?? [];
@@ -1279,6 +1336,11 @@ export class Memory {
     assertPageOwnerKey(scopeId);
     if (pageId !== undefined) assertWikiPageId(pageId);
     await this._initPromise;
+    return this._onePageWriteAtATime(scopeId, () => this._deletePageRows(scopeId, pageId));
+  }
+
+  /** {@link deletePageRows}, once the scope's earlier page writes have settled. */
+  private async _deletePageRows(scopeId: string, pageId?: string): Promise<{ pages: number; chunks: number }> {
     let rows: MemoryPageRow[];
     if (pageId === undefined) {
       rows = await this.listPageRows(scopeId);
@@ -1288,13 +1350,13 @@ export class Memory {
     }
     if (rows.length === 0) return { pages: 0, chunks: 0 };
     const { deleted } = await this.deleteTraces(rows.flatMap((row) => row.chunkIds));
-    const params: unknown[] = [this._brain.brainId, CONVERSATION_SCOPE, scopeId];
-    if (pageId !== undefined) params.push(pageId);
-    await this._brain.run(
-      `DELETE FROM memory_pages
-        WHERE brain_id = ? AND scope = ? AND scope_id = ?${pageId === undefined ? '' : ' AND page_id = ?'}`,
-      params,
-    );
+    // The rows that were read, by their ids: a page another writer added meanwhile keeps its row with its chunks.
+    for (const row of rows) {
+      await this._brain.run(
+        'DELETE FROM memory_pages WHERE brain_id = ? AND scope = ? AND scope_id = ? AND page_id = ?',
+        [this._brain.brainId, CONVERSATION_SCOPE, scopeId, row.pageId],
+      );
+    }
     return { pages: rows.length, chunks: deleted };
   }
 
@@ -1333,11 +1395,14 @@ export class Memory {
    * @param sinceMs - Exclusive lower bound on `created_at` (Unix ms). Use 0 for "all".
    * @param options - Optional scope filter, scope id filter (equality on the `scope_id` column), result cap
    *   (default 200), and sort order.
+   * @throws TypeError when `options.scope` is `'conversation'` and no `scopeId` is given: that scope is read one
+   *   key at a time.
    */
   async recentTraces(
     sinceMs: number,
     options?: { limit?: number; scope?: string; scopeId?: string; order?: 'asc' | 'desc' },
   ): Promise<MemoryTrace[]> {
+    assertConversationKeyGiven('recentTraces', options?.scope, options?.scopeId);
     await this._initPromise;
     const limit = options?.limit ?? 200;
     // Whitelisted literal — never interpolate user input into SQL.
@@ -2383,7 +2448,10 @@ export class Memory {
    * user's words stay a trace of their own beside the same words of the
    * session's owner, so a deletion of either user's traces leaves the other's.
    *
+   * A trace tagged `wiki` (a chunk of a wiki page) and one that is not are never duplicates of each other.
+   *
    * @param turnUserId - The second user the new trace is filed for, or `''`.
+   * @param asChunk - Whether the new trace is a chunk of a wiki page (tagged `wiki`).
    */
   private async _findExistingTraceByHash(
     contentHash: string,
@@ -2391,9 +2459,10 @@ export class Memory {
     scope: string,
     scopeId: string,
     turnUserId: string,
+    asChunk = false,
   ): Promise<TraceRow | undefined> {
     const { dialect } = this._brain.features;
-    const row = await this._brain.get<TraceRow>(
+    const rows = await this._brain.all<TraceRow>(
       `SELECT id, type, scope, content, embedding, strength, created_at,
               last_accessed, retrieval_count, tags, emotions, metadata, deleted
        FROM memory_traces
@@ -2407,10 +2476,19 @@ export class Memory {
            ${dialect.jsonExtract('metadata', '$.content_hash')} = ?
            OR ${dialect.jsonExtract('metadata', '$.import_hash')} = ?
          )
-       LIMIT 1`,
+       LIMIT 50`,
       [this._brain.brainId, type, scope, scopeId, turnUserId, contentHash, contentHash],
     );
-    return row ?? undefined;
+    // The tags are a JSON array in a text column, tested here: the dialect has no array test for both engines.
+    return rows.find((row) => {
+      let tags: unknown = [];
+      try {
+        tags = JSON.parse(row.tags);
+      } catch {
+        /* tags that do not parse name no page */
+      }
+      return (Array.isArray(tags) && tags.includes('wiki')) === asChunk;
+    });
   }
 
   /**
