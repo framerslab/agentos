@@ -83,8 +83,8 @@ interface GuardrailConfig {
   canSanitize?: boolean; // default: false
 
   // Maximum time (ms) to wait for this guardrail's evaluation.
-  // On timeout the evaluation is abandoned and a warning is logged; the
-  // guardrail is skipped (fail-open) unless failClosed is true.
+  // On timeout the evaluation is abandoned and a guardrail.failed event is
+  // written; the guardrail is skipped (fail-open) unless failClosed is true.
   //
   // SAFETY WARNING: Do NOT set timeoutMs on a safety-critical guardrail
   // (e.g., CSAM detection, compliance-mandatory filters) without failClosed,
@@ -94,8 +94,15 @@ interface GuardrailConfig {
   // When true, an evaluation that throws or times out yields a BLOCK
   // (reasonCode 'GUARDRAIL_ERROR') instead of skipping this guardrail.
   failClosed?: boolean; // default: false
+
+  // Every reason code and review code this guardrail can answer: a closed
+  // list. A verdict line writes a code only when the deciding guard lists it
+  // here; a guard that lists none has its verdict lines written with unknown.
+  reasonCodes?: readonly string[]; // default: undefined
 }
 ```
+
+A guard that answers codes lists them all in `reasonCodes`, so a log line can name the code that decided: a code supplied from outside the list (a model's answer, a vendor's label) is written as `unknown`. `PhraseListGuardrail` lists the rule ids of the list it holds, and lists them again on each `reload()`.
 
 ### evaluateInput(payload)
 
@@ -178,8 +185,26 @@ interface GuardrailEvaluationResult {
   // in place of the error chunk; an empty string or none yields the error
   // chunk. Input BLOCKs do not read it.
   replacementText?: string;
+
+  // With BLOCK only: the content is kept back for a person's review instead
+  // of refused. On any other action it is ignored.
+  hold?: { reviewCode: string };
 }
 ```
+
+### Answering a hold
+
+A guard that wants a person to look before content goes on answers a `BLOCK` with `hold`:
+
+```typescript
+import { holdResult } from '@framers/agentos/safety/guardrails';
+
+// in evaluateInput or evaluateOutput
+return holdResult('REVIEW_LINKS', { reasonCode: 'NEEDS_REVIEW' });
+// { action: GuardrailAction.BLOCK, reasonCode: 'NEEDS_REVIEW', hold: { reviewCode: 'REVIEW_LINKS' } }
+```
+
+The dispatcher treats it as the `BLOCK` it is at every enforcement point, so nothing it keeps back is delivered. A refusal (a `BLOCK` without `hold`) from any other guard outranks it; it outranks every other action. The host stores the content and queues it under `reviewCode` (letters, digits and underscores, at most 64), and reads which it was from `GuardrailInputOutcome.outcome` or `guardrailOutcomeOf()`. A `hold` on `FLAG` or `SANITIZE` is ignored, and the dispatcher writes `guardrail.hold_ignored` once for that guard. List the review codes in `config.reasonCodes` beside the reason codes.
 
 ---
 
@@ -190,12 +215,12 @@ interface GuardrailEvaluationResult {
 | **ALLOW**    | `'allow'`    | Pass content unchanged. Use when all checks pass.                                                                                                                                         |
 | **FLAG**     | `'flag'`     | Pass content through but record metadata for audit/analytics. Content reaches the user; the evaluation is logged for review.                                                              |
 | **SANITIZE** | `'sanitize'` | Replace content with the value in `modifiedText`. Use for PII redaction, profanity masking, or content rewriting. Requires `canSanitize: true` in config to work in Phase 1.              |
-| **BLOCK**    | `'block'`    | Reject/terminate the interaction. For input evaluation, the request is never processed. For output evaluation, the stream ends at once: with a `FINAL_RESPONSE` holding the evaluation's `replacementText` when that is a non-empty string, otherwise with an error chunk. |
+| **BLOCK**    | `'block'`    | Reject/terminate the interaction. For input evaluation, the request is never processed. For output evaluation, the stream ends at once: with a `FINAL_RESPONSE` holding the evaluation's `replacementText` when that is a non-empty string, otherwise with an error chunk. A BLOCK that carries `hold` keeps the content back for review; it is enforced the same way. |
 
 ### SANITIZE rules
 
 - If `canSanitize: true` is set in your config, your guardrail runs in **Phase 1 (sequential)** and your `modifiedText` is applied before downstream guardrails see the content.
-- If your guardrail is in **Phase 2** (no `canSanitize` or `canSanitize: false`) and it returns SANITIZE, the action is **automatically downgraded to FLAG** with a warning logged. This prevents non-deterministic concurrent modifications.
+- If your guardrail is in **Phase 2** (no `canSanitize` or `canSanitize: false`) and it returns SANITIZE, the action is **automatically downgraded to FLAG** and a `guardrail.sanitize_downgraded` event is written. This prevents non-deterministic concurrent modifications.
 - On a `FINAL_RESPONSE`, `modifiedText` replaces the reply in every field that carries it: `finalResponseText`; `finalResponseTextPlain`, rendered as plain text as a turn renders its own reply; the reply in `updatedConversationContext`; and `audioOutput`, which keeps its voice settings, speaks the new text as plain text in `textToSpeak` and drops the `url` of the audio made from the replaced reply. A `null` `modifiedText` removes the reply, and the audio output with it. A structured value parsed from the replaced reply is withdrawn, as [Structured replies](../features/STRUCTURED_REPLY.md) (item 5) states. A `modifiedText` equal to the reply changes nothing: the parsed value and the audio output stay.
 
 ---
@@ -362,13 +387,13 @@ A **BLOCK** in Phase 1 short-circuits immediately -- Phase 2 never runs.
 
 All remaining guardrails (those without `canSanitize` or with `canSanitize: false`) run **concurrently via `Promise.allSettled`** on the fully-sanitized text from Phase 1.
 
-If a Phase 2 guardrail returns **SANITIZE**, the action is **downgraded to FLAG** with a warning logged, because concurrent sanitization would produce non-deterministic results.
+If a Phase 2 guardrail returns **SANITIZE**, the action is **downgraded to FLAG** and a `guardrail.sanitize_downgraded` event is written, because concurrent sanitization would produce non-deterministic results.
 
 ### Worst-wins aggregation
 
 After both phases complete, the dispatcher picks the single worst action:
 
-- **BLOCK** (severity 3) takes priority over everything.
+- **BLOCK** (severity 3) takes priority over everything. Among blocks, a refusal (no `hold`) decides over a hold, whatever the registration order; the dispatcher reads every guard of the phase before it picks.
 - **FLAG** (severity 2) takes priority over ALLOW.
 - **ALLOW** (severity 0) is the default when no guardrail triggers.
 

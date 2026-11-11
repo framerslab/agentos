@@ -82,6 +82,36 @@ await agent.initialize({
 | `SANITIZE` | Replace content with modified version |
 | `BLOCK` | Reject/terminate the interaction |
 
+A `BLOCK` can also carry `hold: { reviewCode }`: the content is kept back for a person's review instead of refused. See [Holding Content for Review](#holding-content-for-review).
+
+## Holding Content for Review
+
+A guard that cannot decide alone keeps the content back for a person to look at. It answers a `BLOCK` with `hold`, or builds the same answer with `holdResult()`:
+
+```typescript
+import { GuardrailAction, holdResult, type IGuardrailService } from '@framers/agentos/safety/guardrails';
+
+const reviewer: IGuardrailService = {
+  id: 'needs-review',
+  config: { reasonCodes: ['NEEDS_REVIEW', 'REVIEW_LINKS'] },
+  async evaluateInput({ input }) {
+    if (!/https?:\/\//.test(input.textInput ?? '')) return null;
+    return holdResult('REVIEW_LINKS', { reasonCode: 'NEEDS_REVIEW' });
+    // the same as { action: GuardrailAction.BLOCK, reasonCode: 'NEEDS_REVIEW', hold: { reviewCode: 'REVIEW_LINKS' } }
+  },
+};
+```
+
+- **A hold is a BLOCK everywhere.** Every enforcement point (input, a streamed delta, the final reply, a tool call) treats it as the `BLOCK` it is, so nothing it keeps back is delivered and a held tool call never runs.
+- **A refusal outranks a hold.** When one guard holds and another refuses, the refusal decides, whichever was registered first; the hold stays in `evaluations`. A hold outranks a `FLAG`, a `SANITIZE` and an `ALLOW`.
+- **Which it was.** `GuardrailInputOutcome.outcome` is always set: `'allow'`, `'flag'`, `'sanitize'`, `'hold'` or `'block'`. `guardrailOutcomeOf(evaluations)` gives the same answer for any list, and `isGuardrailHold(evaluation)` says whether one evaluation is a hold.
+- **What the caller receives.** Under `processRequest()` a held input ends the turn as a block does: one ERROR chunk, with the hold in `details.hold` (`{ reviewCode }`) beside `details.action`. A held reply ends the stream the same way, and `onVerdict` receives `hold` on its verdict. The serialised evaluation in chunk metadata carries `hold` too.
+- **The host does the rest.** It stores the content, tells the sender it is waiting for review and puts it in its review queue under `reviewCode`. The library keeps nothing.
+- **A hold on another action is ignored.** `hold` counts only with `BLOCK`. On a `FLAG` or a `SANITIZE` the dispatcher ignores it and writes `guardrail.hold_ignored` once for that guard; a `SANITIZE` of a tool call is applied as a `BLOCK` that is a refusal, not a hold.
+- **Codes.** A `reviewCode` is letters, digits and underscores, at most 64. `toModerationEvaluation()` reports an evaluation without its `reason` and `details`, and writes a code outside its shape as `INVALID_CODE`.
+
+A guard's failure is a typed event, not a console line: a throw or a timeout writes `guardrail.failed` with the guard's id, the stage, the posture (`open` or `closed`), the cause and the error's listed type and code, never its message (see [Logging](../observability/LOGGING.md)). Under `processRequest()` a guard with no `failClosed` is still skipped when it throws.
+
 ## Mid-Stream Decision Override ("Changing Mind")
 
 Guardrails can evaluate streaming chunks in real-time and "change their mind" about allowing content. The examples below import `AgentOSResponseChunkType` from `@framers/agentos` (as the Quick Start does): chunk types are lowercase strings such as `'text_delta'`, so compare against the enum. This enables:
@@ -366,6 +396,7 @@ class QualityGateGuardrail implements ICrossAgentGuardrailService {
 | `canSanitize` | `boolean` | `false` | Run this guardrail in Phase 1 so SANITIZE results chain deterministically |
 | `timeoutMs` | `number` | `undefined` | Per-guardrail timeout. On timeout/error the dispatcher fails open for that guardrail, unless `failClosed` is set or the guard is required |
 | `failClosed` | `boolean` | `false` | A throw or a timeout blocks instead of passing. Forced on for a required guard |
+| `reasonCodes` | `readonly string[]` | `undefined` | Every reason code and review code the guard can answer, a closed list. A verdict line writes a code only when the deciding guard lists it here; a guard that lists none has its verdict lines written with `unknown`. `PhraseListGuardrail` lists the rule ids of the list it holds |
 
 ### Output Payload Extras
 
@@ -575,6 +606,7 @@ interface GuardrailEvaluationResult {
   details?: unknown;         // Debugging detail, not shown to users
   modifiedText?: string | null;  // For SANITIZE action
   replacementText?: string;  // With BLOCK on output, a non-empty string is the reply sent in place of the error chunk
+  hold?: { reviewCode: string }; // With BLOCK only: kept back for a person's review, not refused
 }
 ```
 
