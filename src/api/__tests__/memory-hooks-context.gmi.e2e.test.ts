@@ -497,3 +497,14 @@ describe("an id the agent's learning.anonymousUserIds lists, on runtime: 'gmi'",
     await a.close();
   });
 });
+
+describe.each(runtimes)('a recalled record whose fields are not strings, on %s', (_name, runtime) => {
+  it('is sent with its text and without those fields, and the turn goes on', async () => {
+    const k = key();
+    const s = script('openai', k, { whole: true, replies: [reply.text('Tea.')] });
+    const odd = { getContext: async () => ({ items: [{ text: 'likes tea', page: BigInt(1), when: 5, speaker: 'robot' }] }) } as unknown as AgentMemoryProvider;
+    const r = await agent(stubbed(k, { ...runtime, memoryProvider: odd })).session('s1').send('Hi.');
+    expect(r.text).toBe('Tea.');
+    expect(recallOf(s.seen[0])!.items).toEqual([{ text: 'likes^tea' }]);
+  });
+});
