@@ -1108,14 +1108,16 @@ export function gmi(opts: GmiOptions): GmiHandle {
       if (existing) {
         // A seat runs in a session of its own: one the agent serves already is never the seat's to run in or close.
         if (seat) throw new TypeError(`gmi(): session '${sessionId}' is open; a seat opens a session of its own`);
-        if (sessionOptions?.userId !== undefined && sessionOptions.userId !== existing.userId) {
+        // An anonymous id names no user, so it never asks for another one.
+        const asked = namedSessionUser(sessionOptions?.userId, 'gmi', learningConfig?.anonymousUserIds);
+        if (asked !== undefined && asked !== existing.userId) {
           throw new Error(`gmi(): session '${sessionId}' already runs as user '${existing.userId}'; close it to open it for another user.`);
         }
         return existing.session;
       }
       // The user the session's memory serves: the user id the caller named, unless it is an anonymous id, which names
       // no user. A seat names none: its memory is a scope of its own.
-      const hookUser = seat ? undefined : namedSessionUser(sessionOptions?.userId, 'gmi');
+      const hookUser = seat ? undefined : namedSessionUser(sessionOptions?.userId, 'gmi', learningConfig?.anonymousUserIds);
       // Each session's memory scope is its own unless the caller names the user:
       // sessions are often different people, and one person's facts must not
       // reach another's replies. With memory.store a session id's memory
@@ -1157,7 +1159,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
       if (cognition.memory && !seat && !generation) openedSessionIds.add(sessionId);
       /** The id the session's memory files and recalls under: its generation's, read from the store, or the one above. */
       const memoryScopeIdOf = async (): Promise<string> => (generation ? (await generation.get()).memoryScopeId : inProcessScopeId!);
-      const userId = sessionOptions?.userId ?? sessionId;
+      // The user the turns run as: the named user, else the session id. A seat runs as the user id it was given.
+      const userId = seat ? (sessionOptions?.userId ?? sessionId) : (hookUser ?? sessionId);
       const history = opts.history === false ? null : new SessionHistoryBuffer({ ...SESSION_HISTORY_DEFAULTS, ...(opts.history ?? {}) });
       // A tally the agent's own earlier session of this id left is kept: a seat session adds to it and leaves it at close.
       const ownsTally = !sessionTallies.has(sessionId);
@@ -1227,8 +1230,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
         opts,
         userId,
         // The turn's memory scope comes with its GMI (gmiFor), once the session has read it.
-        // Only a user id the caller passed reaches the provider's end-user field.
-        providerUserId: sessionOptions?.userId,
+        // Only a user id the caller passed reaches the provider's end-user field, and never an anonymous one.
+        providerUserId: seat ? sessionOptions?.userId : hookUser,
         history,
         lock,
         // A seat session records under its ledger's own source when it names one (a temporary seat's is launch_agency).

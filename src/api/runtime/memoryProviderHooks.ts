@@ -40,7 +40,9 @@ export interface MemoryProviderHookOptions {
    */
   timeoutMs?: number;
   /**
-   * Token budget forwarded to `getContext` as the recall ceiling.
+   * Token budget forwarded to `getContext` as the ceiling of the recalled
+   * text. The `<memory_recall>` block it is sent in adds its tags, its note,
+   * each record's keys and the escapes of `<`, `>` and `&` beyond it.
    * Defaults to {@link DEFAULT_MEMORY_TOKEN_BUDGET}.
    */
   tokenBudget?: number;
@@ -55,9 +57,18 @@ export interface MemoryTurn {
 /** What a provider's `getContext` resolves to. */
 type Recalled = Awaited<ReturnType<NonNullable<AgentMemoryProvider['getContext']>>>;
 
+/** True for an object whose `contextText` is a string or absent and whose `items` is an array or absent. */
+function isRecallShape(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const { contextText, items } = value as { contextText?: unknown; items?: unknown };
+  return (contextText === undefined || contextText === null || typeof contextText === 'string')
+    && (items === undefined || items === null || Array.isArray(items));
+}
+
 /**
  * `provider.getContext` for one turn, within the timeout. Null when the provider has no `getContext`, returns
- * nothing, fails or times out; a failure or a timeout writes one `memory.hook_failed` line and the turn goes on
+ * nothing, fails, times out or resolves a value that is not a recall (its `items` not a list, its `contextText` not a
+ * string); a failure, a timeout or a malformed recall writes one `memory.hook_failed` line and the turn goes on
  * without recall.
  *
  * @param provider - The memory provider.
@@ -84,6 +95,11 @@ export async function recallForTurn(
     if (result === TIMED_OUT) {
       // The provider lost the race: the turn goes without the recall block, whatever the provider logs later.
       memoryLog.warn('memory.hook_failed', { hook: 'getContext', type: 'TimeoutError', code: 'MEMORY_HOOK_TIMEOUT' });
+      return null;
+    }
+    if (result !== null && result !== undefined && !isRecallShape(result)) {
+      // A JavaScript provider can resolve anything: a recall that is not the shape getContext returns fails as a hook.
+      memoryLog.warn('memory.hook_failed', { hook: 'getContext', type: 'TypeError', code: 'MEMORY_HOOK_MALFORMED' });
       return null;
     }
     return result ?? null;

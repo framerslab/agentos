@@ -297,16 +297,19 @@ export interface AgentOptions extends BaseAgentConfig {
    * - `getContext` runs once per turn; its recall goes into every model call
    *   of the turn as a data block in a user-role message before the turn's
    *   own, with one static line of the system prompt that explains it.
-   * - `observe` runs as fire-and-forget after each LLM call, except schema
-   *   calls, which observe only the accepted exchange after validation.
+   * - `observe` runs as fire-and-forget once per side of an answered turn,
+   *   after the result the caller receives: a schema call observes only the
+   *   accepted exchange, and a stream that ends in an error is not observed.
    */
   memoryProvider?: AgentMemoryProvider;
   /**
    * Optional tunables for the automatic {@link memoryProvider} hooks.
    * `timeoutMs` bounds each `getContext` call before the turn ships without
    * memory (default `MEMORY_TIMEOUT_MS`, 5000); `tokenBudget` is forwarded to
-   * `getContext` as the recall ceiling (default `DEFAULT_MEMORY_TOKEN_BUDGET`,
-   * 2000). Both fall back to the historical module constants when omitted.
+   * `getContext` as the ceiling of the recalled text (default
+   * `DEFAULT_MEMORY_TOKEN_BUDGET`, 2000). The block the recall is sent in adds
+   * its tags, a note, each record's keys and the escapes of `<`, `>` and `&`
+   * beyond that ceiling. Both fall back to the module constants when omitted.
    */
   memoryProviderOptions?: MemoryProviderHookOptions;
   /**
@@ -635,12 +638,14 @@ export interface AgentSessionOptions {
    * and the tools are told the turn is for: sessions opened with the same user
    * id share that user's memory, and a session opened without one is a subject
    * of its own, its session id. An anonymous id (`system`, `anonymous`, `guest`
-   * and the like) counts as none. With `runtime: 'gmi'` it also scopes the
-   * session's cognitive memory, and the GMI sends it with each model request as
-   * the end user's id (OpenAI's `user` or `safety_identifier`), so pass an
-   * opaque or hashed id, not an email address; a session opened without one
-   * sends none, and the default runtime sends none. Asking for an open session
-   * with another user id throws on both runtimes. One session is one user: for
+   * and the like, and any id `learning.anonymousUserIds` lists) counts as none,
+   * and opening an open session with one returns it. With `runtime: 'gmi'` it
+   * also scopes the session's cognitive memory, and the GMI sends it with each
+   * model request as the end user's id (OpenAI's `user` or
+   * `safety_identifier`), so pass an opaque or hashed id, not an email address;
+   * a session opened without one, or with an anonymous id, sends none, and the
+   * default runtime sends none. Asking for an open session with another user id
+   * throws on both runtimes. One session is one user: for
    * a conversation several people share, pass one id for the group.
    */
   userId?: string;
@@ -1075,6 +1080,8 @@ export function agent(opts: AgentOptions): Agent {
   const sessionBuffers = new Map<string, SessionHistoryBuffer | null>();
   // The user each open session was opened with, `undefined` for none: one session is one user.
   const sessionUsers = new Map<string, string | undefined>();
+  // The ids the agent's learning config adds to the built-in anonymous ids: none of them names a session's user.
+  const agentAnonymousUserIds = typeof opts.learning === 'object' && opts.learning !== null ? opts.learning.anonymousUserIds : undefined;
   // In-memory usage tally per session and per agent. Populated synchronously
   // after every generate/send/stream call so `agent.usage()` and
   // `session.usage()` work even when the persisted ledger is disabled (the
@@ -1303,7 +1310,7 @@ export function agent(opts: AgentOptions): Agent {
 
     session(id?: string, options?: AgentSessionOptions): AgentSession {
       const sessionId = id ?? crypto.randomUUID();
-      const namedUser = namedSessionUser(options?.userId, 'plain');
+      const namedUser = namedSessionUser(options?.userId, 'plain', agentAnonymousUserIds);
       if (sessionBuffers.has(sessionId)) {
         // One session is one user: an open session is opened again only for the user it runs as.
         const current = sessionUsers.get(sessionId) ?? sessionId;

@@ -74,9 +74,10 @@ export function renderMemoryRecallBlock(items: readonly MemoryRecallItem[]): str
 export function memoryItemsOf(
   result: { contextText?: string; items?: readonly MemoryRecallItem[] } | null | undefined,
 ): MemoryRecallItem[] {
-  const items = (result?.items ?? []).filter((item) => typeof item?.text === 'string' && item.text.length > 0);
+  const listed = Array.isArray(result?.items) ? result.items : [];
+  const items = listed.filter((item) => typeof item?.text === 'string' && item.text.length > 0);
   if (items.length > 0) return items;
-  return result?.contextText ? [{ text: result.contextText }] : [];
+  return typeof result?.contextText === 'string' && result.contextText ? [{ text: result.contextText }] : [];
 }
 
 /**

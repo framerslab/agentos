@@ -11,16 +11,29 @@ import { memoryLog } from '../../cognition/memory/log.js';
 
 /**
  * The user a session's options name. Undefined when they name none, and for an anonymous id (`system`, `anonymous`,
- * `guest` and the like), which is never a user: one `memory.anonymous_user` line is then written.
+ * `guest` and the like, and any id the agent's `learning.anonymousUserIds` adds), which is never a user: one
+ * `memory.anonymous_user` line is then written.
  *
  * @param userId - The `userId` the session was opened with.
  * @param path - The runtime the session runs on, for the log line.
+ * @param anonymousUserIds - The agent's own anonymous ids (`learning.anonymousUserIds`), beside the built-in ones.
  */
-export function namedSessionUser(userId: string | undefined, path: 'plain' | 'gmi'): string | undefined {
+export function namedSessionUser(
+  userId: string | undefined,
+  path: 'plain' | 'gmi',
+  anonymousUserIds?: readonly string[] | null,
+): string | undefined {
   if (userId === undefined) return undefined;
-  if (typeof userId === 'string' && !DEFAULT_ANONYMOUS_USER_IDS.includes(userId.trim())) return userId;
+  if (typeof userId === 'string' && !isAnonymousUserId(userId, anonymousUserIds)) return userId;
   memoryLog.warn('memory.anonymous_user', { path });
   return undefined;
+}
+
+/** True for a built-in anonymous id and for one of the agent's own, compared after trimming. */
+function isAnonymousUserId(userId: string, anonymousUserIds: readonly string[] | null | undefined): boolean {
+  const id = userId.trim();
+  if (DEFAULT_ANONYMOUS_USER_IDS.includes(id)) return true;
+  return Array.isArray(anonymousUserIds) && anonymousUserIds.some((other) => typeof other === 'string' && other.trim() === id);
 }
 
 /** The context of one session turn, or of one one-shot call, whose own id is its session and its subject. */
