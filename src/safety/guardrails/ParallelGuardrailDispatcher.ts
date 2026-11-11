@@ -54,6 +54,8 @@ import {
 } from './guardrailDispatcher';
 import { renderPlainText } from '../../api/runtime/turnFinalResponse';
 import { sanitizedFinalResponse } from './sanitizedFinalResponse';
+import { listedErrorFields, safeWord } from '../../core/logging/events.js';
+import { guardrailLog } from './log.js';
 
 // ---------------------------------------------------------------------------
 // Severity map used by worstAction — SANITIZE is excluded because it is
@@ -72,17 +74,6 @@ const ACTION_SEVERITY: Record<GuardrailAction, number> = {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Race a promise against an optional timeout.
- *
- * If `timeoutMs` is not set (undefined / 0), the original promise is returned
- * unmodified. On timeout or error the function returns `null` (fail-open)
- * and logs a warning so operators can tune the timeout.
- *
- * @param fn        - The async function to execute
- * @param timeoutMs - Maximum milliseconds to wait (undefined = no limit)
- * @returns The evaluation result, or `null` on timeout / error
- */
 /** Synthetic BLOCK returned when a fail-closed guardrail throws or times out. */
 function guardrailErrorBlock(reason: string): GuardrailEvaluationResult {
   return {
@@ -95,11 +86,37 @@ function guardrailErrorBlock(reason: string): GuardrailEvaluationResult {
 
 const GUARDRAIL_TIMEOUT = Symbol('guardrail-timeout');
 
+/** The stage a guard judges at, as the `guardrail.*` events name it. */
+type GuardrailEventStage = 'input' | 'output' | 'tool_call';
+
+/** One `guardrail.failed` line. `error` is absent for a timeout. */
+function failed(svc: IGuardrailService, stage: GuardrailEventStage, cause: 'error' | 'timeout', error?: unknown): void {
+  guardrailLog.warn('guardrail.failed', {
+    guardrailId: safeWord(svc.id), stage, posture: svc.config?.failClosed ? 'closed' : 'open', cause,
+    ...(cause === 'error' ? listedErrorFields(error) : {}),
+  });
+}
+
+/**
+ * Race a guard's evaluation against its `config.timeoutMs`.
+ *
+ * Without a timeout (undefined / 0) the evaluation is awaited as it is. On a
+ * timeout or a throw the guard's `config.failClosed` decides: a synthetic BLOCK
+ * when it is set, else `null` (fail-open). Either way one `guardrail.failed`
+ * line names the guard, the stage and the cause, and never the error's message.
+ *
+ * @param fn    - The async function to execute
+ * @param svc   - The guard whose evaluation it is
+ * @param stage - The stage the guard judges at
+ * @returns The evaluation result, a synthetic BLOCK, or `null`
+ */
 async function callWithTimeout(
   fn: () => Promise<GuardrailEvaluationResult | null>,
-  timeoutMs?: number,
-  failClosed?: boolean,
+  svc: IGuardrailService,
+  stage: GuardrailEventStage,
 ): Promise<GuardrailEvaluationResult | null> {
+  const timeoutMs = svc.config?.timeoutMs;
+  const failClosed = svc.config?.failClosed;
   try {
     if (!timeoutMs || timeoutMs <= 0) {
       return await fn();
@@ -116,22 +133,14 @@ async function callWithTimeout(
     ]);
 
     if (result === GUARDRAIL_TIMEOUT) {
-      if (failClosed) {
-        console.warn('[AgentOS][Guardrails] callWithTimeout: guardrail timed out, failing CLOSED (block).');
-        return guardrailErrorBlock('Guardrail evaluation timed out');
-      }
-      console.warn('[AgentOS][Guardrails] callWithTimeout: guardrail timed out, failing open.');
-      return null;
+      failed(svc, stage, 'timeout');
+      return failClosed ? guardrailErrorBlock('Guardrail evaluation timed out') : null;
     }
 
     return result;
   } catch (error) {
-    if (failClosed) {
-      console.warn('[AgentOS][Guardrails] callWithTimeout: guardrail threw, failing CLOSED (block).', error);
-      return guardrailErrorBlock('Guardrail evaluation threw an error');
-    }
-    console.warn('[AgentOS][Guardrails] callWithTimeout: guardrail threw, failing open.', error);
-    return null;
+    failed(svc, stage, 'error', error);
+    return failClosed ? guardrailErrorBlock('Guardrail evaluation threw an error') : null;
   }
 }
 
@@ -169,25 +178,25 @@ function blockVerdictOf(evaluation: GuardrailEvaluationResult): Pick<GuardrailOu
 }
 
 /**
- * If a Phase 2 guardrail returns SANITIZE, downgrade it to FLAG with a
- * warning. Concurrent sanitization is non-deterministic so we refuse it.
+ * If a Phase 2 guardrail returns SANITIZE, downgrade it to FLAG and write one
+ * `guardrail.sanitize_downgraded` line. Concurrent sanitization is
+ * non-deterministic so we refuse it.
  *
  * @param evaluation - The raw evaluation from Phase 2
- * @param svcIndex   - Registration index for logging
+ * @param svc        - The guard that answered it
+ * @param stage      - The stage the guard judged at
  * @returns The (potentially downgraded) evaluation
  */
 function downgradePhase2Sanitize(
   evaluation: GuardrailEvaluationResult,
-  svcIndex: number,
+  svc: IGuardrailService,
+  stage: 'input' | 'output',
 ): GuardrailEvaluationResult {
   if (evaluation.action !== GuardrailAction.SANITIZE) {
     return evaluation;
   }
 
-  console.warn(
-    `[AgentOS][Guardrails] Phase 2 guardrail at index ${svcIndex} returned SANITIZE — ` +
-    'downgrading to FLAG because concurrent sanitization is non-deterministic.',
-  );
+  guardrailLog.warn('guardrail.sanitize_downgraded', { guardrailId: safeWord(svc.id), stage });
 
   return {
     ...evaluation,
@@ -201,26 +210,25 @@ function downgradePhase2Sanitize(
 /**
  * A guard cannot rewrite a tool call: a SANITIZE on a TOOL_CALL_REQUEST chunk
  * is applied as a BLOCK that keeps the guard's reason, so the call never goes
- * out in a form no guard approved.
+ * out in a form no guard approved. A `hold` the SANITIZE carried was ignored,
+ * so the BLOCK is a refusal, not a hold. One `guardrail.sanitize_downgraded`
+ * line names the guard.
  *
  * @param evaluation - The raw evaluation of a tool-call chunk
- * @param svcIndex   - Registration index for logging
+ * @param svc        - The guard that answered it
  * @returns The evaluation, with a SANITIZE turned into a BLOCK
  */
 function sanitizeOfToolCallAsBlock(
   evaluation: GuardrailEvaluationResult,
-  svcIndex: number,
+  svc: IGuardrailService,
 ): GuardrailEvaluationResult {
   if (evaluation.action !== GuardrailAction.SANITIZE) {
     return evaluation;
   }
 
-  console.warn(
-    `[AgentOS][Guardrails] Guardrail at index ${svcIndex} returned SANITIZE for a tool call — ` +
-    'a tool call cannot be rewritten, so the call is blocked.',
-  );
+  guardrailLog.warn('guardrail.sanitize_downgraded', { guardrailId: safeWord(svc.id), stage: 'tool_call' });
 
-  const { modifiedText: _modifiedText, ...rest } = evaluation;
+  const { modifiedText: _modifiedText, hold: _hold, ...rest } = evaluation;
   return {
     ...rest,
     action: GuardrailAction.BLOCK,
@@ -228,6 +236,16 @@ function sanitizeOfToolCallAsBlock(
       ? `${evaluation.reason} [SANITIZE of a tool call applied as BLOCK]`
       : 'SANITIZE of a tool call applied as BLOCK: a tool call cannot be rewritten',
   };
+}
+
+const holdIgnoredFor = new Set<string>();
+/** Writes `guardrail.hold_ignored` the first time a guard answers a hold on an action other than BLOCK. At most 256 guards are remembered. */
+function noteIgnoredHold(evaluation: GuardrailEvaluationResult, svc: IGuardrailService, stage: GuardrailEventStage): void {
+  if (evaluation.hold === undefined || evaluation.hold === null || evaluation.action === GuardrailAction.BLOCK) return;
+  const guardrailId = safeWord(svc.id);
+  if (holdIgnoredFor.has(guardrailId) || holdIgnoredFor.size >= 256) return;
+  holdIgnoredFor.add(guardrailId);
+  guardrailLog.warn('guardrail.hold_ignored', { guardrailId, stage });
 }
 
 /** A guardrail that evaluates tool calls, with its place in the registration order. */
@@ -271,8 +289,8 @@ async function evaluateToolCallGuards(
     guards.map(({ svc }) =>
       callWithTimeout(
         () => svc.evaluateOutput!({ context, chunk, ragSources }),
-        svc.config?.timeoutMs,
-        svc.config?.failClosed,
+        svc,
+        'tool_call',
       ),
     ),
   );
@@ -280,16 +298,17 @@ async function evaluateToolCallGuards(
   const evaluations: GuardrailEvaluationResult[] = [];
   for (let j = 0; j < results.length; j++) {
     const result = results[j];
+    const { svc } = guards[j];
     if (result.status === 'rejected') {
-      console.warn('[AgentOS][Guardrails] Tool-call evaluateOutput rejected.', result.reason);
+      failed(svc, 'tool_call', 'error', result.reason);
       continue;
     }
     if (!result.value) {
       continue;
     }
 
-    const { svc, registrationIndex } = guards[j];
-    const evaluation = stampGuardrailId(sanitizeOfToolCallAsBlock(result.value, registrationIndex), svc);
+    noteIgnoredHold(result.value, svc, 'tool_call');
+    const evaluation = stampGuardrailId(sanitizeOfToolCallAsBlock(result.value, svc), svc);
     evaluations.push(evaluation);
   }
 
@@ -391,17 +410,17 @@ export class ParallelGuardrailDispatcher {
         continue;
       }
 
-      const timeoutMs = svc.config?.timeoutMs;
       const evaluation = await callWithTimeout(
         () => svc.evaluateInput!({ context, input: sanitizedInput }),
-        timeoutMs,
-        svc.config?.failClosed,
+        svc,
+        'input',
       );
 
       if (!evaluation) {
         continue;
       }
 
+      noteIgnoredHold(evaluation, svc, 'input');
       evaluationSlots[i] = evaluation;
 
       // BLOCK in Phase 1 short-circuits everything — Phase 2 never runs
@@ -429,11 +448,10 @@ export class ParallelGuardrailDispatcher {
             return Promise.resolve(null);
           }
 
-          const timeoutMs = svc.config?.timeoutMs;
           return callWithTimeout(
             () => svc.evaluateInput!({ context, input: sanitizedInput }),
-            timeoutMs,
-            svc.config?.failClosed,
+            svc,
+            'input',
           );
         }),
       );
@@ -442,10 +460,7 @@ export class ParallelGuardrailDispatcher {
       for (let j = 0; j < parallel.length; j++) {
         const outcome = settled[j];
         if (outcome.status === 'rejected') {
-          console.warn(
-            '[AgentOS][Guardrails] Phase 2 evaluateInput rejected.',
-            outcome.reason,
-          );
+          failed(parallel[j].svc, 'input', 'error', outcome.reason);
           continue;
         }
 
@@ -454,8 +469,9 @@ export class ParallelGuardrailDispatcher {
           continue;
         }
 
+        noteIgnoredHold(evaluation, parallel[j].svc, 'input');
         // Downgrade SANITIZE → FLAG in Phase 2
-        evaluation = downgradePhase2Sanitize(evaluation, parallel[j].registrationIndex);
+        evaluation = downgradePhase2Sanitize(evaluation, parallel[j].svc, 'input');
 
         evaluationSlots[parallel[j].registrationIndex] = evaluation;
       }
@@ -627,7 +643,7 @@ export class ParallelGuardrailDispatcher {
       try {
         await options.onVerdict(verdict);
       } catch (error) {
-        console.warn('[AgentOS][Guardrails] onVerdict threw; the verdict stands.', error);
+        guardrailLog.warn('guardrail.verdict_callback_failed', listedErrorFields(error));
       }
     };
 
@@ -652,17 +668,17 @@ export class ParallelGuardrailDispatcher {
           continue;
         }
 
-        const timeoutMs = svc.config?.timeoutMs;
         const raw = await callWithTimeout(
           () => svc.evaluateOutput!({ context, chunk: workingChunk, ragSources: currentRagSources }),
-          timeoutMs,
-          svc.config?.failClosed,
+          svc,
+          'output',
         );
 
         if (!raw) {
           continue;
         }
 
+        noteIgnoredHold(raw, svc, 'output');
         const evaluation = stampGuardrailId(raw, svc);
         outputEvaluations.push(evaluation);
 
@@ -692,33 +708,31 @@ export class ParallelGuardrailDispatcher {
             return Promise.resolve({ evaluation: null, registrationIndex, svc });
           }
 
-          const timeoutMs = svc.config?.timeoutMs;
           return callWithTimeout(
             () => svc.evaluateOutput!({ context, chunk: workingChunk, ragSources: currentRagSources }),
-            timeoutMs,
-            svc.config?.failClosed,
+            svc,
+            'output',
           ).then((evaluation) => ({ evaluation, registrationIndex, svc }));
         });
 
         const results = await Promise.allSettled(tasks);
         const phase: GuardrailEvaluationResult[] = [];
 
-        for (const result of results) {
+        for (let k = 0; k < results.length; k++) {
+          const result = results[k];
           if (result.status === 'rejected') {
-            console.warn(
-              '[AgentOS][Guardrails] Phase 2 final evaluateOutput rejected.',
-              result.reason,
-            );
+            failed(finalParallel[k].svc, 'output', 'error', result.reason);
             continue;
           }
 
-          const { evaluation: rawEvaluation, registrationIndex, svc } = result.value;
+          const { evaluation: rawEvaluation, svc } = result.value;
           if (!rawEvaluation) {
             continue;
           }
 
+          noteIgnoredHold(rawEvaluation, svc, 'output');
           // Downgrade SANITIZE → FLAG in Phase 2
-          const evaluation = stampGuardrailId(downgradePhase2Sanitize(rawEvaluation, registrationIndex), svc);
+          const evaluation = stampGuardrailId(downgradePhase2Sanitize(rawEvaluation, svc, 'output'), svc);
           outputEvaluations.push(evaluation);
           phase.push(evaluation);
         }
@@ -814,11 +828,10 @@ export class ParallelGuardrailDispatcher {
             continue;
           }
 
-          const timeoutMs = svc.config?.timeoutMs;
           const raw = await callWithTimeout(
             () => svc.evaluateOutput!({ context, chunk: workingChunk, ragSources: currentRagSources }),
-            timeoutMs,
-            svc.config?.failClosed,
+            svc,
+            'output',
           );
 
           streamingEvaluationCounts.set(svcId, currentCount + 1);
@@ -827,6 +840,7 @@ export class ParallelGuardrailDispatcher {
             continue;
           }
 
+          noteIgnoredHold(raw, svc, 'output');
           const evaluation = stampGuardrailId(raw, svc);
           outputEvaluations.push(evaluation);
 
@@ -859,11 +873,10 @@ export class ParallelGuardrailDispatcher {
               return Promise.resolve({ evaluation: null, registrationIndex, svcId, svc });
             }
 
-            const timeoutMs = svc.config?.timeoutMs;
             return callWithTimeout(
               () => svc.evaluateOutput!({ context, chunk: workingChunk, ragSources: currentRagSources }),
-              timeoutMs,
-              svc.config?.failClosed,
+              svc,
+              'output',
             ).then((evaluation) => {
               streamingEvaluationCounts.set(svcId, currentCount + 1);
               return { evaluation, registrationIndex, svcId, svc };
@@ -873,22 +886,21 @@ export class ParallelGuardrailDispatcher {
           const results = await Promise.allSettled(tasks);
           const phase: GuardrailEvaluationResult[] = [];
 
-          for (const result of results) {
+          for (let k = 0; k < results.length; k++) {
+            const result = results[k];
             if (result.status === 'rejected') {
-              console.warn(
-                '[AgentOS][Guardrails] Phase 2 streaming evaluateOutput rejected.',
-                result.reason,
-              );
+              failed(streamingParallel[k].svc, 'output', 'error', result.reason);
               continue;
             }
 
-            const { evaluation: rawEvaluation, registrationIndex, svc } = result.value;
+            const { evaluation: rawEvaluation, svc } = result.value;
             if (!rawEvaluation) {
               continue;
             }
 
+            noteIgnoredHold(rawEvaluation, svc, 'output');
             // Downgrade SANITIZE → FLAG in Phase 2
-            const evaluation = stampGuardrailId(downgradePhase2Sanitize(rawEvaluation, registrationIndex), svc);
+            const evaluation = stampGuardrailId(downgradePhase2Sanitize(rawEvaluation, svc, 'output'), svc);
             outputEvaluations.push(evaluation);
             phase.push(evaluation);
           }

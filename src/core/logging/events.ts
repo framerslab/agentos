@@ -94,6 +94,14 @@ export const AGENTOS_EVENTS = {
   'language.detector_unsupported': { detector: 'word' },
   // A detection provider threw; LanguageService goes on with the others.
   'language.detection_failed': { detector: 'word', type: 'word', code: 'word' },
+  // A guard threw, timed out or answered no recognised action. No guard text and no error message is ever a field.
+  'guardrail.failed': { guardrailId: 'word', stage: { enum: ['input', 'output', 'tool_call'] }, posture: { enum: ['open', 'closed'] }, cause: { enum: ['error', 'timeout', 'malformed'] }, type: 'word', code: 'word' },
+  // A SANITIZE the dispatcher could not apply: a phase 2 answer became a FLAG, a tool call's a BLOCK.
+  'guardrail.sanitize_downgraded': { guardrailId: 'word', stage: { enum: ['input', 'output', 'tool_call'] } },
+  // A hold came with an action other than BLOCK and was ignored; written once per guard.
+  'guardrail.hold_ignored': { guardrailId: 'word', stage: { enum: ['input', 'output', 'tool_call'] } },
+  // An onVerdict callback threw; the verdict stands.
+  'guardrail.verdict_callback_failed': { type: 'word', code: 'word' },
   // A soul given `optional: true` failed to load; the agent runs without it.
   'soul.load_failed': { optional: { enum: ['yes'] }, type: 'word', code: 'word' },
   // gmi() left out a front matter field that path cannot apply.
