@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { attachMemoryWiki } from '../attachMemoryWiki.js';
-import { ensureMemoryDir, type WikiPage } from '../../../substrate/memory/wiki/index.js';
+import { ensureMemoryDir } from '../../../substrate/memory/wiki/index.js';
 import { Memory } from '../facade/Memory.js';
 import type { Brain } from '../../retrieval/store/Brain.js';
 import { conversationScopeKey } from '../../retrieval/store/conversationScopeKey.js';
@@ -75,7 +75,7 @@ describe('attachMemoryWiki', () => {
     try {
       const agentId = 'a1';
       const subject = conversationScopeKey(agentId, { kind: 'user', id: 'johnny' });
-      const attached = await attachMemoryWiki({ memory, memoryDir, agentId, llm: async () => 'merged body', chunk: (t) => [{ text: t }] });
+      const { storeFor } = await attachMemoryWiki({ memory, memoryDir, agentId, llm: async () => 'merged body', chunk: (t) => [{ text: t }] });
       await memory.remember('Johnny likes green tea', { type: 'episodic', scope: 'conversation', scopeId: subject });
 
       const before = Date.now();
@@ -83,7 +83,6 @@ describe('attachMemoryWiki', () => {
       const after = Date.now();
 
       // The page is the subject's own: a row of the store, read through the store of the subject's scope.
-      const { storeFor } = attached as unknown as { storeFor(scopeId: string): { readPage(id: string): Promise<WikiPage | null> } };
       const page = await storeFor(subject).readPage('concepts/notes');
       expect(page?.body.trim()).toBe('merged body');
       expect(fs.existsSync(path.join(memoryDir, 'concepts', 'notes.md'))).toBe(false);

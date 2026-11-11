@@ -90,6 +90,8 @@ export const AGENTOS_EVENTS = {
   'memory.legacy_traces': { count: 'int' },
   // A one-shot generate() or stream() on a souled agent names no user: nothing is filed for it and it recalls the operator's pages alone. Written once an agent.
   'memory.one_shot_unfiled': {},
+  // A scope's wiki compile did not run in a compile call: a spend budget refused its model call, the account's memory policy keeps raw traces only, the screen hook failed or had no turn of the scope to run for, or the agent compiles no wiki at all. The scope's traces wait for a later compile. Written once a reason a call, with no scope.
+  'memory.compile_skipped': { reason: { enum: ['budget', 'policy_raw', 'compile_off', 'screen_failed'] } },
   // read_memory_page answered a page as not found, or a call as invalid, for a page the asker may not read: another subject's page, a user's page asked with no user, a page an earlier version compiled asked by a user, or a call that named a scope or a user.
   'memory.page_read_refused': { reason: { enum: ['other_user', 'no_user', 'legacy', 'caller_filter'] } },
   // A translation failed, answered with no text, ran past the transcript translator's own timeout, stopped at its output cap or stopped for another reason (a content filter); it throws TranslationProviderError, and status is 0 when no HTTP status came back.

@@ -40,6 +40,7 @@ async function _getOs(): Promise<typeof import('node:os')> {
 import type { StorageAdapter } from '@framers/sql-storage-adapter';
 import type { MemoryTrace } from '../../core/types.js';
 import type { CompileResult } from '../../../substrate/memory/wiki/types.js';
+import type { WikiCompilerStorePort } from '../../../substrate/memory/wiki/WikiCompiler.js';
 import type { ITool } from '../../../../core/tools/ITool.js';
 import type {
   MemoryConfig,
@@ -83,6 +84,7 @@ import {
 import { fillScopeIds } from '../../retrieval/store/migrations/v2-to-v3.js';
 import { CONVERSATION_SCOPE, parseConversationScopeKey } from '../../retrieval/store/conversationScopeKey.js';
 import { ensureScopeRow, registerUnregisteredConversationScopes } from '../../retrieval/store/conversationScopes.js';
+import { memoryLog } from '../../log.js';
 import { assertWikiPageId } from '../../../substrate/memory/wiki/WikiPageId.js';
 import { refileBrainScopeIds, snapshotInEncodedForm, takeScopeIdFormLock } from '../../retrieval/store/scopeIdForm.js';
 import { SqlKnowledgeGraph } from '../../retrieval/store/SqlKnowledgeGraph.js';
@@ -110,6 +112,36 @@ import {
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
+
+/** Why a scope's wiki compile did not run in a call, as its `memory.compile_skipped` line says it. */
+export type CompileSkipReason = 'budget' | 'policy_raw' | 'screen_failed';
+
+/** What {@link Memory.attachWiki} takes: a page store per conversation scope, a compiler, and two optional hooks. */
+export interface AttachedWiki {
+  /** The page store of one conversation scope: a user's or a session's key. */
+  storeFor(scopeId: string): WikiCompilerStorePort;
+  compiler: {
+    compile(input: {
+      traces: MemoryTrace[];
+      reason: 'consolidation' | 'session-end' | 'explicit';
+      /** The store of the scope the traces are of: the compile reads and writes its pages there. */
+      store: WikiCompilerStorePort;
+    }): Promise<CompileResult>;
+  };
+  /**
+   * Asked once a batch of a scope's traces, before the compiler: the traces to compile, or why this scope's
+   * compile does not run. A skipped scope keeps its watermark.
+   */
+  beforeScopeCompile?(
+    scopeId: string,
+    traces: MemoryTrace[],
+  ): Promise<{ traces: MemoryTrace[] } | { skip: 'policy_raw' | 'screen_failed' }>;
+  /**
+   * The reason to log for an error a scope's compile threw: `'budget'` for a spend budget's refusal. Undefined:
+   * the error is the call's, thrown once every scope has run.
+   */
+  compileSkipReasonOf?(error: unknown): 'budget' | undefined;
+}
 
 /**
  * A memory trace paired with its retrieval relevance score.
@@ -1334,77 +1366,153 @@ export class Memory {
     return rows.map((row) => this._buildTrace(row));
   }
 
-  /** Optional markdown wiki store + compiler, attached by the agent at boot. */
-  private _wiki?: {
-    store: {
-      index: (o?: { force?: boolean }) => Promise<unknown>;
-      readMetaWatermark: () => Promise<string | null>;
-      writeMetaWatermark: (iso: string) => Promise<void>;
-    };
-    compiler: {
-      compile: (input: {
-        traces: MemoryTrace[];
-        reason: 'consolidation' | 'session-end' | 'explicit';
-      }) => Promise<CompileResult>;
-    };
-  };
+  /** The wiki attached by the agent at boot: a page store per conversation scope, and the compiler. */
+  private _wiki?: AttachedWiki;
 
   /**
-   * Attach a markdown wiki store + compiler. Called by the agent at boot once
-   * the memory/ workspace directory is known. Idempotent (last call wins).
+   * Attach a wiki: a page store per conversation scope, a compiler, and its two optional hooks. Called by the
+   * agent at boot. Idempotent (last call wins).
    */
-  attachWiki(wiki: NonNullable<Memory['_wiki']>): void {
+  attachWiki(wiki: AttachedWiki): void {
     this._wiki = wiki;
   }
 
   /**
-   * Compile recent (non-wiki) traces into the markdown wiki, then re-index.
-   * Reads the wiki's watermark, folds every trace created since into pages, and
-   * advances the watermark. No-op when no wiki is attached. A batch whose
-   * compile rejects, such as on a page write that fails for want of disk space
-   * or permission, leaves the watermark where it was, so the next compile
-   * starts from that batch again.
+   * Compile new traces into wiki pages, one conversation scope at a time: each scope's traces go to the compiler
+   * with that scope's own page store, and each scope keeps its own watermark, `compiled_at` in its row of
+   * `memory_scopes`. No-op when no wiki is attached.
+   *
+   * Only the scopes of a user or a session are compiled; the operator's scope never is. For each scope the traces
+   * stored after its watermark are read oldest first, in batches. The scope's own page chunks (tagged `wiki`) are
+   * left out, so a scope whose only new traces are its chunks makes no model call. The watermark then moves to the
+   * newest trace of the batch read, not to wall-clock now.
+   *
+   * A scope whose compile throws keeps its watermark where it was, so the next compile takes up the same traces,
+   * and the other scopes go on. When the wiki's `compileSkipReasonOf` names a reason for the error, such as a spend
+   * budget's refusal, the scope is skipped; any other error is thrown once every scope has run, the first of them
+   * when several scopes failed. A scope the wiki's `beforeScopeCompile` skips keeps its watermark too. Each reason a
+   * scope was skipped for is logged once a call, as one `memory.compile_skipped` line that names no scope.
    *
    * @param opts.reason - What triggered this compile (telemetry + compiler hint).
+   * @param opts.scopes - The scope ids to compile. Unset: every user or session scope that holds a trace newer than
+   *   its watermark. An id with no registry row, and the operator's, is left out. An empty list compiles nothing.
+   * @returns The pages written, the traces consumed and the conflicts, summed over the scopes that compiled.
    */
   async compileWiki(opts?: {
     reason?: 'consolidation' | 'session-end' | 'explicit';
+    scopes?: readonly string[];
   }): Promise<CompileResult> {
     await this._initPromise;
-    const empty: CompileResult = { pagesWritten: [], tracesConsumed: 0, conflicts: [] };
-    if (!this._wiki) return empty;
+    const aggregate: CompileResult = { pagesWritten: [], tracesConsumed: 0, conflicts: [] };
+    const wiki = this._wiki;
+    if (!wiki) return aggregate;
 
     const reason = opts?.reason ?? 'explicit';
-    const BATCH = 500;
-    const watermarkIso = await this._wiki.store.readMetaWatermark();
-    let sinceMs = watermarkIso ? Date.parse(watermarkIso) : 0;
-    const aggregate: CompileResult = { pagesWritten: [], tracesConsumed: 0, conflicts: [] };
-
-    // Drain the window oldest-first in batches, advancing the watermark to the
-    // newest created_at actually processed (not wall-clock now). This avoids
-    // dropping traces beyond a single batch and avoids racing traces inserted
-    // between the query and the watermark write.
-    for (;;) {
-      const traces = await this.recentTraces(sinceMs, { limit: BATCH, order: 'asc' });
-      if (traces.length === 0) break;
-
-      const result = await this._wiki.compiler.compile({ traces, reason });
-      aggregate.pagesWritten.push(...result.pagesWritten);
-      aggregate.tracesConsumed += result.tracesConsumed;
-      aggregate.conflicts.push(...result.conflicts);
-
-      sinceMs = Math.max(...traces.map((t) => t.createdAt));
-      await this._wiki.store.writeMetaWatermark(new Date(sinceMs).toISOString());
-
-      if (traces.length < BATCH) break;
+    const skipped = new Set<CompileSkipReason>();
+    let failed = false;
+    let failure: unknown;
+    for (const target of await this._scopesToCompile(opts?.scopes)) {
+      try {
+        const skip = await this._compileScope(wiki, target, reason, aggregate);
+        if (skip) skipped.add(skip);
+      } catch (error) {
+        const why = wiki.compileSkipReasonOf?.(error);
+        if (why) {
+          skipped.add(why);
+        } else if (!failed) {
+          failed = true;
+          failure = error;
+        }
+      }
     }
-
-    // A page reported in conflicts may still be on disk (its file written before the catalog failed), so the
-    // index runs after any compile that wrote or reported a page; it re-embeds only pages whose text changed.
-    if (aggregate.pagesWritten.length > 0 || aggregate.conflicts.length > 0) {
-      await this._wiki.store.index();
-    }
+    for (const why of skipped) memoryLog.warn('memory.compile_skipped', { reason: why });
+    if (failed) throw failure;
     return aggregate;
+  }
+
+  /**
+   * The user and session scopes a compile runs over, each with its watermark: the scopes named, or, with none
+   * named, every one that holds a live trace newer than its watermark. A scope is matched by equality on its id.
+   */
+  private async _scopesToCompile(scopes: readonly string[] | undefined): Promise<Array<{ scopeId: string; compiledAt: number }>> {
+    const brainId = this._brain.brainId;
+    type Row = { scope_id: string; compiled_at: number | string | null };
+    // A BIGINT column can come back as text (Postgres): the watermark is read through Number().
+    const target = (row: Row) => ({ scopeId: row.scope_id, compiledAt: row.compiled_at === null || row.compiled_at === undefined ? 0 : Number(row.compiled_at) });
+    if (scopes === undefined) {
+      const rows = await this._brain.all<Row>(
+        `SELECT s.scope_id AS scope_id, s.compiled_at AS compiled_at
+           FROM memory_scopes s
+          WHERE s.brain_id = ? AND s.scope = ? AND s.kind IN ('user', 'session')
+            AND EXISTS (
+              SELECT 1 FROM memory_traces t
+               WHERE t.brain_id = s.brain_id AND t.scope = s.scope AND t.scope_id = s.scope_id
+                 AND t.deleted = 0 AND t.created_at > COALESCE(s.compiled_at, 0))
+          ORDER BY s.scope_id`,
+        [brainId, CONVERSATION_SCOPE],
+      );
+      return rows.map(target);
+    }
+    const targets: Array<{ scopeId: string; compiledAt: number }> = [];
+    for (const scopeId of new Set(scopes)) {
+      if (typeof scopeId !== 'string' || scopeId === '') continue;
+      const row = await this._brain.get<Row>(
+        `SELECT scope_id, compiled_at FROM memory_scopes
+          WHERE brain_id = ? AND scope = ? AND scope_id = ? AND kind IN ('user', 'session')`,
+        [brainId, CONVERSATION_SCOPE, scopeId],
+      );
+      if (row) targets.push(target(row));
+    }
+    return targets;
+  }
+
+  /**
+   * Compiles one scope from its watermark on, adding what its compiles return to `aggregate`, and moves the
+   * watermark past each batch it compiled.
+   *
+   * @returns The reason the wiki's `beforeScopeCompile` skipped the scope for; undefined when it was not skipped.
+   * @throws Whatever the hook, the compiler or the store throws; the watermark then stays where the last compiled
+   *   batch left it.
+   */
+  private async _compileScope(
+    wiki: AttachedWiki,
+    target: { scopeId: string; compiledAt: number },
+    reason: 'consolidation' | 'session-end' | 'explicit',
+    aggregate: CompileResult,
+  ): Promise<CompileSkipReason | undefined> {
+    const BATCH = 500;
+    const { scopeId } = target;
+    const store = wiki.storeFor(scopeId);
+    let sinceMs = target.compiledAt;
+    // Oldest first in batches, the watermark moving to the newest created_at actually read: a trace beyond one batch
+    // is not dropped, and one stored between the read and the watermark's write is read by the next compile.
+    for (;;) {
+      const batch = await this.recentTraces(sinceMs, { scope: CONVERSATION_SCOPE, scopeId, limit: BATCH, order: 'asc' });
+      if (batch.length === 0) break;
+
+      // The scope's own page chunks are never compiled back into its pages.
+      let traces = batch.filter((trace) => !trace.tags.includes('wiki'));
+      if (traces.length > 0) {
+        if (wiki.beforeScopeCompile) {
+          const answer = await wiki.beforeScopeCompile(scopeId, traces);
+          if ('skip' in answer) return answer.skip;
+          traces = answer.traces;
+        }
+        const result = await wiki.compiler.compile({ traces, reason, store });
+        aggregate.pagesWritten.push(...result.pagesWritten);
+        aggregate.tracesConsumed += result.tracesConsumed;
+        aggregate.conflicts.push(...result.conflicts);
+      }
+
+      sinceMs = Math.max(...batch.map((trace) => Number(trace.createdAt)));
+      await this._brain.run(
+        'UPDATE memory_scopes SET compiled_at = ? WHERE brain_id = ? AND scope = ? AND scope_id = ?',
+        [sinceMs, this._brain.brainId, CONVERSATION_SCOPE, scopeId],
+      );
+
+      if (batch.length < BATCH) break;
+    }
+    return undefined;
   }
 
   // =========================================================================

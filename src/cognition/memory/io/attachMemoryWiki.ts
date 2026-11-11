@@ -1,7 +1,8 @@
 /** @fileoverview Wire a markdown memory wiki onto a Memory facade + soul workspace. */
 import { messageOf } from '../../../api/runtime/memoryObserveFailures.js';
 import { WikiMemoryStore, WikiCompiler, UserWikiStore, originOfPage } from '../../substrate/memory/wiki/index.js';
-import type { CompileResult, UserWikiPagesPort } from '../../substrate/memory/wiki/index.js';
+import type { UserWikiPagesPort } from '../../substrate/memory/wiki/index.js';
+import type { AttachedWiki } from './facade/Memory.js';
 import { conversationScopeKey } from '../retrieval/store/conversationScopeKey.js';
 import { memoryLog } from '../log.js';
 import { ReadMemoryPageTool, type ReadMemoryPagePort } from './tools/ReadMemoryPageTool.js';
@@ -19,8 +20,9 @@ interface ClusterAssignment {
 }
 
 /**
- * Minimal Memory-facade surface this helper needs (structural, no hard import): the trace calls the operator's
- * pages are indexed with, and the page rows a subject's own pages are kept in (`UserWikiPagesPort`).
+ * Minimal Memory-facade surface this helper needs (structural: the facade's types alone are imported, never the
+ * class): the trace calls the operator's pages are indexed with, and the page rows a subject's own pages are kept in
+ * (`UserWikiPagesPort`).
  */
 export interface WikiAttachableMemory extends UserWikiPagesPort {
   /**
@@ -32,19 +34,8 @@ export interface WikiAttachableMemory extends UserWikiPagesPort {
   forget(traceId: string): Promise<void>;
   /** Deletes traces for good: the chunks of an operator page that was edited, removed or deleted. */
   deleteTraces(ids: readonly string[]): Promise<unknown>;
-  attachWiki(wiki: {
-    store: {
-      index: (o?: { force?: boolean }) => Promise<unknown>;
-      readMetaWatermark: () => Promise<string | null>;
-      writeMetaWatermark: (iso: string) => Promise<void>;
-    };
-    compiler: {
-      compile: (input: {
-        traces: TraceLike[];
-        reason: 'consolidation' | 'session-end' | 'explicit';
-      }) => Promise<CompileResult>;
-    };
-  }): void;
+  /** Takes the wiki: a page store per conversation scope, the compiler, and the two optional compile hooks. */
+  attachWiki(wiki: AttachedWiki): void;
 }
 
 export interface AttachMemoryWikiOptions {
@@ -67,10 +58,24 @@ export interface AttachMemoryWikiOptions {
    * reads the key those writes went to. Unset, the subject is read as given.
    */
   subjectOf?: (subject: { kind: 'user' | 'session'; id: string }) => { kind: 'user' | 'session'; id: string };
+  /**
+   * Asked once a batch of a scope's traces, before the compiler: the traces to compile (a host can screen their
+   * text), or why this scope's compile does not run. A skipped scope keeps its watermark and is logged.
+   */
+  beforeScopeCompile?: AttachedWiki['beforeScopeCompile'];
+  /**
+   * The reason to log for an error a scope's compile threw, such as `'budget'` for a spend budget's refusal: the
+   * scope is then skipped, its traces wait for the next compile, and the other scopes compile. Undefined, or no
+   * answer: the error rejects the compile call once every scope has run.
+   */
+  compileSkipReasonOf?: AttachedWiki['compileSkipReasonOf'];
 }
 
 export interface AttachMemoryWikiResult {
+  /** The operator's pages: the markdown files under memory/. */
   store: WikiMemoryStore;
+  /** The store of one subject's own pages, which are rows of the Memory facade: a user's or a session's scope key. */
+  storeFor: (scopeId: string) => UserWikiStore;
   tools: unknown[];
 }
 
@@ -103,6 +108,11 @@ async function defaultCluster(traces: TraceLike[]): Promise<ClusterAssignment[]>
  * Construct the wiki store + compiler over an agent's memory/ directory, attach
  * the write-back loop to the Memory facade, boot-index the markdown into the
  * store, and append the read_memory_page tool to the agent's tool list.
+ *
+ * The write-back loop compiles one conversation scope at a time into that scope's own pages, which are rows of the
+ * facade (`storeFor`) and never files: the compiler is given each scope's store with its traces, and writes nothing
+ * under memory/. The default clusterer runs over one scope's traces at a time, so `concepts/notes` is one page a
+ * subject.
  *
  * The pages under memory/ are the operator's. At attach, `index.md` is written again from them, so a line an earlier
  * version wrote for a page it compiled is gone from it; a failure to write it is a warning, and the attach goes on,
@@ -138,20 +148,19 @@ export async function attachMemoryWiki(opts: AttachMemoryWikiOptions): Promise<A
     },
   });
 
+  // One compiler for every scope, with no store of its own: each compile is given the store of the scope it runs for.
   const compiler = new WikiCompiler({
-    store,
     llm: opts.llm,
     cluster: opts.cluster ?? defaultCluster,
     now: opts.now,
   });
+  const storeFor = (scopeId: string): UserWikiStore => new UserWikiStore({ scopeId, pages: opts.memory, chunk: opts.chunk });
 
   opts.memory.attachWiki({
-    store: {
-      index: (o) => store.index(o),
-      readMetaWatermark: () => store.readMetaWatermark(),
-      writeMetaWatermark: (iso) => store.writeMetaWatermark(iso),
-    },
+    storeFor,
     compiler,
+    ...(opts.beforeScopeCompile ? { beforeScopeCompile: opts.beforeScopeCompile } : {}),
+    ...(opts.compileSkipReasonOf ? { compileSkipReasonOf: opts.compileSkipReasonOf } : {}),
   });
 
   // index.md lists the operator's pages alone, whatever an earlier version wrote into it.
@@ -173,7 +182,7 @@ export async function attachMemoryWiki(opts: AttachMemoryWikiOptions): Promise<A
   if (withheld.length > 0) memoryLog.warn('memory.legacy_pages', { count: withheld.length });
 
   const tools = [...(opts.tools ?? []), new ReadMemoryPageTool(pagePortOf(opts, store))];
-  return { store, tools };
+  return { store, storeFor, tools };
 }
 
 /**

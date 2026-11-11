@@ -23,6 +23,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Memory } from '../Memory.js';
+import type { AttachedWiki } from '../Memory.js';
 import type { Brain } from '../../../retrieval/store/Brain.js';
 import { PORTABLE_TABLES } from '../../../retrieval/store/portable-tables.js';
 import { conversationScopeKey } from '../../../retrieval/store/conversationScopeKey.js';
@@ -31,7 +32,6 @@ import type { StorageAdapter } from '@framers/sql-storage-adapter';
 import pino from 'pino';
 import { InvalidWikiPageIdError, UserWikiStore, WikiCompiler } from '../../../../substrate/memory/wiki/index.js';
 import type { CompileResult, WikiPage } from '../../../../substrate/memory/wiki/index.js';
-import type { MemoryTrace } from '../../../core/types.js';
 import { resetLoggerFactory, setLogger } from '../../../../../core/logging/loggerFactory.js';
 
 const POSTGRES_URL = process.env.AGENTOS_TEST_POSTGRES_URL;
@@ -518,28 +518,7 @@ const NOTHING_COMPILED: CompileResult = { pagesWritten: [], tracesConsumed: 0, c
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** The hooks a wiki may be attached with. */
-interface CompileHooks {
-  beforeScopeCompile?: (
-    scopeId: string,
-    traces: MemoryTrace[],
-  ) => Promise<{ traces: MemoryTrace[] } | { skip: 'policy_raw' | 'screen_failed' }>;
-  compileSkipReasonOf?: (error: unknown) => 'budget' | undefined;
-}
-
-/** The compile members of the facade, as a wiki kept per scope is attached and compiled. */
-interface Compiling {
-  attachWiki(
-    wiki: CompileHooks & {
-      storeFor(scopeId: string): UserWikiStore;
-      compiler: WikiCompiler;
-    },
-  ): void;
-  compileWiki(opts?: {
-    reason?: 'consolidation' | 'session-end' | 'explicit';
-    scopes?: readonly string[];
-  }): Promise<CompileResult>;
-}
-const compiling = (memory: Memory): Compiling => memory as unknown as Compiling;
+type CompileHooks = Pick<AttachedWiki, 'beforeScopeCompile' | 'compileSkipReasonOf'>;
 
 /**
  * Attaches a wiki whose pages are rows of `memory`, one page (`concepts/notes`) a scope, and returns every merge
@@ -552,13 +531,13 @@ function attachRows(
   const prompts: string[] = [];
   const { llm, ...hooks } = extra;
   const compiler = new WikiCompiler({
-    llm: async (prompt: string) => {
+    llm: async (prompt) => {
       prompts.push(prompt);
       return llm ? llm(prompt) : 'Merged notes.';
     },
-    cluster: async (traces: Array<{ id: string }>) => [{ pageId: 'concepts/notes', traceIds: traces.map((t) => t.id) }],
-  } as never);
-  compiling(memory).attachWiki({
+    cluster: async (traces) => [{ pageId: 'concepts/notes', traceIds: traces.map((t) => t.id) }],
+  });
+  memory.attachWiki({
     storeFor: (scopeId) => new UserWikiStore({ scopeId, pages: memory, chunk }),
     compiler,
     ...hooks,
@@ -612,7 +591,7 @@ describe.each(STORES)('the compile per scope on %s', (store) => {
     const a2 = await memory.remember('Alice has a cat.', { scope: 'conversation', scopeId: A });
     const b1 = await memory.remember('Bob plays cello.', { scope: 'conversation', scopeId: B });
 
-    const result = await compiling(memory).compileWiki();
+    const result = await memory.compileWiki();
 
     expect(result.pagesWritten).toEqual(['concepts/notes', 'concepts/notes']);
     expect(result.tracesConsumed).toBe(3);
@@ -640,15 +619,15 @@ describe.each(STORES)('the compile per scope on %s', (store) => {
     const prompts = attachRows(memory);
     await memory.remember('Alice likes tea.', { scope: 'conversation', scopeId: A });
     await memory.remember('Bob plays cello.', { scope: 'conversation', scopeId: B });
-    await compiling(memory).compileWiki();
+    await memory.compileWiki();
     expect(prompts).toHaveLength(2);
 
-    expect(await compiling(memory).compileWiki()).toEqual(NOTHING_COMPILED);
+    expect(await memory.compileWiki()).toEqual(NOTHING_COMPILED);
     expect(prompts).toHaveLength(2);
 
     await pause(5);
     await memory.remember('Bob has a dog.', { scope: 'conversation', scopeId: B });
-    const third = await compiling(memory).compileWiki();
+    const third = await memory.compileWiki();
 
     expect(third.pagesWritten).toEqual(['concepts/notes']);
     expect(third.tracesConsumed).toBe(1);
@@ -664,14 +643,14 @@ describe.each(STORES)('the compile per scope on %s', (store) => {
     const prompts = attachRows(memory);
     const fact = await memory.remember('Alice likes tea.', { scope: 'conversation', scopeId: A });
     await pause(5);
-    await compiling(memory).compileWiki();
+    await memory.compileWiki();
     expect(prompts).toHaveLength(1);
     expect((await watermarks(memory)).get(A)).toBe(fact.createdAt);
     // The page's chunks were stored after the trace the compile read.
     const newest = await newestTraceAt(brain, A);
     expect(newest).toBeGreaterThan(fact.createdAt);
 
-    expect(await compiling(memory).compileWiki()).toEqual(NOTHING_COMPILED);
+    expect(await memory.compileWiki()).toEqual(NOTHING_COMPILED);
 
     expect(prompts).toHaveLength(1);
     expect((await watermarks(memory)).get(A)).toBe(newest);
@@ -682,8 +661,8 @@ describe.each(STORES)('the compile per scope on %s', (store) => {
     const prompts = attachRows(memory);
     await memory.remember('Open nine to five.', { scope: 'conversation', scopeId: OPERATOR });
 
-    expect(await compiling(memory).compileWiki()).toEqual(NOTHING_COMPILED);
-    expect(await compiling(memory).compileWiki({ scopes: [OPERATOR] })).toEqual(NOTHING_COMPILED);
+    expect(await memory.compileWiki()).toEqual(NOTHING_COMPILED);
+    expect(await memory.compileWiki({ scopes: [OPERATOR] })).toEqual(NOTHING_COMPILED);
 
     expect(prompts).toEqual([]);
     expect(await pageRows(brain)).toEqual([]);
@@ -696,11 +675,11 @@ describe.each(STORES)('the compile per scope on %s', (store) => {
     await memory.remember('Alice likes tea.', { scope: 'conversation', scopeId: A });
     await memory.remember('Bob plays cello.', { scope: 'conversation', scopeId: B });
 
-    expect(await compiling(memory).compileWiki({ scopes: [] })).toEqual(NOTHING_COMPILED);
+    expect(await memory.compileWiki({ scopes: [] })).toEqual(NOTHING_COMPILED);
     expect(prompts).toEqual([]);
 
     // A scope with no registry row is left out, and a scope named twice is compiled once.
-    const result = await compiling(memory).compileWiki({ scopes: [B, C, B] });
+    const result = await memory.compileWiki({ scopes: [B, C, B] });
 
     expect(result.pagesWritten).toEqual(['concepts/notes']);
     expect(prompts).toHaveLength(1);
@@ -726,7 +705,7 @@ describe.each(STORES)('the compile per scope on %s', (store) => {
     await memory.remember('Bob plays cello.', { scope: 'conversation', scopeId: B });
     await memory.remember('Carol keeps bees.', { scope: 'conversation', scopeId: C });
 
-    const result = await compiling(memory).compileWiki();
+    const result = await memory.compileWiki();
 
     expect(result.pagesWritten).toEqual(['concepts/notes', 'concepts/notes']);
     expect(prompts).toHaveLength(3);
@@ -754,7 +733,7 @@ describe.each(STORES)('the compile per scope on %s', (store) => {
     await memory.remember('Bob plays cello.', { scope: 'conversation', scopeId: B });
     await memory.remember('Carol keeps bees.', { scope: 'conversation', scopeId: C });
 
-    await expect(compiling(memory).compileWiki()).rejects.toThrow('the model answered nothing');
+    await expect(memory.compileWiki()).rejects.toThrow('the model answered nothing');
 
     expect(prompts).toHaveLength(3);
     expect((await pageRows(brain)).map((row) => row.scope_id).sort()).toEqual([B, C].sort());
@@ -779,7 +758,7 @@ describe.each(STORES)('the compile per scope on %s', (store) => {
     await pause(5);
     const later = await memory.remember('Bob has a dog.', { scope: 'conversation', scopeId: B });
 
-    const result = await compiling(memory).compileWiki();
+    const result = await memory.compileWiki();
 
     expect(asked.sort()).toEqual([A, B].sort());
     expect(result.pagesWritten).toEqual(['concepts/notes']);

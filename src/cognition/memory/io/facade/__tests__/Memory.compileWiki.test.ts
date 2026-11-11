@@ -62,7 +62,7 @@ describe('Memory.compileWiki', () => {
           return { pagesWritten: ['entities/johnny'], tracesConsumed: 1, conflicts: [] };
         },
       },
-    } as never);
+    });
 
     const res = await mem.compileWiki({ reason: 'explicit' });
     expect(res.pagesWritten).toEqual(['entities/johnny']);
@@ -91,7 +91,7 @@ describe('Memory.compileWiki', () => {
           };
         },
       },
-    } as never);
+    });
 
     const first = await mem.compileWiki({ reason: 'explicit' });
     expect(first.tracesConsumed).toBe(1);
@@ -121,7 +121,7 @@ describe('Memory.compileWiki', () => {
           return { pagesWritten: ['entities/johnny'], tracesConsumed: input.traces.length, conflicts: [] };
         },
       },
-    } as never);
+    });
 
     await expect(mem.compileWiki({ reason: 'explicit' })).rejects.toMatchObject({ code: 'ENOSPC' });
     expect(await watermarkOf(mem)).toBeNull();
@@ -146,7 +146,7 @@ describe('Memory.compileWiki', () => {
           return { pagesWritten: [], tracesConsumed: 0, conflicts: [] };
         },
       },
-    } as never);
+    });
 
     expect(await mem.compileWiki({ reason: 'explicit' })).toEqual({ pagesWritten: [], tracesConsumed: 0, conflicts: [] });
     expect(compileCalls).toBe(0);

@@ -331,7 +331,7 @@ export type { RecallResult, RememberResult, SearchOptions } from './AgentMemory.
 
 // --- Memory Facade (Phase 1: Ingestion + Self-Improving Graph) ---
 export { Memory } from './io/facade/index.js';
-export type { ScoredTrace, MemoryScopeRow, MemoryPageRow, MemoryPageChunk } from './io/facade/index.js';
+export type { ScoredTrace, MemoryScopeRow, MemoryPageRow, MemoryPageChunk, AttachedWiki, CompileSkipReason } from './io/facade/index.js';
 // A trace as a ledger row's before-state holds it: `Memory.readTrace` reads one, `Memory.restoreTrace` writes one back.
 export { readTraceSnapshot } from './retrieval/store/tracePersistence.js';
 export type { TraceSnapshot } from './retrieval/store/tracePersistence.js';

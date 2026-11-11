@@ -228,6 +228,16 @@ function assertSharedMemory(sharedMemory: unknown, anonymousUserIds: readonly st
   }
 }
 
+/**
+ * True for the errors a spend budget's refusal throws, by name as the runtime reads them: `CostCapExceededError`,
+ * `UnpricedModelError`, and `SpendMeterUnavailableError` when the budget's meter could not answer.
+ */
+function isBudgetRefusal(error: unknown): boolean {
+  if (error === null || typeof error !== 'object') return false;
+  const name = (error as { name?: unknown }).name;
+  return name === 'CostCapExceededError' || name === 'UnpricedModelError' || name === 'SpendMeterUnavailableError';
+}
+
 /** Options for {@link souledAgent}: those of {@link AgentOptions}, with `soul` required. */
 export interface SouledAgentOptions extends AgentOptions {
   soul: NonNullable<AgentOptions['soul']>;
@@ -278,6 +288,12 @@ export type SouledAgent = Agent & { memory?: Memory };
  * speaker and its date, in a data block. The wiki compile's model calls go on the agent's route with its fallback
  * settings, are checked against and charged to its spend budget, and are written to its usage ledger under the source
  * {@link SOULED_AGENT_COMPILE_SOURCE}.
+ *
+ * The wiki is compiled once a subject, from that subject's traces alone, into pages that are rows of the store and
+ * never files under `memory/`; each subject has its own watermark. `close()` compiles the subjects its turns wrote
+ * to, and `agent.memory.compileWiki()` every subject with new traces. A subject whose compile the spend budget
+ * refuses is skipped with one `memory.compile_skipped` line: its traces wait for the next compile, and the other
+ * subjects compile.
  *
  * `close()` first closes the agent (with `runtime: 'gmi'` that stops its session turns), then waits, within one
  * deadline (see {@link SouledAgentOptions.pendingWritesTimeoutMs}), for the turns still running (a `generate()`, a
@@ -530,7 +546,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
 
   // The compile's model calls: the agent's route and fallback settings, its completion cap (the budget's check
   // estimates a call without one at 4,096 output tokens), its budget (checked before each call and charged after it; a
-  // refusal fails the compile, and the watermark stays where it was), and its usage ledger.
+  // refusal skips that subject's compile, and its watermark stays where it was), and its usage ledger.
   const llm = async (prompt: string): Promise<string> =>
     (
       await generateText({
@@ -563,6 +579,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     tools: Array.isArray(priorTools) ? [...priorTools] : undefined,
     // The page tool reads the key the observer writes.
     subjectOf,
+    // A subject whose compile the budget refuses is skipped: its traces wait, and the other subjects compile.
+    compileSkipReasonOf: (error) => (isBudgetRefusal(error) ? 'budget' : undefined),
   });
 
   // attachMemoryWiki appends read_memory_page to an array. Use the augmented
@@ -627,9 +645,10 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
         );
       }
       try {
-        await memory.compileWiki({ reason: 'session-end' });
+        // The subjects this agent's turns wrote to; a trace stored another way waits for memory.compileWiki().
+        await memory.compileWiki({ reason: 'session-end', scopes: [...written] });
       } catch (err) {
-        // The watermark moves only past compiled traces, so the next compile takes these up again.
+        // A subject's watermark moves only past compiled traces, so the next compile takes these up again.
         // The reason goes in as text alone: the console's inspection of an error can throw, and close must go on.
         console.warn(
           `[agentos] souledAgent: the memory wiki compile on close failed (${messageOf(err)}); ` +

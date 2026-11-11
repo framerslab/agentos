@@ -62,11 +62,20 @@ source of truth, and the vector and graph index is rebuilt from it.
 
 Pages are markdown with YAML frontmatter and `[[wikilinks]]`. The agent reads
 the index from its prelude, then opens any page with the `read_memory_page` tool.
-The LLM folds new conversation into pages when memory consolidates: a
-[`souledAgent`](getting-started/HIGH_LEVEL_API.md) runs this on the agent's `close()`,
-and `agent.memory.compileWiki()` triggers it mid-session. Merges integrate new facts
-rather than clobbering human edits, and each page written is dated with the time
-of the compile. The runtime does not version the pages.
+
+The LLM folds new conversation into pages when memory consolidates, once a subject:
+a compile runs for each subject (a user, or a session that named none) that has new
+traces, reads that subject's traces alone, and writes that subject's own pages. Those
+pages are rows of the store (`memory_pages`), never files under `memory/`: a compile
+writes nothing into the folder, and a page the operator wrote there is never read or
+rewritten by one, even when a subject's page has the same id. Each subject has its own
+watermark, in its row of the store's scope registry, so one subject's compile neither
+waits for nor repeats another's. A [`souledAgent`](getting-started/HIGH_LEVEL_API.md)
+compiles the subjects its turns wrote to on the agent's `close()`, and
+`agent.memory.compileWiki()` compiles every subject with new traces mid-session
+(`compileWiki({ scopes })` the named ones alone). A merge integrates new facts into
+the subject's page rather than replacing it, and each page written is dated with the
+time of the compile. The runtime does not version the pages.
 
 `read_memory_page` takes `{ "id": "<page id>" }` or `{ "list": true }`. Whose pages
 it reads is decided by the turn the call runs in, never by the call: the asker is the
@@ -164,9 +173,12 @@ The compile's model calls go on the agent's route with its fallback settings (`f
 `onFallback`, `router`, `policyTier`), carry the agent's completion cap (`maxTokens`,
 or `controls.maxTotalTokens`; the budget's check estimates a call without one at 4,096
 output tokens), are checked against and charged to the agent's `budget` like its own
-calls, and are written to its usage ledger under the source `souledAgent.compileWiki`. A call the budget refuses fails the compile, which
-`close()` logs as any failed compile; the watermark stays where it was, so the next
-compile takes the same traces up again.
+calls, and are written to its usage ledger under the source `souledAgent.compileWiki`. A call the budget refuses skips that subject:
+one `memory.compile_skipped` log line gives the reason (`budget`) and no subject, the
+subject's watermark stays where it was, so the next compile takes the same traces up
+again, and the other subjects compile. A compile that fails for any other reason
+keeps that subject's watermark too, lets the other subjects compile, and then fails
+the call, which `close()` logs as a warning.
 
 A page's id is its path under `memory/` without `.md`, with `/` between folders:
 `entities/johnny` is `memory/entities/johnny.md`. An id is one or more names joined
@@ -182,10 +194,10 @@ before it reads or writes anything. `readPage` and `writePage` throw an
 `InvalidWikiPageIdError` for any other id, `read_memory_page` answers one with an
 error result whose `details.code` is `INVALID_WIKI_PAGE_ID`, and a compile skips a
 cluster assignment whose page id is refused and reports it in the result's
-`conflicts`. A compile also reports there a page the file system refuses for its
-path, such as a name too long or a file where a folder must be, and goes on with the
-other pages; any other failed write, such as on a full disk, stops the compile, and
-the next compile takes up the same traces again. `isWikiPageId` tells whether an id
+`conflicts`. A `WikiCompiler` run against the folder's own store also reports there a
+page the file system refuses for its path, such as a name too long or a file where a
+folder must be, and goes on with the other pages; any other failed write stops that
+subject's compile, and the next compile takes up the same traces again. `isWikiPageId` tells whether an id
 has this form. A file whose path makes no valid id, such as any file in a folder whose
 name starts with a dot (`.meta/`, `.store/`), is not a page: the store does not list
 or index it.
