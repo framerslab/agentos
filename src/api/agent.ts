@@ -1327,10 +1327,13 @@ export function agent(opts: AgentOptions): Agent {
       }
       const historyBuffer = sessionBuffers.get(sessionId)!;
       const sessionUsageTally = sessionUsageTallies.get(sessionId)!;
-      // A turn as the memory hooks see it: its text, and the session's user, else the session.
+      // The user this handle runs as, read once: the handle keeps it after its session is closed and the id is opened
+      // again for another user, and after agent.close().
+      const handleUser = sessionUsers.get(sessionId);
+      // A turn as the memory hooks see it: its text, and the handle's user, else the session.
       const turnOf = (userText: string): MemoryTurn => ({
         userText,
-        context: memoryHookContextOf({ sessionId, namedUser: sessionUsers.get(sessionId), agentId, call: 'session' }),
+        context: memoryHookContextOf({ sessionId, namedUser: handleUser, agentId, call: 'session' }),
       });
 
       const session = {
