@@ -164,6 +164,7 @@ export class CallManager {
       state: 'initiated',
       direction: 'outbound',
       mode,
+      ...(params.message !== undefined ? { message: params.message } : {}),
       fromNumber,
       toNumber: params.toNumber,
       seedId: params.seedId,
@@ -317,7 +318,9 @@ export class CallManager {
       const call = [...this.activeCalls.values()].find((candidate) => (!event.provider || candidate.provider === event.provider) && (candidate.providerCallId === event.providerCallId || (event.providerRequestId !== undefined && candidate.providerRequestId === event.providerRequestId)));
       if (!call) return;
       this.bindCarrierIdentity(call, event);
-      for (const notification of this.applyCarrierEvent(call, event)) this.emit(notification);
+      const notifications = this.applyCarrierEvent(call, event);
+      for (const notification of notifications) this.emit(notification);
+      if (notifications.some((notification) => notification.type === 'call:answered')) this.setUpAnsweredCall(call);
       return;
     }
     // Idempotency check
@@ -342,8 +345,10 @@ export class CallManager {
         this.emit({ type: 'call:ringing', callId: call.callId, call });
         break;
 
-      case 'call-answered':
+      case 'call-answered': {
+        const before = call.state;
         this.transitionState(call, 'answered');
+        const answeredNow = before !== 'answered' && call.state === 'answered';
         this.emit({ type: 'call:answered', callId: call.callId, call });
         // Auto-transition to active then listening for conversation mode
         if (call.mode === 'conversation') {
@@ -352,7 +357,9 @@ export class CallManager {
           this.transitionState(call, 'listening');
           this.emit({ type: 'call:listening', callId: call.callId, call });
         }
+        if (answeredNow) this.setUpAnsweredCall(call);
         break;
+      }
 
       case 'call-completed':
         this.transitionState(call, 'completed');
@@ -532,6 +539,7 @@ export class CallManager {
       });
       for (const call of committed.calls) this.refreshDurable(call, store, committed.speech.get(call.callId) ?? []);
       for (const event of committed.notifications) this.emit(event);
+      for (const event of committed.notifications) if (event.type === 'call:answered') this.setUpAnsweredCall(event.call);
       return { accepted: true, applied: committed.applied };
     });
   }
@@ -607,6 +615,29 @@ export class CallManager {
     await this.requestCarrierHangup(provider, committed.stored.providerCallId);
     if (committed.ended) this.emit({ type: 'call:ended', callId: call.callId, call: structuredClone(committed.stored) });
   }
+  /**
+   * Hands a call that has just reached `answered` to its provider's {@link IVoiceCallProvider.onCallAnswered}, with
+   * the call's mode, its notify message and the configured TTS voice. It does not wait for the provider: webhook
+   * processing goes on, and a provider that throws or rejects is written to the console, as a failed hangup is.
+   */
+  private setUpAnsweredCall(call: CallRecord): void {
+    const provider = this.getProvider(call.provider);
+    if (!provider?.onCallAnswered || !call.providerCallId) return;
+    const report = (err: unknown): void => console.error('[CallManager] Setting up the answered call failed:', err);
+    try {
+      provider.onCallAnswered({
+        callId: call.callId,
+        providerCallId: call.providerCallId,
+        direction: call.direction,
+        mode: call.mode,
+        ...(call.message !== undefined ? { message: call.message } : {}),
+        ...(this.config.tts?.voice !== undefined ? { voice: this.config.tts.voice } : {}),
+      }).catch(report);
+    } catch (err) {
+      report(err);
+    }
+  }
+
   /** Asks the call's carrier to hang up. A failed request is written to the console; the call ends here regardless. */
   private async requestCarrierHangup(provider: IVoiceCallProvider | undefined, providerCallId: string | undefined): Promise<void> {
     if (!provider || !providerCallId) return;

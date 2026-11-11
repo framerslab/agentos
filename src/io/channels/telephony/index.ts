@@ -10,6 +10,7 @@ export type {
   InitiateCallInput,
   InitiateCallResult,
   HangupCallInput,
+  CallAnsweredInput,
   PlayTtsInput,
   StartListeningInput,
   StopListeningInput,
