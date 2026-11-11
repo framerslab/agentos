@@ -780,6 +780,52 @@ describe.each(STORES)('the compile per scope on %s', (store) => {
     expect(lines('memory.compile_skipped')).toHaveLength(1);
     expect(lines('memory.compile_skipped')[0]).toMatchObject({ reason: 'policy_raw' });
   });
+
+  it('compiles every trace of a millisecond that more traces share than one batch holds', async () => {
+    const { memory, brain } = await open(store);
+    attachRows(memory);
+    for (let i = 0; i < 501; i += 1) await memory.remember(`Alice fact ${i}.`, { scope: 'conversation', scopeId: A });
+    // Stored in one millisecond, as an import can store them.
+    await brain.run(`UPDATE memory_traces SET created_at = ? WHERE brain_id = ? AND scope = 'conversation' AND scope_id = ?`, [
+      1_700_000_000_000,
+      brain.brainId,
+      A,
+    ]);
+
+    const result = await memory.compileWiki();
+
+    expect(result.tracesConsumed).toBe(501);
+    expect((await memory.compileWiki()).tracesConsumed).toBe(0);
+  });
+
+  it('a trace whose write is still being made when a compile reads is compiled by the next compile', async () => {
+    const { memory } = await open(store);
+    const prompts = attachRows(memory);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // The trace's embedding is made after its time is stamped and before its row is stored: held here, it is stored
+    // after a trace stamped later.
+    const facade = memory as unknown as { _embeddingBlobOf: (text: string) => Promise<unknown> };
+    const embed = facade._embeddingBlobOf.bind(memory);
+    facade._embeddingBlobOf = async (text: string) => {
+      if (text.includes('kestrel')) await gate;
+      return embed(text);
+    };
+    const late = memory.remember('Alice keeps a kestrel.', { scope: 'conversation', scopeId: A });
+    await pause(5);
+    await memory.remember('Alice likes tea.', { scope: 'conversation', scopeId: A });
+
+    await memory.compileWiki();
+    release();
+    await late;
+    await memory.compileWiki();
+
+    const merged = prompts.join('\n');
+    expect(merged).toContain('Alice keeps a kestrel.');
+    expect(merged).toContain('Alice likes tea.');
+  });
 });
 
 /** The ids of the traces of a scope that are chunks of a wiki page. */
@@ -893,6 +939,21 @@ describe.each(STORES)('scopes kept apart on every path, on %s', (store) => {
     expect(await contentsUnder(brain, A)).toEqual([body]);
   });
 
+  it("a write of the body a page holds, made while another write changes it, leaves that body's chunks", async () => {
+    const { memory, brain } = await open(store);
+    const pages = new UserWikiStore({ scopeId: A, pages: memory, chunk });
+    await pages.writePage(P('Alice likes tea.'));
+
+    // Both writes read the stored page before either is made; the second one's body is the one stored.
+    await Promise.all([pages.writePage(P('Alice drinks espresso.')), pages.writePage(P('Alice likes tea.'))]);
+
+    const rows = await pageRows(brain);
+    expect(rows).toHaveLength(1);
+    expect(bodyOf(await pages.readPage('concepts/notes'))).toBe('Alice likes tea.');
+    expect(await contentsUnder(brain, A)).toEqual(['Alice likes tea.']);
+    expect(await traceIdsUnder(brain, A)).toEqual(chunkIdsOf(rows[0]!));
+  });
+
   // These run the consolidation loop on a store of its own, or write and read a SQLite export file.
   if (store === 'sqlite') {
     /** A facade on a fresh SQLite file, with the options given. */
@@ -991,6 +1052,94 @@ describe.each(STORES)('scopes kept apart on every path, on %s', (store) => {
       expect(bodyOf(await new UserWikiStore({ scopeId: A, pages: memory, chunk }).readPage('concepts/notes'))).toBe(
         'Alice likes tea.\n\nAlice has a cat.',
       );
+    });
+
+    /** Runs `edit` on a SQLite file through an adapter of its own, then closes it. */
+    const editFile = async (file: string, edit: (db: StorageAdapter) => Promise<unknown>): Promise<void> => {
+      const db = await resolveStorageAdapter({ filePath: file, quiet: true });
+      try {
+        await edit(db);
+      } finally {
+        await db.close();
+      }
+    };
+
+    it('an import of a file whose pages cannot be read is refused, and brings nothing in', async () => {
+      const { file } = await exported();
+      await editFile(file, (db) => db.run('ALTER TABLE memory_pages RENAME COLUMN brain_id TO owner_id'));
+      const { memory, brain } = await openWith({ selfImprove: false });
+
+      const result = await memory.importFrom(file, { format: 'sqlite' });
+
+      expect(result.errors.join('\n')).toContain('memory_pages');
+      expect(await contentsUnder(brain, A)).toEqual([]);
+      expect(await pageRows(brain)).toEqual([]);
+    });
+
+    it('an import of a file whose pages are of two brains is refused, though the file holds no trace', async () => {
+      const { memory: source, dir } = await openWith({ selfImprove: false });
+      await source.writePageRow(A, { pageId: 'concepts/notes', content: 'Alice likes tea.\n', contentHash: 'h-alice' });
+      const file = path.join(dir, 'pages.sqlite');
+      await source.export(file, { format: 'sqlite' });
+      await editFile(file, (db) =>
+        db.run(
+          `INSERT INTO memory_pages (brain_id, scope, scope_id, page_id, content, content_hash, chunk_ids, updated_at)
+           VALUES ('another-brain', 'conversation', ?, 'concepts/notes', 'Bob plays cello.', 'h-bob', '[]', 1)`,
+          [B],
+        ),
+      );
+      const { memory, brain } = await openWith({ selfImprove: false });
+
+      const result = await memory.importFrom(file, { format: 'sqlite' });
+
+      expect(result.errors.join('\n')).toContain('several brains');
+      expect(await pageRows(brain)).toEqual([]);
+    });
+
+    it("an imported message with the text of one of the brain's page chunks is stored as a trace of its own", async () => {
+      const source = await openWith({ selfImprove: false });
+      await source.memory.remember('Alice likes tea.', { scope: 'conversation', scopeId: A });
+      const file = path.join(source.dir, 'message.sqlite');
+      await source.memory.export(file, { format: 'sqlite' });
+      const { memory, brain } = await openWith({ selfImprove: false });
+      const pages = new UserWikiStore({ scopeId: A, pages: memory, chunk });
+      await pages.writePage(P('Alice likes tea.'));
+
+      const result = await memory.importFrom(file, { format: 'sqlite' });
+
+      expect(result.errors).toEqual([]);
+      expect(await contentsUnder(brain, A)).toEqual(['Alice likes tea.', 'Alice likes tea.']);
+      // The page's next rewrite takes its own chunk and leaves the message.
+      await pages.writePage(P('Alice drinks espresso.'));
+      expect(await contentsUnder(brain, A)).toEqual(['Alice drinks espresso.', 'Alice likes tea.']);
+    });
+
+    /** A brain file that holds one message of alice's, stored long before anything the test stores. */
+    const olderMessage = async (): Promise<string> => {
+      const source = await openWith({ selfImprove: false });
+      await source.memory.remember('Alice keeps a kestrel.', { scope: 'conversation', scopeId: A });
+      await source.brain.run('UPDATE memory_traces SET created_at = ? WHERE brain_id = ?', [1_000, source.brain.brainId]);
+      const file = path.join(source.dir, 'older.sqlite');
+      await source.memory.export(file, { format: 'sqlite' });
+      return file;
+    };
+
+    it.each<[string, (memory: Memory, brain: Brain, file: string) => Promise<unknown>]>([
+      ['an import', (memory, _brain, file) => memory.importFrom(file, { format: 'sqlite' })],
+      ['a merge of the brain file', (_memory, brain, file) => brain.importFromSqlite(file, { strategy: 'merge' })],
+    ])("a message %s brings in, older than its scope's compile, is compiled by the next compile", async (_case, bringIn) => {
+      const file = await olderMessage();
+      const { memory, brain } = await openWith({ selfImprove: false });
+      const prompts = attachRows(memory);
+      await memory.remember('Alice likes tea.', { scope: 'conversation', scopeId: A });
+      await memory.compileWiki();
+      expect(prompts).toHaveLength(1);
+
+      await bringIn(memory, brain, file);
+      await memory.compileWiki();
+
+      expect(prompts).toHaveLength(2);
+      expect(prompts[1]).toContain('Alice keeps a kestrel.');
     });
   }
 });

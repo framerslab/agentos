@@ -103,4 +103,30 @@ describe('WikiMemoryStore.index', () => {
     expect(res.indexed).toEqual(['concepts/ops']);
     expect(port.remembered.map((r) => r.content)).toEqual(['Open nine to five.\n']);
   });
+
+  it('a delete that failed once its file was gone is finished by the next delete', async () => {
+    const port = fakePort();
+    const deleteTraces = port.deleteTraces;
+    let busy = true;
+    port.deleteTraces = async (ids: readonly string[]) => {
+      if (busy) {
+        busy = false;
+        throw new Error('the store is busy');
+      }
+      return deleteTraces(ids);
+    };
+    const store = new WikiMemoryStore({ memoryDir, port, agentId: 'a1' });
+    await store.writePage({ id: 'concepts/x', type: 'concept', summary: '', updated: '', sources: [], body: 'Gone soon.', links: [] });
+    await store.index();
+
+    await expect(store.deletePage('concepts/x')).rejects.toThrow('the store is busy');
+    expect(fs.existsSync(path.join(memoryDir, 'concepts', 'x.md'))).toBe(false);
+
+    expect(await store.deletePage('concepts/x')).toBe(true);
+    expect(port.deleted).toEqual([['t1']]);
+    const meta = JSON.parse(fs.readFileSync(path.join(memoryDir, '.meta', 'index.json'), 'utf8'));
+    expect(meta.pages).toEqual({});
+    // Nothing is left of it: a third delete finds no page.
+    expect(await store.deletePage('concepts/x')).toBe(false);
+  });
 });

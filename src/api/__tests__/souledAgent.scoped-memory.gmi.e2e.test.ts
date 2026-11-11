@@ -32,6 +32,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
+vi.mock('../../core/llm/providers/implementations/AnthropicProvider', async () => ({ AnthropicProvider: (await import('./helpers/stubProviders')).stubProviderClass('anthropic') }));
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -860,6 +861,37 @@ describe("a compile on a provider key of its own", () => {
   });
 });
 
+describe("a compile model whose prefix names another provider than the agent's", () => {
+  it.each<[string, Record<string, unknown>]>([
+    ['by its model alone', { model: 'openai:stub-model' }],
+    ['by name', { provider: 'openai', model: 'stub-model' }],
+  ])("runs on that provider's own key when the agent names its provider %s, and the agent's key goes nowhere else", async (_case, route) => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const k = key();
+    const turns = scripted(k);
+    const envKey = key();
+    vi.stubEnv('ANTHROPIC_API_KEY', envKey);
+    const compiles = script('anthropic', envKey, { whole: true, replies: [reply.text('Owl notes.')] });
+    // Scripted so a call that carried the agent's key to the other provider would be answered, and seen.
+    const carried = script('anthropic', k, { whole: true, replies: [reply.text('Owl notes.')] });
+    const a = await souledAgent({
+      ...route,
+      apiKey: k,
+      fallbackProviders: [],
+      soul: dir,
+      compile: { model: 'anthropic:stub-compile-model' },
+    } as never);
+    await say(a, { session: 'sa', user: 'alice' }, 'My owl is named Wexford.');
+    await a.close();
+
+    expect(mergesOf(compiles)).toHaveLength(1);
+    expect(mergesOf(compiles)[0]).toContain('Wexford');
+    expect(compiles.seen.map((call) => call.modelId)).toEqual(['stub-compile-model']);
+    expect(carried.seen).toEqual([]);
+    expect(mergesOf(turns)).toEqual([]);
+  });
+});
+
 /** A memory policy that answers `off` for the user bob and `compiled` for everyone else. */
 const offForBob = (context: { userId: string }) => (context.userId === 'bob' ? { longTerm: 'off' } : { longTerm: 'compiled' });
 
@@ -889,6 +921,36 @@ describe.each(runtimes)("the host's memory policy for an account, on %s", (_name
       // The host's standing choice for the account is said once a session, not once a write.
       expect(lines('memory.write_refused')).toHaveLength(1);
       expect(lines('memory.write_refused')[0]).toMatchObject({ reason: 'policy_off' });
+    } finally {
+      await a.close();
+    }
+  });
+
+  it("a policy of off serves that account none of its own pages through the tool, and the operator's still", async () => {
+    writePage('concepts/ops', OPS);
+    const { a, s } = await openedWith(
+      runtime,
+      [...readsPage({ list: true }, 'c1'), ...readsPage({ id: 'concepts/notes' }, 'c2'), ...readsPage({ list: true }, 'c3')],
+      { memoryPolicy: offForBob },
+    );
+    try {
+      // Pages kept for bob before his account's policy was off.
+      await writeOwnPage(a, userKey('bob'), OWL_PAGE);
+      await writeOwnPage(a, userKey('alice'), OWL_PAGE);
+
+      await say(a, BOB, 'What can I read?');
+      const listed = toolAnswerIn(lastCall(s));
+      expect(listed).toContain('concepts/ops');
+      expect(listed).not.toContain('concepts/notes');
+
+      await say(a, BOB, 'Open my notes.');
+      const read = toolAnswerIn(lastCall(s));
+      expect(read).toContain('No memory page found with id');
+      expect(read).not.toContain(OWL_PAGE);
+
+      // An account whose policy keeps memory reads its own pages as before.
+      await say(a, ALICE, 'What can I read?');
+      expect(toolAnswerIn(lastCall(s))).toContain('concepts/notes');
     } finally {
       await a.close();
     }
@@ -969,6 +1031,38 @@ describe.each(runtimes)("the host's memory policy for an account, on %s", (_name
   });
 });
 
+describe("an account's policy across its session's close", () => {
+  it('an answer that comes after the session closed is not kept for the next user who opens the session', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const asked: string[] = [];
+    const memoryPolicy = async (context: { userId: string }) => {
+      asked.push(context.userId);
+      if (context.userId !== 'alice') return { longTerm: 'off' };
+      await gate;
+      return { longTerm: 'compiled' };
+    };
+    const { a } = await opened({}, { memoryPolicy, memoryProviderOptions: { timeoutMs: 4_000 } });
+
+    const first = a.session('shared', { userId: 'alice' });
+    const sent = first.send('My owl is named Wexford.');
+    await vi.waitFor(() => expect(asked).toEqual(['alice']));
+    await first.close();
+    const second = a.session('shared', { userId: 'bob' });
+    // Alice's answer comes once her session is closed and bob has opened it.
+    release();
+    await sent.catch(() => undefined);
+    await second.send('My crab is named Pellam.');
+    await a.close();
+
+    expect(asked).toContain('bob');
+    expect(await withStore((memory) => memory.countScope('conversation', userKey('bob')))).toBe(0);
+  });
+});
+
 describe.each(runtimes)('the screen hook, on %s', (_name, runtime) => {
   beforeEach(() => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
@@ -1005,6 +1099,20 @@ describe.each(runtimes)('the screen hook, on %s', (_name, runtime) => {
       expect(await tracesOf(a, 'The secret is Wexford.')).toBe(0);
       expect(lines('memory.write_refused')).toHaveLength(1);
       expect(lines('memory.write_refused')[0]).toMatchObject({ reason: 'screened' });
+    } finally {
+      await a.close();
+    }
+  });
+
+  it.each<[string, Record<string, unknown>]>([
+    ['with no screen', {}],
+    ['through a screen that answers the word', { screen: async () => 'failed' }],
+  ])('a message whose text is the word failed is filed %s', async (_case, hook) => {
+    const { a } = await opened(runtime, hook);
+    try {
+      await say(a, { session: 'sa', user: 'alice' }, 'failed');
+      await stored(a, 'failed');
+      expect(lines('memory.write_refused')).toEqual([]);
     } finally {
       await a.close();
     }
@@ -1402,5 +1510,33 @@ describe("a souled agent on runtime: 'gmi', beyond its own sessions", () => {
     } finally {
       await a.close();
     }
+  });
+});
+
+describe('the two hooks beside cognitive memory', () => {
+  it.each<[string, Record<string, unknown>]>([
+    ['memoryPolicy', { memoryPolicy: () => ({ longTerm: 'off' }) }],
+    ['screen', { screen: async (text: string) => text }],
+  ])('%s is refused at the open of an agent whose cognitive memory is on', async (_name, hook) => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const embeddings = key();
+    script('openai', embeddings, { replies: [] });
+    vi.stubEnv('OPENAI_API_KEY', embeddings);
+    const k = key();
+    scripted(k);
+    const cognitive = { runtime: 'gmi', cognition: { memory: { embedding: { provider: 'openai' } }, mechanisms: false } };
+
+    // An agent the call opens is closed again, so a failing case leaves no store open.
+    const outcome = await souledAgent({ ...stubbed(k, cognitive as Partial<AgentOptions>), soul: dir, ...hook } as never).then(
+      async (a) => {
+        await a.close();
+        return 'opened';
+      },
+      (err: unknown) => (err instanceof Error ? err.message : String(err)),
+    );
+
+    expect(outcome).toMatch(/cognitive memory/);
+    // Nothing was opened: no store folder was made.
+    expect(fs.existsSync(path.join(dir, 'memory', '.store', 'memory.sqlite'))).toBe(false);
   });
 });
