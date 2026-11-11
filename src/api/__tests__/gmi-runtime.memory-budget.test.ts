@@ -414,6 +414,9 @@ describe("agent({ runtime: 'gmi' }) memory budget across a fallback hop", () => 
     expect(control.result.provider).toBe('openai');
     expect(control.result.memoryRecall!.budget).toMatchObject({ requested: 1600, effective: 1600, hop: 0 });
     expect(control.result.memoryRecall!.budget.reassembled).toBeUndefined();
+    // What reached the serving model: PromptEngine's count of the block, and no other context on this agent.
+    expect(control.result.memoryRecall!.delivery).toEqual({ memoryBlockTokens: expect.any(Number) });
+    expect(control.result.memoryRecall!.delivery!.memoryBlockTokens).toBeGreaterThan(600);
     expect(events('memory.recall.budget_clamped')).toEqual([]);
 
     const fell = await turn({ primaryWindow: 128_000, fallbackWindow: 3_000, fail: true });
@@ -422,6 +425,10 @@ describe("agent({ runtime: 'gmi' }) memory budget across a fallback hop", () => 
     expect(fell.embedCalls).toBe(control.embedCalls);
     expect(fell.result.memoryRecall!.budget).toMatchObject({ requested: 1600, effective: 600, clampReason: 'prompt_share', promptShareTokens: 600, otherContextTokens: 0, hop: 1, reassembled: true });
     expect(fell.result.memoryRecall!.tokensUsed).toBeLessThanOrEqual(600);
+    // The record's delivery is the fallback hop's: the re-rendered block as PromptEngine counted it for that model.
+    expect(fell.result.memoryRecall!.delivery).toEqual({ memoryBlockTokens: expect.any(Number) });
+    expect(fell.result.memoryRecall!.delivery!.memoryBlockTokens).toBeGreaterThan(0);
+    expect(fell.result.memoryRecall!.delivery!.memoryBlockTokens).toBeLessThanOrEqual(600);
     // The failed primary hop was sent the first rendering; the fallback, the re-render.
     expect(tokensOf(blockIn(fell.primary.seen.at(-1)))).toBeGreaterThan(600);
     const block = blockIn(fell.fallback.seen[0]);
@@ -443,6 +450,8 @@ describe("agent({ runtime: 'gmi' }) memory budget across a fallback hop", () => 
     const served = blockIn(fell.fallback.seen[0]);
     expect(tokensOf(served)).toBeGreaterThan(600);
     expect(record.tokensUsed).toBeGreaterThan(600);
+    expect(record.delivery).toEqual({ memoryBlockTokens: expect.any(Number) });
+    expect(record.delivery!.memoryBlockTokens).toBeGreaterThan(0);
     expect(events('memory.recall.budget_clamped')).toEqual([expect.objectContaining({ requested: 1600, effective: 600, hop: 0, reason: 'prompt_share' })]);
   });
 });
