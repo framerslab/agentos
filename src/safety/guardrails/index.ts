@@ -77,16 +77,28 @@ export {
   wrapOutputGuardrails,
 } from './guardrailDispatcher';
 
-// Guards a deployment requires: the boot and request checks and the fail-closed posture
+// Guards a deployment requires: the boot and request checks and the fail-closed posture; the moderation posture
 export {
   assertRequiredGuardrails,
   checkRequiredGuardrails,
+  withModerationPosture,
   withRequiredPosture,
   type ActiveGuardrail,
   type GuardrailStage,
+  type ModerationPostureOptions,
   type RequiredGuardrailReport,
   type RequiredGuardrailSpec,
 } from './requiredGuardrails';
+
+// Content between people: one entry point, a closed posture, a typed context
+export {
+  moderateContent,
+  type ContentUnderReview,
+  type ModerateContentOptions,
+  type ModerationDecision,
+  type ModerationOutcome,
+} from './contentModeration';
+export { assertModerationContext, type ModerationContext, type ModerationSurface } from './ModerationContext';
 
 // Two-phase parallel guardrail dispatcher
 export { ParallelGuardrailDispatcher, type GuardrailToolCallVerdict } from './ParallelGuardrailDispatcher';

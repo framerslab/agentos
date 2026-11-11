@@ -83,6 +83,11 @@ export interface PhraseListGuardrailOptions {
   replacementFor?(ruleId: string): string | undefined;
   /** The deadline for one evaluation, judge included. Default 8 seconds. */
   timeoutMs?: number;
+  /**
+   * Run the list in phase 1, before any guard that calls a vendor: a text it blocks reaches none of them. A list with
+   * `judge` entries still calls its judge's model from inside the screen. Default false.
+   */
+  sequential?: boolean;
   /** Replaces the built-in normalisation. */
   normalize?(text: string): string;
 }
@@ -168,7 +173,7 @@ export class PhraseListGuardrail implements IGuardrailService {
 
   private constructor(private readonly opts: PhraseListGuardrailOptions) {
     this.id = opts.id;
-    this.config = { failClosed: true, timeoutMs: opts.timeoutMs ?? 8_000, canSanitize: false, evaluateStreamingChunks: false };
+    this.config = { failClosed: true, timeoutMs: opts.timeoutMs ?? 8_000, canSanitize: false, evaluateStreamingChunks: false, ...(opts.sequential === true ? { sequential: true } : {}) };
     this.normalize = opts.normalize ?? normalizePhraseText;
     this.stages = [...(opts.stages ?? ['input', 'output'])];
     this.stageSet = new Set(this.stages);
