@@ -202,6 +202,8 @@ export class PhraseListGuardrail implements IGuardrailService {
     // the swap happens only once the whole list compiled
     this.compiled = compiled;
     this.loaded = snapshot;
+    // every code this guard can answer: the rule ids of the list it holds now
+    (this.config as { reasonCodes?: readonly string[] }).reasonCodes = Object.freeze([...new Set(snapshot.entries.map((e) => e.ruleId ?? 'PHRASE_LIST'))]);
   }
 
   async evaluateInput({ input, context }: GuardrailInputPayload): Promise<GuardrailEvaluationResult | null> {
