@@ -4,7 +4,7 @@
  *
  * Builds deterministic text prompts from {@link AvatarIdentityDescriptor}
  * fields, producing consistent character depictions across emotion variants,
- * emote animations, and full-body shots.
+ * emote animations, viewpoints, and full-body shots.
  */
 
 import type { AvatarIdentityDescriptor } from '../../../api/types.js';
@@ -29,6 +29,16 @@ export const AVATAR_EMOTIONS = [
 
 /** Union type of supported avatar emotions. */
 export type AvatarEmotion = (typeof AVATAR_EMOTIONS)[number];
+
+// ---------------------------------------------------------------------------
+// Angle catalogue
+// ---------------------------------------------------------------------------
+
+/**
+ * Default viewpoints for the `additional_angles` stage, each drawn against
+ * the anchor portrait. A request's `angles` replaces them.
+ */
+export const AVATAR_ANGLES = ['three-quarter view', 'profile view'] as const;
 
 // ---------------------------------------------------------------------------
 // Prompt builders
@@ -93,6 +103,20 @@ export function buildExpressionPrompt(
     return base;
   }
   return `${base}, ${emotion} expression`;
+}
+
+/**
+ * Build a prompt for one viewpoint of the character.
+ *
+ * Appends the angle's words to the base portrait prompt, as written, so a
+ * caller's angle ("from behind, full figure") reaches the model unchanged.
+ *
+ * @param identity - Character identity descriptors.
+ * @param angle - The viewpoint's words (e.g. "profile view").
+ * @returns Prompt string for the viewpoint.
+ */
+export function buildAnglePrompt(identity: AvatarIdentityDescriptor, angle: string): string {
+  return `${buildPortraitPrompt(identity)}, ${angle}`;
 }
 
 /**
