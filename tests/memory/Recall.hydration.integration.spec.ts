@@ -190,6 +190,81 @@ describe.each(ENGINES)('loadTracesForRecall on %s', (_engine, open) => {
     await db.close();
   });
 
+  it("a store() of a cached trace that lands while its row is read keeps its own policy: the older row read before it is not applied", async () => {
+    const db = await open();
+    const store = await storeOver(db.brain, new FlatEmbedder());
+    const everything = { usableForAuthorization: true, usableForPersonalization: true, usableForFactClaim: true };
+    const narrow = { usableForAuthorization: false, usableForPersonalization: true, usableForFactClaim: true };
+    await store.store(trace('pass', 'The harbor pass number is 7781.', { policy: everything }));
+    // The by-id load reads the rows; before they come back, this process stores the trace again under a narrower policy.
+    let armed = true;
+    (store as unknown as { brain: Brain }).brain = new Proxy(db.brain, {
+      get: (b, p) =>
+        p === 'all'
+          ? async (sql: string, params?: unknown[]) => {
+              const rows = await b.all(sql, params as never);
+              if (armed && sql.includes('id IN')) {
+                armed = false;
+                await store.store(trace('pass', 'The harbor pass number is 7781.', { policy: narrow }));
+              }
+              return rows;
+            }
+          : Reflect.get(b, p, b),
+    });
+
+    const { traces } = await store.loadTracesForRecall(['pass']);
+    expect(armed).toBe(false);
+    expect(traces.get('pass')!.policy).toEqual(narrow);
+    expect(store.getTrace('pass')!.policy).toEqual(narrow);
+    expect(isEligibleForRecall(traces.get('pass')!, { scopes: U1, now: NOW, usableFor: ['authorization'] })).toBe(false);
+    store.dispose();
+    await db.close();
+  });
+
+  it('a row with no vector that a store() of the same id replaces before its load is returned as that store() wrote it', async () => {
+    const db = await open();
+    let release: () => void = () => undefined;
+    let gate: Promise<void> | null = null;
+    // An embedder the test holds: the store() below waits on it while it holds the trace's turn.
+    class HeldEmbedder extends FlatEmbedder {
+      override async generateEmbeddings(input: { texts: string | string[] }) {
+        if (gate) await gate;
+        return super.generateEmbeddings(input);
+      }
+    }
+    const store = await storeOver(db.brain, new HeldEmbedder());
+    const everything = { usableForAuthorization: true, usableForPersonalization: true, usableForFactClaim: true };
+    const narrow = { usableForAuthorization: false, usableForPersonalization: true, usableForFactClaim: true };
+    const stated = { sourceType: 'user_statement', sourceTimestamp: NOW - 60_000, confidence: 1, verificationCount: 0 };
+    await insertVectorlessRow(db.brain, 'vl', 'The harbor pass number is 7781.', NOW - 60_000, JSON.stringify({ scopeId: 'u1', policy: everything, provenance: stated }));
+    let armed = true;
+    let stored: Promise<void> | undefined;
+    (store as unknown as { brain: Brain }).brain = new Proxy(db.brain, {
+      get: (b, p) =>
+        p === 'all'
+          ? async (sql: string, params?: unknown[]) => {
+              const rows = await b.all(sql, params as never);
+              if (armed && sql.includes('id IN')) {
+                armed = false;
+                // A store() of the same id takes the trace's turn now and finishes after the load asks for it.
+                gate = new Promise<void>((resolve) => { release = resolve; });
+                stored = store.store(trace('vl', 'The harbor pass number is 7781.', { policy: narrow }));
+                setTimeout(() => release(), 100);
+              }
+              return rows;
+            }
+          : Reflect.get(b, p, b),
+    });
+
+    const { traces } = await store.loadTracesForRecall(['vl']);
+    await stored;
+    expect(armed).toBe(false);
+    expect(traces.get('vl')!.policy).toEqual(narrow);
+    expect(isEligibleForRecall(traces.get('vl')!, { scopes: U1, now: NOW, usableFor: ['authorization'] })).toBe(false);
+    store.dispose();
+    await db.close();
+  });
+
   it('a row with no vector that a move refiles between its read and its load is returned as the Brain holds it after the move', async () => {
     const db = await open();
     const store = await storeOver(db.brain, new FlatEmbedder());
