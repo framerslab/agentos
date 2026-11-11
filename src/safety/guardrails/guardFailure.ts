@@ -2,8 +2,9 @@
  * @module guardrails/guardFailure
  *
  * The mark the library puts on the BLOCK it makes for a closed guard that threw, ran late or answered no recognised
- * action. `metadata.failClosed` and `metadata.cause` say the same for a reader, but a guard can write those keys into
- * its own answer; this mark lives outside the answer, so only the library can set it.
+ * action, and on the BLOCK its image guard makes for an image no check could judge. `metadata.failClosed` and
+ * `metadata.cause` say the same for a reader, but a guard can write those keys into its own answer; this mark lives
+ * outside the answer, so only the library can set it.
  */
 import type { GuardrailEvaluationResult } from './IGuardrailService';
 

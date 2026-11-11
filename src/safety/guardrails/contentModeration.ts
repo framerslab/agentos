@@ -47,7 +47,10 @@ export interface ModerationDecision {
   /** In a dry run: the outcome enforcement would have given. */
   wouldBe?: ModerationOutcome;
   enforced: boolean;
-  /** Nothing but a guard that threw, timed out or answered nonsense kept the content back: no rule refused it and no guard held it. */
+  /**
+   * Nothing but a guard that threw, timed out or answered nonsense, or an image the image guard could not have checked,
+   * kept the content back: no rule refused it and no guard held it.
+   */
   unavailable: boolean;
   /** The evaluation that decided: a rule's BLOCK, else a hold, else a closed guard's failure, else a FLAG. */
   deciding?: ModerationEvaluation;
@@ -68,8 +71,9 @@ const MADE_BY_THE_LIBRARY: ReadonlySet<string> = new Set(['GUARDRAIL_ERROR', 'GU
 
 /**
  * Whether an evaluation is a closed guard's failure: a BLOCK the library made for a guard that threw, ran late or
- * answered no recognised action. A guard that writes `metadata.failClosed` or a library code into its own answer
- * gives a rule's refusal, not a failure: the library marks its own BLOCK outside the answer.
+ * answered no recognised action, or the image guard's `IMAGE_CHECK_UNAVAILABLE` for an image no check could judge. A
+ * guard that writes `metadata.failClosed` or a library code into its own answer gives a rule's refusal, not a failure:
+ * the library marks its own BLOCK outside the answer.
  */
 export function isGuardFailure(evaluation: GuardrailEvaluationResult): boolean {
   return evaluation.action === GuardrailAction.BLOCK && isMarkedGuardFailure(evaluation);
