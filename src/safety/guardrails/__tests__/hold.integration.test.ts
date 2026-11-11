@@ -103,6 +103,19 @@ describe('a hold on a block, on output and tool calls', () => {
     expect(JSON.stringify(chunks)).not.toContain('the reply');
   });
 
+  it('in hold mode, holds the text before an actionable tool call and reports it to onVerdict with the withheld calls', async () => {
+    async function* textThenExternalCall(): AsyncGenerator<AgentOSResponse, void, undefined> {
+      yield { type: AgentOSResponseChunkType.TEXT_DELTA, streamId: 's1', gmiInstanceId: 'g1', personaId: 'p1', isFinal: false, timestamp: '2026-11-10T00:00:00.000Z', textDelta: 'the text before' } as AgentOSResponse;
+      yield { ...toolCallChunk(), executionMode: 'external', requiresExternalToolResult: true } as AgentOSResponse;
+    }
+    const verdicts: Array<{ action: GuardrailAction; hold?: { reviewCode: string }; toolCallIds?: string[]; originalText: string | null }> = [];
+    const chunks = await collect(wrapOutputGuardrails([answering('a', HOLD)], context, textThenExternalCall(), { streamId: 's1', holdUntilFinal: true, onVerdict: (v) => { verdicts.push(v); } }));
+    expect(chunks).toHaveLength(1);
+    expect(((chunks[0] as AgentOSErrorChunk).details as { hold?: { reviewCode: string } }).hold).toEqual({ reviewCode: 'REVIEW' });
+    expect(verdicts).toEqual([expect.objectContaining({ action: GuardrailAction.BLOCK, hold: { reviewCode: 'REVIEW' }, toolCallIds: ['call-1'], originalText: 'the text before' })]);
+    expect(JSON.stringify(chunks)).not.toContain('the text before');
+  });
+
   it('a refusal later in registration order outranks an earlier hold in phase 2', async () => {
     const verdicts: Array<{ reasonCode?: string; hold?: { reviewCode: string } }> = [];
     const chunks = await collect(wrapOutputGuardrails([answering('a', HOLD), answering('c', REFUSE)], context, reply('the reply'), { streamId: 's1', onVerdict: (v) => { verdicts.push(v); } }));
