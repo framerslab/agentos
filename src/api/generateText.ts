@@ -30,7 +30,7 @@ import { resolveDynamicToolCalls } from './runtime/dynamicToolCalling.js';
 import type { ITool, ToolExecutionContext } from '../core/tools/ITool.js';
 import { recordAgentOSTurnMetrics, withAgentOSSpan } from '../safety/evaluation/observability/otel.js';
 import { moduleLogger } from '../core/logging/loggerFactory.js';
-import { errorFields, providerName, safePath } from '../core/logging/events.js';
+import { listedErrorFields, providerName, safePath } from '../core/logging/events.js';
 import { isCallMask } from './runtime/pool/redact.js';
 import { createContentSafeConsole } from '../core/logging/contentSafeConsole.js';
 import type { AgentCallRecord, AgencyTraceEvent } from './types.js';
@@ -95,7 +95,7 @@ function safeBuildLegResponseFormat(
   try {
     return builder(providerId, modelId);
   } catch (err) {
-    logger.warn('llm.response_format_failed', { provider: providerName(providerId), ...errorFields(err) });
+    logger.warn('llm.response_format_failed', { provider: providerName(providerId), ...listedErrorFields(err) });
     return undefined;
   }
 }
@@ -3812,7 +3812,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             : undefined;
           // The line, the callback and the leg's hop name the provider and
           // model the leg is sent as, not the provider the entry says.
-          fallbackLogger.warn('llm.fallback_fired', { api: 'generateText', primaryProvider: providerName(metricProviderId), fallbackProvider: providerName(legSentAs.provider), ...(legSentAs.model !== undefined ? { fallbackModel: safePath(legSentAs.model) } : {}), attempt, ...errorFields(lastErr) });
+          fallbackLogger.warn('llm.fallback_fired', { api: 'generateText', primaryProvider: providerName(metricProviderId), fallbackProvider: providerName(legSentAs.provider), ...(legSentAs.model !== undefined ? { fallbackModel: safePath(legSentAs.model) } : {}), attempt, ...listedErrorFields(lastErr) });
           // A seat's callback is handed the error through the seat's mask, as it would leave the seat.
           opts.onFallback?.(opts.__maskError ? (opts.__maskError(lastErr) as Error) : lastErr, legSentAs.provider);
           // Build a new options object targeting the fallback provider.
@@ -3943,7 +3943,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       }
       // All fallbacks exhausted: fall through to throw
       const lastErr = lastError instanceof Error ? lastError: new Error(String(lastError));
-      fallbackLogger.error('llm.fallback_exhausted', { api: 'generateText', primaryProvider: providerName(metricProviderId), attempts: attempt, ...errorFields(lastErr) });
+      fallbackLogger.error('llm.fallback_exhausted', { api: 'generateText', primaryProvider: providerName(metricProviderId), attempts: attempt, ...listedErrorFields(lastErr) });
       metricStatus = 'error';
       throw markChainWalked(
         toolProgress.shimRanTool || toolProgress.completedToolRounds ? markToolsRan(lastError) : lastError,

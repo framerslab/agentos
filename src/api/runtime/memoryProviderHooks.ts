@@ -16,7 +16,7 @@
  */
 import type { GenerateTextOptions, GenerationHookContext } from '../generateText.js';
 import type { AgentMemoryProvider, MemoryHookContext } from '../agent.js';
-import { errorFields } from '../../core/logging/events.js';
+import { listedErrorFields } from '../../core/logging/events.js';
 import { memoryLog } from '../../cognition/memory/log.js';
 import { memoryItemsOf, renderMemoryRecallBlock } from './memoryDataBlock.js';
 
@@ -104,7 +104,7 @@ export async function recallForTurn(
     }
     return result ?? null;
   } catch (error) {
-    memoryLog.warn('memory.hook_failed', { hook: 'getContext', ...errorFields(error) });
+    memoryLog.warn('memory.hook_failed', { hook: 'getContext', ...listedErrorFields(error) });
     return null;
   } finally {
     if (timer) clearTimeout(timer);

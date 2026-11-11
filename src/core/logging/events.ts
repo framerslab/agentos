@@ -209,28 +209,6 @@ function fieldWord(value: unknown, key: 'type' | 'code'): string {
   return valid('word', value, key) ? value as string : 'unknown';
 }
 
-/**
- * The fields an error is written as: its type and its code, never its message or its stack.
- * Either is `unknown` when it is not a valid word. A class name ending in `Error` or
- * `Exception` and an upper-case constant code such as `STREAM_PARSING_ERROR` are kept at any
- * length up to 64 characters, while a value with the shape of a credential is still `unknown`.
- * Reading the error never throws: a property whose getter throws is written as `unknown`.
- *
- * @param error - The caught value.
- * @returns `type`, the error's name (or the value's `typeof` when it is not an `Error`), and `code`, its `code` property.
- *
- * @example
- * ```ts
- * errorFields(Object.assign(new Error('text that is never written'), { code: 'ECONNRESET' }));
- * // { type: 'Error', code: 'ECONNRESET' }
- * ```
- */
-export function errorFields(error: unknown): { type: string; code: string } {
-  const type = read(() => (error instanceof Error ? error.name : typeof error));
-  const code = read(() => (typeof error === 'object' && error !== null ? (error as Record<string, unknown>).code : undefined));
-  return { type: fieldWord(type, 'type'), code: fieldWord(code, 'code') };
-}
-
 const TYPEOF_WORDS: ReadonlySet<string> = new Set(['undefined', 'object', 'boolean', 'number', 'bigint', 'string', 'symbol', 'function']);
 
 /**
@@ -250,6 +228,17 @@ export function listedErrorFields(error: unknown): { type: string; code: string 
     type: fieldWord(type, 'type'),
     code: typeof code === 'string' && LISTED_ERROR_CODES.has(code) ? fieldWord(code, 'code') : 'unknown',
   };
+}
+
+/**
+ * Kept as a name for deep imports (`@framers/agentos/core/logging/events`). It returns {@link listedErrorFields}'s
+ * answer.
+ *
+ * @param error - The caught value.
+ * @returns The listed type and code, or `unknown` for each.
+ */
+export function errorFields(error: unknown): { type: string; code: string } {
+  return listedErrorFields(error);
 }
 
 /**

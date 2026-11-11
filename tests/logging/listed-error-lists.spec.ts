@@ -6,7 +6,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { LISTED_ERROR_CODES, LISTED_ERROR_TYPES, listedErrorFields, valid } from '../../src/core/logging/events.js';
+import { LISTED_ERROR_CODES, LISTED_ERROR_TYPES, errorFields, listedErrorFields, valid } from '../../src/core/logging/events.js';
 import { GMIErrorCode } from '../../src/core/utils/errors.js';
 
 const named = (name: string, code?: unknown): Error => Object.assign(new Error('never written'), { name, ...(code === undefined ? {} : { code }) });
@@ -30,6 +30,7 @@ describe('listedErrorFields', () => {
   it('writes a name and a code that only have the right shape as unknown', () => {
     const planted = Object.assign(new Error('PERSONAL_DATA'), { name: 'MeetMeAtBakerStreetError', code: 'PERSONAL_DATA' });
     expect(listedErrorFields(planted)).toEqual({ type: 'unknown', code: 'unknown' });
+    expect(errorFields(planted)).toEqual({ type: 'unknown', code: 'unknown' });
     expect(listedErrorFields(named('Error', '23505'))).toEqual({ type: 'Error', code: 'unknown' });
     expect(listedErrorFields(named('Error', 'rev_1'))).toEqual({ type: 'Error', code: 'unknown' });
   });
