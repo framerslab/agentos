@@ -1548,7 +1548,8 @@ export class MemoryStore {
    * again), it takes the row's policy and provenance, and a verification this process recorded since its own store
    * (`lastVerifiedAt`, `contradictedBy`, which the row does not hold) stays when the statement is the same. That row is
    * read again inside the trace's turn before it is applied, so a `store()` of this process that wrote a newer row
-   * after the first read keeps what it wrote. A live row with a usable embedding is filed in the cache and the vector
+   * after the first read keeps what it wrote; a row stored again with other words is returned as the row holds it,
+   * words and trust together, for this call only, and the cached copy keeps the words and trust it was stored with. A live row with a usable embedding is filed in the cache and the vector
    * index as the store's hydration files one; a row without one is returned for this call only and not cached, since
    * the store holds no vector for it, and is read again when a delete or a move ran after the first read (a `store()`
    * of the same id that ran first answers with the trace it filed). A trace that is inactive, tombstoned or
@@ -1612,10 +1613,18 @@ export class MemoryStore {
             const trace = served(id);
             if (!current || !trace || rowFiledElsewhere(current, trace.scope, trace.scopeId)) return;
             const statement = rowStatementOf(current);
-            if (rowRestatesTrace(statement, trace)) {
-              if (statement.policy) trace.policy = { ...statement.policy };
-              if (statement.provenance) trace.provenance = { ...statement.provenance };
+            if (!rowRestatesTrace(statement, trace)) {
+              traces.set(id, trace);
+              return;
             }
+            if (current.content !== trace.content) {
+              // Stored again with other words: the row's words and its trust go together, for this call only. The
+              // cached copy and its vector hold the words this process stored, and keep the trust they were stored with.
+              traces.set(id, this.rowToTrace(current));
+              return;
+            }
+            if (statement.policy) trace.policy = { ...statement.policy };
+            if (statement.provenance) trace.provenance = { ...statement.provenance };
             traces.set(id, trace);
           });
         } catch {
