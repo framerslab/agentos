@@ -103,7 +103,7 @@ const reviewer: IGuardrailService = {
 ```
 
 - **A hold is a BLOCK everywhere.** Every enforcement point (input, a streamed delta, the final reply, a tool call) treats it as the `BLOCK` it is, so nothing it keeps back is delivered and a held tool call never runs.
-- **A refusal outranks a hold.** When one guard holds and another refuses, the refusal decides, whichever was registered first; the hold stays in `evaluations`. A hold outranks a `FLAG`, a `SANITIZE` and an `ALLOW`.
+- **A refusal outranks a hold.** When one guard holds and another refuses in the same phase, the refusal decides, whichever was registered first; the hold stays in `evaluations`. A sanitizer (`canSanitize: true`) runs before the others, one at a time, and any `BLOCK` it answers, a hold included, ends the evaluation before the later guards run. A hold outranks a `FLAG`, a `SANITIZE` and an `ALLOW`.
 - **Which it was.** `GuardrailInputOutcome.outcome` is always set: `'allow'`, `'flag'`, `'sanitize'`, `'hold'` or `'block'`. `guardrailOutcomeOf(evaluations)` gives the same answer for any list, and `isGuardrailHold(evaluation)` says whether one evaluation is a hold.
 - **What the caller receives.** Under `processRequest()` a held input ends the turn as a block does: one ERROR chunk, with the hold in `details.hold` (`{ reviewCode }`) beside `details.action`. A held reply ends the stream the same way, and `onVerdict` receives `hold` on its verdict. The serialised evaluation in chunk metadata carries `hold` too.
 - **The host does the rest.** It stores the content, tells the sender it is waiting for review and puts it in its review queue under `reviewCode`. The library keeps nothing.
