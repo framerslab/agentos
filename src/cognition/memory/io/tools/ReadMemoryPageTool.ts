@@ -8,7 +8,7 @@ import type {
 import { DEFAULT_ANONYMOUS_USER_IDS } from '../../../learning/types.js';
 import type { WikiPage } from '../../../substrate/memory/wiki/types.js';
 import { assertWikiPageId, InvalidWikiPageIdError } from '../../../substrate/memory/wiki/WikiPageId.js';
-import { memoryLog } from '../memoryLog.js';
+import { memoryLog } from '../../log.js';
 
 /** Who asks for a page: the subject of the turn the call runs in, or nobody (the operator running the agent itself). */
 export interface ReadMemoryPageAsker {

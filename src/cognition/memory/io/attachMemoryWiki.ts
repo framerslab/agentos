@@ -3,7 +3,7 @@ import { messageOf } from '../../../api/runtime/memoryObserveFailures.js';
 import { WikiMemoryStore, WikiCompiler, UserWikiStore, originOfPage } from '../../substrate/memory/wiki/index.js';
 import type { CompileResult, UserWikiPagesPort } from '../../substrate/memory/wiki/index.js';
 import { conversationScopeKey } from '../retrieval/store/conversationScopeKey.js';
-import { memoryLog } from './memoryLog.js';
+import { memoryLog } from '../log.js';
 import { ReadMemoryPageTool, type ReadMemoryPagePort } from './tools/ReadMemoryPageTool.js';
 
 interface TraceLike {
