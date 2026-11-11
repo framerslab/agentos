@@ -66,16 +66,31 @@ export function renderMemoryRecallBlock(items: readonly MemoryRecallItem[]): str
   return `<${MEMORY_RECALL_TAG}>${safeJson(block)}</${MEMORY_RECALL_TAG}>`;
 }
 
+const SPEAKERS: ReadonlySet<string> = new Set(['user', 'assistant', 'note']);
+
 /**
- * A provider's recall as items: its `items` that have a text, else its `contextText` as one item, else none.
+ * A provider's recall as items: its `items` that have a text, else its `contextText` as one item, else none. An item
+ * keeps its `speaker` when it is `user`, `assistant` or `note`, and its `page` and `when` when they are non-empty
+ * strings; any other value of those fields is left out, so rendering the block never fails on a provider's record.
  *
  * @param result - What a memory provider's `getContext` returned.
  */
 export function memoryItemsOf(
   result: { contextText?: string; items?: readonly MemoryRecallItem[] } | null | undefined,
 ): MemoryRecallItem[] {
-  const listed = Array.isArray(result?.items) ? result.items : [];
-  const items = listed.filter((item) => typeof item?.text === 'string' && item.text.length > 0);
+  const listed: readonly unknown[] = Array.isArray(result?.items) ? result.items : [];
+  const items: MemoryRecallItem[] = [];
+  for (const entry of listed) {
+    if (typeof entry !== 'object' || entry === null) continue;
+    const { speaker, page, when, text } = entry as Record<string, unknown>;
+    if (typeof text !== 'string' || text.length === 0) continue;
+    items.push({
+      ...(typeof speaker === 'string' && SPEAKERS.has(speaker) ? { speaker: speaker as MemoryRecallItem['speaker'] } : {}),
+      ...(typeof page === 'string' && page ? { page } : {}),
+      ...(typeof when === 'string' && when ? { when } : {}),
+      text,
+    });
+  }
   if (items.length > 0) return items;
   return typeof result?.contextText === 'string' && result.contextText ? [{ text: result.contextText }] : [];
 }
