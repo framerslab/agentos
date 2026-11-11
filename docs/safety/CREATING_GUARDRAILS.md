@@ -78,7 +78,7 @@ interface GuardrailConfig {
 
   // When true, this guardrail runs in Phase 1 (sequential).
   // It sees and can modify text produced by prior sanitizers.
-  // When false, it runs in Phase 2 (parallel).
+  // When false, it runs in Phase 2 (parallel), unless sequential is true.
   // Phase 2 guardrails that return SANITIZE are downgraded to FLAG.
   canSanitize?: boolean; // default: false
 
@@ -141,14 +141,14 @@ interface GuardrailContext {
 }
 ```
 
-`context.moderation` holds `surface`, `roomId`, `rating`, `messageId` and `sender` (`{ id, kind? }`) as words and ids, checked by `moderateContent()` before any guard runs; read `context.moderation?.rating` and its siblings instead of keys in `metadata`. A guard that calls a vendor reads `context.vendorSignal` before each request and starts none once it is aborted: `moderateContent()` aborts it the moment any guard answers a code the host listed in `stopVendorsOn`. A request already sent may finish and be answered as usual.
+`context.moderation` holds `surface`, `roomId`, `rating`, `messageId` and `sender` (`{ id, kind? }`) as words and ids, checked by `moderateContent()` before any guard runs; read `context.moderation?.rating` and its siblings instead of keys in `metadata`. A guard that calls a vendor reads `context.vendorSignal` before each request and starts none once it is aborted: `moderateContent()` aborts it the moment any guard answers a code the host listed in `stopVendorsOn`. A request already sent finishes and is answered as usual, so the guard does not hand the signal to the request itself: a client that honours it would cancel that request and the guard would throw.
 
 ```typescript
 async evaluateInput({ input, context }: GuardrailInputPayload) {
   const scores: number[] = [];
   for (const chunk of chunksOf(input.textInput ?? '')) {
     if (context.vendorSignal?.aborted) break; // another guard already answered a code that stops vendor requests
-    scores.push(await vendor.classify(chunk, { signal: context.vendorSignal }));
+    scores.push(await vendor.classify(chunk));
   }
   return Math.max(0, ...scores) > 0.9 ? { action: GuardrailAction.BLOCK, reasonCode: 'VENDOR_HIGH' } : null;
 }
@@ -247,7 +247,7 @@ The dispatcher treats it as the `BLOCK` it is at every enforcement point, so not
 ### SANITIZE rules
 
 - If `canSanitize: true` is set in your config, your guardrail runs in **Phase 1 (sequential)** and your `modifiedText` is applied before downstream guardrails see the content.
-- If your guardrail is in **Phase 2** (no `canSanitize` or `canSanitize: false`) and it returns SANITIZE, the action is **automatically downgraded to FLAG** and a `guardrail.sanitize_downgraded` event is written. This prevents non-deterministic concurrent modifications.
+- If your guardrail does not set `canSanitize: true` (it runs in **Phase 2**, or in Phase 1 through `sequential: true` alone) and it returns SANITIZE, the action is **automatically downgraded to FLAG** and a `guardrail.sanitize_downgraded` event is written. This prevents non-deterministic concurrent modifications.
 - On a `FINAL_RESPONSE`, `modifiedText` replaces the reply in every field that carries it: `finalResponseText`; `finalResponseTextPlain`, rendered as plain text as a turn renders its own reply; the reply in `updatedConversationContext`; and `audioOutput`, which keeps its voice settings, speaks the new text as plain text in `textToSpeak` and drops the `url` of the audio made from the replaced reply. A `null` `modifiedText` removes the reply, and the audio output with it. A structured value parsed from the replaced reply is withdrawn, as [Structured replies](../features/STRUCTURED_REPLY.md) (item 5) states. A `modifiedText` equal to the reply changes nothing: the parsed value and the audio output stay.
 
 ---
@@ -383,7 +383,7 @@ When multiple guardrails are registered, the [`ParallelGuardrailDispatcher`](htt
                           |
               +-----------+-----------+
               |                       |
-        canSanitize: true       canSanitize: false/omitted
+  canSanitize or sequential      neither set
               |                       |
          Phase 1                 Phase 2
       (Sequential)             (Parallel)
@@ -414,7 +414,7 @@ A guardrail with `sequential: true` joins Phase 1 without sanitizing: a screen t
 
 ### Phase 2: Parallel classifiers
 
-All remaining guardrails (those without `canSanitize` or with `canSanitize: false`) run **concurrently via `Promise.allSettled`** on the fully-sanitized text from Phase 1.
+All remaining guardrails (those that set neither `canSanitize: true` nor `sequential: true`) run **concurrently via `Promise.allSettled`** on the fully-sanitized text from Phase 1.
 
 If a Phase 2 guardrail returns **SANITIZE**, the action is **downgraded to FLAG** and a `guardrail.sanitize_downgraded` event is written, because concurrent sanitization would produce non-deterministic results.
 
