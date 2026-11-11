@@ -165,4 +165,43 @@ describe('AgentOS.create() given providers of its own', () => {
 
     expect(calls.streamed).toEqual([{ providerId: 'openrouter', modelId: 'anthropic/claude-haiku-4.5' }]);
   });
+
+  it('keeps a GMI default the host names when it is the pair the factory took from the environment', async () => {
+    // With no key set the factory's pair is Ollama's llama3.2; the host names that same pair on purpose, beside an
+    // OpenRouter entry it marks default.
+    booted = await AgentOS.create({
+      modelProviderManagerConfig: {
+        providers: [
+          { providerId: 'openrouter', enabled: true, isDefault: true, config: { apiKey: 'test-openrouter-key' } },
+          { providerId: 'ollama', enabled: true, config: { baseURL: 'http://localhost:11434' } },
+        ],
+      },
+      gmiManagerConfig: {
+        defaultGMIBaseConfigDefaults: { defaultLlmProviderId: 'ollama', defaultLlmModelId: 'llama3.2' },
+      },
+      turnPlanning: { enabled: false },
+      personas: [persona],
+    } as any);
+    for await (const _chunk of booted.processRequest({
+      userId: 'user-1', sessionId: 's-host-names-factory-pair', selectedPersonaId: persona.id, textInput: 'Say hello.',
+    } as any)) { /* drain */ }
+
+    expect(calls.streamed).toEqual([{ providerId: 'ollama', modelId: 'llama3.2' }]);
+  });
+
+  it("takes the default from the providers given when the host spreads a factory-built gmiManagerConfig", async () => {
+    const { createAgentOSConfig } = await import('../../core/config/AgentOSConfig');
+    const base = await createAgentOSConfig();
+    booted = await AgentOS.create({
+      modelProviderManagerConfig: { providers: [{ providerId: 'openrouter', enabled: true, isDefault: true, config: { apiKey: 'test-openrouter-key' } }] },
+      gmiManagerConfig: { ...base.gmiManagerConfig, defaultGMIInactivityCleanupMinutes: 30 },
+      turnPlanning: { enabled: false },
+      personas: [persona],
+    } as any);
+    for await (const _chunk of booted.processRequest({
+      userId: 'user-1', sessionId: 's-spread-factory-gmi', selectedPersonaId: persona.id, textInput: 'Say hello.',
+    } as any)) { /* drain */ }
+
+    expect(calls.streamed).toEqual([{ providerId: 'openrouter', modelId: 'openai/gpt-4o-mini' }]);
+  });
 });
