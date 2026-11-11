@@ -48,7 +48,9 @@ import {
   serializeEvaluation,
   withGuardrailMetadata,
   createGuardrailBlockedStream,
+  guardrailOutcomeOf,
   hasEvaluateOutput,
+  isGuardrailHold,
 } from './guardrailDispatcher';
 import { renderPlainText } from '../../api/runtime/turnFinalResponse';
 import { sanitizedFinalResponse } from './sanitizedFinalResponse';
@@ -156,6 +158,16 @@ function worstAction(evaluations: GuardrailEvaluationResult[]): GuardrailAction 
   return worst;
 }
 
+/** Of one phase's settled evaluations: the first BLOCK without a hold, else the first hold, else nothing. */
+function decidingBlock(evaluations: readonly GuardrailEvaluationResult[]): GuardrailEvaluationResult | undefined {
+  return evaluations.find((e) => e.action === GuardrailAction.BLOCK && !isGuardrailHold(e)) ?? evaluations.find((e) => isGuardrailHold(e));
+}
+
+/** The verdict fields a block's notification carries beside its text fields. */
+function blockVerdictOf(evaluation: GuardrailEvaluationResult): Pick<GuardrailOutputVerdict, 'action' | 'guardrailId' | 'reasonCode' | 'hold'> {
+  return { action: GuardrailAction.BLOCK, guardrailId: guardrailIdOf(evaluation), reasonCode: evaluation.reasonCode, ...(isGuardrailHold(evaluation) ? { hold: evaluation.hold } : {}) };
+}
+
 /**
  * If a Phase 2 guardrail returns SANITIZE, downgrade it to FLAG with a
  * warning. Concurrent sanitization is non-deterministic so we refuse it.
@@ -244,8 +256,9 @@ function toolCallGuardsOf(services: IGuardrailService[]): ToolCallGuard[] {
 }
 
 /**
- * The tool-call guards over one TOOL_CALL_REQUEST chunk, in parallel. Returns
- * the first BLOCK by registration order (a SANITIZE counts as one), or every
+ * The tool-call guards over one TOOL_CALL_REQUEST chunk, in parallel. Once
+ * every guard has answered, returns the first BLOCK without a hold by
+ * registration order (a SANITIZE counts as one), else the first hold, or every
  * evaluation of a chunk they pass.
  */
 async function evaluateToolCallGuards(
@@ -278,10 +291,12 @@ async function evaluateToolCallGuards(
     const { svc, registrationIndex } = guards[j];
     const evaluation = stampGuardrailId(sanitizeOfToolCallAsBlock(result.value, registrationIndex), svc);
     evaluations.push(evaluation);
+  }
 
-    if (evaluation.action === GuardrailAction.BLOCK) {
-      return { outcome: 'block', evaluation };
-    }
+  // Every guard has answered: a refusal outranks a hold wherever it sits in registration order.
+  const block = decidingBlock(evaluations);
+  if (block) {
+    return { outcome: 'block', evaluation: block };
   }
 
   return { outcome: 'pass', evaluations };
@@ -324,8 +339,10 @@ export class ParallelGuardrailDispatcher {
    * the text produced by Phase 1. A Phase 2 SANITIZE is downgraded to FLAG.
    *
    * **Aggregation:** worst-wins (BLOCK > FLAG > ALLOW). The singular
-   * `evaluation` field is set to the first BLOCK, else the worst-severity
-   * evaluation, else the last evaluation by registration order.
+   * `evaluation` field is set to the first BLOCK without a hold, else the
+   * first hold, else the worst-severity evaluation, else the last evaluation
+   * by registration order. `outcome` says what the evaluations amount to: a
+   * refusal outranks a hold, and a hold outranks the rest.
    *
    * @param services  - Array of guardrail services (already normalized)
    * @param input     - User input to evaluate
@@ -338,7 +355,7 @@ export class ParallelGuardrailDispatcher {
     context: GuardrailContext,
   ): Promise<GuardrailInputOutcome> {
     if (services.length === 0) {
-      return { sanitizedInput: input, evaluations: [] };
+      return { sanitizedInput: input, evaluations: [], outcome: 'allow' };
     }
 
     // -- Partition into sanitizers (Phase 1) and parallel classifiers (Phase 2)
@@ -390,7 +407,7 @@ export class ParallelGuardrailDispatcher {
       // BLOCK in Phase 1 short-circuits everything — Phase 2 never runs
       if (evaluation.action === GuardrailAction.BLOCK) {
         const evaluations = evaluationSlots.filter(Boolean) as GuardrailEvaluationResult[];
-        return { sanitizedInput, evaluation, evaluations };
+        return { sanitizedInput, evaluation, evaluations, outcome: guardrailOutcomeOf(evaluations) };
       }
 
       // SANITIZE: update the running sanitized input for the next sanitizer
@@ -450,13 +467,14 @@ export class ParallelGuardrailDispatcher {
     const evaluations = evaluationSlots.filter(Boolean) as GuardrailEvaluationResult[];
 
     if (evaluations.length === 0) {
-      return { sanitizedInput, evaluations: [] };
+      return { sanitizedInput, evaluations: [], outcome: 'allow' };
     }
 
-    // Pick the singular evaluation: first BLOCK, else worst severity, else last
-    const blockEval = evaluations.find((e) => e.action === GuardrailAction.BLOCK);
-    if (blockEval) {
-      return { sanitizedInput, evaluation: blockEval, evaluations };
+    // The singular evaluation: the first BLOCK without a hold, else the first hold, else the worst action, else the last.
+    const outcome = guardrailOutcomeOf(evaluations);
+    const block = decidingBlock(evaluations);
+    if (block) {
+      return { sanitizedInput, evaluation: block, evaluations, outcome };
     }
 
     const worst = worstAction(evaluations);
@@ -467,6 +485,7 @@ export class ParallelGuardrailDispatcher {
       sanitizedInput,
       evaluation: worstEval,
       evaluations,
+      outcome,
     };
   }
 
@@ -682,6 +701,7 @@ export class ParallelGuardrailDispatcher {
         });
 
         const results = await Promise.allSettled(tasks);
+        const phase: GuardrailEvaluationResult[] = [];
 
         for (const result of results) {
           if (result.status === 'rejected') {
@@ -700,11 +720,13 @@ export class ParallelGuardrailDispatcher {
           // Downgrade SANITIZE → FLAG in Phase 2
           const evaluation = stampGuardrailId(downgradePhase2Sanitize(rawEvaluation, registrationIndex), svc);
           outputEvaluations.push(evaluation);
+          phase.push(evaluation);
+        }
 
-          // BLOCK terminates the stream
-          if (evaluation.action === GuardrailAction.BLOCK) {
-            return { outcome: 'block', evaluation };
-          }
+        // A BLOCK terminates the stream: a refusal outranks a hold wherever it sits in registration order
+        const block = decidingBlock(phase);
+        if (block) {
+          return { outcome: 'block', evaluation: block };
         }
       }
 
@@ -811,7 +833,7 @@ export class ParallelGuardrailDispatcher {
           // BLOCK terminates the stream immediately
           if (evaluation.action === GuardrailAction.BLOCK) {
             held = [];
-            await notify({ streamId: options.streamId, action: GuardrailAction.BLOCK, guardrailId: guardrailIdOf(evaluation), reasonCode: evaluation.reasonCode, finalText: evaluation.replacementText ?? null, originalText: null });
+            await notify({ streamId: options.streamId, ...blockVerdictOf(evaluation), finalText: evaluation.replacementText ?? null, originalText: null });
             yield* blockedOutput(context, evaluation, options);
             return;
           }
@@ -849,6 +871,7 @@ export class ParallelGuardrailDispatcher {
           });
 
           const results = await Promise.allSettled(tasks);
+          const phase: GuardrailEvaluationResult[] = [];
 
           for (const result of results) {
             if (result.status === 'rejected') {
@@ -867,14 +890,16 @@ export class ParallelGuardrailDispatcher {
             // Downgrade SANITIZE → FLAG in Phase 2
             const evaluation = stampGuardrailId(downgradePhase2Sanitize(rawEvaluation, registrationIndex), svc);
             outputEvaluations.push(evaluation);
+            phase.push(evaluation);
+          }
 
-            // BLOCK terminates the stream immediately
-            if (evaluation.action === GuardrailAction.BLOCK) {
-              held = [];
-              await notify({ streamId: options.streamId, action: GuardrailAction.BLOCK, guardrailId: guardrailIdOf(evaluation), reasonCode: evaluation.reasonCode, finalText: evaluation.replacementText ?? null, originalText: null });
-              yield* blockedOutput(context, evaluation, options);
-              return;
-            }
+          // A BLOCK terminates the stream immediately: a refusal outranks a hold wherever it sits in registration order
+          const block = decidingBlock(phase);
+          if (block) {
+            held = [];
+            await notify({ streamId: options.streamId, ...blockVerdictOf(block), finalText: block.replacementText ?? null, originalText: null });
+            yield* blockedOutput(context, block, options);
+            return;
           }
         }
 
@@ -904,7 +929,7 @@ export class ParallelGuardrailDispatcher {
         const verdict = await evaluateToolCall(currentChunk);
         if (verdict.outcome === 'block') {
           held = [];
-          await notify({ streamId: options.streamId, action: GuardrailAction.BLOCK, guardrailId: guardrailIdOf(verdict.evaluation), reasonCode: verdict.evaluation.reasonCode, finalText: verdict.evaluation.replacementText ?? null, originalText: null, ...withheldCallsOf(chunk) });
+          await notify({ streamId: options.streamId, ...blockVerdictOf(verdict.evaluation), finalText: verdict.evaluation.replacementText ?? null, originalText: null, ...withheldCallsOf(chunk) });
           yield* blockedOutput(context, verdict.evaluation, options);
           return;
         }
@@ -929,7 +954,7 @@ export class ParallelGuardrailDispatcher {
         const verdict = await evaluateFinal(synthetic);
         if (verdict.outcome === 'block') {
           held = [];
-          await notify({ streamId: options.streamId, action: GuardrailAction.BLOCK, guardrailId: guardrailIdOf(verdict.evaluation), reasonCode: verdict.evaluation.reasonCode, finalText: verdict.evaluation.replacementText ?? null, originalText: text, ...withheldCallsOf(chunk) });
+          await notify({ streamId: options.streamId, ...blockVerdictOf(verdict.evaluation), finalText: verdict.evaluation.replacementText ?? null, originalText: text, ...withheldCallsOf(chunk) });
           yield* blockedOutput(context, verdict.evaluation, options);
           return;
         }
@@ -953,7 +978,7 @@ export class ParallelGuardrailDispatcher {
         const verdict = await evaluateFinal(currentChunk);
         if (verdict.outcome === 'block') {
           held = [];
-          await notify({ streamId: options.streamId, action: GuardrailAction.BLOCK, guardrailId: guardrailIdOf(verdict.evaluation), reasonCode: verdict.evaluation.reasonCode, finalText: verdict.evaluation.replacementText ?? null, originalText });
+          await notify({ streamId: options.streamId, ...blockVerdictOf(verdict.evaluation), finalText: verdict.evaluation.replacementText ?? null, originalText });
           yield* blockedOutput(context, verdict.evaluation, options);
           return;
         }
