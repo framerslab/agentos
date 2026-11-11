@@ -21,6 +21,10 @@
  * - Traces an earlier version filed under the agent's plain id are recalled for nobody and counted in one line.
  * - The wiki is compiled once a subject, from that subject's records alone, into a page that is a row of the store
  *   and never a file under memory/. close() compiles the subjects its turns wrote to.
+ * - `compile` names where the compile's model calls go, or turns the compile off; `memoryPolicy` says, per account,
+ *   whether memory is kept at all, kept as raw traces, or compiled; `screen` screens text before it is filed and
+ *   before it is compiled. The two hooks fail closed: a hook that throws, times out or answers anything else files
+ *   nothing and compiles nothing.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
@@ -775,5 +779,264 @@ describe.each(runtimes)('the wiki compiled per subject, on %s', (_name, runtime)
     } finally {
       await a.close();
     }
+  });
+});
+
+/** How many page rows the store of the test's folder holds, once its agent has closed it. */
+const pageRowCount = () =>
+  withStore(async (_memory, brain) => {
+    const row = await brain.get<{ n: number | string }>('SELECT count(*) AS n FROM memory_pages WHERE brain_id = ?', [brain.brainId]);
+    return Number(row?.n ?? 0);
+  });
+
+/** Each registered scope's compile watermark in the store of the test's folder, once its agent has closed it. */
+const compiledAtByScope = () =>
+  withStore(async (memory) => new Map((await memory.listScopes()).map((row) => [row.scopeId, row.compiledAt])));
+
+/** How many traces the store of the test's folder holds under one scope, once its agent has closed it. */
+const traceCountUnder = (scopeId: string) => withStore((memory) => memory.countScope('conversation', scopeId));
+
+describe.each(runtimes)('where the compile goes, on %s', (_name, runtime) => {
+  beforeEach(() => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  });
+
+  it('compile: false writes no page and says so once', async () => {
+    const { a, s } = await opened(runtime, { compile: false });
+    try {
+      expect(lines('memory.compile_skipped')).toHaveLength(1);
+      expect(lines('memory.compile_skipped')[0]).toMatchObject({ reason: 'compile_off' });
+      await say(a, { session: 'sa', user: 'alice' }, 'My owl is named Wexford.');
+      await stored(a, 'My owl is named Wexford.');
+      expect((await a.memory!.compileWiki()).pagesWritten).toEqual([]);
+    } finally {
+      await a.close();
+    }
+
+    expect(mergesOf(s)).toEqual([]);
+    expect(await pageRowCount()).toBe(0);
+    // The turn is kept as raw traces, and the line was written once, at the open.
+    expect(await traceCountUnder(userKey('alice'))).toBe(2);
+    expect(lines('memory.compile_skipped')).toHaveLength(1);
+  });
+
+  it("a named compile model takes the compile's calls", async () => {
+    const { a, s } = await opened(runtime, { compile: { model: 'stub-compile-model' } });
+    await say(a, { session: 'sa', user: 'alice' }, 'My owl is named Wexford.');
+    await a.close();
+
+    const merges = s.seen.filter(isMerge);
+    expect(merges).toHaveLength(1);
+    expect(merges.map((call) => call.modelId)).toEqual(['stub-compile-model']);
+    const turns = s.seen.filter((call) => !isMerge(call));
+    expect(turns.length).toBeGreaterThan(0);
+    for (const call of turns) expect(call.modelId).not.toBe('stub-compile-model');
+    expect(await pageRowCount()).toBe(1);
+  });
+});
+
+describe("a compile on a provider key of its own", () => {
+  it("takes the compile's calls, and the agent's key takes none", async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const k = key();
+    const turns = scripted(k);
+    const k2 = key();
+    const compiles = scripted(k2, ['Owl notes.']);
+    const a = await souledAgent({ ...stubbed(k), soul: dir, compile: { provider: 'openai', model: 'stub-model', apiKey: k2 } } as never);
+    await say(a, { session: 'sa', user: 'alice' }, 'My owl is named Wexford.');
+    await a.close();
+
+    expect(mergesOf(compiles)).toHaveLength(1);
+    expect(mergesOf(compiles)[0]).toContain('Wexford');
+    expect(mergesOf(turns)).toEqual([]);
+    expect(turns.seen).toHaveLength(1);
+  });
+});
+
+/** A memory policy that answers `off` for the user bob and `compiled` for everyone else. */
+const offForBob = (context: { userId: string }) => (context.userId === 'bob' ? { longTerm: 'off' } : { longTerm: 'compiled' });
+
+describe.each(runtimes)("the host's memory policy for an account, on %s", (_name, runtime) => {
+  beforeEach(() => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  });
+
+  it("a policy of off files nothing for that account and recalls the operator's pages alone", async () => {
+    writePage('concepts/ops', OPS);
+    const { a, s } = await opened(runtime, { memoryPolicy: offForBob });
+    try {
+      await say(a, { session: 'sb', user: 'bob' }, 'My crab is named Pellam.');
+      await say(a, { session: 'sa', user: 'alice' }, 'My owl is named Wexford.');
+      await stored(a, 'My owl is named Wexford.');
+
+      await say(a, { session: 'sb', user: 'bob' }, 'Is Pellam open from nine?');
+      const recalled = recalledIn(lastCall(s));
+      expect(recalled).toContain('Open nine to five.');
+      expect(recalled).not.toContain('My crab is named Pellam.');
+
+      // A later turn of alice is stored; bob's two turns, made before it, never are.
+      await say(a, { session: 'sa', user: 'alice' }, 'A later line.');
+      await stored(a, 'A later line.');
+      expect(await a.memory!.countScope('conversation', userKey('bob'))).toBe(0);
+      expect((await subjectScopes(a)).map((row) => row.scopeId)).toEqual([userKey('alice')]);
+      // The host's standing choice for the account is said once a session, not once a write.
+      expect(lines('memory.write_refused')).toHaveLength(1);
+      expect(lines('memory.write_refused')[0]).toMatchObject({ reason: 'policy_off' });
+    } finally {
+      await a.close();
+    }
+  });
+
+  it('a policy of raw files and recalls, and compiles no page', async () => {
+    const fact = 'My owl is named Wexford.';
+    const { a, s } = await opened(runtime, { memoryPolicy: () => ({ longTerm: 'raw' }) }, ['Wexford is a fine owl.', 'An owl indeed.']);
+    await say(a, { session: 'sa', user: 'alice' }, fact);
+    await stored(a, fact);
+    await say(a, { session: 'sa', user: 'alice' }, 'Tell me about Wexford.');
+    expect(recalledIn(lastCall(s))).toContain(fact);
+    await a.close();
+
+    expect(mergesOf(s)).toEqual([]);
+    expect(await pageRowCount()).toBe(0);
+    expect(await traceCountUnder(userKey('alice'))).toBe(4);
+    expect((await compiledAtByScope()).get(userKey('alice'))).toBeNull();
+    expect(lines('memory.compile_skipped')).toHaveLength(1);
+    expect(lines('memory.compile_skipped')[0]).toMatchObject({ reason: 'policy_raw' });
+  });
+
+  it('a policy that throws files nothing for that turn and is asked again on the next', async () => {
+    writePage('concepts/ops', OPS);
+    let asked = 0;
+    const memoryPolicy = () => {
+      asked += 1;
+      if (asked === 1) throw new Error('the account service is down');
+      return { longTerm: 'compiled' };
+    };
+    const { a, s } = await opened(runtime, { memoryPolicy });
+    try {
+      await a.memory!.remember('Alice opens at nine herself.', { type: 'episodic', scope: 'conversation', scopeId: userKey('alice') });
+
+      await say(a, { session: 'sa', user: 'alice' }, 'Is it open from nine?');
+      const first = recalledIn(lastCall(s));
+      expect(first).toContain('Open nine to five.');
+      expect(first).not.toContain('Alice opens at nine herself.');
+
+      await say(a, { session: 'sa', user: 'alice' }, 'My owl is named Wexford.');
+      await stored(a, 'My owl is named Wexford.');
+      await say(a, { session: 'sa', user: 'alice' }, 'A third line.');
+      await stored(a, 'A third line.');
+
+      // The first turn was never filed; the hook failed once, was asked again on the second turn, and its answer
+      // was kept for the session.
+      expect(await tracesOf(a, 'Is it open from nine?')).toBe(0);
+      expect(asked).toBe(2);
+      const failed = lines('memory.hook_failed').filter((line) => line.hook === 'memoryPolicy');
+      expect(failed).toHaveLength(1);
+      expect(failed[0]).toMatchObject({ type: 'Error' });
+      expect(JSON.stringify(failed[0])).not.toContain('account service');
+      const refused = lines('memory.write_refused');
+      expect(refused.length).toBeGreaterThan(0);
+      for (const line of refused) expect(line).toMatchObject({ reason: 'policy_failed' });
+    } finally {
+      await a.close();
+    }
+  });
+
+  it.each<[string, () => unknown]>([
+    ['a word that is none of the three', () => ({ longTerm: 'forever' })],
+    ['nothing', () => null],
+    ['a field beside the one it takes', () => ({ longTerm: 'raw', retentionDays: 7 })],
+    ['no answer in time', () => new Promise(() => undefined)],
+  ])('a policy that answers %s fails the same way', async (_case, memoryPolicy) => {
+    const { a } = await opened(runtime, { memoryPolicy, memoryProviderOptions: { timeoutMs: 50 } });
+    try {
+      await say(a, { session: 'sa', user: 'alice' }, 'My owl is named Wexford.');
+      // Both sides of the turn are refused, each with its line.
+      await vi.waitFor(() => expect(lines('memory.write_refused').length).toBeGreaterThanOrEqual(2), { timeout: 4_000 });
+      expect(await a.memory!.countScope('conversation', userKey('alice'))).toBe(0);
+      for (const line of lines('memory.write_refused')) expect(line).toMatchObject({ reason: 'policy_failed' });
+      expect(lines('memory.hook_failed').filter((line) => line.hook === 'memoryPolicy').length).toBeGreaterThan(0);
+    } finally {
+      await a.close();
+    }
+  });
+});
+
+describe.each(runtimes)('the screen hook, on %s', (_name, runtime) => {
+  beforeEach(() => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  });
+
+  it('what screen returns is what is filed and compiled', async () => {
+    const stages: string[] = [];
+    const screen = async (text: string, context: { stage: string }) => {
+      stages.push(context.stage);
+      return text.replace(/\d{3}-\d{2}-\d{4}/g, '[number]');
+    };
+    const { a, s } = await opened(runtime, { screen });
+    try {
+      await say(a, { session: 'sa', user: 'alice' }, 'My number is 123-45-6789.');
+      await stored(a, 'My number is [number].');
+      expect(await tracesOf(a, 'My number is 123-45-6789.')).toBe(0);
+    } finally {
+      await a.close();
+    }
+
+    const merges = mergesOf(s);
+    expect(merges).toHaveLength(1);
+    expect(merges[0]).toContain('My number is [number].');
+    expect(merges[0]).not.toContain('123-45-6789');
+    expect(stages).toContain('file');
+    expect(stages).toContain('compile');
+  });
+
+  it('screen returning null files nothing', async () => {
+    const { a } = await opened(runtime, { screen: async (text: string) => (text.includes('secret') ? null : text) });
+    try {
+      await say(a, { session: 'sa', user: 'alice' }, 'The secret is Wexford.');
+      await stored(a, 'Noted.');
+      expect(await tracesOf(a, 'The secret is Wexford.')).toBe(0);
+      expect(lines('memory.write_refused')).toHaveLength(1);
+      expect(lines('memory.write_refused')[0]).toMatchObject({ reason: 'screened' });
+    } finally {
+      await a.close();
+    }
+  });
+
+  it('screen rejecting files nothing', async () => {
+    const screen = async () => {
+      throw new Error('the screening service is down');
+    };
+    const { a } = await opened(runtime, { screen });
+    try {
+      const answer = await say(a, { session: 'sa', user: 'alice' }, 'My owl is named Wexford.');
+      expect(answer.text).toBe('Noted.');
+      await vi.waitFor(() => expect(lines('memory.write_refused')).toHaveLength(2), { timeout: 4_000 });
+      for (const line of lines('memory.write_refused')) expect(line).toMatchObject({ reason: 'screen_failed' });
+      const failed = lines('memory.hook_failed').filter((line) => line.hook === 'screen');
+      expect(failed).toHaveLength(2);
+      expect(JSON.stringify(failed)).not.toContain('screening service');
+      expect(await a.memory!.countScope('conversation', userKey('alice'))).toBe(0);
+    } finally {
+      await a.close();
+    }
+  });
+
+  it("screen failing at the compile leaves the scope's traces and its watermark", async () => {
+    const screen = async (text: string, context: { stage: string }) => {
+      if (context.stage === 'compile') throw new Error('the screening service is down');
+      return text;
+    };
+    const { a, s } = await opened(runtime, { screen });
+    await say(a, { session: 'sa', user: 'alice' }, 'My owl is named Wexford.');
+    await a.close();
+
+    expect(mergesOf(s)).toEqual([]);
+    expect(await pageRowCount()).toBe(0);
+    expect(await traceCountUnder(userKey('alice'))).toBe(2);
+    expect((await compiledAtByScope()).get(userKey('alice'))).toBeNull();
+    expect(lines('memory.compile_skipped')).toHaveLength(1);
+    expect(lines('memory.compile_skipped')[0]).toMatchObject({ reason: 'screen_failed' });
+    expect(lines('memory.hook_failed').filter((line) => line.hook === 'screen')).toHaveLength(1);
   });
 });
