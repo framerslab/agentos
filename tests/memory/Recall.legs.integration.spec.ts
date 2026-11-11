@@ -76,6 +76,20 @@ describe.each(ENGINES)('the durable legs on %s', (engine, open) => {
     }
   });
 
+  it('rows the gate drops give way to the rows after them, so an eligible trace past them still fills the limit', async () => {
+    const unsure = { provenance: { sourceType: 'agent_inference' as const, sourceTimestamp: NOW, confidence: 0.2, verificationCount: 0 } };
+    await store.store(trace('sure', 'The locker code 4471 was set in March for the east gym and the pool.'));
+    await store.store(trace('unsure-1', 'Locker code, locker code, locker code.', unsure));
+    await store.store(trace('unsure-2', 'Locker code, locker code, locker code.', unsure));
+    const filters = { limit: 1, minConfidence: 0.5 };
+    // The two unsure traces are the better matches and the newer traces: each leg's first rows are theirs.
+    for (const leg of [exactWordsLeg({ store, lexical: null }, ask('locker code', filters)), recencyLeg({ store }, ask('', filters))]) {
+      const r = await leg;
+      expect(r.traces.map((t) => t.id)).toEqual(['sure']);
+      expect(r.ineligible).toBe(2);
+    }
+  });
+
   it('a turn with no scopes reads nothing', async () => {
     await store.store(trace('a', 'Anything at all.'));
     expect((await exactWordsLeg({ store, lexical: null }, ask('anything', { scopes: [] }))).traces).toEqual([]);
