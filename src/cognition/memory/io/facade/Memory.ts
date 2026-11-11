@@ -1704,13 +1704,15 @@ export class Memory {
       // A trace stored meanwhile, by an import or another writer, under a time the batch spans is read next time: the
       // watermark stops just before the oldest such trace.
       const newest = batch.reduce((latest, trace) => Math.max(latest, Number(trace.createdAt)), sinceMs);
-      const read = new Set(batch.map((trace) => trace.id));
+      const compiledIds = new Set(batch.map((trace) => trace.id));
       const stored = await this._brain.all<{ id: string; created_at: number | string; tags: string }>(
         `SELECT id, created_at, tags FROM memory_traces
           WHERE brain_id = ? AND deleted = 0 AND scope = ? AND scope_id = ? AND created_at > ? AND created_at <= ?`,
         [this._brain.brainId, CONVERSATION_SCOPE, scopeId, sinceMs, newest],
       );
-      const unread = stored.filter((row) => !read.has(row.id) && !isPageChunkTags(row.tags)).map((row) => Number(row.created_at));
+      const unread = stored
+        .filter((row) => !compiledIds.has(row.id) && !isPageChunkTags(row.tags))
+        .map((row) => Number(row.created_at));
       const watermark = unread.length > 0 ? Math.min(...unread) - 1 : newest;
       // Moved only from the value this compile started from: an import that moved it back meanwhile keeps its value,
       // and the compile of this scope stops here.
