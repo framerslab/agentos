@@ -204,4 +204,22 @@ describe('AgentOS.create() given providers of its own', () => {
 
     expect(calls.streamed).toEqual([{ providerId: 'openrouter', modelId: 'openai/gpt-4o-mini' }]);
   });
+
+  it('keeps a model the host sets in place on a factory-built config', async () => {
+    const { createAgentOSConfig } = await import('../../core/config/AgentOSConfig');
+    const base = await createAgentOSConfig();
+    base.gmiManagerConfig.defaultGMIBaseConfigDefaults!.defaultLlmProviderId = 'openrouter';
+    base.gmiManagerConfig.defaultGMIBaseConfigDefaults!.defaultLlmModelId = 'anthropic/claude-haiku-4.5';
+    booted = await AgentOS.create({
+      modelProviderManagerConfig: { providers: [{ providerId: 'openrouter', enabled: true, isDefault: true, config: { apiKey: 'test-openrouter-key' } }] },
+      gmiManagerConfig: base.gmiManagerConfig,
+      turnPlanning: { enabled: false },
+      personas: [persona],
+    } as any);
+    for await (const _chunk of booted.processRequest({
+      userId: 'user-1', sessionId: 's-edited-factory-gmi', selectedPersonaId: persona.id, textInput: 'Say hello.',
+    } as any)) { /* drain */ }
+
+    expect(calls.streamed).toEqual([{ providerId: 'openrouter', modelId: 'anthropic/claude-haiku-4.5' }]);
+  });
 });
