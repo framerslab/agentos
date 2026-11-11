@@ -1,4 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
+import pino from 'pino';
+import { resetLoggerFactory, setLogger } from '../../src/core/logging/loggerFactory.js';
 import {
   GuardrailAction,
   type GuardrailContext,
@@ -267,19 +269,24 @@ describe('evaluateCrossAgentGuardrails', () => {
     };
     const chunk = createTextDeltaChunk('Hello');
 
-    const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const lines: Array<Record<string, unknown>> = [];
+    setLogger(pino({ level: 'debug', base: undefined }, { write(line: string) { lines.push(JSON.parse(line)); } }));
+    try {
+      const result = await evaluateCrossAgentGuardrails(
+        [errorGuardrail],
+        crossAgentContext,
+        baseContext,
+        chunk,
+      );
 
-    const result = await evaluateCrossAgentGuardrails(
-      [errorGuardrail],
-      crossAgentContext,
-      baseContext,
-      chunk,
-    );
-
-    expect(result.blocked).toBe(false);
-    expect(consoleSpy).toHaveBeenCalled();
-
-    consoleSpy.mockRestore();
+      expect(result.blocked).toBe(false);
+      expect(lines.filter((line) => line.event === 'guardrail.failed')).toEqual([
+        expect.objectContaining({ stage: 'output', posture: 'open', cause: 'error', type: 'Error', code: 'unknown' }),
+      ]);
+      expect(JSON.stringify(lines)).not.toContain('Test error');
+    } finally {
+      resetLoggerFactory();
+    }
   });
 });
 

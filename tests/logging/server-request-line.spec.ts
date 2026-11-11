@@ -147,7 +147,7 @@ describe('AgentOSServer request lines', () => {
     const [done] = await completions(lines, 1);
     const failed = lines.filter((line) => line.event === 'http.handler_failed');
     expect(failed).toHaveLength(1);
-    expect(failed[0]).toMatchObject({ level: 50, type: 'Error', code: 'E_FIXTURE', requestId: done.requestId });
+    expect(failed[0]).toMatchObject({ level: 50, type: 'Error', code: 'unknown', requestId: done.requestId });
     expect(done).toMatchObject({ level: 50, method: 'POST', route: 'extension', status: 500, outcome: 'error' });
     // The stub server's embedded AgentOS may report its own configuration on the console; no call carries the error.
     expect(printed.mock.calls.flat().map(String).join('\n')).not.toContain(MARKER);

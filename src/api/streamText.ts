@@ -62,7 +62,7 @@ import { StreamingReconstructor } from '../core/llm/streaming/StreamingReconstru
 import { globalLLMProviderHealth } from '../core/safety/LLMProviderHealthRegistry.js';
 import { recordAgentOSTurnMetrics, startAgentOSSpan } from '../safety/evaluation/observability/otel.js';
 import { moduleLogger } from '../core/logging/loggerFactory.js';
-import { errorFields, providerName, safePath } from '../core/logging/events.js';
+import { listedErrorFields, providerName, safePath } from '../core/logging/events.js';
 import { isCallMask } from './runtime/pool/redact.js';
 import { createContentSafeConsole } from '../core/logging/contentSafeConsole.js';
 
@@ -1794,7 +1794,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           // The run this leg reports as the one that answered, once it ended.
           let legAnswer: { provider: string; model: string } | undefined;
           try {
-            fallbackLogger.warn('llm.fallback_fired', { api: 'streamText', primaryProvider: providerName(recordedProviderId), fallbackProvider: providerName(legProvider), ...(legSentAs.model !== undefined ? { fallbackModel: safePath(legSentAs.model) } : {}), attempt, ...errorFields(lastFallbackError) });
+            fallbackLogger.warn('llm.fallback_fired', { api: 'streamText', primaryProvider: providerName(recordedProviderId), fallbackProvider: providerName(legProvider), ...(legSentAs.model !== undefined ? { fallbackModel: safePath(legSentAs.model) } : {}), attempt, ...listedErrorFields(lastFallbackError) });
             // A seat's callback is handed the error through the seat's mask, as it would leave the seat.
             opts.onFallback?.(opts.__maskError ? (opts.__maskError(lastFallbackError) as Error) : lastFallbackError, legProvider);
             const fallbackResult = streamText({
@@ -1974,7 +1974,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           const walkSignal = opts.abortSignal;
           const walkStoppedBy = walkSignal?.aborted ? abortReasonError(walkSignal) : undefined;
           if (!walkStoppedBy) {
-            fallbackLogger.error('llm.fallback_exhausted', { api: 'streamText', primaryProvider: providerName(recordedProviderId), attempts: attempt, ...errorFields(lastFallbackError) });
+            fallbackLogger.error('llm.fallback_exhausted', { api: 'streamText', primaryProvider: providerName(recordedProviderId), attempts: attempt, ...listedErrorFields(lastFallbackError) });
           }
           metricStatus = 'error';
           // No leg answered: the trail names this attempt's provider.

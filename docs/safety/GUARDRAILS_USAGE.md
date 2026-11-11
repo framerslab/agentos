@@ -82,6 +82,38 @@ await agent.initialize({
 | `SANITIZE` | Replace content with modified version |
 | `BLOCK` | Reject/terminate the interaction |
 
+A `BLOCK` can also carry `hold: { reviewCode }`: the content is kept back for a person's review instead of refused. See [Holding Content for Review](#holding-content-for-review).
+
+## Holding Content for Review
+
+A guard that cannot decide alone keeps the content back for a person to look at. It answers a `BLOCK` with `hold`, or builds the same answer with `holdResult()`:
+
+```typescript
+import { GuardrailAction, holdResult, type IGuardrailService } from '@framers/agentos/safety/guardrails';
+
+const reviewer: IGuardrailService = {
+  id: 'needs-review',
+  config: { reasonCodes: ['NEEDS_REVIEW', 'REVIEW_LINKS'] },
+  async evaluateInput({ input }) {
+    if (!/https?:\/\//.test(input.textInput ?? '')) return null;
+    return holdResult('REVIEW_LINKS', { reasonCode: 'NEEDS_REVIEW' });
+    // the same as { action: GuardrailAction.BLOCK, reasonCode: 'NEEDS_REVIEW', hold: { reviewCode: 'REVIEW_LINKS' } }
+  },
+};
+```
+
+- **A hold is a BLOCK everywhere.** Every enforcement point (input, a streamed delta, the final reply, a tool call) treats it as the `BLOCK` it is, so nothing it keeps back is delivered and a held tool call never runs.
+- **A refusal outranks a hold.** When one guard holds and another refuses in the same phase, the refusal decides, whichever was registered first; the hold stays in `evaluations`. A sanitizer (`canSanitize: true`) runs before the others, one at a time, and any `BLOCK` it answers, a hold included, ends the evaluation before the later guards run. A hold outranks a `FLAG`, a `SANITIZE` and an `ALLOW`. Cross-agent guards stop at the first `BLOCK`, a hold included.
+- **Which it was.** `GuardrailInputOutcome.outcome` is always set: `'allow'`, `'flag'`, `'sanitize'`, `'hold'` or `'block'`. `guardrailOutcomeOf(evaluations)` gives the same answer for any list, and `isGuardrailHold(evaluation)` says whether one evaluation is a hold.
+- **What the caller receives.** Under `processRequest()` a held input ends the turn as a block does: one ERROR chunk, with the hold in `details.hold` (`{ reviewCode }`) beside `details.action`. A held reply ends the stream the same way, and `onVerdict` receives `hold` on its verdict; so does a hold on the text before an actionable tool call in hold mode, whose verdict also names the withheld calls in `toolCallIds`. A hold on output that carries a `replacementText` (`holdResult('REVIEW', { replacementText: 'Waiting for review' })`) is delivered as that fixed reply, a FINAL_RESPONSE chunk and not an ERROR, with the hold in its `metadata.guardrail.output`; a host that queues held replies reads both places. The serialised evaluation in chunk metadata carries `hold` too.
+- **The host does the rest.** It stores the content, tells the sender it is waiting for review and puts it in its review queue under `reviewCode`. The library keeps nothing.
+- **Where a host gets a held reply.** A held input is the host's own input. A held reply is not in what the caller receives: the ERROR chunk and a fixed reply carry the hold and no text, and under `processRequest()` the `onVerdict` callback is AgentOS's own, used to drop withheld tool calls and rewrite the stored reply. A host that queues held replies keeps the text where the hold is decided and queues it only once the caller receives that hold: the guard that holds gets the reply in its `evaluateOutput()` payload and stages it under the stream id and its own id; the host queues it when the stream ends in that guard's hold (`details.hold` with the guard's id in `details.metadata`, or a fixed reply whose `metadata.guardrail.output` names it) and discards it otherwise, since in phase 2 another guard's refusal outranks the hold. A guard on streamed deltas sees a delta, not the whole reply; a host that needs the whole reply decides holds on the final reply, with hold mode on. A host that drives a stream itself with `wrapOutputGuardrails()` passes its own `onVerdict`, whose `originalText` is the reply as the guards judged it on a final reply, and null on a verdict for a streamed delta.
+- **A release goes through the guards again.** A held message may not have been judged by every guard: a sanitizer's hold ends phase 1, so no phase 2 guard read it. A host that releases a held message after a person's review runs the guards on it again before delivering it.
+- **A hold on another action is ignored.** `hold` counts only with `BLOCK`. On a `FLAG` or a `SANITIZE` the dispatcher ignores it and writes `guardrail.hold_ignored` once for that guard; a `SANITIZE` of a tool call is applied as a `BLOCK` that is a refusal, not a hold.
+- **Codes.** A `reviewCode` is letters, digits and underscores, at most 64. `toModerationEvaluation()` reports an evaluation without its `reason` and `details`, and writes a code outside its shape as `INVALID_CODE`.
+
+A guard's failure is a typed event, not a console line: a throw or a timeout writes `guardrail.failed` with the guard's id, the stage, the posture (`open` or `closed`), the cause and the error's listed type and code, never its message (see [Logging](../observability/LOGGING.md)). Under `processRequest()` a guard with no `failClosed` is still skipped when it throws.
+
 ## Mid-Stream Decision Override ("Changing Mind")
 
 Guardrails can evaluate streaming chunks in real-time and "change their mind" about allowing content. The examples below import `AgentOSResponseChunkType` from `@framers/agentos` (as the Quick Start does): chunk types are lowercase strings such as `'text_delta'`, so compare against the enum. This enables:
@@ -366,6 +398,7 @@ class QualityGateGuardrail implements ICrossAgentGuardrailService {
 | `canSanitize` | `boolean` | `false` | Run this guardrail in Phase 1 so SANITIZE results chain deterministically |
 | `timeoutMs` | `number` | `undefined` | Per-guardrail timeout. On timeout/error the dispatcher fails open for that guardrail, unless `failClosed` is set or the guard is required |
 | `failClosed` | `boolean` | `false` | A throw or a timeout blocks instead of passing. Forced on for a required guard |
+| `reasonCodes` | `readonly string[]` | `undefined` | Every reason code and review code the guard can answer, a closed list, declared for the log lines that name the code that decided: such a line takes a code from this list only and writes `unknown` otherwise. No line of this release writes a guard's code yet `PhraseListGuardrail` lists the rule ids of the list it holds |
 
 ### Output Payload Extras
 
@@ -399,7 +432,7 @@ const agentos = await AgentOS.create({
 - **Replacement replies.** A `BLOCK` whose evaluation carries a non-empty `replacementText` reaches the caller as a `FINAL_RESPONSE` holding that text in `finalResponseText`, and in `finalResponseTextPlain` rendered as plain text as a turn renders its own reply, with `metadata.guardrail.output[0].action === 'block'` and the guard's `reasonCode`, in place of an error chunk. A block without one (or with an empty string) yields the error chunk.
 - **The stored reply.** With conversational persistence on, a reply a guard blocked with a replacement or sanitized is rewritten in the conversation's history (and one blocked without a replacement is emptied) before the final chunk leaves, so the history holds what the person saw: the stored message is matched by the text the guards judged, never by position, on a turn and on a tool continuation alike. The message's `metadata.modificationInfo` records the guard's reason code. A block on a streamed delta judges no whole reply and rewrites nothing; hold mode is where nothing streams before the final verdict. With `appendOnlyPersistence` on the conversation manager the stored row keeps the first text and the rewrite stays in memory; the runtime logs a warning when that happens, and a product that must not keep a replaced reply does not run an append-only store. A sanitized final chunk's `updatedConversationContext` reads the rewrite too.
 - **Declared stages.** A guard that has both methods but runs on one stage declares it in `IGuardrailService.stages` (the phrase-list guard does, from its `stages` option); a required guard is held to the stages it declares, and a stage it does not declare is reported as missing instead of passing on the method's existence.
-- **The text before a tool call.** In hold mode the text held before an actionable tool call is judged as a reply of its own, with the text in `finalResponseText` and as plain text in `finalResponseTextPlain`, as a final reply carries them: a block replaces it and the tool call does not go out; a sanitize rewrites what streams. That verdict is not reported through `onVerdict`, since nothing is stored at that point; the turn's final chunk, which carries the whole text, is judged and recorded on its own.
+- **The text before a tool call.** In hold mode the text held before an actionable tool call is judged as a reply of its own, with the text in `finalResponseText` and as plain text in `finalResponseTextPlain`, as a final reply carries them: a block replaces it and the tool call does not go out; a sanitize rewrites what streams. A block there, a hold included, is reported through `onVerdict` like a block on a final reply, with the withheld calls' ids in `toolCallIds`. An allow or a sanitize there is not reported, since nothing is stored at that point; the turn's final chunk, which carries the whole text, is judged and recorded on its own.
 - **Every verdict names its guard.** `metadata.guardrailId` is set on each evaluation when the guard has an `id`; a block's error chunk carries it in `details.metadata`.
 
 ### `PhraseListGuardrail`
@@ -473,7 +506,7 @@ class ShellCommandGuard implements IGuardrailService {
 - **Sanitize.** A guard cannot rewrite a tool call. A `SANITIZE` is applied as a `BLOCK` that keeps the guard's reason and reason code.
 - **Flag and allow.** The chunk goes on with the evaluation in `metadata.guardrail.output`.
 - **Calls the runtime runs itself.** AgentOS asks the guard about each call with `executionMode: 'internal'` before the call runs, as a `TOOL_CALL_REQUEST` chunk holding that one call, with the sources the turn retrieved in `ragSources`, on `processRequest()`, `handleToolResult()` and `resumeExternalToolRequest()` alike. A continuation the orchestrator is given no gate for (`AgentOSOrchestrator.orchestrateToolResult()` takes none) is judged with the gate its turn ran with, which the runtime keeps with the turn's stream. A continuation retrieves nothing of its own, so its calls are judged with the sources the user turn it continues retrieved, which the runtime keeps with the turn's stream: a turn of another conversation on the session's GMI meanwhile, or a GMI built again for the session, does not change them. A turn resumed after a restart is judged without them: the pause stores the calls, never the documents the turn retrieved. A block (or a sanitize) refuses the call: the tool does not run, and the model reads a refused tool result (code `AUTH_PERMISSION_DENIED`, with the guard's reason), as it reads a permission refusal. When a model step asks for several such calls, every call of the step is judged before any of them runs, and the calls that pass alone are judged once more together, as the stream's chunk for the step holds them, so a guard that rules on calls together (notes read and a shell command run in one step) refuses each of them before any runs. On the stream `processRequest()` returns, the guard also judges the stream's chunk for the step, so it is asked about such calls twice; a block there ends the host's stream with the verdict while the turn finishes inside the runtime. A continuation's stream carries no chunk for the calls the GMI runs itself. A refused call never becomes an actionable request and no pending request is saved for it; the `FINAL_RESPONSE` lists it in `finalToolCalls` beside the calls that ran. To have a person approve a tool before it runs, gate the tool: with a `hitlManager` and `toolOrchestratorConfig.hitl.enabled`, the tool orchestrator asks for an approval before a tool with `hasSideEffects: true` runs ([Human-in-the-Loop](./HUMAN_IN_THE_LOOP.md)).
-- **Several guards.** The guards that evaluate tool calls run in parallel on each tool-call chunk; the first block in registration order is the verdict.
+- **Several guards.** The guards that evaluate tool calls run in parallel on each tool-call chunk; the first refusal in registration order is the verdict, else the first hold.
 - **What the guards do not see.** The guards judge the calls a turn's model requests. The steps of a composed tool (one `forge_tool` built from a chain of other tools) and the tool tasks of a workflow are not model requests: they run through the tool orchestrator's `processToolCall()` with no tool-call chunk, so a guard that sets `evaluateToolCalls` judges the composed tool's own call, with the arguments the model gave it, and never the steps that call runs, nor a workflow's tool tasks. Those calls meet the tool orchestrator's own checks: the disabled list, the permission check, argument validation and, with `hitl.enabled`, the approval a tool with `hasSideEffects: true` waits for.
 
 **Why it is opt-in.** A guard written for text may read any chunk it is given as text: one that takes every non-final chunk for a `TEXT_DELTA` reads `textDelta` as `undefined`, and a fail-closed guard that throws on it would block every tool call. A guard that sets `evaluateToolCalls` is written to read tool calls, and a guard without it never receives one. A guard that has a tool-call branch already, as the code-safety pack's guard does, runs it once its config sets the flag.
@@ -575,6 +608,7 @@ interface GuardrailEvaluationResult {
   details?: unknown;         // Debugging detail, not shown to users
   modifiedText?: string | null;  // For SANITIZE action
   replacementText?: string;  // With BLOCK on output, a non-empty string is the reply sent in place of the error chunk
+  hold?: { reviewCode: string }; // With BLOCK only: kept back for a person's review, not refused
 }
 ```
 

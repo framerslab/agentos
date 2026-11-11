@@ -12,7 +12,7 @@
  * @module api/runtime/memoryObserveFailures
  */
 import type { AgentMemoryProvider, MemoryHookContext } from '../agent.js';
-import { errorFields } from '../../core/logging/events.js';
+import { listedErrorFields } from '../../core/logging/events.js';
 import { memoryLog } from '../../cognition/memory/log.js';
 
 /** How many times each provider's `observe` has failed, keyed by the provider object. */
@@ -54,7 +54,7 @@ export function reportObserveFailure(provider: AgentMemoryProvider, error: unkno
   failureCounts.set(provider, count);
   if (!isLoggedFailure(count)) return;
   // The error's type and code alone: its message can hold what the turn said, and reading them never throws.
-  memoryLog.warn('memory.hook_failed', { hook: 'observe', ...errorFields(error) });
+  memoryLog.warn('memory.hook_failed', { hook: 'observe', ...listedErrorFields(error) });
 }
 
 /**
