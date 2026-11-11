@@ -149,10 +149,12 @@ export interface AgentOSFinalResponseChunk extends AgentOSResponseChunk {
   ragSources?: import('../../cognition/rag').RagRetrievedChunk[];
 
   /**
-   * The recall capture of the turn's memory assembly, present only when the
-   * memory manager's `recall.capture` is `'metadata+stream'` (the stream then
-   * also carried it as a `METADATA_UPDATE` with `memorySources`). Ids, ranks,
-   * scores, counts and timings; never a memory's text or the query's.
+   * The recall capture of the turn, present only when the memory manager's
+   * `recall.capture` is `'metadata+stream'`: the record of the model hop that
+   * served the turn, with that hop's `budget` and `delivery`. The stream's
+   * `METADATA_UPDATE` with `memorySources` carried the assembly's record,
+   * without those fields. Ids, ranks, scores, counts and timings; never a
+   * memory's text or the query's.
    */
   memoryRecall?: import('../../cognition/memory/retrieval/recall/capture.js').MemoryRecallCapture;
 

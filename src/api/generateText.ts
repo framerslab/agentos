@@ -1134,11 +1134,11 @@ export interface GenerateTextResult {
   grounding?: import('../cognition/rag/citation/types.js').VerifiedResponse;
   /**
    * On a `gmi()` or `agent({ runtime: 'gmi' })` session's turn with cognitive
-   * memory: the recall capture of the turn's memory assembly (every candidate
-   * with its ranks, scores and outcome, the legs, the reranker, the budget and
-   * the timings; never a memory's text or the query's). `undefined` when the
-   * turn assembled no memory block or the manager's `recall.capture` is
-   * `'off'`.
+   * memory: the recall capture of the model hop that served the turn (every
+   * candidate with its ranks, scores and outcome, the legs, the reranker, the
+   * hop's budget and delivery, and the timings; never a memory's text or the
+   * query's). `undefined` when the turn assembled no memory block or the
+   * manager's `recall.capture` is `'off'`.
    */
   memoryRecall?: import('../cognition/memory/retrieval/recall/capture.js').MemoryRecallCapture;
   /**

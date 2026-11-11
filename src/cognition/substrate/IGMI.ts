@@ -581,9 +581,13 @@ export interface GMIOutput {
      */
     ragSources?: import('../rag/IRetrievalAugmentor.js').RagRetrievedChunk[];
     /**
-     * The recall capture of the turn's memory assembly, when the GMI assembled
-     * a memory block and the memory manager's `recall.capture` is not `'off'`,
-     * on a turn that fails after the assembly as on one that completes. A tool
+     * The recall capture of the turn, when the GMI assembled a memory block and
+     * the memory manager's `recall.capture` is not `'off'`, on a turn that
+     * fails after the assembly as on one that completes: the record of the last
+     * model hop the turn's prompt was built for (on a completed turn, the hop
+     * that served it), with that hop's `budget` and `delivery`; the assembly's
+     * record when the turn failed before a prompt was built. The
+     * `MEMORY_SOURCES_AVAILABLE` chunk carries the assembly's record. A tool
      * continuation assembles none and carries none.
      */
     memoryRecall?: import('../memory/retrieval/recall/capture.js').MemoryRecallCapture;
