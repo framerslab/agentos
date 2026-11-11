@@ -674,6 +674,31 @@ describe('AvatarPipeline caller-owned options', () => {
       expect(generateImage).toHaveBeenCalledTimes(4);
     });
 
+    it('draws and checks each image once when maxRegenerationAttempts is NaN', async () => {
+      const acceptanceCheck = vi.fn<AvatarAcceptanceCheck>().mockResolvedValue({ accepted: true });
+
+      const result = await pipeline.generate(
+        makeRequest({
+          stages: ['neutral_portrait', 'expression_sheet', 'full_body', 'additional_angles'],
+          emotions: ['neutral', 'happy'],
+          angles: ['profile view'],
+          // What Number(process.env.X) gives for an unset variable.
+          driftGuard: { maxRegenerationAttempts: Number(undefined) },
+          acceptanceCheck,
+        }),
+      );
+
+      for (const label of ['expression:happy', 'full_body', 'angle:profile view']) {
+        const job = result.jobs.find((j) => j.label === label);
+        expect(job?.status).toBe('completed');
+        expect(job?.attempts).toBe(1);
+        expect(job?.acceptance).toEqual({ accepted: true });
+      }
+      expect(acceptanceCheck).toHaveBeenCalledTimes(3);
+      // 1 portrait + 1 expression + 1 full body + 1 angle
+      expect(generateImage).toHaveBeenCalledTimes(4);
+    });
+
     it('fails the job when the check throws and draws no more for it', async () => {
       const acceptanceCheck = vi.fn<AvatarAcceptanceCheck>().mockImplementation(async ({ label }) => {
         if (label === 'expression:angry') throw new Error('judge unavailable');
