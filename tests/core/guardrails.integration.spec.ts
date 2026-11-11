@@ -318,6 +318,25 @@ describe('AgentOS.processRequest guardrail integration', () => {
     });
   });
 
+  it('a held input ends the turn as a block does and carries the hold, with no text delivered', async () => {
+    const streamId = 'stream-hold';
+    const streamingManager = new FakeStreamingManager();
+    const orchestrator = new StubOrchestrator(streamingManager, streamId, [buildFinalChunk(streamId, 'persona-default', 'never sent')]);
+    const guardrailService = new TestGuardrailService({
+      inputEvaluation: { action: GuardrailAction.BLOCK, reasonCode: 'NEEDS_REVIEW', hold: { reviewCode: 'REVIEW' } },
+    });
+
+    const agent = createAgentUnderTest(guardrailService, streamingManager, orchestrator);
+    const responses = await collectResponses(agent, baseInput);
+
+    expect(orchestrator.callCount).toBe(0);
+    expect(responses).toHaveLength(1);
+    const errorChunk = responses[0] as AgentOSErrorChunk;
+    expect(errorChunk.type).toBe(AgentOSResponseChunkType.ERROR);
+    expect(errorChunk.details).toMatchObject({ action: GuardrailAction.BLOCK, hold: { reviewCode: 'REVIEW' } });
+    expect(JSON.stringify(responses)).not.toContain('never sent');
+  });
+
   it('converts final output into an error chunk when guardrails block the response', async () => {
     const streamId = 'stream-output-block';
     const streamingManager = new FakeStreamingManager();
