@@ -107,6 +107,27 @@ describe.each(ENGINES)('loadTracesForRecall on %s', (_engine, open) => {
     await db.close();
   });
 
+  it('a cached trace takes the trust policy its row holds now, as another process stored it again', async () => {
+    const db = await open();
+    const store = await storeOver(db.brain, new FlatEmbedder());
+    const everything = { usableForAuthorization: true, usableForPersonalization: true, usableForFactClaim: true };
+    const narrower = { usableForAuthorization: false, usableForPersonalization: true, usableForFactClaim: true };
+    await store.store(trace('pass', 'The harbor pass number is 7781.', { policy: everything }));
+    const row = await db.brain.get<{ metadata: string }>('SELECT metadata FROM memory_traces WHERE brain_id = ? AND id = ?', [db.brain.brainId, 'pass']);
+    await db.brain.run('UPDATE memory_traces SET metadata = ? WHERE brain_id = ? AND id = ?', [
+      JSON.stringify({ ...JSON.parse(row!.metadata), policy: narrower }),
+      db.brain.brainId,
+      'pass',
+    ]);
+    expect(store.getTrace('pass')!.policy).toEqual(everything);
+
+    const { traces } = await store.loadTracesForRecall(['pass']);
+    expect(traces.get('pass')!.policy).toEqual(narrower);
+    expect(isEligibleForRecall(traces.get('pass')!, { scopes: U1, now: NOW, usableFor: ['authorization'] })).toBe(false);
+    store.dispose();
+    await db.close();
+  });
+
   it('a row with no vector that a move refiles between its read and its load is returned as the Brain holds it after the move', async () => {
     const db = await open();
     const store = await storeOver(db.brain, new FlatEmbedder());

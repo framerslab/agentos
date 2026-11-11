@@ -201,6 +201,18 @@ describe('in process (no Brain)', () => {
     store.dispose();
   });
 
+  it("the index follows a trace whose tags change and are persisted", async () => {
+    const store = await storeOver(null, new FlatEmbedder());
+    await store.store(trace('tagged', 'The ferry leaves from pier 3.'));
+    const lexical = new ScopedLexicalIndex(store);
+    expect((await exactWordsLeg({ store, lexical }, ask('harbor'))).traces).toEqual([]);
+    store.getTrace('tagged')!.tags.push('harbor');
+    await store.persistTraceMetadata('tagged');
+    expect((await exactWordsLeg({ store, lexical }, ask('harbor'))).traces.map((t) => t.id)).toEqual(['tagged']);
+    lexical.dispose();
+    store.dispose();
+  });
+
   it('in process the gate runs on every match before the limit, so a better match the gate drops takes no slot', async () => {
     const store = await storeOver(null, new FlatEmbedder());
     await store.store(trace('episode', 'Locker code, locker code, locker code.', { type: 'episodic' }));
