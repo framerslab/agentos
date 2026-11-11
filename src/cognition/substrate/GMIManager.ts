@@ -745,8 +745,10 @@ export class GMIManager {
       toolOrchestrator: this.toolOrchestrator,
       retrievalAugmentor: this.retrievalAugmentor,
       cognitiveMemory,
-      defaultLlmProviderId: persona.defaultProviderId || this.config.defaultGMIBaseConfigDefaults?.defaultLlmProviderId,
-      defaultLlmModelId: persona.defaultModelId || this.config.defaultGMIBaseConfigDefaults?.defaultLlmModelId,
+      // The runtime's model and provider as one pair: the GMI reads the persona's own pair above them, and a persona
+      // that names a provider and no model runs on that provider's default model, never on this pair's model.
+      defaultLlmProviderId: this.config.defaultGMIBaseConfigDefaults?.defaultLlmProviderId,
+      defaultLlmModelId: this.config.defaultGMIBaseConfigDefaults?.defaultLlmModelId,
       defaultReasoningTraceMaxEntries: this.config.defaultGMIBaseConfigDefaults?.defaultReasoningTraceMaxEntries,
       defaultReasoningTraceMaxMessageLength: this.config.defaultGMIBaseConfigDefaults?.defaultReasoningTraceMaxMessageLength,
       customSettings: persona.customFields,
@@ -1078,8 +1080,10 @@ export class GMIManager {
       llmProviderManager: spec.providerManager ? spec.providerManager(this.llmProviderManager) : this.llmProviderManager,
       utilityAI,
       toolOrchestrator: spec.toolView(this.toolOrchestrator),
-      defaultLlmProviderId: persona.defaultProviderId || this.config.defaultGMIBaseConfigDefaults?.defaultLlmProviderId,
-      defaultLlmModelId: persona.defaultModelId || this.config.defaultGMIBaseConfigDefaults?.defaultLlmModelId,
+      // The runtime's model and provider as one pair: the GMI reads the persona's own pair above them, and a persona
+      // that names a provider and no model runs on that provider's default model, never on this pair's model.
+      defaultLlmProviderId: this.config.defaultGMIBaseConfigDefaults?.defaultLlmProviderId,
+      defaultLlmModelId: this.config.defaultGMIBaseConfigDefaults?.defaultLlmModelId,
       defaultReasoningTraceMaxEntries: this.config.defaultGMIBaseConfigDefaults?.defaultReasoningTraceMaxEntries,
       defaultReasoningTraceMaxMessageLength: this.config.defaultGMIBaseConfigDefaults?.defaultReasoningTraceMaxMessageLength,
       customSettings: persona.customFields,
