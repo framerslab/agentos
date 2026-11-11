@@ -62,7 +62,8 @@ import { withMembers } from './runtime/withMembers.js';
 import { LAUNCH_AGENCY_TOOL_NAME, MIN_LAUNCH_TOKENS, resolveLaunchLimits, type AgencyLaunchFrame, type CallerTurnContext, type ToolCallHook } from './runtime/agencyLaunch/types.js';
 import { createGmiLaunchTool } from './runtime/agencyLaunch/gmiLaunchTool.js';
 import { resolveCognition, type ResolvedCognition } from './runtime/gmiCognition.js';
-import { personaFromAgentOptions, stablePersonaIdOf } from './runtime/gmiPersona.js';
+import { agentStableIdOf, personaFromAgentOptions, stablePersonaIdOf } from './runtime/gmiPersona.js';
+import { memoryHookContextOf, namedSessionUser } from './runtime/memorySubject.js';
 import { warnSoulBesideSystemBlocks, withOneSoulWarning } from './runtime/soulLoadWarning.js';
 import { soulLog } from '../cognition/substrate/personas/soulLog.js';
 import { soulAgentIdOf } from '../cognition/substrate/personas/SoulLoader.js';
@@ -583,6 +584,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
   const learningConfig = typeof opts.learning === 'object' && opts.learning !== null ? opts.learning : undefined;
   /** The soul's one stable id; undefined with no soul, or a soul that gives none on an agent with no name. */
   const soulId = soul ? soulAgentIdOf(soul.frontmatter, opts.name) : undefined;
+  // The agent's stable id, which the memory hooks are told: its soul's id, else a named agent's id.
+  const agentStableId = agentStableIdOf(opts, soul);
   /** The key of the brain behind memory.store: `learning.agentKey`, else the soul's id. */
   const brainKey = learningConfig?.agentKey?.trim() || soulId;
   const memoryStore = cognition.memory ? cognition.memory.store : undefined;
@@ -896,8 +899,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
       maxToolLoopIterations: steps,
       defaultLlmProviderId: persona.defaultProviderId,
       defaultLlmModelId: persona.defaultModelId,
-      // Every model call: the memoryProvider block after the leading system
-      // messages (where the legacy path puts it), then onBeforeGeneration.
+      // Every model call: the memoryProvider's recall as a data block before the turn's user message, then
+      // onBeforeGeneration.
       beforeModelCall: async (ctx) => {
         step.index = ctx.stepIndex;
         turn.onModelCall?.({ providerId: ctx.providerId, modelId: ctx.modelId });
@@ -928,9 +931,16 @@ export function gmi(opts: GmiOptions): GmiHandle {
           changed = true;
         }
         if (turn.memoryContext) {
-          let insertAt = 0;
-          while (insertAt < messages.length && messages[insertAt].role === 'system') insertAt += 1;
-          messages = [...messages.slice(0, insertAt), { role: 'system', content: turn.memoryContext }, ...messages.slice(insertAt)];
+          // Recalled text is data in a user-role message right before the turn's own user message, never a system
+          // message, so the persona's hard limits stay the last system text.
+          let insertAt = messages.length;
+          for (let i = messages.length - 1; i >= 0; i -= 1) {
+            if (messages[i].role === 'user') {
+              insertAt = i;
+              break;
+            }
+          }
+          messages = [...messages.slice(0, insertAt), { role: 'user', content: turn.memoryContext }, ...messages.slice(insertAt)];
           changed = true;
         }
         if (opts.onBeforeGeneration) {
@@ -1024,6 +1034,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
       userId: callId,
       useMemoryProviderContext: true,
       providerTokenBudget: resolvedRecall.providerTokenBudget,
+      // A one-shot call is its own session and its own memory subject.
+      memoryHook: memoryHookContextOf({ sessionId: callId, agentId: agentStableId, call: 'one-shot' }),
       history: null,
       ledger: mergeLedger(ledger, extra?.usageLedger, { source: extra?.usageLedger?.source ?? source }),
       onUsage: (u) => accumulateUsage(agentTally, u),
@@ -1096,11 +1108,16 @@ export function gmi(opts: GmiOptions): GmiHandle {
       if (existing) {
         // A seat runs in a session of its own: one the agent serves already is never the seat's to run in or close.
         if (seat) throw new TypeError(`gmi(): session '${sessionId}' is open; a seat opens a session of its own`);
-        if (sessionOptions?.userId !== undefined && sessionOptions.userId !== existing.userId) {
+        // An anonymous id names no user, so it never asks for another one.
+        const asked = namedSessionUser(sessionOptions?.userId, 'gmi', learningConfig?.anonymousUserIds);
+        if (asked !== undefined && asked !== existing.userId) {
           throw new Error(`gmi(): session '${sessionId}' already runs as user '${existing.userId}'; close it to open it for another user.`);
         }
         return existing.session;
       }
+      // The user the session's memory serves: the user id the caller named, unless it is an anonymous id, which names
+      // no user. A seat names none: its memory is a scope of its own.
+      const hookUser = seat ? undefined : namedSessionUser(sessionOptions?.userId, 'gmi', learningConfig?.anonymousUserIds);
       // Each session's memory scope is its own unless the caller names the user:
       // sessions are often different people, and one person's facts must not
       // reach another's replies. With memory.store a session id's memory
@@ -1142,7 +1159,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
       if (cognition.memory && !seat && !generation) openedSessionIds.add(sessionId);
       /** The id the session's memory files and recalls under: its generation's, read from the store, or the one above. */
       const memoryScopeIdOf = async (): Promise<string> => (generation ? (await generation.get()).memoryScopeId : inProcessScopeId!);
-      const userId = sessionOptions?.userId ?? sessionId;
+      // The user the turns run as: the named user, else the session id. A seat runs as the user id it was given.
+      const userId = seat ? (sessionOptions?.userId ?? sessionId) : (hookUser ?? sessionId);
       const history = opts.history === false ? null : new SessionHistoryBuffer({ ...SESSION_HISTORY_DEFAULTS, ...(opts.history ?? {}) });
       // A tally the agent's own earlier session of this id left is kept: a seat session adds to it and leaves it at close.
       const ownsTally = !sessionTallies.has(sessionId);
@@ -1178,7 +1196,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
       // scope too, so nothing it is told is filed under the user it runs as.
       const turnMemoryScope = (memoryScopeId: string): { sessionId: string; userId: string } => ({
         sessionId: memoryScopeId,
-        userId: seat?.memoryScope === 'session' ? memoryScopeId : (sessionOptions?.userId ?? memoryScopeId),
+        userId: seat?.memoryScope === 'session' ? memoryScopeId : (hookUser ?? memoryScopeId),
       });
 
       // A send made after close() fails; one made before it runs, and close() waits for it. The turn's memory scope
@@ -1212,8 +1230,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
         opts,
         userId,
         // The turn's memory scope comes with its GMI (gmiFor), once the session has read it.
-        // Only a user id the caller passed reaches the provider's end-user field.
-        providerUserId: sessionOptions?.userId,
+        // Only a user id the caller passed reaches the provider's end-user field, and never an anonymous one.
+        providerUserId: seat ? sessionOptions?.userId : hookUser,
         history,
         lock,
         // A seat session records under its ledger's own source when it names one (a temporary seat's is launch_agency).
@@ -1222,6 +1240,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
         useMemoryProviderContext: !cognition.memory && !seat,
         providerTokenBudget: resolvedRecall.providerTokenBudget,
         observeMemoryProvider: !seat,
+        // Who the turn's memory hooks are told it serves.
+        memoryHook: memoryHookContextOf({ sessionId, namedUser: hookUser, agentId: agentStableId, call: 'session' }),
         gmiFor: gmiFor(closing !== undefined),
         onUsage: (u) => {
           accumulateUsage(tally, u);

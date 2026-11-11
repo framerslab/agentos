@@ -11,6 +11,7 @@ vi.mock('../../core/llm/providers/implementations/AnthropicProvider', async () =
 import { z } from 'zod';
 import { agent, type AgentOptions } from '../agent';
 import { DEFAULT_COT_INSTRUCTION } from '../generateText';
+import { MEMORY_RECALL_SYSTEM_LINE } from '../runtime/memoryDataBlock';
 import { reply, script } from './helpers/stubProviders';
 import { ObjectGenerationError } from '../generateObject';
 import { setGlobalLlmObserver, type LlmUsageEvent } from '../observers';
@@ -701,15 +702,26 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
     expect(session.messages().at(-1)).toMatchObject({ role: 'assistant', content: 'RAW TEXT' });
   });
 
-  it("memoryProvider: getContext text is its own system message after the agent's, observe runs for both sides", async () => {
+  it("memoryProvider: getContext text is a data block in a user message before the turn's, observe runs for both sides", async () => {
     const k = key(); const s = script('openai', k, { replies: [reply.text('Done.')] });
     const getContext = vi.fn(async (_text: string) => ({ contextText: 'RECALL: likes tea' }));
     const observe = vi.fn(async (_role: string, _text: string) => undefined);
     await agent(base(k, { instructions: 'Be brief.', memoryProvider: { getContext, observe } })).session('s').send('hi');
     expect(getContext).toHaveBeenCalledTimes(1);
-    expect(s.seen[0].messages.filter((m) => m.role === 'system').map((m) => m.content)).toEqual(['Be brief.', 'RECALL: likes tea']);
+    const messages = s.seen[0].messages;
+    expect(messages.filter((m) => m.role === 'system').map((m) => m.content)).toEqual([`Be brief.\n\n${MEMORY_RECALL_SYSTEM_LINE}`]);
+    const turnIndex = messages.map((m) => m.role).lastIndexOf('user');
+    expect(String(messages[turnIndex].content)).toContain('hi');
+    const block = messages[turnIndex - 1];
+    expect(block.role).toBe('user');
+    const raw = String(block.content);
+    expect(raw.startsWith('<memory_recall>') && raw.endsWith('</memory_recall>')).toBe(true);
+    expect(JSON.parse(raw.slice('<memory_recall>'.length, -'</memory_recall>'.length)).items).toEqual([{ text: 'RECALL:^likes^tea' }]);
     await vi.waitFor(() => expect(observe).toHaveBeenCalledTimes(2));
-    expect(observe.mock.calls).toEqual([['user', 'hi'], ['assistant', 'Done.']]);
+    expect(observe.mock.calls).toEqual([
+      ['user', 'hi', expect.objectContaining({ sessionId: 's' })],
+      ['assistant', 'Done.', expect.objectContaining({ sessionId: 's' })],
+    ]);
   });
 
   it('onFallback hears the move to a fallback hop, and one that throws does not fail that hop', async () => {
@@ -843,6 +855,36 @@ describe("agent({ runtime: 'gmi' }) resolves the model and builds memory on firs
     await a.session('carol-1').close();
     await a.session('carol-2', { userId: 'carol' }).send(QUESTION);
     expect(JSON.stringify(s.seen[3].messages)).toContain('vault');
+    await a.close();
+  });
+
+  it('two sessions opened with an anonymous user id share no memory: an anonymous id names no user', async () => {
+    const k = key(); const emb = key();
+    const s = script('openai', k, { replies: [reply.text('Noted.'), reply.text('No idea.')] });
+    script('openai', emb);
+    vi.stubEnv('OPENAI_API_KEY', emb);
+    const a = agent(base(k, plainMemory()));
+
+    await a.session('kiosk-a', { userId: 'anonymous' }).send(FACT);
+    await a.session('kiosk-b', { userId: 'anonymous' }).send(QUESTION);
+    expect(JSON.stringify(s.seen[1].messages)).not.toContain('vault');
+    await a.close();
+  });
+
+  it("an id the agent's learning.anonymousUserIds names is no user either: two sessions opened with it share no memory", async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const k = key(); const emb = key();
+    const s = script('openai', k, { replies: Array.from({ length: 6 }, () => reply.text('Noted.')) });
+    script('openai', emb);
+    vi.stubEnv('OPENAI_API_KEY', emb);
+    const a = agent(base(k, { ...plainMemory(), learning: { anonymousUserIds: ['kiosk'] } }));
+
+    await a.session('kiosk-a', { userId: 'kiosk' }).send(FACT);
+    const before = s.seen.length;
+    await a.session('kiosk-b', { userId: 'kiosk' }).send(QUESTION);
+    const asked = s.seen.slice(before).filter((call) => JSON.stringify(call.messages).includes(QUESTION));
+    expect(asked.length).toBeGreaterThan(0);
+    for (const call of asked) expect(JSON.stringify(call.messages)).not.toContain('vault');
     await a.close();
   });
 

@@ -1029,6 +1029,15 @@ export interface GenerateTextOptions {
    * `messages` instead). Not part of the public API.
    */
   _continuation?: { helperToolRunId: string; stepOffset: number; prompt?: string };
+  /**
+   * INTERNAL: the caller this call's tools run for, set by agent() from the
+   * session's user, or from a one-shot call's own id. Each tool is told its
+   * user and the subject its memory is keyed by in `userContext`, its session
+   * in `sessionData.sessionId`, and the user id the caller named in
+   * `callerTurn.providerUserId`. A direct call has none, and its tools are
+   * told `system`. Not part of the public API.
+   */
+  _callerUser?: { userId: string; sessionId: string; providerUserId?: string; subject: { kind: 'user' | 'session'; id: string } };
 }
 
 /**
@@ -1141,6 +1150,17 @@ export interface GenerateTextResult {
    * `'off'`.
    */
   memoryRecall?: import('../cognition/memory/retrieval/recall/capture.js').MemoryRecallCapture;
+  /**
+   * On a `gmi()` or `agent({ runtime: 'gmi' })` session's turn: the
+   * conversation history the turn's requests left out to fit the prompt
+   * engine's history budget (35 percent of the serving model's context
+   * window). `messages` counts the oldest messages left out of the request
+   * that left out the most, `tokens` is their size at the prompt engine's
+   * estimate; the session's `messages()` still lists them. `undefined` when
+   * every request of the turn carried the whole history, and on the default
+   * runtime, which sends the whole history.
+   */
+  historyOmitted?: import('../core/llm/IPromptEngine.js').PromptHistoryOmission;
   /**
    * Per-hop provider fallback trail. `fired` is true when any non-primary
    * provider produced — or was tried for — the result, so callers can flag a
@@ -2373,20 +2393,24 @@ function buildHelperToolExecutionContext(
   runId: string,
   stepIndex: number,
   correlationId?: string,
+  callerUser?: GenerateTextOptions['_callerUser'],
 ): ToolExecutionContext {
   return {
     gmiId: `${source}:${runId}`,
     personaId: `${source}:persona`,
     userContext: {
-      userId: 'system',
+      // The session's user when an agent made the call; a direct call has none, and tools read `system` as no user.
+      userId: callerUser?.userId ?? 'system',
+      ...(callerUser ? { memorySubject: callerUser.subject } : {}),
       source,
     },
     correlationId: correlationId ?? `${source}:tool:${stepIndex + 1}:${randomUUID()}`,
     sessionData: {
-      sessionId: `${source}:${runId}`,
+      sessionId: callerUser?.sessionId ?? `${source}:${runId}`,
       source,
       stepIndex,
     },
+    ...(callerUser?.providerUserId !== undefined ? { callerTurn: { providerUserId: callerUser.providerUserId } } : {}),
   };
 }
 
@@ -3458,6 +3482,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
                     helperToolRunId,
                     runStep,
                     tcId || undefined,
+                    opts._callerUser,
                   ),
                 );
                 // One masked output serves the record and the tool turn: the

@@ -231,6 +231,22 @@ export type FormattedPrompt =
     };
 
 /**
+ * The conversation history a prompt left out to fit its token budget: the
+ * oldest messages before the turn being answered, dropped with no summary in
+ * their place. The caller's history still holds them.
+ */
+export interface PromptHistoryOmission {
+  /** How many history messages the prompt left out. */
+  messages: number;
+  /**
+   * Their tokens as the prompt engine's budget counts them (the content, any
+   * thinking the model would receive, and five tokens a message), an estimate
+   * rather than the provider's count.
+   */
+  tokens: number;
+}
+
+/**
  * Comprehensive result object returned by prompt construction, containing
  * the formatted prompt, metadata, issues encountered, and optimization information.
  * @interface PromptEngineResult
@@ -265,6 +281,12 @@ export interface PromptEngineResult {
     summarizedComponents?: string[]; // List of component names that were summarized
     removedComponents?: string[]; // List of components entirely removed
     addedContextualElementIds?: string[]; // IDs of contextual elements incorporated
+    /**
+     * The history messages the prompt left out with no summary in their place,
+     * when it left any out; a history the utility AI summarized is listed in
+     * `summarizedComponents` instead.
+     */
+    historyOmitted?: PromptHistoryOmission;
   };
   /** Performance metrics and metadata related to the prompt construction process. */
   metadata: {

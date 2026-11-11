@@ -39,9 +39,19 @@ afterEach(() => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-/** The text of every system message one model call was sent. */
-const systemTexts = (call: ProviderScript['seen'][number]) =>
-  call.messages.filter((m) => m.role === 'system').map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content)));
+/** The recalled lines of one model call, rebuilt from its recall block as the provider's lines read: label, then text. */
+const recallLines = (call: ProviderScript['seen'][number]): string[] => {
+  const message = call.messages.find((m) => m.role === 'user' && typeof m.content === 'string' && m.content.startsWith('<memory_recall>'));
+  if (!message) return [];
+  const { items } = JSON.parse((message.content as unknown as string).slice('<memory_recall>'.length, -'</memory_recall>'.length)) as {
+    items: Array<{ speaker?: string; page?: string; when?: string; text: string }>;
+  };
+  return items.map((item) => {
+    const who = item.speaker === 'note' && item.page ? `note ${item.page}` : item.speaker;
+    const label = item.when ? `[${who ? `${who}, ` : ''}${item.when}] ` : '';
+    return `${label}${item.text.replaceAll('^', ' ')}`;
+  });
+};
 
 describe('a soul given optional: true that fails to load', () => {
   const logged: Record<string, unknown>[] = [];
@@ -95,7 +105,9 @@ describe("souledAgent()'s recall", () => {
     } finally {
       await a.close();
     }
-    return systemTexts(s.seen[0]).find((text) => text.includes(marker));
+    // The recall block's lines, rebuilt label and text; none when nothing was recalled.
+    const lines = recallLines(s.seen[0]);
+    return lines.some((line) => line.includes(marker)) ? lines.join('\n') : undefined;
   }
 
   it('keeps the block to a 500-token budget, in whole traces', async () => {

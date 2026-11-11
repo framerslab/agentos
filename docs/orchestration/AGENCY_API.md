@@ -1124,7 +1124,7 @@ roster, and a member can carry a `soul` file the same way.
 import { agent, agency, type AgentMemoryProvider } from '@framers/agentos';
 
 const myMemory: AgentMemoryProvider = {
-  getContext: async (text) => ({ contextText: await lookupNotes(text) }),   // injected as a system message before the call
+  getContext: async (text) => ({ contextText: await lookupNotes(text) }),   // sent as a data block before the turn's message
   observe: async (turn) => { await saveNotes(turn); },                       // runs after the reply
 };
 
