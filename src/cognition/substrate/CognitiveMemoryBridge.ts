@@ -102,7 +102,8 @@ export function captureForHop(capture: MemoryRecallCapture, budget: EffectiveRec
 
 /**
  * The capture of a hop that was sent no memory block because rendering it again for the hop failed: the turn's
- * candidates, each included one left out for the budget, and no tokens used.
+ * candidates, each included one left out with the reason `render_failed`, no tokens used, and the budget marked
+ * `renderFailed` (never `reassembled`, since no block was rendered).
  *
  * @param capture - The capture of the turn's first rendering.
  * @param budget - The hop's budget.
@@ -110,11 +111,13 @@ export function captureForHop(capture: MemoryRecallCapture, budget: EffectiveRec
  * @returns A new capture; `capture` is not changed.
  */
 export function captureWithoutBlock(capture: MemoryRecallCapture, budget: EffectiveRecallBudget, hop: number): MemoryRecallCapture {
+  const stamped = captureForHop(capture, budget, hop, false);
   return {
-    ...captureForHop(capture, budget, hop, true),
+    ...stamped,
+    budget: { ...stamped.budget, renderFailed: true },
     tokensUsed: 0,
     candidates: capture.candidates.map((candidate) =>
-      candidate.outcome === 'included' ? { ...candidate, outcome: 'left_out' as const, reason: 'budget' as const } : candidate,
+      candidate.outcome === 'included' ? { ...candidate, outcome: 'left_out' as const, reason: 'render_failed' as const } : candidate,
     ),
   };
 }
@@ -439,8 +442,8 @@ export class CognitiveMemoryBridge {
    * The memory block for one model hop of a turn. `context` is the turn's first rendering ({@link assembleContext}),
    * which is never changed. A hop whose budget holds it gets a copy whose capture names the hop; a hop whose budget is
    * smaller gets the block rendered again at `budget.effective`, through the manager's `reassembleForBudget` (no
-   * retrieval, no embedding call), else through `assembleForPrompt` again at that budget with the turn's query and
-   * scopes. A budget whose inputs were not valid leaves the block as it is, with one
+   * retrieval, no embedding call), else, for a manager without that method, through `assembleForPrompt` again at that
+   * budget with the turn's query and scopes. A `reassembleForBudget` that rejects is not followed by a second recall. A budget whose inputs were not valid leaves the block as it is, with one
    * `memory.recall.budget_clamped` line (`invalid`); a clamp writes one (`prompt_share` or `zero_remaining`), and a
    * budget of 0 also one `memory.recall.allocation_exhausted`.
    *
@@ -469,11 +472,12 @@ export class CognitiveMemoryBridge {
       });
     }
     try {
-      let next: AssembledMemoryContext | undefined;
+      let next: AssembledMemoryContext;
       if (typeof this.cognitiveMemory.reassembleForBudget === 'function') {
-        next = await this.cognitiveMemory.reassembleForBudget(context, budget.effective).catch(() => undefined);
-      }
-      if (!next) {
+        // A re-render that rejects sends the hop no block (the catch below): it never starts a second recall, which
+        // would embed and retrieve again and could change the hop's candidates.
+        next = await this.cognitiveMemory.reassembleForBudget(context, budget.effective);
+      } else {
         const turn = this.turns.get(context);
         if (!turn) return null;
         next = await this.cognitiveMemory.assembleForPrompt(turn.query, budget.effective, this.getPadState(), { scopes: turn.scopes });

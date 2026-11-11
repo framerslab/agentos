@@ -2025,9 +2025,16 @@ export class GMI implements IGMI {
               ? hopMemoryContext.capture
               : assembledMemoryContext.capture && captureWithoutBlock(assembledMemoryContext.capture, hopBudget, hop);
           }
+          // An engine that reads `memoryContextText` takes the block on its own; any other (a host's own IPromptEngine)
+          // takes it joined in front of the other retrieved context, as before the field existed, so it is still sent.
+          const hopMemoryText = hopMemoryContext?.contextText;
           const hopComponents: PromptComponents = {
             ...promptComponents,
-            ...(hopMemoryContext?.contextText ? { memoryContextText: hopMemoryContext.contextText } : {}),
+            ...(hopMemoryText
+              ? this.promptEngine.acceptsMemoryContextText === true
+                ? { memoryContextText: hopMemoryText }
+                : { retrievedContext: [hopMemoryText, promptComponents.retrievedContext].filter(Boolean).join("\n\n---\n\n") }
+              : {}),
             ...(hopMemoryContext ? { assembledMemoryContext: hopMemoryContext } : {}),
           };
 

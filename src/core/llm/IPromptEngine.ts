@@ -154,6 +154,8 @@ export interface PromptComponents {
    * PromptEngine counts it into the prompt's tokens and never summarises or truncates it; when the prompt must be
    * reduced, only `retrievedContext` is. After the budget step it is placed before `retrievedContext`, joined to it
    * with `\n\n---\n\n` (as the first entry, with `source: 'cognitive_memory'`, when `retrievedContext` is a list).
+   * The GMI sets it only on an engine whose `acceptsMemoryContextText` is true; on any other it joins the block in
+   * front of `retrievedContext`.
    */
   memoryContextText?: string;
   /** Assembled cognitive memory context (personality-affected, token-budgeted). Not read by PromptEngine: the GMI passes its text as `memoryContextText`. */
@@ -491,6 +493,14 @@ export interface IPromptEngineUtilityAI {
  * @interface IPromptEngine
  */
 export interface IPromptEngine {
+  /**
+   * True when the engine reads `PromptComponents.memoryContextText`, as PromptEngine does. The GMI hands the memory
+   * block to such an engine on its own, and to an engine without this flag joined in front of `retrievedContext`
+   * with `\n\n---\n\n`, as it did before the field existed, so an engine that reads only `retrievedContext` still
+   * sends the block.
+   */
+  readonly acceptsMemoryContextText?: boolean;
+
   /**
    * Initializes the PromptEngine with its configuration and an optional utility AI service.
    * This method must be called successfully before any prompt construction.

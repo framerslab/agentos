@@ -116,7 +116,22 @@ interface EngineStatisticsInternal {
  * @class PromptEngine
  * @implements {IPromptEngine}
  */
+/**
+ * The memory block as the prompt sends it: beside a list of retrieved context it is the list's first entry, which the
+ * chat template renders with its `Source:` and `Content:` labels, so the labels are counted with it.
+ *
+ * @param memory - The memory block (`memoryContextText`).
+ * @param retrievedContext - The other retrieved context it is sent beside.
+ * @returns The text to count for the block.
+ */
+function memoryTextAsSent(memory: string, retrievedContext: PromptComponents['retrievedContext']): string {
+  if (!Array.isArray(retrievedContext)) return memory;
+  return `Source: cognitive_memory\nContent: ${memory}${retrievedContext.length > 0 ? '\n\n' : ''}`;
+}
+
 export class PromptEngine implements IPromptEngine {
+  /** PromptEngine reads `memoryContextText`: it counts the memory block and never reduces it. */
+  public readonly acceptsMemoryContextText = true;
   private config!: Readonly<PromptEngineConfig>;
   private utilityAI?: IPromptEngineUtilityAI;
   private isInitialized: boolean = false;
@@ -909,7 +924,9 @@ export class PromptEngine implements IPromptEngine {
 
     // The memory block counts against the rag share and is never reduced: what the share must lose comes from the
     // other retrieved context alone.
-    const memoryTokens = optimized.memoryContextText ? await this.estimateTokenCount(optimized.memoryContextText, modelInfo.modelId) : 0;
+    const memoryTokens = optimized.memoryContextText
+      ? await this.estimateTokenCount(memoryTextAsSent(optimized.memoryContextText, optimized.retrievedContext), modelInfo.modelId)
+      : 0;
     let otherBefore = 0;
     let otherAfter = 0;
     if (optimized.retrievedContext) {
@@ -920,37 +937,40 @@ export class PromptEngine implements IPromptEngine {
         // What the other context may keep: the share less the memory block, less the overrun when the prompt is over
         // its budget.
         const target = Math.max(0, Math.floor(budgets.rag - memoryTokens - Math.max(0, currentTokens - budget)));
-        const truncate = (): void => {
-          optimized.retrievedContext = ragTokens > 0 ? contextStr.substring(0, Math.floor(contextStr.length * (target / ragTokens))) : '';
-          modifications.details!.truncatedComponents!.push('retrievedContext');
-        };
-        if (target === 0) {
-          optimized.retrievedContext = '';
-          modifications.details!.removedComponents!.push('retrievedContext');
-        } else if (this.utilityAI) {
-          try {
-            const { summary } = await this.utilityAI.summarizeRAGContext(
-              optimized.retrievedContext,
-              target,
-              modelInfo,
-              this.config.contextManagement.preserveSourceAttributionInSummary
-            );
-            optimized.retrievedContext = summary;
-            modifications.details!.summarizedComponents!.push('retrievedContext');
-          } catch(e){
-            issues?.push({type: 'warning', code: 'RAG_SUMMARIZATION_FAILED', message: `RAG summarization failed: ${e instanceof Error ? e.message : String(e)}`});
+        // A target the other context already fits leaves it as it is: nothing is cut, summarised or reported cut.
+        if (target < ragTokens) {
+          const truncate = (): void => {
+            optimized.retrievedContext = ragTokens > 0 ? contextStr.substring(0, Math.floor(contextStr.length * (target / ragTokens))) : '';
+            modifications.details!.truncatedComponents!.push('retrievedContext');
+          };
+          if (target === 0) {
+            optimized.retrievedContext = '';
+            modifications.details!.removedComponents!.push('retrievedContext');
+          } else if (this.utilityAI) {
+            try {
+              const { summary } = await this.utilityAI.summarizeRAGContext(
+                optimized.retrievedContext,
+                target,
+                modelInfo,
+                this.config.contextManagement.preserveSourceAttributionInSummary
+              );
+              optimized.retrievedContext = summary;
+              modifications.details!.summarizedComponents!.push('retrievedContext');
+            } catch(e){
+              issues?.push({type: 'warning', code: 'RAG_SUMMARIZATION_FAILED', message: `RAG summarization failed: ${e instanceof Error ? e.message : String(e)}`});
+              truncate();
+            }
+          } else {
             truncate();
           }
-        } else {
-          truncate();
+          modifications.wasModified = true;
+          const reduced = optimized.retrievedContext;
+          const newRagTokens = reduced
+            ? await this.estimateTokenCount(typeof reduced === 'string' ? reduced : reduced.map(r => r.content).join('\n'), modelInfo.modelId)
+            : 0;
+          currentTokens = currentTokens - ragTokens + newRagTokens;
+          ragTokens = newRagTokens;
         }
-        modifications.wasModified = true;
-        const reduced = optimized.retrievedContext;
-        const newRagTokens = reduced
-          ? await this.estimateTokenCount(typeof reduced === 'string' ? reduced : reduced.map(r => r.content).join('\n'), modelInfo.modelId)
-          : 0;
-        currentTokens = currentTokens - ragTokens + newRagTokens;
-        ragTokens = newRagTokens;
       }
       otherAfter = ragTokens;
     }
@@ -970,7 +990,7 @@ export class PromptEngine implements IPromptEngine {
     let total = 0;
     if(components.systemPrompts) total += (await Promise.all(components.systemPrompts.map(sp => this.estimateTokenCount(sp.content, modelId)))).reduce((a,b) => a+b, 0);
     if(components.userInput) total += await this.estimateTokenCount(components.userInput, modelId);
-    if(components.memoryContextText) total += await this.estimateTokenCount(components.memoryContextText, modelId);
+    if(components.memoryContextText) total += await this.estimateTokenCount(memoryTextAsSent(components.memoryContextText, components.retrievedContext), modelId);
     if(components.conversationHistory) total += await this.calculateTokensForMessages(components.conversationHistory, modelId, sendsThinking);
     if(components.retrievedContext) {
       const contextStr = typeof components.retrievedContext === 'string' ? components.retrievedContext : components.retrievedContext.map(r => r.content).join('\n');

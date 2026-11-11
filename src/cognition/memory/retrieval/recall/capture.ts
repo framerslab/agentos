@@ -52,9 +52,11 @@ export interface MemoryRecallCandidate {
    * Set for a candidate left out, and only then: `budget` when its section was
    * offered no room (or the candidate never reached a section), `section_full`
    * when it did not fit whole in the room its section was offered, `dedupe`
-   * when another candidate holds the same memory (`duplicateOf`).
+   * when another candidate holds the same memory (`duplicateOf`), and
+   * `render_failed` on a GMI hop that was sent no block because rendering it
+   * again for the hop failed (`budget.renderFailed`).
    */
-  reason?: 'budget' | 'dedupe' | 'section_full';
+  reason?: 'budget' | 'dedupe' | 'section_full' | 'render_failed';
   /** The candidate it duplicates, with `reason: 'dedupe'`. */
   duplicateOf?: string;
   /** Whether a memory-question reserve added it. */
@@ -108,6 +110,8 @@ export interface MemoryRecallCapture {
     hop?: number;
     /** True when the block was rendered again at `effective` from the turn's recall, with no second retrieval. */
     reassembled?: boolean;
+    /** True when rendering the block again for the hop failed, so the hop was sent no block (a GMI turn's record). */
+    renderFailed?: boolean;
   };
   /** Estimated tokens of the block, headers included. */
   tokensUsed: number;
