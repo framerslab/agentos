@@ -5,6 +5,7 @@
  *
  * @module agentos/cognition/memory/retrieval/recall/legs/exactWords
  */
+import type { MemoryTrace } from '../../../core/types.js';
 import type { Brain } from '../../store/Brain.js';
 import type { MemoryStore } from '../../store/MemoryStore.js';
 import { bindingsFor, buildNaturalLanguageFtsQuery } from '../../store/tracePersistence.js';
@@ -91,7 +92,7 @@ export async function eligibleTracesOf(
   store: MemoryStore,
   ids: readonly string[],
   q: LegQuery,
-): Promise<{ traces: import('../../../core/types.js').MemoryTrace[]; ineligible: number } | 'query_error'> {
+): Promise<{ traces: MemoryTrace[]; ineligible: number } | 'query_error'> {
   if (ids.length === 0) return { traces: [], ineligible: 0 };
   const { traces: loaded, unread } = await store.loadTracesForRecall(ids);
   if (unread > 0 && loaded.size === 0) return 'query_error';
@@ -100,13 +101,57 @@ export async function eligibleTracesOf(
   return { traces: eligible, ineligible: found.length - eligible.length };
 }
 
+/** How many pages of `limit` rows a durable leg reads, at most, to fill its limit with traces the gate passes. */
+export const MAX_GATED_PAGES = 4;
+
+/**
+ * Reads a durable leg's rows a page of `q.limit` at a time, in the query's order, and keeps the traces the eligibility
+ * gate passes, until the limit is filled, the rows run out, or {@link MAX_GATED_PAGES} pages are read. Scope, type and
+ * time are in the query; confidence and the trust policy live in a row's metadata, so a page's rows can fail them, and
+ * the rows after them stand in. `ineligible` counts every row the gate dropped. A first page that fails is the leg's
+ * failure; a later one ends the read with what the pages before it found.
+ *
+ * @param page - Reads `size` ids from `offset` in the leg's order.
+ */
+export async function readGatedPages(
+  store: MemoryStore,
+  q: LegQuery,
+  page: (offset: number, size: number) => Promise<string[]>,
+): Promise<{ traces: MemoryTrace[]; ineligible: number } | 'query_error'> {
+  const traces: MemoryTrace[] = [];
+  const seen = new Set<string>();
+  let ineligible = 0;
+  let offset = 0;
+  for (let read = 0; read < MAX_GATED_PAGES && traces.length < q.limit; read += 1) {
+    let ids: string[];
+    try {
+      ids = await page(offset, q.limit);
+    } catch (error) {
+      if (read === 0) throw error;
+      break;
+    }
+    offset += ids.length;
+    const fresh = ids.filter((id) => !seen.has(id));
+    for (const id of fresh) seen.add(id);
+    const gated = await eligibleTracesOf(store, fresh, q);
+    if (gated === 'query_error') {
+      if (read === 0) return 'query_error';
+      break;
+    }
+    traces.push(...gated.traces);
+    ineligible += gated.ineligible;
+    if (ids.length < q.limit) break;
+  }
+  return { traces: traces.slice(0, q.limit), ineligible };
+}
+
 /**
  * The exact-words leg: the traces of the turn's scopes whose content or tags hold the turn's words, best match first.
  * A store with a Brain reads the Brain's full-text index through the adapter's engine-neutral query, with the scopes,
- * types and time written into the query before its limit, and the rest of the eligibility gate (confidence, trust
- * policy) run on the rows the limit returned, as the dense leg runs its trust-policy check after its cut. A store
- * without one reads the in-process index and runs the whole gate on every match before the limit. Never throws: an
- * absent or failing index answers `ran: false` with the reason.
+ * types and time written into the query; the rest of the eligibility gate (confidence, trust policy) runs on each
+ * page of rows, and the rows after a page stand in for the ones it drops ({@link readGatedPages}). A store without
+ * one reads the in-process index and runs the whole gate on every match before the limit. Never throws: an absent or
+ * failing index answers `ran: false` with the reason.
  *
  * @param deps - The store, and the in-process index for a store with no Brain.
  * @param q - The turn's text, scopes and filters, and the leg's limit.
@@ -124,7 +169,6 @@ export async function exactWordsLeg(deps: { store: MemoryStore; lexical: ScopedL
   if (q.scopes.length === 0 || q.limit <= 0) return answer({});
   try {
     const brain = deps.store.getBrain();
-    let ids: string[];
     if (brain) {
       const index = await probeIndex(brain);
       if (index !== 'ok') return answer({ ran: false, reason: index });
@@ -133,25 +177,28 @@ export async function exactWordsLeg(deps: { store: MemoryStore; lexical: ScopedL
       const { fts } = brain.features;
       const order = fts.relevanceOrder('memory_traces_fts', '?');
       const filter = scopeAndFilterSql(q);
-      const rows = await brain.all<{ id: string }>(
-        `SELECT mt.id FROM ${fts.joinClause('memory_traces', 'mt', 'memory_traces_fts', 'memory_traces_fts')}
-          WHERE ${fts.matchClause('memory_traces_fts', '?')} AND mt.deleted = 0 AND mt.brain_id = ? AND ${filter.sql}
-          ORDER BY ${order} LIMIT ?`,
-        [words, brain.brainId, ...filter.params, ...bindingsFor(order, words), q.limit],
+      // Equal relevance by id, so each page continues the one before it.
+      const gated = await readGatedPages(deps.store, q, async (offset, size) =>
+        (
+          await brain.all<{ id: string }>(
+            `SELECT mt.id FROM ${fts.joinClause('memory_traces', 'mt', 'memory_traces_fts', 'memory_traces_fts')}
+              WHERE ${fts.matchClause('memory_traces_fts', '?')} AND mt.deleted = 0 AND mt.brain_id = ? AND ${filter.sql}
+              ORDER BY ${order}, mt.id ASC LIMIT ? OFFSET ?`,
+            [words, brain.brainId, ...filter.params, ...bindingsFor(order, words), size, offset],
+          )
+        ).map((row) => row.id),
       );
-      ids = rows.map((row) => row.id);
-    } else if (deps.lexical) {
+      return gated === 'query_error' ? answer({ ran: false, reason: 'query_error' }) : answer(gated);
+    }
+    if (deps.lexical) {
       // In process every match is at hand: the gate runs on all of them before the limit, as the in-process recency
       // leg's does, so a better match the gate drops takes no slot.
       const matches = deps.lexical.search(q.query, q.scopes, Number.POSITIVE_INFINITY).map((hit) => hit.id);
       const gated = await eligibleTracesOf(deps.store, matches, q);
       if (gated === 'query_error') return answer({ ran: false, reason: 'query_error' });
       return answer({ traces: gated.traces.slice(0, q.limit), ineligible: gated.ineligible });
-    } else {
-      return answer({ ran: false, reason: 'no_store' });
     }
-    const eligible = await eligibleTracesOf(deps.store, ids, q);
-    return eligible === 'query_error' ? answer({ ran: false, reason: 'query_error' }) : answer(eligible);
+    return answer({ ran: false, reason: 'no_store' });
   } catch {
     return answer({ ran: false, reason: 'query_error' });
   }

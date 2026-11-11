@@ -200,6 +200,10 @@ A memory search that finds traces outside the vector index, such as a full-text 
 ```typescript
 const { traces, unread } = await store.loadTracesForRecall(['mt_7', 'mt_9']);
 
+// The listener reports what changes after it is added: seed the index with what the store holds first.
+for (const trace of store.listTraces({ activeOnly: true })) {
+  if (!store.isDeleted(trace.id)) index.add(trace.id, trace.content);
+}
 const stop = store.addTraceListener((event) => {
   if (event.kind === 'filed') index.add(event.trace.id, event.trace.content);
   else index.remove(event.traceId);
