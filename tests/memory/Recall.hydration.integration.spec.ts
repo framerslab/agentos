@@ -1,9 +1,10 @@
 /**
  * @fileoverview `MemoryStore.loadTracesForRecall`, the by-id load a recall leg reads its candidates through: a trace
  * another store wrote after this one hydrated is found, a row with no vector is returned for the call without being
- * cached, a deleted trace comes back from nothing, a failed read is counted and never thrown, and a trace's trust
- * policy survives the Brain, so the eligibility gate reads it on a trace loaded from a row. SQLite on every run,
- * Postgres where the `test` job's service is set.
+ * cached, a deleted trace comes back from nothing, a cached trace is checked against its row as a vector query checks
+ * its hits, a failed read returns nothing and is counted, never thrown, and a trace's trust policy survives the Brain,
+ * so the eligibility gate reads it on a trace loaded from a row. SQLite on every run, Postgres where the `test` job's
+ * service is set.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -15,11 +16,11 @@ const NOW = Date.UTC(2026, 10, 10);
 const NEUTRAL = { valence: 0, arousal: 0, dominance: 0 };
 
 /** Writes a row with no embedding, as an older release or another writer may hold one, and indexes its words. */
-async function insertVectorlessRow(brain: Brain, id: string, content: string, at: number): Promise<void> {
+async function insertVectorlessRow(brain: Brain, id: string, content: string, at: number, metadata = '{"scopeId":"u1"}'): Promise<void> {
   await brain.run(
     `INSERT INTO memory_traces (brain_id, id, type, scope, content, embedding, strength, created_at, last_accessed, retrieval_count, tags, emotions, metadata, deleted, scope_id)
-     VALUES (?, ?, 'semantic', 'user', ?, NULL, 0.5, ?, ?, 0, '[]', '{}', '{"scopeId":"u1"}', 0, 'u1')`,
-    [brain.brainId, id, content, at, at],
+     VALUES (?, ?, 'semantic', 'user', ?, NULL, 0.5, ?, ?, 0, '[]', '{}', ?, 0, 'u1')`,
+    [brain.brainId, id, content, at, at, metadata],
   );
   const rebuild = brain.fullTextRebuild();
   await brain.run(rebuild.sql, rebuild.params as never);
@@ -54,13 +55,14 @@ describe.each(ENGINES)('loadTracesForRecall on %s', (_engine, open) => {
     await db.close();
   });
 
-  it('a trace deleted before its load is returned by nothing, and a failed read is counted, never thrown', async () => {
+  it('a trace deleted before its load is returned by nothing, and a failed read returns nothing and is counted, never thrown', async () => {
     const db = await open();
     const store = await storeOver(db.brain, new FlatEmbedder());
     const other = await storeOver(await db.reopen(), new FlatEmbedder());
     await other.store(trace('gone', 'The locker code is 4471.'));
     await other.deleteTraces(['gone']);
     expect((await store.loadTracesForRecall(['gone'])).traces.size).toBe(0);
+    await store.store(trace('cached', 'The ferry leaves from pier 3.'));
     const broken = new Proxy(db.brain, {
       get: (target, property) =>
         property === 'all'
@@ -71,8 +73,80 @@ describe.each(ENGINES)('loadTracesForRecall on %s', (_engine, open) => {
     });
     (store as unknown as { brain: Brain }).brain = broken;
     await expect(store.loadTracesForRecall(['q1', 'q2'])).resolves.toEqual({ traces: new Map(), unread: 2 });
+    // A cached trace is not returned unchecked: with its row unread, it is counted with the rest.
+    await expect(store.loadTracesForRecall(['cached', 'q1', 'cached'])).resolves.toEqual({ traces: new Map(), unread: 2 });
     store.dispose();
     other.dispose();
+    await db.close();
+  });
+
+  it('a cached trace whose row another process deleted or moved since is left out', async () => {
+    const db = await open();
+    const store = await storeOver(db.brain, new FlatEmbedder());
+    await store.store(trace('gone', 'The locker code is 4471.'));
+    await store.store(trace('moved', 'The locker key is under the mat.'));
+    await store.store(trace('kept', 'The locker is on the east side.'));
+    // Another process writes the rows: nothing reaches this store's cache or its namespace.
+    await db.brain.run('UPDATE memory_traces SET deleted = 1 WHERE brain_id = ? AND id = ?', [db.brain.brainId, 'gone']);
+    const row = await db.brain.get<{ metadata: string }>('SELECT metadata FROM memory_traces WHERE brain_id = ? AND id = ?', [db.brain.brainId, 'moved']);
+    await db.brain.run('UPDATE memory_traces SET scope_id = ?, metadata = ? WHERE brain_id = ? AND id = ?', [
+      'u2',
+      JSON.stringify({ ...JSON.parse(row!.metadata), scopeId: 'u2' }),
+      db.brain.brainId,
+      'moved',
+    ]);
+    expect(store.getTrace('gone')).toBeDefined();
+    expect(store.getTrace('moved')).toMatchObject({ scopeId: 'u1' });
+
+    const { traces, unread } = await store.loadTracesForRecall(['gone', 'moved', 'kept']);
+    expect(unread).toBe(0);
+    expect([...traces.keys()]).toEqual(['kept']);
+    const leg = await exactWordsLeg({ store, lexical: null }, { query: 'locker', scopes: U1, limit: 60, now: NOW });
+    expect(leg.traces.map((t) => t.id)).toEqual(['kept']);
+    store.dispose();
+    await db.close();
+  });
+
+  it('a row with no vector that a move refiles between its read and its load is returned as the Brain holds it after the move', async () => {
+    const db = await open();
+    const store = await storeOver(db.brain, new FlatEmbedder());
+    await insertVectorlessRow(db.brain, 'moving', 'The locker key is under the mat.', Date.UTC(2026, 10, 2));
+    let moving = false;
+    let movedCount: number | undefined;
+    (store as unknown as { brain: Brain }).brain = new Proxy(db.brain, {
+      get: (target, property) =>
+        property === 'all'
+          ? async (sql: string, params?: unknown[]) => {
+              const rows = await target.all(sql, params as never);
+              // The move runs once the load has read the rows, before it files them.
+              if (!moving && sql.includes('id IN')) {
+                moving = true;
+                movedCount = await store.refileScope('user', 'u1', 'u2');
+              }
+              return rows;
+            }
+          : Reflect.get(target, property, target),
+    });
+
+    const { traces, unread } = await store.loadTracesForRecall(['moving']);
+    expect(movedCount).toBe(1);
+    expect(unread).toBe(0);
+    expect(traces.get('moving')).toMatchObject({ scope: 'user', scopeId: 'u2' });
+    expect(isEligibleForRecall(traces.get('moving')!, { scopes: U1, now: NOW })).toBe(false);
+    store.dispose();
+    await db.close();
+  });
+
+  it('a row that names its scope id in the scope_id column alone is read under that scope id', async () => {
+    const db = await open();
+    const store = await storeOver(db.brain, new FlatEmbedder());
+    await insertVectorlessRow(db.brain, 'column-only', 'The locker key is under the mat.', Date.UTC(2026, 10, 2), '{}');
+    const { traces } = await store.loadTracesForRecall(['column-only']);
+    expect(traces.get('column-only')).toMatchObject({ scope: 'user', scopeId: 'u1' });
+    const leg = await exactWordsLeg({ store, lexical: null }, { query: 'locker', scopes: U1, limit: 60, now: NOW });
+    expect(leg).toMatchObject({ ran: true, ineligible: 0 });
+    expect(leg.traces.map((t) => t.id)).toEqual(['column-only']);
+    store.dispose();
     await db.close();
   });
 

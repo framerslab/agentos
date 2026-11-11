@@ -173,6 +173,31 @@ describe('in process (no Brain)', () => {
     lexical.dispose();
     store.dispose();
   });
+
+  it('the index follows a trace refileScope moves to another scope', async () => {
+    const store = await storeOver(null, new FlatEmbedder());
+    await store.store(trace('mover', 'The locker code is 4471.'));
+    const lexical = new ScopedLexicalIndex(store);
+    expect(await store.refileScope('user', 'u1', 'u2')).toBe(1);
+    const leg = (scopeId: string) => exactWordsLeg({ store, lexical }, ask('locker code', { scopes: [{ scope: 'user', scopeId }] }));
+    expect((await leg('u2')).traces.map((t) => t.id)).toEqual(['mover']);
+    // The old scope's index no longer holds it: no match, so nothing for the gate to drop.
+    expect(await leg('u1')).toMatchObject({ traces: [], ineligible: 0 });
+    lexical.dispose();
+    store.dispose();
+  });
+
+  it('in process the gate runs on every match before the limit, so a better match the gate drops takes no slot', async () => {
+    const store = await storeOver(null, new FlatEmbedder());
+    await store.store(trace('episode', 'Locker code, locker code, locker code.', { type: 'episodic' }));
+    await store.store(trace('fact', 'The locker code is 4471.'));
+    const lexical = new ScopedLexicalIndex(store);
+    const leg = await exactWordsLeg({ store, lexical }, ask('locker code', { limit: 1, types: ['semantic'] }));
+    expect(leg.traces.map((t) => t.id)).toEqual(['fact']);
+    expect(leg.ineligible).toBe(1);
+    lexical.dispose();
+    store.dispose();
+  });
 });
 
 describe('isEligibleForRecall', () => {
