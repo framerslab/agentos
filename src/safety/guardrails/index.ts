@@ -100,6 +100,9 @@ export {
 } from './contentModeration';
 export { assertModerationContext, type ModerationContext, type ModerationSurface } from './ModerationContext';
 
+// Text a person wrote, framed so a model reads it as data
+export { UNTRUSTED_EVIDENCE_NOTICE, frameUntrustedEvidence, type FramedEvidence } from './untrustedEvidence';
+
 // Two-phase parallel guardrail dispatcher
 export { ParallelGuardrailDispatcher, type GuardrailToolCallVerdict } from './ParallelGuardrailDispatcher';
 
