@@ -312,15 +312,20 @@ export class CallManager {
    * the manager. This repairs transitions in process and adds no restart
    * durability; see {@link processWebhookDurable}. Otherwise the original
    * handling below applies.
+   *
+   * In either handling, the first `notify-message-spoken` event for a notify
+   * call hangs it up as {@link hangupCall} does, without waiting for it.
    */
   processNormalizedEvent(event: NormalizedCallEvent): void {
     if (this.config.eventHandling === 'carrier') {
       const call = [...this.activeCalls.values()].find((candidate) => (!event.provider || candidate.provider === event.provider) && (candidate.providerCallId === event.providerCallId || (event.providerRequestId !== undefined && candidate.providerRequestId === event.providerRequestId)));
       if (!call) return;
       this.bindCarrierIdentity(call, event);
+      const spoken = this.isNotifyMessageSpoken(call, event);
       const notifications = this.applyCarrierEvent(call, event);
       for (const notification of notifications) this.emit(notification);
       if (notifications.some((notification) => notification.type === 'call:answered')) this.setUpAnsweredCall(call);
+      if (spoken) this.hangUpSpokenNotifyCall(call.callId);
       return;
     }
     // Idempotency check
@@ -457,6 +462,11 @@ export class CallManager {
           data: { digit: event.digit, durationMs: event.durationMs },
         });
         break;
+
+      case 'notify-message-spoken':
+        // The carrier has spoken a notify call's message to the end: the call has done its work.
+        if (call.mode === 'notify') this.hangUpSpokenNotifyCall(call.callId);
+        break;
     }
   }
 
@@ -517,6 +527,8 @@ export class CallManager {
    * commit and are best-effort; financial/external effects must consume durable records, not handlers.
    * A call's bot speech not yet committed commits first, and the manager's record of each call becomes the
    * committed one with the speech recorded since on top; the manager's store transactions run one at a time.
+   * A `notify-message-spoken` event counts as applied, and after the commit its notify call hangs up as
+   * {@link hangupCall} does, in a store transaction of its own that the returned promise does not wait for.
    */
   async processWebhookDurable(providerName: VoiceProviderName, context: WebhookContext, store: ITelephonyCallStore): Promise<{ accepted: boolean; applied: number }> {
     const provider = this.providers.get(providerName);
@@ -525,21 +537,24 @@ export class CallManager {
     const events = provider.parseWebhookEvent(context).events;
     return this.durable(async () => {
       const committed = await store.withProvider(providerName, async (tx) => {
-        const notifications: CallManagerEvent[] = []; const calls = new Map<string, CallRecord>(); const speech = new Map<string, TranscriptEntry[]>(); let applied = 0;
+        const notifications: CallManagerEvent[] = []; const calls = new Map<string, CallRecord>(); const speech = new Map<string, TranscriptEntry[]>(); const spoken: CallId[] = []; let applied = 0;
         for (const event of events) {
           if (event.provider !== providerName || !event.eventId.startsWith(`${providerName}:v1:`)) throw new Error('unstable carrier event');
           const call = await tx.find(event.providerCallId) ?? (event.providerRequestId ? await tx.find(`request:${event.providerRequestId}`) : undefined);
           if (!call) throw new Error('unknown carrier call');
           if (!speech.has(call.callId)) speech.set(call.callId, this.applyUnsavedSpeech(call));
           this.bindCarrierIdentity(call, event);
-          const changed = this.applyCarrierEvent(call, event); if (changed.length) applied += 1;
+          const ends = this.isNotifyMessageSpoken(call, event); if (ends) spoken.push(call.callId);
+          const changed = this.applyCarrierEvent(call, event); if (changed.length || ends) applied += 1;
           await tx.put(call); calls.set(call.callId, call); notifications.push(...changed);
         }
-        return { applied, notifications, calls: [...calls.values()], speech };
+        return { applied, notifications, calls: [...calls.values()], speech, spoken };
       });
       for (const call of committed.calls) this.refreshDurable(call, store, committed.speech.get(call.callId) ?? []);
       for (const event of committed.notifications) this.emit(event);
       for (const event of committed.notifications) if (event.type === 'call:answered') this.setUpAnsweredCall(event.call);
+      // Queued behind this transaction, not awaited inside it: the hangup commits its end in a transaction of its own.
+      for (const callId of committed.spoken) this.hangUpSpokenNotifyCall(callId);
       return { accepted: true, applied: committed.applied };
     });
   }
@@ -636,6 +651,24 @@ export class CallManager {
     } catch (err) {
       report(err);
     }
+  }
+
+  /**
+   * Whether a carrier event, not yet applied to the call, reports that the carrier has spoken the call's notify
+   * message to the end ({@link NormalizedCallEvent} `notify-message-spoken`). Read before the event is applied: a
+   * repeated event, or one for an ended call, is not new.
+   */
+  private isNotifyMessageSpoken(call: CallRecord, event: NormalizedCallEvent): boolean {
+    return event.kind === 'notify-message-spoken' && call.mode === 'notify' && !call.processedEventIds.includes(event.eventId) && !TERMINAL_CALL_STATES.has(call.state);
+  }
+
+  /**
+   * Hangs up a notify call whose message the carrier has spoken to the end, as {@link hangupCall} does: the call ends
+   * `hangup-bot`, committed to its store first when it has one, and `call:ended` follows the carrier request. It does
+   * not wait for the hangup: a failed one is written to the console.
+   */
+  private hangUpSpokenNotifyCall(callId: CallId): void {
+    this.hangupCall(callId).catch((err: unknown) => console.error('[CallManager] Hanging up the notify call failed:', err));
   }
 
   /** Asks the call's carrier to hang up. A failed request is written to the console; the call ends here regardless. */
