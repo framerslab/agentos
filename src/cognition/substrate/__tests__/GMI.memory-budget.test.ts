@@ -177,6 +177,24 @@ describe('GMI memory block on a small model', () => {
     expect(JSON.stringify(received[0])).toContain('How To Use Your Memories');
   });
 
+  it("a host's beforeModelCall that replaces the prompt is named in the record's delivery, whose counts are of the prompt PromptEngine built", async () => {
+    mem = await ferryMemory();
+    const { provider, received } = scriptedProvider([textReply('Pier 3.'), textReply('Pier 3.')]);
+    const replace = vi.fn(async ({ messages }: { messages: Array<{ role: string; content: unknown }> }) =>
+      messages.map((m) => (m.role === 'user' ? { ...m, content: 'Which pier does the island ferry leave from?' } : m)));
+    const { gmi } = await createScriptedGmi({ provider, config: { beforeModelCall: replace, cognitiveMemory: mem.manager.forSession(), llmProviderManager: smallWindowManager(provider, 128_000) } as never });
+    const { output } = await runTurn(gmi, textTurn('t1', 'Which pier does the island ferry leave from?'));
+    expect(replace).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(received[0])).not.toContain('How To Use Your Memories');
+    const capture = output.memoryRecall as MemoryRecallCapture;
+    expect(capture.delivery).toEqual({ memoryBlockTokens: expect.any(Number), promptReplacedByHook: true });
+
+    // A hook that returns nothing leaves the built prompt, and the record says nothing of a hook.
+    const { gmi: plain } = await createScriptedGmi({ provider, config: { beforeModelCall: async () => undefined, cognitiveMemory: mem.manager.forSession(), llmProviderManager: smallWindowManager(provider, 128_000) } as never });
+    const second = await runTurn(plain, textTurn('t2', 'Which pier does the island ferry leave from?'));
+    expect((second.output.memoryRecall as MemoryRecallCapture).delivery).toEqual({ memoryBlockTokens: expect.any(Number) });
+  });
+
   it('a model whose share holds the block takes the turn\'s first rendering: no re-render, the record names the hop', async () => {
     mem = await ferryMemory();
     const { provider, received } = scriptedProvider([textReply('Pier 3.')]);

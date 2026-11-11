@@ -174,6 +174,17 @@ describe('PromptEngine memoryContextText', () => {
     expect(JSON.stringify(r.prompt)).toContain(JSON.stringify(MEMORY).slice(1, -1));
   });
 
+  it.each(['anthropic_messages', 'generic_completion'])('the %s template sends the memory block and the other context in front of the query', async (template) => {
+    const model = { ...baseModelInfo, promptFormatType: template } as ModelTargetInfo;
+    const r = await build({ ...base, memoryContextText: MEMORY, retrievedContext: RAG_SHORT }, model);
+    expect(r.metadata.templateUsed).toBe(template);
+    const text = JSON.stringify(r.prompt);
+    expect(text).toContain(JSON.stringify(MEMORY).slice(1, -1));
+    expect(text).toContain(RAG_SHORT);
+    expect(text.indexOf('How To Use Your Memories')).toBeLessThan(text.indexOf(RAG_SHORT));
+    expect(text.indexOf(RAG_SHORT)).toBeLessThan(text.indexOf('When does the ferry leave?'));
+  });
+
   it('does not serve a prompt cached for another memory text', async () => {
     await build({ ...base, memoryContextText: 'The user prefers tea.' }, baseModelInfo);
     const second = await build({ ...base, memoryContextText: 'The user prefers coffee.' }, baseModelInfo);
