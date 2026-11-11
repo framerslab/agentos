@@ -555,9 +555,9 @@ export class CallManager {
    * committed one with the speech recorded since on top; the manager's store transactions run one at a time.
    * A `notify-message-spoken` event counts as applied and is not recorded as processed: after the commit, outside
    * the store queue, its notify call hangs up as {@link hangupCall} does, and the returned promise waits for that
-   * hangup and rejects with its error. A webhook acknowledged on that promise has had its hangup committed and asked
-   * of the carrier; one redelivered because the hangup did not commit (the worker stopped, or the commit failed)
-   * finds the call still open and hangs it up.
+   * hangup and rejects with its error, or when the manager was disposed before it. A webhook acknowledged on that
+   * promise has had its hangup committed and asked of the carrier; one redelivered because the hangup did not commit
+   * (the worker stopped, or the commit failed) finds the call still open and hangs it up.
    */
   async processWebhookDurable(providerName: VoiceProviderName, context: WebhookContext, store: ITelephonyCallStore): Promise<{ accepted: boolean; applied: number }> {
     const provider = this.providers.get(providerName);
@@ -586,7 +586,11 @@ export class CallManager {
       return { applied: committed.applied, spoken: committed.spoken };
     });
     // Outside the store queue: each hangup commits the call's end in a transaction of its own, then asks the carrier.
-    for (const callId of result.spoken) await this.hangupCall(callId);
+    for (const callId of result.spoken) {
+      // A disposed manager no longer holds the call and cannot hang it up: refuse the webhook so it is redelivered.
+      if (this.disposed) throw new Error('call manager disposed before the notify hangup');
+      await this.hangupCall(callId);
+    }
     return { accepted: true, applied: result.applied };
   }
   /** Runs `work` once this manager's earlier store transactions, and the refreshes after them, have finished. */
