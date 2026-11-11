@@ -82,6 +82,13 @@ interface GuardrailConfig {
   // Phase 2 guardrails that return SANITIZE are downgraded to FLAG.
   canSanitize?: boolean; // default: false
 
+  // When true, this guardrail runs in Phase 1 too, one at a time in
+  // registration order, though it does not sanitize. Its BLOCK ends the
+  // evaluation before any Phase 2 guardrail is called, so content it refuses
+  // never reaches a guardrail that calls a vendor. A SANITIZE it returns is
+  // applied only when canSanitize is also true; otherwise it is a FLAG.
+  sequential?: boolean; // default: false
+
   // Maximum time (ms) to wait for this guardrail's evaluation.
   // On timeout the evaluation is abandoned and a guardrail.failed event is
   // written; the guardrail is skipped (fail-open) unless failClosed is true.
@@ -89,6 +96,9 @@ interface GuardrailConfig {
   // SAFETY WARNING: Do NOT set timeoutMs on a safety-critical guardrail
   // (e.g., CSAM detection, compliance-mandatory filters) without failClosed,
   // because fail-open on timeout means content passes unchecked.
+  //
+  // Under moderateContent() a guardrail runs closed unless failClosed is
+  // false, with a deadline of 8 seconds when it names none.
   timeoutMs?: number; // default: undefined (wait indefinitely)
 
   // When true, an evaluation that throws or times out yields a BLOCK
@@ -96,13 +106,15 @@ interface GuardrailConfig {
   failClosed?: boolean; // default: false
 
   // Every reason code and review code this guardrail can answer: a closed
-  // list. A verdict line writes a code only when the deciding guard lists it
-  // here; a guard that lists none has its verdict lines written with unknown.
+  // list. The guardrail.verdict line writes a code only when the deciding
+  // guard lists it here (or the library made it for a closed guard's
+  // failure); a guard that lists none has its verdict lines written with
+  // unknown.
   reasonCodes?: readonly string[]; // default: undefined
 }
 ```
 
-A guard that answers codes declares them all in `reasonCodes`, for the log lines that name the code that decided: such a line writes a code supplied from outside the list (a model's answer, a vendor's label) as `unknown`. No line of this release writes a guard's code yet, so the list is a declaration to make now. `PhraseListGuardrail` lists the rule ids of the list it holds, and lists them again on each `reload()`.
+A guard that answers codes declares them all in `reasonCodes`, for the log lines that name the code that decided: such a line writes a code supplied from outside the list (a model's answer, a vendor's label) as `unknown`. `moderateContent()` writes one such line, `guardrail.verdict`, for each decision that is not a plain allow. `PhraseListGuardrail` lists the rule ids of the list it holds, and lists them again on each `reload()`.
 
 ### evaluateInput(payload)
 
@@ -124,6 +136,21 @@ interface GuardrailContext {
   conversationId?: string; // Conversation thread
   mode?: string; // Operating mode (e.g., 'debug', 'production')
   metadata?: Record<string, unknown>; // Arbitrary context for your policy logic
+  moderation?: ModerationContext; // Where the content appears and who wrote it
+  vendorSignal?: AbortSignal; // Set by moderateContent(): stop starting vendor requests once aborted
+}
+```
+
+`context.moderation` holds `surface`, `roomId`, `rating`, `messageId` and `sender` (`{ id, kind? }`) as words and ids, checked by `moderateContent()` before any guard runs; read `context.moderation?.rating` and its siblings instead of keys in `metadata`. A guard that calls a vendor reads `context.vendorSignal` before each request and starts none once it is aborted: `moderateContent()` aborts it the moment any guard answers a code the host listed in `stopVendorsOn`. A request already sent may finish and be answered as usual.
+
+```typescript
+async evaluateInput({ input, context }: GuardrailInputPayload) {
+  const scores: number[] = [];
+  for (const chunk of chunksOf(input.textInput ?? '')) {
+    if (context.vendorSignal?.aborted) break; // another guard already answered a code that stops vendor requests
+    scores.push(await vendor.classify(chunk, { signal: context.vendorSignal }));
+  }
+  return Math.max(0, ...scores) > 0.9 ? { action: GuardrailAction.BLOCK, reasonCode: 'VENDOR_HIGH' } : null;
 }
 ```
 
@@ -382,6 +409,8 @@ Guardrails with `canSanitize: true` run **one at a time in registration order**.
 3. Custom rewriter sanitizer receives PII-redacted + profanity-filtered text.
 
 A **BLOCK** in Phase 1 short-circuits immediately -- Phase 2 never runs.
+
+A guardrail with `sequential: true` joins Phase 1 without sanitizing: a screen that must judge the content before any guardrail that calls a vendor sees it, such as a local list of banned phrases. Its BLOCK ends the evaluation like a sanitizer's, in enforcement and in a dry run. A SANITIZE it returns is downgraded to FLAG (with a `guardrail.sanitize_downgraded` line) unless it also sets `canSanitize`. `sequential` orders guardrails; it does not stop one from calling out, so a screen that calls a model is not a local screen.
 
 ### Phase 2: Parallel classifiers
 
@@ -1308,7 +1337,7 @@ describe('Integration: ParallelGuardrailDispatcher + MyGuardrail', () => {
 
 3. **Use specific reasonCodes for analytics.** Codes like `'PII_SSN_REDACTED'`, `'TOXICITY_HIGH'`, or `'COST_CEILING_EXCEEDED'` are far more useful than generic codes. These are machine-readable and can drive dashboards.
 
-4. **Fail-open on errors, unless the guardrail is safety-critical.** The dispatcher skips a guardrail that throws, with a logged warning, unless its config sets `failClosed: true`, which turns the throw into a BLOCK. A safety-critical guardrail sets `failClosed` and lets its errors propagate; any other guardrail wraps its evaluation logic in try/catch and returns `null` on unexpected errors:
+4. **Fail-open on errors, unless the guardrail is safety-critical.** The dispatcher skips a guardrail that throws, with a logged warning, unless its config sets `failClosed: true`, which turns the throw into a BLOCK. Under `moderateContent()` a guardrail runs closed unless its config says `failClosed: false`, with a deadline of 8 seconds when it names none. A safety-critical guardrail sets `failClosed` and lets its errors propagate; any other guardrail wraps its evaluation logic in try/catch and returns `null` on unexpected errors:
 
    ```typescript
    async evaluateInput(payload) {
@@ -1321,7 +1350,7 @@ describe('Integration: ParallelGuardrailDispatcher + MyGuardrail', () => {
    }
    ```
 
-5. **Do NOT set timeoutMs on safety-critical guardrails without `failClosed: true`.** Fail-open on timeout means content passes unchecked. Without `failClosed`, use timeoutMs only on guardrails where a missed evaluation is acceptable (e.g., quality flags, analytics).
+5. **Do NOT set timeoutMs on safety-critical guardrails without `failClosed: true`.** Fail-open on timeout means content passes unchecked. Without `failClosed`, use timeoutMs only on guardrails where a missed evaluation is acceptable (e.g., quality flags, analytics). Under `moderateContent()` a guardrail that times out refuses the content as unavailable unless its config says `failClosed: false`.
 
 6. **Keep guardrails focused.** One concern per guardrail. A PII guardrail should not also check for toxicity. This makes them independently testable, configurable, and composable.
 
