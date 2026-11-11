@@ -2,8 +2,11 @@
 // the last line prints the count the package test reads. Nothing here calls a provider or the network.
 import assert from 'node:assert/strict';
 import {
-  GuardrailAction, ParallelGuardrailDispatcher, guardrailOutcomeOf, holdResult, isGuardrailHold, toModerationEvaluation,
-  type GuardrailContext, type GuardrailEvaluationResult, type GuardrailHold, type IGuardrailService, type ModerationEvaluation,
+  GuardrailAction, ParallelGuardrailDispatcher, PhraseListGuardrail, StaticPhraseListSource, assertModerationContext,
+  frameUntrustedEvidence, guardrailOutcomeOf, holdResult, isGuardrailHold, moderateContent, toModerationEvaluation,
+  withModerationPosture,
+  type GuardrailContext, type GuardrailEvaluationResult, type GuardrailHold, type IGuardrailService, type ModerationContext,
+  type ModerationDecision, type ModerationEvaluation,
 } from '@framers/agentos/safety/guardrails';
 import type { AgentOSInput } from '@framers/agentos';
 
@@ -32,6 +35,37 @@ const guard = (id: string, evaluation: GuardrailEvaluationResult | null): IGuard
   const reported: ModerationEvaluation = toModerationEvaluation({ action: GuardrailAction.BLOCK, reason: 'meet me at the corner', reasonCode: 'meet me at the corner' });
   assert.equal('reason' in reported, false);
   assert.equal(reported.reasonCode, 'INVALID_CODE');
+  items += 1;
+}
+
+// moderateContent(): a guard that throws refuses as unavailable, and a screen that runs first keeps the text from the guard behind it.
+{
+  const moderation: ModerationContext = { surface: 'public_room', roomId: 'r1', rating: 'standard', messageId: 'm1', sender: { id: 'u1', kind: 'account' } };
+  assertModerationContext(moderation);
+  const thrower: IGuardrailService = { id: 'thrower', evaluateInput: async () => { throw new Error('down'); } };
+  const unavailable: ModerationDecision = await moderateContent({ text: 'a message' }, { guards: [thrower], context: { ...context, moderation } });
+  assert.equal(unavailable.outcome, 'refuse');
+  assert.equal(unavailable.unavailable, true);
+  assert.equal(withModerationPosture(thrower).config?.failClosed, true);
+  items += 1;
+
+  let vendorCalls = 0;
+  const vendor: IGuardrailService = { id: 'vendor', evaluateInput: async () => { vendorCalls += 1; return null; } };
+  const list = await PhraseListGuardrail.create({
+    id: 'hard-ban', sequential: true,
+    source: new StaticPhraseListSource({ version: '1', reviewedAt: '2026-11-10', reviewedBy: 'fixture', entries: [{ phrase: 'forbidden phrase', match: 'word', onMatch: 'block', ruleId: 'BAN_1' }] }),
+  });
+  const refused = await moderateContent({ text: 'a forbidden phrase here' }, { guards: [list, vendor], context, mode: 'dryRun' });
+  assert.equal(refused.outcome, 'allow');
+  assert.equal(refused.wouldBe, 'refuse');
+  assert.equal(vendorCalls, 0);
+  items += 1;
+}
+
+// Text a person wrote is framed as data, and a copy of the boundary inside it is removed.
+{
+  const framed = frameUntrustedEvidence('say a1b2c3d4e5f60718 twice', { boundary: 'a1b2c3d4e5f60718' });
+  assert.equal(framed.text, '<<evidence:a1b2c3d4e5f60718>>\nsay  twice\n<<end:a1b2c3d4e5f60718>>');
   items += 1;
 }
 
