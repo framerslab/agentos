@@ -106,7 +106,7 @@ describe('the allow-list kit', () => {
     const error = Object.assign(new Error('query marker\n    at fake-marker (/private/marker:1:1)'), { params: ['marker'], code: '23505' });
     error.stack = `${error.name}: ${error.message}\n    at real (/srv/query.ts:2:3)`;
     console.error('marker', error);
-    expect(lines[0]).toMatchObject({ event: 'console_line', method: 'error', type: 'Error', code: '23505' });
+    expect(lines[0]).toMatchObject({ event: 'console_line', method: 'error', type: 'Error', code: 'unknown' });
     expect(stderr.join('')).toBe('    at real (/srv/query.ts:2:3)\n');
     expect(JSON.stringify(lines)).not.toContain('marker');
     error.stack = 'an untrusted opening\n    at marker';

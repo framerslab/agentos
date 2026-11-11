@@ -1,0 +1,51 @@
+name: Published moderation entry points
+
+# After a release: installs that exact version from the registry into an empty project and runs the consumer fixture of
+# the version's own tag against it (scripts/moderation-package.test.mjs with AGENTOS_PUBLISHED_VERSION). Started by
+# hand, on any version released since the fixture exists:
+#   gh workflow run moderation-published.yml -f version=<x.y.z>
+# It reads no secret and writes nothing.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact released version, without v
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  published:
+    name: Published moderation entry points
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: The version is a release number
+        env:
+          VERSION: ${{ inputs.version }}
+        run: printf '%s\n' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'
+
+      - uses: actions/checkout@v5
+        with:
+          ref: refs/tags/v${{ inputs.version }}
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Install PNPM
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: The moderation entry points run from the published package
+        env:
+          AGENTOS_PUBLISHED_VERSION: ${{ inputs.version }}
+        run: node --test scripts/moderation-package.test.mjs

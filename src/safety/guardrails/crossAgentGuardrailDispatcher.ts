@@ -32,6 +32,8 @@ import {
 } from './ICrossAgentGuardrailService';
 import { createGuardrailBlockedStream, type GuardrailOutputOptions } from './guardrailDispatcher';
 import { sanitizedFinalResponse } from './sanitizedFinalResponse';
+import { listedErrorFields, safeWord } from '../../core/logging/events.js';
+import { guardrailLog } from './log.js';
 
 /**
  * Context for cross-agent guardrail evaluation.
@@ -130,7 +132,7 @@ export async function evaluateCrossAgentGuardrails(
     try {
       evaluation = await guardrail.evaluateCrossAgentOutput(payload);
     } catch (error) {
-      console.warn('[AgentOS][CrossAgentGuardrails] evaluateCrossAgentOutput failed.', error);
+      guardrailLog.warn('guardrail.failed', { guardrailId: safeWord((guardrail as { id?: unknown }).id), stage: 'output', posture: 'open', cause: 'error', ...listedErrorFields(error) });
       continue;
     }
 

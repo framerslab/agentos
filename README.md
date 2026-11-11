@@ -248,7 +248,7 @@ Provider fallback is on by default for `generateText()`, `streamText()`, `agent(
 - **[Library Index](https://docs.agentos.sh/features/library-index)**: sources over any vector store, and a browser entry for a page's own search and records, transcript files from other notetakers (SubRip, WebVTT, Otter, Fireflies, Word) read to turns with the speakers kept apart, and the plan of an archive's entries
 - **[Text Processing & Search](https://docs.agentos.sh/text)**: tokenizers and stemming, BM25, fuzzy and hybrid search, text statistics, chunking, reranking
 - **[Reranking](https://docs.agentos.sh/text/reranking)**: one `RerankerService` over a local Transformers.js cross-encoder (scoring stays in the process), Cohere's rerank API, an LLM judge on any model your function calls, or a provider of your own
-- **[Guardrails](https://docs.agentos.sh/features/guardrails-architecture)**: two-phase dispatcher, four verdicts, fail-open and fail-closed guards
+- **[Guardrails](https://docs.agentos.sh/features/guardrails-architecture)**: two-phase dispatcher, four verdicts, a hold on a BLOCK that keeps content back for a person's review, fail-open and fail-closed guards
 - **[Voice Pipeline](https://docs.agentos.sh/features/voice-pipeline)**: TTS, STT, telephony
 - **[Blog](https://docs.agentos.sh/blog)**: engineering posts, benchmark publications, transparency audits
 - **[Discord](https://wilds.ai/discord)** * **[GitHub Issues](https://github.com/framerslab/agentos/issues)** * **[Wilds.ai](https://wilds.ai)** (AI game worlds powered by AgentOS)

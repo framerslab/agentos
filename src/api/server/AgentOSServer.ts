@@ -8,7 +8,7 @@ import type { AgentOSResponse } from '../types/AgentOSResponse.js';
 import { AgentOSServerConfig } from './config/ServerConfig';
 import { moduleLogger } from '../../core/logging/loggerFactory.js';
 import { getLoggingState } from '../../core/logging/state.js';
-import { errorFields } from '../../core/logging/events.js';
+import { listedErrorFields } from '../../core/logging/events.js';
 
 /** The server's events, to the target current when each is written; each line of a request carries its id. */
 const log = moduleLogger('http', 'agentos_server');
@@ -93,7 +93,7 @@ export class AgentOSServer {
     requests.run({ requestId }, () => {
       void this.handleRequest(req, res, record).catch((error: unknown) => {
         // A failure an extension's handler already wrote is not written again.
-        if (!record.failed) { record.failed = true; log.error('http.handler_failed', errorFields(error)); }
+        if (!record.failed) { record.failed = true; log.error('http.handler_failed', listedErrorFields(error)); }
         if (!res.headersSent) this.sendJson(res, 500, { error: 'Internal Server Error' });
         else res.destroy();
       });
@@ -153,7 +153,7 @@ export class AgentOSServer {
           // The error is written as its type and code alone; its text, which can carry internal or sensitive strings,
           // reaches neither the line nor the client.
           record.failed = true;
-          log.error('http.handler_failed', errorFields(error));
+          log.error('http.handler_failed', listedErrorFields(error));
           // A handler that began its response before it threw has its connection closed; a status cannot follow.
           if (!res.headersSent) this.sendJson(res, 500, { error: 'Extension HTTP handler error' });
           else res.destroy();

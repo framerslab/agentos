@@ -11,6 +11,10 @@
  * @module agentos/core/logging/events
  */
 
+import { LISTED_ERROR_CODES, LISTED_ERROR_TYPES } from './listedErrors.js';
+
+export { LISTED_ERROR_CODES, LISTED_ERROR_TYPES };
+
 /** The kind of one field: an integer, a word, a path, or one of a declared list. */
 export type FieldKind = 'int' | 'word' | 'path' | { readonly enum: readonly string[] };
 
@@ -90,6 +94,14 @@ export const AGENTOS_EVENTS = {
   'language.detector_unsupported': { detector: 'word' },
   // A detection provider threw; LanguageService goes on with the others.
   'language.detection_failed': { detector: 'word', type: 'word', code: 'word' },
+  // A guard threw, timed out or answered no recognised action. No guard text and no error message is ever a field.
+  'guardrail.failed': { guardrailId: 'word', stage: { enum: ['input', 'output', 'tool_call'] }, posture: { enum: ['open', 'closed'] }, cause: { enum: ['error', 'timeout', 'malformed'] }, type: 'word', code: 'word' },
+  // A SANITIZE the dispatcher could not apply: a phase 2 answer became a FLAG, a tool call's a BLOCK.
+  'guardrail.sanitize_downgraded': { guardrailId: 'word', stage: { enum: ['input', 'output', 'tool_call'] } },
+  // A hold came with an action other than BLOCK and was ignored; written once per guard.
+  'guardrail.hold_ignored': { guardrailId: 'word', stage: { enum: ['input', 'output', 'tool_call'] } },
+  // An onVerdict callback threw; the verdict stands.
+  'guardrail.verdict_callback_failed': { type: 'word', code: 'word' },
   // A soul given `optional: true` failed to load; the agent runs without it.
   'soul.load_failed': { optional: { enum: ['yes'] }, type: 'word', code: 'word' },
   // gmi() left out a front matter field that path cannot apply.
@@ -197,26 +209,36 @@ function fieldWord(value: unknown, key: 'type' | 'code'): string {
   return valid('word', value, key) ? value as string : 'unknown';
 }
 
+const TYPEOF_WORDS: ReadonlySet<string> = new Set(['undefined', 'object', 'boolean', 'number', 'bigint', 'string', 'symbol', 'function']);
+
 /**
- * The fields an error is written as: its type and its code, never its message or its stack.
- * Either is `unknown` when it is not a valid word. A class name ending in `Error` or
- * `Exception` and an upper-case constant code such as `STREAM_PARSING_ERROR` are kept at any
- * length up to 64 characters, while a value with the shape of a credential is still `unknown`.
- * Reading the error never throws: a property whose getter throws is written as `unknown`.
+ * The fields an error is written as: `type`, its `name` when it is in {@link LISTED_ERROR_TYPES} (or the value's
+ * `typeof` when it is not an `Error`), and `code`, its `code` when it is in {@link LISTED_ERROR_CODES}. Anything
+ * else, and an error with no code, is `unknown`: a name or a code is set by whoever threw the error, so one that only
+ * has the right shape is never written. Never the message or the stack. Reading never throws.
  *
  * @param error - The caught value.
- * @returns `type`, the error's name (or the value's `typeof` when it is not an `Error`), and `code`, its `code` property.
+ * @returns The listed type and code, or `unknown` for each.
+ */
+export function listedErrorFields(error: unknown): { type: string; code: string } {
+  const named = read(() => (error instanceof Error ? { name: error.name as unknown, isError: true } : { name: typeof error as unknown, isError: false })) as { name: unknown; isError: boolean } | undefined;
+  const code = read(() => (typeof error === 'object' && error !== null ? (error as Record<string, unknown>).code : undefined));
+  const type = named !== undefined && typeof named.name === 'string' && (named.isError ? LISTED_ERROR_TYPES.has(named.name) : TYPEOF_WORDS.has(named.name)) ? named.name : 'unknown';
+  return {
+    type: fieldWord(type, 'type'),
+    code: typeof code === 'string' && LISTED_ERROR_CODES.has(code) ? fieldWord(code, 'code') : 'unknown',
+  };
+}
+
+/**
+ * Kept as a name for deep imports (`@framers/agentos/core/logging/events`). It returns {@link listedErrorFields}'s
+ * answer.
  *
- * @example
- * ```ts
- * errorFields(Object.assign(new Error('text that is never written'), { code: 'ECONNRESET' }));
- * // { type: 'Error', code: 'ECONNRESET' }
- * ```
+ * @param error - The caught value.
+ * @returns The listed type and code, or `unknown` for each.
  */
 export function errorFields(error: unknown): { type: string; code: string } {
-  const type = read(() => (error instanceof Error ? error.name : typeof error));
-  const code = read(() => (typeof error === 'object' && error !== null ? (error as Record<string, unknown>).code : undefined));
-  return { type: fieldWord(type, 'type'), code: fieldWord(code, 'code') };
+  return listedErrorFields(error);
 }
 
 /**
