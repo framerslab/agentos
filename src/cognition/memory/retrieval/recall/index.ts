@@ -23,10 +23,13 @@ export type {
 } from './capture.js';
 export {
   DEFAULT_RECALL_BUDGET_TOKENS,
+  PROMPT_CONTEXT_SHARE,
   RecallOptionError,
   assertRecallConfig,
+  effectiveRecallBudget,
+  estimateMemoryTokens,
   rejectRecallOption,
   recallBudgetTokens,
 } from './budget.js';
-export type { RecallOptionRejection } from './budget.js';
+export type { EffectiveRecallBudget, RecallOptionRejection } from './budget.js';
 export { recallLog } from './log.js';

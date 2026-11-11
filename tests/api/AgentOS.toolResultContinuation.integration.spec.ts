@@ -451,10 +451,17 @@ const RECALL_CAPTURE = {
   timings: { legsMs: 2, fuseMs: 0, dedupeMs: 0, rerankMs: 0, assembleMs: 1, totalMs: 3 },
 };
 
+/** The record of the model hop that served the paused turn: the assembly's record with the hop's budget and delivery. */
+const HOP_RECALL_CAPTURE = {
+  ...RECALL_CAPTURE,
+  budget: { requested: 1600, effective: 1600, promptShareTokens: 25_600, otherContextTokens: 0, hop: 0 },
+  delivery: { memoryBlockTokens: 118 },
+};
+
 /**
- * A GMI whose turn returns the recall capture of its memory assembly, streaming it first (as a GMI does when its
- * memory manager's `recall.capture` is 'metadata+stream') when `announce` is set, and then stops for READ_CALL as
- * `hostToolGmi` does; its continuation, like the shipped GMI's, retrieves nothing and returns no capture.
+ * A GMI whose turn streams the assembly's recall capture first (as a GMI does when its memory manager's
+ * `recall.capture` is 'metadata+stream') when `announce` is set, returns the serving hop's record, and then stops for
+ * READ_CALL as `hostToolGmi` does; its continuation, like the shipped GMI's, retrieves nothing and returns no capture.
  */
 function memoryRecallToolGmi(announce: boolean) {
   return {
@@ -476,7 +483,7 @@ function memoryRecallToolGmi(announce: boolean) {
         timestamp: new Date(),
         metadata: { executionMode: 'external', requiresExternalToolResult: true },
       };
-      return { isFinal: false, responseText: 'I need the notes file first.', toolCalls: [READ_CALL], memoryRecall: RECALL_CAPTURE as any };
+      return { isFinal: false, responseText: 'I need the notes file first.', toolCalls: [READ_CALL], memoryRecall: HOP_RECALL_CAPTURE as any };
     },
   };
 }
@@ -1286,7 +1293,7 @@ describe('AgentOS tool-result continuations', () => {
   it.each([
     ['streamed its recall capture', 'conv-recall-streamed', true],
     ['streamed no recall capture', 'conv-recall-quiet', false],
-  ])("a turn that %s and stopped for the host: the continuation's FINAL_RESPONSE carries the capture only when the stream announced it", async (_label, conversationId, announce) => {
+  ])("a turn that %s and stopped for the host: the continuation's FINAL_RESPONSE carries the serving hop's record only when the stream announced a capture", async (_label, conversationId, announce) => {
     const rt = await runtime(conversationId);
     const { request } = await rt.pauseOnRead(memoryRecallToolGmi(announce) as unknown as ReturnType<typeof hostToolGmi>);
 
@@ -1297,7 +1304,8 @@ describe('AgentOS tool-result continuations', () => {
     const final = continuation.at(-1) as AgentOSFinalResponseChunk;
     expect(final.type).toBe(AgentOSResponseChunkType.FINAL_RESPONSE);
     expect(final.finalResponseText).toBe('Done.');
-    if (announce) expect(final.memoryRecall).toEqual(RECALL_CAPTURE);
+    // The paused output's record, with the hop's budget and delivery, not the assembly's record the stream announced.
+    if (announce) expect(final.memoryRecall).toEqual(HOP_RECALL_CAPTURE);
     else expect('memoryRecall' in final).toBe(false);
   });
 
