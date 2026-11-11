@@ -221,6 +221,31 @@ describe.each(ENGINES)('loadTracesForRecall on %s', (_engine, open) => {
     await db.close();
   });
 
+  it("a cached trace stored again elsewhere with other words is returned as the row holds it, words and trust together; the cached copy keeps its own", async () => {
+    const db = await open();
+    const store = await storeOver(db.brain, new FlatEmbedder());
+    const narrow = { usableForAuthorization: false, usableForPersonalization: true, usableForFactClaim: true };
+    const everything = { usableForAuthorization: true, usableForPersonalization: true, usableForFactClaim: true };
+    const said = { sourceType: 'user_statement' as const, sourceTimestamp: NOW - 120_000, confidence: 1, verificationCount: 0 };
+    await store.store(trace('pass', 'The harbor pass number is 7781.', { policy: narrow, provenance: said }));
+    // Another process stores a tool's result under the same id: other words, another source, a policy that allows authorization.
+    const row = await db.brain.get<{ metadata: string }>('SELECT metadata FROM memory_traces WHERE brain_id = ? AND id = ?', [db.brain.brainId, 'pass']);
+    const looked = { sourceType: 'tool_result', sourceTimestamp: NOW - 60_000, confidence: 1, verificationCount: 1, lastVerifiedAt: NOW - 60_000 };
+    await db.brain.run('UPDATE memory_traces SET content = ?, metadata = ? WHERE brain_id = ? AND id = ?', [
+      'The harbor pass on file is 9900.',
+      JSON.stringify({ ...JSON.parse(row!.metadata), provenance: looked, policy: everything }),
+      db.brain.brainId,
+      'pass',
+    ]);
+
+    const { traces } = await store.loadTracesForRecall(['pass']);
+    expect(traces.get('pass')).toMatchObject({ content: 'The harbor pass on file is 9900.', policy: everything, provenance: looked });
+    // The cached copy and its vector are of the words this process stored: its trust is not replaced by another text's.
+    expect(store.getTrace('pass')).toMatchObject({ content: 'The harbor pass number is 7781.', policy: narrow, provenance: said });
+    store.dispose();
+    await db.close();
+  });
+
   it('a row with no vector that a store() of the same id replaces before its load is returned as that store() wrote it', async () => {
     const db = await open();
     let release: () => void = () => undefined;
