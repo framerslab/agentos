@@ -2611,33 +2611,38 @@ export class Memory {
     asChunk = false,
   ): Promise<TraceRow | undefined> {
     const { dialect } = this._brain.features;
-    const rows = await this._brain.all<TraceRow>(
-      `SELECT id, type, scope, content, embedding, strength, created_at,
-              last_accessed, retrieval_count, tags, emotions, metadata, deleted
-       FROM memory_traces
-       WHERE brain_id = ?
-         AND deleted = 0
-         AND type = ?
-         AND scope = ?
-         AND ${dialect.ifnull(dialect.jsonExtract('metadata', '$.scopeId'), "''")} = ?
-         AND ${dialect.ifnull(dialect.jsonExtract('metadata', '$.turnUserId'), "''")} = ?
-         AND (
-           ${dialect.jsonExtract('metadata', '$.content_hash')} = ?
-           OR ${dialect.jsonExtract('metadata', '$.import_hash')} = ?
-         )
-       LIMIT 50`,
-      [this._brain.brainId, type, scope, scopeId, turnUserId, contentHash, contentHash],
-    );
-    // The tags are a JSON array in a text column, tested here: the dialect has no array test for both engines.
-    return rows.find((row) => {
-      let tags: unknown = [];
-      try {
-        tags = JSON.parse(row.tags);
-      } catch {
-        /* tags that do not parse name no page */
-      }
-      return (Array.isArray(tags) && tags.includes('wiki')) === asChunk;
-    });
+    // Read 50 candidates at a time until one of the kind asked for is found: any number of the other kind can come
+    // first.
+    for (let offset = 0; ; offset += 50) {
+      const rows = await this._brain.all<TraceRow>(
+        `SELECT id, type, scope, content, embedding, strength, created_at,
+                last_accessed, retrieval_count, tags, emotions, metadata, deleted
+         FROM memory_traces
+         WHERE brain_id = ?
+           AND deleted = 0
+           AND type = ?
+           AND scope = ?
+           AND ${dialect.ifnull(dialect.jsonExtract('metadata', '$.scopeId'), "''")} = ?
+           AND ${dialect.ifnull(dialect.jsonExtract('metadata', '$.turnUserId'), "''")} = ?
+           AND (
+             ${dialect.jsonExtract('metadata', '$.content_hash')} = ?
+             OR ${dialect.jsonExtract('metadata', '$.import_hash')} = ?
+           )
+         LIMIT 50 OFFSET ?`,
+        [this._brain.brainId, type, scope, scopeId, turnUserId, contentHash, contentHash, offset],
+      );
+      // The tags are a JSON array in a text column, tested here: the dialect has no array test for both engines.
+      const found = rows.find((row) => {
+        let tags: unknown = [];
+        try {
+          tags = JSON.parse(row.tags);
+        } catch {
+          /* tags that do not parse name no page */
+        }
+        return (Array.isArray(tags) && tags.includes('wiki')) === asChunk;
+      });
+      if (found || rows.length < 50) return found;
+    }
   }
 
   /**

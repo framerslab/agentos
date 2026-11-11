@@ -459,7 +459,7 @@ export class SqliteImporter {
        FROM memory_traces
        WHERE brain_id = ? AND scope = ? AND scope_id = ?
          AND ${duplicateTraceCondition(this.brain)}
-       LIMIT 50`;
+       LIMIT 50 OFFSET ?`;
     const tagsOf = (tags: string): string[] => {
       try {
         const parsed: unknown = JSON.parse(tags);
@@ -494,10 +494,20 @@ export class SqliteImporter {
         // A chunk of a page that comes in is a row of its own: merged into a trace the brain holds, the page would
         // list a trace that is not its chunk, and its next rewrite would delete it.
         if ((options?.dedup ?? true) && !(row.id && pageChunks.has(row.id))) {
-          const candidates = await trx.all<{ id: string; created_at: number; tags: string }>(
-            checkSql, [brainId, scope, scopeId, ...duplicateTraceParams(hash, row.content, importedTurnUserId(meta))],
-          );
-          const existing = candidates.find((candidate) => !tagsOf(candidate.tags).includes('wiki'));
+          // Read 50 candidates at a time until one that is not a page chunk is found: any number of chunks of the
+          // same text can come first.
+          let existing: { id: string; created_at: number; tags: string } | undefined;
+          for (let offset = 0; ; offset += 50) {
+            const candidates = await trx.all<{ id: string; created_at: number; tags: string }>(checkSql, [
+              brainId,
+              scope,
+              scopeId,
+              ...duplicateTraceParams(hash, row.content, importedTurnUserId(meta)),
+              offset,
+            ]);
+            existing = candidates.find((candidate) => !tagsOf(candidate.tags).includes('wiki'));
+            if (existing || candidates.length < 50) break;
+          }
 
           if (existing) {
             const newerAt = Math.max(existing.created_at, row.created_at);

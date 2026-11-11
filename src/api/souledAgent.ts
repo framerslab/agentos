@@ -406,6 +406,15 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   const anonymousUserIds =
     typeof rest.learning === 'object' && rest.learning !== null ? rest.learning.anonymousUserIds : undefined;
   if (sharedMemory !== undefined) assertSharedMemory(sharedMemory, anonymousUserIds);
+  // The two hooks and sharedMemory act on this agent's own store. A GMI's cognitive memory files and recalls in a store
+  // of its own, which none of them reaches: an account the policy turns off would still be remembered there, and
+  // sessions sharedMemory runs as one user would not share it. They are refused together, before the soul is loaded:
+  // an inline soul, or an optional one that does not load, builds a plain agent that keeps cognitive memory too.
+  if ((memoryPolicy || screen || sharedMemory !== undefined) && rest.runtime === 'gmi' && cognitiveMemoryOf(rest as CognitionInputs)) {
+    throw new TypeError(
+      "souledAgent: memoryPolicy, screen and sharedMemory act on the souled agent's own memory, and cognitive memory (runtime: 'gmi' with cognition memory on) keeps a store none of them reaches; turn cognitive memory off, or leave them out",
+    );
+  }
   const loaded = loadSoulFromOption(rest.soul);
   if (!loaded) {
     // The soul failed to load, and loadSoulFromOption has warned: a plain agent without it, which loads it no
@@ -435,14 +444,6 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   if (!agentId) {
     throw new Error(
       "souledAgent: the soul has no agentId and no name, and the agent has no name; set agentId in SOUL.md's front matter so the agent's memory has one stable id",
-    );
-  }
-  // The two hooks and sharedMemory act on this agent's own store. A GMI's cognitive memory files and recalls in a store
-  // of its own, which none of them reaches: an account the policy turns off would still be remembered there, and
-  // sessions sharedMemory runs as one user would not share it. They are refused together.
-  if ((memoryPolicy || screen || sharedMemory !== undefined) && rest.runtime === 'gmi' && cognitiveMemoryOf(rest as CognitionInputs)) {
-    throw new TypeError(
-      "souledAgent: memoryPolicy, screen and sharedMemory act on the souled agent's own memory, and cognitive memory (runtime: 'gmi' with cognition memory on) keeps a store none of them reaches; turn cognitive memory off, or leave them out",
     );
   }
 
