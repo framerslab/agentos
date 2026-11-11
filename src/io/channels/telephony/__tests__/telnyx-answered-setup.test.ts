@@ -30,7 +30,7 @@ import { generateKeyPairSync, sign } from 'node:crypto';
 import { CallManager } from '../CallManager.js';
 import { TelnyxVoiceProvider } from '../providers/telnyx.js';
 import { InMemoryTelephonyCallStore } from '../TelephonyCallStore.js';
-import type { VoiceCallConfig, WebhookContext } from '../types.js';
+import type { ITelephonyCallStore, VoiceCallConfig, WebhookContext } from '../types.js';
 
 const CONNECTION_ID = 'conn-answered-setup';
 const CALL_CONTROL_ID = 'v3:call-control-answered';
@@ -234,6 +234,39 @@ describe('a carrier-profile Telnyx notify call hung up after its message', () =>
       expect(manager.getCall(call.callId)?.state).toBe('hangup-bot');
     } finally {
       manager.dispose();
+    }
+  });
+
+  it('hangs up on a call.speak.ended redelivered to another manager when the first hangup did not commit', async () => {
+    const store = new InMemoryTelephonyCallStore();
+    // Fails one transaction, the way a worker that stopped leaves it uncommitted.
+    let failTransaction = 0;
+    let transactions = 0;
+    const flaky: ITelephonyCallStore = {
+      withProvider: (provider, work) => (++transactions === failTransaction ? Promise.reject(new Error('store unavailable')) : store.withProvider(provider, work)),
+    };
+    const first = setUp();
+    const second = setUp();
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const call = await first.manager.initiateCall({ toNumber: '+15550000002', mode: 'notify', message: MESSAGE });
+      await first.manager.persistCall(call.callId, flaky);
+      await first.manager.processWebhookDurable('telnyx', signedEvent('call.answered', 'evt-answered'), flaky);
+      await vi.waitFor(() => expect(actions(first.fetchMock)).toEqual(['speak']));
+      const spoken = signedEvent('call.speak.ended', 'evt-speak-ended', { client_state: commands(first.fetchMock)[0]?.body.client_state, status: 'completed' });
+
+      // The event commits; the hangup's own transaction, the next one, does not.
+      failTransaction = transactions + 2;
+      await expect(first.manager.processWebhookDurable('telnyx', spoken, flaky)).rejects.toThrow('store unavailable');
+
+      // Telnyx redelivers the webhook it got no 2xx for, here to another manager on the same store.
+      expect(await second.manager.processWebhookDurable('telnyx', spoken, store)).toEqual({ accepted: true, applied: 1 });
+      expect(actions(second.fetchMock)).toEqual(['hangup']);
+      expect(second.manager.getCall(call.callId)?.state).toBe('hangup-bot');
+    } finally {
+      consoleError.mockRestore();
+      first.manager.dispose();
+      second.manager.dispose();
     }
   });
 
