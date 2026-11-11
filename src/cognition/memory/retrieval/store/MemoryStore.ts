@@ -259,6 +259,26 @@ function sameTrustPolicy(a: MemoryTrace['policy'], b: MemoryTrace['policy']): bo
   );
 }
 
+/** Whether a row's metadata holds a provenance ({@link MemoryTrace.provenance}) of the shape `store()` writes. */
+function isStoredProvenance(value: unknown): value is MemoryTrace['provenance'] {
+  if (!isJsonObject(value)) return false;
+  return typeof value.sourceType === 'string' && typeof value.sourceTimestamp === 'number' && typeof value.confidence === 'number';
+}
+
+/**
+ * Whether two provenances record the same statement: the fields a `store()` writes. A verification a process records
+ * after it (`lastVerifiedAt`, `contradictedBy`) is not compared.
+ */
+function sameStatement(a: MemoryTrace['provenance'], b: MemoryTrace['provenance']): boolean {
+  return (
+    a.sourceType === b.sourceType &&
+    a.sourceId === b.sourceId &&
+    a.sourceTimestamp === b.sourceTimestamp &&
+    a.confidence === b.confidence &&
+    (a.verificationCount ?? 0) === (b.verificationCount ?? 0)
+  );
+}
+
 /** Parse a JSON string and return `undefined` on any failure. */
 function safeParseJson<T>(raw: string): T | undefined {
   try {
@@ -1492,8 +1512,10 @@ export class MemoryStore {
    * as a vector query checks its hits: a trace whose row is gone or deleted, by this process or another, is left out
    * (and fenced in every store on the Brain), and a cached trace whose row a move filed under another scope id is left
    * out until this store follows the move. A cached trace is answered from the cache; when its row names another
-   * trust policy (another process stored the trace again), it takes the row's policy and provenance. A live row with
-   * a usable embedding is filed in the cache and the vector index as the store's hydration files one; a row without
+   * trust policy or another statement (source, time, confidence, verification count: another process stored the trace
+   * again), it takes the row's policy and provenance, and a verification this process recorded since its own store
+   * (`lastVerifiedAt`, `contradictedBy`, which the row does not hold) stays when the statement is the same. A live
+   * row with a usable embedding is filed in the cache and the vector index as the store's hydration files one; a row without
    * one is returned for this call only and not cached, since the store holds no vector for it, and is read again
    * when a delete or a move ran after the first read. A trace that is inactive, tombstoned or delete-pending is left
    * out.
@@ -1536,14 +1558,20 @@ export class MemoryStore {
       const cached = served(id);
       if (cached) {
         if (rowFiledElsewhere(row, cached.scope, cached.scopeId)) continue;
-        // A row whose trust policy differs was stored again elsewhere: its policy and the provenance it is checked
-        // against (the verification time) are the trace's now, so a verification of the earlier copy cannot extend it.
+        // The row holds what the last `store()` of the trace wrote. A row whose trust policy or statement (source,
+        // time, confidence, verification count) differs was stored again elsewhere: its policy and provenance are the
+        // trace's now, so neither a confidence nor a verification of the earlier copy carries over. A row that differs
+        // only in `lastVerifiedAt` or `contradictedBy` holds less than this process verified since, which
+        // `persistTraceMetadata` writes to the vector store and not the row: the cached provenance stands.
         const { policy, provenance } = parseTraceMetadata(row.metadata);
-        if (isTrustPolicy(policy) && !sameTrustPolicy(policy, cached.policy)) {
-          cached.policy = { ...policy };
-          if (isJsonObject(provenance) && typeof provenance.sourceTimestamp === 'number') {
-            cached.provenance = { ...(provenance as unknown as MemoryTrace['provenance']) };
-          }
+        const rowPolicy = isTrustPolicy(policy) ? policy : undefined;
+        const rowProvenance = isStoredProvenance(provenance) ? provenance : undefined;
+        if (
+          (rowPolicy && !sameTrustPolicy(rowPolicy, cached.policy)) ||
+          (rowProvenance && !sameStatement(rowProvenance, cached.provenance))
+        ) {
+          if (rowPolicy) cached.policy = { ...rowPolicy };
+          if (rowProvenance) cached.provenance = { ...rowProvenance };
         }
         traces.set(id, cached);
         continue;
