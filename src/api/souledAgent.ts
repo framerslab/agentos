@@ -28,7 +28,7 @@ import {
 } from './agent.js';
 import { generateText } from './generateText.js';
 import type { StreamTextResult } from './streamText.js';
-import { Memory, type ScoredTrace } from '../cognition/memory/io/facade/Memory.js';
+import { Memory, type AttachedWiki, type ScoredTrace } from '../cognition/memory/io/facade/Memory.js';
 import { conversationScopeKey, parseConversationScopeKey } from '../cognition/memory/retrieval/store/conversationScopeKey.js';
 import { encodePlainScopeId } from '../cognition/memory/retrieval/store/scopeIdForm.js';
 import { memoryLog } from '../cognition/memory/log.js';
@@ -40,7 +40,7 @@ import { createFileOutsideLinksSync } from '../core/utils/linkFreeWrite.js';
 import { errorFields } from '../core/logging/events.js';
 import { formatMemoryAge } from '../cognition/memory/core/prompt/MemoryFormatters.js';
 import { parseTraceMetadata } from '../cognition/memory/retrieval/store/tracePersistence.js';
-import { DEFAULT_MEMORY_TOKEN_BUDGET } from './runtime/memoryProviderHooks.js';
+import { DEFAULT_MEMORY_TOKEN_BUDGET, MEMORY_TIMEOUT_MS } from './runtime/memoryProviderHooks.js';
 import { messageOf } from './runtime/memoryObserveFailures.js';
 import { isAnonymousUserId } from './runtime/memorySubject.js';
 import { asSpendBudget } from './runtime/spendBudget.js';
@@ -76,6 +76,48 @@ type MemorySubject = MemoryHookContext['subject'];
 
 /** How many traces a turn's recall reads from its subject's memory, and how many from the operator's pages. */
 const RECALL_LIMIT = 8;
+
+/**
+ * What a host's memory policy answers for the account a turn serves.
+ *
+ * - `{ longTerm: 'off' }`: nothing is filed for the account, and its turns recall the operator's pages alone.
+ * - `{ longTerm: 'raw' }`: its turns are filed and recalled as traces, and no page is compiled for it.
+ * - `{ longTerm: 'compiled' }`: its turns are filed, recalled and compiled into its pages. The default.
+ */
+export type MemoryPolicy = { longTerm: 'off' } | { longTerm: 'raw' } | { longTerm: 'compiled' };
+
+/** The policy of an agent that names none. */
+const COMPILED: MemoryPolicy = { longTerm: 'compiled' };
+
+/** What a turn's memory does: the account's policy, or `'failed'` when the host's policy hook gave no valid answer. */
+type TurnPolicy = MemoryPolicy | 'failed';
+
+/** A hook that did not answer within its time. */
+const TIMED_OUT = Symbol('timed out');
+
+/** `work`'s result, or {@link TIMED_OUT} when it has not settled within `ms`. A rejection is the caller's to catch. */
+async function within<T>(work: Promise<T>, ms: number): Promise<T | typeof TIMED_OUT> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<typeof TIMED_OUT>((resolve) => {
+        timer = setTimeout(() => resolve(TIMED_OUT), Math.min(Math.max(ms, 0), MAX_TIMER_DELAY_MS));
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** True for an object whose only key is `longTerm`, holding one of the three words a policy takes. */
+function isMemoryPolicy(value: unknown): value is MemoryPolicy {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const keys = Object.keys(value);
+  if (keys.length !== 1 || keys[0] !== 'longTerm') return false;
+  const { longTerm } = value as { longTerm?: unknown };
+  return longTerm === 'off' || longTerm === 'raw' || longTerm === 'compiled';
+}
 
 /** What `sharedMemory` must be, as the rejection of an option that is not says it. */
 const SHARED_MEMORY_SHAPE =
@@ -255,6 +297,26 @@ export interface SouledAgentOptions extends AgentOptions {
    * refused, and so is opening a store that already holds the memory of another user or session.
    */
   sharedMemory?: { as: string; reason: 'one-persons-machine' | 'operators-notes' };
+  /**
+   * Where the wiki compile's model calls go. Unset: the agent's own provider and model, on its route, budget and
+   * ledger. An object names another provider or model (a local model included): the compile's text then goes to that
+   * provider alone, with no fallback and no router, and the agent's own key is sent only to the agent's own provider.
+   * `false`: no compile; raw traces only, and no per-user page is ever written.
+   */
+  compile?: { provider?: string; model?: string; apiKey?: string; baseUrl?: string } | false;
+  /**
+   * The host's policy for the account a turn serves; asked once a session and kept for it. A hook that throws,
+   * rejects, does not answer within the memory hooks' timeout (`memoryProviderOptions.timeoutMs`) or answers anything
+   * but one of the three policies fails closed: nothing is filed for that turn, it recalls the operator's pages alone,
+   * and the next turn asks again.
+   */
+  memoryPolicy?: (context: MemoryHookContext) => MemoryPolicy | Promise<MemoryPolicy>;
+  /**
+   * Screens or redacts text before it is filed (and so embedded) and before it is sent to a compile. Returns the text
+   * to use, or null to drop it. A hook that throws, rejects, does not answer within the memory hooks' timeout or
+   * answers anything else fails closed: the text is not filed, and a compile that needs it does not run.
+   */
+  screen?: (text: string, context: MemoryHookContext & { stage: 'file' | 'compile' }) => Promise<string | null>;
 }
 
 /**
@@ -295,6 +357,16 @@ export type SouledAgent = Agent & { memory?: Memory };
  * refuses is skipped with one `memory.compile_skipped` line: its traces wait for the next compile, and the other
  * subjects compile.
  *
+ * Three options say what is kept and where it goes. {@link SouledAgentOptions.compile} names the provider or model
+ * the compile's calls go to, or turns the compile off (`false`: raw traces only, one `memory.compile_skipped` line at
+ * open). {@link SouledAgentOptions.memoryPolicy} is asked once a session for the account the turn serves: `off` files
+ * nothing and recalls the operator's pages alone, `raw` files and recalls and compiles no page, `compiled` is the
+ * default. {@link SouledAgentOptions.screen} is given each text before it is filed and again before it is compiled.
+ * Both hooks fail closed: a hook that throws, times out or answers anything else files nothing for that write
+ * (`memory.write_refused`), and a compile it fails for does not run (`memory.compile_skipped`), its traces waiting
+ * with their watermark where it was. A compile started in a process that served no turn of a subject has no policy
+ * answer and no hook context for it: under a policy hook it is not compiled, and under a screen hook neither.
+ *
  * `close()` first closes the agent (with `runtime: 'gmi'` that stops its session turns), then waits, within one
  * deadline (see {@link SouledAgentOptions.pendingWritesTimeoutMs}), for the turns still running (a `generate()`, a
  * `stream()`, a session's `send()` or `stream()`, on either runtime; a stream whose signal aborted before anything was
@@ -311,7 +383,7 @@ export type SouledAgent = Agent & { memory?: Memory };
  *   store is closed first.
  */
 export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent> {
-  const { pendingWritesTimeoutMs, sharedMemory, ...rest } = opts;
+  const { pendingWritesTimeoutMs, sharedMemory, compile, memoryPolicy, screen, ...rest } = opts;
   /** The ids the agent itself reads as naming nobody, beside the built-in ones. */
   const anonymousUserIds =
     typeof rest.learning === 'object' && rest.learning !== null ? rest.learning.anonymousUserIds : undefined;
@@ -406,6 +478,177 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   /** The key of every scope a turn of this agent wrote to. */
   const written = new Set<string>();
 
+  /** How long the host's policy hook and its screen hook may take: the memory hooks' own timeout. */
+  const hookTimeoutMs = rest.memoryProviderOptions?.timeoutMs ?? MEMORY_TIMEOUT_MS;
+  /** The context a host's hook is given: the turn's, with the subject its memory is kept under and that subject's user. */
+  const hookContextOf = (context: MemoryHookContext, subject: MemorySubject): MemoryHookContext => ({
+    ...context,
+    subject,
+    ...(subject.kind === 'user' ? { userId: subject.id } : {}),
+  });
+  /** The policy the host answered for a session, kept until the session closes. */
+  const sessionPolicies = new Map<string, MemoryPolicy>();
+  /** What the turn a session is in decided, from its first hook to its reply's write. */
+  const sessionTurns = new Map<string, Promise<TurnPolicy>>();
+  /** The same for a one-shot call, by the context its hooks share. */
+  const oneShotTurns = new WeakMap<MemoryHookContext, Promise<TurnPolicy>>();
+  /** The sessions whose `off` policy has been said. */
+  const offSaid = new Set<string>();
+  /** For each scope a turn of this process served under a policy that keeps memory: the policy and the turn's context. */
+  const served = new Map<string, { policy: MemoryPolicy; context: MemoryHookContext }>();
+
+  /**
+   * Asks the host's policy for the account a turn serves. A throw, a rejection, no answer in time or any answer but
+   * one of the three policies is a failure: one `memory.hook_failed` line, and `'failed'`.
+   */
+  const askPolicy = async (context: MemoryHookContext): Promise<TurnPolicy> => {
+    if (!memoryPolicy) return COMPILED;
+    try {
+      const answer = await within(Promise.resolve().then(() => memoryPolicy(context)), hookTimeoutMs);
+      if (answer === TIMED_OUT) {
+        memoryLog.warn('memory.hook_failed', { hook: 'memoryPolicy', type: 'TimeoutError', code: 'MEMORY_HOOK_TIMEOUT' });
+        return 'failed';
+      }
+      if (!isMemoryPolicy(answer)) {
+        memoryLog.warn('memory.hook_failed', { hook: 'memoryPolicy', type: 'TypeError', code: 'MEMORY_HOOK_MALFORMED' });
+        return 'failed';
+      }
+      return answer;
+    } catch (err) {
+      memoryLog.warn('memory.hook_failed', { hook: 'memoryPolicy', ...errorFields(err) });
+      return 'failed';
+    }
+  };
+  /**
+   * What one turn's memory does, decided once a turn: the answer kept for its session, else the host's answer now. A
+   * valid answer of a session turn is kept for the session; a failure is kept for nothing, so the next turn asks again.
+   */
+  const decide = async (context: MemoryHookContext, subject: MemorySubject, scopeId: string): Promise<TurnPolicy> => {
+    const hookContext = hookContextOf(context, subject);
+    const kept = context.call === 'session' ? sessionPolicies.get(context.sessionId) : undefined;
+    const policy = kept ?? (await askPolicy(hookContext));
+    if (policy === 'failed') return policy;
+    // Kept only where a hook reads it later: the session's answer for its next turns, the scope's for its compile.
+    if (memoryPolicy && context.call === 'session') sessionPolicies.set(context.sessionId, policy);
+    if ((memoryPolicy || screen) && policy.longTerm !== 'off') served.set(scopeId, { policy, context: hookContext });
+    return policy;
+  };
+  /**
+   * The decision of the turn a hook call belongs to. A turn's recall opens it; the write of its reply closes it, so
+   * the whole turn recalls and files under one answer, and a hook that failed is not asked a second time in the turn.
+   */
+  const turnPolicyOf = (
+    context: MemoryHookContext,
+    subject: MemorySubject,
+    scopeId: string,
+    at: 'recall' | 'user' | 'assistant',
+  ): Promise<TurnPolicy> => {
+    if (context.call === 'one-shot') {
+      const open = at === 'recall' ? undefined : oneShotTurns.get(context);
+      const decision = open ?? decide(context, subject, scopeId);
+      oneShotTurns.set(context, decision);
+      return decision;
+    }
+    const open = at === 'recall' ? undefined : sessionTurns.get(context.sessionId);
+    const decision = open ?? decide(context, subject, scopeId);
+    if (at === 'assistant') sessionTurns.delete(context.sessionId);
+    else sessionTurns.set(context.sessionId, decision);
+    return decision;
+  };
+  /**
+   * `text` through the host's screen hook: the text to use, null when the hook drops it, or `'failed'` (with one
+   * `memory.hook_failed` line) when it throws, rejects, does not answer in time or answers anything else.
+   */
+  const screened = async (text: string, context: MemoryHookContext, stage: 'file' | 'compile'): Promise<string | null | 'failed'> => {
+    if (!screen) return text;
+    try {
+      const answer = await within(Promise.resolve().then(() => screen(text, { ...context, stage })), hookTimeoutMs);
+      if (answer === TIMED_OUT) {
+        memoryLog.warn('memory.hook_failed', { hook: 'screen', type: 'TimeoutError', code: 'MEMORY_HOOK_TIMEOUT' });
+        return 'failed';
+      }
+      if (answer === null) return null;
+      if (typeof answer !== 'string') {
+        memoryLog.warn('memory.hook_failed', { hook: 'screen', type: 'TypeError', code: 'MEMORY_HOOK_MALFORMED' });
+        return 'failed';
+      }
+      return answer;
+    } catch (err) {
+      memoryLog.warn('memory.hook_failed', { hook: 'screen', ...errorFields(err) });
+      return 'failed';
+    }
+  };
+  /**
+   * Files one side of a turn under its subject's key, when the account's policy keeps memory and the screen hook
+   * lets the text through. Each write that is not made says why in one `memory.write_refused` line, except under an
+   * `off` policy, the host's standing choice for the account, which is said once a session.
+   */
+  const fileTurn = async (role: Speaker, text: string, context: MemoryHookContext): Promise<void> => {
+    const subject = turnSubjectOf(context);
+    if (!subject) return;
+    // An id no key can be built from rejects the write: the runtime logs the hook's failure and the turn goes on.
+    const scopeId = conversationScopeKey(agentId, subject);
+    const policy = await turnPolicyOf(context, subject, scopeId, role);
+    if (policy === 'failed') {
+      memoryLog.warn('memory.write_refused', { reason: 'policy_failed' });
+      return;
+    }
+    if (policy.longTerm === 'off') {
+      if (context.call !== 'session' || !offSaid.has(context.sessionId)) {
+        if (context.call === 'session') offSaid.add(context.sessionId);
+        memoryLog.warn('memory.write_refused', { reason: 'policy_off' });
+      }
+      return;
+    }
+    const filed = await screened(text, hookContextOf(context, subject), 'file');
+    if (filed === 'failed') {
+      memoryLog.warn('memory.write_refused', { reason: 'screen_failed' });
+      return;
+    }
+    if (filed === null || filed === '') {
+      memoryLog.warn('memory.write_refused', { reason: 'screened' });
+      return;
+    }
+    written.add(scopeId);
+    // The user's message and the reply alike go under the subject's key. Who spoke goes in the trace's metadata:
+    // outside its text and its tags, which full-text search reads.
+    await memory.remember(filed, {
+      type: 'episodic',
+      scope: 'conversation',
+      scopeId,
+      metadata: {
+        [SPEAKER_METADATA_KEY]: role,
+        subject: { kind: subject.kind, id: subject.id },
+        ...(subject.kind === 'user' ? { turnUserId: subject.id } : {}),
+      },
+    });
+  };
+  /**
+   * Asked before a scope's traces are compiled. Under a policy hook, a scope no turn of this process was served for,
+   * or whose account keeps raw traces only, is not compiled. Under a screen hook, a scope with no turn of this process
+   * has no context to screen with, and is not compiled; otherwise each trace's text goes through the hook again: what
+   * it returns is what is compiled, a trace it drops is left out, and a failure stops the scope's compile.
+   */
+  const beforeScopeCompile: NonNullable<AttachedWiki['beforeScopeCompile']> = async (scopeId, traces) => {
+    const turn = served.get(scopeId);
+    if (memoryPolicy && turn?.policy.longTerm !== 'compiled') return { skip: 'policy_raw' };
+    if (!screen) return { traces };
+    if (!turn) return { skip: 'screen_failed' };
+    const kept: typeof traces = [];
+    let dropped = false;
+    for (const trace of traces) {
+      const text = await screened(trace.content, turn.context, 'compile');
+      if (text === 'failed') return { skip: 'screen_failed' };
+      if (text === null || text === '') {
+        dropped = true;
+        continue;
+      }
+      kept.push(text === trace.content ? trace : { ...trace, content: text });
+    }
+    if (dropped) memoryLog.warn('memory.write_refused', { reason: 'screened' });
+    return { traces: kept };
+  };
+
   // The turns still running and the memory writes the observer has started, until each settles: close() waits for
   // them before it compiles. A turn never waits for its writes.
   const pending = new Set<Promise<unknown>>();
@@ -468,38 +711,17 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     observe: (role, text, context) => {
       // Nothing is ever filed without the subject of its turn.
       if (!context) return Promise.reject(new TypeError('souledAgent: a memory write needs the hook context of its turn'));
-      const subject = turnSubjectOf(context);
-      if (!subject) return Promise.resolve();
-      let scopeId: string;
-      try {
-        scopeId = conversationScopeKey(agentId, subject);
-      } catch (err) {
-        // An id no key can be built from: the hook's failure is logged by the runtime and the turn goes on.
-        return Promise.reject(err);
-      }
-      written.add(scopeId);
-      // The user's message and the reply alike go under the subject's key. Who spoke goes in the trace's metadata:
-      // outside its text and its tags, which full-text search reads.
-      const write = awaitedOnClose(
-        memory.remember(text, {
-          type: 'episodic',
-          scope: 'conversation',
-          scopeId,
-          metadata: {
-            [SPEAKER_METADATA_KEY]: role,
-            subject: { kind: subject.kind, id: subject.id },
-            ...(subject.kind === 'user' ? { turnUserId: subject.id } : {}),
-          },
-        }),
-      );
-      return write.then(() => undefined);
+      // The whole write, its policy and its screening with it, is what close() waits for.
+      return awaitedOnClose(fileTurn(role, text, context));
     },
     getContext: async (text, options) => {
       // Two reads, each of one key, by equality: the turn's own subject, and the operator's pages. Nothing a caller
-      // passes widens them. A turn with no subject, or one whose id no key can be built from, reads the operator's.
-      const subject = options?.context ? turnSubjectOf(options.context) : undefined;
+      // passes widens them. A turn with no subject, one whose id no key can be built from, and one whose account
+      // keeps no memory (or whose policy hook failed) read the operator's pages alone.
+      const context = options?.context;
+      const subject = context ? turnSubjectOf(context) : undefined;
       let own: ScoredTrace[] = [];
-      if (subject) {
+      if (context && subject) {
         let scopeId: string | undefined;
         try {
           scopeId = conversationScopeKey(agentId, subject);
@@ -507,7 +729,12 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
           // An id no key can be built from has no memory to read: the turn goes on with the operator's pages.
           memoryLog.warn('memory.hook_failed', { hook: 'getContext', ...errorFields(err) });
         }
-        if (scopeId !== undefined) own = await memory.recall(text, { scope: 'conversation', scopeId, limit: RECALL_LIMIT });
+        if (scopeId !== undefined) {
+          const policy = await turnPolicyOf(context, subject, scopeId, 'recall');
+          if (policy !== 'failed' && policy.longTerm !== 'off') {
+            own = await memory.recall(text, { scope: 'conversation', scopeId, limit: RECALL_LIMIT });
+          }
+        }
       }
       const shared = await memory.recall(text, { scope: 'conversation', scopeId: operatorKey, limit: RECALL_LIMIT });
       // Best match first across the two reads; a score that is not a number ranks last.
@@ -546,22 +773,30 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
 
   // The compile's model calls: the agent's route and fallback settings, its completion cap (the budget's check
   // estimates a call without one at 4,096 output tokens), its budget (checked before each call and charged after it; a
-  // refusal skips that subject's compile, and its watermark stays where it was), and its usage ledger.
+  // refusal skips that subject's compile, and its watermark stays where it was), and its usage ledger. A compile
+  // target the host named takes them instead: that provider and model alone, with no fallback and no router, so a
+  // compile's text goes nowhere else; the agent's own key and base URL go with it only to the agent's own provider.
+  const target = typeof compile === 'object' && compile !== null ? compile : undefined;
+  const sameProvider = !target || target.provider === undefined || target.provider === rest.provider;
   const llm = async (prompt: string): Promise<string> =>
     (
       await generateText({
-        provider: rest.provider,
-        model: rest.model,
+        provider: target?.provider ?? rest.provider,
+        model: target?.model ?? rest.model,
         prompt,
         maxTokens: rest.maxTokens ?? rest.controls?.maxTotalTokens,
-        apiKey: rest.apiKey,
-        baseUrl: rest.baseUrl,
-        fallbackProviders: rest.fallbackProviders,
-        onFallback: rest.onFallback,
-        router: rest.router,
-        hostPolicy: rest.hostPolicy,
-        routerParams: rest.routerParams,
-        policyTier: rest.policyTier,
+        apiKey: target?.apiKey ?? (sameProvider ? rest.apiKey : undefined),
+        baseUrl: target?.baseUrl ?? (sameProvider ? rest.baseUrl : undefined),
+        ...(target
+          ? { fallbackProviders: [] }
+          : {
+              fallbackProviders: rest.fallbackProviders,
+              onFallback: rest.onFallback,
+              router: rest.router,
+              hostPolicy: rest.hostPolicy,
+              routerParams: rest.routerParams,
+              policyTier: rest.policyTier,
+            }),
         ...(budget ? { budget } : {}),
         ...(rest.accountIdOf ? { accountIdOf: rest.accountIdOf } : {}),
         usageLedger: { ...(ledger ?? {}), source: SOULED_AGENT_COMPILE_SOURCE },
@@ -581,7 +816,11 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     subjectOf,
     // A subject whose compile the budget refuses is skipped: its traces wait, and the other subjects compile.
     compileSkipReasonOf: (error) => (isBudgetRefusal(error) ? 'budget' : undefined),
+    ...(memoryPolicy || screen ? { beforeScopeCompile } : {}),
+    // No compile at all: raw traces only, and no page is ever written.
+    ...(compile === false ? { compile: false as const } : {}),
   });
+  if (compile === false) memoryLog.warn('memory.compile_skipped', { reason: 'compile_off' });
 
   // attachMemoryWiki appends read_memory_page to an array. Use the augmented
   // array when tools were an array (or absent); pass map/registry inputs through
@@ -614,6 +853,16 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       trackedSessions.add(session);
       const send = session.send.bind(session) as (...args: unknown[]) => Promise<unknown>;
       session.send = ((...args: unknown[]) => awaitedOnClose(send(...args))) as AgentSession['send'];
+      // A closed session keeps nothing of its account's policy: its next opening asks again.
+      const closeSession = (session as { close?: (...args: unknown[]) => Promise<unknown> }).close?.bind(session);
+      if (closeSession) {
+        (session as { close: (...args: unknown[]) => Promise<unknown> }).close = (...args: unknown[]) => {
+          sessionPolicies.delete(session.id);
+          sessionTurns.delete(session.id);
+          offSaid.delete(session.id);
+          return closeSession(...args);
+        };
+      }
       const streamSession = session.stream.bind(session);
       session.stream = (input, streamOpts) => awaitStreamOnClose(streamSession(input, streamOpts), streamOpts?.abortSignal);
     }
@@ -645,7 +894,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
         );
       }
       try {
-        // The subjects this agent's turns wrote to; a trace stored another way waits for memory.compileWiki().
+        // The subjects this agent's turns wrote to; a trace stored another way waits for memory.compileWiki(). With
+        // `compile: false` no wiki is attached, and this compiles nothing.
         await memory.compileWiki({ reason: 'session-end', scopes: [...written] });
       } catch (err) {
         // A subject's watermark moves only past compiled traces, so the next compile takes these up again.

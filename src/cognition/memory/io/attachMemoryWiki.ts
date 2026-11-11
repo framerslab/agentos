@@ -69,6 +69,11 @@ export interface AttachMemoryWikiOptions {
    * answer: the error rejects the compile call once every scope has run.
    */
   compileSkipReasonOf?: AttachedWiki['compileSkipReasonOf'];
+  /**
+   * `false`: no compile. No compiler is attached to the facade, so its `compileWiki()` writes nothing and no
+   * subject's page is ever made; the operator's pages are indexed and read as before.
+   */
+  compile?: false;
 }
 
 export interface AttachMemoryWikiResult {
@@ -156,12 +161,14 @@ export async function attachMemoryWiki(opts: AttachMemoryWikiOptions): Promise<A
   });
   const storeFor = (scopeId: string): UserWikiStore => new UserWikiStore({ scopeId, pages: opts.memory, chunk: opts.chunk });
 
-  opts.memory.attachWiki({
-    storeFor,
-    compiler,
-    ...(opts.beforeScopeCompile ? { beforeScopeCompile: opts.beforeScopeCompile } : {}),
-    ...(opts.compileSkipReasonOf ? { compileSkipReasonOf: opts.compileSkipReasonOf } : {}),
-  });
+  if (opts.compile !== false) {
+    opts.memory.attachWiki({
+      storeFor,
+      compiler,
+      ...(opts.beforeScopeCompile ? { beforeScopeCompile: opts.beforeScopeCompile } : {}),
+      ...(opts.compileSkipReasonOf ? { compileSkipReasonOf: opts.compileSkipReasonOf } : {}),
+    });
+  }
 
   // index.md lists the operator's pages alone, whatever an earlier version wrote into it.
   try {
