@@ -851,6 +851,8 @@ export class PromptEngine implements IPromptEngine {
         // entirely.
         const minEarlierKept = turnMessages.length > 0 || optimized.userInput ? 0 : 1;
         let reducedEarlier = earlier;
+        // True once a summary stands in for the earlier history.
+        let summarized = false;
         if (earlier.length > 0 && earlierTarget <= 0 && minEarlierKept === 0) {
           // Nothing earlier fits; a summary would still add a message.
           reducedEarlier = [];
@@ -866,6 +868,7 @@ export class PromptEngine implements IPromptEngine {
                 this.config.historyManagement.preserveImportantMessages
               );
               reducedEarlier = summaryMessages;
+              summarized = true;
               modifications.details!.summarizedComponents!.push('conversationHistory');
               modifications.wasModified = true;
             } catch (e) {
@@ -885,6 +888,15 @@ export class PromptEngine implements IPromptEngine {
         optimized.conversationHistory = [...reducedEarlier, ...turnMessages];
         const newEarlierTokens = await this.calculateTokensForMessages(reducedEarlier, modelInfo.modelId, sendsThinking);
         currentTokens = currentTokens - earlierTokens + newEarlierTokens;
+        // Truncation keeps the newest messages, so what it dropped is the
+        // oldest `dropped` of them; the report counts them as the budget did.
+        const dropped = summarized ? 0 : earlier.length - reducedEarlier.length;
+        if (dropped > 0) {
+          modifications.details!.historyOmitted = {
+            messages: dropped,
+            tokens: await this.calculateTokensForMessages(earlier.slice(0, dropped), modelInfo.modelId, sendsThinking),
+          };
+        }
       }
     }
 
