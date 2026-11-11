@@ -64,8 +64,8 @@ export interface AvatarAcceptanceVerdict {
  * (the expression sheet, the additional angles and the full-body image). When
  * given it replaces the embedding drift check: the pipeline extracts and
  * compares no face embedding, skips the `face_embedding` stage and returns no
- * drift report. A refused candidate is regenerated up to
- * `driftGuard.maxRegenerationAttempts` times; a job whose every attempt is
+ * drift report. A refused candidate is drawn again, up to
+ * `driftGuard.maxRegenerationAttempts` draws in all; a job whose every attempt is
  * refused fails with the last reason and its image is left out of the
  * identity package. A check that throws fails that job with the error's
  * message and draws no more for it, so a caller that wants to keep a render
@@ -130,7 +130,7 @@ export interface AvatarGenerationRequest {
     rejectBelowThreshold?: boolean;
     /**
      * Maximum attempts per image when its face drifts or the acceptance check
-     * refuses it.
+     * refuses it: draws in all, the first included. Below 1 counts as 1.
      */
     maxRegenerationAttempts?: number;
   };
