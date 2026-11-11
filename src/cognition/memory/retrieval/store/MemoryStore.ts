@@ -248,6 +248,17 @@ function isTrustPolicy(value: unknown): value is NonNullable<MemoryTrace['policy
   );
 }
 
+/** Whether two trust policies allow the same uses. */
+function sameTrustPolicy(a: MemoryTrace['policy'], b: MemoryTrace['policy']): boolean {
+  if (!a || !b) return a === b;
+  return (
+    a.usableForAuthorization === b.usableForAuthorization &&
+    a.usableForPersonalization === b.usableForPersonalization &&
+    a.usableForFactClaim === b.usableForFactClaim &&
+    a.requiresReverificationAfterMs === b.requiresReverificationAfterMs
+  );
+}
+
 /** Parse a JSON string and return `undefined` on any failure. */
 function safeParseJson<T>(raw: string): T | undefined {
   try {
@@ -1178,7 +1189,7 @@ export class MemoryStore {
   /**
    * Calls `listener` whenever this store files an active trace in its cache (a store, a revival, a hydration, a read
    * that loads it, a move to another scope id by {@link refileScope} or a Brain's re-file, which files it again under
-   * the new id) or stops serving one (a soft delete, a delete, a delete in a sibling store on the same backing
+   * the new id, a {@link persistTraceMetadata} of a trace a caller changed) or stops serving one (a soft delete, a delete, a delete in a sibling store on the same backing
    * resource). A listener that throws is ignored.
    *
    * @returns The call that removes the listener.
@@ -1480,7 +1491,8 @@ export class MemoryStore {
    * its newest rows). Without a Brain they come from the cache. With one, every id is checked against its row first,
    * as a vector query checks its hits: a trace whose row is gone or deleted, by this process or another, is left out
    * (and fenced in every store on the Brain), and a cached trace whose row a move filed under another scope id is left
-   * out until this store follows the move. A cached trace is answered from the cache; a live row with a usable
+   * out until this store follows the move. A cached trace is answered from the cache, with the trust policy its row
+   * holds when the row names one (another process may have stored the trace again); a live row with a usable
    * embedding is filed in the cache and the vector index as the store's hydration files one; a row without one is
    * returned for this call only and not cached, since the store holds no vector for it, and is read again when a
    * delete or a move ran after the first read. A trace that is inactive, tombstoned or delete-pending is left out.
@@ -1522,7 +1534,11 @@ export class MemoryStore {
       if (!row || Number(row.deleted ?? 0) !== 0) continue;
       const cached = served(id);
       if (cached) {
-        if (!rowFiledElsewhere(row, cached.scope, cached.scopeId)) traces.set(id, cached);
+        if (rowFiledElsewhere(row, cached.scope, cached.scopeId)) continue;
+        // The row's trust policy is the trace's: another process may have stored the trace again under another one.
+        const { policy } = parseTraceMetadata(row.metadata);
+        if (isTrustPolicy(policy) && !sameTrustPolicy(policy, cached.policy)) cached.policy = { ...policy };
+        traces.set(id, cached);
         continue;
       }
       if (!this.traceCache.has(id) && !this.tombstonedTraceIds.has(id)) uncached.push(row);
@@ -3135,6 +3151,8 @@ export class MemoryStore {
       if (isDeletePending() || !trace.isActive) {
         await this.config.vectorStore.delete(collection, [traceId]);
       }
+      // A caller may have changed what an index of the trace holds (its tags) before persisting it.
+      if (!isDeletePending()) this.notifyServing(trace);
     } catch {
       // Best-effort persistence — the in-memory mutation already
       // happened, so a vector-store failure should not kill the caller.
