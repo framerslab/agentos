@@ -989,6 +989,68 @@ describe('OpenAIRealtimeTranscriptionSTT: reconnects, failures, flush and close'
     session.close();
   });
 
+  it('a flush that stops waiting commits the audio held before it stopped, not audio pushed after it returned', async () => {
+    fakeClock();
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY, turnDetection: null, finalTimeoutMs: 50 });
+    const session = await stt.startSession();
+    const log = record(session);
+    const first = Sockets.instances[0];
+    first.readyState = 2; // CLOSING, and its close event has not come
+    session.pushAudio(frame(2_400)); // 100 ms held for the flush
+    const flushing = session.flush();
+    await vi.advanceTimersByTimeAsync(60);
+    await flushing; // no connection took over within finalTimeoutMs
+    session.pushAudio(frame(4_800)); // 200 ms of a new turn, pushed after the flush returned
+    first.drop();
+    await vi.advanceTimersByTimeAsync(100);
+    await settle();
+    const next = Sockets.instances[1];
+    expect(sentSamples(next).map((samples) => samples.length)).toEqual([2_400, 4_800]);
+    const order = next.sent
+      .filter((event) => event.type === 'input_audio_buffer.append' || event.type === 'input_audio_buffer.commit')
+      .map((event) => event.type);
+    expect(order).toEqual(['input_audio_buffer.append', 'input_audio_buffer.commit', 'input_audio_buffer.append']);
+    expect(log.errors).toEqual([]);
+    session.close();
+  });
+
+  it('commits each of two flushes that stopped waiting at its own point, and a flush still waiting after the rest', async () => {
+    fakeClock();
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY, turnDetection: null, finalTimeoutMs: 50 });
+    const session = await stt.startSession();
+    const log = record(session);
+    const first = Sockets.instances[0];
+    first.readyState = 2; // CLOSING
+    session.pushAudio(frame(2_400));
+    const one = session.flush();
+    await vi.advanceTimersByTimeAsync(60);
+    await one;
+    session.pushAudio(frame(4_800));
+    const two = session.flush();
+    await vi.advanceTimersByTimeAsync(60);
+    await two;
+    first.drop();
+    await vi.advanceTimersByTimeAsync(60); // the reconnect waits 100 ms
+    session.pushAudio(frame(1_200));
+    let flushed = false;
+    const three = session.flush().then(() => {
+      flushed = true;
+    });
+    await vi.advanceTimersByTimeAsync(45); // the replacement is adopted before the third flush's 50 ms run out
+    await settle();
+    const next = Sockets.instances[1];
+    expect(sentSamples(next).map((samples) => samples.length)).toEqual([2_400, 4_800, 1_200]);
+    const order = next.sent
+      .filter((event) => event.type === 'input_audio_buffer.append' || event.type === 'input_audio_buffer.commit')
+      .map((event) => (event.type === 'input_audio_buffer.commit' ? 'commit' : 'append'));
+    expect(order).toEqual(['append', 'commit', 'append', 'commit', 'append', 'commit']);
+    expect(flushed).toBe(false); // the third flush waits for its final
+    await vi.advanceTimersByTimeAsync(60);
+    await three;
+    expect(log.errors).toEqual([]);
+    session.close();
+  });
+
   it('abandons a reconnect still connecting when the session closes, and leaves no timer behind', async () => {
     fakeClock();
     const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY });
