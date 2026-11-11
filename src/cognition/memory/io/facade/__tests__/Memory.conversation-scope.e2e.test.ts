@@ -809,13 +809,21 @@ describe.each(STORES)('the compile per scope on %s', (store) => {
     // The trace's embedding is made after its time is stamped and before its row is stored: held here, it is stored
     // after a trace stamped later.
     const facade = memory as unknown as { _embeddingBlobOf: (text: string) => Promise<unknown> };
+    let entered!: () => void;
+    const stamped = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
     const embed = facade._embeddingBlobOf.bind(memory);
     facade._embeddingBlobOf = async (text: string) => {
-      if (text.includes('kestrel')) await gate;
+      if (text.includes('kestrel')) {
+        // The trace is stamped and counted as not yet stored by now.
+        entered();
+        await gate;
+      }
       return embed(text);
     };
     const late = memory.remember('Alice keeps a kestrel.', { scope: 'conversation', scopeId: A });
-    await pause(5);
+    await stamped;
     await memory.remember('Alice likes tea.', { scope: 'conversation', scopeId: A });
 
     await memory.compileWiki();
@@ -1167,14 +1175,22 @@ describe.each(STORES)('scopes kept apart on every path, on %s', (store) => {
       const gate = new Promise<void>((resolve) => {
         release = resolve;
       });
+      let entered!: () => void;
+      const stamped = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
       const facade = memory as unknown as { _embeddingBlobOf: (text: string) => Promise<unknown> };
       const embed = facade._embeddingBlobOf.bind(memory);
       facade._embeddingBlobOf = async (text: string) => {
-        if (text.includes('kestrel')) await gate;
+        if (text.includes('kestrel')) {
+          // The trace is stamped and counted as not yet stored by now.
+          entered();
+          await gate;
+        }
         return embed(text);
       };
       const late = memory.remember('Alice keeps a kestrel.', { scope: 'conversation', scopeId: A });
-      await pause(5);
+      await stamped;
       await second.remember('Alice likes tea.', { scope: 'conversation', scopeId: A });
 
       await second.compileWiki();
