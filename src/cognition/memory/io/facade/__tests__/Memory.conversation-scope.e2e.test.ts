@@ -849,6 +849,14 @@ const contentsUnder = async (brain: Brain, scopeId: string): Promise<string[]> =
   )
     .map((row) => row.content)
     .sort();
+/** How many traces of exactly `text` a scope holds that are not page chunks. */
+const messagesUnder = async (brain: Brain, scopeId: string, text: string): Promise<number> =>
+  (
+    await brain.all<{ tags: string }>(
+      `SELECT tags FROM memory_traces WHERE brain_id = ? AND scope = 'conversation' AND scope_id = ? AND content = ?`,
+      [brain.brainId, scopeId, text],
+    )
+  ).filter((row) => !(JSON.parse(row.tags) as string[]).includes('wiki')).length;
 /** A tool context with no user and no turn of a learning layer. */
 const NO_TURN = { gmiId: 'g', personaId: 'p', userContext: { userId: 'system' } } as never;
 
@@ -937,6 +945,18 @@ describe.each(STORES)('scopes kept apart on every path, on %s', (store) => {
     const body = bodyOf(await pages.readPage('concepts/notes'));
     expect(['Alice drinks espresso.', 'Alice keeps a ferret.']).toContain(body);
     expect(await contentsUnder(brain, A)).toEqual([body]);
+  });
+
+  it('a message stored again is one trace, though more page chunks of its text than one read takes come first', async () => {
+    const { memory, brain } = await open(store);
+    const log: WikiPage = { ...P(Array.from({ length: 51 }, () => 'We met on Tuesday.').join('\n\n')), id: 'log/2026-01-01', type: 'log' };
+    await new UserWikiStore({ scopeId: A, pages: memory, chunk }).writePage(log);
+    expect(await chunkTraceIdsUnder(brain, A)).toHaveLength(51);
+
+    await memory.remember('We met on Tuesday.', { type: 'episodic', scope: 'conversation', scopeId: A });
+    await memory.remember('We met on Tuesday.', { type: 'episodic', scope: 'conversation', scopeId: A });
+
+    expect(await messagesUnder(brain, A, 'We met on Tuesday.')).toBe(1);
   });
 
   it('a forced re-index never writes back a page that a write of the scope changed meanwhile', async () => {
@@ -1199,6 +1219,24 @@ describe.each(STORES)('scopes kept apart on every path, on %s', (store) => {
       // The page's next rewrite takes its own chunk and leaves the message.
       await pages.writePage(P('Alice drinks espresso.'));
       expect(await contentsUnder(brain, A)).toEqual(['Alice drinks espresso.', 'Alice likes tea.']);
+    });
+
+    it('an imported message is matched to the message the brain holds, though more page chunks of its text come first', async () => {
+      const source = await openWith({ selfImprove: false });
+      await source.memory.remember('Alice likes tea.', { scope: 'conversation', scopeId: A });
+      const file = path.join(source.dir, 'many.sqlite');
+      await source.memory.export(file, { format: 'sqlite' });
+      const { memory, brain } = await openWith({ selfImprove: false });
+      // A page of 51 chunks of that text, stored before the message.
+      await new UserWikiStore({ scopeId: A, pages: memory, chunk }).writePage(
+        P(Array.from({ length: 51 }, () => 'Alice likes tea.').join('\n\n')),
+      );
+      await memory.remember('Alice likes tea.', { scope: 'conversation', scopeId: A });
+
+      const result = await memory.importFrom(file, { format: 'sqlite' });
+
+      expect(result.errors).toEqual([]);
+      expect(await messagesUnder(brain, A, 'Alice likes tea.')).toBe(1);
     });
 
     /** A brain file that holds one message of alice's, stored long before anything the test stores. */

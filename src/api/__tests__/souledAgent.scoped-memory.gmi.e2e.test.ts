@@ -1654,4 +1654,31 @@ describe('the options cognitive memory does not reach', () => {
     // Nothing was opened: no store folder was made.
     expect(fs.existsSync(path.join(dir, 'memory', '.store', 'memory.sqlite'))).toBe(false);
   });
+
+  it.each<[string, Record<string, unknown>]>([
+    ['an inline soul', { soul: { content: '---\nname: Aria\nagentId: aria-1\n---\nYou are Aria.' } }],
+    ['an optional soul that does not load', { soul: { path: '/no/such/soul-with-hooks', optional: true } }],
+  ])('memoryPolicy beside cognitive memory is refused for %s too, which opens no wiki', async (_case, soulOption) => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const embeddings = key();
+    script('openai', embeddings, { replies: [] });
+    vi.stubEnv('OPENAI_API_KEY', embeddings);
+    const k = key();
+    scripted(k);
+    const cognitive = { runtime: 'gmi', cognition: { memory: { embedding: { provider: 'openai' } }, mechanisms: false } };
+
+    const outcome = await souledAgent({
+      ...stubbed(k, cognitive as Partial<AgentOptions>),
+      ...soulOption,
+      memoryPolicy: () => ({ longTerm: 'off' }),
+    } as never).then(
+      async (a) => {
+        await a.close();
+        return 'opened';
+      },
+      (err: unknown) => (err instanceof Error ? err.message : String(err)),
+    );
+
+    expect(outcome).toMatch(/cognitive memory/);
+  });
 });
