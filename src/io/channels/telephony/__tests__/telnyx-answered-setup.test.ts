@@ -395,6 +395,27 @@ describe('a carrier-profile Telnyx notify call hung up after its message', () =>
     }
   });
 
+  it('writes a hangup Telnyx refuses to the console, and the call stays ended hangup-bot', async () => {
+    const { manager, fetchMock } = setUp({ eventHandling: 'carrier' });
+    const respond = fetchMock.getMockImplementation();
+    fetchMock.mockImplementation(async (input, init) => (String(input).endsWith('/actions/hangup')
+      ? new Response(JSON.stringify({ errors: [{ title: 'Command refused' }] }), { status: 422, headers: { 'Content-Type': 'application/json' } })
+      : respond!(input, init)));
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const call = await manager.initiateCall({ toNumber: '+15550000002', mode: 'notify', message: MESSAGE });
+      manager.processWebhook('telnyx', signedEvent('call.answered', 'evt-answered'));
+      await vi.waitFor(() => expect(actions(fetchMock)).toEqual(['speak']));
+      manager.processWebhook('telnyx', signedEvent('call.speak.ended', 'evt-speak-ended', { client_state: commands(fetchMock)[0]?.body.client_state, status: 'completed' }));
+      await vi.waitFor(() => expect(consoleError).toHaveBeenCalledWith('[CallManager] Hangup failed:', expect.objectContaining({ message: 'Telnyx hangup failed: 422' })));
+      expect(actions(fetchMock)).toEqual(['speak', 'hangup']);
+      expect(manager.getCall(call.callId)?.state).toBe('hangup-bot');
+    } finally {
+      consoleError.mockRestore();
+      manager.dispose();
+    }
+  });
+
   it.each(['call_hangup', 'cancelled_amd'])('hangs nothing up when the message ends with status %s', async (status) => {
     const { manager, fetchMock } = setUp();
     try {
@@ -445,7 +466,7 @@ const OUR_NUMBER = '+15550000001';
 const inboundInitiated = (): WebhookContext => signedEvent('call.initiated', 'evt-inbound-initiated', { direction: 'incoming', from: CALLER, to: OUR_NUMBER, state: 'parked' });
 
 /** The stream settings a carrier-profile dial request carries, which the answer of an inbound call carries too. */
-const STREAM_SETTINGS = { stream_url: 'wss://example.test/voice/media-stream', stream_track: 'inbound_track', stream_bidirectional_mode: 'rtp', stream_bidirectional_codec: 'PCMU' };
+const STREAM_SETTINGS = { stream_url: 'wss://example.test/voice/media-stream', stream_track: 'inbound_track', stream_codec: 'PCMU', stream_bidirectional_mode: 'rtp', stream_bidirectional_codec: 'PCMU' };
 
 describe('a carrier-profile Telnyx inbound call answered by AgentOS', () => {
   it('answers an admitted call once with the media stream settings, and its call.answered starts listening with no other command', async () => {
