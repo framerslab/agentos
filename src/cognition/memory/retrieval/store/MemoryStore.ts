@@ -238,6 +238,16 @@ function traceToMetadata(trace: MemoryTrace, accessState: boolean): Record<strin
   };
 }
 
+/** Whether a row's metadata holds a trust policy ({@link MemoryTrace.policy}) of the shape `store()` writes. */
+function isTrustPolicy(value: unknown): value is NonNullable<MemoryTrace['policy']> {
+  if (!isJsonObject(value)) return false;
+  return (
+    typeof value.usableForAuthorization === 'boolean' &&
+    typeof value.usableForPersonalization === 'boolean' &&
+    typeof value.usableForFactClaim === 'boolean'
+  );
+}
+
 /** Parse a JSON string and return `undefined` on any failure. */
 function safeParseJson<T>(raw: string): T | undefined {
   try {
@@ -1012,6 +1022,20 @@ async function indexStoredTrace(
   await syncTraceFullTextIndex(brain, trace);
 }
 
+/** What a store tells its listeners: a trace it now serves, or one it no longer serves. */
+export type MemoryStoreTraceEvent = { kind: 'filed'; trace: MemoryTrace } | { kind: 'removed'; traceId: string };
+
+/** The errors a `MemoryStore.query` embedding call threw, as thrown: the same objects, so their identity is kept. */
+const queryEmbeddingFailures = new WeakSet<object>();
+
+/**
+ * Whether `error` was thrown by the embedding call of a {@link MemoryStore.query}: the embedder failed, not the store.
+ * The error is the embedder's own object, rethrown unchanged.
+ */
+export function isQueryEmbeddingFailure(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && queryEmbeddingFailures.has(error);
+}
+
 export class MemoryStore {
   /** Max traces hydrated from the Brain per instance (most-recent first); bounds the per-request load. */
   private static readonly HYDRATION_LIMIT = 1000;
@@ -1057,6 +1081,8 @@ export class MemoryStore {
    * after a measurement that failed.
    */
   private measuredVectorSize: Promise<number | undefined> | undefined;
+  /** The callers told when this store files or stops serving a trace ({@link addTraceListener}). */
+  private readonly traceListeners = new Set<(event: MemoryStoreTraceEvent) => void>();
 
   constructor(config: MemoryStoreConfig) {
     this.config = config;
@@ -1145,7 +1171,42 @@ export class MemoryStore {
       unregisterCoordinationTarget(this.coordinationRegistration);
       this.coordinationRegistration = null;
     }
+    this.traceListeners.clear();
     this.disposed = true;
+  }
+
+  /**
+   * Calls `listener` whenever this store files an active trace in its cache (a store, a revival, a hydration, a read
+   * that loads it) or stops serving one (a soft delete, a delete, a delete in a sibling store on the same backing
+   * resource). A listener that throws is ignored.
+   *
+   * @returns The call that removes the listener.
+   */
+  addTraceListener(listener: (event: MemoryStoreTraceEvent) => void): () => void {
+    this.traceListeners.add(listener);
+    return () => {
+      this.traceListeners.delete(listener);
+    };
+  }
+
+  private notify(event: MemoryStoreTraceEvent): void {
+    for (const listener of this.traceListeners) {
+      try {
+        listener(event);
+      } catch {
+        // A listener never breaks a write.
+      }
+    }
+  }
+
+  /** Files `trace` in the cache and tells the listeners whether the store now serves it. */
+  private cacheTrace(trace: MemoryTrace): void {
+    this.traceCache.set(trace.id, trace);
+    this.notify(
+      trace.isActive && !this.tombstonedTraceIds.has(trace.id)
+        ? { kind: 'filed', trace }
+        : { kind: 'removed', traceId: trace.id },
+    );
   }
 
   private assertNotDisposed(): void {
@@ -1171,6 +1232,7 @@ export class MemoryStore {
       trace.isActive = false;
       trace.updatedAt = Date.now();
     }
+    this.notify({ kind: 'removed', traceId });
   }
 
   private async evictDeletedLocally(
@@ -1204,7 +1266,7 @@ export class MemoryStore {
     const trace = this.traceCache.get(traceId);
     if (trace?.isActive) return;
     this.embeddingCache.delete(traceId);
-    if (trace) this.traceCache.set(traceId, withoutWords(trace));
+    if (trace) this.cacheTrace(withoutWords(trace));
   }
 
   private async reviveLocally(
@@ -1218,6 +1280,7 @@ export class MemoryStore {
       if (cached) cached.isActive = true;
       this.tombstonedTraceIds.delete(trace.id);
       this.authoritativeTombstoneIds.delete(trace.id);
+      if (cached) this.notify({ kind: 'filed', trace: cached });
       return true;
     }
 
@@ -1244,11 +1307,11 @@ export class MemoryStore {
       };
       const synced = syncedDecayStates.get(trace);
       if (synced) syncedDecayStates.set(revivedTrace, synced);
-      this.traceCache.set(trace.id, revivedTrace);
-      this.embeddingCache.set(trace.id, [...embedding]);
-      this.registerScope(trace.scope, trace.scopeId);
       this.tombstonedTraceIds.delete(trace.id);
       this.authoritativeTombstoneIds.delete(trace.id);
+      this.cacheTrace(revivedTrace);
+      this.embeddingCache.set(trace.id, [...embedding]);
+      this.registerScope(trace.scope, trace.scopeId);
       return true;
     } catch {
       // Keep the sibling tombstone when its vector index cannot be revived.
@@ -1407,6 +1470,70 @@ export class MemoryStore {
   }
 
   /**
+   * The traces with these ids, for a recall leg that found them outside the vector index (the Brain's full-text index,
+   * its newest rows): from the cache where it holds them, else read by id from the Brain. A trace that is inactive,
+   * deleted, tombstoned or delete-pending is left out, as is an id with no row. A row with a usable embedding is filed
+   * in the cache and the vector index as the store's hydration files one; a row without one is returned for this call
+   * only and not cached, since the store holds no vector for it.
+   *
+   * Never throws: when the Brain cannot be read, `unread` counts the ids the read left out and `traces` holds the
+   * cached ones.
+   *
+   * @param traceIds - The ids, in any order; repeats are read once.
+   * @returns The traces found, by id, and how many ids a failed read left out.
+   */
+  async loadTracesForRecall(traceIds: readonly string[]): Promise<{ traces: Map<string, MemoryTrace>; unread: number }> {
+    this.beginOperation();
+    const namespace = this.coordinationNamespace;
+    const brain = this.brain;
+    const traces = new Map<string, MemoryTrace>();
+    const served = (id: string): MemoryTrace | undefined => {
+      if (this.tombstonedTraceIds.has(id) || isTraceDeletePending(namespace, id) || hasDeletedTrace(namespace, id)) {
+        return undefined;
+      }
+      const trace = this.traceCache.get(id);
+      return trace?.isActive ? trace : undefined;
+    };
+    const missing: string[] = [];
+    for (const id of new Set(traceIds)) {
+      const trace = served(id);
+      if (trace) traces.set(id, trace);
+      else if (!this.traceCache.has(id) && !this.tombstonedTraceIds.has(id)) missing.push(id);
+    }
+    if (!brain || missing.length === 0) return { traces, unread: 0 };
+    const epochs = hydrationEpochs(namespace);
+    const durable = await this.getDurableTraceRows(missing, brain);
+    if (!durable.ok) return { traces, unread: missing.length };
+    const live: MemoryTraceRow[] = [];
+    for (const id of missing) {
+      const row = durable.rows.get(id);
+      if (row && Number(row.deleted ?? 0) === 0) live.push(row);
+    }
+    const withVector = live.filter((row) => {
+      const embedding = blobToEmbedding(row.embedding);
+      return embedding != null && isUsableEmbedding(embedding);
+    });
+    try {
+      await this.hydrateRows(withVector, brain, namespace, epochs);
+    } catch {
+      // A row that did not file is read below as one with no vector.
+    }
+    for (const row of live) {
+      const filed = served(row.id);
+      if (filed) {
+        traces.set(row.id, filed);
+        continue;
+      }
+      if (this.traceCache.has(row.id)) continue;
+      await withTraceOperation(namespace, row.id, 'normal', async ({ blockedByDelete }) => {
+        if (blockedByDelete || this.tombstonedTraceIds.has(row.id) || hasDeletedTrace(namespace, row.id)) return;
+        traces.set(row.id, this.rowToTrace(row));
+      });
+    }
+    return { traces, unread: 0 };
+  }
+
+  /**
    * Hydrate the in-memory vector store + scope registry from the attached
    * Brain on first use. The Brain is the durable backing store, but the vector
    * index is per-instance and starts cold — without this, a host that opens a
@@ -1549,7 +1676,7 @@ export class MemoryStore {
             return;
           }
 
-          this.traceCache.set(trace.id, trace);
+          this.cacheTrace(trace);
           this.embeddingCache.set(trace.id, embedding);
           this.registerScope(trace.scope, trace.scopeId);
           loaded += 1;
@@ -1608,6 +1735,7 @@ export class MemoryStore {
       importance: typeof meta.importance === 'number' ? meta.importance : undefined,
       structuredData: meta.structuredData,
       ...(typeof meta.turnUserId === 'string' && meta.turnUserId ? { turnUserId: meta.turnUserId } : {}),
+      ...(isTrustPolicy(meta.policy) ? { policy: meta.policy } : {}),
     } as MemoryTrace;
     syncedDecayStates.set(trace, decay);
     return trace;
@@ -1738,6 +1866,8 @@ export class MemoryStore {
           associatedTraceIds: trace.associatedTraceIds,
           structuredData: trace.structuredData,
           turnUserId: trace.turnUserId,
+          // The trust policy, so a store that loads the row (a hydration, a recall leg's by-id read) still gates it.
+          policy: trace.policy,
         };
         const insertParams = [
           brain.brainId,
@@ -1796,7 +1926,7 @@ export class MemoryStore {
     }
 
     // Cache trace and its embedding (avoids re-generation on recordAccess)
-    this.traceCache.set(trace.id, trace);
+    this.cacheTrace(trace);
     this.embeddingCache.set(trace.id, embedding);
     this.registerScope(trace.scope, trace.scopeId);
     return embedding;
@@ -1825,6 +1955,8 @@ export class MemoryStore {
       vectorSearchMs: number;
       scoringMs: number;
     };
+    /** The embedding manager returned no usable vector for the query: nothing was searched. */
+    emptyQueryVector?: true;
   }> {
     this.beginOperation();
     const now = Date.now();
@@ -1843,10 +1975,17 @@ export class MemoryStore {
       return { scored: [], partial: [], timings: { vectorSearchMs: 0, scoringMs: 0 } };
     }
 
-    // Generate query embedding
-    const embeddingResponse = await this.config.embeddingManager.generateEmbeddings({
-      texts: queryText,
-    });
+    // Generate query embedding. An error the embedder throws is rethrown as it is, marked so that a caller can tell
+    // the embedder failed ({@link isQueryEmbeddingFailure}).
+    let embeddingResponse: Awaited<ReturnType<IEmbeddingManager['generateEmbeddings']>>;
+    try {
+      embeddingResponse = await this.config.embeddingManager.generateEmbeddings({
+        texts: queryText,
+      });
+    } catch (error) {
+      if (typeof error === 'object' && error !== null) queryEmbeddingFailures.add(error);
+      throw error;
+    }
     const queryEmbedding = embeddingResponse.embeddings[0];
     if (!isUsableEmbedding(queryEmbedding)) {
       // CR4: the embedding manager failed to embed the query (returned []).
@@ -1857,7 +1996,7 @@ export class MemoryStore {
         'MemoryStore.query: embedding manager returned an empty query vector; ' +
           'returning no results rather than issuing a corrupt similarity search.',
       );
-      return { scored: [], partial: [], timings: { vectorSearchMs: 0, scoringMs: 0 } };
+      return { scored: [], partial: [], timings: { vectorSearchMs: 0, scoringMs: 0 }, emptyQueryVector: true };
     }
 
     // Build metadata filter
@@ -2002,7 +2141,7 @@ export class MemoryStore {
 
           if (!cached) {
             syncedDecayStates.set(trace, decayStateOf(trace));
-            this.traceCache.set(trace.id, trace);
+            this.cacheTrace(trace);
           }
           if (trace.scope && trace.scopeId) {
             this.registerScope(trace.scope, trace.scopeId);
@@ -2357,7 +2496,7 @@ export class MemoryStore {
             const trace: MemoryTrace = { ...this.traceFromVectorDocument(doc), scope, scopeId };
             if (!trace.isActive) continue;
             syncedDecayStates.set(trace, decayStateOf(trace));
-            this.traceCache.set(trace.id, trace);
+            this.cacheTrace(trace);
             results.push(trace);
           }
         }
@@ -3010,7 +3149,7 @@ export class MemoryStore {
           // A tombstoned row is loaded solely to name the collection for
           // (re-)eviction — never recached, so it cannot re-enter recall.
           if (row.deleted !== 1) {
-            this.traceCache.set(trace.id, trace);
+            this.cacheTrace(trace);
             const embedding = blobToEmbedding(row.embedding);
             if (embedding && isUsableEmbedding(embedding)) {
               this.embeddingCache.set(trace.id, embedding);
@@ -3447,7 +3586,7 @@ export class MemoryStore {
       const isActive = trace.isActive && !this.tombstonedTraceIds.has(document.id);
       const filed: MemoryTrace = { ...trace, scope, scopeId, isActive };
       syncedDecayStates.set(filed, decayStateOf(filed));
-      this.traceCache.set(document.id, filed);
+      this.cacheTrace(filed);
     }
     return { traceIds, staleIds, read: documents.length, nextCursor };
   }

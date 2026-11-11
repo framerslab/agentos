@@ -193,6 +193,23 @@ fuseRanked([notes, call], { idOf: (item) => item.id, weights: [1, 0.8], groupOf:
 - The SQLite brain keeps an FTS5 index over its memory traces, which `recall()` and the `memory_search` tool query ([SQLite Brain Storage](../memory/MEMORY_STORAGE.md)).
 - The `QueryRouter` falls back to keyword matching over its corpus when it has no embeddings ([Query Router](../QUERY_ROUTER.md)).
 
+## Reading memory traces by id and following a store
+
+A memory search that finds traces outside the vector index, such as a full-text query over the brain's `memory_traces`, reads the traces it found through the store, and an index kept beside a store follows the store's writes:
+
+```typescript
+const { traces, unread } = await store.loadTracesForRecall(['mt_7', 'mt_9']);
+
+const stop = store.addTraceListener((event) => {
+  if (event.kind === 'filed') index.add(event.trace.id, event.trace.content);
+  else index.remove(event.traceId);
+});
+```
+
+`MemoryStore.loadTracesForRecall(ids)` answers each id from the store's cache, and reads the ones the cache lacks by id from the attached brain. It leaves out an id with no row and a trace that is inactive, deleted, or being deleted. A row with a usable embedding is filed in the cache and the vector index, as the store's first read from the brain files its rows; a row without one is returned for that call only and not cached. It never throws: when the brain cannot be read, `unread` counts the ids it left out and `traces` holds the cached ones.
+
+`MemoryStore.addTraceListener(listener)` calls `listener` with `{ kind: 'filed', trace }` when the store files an active trace in its cache (a store, a revival, a load from the brain or the vector index) and with `{ kind: 'removed', traceId }` when it stops serving one (a soft delete, a delete, or a delete in another store on the same brain or vector index). A listener that throws is ignored; the call returns the function that removes the listener, and `dispose()` removes them all.
+
 ## Where it runs
 
 `LexicalIndex` and `FuzzyIndex`, through `@framers/agentos/cognition/library/browser`, run in a browser; nothing that entry reaches imports a Node module, and the one package it reaches, `@framers/sql-storage-adapter/kv`, imports no adapter. `BM25Index`, `HybridSearcher`, `InMemoryVectorStore` and `@framers/agentos/cognition/rag` run in Node. No index calls a model; `HybridSearcher` calls the embedder it is given once per search, and a hosted embedder needs its provider's key.
