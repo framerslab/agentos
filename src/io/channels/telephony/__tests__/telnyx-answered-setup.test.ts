@@ -349,9 +349,10 @@ describe('a carrier-profile Telnyx notify call hung up after its message', () =>
     const carrier = setUp();
     const legacy = setUp({ protocol: 'legacy' });
     try {
-      // The host's own speak (TelnyxVoiceProvider.playTts) carries no client_state of the provider's.
-      const carrierCall = await carrier.manager.initiateCall({ toNumber: '+15550000002', mode: 'notify' });
+      // The provider has spoken; the end of a speak with another client_state (the host's own) is not its message's.
+      const carrierCall = await carrier.manager.initiateCall({ toNumber: '+15550000002', mode: 'notify', message: MESSAGE });
       carrier.manager.processWebhook('telnyx', signedEvent('call.answered', 'evt-answered'));
+      await vi.waitFor(() => expect(actions(carrier.fetchMock)).toEqual(['speak']));
       carrier.manager.processWebhook('telnyx', signedEvent('call.speak.ended', 'evt-speak-ended', { client_state: Buffer.from('host-state').toString('base64'), status: 'completed' }));
 
       const legacyCall = await legacy.manager.initiateCall({ toNumber: '+15550000002', mode: 'notify', message: MESSAGE });
@@ -359,7 +360,7 @@ describe('a carrier-profile Telnyx notify call hung up after its message', () =>
       legacy.manager.processWebhook('telnyx', signedEvent('call.speak.ended', 'evt-speak-ended', { client_state: clientState, status: 'completed' }));
 
       await settle();
-      expect(actions(carrier.fetchMock)).toEqual([]);
+      expect(actions(carrier.fetchMock)).toEqual(['speak']);
       expect(carrier.manager.getCall(carrierCall.callId)?.state).toBe('answered');
       expect(actions(legacy.fetchMock)).toEqual([]);
       expect(legacy.manager.getCall(legacyCall.callId)?.state).toBe('answered');
