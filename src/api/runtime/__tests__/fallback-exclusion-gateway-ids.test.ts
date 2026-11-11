@@ -6,7 +6,7 @@
  * completion gateway alike:
  *
  * - a leg sent to a gateway that names models `vendor/model` (OpenRouter's
- *   `anthropic/claude-sonnet-4-6`, its default `openai/gpt-4o`, the
+ *   `anthropic/claude-sonnet-4-6`, its default `openai/gpt-4o-mini`, the
  *   auto-built chain's `openai/gpt-5.6-sol`) is matched by the bare id and by
  *   the `provider:model` id;
  * - an exclusion written `anthropic/<model>` names Anthropic's model whether
@@ -195,8 +195,8 @@ const SKIPPED: Array<{ name: string; entry: Entry; exclusions: string[]; sentAs:
   {
     name: "an OpenRouter entry with no model, by its default's bare id",
     entry: { provider: 'openrouter' },
-    exclusions: ['gpt-4o'],
-    sentAs: ['openrouter', 'openai/gpt-4o'],
+    exclusions: ['gpt-4o-mini'],
+    sentAs: ['openrouter', 'openai/gpt-4o-mini'],
   },
   {
     name: 'a rerouted Anthropic entry, by an anthropic/ exclusion',

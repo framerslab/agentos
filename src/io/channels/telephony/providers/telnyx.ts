@@ -21,6 +21,15 @@
  * PCMU RTP settings when dialing. Legacy mode leaves stream startup to the
  * host.
  *
+ * ## Answered calls
+ *
+ * In carrier mode, when `CallManager` reports a notify call answered
+ * ({@link TelnyxVoiceProvider.onCallAnswered}), the provider speaks the call's
+ * message with the `speak` command, tagged with a `client_state`. The
+ * `call.speak.ended` webhook Telnyx sends with that tag and status
+ * `completed` becomes a `notify-message-spoken` event, on which `CallManager`
+ * hangs the call up. Legacy mode leaves both to the host.
+ *
  * ## Webhook verification: Ed25519
  *
  * Telnyx signs webhooks using Ed25519 public key cryptography:
@@ -58,6 +67,11 @@
  * | `call.machine.detection.ended`   | result=`machine`          | `call-voicemail`     |
  * | `call.machine.detection.ended`   | result=`human`            | (no event)           |
  *
+ * In carrier mode, a `call.speak.ended` whose `client_state` is the tag the
+ * provider puts on a notify call's `speak` and whose `status` is `completed`
+ * becomes `notify-message-spoken`. Any other `call.speak.ended`, and every
+ * one in legacy mode, yields no event.
+ *
  * @module @framers/agentos/voice/providers/telnyx
  */
 
@@ -69,6 +83,7 @@ import type {
   InitiateCallInput,
   InitiateCallResult,
   HangupCallInput,
+  CallAnsweredInput,
   PlayTtsInput,
 } from '../IVoiceCallProvider.js';
 
@@ -163,6 +178,10 @@ interface TelnyxWebhookPayload {
       digit?: string;
       /** AMD result: `'machine'` or `'human'`. */
       result?: string;
+      /** The base64 state a command on the call set (`client_state`). */
+      client_state?: string;
+      /** How a `speak` ended: `completed`, `call_hangup` or `cancelled_amd`. */
+      status?: string;
       [key: string]: unknown;
     };
   };
@@ -180,6 +199,17 @@ const DEFAULT_WEBHOOK_TOLERANCE_SEC = 300;
 
 /** The refusal of a webhook when no public key is configured and unverified webhooks are not allowed. */
 const NO_PUBLIC_KEY_ERROR = 'No publicKey configured to verify Telnyx webhooks';
+
+/**
+ * The `client_state` on a notify call's `speak`, base64 as Telnyx requires it.
+ * Telnyx sends it back on the call's later webhooks, so the `call.speak.ended`
+ * of that command can be told from the end of a `speak` the host sent before.
+ * A `call.speak.ended` carries no `command_id`, and `client_state` belongs to
+ * the call rather than the command: a `speak` the host sends, or a
+ * `client_state` it sets, while the message plays can end the call early or
+ * keep it from hanging up.
+ */
+const NOTIFY_SPEAK_CLIENT_STATE = Buffer.from('agentos:notify').toString('base64');
 
 /** The warning a provider logs once when it is constructed to accept webhooks unverified. */
 const UNVERIFIED_WEBHOOKS_WARNING =
@@ -221,6 +251,18 @@ function warnUnverifiedWebhooks(logger: ILogger | undefined): void {
 function telnyxPublicKeyDer(publicKey: string): Buffer {
   const bytes = Buffer.from(publicKey, 'base64');
   return bytes.length === 32 ? Buffer.concat([ED25519_SPKI_PREFIX, bytes]) : bytes;
+}
+
+/**
+ * A call control id as a URL path segment. Characters a path segment may hold
+ * as they are (`:` among them, as in Telnyx's `v3:` ids) stay; the rest are
+ * percent-encoded, as telnyx-node's `encodeURIPath` does.
+ *
+ * @param id - The call control id.
+ * @returns The id, safe to put between two `/` in a command URL.
+ */
+function telnyxPathSegment(id: string): string {
+  return id.replace(/[^A-Za-z0-9._~!$&'()*+,;=:@-]+/g, encodeURIComponent);
 }
 
 /**
@@ -433,6 +475,13 @@ export class TelnyxVoiceProvider implements IVoiceCallProvider {
         }
         break;
 
+      case 'call.speak.ended':
+        // Only the end of the speak that carried a notify call's message, spoken to the end.
+        if (this.config.protocol === 'carrier' && payload.client_state === NOTIFY_SPEAK_CLIENT_STATE && payload.status === 'completed') {
+          events.push({ ...base(), kind: 'notify-message-spoken' });
+        }
+        break;
+
       default:
         // Unrecognized event type -- silently ignore for forward-compatibility.
         break;
@@ -500,6 +549,44 @@ export class TelnyxVoiceProvider implements IVoiceCallProvider {
       },
       body: JSON.stringify({}),
     });
+  }
+
+  /**
+   * Set up a call Telnyx reports answered. `CallManager` calls it once per
+   * call, when an event first moves the call to `answered`.
+   *
+   * In the carrier profile a notify call with a message speaks it: a POST to
+   * `/v2/calls/{id}/actions/speak` with the message as `payload`, the voice
+   * given (`female` when none is), language `en-US`, a `command_id` named
+   * after the call, so Telnyx ignores the command if it is sent again for that
+   * call, and a `client_state` tag. It does not hang up: the command's
+   * `call.speak.ended` webhook, with that tag and status `completed`, parses
+   * to `notify-message-spoken`, on which `CallManager` hangs the call up. A
+   * conversation call gets no command: an outbound call's dial request
+   * carries the media stream URL.
+   *
+   * The legacy profile sends nothing, and its host sends the commands.
+   *
+   * @param input - The answered call.
+   * @throws When Telnyx answers the command with a status outside 2xx.
+   */
+  async onCallAnswered(input: CallAnsweredInput): Promise<void> {
+    if (this.config.protocol !== 'carrier' || input.mode !== 'notify' || !input.message) return;
+    const response = await this.fetch(`${this.baseUrl}/calls/${telnyxPathSegment(input.providerCallId)}/actions/speak`, {
+      method: 'POST',
+      headers: {
+        Authorization: this.authHeader,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        payload: input.message,
+        voice: input.voice ?? 'female',
+        language: 'en-US',
+        command_id: `${input.callId}:notify`,
+        client_state: NOTIFY_SPEAK_CLIENT_STATE,
+      }),
+    });
+    if (!response.ok) throw new Error(`Telnyx speak failed: ${response.status}`);
   }
 
   /**

@@ -681,8 +681,8 @@ export interface StreamingSTTUsageEvent {
  * | Event            | Payload                         | Description                                          |
  * |------------------|---------------------------------|------------------------------------------------------|
  * | `'transcript'`   | {@link TranscriptEvent}         | Interim or final hypothesis.                         |
- * | `'speech_start'` | *(none)*                        | Speech began (providers with voice-activity events). |
- * | `'speech_end'`   | *(none)*                        | Speech ended (providers with voice-activity events). |
+ * | `'speech_start'` | {@link SttSpeechEdge} or none   | Speech began (providers with voice-activity events). |
+ * | `'speech_end'`   | {@link SttSpeechEdge} or none   | Speech ended (providers with voice-activity events). |
  * | `'usage'`        | {@link StreamingSTTUsageEvent}  | Audio sent on one provider connection (providers that meter per connection). |
  * | `'error'`        | `Error`                         | Unrecoverable provider error.                        |
  * | `'close'`        | *(none)*                        | Session has been fully terminated.                   |
@@ -820,6 +820,34 @@ export interface VadEvent {
    * a dedicated VAD is not available, using the source field to distinguish them.
    */
   source?: 'vad' | 'stt';
+
+  /**
+   * The provider input item the speech belongs to, on a `speech_start` or
+   * `speech_end` the transcriber reported with one (its {@link SttSpeechEdge}),
+   * as `OpenAIRealtimeTranscriptionSTT` does. The same id its finals carry as
+   * `TranscriptEvent.itemId`, so {@link HeuristicEndpointDetector} pairs the
+   * speech end with that item's final alone: a final that arrives after its
+   * own speech end stopped waiting answers no later one, and a final of an
+   * item whose turn has completed joins no later turn. `VoicePipelineOrchestrator`
+   * and `startListenSession()` copy it from the transcriber's event. Undefined
+   * on a standalone VAD's events and on a speech edge the transcriber names
+   * no item for, which keep the detector's matching by order.
+   */
+  itemId?: string;
+}
+
+/**
+ * What a streaming STT session passes with its `'speech_start'` and
+ * `'speech_end'`, when it passes anything: the provider input item the
+ * speech belongs to. `OpenAIRealtimeTranscriptionSTT` passes the item its
+ * `input_audio_buffer.speech_started`, `speech_stopped` or `committed`
+ * names; a speech edge it raises for no item (a connection that stops
+ * leading) passes none. Providers that know no item emit the events with
+ * no argument.
+ */
+export interface SttSpeechEdge {
+  /** The provider input item, the same id that item's transcripts carry as `TranscriptEvent.itemId`. */
+  itemId?: string;
 }
 
 /**
