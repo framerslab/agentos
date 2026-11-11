@@ -103,8 +103,10 @@ export async function eligibleTracesOf(
 /**
  * The exact-words leg: the traces of the turn's scopes whose content or tags hold the turn's words, best match first.
  * A store with a Brain reads the Brain's full-text index through the adapter's engine-neutral query, with the scopes,
- * types and time written into the query before its limit; a store without one reads the in-process index. Each trace
- * then passes the eligibility gate. Never throws: an absent or failing index answers `ran: false` with the reason.
+ * types and time written into the query before its limit, and the rest of the eligibility gate (confidence, trust
+ * policy) run on the rows the limit returned, as the dense leg runs its trust-policy check after its cut. A store
+ * without one reads the in-process index and runs the whole gate on every match before the limit. Never throws: an
+ * absent or failing index answers `ran: false` with the reason.
  *
  * @param deps - The store, and the in-process index for a store with no Brain.
  * @param q - The turn's text, scopes and filters, and the leg's limit.
@@ -139,7 +141,12 @@ export async function exactWordsLeg(deps: { store: MemoryStore; lexical: ScopedL
       );
       ids = rows.map((row) => row.id);
     } else if (deps.lexical) {
-      ids = deps.lexical.search(q.query, q.scopes, q.limit).map((hit) => hit.id);
+      // In process every match is at hand: the gate runs on all of them before the limit, as the in-process recency
+      // leg's does, so a better match the gate drops takes no slot.
+      const matches = deps.lexical.search(q.query, q.scopes, Number.POSITIVE_INFINITY).map((hit) => hit.id);
+      const gated = await eligibleTracesOf(deps.store, matches, q);
+      if (gated === 'query_error') return answer({ ran: false, reason: 'query_error' });
+      return answer({ traces: gated.traces.slice(0, q.limit), ineligible: gated.ineligible });
     } else {
       return answer({ ran: false, reason: 'no_store' });
     }

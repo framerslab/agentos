@@ -1177,7 +1177,8 @@ export class MemoryStore {
 
   /**
    * Calls `listener` whenever this store files an active trace in its cache (a store, a revival, a hydration, a read
-   * that loads it) or stops serving one (a soft delete, a delete, a delete in a sibling store on the same backing
+   * that loads it, a move to another scope id by {@link refileScope} or a Brain's re-file, which files it again under
+   * the new id) or stops serving one (a soft delete, a delete, a delete in a sibling store on the same backing
    * resource). A listener that throws is ignored.
    *
    * @returns The call that removes the listener.
@@ -1202,6 +1203,11 @@ export class MemoryStore {
   /** Files `trace` in the cache and tells the listeners whether the store now serves it. */
   private cacheTrace(trace: MemoryTrace): void {
     this.traceCache.set(trace.id, trace);
+    this.notifyServing(trace);
+  }
+
+  /** Tells the listeners whether the store serves `trace` as its cache now holds it. */
+  private notifyServing(trace: MemoryTrace): void {
     this.notify(
       trace.isActive && !this.tombstonedTraceIds.has(trace.id)
         ? { kind: 'filed', trace }
@@ -1471,13 +1477,15 @@ export class MemoryStore {
 
   /**
    * The traces with these ids, for a recall leg that found them outside the vector index (the Brain's full-text index,
-   * its newest rows): from the cache where it holds them, else read by id from the Brain. A trace that is inactive,
-   * deleted, tombstoned or delete-pending is left out, as is an id with no row. A row with a usable embedding is filed
-   * in the cache and the vector index as the store's hydration files one; a row without one is returned for this call
-   * only and not cached, since the store holds no vector for it.
+   * its newest rows). Without a Brain they come from the cache. With one, every id is checked against its row first,
+   * as a vector query checks its hits: a trace whose row is gone or deleted, by this process or another, is left out
+   * (and fenced in every store on the Brain), and a cached trace whose row a move filed under another scope id is left
+   * out until this store follows the move. A cached trace is answered from the cache; a live row with a usable
+   * embedding is filed in the cache and the vector index as the store's hydration files one; a row without one is
+   * returned for this call only and not cached, since the store holds no vector for it, and is read again when a
+   * delete or a move ran after the first read. A trace that is inactive, tombstoned or delete-pending is left out.
    *
-   * Never throws: when the Brain cannot be read, `unread` counts the ids the read left out and `traces` holds the
-   * cached ones.
+   * Never throws: when the Brain cannot be read, no trace is returned and `unread` counts the ids.
    *
    * @param traceIds - The ids, in any order; repeats are read once.
    * @returns The traces found, by id, and how many ids a failed read left out.
@@ -1486,6 +1494,7 @@ export class MemoryStore {
     this.beginOperation();
     const namespace = this.coordinationNamespace;
     const brain = this.brain;
+    const ids = [...new Set(traceIds)];
     const traces = new Map<string, MemoryTrace>();
     const served = (id: string): MemoryTrace | undefined => {
       if (this.tombstonedTraceIds.has(id) || isTraceDeletePending(namespace, id) || hasDeletedTrace(namespace, id)) {
@@ -1494,22 +1503,31 @@ export class MemoryStore {
       const trace = this.traceCache.get(id);
       return trace?.isActive ? trace : undefined;
     };
-    const missing: string[] = [];
-    for (const id of new Set(traceIds)) {
-      const trace = served(id);
-      if (trace) traces.set(id, trace);
-      else if (!this.traceCache.has(id) && !this.tombstonedTraceIds.has(id)) missing.push(id);
+    if (!brain) {
+      for (const id of ids) {
+        const trace = served(id);
+        if (trace) traces.set(id, trace);
+      }
+      return { traces, unread: 0 };
     }
-    if (!brain || missing.length === 0) return { traces, unread: 0 };
+    if (ids.length === 0) return { traces, unread: 0 };
+
     const epochs = hydrationEpochs(namespace);
-    const durable = await this.getDurableTraceRows(missing, brain);
-    if (!durable.ok) return { traces, unread: missing.length };
-    const live: MemoryTraceRow[] = [];
-    for (const id of missing) {
+    // The rows decide, as they do for a vector query's hits: a delete or a move another process made reaches no cache.
+    const durable = await this.reconcileDurableTraceStates(ids, namespace, brain);
+    if (!durable.ok) return { traces, unread: ids.length };
+    const uncached: MemoryTraceRow[] = [];
+    for (const id of ids) {
       const row = durable.rows.get(id);
-      if (row && Number(row.deleted ?? 0) === 0) live.push(row);
+      if (!row || Number(row.deleted ?? 0) !== 0) continue;
+      const cached = served(id);
+      if (cached) {
+        if (!rowFiledElsewhere(row, cached.scope, cached.scopeId)) traces.set(id, cached);
+        continue;
+      }
+      if (!this.traceCache.has(id) && !this.tombstonedTraceIds.has(id)) uncached.push(row);
     }
-    const withVector = live.filter((row) => {
+    const withVector = uncached.filter((row) => {
       const embedding = blobToEmbedding(row.embedding);
       return embedding != null && isUsableEmbedding(embedding);
     });
@@ -1518,19 +1536,36 @@ export class MemoryStore {
     } catch {
       // A row that did not file is read below as one with no vector.
     }
-    for (const row of live) {
+    let unread = 0;
+    for (const row of uncached) {
       const filed = served(row.id);
       if (filed) {
         traces.set(row.id, filed);
         continue;
       }
       if (this.traceCache.has(row.id)) continue;
-      await withTraceOperation(namespace, row.id, 'normal', async ({ blockedByDelete }) => {
-        if (blockedByDelete || this.tombstonedTraceIds.has(row.id) || hasDeletedTrace(namespace, row.id)) return;
-        traces.set(row.id, this.rowToTrace(row));
-      });
+      try {
+        await withTraceOperation(namespace, row.id, 'normal', async ({ blockedByDelete }) => {
+          if (blockedByDelete || this.tombstonedTraceIds.has(row.id) || hasDeletedTrace(namespace, row.id)) return;
+          // A delete or a move may have run since the read: the row is read again, as hydration reads one.
+          let current: MemoryTraceRow | null = row;
+          const now = hydrationEpochs(namespace);
+          if (now.deletes !== epochs.deletes || now.refiles !== epochs.refiles) {
+            current = await brain.get<MemoryTraceRow>(
+              `SELECT id, type, scope, content, embedding, strength, created_at,
+                      last_accessed, retrieval_count, tags, emotions, metadata, deleted, scope_id
+                 FROM memory_traces
+                WHERE brain_id = ? AND id = ? AND deleted = 0`,
+              [brain.brainId, row.id],
+            );
+          }
+          if (current) traces.set(row.id, this.rowToTrace(current));
+        });
+      } catch {
+        unread += 1;
+      }
     }
-    return { traces, unread: 0 };
+    return { traces, unread };
   }
 
   /**
@@ -1708,7 +1743,8 @@ export class MemoryStore {
       id: row.id,
       type: row.type as MemoryType,
       scope: row.scope as MemoryScope,
-      scopeId: typeof meta.scopeId === 'string' ? meta.scopeId : '',
+      // The metadata's copy, else the `scope_id` column, for a row whose metadata names none.
+      scopeId: typeof meta.scopeId === 'string' ? meta.scopeId : typeof row.scope_id === 'string' ? row.scope_id : '',
       content: row.content,
       entities: Array.isArray(meta.entities) ? (meta.entities as string[]) : [],
       tags,
@@ -2757,6 +2793,8 @@ export class MemoryStore {
     held.updatedAt = Date.now();
     if (embedding) this.embeddingCache.set(moved.id, embedding);
     if (held.isActive) this.registerScope(scope, moved.to);
+    // The copy moved in place: a listener files it again under the new id.
+    this.notifyServing(held);
     if (live) await this.followGraphCopy(trace, embedding);
     return true;
   }
@@ -2885,6 +2923,8 @@ export class MemoryStore {
       held.updatedAt = Date.now();
       if (embedding) this.embeddingCache.set(traceId, embedding);
       if (held.isActive) this.registerScope(scope, toScopeId);
+      // The copy moved in place: a listener files it again under the new id.
+      this.notifyServing(held);
     }
 
     // The copy follows its trace where the graph holds one; a trace with no copy gets none.
