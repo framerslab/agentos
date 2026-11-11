@@ -6,7 +6,7 @@ import { Memory } from '../Memory.js';
 import { conversationScopeKey } from '../../../retrieval/store/conversationScopeKey.js';
 
 /** The scope the traces of these tests are filed under: one user of one agent. */
-const SCOPE = conversationScopeKey('a1', { kind: 'user', id: 'johnny' });
+const SCOPE = conversationScopeKey('a1', { kind: 'user', id: 'ana' });
 /** A page store that holds nothing and keeps nothing. */
 const noPages = () => ({ readPage: async () => null, writePage: async () => {} });
 /** When the scope was last compiled (Unix ms), from its registry row; null before its first compile. */

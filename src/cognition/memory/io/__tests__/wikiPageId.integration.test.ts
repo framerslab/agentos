@@ -9,7 +9,7 @@ import { ensureMemoryDir, InvalidWikiPageIdError, WikiCompiler, type WikiPage } 
 import { conversationScopeKey } from '../../retrieval/store/conversationScopeKey.js';
 
 /** One user's scope under the agent every test wires. */
-const SUBJECT = conversationScopeKey('a1', { kind: 'user', id: 'johnny' });
+const SUBJECT = conversationScopeKey('a1', { kind: 'user', id: 'ana' });
 
 // The wiki is <root>/workspace/memory. A Markdown file sits one level above it, another two levels above.
 let root: string;

@@ -108,9 +108,10 @@ one `memory.page_read_refused` log line that carries its reason (`other_user`,
 `no_user`, `legacy` or `caller_filter`) and no id.
 
 The traces a `souledAgent`'s own observer stores carry no entities, so the default
-clusterer merges them into the page `concepts/notes`. Entity pages come from traces
-stored with entities through `agent.memory.remember()`, or from a clusterer passed
-to `attachMemoryWiki()`.
+clusterer merges them into the page `concepts/notes`: one such page a subject, since
+the clusterer runs over one subject's traces at a time. Entity pages come from traces
+stored with entities through `agent.memory.remember()` under a subject's key, or
+from a clusterer passed to `attachMemoryWiki()`.
 
 Each trace the observer stores records who spoke it in the trace's metadata
 (`speaker: 'user'` or `speaker: 'assistant'`), outside its text and its tags, which
@@ -226,8 +227,9 @@ or index it.
 
 Both checks are on the path the id names, not on where a link leads. The store
 follows a link inside `memory/` like any other file there, for reads and for writes:
-what it points to, inside the folder or outside it, is part of the wiki, and a compile
-that merges into a page that is a link rewrites the file the link points to. The store
+what it points to, inside the folder or outside it, is part of the wiki, and a write
+to a page that is a link (`WikiMemoryStore.writePage`) rewrites the file the link
+points to. A compile writes no file under `memory/`. The store
 never makes a link, and no page id makes one, so only whoever can write the folder
 can add one. Let only people and tools you trust as much as the agent's own process
 write to `memory/`, and check a `memory/` folder you did not make for links before an
@@ -260,8 +262,8 @@ follows a link.) Where the platform refuses the new file or the rename (`EACCES`
 refresh running at that moment can then read it half written. A symbolic link at
 `index.md` is not read: the refresh replaces the link with the catalog file and
 leaves the link's target as it is. An `index.md` the wiki cannot read for any
-other reason is left as it is: the page write that would refresh it fails, and so
-does the compile, which takes the same traces up again the next time.
+other reason is left as it is: the page write that would refresh it fails. A
+compile writes each subject's pages as rows of the store and refreshes no catalog.
 
 ## SOUL.md Format
 

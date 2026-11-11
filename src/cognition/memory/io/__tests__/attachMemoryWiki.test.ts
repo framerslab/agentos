@@ -74,7 +74,7 @@ describe('attachMemoryWiki', () => {
     const memory = await Memory.createSqlite(path.join(dir, 'memory.sqlite'), { graph: false, selfImprove: false, decay: false });
     try {
       const agentId = 'a1';
-      const subject = conversationScopeKey(agentId, { kind: 'user', id: 'johnny' });
+      const subject = conversationScopeKey(agentId, { kind: 'user', id: 'ana' });
       const { storeFor } = await attachMemoryWiki({ memory, memoryDir, agentId, llm: async () => 'merged body', chunk: (t) => [{ text: t }] });
       await memory.remember('Johnny likes green tea', { type: 'episodic', scope: 'conversation', scopeId: subject });
 
