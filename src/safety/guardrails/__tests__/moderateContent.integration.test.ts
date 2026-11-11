@@ -95,6 +95,16 @@ describe('moderateContent: closed unless a guard says otherwise', () => {
     const nameless: IGuardrailService = { evaluateOutput: async () => null };
     await expect(moderateContent({ text: 'a message' }, { guards: [answering('first', null), nameless], context })).rejects.toThrow(/guard_1/);
   });
+
+  it('a mode it does not know is a configuration error, before any guard runs', async () => {
+    // 'dry_run' is the log line's spelling; taken as a mode it once gave enforced: false beside an enforced outcome
+    const spy = vi.fn(async (): Promise<GuardrailEvaluationResult | null> => ({ action: GuardrailAction.SANITIZE, modifiedText: 'cleaned' }));
+    const sanitizer: IGuardrailService = { id: 'sanitizer', config: { canSanitize: true }, evaluateInput: spy };
+    const call = moderateContent({ text: 'original' }, { guards: [sanitizer], context, mode: 'dry_run' as unknown as 'dryRun' });
+    await expect(call).rejects.toThrow(TypeError);
+    await expect(call).rejects.toThrow(/mode/);
+    expect(spy).not.toHaveBeenCalled();
+  });
 });
 
 describe('moderateContent: screens that run first', () => {
@@ -134,6 +144,18 @@ describe('moderateContent: screens that run first', () => {
     const dry = await moderateContent({ text: 'original' }, { guards: [sanitizer], context, mode: 'dryRun' });
     expect(dry.outcome).toBe('allow');
     expect(dry.sanitizedText).toBeUndefined();
+    // a rewrite alone is an allow, and still writes one line, as `sanitize`
+    expect(events(lines, 'guardrail.verdict').map((line) => [line.guardrailId, line.action, line.code, line.mode])).toEqual([
+      ['rewriter', 'flag', 'unknown', 'enforce'], ['sanitizer', 'sanitize', 'unknown', 'enforce'], ['sanitizer', 'sanitize', 'unknown', 'dry_run'],
+    ]);
+  });
+
+  it('a screen that fails ends the evaluation as its BLOCK does: the guard behind it never sees the text', async () => {
+    const spy = vi.fn(async () => holdResult('REVIEW'));
+    const decision = await moderateContent({ text: 'a message' }, { guards: [throwing({ sequential: true }), { id: 'holder', evaluateInput: spy }], context });
+    expect(decision).toMatchObject({ outcome: 'refuse', unavailable: true, deciding: { reasonCode: 'GUARDRAIL_ERROR', metadata: { guardrailId: 'thrower' } } });
+    expect(decision.hold).toBeUndefined();
+    expect(spy).not.toHaveBeenCalled();
   });
 
   it('(f) a listed code stops every further vendor request for the content', async () => {
