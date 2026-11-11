@@ -28,7 +28,8 @@
  * - `...transcription.delta` → `'transcript'` with `isFinal: false`, carrying
  *   the item's text so far and its `itemId`
  * - `...transcription.completed` → `'transcript'` with `isFinal: true`
- * - `speech_started` / `speech_stopped` → `'speech_start'` / `'speech_end'`
+ * - `speech_started` / `speech_stopped` → `'speech_start'` / `'speech_end'`,
+ *   each with `{ itemId }` (an `SttSpeechEdge`) naming the item the server gave
  * - a server `error` the session survives, or a failed item → `'warning'`
  *   (a {@link VoicePipelineError})
  * - a failure the session cannot recover from → `'error'`, then `'close'`
@@ -61,6 +62,7 @@ import type {
   StreamingSTTSession,
   StreamingSTTConfig,
   AudioFrame,
+  SttSpeechEdge,
   TranscriptEvent,
 } from '../types.js';
 import {
@@ -1415,7 +1417,7 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
     }
     if (connection.state !== 'open') return;
     connection.speaking = true;
-    if (this.lead() === connection) this.setSpeaking(true);
+    if (this.lead() === connection) this.setSpeaking(true, itemId);
   }
 
   private onSpeechStopped(connection: TranscriptionConnection, event: ServerEvent): void {
@@ -1431,7 +1433,7 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
     if (connection.state !== 'open') return;
     connection.speaking = false;
     if (this.lead() === connection) {
-      this.setSpeaking(false);
+      this.setSpeaking(false, itemId);
       this.maybeRollOver(connection, 'speech_stopped');
     }
     if (connection.drainWhenQuiet) void this.drain(connection, false);
@@ -1455,7 +1457,7 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
         if (item.endMs === undefined) item.endMs = ours.endMs;
         if (connection.speaking) {
           connection.speaking = false;
-          if (this.lead() === connection) this.setSpeaking(false);
+          if (this.lead() === connection) this.setSpeaking(false, item.itemId);
         }
       }
       if (!item.dropped && !item.finished) {
@@ -1580,10 +1582,22 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
     return event;
   }
 
-  private setSpeaking(speaking: boolean): void {
+  /**
+   * Reports a change of the lead connection's speech as `'speech_start'` or
+   * `'speech_end'`, with the item the server named for it ({@link SttSpeechEdge}),
+   * so an endpoint detector pairs a speech end with that item's final alone.
+   * A change no server event names an item for (a connection that stops
+   * leading) passes no argument.
+   *
+   * @param speaking - Whether the user now speaks.
+   * @param itemId - The input item the speech belongs to, when the server named one.
+   */
+  private setSpeaking(speaking: boolean, itemId?: string): void {
     if (this.speaking === speaking) return;
     this.speaking = speaking;
-    this.emit(speaking ? 'speech_start' : 'speech_end');
+    const edge: SttSpeechEdge | undefined = itemId ? { itemId } : undefined;
+    if (edge) this.emit(speaking ? 'speech_start' : 'speech_end', edge);
+    else this.emit(speaking ? 'speech_start' : 'speech_end');
   }
 
   // -------------------------------------------------------------------------
