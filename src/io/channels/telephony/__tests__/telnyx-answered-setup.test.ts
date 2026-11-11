@@ -270,6 +270,44 @@ describe('a carrier-profile Telnyx notify call hung up after its message', () =>
     }
   });
 
+  it('refuses the call.speak.ended webhook when the manager is disposed before the hangup, and a redelivery hangs up', async () => {
+    const store = new InMemoryTelephonyCallStore();
+    // Holds a committed transaction's result back, while the manager is disposed.
+    let hold: Promise<void> | undefined;
+    const held: ITelephonyCallStore = {
+      withProvider: async (provider, work) => {
+        const result = await store.withProvider(provider, work);
+        if (hold) await hold;
+        return result;
+      },
+    };
+    const first = setUp();
+    const second = setUp();
+    try {
+      const call = await first.manager.initiateCall({ toNumber: '+15550000002', mode: 'notify', message: MESSAGE });
+      await first.manager.persistCall(call.callId, held);
+      await first.manager.processWebhookDurable('telnyx', signedEvent('call.answered', 'evt-answered'), held);
+      await vi.waitFor(() => expect(actions(first.fetchMock)).toEqual(['speak']));
+      const spoken = signedEvent('call.speak.ended', 'evt-speak-ended', { client_state: commands(first.fetchMock)[0]?.body.client_state, status: 'completed' });
+
+      let release: () => void = () => undefined;
+      hold = new Promise<void>((resolve) => { release = resolve; });
+      const delivery = first.manager.processWebhookDurable('telnyx', spoken, held);
+      await settle();
+      first.manager.dispose();
+      release();
+      await expect(delivery).rejects.toThrow('disposed');
+      expect(actions(first.fetchMock)).toEqual(['speak']);
+
+      expect(await second.manager.processWebhookDurable('telnyx', spoken, store)).toEqual({ accepted: true, applied: 1 });
+      expect(actions(second.fetchMock)).toEqual(['hangup']);
+      expect(second.manager.getCall(call.callId)?.state).toBe('hangup-bot');
+    } finally {
+      first.manager.dispose();
+      second.manager.dispose();
+    }
+  });
+
   it.each(['carrier', 'legacy'] as const)('hangs up once through processWebhook with eventHandling %s, and ends the call once', async (eventHandling) => {
     const { manager, fetchMock } = setUp({ eventHandling });
     const ended: string[] = [];
