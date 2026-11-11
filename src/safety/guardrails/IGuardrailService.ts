@@ -93,6 +93,12 @@ export interface GuardrailContext {
   metadata?: Record<string, unknown>;
 }
 
+/** Asks for a person's review of content a guard keeps back. */
+export interface GuardrailHold {
+  /** Why a person must look: a code the host maps to its review queue. Letters, digits and underscores, at most 64. */
+  reviewCode: string;
+}
+
 /**
  * Result returned by a guardrail evaluation.
  *
@@ -159,6 +165,12 @@ export interface GuardrailEvaluationResult {
    * answer this way, so a person reads a fixed text and never a raw failure.
    */
   replacementText?: string;
+
+  /**
+   * With BLOCK only: the content is kept back for a person's review, not refused. Every enforcement point treats
+   * the result as the BLOCK it is, so nothing it keeps back is delivered. On any other action it is ignored.
+   */
+  hold?: GuardrailHold;
 }
 
 /**
@@ -378,6 +390,14 @@ export interface GuardrailConfig {
    * @default 'per-chunk'
    */
   streamingMode?: 'per-chunk' | 'sentence-buffered';
+
+  /**
+   * Every reason code and review code this guard can answer: a closed list. A verdict line writes a code only when
+   * the deciding guard lists it here, or when the dispatcher made the code itself for a closed guard's failure, and
+   * `unknown` otherwise. A guard that lists none has its verdict lines written with `unknown`.
+   * @default undefined
+   */
+  reasonCodes?: readonly string[];
 }
 
 /**
