@@ -12,6 +12,8 @@
  *   sends nothing more.
  * - A conversation call, whose dial request carried the media stream URL,
  *   gets no command.
+ * - A `speak` Telnyx refuses is written to the console, and the call's later
+ *   webhooks still apply.
  * - A legacy-profile provider sends no command: its host sends them, as the
  *   telephony guide says.
  *
@@ -55,14 +57,15 @@ function signedEvent(eventType: string, id: string): WebhookContext {
   };
 }
 
-/** A fetch mock that answers the dial request with a call control id and every command with 200. */
-function telnyxApi() {
+/** A fetch mock that answers the dial request with a call control id and every command with `commandStatus`. */
+function telnyxApi(commandStatus = 200) {
   return vi.fn<typeof fetch>(async (input) => {
     const url = String(input);
-    const body = url.endsWith('/v2/calls')
+    const dial = url.endsWith('/v2/calls');
+    const body = dial
       ? { data: { call_control_id: CALL_CONTROL_ID, call_session_id: 'session-answered-setup' } }
-      : { data: { result: 'ok' } };
-    return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      : commandStatus === 200 ? { data: { result: 'ok' } } : { errors: [{ title: 'Command refused' }] };
+    return new Response(JSON.stringify(body), { status: dial ? 200 : commandStatus, headers: { 'Content-Type': 'application/json' } });
   });
 }
 
@@ -77,8 +80,8 @@ function commands(fetchMock: ReturnType<typeof telnyxApi>): Array<{ action: stri
 /** Lets the manager's fire-and-forget setup reach the mock. */
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 
-function setUp(options: { protocol?: 'legacy' | 'carrier'; eventHandling?: VoiceCallConfig['eventHandling'] } = {}) {
-  const fetchMock = telnyxApi();
+function setUp(options: { protocol?: 'legacy' | 'carrier'; eventHandling?: VoiceCallConfig['eventHandling']; commandStatus?: number } = {}) {
+  const fetchMock = telnyxApi(options.commandStatus);
   const manager = new CallManager({
     provider: { provider: 'telnyx', config: { apiKey: 'KEY_answered_setup', connectionId: CONNECTION_ID, publicKey: PORTAL_PUBLIC_KEY, fromNumber: '+15550000001' } },
     webhookBaseUrl: 'https://example.test',
@@ -152,6 +155,22 @@ describe('a carrier-profile Telnyx call set up when it is answered', () => {
       await settle();
       expect(commands(fetchMock)).toEqual([]);
     } finally {
+      manager.dispose();
+    }
+  });
+
+  it('writes a refused speak command to the console and goes on applying the call\'s webhooks', async () => {
+    const { manager, fetchMock } = setUp({ commandStatus: 422 });
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const call = await manager.initiateCall({ toNumber: '+15550000002', mode: 'notify', message: MESSAGE });
+      expect(() => manager.processWebhook('telnyx', signedEvent('call.answered', 'evt-answered'))).not.toThrow();
+      await vi.waitFor(() => expect(consoleError).toHaveBeenCalledWith('[CallManager] Setting up the answered call failed:', expect.objectContaining({ message: 'Telnyx speak failed: 422' })));
+      expect(commands(fetchMock)).toHaveLength(1);
+      manager.processWebhook('telnyx', signedEvent('call.hangup', 'evt-hangup'));
+      expect(manager.getCall(call.callId)?.state).toBe('completed');
+    } finally {
+      consoleError.mockRestore();
       manager.dispose();
     }
   });

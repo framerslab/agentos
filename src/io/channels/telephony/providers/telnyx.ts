@@ -21,6 +21,12 @@
  * PCMU RTP settings when dialing. Legacy mode leaves stream startup to the
  * host.
  *
+ * ## Answered calls
+ *
+ * In carrier mode, when `CallManager` reports a notify call answered
+ * ({@link TelnyxVoiceProvider.onCallAnswered}), the provider speaks the call's
+ * message with the `speak` command. Legacy mode leaves that to the host.
+ *
  * ## Webhook verification: Ed25519
  *
  * Telnyx signs webhooks using Ed25519 public key cryptography:
@@ -69,6 +75,7 @@ import type {
   InitiateCallInput,
   InitiateCallResult,
   HangupCallInput,
+  CallAnsweredInput,
   PlayTtsInput,
 } from '../IVoiceCallProvider.js';
 
@@ -221,6 +228,18 @@ function warnUnverifiedWebhooks(logger: ILogger | undefined): void {
 function telnyxPublicKeyDer(publicKey: string): Buffer {
   const bytes = Buffer.from(publicKey, 'base64');
   return bytes.length === 32 ? Buffer.concat([ED25519_SPKI_PREFIX, bytes]) : bytes;
+}
+
+/**
+ * A call control id as a URL path segment. Characters a path segment may hold
+ * as they are (`:` among them, as in Telnyx's `v3:` ids) stay; the rest are
+ * percent-encoded, as telnyx-node's `encodeURIPath` does.
+ *
+ * @param id - The call control id.
+ * @returns The id, safe to put between two `/` in a command URL.
+ */
+function telnyxPathSegment(id: string): string {
+  return id.replace(/[^A-Za-z0-9._~!$&'()*+,;=:@-]+/g, encodeURIComponent);
 }
 
 /**
@@ -500,6 +519,40 @@ export class TelnyxVoiceProvider implements IVoiceCallProvider {
       },
       body: JSON.stringify({}),
     });
+  }
+
+  /**
+   * Set up a call Telnyx reports answered. `CallManager` calls it once per
+   * call, when an event first moves the call to `answered`.
+   *
+   * In the carrier profile a notify call with a message speaks it: a POST to
+   * `/v2/calls/{id}/actions/speak` with the message as `payload`, the voice
+   * given (`female` when none is), language `en-US`, and a `command_id` named
+   * after the call, so Telnyx ignores the command if it is sent again for that
+   * call. It does not hang up. A conversation call gets no command: an
+   * outbound call's dial request carries the media stream URL.
+   *
+   * The legacy profile sends nothing, and its host sends the commands.
+   *
+   * @param input - The answered call.
+   * @throws When Telnyx answers the command with a status outside 2xx.
+   */
+  async onCallAnswered(input: CallAnsweredInput): Promise<void> {
+    if (this.config.protocol !== 'carrier' || input.mode !== 'notify' || !input.message) return;
+    const response = await this.fetch(`${this.baseUrl}/calls/${telnyxPathSegment(input.providerCallId)}/actions/speak`, {
+      method: 'POST',
+      headers: {
+        Authorization: this.authHeader,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        payload: input.message,
+        voice: input.voice ?? 'female',
+        language: 'en-US',
+        command_id: `${input.callId}:notify`,
+      }),
+    });
+    if (!response.ok) throw new Error(`Telnyx speak failed: ${response.status}`);
   }
 
   /**

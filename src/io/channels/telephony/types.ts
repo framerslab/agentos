@@ -205,6 +205,12 @@ export interface CallRecord {
   direction: CallDirection;
   /** Call interaction mode. */
   mode: CallMode;
+  /**
+   * The message a notify call speaks, as passed to `CallManager.initiateCall`. It is kept on the
+   * record, and in a store the record is persisted to, so the provider can speak it when the call
+   * is answered.
+   */
+  message?: string;
   /** E.164 phone number of the caller. */
   fromNumber: string;
   /** E.164 phone number being called. */
