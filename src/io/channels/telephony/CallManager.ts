@@ -33,6 +33,17 @@ import {
   TERMINAL_CALL_STATES,
 } from './types.js';
 
+/** The event kinds that end a call. */
+const ENDING_EVENT_KINDS: ReadonlySet<NormalizedCallEvent['kind']> = new Set<NormalizedCallEvent['kind']>([
+  'call-completed',
+  'call-failed',
+  'call-busy',
+  'call-no-answer',
+  'call-voicemail',
+  'call-hangup-user',
+  'call-error',
+]);
+
 // ============================================================================
 // Event Emitter Types
 // ============================================================================
@@ -317,7 +328,9 @@ export class CallManager {
    * nothing, a call emits one terminal notification, and the record stays in
    * the manager. This repairs transitions in process and adds no restart
    * durability; see {@link processWebhookDurable}. Otherwise the original
-   * handling below applies.
+   * handling below applies, except that an event ending a call that has
+   * already ended (the carrier's report of a hangup the manager asked for,
+   * say) changes nothing and emits no second `call:ended`.
    *
    * In either handling, the first `notify-message-spoken` event for a notify
    * call hangs it up as {@link hangupCall} does, without waiting for it.
@@ -345,6 +358,13 @@ export class CallManager {
       console.warn(
         `[CallManager] Event for unknown call: ${event.providerCallId} (kind: ${event.kind})`,
       );
+      return;
+    }
+
+    // A call ends once: an ending event for a call that has ended, such as the carrier's report of a hangup the
+    // manager asked for, changes nothing and emits nothing.
+    if (TERMINAL_CALL_STATES.has(call.state) && ENDING_EVENT_KINDS.has(event.kind)) {
+      this.processedEventIds.delete(event.eventId);
       return;
     }
 
