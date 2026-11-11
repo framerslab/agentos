@@ -3,7 +3,7 @@
  * An error whose name, code and message are a person's words reaches each line the library wrote before it had a
  * closed list of error types and codes: a server handler, a language detector, an optional soul that fails to load,
  * a captured console call and an unhandled rejection. No line keeps the words; a library error keeps its type and
- * its code.
+ * its code, a name the library sets where it throws the error included.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -12,6 +12,7 @@ import { AgentOSServer } from '../../src/api/server/AgentOSServer.js';
 import { createAgentOSConfig } from '../../src/api/server/config/ServerConfig.js';
 import type { AgentOS } from '../../src/api/AgentOS.js';
 import { LanguageService } from '../../src/cognition/nlp/language/LanguageService.js';
+import { DeepLTranslationProvider } from '../../src/cognition/nlp/language/providers/DeepLTranslationProvider.js';
 import { warnSoulLoadFailed } from '../../src/api/runtime/soulLoadWarning.js';
 import { createAllowListLogger } from '../../src/core/logging/kit/allowList.js';
 import { captureConsole } from '../../src/core/logging/kit/consoleCapture.js';
@@ -111,6 +112,19 @@ describe('a library error keeps its type and code', () => {
     await vi.waitFor(() => expect(lines.filter((line) => line.event === 'http.handler_failed')).toHaveLength(2));
     expect(lines.filter((line) => line.event === 'http.handler_failed').map((line) => [line.type, line.code])).toEqual([
       ['OpenRouterProviderError', 'STREAM_PARSING_ERROR'], ['Error', 'ECONNRESET'],
+    ]);
+  });
+
+  it('(g) a translation provider\'s own error, named where it is thrown, on language.translation_failed', async () => {
+    const lines = capture();
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('quota exceeded', { status: 456 })));
+    try {
+      const provider = new DeepLTranslationProvider('deepl', { apiKey: 'fixture-key' });
+      await provider.initialize();
+      await expect(provider.translate('the text', 'en', 'de')).rejects.toMatchObject({ code: 'TRANSLATION_REQUEST_FAILED' });
+    } finally { vi.unstubAllGlobals(); }
+    expect(lines.filter((line) => line.event === 'language.translation_failed')).toEqual([
+      expect.objectContaining({ provider: 'deepl', reason: 'request_failed', status: 456, type: 'DeepLHttpError', code: 'unknown' }),
     ]);
   });
 });

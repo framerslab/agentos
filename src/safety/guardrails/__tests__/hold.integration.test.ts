@@ -98,6 +98,22 @@ describe('a hold on a block, on output and tool calls', () => {
     expect(verdicts[0].hold).toBeUndefined();
   });
 
+  it('a refusal later in registration order outranks an earlier hold on a streamed delta', async () => {
+    const streaming = { evaluateStreamingChunks: true };
+    async function* deltaThenReply(): AsyncGenerator<AgentOSResponse, void, undefined> {
+      yield { type: AgentOSResponseChunkType.TEXT_DELTA, streamId: 's1', gmiInstanceId: 'g1', personaId: 'p1', isFinal: false, timestamp: '2026-11-10T00:00:00.000Z', textDelta: 'the delta' } as AgentOSResponse;
+      yield* reply('the reply');
+    }
+    const verdicts: Array<{ reasonCode?: string; hold?: { reviewCode: string } }> = [];
+    const chunks = await collect(wrapOutputGuardrails([answering('a', HOLD, streaming), answering('c', REFUSE, streaming)], context, deltaThenReply(), { streamId: 's1', onVerdict: (v) => { verdicts.push(v); } }));
+    expect(chunks).toHaveLength(1);
+    expect((chunks[0] as AgentOSErrorChunk).code).toBe('RULE_1');
+    expect(((chunks[0] as AgentOSErrorChunk).details as { hold?: unknown }).hold).toBeUndefined();
+    expect(verdicts).toEqual([expect.objectContaining({ action: GuardrailAction.BLOCK, reasonCode: 'RULE_1' })]);
+    expect(verdicts[0].hold).toBeUndefined();
+    expect(JSON.stringify(chunks)).not.toContain('the delta');
+  });
+
   it('a held tool call is a refused tool call, and a refusal outranks it', async () => {
     const tools = { evaluateToolCalls: true };
     const held = await ParallelGuardrailDispatcher.evaluateToolCall([answering('a', HOLD, tools)], context, toolCallChunk());

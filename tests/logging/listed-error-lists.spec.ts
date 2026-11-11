@@ -22,6 +22,30 @@ function sources(dir: string): string[] {
   return out;
 }
 
+/** An error built and given fields in one call: `Object.assign(new Error(...), { name: ..., code: ... })`. Group 1 is the fields. */
+const ASSIGNED = /Object\.assign\(\s*new [A-Z]\w*\([\s\S]{0,600}?\),\s*\{([^}]*)\}/g;
+
+/** A class the source declares: its name, the class it extends, and its text up to the next class of its file. */
+interface DeclaredClass { name: string; base: string; body: string; file: string }
+
+/** The library's error classes: each class that extends a built-in error class, or extends one of these. */
+function libraryErrorClasses(files: readonly string[]): DeclaredClass[] {
+  const declared: DeclaredClass[] = [];
+  for (const file of files) {
+    const text = readFileSync(file, 'utf8');
+    const found = [...text.matchAll(/\bclass ([A-Z]\w*) extends ([A-Z][\w.]*)/g)];
+    found.forEach((match, i) => {
+      declared.push({ name: match[1], base: match[2].split('.').pop() ?? match[2], body: text.slice(match.index ?? 0, found[i + 1]?.index ?? text.length), file });
+    });
+  }
+  const errors = new Set(['Error', 'TypeError', 'RangeError']);
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const c of declared) if (!errors.has(c.name) && errors.has(c.base)) { errors.add(c.name); grew = true; }
+  }
+  return declared.filter((c) => errors.has(c.name));
+}
+
 describe('listedErrorFields', () => {
   it('keeps a listed type and a listed code', () => {
     expect(listedErrorFields(named('OpenRouterProviderError', 'STREAM_PARSING_ERROR'))).toEqual({ type: 'OpenRouterProviderError', code: 'STREAM_PARSING_ERROR' });
@@ -68,6 +92,50 @@ describe('the two lists', () => {
       for (const match of text.matchAll(/(?:\bcode(?:: [A-Za-z' |]+)? = |this\.code = )'([A-Z][A-Z0-9_]*)'/g)) {
         if (!LISTED_ERROR_CODES.has(match[1])) missing.add(`${match[1]} (${file})`);
       }
+    }
+    expect([...missing]).toEqual([]);
+  });
+  it('hold every name the library gives an error: a class that sets its name, and a name set on an error it throws', () => {
+    const missing = new Set<string>();
+    const need = (name: string, file: string) => { if (valid('word', name, 'type') && !LISTED_ERROR_TYPES.has(name)) missing.add(`${name} (${file})`); };
+    for (const { body, file } of libraryErrorClasses(files)) {
+      for (const match of body.matchAll(/\bthis\.name = '([A-Za-z]\w*)'/g)) need(match[1], file);
+    }
+    for (const file of files) {
+      const text = readFileSync(file, 'utf8');
+      for (const match of text.matchAll(ASSIGNED)) for (const field of match[1].matchAll(/\bname: '([A-Za-z]\w*)'/g)) need(field[1], file);
+      for (const match of text.matchAll(/\b(?:error|err)\.name = '([A-Za-z]\w*)'/g)) need(match[1], file);
+    }
+    expect([...missing]).toEqual([]);
+  });
+  it('hold every code a library error is given: by assignment, by a declared union of codes, or as the code its constructor takes first', () => {
+    const missing = new Set<string>();
+    const need = (code: string, file: string) => { if (valid('word', code, 'code') && !LISTED_ERROR_CODES.has(code)) missing.add(`${code} (${file})`); };
+    const classes = libraryErrorClasses(files);
+    const unions = new Map<string, string[]>();
+    for (const file of files) {
+      for (const match of readFileSync(file, 'utf8').matchAll(/\btype ([A-Z]\w*)\s*=((?:\s*\|?\s*'[A-Za-z]\w*')+)\s*;/g)) {
+        unions.set(match[1], [...match[2].matchAll(/'([A-Za-z]\w*)'/g)].map((literal) => literal[1]));
+      }
+    }
+    // A class whose constructor takes the code first, and a subclass that keeps that constructor.
+    const codeFirst = new Set(classes.filter((c) => /\bconstructor\(\s*(?:(?:public|private|protected)\s+)?(?:readonly\s+)?code\b/.test(c.body)).map((c) => c.name));
+    for (let grew = true; grew;) {
+      grew = false;
+      for (const c of classes) if (!codeFirst.has(c.name) && codeFirst.has(c.base) && !/\bconstructor\(/.test(c.body)) { codeFirst.add(c.name); grew = true; }
+    }
+    for (const { base, body, file } of classes) {
+      for (const match of body.matchAll(/\b(?:readonly|public|private|protected)\s+(?:readonly\s+)?code\??: ((?:'[A-Za-z]\w*'\s*\|?\s*)+|[A-Z]\w*)/g)) {
+        const literals = match[1].startsWith("'") ? [...match[1].matchAll(/'([A-Za-z]\w*)'/g)].map((literal) => literal[1]) : unions.get(match[1]) ?? [];
+        for (const code of literals) need(code, file);
+      }
+      if (codeFirst.has(base)) for (const match of body.matchAll(/\bsuper\(\s*'([A-Za-z]\w*)'/g)) need(match[1], file);
+    }
+    for (const file of files) {
+      const text = readFileSync(file, 'utf8');
+      for (const match of text.matchAll(ASSIGNED)) for (const field of match[1].matchAll(/\bcode: '([A-Za-z]\w*)'/g)) need(field[1], file);
+      for (const match of text.matchAll(/\.code = '([A-Za-z]\w*)'/g)) need(match[1], file);
+      for (const name of codeFirst) for (const match of text.matchAll(new RegExp(`\\bnew ${name}\\(\\s*'([A-Za-z]\\w*)'`, 'g'))) need(match[1], file);
     }
     expect([...missing]).toEqual([]);
   });
