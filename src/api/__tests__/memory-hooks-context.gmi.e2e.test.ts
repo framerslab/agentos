@@ -133,6 +133,37 @@ describe('one session is one user on the default runtime', () => {
     await a.close();
     expect(a.session('s2', { userId: 'ana' }).id).toBe('s2');
   });
+
+  it('a handle keeps the user it was opened for once its session is closed and the id opened again for another user', async () => {
+    const k = key();
+    script('openai', k, { whole: true, replies: [reply.text('One.'), reply.text('Two.'), reply.text('Three.')] });
+    const { provider, calls, observed } = recorder();
+    const a = agent(stubbed(k, { memoryProvider: provider }));
+    const anas = a.session('s1', { userId: 'ana' });
+    await anas.close();
+    a.session('s1', { userId: 'ben' });
+    await anas.send('My PIN is 1234.');
+    await vi.waitFor(() => expect(observed()).toHaveLength(2));
+    for (const call of calls) expect(call.context).toMatchObject({ userId: 'ana', subject: { kind: 'user', id: 'ana' } });
+
+    // agent.close() leaves an open handle's user as it was.
+    const bens = a.session('s2', { userId: 'ben' });
+    await a.close();
+    calls.length = 0;
+    await bens.send('Hi.');
+    await vi.waitFor(() => expect(observed()).toHaveLength(2));
+    for (const call of calls) expect(call.context).toMatchObject({ userId: 'ben', subject: { kind: 'user', id: 'ben' } });
+
+    // With no history, closing any handle of an id ends the session; a handle still held keeps its user.
+    const noHistory = agent(stubbed(k, { memoryProvider: provider, history: false }));
+    const held = noHistory.session('s3', { userId: 'ana' });
+    await noHistory.session('s3').close();
+    noHistory.session('s3', { userId: 'ben' });
+    calls.length = 0;
+    await held.send('Still me.');
+    await vi.waitFor(() => expect(observed()).toHaveLength(2));
+    for (const call of calls) expect(call.context).toMatchObject({ userId: 'ana', subject: { kind: 'user', id: 'ana' } });
+  });
 });
 
 const lookup = { name: 'lookup', description: 'Look up.', inputSchema: { type: 'object', properties: { q: { type: 'string' } } }, execute: async () => ({ found: true }) };
