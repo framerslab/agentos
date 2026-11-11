@@ -1073,7 +1073,7 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
   /**
    * Sends the held frames to a connection that takes audio, then the commit a flush asked for meanwhile.
    * Frames its socket no longer takes (it began closing after the connection opened) stay held, and so
-   * does that commit, for the connection that replaces it.
+   * does that commit, for the connection that replaces it, whether or not any frame was held.
    */
   private releaseBacklog(connection: TranscriptionConnection): void {
     const held = this.backlog;
@@ -1085,7 +1085,7 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
       this.hold(frame);
       refused = true;
     }
-    if (refused || !this.commitOnAdopt) return;
+    if (refused || !this.commitOnAdopt || !connection.takesAudio()) return;
     this.commitOnAdopt = false;
     connection.commit(this.sessionAudioMs);
   }
