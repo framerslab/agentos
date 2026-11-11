@@ -625,6 +625,31 @@ describe('AvatarPipeline caller-owned options', () => {
       expect(result.identityPackage.anchors.expressionSheet!.happy).toBe(secondCandidate?.candidateUrl);
     });
 
+    it('tells the generator which attempt each redraw of a refused render is', async () => {
+      const acceptanceCheck = vi.fn<AvatarAcceptanceCheck>().mockImplementation(async ({ label }) =>
+        label === 'expression:sad' ? { accepted: false, reason: 'the same refused face' } : { accepted: true },
+      );
+
+      await pipeline.generate(
+        makeRequest({
+          stages: ['neutral_portrait', 'expression_sheet'],
+          emotions: ['neutral', 'sad'],
+          driftGuard: { maxRegenerationAttempts: 3 },
+          acceptanceCheck,
+        }),
+      );
+
+      const sadCalls = (generateImage as ReturnType<typeof vi.fn>).mock.calls
+        .map(([, options]) => options)
+        .filter((options) => options.label === 'expression:sad');
+      // With a fixed seed, the attempt is the only argument that tells a redraw from the draw it replaces.
+      expect(sadCalls).toEqual(
+        [1, 2, 3].map((attempt) =>
+          expect.objectContaining({ seed: 42, stage: 'expression_sheet', label: 'expression:sad', attempt }),
+        ),
+      );
+    });
+
     it('fails the job when the check throws and draws no more for it', async () => {
       const acceptanceCheck = vi.fn<AvatarAcceptanceCheck>().mockImplementation(async ({ label }) => {
         if (label === 'expression:angry') throw new Error('judge unavailable');
