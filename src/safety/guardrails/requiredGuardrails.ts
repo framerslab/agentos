@@ -75,16 +75,19 @@ export function assertRequiredGuardrails(active: readonly ActiveGuardrail[], req
 const ACTIONS = new Set<string>(Object.values(GuardrailAction));
 
 /**
- * A well-formed answer as it came. `null` is an allow. An answer whose action is not one of {@link GuardrailAction},
- * `undefined` included (a guard that returned nothing), is written once as `guardrail.failed` with cause `malformed`,
- * then turned into a BLOCK when the guard runs closed, or dropped when it runs open.
+ * A well-formed answer as it came. `null` is an allow. An answer whose action is not one of {@link GuardrailAction}
+ * as a string, `undefined` included (a guard that returned nothing), is written once as `guardrail.failed` with cause
+ * `malformed`, then turned into a BLOCK that names the guard in `metadata.guardrailId` when the guard runs closed, or
+ * dropped when it runs open.
  */
 function settled(evaluation: GuardrailEvaluationResult | null, guardrailId: string | undefined, stage: GuardrailStage, closed: boolean): GuardrailEvaluationResult | null {
   if (evaluation === null) return null;
-  if (typeof evaluation === 'object' && ACTIONS.has(String((evaluation as GuardrailEvaluationResult).action))) return evaluation;
+  // the action must be the string itself: a String object prints as one but fails the dispatcher's strict comparison
+  const action: unknown = typeof evaluation === 'object' ? (evaluation as GuardrailEvaluationResult).action : undefined;
+  if (typeof action === 'string' && ACTIONS.has(action)) return evaluation;
   guardrailLog.warn('guardrail.failed', { guardrailId: safeWord(guardrailId), stage, posture: closed ? 'closed' : 'open', cause: 'malformed' });
   if (!closed) return null;
-  return markGuardFailure({ action: GuardrailAction.BLOCK, reason: 'The guardrail answered with no recognised action.', reasonCode: 'GUARDRAIL_MALFORMED', metadata: { failClosed: true, cause: 'malformed' } });
+  return markGuardFailure({ action: GuardrailAction.BLOCK, reason: 'The guardrail answered with no recognised action.', reasonCode: 'GUARDRAIL_MALFORMED', metadata: { failClosed: true, cause: 'malformed', ...(guardrailId ? { guardrailId } : {}) } });
 }
 
 /**
