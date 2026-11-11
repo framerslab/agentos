@@ -553,15 +553,18 @@ export class CallManager {
    * commit and are best-effort; financial/external effects must consume durable records, not handlers.
    * A call's bot speech not yet committed commits first, and the manager's record of each call becomes the
    * committed one with the speech recorded since on top; the manager's store transactions run one at a time.
-   * A `notify-message-spoken` event counts as applied, and after the commit its notify call hangs up as
-   * {@link hangupCall} does, in a store transaction of its own that the returned promise does not wait for.
+   * A `notify-message-spoken` event counts as applied and is not recorded as processed: after the commit, outside
+   * the store queue, its notify call hangs up as {@link hangupCall} does, and the returned promise waits for that
+   * hangup and rejects with its error. A webhook acknowledged on that promise has had its hangup committed and asked
+   * of the carrier; one redelivered because the hangup did not commit (the worker stopped, or the commit failed)
+   * finds the call still open and hangs it up.
    */
   async processWebhookDurable(providerName: VoiceProviderName, context: WebhookContext, store: ITelephonyCallStore): Promise<{ accepted: boolean; applied: number }> {
     const provider = this.providers.get(providerName);
     if (!provider || provider.webhookIdentity !== 'stable-v1') throw new Error('stable carrier provider required');
     if (!provider.verifyWebhook(context).valid) return { accepted: false, applied: 0 };
     const events = provider.parseWebhookEvent(context).events;
-    return this.durable(async () => {
+    const result = await this.durable(async () => {
       const committed = await store.withProvider(providerName, async (tx) => {
         const notifications: CallManagerEvent[] = []; const calls = new Map<string, CallRecord>(); const speech = new Map<string, TranscriptEntry[]>(); const spoken: CallId[] = []; let applied = 0;
         for (const event of events) {
@@ -570,8 +573,9 @@ export class CallManager {
           if (!call) throw new Error('unknown carrier call');
           if (!speech.has(call.callId)) speech.set(call.callId, this.applyUnsavedSpeech(call));
           this.bindCarrierIdentity(call, event);
+          // The hangup below ends the call; until it commits, a redelivery of the event is not a duplicate.
           const ends = this.isNotifyMessageSpoken(call, event); if (ends) spoken.push(call.callId);
-          const changed = this.applyCarrierEvent(call, event); if (changed.length || ends) applied += 1;
+          const changed = ends ? [] : this.applyCarrierEvent(call, event); if (changed.length || ends) applied += 1;
           await tx.put(call); calls.set(call.callId, call); notifications.push(...changed);
         }
         return { applied, notifications, calls: [...calls.values()], speech, spoken };
@@ -579,10 +583,11 @@ export class CallManager {
       for (const call of committed.calls) this.refreshDurable(call, store, committed.speech.get(call.callId) ?? []);
       for (const event of committed.notifications) this.emit(event);
       for (const event of committed.notifications) if (event.type === 'call:answered') this.setUpAnsweredCall(event.call);
-      // Queued behind this transaction, not awaited inside it: the hangup commits its end in a transaction of its own.
-      for (const callId of committed.spoken) this.hangUpSpokenNotifyCall(callId);
-      return { accepted: true, applied: committed.applied };
+      return { applied: committed.applied, spoken: committed.spoken };
     });
+    // Outside the store queue: each hangup commits the call's end in a transaction of its own, then asks the carrier.
+    for (const callId of result.spoken) await this.hangupCall(callId);
+    return { accepted: true, applied: result.applied };
   }
   /** Runs `work` once this manager's earlier store transactions, and the refreshes after them, have finished. */
   private durable<T>(work: () => Promise<T>): Promise<T> {
