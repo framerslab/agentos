@@ -261,7 +261,8 @@ export type NormalizedCallEvent =
   | NormalizedTranscript
   | NormalizedSpeechStart
   | NormalizedMediaStreamConnected
-  | NormalizedDtmfReceived;
+  | NormalizedDtmfReceived
+  | NormalizedNotifyMessageSpoken;
 
 /**
  * Common fields shared by every normalized event variant.
@@ -391,6 +392,16 @@ export interface NormalizedDtmfReceived extends NormalizedEventBase {
    * payloads typically omit it.
    */
   durationMs?: number;
+}
+
+/**
+ * The carrier has spoken a notify call's message to the end. A
+ * carrier-profile Telnyx provider reports it from the `call.speak.ended`
+ * webhook of the `speak` command that carried the message, when its status
+ * is `completed`; `CallManager` then hangs the notify call up.
+ */
+export interface NormalizedNotifyMessageSpoken extends NormalizedEventBase {
+  kind: 'notify-message-spoken';
 }
 
 // ============================================================================
