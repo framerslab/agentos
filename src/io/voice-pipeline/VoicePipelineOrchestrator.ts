@@ -172,6 +172,7 @@ import {
 import { isClientTranscriptMessage, transcriptEventFromClient } from './clientTranscript.js';
 import { isClientTextInputMessage, MAX_TEXT_INPUT_LENGTH } from './clientTextInput.js';
 import { describeReason, isError } from './describeReason.js';
+import { speechEdgeItem, sttSpeechEvent } from './speechEdgeItem.js';
 import type { VoiceEventListener } from './VoiceEventEmitter.js';
 
 /**
@@ -569,10 +570,13 @@ interface FailureEvent {
 
 /** What the user's speech does, from the STT session's events or a client's transcript lines. */
 interface SpeechEdges {
-  /** Speech began: a synthetic VAD event, and, while the agent speaks, an interruption of the reply. */
-  start(): Promise<void>;
-  /** Speech ended: a synthetic VAD event. */
-  end(): void;
+  /**
+   * Speech began: a synthetic VAD event, carrying the item the transcriber named for the speech, and, while the agent
+   * speaks, an interruption of the reply.
+   */
+  start(itemId?: string): Promise<void>;
+  /** Speech ended: a synthetic VAD event, carrying the item the transcriber named for the speech. */
+  end(itemId?: string): void;
   /**
    * A transcript of the speech arrived: during an interruption, a final counts toward the decision, and the barge-in
    * handler is asked again.
@@ -1740,11 +1744,11 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     // decided (`_interrupt`): the barge-in handler is asked as the speech grows, and what the detector is told of the
     // speech waits for the decision.
     const speech: SpeechEdges = {
-      start: async () => {
+      start: async (itemId) => {
         if (this.current === 'closed') return;
         this.events.userTo('speaking');
         if ((this.current as PipelineState) === 'closed') return;
-        const event: VadEvent = { type: 'speech_start', timestamp: Date.now(), source: 'stt' };
+        const event: VadEvent = sttSpeechEvent('speech_start', itemId);
         const open = this.interruption;
         if (open) {
           // The user speaks again before the floor is decided: the same interruption, measured across both.
@@ -1756,11 +1760,11 @@ export class VoicePipelineOrchestrator extends EventEmitter {
           if (this.current === 'speaking') await this._interrupt(parts);
         }
       },
-      end: () => {
+      end: (itemId) => {
         if (this.current === 'closed') return;
         if (this.events.user === 'speaking') this.events.userTo('listening');
         if ((this.current as PipelineState) === 'closed') return;
-        const event: VadEvent = { type: 'speech_end', timestamp: Date.now(), source: 'stt' };
+        const event: VadEvent = sttSpeechEvent('speech_end', itemId);
         speech.tell(() => endpoint.pushVadEvent(event));
         const open = this.interruption;
         if (!open) return;
@@ -1859,8 +1863,9 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       // The reply ends once the transport has played its audio out; speech over the rest of it interrupts it.
       this._finishReply(parts);
     });
-    stt.on('speech_start', () => this.supervise(() => speech.start()));
-    stt.on('speech_end', () => this.supervise(() => speech.end()));
+    // Each edge carries the item the transcriber named for it, so the detector pairs a speech end with that item's final.
+    stt.on('speech_start', (edge?: unknown) => this.supervise(() => speech.start(speechEdgeItem(edge))));
+    stt.on('speech_end', (edge?: unknown) => this.supervise(() => speech.end(speechEdgeItem(edge))));
     this._wireClientTranscripts(transport, endpoint, speech, parts);
     const publicSession = Object.assign(new EventEmitter(), { sessionId: randomUUID(), transport, close: (reason?: string) => this.stopSession(reason) });
     // A getter, so the session reads the state of the moment rather than a copy taken here.
