@@ -130,6 +130,18 @@ describe('a provider named without a model', () => {
     expect(calls.streamed).toEqual([{ providerId: 'minimax', modelId: 'MiniMax-M3' }]);
   });
 
+  it("keeps the persona's model when a turn names the persona's own provider", async () => {
+    const pinnedPersona = persona({ id: 'pinned-same', defaultProviderId: 'minimax', defaultModelId: 'MiniMax-M3' });
+    booted = await AgentOS.create({
+      modelProviderManagerConfig: { providers }, turnPlanning: { enabled: false }, personas: [pinnedPersona],
+    } as any);
+
+    const chunks = await runTurn(booted, pinnedPersona.id, { preferredProviderId: 'minimax' });
+
+    expectNoError(chunks);
+    expect(calls.streamed).toEqual([{ providerId: 'minimax', modelId: 'MiniMax-M3' }]);
+  });
+
   it("runs a streamed turn on the default provider's default model when no level names a model", async () => {
     const { createAgentOSConfig } = await import('../../core/config/AgentOSConfig');
     const base = await createAgentOSConfig();
