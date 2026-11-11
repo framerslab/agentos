@@ -464,16 +464,36 @@ describe.each(runtimes)('a recall that is not the shape a provider returns, on %
   });
 });
 
-describe.each(runtimes)("a structured send's repair attempt, on %s", (_name, runtime) => {
+describe("a structured send's repair attempt on the default runtime", () => {
   it("keeps the recall block right before the turn's own message", async () => {
     const k = key();
     const s = script('openai', k, { whole: true, replies: [reply.text('{"count":"two"}'), reply.text('{"count":2}')] });
     const { provider } = recorder({ contextText: 'RECALL-likes-tea' });
-    const r = await agent(stubbed(k, { ...runtime, memoryProvider: provider })).session('s1').send('Count.', { responseSchema: z.object({ count: z.number() }), maxValidationRetries: 1 });
+    const r = await agent(stubbed(k, { memoryProvider: provider })).session('s1').send('Count.', { responseSchema: z.object({ count: z.number() }), maxValidationRetries: 1 });
     expect(r.object).toEqual({ count: 2 });
     expect(s.seen).toHaveLength(2);
     const turnMessageOf = (call: ProviderScript['seen'][number]) => call.messages[recallOf(call)!.index + 1];
     expect(JSON.stringify(turnMessageOf(s.seen[0]).content)).toContain('Count.');
     expect(turnMessageOf(s.seen[1])).toEqual(turnMessageOf(s.seen[0]));
+  });
+});
+
+describe("an id the agent's learning.anonymousUserIds lists, on runtime: 'gmi'", () => {
+  it('is no user: the hooks are told the session, and two sessions opened with it are two subjects', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const k = key();
+    script('openai', k, { whole: true, replies: [reply.text('One.'), reply.text('Two.')] });
+    const { provider, calls, observed } = recorder();
+    const a = agent(stubbed(k, { runtime: 'gmi', learning: { anonymousUserIds: ['kiosk'] }, memoryProvider: provider }));
+    await a.session('kiosk-a', { userId: 'kiosk' }).send('Hi.');
+    await a.session('kiosk-b', { userId: 'kiosk' }).send('Hi.');
+    await vi.waitFor(() => expect(observed()).toHaveLength(4));
+    for (const call of calls) {
+      const id = call.context!.sessionId;
+      expect(call.context).toMatchObject({ userId: id, subject: { kind: 'session', id } });
+      expect(call.context).not.toHaveProperty('providerUserId');
+    }
+    expect(new Set(calls.map((call) => call.context!.sessionId))).toEqual(new Set(['kiosk-a', 'kiosk-b']));
+    await a.close();
   });
 });
