@@ -139,6 +139,7 @@ const result = await pipeline.generate({
 - `emotions` replaces the default emotion set (`AVATAR_EMOTIONS`: neutral, happy, sad, angry, surprised, flirty, fearful) for the expression sheet and the animated emotes. An emotion left out of the list is never drawn, a repeated one is drawn once, and `neutral` in the expression sheet reuses the portrait.
 - `angles` replaces the default viewpoints (`AVATAR_ANGLES`: three-quarter view, profile view). Each angle's words are appended to the portrait prompt as written. `anchors.additionalAngles` lists the accepted images in the order of `angles`, and each job's label, `angle:<words>`, names the angle it drew.
 - Every call to the image generator carries `stage` and `label` in its options (`expression_sheet` and `expression:happy`, for example), so one generator function can route each stage to its own provider or model and account for each image.
+- Every call for an image the pipeline may draw again (the expression sheet, the additional angles, and the full-body image under an acceptance check) also carries `attempt`, starting at 1. A generator that sends a fixed `seed` varies it by `attempt` (`seed + attempt - 1`, for example); with the same seed and the same inputs, a provider returns the refused image again on every redraw.
 
 ## Choosing the Right Mode
 

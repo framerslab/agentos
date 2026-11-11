@@ -52,6 +52,14 @@ export interface ImageGeneratorOptions {
   stage?: AvatarGenerationStage;
   /** The job's label (e.g. "expression:happy", "angle:profile view"). */
   label?: string;
+  /**
+   * Which draw of this image the call is, starting at 1, on the images the
+   * pipeline may draw again (the expression sheet, the additional angles, and
+   * the full-body image under an acceptance check). A generator that sends a
+   * fixed seed varies it by this number, or every redraw repeats the image
+   * that was refused.
+   */
+  attempt?: number;
 }
 
 /**
@@ -535,7 +543,6 @@ export class AvatarPipeline {
     driftRegenerated: string[];
   }): Promise<CheckedDraw> {
     const { stage, label, prompt, referenceUrl, driftEmbedding, acceptanceCheck, driftConfig } = args;
-    const options: ImageGeneratorOptions = { ...args.options, stage, label };
     let imageUrl: string | undefined;
     let bestScore = -1;
     let attempts = 0;
@@ -543,6 +550,7 @@ export class AvatarPipeline {
 
     while (attempts < driftConfig.maxRegenerationAttempts) {
       attempts++;
+      const options: ImageGeneratorOptions = { ...args.options, stage, label, attempt: attempts };
       const url = await this.generateImage(prompt, options);
 
       if (acceptanceCheck) {
