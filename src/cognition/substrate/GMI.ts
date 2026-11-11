@@ -50,7 +50,7 @@ import { applyTraitOverlay, droppedTraitPatchWarning, PERSONALITY_PROMPT_PRIORIT
 import type { GuardedMemoryWrite, ILearnerSession, ToolLearningContext, TurnScopes } from '../learning/types.js';
 import { explicitTurnUserOf, isTurnScopes, toolLearningContextFor } from '../learning/toolContext.js';
 import { IWorkingMemory } from './memory/IWorkingMemory';
-import { IPromptEngine, PromptExecutionContext, PromptComponents, PromptEngineResult, ModelTargetInfo } from '../../core/llm/IPromptEngine';
+import { IPromptEngine, PromptExecutionContext, PromptComponents, PromptEngineResult, ModelTargetInfo, type PromptHistoryOmission } from '../../core/llm/IPromptEngine';
 import { IRetrievalAugmentor, RagRetrievalOptions, RagDocumentInput, RagIngestionOptions, RagMemoryCategory } from '../rag/IRetrievalAugmentor';
 
 import { ChatMessage, ModelCompletionOptions, ModelCompletionResponse, ModelUsage, ThinkingBlock } from '../../core/llm/providers/IProvider';
@@ -1528,6 +1528,8 @@ export class GMI implements IGMI {
     // The recall capture of the turn's memory assembly, for the turn's output: the error output carries it too, so a
     // turn that fails after its memory was assembled still reports what that assembly recalled.
     let turnMemoryRecall: MemoryRecallCapture | undefined;
+    // The history the turn's requests left out: the report of the serving request that left the most messages out.
+    let turnHistoryOmitted: PromptHistoryOmission | undefined;
 
     // The turn's stop. The caller's abort signal (a session's close()) and this
     // GMI's shutdown() both abort it; the model call in progress then ends with
@@ -1989,6 +1991,8 @@ export class GMI implements IGMI {
         // The route the gateway's Anthropic hop took, read with it once the stream has ended.
         let stepSchemaRoute = undefined as CompletionAttempt['schemaRoute'];
         let modelTargetInfo!: ModelTargetInfo;
+        // The history the attempt's prompt left out, set with each hop's prompt; the serving hop's is the step's.
+        let stepHistoryOmitted: PromptHistoryOmission | undefined;
 
         // One attempt per hop. A failure before any output moves to the next
         // hop and rebuilds the prompt for that hop's model; after output
@@ -2013,6 +2017,14 @@ export class GMI implements IGMI {
           );
 
           promptEngineResult.issues?.forEach(issue => this.addTraceEntry(ReasoningEntryType.WARNING, `Prompt Engine Issue: ${issue.message}`, issue as any));
+          stepHistoryOmitted = promptEngineResult.modificationDetails?.historyOmitted;
+          if (stepHistoryOmitted) {
+            this.addTraceEntry(
+              ReasoningEntryType.PROMPT_CONSTRUCTION_DETAIL,
+              `The prompt for model ${modelTargetInfo.modelId} leaves out the ${stepHistoryOmitted.messages} oldest history message(s), about ${stepHistoryOmitted.tokens} tokens, to fit the history budget.`,
+              { historyOmitted: { ...stepHistoryOmitted } },
+            );
+          }
           // A failed template leaves the prompt empty, and every provider takes
           // a non-empty ChatMessage[]; fail the turn rather than send nothing.
           const promptMessages = promptEngineResult.prompt;
@@ -2233,6 +2245,10 @@ export class GMI implements IGMI {
 
         // The step's usage, counted once.
         if (stepUsage) addUsage(aggregatedUsage, stepUsage);
+        // The serving request's cut counts toward the turn's report; a failed hop's prompt does not.
+        if (stepHistoryOmitted && (!turnHistoryOmitted || stepHistoryOmitted.messages > turnHistoryOmitted.messages)) {
+          turnHistoryOmitted = { ...stepHistoryOmitted };
+        }
 
         // The next step's diagnostics compare against this step's response.
         if (stepCacheDiagnostics) {
@@ -2448,6 +2464,7 @@ export class GMI implements IGMI {
         // its calls are judged with too
         ragSources: lastRagSources ?? continuedTurnSources,
         ...(turnMemoryRecall ? { memoryRecall: turnMemoryRecall } : {}),
+        ...(turnHistoryOmitted ? { historyOmitted: turnHistoryOmitted } : {}),
         ...(structuredResult ? { structuredOutput: structuredResult } : {}),
       };
       return finalTurnOutput; // Return the aggregated output
@@ -2474,6 +2491,7 @@ export class GMI implements IGMI {
         error: lastErrorForOutput,
         usage: aggregatedUsage, // Could be partial
         ...(turnMemoryRecall ? { memoryRecall: turnMemoryRecall } : {}),
+        ...(turnHistoryOmitted ? { historyOmitted: turnHistoryOmitted } : {}),
       };
     } finally {
       // The turn's work is done: shutdown() stops waiting for it, and the

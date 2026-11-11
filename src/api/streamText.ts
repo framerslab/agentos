@@ -289,6 +289,15 @@ export interface StreamTextResult {
    */
   memoryRecall?: Promise<import('../cognition/memory/retrieval/recall/capture.js').MemoryRecallCapture | undefined>;
   /**
+   * On a `gmi()` or `agent({ runtime: 'gmi' })` session's `stream()`: the
+   * conversation history the turn's requests left out to fit the prompt
+   * engine's history budget, as `GenerateTextResult.historyOmitted` reports it
+   * on `send()`. Resolves when the stream ends, to `undefined` when every
+   * request carried the whole history or the turn ended before the GMI
+   * returned its output. Unset on `streamText()` and on the default runtime.
+   */
+  historyOmitted?: Promise<import('../core/llm/IPromptEngine.js').PromptHistoryOmission | undefined>;
+  /**
    * Resolves to the reason the FINAL model step stopped emitting, on the
    * same cadence as {@link usage} (when the stream completes):
    *

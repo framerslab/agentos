@@ -1151,6 +1151,17 @@ export interface GenerateTextResult {
    */
   memoryRecall?: import('../cognition/memory/retrieval/recall/capture.js').MemoryRecallCapture;
   /**
+   * On a `gmi()` or `agent({ runtime: 'gmi' })` session's turn: the
+   * conversation history the turn's requests left out to fit the prompt
+   * engine's history budget (35 percent of the serving model's context
+   * window). `messages` counts the oldest messages left out of the request
+   * that left out the most, `tokens` is their size at the prompt engine's
+   * estimate; the session's `messages()` still lists them. `undefined` when
+   * every request of the turn carried the whole history, and on the default
+   * runtime, which sends the whole history.
+   */
+  historyOmitted?: import('../core/llm/IPromptEngine.js').PromptHistoryOmission;
+  /**
    * Per-hop provider fallback trail. `fired` is true when any non-primary
    * provider produced — or was tried for — the result, so callers can flag a
    * degraded run even when the final attempt recovered on the primary.
