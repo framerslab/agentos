@@ -96,6 +96,10 @@ export const AGENTOS_EVENTS = {
   'soul.field_ignored': { field: { enum: ['voice', 'avatar'] } },
   // A gmi() agent's learners stay under the slug of its name: the learning store holds learner rows under it and none under the soul's id.
   'soul.id_fallback': { reason: { enum: ['old_slug_learner'] } },
+  // A session was opened with an anonymous id as its user id; the session is the memory subject.
+  'memory.anonymous_user': { path: { enum: ['plain', 'gmi'] } },
+  // A host's memory hook threw, rejected or timed out; the turn went on without it.
+  'memory.hook_failed': { hook: { enum: ['getContext', 'observe', 'memoryPolicy', 'screen'] }, type: 'word', code: 'word' },
   // Cognitive memory's recall (src/cognition/memory/retrieval/recall). No memory text, query text or id is ever a field.
   'memory.recall.leg_absent': { leg: { enum: ['dense', 'exact_words', 'recency'] }, reason: { enum: ['no_store', 'no_embedder', 'no_index', 'no_scope_filter', 'query_error', 'disabled'] } },
   'memory.recall.rerank_skipped': { provider: { enum: ['local', 'llm'] }, reason: { enum: ['loading', 'timeout', 'error', 'backoff'] } },

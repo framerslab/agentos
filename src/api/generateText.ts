@@ -1029,6 +1029,15 @@ export interface GenerateTextOptions {
    * `messages` instead). Not part of the public API.
    */
   _continuation?: { helperToolRunId: string; stepOffset: number; prompt?: string };
+  /**
+   * INTERNAL: the caller this call's tools run for, set by agent() from the
+   * session's user, or from a one-shot call's own id. Each tool is told its
+   * user and the subject its memory is keyed by in `userContext`, its session
+   * in `sessionData.sessionId`, and the user id the caller named in
+   * `callerTurn.providerUserId`. A direct call has none, and its tools are
+   * told `system`. Not part of the public API.
+   */
+  _callerUser?: { userId: string; sessionId: string; providerUserId?: string; subject: { kind: 'user' | 'session'; id: string } };
 }
 
 /**
@@ -2384,20 +2393,24 @@ function buildHelperToolExecutionContext(
   runId: string,
   stepIndex: number,
   correlationId?: string,
+  callerUser?: GenerateTextOptions['_callerUser'],
 ): ToolExecutionContext {
   return {
     gmiId: `${source}:${runId}`,
     personaId: `${source}:persona`,
     userContext: {
-      userId: 'system',
+      // The session's user when an agent made the call; a direct call has none, and tools read `system` as no user.
+      userId: callerUser?.userId ?? 'system',
+      ...(callerUser ? { memorySubject: callerUser.subject } : {}),
       source,
     },
     correlationId: correlationId ?? `${source}:tool:${stepIndex + 1}:${randomUUID()}`,
     sessionData: {
-      sessionId: `${source}:${runId}`,
+      sessionId: callerUser?.sessionId ?? `${source}:${runId}`,
       source,
       stepIndex,
     },
+    ...(callerUser?.providerUserId !== undefined ? { callerTurn: { providerUserId: callerUser.providerUserId } } : {}),
   };
 }
 
@@ -3469,6 +3482,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
                     helperToolRunId,
                     runStep,
                     tcId || undefined,
+                    opts._callerUser,
                   ),
                 );
                 // One masked output serves the record and the tool turn: the

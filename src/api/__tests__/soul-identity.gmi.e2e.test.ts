@@ -503,10 +503,13 @@ describe('what the docs say about the limits closing the prompt', () => {
   const PACKAGE_ROOT = fileURLToPath(new URL('../../../', import.meta.url));
   const doc = (file: string) => fs.readFileSync(path.join(PACKAGE_ROOT, file), 'utf8');
 
-  it('name the system messages a turn can add after the limits', () => {
-    const exception = "on a turn where a memory provider's `getContext` returns text (the wiki's recall on a souled agent), that text is a system message after the limits, and so is the plan of a call with `planning` on";
-    expect(doc('docs/SOUL_FILES.md')).toContain(exception);
-    expect(doc('docs/safety/GUARDRAILS_USAGE.md')).toContain(exception);
+  it('name the system messages a turn can add after the limits, and say recall is not one', () => {
+    const exception = 'the plan of a call with `planning` on is a system message after the limits.';
+    const recall = "A memory provider's recall (the wiki's recall on a souled agent) is a data block in a user-role message, never a system message.";
+    for (const file of ['docs/SOUL_FILES.md', 'docs/safety/GUARDRAILS_USAGE.md']) {
+      expect(doc(file)).toContain(exception);
+      expect(doc(file)).toContain(recall);
+    }
     expect(doc('README.md')).not.toContain('Identity, voice, hard limits, and HEXACO scores');
     expect(doc('README.md')).toContain("With `systemBlocks`, the soul's prose and style are left out and its hard limits still close the prompt.");
   });

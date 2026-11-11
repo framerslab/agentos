@@ -61,6 +61,8 @@ export enum GMIPrimeState {
  */
 export interface UserContext {
   userId: string;
+  /** The subject the turn's conversation memory is keyed by: the session's user, else the session. Set by `agent()` and `gmi()`. */
+  memorySubject?: { kind: 'user' | 'session'; id: string };
   skillLevel?: string;
   preferences?: Record<string, any>;
   pastInteractionSummary?: string;

@@ -30,6 +30,7 @@ import { canonicalJson } from '../../cognition/learning/ledger/canonical.js';
 import type { ITool } from '../../core/tools/ITool.js';
 import type { ModelCompletionOptions } from '../../core/llm/providers/IProvider.js';
 import type { ResolvedCognition } from './gmiCognition.js';
+import { MEMORY_RECALL_SYSTEM_LINE } from './memoryDataBlock.js';
 
 /** The session store bounds history, so the GMI's own count window stays out of the way. */
 export const GMI_SESSION_MAX_HISTORY_MESSAGES = 100_000;
@@ -100,13 +101,17 @@ export function agentStableIdOf(opts: Partial<AgentOptions>, soul: LoadedSoul | 
 
 /**
  * The persona's base prompt. The personality section stays out of it whenever the GMI renders one itself (learning
- * on, or a persona with traits), so the section appears once; `systemBlocks` never carry one.
+ * on, or a persona with traits), so the section appears once; `systemBlocks` never carry one. With a `memoryProvider`
+ * that recalls, its last line is the one that explains the recall block.
  *
  * @param soul - The soul loaded from `opts.soul`, or `null` for none.
  */
 function basePrompt(opts: AgentOptions, leaveOutPersonality: boolean, soul: LoadedSoul | null): string {
-  if (opts.systemBlocks) return opts.systemBlocks.map((block) => block.text).filter(Boolean).join('\n\n');
-  return buildSystemPrompt(opts, soul, leaveOutPersonality ? { personality: false } : undefined) ?? '';
+  const prompt = opts.systemBlocks
+    ? opts.systemBlocks.map((block) => block.text).filter(Boolean).join('\n\n')
+    : (buildSystemPrompt(opts, soul, leaveOutPersonality ? { personality: false } : undefined) ?? '');
+  // The static line that explains the recall block is the base prompt's last line, so it renders before the limits.
+  return opts.memoryProvider?.getContext ? [prompt, MEMORY_RECALL_SYSTEM_LINE].filter(Boolean).join('\n\n') : prompt;
 }
 
 /**
