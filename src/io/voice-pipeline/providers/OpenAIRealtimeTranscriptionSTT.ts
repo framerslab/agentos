@@ -994,19 +994,23 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
 
   /**
    * Resolves when a connection takes audio again (one is adopted, or a refused rollover keeps the old
-   * one) or the session closes, or after `timeoutMs`.
+   * one) or the session closes, or after `timeoutMs`. A connection adopted while its socket is already
+   * closing takes nothing, so the wait goes on for the one that replaces it.
    */
   private waitAdopted(timeoutMs: number): Promise<void> {
     if (this.receiver() || this.closed) return Promise.resolve();
     return new Promise<void>((resolve) => {
       const finish = (): void => {
         clearTimeout(timer);
-        this.adoptWaiters.delete(finish);
+        this.adoptWaiters.delete(wake);
         this.off('close', finish);
         resolve();
       };
+      const wake = (): void => {
+        if (this.receiver() || this.closed) finish();
+      };
       const timer = setTimeout(finish, timeoutMs);
-      this.adoptWaiters.add(finish);
+      this.adoptWaiters.add(wake);
       this.once('close', finish);
     });
   }
