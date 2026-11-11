@@ -6,7 +6,7 @@ spec. Identity, voice, procedural rules, and long-term memory all live in plain
 markdown files inside a per-agent workspace directory. The loader parses YAML frontmatter into structured [`IPersonaDefinition`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/IPersonaDefinition.ts) fields, and
 `agent({ soul })` puts the prose at the head of the system prompt.
 
-The `memory/` directory is the agent's **LLM wiki**: a markdown knowledge base the agent reads and rewrites itself (the "LLM keeps a wiki" pattern). Markdown is the source of truth and the vector/graph index is rebuilt from it; [`souledAgent()`](https://docs.agentos.sh/getting-started/high-level-api) wires it end to end. Full detail in [The `memory/` Wiki](#the-memory-wiki) below.
+The agent's long-term memory is an **LLM wiki** in two layers (the "LLM keeps a wiki" pattern). The pages under `memory/` are the operator's: markdown files written by hand, shared by everyone the agent talks with, and never written by the runtime. What people say to the agent is kept per subject (a user, or a session that names none) in a store under `memory/.store/`, and compiled into that subject's own pages, which are rows of the store and never files. [`souledAgent()`](https://docs.agentos.sh/getting-started/high-level-api) wires both end to end. Full detail in [The `memory/` Wiki](#the-memory-wiki) below.
 
 ![Soul file anatomy: the loader reads SOUL.md, the optional STYLE.md, IDENTITY.md and AGENTS.md, and the memory/ wiki, but not examples/. SOUL.md splits into persona fields and the prose that opens the system prompt unless systemBlocks replace it. Hard limits are prompt text, not a check. loadSoul() returns AGENTS.md and IDENTITY.md without applying them.](/img/diagrams/soul-files-anatomy.svg)
 
@@ -39,7 +39,7 @@ The cognitive-memory mechanisms layered on top (decay, retrieval-induced forgett
 | **STYLE.md** | Voice patterns, vocabulary, register | Appended to the system prompt as a `## Style` section. |
 | **IDENTITY.md** | Display card: name, role, agent-ID, avatar | Returned as `identityContent`; nothing in the runtime reads it. |
 | **AGENTS.md** | Procedural rules, session-start checks, workflow steps | Returned as `agentsContent`; nothing in the runtime reads or runs it. |
-| **memory/** | Long-term memory wiki (markdown pages the agent compiles and reads) | `index.md` joins the system prompt; [`souledAgent()`](./getting-started/HIGH_LEVEL_API.md) wires the wiki end to end. Without it, each session starts cold. |
+| **memory/** | The operator's wiki pages (markdown written by hand, shared by every user), and the store of per-user memory under `.store/` | The index of the operator's pages joins the system prompt; [`souledAgent()`](./getting-started/HIGH_LEVEL_API.md) wires the wiki and per-user memory end to end. Without it, each session starts cold. |
 | **examples/** | Good/bad output calibration | Not read by the loader. |
 
 The principle from OpenClaw: **personality in SOUL.md, procedures in AGENTS.md.**
@@ -47,18 +47,30 @@ Don't mix them.
 
 ## The `memory/` Wiki
 
-Long-term memory is a directory of markdown pages: the **LLM wiki**. It is a knowledge
-base the agent compiles from what it learns and reads back on demand. Markdown is the
-source of truth, and the vector and graph index is rebuilt from it.
+Long-term memory is an **LLM wiki** in two layers:
+
+- **Operator pages** are markdown files under `memory/`, written by hand. They are
+  shared by every user of the agent, listed in `index.md` and in the system prompt,
+  indexed for recall under the operator's own key, and never written by the runtime:
+  the files are the source of truth for themselves.
+- **Per-user pages** are compiled from one subject's conversation alone (a user, or a
+  session that names none). They are rows of the store (`memory_pages`), never files,
+  never in `index.md` or in any prompt, and reached through that subject's recall and
+  through `read_memory_page`.
 
 ```
 <agent-id>/memory/
-├── index.md        catalog of every page, injected into the system prelude
-├── entities/       one page per person, place, thing, or project
-├── concepts/       one page per topic or fact-cluster
-├── log/            append-only daily logs (log/YYYY-MM-DD.md)
-└── .meta/          page hashes, backlinks, and the compile watermark
+├── index.md        catalog of the operator's pages, written by the wiki
+├── entities/       operator pages: one per person, place, thing, or project
+├── concepts/       operator pages: one per topic or fact-cluster
+├── log/            operator pages: daily logs (log/YYYY-MM-DD.md)
+├── .meta/          the operator pages' hashes and index entries
+└── .store/         the store: every subject's traces and pages, with a .gitignore
 ```
+
+`.store/` holds what people said to the agent, so it is kept out of version control:
+the store's folder is made with a `.gitignore` holding `*`, and one already there is
+left as it is.
 
 Pages are markdown with YAML frontmatter and `[[wikilinks]]`. The agent reads
 the index from its prelude, then opens any page with the `read_memory_page` tool.
@@ -136,6 +148,16 @@ indexed for recall. This is the rule for pages an earlier version compiled into 
 folder, whose summary or body could carry what one person said into the prompt of
 every agent built from the soul. When a souled agent starts and the folder holds such
 files, one `memory.legacy_pages` log line gives their count.
+
+Memory an earlier version stored is left where it is and read by no user's turn: the
+traces it filed under the agent's plain id (one `memory.legacy_traces` log line counts
+them at start), the chunks of the pages it indexed there, and the page files it
+compiled into the folder. A call with no user still reads those page files through
+`read_memory_page`. Nothing of it is moved, rewritten or deleted by the library, since
+whose words it holds is not recorded. To remove it,
+`await agent.memory.deleteScope('persona', '<agentId>')` deletes the earlier traces and
+chunks under the agent's plain id for good; then delete the compiled page files (the
+ones whose front matter lists `sources`), and the next start writes `index.md` again.
 
 The memory index in the system prompt is rendered from the operator's page files and
 the text migrated from `MEMORY.md` (below), not read from `index.md`; `loadSoul()` and
@@ -339,13 +361,13 @@ The loader reads the soul's files (SOUL.md, STYLE.md, IDENTITY.md, AGENTS.md, ME
 
 What a soul gives an agent depends on how it is loaded:
 
-| Path | Soul prose and style in the prompt | Memory index in the prompt | Front matter applied (traits, mood, hard limits, `agentId`) | Recall each turn (a data block in a user-role message) | `read_memory_page` tool | Wiki compiled |
+| Path | Soul prose and style in the prompt | Index of the operator's pages in the prompt | Front matter applied (traits, mood, hard limits, `agentId`) | Recall each turn (a data block in a user-role message) | `read_memory_page` tool | Wiki compiled |
 |---|---|---|---|---|---|---|
 | `agent({ soul })` | Yes | Yes | Hard limits as the last block of the system prompt; the `hexaco` paragraph unless `personality` is set; the soul's `name` unless `name` is set. Mood, voice, avatar and reasoning-trace limits have no renderer here | No (only from a `memoryProvider` you pass) | No | No |
-| `souledAgent()` | Yes | Yes | As `agent({ soul })`; the soul's id (`agentId`, else the slug of its `name`, which for a name with no Latin letters or digits is `agent-` and a hash of the name, else the agent's `name`) scopes the wiki's traces, and a soul with none of the three is rejected | Yes, per subject: the memory of the turn's subject (the session's `userId`, else the session) and the operator's pages, from the wiki's store | Yes | Yes, on `close()` and by `agent.memory.compileWiki()` |
+| `souledAgent()` | Yes | Yes | As `agent({ soul })`; the soul's id (`agentId`, else the slug of its `name`, which for a name with no Latin letters or digits is `agent-` and a hash of the name, else the agent's `name`) scopes the wiki's traces, and a soul with none of the three is rejected | Yes, per subject: the memory of the turn's subject (the session's `userId`, else the session) and the operator's pages, from the wiki's store | Yes: the asker's own pages and the operator's | Yes, per subject, into the store: on `close()` for the subjects its turns wrote to, and by `agent.memory.compileWiki()` |
 | `agent({ runtime: 'gmi', soul })`, `gmi({ soul })` | Yes | Yes | The persona's id, name, role, traits, mood, reasoning-trace limits and hard limits, the limits as the last block; `voice` and `avatar` are left out with one log line | With cognitive memory on, from cognitive memory; off, only from a `memoryProvider` you pass | No | No |
-| `souledAgent({ runtime: 'gmi' })`, cognitive memory off | Yes | Yes | As `gmi({ soul })`; one id for the persona and the wiki | Yes, per subject, from the wiki's store | Yes | Yes |
-| `souledAgent({ runtime: 'gmi' })`, cognitive memory on | Yes | Yes | As the row above | From cognitive memory; the wiki store's recall is skipped, with a warning, and its turns are still stored, each under its subject | Yes | Yes |
+| `souledAgent({ runtime: 'gmi' })`, cognitive memory off | Yes | Yes | As `gmi({ soul })`; one id for the persona and the wiki | Yes, per subject, from the wiki's store | Yes: the asker's own pages and the operator's | Yes, per subject, into the store |
+| `souledAgent({ runtime: 'gmi' })`, cognitive memory on | Yes | Yes | As the row above | From cognitive memory; the wiki store's recall is skipped, with a warning, and its turns are still stored, each under its subject | Yes: the asker's own pages and the operator's, and the listing (`{ "list": true }`) is how a user reaches their own | Yes, per subject, into the store |
 | The full runtime given `loadSoul().personaDefinition` | Yes (the persona's `baseSystemPrompt`) | No | Yes, every field | From the runtime's own memory, when configured; not from the wiki | No | No |
 
 The exceptions:
@@ -355,6 +377,7 @@ The exceptions:
 - An inline soul (`{ content }`) has no workspace folder: `souledAgent()` builds a plain `agent()` with no wiki memory, no `read_memory_page` tool and no compile, and says so in one `console.warn` line.
 - One-shot `generate()` and `stream()` on a GMI run the light profile, so they use the memory provider's recall, the wiki store's on a souled agent, even when sessions run with cognitive memory on. On a souled agent a one-shot call names no user: nothing is filed for it and it recalls the operator's pages alone, unless `sharedMemory` runs it as one user.
 - A seat of a launched team uses neither memory hook (no recall from the provider, nothing stored with it) and is refused the memory tools, `read_memory_page` among them.
+- A souled agent's memory is kept apart per subject on every path this page tables: recall, the page tool, the compile and the store's own reads take one subject's key and match it by equality. The agent's export (`exportAgentConfig`) carries its configuration and no trace and no page.
 - A `memoryProvider`'s recall is sent as a `<memory_recall>` block of JSON in a user-role message before the turn's own, each text datamarked, with one static line of the system prompt that says it is data. It is never a system message, so the hard limits stay the last system text. The framing lowers the chance that a stored sentence is followed as an instruction; it does not remove it. Cognitive memory's own block is rendered by the GMI and is not this block.
 - `agent.session(id, { userId })` scopes what the hooks and the tools are told on both runtimes: the user id, else the session id (an anonymous id such as `system`, `anonymous` or `guest`, or one `learning.anonymousUserIds` lists, counts as none). One session is one user; for a conversation several people share, pass one id for the group. On a souled agent that subject is the key the turn's memory is filed and recalled under, so two users, or two sessions that name none, never read each other's.
 - Hard limits are a block of prompt text every path renders last, after `systemBlocks` too, with one exception: the plan of a call with `planning` on is a system message after the limits. A memory provider's recall (the wiki's recall on a souled agent) is a data block in a user-role message, never a system message. It tells the model; it is not a check that enforces the limits.

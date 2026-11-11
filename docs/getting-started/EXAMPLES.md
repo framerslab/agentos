@@ -686,7 +686,7 @@ Workspace layout (per agent):
 ├── STYLE.md      # voice, syntax, vocabulary patterns (optional)
 ├── IDENTITY.md   # display card: name, role, agent-ID (optional; loaded, not used by the runtime)
 ├── AGENTS.md     # procedural rules (optional; loaded, not used by the runtime)
-├── memory/       # long-term memory wiki: index.md + entities/ + concepts/ + log/ (auto-managed)
+├── memory/       # the operator's wiki pages (index.md + entities/ + concepts/ + log/) and .store/, the per-user memory
 └── examples/     # good-outputs.md + bad-outputs.md (optional; not read)
 ```
 
@@ -750,20 +750,24 @@ const reply = await aria.generate('I need help with my invoice.');
 
 `agent({ soul })` does not read the `hexaco` scores; pass `personality` to give the agent its trait directives. On the full runtime the scores become the persona's `personalityTraits`. See [SOUL_FILES.md](../SOUL_FILES.md) for the full 6-file workspace spec.
 
-For an agent whose long-term memory **is** its `memory/` wiki, use `souledAgent()` instead of `agent()`. It injects `memory/index.md` into the prelude, adds the `read_memory_page` tool, and folds new conversation into entity/concept pages:
+For an agent with long-term memory, use `souledAgent()` instead of `agent()`. It injects the index of the operator's pages (the markdown files under `memory/`) into the prelude, adds the `read_memory_page` tool, keeps what each user says apart under that user's own key, and folds it into that user's own pages, which are rows of the store and never files:
 
 ```typescript
 import { souledAgent } from '@framers/agentos';
 
 const aria = await souledAgent({ provider: 'anthropic', soul: '~/.agentos/agents/aria' });
 
-const reply = await aria.generate('I need help with my invoice.');
+// A session's turns are filed and recalled for its user (or for the session, when it names none).
+const session = aria.session('support-42', { userId: 'ana' });
+const reply = await session.send('I need help with my invoice.');
 
-// Fold this session's conversation into the wiki mid-session
-// (also runs automatically on close()):
+// Fold what was said into each user's pages mid-session
+// (close() compiles the users its turns wrote to):
 await aria.memory?.compileWiki();
 await aria.close();
 ```
+
+A one-shot `aria.generate()` names no user: nothing is filed for it, and it recalls the operator's pages alone.
 
 See [High-Level API](./HIGH_LEVEL_API.md) for the full `souledAgent()` reference.
 
