@@ -62,4 +62,14 @@ describe('withRequiredPosture', () => {
       expect.objectContaining({ guardrailId: 'safety-gate', stage: 'input', posture: 'closed', cause: 'malformed' }),
     ]);
   });
+
+  it('turns an answer of undefined into the same block, and keeps null as an allow', async () => {
+    const context: GuardrailContext = { userId: 'user-1', sessionId: 'session-1' };
+    const input = { userId: 'user-1', sessionId: 'session-1', textInput: 'a message' } as AgentOSInput;
+    const silent: IGuardrailService = { evaluateInput: async () => undefined as unknown as null };
+    const required = withRequiredPosture('safety-gate', silent, { id: 'safety-gate', stages: ['input'], timeoutMs: 1000 });
+    expect(await required.evaluateInput!({ context, input })).toMatchObject({ action: GuardrailAction.BLOCK, reasonCode: 'GUARDRAIL_MALFORMED', metadata: { failClosed: true, cause: 'malformed' } });
+    const quiet = withRequiredPosture('safety-gate', { evaluateInput: async () => null }, { id: 'safety-gate', stages: ['input'], timeoutMs: 1000 });
+    expect(await quiet.evaluateInput!({ context, input })).toBeNull();
+  });
 });

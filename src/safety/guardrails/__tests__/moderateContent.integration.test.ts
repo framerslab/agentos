@@ -9,6 +9,7 @@ import pino from 'pino';
 import { moderateContent } from '../contentModeration';
 import { evaluateInputGuardrails, holdResult, wrapOutputGuardrails } from '../guardrailDispatcher';
 import { PhraseListGuardrail, StaticPhraseListSource } from '../builtin/PhraseListGuardrail';
+import { ParallelGuardrailDispatcher } from '../ParallelGuardrailDispatcher';
 import { GuardrailAction, type GuardrailConfig, type GuardrailContext, type GuardrailEvaluationResult, type IGuardrailService } from '../IGuardrailService';
 import type { AgentOSInput } from '../../../api/types/AgentOSInput';
 import { AgentOSResponseChunkType, type AgentOSErrorChunk, type AgentOSFinalResponseChunk, type AgentOSResponse, type AgentOSTextDeltaChunk } from '../../../api/types/AgentOSResponse';
@@ -207,6 +208,41 @@ describe('moderateContent: what the decision carries', () => {
     expect(refused.evaluations.some((evaluation) => evaluation.hold?.reviewCode === 'REVIEW')).toBe(true);
     expect(await moderateContent({ text: 'a message' }, { guards: [answering('f', { action: GuardrailAction.FLAG, reasonCode: 'NOTE_1' })], context })).toMatchObject({ outcome: 'flag', unavailable: false });
   });
+
+  it('a guard that writes the failure markers into its own answer refuses as a rule, not as an outage', async () => {
+    const lines = capture();
+    const lookalike = answering('lookalike', { action: GuardrailAction.BLOCK, reasonCode: 'GUARDRAIL_ERROR', metadata: { failClosed: true, cause: 'error' } });
+    const alone = await moderateContent({ text: 'a message' }, { guards: [lookalike], context });
+    expect(alone).toMatchObject({ outcome: 'refuse', unavailable: false });
+    // a rule's refusal outranks a hold, so the lookalike is not passed over for the hold beside it
+    const beside = await moderateContent({ text: 'a message' }, { guards: [answering('holder', holdResult('REVIEW')), lookalike], context });
+    expect(beside).toMatchObject({ outcome: 'refuse', unavailable: false, deciding: { metadata: { guardrailId: 'lookalike' } } });
+    // the library's own code is written only for the library's own failure; the guard does not list it
+    expect(events(lines, 'guardrail.verdict').map((line) => [line.guardrailId, line.code, line.unavailable])).toEqual([
+      ['lookalike', 'unknown', 'no'], ['lookalike', 'unknown', 'no'],
+    ]);
+  });
+
+  it('a sanitizer that removes the whole text gives an empty sanitizedText, so the original cannot come back', async () => {
+    const remover = answering('remover', { action: GuardrailAction.SANITIZE, modifiedText: null }, { canSanitize: true });
+    const decision = await moderateContent({ text: 'call 555 0100' }, { guards: [remover], context });
+    expect(decision).toMatchObject({ outcome: 'allow', sanitizedText: '' });
+    expect(JSON.stringify(decision)).not.toContain('555');
+  });
+
+  it('a guard that answers nothing at all (undefined) is malformed: closed it refuses as unavailable, open it is dropped', async () => {
+    const lines = capture();
+    const silent = (config?: GuardrailConfig): IGuardrailService => ({ id: 'silent', ...(config ? { config } : {}), evaluateInput: async () => undefined as unknown as null });
+    const closed = await moderateContent({ text: 'a message' }, { guards: [silent()], context });
+    expect(closed).toMatchObject({ outcome: 'refuse', unavailable: true, deciding: { reasonCode: 'GUARDRAIL_MALFORMED', metadata: { cause: 'malformed' } } });
+    const open = await moderateContent({ text: 'a message' }, { guards: [silent({ failClosed: false })], context });
+    expect(open).toMatchObject({ outcome: 'allow', unavailable: false, evaluations: [] });
+    expect(events(lines, 'guardrail.failed').map((line) => [line.guardrailId, line.posture, line.cause])).toEqual([
+      ['silent', 'closed', 'malformed'], ['silent', 'open', 'malformed'],
+    ]);
+    // an explicit null is still an allow
+    expect((await moderateContent({ text: 'a message' }, { guards: [answering('quiet', null)], context })).outcome).toBe('allow');
+  });
 });
 
 describe('moderateContent: typed context', () => {
@@ -280,5 +316,37 @@ describe('a screen that runs first, on the reply', () => {
     const sanitizer: IGuardrailService = { ...rewriter, config: { sequential: true, canSanitize: true } };
     const rewritten = await collect(wrapOutputGuardrails([sanitizer], context, reply('the reply'), { streamId: 's1' }));
     expect((rewritten.at(-1) as AgentOSFinalResponseChunk).finalResponseText).toBe('changed');
+  });
+
+  it('two unnamed screens that run first on streamed deltas each keep their own evaluation count', async () => {
+    const calls: string[] = [];
+    const screen = (name: string): IGuardrailService => ({
+      config: { sequential: true, evaluateStreamingChunks: true, maxStreamingEvaluations: 1 },
+      evaluateOutput: async ({ chunk: item }) => {
+        if (item.type === AgentOSResponseChunkType.TEXT_DELTA) calls.push(name);
+        return null;
+      },
+    });
+    await collect(wrapOutputGuardrails([screen('first'), screen('second')], context, reply('the reply', 'the delta'), { streamId: 's1' }));
+    expect(calls).toEqual(['first', 'second']);
+  });
+
+  it('a tool-call screen that runs first refuses the call before any other tool-call guard sees it', async () => {
+    const spy = vi.fn(async () => null);
+    const vendor: IGuardrailService = { id: 'vendor', config: { evaluateToolCalls: true }, evaluateOutput: spy };
+    const screen = (action: GuardrailAction): IGuardrailService => ({
+      id: 'screen', config: { sequential: true, evaluateToolCalls: true },
+      evaluateOutput: async () => (action === GuardrailAction.BLOCK ? { action, reasonCode: 'BAN_1' } : null),
+    });
+    const toolCall = { ...chunk, type: AgentOSResponseChunkType.TOOL_CALL_REQUEST, toolCalls: [{ id: 'call-1', name: 'search', arguments: {} }], executionMode: 'internal', requiresExternalToolResult: false } as unknown as AgentOSResponse;
+
+    // registered after the vendor guard, the screen still answers first
+    const refused = await ParallelGuardrailDispatcher.evaluateToolCall([vendor, screen(GuardrailAction.BLOCK)], context, toolCall);
+    expect(refused).toMatchObject({ outcome: 'block', evaluation: { reasonCode: 'BAN_1' } });
+    expect(spy).not.toHaveBeenCalled();
+
+    const passed = await ParallelGuardrailDispatcher.evaluateToolCall([vendor, screen(GuardrailAction.ALLOW)], context, toolCall);
+    expect(passed.outcome).toBe('pass');
+    expect(spy).toHaveBeenCalledTimes(1);
   });
 });

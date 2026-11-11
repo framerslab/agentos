@@ -44,6 +44,14 @@ describe('frameUntrustedEvidence', () => {
     expect(() => frameUntrustedEvidence('hello', { boundary: 'short' })).toThrow(TypeError);
   });
 
+  it('breaks a chat-template token that the label line would make', () => {
+    const head = (label: string): string => frameUntrustedEvidence('hello', { boundary: BOUNDARY, label }).text.split('\n')[0];
+    expect(head('INST')).toBe('[ INST]');
+    expect(head('/INST')).toBe('[ /INST]');
+    expect(head('inst')).toBe('[ inst]');
+    expect(head('room-1')).toBe('[room-1]');
+  });
+
   it('has a notice that names both markers', () => {
     expect(UNTRUSTED_EVIDENCE_NOTICE).toContain('<<evidence:');
     expect(UNTRUSTED_EVIDENCE_NOTICE).toContain('<<end:');
