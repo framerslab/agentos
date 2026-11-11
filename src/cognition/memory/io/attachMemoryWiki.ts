@@ -61,6 +61,12 @@ export interface AttachMemoryWikiOptions {
   now?: () => string;
   /** Override the default by-entity heuristic clusterer. */
   cluster?: (traces: TraceLike[]) => Promise<ClusterAssignment[]>;
+  /**
+   * Maps the subject a tool call runs for to the subject whose pages it reads, before any key is built: a host that
+   * files every session that names no user under one user passes the same mapping its writes use, so the page tool
+   * reads the key those writes went to. Unset, the subject is read as given.
+   */
+  subjectOf?: (subject: { kind: 'user' | 'session'; id: string }) => { kind: 'user' | 'session'; id: string };
 }
 
 export interface AttachMemoryWikiResult {
@@ -111,8 +117,8 @@ async function defaultCluster(traces: TraceLike[]): Promise<ClusterAssignment[]>
  * The `read_memory_page` tool it adds answers by who asks (see {@link ReadMemoryPageTool}): a subject reads its own
  * pages, kept as rows of the store under its conversation key, and the operator's pages; another subject's page, and
  * a page an earlier version compiled into the folder, answer a subject as a page that does not exist. A call with no
- * user reads the folder's pages alone. The keys are built here from the agent's id and the turn's subject; nothing a
- * tool call passes reaches them.
+ * user reads the folder's pages alone. The keys are built here from the agent's id and the turn's subject (through
+ * `subjectOf` when the host maps subjects); nothing a tool call passes reaches them.
  *
  * @returns The store (for direct reads) and the augmented tools array.
  * @throws TypeError when `agentId` is not a non-empty string: no key could tell this agent's pages from another's.
@@ -181,7 +187,8 @@ function pagePortOf(opts: AttachMemoryWikiOptions, operatorStore: WikiMemoryStor
     return null;
   };
   /** The store of one subject's own pages, and the key they are filed under. */
-  const ownPages = (subject: { kind: 'user' | 'session'; id: string }) => {
+  const ownPages = (asker: { kind: 'user' | 'session'; id: string }) => {
+    const subject = opts.subjectOf ? opts.subjectOf(asker) : asker;
     const key = conversationScopeKey(opts.agentId, subject);
     return { key, own: new UserWikiStore({ scopeId: key, pages: opts.memory, chunk: opts.chunk }) };
   };

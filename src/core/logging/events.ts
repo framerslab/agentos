@@ -86,6 +86,10 @@ export const AGENTOS_EVENTS = {
   'llm.fallback_exhausted': { api, primaryProvider: provider, attempts: 'int', type: 'word', code: 'word' },
   // At start, a soul's memory/ folder holds page files that are not the operator's: pages a compile of an earlier version wrote, or pages whose front matter cannot be read. They stay on disk and are in no index, no prompt and no recall.
   'memory.legacy_pages': { count: 'int' },
+  // At open, a souled agent's store holds traces an earlier version filed under the agent's plain id. They stay in the store and no turn reads them.
+  'memory.legacy_traces': { count: 'int' },
+  // A one-shot generate() or stream() on a souled agent names no user: nothing is filed for it and it recalls the operator's pages alone. Written once an agent.
+  'memory.one_shot_unfiled': {},
   // read_memory_page answered a page as not found, or a call as invalid, for a page the asker may not read: another subject's page, a user's page asked with no user, a page an earlier version compiled asked by a user, or a call that named a scope or a user.
   'memory.page_read_refused': { reason: { enum: ['other_user', 'no_user', 'legacy', 'caller_filter'] } },
   // A translation failed, answered with no text, ran past the transcript translator's own timeout, stopped at its output cap or stopped for another reason (a content filter); it throws TranslationProviderError, and status is 0 when no HTTP status came back.

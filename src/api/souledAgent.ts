@@ -1,17 +1,17 @@
 /**
  * @fileoverview souledAgent — first-class factory for a soul-file agent whose
- * long-term memory is the markdown `memory/` wiki.
+ * long-term memory is kept per subject beside its `memory/` wiki.
  *
  * Composes existing, tested pieces:
  * - {@link loadSoulFromOption} resolves the soul and its `memory/` dir.
- * - {@link Memory.createSqlite} opens the single backing store (the rebuildable
- *   index; the markdown stays source of truth).
+ * - {@link Memory.createSqlite} opens the single backing store, in `memory/.store/`.
  * - {@link attachMemoryWiki} wires the wiki write-back loop + the
  *   `read_memory_page` tool + the boot index over the same facade.
- * - {@link agent} runs it; its `buildSystemPrompt` already injects `index.md`.
+ * - {@link agent} runs it; its `buildSystemPrompt` already injects the index of the operator's pages.
  *
  * One `Memory` facade is both the agent's live memory and the wiki store, so the
- * conversation the agent observes lands where the wiki compiler reads it.
+ * conversation the agent observes lands where the wiki compiler reads it. Each turn is filed under the key of its
+ * subject (the session's user, else the session) and recalls that subject's memory and the operator's pages alone.
  *
  * @module agentos/api/souledAgent
  */
@@ -24,18 +24,25 @@ import {
   type Agent,
   type AgentMemoryProvider,
   type AgentSession,
+  type MemoryHookContext,
 } from './agent.js';
 import { generateText } from './generateText.js';
 import type { StreamTextResult } from './streamText.js';
-import { Memory } from '../cognition/memory/io/facade/Memory.js';
+import { Memory, type ScoredTrace } from '../cognition/memory/io/facade/Memory.js';
+import { conversationScopeKey, parseConversationScopeKey } from '../cognition/memory/retrieval/store/conversationScopeKey.js';
+import { encodePlainScopeId } from '../cognition/memory/retrieval/store/scopeIdForm.js';
+import { memoryLog } from '../cognition/memory/log.js';
 import { soulAgentIdOf } from '../cognition/substrate/personas/SoulLoader.js';
 import { attachMemoryWiki } from '../cognition/memory/io/attachMemoryWiki.js';
 import { SemanticChunker } from '../cognition/rag/chunking/SemanticChunker.js';
 import { estimateTokens } from '../core/utils/text-utils.js';
+import { createFileOutsideLinksSync } from '../core/utils/linkFreeWrite.js';
+import { errorFields } from '../core/logging/events.js';
 import { formatMemoryAge } from '../cognition/memory/core/prompt/MemoryFormatters.js';
 import { parseTraceMetadata } from '../cognition/memory/retrieval/store/tracePersistence.js';
 import { DEFAULT_MEMORY_TOKEN_BUDGET } from './runtime/memoryProviderHooks.js';
 import { messageOf } from './runtime/memoryObserveFailures.js';
+import { isAnonymousUserId } from './runtime/memorySubject.js';
 import { asSpendBudget } from './runtime/spendBudget.js';
 import type { AgentOSUsageLedgerOptions } from './runtime/usageLedger.js';
 
@@ -63,6 +70,16 @@ export const SPEAKER_METADATA_KEY = 'speaker';
 
 /** Who spoke a trace, as the observer records it. */
 type Speaker = 'user' | 'assistant';
+
+/** Who a turn's memory belongs to: the user its session named, else the session. */
+type MemorySubject = MemoryHookContext['subject'];
+
+/** How many traces a turn's recall reads from its subject's memory, and how many from the operator's pages. */
+const RECALL_LIMIT = 8;
+
+/** What `sharedMemory` must be, as the rejection of an option that is not says it. */
+const SHARED_MEMORY_SHAPE =
+  "souledAgent: sharedMemory needs { as: <a user id>, reason: 'one-persons-machine' | 'operators-notes' }";
 
 /** The tag a wiki page chunk carries for its page: `page:<id>`. */
 const PAGE_TAG = 'page:';
@@ -189,6 +206,28 @@ function codePointPrefix(text: string, maxUnits: number): string {
   return end > 0 ? text.slice(0, end) : String.fromCodePoint(text.codePointAt(0) ?? 0);
 }
 
+/**
+ * Throws unless `sharedMemory` is `{ as, reason }` with a user id that names someone, which a conversation key can be
+ * built from, and one of the two reasons.
+ *
+ * @param sharedMemory - The option as the caller gave it.
+ * @param anonymousUserIds - The ids the agent itself reads as naming nobody, beside the built-in ones.
+ * @throws TypeError naming the shape the option must have.
+ */
+function assertSharedMemory(sharedMemory: unknown, anonymousUserIds: readonly string[] | null | undefined): void {
+  const given = (sharedMemory !== null && typeof sharedMemory === 'object' ? sharedMemory : {}) as Record<string, unknown>;
+  const user = given.as;
+  const reason = given.reason;
+  if (typeof user !== 'string' || isAnonymousUserId(user, anonymousUserIds)) throw new TypeError(SHARED_MEMORY_SHAPE);
+  if (reason !== 'one-persons-machine' && reason !== 'operators-notes') throw new TypeError(SHARED_MEMORY_SHAPE);
+  try {
+    // An id that is not well-formed text has no key.
+    conversationScopeKey('agent', { kind: 'user', id: user });
+  } catch {
+    throw new TypeError(SHARED_MEMORY_SHAPE);
+  }
+}
+
 /** Options for {@link souledAgent}: those of {@link AgentOptions}, with `soul` required. */
 export interface SouledAgentOptions extends AgentOptions {
   soul: NonNullable<AgentOptions['soul']>;
@@ -200,6 +239,12 @@ export interface SouledAgentOptions extends AgentOptions {
    * line gives their number.
    */
   pendingWritesTimeoutMs?: number;
+  /**
+   * For one person's own machine, or an operator's own notes: every session that names no user, and every one-shot
+   * `generate()` or `stream()`, runs as the user `as`, so they share one memory. A session that names another user is
+   * refused, and so is opening a store that already holds the memory of another user or session.
+   */
+  sharedMemory?: { as: string; reason: 'one-persons-machine' | 'operators-notes' };
 }
 
 /**
@@ -219,6 +264,15 @@ export type SouledAgent = Agent & { memory?: Memory };
  * souls (`{ content }`) there is no workspace, so this falls back to a plain
  * {@link agent} and says so in one `console.warn` line.
  *
+ * Memory is kept per subject. A session turn is filed under the key of its subject, the user the session named or
+ * else the session itself, the user's message and the reply alike, and it recalls that subject's memory and the
+ * operator's pages, and nobody else's. A one-shot `generate()` or `stream()` names no user: nothing is filed for it,
+ * it recalls the operator's pages alone, and one `memory.one_shot_unfiled` line an agent says so. With
+ * {@link SouledAgentOptions.sharedMemory} every session that names no user, and every one-shot call, runs as one
+ * user. Traces an earlier version filed under the agent's plain id stay in the store, are read by no turn, and are
+ * counted in one `memory.legacy_traces` line at open. The store's folder, `memory/.store/`, gets a `.gitignore` that
+ * keeps it out of version control.
+ *
  * Each stored turn records who spoke it in the trace's metadata ({@link SPEAKER_METADATA_KEY}), outside its text and
  * its tags, so recall never matches a trace by its speaker; each recalled trace is sent as one record, with its
  * speaker and its date, in a data block. The wiki compile's model calls go on the agent's route with its fallback
@@ -235,9 +289,17 @@ export type SouledAgent = Agent & { memory?: Memory };
  *
  * @param opts - Agent options with a required `soul`.
  * @returns A fully-wired {@link Agent}.
+ * @throws TypeError when `sharedMemory` is not `{ as, reason }` with a user id that names someone and one of the two
+ *   reasons; nothing is opened.
+ * @throws Error when `sharedMemory` is set and the store already holds the memory of another user or session; the
+ *   store is closed first.
  */
 export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent> {
-  const { pendingWritesTimeoutMs, ...rest } = opts;
+  const { pendingWritesTimeoutMs, sharedMemory, ...rest } = opts;
+  /** The ids the agent itself reads as naming nobody, beside the built-in ones. */
+  const anonymousUserIds =
+    typeof rest.learning === 'object' && rest.learning !== null ? rest.learning.anonymousUserIds : undefined;
+  if (sharedMemory !== undefined) assertSharedMemory(sharedMemory, anonymousUserIds);
   const loaded = loadSoulFromOption(rest.soul);
   if (!loaded) {
     // The soul failed to load, and loadSoulFromOption has warned: a plain agent without it, which loads it no
@@ -270,13 +332,63 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     );
   }
 
-  // The markdown memory/ is source of truth; the sqlite is the rebuildable index.
+  // The operator's pages under memory/ are markdown files; what people said to the agent lives in the store.
   const storeDir = path.join(loaded.memoryDir, '.store');
   await fs.mkdir(storeDir, { recursive: true });
+  // The store holds what people said: it stays out of version control. A .gitignore already there is left as it is.
+  createFileOutsideLinksSync(path.join(storeDir, '.gitignore'), '*\n');
   const memory = await Memory.createSqlite(path.join(storeDir, 'memory.sqlite'), {
     graph: true,
     selfImprove: true,
   });
+
+  /** The user every session that names none, and every one-shot call, runs as; undefined without `sharedMemory`. */
+  const sharedUser = sharedMemory?.as;
+  if (sharedUser !== undefined) {
+    // One person's memory: a store that holds another user's, or a session's, is not opened as theirs.
+    const others = (await memory.listScopes()).filter((row) => {
+      if (row.kind === 'operator') return false;
+      const subject = parseConversationScopeKey(row.scopeId)?.subject;
+      return !(subject?.kind === 'user' && subject.id === sharedUser);
+    });
+    if (others.length > 0) {
+      await memory.close();
+      throw new Error(
+        "souledAgent: sharedMemory runs one person's memory, and this store already holds memory of another user or session",
+      );
+    }
+  }
+
+  // Traces an earlier version filed under the agent's plain id, in either form it was written in: no turn reads
+  // them, and nothing here deletes, moves or rewrites them.
+  const encodedAgentId = encodePlainScopeId('persona', agentId);
+  const earlierTraces =
+    (await memory.countScope('persona', agentId)) +
+    (encodedAgentId !== agentId ? await memory.countScope('persona', encodedAgentId) : 0);
+  if (earlierTraces > 0) memoryLog.warn('memory.legacy_traces', { count: earlierTraces });
+
+  /** The key the operator's own pages are indexed under. */
+  const operatorKey = conversationScopeKey(agentId, { kind: 'operator' });
+  /** The subject a turn's memory is kept under: the one user of `sharedMemory` for a subject that names none. */
+  const subjectOf = (subject: MemorySubject): MemorySubject =>
+    sharedUser !== undefined && subject.kind === 'session' ? { kind: 'user', id: sharedUser } : subject;
+  let oneShotNoted = false;
+  /**
+   * The subject one turn is filed and recalled under, from the context its hooks were given. A one-shot call that
+   * names no user has none: nothing is filed for it and it recalls the operator's pages alone, which one line an
+   * agent says.
+   */
+  const turnSubjectOf = (context: MemoryHookContext): MemorySubject | undefined => {
+    const subject = subjectOf(context.subject);
+    if (context.call !== 'one-shot' || subject.kind === 'user') return subject;
+    if (!oneShotNoted) {
+      oneShotNoted = true;
+      memoryLog.warn('memory.one_shot_unfiled', {});
+    }
+    return undefined;
+  };
+  /** The key of every scope a turn of this agent wrote to. */
+  const written = new Set<string>();
 
   // The turns still running and the memory writes the observer has started, until each settles: close() waits for
   // them before it compiles. A turn never waits for its writes.
@@ -337,20 +449,54 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   // getContext/observe signatures don't match AgentMemoryProvider, so wrap the
   // facade's remember/recall here.
   const provider: AgentMemoryProvider = {
-    observe: (role, text) => {
-      // Who spoke goes in the trace's metadata: outside its text and its tags, which full-text search reads.
+    observe: (role, text, context) => {
+      // Nothing is ever filed without the subject of its turn.
+      if (!context) return Promise.reject(new TypeError('souledAgent: a memory write needs the hook context of its turn'));
+      const subject = turnSubjectOf(context);
+      if (!subject) return Promise.resolve();
+      let scopeId: string;
+      try {
+        scopeId = conversationScopeKey(agentId, subject);
+      } catch (err) {
+        // An id no key can be built from: the hook's failure is logged by the runtime and the turn goes on.
+        return Promise.reject(err);
+      }
+      written.add(scopeId);
+      // The user's message and the reply alike go under the subject's key. Who spoke goes in the trace's metadata:
+      // outside its text and its tags, which full-text search reads.
       const write = awaitedOnClose(
         memory.remember(text, {
           type: 'episodic',
-          scope: 'persona',
-          scopeId: agentId,
-          metadata: { [SPEAKER_METADATA_KEY]: role },
+          scope: 'conversation',
+          scopeId,
+          metadata: {
+            [SPEAKER_METADATA_KEY]: role,
+            subject: { kind: subject.kind, id: subject.id },
+            ...(subject.kind === 'user' ? { turnUserId: subject.id } : {}),
+          },
         }),
       );
       return write.then(() => undefined);
     },
     getContext: async (text, options) => {
-      const scored = await memory.recall(text, { limit: 8 });
+      // Two reads, each of one key, by equality: the turn's own subject, and the operator's pages. Nothing a caller
+      // passes widens them. A turn with no subject, or one whose id no key can be built from, reads the operator's.
+      const subject = options?.context ? turnSubjectOf(options.context) : undefined;
+      let own: ScoredTrace[] = [];
+      if (subject) {
+        let scopeId: string | undefined;
+        try {
+          scopeId = conversationScopeKey(agentId, subject);
+        } catch (err) {
+          // An id no key can be built from has no memory to read: the turn goes on with the operator's pages.
+          memoryLog.warn('memory.hook_failed', { hook: 'getContext', ...errorFields(err) });
+        }
+        if (scopeId !== undefined) own = await memory.recall(text, { scope: 'conversation', scopeId, limit: RECALL_LIMIT });
+      }
+      const shared = await memory.recall(text, { scope: 'conversation', scopeId: operatorKey, limit: RECALL_LIMIT });
+      // Best match first across the two reads; a score that is not a number ranks last.
+      const rank = (score: number): number => (Number.isFinite(score) ? score : 0);
+      const scored = [...own, ...shared].sort((a, b) => rank(b.score) - rank(a.score));
       const now = Date.now();
       // A recalled trace carries no metadata, so each one's speaker is read from its stored record.
       const lines: RecallLine[] = await Promise.all(
@@ -415,6 +561,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     llm,
     chunk: (t) => chunker.chunk(t).map((c) => ({ text: c.text })),
     tools: Array.isArray(priorTools) ? [...priorTools] : undefined,
+    // The page tool reads the key the observer writes.
+    subjectOf,
   });
 
   // attachMemoryWiki appends read_memory_page to an array. Use the augmented
@@ -435,6 +583,13 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   const openSession = built.session.bind(built);
   const trackedSessions = new WeakSet<AgentSession>();
   built.session = (id, sessionOptions) => {
+    if (sharedUser !== undefined) {
+      // One person's memory: a session runs as that user, by name or by naming nobody.
+      const asked: unknown = sessionOptions?.userId;
+      if (typeof asked === 'string' && asked !== sharedUser && !isAnonymousUserId(asked, anonymousUserIds)) {
+        throw new Error('souledAgent: sharedMemory runs every session as one user; this session named another');
+      }
+    }
     const session = openSession(id, sessionOptions);
     // A runtime that hands the same session object back is wrapped once.
     if (!trackedSessions.has(session)) {

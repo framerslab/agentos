@@ -30,7 +30,7 @@ export function namedSessionUser(
 }
 
 /** True for a built-in anonymous id and for one of the agent's own, compared after trimming. */
-function isAnonymousUserId(userId: string, anonymousUserIds: readonly string[] | null | undefined): boolean {
+export function isAnonymousUserId(userId: string, anonymousUserIds: readonly string[] | null | undefined): boolean {
   const id = userId.trim();
   if (DEFAULT_ANONYMOUS_USER_IDS.includes(id)) return true;
   return Array.isArray(anonymousUserIds) && anonymousUserIds.some((other) => typeof other === 'string' && other.trim() === id);
