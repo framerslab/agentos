@@ -239,12 +239,21 @@ function sanitizeOfToolCallAsBlock(
 }
 
 const holdIgnoredFor = new Set<string>();
-/** Writes `guardrail.hold_ignored` the first time a guard answers a hold on an action other than BLOCK. At most 256 guards are remembered. */
+const holdIgnoredByUnnamed = new WeakSet<IGuardrailService>();
+/**
+ * Writes `guardrail.hold_ignored` the first time a guard answers a hold on an action other than BLOCK. A guard with an
+ * id is remembered by it (at most 256 ids); one without is remembered as the object it is, though its line says `unknown`.
+ */
 function noteIgnoredHold(evaluation: GuardrailEvaluationResult, svc: IGuardrailService, stage: GuardrailEventStage): void {
   if (evaluation.hold === undefined || evaluation.hold === null || evaluation.action === GuardrailAction.BLOCK) return;
   const guardrailId = safeWord(svc.id);
-  if (holdIgnoredFor.has(guardrailId) || holdIgnoredFor.size >= 256) return;
-  holdIgnoredFor.add(guardrailId);
+  if (guardrailId === 'unknown') {
+    if (holdIgnoredByUnnamed.has(svc)) return;
+    holdIgnoredByUnnamed.add(svc);
+  } else {
+    if (holdIgnoredFor.has(guardrailId) || holdIgnoredFor.size >= 256) return;
+    holdIgnoredFor.add(guardrailId);
+  }
   guardrailLog.warn('guardrail.hold_ignored', { guardrailId, stage });
 }
 
