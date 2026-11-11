@@ -241,6 +241,29 @@ describe('CognitiveMemoryBridge.contextForHop', () => {
     expect(JSON.stringify(trace)).not.toMatch(/diagnosis|patient-4471/);
   });
 
+  it('a reassembleForBudget that rejects sends the hop no block and starts no second recall; the trace entry names the error class', async () => {
+    const trace: Entry[] = [];
+    let assemblies = 0;
+    const custom = {
+      getConfig: () => ({ agentId: 'memo' }),
+      assembleForPrompt: async (_query: string, budget: number) => {
+        assemblies += 1;
+        return { contextText: 'x'.repeat(4000), tokensUsed: Math.min(1000, budget), allocation: ALLOCATION, includedMemoryIds: [] };
+      },
+      reassembleForBudget: async () => { throw new RangeError('query=What is my diagnosis? trace=patient-4471'); },
+    };
+    const bridge = bridgeOver(custom, trace);
+    const first = (await bridge.assembleContext('What is my diagnosis?'))!;
+    const hop = await bridge.contextForHop(first, effectiveRecallBudget({ totalTokens: 1600, contextTokens: 3_000, otherContextTokens: 0 }), 1);
+    expect(hop).toBeNull();
+    // The turn's one recall: the rejection does not start another, which would embed and retrieve again.
+    expect(assemblies).toBe(1);
+    expect(trace.filter((entry) => entry.type === 'WARNING')).toEqual([
+      { type: 'WARNING', message: 'Cognitive memory re-render for a model hop failed.', details: { errorName: 'RangeError' } },
+    ]);
+    expect(JSON.stringify(trace)).not.toMatch(/diagnosis|patient-4471/);
+  });
+
   it("a failed assembly writes the error's class to the trace entry, never its message", async () => {
     const trace: Entry[] = [];
     const custom = {

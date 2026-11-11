@@ -145,6 +145,35 @@ describe('PromptEngine memoryContextText', () => {
     expect(contextTokens(r)).toMatchObject({ otherBefore: 0, otherAfter: 0 });
   });
 
+  it('a prompt over its budget whose other context fits beside the memory text leaves that context as it is and reports no cut', async () => {
+    // About 4,000 tokens of question on a 4,000-token model: the prompt is a few hundred tokens over its budget, and
+    // the share less the memory text and the overrun still holds the short retrieved context.
+    const userInput = 'Which crossing suits a morning ferry? '.repeat(400);
+    const r = await build({ ...base, userInput, memoryContextText: MEMORY, retrievedContext: RAG_SHORT });
+    const t = contextTokens(r);
+    expect(t.otherAfter).toBe(t.otherBefore);
+    expect(r.modificationDetails?.truncatedComponents ?? []).not.toContain('retrievedContext');
+    expect(r.modificationDetails?.summarizedComponents ?? []).not.toContain('retrievedContext');
+    expect(r.modificationDetails?.removedComponents ?? []).not.toContain('retrievedContext');
+    expect(JSON.stringify(r.prompt)).toContain(RAG_SHORT);
+    expect(r.issues?.map((issue) => issue.code)).toContain('TOKEN_BUDGET_EXCEEDED_POST_OPT');
+  });
+
+  it('beside a list of retrieved context the memory entry is counted as the template sends it, labels included', async () => {
+    const memoryTokens = await engine.estimateTokenCount(MEMORY, SMALL.modelId);
+    const room = 800 - memoryTokens;
+    // Fits the share beside the bare memory text, not beside the labelled entry the template renders.
+    const content = 'r'.repeat(Math.floor(room * 3.8));
+    expect(await engine.estimateTokenCount(content, SMALL.modelId)).toBeLessThanOrEqual(room);
+    const r = await build({ ...base, memoryContextText: MEMORY, retrievedContext: [{ source: 'timetable', content }] });
+    const labelled = await engine.estimateTokenCount(`Source: cognitive_memory\nContent: ${MEMORY}\n\n`, SMALL.modelId);
+    const t = contextTokens(r);
+    expect(t.memory).toBe(labelled);
+    expect(r.modificationDetails?.truncatedComponents).toEqual(['retrievedContext']);
+    expect(t.memory + t.otherAfter).toBeLessThanOrEqual(800);
+    expect(JSON.stringify(r.prompt)).toContain(JSON.stringify(MEMORY).slice(1, -1));
+  });
+
   it('does not serve a prompt cached for another memory text', async () => {
     await build({ ...base, memoryContextText: 'The user prefers tea.' }, baseModelInfo);
     const second = await build({ ...base, memoryContextText: 'The user prefers coffee.' }, baseModelInfo);

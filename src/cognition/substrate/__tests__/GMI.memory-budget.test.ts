@@ -11,7 +11,9 @@ import { createAgentCognitiveMemory, type AgentCognitiveMemory } from '../../../
 import type { AIModelProviderManager } from '../../../core/llm/providers/AIModelProviderManager';
 import type { IProvider } from '../../../core/llm/providers/IProvider';
 import type { MemoryRecallCapture } from '../../memory/retrieval/recall/capture';
-import { createScriptedGmi, runTurn, scriptedProvider, textReply, textTurn } from './helpers/scriptedGmi';
+import { PromptEngine } from '../../../core/llm/PromptEngine';
+import type { IPromptEngine, ModelTargetInfo, PromptComponents, PromptExecutionContext } from '../../../core/llm/IPromptEngine';
+import { createScriptedGmi, promptEngineConfig, runTurn, scriptedProvider, textReply, textTurn } from './helpers/scriptedGmi';
 
 const DIM = 64;
 
@@ -129,6 +131,50 @@ describe('GMI memory block on a small model', () => {
     expect(included.length).toBeGreaterThan(0);
     for (const c of included) expect(prompt).toContain(mem.manager.getStore().getTrace(c.id)!.content);
     expect(prompt).not.toContain('…[cut]');
+  });
+
+  it('a re-render that fails sends the model no block, and the record says the render failed, not that the budget left the memories out', async () => {
+    mem = await ferryMemory();
+    // The first test's 8,000-token model and long-term-memory text: the block must be rendered again at about 200.
+    const longTerm = Array.from({ length: 60 }, (_, i) => `Profile line ${i}: the learner prefers morning crossings and window seats on the island ferry.`).join('\n');
+    const { provider, received } = scriptedProvider([textReply('Pier 3.')]);
+    const { gmi } = await createScriptedGmi({ provider, config: { cognitiveMemory: mem.manager.forSession(), llmProviderManager: smallWindowManager(provider, 8_000) } });
+    vi.spyOn(mem.manager as unknown as { reassembleForBudget: (...args: unknown[]) => Promise<unknown> }, 'reassembleForBudget').mockRejectedValue(new Error('assembler failed'));
+    const { output } = await runTurn(gmi, textTurn('t1', 'Which pier does the island ferry leave from?', { longTermMemoryContext: longTerm }));
+    const capture = output.memoryRecall as MemoryRecallCapture;
+    expect(capture.budget).toMatchObject({ requested: 1600, clampReason: 'prompt_share', hop: 0, renderFailed: true });
+    expect(capture.budget.reassembled).toBeUndefined();
+    expect(capture.tokensUsed).toBe(0);
+    expect(capture.candidates.filter((candidate) => candidate.outcome === 'included')).toEqual([]);
+    expect(capture.candidates.some((candidate) => candidate.reason === 'render_failed')).toBe(true);
+    expect(JSON.stringify(received[0])).not.toContain('How To Use Your Memories');
+  });
+
+  it("a host's own prompt engine that reads only retrievedContext still sends the block: the GMI joins it in front of the other context", async () => {
+    mem = await ferryMemory();
+    const real = new PromptEngine();
+    await real.initialize(promptEngineConfig());
+    const seen: PromptComponents[] = [];
+    // An engine written before memoryContextText existed: it builds its prompt from the fields it knows.
+    const legacy = {
+      initialize: async () => undefined,
+      estimateTokenCount: (content: string, modelId?: string) => real.estimateTokenCount(content, modelId),
+      constructPrompt: async (components: PromptComponents, model: ModelTargetInfo, context: PromptExecutionContext) => {
+        seen.push(components);
+        const { memoryContextText: _unread, ...known } = components;
+        return real.constructPrompt(known, model, context);
+      },
+    } as unknown as IPromptEngine;
+    const { provider, received } = scriptedProvider([textReply('Pier 3.')]);
+    const { gmi } = await createScriptedGmi({ provider, config: { promptEngine: legacy, cognitiveMemory: mem.manager.forSession(), llmProviderManager: smallWindowManager(provider, 128_000) } });
+    await runTurn(gmi, textTurn('t1', 'Which pier does the island ferry leave from?', { longTermMemoryContext: 'Profile: the learner prefers window seats.' }));
+    expect(seen).toHaveLength(1);
+    expect(seen[0].memoryContextText).toBeUndefined();
+    const retrieved = seen[0].retrievedContext as string;
+    // The block first, then the long-term-memory text, joined as the GMI joined them before the field existed.
+    expect(retrieved.indexOf('How To Use Your Memories')).toBeGreaterThanOrEqual(0);
+    expect(retrieved.endsWith('\n\n---\n\nProfile: the learner prefers window seats.')).toBe(true);
+    expect(JSON.stringify(received[0])).toContain('How To Use Your Memories');
   });
 
   it('a model whose share holds the block takes the turn\'s first rendering: no re-render, the record names the hop', async () => {
