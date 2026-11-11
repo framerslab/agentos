@@ -939,6 +939,93 @@ describe.each(STORES)('scopes kept apart on every path, on %s', (store) => {
     expect(await contentsUnder(brain, A)).toEqual([body]);
   });
 
+  it('a forced re-index never writes back a page that a write of the scope changed meanwhile', async () => {
+    const { memory } = await open(store);
+    const pages = new UserWikiStore({ scopeId: A, pages: memory, chunk });
+    await pages.writePage({ ...P('Alice likes tea.'), id: 'concepts/a' });
+    await pages.writePage({ ...P('Alice has a cat.'), id: 'concepts/b' });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let held = false;
+    // The re-index of the first page waits in its chunks' embedding, inside the scope's serialized write.
+    const facade = memory as unknown as { _embeddingBlobOf: (text: string) => Promise<unknown> };
+    const embed = facade._embeddingBlobOf.bind(memory);
+    facade._embeddingBlobOf = async (text: string) => {
+      if (!held && text.includes('tea')) {
+        held = true;
+        await gate;
+      }
+      return embed(text);
+    };
+
+    const reindexed = pages.index({ force: true });
+    for (let i = 0; i < 400 && !held; i += 1) await pause(5);
+    expect(held).toBe(true);
+    const rewritten = pages.writePage({ ...P('Alice keeps a ferret.'), id: 'concepts/b' });
+    release();
+    await reindexed;
+    await rewritten;
+
+    expect(bodyOf(await pages.readPage('concepts/b'))).toBe('Alice keeps a ferret.');
+    expect(bodyOf(await pages.readPage('concepts/a'))).toBe('Alice likes tea.');
+  });
+
+  if (store === 'postgres') {
+    /** A second facade on the brain of `memory`, as a second handle of one process opens it. */
+    const sameBrain = async (memory: Memory): Promise<Memory> => {
+      const second = await Memory.createPostgres(POSTGRES_URL!, {
+        brainId: brainOf(memory).brainId,
+        poolSize: 2,
+        graph: false,
+        selfImprove: false,
+      });
+      memories.push(second);
+      return second;
+    };
+
+    it("two facades of one brain, writing one page at once, leave the kept page's chunks and no other's", async () => {
+      const { memory, brain } = await open(store);
+      const second = await sameBrain(memory);
+      const one = new UserWikiStore({ scopeId: A, pages: memory, chunk });
+      const two = new UserWikiStore({ scopeId: A, pages: second, chunk });
+      await one.writePage(P('Alice likes tea.'));
+
+      await Promise.all([one.writePage(P('Alice drinks espresso.')), two.writePage(P('Alice keeps a ferret.'))]);
+
+      const rows = await pageRows(brain);
+      expect(rows).toHaveLength(1);
+      expect(await traceIdsUnder(brain, A)).toEqual(chunkIdsOf(rows[0]!));
+    });
+
+    it('a trace one facade is still storing when another facade of the brain compiles is compiled by the next compile', async () => {
+      const { memory } = await open(store);
+      const second = await sameBrain(memory);
+      const prompts = attachRows(second);
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const facade = memory as unknown as { _embeddingBlobOf: (text: string) => Promise<unknown> };
+      const embed = facade._embeddingBlobOf.bind(memory);
+      facade._embeddingBlobOf = async (text: string) => {
+        if (text.includes('kestrel')) await gate;
+        return embed(text);
+      };
+      const late = memory.remember('Alice keeps a kestrel.', { scope: 'conversation', scopeId: A });
+      await pause(5);
+      await second.remember('Alice likes tea.', { scope: 'conversation', scopeId: A });
+
+      await second.compileWiki();
+      release();
+      await late;
+      await second.compileWiki();
+
+      expect(prompts.join('\n')).toContain('Alice keeps a kestrel.');
+    });
+  }
+
   it("a write of the body a page holds, made while another write changes it, leaves that body's chunks", async () => {
     const { memory, brain } = await open(store);
     const pages = new UserWikiStore({ scopeId: A, pages: memory, chunk });
@@ -1123,6 +1210,39 @@ describe.each(STORES)('scopes kept apart on every path, on %s', (store) => {
       await source.memory.export(file, { format: 'sqlite' });
       return file;
     };
+
+    it('a message an import brings in while a compile of its scope runs is compiled by the next compile', async () => {
+      const file = await olderMessage();
+      const { memory } = await openWith({ selfImprove: false });
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let holding = false;
+      const prompts = attachRows(memory, {
+        llm: async () => {
+          if (holding) await gate;
+          return 'Merged notes.';
+        },
+      });
+      await memory.remember('Alice likes tea.', { scope: 'conversation', scopeId: A });
+      await memory.compileWiki();
+      await pause(5);
+      await memory.remember('Alice has a cat.', { scope: 'conversation', scopeId: A });
+
+      holding = true;
+      const compiling = memory.compileWiki();
+      for (let i = 0; i < 400 && prompts.length < 2; i += 1) await pause(5);
+      expect(prompts).toHaveLength(2);
+      const result = await memory.importFrom(file, { format: 'sqlite' });
+      expect(result.errors).toEqual([]);
+      release();
+      await compiling;
+      holding = false;
+      await memory.compileWiki();
+
+      expect(prompts.slice(2).join('\n')).toContain('Alice keeps a kestrel.');
+    });
 
     it.each<[string, (memory: Memory, brain: Brain, file: string) => Promise<unknown>]>([
       ['an import', (memory, _brain, file) => memory.importFrom(file, { format: 'sqlite' })],

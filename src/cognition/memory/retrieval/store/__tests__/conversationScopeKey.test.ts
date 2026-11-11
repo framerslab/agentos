@@ -123,4 +123,13 @@ describe('conversationScopeKey', () => {
     expect(conversationScopeKey('aria', { kind: 'user', id: 'a😀' })).toBe('c1:u:4:aria:3:a😀;');
     expect(conversationScopeKey('aria', { kind: 'user', id: 'a�' })).toBe('c1:u:4:aria:2:a�;');
   });
+
+  it('refuses an id that holds a NUL, and reads no string that holds one as a key', () => {
+    // Postgres stores no NUL in text: a key that held one could not be stored, so such an id gets no key.
+    expect(() => conversationScopeKey('aria', { kind: 'user', id: 'a\u0000b' })).toThrow(TypeError);
+    expect(() => conversationScopeKey('aria', { kind: 'session', id: '\u0000' })).toThrow(TypeError);
+    expect(() => conversationScopeKey('ar\u0000ia', { kind: 'operator' })).toThrow(TypeError);
+    expect(parseConversationScopeKey('c1:u:4:aria:3:a\u0000b;')).toBeUndefined();
+    expect(parseConversationScopeKey('c1:o:5:ar\u0000ia:0:;')).toBeUndefined();
+  });
 });

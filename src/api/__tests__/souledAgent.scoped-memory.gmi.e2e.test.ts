@@ -861,6 +861,32 @@ describe("a compile on a provider key of its own", () => {
   });
 });
 
+describe('a compile target that names a provider alone', () => {
+  it("runs on that provider's default model, not on a model of the agent's own provider", async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const k = key();
+    const turns = scripted(k);
+    const envKey = key();
+    vi.stubEnv('ANTHROPIC_API_KEY', envKey);
+    const compiles = script('anthropic', envKey, { whole: true, replies: [reply.text('Owl notes.')] });
+    const carried = script('anthropic', k, { whole: true, replies: [reply.text('Owl notes.')] });
+    const a = await souledAgent({
+      model: 'openai:stub-model',
+      apiKey: k,
+      fallbackProviders: [],
+      soul: dir,
+      compile: { provider: 'anthropic' },
+    } as never);
+    await say(a, { session: 'sa', user: 'alice' }, 'My owl is named Wexford.');
+    await a.close();
+
+    expect(mergesOf(compiles)).toHaveLength(1);
+    expect(compiles.seen.map((call) => call.modelId)).not.toContain('stub-model');
+    expect(carried.seen).toEqual([]);
+    expect(mergesOf(turns)).toEqual([]);
+  });
+});
+
 describe("a compile model whose prefix names another provider than the agent's", () => {
   it.each<[string, Record<string, unknown>]>([
     ['by its model alone', { model: 'openai:stub-model' }],
@@ -973,6 +999,20 @@ describe.each(runtimes)("the host's memory policy for an account, on %s", (_name
     expect(lines('memory.compile_skipped')[0]).toMatchObject({ reason: 'policy_raw' });
   });
 
+  it('an account answered off after an earlier session of it was answered compiled is not compiled', async () => {
+    const memoryPolicy = (context: { sessionId: string }) => (context.sessionId === 'sb' ? { longTerm: 'off' } : { longTerm: 'compiled' });
+    const { a, s } = await opened(runtime, { memoryPolicy });
+    await say(a, { session: 'sa', user: 'alice' }, 'My owl is named Wexford.');
+    await stored(a, 'My owl is named Wexford.');
+    // The host's latest answer for the account.
+    await say(a, { session: 'sb', user: 'alice' }, 'Keep nothing of me.');
+    await a.close();
+
+    expect(mergesOf(s)).toEqual([]);
+    expect(await pageRowCount()).toBe(0);
+    expect(lines('memory.compile_skipped').map((line) => line.reason)).toContain('policy_raw');
+  });
+
   it('a policy that throws files nothing for that turn and is asked again on the next', async () => {
     writePage('concepts/ops', OPS);
     let asked = 0;
@@ -1025,6 +1065,80 @@ describe.each(runtimes)("the host's memory policy for an account, on %s", (_name
       expect(await a.memory!.countScope('conversation', userKey('alice'))).toBe(0);
       for (const line of lines('memory.write_refused')) expect(line).toMatchObject({ reason: 'policy_failed' });
       expect(lines('memory.hook_failed').filter((line) => line.hook === 'memoryPolicy').length).toBeGreaterThan(0);
+    } finally {
+      await a.close();
+    }
+  });
+});
+
+describe("an account's policy on turns that overlap", () => {
+  it('a turn whose policy failed files nothing, though a turn of its session that overlapped it was answered', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let asked = 0;
+    const memoryPolicy = async () => {
+      asked += 1;
+      if (asked > 1) return { longTerm: 'compiled' };
+      await gate;
+      throw new Error('the account service is down');
+    };
+    const { a } = await opened({}, { memoryPolicy, memoryProviderOptions: { timeoutMs: 4_000 } });
+    try {
+      const session = a.session('sa', { userId: 'alice' });
+      const first = session.send('My owl is named Wexford.');
+      await vi.waitFor(() => expect(asked).toBe(1));
+      // A second turn of the session, answered while the first waits for its answer.
+      await session.send('My crab is named Pellam.');
+      await stored(a, 'My crab is named Pellam.');
+      release();
+      await first;
+      await vi.waitFor(() =>
+        expect(lines('memory.write_refused').filter((line) => line.reason === 'policy_failed')).toHaveLength(2),
+      );
+
+      expect(await tracesOf(a, 'My owl is named Wexford.')).toBe(0);
+    } finally {
+      await a.close();
+    }
+  });
+
+  it("the page tool serves an account's own pages by the host's latest answer, not by a turn that kept an earlier one", async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    writePage('concepts/ops', OPS);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const memoryPolicy = (context: { sessionId: string }) => (context.sessionId === 'sb' ? { longTerm: 'off' } : { longTerm: 'compiled' });
+    const k = key();
+    const s = script('openai', k, {
+      whole: true,
+      replies: [
+        reply.text('Hello.'),
+        // The turn of the session answered off asks for the listing once the other session's turn has begun.
+        reply.hold([], gate, reply.tools([{ id: 'c1', name: 'read_memory_page', args: { list: true } }])),
+        reply.text('Noted.'),
+        reply.text('Done.'),
+        ...Array.from({ length: 30 }, () => reply.text('Noted.')),
+      ],
+    });
+    const a = await souledAgent({ ...stubbed(k), soul: dir, memoryPolicy } as never);
+    try {
+      await writeOwnPage(a, userKey('alice'), OWL_PAGE);
+      await say(a, { session: 'sa', user: 'alice' }, 'Hello.');
+      const held = say(a, { session: 'sb', user: 'alice' }, 'What can I read?');
+      await vi.waitFor(() => expect(s.seen.length).toBe(2));
+      // The session answered compiled starts a turn under its kept answer.
+      await say(a, { session: 'sa', user: 'alice' }, 'Still here.');
+      release();
+      await held;
+
+      const listed = toolAnswerIn(s.seen[s.seen.length - 1]!);
+      expect(listed).toContain('concepts/ops');
+      expect(listed).not.toContain('concepts/notes');
     } finally {
       await a.close();
     }
@@ -1513,10 +1627,11 @@ describe("a souled agent on runtime: 'gmi', beyond its own sessions", () => {
   });
 });
 
-describe('the two hooks beside cognitive memory', () => {
+describe('the options cognitive memory does not reach', () => {
   it.each<[string, Record<string, unknown>]>([
     ['memoryPolicy', { memoryPolicy: () => ({ longTerm: 'off' }) }],
     ['screen', { screen: async (text: string) => text }],
+    ['sharedMemory', { sharedMemory: { as: 'johnny', reason: 'one-persons-machine' } }],
   ])('%s is refused at the open of an agent whose cognitive memory is on', async (_name, hook) => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const embeddings = key();
