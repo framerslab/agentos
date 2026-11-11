@@ -64,7 +64,7 @@ for the requested task automatically:
 | `openai`                 | Cloud | `gpt-4o`                   | `gpt-image-2.5-flare`            | `text-embedding-3-small` | `OPENAI_API_KEY`                  |
 | `anthropic`              | Cloud | `claude-sonnet-4-6`        | —                                | —                        | `ANTHROPIC_API_KEY` (`ANTHROPIC_BASE_URL` for another endpoint) |
 | `gemini`                 | Cloud | `gemini-2.5-flash`         | —                                | —                        | `GEMINI_API_KEY`                  |
-| `openrouter`             | Cloud | `openai/gpt-4o`            | —                                | —                        | `OPENROUTER_API_KEY`              |
+| `openrouter`             | Cloud | `openai/gpt-4o-mini`       | —                                | —                        | `OPENROUTER_API_KEY`              |
 | `claude-code-cli`        | Local | `claude-sonnet-4-6`        | —                                | —                        | `which claude`                    |
 | `gemini-cli`             | Local | `gemini-3.5-flash`         | —                                | —                        | `which gemini`                    |
 | `stability`              | Cloud | —                          | `stable-diffusion-xl-1024-v1-0`  | —                        | `STABILITY_API_KEY`               |

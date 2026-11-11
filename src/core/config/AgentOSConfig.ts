@@ -24,6 +24,12 @@ import type {
   AIModelProviderManagerConfig,
   ProviderConfigEntry,
 } from '../llm/providers/AIModelProviderManager.js';
+import type { OpenAIProviderConfig } from '../llm/providers/implementations/OpenAIProvider.js';
+import type { OpenRouterProviderConfig } from '../llm/providers/implementations/OpenRouterProvider.js';
+import type { RequestyProviderConfig } from '../llm/providers/implementations/RequestyProvider.js';
+import type { OllamaProviderConfig } from '../llm/providers/implementations/OllamaProvider.js';
+import type { MiniMaxProviderConfig } from '../llm/providers/implementations/MiniMaxProvider.js';
+import { PROVIDER_DEFAULTS } from '../../api/runtime/provider-defaults.js';
 import type { PersonaLoaderConfig } from '../../cognition/substrate/personas/IPersonaLoader.js';
 
 import type { IUtilityAI } from '../../cognition/nlp/ai_utilities/IUtilityAI.js';
@@ -199,7 +205,45 @@ function createPersonaLoaderConfig(env: EnvironmentConfig): PersonaLoaderConfig 
 }
 
 /**
- * Creates the AI Model Provider Manager configuration.
+ * The text model a call that names a provider and no model resolves to: the provider's `text` entry in
+ * {@link PROVIDER_DEFAULTS}, the one place each provider's default model is set. The factory configures each
+ * provider with it, so a model-less GMI turn and a model-less `generateText()` call reach the same model.
+ *
+ * @param providerId - A provider id the factory configures.
+ * @returns The provider's default text model.
+ */
+function defaultTextModel(providerId: string): string | undefined {
+  return PROVIDER_DEFAULTS[providerId]?.text;
+}
+
+/**
+ * The GMIs' default provider and model for a runtime's provider entries, which a persona that names no provider or
+ * model runs on: the default entry (the first enabled entry marked `isDefault`, else the first enabled entry, as the
+ * provider manager picks its default) and that entry's `defaultModelId`, else its provider's default text model in
+ * {@link PROVIDER_DEFAULTS}. The GMI reads a provider's own default model only when no model is set at all, so the
+ * pair names both, from the same entry. With no enabled entry, or none whose model is known, the pair is OpenAI's
+ * `gpt-4o`.
+ *
+ * @param providers - The runtime's provider entries (`modelProviderManagerConfig.providers`).
+ * @returns The pair for `gmiManagerConfig.defaultGMIBaseConfigDefaults`.
+ */
+export function gmiModelDefaultsFor(
+  providers: readonly ProviderConfigEntry[],
+): { defaultLlmProviderId: string; defaultLlmModelId: string } {
+  const enabled = providers.filter((entry) => entry.enabled);
+  const entry = enabled.find((candidate) => candidate.isDefault) ?? enabled[0];
+  const modelId = entry
+    ? (entry.config as { defaultModelId?: string } | undefined)?.defaultModelId || defaultTextModel(entry.providerId)
+    : undefined;
+  return entry && modelId
+    ? { defaultLlmProviderId: entry.providerId, defaultLlmModelId: modelId }
+    : { defaultLlmProviderId: 'openai', defaultLlmModelId: 'gpt-4o' };
+}
+
+/**
+ * Creates the AI Model Provider Manager configuration. Each entry's `config` is checked against its provider's
+ * config type (`satisfies`), so a misspelled or unknown key is a compile error instead of a value the provider
+ * never reads.
  *
  * @param env - Environment configuration
  * @returns AIModelProviderManagerConfig
@@ -216,10 +260,10 @@ function createModelProviderManagerConfig(env: EnvironmentConfig): AIModelProvid
       config: {
         apiKey: env.OPENAI_API_KEY,
         baseURL: 'https://api.openai.com/v1',
-        defaultModelId: 'gpt-4o',
+        defaultModelId: defaultTextModel('openai'),
         maxRetries: 3,
         requestTimeout: 60000,
-      },
+      } satisfies Partial<OpenAIProviderConfig>,
     });
   }
 
@@ -231,9 +275,9 @@ function createModelProviderManagerConfig(env: EnvironmentConfig): AIModelProvid
       config: {
         apiKey: env.MINIMAX_API_KEY,
         baseURL: env.MINIMAX_BASE_URL || 'https://api.minimax.io/v1',
-        defaultModelId: 'MiniMax-M3.1-Flash',
+        defaultModelId: defaultTextModel('minimax'),
         requestTimeout: 60000,
-      },
+      } satisfies Partial<MiniMaxProviderConfig>,
     });
   }
 
@@ -246,14 +290,10 @@ function createModelProviderManagerConfig(env: EnvironmentConfig): AIModelProvid
       config: {
         apiKey: env.OPENROUTER_API_KEY,
         baseURL: 'https://openrouter.ai/api/v1',
-        // Mini, deliberately: any model-less OpenRouter resolution (bare
-        // chain entries, null-router fallthroughs) lands on this default,
-        // and 'openai/gpt-4o' made that silent path the top LLM spend
-        // twice (2026-06-07, 2026-07-02). Callers that want a stronger
-        // model must name it explicitly.
-        defaultModelId: 'openai/gpt-4o-mini',
+        // openai/gpt-4o-mini: PROVIDER_DEFAULTS says why OpenRouter's default is the low-cost model.
+        defaultModelId: defaultTextModel('openrouter'),
         requestTimeout: 60000,
-      },
+      } satisfies Partial<OpenRouterProviderConfig>,
     });
   }
 
@@ -266,10 +306,10 @@ function createModelProviderManagerConfig(env: EnvironmentConfig): AIModelProvid
       config: {
         apiKey: env.REQUESTY_API_KEY,
         baseURL: 'https://router.requesty.ai/v1',
-        defaultModelId: 'openai/gpt-4o',
+        defaultModelId: defaultTextModel('requesty'),
         requestTimeout: 60000,
         streamRequestTimeout: 180000,
-      },
+      } satisfies Partial<RequestyProviderConfig>,
     });
   }
 
@@ -281,9 +321,9 @@ function createModelProviderManagerConfig(env: EnvironmentConfig): AIModelProvid
       isDefault: !env.OPENAI_API_KEY && !env.OPENROUTER_API_KEY && !env.REQUESTY_API_KEY && !env.MINIMAX_API_KEY,
       config: {
         baseURL: env.OLLAMA_BASE_URL,
-        defaultModelId: 'llama3.2',
+        defaultModelId: defaultTextModel('ollama'),
         requestTimeout: 120000, // Longer timeout for local models
-      },
+      } satisfies Partial<OllamaProviderConfig>,
     });
   }
 
@@ -383,19 +423,14 @@ export async function createAgentOSConfig(
     const utilityAIService = await createUtilityAIService(env);
 
     const modelProviderManagerConfig = createModelProviderManagerConfig(env);
-    const miniMaxDefault = modelProviderManagerConfig.providers.find(
-      provider => provider.providerId === 'minimax' && provider.isDefault,
-    );
 
     // Create individual component configurations
     const gmiManagerConfig: GMIManagerConfig = {
       personaLoaderConfig: createPersonaLoaderConfig(env),
       defaultGMIInactivityCleanupMinutes: 60,
       defaultWorkingMemoryType: 'in_memory',
-      defaultGMIBaseConfigDefaults: {
-        defaultLlmProviderId: miniMaxDefault ? 'minimax' : 'openai',
-        defaultLlmModelId: miniMaxDefault ? 'MiniMax-M3.1-Flash' : 'gpt-4o',
-      },
+      // A persona that names no provider or model runs on the default provider entry and its default model.
+      defaultGMIBaseConfigDefaults: gmiModelDefaultsFor(modelProviderManagerConfig.providers),
     };
 
     const orchestratorConfig: AgentOSOrchestratorConfig = {
