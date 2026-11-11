@@ -11,6 +11,10 @@
  * @module agentos/core/logging/events
  */
 
+import { LISTED_ERROR_CODES, LISTED_ERROR_TYPES } from './listedErrors.js';
+
+export { LISTED_ERROR_CODES, LISTED_ERROR_TYPES };
+
 /** The kind of one field: an integer, a word, a path, or one of a declared list. */
 export type FieldKind = 'int' | 'word' | 'path' | { readonly enum: readonly string[] };
 
@@ -217,6 +221,27 @@ export function errorFields(error: unknown): { type: string; code: string } {
   const type = read(() => (error instanceof Error ? error.name : typeof error));
   const code = read(() => (typeof error === 'object' && error !== null ? (error as Record<string, unknown>).code : undefined));
   return { type: fieldWord(type, 'type'), code: fieldWord(code, 'code') };
+}
+
+const TYPEOF_WORDS: ReadonlySet<string> = new Set(['undefined', 'object', 'boolean', 'number', 'bigint', 'string', 'symbol', 'function']);
+
+/**
+ * The fields an error is written as: `type`, its `name` when it is in {@link LISTED_ERROR_TYPES} (or the value's
+ * `typeof` when it is not an `Error`), and `code`, its `code` when it is in {@link LISTED_ERROR_CODES}. Anything
+ * else, and an error with no code, is `unknown`: a name or a code is set by whoever threw the error, so one that only
+ * has the right shape is never written. Never the message or the stack. Reading never throws.
+ *
+ * @param error - The caught value.
+ * @returns The listed type and code, or `unknown` for each.
+ */
+export function listedErrorFields(error: unknown): { type: string; code: string } {
+  const named = read(() => (error instanceof Error ? { name: error.name as unknown, isError: true } : { name: typeof error as unknown, isError: false })) as { name: unknown; isError: boolean } | undefined;
+  const code = read(() => (typeof error === 'object' && error !== null ? (error as Record<string, unknown>).code : undefined));
+  const type = named !== undefined && typeof named.name === 'string' && (named.isError ? LISTED_ERROR_TYPES.has(named.name) : TYPEOF_WORDS.has(named.name)) ? named.name : 'unknown';
+  return {
+    type: fieldWord(type, 'type'),
+    code: typeof code === 'string' && LISTED_ERROR_CODES.has(code) ? fieldWord(code, 'code') : 'unknown',
+  };
 }
 
 /**
