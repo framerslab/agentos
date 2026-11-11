@@ -1250,9 +1250,9 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
         tokensUsed: context.tokensUsed,
         allocation: context.allocation,
         // The recall's own report of its legs; the dense leg's time takes in a HyDE hypothesis, as its embedding does.
-        legs: recall
+        legs: recall?.legs
           ? recall.legs.map((leg) => (leg.leg === 'dense' ? { ...leg, ms: Math.round(recall.denseMs) } : { ...leg }))
-          : [{ leg: 'dense', ran: true, candidates: result.retrieved.length, ineligible: 0, ms: Math.round(result.diagnostics.totalTimeMs) }],
+          : [{ leg: 'dense', ran: true, candidates: result.retrieved.length, ineligible: 0, ms: Math.round(recall?.denseMs ?? result.diagnostics.totalTimeMs) }],
         lexicalBackend: 'none',
         ...(this.config.recall?.embedder ? { embedder: { ...this.config.recall.embedder } } : {}),
         reranker: result.diagnostics.reranker ?? { provider: 'none', reason: 'none_configured' },
