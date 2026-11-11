@@ -58,7 +58,12 @@ export const PROVIDER_DEFAULTS: Record<string, ProviderDefaults> = {
     cheap: 'llama3.2',
   },
   openrouter: {
-    text: 'openai/gpt-4o',
+    // The low-cost model, deliberately: a model-less OpenRouter call (a bare
+    // fallback entry, `generateText({ provider: 'openrouter' })`, a factory-built
+    // GMI turn whose persona names no model) lands here, and 'openai/gpt-4o'
+    // made that silent path the top LLM spend twice (2026-06-07, 2026-07-02).
+    // A caller that wants a stronger model names it.
+    text: 'openai/gpt-4o-mini',
     cheap: 'openai/gpt-4o-mini',
   },
   requesty: {

@@ -14,8 +14,11 @@ import type { GraphNode } from '../ir/types.js';
 import type { ProviderStrategyConfig, NodeProviderAssignment, ExplicitAssignment } from './types.js';
 
 /**
- * Provider defaults — mirrors PROVIDER_DEFAULTS from api/provider-defaults.ts
- * but inlined to avoid circular dependency across package boundaries.
+ * Each provider's strong (`text`) and cheap model: the models of PROVIDER_DEFAULTS
+ * in api/runtime/provider-defaults.ts, inlined to avoid a circular dependency
+ * across package boundaries, except OpenRouter's strong model. PROVIDER_DEFAULTS
+ * gives a model-less OpenRouter call the low-cost `openai/gpt-4o-mini`; the
+ * `best` strategy and the strong tier keep `openai/gpt-4o`.
  */
 const DEFAULTS: Record<string, { text: string; cheap: string }> = {
   openai: { text: 'gpt-4o', cheap: 'gpt-4o-mini' },
