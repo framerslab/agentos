@@ -275,6 +275,30 @@ describe('a carrier-profile Telnyx notify call hung up after its message', () =>
     }
   });
 
+  it('sends one hangup when two deliveries of the call.speak.ended are handled at once', async () => {
+    const { manager, fetchMock } = setUp();
+    const store = new InMemoryTelephonyCallStore();
+    const ended: string[] = [];
+    manager.on((event) => { if (event.type === 'call:ended') ended.push(event.call.state); });
+    try {
+      const call = await manager.initiateCall({ toNumber: '+15550000002', mode: 'notify', message: MESSAGE });
+      await manager.persistCall(call.callId, store);
+      await manager.processWebhookDurable('telnyx', signedEvent('call.answered', 'evt-answered'), store);
+      await vi.waitFor(() => expect(actions(fetchMock)).toEqual(['speak']));
+      const spoken = signedEvent('call.speak.ended', 'evt-speak-ended', { client_state: commands(fetchMock)[0]?.body.client_state, status: 'completed' });
+
+      // Telnyx retries the webhook while the first delivery is still handled: both commit the event before either hangup commits.
+      const deliveries = await Promise.all([manager.processWebhookDurable('telnyx', spoken, store), manager.processWebhookDurable('telnyx', spoken, store)]);
+      expect(deliveries.map(({ accepted }) => accepted)).toEqual([true, true]);
+      await settle();
+      expect(actions(fetchMock)).toEqual(['speak', 'hangup']);
+      expect(ended).toEqual(['hangup-bot']);
+      expect(manager.getCall(call.callId)?.state).toBe('hangup-bot');
+    } finally {
+      manager.dispose();
+    }
+  });
+
   it('refuses the call.speak.ended webhook when the manager is disposed before the hangup, and a redelivery hangs up', async () => {
     const store = new InMemoryTelephonyCallStore();
     // Holds a committed transaction's result back, while the manager is disposed.
