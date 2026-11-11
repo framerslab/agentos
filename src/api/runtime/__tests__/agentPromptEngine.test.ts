@@ -293,13 +293,15 @@ describe('agent() PromptEngine/Memory/Skills integration', () => {
 
       expect(memory.getContext).toHaveBeenCalled();
       expect(memory.observe).toHaveBeenCalledWith('user', 'hello', expect.objectContaining({ sessionId: expect.any(String) }));
-      // System prompt should contain both skill content and memory
+      // The system prompt holds the skill; the memory arrives as a data block
+      // in a user message.
       const callArgs = mockGenerateCompletion.mock.calls[0];
       const messages = callArgs[1];
       const systemMsgs = messages.filter((m: any) => m.role === 'system');
-      const combined = systemMsgs.map((m: any) => m.content).join('\n');
+      const combined = systemMsgs.map((m: any) => String(m.content)).join('\n');
       expect(combined).toContain('skill content');
-      expect(combined).toContain('Memory: user likes hiking');
+      expect(combined).not.toContain('likes hiking');
+      expect(recallBlocksIn(messages)).toEqual([expect.stringContaining('Memory:^user^likes^hiking')]);
     });
   });
 
