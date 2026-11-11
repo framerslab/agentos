@@ -19,7 +19,7 @@ User Input → [Input Guardrails] → Orchestration → [Output Guardrails] → 
 
 When multiple guardrails are active, AgentOS uses a **two-phase dispatcher**:
 
-1. **Phase 1 (sequential sanitizers)** - Guardrails with `config.canSanitize === true` run in registration order so each sanitizer sees the cumulative sanitized text
+1. **Phase 1 (sequential sanitizers)** - Guardrails with `config.canSanitize === true` run in registration order so each sanitizer sees the cumulative sanitized text; so do screens with `config.sequential === true`, whose BLOCK ends the evaluation before Phase 2 starts
 2. **Phase 2 (parallel classifiers)** - All remaining guardrails run concurrently via `Promise.allSettled`, with worst-action aggregation (`BLOCK > FLAG > ALLOW`)
 
 This keeps redaction deterministic while still allowing heavyweight classifiers and grounding checks to run in parallel.
@@ -113,6 +113,93 @@ const reviewer: IGuardrailService = {
 - **Codes.** A `reviewCode` is letters, digits and underscores, at most 64. `toModerationEvaluation()` reports an evaluation without its `reason` and `details`, and writes a code outside its shape as `INVALID_CODE`.
 
 A guard's failure is a typed event, not a console line: a throw or a timeout writes `guardrail.failed` with the guard's id, the stage, the posture (`open` or `closed`), the cause and the error's listed type and code, never its message (see [Logging](../observability/LOGGING.md)). Under `processRequest()` a guard with no `failClosed` is still skipped when it throws.
+
+## Content Between People: `moderateContent()`
+
+One call judges a message, a post or an upload that one person sends another, before the host delivers it:
+
+```typescript
+import { moderateContent, PhraseListGuardrail } from '@framers/agentos/safety/guardrails';
+
+const hardBan = await PhraseListGuardrail.create({ id: 'hard-ban', sequential: true, source: reviewedList });
+
+const decision = await moderateContent(
+  { text: message.text, images: message.images },
+  {
+    guards: [hardBan, vendorClassifier, reviewer],
+    context: {
+      userId: sender.id,
+      sessionId: room.id,
+      moderation: { surface: 'public_room', roomId: room.id, rating: 'standard', messageId: message.id },
+    },
+    stopVendorsOn: ['MINOR_SAFETY'],
+  },
+);
+
+if (decision.outcome === 'refuse' && decision.unavailable) tellSenderToRetry();
+else if (decision.outcome === 'refuse') refuse(decision.deciding?.reasonCode);
+else if (decision.outcome === 'hold') queueForReview(decision.hold?.reviewCode);
+else deliver(decision.sanitizedText ?? message.text);
+```
+
+- **Four outcomes.** `allow`, `flag`, `refuse` and `hold`. A `refuse` with `unavailable: true` means nothing but a guard that threw, ran late or answered no recognised action kept the content back: no rule refused it and no guard held it. A host tells the sender and does not count it as a policy refusal.
+- **Every guard runs closed** unless its config says `failClosed: false`, with a deadline of 8 seconds when neither its config nor the call's `timeoutMs` names one. A closed guard that throws, runs late or answers no recognised action (`undefined` included; `null` is an allow) becomes a `BLOCK` with `metadata.failClosed: true` and `metadata.cause` (`error`, `timeout` or `malformed`), and writes one `guardrail.failed` line with `posture: closed`. The library marks that `BLOCK` outside the answer: a guard that writes `failClosed`, `cause` or a library code into its own answer gives a rule's refusal, never an outage. A guard with `failClosed: false` is skipped and writes the same line with `posture: open`.
+- **What decides,** in this order: the first `BLOCK` a rule gave (not a hold, not a closed guard's failure); else the first hold; else the first closed guard's failure; else the first `FLAG`; else nothing. So among the guards that ran, one guard's outage never hides another guard's refusal or hold. A screen with `sequential: true` that fails ends the evaluation as its `BLOCK` would, so no phase 2 guard sees that text: a screen that is down cannot say the text is not one it refuses. `deciding` is that evaluation, `evaluations` holds every evaluation in registration order, and `hold` is set when the outcome (or `wouldBe`) is `hold`. `guardrailOutcomeOf()` keeps the plainer order of the older entry points, where any refusal comes first.
+- **No content in the decision but two fields.** It carries codes, ids and scores: each evaluation as `toModerationEvaluation()` reports it, without the guard's `reason` and `details`. Two fields can hold a person's text: `sanitizedText`, and an evaluation's `metadata`, which is the guard's own and passes through as the guard wrote it. A guard keeps the text out of its `metadata`, and a host keeps `sanitizedText` out of its logs.
+- **`sanitizedText`.** In `enforce`, the text as the guards with `canSanitize` left it, when one changed it, whatever the outcome; `''` when one removed it (`modifiedText: null`), so `sanitizedText ?? message.text` never brings the text back. A rewrite alone is an `allow` with `sanitizedText`.
+- **Dry run.** With `mode: 'dryRun'` every guard runs as it would in enforcement, and a screen's `BLOCK` still ends the evaluation. `outcome` is always `allow`, `wouldBe` is the outcome enforcement would have given, `enforced` is false, `unavailable` says what enforcement would have reported, and `sanitizedText` is never set. A `mode` other than `enforce` or `dryRun` throws a `TypeError` before any guard runs.
+- **Stopping vendor requests.** `stopVendorsOn` lists reason codes and review codes. Every guard of the call receives the same `context.vendorSignal`, and it is aborted the moment a guard answers one of those codes, while the other guards are still running. A guard that reads it starts no new vendor request. A request already sent is still answered.
+- **A guard that cannot judge input** is a configuration error: the call throws a `TypeError` naming a guard that has no `evaluateInput`, or declares `stages` without `input`. A guard with no `id` is reported as `guard_<its index>`.
+- **One line per decision.** A decision other than `allow` writes one `guardrail.verdict` line, and so does an `allow` whose text a guard rewrote (with `action: sanitize`); any other allow writes none (see [Logging](../observability/LOGGING.md#guardrail-events)).
+
+The closed default belongs to `moderateContent()`. Under `processRequest()`, `evaluateInputGuardrails()` and `wrapOutputGuardrails()` a guard with no `failClosed` is still skipped when it throws. `withModerationPosture(guard)` returns a guard wrapped the way `moderateContent()` wraps it, for a host that calls the dispatcher itself.
+
+## Screens That Run First
+
+A guard with `config.sequential: true` runs in phase 1, one at a time in registration order with the guards that can sanitize, though it does not rewrite. Its `BLOCK` ends the evaluation before any phase 2 guard is called, so text a local list refuses never reaches a phase 2 guard that calls a vendor, in enforcement and in a dry run. A phase 1 guard registered before the list still runs before it: register the list ahead of any sanitizer that calls a vendor. On a tool call the guards with `sequential` answer before the other guards that set `evaluateToolCalls`, and a `BLOCK` among them is the verdict before those are called. A `SANITIZE` from it is applied only when `canSanitize` is also true; otherwise it becomes a `FLAG` and writes `guardrail.sanitize_downgraded`. The phrase-list guard takes the option:
+
+```typescript
+const hardBan = await PhraseListGuardrail.create({
+  id: 'hard-ban',
+  sequential: true,
+  source: new StaticPhraseListSource({
+    version: '3', reviewedAt: '2026-11-10', reviewedBy: 'trust-and-safety',
+    entries: [{ phrase: 'a banned phrase', match: 'word', onMatch: 'block', ruleId: 'BAN_1' }],
+  }),
+});
+```
+
+A screen is local only when its list is. `sequential` orders guards; it does not stop one from calling out. A list with `judge` entries sends a matched text to its judge's model from inside the screen, so a host that wants no network call before its vendor guards keeps `block` entries alone in the screen and its `judge` entries in a second list without `sequential`.
+
+## Typed Context
+
+`context.moderation` tells a guard where the content appears and who wrote it:
+
+| Field | Shape | Meaning |
+|---|---|---|
+| `surface` | a word, required | `public_room`, `private_chat`, `group_chat`, `discussion_page`, `agent_turn`, `generated_media`, `upload`, `report_evidence`, or a word of the host's own |
+| `roomId` | an id | The place the content appears in: a room, a thread, a page |
+| `rating` | a word | The place's content rating, in the host's own words (`safe`, `standard`, ...) |
+| `messageId` | an id | The content's own id in the host's store |
+| `sender` | `{ id, kind? }` | Who wrote it, when that is not the call's `userId`; `id` is an id, `kind` is `account`, `guest` or `agent` |
+
+A word is letters, digits and `_ . : -`, at most 64 characters; an id is letters, digits and `_ . : / -`, at most 128. `moderateContent()` checks the field with `assertModerationContext()` before any guard runs and throws a `TypeError` that names the field and never its value. A host whose ids hold other characters (an email address, a provider's `auth|id`) passes a surrogate key of its own. Guards read `context.moderation?.rating` and its siblings; `context.metadata` stays as it is for everything else.
+
+### Text a person wrote, framed as data
+
+A guard or an agent that hands a person's text to a model frames it with `frameUntrustedEvidence()` and puts `UNTRUSTED_EVIDENCE_NOTICE` in the system prompt:
+
+```typescript
+import { UNTRUSTED_EVIDENCE_NOTICE, frameUntrustedEvidence } from '@framers/agentos/safety/guardrails';
+
+const { text } = frameUntrustedEvidence(message.text, { label: `message:${message.id}` });
+// [message:m1]
+// <<evidence:9f2c41d07ab3e855>>
+// ...the text...
+// <<end:9f2c41d07ab3e855>>
+```
+
+The two markers share a random boundary of 16 hexadecimal characters, new on every call. Any copy of it in the text is removed, null bytes are dropped, and chat-template tokens (`<|...|>`, `[INST]`, `[/INST]`, `<s>`, `</s>`) are broken with a space, in the text and in the label's line (a label `INST` is written `[ INST]`). The label, when given, must be an id. Framing lowers how often instructions planted in the text work; it does not make a model ignore them, so an agent that acts on such text is also held to limits and checked evidence.
 
 ## Mid-Stream Decision Override ("Changing Mind")
 
@@ -396,9 +483,10 @@ class QualityGateGuardrail implements ICrossAgentGuardrailService {
 | `evaluateToolCalls` | `boolean` | `false` | Evaluate tool calls: a block refuses a call the runtime runs itself before it runs, and keeps an actionable call from the host and ends the stream; a sanitize is applied as a block. See [Tool Calls](#tool-calls) |
 | `maxStreamingEvaluations` | `number` | `undefined` | Rate limit streaming evaluations per guarded stream (the turn's stream and each continuation stream count on their own) |
 | `canSanitize` | `boolean` | `false` | Run this guardrail in Phase 1 so SANITIZE results chain deterministically |
-| `timeoutMs` | `number` | `undefined` | Per-guardrail timeout. On timeout/error the dispatcher fails open for that guardrail, unless `failClosed` is set or the guard is required |
-| `failClosed` | `boolean` | `false` | A throw or a timeout blocks instead of passing. Forced on for a required guard |
-| `reasonCodes` | `readonly string[]` | `undefined` | Every reason code and review code the guard can answer, a closed list, declared for the log lines that name the code that decided: such a line takes a code from this list only and writes `unknown` otherwise. No line of this release writes a guard's code yet `PhraseListGuardrail` lists the rule ids of the list it holds |
+| `sequential` | `boolean` | `false` | Run this guardrail in Phase 1, one at a time in registration order, though it does not sanitize: its BLOCK ends the evaluation before any Phase 2 guard is called. A SANITIZE it returns is a FLAG unless `canSanitize` is also set. See [Screens That Run First](#screens-that-run-first) |
+| `timeoutMs` | `number` | `undefined` | Per-guardrail timeout. On timeout/error the dispatcher fails open for that guardrail, unless `failClosed` is set or the guard is required. Under `moderateContent()` a guard that names none gets the call's deadline, 8 seconds by default |
+| `failClosed` | `boolean` | `false` | A throw or a timeout blocks instead of passing. Forced on for a required guard. Under `moderateContent()` a guard runs closed unless this is `false` |
+| `reasonCodes` | `readonly string[]` | `undefined` | Every reason code and review code the guard can answer, a closed list, declared for the log lines that name the code that decided: the `guardrail.verdict` line of `moderateContent()` takes a code from this list only, or a code the library made for a closed guard's failure, and writes `unknown` otherwise. `PhraseListGuardrail` lists the rule ids of the list it holds |
 
 ### Output Payload Extras
 
@@ -506,7 +594,7 @@ class ShellCommandGuard implements IGuardrailService {
 - **Sanitize.** A guard cannot rewrite a tool call. A `SANITIZE` is applied as a `BLOCK` that keeps the guard's reason and reason code.
 - **Flag and allow.** The chunk goes on with the evaluation in `metadata.guardrail.output`.
 - **Calls the runtime runs itself.** AgentOS asks the guard about each call with `executionMode: 'internal'` before the call runs, as a `TOOL_CALL_REQUEST` chunk holding that one call, with the sources the turn retrieved in `ragSources`, on `processRequest()`, `handleToolResult()` and `resumeExternalToolRequest()` alike. A continuation the orchestrator is given no gate for (`AgentOSOrchestrator.orchestrateToolResult()` takes none) is judged with the gate its turn ran with, which the runtime keeps with the turn's stream. A continuation retrieves nothing of its own, so its calls are judged with the sources the user turn it continues retrieved, which the runtime keeps with the turn's stream: a turn of another conversation on the session's GMI meanwhile, or a GMI built again for the session, does not change them. A turn resumed after a restart is judged without them: the pause stores the calls, never the documents the turn retrieved. A block (or a sanitize) refuses the call: the tool does not run, and the model reads a refused tool result (code `AUTH_PERMISSION_DENIED`, with the guard's reason), as it reads a permission refusal. When a model step asks for several such calls, every call of the step is judged before any of them runs, and the calls that pass alone are judged once more together, as the stream's chunk for the step holds them, so a guard that rules on calls together (notes read and a shell command run in one step) refuses each of them before any runs. On the stream `processRequest()` returns, the guard also judges the stream's chunk for the step, so it is asked about such calls twice; a block there ends the host's stream with the verdict while the turn finishes inside the runtime. A continuation's stream carries no chunk for the calls the GMI runs itself. A refused call never becomes an actionable request and no pending request is saved for it; the `FINAL_RESPONSE` lists it in `finalToolCalls` beside the calls that ran. To have a person approve a tool before it runs, gate the tool: with a `hitlManager` and `toolOrchestratorConfig.hitl.enabled`, the tool orchestrator asks for an approval before a tool with `hasSideEffects: true` runs ([Human-in-the-Loop](./HUMAN_IN_THE_LOOP.md)).
-- **Several guards.** The guards that evaluate tool calls run in parallel on each tool-call chunk; the first refusal in registration order is the verdict, else the first hold.
+- **Several guards.** The guards that evaluate tool calls and set `config.sequential` answer first, one at a time in registration order, and the first `BLOCK` among them is the verdict before any other guard is called. The rest run in parallel on each tool-call chunk; the first refusal in registration order is the verdict, else the first hold.
 - **What the guards do not see.** The guards judge the calls a turn's model requests. The steps of a composed tool (one `forge_tool` built from a chain of other tools) and the tool tasks of a workflow are not model requests: they run through the tool orchestrator's `processToolCall()` with no tool-call chunk, so a guard that sets `evaluateToolCalls` judges the composed tool's own call, with the arguments the model gave it, and never the steps that call runs, nor a workflow's tool tasks. Those calls meet the tool orchestrator's own checks: the disabled list, the permission check, argument validation and, with `hitl.enabled`, the approval a tool with `hasSideEffects: true` waits for.
 
 **Why it is opt-in.** A guard written for text may read any chunk it is given as text: one that takes every non-final chunk for a `TEXT_DELTA` reads `textDelta` as `undefined`, and a fail-closed guard that throws on it would block every tool call. A guard that sets `evaluateToolCalls` is written to read tool calls, and a guard without it never receives one. A guard that has a tool-call branch already, as the code-safety pack's guard does, runs it once its config sets the flag.
@@ -557,8 +645,8 @@ await agent.initialize({
 ```
 
 **Evaluation Order:**
-1. Phase 1 sanitizers run first in registration order
-2. If any sanitizer returns `BLOCK`, processing stops immediately
+1. Phase 1 sanitizers, and screens with `sequential: true`, run first in registration order
+2. If any of them returns `BLOCK`, processing stops immediately
 3. Sanitized text from Phase 1 becomes the input to all Phase 2 guardrails
 4. Phase 2 guardrails run concurrently, and the worst action wins
 5. `SANITIZE` returned from Phase 2 is downgraded to `FLAG` to preserve deterministic output

@@ -37,16 +37,19 @@ Both lists are read-only views with no `add`, `delete` or `clear`, so a host can
 
 ### Guardrail events
 
-The guardrail dispatchers write four events through the `guardrails` component. None carries a guard's reason, the content it judged or an error's message.
+The guardrail dispatchers and `moderateContent()` write five events through the `guardrails` component. None carries a guard's reason, the content it judged or an error's message.
 
 | Event | Level | Fields | Written when |
 |---|---|---|---|
-| `guardrail.failed` | warn | `guardrailId`, `stage` (`input`, `output`, `tool_call`), `posture` (`open`, `closed`), `cause` (`error`, `timeout`, `malformed`), `type`, `code` | A guard threw or timed out. `posture` says whether it was skipped (`open`) or blocked (`closed`); a timeout has no `type` or `code` |
+| `guardrail.failed` | warn | `guardrailId`, `stage` (`input`, `output`, `tool_call`), `posture` (`open`, `closed`), `cause` (`error`, `timeout`, `malformed`), `type`, `code` | A guard threw or timed out, or a guard run under the required or the moderation posture answered no recognised action, `undefined` included (`malformed`). `posture` says whether it was skipped (`open`) or blocked (`closed`); a timeout and a malformed answer have no `type` or `code` |
 | `guardrail.sanitize_downgraded` | warn | `guardrailId`, `stage` | A phase 2 SANITIZE became a FLAG, or a tool call's SANITIZE a BLOCK |
 | `guardrail.hold_ignored` | warn | `guardrailId`, `stage` | A guard answered `hold` with an action other than BLOCK; written once per guard |
 | `guardrail.verdict_callback_failed` | warn | `type`, `code` | An `onVerdict` callback threw; the verdict stands |
+| `guardrail.verdict` | info | `guardrailId`, `stage` (`input`, `output`, `tool_call`), `action` (`flag`, `sanitize`, `hold`, `block`), `code`, `surface`, `mode` (`enforce`, `dry_run`), `unavailable` (`yes`, `no`) | `moderateContent()` decided something other than an allow, or a guard rewrote the text of an allow (`action: sanitize`). `guardrailId` is the deciding guard; `unavailable` is `yes` when only a closed guard's failure kept the content back |
 
 `type` and `code` come from `listedErrorFields()`. A guard's id that is not a valid word is written `unknown`.
+
+The `code` of `guardrail.verdict` is the deciding evaluation's reason code, or a hold's review code. It is written only when the deciding guard lists it in `config.reasonCodes` or the library made the evaluation for a closed guard's failure (`GUARDRAIL_ERROR`, `GUARDRAIL_MALFORMED`; a guard that answers one of those codes itself does not count); any other code, a model's answer or a vendor's label included, is written `unknown`. `surface` is the word from `context.moderation.surface`. A plain allow writes no line, and no line carries the content.
 
 ### One line per server request
 
