@@ -2777,8 +2777,9 @@ export class GMI implements IGMI {
     const modelId = modelLevel >= 0 ? levels[modelLevel].modelId : undefined;
     const providerId = providerLevel >= 0 ? levels[providerLevel].providerId : undefined;
 
-    // A model whose own level names the same provider belongs to it and is kept.
-    const modelBelongsToProvider = modelLevel >= 0 && levels[modelLevel].providerId === providerId;
+    // A model whose own level names the same provider, in any letter case, belongs to it and is kept.
+    const modelBelongsToProvider =
+      modelLevel >= 0 && levels[modelLevel].providerId?.toLowerCase() === providerId?.toLowerCase();
     if (providerId && !modelBelongsToProvider && (modelLevel < 0 || providerLevel < modelLevel)) {
       const providerDefault = this.servedProvider(providerId)?.defaultModelId;
       return { modelId: providerDefault || modelId, providerId };

@@ -131,7 +131,8 @@ describe('a provider named without a model', () => {
   });
 
   it("keeps the persona's model when a turn names the persona's own provider", async () => {
-    const pinnedPersona = persona({ id: 'pinned-same', defaultProviderId: 'minimax', defaultModelId: 'MiniMax-M3' });
+    // The persona spells the provider in another letter case: it is still the turn's provider.
+    const pinnedPersona = persona({ id: 'pinned-same', defaultProviderId: 'MiniMax', defaultModelId: 'MiniMax-M3' });
     booted = await AgentOS.create({
       modelProviderManagerConfig: { providers }, turnPlanning: { enabled: false }, personas: [pinnedPersona],
     } as any);
