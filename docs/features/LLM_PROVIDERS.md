@@ -540,7 +540,8 @@ Popular OpenRouter models:
 
 `provider: 'openrouter'` without a model uses `openai/gpt-4o-mini`, and so does
 a persona that names no model on an `AgentOS` runtime whose default provider is
-OpenRouter. Name the model for a stronger one.
+OpenRouter, unless the runtime's `gmiManagerConfig.defaultGMIBaseConfigDefaults`
+names another model. Name the model for a stronger one.
 
 ### Requesty
 

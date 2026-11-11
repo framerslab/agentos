@@ -241,6 +241,25 @@ export function gmiModelDefaultsFor(
 }
 
 /**
+ * The `defaultGMIBaseConfigDefaults` objects {@link createAgentOSConfig} built from the environment's providers. A
+ * host that spreads a factory-built `gmiManagerConfig` passes the same object on; a pair the host writes is another
+ * object, even when its values are the factory's.
+ */
+const factoryGmiModelDefaults = new WeakSet<object>();
+
+/**
+ * Whether a `gmiManagerConfig.defaultGMIBaseConfigDefaults` is the one {@link createAgentOSConfig} took from the
+ * environment's providers, rather than one a host wrote. `AgentOS.create()` given providers of the host's own takes
+ * the GMI default from those providers only in that case.
+ *
+ * @param defaults - A config's `gmiManagerConfig.defaultGMIBaseConfigDefaults`.
+ * @returns `true` for the factory's own object.
+ */
+export function isFactoryGmiModelDefaults(defaults: unknown): boolean {
+  return typeof defaults === 'object' && defaults !== null && factoryGmiModelDefaults.has(defaults);
+}
+
+/**
  * Creates the AI Model Provider Manager configuration. Each entry's `config` is checked against its provider's
  * config type (`satisfies`), so a misspelled or unknown key is a compile error instead of a value the provider
  * never reads.
@@ -423,14 +442,16 @@ export async function createAgentOSConfig(
     const utilityAIService = await createUtilityAIService(env);
 
     const modelProviderManagerConfig = createModelProviderManagerConfig(env);
+    // A persona that names no provider or model runs on the default provider entry and its default model.
+    const defaultGMIBaseConfigDefaults = gmiModelDefaultsFor(modelProviderManagerConfig.providers);
+    factoryGmiModelDefaults.add(defaultGMIBaseConfigDefaults);
 
     // Create individual component configurations
     const gmiManagerConfig: GMIManagerConfig = {
       personaLoaderConfig: createPersonaLoaderConfig(env),
       defaultGMIInactivityCleanupMinutes: 60,
       defaultWorkingMemoryType: 'in_memory',
-      // A persona that names no provider or model runs on the default provider entry and its default model.
-      defaultGMIBaseConfigDefaults: gmiModelDefaultsFor(modelProviderManagerConfig.providers),
+      defaultGMIBaseConfigDefaults,
     };
 
     const orchestratorConfig: AgentOSOrchestratorConfig = {
