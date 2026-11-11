@@ -20,7 +20,7 @@ vi.mock('ws', () => {
     /** Every socket opened, in order. */
     static instances: MockWebSocket[] = [];
     /** How the next socket behaves; reset to 'ack' after use. */
-    static nextBehavior: 'ack' | 'silent' | 'reject-401' | 'reject-429' | 'reject-500' | 'error-on-update' | 'ack-then-drop' = 'ack';
+    static nextBehavior: 'ack' | 'silent' | 'reject-401' | 'reject-429' | 'reject-500' | 'error-on-update' | 'ack-then-drop' | 'ack-then-closing' = 'ack';
     readyState = 1;
     url: string;
     headers: Record<string, string>;
@@ -41,6 +41,13 @@ vi.mock('ws', () => {
         process.nextTick(() => {
           this.serve({ type: 'session.updated', event_id: 'event_ack', session: event.session });
           this.drop();
+        });
+      } else if (this.behavior === 'ack-then-closing') {
+        // The server confirms the session update and starts closing at once: the socket is CLOSING
+        // when the provider adopts it, and its close event has not come.
+        process.nextTick(() => {
+          this.serve({ type: 'session.updated', event_id: 'event_ack', session: event.session });
+          this.readyState = 2;
         });
       } else if (this.behavior === 'error-on-update') {
         process.nextTick(() =>
@@ -140,7 +147,7 @@ interface FakeSocket extends EventEmitter {
 
 const Sockets = MockedWs as unknown as {
   instances: FakeSocket[];
-  nextBehavior: 'ack' | 'silent' | 'reject-401' | 'reject-429' | 'reject-500' | 'error-on-update' | 'ack-then-drop';
+  nextBehavior: 'ack' | 'silent' | 'reject-401' | 'reject-429' | 'reject-500' | 'error-on-update' | 'ack-then-drop' | 'ack-then-closing';
 };
 
 /** A key that is plainly fake. */
@@ -905,9 +912,45 @@ describe('OpenAIRealtimeTranscriptionSTT: reconnects, failures, flush and close'
     expect(sentOfType(next, 'input_audio_buffer.commit')).toHaveLength(1);
     expect(flushed).toBe(false);
     next.serve({ type: 'input_audio_buffer.committed', item_id: 'item_C', previous_item_id: null });
+    await settle();
+    expect(flushed).toBe(false); // committed is not the final
     next.serve({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'item_C', content_index: 0, transcript: 'Held words.' });
     await flushing;
     expect(log.transcripts.at(-1)).toMatchObject({ itemId: 'item_C', isFinal: true, text: 'Held words.' });
+    expect(log.errors).toEqual([]);
+    session.close();
+  });
+
+  it('flush keeps waiting when the connection that takes over is closing too, and commits on the one after it', async () => {
+    fakeClock();
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY, turnDetection: null });
+    const session = await stt.startSession();
+    const log = record(session);
+    const first = Sockets.instances[0];
+    first.readyState = 2; // CLOSING
+    session.pushAudio(frame(4_800)); // 200 ms the closing socket does not take: held
+    let flushed = false;
+    const flushing = session.flush().then(() => {
+      flushed = true;
+    });
+    Sockets.nextBehavior = 'ack-then-closing';
+    first.drop();
+    await vi.advanceTimersByTimeAsync(100);
+    await settle();
+    const second = Sockets.instances[1];
+    expect(sentOfType(second, 'input_audio_buffer.append')).toEqual([]); // its socket was closing when it was adopted
+    expect(flushed).toBe(false);
+    second.drop();
+    await vi.advanceTimersByTimeAsync(2_000);
+    await settle();
+    const third = Sockets.instances[2];
+    expect(sentSamples(third).map((samples) => samples.length)).toEqual([4_800]);
+    expect(sentOfType(third, 'input_audio_buffer.commit')).toHaveLength(1);
+    expect(flushed).toBe(false);
+    third.serve({ type: 'input_audio_buffer.committed', item_id: 'item_D', previous_item_id: null });
+    third.serve({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'item_D', content_index: 0, transcript: 'Twice held.' });
+    await flushing;
+    expect(log.transcripts.at(-1)).toMatchObject({ itemId: 'item_D', isFinal: true, text: 'Twice held.' });
     expect(log.errors).toEqual([]);
     session.close();
   });
