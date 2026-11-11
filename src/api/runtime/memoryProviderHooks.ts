@@ -7,8 +7,9 @@
  * `AgentSession.send`, `AgentSession.stream`): `memory.getContext` runs once
  * for the call, at its first model call, and the same recall goes into every
  * model call of it (its tool steps, its validation attempts and its fallback
- * legs). `observe` is the caller's: `agent()` observes after the turn is
- * answered. A hook that fails or times out is a `memory.hook_failed` event.
+ * legs), as a data block in a user-role message right before the turn's own
+ * user message. `observe` is the caller's: `agent()` observes after the turn
+ * is answered. A hook that fails or times out is a `memory.hook_failed` event.
  * Pure function: returns a new options object without mutating inputs.
  *
  * @module api/runtime/memoryProviderHooks
@@ -17,6 +18,7 @@ import type { GenerateTextOptions, GenerationHookContext } from '../generateText
 import type { AgentMemoryProvider, MemoryHookContext } from '../agent.js';
 import { errorFields } from '../../core/logging/events.js';
 import { memoryLog } from '../../cognition/memory/log.js';
+import { memoryItemsOf, renderMemoryRecallBlock } from './memoryDataBlock.js';
 
 /** Timeout applied to memory.getContext calls to prevent hangs. */
 export const MEMORY_TIMEOUT_MS = 5000;
@@ -119,34 +121,37 @@ export function applyMemoryProvider(
   const userOnBefore = baseOpts.onBeforeGeneration;
   // One recall for the call: its tool steps, its validation attempts and its fallback legs send the same block.
   let recalled: Promise<Recalled> | undefined;
+  /** The rendered block, once there is one. */
+  let block: string | undefined;
+  /** How far the turn's own user message sits from the end of the leading system messages, read at the first call. */
+  let turnOffset: number | undefined;
 
   const wrappedOnBefore: NonNullable<GenerateTextOptions['onBeforeGeneration']> = async (
     ctx: GenerationHookContext,
   ): Promise<GenerationHookContext | void> => {
     recalled ??= recallForTurn(provider, turn, hookOptions);
-    const memCtx = await recalled;
+    const items = memoryItemsOf(await recalled);
     let nextCtx: GenerationHookContext = ctx;
-    if (memCtx?.contextText) {
-      // Insert AFTER the leading system message(s), never at index 0.
-      // Providers derive the prompt-cache key from the request prefix
-      // in order, so a per-turn recall block prepended at the front
-      // rewrites the prefix on every call — a cache-marked system
-      // prompt gets WRITTEN fresh each turn (cache-write premium) but
-      // never read back (hit rate 0). Placed after the caller's system
-      // content, recall keeps system authority while the cacheable
-      // prefix stays byte-stable across turns.
-      let insertAt = 0;
-      while (insertAt < ctx.messages.length && ctx.messages[insertAt].role === 'system') {
-        insertAt += 1;
+    if (items.length > 0) {
+      block ??= renderMemoryRecallBlock(items);
+      // Recalled text is data in a user-role message right before the turn's own user message, never a system
+      // message: the system prefix and the earlier turns stay as they were, so a cached prefix is still read. The
+      // turn's message is the last user message of the call's first request; its distance from the leading system
+      // messages is kept, since a later attempt or a fallback leg can carry one system message more or fewer.
+      let lead = 0;
+      while (lead < ctx.messages.length && ctx.messages[lead].role === 'system') lead += 1;
+      if (turnOffset === undefined) {
+        let last = ctx.messages.length;
+        for (let i = ctx.messages.length - 1; i >= lead; i -= 1) {
+          if (ctx.messages[i].role === 'user') {
+            last = i;
+            break;
+          }
+        }
+        turnOffset = last - lead;
       }
-      nextCtx = {
-        ...ctx,
-        messages: [
-          ...ctx.messages.slice(0, insertAt),
-          { role: 'system' as const, content: memCtx.contextText },
-          ...ctx.messages.slice(insertAt),
-        ],
-      };
+      const at = Math.min(lead + turnOffset, ctx.messages.length);
+      nextCtx = { ...ctx, messages: [...ctx.messages.slice(0, at), { role: 'user' as const, content: block }, ...ctx.messages.slice(at)] };
     }
     if (userOnBefore) {
       const userResult = await userOnBefore(nextCtx);

@@ -31,6 +31,7 @@ import type { SessionHistoryBuffer, SessionTurnWriter } from '../sessionHistory.
 import type { SessionTranscriptMessage } from '../sessionTranscript.js';
 import type { AgentMemoryProvider, AgentOptions, MemoryHookContext } from '../agent.js';
 import { recallForTurn } from './memoryProviderHooks.js';
+import { memoryItemsOf, renderMemoryRecallBlock } from './memoryDataBlock.js';
 import type { AgentOSUsageLedgerOptions } from './usageLedger.js';
 import type { LateAttemptUsage } from './completionGateway.js';
 import { costOfUsageUSD, type SpendBudget } from './spendBudget.js';
@@ -120,7 +121,10 @@ export interface GmiTurnOptions {
 export interface GmiTurnContext {
   /** The turn's text input, for `onBeforeGeneration`'s `prompt` (undefined for multimodal input). */
   prompt: string | undefined;
-  /** The `memoryProvider.getContext` block for this turn, inserted as a system message on every model call. */
+  /**
+   * The `memoryProvider.getContext` recall for this turn, rendered as a data block: inserted as a user-role message
+   * before the turn's user message on every model call.
+   */
   memoryContext: string | undefined;
   /** Called before every model call of the turn with the provider and model its hop was routed to. */
   onModelCall?: (route: { providerId: string; modelId: string }) => void;
@@ -375,7 +379,8 @@ export async function* runGmiTurn(
           ...(deps.providerTokenBudget !== undefined ? { tokenBudget: deps.providerTokenBudget } : {}),
         })
       : null;
-    const memoryContext = recalled?.contextText || undefined;
+    const items = memoryItemsOf(recalled);
+    const memoryContext = items.length > 0 ? renderMemoryRecallBlock(items) : undefined;
     // When the model call in progress started: the turn's start, the end of the
     // tool round before it, or the failure of the attempt it replaces.
     let callStartedAt = Date.now();

@@ -67,11 +67,17 @@ type Speaker = 'user' | 'assistant';
 /** The tag a wiki page chunk carries for its page: `page:<id>`. */
 const PAGE_TAG = 'page:';
 
-/** One recalled trace: the label that opens its line, then its text. */
+/** One recalled trace: the label that opens its line, then its text, and the label's parts as a record's fields. */
 interface RecallLine {
-  /** `[user, 26 days ago, 2026-10-14] `: who spoke it and when it was stored; ends with a space. */
+  /** `[user, 26 days ago, 2026-10-14] `: who spoke it and when it was stored; ends with a space. Empty when dropped. */
   prefix: string;
   content: string;
+  /** Who spoke it, or `note` for a chunk of a wiki page; undefined when no speaker was recorded. */
+  speaker?: 'user' | 'assistant' | 'note';
+  /** The page id of a chunk of a wiki page. */
+  page?: string;
+  /** When it was stored, as its label shows it (`26 days ago, 2026-10-14`). */
+  when: string;
 }
 
 /** The page id of a chunk of a wiki page, from the tags the wiki gives it (`wiki` and `page:<id>`); else undefined. */
@@ -110,39 +116,42 @@ function onOneLine(text: string): string {
 }
 
 /**
- * Join recalled traces, in rank order, one line each (its label, then its text), into a recall block that fits
- * `tokenBudget` (estimated with `estimateTokens`). Whole lines are added while they fit; when the first alone is
- * larger, its text is cut at the last word boundary that fits beside its label (mid-word only when it has none, and
- * never inside a character a surrogate pair encodes), so a matched trace never yields an empty block under a positive
- * budget; a label longer than the whole budget is dropped. A budget of 0 or less asks for no recall, and one that is
- * not a number is the hooks' default.
+ * The recalled traces, in rank order, that fit `tokenBudget` when joined one line each (its label, then its text),
+ * estimated with `estimateTokens`. Whole lines are kept while they fit; when the first alone is larger, it is kept with
+ * its text cut at the last word boundary that fits beside its label (mid-word only when it has none, and never inside a
+ * character a surrogate pair encodes), so a matched trace never yields no recall under a positive budget; a label
+ * longer than the whole budget is dropped (its `prefix` is then empty). A budget of 0 or less asks for no recall, and
+ * one that is not a number is the hooks' default.
  *
  * @param lines - The traces' labels and text, best first.
- * @param tokenBudget - The block's token ceiling.
- * @returns The block, or '' when nothing was recalled or the budget is 0 or less.
+ * @param tokenBudget - The recall's token ceiling.
+ * @returns The kept lines; none when nothing was recalled or the budget is 0 or less.
  */
-function recallWithinBudget(lines: readonly RecallLine[], tokenBudget: number): string {
-  if (tokenBudget <= 0) return '';
+function fitRecallLines(lines: readonly RecallLine[], tokenBudget: number): RecallLine[] {
+  if (tokenBudget <= 0) return [];
   const budget = Number.isNaN(tokenBudget) ? DEFAULT_MEMORY_TOKEN_BUDGET : Math.floor(tokenBudget);
   const recalled = lines.filter((line) => line.content.length > 0);
-  if (recalled.length === 0) return '';
+  if (recalled.length === 0) return [];
+  const kept: RecallLine[] = [];
   let block = '';
   for (const line of recalled) {
     const text = `${line.prefix}${line.content}`;
     const next = block ? `${block}\n${text}` : text;
     if (estimateTokens(next) > budget) break;
     block = next;
+    kept.push(line);
   }
-  if (block) return block;
-  const { content } = recalled[0];
-  const room = budget * CHARS_PER_TOKEN - recalled[0].prefix.length;
-  const prefix = room >= 1 ? recalled[0].prefix : '';
+  if (kept.length > 0) return kept;
+  const first = recalled[0];
+  const { content } = first;
+  const room = budget * CHARS_PER_TOKEN - first.prefix.length;
+  const prefix = room >= 1 ? first.prefix : '';
   const maxChars = Math.max(1, room >= 1 ? room : budget * CHARS_PER_TOKEN);
   const head = codePointPrefix(content, maxChars);
   // Cut back to the last whitespace when the cut falls inside a word; text that fits whole is not cut.
   const whole = head.length >= content.length;
   const cut = whole || /\s/.test(content.charAt(maxChars)) ? head : head.replace(/\s+\S*$/, '');
-  return prefix + (cut.trimEnd() || head);
+  return [{ ...first, prefix, content: cut.trimEnd() || head }];
 }
 
 /**
@@ -211,8 +220,8 @@ export type SouledAgent = Agent & { memory?: Memory };
  * {@link agent} and says so in one `console.warn` line.
  *
  * Each stored turn records who spoke it in the trace's metadata ({@link SPEAKER_METADATA_KEY}), outside its text and
- * its tags, so recall never matches a trace by its speaker; each recalled trace is rendered on one line with its
- * speaker and its date. The wiki compile's model calls go on the agent's route with its fallback
+ * its tags, so recall never matches a trace by its speaker; each recalled trace is sent as one record, with its
+ * speaker and its date, in a data block. The wiki compile's model calls go on the agent's route with its fallback
  * settings, are checked against and charged to its spend budget, and are written to its usage ledger under the source
  * {@link SOULED_AGENT_COMPILE_SOURCE}.
  *
@@ -344,15 +353,32 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       const scored = await memory.recall(text, { limit: 8 });
       const now = Date.now();
       // A recalled trace carries no metadata, so each one's speaker is read from its stored record.
-      const lines = await Promise.all(
+      const lines: RecallLine[] = await Promise.all(
         scored.map(async ({ trace }) => {
           const page = wikiPageOf(trace);
-          const speaker = page ? `note ${page}` : speakerIn((await memory.readTrace(trace.id))?.metadata);
-          return { prefix: recallPrefix(trace, speaker, now), content: onOneLine(trace.content) };
+          const speaker = page ? ('note' as const) : speakerIn((await memory.readTrace(trace.id))?.metadata);
+          const label = page ? `note ${page}` : speaker;
+          return {
+            prefix: recallPrefix(trace, label, now),
+            content: onOneLine(trace.content),
+            ...(speaker ? { speaker } : {}),
+            ...(page ? { page } : {}),
+            when: formatMemoryAge(trace.createdAt, now),
+          };
         }),
       );
-      const contextText = recallWithinBudget(lines, options?.tokenBudget ?? DEFAULT_MEMORY_TOKEN_BUDGET);
-      return contextText ? { contextText } : null;
+      const kept = fitRecallLines(lines, options?.tokenBudget ?? DEFAULT_MEMORY_TOKEN_BUDGET);
+      if (kept.length === 0) return null;
+      return {
+        contextText: kept.map((line) => `${line.prefix}${line.content}`).join('\n'),
+        // The same lines as records: a line whose label was dropped for the budget keeps its text alone.
+        items: kept.map((line) => ({
+          ...(line.prefix && line.speaker ? { speaker: line.speaker } : {}),
+          ...(line.prefix && line.page ? { page: line.page } : {}),
+          ...(line.prefix ? { when: line.when } : {}),
+          text: line.content,
+        })),
+      };
     },
   };
 

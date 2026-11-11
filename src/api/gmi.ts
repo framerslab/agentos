@@ -899,8 +899,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
       maxToolLoopIterations: steps,
       defaultLlmProviderId: persona.defaultProviderId,
       defaultLlmModelId: persona.defaultModelId,
-      // Every model call: the memoryProvider block after the leading system
-      // messages (where the legacy path puts it), then onBeforeGeneration.
+      // Every model call: the memoryProvider's recall as a data block before the turn's user message, then
+      // onBeforeGeneration.
       beforeModelCall: async (ctx) => {
         step.index = ctx.stepIndex;
         turn.onModelCall?.({ providerId: ctx.providerId, modelId: ctx.modelId });
@@ -931,9 +931,16 @@ export function gmi(opts: GmiOptions): GmiHandle {
           changed = true;
         }
         if (turn.memoryContext) {
-          let insertAt = 0;
-          while (insertAt < messages.length && messages[insertAt].role === 'system') insertAt += 1;
-          messages = [...messages.slice(0, insertAt), { role: 'system', content: turn.memoryContext }, ...messages.slice(insertAt)];
+          // Recalled text is data in a user-role message right before the turn's own user message, never a system
+          // message, so the persona's hard limits stay the last system text.
+          let insertAt = messages.length;
+          for (let i = messages.length - 1; i >= 0; i -= 1) {
+            if (messages[i].role === 'user') {
+              insertAt = i;
+              break;
+            }
+          }
+          messages = [...messages.slice(0, insertAt), { role: 'user', content: turn.memoryContext }, ...messages.slice(insertAt)];
           changed = true;
         }
         if (opts.onBeforeGeneration) {

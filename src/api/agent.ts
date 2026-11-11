@@ -22,6 +22,7 @@ import {
   type GenerationHookResult,
   type Message,
   type MessageContent,
+  type SystemContentBlock,
   type ToolCallHookInfo,
 } from './generateText.js';
 import { buildResponseFormatForProvider } from './runtime/responseFormatForProvider.js';
@@ -42,6 +43,7 @@ import { loadSoulSync, parseSoul, SoulLoadError, type LoadedSoul } from '../cogn
 import { renderPersonalitySection } from '../cognition/substrate/personas/personalityPrompt.js';
 import { hardLimitsBlock } from '../cognition/substrate/personas/hardLimits.js';
 import { withHardLimitsLast } from './runtime/hardLimitsSystem.js';
+import { withMemoryRecallLine } from './runtime/memoryDataBlock.js';
 import type { ForgetReport, ImportReport, LearnedStateDocument, LearningConfig, LedgerEntry, LoopManifest } from '../cognition/learning/types.js';
 import type { HexacoTraitValues } from '../cognition/substrate/personas/hexaco.js';
 import type { AgencyLaunchOptions } from './runtime/agencyLaunch/types.js';
@@ -292,8 +294,9 @@ export interface AgentOptions extends BaseAgentConfig {
    * Optional memory provider. When provided, memory auto-wires on all four
    * agent call paths (see {@link AgentMemoryProvider} for hook contract).
    *
-   * - `getContext` runs before each LLM call; result prepended as a system
-   *   message.
+   * - `getContext` runs once per turn; its recall goes into every model call
+   *   of the turn as a data block in a user-role message before the turn's
+   *   own, with one static line of the system prompt that explains it.
    * - `observe` runs as fire-and-forget after each LLM call, except schema
    *   calls, which observe only the accepted exchange after validation.
    */
@@ -1060,8 +1063,11 @@ export function agent(opts: AgentOptions): Agent {
   // Loaded once, at build: a soul that fails to load throws here unless it is optional.
   const loadedSoul = opts.soul ? loadSoulFromOption(opts.soul) : null;
   const hardLimits = loadedSoul?.frontmatter.hardLimits;
+  // The static line that explains the recall block, for an agent whose provider recalls; before the limits.
+  const explainsRecall = Boolean(opts.memoryProvider?.getContext);
+  const withRecallLine = (system: string | SystemContentBlock[] | undefined) => (explainsRecall ? withMemoryRecallLine(system) : system);
   // The soul's hard limits close the system prompt, after systemBlocks too.
-  const agentSystem = withHardLimitsLast(opts.systemBlocks ?? buildSystemPrompt(opts, loadedSoul), hardLimits);
+  const agentSystem = withHardLimitsLast(withRecallLine(opts.systemBlocks ?? buildSystemPrompt(opts, loadedSoul)), hardLimits);
   // A string prompt carries no mark, so the block's text goes beside it for generateText's split.
   const hardLimitsText = hardLimitsBlock(hardLimits) ?? undefined;
   // The agent's stable id, which the memory hooks are told: its soul's id, else a named agent's id.
@@ -1190,7 +1196,7 @@ export function agent(opts: AgentOptions): Agent {
   const callOptions = (extra: Partial<GenerateTextOptions> | undefined): Partial<GenerateTextOptions> => {
     // A call's own system prompt replaces the agent's, and the hard limits close it too.
     // A call that sets `system`, even to undefined, still closes with the limits.
-    let merged = { ...baseOpts, ...extra, ...(extra && 'system' in extra ? { system: withHardLimitsLast(extra.system, hardLimits) } : {}) };
+    let merged = { ...baseOpts, ...extra, ...(extra && 'system' in extra ? { system: withHardLimitsLast(withRecallLine(extra.system), hardLimits) } : {}) };
     if (!extra || (extra.provider === undefined && extra.model === undefined)) return merged;
     if (
       extra.provider === undefined &&
