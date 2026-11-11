@@ -279,6 +279,38 @@ function sameStatement(a: MemoryTrace['provenance'], b: MemoryTrace['provenance'
   );
 }
 
+/** The trust policy and provenance a Brain row's metadata holds, each where it has the shape `store()` writes. */
+interface RowStatement {
+  policy?: NonNullable<MemoryTrace['policy']>;
+  provenance?: MemoryTrace['provenance'];
+}
+
+function rowStatementOf(row: Pick<MemoryTraceRow, 'metadata'>): RowStatement {
+  const { policy, provenance } = parseTraceMetadata(row.metadata);
+  return {
+    policy: isTrustPolicy(policy) ? policy : undefined,
+    provenance: isStoredProvenance(provenance) ? provenance : undefined,
+  };
+}
+
+/**
+ * Whether a row names another trust policy or another statement than `trace` holds, so the trace was stored again
+ * after `trace` was. A row that differs only in `lastVerifiedAt` or `contradictedBy` does not: those are what a
+ * process records after its own store, and `persistTraceMetadata` writes them to the vector store, not the row.
+ */
+function rowRestatesTrace(row: RowStatement, trace: MemoryTrace): boolean {
+  return Boolean(
+    (row.policy && !sameTrustPolicy(row.policy, trace.policy)) ||
+      (row.provenance && !sameStatement(row.provenance, trace.provenance)),
+  );
+}
+
+/** The live row of one trace, read again where a write may have run since the first read. */
+const LIVE_TRACE_ROW_SQL = `SELECT id, type, scope, content, embedding, strength, created_at,
+        last_accessed, retrieval_count, tags, emotions, metadata, deleted, scope_id
+   FROM memory_traces
+  WHERE brain_id = ? AND id = ? AND deleted = 0`;
+
 /** Parse a JSON string and return `undefined` on any failure. */
 function safeParseJson<T>(raw: string): T | undefined {
   try {
@@ -1514,11 +1546,13 @@ export class MemoryStore {
    * out until this store follows the move. A cached trace is answered from the cache; when its row names another
    * trust policy or another statement (source, time, confidence, verification count: another process stored the trace
    * again), it takes the row's policy and provenance, and a verification this process recorded since its own store
-   * (`lastVerifiedAt`, `contradictedBy`, which the row does not hold) stays when the statement is the same. A live
-   * row with a usable embedding is filed in the cache and the vector index as the store's hydration files one; a row without
-   * one is returned for this call only and not cached, since the store holds no vector for it, and is read again
-   * when a delete or a move ran after the first read. A trace that is inactive, tombstoned or delete-pending is left
-   * out.
+   * (`lastVerifiedAt`, `contradictedBy`, which the row does not hold) stays when the statement is the same. That row is
+   * read again inside the trace's turn before it is applied, so a `store()` of this process that wrote a newer row
+   * after the first read keeps what it wrote. A live row with a usable embedding is filed in the cache and the vector
+   * index as the store's hydration files one; a row without one is returned for this call only and not cached, since
+   * the store holds no vector for it, and is read again when a delete or a move ran after the first read (a `store()`
+   * of the same id that ran first answers with the trace it filed). A trace that is inactive, tombstoned or
+   * delete-pending is left out.
    *
    * Never throws: when the Brain cannot be read, no trace is returned and `unread` counts the ids.
    *
@@ -1552,6 +1586,7 @@ export class MemoryStore {
     const durable = await this.reconcileDurableTraceStates(ids, namespace, brain);
     if (!durable.ok) return { traces, unread: ids.length };
     const uncached: MemoryTraceRow[] = [];
+    let unread = 0;
     for (const id of ids) {
       const row = durable.rows.get(id);
       if (!row || Number(row.deleted ?? 0) !== 0) continue;
@@ -1559,21 +1594,33 @@ export class MemoryStore {
       if (cached) {
         if (rowFiledElsewhere(row, cached.scope, cached.scopeId)) continue;
         // The row holds what the last `store()` of the trace wrote. A row whose trust policy or statement (source,
-        // time, confidence, verification count) differs was stored again elsewhere: its policy and provenance are the
+        // time, confidence, verification count) differs was stored again since: its policy and provenance are the
         // trace's now, so neither a confidence nor a verification of the earlier copy carries over. A row that differs
         // only in `lastVerifiedAt` or `contradictedBy` holds less than this process verified since, which
         // `persistTraceMetadata` writes to the vector store and not the row: the cached provenance stands.
-        const { policy, provenance } = parseTraceMetadata(row.metadata);
-        const rowPolicy = isTrustPolicy(policy) ? policy : undefined;
-        const rowProvenance = isStoredProvenance(provenance) ? provenance : undefined;
-        if (
-          (rowPolicy && !sameTrustPolicy(rowPolicy, cached.policy)) ||
-          (rowProvenance && !sameStatement(rowProvenance, cached.provenance))
-        ) {
-          if (rowPolicy) cached.policy = { ...rowPolicy };
-          if (rowProvenance) cached.provenance = { ...rowProvenance };
+        if (!rowRestatesTrace(rowStatementOf(row), cached)) {
+          traces.set(id, cached);
+          continue;
         }
-        traces.set(id, cached);
+        // The row was read outside the trace's turn, so a store() of this process may have written a newer row and
+        // filed its trace since. Inside the turn, behind any store() in flight, the row is read again and the trace
+        // the cache holds then takes what that row holds.
+        try {
+          await withTraceOperation(namespace, id, 'normal', async ({ blockedByDelete }) => {
+            if (blockedByDelete) return;
+            const current = await brain.get<MemoryTraceRow>(LIVE_TRACE_ROW_SQL, [brain.brainId, id]);
+            const trace = served(id);
+            if (!current || !trace || rowFiledElsewhere(current, trace.scope, trace.scopeId)) return;
+            const statement = rowStatementOf(current);
+            if (rowRestatesTrace(statement, trace)) {
+              if (statement.policy) trace.policy = { ...statement.policy };
+              if (statement.provenance) trace.provenance = { ...statement.provenance };
+            }
+            traces.set(id, trace);
+          });
+        } catch {
+          unread += 1;
+        }
         continue;
       }
       if (!this.traceCache.has(id) && !this.tombstonedTraceIds.has(id)) uncached.push(row);
@@ -1587,7 +1634,6 @@ export class MemoryStore {
     } catch {
       // A row that did not file is read below as one with no vector.
     }
-    let unread = 0;
     for (const row of uncached) {
       const filed = served(row.id);
       if (filed) {
@@ -1598,17 +1644,17 @@ export class MemoryStore {
       try {
         await withTraceOperation(namespace, row.id, 'normal', async ({ blockedByDelete }) => {
           if (blockedByDelete || this.tombstonedTraceIds.has(row.id) || hasDeletedTrace(namespace, row.id)) return;
+          // A store() of this id that held the turn before this one has filed its own trace and row: that is the trace.
+          const stored = served(row.id);
+          if (stored) {
+            traces.set(row.id, stored);
+            return;
+          }
           // A delete or a move may have run since the read: the row is read again, as hydration reads one.
           let current: MemoryTraceRow | null = row;
           const now = hydrationEpochs(namespace);
           if (now.deletes !== epochs.deletes || now.refiles !== epochs.refiles) {
-            current = await brain.get<MemoryTraceRow>(
-              `SELECT id, type, scope, content, embedding, strength, created_at,
-                      last_accessed, retrieval_count, tags, emotions, metadata, deleted, scope_id
-                 FROM memory_traces
-                WHERE brain_id = ? AND id = ? AND deleted = 0`,
-              [brain.brainId, row.id],
-            );
+            current = await brain.get<MemoryTraceRow>(LIVE_TRACE_ROW_SQL, [brain.brainId, row.id]);
           }
           if (current) traces.set(row.id, this.rowToTrace(current));
         });
