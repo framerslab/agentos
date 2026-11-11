@@ -37,7 +37,7 @@ import { resolveStorageAdapter } from '@framers/sql-storage-adapter';
 import type { StorageAdapter } from '@framers/sql-storage-adapter';
 import pino from 'pino';
 import { InvalidWikiPageIdError, UserWikiStore, WikiCompiler } from '../../../../substrate/memory/wiki/index.js';
-import type { CompileResult, WikiPage } from '../../../../substrate/memory/wiki/index.js';
+import type { CompileResult, UserWikiPagesPort, WikiPage } from '../../../../substrate/memory/wiki/index.js';
 import { resetLoggerFactory, setLogger } from '../../../../../core/logging/loggerFactory.js';
 
 const POSTGRES_URL = process.env.AGENTOS_TEST_POSTGRES_URL;
@@ -990,6 +990,144 @@ describe.each(STORES)('scopes kept apart on every path, on %s', (store) => {
 
     expect(bodyOf(await pages.readPage('concepts/b'))).toBe('Alice keeps a ferret.');
     expect(bodyOf(await pages.readPage('concepts/a'))).toBe('Alice likes tea.');
+  });
+
+  it('a forced re-index keeps the summary a write of the scope gave a page meanwhile', async () => {
+    const { memory } = await open(store);
+    const pages = new UserWikiStore({ scopeId: A, pages: memory, chunk });
+    await pages.writePage({ ...P('Alice likes tea.'), id: 'concepts/a' });
+    await pages.writePage({ ...P('Alice has a cat.'), id: 'concepts/b' });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let held = false;
+    const facade = memory as unknown as { _embeddingBlobOf: (text: string) => Promise<unknown> };
+    const embed = facade._embeddingBlobOf.bind(memory);
+    facade._embeddingBlobOf = async (text: string) => {
+      if (!held && text.includes('tea')) {
+        held = true;
+        await gate;
+      }
+      return embed(text);
+    };
+
+    const reindexed = pages.index({ force: true });
+    for (let i = 0; i < 400 && !held; i += 1) await pause(5);
+    expect(held).toBe(true);
+    // The body the re-index listed, with a new summary.
+    const resummarized = pages.writePage({ ...P('Alice has a cat.'), id: 'concepts/b', summary: 'What Alice keeps at home' });
+    release();
+    await reindexed;
+    await resummarized;
+
+    const b = await pages.readPage('concepts/b');
+    expect(b?.summary).toBe('What Alice keeps at home');
+    expect(bodyOf(b)).toBe('Alice has a cat.');
+  });
+
+  it('a page write leaves no chunk its row does not list when another process rewrites the page meanwhile', async () => {
+    const { memory, brain } = await open(store);
+    const pages = new UserWikiStore({ scopeId: A, pages: memory, chunk });
+    await pages.writePage(P('Alice likes tea.'));
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let held = false;
+    const facade = memory as unknown as {
+      _embeddingBlobOf: (text: string) => Promise<unknown>;
+      _writePageRow: UserWikiPagesPort['writePageRow'];
+    };
+    const embed = facade._embeddingBlobOf.bind(memory);
+    facade._embeddingBlobOf = async (text: string) => {
+      if (!held && text.includes('espresso')) {
+        held = true;
+        await gate;
+      }
+      return embed(text);
+    };
+    // A writer in another process: the same rows, and none of this process's ordering of page writes.
+    const otherProcess = new UserWikiStore({
+      scopeId: A,
+      chunk,
+      pages: {
+        readPageRow: (scopeId, pageId) => memory.readPageRow(scopeId, pageId),
+        listPageRows: (scopeId) => memory.listPageRows(scopeId),
+        writePageRow: (scopeId, page) => facade._writePageRow.call(memory, scopeId, page),
+        deletePageRows: (scopeId, pageId) => memory.deletePageRows(scopeId, pageId),
+      },
+    });
+
+    const written = pages.writePage(P('Alice drinks espresso.'));
+    for (let i = 0; i < 400 && !held; i += 1) await pause(5);
+    expect(held).toBe(true);
+    await otherProcess.writePage(P('Alice keeps a ferret.'));
+    release();
+    await written;
+
+    const rows = await pageRows(brain);
+    expect(rows).toHaveLength(1);
+    expect(await traceIdsUnder(brain, A)).toEqual(chunkIdsOf(rows[0]!));
+  });
+
+  it('deleteScope keeps the registry row of a scope a message is stored under while it deletes', async () => {
+    const { memory, brain } = await open(store);
+    await memory.remember('Alice likes tea.', { scope: 'conversation', scopeId: A });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let deleted = false;
+    const facade = memory as unknown as { deleteTraces: (ids: readonly string[]) => Promise<{ deleted: number }> };
+    const deleteTraces = facade.deleteTraces.bind(memory);
+    facade.deleteTraces = async (ids) => {
+      const result = await deleteTraces(ids);
+      deleted = true;
+      await gate;
+      return result;
+    };
+
+    const deleting = memory.deleteScope('conversation', A);
+    for (let i = 0; i < 400 && !deleted; i += 1) await pause(5);
+    expect(deleted).toBe(true);
+    // Stored once the delete has read the scope's traces, before it comes to the registry row.
+    await memory.remember('Alice keeps a kestrel.', { scope: 'conversation', scopeId: A });
+    release();
+    await deleting;
+
+    expect(await contentsUnder(brain, A)).toEqual(['Alice keeps a kestrel.']);
+    expect((await scopeRows(brain)).map((row) => row.scope_id)).toEqual([A]);
+  });
+
+  it("a scope's pages and traces deleted while its compile runs leave nothing of the scope", async () => {
+    const { memory, brain } = await open(store);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const prompts = attachRows(memory, {
+      llm: async () => {
+        await gate;
+        return 'Merged notes.';
+      },
+    });
+    await memory.remember('Alice likes tea.', { scope: 'conversation', scopeId: A });
+    const compiling = memory.compileWiki();
+    for (let i = 0; i < 400 && prompts.length < 1; i += 1) await pause(5);
+    expect(prompts).toHaveLength(1);
+
+    // The scope deleted as an account's deletion deletes it: its pages, then its traces.
+    const pages = new UserWikiStore({ scopeId: A, pages: memory, chunk });
+    const forgotten = pages.deleteAll().then(() => memory.deleteScope('conversation', A));
+    await pause(20);
+    release();
+    await compiling;
+    await forgotten;
+
+    expect(await pageRows(brain)).toEqual([]);
+    expect(await traceIdsUnder(brain, A)).toEqual([]);
+    expect(await scopeRows(brain)).toEqual([]);
   });
 
   if (store === 'postgres') {

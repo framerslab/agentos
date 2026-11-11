@@ -1143,6 +1143,69 @@ describe("an account's policy on turns that overlap", () => {
       await a.close();
     }
   });
+
+  it('an answer asked for before a later off answer, and given after it, takes back nothing of that off', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const asked: string[] = [];
+    // The first session's answer is asked for first and comes last.
+    const memoryPolicy = async (context: { sessionId: string }) => {
+      asked.push(context.sessionId);
+      if (context.sessionId === 'sb') return { longTerm: 'off' };
+      await gate;
+      return { longTerm: 'compiled' };
+    };
+    const { a, s } = await opened({}, { memoryPolicy, memoryProviderOptions: { timeoutMs: 4_000 } });
+    const first = say(a, { session: 'sa', user: 'alice' }, 'My owl is named Wexford.');
+    await vi.waitFor(() => expect(asked).toEqual(['sa']));
+    await say(a, { session: 'sb', user: 'alice' }, 'Keep nothing of me.');
+    release();
+    await first;
+    // The turn files under the answer it was given.
+    await stored(a, 'My owl is named Wexford.');
+    await a.close();
+
+    // The host's latest answer for the account is off: nothing of it is compiled.
+    expect(mergesOf(s)).toEqual([]);
+    expect(await pageRowCount()).toBe(0);
+    expect(lines('memory.compile_skipped').map((line) => line.reason)).toContain('policy_raw');
+  });
+});
+
+describe("an account's policy while its compile screens the traces", () => {
+  it('an off answer given while the compile waits for the screen stops that compile', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let screening = false;
+    const screen = async (text: string, context: { stage: string }) => {
+      if (context.stage === 'compile') {
+        screening = true;
+        await gate;
+      }
+      return text;
+    };
+    const memoryPolicy = (context: { sessionId: string }) => (context.sessionId === 'sb' ? { longTerm: 'off' } : { longTerm: 'compiled' });
+    const { a, s } = await opened({}, { memoryPolicy, screen, memoryProviderOptions: { timeoutMs: 4_000 } });
+    await say(a, { session: 'sa', user: 'alice' }, 'My owl is named Wexford.');
+    await stored(a, 'My owl is named Wexford.');
+    await stored(a, 'Noted.');
+    const compiling = a.memory!.compileWiki();
+    await vi.waitFor(() => expect(screening).toBe(true));
+    // The host's answer for the account turns off while the compile waits for its screen.
+    await say(a, { session: 'sb', user: 'alice' }, 'Keep nothing of me.');
+    release();
+    await compiling;
+    await a.close();
+
+    expect(mergesOf(s)).toEqual([]);
+    expect(await pageRowCount()).toBe(0);
+  });
 });
 
 describe("an account's policy across its session's close", () => {
