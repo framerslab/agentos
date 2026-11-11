@@ -151,6 +151,45 @@ describe.each(ENGINES)('loadTracesForRecall on %s', (_engine, open) => {
     await db.close();
   });
 
+  it("a cached trace stored again elsewhere under the same policy takes the row's provenance, so the row's confidence is the one checked", async () => {
+    const db = await open();
+    const store = await storeOver(db.brain, new FlatEmbedder());
+    const everything = { usableForAuthorization: true, usableForPersonalization: true, usableForFactClaim: true };
+    const sure = { sourceType: 'user_statement' as const, sourceTimestamp: NOW - 60_000, confidence: 1, verificationCount: 0 };
+    await store.store(trace('pass', 'The harbor pass number is 7781.', { policy: everything, provenance: sure }));
+    const row = await db.brain.get<{ metadata: string }>('SELECT metadata FROM memory_traces WHERE brain_id = ? AND id = ?', [db.brain.brainId, 'pass']);
+    // Another process stores the trace again under the same policy, at a confidence of 0.2.
+    await db.brain.run('UPDATE memory_traces SET metadata = ? WHERE brain_id = ? AND id = ?', [
+      JSON.stringify({ ...JSON.parse(row!.metadata), provenance: { ...sure, confidence: 0.2 } }),
+      db.brain.brainId,
+      'pass',
+    ]);
+    expect(store.getTrace('pass')!.provenance.confidence).toBe(1);
+
+    const leg = await exactWordsLeg({ store, lexical: null }, { query: 'harbor pass', scopes: U1, limit: 5, now: NOW, minConfidence: 0.5 });
+    expect(leg).toMatchObject({ ran: true, traces: [], ineligible: 1 });
+    expect(store.getTrace('pass')!.provenance).toEqual({ ...sure, confidence: 0.2 });
+    store.dispose();
+    await db.close();
+  });
+
+  it("a verification this process recorded stays when the row holds the same statement, as persistTraceMetadata writes it beside the row", async () => {
+    const db = await open();
+    const store = await storeOver(db.brain, new FlatEmbedder());
+    const hourly = { usableForAuthorization: true, usableForPersonalization: true, usableForFactClaim: true, requiresReverificationAfterMs: 3_600_000 };
+    const stated = { sourceType: 'user_statement' as const, sourceTimestamp: NOW - 172_800_000, confidence: 1, verificationCount: 1 };
+    await store.store(trace('pass', 'The harbor pass number is 7781.', { policy: hourly, provenance: stated }));
+    // The consolidation pass verifies the trace in this process: the cached trace and the vector store hold the time, the row does not.
+    store.getTrace('pass')!.provenance.lastVerifiedAt = NOW - 60_000;
+    await store.persistTraceMetadata('pass');
+
+    const { traces } = await store.loadTracesForRecall(['pass']);
+    expect(traces.get('pass')!.provenance.lastVerifiedAt).toBe(NOW - 60_000);
+    expect(isEligibleForRecall(traces.get('pass')!, { scopes: U1, now: NOW, usableFor: ['authorization'] })).toBe(true);
+    store.dispose();
+    await db.close();
+  });
+
   it('a row with no vector that a move refiles between its read and its load is returned as the Brain holds it after the move', async () => {
     const db = await open();
     const store = await storeOver(db.brain, new FlatEmbedder());
