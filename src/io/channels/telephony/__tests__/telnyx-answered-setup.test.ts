@@ -237,8 +237,10 @@ describe('a carrier-profile Telnyx notify call hung up after its message', () =>
     }
   });
 
-  it.each(['carrier', 'legacy'] as const)('hangs up once through processWebhook with eventHandling %s', async (eventHandling) => {
+  it.each(['carrier', 'legacy'] as const)('hangs up once through processWebhook with eventHandling %s, and ends the call once', async (eventHandling) => {
     const { manager, fetchMock } = setUp({ eventHandling });
+    const ended: string[] = [];
+    manager.on((event) => { if (event.type === 'call:ended') ended.push(event.call.state); });
     try {
       const call = await manager.initiateCall({ toNumber: '+15550000002', mode: 'notify', message: MESSAGE });
       manager.processWebhook('telnyx', signedEvent('call.answered', 'evt-answered'));
@@ -248,8 +250,14 @@ describe('a carrier-profile Telnyx notify call hung up after its message', () =>
       manager.processWebhook('telnyx', spoken);
       await vi.waitFor(() => expect(actions(fetchMock)).toEqual(['speak', 'hangup']));
       await vi.waitFor(() => expect(manager.getCall(call.callId)?.state).toBe('hangup-bot'));
+      await vi.waitFor(() => expect(ended).toEqual(['hangup-bot']));
+
+      // The call.hangup Telnyx posts for the hangup ends nothing again.
+      manager.processWebhook('telnyx', signedEvent('call.hangup', 'evt-hangup', { hangup_cause: 'normal_clearing' }));
       await settle();
       expect(actions(fetchMock)).toEqual(['speak', 'hangup']);
+      expect(ended).toEqual(['hangup-bot']);
+      expect(manager.getCall(call.callId)?.state).toBe('hangup-bot');
     } finally {
       manager.dispose();
     }
