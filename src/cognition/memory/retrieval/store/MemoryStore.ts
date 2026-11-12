@@ -1784,9 +1784,10 @@ export class MemoryStore {
       // keep the SQL read + vector upserts bounded for very long-lived scopes.
       // A process-level facade cache (so hydration runs once, not per request)
       // is the follow-up optimisation; the cap keeps the un-cached path safe.
+      // `scope_id` too: a row whose metadata names no scope id loads under the column's (`rowToTrace`).
       const rows = await brain.all<MemoryTraceRow>(
         `SELECT id, type, scope, content, embedding, strength, created_at,
-                last_accessed, retrieval_count, tags, emotions, metadata
+                last_accessed, retrieval_count, tags, emotions, metadata, scope_id
            FROM memory_traces
           WHERE brain_id = ? AND deleted = 0
           ORDER BY created_at DESC
@@ -1837,7 +1838,7 @@ export class MemoryStore {
           if (current.deletes !== epochs.deletes || current.refiles !== epochs.refiles) {
             const fresh = await brain.get<MemoryTraceRow>(
               `SELECT id, type, scope, content, embedding, strength, created_at,
-                      last_accessed, retrieval_count, tags, emotions, metadata
+                      last_accessed, retrieval_count, tags, emotions, metadata, scope_id
                  FROM memory_traces
                 WHERE brain_id = ? AND id = ? AND deleted = 0`,
               [brain.brainId, traceId],
@@ -2774,7 +2775,7 @@ export class MemoryStore {
     const epochs = hydrationEpochs(namespace);
     const rows = await brain.all<MemoryTraceRow>(
       `SELECT id, type, scope, content, embedding, strength, created_at,
-              last_accessed, retrieval_count, tags, emotions, metadata
+              last_accessed, retrieval_count, tags, emotions, metadata, scope_id
          FROM memory_traces
         WHERE brain_id = ? AND scope = ? AND scope_id = ? AND deleted = 0
         ORDER BY created_at DESC
@@ -3367,7 +3368,7 @@ export class MemoryStore {
       try {
         const row = await brain.get<MemoryTraceRow>(
           `SELECT id, type, scope, content, embedding, strength, created_at,
-                  last_accessed, retrieval_count, tags, emotions, metadata, deleted
+                  last_accessed, retrieval_count, tags, emotions, metadata, deleted, scope_id
              FROM memory_traces
             WHERE brain_id = ? AND id = ?`,
           [brain.brainId, traceId],
