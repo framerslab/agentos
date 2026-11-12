@@ -361,6 +361,7 @@ describe('the vector index after a delete', () => {
       embeddings: { provider: 'test', dimensions: 8 },
     });
     memories.push(reopened);
+    await reopened.recall('cello');
     const index = (reopened as unknown as { _hnswSidecar: HnswSidecar })._hnswSidecar;
     expect(index.size).toBe(2);
     expect(idsIn(mapFile)).toEqual([first.id, later.id].sort());
