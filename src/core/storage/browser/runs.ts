@@ -166,7 +166,8 @@ export interface RunOwner {
    * memory alone among them: call it again. The last
    * read of the rows after a sign-out or a session's end redraws them and leaves the answer as it is. A start made in
    * another tab within the ten seconds after that tab heard the stop is fenced there from its start, its record deleted
-   * or marked by that tab; a deletion or a mark the store refuses there is not in this answer.
+   * or marked by that tab; a deletion or a mark the store refuses there is not in this answer. With no channel, a
+   * start in another tab that writes its record after the second listing is neither fenced nor in this answer.
    */
   stopAccount(cut: 'removal' | 'signout' | 'session'): Promise<{ complete: boolean }>;
   /**
@@ -181,8 +182,9 @@ export interface RunOwner {
   subscribe(listener: () => void): () => void;
   /**
    * Called once when a run this owner holds or watches ends, fails or turns unsaved, and at no count. A run the
-   * account's stop or a dismissal fenced calls it at no end. With no channel, a run watched in another tab calls it
-   * only when its record turns failed or unsaved: its finish, stop or cut there is not heard.
+   * account's stop or a dismissal fenced calls it at no end, nor does one they reach while its last record write is in
+   * flight. With no channel, a run watched in another tab calls it only when its record turns failed or unsaved: its
+   * finish, stop or cut there is not heard.
    */
   subscribeEnds(listener: (read: RunRead, ended: RunEnd['ended']) => void): () => void;
   /** Each run's end, once every run this owner started has returned. */
@@ -646,11 +648,13 @@ class BrowserRunOwner implements RunOwner {
   /** The next attempt of a stopped or failed run, its lock handed over when the job is the same; the earlier attempt's record goes. */
   async continueRun(id: string, job: RunJob): Promise<{ id: string } | { refused: 'another-tab' }> {
     const old = this.held.get(id);
+    // An account stop that begins and ends while the attempt before this one returns fences this one too.
+    const since = this.stopCuts.length;
     if (old && old.ended === null) await old.done;
     // The run's own lock passes to the next attempt of the same job, so the two take one lock.
     const lock = old && old.release !== null && old.job.key === job.key ? old.release : undefined;
     if (old && lock) old.release = null;
-    const started = await this.begin(job, { carry: old?.record, lock });
+    const started = await this.begin(job, { carry: old?.record, lock, since });
     if ('id' in started && old && this.held.get(old.record.id) === old) {
       this.drop(old);
       await this.deleteRecord(old.record.id);
@@ -662,8 +666,10 @@ class BrowserRunOwner implements RunOwner {
   /** A cut run's rest under its own id, from the record as read (a run this owner holds goes to `continueRun`). */
   async finish(id: string, job: RunJob): Promise<{ id: string } | { refused: 'another-tab' }> {
     if (this.held.has(id)) return this.continueRun(id, job);
+    // An account stop that begins and ends while the record is read fences this finish too.
+    const since = this.stopCuts.length;
     const resume = this.seen.get(id)?.read.record ?? (await this.readOne(id));
-    return this.begin(job, resume ? { resume } : {});
+    return this.begin(job, resume ? { resume, since } : { since });
   }
 
   /** Deletes the record and drops the run; another tab's record only while its lock can be held here. */
@@ -977,7 +983,10 @@ class BrowserRunOwner implements RunOwner {
   }
 
   /** Takes the job's lock (or the one handed over), writes the record before the job's first write, and runs the job. */
-  private async begin(job: RunJob, from: { resume?: RunRecord; carry?: RunRecord; lock?: () => void }): Promise<{ id: string } | { refused: 'another-tab' }> {
+  private async begin(
+    job: RunJob,
+    from: { resume?: RunRecord; carry?: RunRecord; lock?: () => void; since?: number },
+  ): Promise<{ id: string } | { refused: 'another-tab' }> {
     const now = this.now();
     const fresh = { total: job.total, pending: job.total ?? 0, applied: 0, skipped: 0, failed: 0 };
     const record: RunRecord = from.resume
@@ -1000,7 +1009,8 @@ class BrowserRunOwner implements RunOwner {
     });
     this.starting.add(settled);
     try {
-      const stopsBefore = this.stopCuts.length;
+      // The account stops logged since the caller began: one that ended before this start's lock was asked for counts.
+      const stopsBefore = from.since ?? this.stopCuts.length;
       // A stop running now, here or heard from another tab, fences this start even when it ends before the start's lock
       // is granted.
       const stopsRunning = this.stopsRunningNow();
@@ -1419,6 +1429,12 @@ class BrowserRunOwner implements RunOwner {
     else if (ended === 'stopped') held.record.state = 'stopping';
     held.record.progressed = this.now();
     await this.persist(held);
+    // Dismissed, or reached by the account's stop, while that write was in flight: no end is posted or heard.
+    if (this.held.get(held.record.id) !== held || this.isFenced(held)) {
+      this.ensureTimers();
+      this.touch();
+      return;
+    }
     this.post(held);
     this.fire(this.heldRead(held), ended);
     this.ensureTimers();
