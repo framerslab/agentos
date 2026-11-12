@@ -815,6 +815,21 @@ describe('export and correction', () => {
     expect(JSON.stringify(doc)).not.toContain('alice');
   });
 
+  it('exports every trace when an imported batch shares one timestamp', async () => {
+    const { a } = await open({ compile: false });
+    const ids: string[] = [];
+    for (let n = 0; n < 501; n += 1) {
+      const trace = await a.memory!.remember(`imported statement ${n}`, {
+        scope: 'conversation', scopeId: keyOf(alice), metadata: { speaker: 'user' },
+      });
+      ids.push(trace.id);
+    }
+    // An imported batch can retain a single timestamp for all its records.
+    await brainOf(a).run('UPDATE memory_traces SET created_at = ? WHERE scope_id = ?', [1_700_000_000_000, keyOf(alice)]);
+    const doc = await a.exportUserMemory!('alice');
+    expect(doc.traces.map((trace) => trace.id).sort()).toEqual(ids.sort());
+  }, 30_000);
+
   it('exports nothing for a forgotten user, and refuses an empty id', async () => {
     const { a } = await open();
     await turn(a, 's1', 'alice', 'My canary is LARK-7.');
