@@ -29,7 +29,8 @@
  * that hears the stop fences its own runs' records too. The whole stop answers within ten seconds, and answers whether
  * every record was deleted or marked, the records of this owner's starts in flight among them. With no channel, each
  * owner reads the records once a second and stops a run of its own whose record another owner's stop deleted or marked.
- * A start still waiting for its lock when the account stops, or made while the stop runs, is fenced from its start.
+ * A start still waiting for its lock when the account stops, or made while the stop runs, is fenced from its start; a
+ * tab that heard another tab's stop counts it as running for the ten seconds after its message, the longest it runs.
  * @module agentos/core/storage/browser/runs
  */
 import type { KeyValueStore } from '@framers/sql-storage-adapter/kv';
@@ -159,7 +160,9 @@ export interface RunOwner {
    * refused a listing, a read, a deletion or a mark, or a listing had not answered by the ten seconds, or a write or a
    * start was still in flight then (that record is deleted or marked once the write returns), a write of a run kept in
    * memory alone among them: call it again. The last
-   * read of the rows after a sign-out or a session's end redraws them and leaves the answer as it is.
+   * read of the rows after a sign-out or a session's end redraws them and leaves the answer as it is. A start made in
+   * another tab within the ten seconds after that tab heard the stop is fenced there from its start, its record deleted
+   * or marked by that tab.
    */
   stopAccount(cut: 'removal' | 'signout' | 'session'): Promise<{ complete: boolean }>;
   /**
@@ -172,7 +175,11 @@ export interface RunOwner {
   snapshot(): RunsSnapshot;
   /** Called when the snapshot changes, at most four times a second. */
   subscribe(listener: () => void): () => void;
-  /** Called once when a run this owner holds or watches ends, fails or turns unsaved, and at no count. */
+  /**
+   * Called once when a run this owner holds or watches ends, fails or turns unsaved, and at no count. A run the
+   * account's stop or a dismissal fenced calls it at no end. With no channel, a run watched in another tab calls it
+   * only when its record turns failed or unsaved: its finish, stop or cut there is not heard.
+   */
   subscribeEnds(listener: (read: RunRead, ended: RunEnd['ended']) => void): () => void;
   /** Each run's end, once every run this owner started has returned. */
   whenIdle(): Promise<Map<string, RunEnd>>;
@@ -576,6 +583,12 @@ class BrowserRunOwner implements RunOwner {
   private readonly stopCuts: AccountStop[] = [];
   /** This owner's account stops running now: a start that gets its lock while one runs fences itself too. */
   private readonly runningStops: AccountStop[] = [];
+  /**
+   * Another tab's account stops this owner heard, each counted as running until ten seconds after its message, the
+   * longest that stop runs: its second listing may already have read the records, so a start made here meanwhile is
+   * fenced from its start, as one made while this owner's own stop runs is.
+   */
+  private heardStops: Array<{ cut: AccountStop; until: number }> = [];
   /** The starts in flight, each settling once its record is written and fenced where a stop reached it. */
   private readonly starting = new Set<Promise<boolean>>();
   /** How many of this owner's fences of a start's record, or of its own records on a heard stop, the store refused. */
@@ -924,7 +937,7 @@ class BrowserRunOwner implements RunOwner {
     };
   }
 
-  /** Called once at each end of a run this owner holds or watches, and at no count. */
+  /** Called once at each end of a run this owner holds or watches, and at no count; never for a fenced run. */
   subscribeEnds(listener: (read: RunRead, ended: Ended) => void): () => void {
     this.endListeners.add(listener);
     return () => {
@@ -984,8 +997,9 @@ class BrowserRunOwner implements RunOwner {
     this.starting.add(settled);
     try {
       const stopsBefore = this.stopCuts.length;
-      // A stop running now fences this start even when it ends before the start's lock is granted.
-      const stopsRunning = [...this.runningStops];
+      // A stop running now, here or heard from another tab, fences this start even when it ends before the start's lock
+      // is granted.
+      const stopsRunning = this.stopsRunningNow();
       let release = from.lock;
       if (!release) {
         // A finish holds the cut run's own lock too, so one tab alone finishes it whatever key its new pick makes.
@@ -1066,6 +1080,13 @@ class BrowserRunOwner implements RunOwner {
       this.starting.delete(settled);
       settle(fenced);
     }
+  }
+
+  /** The account's stops running now: this owner's own, and those heard from another tab within their ten seconds. */
+  private stopsRunningNow(): AccountStop[] {
+    const now = Date.now();
+    this.heardStops = this.heardStops.filter((stop) => stop.until > now);
+    return [...this.runningStops, ...this.heardStops.map((stop) => stop.cut)];
   }
 
   /** Holds the run lock of a job's key, or answers null at once when it is held. */
@@ -1480,6 +1501,9 @@ class BrowserRunOwner implements RunOwner {
     if (this.closed || !isRunMessage(message) || message.account !== this.account) return;
     if ('stop' in message) {
       this.stopCuts.push(message.stop);
+      // The stopping tab's stop goes on for up to ten seconds after its message, and its second listing may already
+      // have read the records: a start made here meanwhile is fenced from its start.
+      this.heardStops.push({ cut: message.stop, until: Date.now() + STOP_WAIT });
       // A run started here after the other tab listed the records has a record that listing missed: this owner deletes
       // or marks its own runs' records under their locks, as the stopping tab does.
       for (const held of this.held.values()) {
