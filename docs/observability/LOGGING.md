@@ -50,7 +50,7 @@ The guardrail dispatchers, `moderateContent()` and the image guard write six eve
 
 `type` and `code` come from `listedErrorFields()`. A guard's id that is not a valid word is written `unknown`.
 
-The `code` of `guardrail.verdict` is the deciding evaluation's reason code, or a hold's review code. It is written only when the deciding guard lists it in `config.reasonCodes` or the library made the evaluation for a closed guard's failure (`GUARDRAIL_ERROR`, `GUARDRAIL_MALFORMED`; a guard that answers one of those codes itself does not count); any other code, a model's answer or a vendor's label included, is written `unknown`. `surface` is the word from `context.moderation.surface`. A plain allow writes no line, and no line carries the content.
+The `code` of `guardrail.verdict` is the deciding evaluation's reason code, or a hold's review code. It is written only when the deciding guard lists it in `config.reasonCodes` or the library made the evaluation for a closed guard's failure (`GUARDRAIL_ERROR`, `GUARDRAIL_MALFORMED`; a guard that answers one of those codes itself does not count); any other code, a model's answer or a vendor's label included, is written `unknown`. `surface` is the word from `context.moderation.surface`. A plain allow writes no line, and no line carries the content. The `guards` option of `generateText()` and `streamText()` writes the same line for each stage decision, with `stage` `input`, `output` or `tool_call`.
 
 ### One line per server request
 

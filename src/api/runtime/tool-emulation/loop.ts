@@ -40,6 +40,13 @@ export interface RunEmulatedToolLoopOptions {
    */
   onToolExecute?: (toolName: string) => void;
   /**
+   * Asked about each parsed call before `onBeforeToolExecution`, with the
+   * arguments the model sent. An answer other than null refuses the call: no
+   * hook is called, the tool does not run and the model reads `error`, with
+   * the guard's `reasonCode` when it gave one.
+   */
+  judgeToolCall?: (call: { name: string; args: Record<string, unknown>; step: number; index: number; registered: boolean }) => Promise<{ error: string; result: { reasonCode?: string } } | null>;
+  /**
    * Called before each parsed call runs, on `{ name, args, id: '', step }`.
    * The returned `args` replace the call's; `null` skips the tool. A hook
    * that throws is logged and the tool runs, unless `hookErrors` is `'throw'`.
@@ -124,8 +131,16 @@ export async function runEmulatedToolLoop(
     }
     // Execute all calls in the turn (batch / parallel within the turn).
     const results = await Promise.all(
-      calls.map(async (call) => {
+      calls.map(async (call, index) => {
         const tool = toolMap.get(call.name);
+        // Guards judge the call before anything else sees it, an unknown tool's call included.
+        if (opts.judgeToolCall) {
+          const refusal = await opts.judgeToolCall({ name: call.name, args: call.arguments, step, index, registered: tool !== undefined });
+          if (refusal) {
+            toolCalls.push({ name: call.name, args: call.arguments, error: refusal.error });
+            return formatToolResponse(call.name, { success: false, error: refusal.result.reasonCode ? `${refusal.error} Code: ${refusal.result.reasonCode}.` : refusal.error });
+          }
+        }
         if (!tool) {
           return formatToolResponse(call.name, { success: false, error: `unknown tool "${call.name}"` });
         }

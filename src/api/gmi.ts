@@ -1023,6 +1023,11 @@ export function gmi(opts: GmiOptions): GmiHandle {
   const unrecordedEnds = new Map<string, GenerationEnd>();
   const agentTally = createEmptyUsageAggregate();
 
+  /** A session's send or stream with `guards` throws as generate() and stream() do: nothing here would enforce them. */
+  function refuseGuards(callOpts: { guards?: unknown } | undefined): void {
+    if (callOpts?.guards !== undefined) throw new Error("gmi(): the per-call option 'guards' is not supported on the GMI path.");
+  }
+
   /** The per-call overrides as completion options; throws naming an override the GMI path does not take. */
   function overridesOf(extra?: Partial<GenerateTextOptions>): Record<string, unknown> {
     const out: Record<string, unknown> = {};
@@ -1331,6 +1336,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
       const session = {
         id: sessionId,
         send: async (input: MessageContent, sendOpts?: SessionSendOptions<GmiTurnOptions['responseSchema']>) => {
+          refuseGuards(sendOpts);
           const callerSignal = sendOpts?.abortSignal;
           // A send whose signal has already aborted starts no turn.
           callerSignal?.throwIfAborted();
@@ -1359,13 +1365,15 @@ export function gmi(opts: GmiOptions): GmiHandle {
           });
         },
         // As in send(), the turn takes the caller's budget and the gate, tool names and hooks a seat puts on its calls.
-        stream: (input: MessageContent, streamOpts?: { abortSignal?: AbortSignal; budget?: SpendBudget | SpendBudgetOptions }) =>
-          streamGmiTurn(deps('agent.session.stream', streamOpts), input, {
+        stream: (input: MessageContent, streamOpts?: { abortSignal?: AbortSignal; budget?: SpendBudget | SpendBudgetOptions; guards?: GenerateTextOptions['guards'] }) => {
+          refuseGuards(streamOpts);
+          return streamGmiTurn(deps('agent.session.stream', streamOpts), input, {
             abortSignal: turnSignal(streamOpts?.abortSignal),
             ...(streamOpts?.abortSignal ? { callerSignal: streamOpts.abortSignal } : {}),
             budget: turnBudget(streamOpts?.budget),
             ...seatTurnOf(streamOpts),
-          }),
+          });
+        },
         messages: (): SessionTranscriptMessage[] => history?.messages() ?? [],
         reseed: (snapshot: SessionTranscriptMessage[]) => {
           if (!history) throw new Error('reseed requires session history (history: false is set on this agent)');
