@@ -262,6 +262,21 @@ describe.each(ENGINES)('loadTracesForRecall on %s', (_engine, open) => {
     await db.close();
   });
 
+  it('a cached trace whose row was written since with another type and creation time is returned as the row holds them, so the gate reads what the query selected', async () => {
+    const db = await open();
+    const store = await storeOver(db.brain, new FlatEmbedder());
+    await store.store(trace('pass', 'The harbor pass number is 7781.', { type: 'semantic', createdAt: NOW - 86_400_000 }));
+    // Another process stores the same words under the same id as an episode, created later.
+    await db.brain.run('UPDATE memory_traces SET type = ?, created_at = ? WHERE brain_id = ? AND id = ?', ['episodic', NOW - 60_000, db.brain.brainId, 'pass']);
+
+    const leg = await exactWordsLeg({ store, lexical: null }, { query: 'harbor pass', scopes: U1, limit: 5, now: NOW, types: ['episodic'], after: NOW - 120_000 });
+    expect(leg).toMatchObject({ ran: true, ineligible: 0 });
+    expect(leg.traces.map((t) => [t.id, t.type, t.createdAt])).toEqual([['pass', 'episodic', NOW - 60_000]]);
+    expect(store.getTrace('pass')).toMatchObject({ type: 'semantic', createdAt: NOW - 86_400_000 });
+    store.dispose();
+    await db.close();
+  });
+
   it("this process's own changes to a cached trace stay while its row is as this store wrote it: a verification count it persisted, a gist of its words", async () => {
     const db = await open();
     const store = await storeOver(db.brain, new FlatEmbedder());
@@ -305,11 +320,11 @@ describe.each(ENGINES)('loadTracesForRecall on %s', (_engine, open) => {
               const rows = await b.all(sql, params as never);
               if (armed && sql.includes('id IN')) {
                 armed = false;
-                // A store() of `second` holds its turn; while the load waits on it, `first` (already read) is deleted.
+                // A store() of `second` holds its turn; while the load waits on it, `first` (already read) is deleted,
+                // and the store() is let go only once the delete has finished.
                 gate = new Promise<void>((resolve) => { release = resolve; });
                 stored = store.store(trace('second', 'The ferry ticket number is 5520.'));
-                setTimeout(() => { deleted = store.deleteTraces(['first']); }, 50);
-                setTimeout(() => release(), 150);
+                setTimeout(() => { deleted = store.deleteTraces(['first']).finally(() => release()); }, 50);
               }
               return rows;
             }
