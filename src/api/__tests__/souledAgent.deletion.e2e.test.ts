@@ -17,6 +17,9 @@
  * - A store more than one user or session shares needs a retention choice; the sweep deletes expired traces and the
  *   pages they fed (whole, or rebuilt from the traces that survive), on its own period for anonymous sessions, and
  *   leaves operator pages and older memory.
+ * - A person's memory is exported as JSON from their own scope alone, and corrected: the wrong traces are deleted for
+ *   good, the correction is filed, and the pages built from them are rebuilt by the next compile; a correction that
+ *   names a trace that is not the person's own changes nothing.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
@@ -774,5 +777,112 @@ describe('retention', () => {
     at(start + 31 * DAY);
     expect(await a.sweepRetention!()).toMatchObject({ traces: 2 });
     expect(tracesOf(keyOf(bob))).toEqual([]);
+  });
+});
+
+describe('export and correction', () => {
+  it("exports one user's traces and pages, and nothing of anyone else", async () => {
+    const { a } = await open();
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await turn(a, 's2', 'bob', 'My canary is WREN-2.');
+    await a.memory!.compileWiki();
+    const said = saidOf(keyOf(alice)).map((trace) => trace.id);
+    expect(said).toHaveLength(2);
+
+    const doc = await a.exportUserMemory!('alice');
+    expect(doc.agentId).toBe('aria-1');
+    expect(doc.subject).toEqual({ kind: 'user' });
+    expect(Number.isNaN(Date.parse(doc.exportedAt))).toBe(false);
+    expect(doc.traces.map((trace) => trace.speaker)).toEqual(['user', 'assistant']);
+    expect(doc.traces[0].text).toBe('My canary is LARK-7.');
+    expect(doc.traces.map((trace) => trace.id).sort()).toEqual([...said].sort());
+    for (const trace of doc.traces) {
+      expect(Number.isNaN(Date.parse(trace.createdAt))).toBe(false);
+      expect(trace.tags).not.toContain('wiki');
+    }
+    expect(doc.pages).toHaveLength(1);
+    const [page] = doc.pages;
+    expect(page.id).toBe('concepts/notes');
+    expect([...page.sources].sort()).toEqual([...said].sort());
+    expect(typeof page.summary).toBe('string');
+    expect(Number.isNaN(Date.parse(page.updated))).toBe(false);
+    expect(page.body.length).toBeGreaterThan(0);
+    expect(JSON.stringify(doc)).not.toContain('WREN-2');
+    expect(JSON.stringify(doc)).not.toContain('alice');
+  });
+
+  it('exports nothing for a forgotten user, and refuses an empty id', async () => {
+    const { a } = await open();
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await a.forgetUser!('alice');
+    const doc = await a.exportUserMemory!('alice');
+    expect(doc.traces).toEqual([]);
+    expect(doc.pages).toEqual([]);
+    await expect(a.exportUserMemory!('')).rejects.toThrow(TypeError);
+  });
+
+  it("rejects a correction that names another user's trace, whole", async () => {
+    const { a } = await open();
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await turn(a, 's2', 'bob', 'My canary is WREN-2.');
+    const before = rows(storeFile(), 'SELECT id, content FROM memory_traces ORDER BY id');
+    const bobId = saidOf(keyOf(bob))[0].id;
+    const aliceId = saidOf(keyOf(alice))[0].id;
+
+    const one = a.correctUserMemory!('alice', { traceIds: [bobId], text: 'x' });
+    await expect(one).rejects.toThrow("correctUserMemory: 1 of 1 trace ids are not this user's live traces");
+    const two = a.correctUserMemory!('alice', { traceIds: [aliceId, bobId], text: 'x' });
+    await expect(two).rejects.toThrow("correctUserMemory: 1 of 2 trace ids are not this user's live traces");
+    for (const attempt of [one, two]) {
+      const message = await attempt.catch((error: Error) => error.message);
+      expect(message).not.toContain(bobId);
+    }
+    await expect(a.correctUserMemory!('alice', { traceIds: [], text: 'x' })).rejects.toThrow(TypeError);
+    await expect(a.correctUserMemory!('', { traceIds: [aliceId], text: 'x' })).rejects.toThrow(TypeError);
+
+    expect(rows(storeFile(), 'SELECT id, content FROM memory_traces ORDER BY id')).toEqual(before);
+    const refused = lines('memory.write_refused');
+    expect(refused).toHaveLength(2);
+    for (const line of refused) expect(line).toMatchObject({ reason: 'foreign_trace' });
+  });
+
+  it('replaces a wrong trace with a correction the next compile keeps', async () => {
+    const { a, s } = await open({}, [
+      reply.text('A canary, lovely.'),
+      reply.text('The user keeps a canary named LARK-7.'),
+      reply.text('The user keeps a canary named WREN-9.'),
+    ]);
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    const t1 = saidOf(keyOf(alice)).find((trace) => trace.content === 'My canary is LARK-7.')!.id;
+    const t2 = saidOf(keyOf(alice)).find((trace) => trace.id !== t1)!.id;
+    await a.memory!.compileWiki();
+    expect(pagesOf(keyOf(alice))).toHaveLength(1);
+
+    const result = await a.correctUserMemory!('alice', { traceIds: [t1], text: 'My canary is WREN-9.' });
+    expect(result.deleted).toBe(1);
+    expect(result.pagesDeleted).toBe(1);
+    expect(rows(storeFile(), 'SELECT id FROM memory_traces WHERE id = ?', [t1])).toEqual([]);
+    expect(pagesOf(keyOf(alice))).toEqual([]);
+    const [filed] = rows<{ tags: string; metadata: string; scope_id: string }>(
+      storeFile(),
+      'SELECT tags, metadata, scope_id FROM memory_traces WHERE id = ?',
+      [result.correctionTraceId],
+    );
+    expect(filed.scope_id).toBe(keyOf(alice));
+    expect(JSON.parse(filed.tags) as string[]).toContain('correction');
+    expect((JSON.parse(filed.metadata) as { corrects?: string[] }).corrects).toEqual([t1]);
+    const registry = () =>
+      rows<{ rebuild_sources: string | null }>(storeFile(), 'SELECT rebuild_sources FROM memory_scopes WHERE scope_id = ?', [keyOf(alice)]);
+    expect(JSON.parse(registry()[0].rebuild_sources!)).toEqual([t2]);
+
+    const calls = s.seen.length;
+    await a.memory!.compileWiki();
+    expect(s.seen).toHaveLength(calls + 1);
+    const merge = JSON.stringify(s.seen.at(-1)!.messages);
+    expect(merge).toContain('WREN-9');
+    expect(merge).toContain('A canary, lovely.');
+    expect(merge).not.toContain('LARK-7');
+    expect(pagesOf(keyOf(alice))).toHaveLength(1);
+    expect(registry()).toEqual([{ rebuild_sources: null }]);
   });
 });
