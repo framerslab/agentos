@@ -4,7 +4,8 @@
  * A guard over the images of an input. It holds the order of checks and no vendor code: every `match` check (a hash
  * service that knows material) runs on every image before any `classify` check (a model) runs on any image, a
  * quarantine ends the whole evaluation, and every check receives its own copy of bytes the guard captured once,
- * never a URL. An image no `classify` check answered for was judged by nobody and is refused as unavailable.
+ * never a URL. An image no `classify` check answered for was judged by nobody and is refused as unavailable. Past its
+ * deadline the guard starts no further capture or check.
  */
 import { listedErrorFields, safeWord } from '../../../core/logging/events.js';
 import type { VisionInputData } from '../../../cognition/substrate/IGMI';
@@ -72,7 +73,10 @@ export interface ImageGuardrailOptions {
   loadImage?: (url: string, context: GuardrailContext) => Promise<{ bytes: Uint8Array; mimeType?: string }>;
   /** The most images one input may carry; more are refused with `IMAGE_LIMIT` before any check runs. Default 4. */
   maxImages?: number;
-  /** The deadline for one evaluation, every check of every image included. Default 15000 ms. */
+  /**
+   * The deadline for one evaluation, every check of every image included. Default 15000 ms. Past it no further capture
+   * or check starts, and an image whose checks had not all run is refused as unavailable.
+   */
   timeoutMs?: number;
   /** Sets `config.sequential`: the image checks finish before any phase 2 guard sees the input's text. Default false. */
   sequential?: boolean;
@@ -113,17 +117,19 @@ export class ImageGuardrail implements IGuardrailService {
   private readonly matches: ImageCheck[];
   private readonly classifies: ImageCheck[];
   private readonly maxImages: number;
+  private readonly timeoutMs: number;
 
   private constructor(private readonly opts: ImageGuardrailOptions) {
     this.id = opts.id;
     this.matches = opts.checks.filter((check) => check.kind === 'match');
     this.classifies = opts.checks.filter((check) => check.kind === 'classify');
     this.maxImages = opts.maxImages ?? 4;
+    this.timeoutMs = opts.timeoutMs ?? 15_000;
     this.config = {
       canSanitize: false,
       evaluateStreamingChunks: false,
       failClosed: true,
-      timeoutMs: opts.timeoutMs ?? 15_000,
+      timeoutMs: this.timeoutMs,
       ...(opts.sequential === true ? { sequential: true } : {}),
       // every code this guard can answer: its own two and each check's list
       reasonCodes: Object.freeze([...new Set<string>([...FIXED_CODES, ...opts.checks.flatMap((check) => [...(check.reasonCodes ?? [])])])]),
@@ -222,7 +228,9 @@ export class ImageGuardrail implements IGuardrailService {
     if (verdict === 'block') {
       const blocked = answer as Extract<ImageCheckResult, { verdict: 'block' }>;
       const block: GuardrailEvaluationResult = { action: GuardrailAction.BLOCK, reasonCode: blocked.reasonCode, metadata: { ...metadata, ...(blocked.quarantine === true ? { quarantine: true } : {}) } };
-      state.open = false; state.judged = true; state.rank = 4; state.verdict = block;
+      state.open = false; state.judged = true;
+      // the first block on an image decides it; a later match check still runs and may quarantine
+      if (state.rank < 4) { state.rank = 4; state.verdict = block; }
       return blocked.quarantine === true ? block : undefined;
     }
     if (verdict === 'hold') {
@@ -258,10 +266,21 @@ export class ImageGuardrail implements IGuardrailService {
       return { action: GuardrailAction.BLOCK, reason: 'Too many images.', reasonCode: 'IMAGE_LIMIT', metadata: { guardrailId: this.id } };
     }
 
+    // The dispatcher answers at the deadline and does not stop this evaluation: past it, nothing further starts, so no
+    // image goes to a vendor after the decision. An image whose next step would start late is refused as unavailable.
+    const deadline = Date.now() + this.timeoutMs;
+    const late = (state: ImageState, index: number, step: string): boolean => {
+      if (Date.now() < deadline) return false;
+      state.open = false;
+      if (state.rank < 2) { state.rank = 2; state.verdict = this.unavailable(index, step); }
+      return true;
+    };
+
     // One capture per image, before any check runs.
     const images: Captured[] = [];
     const states: ImageState[] = inputs.map(() => ({ open: true, judged: false, rank: 0 }));
     for (const [index, image] of inputs.entries()) {
+      if (late(states[index], index, 'load')) continue;
       try {
         images.push({ index, ...(await this.capture(image, context)) });
       } catch (error) {
@@ -270,11 +289,14 @@ export class ImageGuardrail implements IGuardrailService {
       }
     }
 
-    // Every match check on every image, before any model check on any image. A quarantine ends everything.
+    // Every match check on every image, before any model check on any image. A quarantine ends everything. A block, a
+    // hold or a failure keeps the image from the model checks but not from the other match checks: a later one may
+    // still find known material.
     for (const image of images) {
+      const state = states[image.index];
       for (const check of this.matches) {
-        if (!states[image.index].open) break;
-        const quarantine = await this.run(check, image, states[image.index], context);
+        if (late(state, image.index, check.id)) break;
+        const quarantine = await this.run(check, image, state, context);
         if (quarantine) return quarantine;
       }
     }
@@ -284,6 +306,8 @@ export class ImageGuardrail implements IGuardrailService {
       const state = states[image.index];
       for (const check of this.classifies) {
         if (!state.open || context.vendorSignal?.aborted) break;
+        // a model check that never ran past the deadline leaves the image refused, whatever an earlier one answered
+        if (late(state, image.index, check.id)) break;
         const quarantine = await this.run(check, image, state, context);
         // a model check's quarantine ends the evaluation too: no further image goes to a model
         if (quarantine) return quarantine;
