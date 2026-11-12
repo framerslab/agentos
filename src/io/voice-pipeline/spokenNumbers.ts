@@ -17,10 +17,13 @@
  * and Korean's Sino-Korean numbers are read by place value (三百六十五, 삼백육십오), and a Chinese word is cut into its
  * numeral characters and the rest first, since the segmenter may keep "三点" as one word.
  *
- * Limits, each compared as written: a decimal, an ordinal, a date, a time of day and an amount of money; a number with
- * an article ("a hundred"); a year said in pairs ("twenty twenty-six"); a Chinese number whose last digit stands for a
- * place it does not name ("一百一", "三万五"). A line that writes one of them in digits while a voice's transcript writes
- * it in words does not match. Both texts go through the same rule, so the limits refuse a match and never make one.
+ * Limits, each compared as written: a decimal, an ordinal, a date, a time of day, a fraction, a signed number, a
+ * percent and an amount of money (`spokenWords` keeps a number written with a separator, a sign, a currency or a
+ * percent as one word); a number with an article ("a hundred"); a year said in pairs ("twenty twenty-six"); a Chinese
+ * number whose last digit stands for a place it does not name ("一百一", "三万五"). A line that writes one of them in
+ * digits while a voice's transcript writes it in words does not match. Both texts go through the same rule, so a limit
+ * refuses a match and never makes one. A word that is also a numeral (Korean 이, "this", is also 2) folds on both
+ * sides; the two are said alike, so a transcript that writes the other form still matches.
  */
 
 /** A value added to the number, the bound of the value that may follow it, or a multiplier. */
@@ -96,12 +99,13 @@ const MAX = 999_999;
 const MAX_RUN = 24;
 /** The most ways one compound word is split. */
 const MAX_SPLITS = 16;
-/** The longest compound word read. */
-const MAX_COMPOUND = 48;
+/** The longest compound word read, above German's longest spelling up to 999,999 (737,737 with "dreissig": 67 letters). */
+const MAX_COMPOUND = 80;
 
-const COMMA = /^\d{1,3}(?:,\d{3})+$/;
-const DOT = /^\d{1,3}(?:\.\d{3})+$/;
-const INDIAN = /^(?:\d{1,3}(?:,\d{3})+|\d{1,2}(?:,\d{2})+,\d{3})$/;
+/** Grouped digit strings, in digits of any script. */
+const COMMA = /^\p{Nd}{1,3}(?:,\p{Nd}{3})+$/u;
+const DOT = /^\p{Nd}{1,3}(?:\.\p{Nd}{3})+$/u;
+const INDIAN = /^(?:\p{Nd}{1,3}(?:,\p{Nd}{3})+|\p{Nd}{1,2}(?:,\p{Nd}{2})+,\p{Nd}{3})$/u;
 
 const SOURCES: Record<string, Source> = {
   en: {

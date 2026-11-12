@@ -1305,7 +1305,7 @@ export interface StreamingTTSConfig {
  * | `'warning'`        | `Error`                   | A failure the session goes on after, such as a provider socket lost mid-segment and the segment spoken again (`ElevenLabsStreamingTTS`), or a socket that failed to open for a reply, which ends unplayed, or one lost while the late audio of a segment that timed out was still to come, or a reply whose last segment timed out, whose flush completes before that audio could come (`DeepgramAuraStreamingTTS`). With nothing listening for it, the provider writes one warning line; `StreamingTTSChain`'s failover facade carries the warning of the provider session in use; `VoicePipelineOrchestrator` listens, and reports it as a recoverable `session_error` of the TTS part. |
  * | `'error'`          | `Error`                   | Unrecoverable synthesis error.       |
  * | `'close'`          | *(none)*                  | Session terminated.                  |
- * | `'reply_transcript'` | `OpenAIRealtimeReplyTranscript` | `OpenAIRealtimeTTS` opened with `outputTranscript` alone: at each reply's end, the text asked for, the model's transcript of its audio and whether the two match. |
+ * | `'reply_transcript'` | `OpenAIRealtimeReplyTranscript` | `OpenAIRealtimeTTS` opened with `outputTranscript` alone, and a `StreamingTTSChain`'s facade over one: at each reply's end, the text asked for, the model's transcript of its audio and whether the two match. |
  *
  * See `IStreamingTTS.startSession()` for the factory method that creates these sessions.
  */

@@ -34,8 +34,36 @@ const MAX_SEGMENTERS = 64;
 /** Characters that change nothing a voice says: the soft hyphens CLDR writes inside German and Italian numbers, joiners. */
 const IGNORABLE = /\p{Default_Ignorable_Code_Point}/gu;
 
-/** The words of a runtime with no `Intl.Segmenter`: runs of letters, marks and digits. */
-const WORD = /[\p{L}\p{M}\p{Nd}]+/gu;
+/**
+ * The words of a runtime with no `Intl.Segmenter`: runs of letters, marks and digits, an apostrophe or a mid-word
+ * point between two of them kept inside the word as the segmenter keeps it ("don't", "l'homme").
+ */
+const WORD = /[\p{L}\p{M}\p{Nd}]+(?:['\u2019.:\u00B7][\p{L}\p{M}\p{Nd}]+)*/gu;
+
+/** What a word loses inside it: everything but letters, marks and digits, so "don't" is "dont" on every runtime. */
+const INNER = /[^\p{L}\p{M}\p{Nd}]+/gu;
+
+/** A separator between digits: a point, a comma, a colon, a slash or a dash. */
+const SEPARATOR = '[.,:/\\u002D\\u2010-\\u2015\\u2212]';
+/** A percent or currency sign after digits. */
+const AFTER = '(?:[%\\u2030]|\\p{Sc})';
+
+/**
+ * Digits written with a separator between them ("3:15", "1/2", "1,000"), with a sign or a currency before them ("-5",
+ * "$5"), or with a percent or currency after them ("5%"): one word, compared as written, so a time, a date, a fraction,
+ * a signed number and an amount never fold to bare numbers. A dash after a letter or a digit is no sign ("covid-19").
+ */
+const NUMERIC_SPAN = new RegExp(
+  [
+    `(?:(?<![\\p{L}\\p{M}\\p{Nd}])[+\\u002D\\u2212]|\\p{Sc})\\p{Nd}+(?:${SEPARATOR}\\p{Nd}+)*${AFTER}?`,
+    `\\p{Nd}+(?:${SEPARATOR}\\p{Nd}+)+${AFTER}?`,
+    `\\p{Nd}+${AFTER}`,
+  ].join('|'),
+  'gu'
+);
+
+/** Past this many pairs of words between their shared start and end, two texts' common share counts those alone. */
+const MAX_PAIRS = 1_000_000;
 
 /** A BCP-47 tag in canonical form; `'und'`, the undetermined language, for a tag the platform refuses. */
 function localeOf(language: string): string {
@@ -56,10 +84,24 @@ function segmenterFor(locale: string, make: WordSegmenterConstructor): WordSegme
   return segmenter;
 }
 
+/** Adds a stretch of text's words: the segmenter's word-like segments, or `WORD`'s runs, each without its inner punctuation. */
+function addWords(text: string, locale: string, words: string[]): void {
+  if (!text) return;
+  const parts = Segmenter
+    ? [...segmenterFor(locale, Segmenter).segment(text)].filter((part) => part.isWordLike).map((part) => part.segment)
+    : (text.match(WORD) ?? []);
+  for (const part of parts) {
+    const word = part.replace(INNER, '');
+    if (word) words.push(word);
+  }
+}
+
 /**
  * A text's words as the comparison reads them: width and compatibility forms folded (NFKC), default-ignorable
- * characters such as the soft hyphen dropped, lower case in the language's own rule, punctuation and symbols dropped,
- * and a script written without spaces cut into words by the platform's segmenter.
+ * characters such as the soft hyphen dropped, lower case in the language's own rule, punctuation and symbols dropped
+ * (inside a word too: "don't" is "dont"), and a script written without spaces cut into words by the platform's
+ * segmenter. A number written with a separator, a sign, a currency or a percent ("3:15", "1/2", "-5", "$5", "5%") is
+ * one word as written.
  *
  * @param text - The text.
  * @param language - The text's language, a BCP-47 tag; a tag the platform refuses reads as `'und'`.
@@ -68,16 +110,35 @@ function segmenterFor(locale: string, make: WordSegmenterConstructor): WordSegme
 export function spokenWords(text: string, language: string): string[] {
   const locale = localeOf(language);
   const folded = text.normalize('NFKC').replace(IGNORABLE, '').toLocaleLowerCase(locale);
-  if (!Segmenter) return folded.match(WORD) ?? [];
   const words: string[] = [];
-  for (const part of segmenterFor(locale, Segmenter).segment(folded)) {
-    if (part.isWordLike) words.push(part.segment);
+  let from = 0;
+  for (const span of folded.matchAll(NUMERIC_SPAN)) {
+    const at = span.index ?? from;
+    addWords(folded.slice(from, at), locale, words);
+    words.push(span[0]);
+    from = at + span[0].length;
   }
+  addWords(folded.slice(from), locale, words);
   return words;
 }
 
-/** The longest run of words two sequences hold in common, in order. */
+/**
+ * The words two sequences hold in common, in order: their shared start and end, and the longest common subsequence
+ * between them while the words left between them make at most `MAX_PAIRS` pairs.
+ */
 function common(a: readonly string[], b: readonly string[]): number {
+  let start = 0;
+  while (start < a.length && start < b.length && a[start] === b[start]) start += 1;
+  let end = 0;
+  while (end < a.length - start && end < b.length - start && a[a.length - 1 - end] === b[b.length - 1 - end]) end += 1;
+  const restA = a.slice(start, a.length - end);
+  const restB = b.slice(start, b.length - end);
+  if (restA.length * restB.length > MAX_PAIRS) return start + end;
+  return start + end + inOrder(restA, restB);
+}
+
+/** The longest run of words two sequences hold in common, in order. */
+function inOrder(a: readonly string[], b: readonly string[]): number {
   let row = new Array<number>(b.length + 1).fill(0);
   for (const word of a) {
     const next = [0];
@@ -88,7 +149,9 @@ function common(a: readonly string[], b: readonly string[]): number {
 }
 
 /**
- * Compares what was asked with what was said, in one language. A reply with no transcript does not match.
+ * Compares what was asked with what was said, in one language. A reply with no transcript does not match. Two long
+ * texts that differ past their shared start and end, with more than a million pairs of words left between them, get the
+ * share of that start and end alone as their ratio, so the work stays bounded; `match` is exact at any length.
  *
  * @param asked - The text the voice was asked to say.
  * @param said - What the voice said, such as its own transcript of the audio.

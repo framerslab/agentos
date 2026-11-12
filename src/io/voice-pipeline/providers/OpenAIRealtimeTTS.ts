@@ -156,6 +156,11 @@ class OpenAIRealtimeTTSSession extends EventEmitter implements StreamingTTSSessi
   private lastReplySpoken = true;
   /** Tags of responses cut before `response.created` named them: each is cancelled when it comes. */
   private readonly cutBeforeNamed = new Set<string>();
+  /**
+   * Counts each `cancel()` and `close()`. A listener may call either while a reply ends; the end then goes no further,
+   * since the cut has settled every flush, and no `'flush_complete'` follows it.
+   */
+  private cuts = 0;
   private lastTag = 0;
 
   constructor(
@@ -270,6 +275,7 @@ class OpenAIRealtimeTTSSession extends EventEmitter implements StreamingTTSSessi
    * not emitted and its `response.done` completes nothing of the next reply.
    */
   cancel(): void {
+    this.cuts += 1;
     this.pendingText = '';
     this.lastReplySpoken = true;
     const cut = this.requests;
@@ -282,6 +288,7 @@ class OpenAIRealtimeTTSSession extends EventEmitter implements StreamingTTSSessi
   }
 
   close(): void {
+    this.cuts += 1;
     this.closed = true;
     this.pendingText = '';
     this.settleAll();
@@ -362,8 +369,9 @@ class OpenAIRealtimeTTSSession extends EventEmitter implements StreamingTTSSessi
       this.requests.shift();
       this.stopResponse(request);
       this.lastReplySpoken = false;
+      const cuts = this.cuts;
       this.reportError(new Error(`OpenAI Realtime response sent nothing for ${timeoutMs} ms`));
-      this.startNext();
+      if (this.cuts === cuts) this.startNext();
     }, timeoutMs);
   }
 
@@ -433,8 +441,9 @@ class OpenAIRealtimeTTSSession extends EventEmitter implements StreamingTTSSessi
         this.stopTimer(refused);
       }
       if (refused) this.lastReplySpoken = false;
+      const cuts = this.cuts;
       this.reportError(new Error(String(msg.error?.message ?? 'Unknown error')));
-      if (refused) this.startNext();
+      if (refused && this.cuts === cuts) this.startNext();
     }
   }
 
@@ -447,7 +456,10 @@ class OpenAIRealtimeTTSSession extends EventEmitter implements StreamingTTSSessi
     else if (typeof msg.delta === 'string') parts.set(part, (parts.get(part) ?? '') + msg.delta);
   }
 
-  /** Emits a reply's transcript and its verdict, for a session opened with `outputTranscript`. */
+  /**
+   * Emits a reply's transcript and its verdict, for a session opened with `outputTranscript`. A listener that throws is
+   * reported as a `'warning'`, and the reply ends as it would have.
+   */
   private emitTranscript(request: SpeechRequest): void {
     const transcript = [...(request.transcript?.values() ?? [])].join(' ');
     const reply: OpenAIRealtimeReplyTranscript = {
@@ -455,17 +467,25 @@ class OpenAIRealtimeTTSSession extends EventEmitter implements StreamingTTSSessi
       transcript,
       verdict: spokenMatch(request.text, transcript, this.sessionConfig.language ?? 'und'),
     };
-    this.emit('reply_transcript', reply);
+    try {
+      this.emit('reply_transcript', reply);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.reportWarning(new Error(`a 'reply_transcript' listener threw: ${message}`));
+    }
   }
 
   /**
    * Ends the reply at its `response.done`: `completed` is spoken, `incomplete` warns and counts what was said, and any
-   * other status fails it. With `outputTranscript` the reply's transcript is emitted first.
+   * other status fails it. With `outputTranscript` the reply's transcript is emitted first. A listener that cuts the
+   * session (`cancel()` or `close()`) ends the reply there.
    */
   private endReply(request: SpeechRequest, msg: RealtimeServerEvent): void {
+    const cuts = this.cuts;
     this.requests.shift();
     this.stopTimer(request);
     if (this.config.outputTranscript) this.emitTranscript(request);
+    if (this.cuts !== cuts) return;
     const status = msg.response?.status;
     this.lastReplySpoken = status === 'completed' || status === 'incomplete';
     if (status === 'incomplete') {
@@ -473,7 +493,7 @@ class OpenAIRealtimeTTSSession extends EventEmitter implements StreamingTTSSessi
     } else if (!this.lastReplySpoken) {
       this.reportError(new Error(String(msg.response?.status_details?.error?.message ?? `OpenAI Realtime response ended with status ${status}`)));
     }
-    this.startNext();
+    if (this.cuts === cuts) this.startNext();
   }
 }
 
