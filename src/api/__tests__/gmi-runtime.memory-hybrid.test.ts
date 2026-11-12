@@ -326,6 +326,57 @@ describe("agent({ runtime: 'gmi' }) memory.recall.retrieval", () => {
     expect(hybrid.memoryRecall.candidates.find((c) => c.id === old.duplicateOf)).toMatchObject({ outcome: 'included', section: 'recall' });
   });
 
+  it("'hybrid' on a GMI turn: a memory question sends the exact-words hit the cut left out; the same words without the question leave it out for the budget", async () => {
+    type Reserved = Capture & { memoryQuestionReserve: { fired: boolean; added: number }; candidates: Array<Candidate & { reserve?: boolean }> };
+    const GOLD = 'The bike shed code is XQ7Z.';
+    // Filed first, then 64 notes whose words are the questions' stop words and a number: by meaning the notes are
+    // nearer, so the dense leg's sixty are notes, and no note shares a word the exact-words leg reads. Only the code's
+    // exact word finds the oldest memory, and its fused score sorts it after every note the dense leg returned.
+    const statements = [GOLD, ...Array.from({ length: 64 }, (_, i) => `Note ${i + 10}: what it is you and I are on, and where it is.`)];
+    const k = key();
+    const emb = key();
+    const s = script('openai', k, { replies: [...statements.map(() => reply.text('Noted.')), reply.text('Noted.'), reply.text('Noted.')] });
+    script('openai', emb, { replies: [] });
+    vi.stubEnv('OPENAI_API_KEY', emb);
+    const a = agent({
+      runtime: 'gmi',
+      name: 'Shed',
+      provider: 'openai',
+      model: 'stub-model',
+      apiKey: k,
+      fallbackProviders: [],
+      cognition: { memory: { embedding: { provider: 'openai' }, recall: { retrieval: 'hybrid' } }, mechanisms: false },
+    } as unknown as AgentOptions);
+    try {
+      const session = a.session('s');
+      for (const statement of statements) await session.send(statement);
+      session.clear();
+      const plain = (await session.send('What is it you and I are on, and where is XQ7Z?')) as unknown as { memoryRecall: Reserved };
+      session.clear();
+      const asked = (await session.send('Do you remember what it is you and I are on, and where is XQ7Z?')) as unknown as { memoryRecall: Reserved };
+      const plainBlock = memoryBlockOf(s, statements.length);
+      const askedBlock = memoryBlockOf(s, statements.length + 1);
+
+      // Without a memory question: ranked first by exact words, never by meaning, and cut for the budget.
+      expect(plain.memoryRecall.memoryQuestionReserve).toEqual({ fired: false, added: 0 });
+      const left = plain.memoryRecall.candidates.find((c) => c.ranks.exact_words === 1)!;
+      expect(left).toMatchObject({ outcome: 'left_out', reason: 'budget' });
+      expect(left.ranks.dense).toBeUndefined();
+      expect(left.reserve).toBeUndefined();
+      expect(plainBlock).not.toContain(GOLD.slice(0, -1));
+
+      // With one: the same memory is reserved, shown in the recall section, and the model receives it.
+      expect(asked.memoryRecall.memoryQuestionReserve).toEqual({ fired: true, added: 1 });
+      expect(asked.memoryRecall.candidates.find((c) => c.id === left.id)).toMatchObject({ reserve: true, outcome: 'included', section: 'recall' });
+      expect(asked.memoryRecall.candidates.filter((c) => c.reserve)).toHaveLength(1);
+      expect(askedBlock).toContain(GOLD.slice(0, -1));
+      expect(askedBlock.match(/^## Relevant Memories/gm)).toHaveLength(1);
+      expect(events('memory.recall.reserve_fired')).toEqual([expect.objectContaining({ added: 1 })]);
+    } finally {
+      await a.close();
+    }
+  });
+
   it("'hybrid' on a GMI turn whose question the embedding provider fails on: the dense leg is absent, exact words still put the memory in the block", async () => {
     const MARK = 'tarpaulin';
     const statements = ['The bike shed code is XQ7Z.', 'I water the tomatoes every second day.', 'My sister Ana lives in Porto.'];
