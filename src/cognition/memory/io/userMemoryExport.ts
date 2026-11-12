@@ -78,8 +78,9 @@ export async function exportSubjectMemory(options: {
   /** Every live trace of one scope, oldest first, a page's chunks left out. */
   const readScope = async (scope: string, scopeId: string): Promise<void> => {
     let since = 0;
+    let limit = EXPORT_BATCH;
     for (;;) {
-      const batch = await memory.recentTraces(since, { scope, scopeId, limit: EXPORT_BATCH, order: 'asc' });
+      const batch = await memory.recentTraces(since, { scope, scopeId, limit, order: 'asc' });
       const fresh = batch.filter((trace) => !seen.has(trace.id));
       for (const trace of fresh) {
         seen.add(trace.id);
@@ -93,11 +94,16 @@ export async function exportSubjectMemory(options: {
           tags: [...trace.tags],
         });
       }
-      if (batch.length < EXPORT_BATCH) break;
-      // The next read starts in the last millisecond read, whose traces a full batch may have cut, and past it once
-      // that millisecond holds nothing new.
+      if (batch.length < limit) break;
+      // Re-read the last millisecond in case this batch cut it in two. If the window still ends in that same
+      // millisecond, widen it: advancing the timestamp would skip records beyond the current limit.
       const newest = Number(batch[batch.length - 1].createdAt);
-      since = fresh.length > 0 ? newest - 1 : newest;
+      if (newest - 1 <= since) {
+        limit += EXPORT_BATCH;
+      } else {
+        since = newest - 1;
+        limit = EXPORT_BATCH;
+      }
     }
   };
   for (const form of options.legacy?.forms ?? []) await readScope(LEGACY_SCOPE, form);
