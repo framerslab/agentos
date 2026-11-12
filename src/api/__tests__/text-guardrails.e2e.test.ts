@@ -644,11 +644,13 @@ describe('the turn, the reply and the report hold what the guards decided, on th
     await expect(generateText({ ...OPENAI, prompt: 'hello', abortSignal: controller.signal, guards: guards(aborting) })).rejects.toThrow('stopped by the caller');
   });
 
+  /** A streamed tool step that writes text before its call, then the answer. */
+  const stepThenAnswer = () => [
+    () => sse([delta({ role: 'assistant', content: 'Searching.' }), delta({ tool_calls: [{ index: 0, id: 'call_s1', type: 'function', function: { name: 'search', arguments: '{"q":"x"}' } }] }), delta({}, 'tool_calls'), '[DONE]']),
+    textStream('Answer.'),
+  ];
+
   it('a dry-run stream with a tool step resolves text as the same call without guards does', async () => {
-    const stepThenAnswer = () => [
-      () => sse([delta({ role: 'assistant', content: 'Searching.' }), delta({ tool_calls: [{ index: 0, id: 'call_s1', type: 'function', function: { name: 'search', arguments: '{"q":"x"}' } }] }), delta({}, 'tool_calls'), '[DONE]']),
-      textStream('Answer.'),
-    ];
     serve(stepThenAnswer());
     const plain = streamText({ ...OPENAI, prompt: 'find x', tools: { search }, maxSteps: 3 });
     await collect(plain.fullStream);
@@ -658,6 +660,37 @@ describe('the turn, the reply and the report hold what the guards decided, on th
     const dry = streamText({ ...OPENAI, prompt: 'find x', tools: { search }, maxSteps: 3, guards: { services: [blocksOutput], context, mode: 'dryRun' as const } });
     await collect(dry.fullStream);
     expect(await dry.text).toBe(expected);
+  });
+
+  it('a guarded stream whose reply passed resolves text as the same call without guards does', async () => {
+    serve(stepThenAnswer());
+    const passing: IGuardrailService = { id: 'out', evaluateOutput: async () => null };
+    const guarded = streamText({ ...OPENAI, prompt: 'find x', tools: { search }, maxSteps: 3, guards: guards(passing) });
+    await collect(guarded.fullStream);
+    expect(await guarded.text).toBe('Answer.');
+    expect(await guarded.guardReport).toMatchObject({ result: 'passed' });
+  });
+
+  it('a call aborted while the guards judge the prompt or a held reply delivers nothing and ends with the reason', async () => {
+    const reasonOf = (parts: StreamPart[]) => ((parts.find((p) => p.type === 'error') as { error?: Error } | undefined)?.error)?.message;
+    const abortsOnInput = (controller: AbortController): IGuardrailService => ({
+      id: 'in',
+      evaluateInput: async () => { controller.abort(new Error('stopped by the caller')); return { action: GuardrailAction.BLOCK, reasonCode: 'RULE_IN', replacementText: 'A fixed reply.' }; },
+    });
+    let controller = new AbortController();
+    await expect(generateText({ ...OPENAI, prompt: 'hello', abortSignal: controller.signal, guards: guards(abortsOnInput(controller)) })).rejects.toThrow('stopped by the caller');
+    controller = new AbortController();
+    const replaced = await collect(streamText({ ...OPENAI, prompt: 'hello', abortSignal: controller.signal, guards: guards(abortsOnInput(controller)) }).fullStream);
+    expect(replaced.some((p) => p.type === 'text')).toBe(false);
+    expect(reasonOf(replaced)).toBe('stopped by the caller');
+    expect(posted()).toHaveLength(0);
+
+    controller = new AbortController();
+    const abortsOnReply: IGuardrailService = { id: 'out', evaluateOutput: async ({ chunk }) => { if (isFinal(chunk)) controller.abort(new Error('stopped by the caller')); return null; } };
+    serve([textStream('the streamed reply')]);
+    const held = await collect(streamText({ ...OPENAI, prompt: 'hello', abortSignal: controller.signal, guards: guards(abortsOnReply) }).fullStream);
+    expect(held.some((p) => p.type === 'text')).toBe(false);
+    expect(held.some((p) => p.type === 'error')).toBe(true);
   });
 
   it('a refused call is not shown to a stream reader as a call; a passed one is, before its result', async () => {

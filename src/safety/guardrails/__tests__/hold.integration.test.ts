@@ -185,6 +185,18 @@ describe('a hold on a block, on output and tool calls', () => {
     expect(verdicts).toEqual([GuardrailAction.FLAG, GuardrailAction.ALLOW]);
   });
 
+  it('a caller\'s picker is shown every answer before a screen\'s BLOCK, in registration order', async () => {
+    const shown: string[][] = [];
+    const picker = (evaluations: readonly GuardrailEvaluationResult[]) => { shown.push(evaluations.map((e) => e.reasonCode ?? '')); return evaluations.find((e) => e.action === GuardrailAction.BLOCK); };
+    const NOTE: GuardrailEvaluationResult = { action: GuardrailAction.FLAG, reasonCode: 'NOTE' };
+    await ParallelGuardrailDispatcher.evaluateToolCall([answering('first', NOTE, { evaluateToolCalls: true, sequential: true }), answering('screen', REFUSE, { evaluateToolCalls: true, sequential: true })], context, toolCallChunk(), undefined, picker);
+    expect(shown).toEqual([['NOTE', 'RULE_1']]);
+    shown.length = 0;
+    // a guard of the parallel phase registered before a screen is shown before the screen's answer
+    await collect(wrapOutputGuardrails([answering('classifier', REFUSE), answering('screen', NOTE, { sequential: true })], context, reply('the reply'), { streamId: 's1', pickBlock: picker }));
+    expect(shown).toEqual([['RULE_1', 'NOTE']]);
+  });
+
   it('is carried by the serialised entry and the blocked stream', async () => {
     expect(serializeEvaluation(holdResult('REVIEW', { reasonCode: 'NEEDS_REVIEW' }))).toMatchObject({ action: GuardrailAction.BLOCK, reasonCode: 'NEEDS_REVIEW', hold: { reviewCode: 'REVIEW' } });
     const [chunk] = await collect(createGuardrailBlockedStream(context, HOLD, { streamId: 's1' }));
