@@ -29,7 +29,7 @@ import type { ChatMessage } from '../../core/llm/providers/IProvider';
 let n = 0;
 const key = () => `k-memory-hybrid-${++n}`;
 
-type Candidate = { id: string; ranks: { dense?: number; exact_words?: number; recency?: number }; outcome: string; reason?: string; duplicateOf?: string; section?: string };
+type Candidate = { id: string; ranks: { dense?: number; exact_words?: number; recency?: number }; outcome: string; reason?: string; duplicateOf?: string; reserve?: boolean; section?: string };
 type Capture = {
   retrieval: string;
   lexicalBackend: string;
