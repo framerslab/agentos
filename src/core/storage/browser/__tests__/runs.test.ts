@@ -1225,6 +1225,36 @@ describe('the run owner', () => {
     }
   });
 
+  it('refuses to finish from a copy it read earlier when the store refuses the read of the record under its lock', async () => {
+    const store = new MemoryKeyValueStore();
+    await store.set('lib/j/r11', { id: 'r11', key: KEY, account: ACCOUNT, kind: 'library', way: null, unit: 'sessions', chosen: null, counts: { total: 3, pending: 2, applied: 1, skipped: 0, failed: 0 }, items: [], state: 'running', cut: 'session', phase: null, began: 1, progressed: 2 });
+    const locks = memoryLocks();
+    const own = owner(store, locks, bus());
+    try {
+      expect(await own.records()).toEqual([expect.objectContaining({ status: 'cut' })]);
+      const get = store.get.bind(store);
+      store.get = (async (key: string) => {
+        if (key === 'lib/j/r11') throw new Error('the store refused the read');
+        return get(key);
+      }) as typeof store.get;
+      let wrote = false;
+      const finished = await own.finish('r11', {
+        ...countingJob(1, []),
+        async run(context) {
+          await context.write(async () => { wrote = true; return true; });
+          return { ended: 'finished', counts: context.record().counts };
+        },
+      });
+      await own.whenIdle();
+      expect(finished).toEqual({ refused: 'another-tab' });
+      expect(wrote).toBe(false);
+      expect((await get<RunRecord>('lib/j/r11'))?.cut).toBe('session');
+      expect(locks.names()).toEqual([]); // the run locks the finish took are let go
+    } finally {
+      own.close();
+    }
+  });
+
   it('refuses to finish a record it cannot find, and starts nothing in its place', async () => {
     const store = new MemoryKeyValueStore();
     const own = owner(store, memoryLocks(), bus());
