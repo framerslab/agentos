@@ -55,7 +55,7 @@ export interface MemoryTurn {
 }
 
 /** The text of the turn a request sends: its `prompt`, else its last user message. */
-function sentTurnText(ctx: GenerationHookContext): string | undefined {
+export function sentTurnText(ctx: GenerationHookContext): string | undefined {
   if (typeof ctx.prompt === 'string') return ctx.prompt;
   for (let i = ctx.messages.length - 1; i >= 0; i -= 1) {
     const message = ctx.messages[i];

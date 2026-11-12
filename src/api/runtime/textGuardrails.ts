@@ -161,12 +161,18 @@ function withTurnText(opts: GenerateTextOptions, text: string): GenerateTextOpti
   messages[messages.length - 1] = { ...last, content };
   return { ...opts, messages };
 }
-/** The delta with its last assistant entry holding the delivered text and nothing of the reply a guard took out. */
+/**
+ * The delta with its last assistant entry holding the delivered text and nothing of the reply a guard took out. When
+ * the step limit ended the call on a tool step, the reply is that step's text: its entry keeps its tool calls and
+ * their thinking (each tool result after it answers one of those calls) and holds the delivered text in place of its own.
+ */
 function deliveredDelta(delta: GenerateTextResult['transcriptDelta'], text: string): GenerateTextResult['transcriptDelta'] {
   if (!delta || delta.length === 0) return delta;
-  const last = delta.length - 1;
-  if ((delta[last] as { role?: string }).role !== 'assistant') return delta;
-  return [...delta.slice(0, last), { role: 'assistant', content: text } as (typeof delta)[number]];
+  let at = delta.length - 1;
+  while (at >= 0 && (delta[at] as { role?: string }).role !== 'assistant') at -= 1;
+  if (at < 0) return delta;
+  const entry = at === delta.length - 1 ? { role: 'assistant', content: text } : { ...delta[at], content: text };
+  return [...delta.slice(0, at), entry as (typeof delta)[number], ...delta.slice(at + 1)];
 }
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T | PromiseLike<T>) => void } {
   let resolve!: (value: T | PromiseLike<T>) => void;

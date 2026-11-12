@@ -286,7 +286,7 @@ Its message is one fixed sentence: it holds no guard's reason, no prompt and no 
 
 The report carries codes, ids and scores: no guard's `reason`, no prompt, no reply and no call id from a provider. An evaluation's `metadata` is the guard's own and passes through as the guard wrote it, as in `moderateContent()`.
 
-After a reply was rewritten or replaced, `text` is what the caller receives and the last entry of `transcriptDelta` is `{ role: 'assistant', content: <that text> }`, so a next turn built from the delta never sends what a guard took out. After the input was rewritten, the delta's user turn is the rewritten one, as it was sent.
+After a reply was rewritten or replaced, `text` is what the caller receives and the last entry of `transcriptDelta` is `{ role: 'assistant', content: <that text> }`, so a next turn built from the delta never sends what a guard took out. When `maxSteps` ended the call on a tool step, the reply is that step's text: its assistant entry keeps its tool calls and holds the delivered text. After the input was rewritten, the delta's user turn is the rewritten one, as it was sent.
 
 `onVerdict` receives one verdict per stage decision: `stage` (`input`, `toolCall` or `output`), `action`, `enforced`, `unavailable`, `guardrailId`, `reasonCode`, `hold`, and on a tool call `toolCallId` and `toolName`. On the output stage `originalText` and `finalText` hold the reply as the guards judged it and as the caller receives it, so a host keeps them out of its logs. Each verdict also writes one `guardrail.verdict` line ([Logging](../observability/LOGGING.md#guardrail-events)).
 
@@ -878,6 +878,8 @@ const live = session.stream(message, { guards });
 
 - A schema retry is a call of its own: the retry's input stage judges its
   correction turn, and the turns it repeats hold the text that was delivered.
+  A send whose input a guard replaced is not retried: no request is made and
+  it rejects with `ObjectGenerationError`, whose `rawText` is the replacement.
 - A session's history holds what was delivered. A reply a guard rewrote or
   replaced is stored as delivered, a send whose input a guard rewrote stores
   the rewritten turn, and a send whose input a guard replaced adds nothing. A
@@ -885,7 +887,10 @@ const live = session.stream(message, { guards });
   history.
 - A memory provider's `getContext()` recalls for the turn as it was sent, a
   rewritten turn's text included, and its `observe()` is not called for a turn
-  whose input an enforced guard rewrote or replaced.
+  whose input an enforced guard rewrote or replaced, a turn whose schema retry
+  then passed included.
+- `verifyCitations` retrieves with the turn as it was sent, a rewritten turn's
+  text included, and does not run for a turn a guard replaced.
 - The `guardrails` ids in an `agent()` or `agency()` config are stored and not
   applied: a call is guarded by its `guards`. A panel agency's call cannot
   carry `guards`.
