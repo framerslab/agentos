@@ -1758,6 +1758,18 @@ export class Brain {
           `SELECT DISTINCT brain_id FROM brain_meta WHERE brain_id IS NOT NULL`,
         );
       }
+      // The registry of conversation scopes and the pages name their brain too, and the copy reads them whole: a file
+      // whose rows of the two tables name another brain than its meta is a file of two brains.
+      const named = new Set(sourceBrainIds.map((row) => row.brain_id));
+      for (const table of CONVERSATION_SCOPE_TABLES) {
+        const columns = await peekAdapter.all<{ name: string }>(`PRAGMA table_info(${table})`);
+        if (!columns.some((column) => column.name === 'brain_id')) continue;
+        const rows = await peekAdapter.all<{ brain_id: string }>(
+          `SELECT DISTINCT brain_id FROM ${table} WHERE brain_id IS NOT NULL`,
+        );
+        for (const row of rows) named.add(row.brain_id);
+      }
+      sourceBrainIds = [...named].sort().map((brain_id) => ({ brain_id }));
     } finally {
       await peekAdapter.close();
     }
