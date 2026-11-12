@@ -22,7 +22,14 @@ import type { ChatMessage } from '../../core/llm/providers/IProvider';
 let n = 0;
 const key = () => `k-memory-hybrid-${++n}`;
 
-type Capture = { retrieval: string; lexicalBackend: string; legs: Array<{ leg: string; ran: boolean }> };
+type Candidate = { id: string; ranks: { dense?: number; exact_words?: number; recency?: number }; outcome: string; reason?: string; duplicateOf?: string; section?: string };
+type Capture = {
+  retrieval: string;
+  lexicalBackend: string;
+  legs: Array<{ leg: string; ran: boolean; reason?: string }>;
+  allocation: Record<string, number | undefined>;
+  candidates: Candidate[];
+};
 
 function textOf(message: ChatMessage): string {
   const content = message.content as unknown;
@@ -48,6 +55,14 @@ function memoryBlockOf(s: ProviderScript, call: number): string {
   const start = text.indexOf(PREAMBLE_HEADING);
   const end = text.indexOf('\n\nUser Query:', start);
   return text.slice(start, end === -1 ? undefined : end);
+}
+
+/** The memory block of request `call`, or '' when that request carried none (a turn that recalled nothing). */
+function blockOrNone(s: ProviderScript, call: number): string {
+  const request = s.seen[call];
+  expect(request, `model call ${call}`).toBeDefined();
+  const holders = request.messages.map(textOf).filter((text) => text.includes(PREAMBLE_HEADING));
+  return holders.length === 0 ? '' : memoryBlockOf(s, call);
 }
 
 const logged: Record<string, unknown>[] = [];
@@ -116,6 +131,41 @@ async function failureOf(build: () => { session(id: string): { send(text: string
   return '';
 }
 
+/**
+ * Files `statements` through the session's own sends, clears its history and asks `question`; `embedding` sets the
+ * embedding provider's script (its `failEmbedding` among them). Returns the question's block, record and the scripts.
+ */
+async function ask(recall: Record<string, unknown> | undefined, statements: readonly string[], question: string, embedding: Partial<ProviderScript> = {}) {
+  const k = key();
+  const emb = key();
+  const s = script('openai', k, { replies: [...statements.map(() => reply.text('Noted.')), reply.text('XQ7Z.')] });
+  const embedder = script('openai', emb, { replies: [], ...embedding });
+  vi.stubEnv('OPENAI_API_KEY', emb);
+  const a = agent({
+    runtime: 'gmi',
+    name: 'Shed',
+    provider: 'openai',
+    model: 'stub-model',
+    apiKey: k,
+    fallbackProviders: [],
+    cognition: { memory: { embedding: { provider: 'openai' }, ...(recall ? { recall } : {}) }, mechanisms: false },
+  } as unknown as AgentOptions);
+  try {
+    const session = a.session('s');
+    for (const statement of statements) await session.send(statement);
+    session.clear();
+    const result = await session.send(question);
+    return {
+      text: (result as unknown as { text: string }).text,
+      block: blockOrNone(s, statements.length),
+      embedder,
+      memoryRecall: (result as unknown as { memoryRecall?: Capture }).memoryRecall!,
+    };
+  } finally {
+    await a.close();
+  }
+}
+
 describe("agent({ runtime: 'gmi' }) memory.recall.retrieval", () => {
   it("'hybrid' reaches the manager: three legs, one recall section, the same embedding calls as dense", async () => {
     const dense = await turn(undefined);
@@ -175,5 +225,79 @@ describe("agent({ runtime: 'gmi' }) memory.recall.retrieval", () => {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+  it("'hybrid' on a GMI turn: one recall section in the record's allocation and its lines, and two near-duplicate memories shown once with the dropped one recorded against the one shown", async () => {
+    const statements = ['The bike shed code is XQ7Z.', 'I water the tomatoes every second day.', 'The bike shed code is XQ7Z!'];
+    const dense = await ask(undefined, statements, 'What is the bike shed code?');
+    const hybrid = await ask({ retrieval: 'hybrid' }, statements, 'What is the bike shed code?');
+
+    // Precondition: dense recall shows both copies, so the hybrid block showing one is the dedupe's doing.
+    expect((dense.block.match(/XQ7Z/g) ?? []).length).toBeGreaterThanOrEqual(2);
+    expect(dense.memoryRecall.candidates.filter((c) => c.reason === 'dedupe')).toEqual([]);
+
+    expect(hybrid.block.match(/XQ7Z/g)).toHaveLength(1);
+    expect(hybrid.block.match(/^## Relevant Memories/gm)).toHaveLength(1);
+    expect(hybrid.block).not.toContain('## Semantic Recall');
+    expect(hybrid.block).not.toContain('## Recent Experiences');
+
+    const recall = hybrid.memoryRecall;
+    expect(recall.allocation.recall).toBeGreaterThan(0);
+    expect(recall.allocation).toMatchObject({ semanticRecall: 0, recentEpisodic: 0 });
+
+    const byId = new Map(recall.candidates.map((c) => [c.id, c]));
+    const dropped = recall.candidates.filter((c) => c.reason === 'dedupe');
+    expect(dropped.length).toBeGreaterThanOrEqual(1);
+    for (const d of dropped) {
+      expect(d.outcome).toBe('left_out');
+      // Each dropped copy names the candidate that holds its place, and that one is in the block.
+      expect(byId.get(d.duplicateOf!), `holder of ${d.id}`).toMatchObject({ outcome: 'included' });
+    }
+    // The code's copies: one included, one dropped against it (both rank first or second by exact words).
+    const codeCopies = recall.candidates.filter((c) => c.ranks.exact_words !== undefined && c.ranks.exact_words <= 2);
+    expect(codeCopies.map((c) => c.outcome).sort()).toEqual(['included', 'left_out']);
+    const droppedCopy = codeCopies.find((c) => c.outcome === 'left_out')!;
+    expect(droppedCopy.duplicateOf).toBe(codeCopies.find((c) => c.outcome === 'included')!.id);
+
+    // Every recalled line the block shows is in the one recall section.
+    const included = recall.candidates.filter((c) => c.outcome === 'included' && c.section !== 'involuntary');
+    expect(included.length).toBeGreaterThan(0);
+    for (const c of included) expect(c.section, c.id).toBe('recall');
+  });
+
+  it("'hybrid' on a GMI turn whose question the embedding provider fails on: the dense leg is absent, exact words still put the memory in the block", async () => {
+    const MARK = 'tarpaulin';
+    const statements = ['The bike shed code is XQ7Z.', 'I water the tomatoes every second day.', 'My sister Ana lives in Porto.'];
+    const question = `What is the bike shed code under the ${MARK}?`;
+    const dense = await ask(undefined, statements, question, { failEmbedding: (text) => text.includes(MARK) });
+    // The leg_absent line is once a process: start the hybrid turn's count from none.
+    resetRecallLogOnce();
+    logged.length = 0;
+    const hybrid = await ask({ retrieval: 'hybrid' }, statements, question, { failEmbedding: (text) => text.includes(MARK) });
+
+    // The provider was asked to embed the question and failed; both turns answered.
+    expect(hybrid.embedder.embedded.some((text) => text.includes(MARK))).toBe(true);
+    expect(dense.text).toBe('XQ7Z.');
+    expect(hybrid.text).toBe('XQ7Z.');
+
+    // Dense recall has nothing to rank; hybrid's other two legs run.
+    expect(dense.memoryRecall.candidates.filter((c) => c.ranks.dense !== undefined)).toEqual([]);
+    expect(dense.block).not.toContain('XQ7Z');
+    expect(hybrid.memoryRecall.legs.map((l) => [l.leg, l.ran, l.reason])).toEqual([
+      ['dense', false, 'no_embedder'],
+      ['exact_words', true, undefined],
+      ['recency', true, undefined],
+    ]);
+    expect(hybrid.memoryRecall.lexicalBackend).toBe('in_process');
+
+    const first = hybrid.memoryRecall.candidates.find((c) => c.ranks.exact_words === 1);
+    expect(first).toMatchObject({ outcome: 'included', section: 'recall' });
+    expect(first!.ranks.dense).toBeUndefined();
+    expect(hybrid.block).toContain('XQ7Z');
+    expect(hybrid.block.match(/^## Relevant Memories/gm)).toHaveLength(1);
+
+    // One leg_absent line for the dense leg, naming no words of the turn.
+    const absent = events('memory.recall.leg_absent');
+    expect(absent).toEqual([expect.objectContaining({ leg: 'dense', reason: 'no_embedder' })]);
+    expect(JSON.stringify(absent)).not.toContain(MARK);
   });
 });
