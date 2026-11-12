@@ -170,6 +170,20 @@ Each conversation scope has one row, written with the scope's first trace: in on
 
 `compiled_at` is the scope's wiki-compile watermark. `Memory.compileWiki({ reason?, scopes? })` compiles one user or session scope at a time, each into its own page store (`AttachedWiki.storeFor(scopeId)`): it reads the scope's traces stored after the watermark, oldest first, leaves out the scope's own page chunks, hands the rest to the compiler, and moves the watermark to the newest trace it read. A batch (500 traces) never ends inside a millisecond: the traces of the millisecond a batch would cut wait for the next one, and a millisecond more traces share than a batch holds is read whole. The read stops below a trace any facade of the same store in this process (one Brain coordination token) has stamped and is still storing (its embedding being made, say), and a conversation trace is stamped after the last compile read, so the watermark never passes a trace stored after the read. Before it moves, the watermark is checked against the store: a trace stored meanwhile under a time the batch spans (by an import, or a writer in another process) holds it just before that trace, and the watermark moves only from the value the compile started from, so an import that moved it back keeps its value. Page writes of one scope are ordered across the facades of one store in this process the same way. With no `scopes` it takes every user or session scope that holds a trace newer than its watermark; the operator's scope is never compiled. A scope whose compile throws keeps its watermark, and the other scopes go on: when the wiki's `compileSkipReasonOf(error)` names a reason (a spend budget's refusal is `'budget'`) the scope is skipped, and any other error is thrown once every scope has run. The wiki's `beforeScopeCompile(scopeId, traces)` can skip a scope or change the traces it compiles. Each reason a scope was skipped for is logged once a call as `memory.compile_skipped`, with no scope in the line.
 
+### `memory_legacy_owner`
+
+```sql
+CREATE TABLE IF NOT EXISTS memory_legacy_owner (
+  brain_id      TEXT   NOT NULL,
+  agent_id      TEXT   NOT NULL,
+  owner_key     TEXT   NOT NULL,   -- the conversation key of the user the agent's older memory is attributed to
+  attributed_at BIGINT NOT NULL,   -- Unix ms
+  PRIMARY KEY (brain_id, agent_id)
+);
+```
+
+One row an agent at most: the user a souled agent's `legacyMemory` attributed the memory from before per-user scope to (`Memory.legacyOwner`, `setLegacyOwner`, `clearLegacyOwner`). The row is written once and never moved; that user's deletion removes it once the attributed memory is gone. It is not a portable table: an export or an import does not carry it.
+
 ### `memory_pages`
 
 ```sql

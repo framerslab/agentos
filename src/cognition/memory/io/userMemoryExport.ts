@@ -12,6 +12,7 @@ import type { SuppressionSubject } from '../suppression/ForgottenLedger.js';
 import { guardedWrite } from '../suppression/guardedWrite.js';
 import type { Memory } from './facade/Memory.js';
 import type { SubjectPages } from './forgetUserMemory.js';
+import { LEGACY_SCOPE } from './legacyMemory.js';
 
 /** One subject's memory: what they and the agent said, as the store holds it, and the pages compiled from it. */
 export interface UserMemoryExport {
@@ -55,6 +56,11 @@ export async function exportSubjectMemory(options: {
   wiki: { storeFor(scopeId: string): { listPages(): Promise<WikiPage[]> } };
   agentId: string;
   subject: SuppressionSubject;
+  /**
+   * The memory from before per-user scope attributed to this subject (`legacyMemory`), passed for its owner alone:
+   * the written forms of the agent's plain scope id its traces sit under, and its compiled pages.
+   */
+  legacy?: { forms: readonly string[]; pages(): Promise<WikiPage[]> };
 }): Promise<UserMemoryExport> {
   const { memory, agentId } = options;
   const subject = checkedSubject(options.subject, 'exportSubjectMemory');
@@ -69,30 +75,36 @@ export async function exportSubjectMemory(options: {
   if (memory.forgotten && (await memory.isForgotten(subject))) return document;
 
   const seen = new Set<string>();
-  let since = 0;
-  for (;;) {
-    const batch = await memory.recentTraces(since, { scope: CONVERSATION_SCOPE, scopeId: key, limit: EXPORT_BATCH, order: 'asc' });
-    const fresh = batch.filter((trace) => !seen.has(trace.id));
-    for (const trace of fresh) {
-      seen.add(trace.id);
-      if (trace.tags.includes('wiki')) continue;
-      const speaker = parseTraceMetadata((await memory.readTrace(trace.id))?.metadata)[SPEAKER_KEY];
-      document.traces.push({
-        id: trace.id,
-        createdAt: new Date(Number(trace.createdAt)).toISOString(),
-        ...(speaker === 'user' || speaker === 'assistant' ? { speaker } : {}),
-        text: trace.content,
-        tags: [...trace.tags],
-      });
+  /** Every live trace of one scope, oldest first, a page's chunks left out. */
+  const readScope = async (scope: string, scopeId: string): Promise<void> => {
+    let since = 0;
+    for (;;) {
+      const batch = await memory.recentTraces(since, { scope, scopeId, limit: EXPORT_BATCH, order: 'asc' });
+      const fresh = batch.filter((trace) => !seen.has(trace.id));
+      for (const trace of fresh) {
+        seen.add(trace.id);
+        if (trace.tags.includes('wiki')) continue;
+        const speaker = parseTraceMetadata((await memory.readTrace(trace.id))?.metadata)[SPEAKER_KEY];
+        document.traces.push({
+          id: trace.id,
+          createdAt: new Date(Number(trace.createdAt)).toISOString(),
+          ...(speaker === 'user' || speaker === 'assistant' ? { speaker } : {}),
+          text: trace.content,
+          tags: [...trace.tags],
+        });
+      }
+      if (batch.length < EXPORT_BATCH) break;
+      // The next read starts in the last millisecond read, whose traces a full batch may have cut, and past it once
+      // that millisecond holds nothing new.
+      const newest = Number(batch[batch.length - 1].createdAt);
+      since = fresh.length > 0 ? newest - 1 : newest;
     }
-    if (batch.length < EXPORT_BATCH) break;
-    // The next read starts in the last millisecond read, whose traces a full batch may have cut, and past it once
-    // that millisecond holds nothing new.
-    const newest = Number(batch[batch.length - 1].createdAt);
-    since = fresh.length > 0 ? newest - 1 : newest;
-  }
+  };
+  for (const form of options.legacy?.forms ?? []) await readScope(LEGACY_SCOPE, form);
+  await readScope(CONVERSATION_SCOPE, key);
 
-  for (const page of await options.wiki.storeFor(key).listPages()) {
+  const pages = [...(options.legacy ? await options.legacy.pages() : []), ...(await options.wiki.storeFor(key).listPages())];
+  for (const page of pages) {
     document.pages.push({ id: page.id, summary: page.summary, updated: page.updated, sources: [...page.sources], body: page.body });
   }
   return document;

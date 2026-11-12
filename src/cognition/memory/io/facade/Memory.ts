@@ -1408,8 +1408,9 @@ export class Memory {
    * Every subject this store holds anything of, each once: the users and sessions whose conversation key names a
    * registry row, a trace or a wiki page of this brain (a registry row may be gone after a deletion that did not
    * finish), the users a trace's metadata names as `turnUserId`, and, where the store's database holds the learning
-   * tables, the users of their session and chain-head rows. The operator's key names no subject. The re-application
-   * of the tombstones asks the ledger about each.
+   * tables, the users of their session and chain-head rows, and the user memory from before per-user scope is
+   * attributed to ({@link legacyOwner}). The operator's key names no subject. The re-application of the tombstones asks
+   * the ledger about each.
    */
   async listHeldSubjects(): Promise<SuppressionSubject[]> {
     await this._initPromise;
@@ -1427,6 +1428,12 @@ export class Memory {
         const subject = typeof row.scope_id === 'string' ? parseConversationScopeKey(row.scope_id)?.subject : undefined;
         if (subject && subject.kind !== 'operator') hold({ kind: subject.kind, id: subject.id });
       }
+    }
+    // The owner of older memory: a forgotten owner's attributed memory is deleted again after a restore.
+    const owners = await this._brain.all<{ owner_key: string }>('SELECT owner_key FROM memory_legacy_owner WHERE brain_id = ?', [brainId]);
+    for (const row of owners) {
+      const subject = parseConversationScopeKey(row.owner_key)?.subject;
+      if (subject && subject.kind !== 'operator') hold({ kind: subject.kind, id: subject.id });
     }
     const holdUser = (userId: unknown): void => {
       if (typeof userId === 'number') hold({ kind: 'user', id: String(userId) });
@@ -1447,6 +1454,41 @@ export class Memory {
       }
     }
     return [...held.values()];
+  }
+
+  /**
+   * The conversation key of the user the agent's memory from before per-user scope is attributed to; undefined when
+   * it is attributed to nobody. An attribution stands for the store's life, whatever later opens pass.
+   */
+  async legacyOwner(agentId: string): Promise<string | undefined> {
+    await this._initPromise;
+    const row = await this._brain.get<{ owner_key: string }>(
+      'SELECT owner_key FROM memory_legacy_owner WHERE brain_id = ? AND agent_id = ?',
+      [this._brain.brainId, agentId],
+    );
+    return typeof row?.owner_key === 'string' ? row.owner_key : undefined;
+  }
+
+  /**
+   * Attributes the agent's memory from before per-user scope to one user, by their conversation key. An attribution
+   * already made is never moved: the call then writes nothing.
+   */
+  async setLegacyOwner(agentId: string, ownerKey: string): Promise<void> {
+    if (typeof ownerKey !== 'string' || ownerKey === '') {
+      throw new TypeError('Memory.setLegacyOwner: ownerKey must be a non-empty string');
+    }
+    await this._initPromise;
+    await this._brain.run(
+      `INSERT INTO memory_legacy_owner (brain_id, agent_id, owner_key, attributed_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT (brain_id, agent_id) DO NOTHING`,
+      [this._brain.brainId, agentId, ownerKey, Date.now()],
+    );
+  }
+
+  /** Removes the attribution of the agent's older memory: the owner's deletion does, once that memory is gone. */
+  async clearLegacyOwner(agentId: string): Promise<void> {
+    await this._initPromise;
+    await this._brain.run('DELETE FROM memory_legacy_owner WHERE brain_id = ? AND agent_id = ?', [this._brain.brainId, agentId]);
   }
 
   /**

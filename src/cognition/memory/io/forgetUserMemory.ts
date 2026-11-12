@@ -9,6 +9,7 @@ import { memoryLog } from '../log.js';
 import { CONVERSATION_SCOPE, conversationScopeKey, parseConversationScopeKey } from '../retrieval/store/conversationScopeKey.js';
 import type { ForgottenLedger, SuppressionSubject } from '../suppression/ForgottenLedger.js';
 import type { Memory } from './facade/Memory.js';
+import { LEGACY_SCOPE } from './legacyMemory.js';
 
 /** What a deletion did. It never holds the subject's id or any text of theirs. */
 export interface ForgetMemoryReport {
@@ -71,6 +72,25 @@ export interface ForgetUserMemoryOptions {
    * done.
    */
   legacyUnattributed?: () => Promise<boolean>;
+  /**
+   * The memory from before per-user scope a single person's install attributed to one user (`legacyMemory`). When
+   * `ownerKey` is the subject's key for this agent, the deletion also deletes the legacy traces under each of `forms`
+   * and each legacy compiled page, and then, once every such page is gone, the attribution. Any other subject never
+   * touches it.
+   */
+  legacy?: LegacyDeletion;
+}
+
+/** What a deletion of the owner of attributed legacy memory reaches: see {@link ForgetUserMemoryOptions.legacy}. */
+export interface LegacyDeletion {
+  /** The conversation key the legacy memory is attributed to; undefined when it is attributed to nobody. */
+  ownerKey: string | undefined;
+  /** The written forms of the agent's plain scope id the legacy traces sit under. */
+  forms: readonly string[];
+  /** The legacy pages on disk: only the compiled ones (`parsed`) are the owner's. */
+  pages: { list(): Promise<Array<{ id: string; parsed: boolean }>>; deletePage(id: string): Promise<unknown> };
+  /** Removes the attribution. */
+  clearOwner(): Promise<void>;
 }
 
 /** The stores a deletion never reaches, each with why. */
@@ -104,7 +124,8 @@ export async function deleteScopeWithDocuments(memory: Memory, scope: string, sc
  * ledger's copy and then to the store, and from then on every new write of the subject is refused; the subject's
  * conversation traces are deleted under this agent's key and under every other agent's key of the subject, the
  * soft-deleted rows, the graph copies, the full-text entries and the document chunks with them; for a user, the
- * traces that name the user under other scopes; each compiled page with its chunks; the scope's registry row; then the
+ * traces that name the user under other scopes; each compiled page with its chunks; the scope's registry row; for the
+ * user older memory is attributed to (`legacy`), that memory and the attribution; then the
  * vector index is written again from what is left, and the write-ahead log is emptied. A store that throws is named as
  * not reached and the next one still runs. No model call is made, and `Memory.forget()` (a soft delete) is never used.
  *
@@ -205,6 +226,37 @@ export async function forgetUserMemory(options: ForgetUserMemoryOptions): Promis
     );
     if (naming) stores.push(naming);
 
+    // The older memory attributed to this user: its traces, then its compiled pages, then the attribution, which stays
+    // while a page is left so a later deletion still finds it. A page whose front matter cannot be read is nobody's.
+    const legacy = options.legacy;
+    if (legacy && legacy.ownerKey !== undefined && legacy.ownerKey === ownKey) {
+      const store = 'legacy memory attributed to the user';
+      let legacyTraces = 0;
+      let legacyFailure: string | undefined;
+      try {
+        for (const form of legacy.forms) legacyTraces += await deleteScopeWithDocuments(memory, LEGACY_SCOPE, form);
+        let left = false;
+        for (const page of await legacy.pages.list()) {
+          if (!page.parsed) continue;
+          try {
+            await legacy.pages.deletePage(page.id);
+            pages.deleted += 1;
+          } catch (error) {
+            left = true;
+            pages.failed.push({ id: page.id, reason: messageOf(error) });
+          }
+        }
+        if (!left) await legacy.clearOwner();
+      } catch (error) {
+        legacyFailure = messageOf(error);
+      }
+      traces += legacyTraces;
+      // One entry, whatever step failed: the traces deleted before a failure are still counted for the vector index.
+      stores.push(
+        legacyFailure === undefined ? { store, reached: true, deleted: legacyTraces } : { store, reached: false, reason: legacyFailure },
+      );
+    }
+
     // A delete only marks a vector in the index: the index is written again from the traces that are left.
     try {
       await memory.rebuildVectorIndex();
@@ -265,7 +317,7 @@ export interface ReapplyTombstonesOptions
   /** The per-subject parts of one deletion: the subject's drain and chain, and what the caller reached itself. */
   forSubject?: (
     subject: SuppressionSubject,
-  ) => Promise<Pick<ForgetUserMemoryOptions, 'drain' | 'onChain' | 'extraStores' | 'alsoIncomplete'>>;
+  ) => Promise<Pick<ForgetUserMemoryOptions, 'drain' | 'onChain' | 'extraStores' | 'alsoIncomplete' | 'legacy'>>;
 }
 
 /**

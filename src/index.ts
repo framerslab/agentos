@@ -217,6 +217,7 @@ export type { UserMemoryExport } from './cognition/memory/io/userMemoryExport.js
 export type {
   ForgetMemoryReport,
   ForgetUserMemoryOptions,
+  LegacyDeletion,
   ReapplyTombstonesOptions,
   SubjectPages,
 } from './cognition/memory/io/forgetUserMemory.js';

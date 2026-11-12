@@ -47,6 +47,14 @@ import { shareForgottenLedger } from '../cognition/memory/suppression/learnerTom
 import { guardedWrite } from '../cognition/memory/suppression/guardedWrite.js';
 import { sweepRetention, type RetentionPeriod } from '../cognition/memory/io/retentionSweep.js';
 import { correctSubjectMemory, exportSubjectMemory, type UserMemoryExport } from '../cognition/memory/io/userMemoryExport.js';
+import {
+  assertLegacyMemory,
+  attributeLegacyMemory,
+  LEGACY_SCOPE,
+  legacyScopeIds,
+  type LegacyMemoryReason,
+} from '../cognition/memory/io/legacyMemory.js';
+import type { WikiPage } from '../cognition/substrate/memory/wiki/types.js';
 import { WriteChains } from '../cognition/learning/writeChains.js';
 import { conversationScopeKey, parseConversationScopeKey } from '../cognition/memory/retrieval/store/conversationScopeKey.js';
 import { encodePlainScopeId } from '../cognition/memory/retrieval/store/scopeIdForm.js';
@@ -427,6 +435,15 @@ export interface SouledAgentOptions extends AgentOptions {
    * unreadable does not open.
    */
   tombstoneCopy?: { path: string } | { adapter: StorageAdapter };
+  /**
+   * For a single person's own machine: attributes all memory the store holds from before per-user scope (traces
+   * under the agent's plain scope, pages an earlier version compiled under `memory/`) to one named user, who then
+   * recalls it, reads and lists those pages, gets both in an export, and whose deletion removes them. Unset, the
+   * default, that memory stays in place and is read by nobody new. The store refuses the attribution when it records
+   * any other user or session, and it is never moved to another user. A page whose front matter does not parse is
+   * never attributed.
+   */
+  legacyMemory?: { attributeTo: string; reason: LegacyMemoryReason };
 }
 
 /**
@@ -547,13 +564,24 @@ export type SouledAgent = Agent & {
  *   in a store of its own, which none of them reaches; nothing is opened.
  */
 export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent> {
-  const { pendingWritesTimeoutMs, sharedMemory, compile, memoryPolicy, screen, tombstoneKey, tombstoneCopy, retention, ...rest } =
-    opts;
+  const {
+    pendingWritesTimeoutMs,
+    sharedMemory,
+    compile,
+    memoryPolicy,
+    screen,
+    tombstoneKey,
+    tombstoneCopy,
+    retention,
+    legacyMemory,
+    ...rest
+  } = opts;
   /** The ids the agent itself reads as naming nobody, beside the built-in ones. */
   const anonymousUserIds =
     typeof rest.learning === 'object' && rest.learning !== null ? rest.learning.anonymousUserIds : undefined;
   if (sharedMemory !== undefined) assertSharedMemory(sharedMemory, anonymousUserIds);
   if (retention !== undefined) assertRetention(retention);
+  if (legacyMemory !== undefined) assertLegacyMemory(legacyMemory, (id) => isAnonymousUserId(id, anonymousUserIds));
   // The two hooks and sharedMemory act on this agent's own store. A GMI's cognitive memory files and recalls in a store
   // of its own, which none of them reaches: an account the policy turns off would still be remembered there, and
   // sessions sharedMemory runs as one user would not share it. They are refused together, before the soul is loaded:
@@ -705,6 +733,13 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       (encodedAgentId !== agentId ? await memory.countScope('persona', encodedAgentId) : 0),
   );
   if (earlierTraces > 0) memoryLog.warn('memory.legacy_traces', { count: earlierTraces });
+  /** The written forms of the agent's plain scope id the older traces sit under. */
+  const legacyForms = legacyScopeIds(agentId);
+  /**
+   * The conversation key of the user the older memory is attributed to (`legacyMemory`), as the store records it: an
+   * attribution made by an earlier open stands without the option.
+   */
+  let legacyOwnerKey = await closingOnThrow(() => memory.legacyOwner(agentId));
 
   /** The subject a turn's memory is kept under: the one user of `sharedMemory` for a subject that names none. */
   const subjectOf = (subject: MemorySubject): MemorySubject =>
@@ -1109,6 +1144,13 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
           const policy = await turnPolicyOf(context, subject, scopeId, 'recall');
           if (policy !== 'failed' && policy.longTerm !== 'off') {
             own = await memory.recall(text, { scope: 'conversation', scopeId, limit: RECALL_LIMIT });
+            // The older memory attributed to this user is theirs too: a third read, of each form of the agent's plain
+            // scope, merged with the other two under the same budget. No other subject reads it.
+            if (legacyOwnerKey !== undefined && scopeId === legacyOwnerKey) {
+              for (const form of legacyForms) {
+                own.push(...(await memory.recall(text, { scope: LEGACY_SCOPE, scopeId: form, limit: RECALL_LIMIT })));
+              }
+            }
           }
         }
       }
@@ -1225,6 +1267,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     ...(compile === false ? { compile: false as const } : {}),
     // A forgotten subject reads no page and is compiled no page.
     isForgotten: (subject) => forgotten.isForgotten(subject),
+    // The user older memory is attributed to reads the pages an earlier version compiled as their own.
+    legacyOwnerKey: async () => legacyOwnerKey,
     // Each subject's compile runs on its chain, after its writes; close() compiles what is stored at its deadline.
     runScope: (scopeId, work) => (closing ? work() : onSubject(scopeId, work)),
   }));
@@ -1325,13 +1369,39 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   };
   /**
    * Whether the store holds memory from before per-user scope that nobody attributed: traces under the agent's plain
-   * id, in either form it was written in, or page files under memory/ that are not the operator's.
+   * id, in either form it was written in, or page files under memory/ that are not the operator's, while no user owns
+   * them; and, whoever owns the rest, a page file whose front matter cannot be read, which is never attributed.
    */
   const legacyUnattributed = async (): Promise<boolean> => {
-    if ((await memory.countScope('persona', agentId)) > 0) return true;
-    if (encodedAgentId !== agentId && (await memory.countScope('persona', encodedAgentId)) > 0) return true;
-    return (await operatorPages.withheldPages()).length > 0;
+    const withheld = await operatorPages.withheldPages();
+    if (withheld.some((page) => page.origin === 'uncertain')) return true;
+    if ((await memory.legacyOwner(agentId)) !== undefined) return false;
+    for (const form of legacyForms) if ((await memory.countScope(LEGACY_SCOPE, form)) > 0) return true;
+    return withheld.length > 0;
   };
+  /** The older pages under memory/: those an earlier version compiled (`parsed`), and those that cannot be read. */
+  const legacyPageEntries = async (): Promise<Array<{ id: string; parsed: boolean }>> =>
+    (await operatorPages.withheldPages()).map((page) => ({ id: page.id, parsed: page.origin === 'compiled' }));
+  /** The pages an earlier version compiled under memory/, read whole. */
+  const legacyCompiledPages = async (): Promise<WikiPage[]> => {
+    const pages: WikiPage[] = [];
+    for (const entry of await legacyPageEntries()) {
+      if (!entry.parsed) continue;
+      const page = await operatorPages.readPage(entry.id);
+      if (page) pages.push(page);
+    }
+    return pages;
+  };
+  /** What a deletion of the owner of the older memory also deletes; any other subject's deletion leaves it. */
+  const legacyDeletionOf = async (): Promise<NonNullable<ForgetUserMemoryOptions['legacy']>> => ({
+    ownerKey: await memory.legacyOwner(agentId),
+    forms: legacyForms,
+    pages: { list: legacyPageEntries, deletePage: (id) => operatorPages.deletePage(id) },
+    clearOwner: async () => {
+      await memory.clearLegacyOwner(agentId);
+      legacyOwnerKey = undefined;
+    },
+  });
   /**
    * What a deletion of one subject reaches beside the store: the history of the sessions this handle holds open for
    * the subject, which the default runtime keeps in this process. A gmi() session keeps its own messages.
@@ -1368,7 +1438,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     };
   };
   /** Deletes one subject's memory on its own chain, after its pending writes. */
-  const forgetSubject = (
+  const forgetSubject = async (
     subject: SuppressionSubject,
     extra: { stores: ForgetMemoryReport['stores']; incomplete: boolean },
   ): Promise<ForgetMemoryReport> =>
@@ -1379,6 +1449,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       subject,
       agentId,
       ...deletionPartsOf(subject, extra),
+      legacy: await legacyDeletionOf(),
       legacyUnattributed,
     });
   /** What the agent's learning layer deleted of a user, as entries of a deletion report; none when it runs no layer. */
@@ -1442,8 +1513,10 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       wiki: { storeFor: pagesOf },
       agentId,
       legacyUnattributed,
-      forSubject: async (subject) =>
-        deletionPartsOf(subject, subject.kind === 'user' ? await forgetLearner(subject.id) : { stores: [], incomplete: false }),
+      forSubject: async (subject) => ({
+        ...deletionPartsOf(subject, subject.kind === 'user' ? await forgetLearner(subject.id) : { stores: [], incomplete: false }),
+        legacy: await legacyDeletionOf(),
+      }),
     });
   built.applyTombstones = () => awaitedOnClose(applyTombstones());
   /** Deletes what the agent's retention no longer keeps, each subject on its own chain. */
@@ -1462,9 +1535,19 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     if (typeof userId !== 'string' || userId === '') {
       return Promise.reject(new TypeError('souledAgent: exportUserMemory needs a non-empty user id'));
     }
-    return awaitedOnClose(
-      exportSubjectMemory({ memory, wiki: { storeFor: pagesOf }, agentId, subject: { kind: 'user', id: userId } }),
-    );
+    const subject: SuppressionSubject = { kind: 'user', id: userId };
+    const run = async (): Promise<UserMemoryExport> => {
+      // The owner of the older memory gets it in their export too.
+      const owns = legacyOwnerKey !== undefined && conversationScopeKey(agentId, subject) === legacyOwnerKey;
+      return exportSubjectMemory({
+        memory,
+        wiki: { storeFor: pagesOf },
+        agentId,
+        subject,
+        ...(owns ? { legacy: { forms: legacyForms, pages: legacyCompiledPages } } : {}),
+      });
+    };
+    return awaitedOnClose(run());
   };
   built.correctUserMemory = (userId, correction) => {
     if (typeof userId !== 'string' || userId === '') {
@@ -1547,6 +1630,20 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   // ledger whose copy cannot be read fails the open, and no memory is served.
   try {
     await applyTombstones();
+    // On a single person's own machine the older memory is attributed to its one user, once the tombstones are
+    // applied: a forgotten user, an attribution to another user, and a store that records anyone else refuse the open.
+    if (legacyMemory !== undefined) {
+      await attributeLegacyMemory({
+        memory,
+        ledger: forgotten,
+        agentId,
+        attributeTo: legacyMemory.attributeTo,
+        reason: legacyMemory.reason,
+        legacyPages: legacyPageEntries,
+        isAnonymous: (id) => isAnonymousUserId(id, anonymousUserIds),
+      });
+    }
+    legacyOwnerKey = await memory.legacyOwner(agentId);
   } catch (err) {
     await originalClose().catch(() => undefined);
     await closeStore().catch(() => undefined);

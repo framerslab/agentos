@@ -94,6 +94,12 @@ export interface AttachMemoryWikiOptions {
    * passes it, and runs `work` in the subject's turn. Unset: the compile runs at once.
    */
   runScope?: <T>(scopeId: string, work: () => Promise<T>) => Promise<T>;
+  /**
+   * The conversation key of the user the memory from before per-user scope is attributed to (a souled agent's
+   * `legacyMemory`), or undefined. For that asker alone, `read_memory_page` reads and lists the pages an earlier
+   * version compiled under memory/ as their own; a page whose front matter cannot be read stays withheld from them too.
+   */
+  legacyOwnerKey?: () => Promise<string | undefined>;
 }
 
 export interface AttachMemoryWikiResult {
@@ -304,6 +310,9 @@ function pagePortOf(opts: AttachMemoryWikiOptions, operatorStore: WikiMemoryStor
     const key = conversationScopeKey(opts.agentId, subjectFor(asker));
     return { key, own: new UserWikiStore({ scopeId: key, pages: opts.memory, chunk: opts.chunk }) };
   };
+  /** Whether the older memory under memory/ is attributed to the asker whose pages are kept under `key`. */
+  const ownsLegacy = async (key: string): Promise<boolean> =>
+    opts.legacyOwnerKey ? (await opts.legacyOwnerKey()) === key : false;
   /** Whether the asker's memory is forgotten: such an asker is answered nothing at all. */
   const forgotten = async (asker: { kind: 'user' | 'session'; id: string }): Promise<boolean> =>
     opts.isForgotten ? opts.isForgotten(subjectFor(asker)) : false;
@@ -322,8 +331,10 @@ function pagePortOf(opts: AttachMemoryWikiOptions, operatorStore: WikiMemoryStor
       const served = opts.ownPagesServed ? await opts.ownPagesServed(key) : true;
       const page = served ? await own.readPage(id) : null;
       if (page) return page;
-      // The folder's page is served only when the text just read is an operator page's.
+      // The folder's page is served only when the text just read is an operator page's, or a page an earlier version
+      // compiled and the older memory is attributed to the asker.
       if (shared && originOfPage(shared) === 'operator') return shared;
+      if (served && shared && originOfPage(shared) === 'compiled' && (await ownsLegacy(key))) return shared;
       // A page an earlier version compiled, or one that cannot be told from one, may hold what someone else said:
       // no user is served it.
       const origin = shared ? originOfPage(shared) : await operatorStore.pageOrigin(id);
@@ -341,8 +352,10 @@ function pagePortOf(opts: AttachMemoryWikiOptions, operatorStore: WikiMemoryStor
       }
       const { key, own } = ownPages(asker.subject);
       const served = opts.ownPagesServed ? await opts.ownPagesServed(key) : true;
+      const legacy = served && (await ownsLegacy(key)) ? shared.filter((page) => originOfPage(page) === 'compiled') : [];
       return [
         ...(served ? await own.listPages() : []).map((page) => ({ id: page.id, summary: page.summary, owner: 'own' as const })),
+        ...legacy.map((page) => ({ id: page.id, summary: page.summary, owner: 'own' as const })),
         ...shared
           .filter((page) => originOfPage(page) === 'operator')
           .map((page) => ({ id: page.id, summary: page.summary, owner: 'operator' as const })),

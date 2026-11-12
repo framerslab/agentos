@@ -624,6 +624,24 @@ CREATE TABLE IF NOT EXISTS memory_pages (
 );
 `;
 
+/**
+ * The one user memory from before per-user scope is attributed to, a row an agent: written once by a souled agent's
+ * `legacyMemory` option on a single person's own machine, and removed by that user's deletion.
+ *
+ * Column notes:
+ * - `owner_key` is the user's conversation key (`conversationScopeKey(agentId, { kind: 'user', id })`).
+ * - `attributed_at` is Unix milliseconds.
+ */
+const DDL_MEMORY_LEGACY_OWNER = `
+CREATE TABLE IF NOT EXISTS memory_legacy_owner (
+  brain_id      TEXT   NOT NULL,
+  agent_id      TEXT   NOT NULL,
+  owner_key     TEXT   NOT NULL,
+  attributed_at BIGINT NOT NULL,
+  PRIMARY KEY (brain_id, agent_id)
+);
+`;
+
 // FTS index DDL is now generated dynamically by features.fts.createIndex()
 // to support both SQLite FTS5 and Postgres tsvector/GIN.
 
@@ -1290,6 +1308,7 @@ export class Brain {
       DDL_MEMORY_TRACES,
       DDL_MEMORY_SCOPES,
       DDL_MEMORY_PAGES,
+      DDL_MEMORY_LEGACY_OWNER,
       DDL_KNOWLEDGE_NODES,
       DDL_KNOWLEDGE_EDGES,
       DDL_DOCUMENTS,

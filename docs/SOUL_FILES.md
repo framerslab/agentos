@@ -170,6 +170,20 @@ if (encoded !== agentId) await agent.memory.deleteScope('persona', encoded);
 Then delete the compiled page files (the ones whose front matter lists `sources`), and
 the next start writes `index.md` again and logs no `memory.legacy_traces` line.
 
+On a single person's own machine, `legacyMemory: { attributeTo, reason:
+'one-persons-machine' }` on `souledAgent()` attributes that older memory to one user:
+the user recalls the old traces, reads and lists the old compiled pages, gets both in an
+export, and a deletion you request for that user removes them. The option is a statement
+you make. The library refuses it when the store records another user, any anonymous
+session, a trace that names another user, another forgotten subject or another learner,
+and it cannot check more than that. The attribution is recorded in the store, stands for
+the store's life whether later opens pass the option or not, and is never moved to
+another user; one `memory.legacy_attributed` log line counts the traces and pages it
+attributed. A page whose front matter does not parse is never attributed: it stays
+withheld from every user, and a deletion report goes on naming it as legacy memory nobody
+attributed. A person who uses the agent later is another subject and never reads the
+attributed memory.
+
 The memory index in the system prompt is rendered from the operator's page files and
 the text migrated from `MEMORY.md` (below), not read from `index.md`; `loadSoul()` and
 `loadSoulSync()` return it as `wikiIndex`. A line written by hand into `index.md`
