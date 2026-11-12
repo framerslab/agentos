@@ -1733,14 +1733,17 @@ export class MemoryStore {
 
   /**
    * Whether a trace's row was written since this store last wrote or read it: its words, type, creation time, trust
-   * policy or statement differ from what the store saw. What this process changed on the cached trace alone (a verification it
-   * persisted, a gist of its words) does not count. A trace this store never saw a row for is compared as it is.
+   * policy or statement differ from what the store saw. What this process changed on the cached trace alone (a
+   * verification it persisted, a gist of its words) does not count. A trace this store never saw a row for is
+   * compared as it is, a policy the row no longer holds included.
    */
   private rowChangedSince(trace: MemoryTrace, row: MemoryTraceRow): boolean {
     const now = seenRowOf(rowFieldsOf(row), rowStatementOf(row));
     const seen = this.rowSeen.get(trace);
     if (seen) return !sameSeenRow(seen, now);
-    return rowRestatesTrace(now, trace) || !sameRowFields(now, trace);
+    // A trace filed here from another store's write (a sibling's revival): its row held what it holds now, so a row
+    // that names another policy or statement, other fields, or no policy where the trace has one was written since.
+    return rowRestatesTrace(now, trace) || !sameRowFields(now, trace) || (!now.policy && Boolean(trace.policy));
   }
 
   /**
