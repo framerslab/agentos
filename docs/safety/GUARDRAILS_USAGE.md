@@ -201,6 +201,37 @@ const { text } = frameUntrustedEvidence(message.text, { label: `message:${messag
 
 The two markers share a random boundary of 16 hexadecimal characters, new on every call. Any copy of it in the text is removed, null bytes are dropped, and chat-template tokens (`<|...|>`, `[INST]`, `[/INST]`, `<s>`, `</s>`) are broken with a space, in the text and in the label's line (a label `INST` is written `[ INST]`). The label, when given, must be an id. Framing lowers how often instructions planted in the text work; it does not make a model ignore them, so an agent that acts on such text is also held to limits and checked evidence.
 
+## Guards Under the Text Functions
+
+`generateText()` and `streamText()` take `guards`, and so do an agent's `generate()`, `stream()` and a session's `send()` and `stream()`:
+
+```typescript
+import { GuardrailStopError, generateText } from '@framers/agentos';
+
+const result = await generateText({
+  provider: 'openai',
+  prompt,
+  tools,
+  guards: { services: [hardBan, classifier], context: { userId: user.id, sessionId: thread.id, moderation: { surface: 'agent_turn' } } },
+});
+```
+
+- **Three stages.** The call's own user turn is judged once, before the first provider request. Each tool call the model makes is judged by the guards that set `evaluateToolCalls`, on the arguments the model sent, before `onBeforeToolExecution` and so before any approval. The whole reply is judged before the caller receives it. `stages` picks among `input`, `toolCalls` and `output`.
+- **Closed by default.** Each guard runs as `moderateContent()` runs it: closed unless its config says `failClosed: false`, with a deadline, and what decides a stage is what decides `moderateContent()`.
+- **A stop** rejects with `GuardrailStopError` (`GUARDRAIL_BLOCKED`, `GUARDRAIL_HELD` or `GUARDRAIL_UNAVAILABLE`); a stream yields it as one `error` part. The input and output stages run once per call, outside the fallback chain, so a stop is not retried on a fallback provider. A refused tool call is not a stop: the tool does not run, the model reads the refusal as the call's result and the loop goes on.
+- **A replacement reply.** A `BLOCK` that carries a non-empty `replacementText` on the input is the reply, and no request is made; on the output it takes the reply's place.
+- **The report.** `guardReport` carries codes and ids: no guard's reason, no prompt, no reply, and no call id from a provider.
+
+[Guards on a call](../getting-started/HIGH_LEVEL_API.md#guards-on-a-call) has the options, the error, the report and what a stream delivers after a stop.
+
+## The Dry Run
+
+`mode: 'dryRun'` on `moderateContent()` and on `guards` runs every guard as enforcement would, and changes nothing:
+
+- Every verdict is reported with `enforced: false`: `moderateContent()` answers `allow` with `wouldBe`, and `guards` passes each verdict to `onVerdict` and writes its `guardrail.verdict` line with `mode: dry_run`.
+- Under `guards` the input is sent as given, tools run and text passes. A stream's output guards judge the whole reply once it was delivered.
+- A screen's `BLOCK` still ends its evaluation, so a dry run calls the guards enforcement would call and no others.
+
 ## Images: `ImageGuardrail`
 
 `ImageGuardrail` judges the images of an input (`visionInputs`, which `moderateContent()` fills from `content.images`). It holds the order of the checks and no vendor code: the host hands it its checks.
