@@ -95,6 +95,68 @@ describe('dedupePool', () => {
     expect(kept.map((e) => e.trace.id)).toEqual(['old', 'new']);
     expect(dropped).toEqual([]);
   });
+
+  it('counts a one-letter word that is also a stop word, so "room A" and "room I" are two memories', () => {
+    expect(nearDuplicate(dedupeTokens('We meet in room A.'), dedupeTokens('We meet in room I.'), 0.8)).toBe(false);
+    expect(dedupeTokens('We meet in room A.')).toEqual(new Set(['meet', 'room', 'a']));
+    expect(nearDuplicate(dedupeTokens('We meet in room A.'), dedupeTokens('we meet in room a'), 0.8)).toBe(true);
+  });
+
+  describe('of two near-duplicates whose words differ, the newer stays', () => {
+    const sister = 'My sister Ana moved out of the old riverside flat last spring and now lives in';
+
+    it('in the higher-ranked one\'s place, with its fused score and ranks, and the older is recorded against it', () => {
+      // 11 of 13 words shared (0.85): one memory, and the newer text is its current state.
+      expect(nearDuplicate(dedupeTokens(`${sister} Porto`), dedupeTokens(`${sister} Lisbon`), 0.8)).toBe(true);
+      const { kept, dropped } = dedupePool(
+        [
+          { ...entry('old', `${sister} Porto`, 0.02, 100), ranks: { dense: 1, exact_words: 1 } },
+          { ...entry('mid', 'The tomatoes on the east bed were watered', 0.017, 150), ranks: { dense: 2 } },
+          { ...entry('new', `${sister} Lisbon`, 0.015, 200), ranks: { dense: 3 } },
+        ],
+        0.8,
+      );
+      expect(kept.map((e) => e.trace.id)).toEqual(['new', 'mid']);
+      expect(kept[0]).toMatchObject({ id: 'new', fusedScore: 0.02, ranks: { dense: 1, exact_words: 1 } });
+      expect(kept[0].trace.content).toContain('Lisbon');
+      expect(dropped).toEqual([{ entry: expect.objectContaining({ id: 'old', fusedScore: 0.02 }), duplicateOf: 'new' }]);
+    });
+
+    it('the review\'s own input: Porto then Lisbon keeps Lisbon', () => {
+      const { kept, dropped } = dedupePool(
+        [entry('old', `${sister} Porto`, 0.02, 100), entry('new', `${sister} Lisbon`, 0.015, 200)],
+        0.8,
+      );
+      expect(kept.map((e) => e.trace.id)).toEqual(['new']);
+      expect(dropped.map((d) => [d.entry.trace.id, d.duplicateOf])).toEqual([['old', 'new']]);
+    });
+
+    it('equal words, or a candidate with no createdAt, keep the higher fused score as before', () => {
+      const same = dedupePool([entry('old', `${sister} Porto.`, 0.02, 100), entry('new', `${sister} Porto!`, 0.015, 200)], 0.8);
+      expect(same.kept.map((e) => e.trace.id)).toEqual(['old']);
+      expect(same.dropped.map((d) => [d.entry.trace.id, d.duplicateOf])).toEqual([['new', 'old']]);
+      const undated = { id: 'new', trace: { id: 'new', content: `${sister} Lisbon`, createdAt: Number.NaN }, fusedScore: 0.015 };
+      const noTime = dedupePool([entry('old', `${sister} Porto`, 0.02, 100), undated], 0.8);
+      expect(noTime.kept.map((e) => e.trace.id)).toEqual(['old']);
+      const flagged = dedupePool([entry('old', `${sister} Porto`, 0.02, 100), { ...entry('new', `${sister} Lisbon`, 0.015, 200), undated: true }], 0.8);
+      expect(flagged.kept.map((e) => e.trace.id)).toEqual(['old']);
+    });
+
+    it('leaves no two near-duplicates kept when the newer text that takes a place repeats another kept memory', () => {
+      const common = 'w1 w2 w3 w4 w5 w6 w7 w8';
+      // A and C share 8 of 12 words (0.67), so they are two; B shares 9 of 11 with each (0.82) and is the newest.
+      const { kept, dropped } = dedupePool(
+        [entry('A', `${common} alpha beta`, 0.02, 100), entry('C', `${common} gamma delta`, 0.018, 150), entry('B', `${common} alpha gamma`, 0.01, 200)],
+        0.8,
+      );
+      for (const [i, a] of kept.entries()) {
+        for (const b of kept.slice(i + 1)) expect(nearDuplicate(dedupeTokens(a.trace.content), dedupeTokens(b.trace.content), 0.8)).toBe(false);
+      }
+      expect(kept.map((e) => e.trace.id)).toEqual(['B']);
+      expect(kept[0].fusedScore).toBe(0.02);
+      expect(dropped.map((d) => [d.entry.trace.id, d.duplicateOf])).toEqual([['A', 'B'], ['C', 'B']]);
+    });
+  });
 });
 
 describe("the hybrid block's share", () => {

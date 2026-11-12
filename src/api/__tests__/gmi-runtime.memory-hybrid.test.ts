@@ -307,6 +307,25 @@ describe("agent({ runtime: 'gmi' }) memory.recall.retrieval", () => {
     for (const c of included) expect(c.section, c.id).toBe('recall');
   });
 
+  it("'hybrid' on a GMI turn: a correction that changes one word in a longer memory is sent in place of the text it corrects", async () => {
+    const sister = 'My sister Ana moved out of the old riverside flat last spring and now lives in';
+    const statements = [`${sister} Porto.`, 'I water the tomatoes every second day.', `${sister} Lisbon.`];
+    const question = 'Does my sister Ana still live in Porto?';
+    const dense = await ask(undefined, statements, question);
+    // Precondition: dense recall shows both texts, so the hybrid block showing one is the dedupe's doing.
+    expect(dense.block).toContain('lives in Porto');
+    expect(dense.block).toContain('lives in Lisbon');
+
+    const hybrid = await ask({ retrieval: 'hybrid' }, statements, question);
+    expect(hybrid.block).toContain('lives in Lisbon');
+    expect(hybrid.block).not.toContain('lives in Porto');
+    const dropped = hybrid.memoryRecall.candidates.filter((c) => c.reason === 'dedupe');
+    expect(dropped).toHaveLength(1);
+    // The old text ranks first by exact words (the question names its city) and is the one dropped.
+    expect(dropped[0].ranks.exact_words).toBe(1);
+    expect(hybrid.memoryRecall.candidates.find((c) => c.id === dropped[0].duplicateOf)).toMatchObject({ outcome: 'included', section: 'recall' });
+  });
+
   it("'hybrid' on a GMI turn whose question the embedding provider fails on: the dense leg is absent, exact words still put the memory in the block", async () => {
     const MARK = 'tarpaulin';
     const statements = ['The bike shed code is XQ7Z.', 'I water the tomatoes every second day.', 'My sister Ana lives in Porto.'];

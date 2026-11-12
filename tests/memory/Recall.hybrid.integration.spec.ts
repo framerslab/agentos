@@ -163,6 +163,41 @@ describe.each(ENGINES)('hybrid recall on %s', (engine, open) => {
     await db.close();
   });
 
+  it('a correction that changes one word in a longer memory is shown in place of the text it corrects: the newer stays', async () => {
+    const db = await open();
+    const mem = await memoryWith({ retrieval: 'hybrid' }, new WordHashEmbedder(), db.brain);
+    const sister = 'My sister Ana moved out of the old riverside flat last spring and now lives in';
+    await plant(mem, 'ana-old', `${sister} Porto.`, at(0));
+    await plant(mem, 'ana-new', `${sister} Lisbon.`, at(1));
+    // The question holds the old text's last word, so the old text ranks first by exact words.
+    const h = await mem.manager.assembleForPrompt('Does my sister Ana still live in Porto?', 1600, NEUTRAL, { scopes: U1 });
+    expect(h.contextText).toContain('lives in Lisbon');
+    expect(h.contextText).not.toContain('lives in Porto');
+    const c = captureOf(h);
+    const old = c.candidates.find((x) => x.id === 'ana-old')!;
+    const kept = c.candidates.find((x) => x.id === 'ana-new')!;
+    expect(old).toMatchObject({ ranks: { exact_words: 1 }, outcome: 'left_out', reason: 'dedupe', duplicateOf: 'ana-new', tokens: 0 });
+    expect(kept).toMatchObject({ outcome: 'included', section: 'recall' });
+    // The newer takes the better of the two fused scores.
+    expect(kept.fusedScore).toBeGreaterThanOrEqual(old.fusedScore);
+    await mem.close();
+    await db.close();
+  });
+
+  it('a retrieve() with no scopes reads the dense leg alone: exact words and recency are absent for no_scopes, and no backend is named', async () => {
+    const { db, mem } = await fixture({ retrieval: 'hybrid' });
+    const result = await mem.manager.retrieve(QUESTION, NEUTRAL, {});
+    const recall = result.diagnostics.recall as unknown as Capture;
+    expect(recall.legs.map((l) => [l.leg, l.ran, l.reason])).toEqual([
+      ['dense', true, undefined],
+      ['exact_words', false, 'no_scopes'],
+      ['recency', false, 'no_scopes'],
+    ]);
+    expect(recall.lexicalBackend).toBe('none');
+    await mem.close();
+    await db.close();
+  });
+
   it('a graph association that repeats a pooled memory is not shown twice', async () => {
     const { db, mem } = await fixture({ retrieval: 'hybrid' });
     // The association's trace is below the turn's minConfidence, so no leg returns it; the graph leads to it.
