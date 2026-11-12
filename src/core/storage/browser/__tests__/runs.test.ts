@@ -1287,6 +1287,85 @@ describe('the run owner', () => {
     }
   });
 
+  it("refuses a finish that waited for the record's lock while another tab's sign-out marked the record, though no message of that stop reached it", async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
+    const store = new MemoryKeyValueStore();
+    await store.set('lib/j/r13', { id: 'r13', key: KEY, account: ACCOUNT, kind: 'library', way: null, unit: 'sessions', chosen: null, counts: { total: 3, pending: 2, applied: 1, skipped: 0, failed: 0 }, items: [], state: 'running', cut: null, phase: null, began: 1, progressed: 2 });
+    const base = recordLocks();
+    let asked = 0;
+    const stopAsked = deferred();
+    const finishAsked = deferred();
+    // One record lock queue for both owners, counting the asks for the record's lock once the test starts counting.
+    let counting = false;
+    const records: RunOwnerOptions['locks'] = {
+      request: (name, work) => {
+        if (counting && name === 'record-lib/j/r13') {
+          asked += 1;
+          if (asked === 2) stopAsked.resolve();
+          if (asked === 3) finishAsked.resolve();
+        }
+        return base.request(name, work);
+      },
+    };
+    const locks = memoryLocks();
+    // On channels of their own, so the finishing owner never hears the stop.
+    const a = owner(store, locks, bus(), { locks: records });
+    const b = owner(store, locks, bus(), { locks: records });
+    const blocker = deferred();
+    try {
+      expect(await b.records()).toEqual([expect.objectContaining({ status: 'cut' })]);
+      counting = true;
+      // The record's lock is held, so the sign-out's mark and then the finish wait for it in that order.
+      void records.request('record-lib/j/r13', () => blocker.promise);
+      let answer: unknown = null;
+      void a.stopAccount('signout').then((result) => { answer = result; });
+      await stopAsked.promise;
+      let wrote = false;
+      const finishing = b.finish('r13', {
+        ...countingJob(1, []),
+        async run(context) {
+          await context.write(async () => { wrote = true; return true; });
+          return { ended: 'finished', counts: context.record().counts };
+        },
+      });
+      await finishAsked.promise;
+      blocker.resolve();
+      expect(await finishing).toEqual({ refused: 'another-tab' });
+      await b.whenIdle();
+      expect(wrote).toBe(false);
+      expect((await store.get<RunRecord>('lib/j/r13'))?.cut).toBe('signout');
+      await vi.advanceTimersByTimeAsync(10_500);
+      expect(answer).toEqual({ complete: true });
+    } finally {
+      blocker.resolve();
+      a.close();
+      b.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(['dismiss', 'shown'] as const)("%s keeps another tab's failed row for another try when the store refuses its deletion", async (call) => {
+    const store = new MemoryKeyValueStore();
+    await store.set('lib/j/r14', { id: 'r14', key: KEY, account: ACCOUNT, kind: 'library', way: null, unit: 'sessions', chosen: null, counts: { total: 3, pending: 2, applied: 0, skipped: 0, failed: 1 }, items: [{ index: 0, state: 'failed', name: 'a.txt' }], state: 'failed', cut: null, phase: null, began: 1, progressed: 2 });
+    const own = owner(store, memoryLocks(), bus());
+    const remove = store.delete.bind(store);
+    try {
+      expect(await own.records()).toEqual([expect.objectContaining({ status: 'failed' })]);
+      store.delete = (async () => { throw new Error('the store refused the deletion'); }) as typeof store.delete;
+      if (call === 'dismiss') expect(await own.dismiss('r14')).toEqual({ refused: 'another-tab' });
+      else await own.shown('r14');
+      expect(await store.keys('lib/j/')).toEqual(['lib/j/r14']);
+      expect(own.snapshot().runs).toEqual([expect.objectContaining({ status: 'failed', record: expect.objectContaining({ id: 'r14' }) })]);
+      // Once the store answers again, the same call deletes the record.
+      store.delete = remove;
+      if (call === 'dismiss') expect(await own.dismiss('r14')).toEqual({ ok: true });
+      else await own.shown('r14');
+      expect(await store.keys('lib/j/')).toEqual([]);
+    } finally {
+      own.close();
+    }
+  });
+
   it('refuses to finish from a copy it read earlier when the store refuses the read of the record under its lock', async () => {
     const store = new MemoryKeyValueStore();
     await store.set('lib/j/r11', { id: 'r11', key: KEY, account: ACCOUNT, kind: 'library', way: null, unit: 'sessions', chosen: null, counts: { total: 3, pending: 2, applied: 1, skipped: 0, failed: 0 }, items: [], state: 'running', cut: 'session', phase: null, began: 1, progressed: 2 });
