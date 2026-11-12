@@ -48,7 +48,7 @@ export interface RecallOptionsInput {
  *   `memoryProvider.getContext` reads it (with one, `generate()` and `stream()` still hand it to the provider).
  * - Without it (the default runtime, or a GMI agent whose memory is off), `budget.totalTokens` is the provider's
  *   `tokenBudget` when `memoryProviderOptions.tokenBudget` is unset, two different values are refused (`conflict`), and
- *   `capture` is refused (`unsupported_runtime`): no cognitive assembler runs. With no `memoryProvider.getContext` to
+ *   `capture` and `retrieval` are refused (`unsupported_runtime`): no cognitive assembler or recall runs. With no `memoryProvider.getContext` to
  *   read it, a set `budget.totalTokens` is reported in `ignored` (`recall_budget`).
  * - Either way, a value of the wrong kind, or a setting or a budget that is not an object, is refused (`invalid_value`).
  *
@@ -69,6 +69,13 @@ export function resolveRecallOptions(o: RecallOptionsInput): ResolvedRecallOptio
       'capture',
       'unsupported_runtime',
       `${o.where}: memory.recall.capture needs cognitive memory, which runs on runtime: 'gmi' (or gmi()) with memory on; this agent's memory comes from memoryProvider.`,
+    );
+  }
+  if (recall?.retrieval != null) {
+    rejectRecallOption(
+      'retrieval',
+      'unsupported_runtime',
+      `${o.where}: memory.recall.retrieval needs cognitive memory, which runs on runtime: 'gmi' (or gmi()) with memory on; this agent's memory comes from memoryProvider.`,
     );
   }
   const total = recall?.budget?.totalTokens ?? undefined;
