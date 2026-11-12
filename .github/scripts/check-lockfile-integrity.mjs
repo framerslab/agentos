@@ -19,10 +19,13 @@
  * - pkg-manager/resolve-dependencies/src/updateLockfile.ts line 189: a resolution without one is written as it is;
  * - lockfile/utils/src/pkgSnapshotToResolution.ts lines 17-38: a git-hosted entry installs without one.
  *
- * The check reads the packages section of each file and compares the entries both have; an entry the refresh removed
- * went with the bump and is not compared. It exits 0 when every such entry has the integrity it had (one the refresh
- * adds an integrity to is reported), 1 when one lost or changed its integrity, and 2 when a file cannot be read or has
- * no package entries.
+ * The check reads the packages section of each file and compares the entries both have. An entry the refresh removed
+ * went with the bump and is not compared, unless the refresh added an entry of the same package under another key that
+ * pins no integrity: pull request 745's first refresh wrote libsignal as git+https://github.com/...#<commit> with
+ * { type: git } and no integrity, where the lockfile had the codeload tarball and its integrity, so the key changed and
+ * a comparison by key saw nothing lost. It exits 0 when every such entry has the integrity it had (one the refresh
+ * adds an integrity to is reported), 1 when one lost or changed its integrity or was replaced by an entry with none,
+ * and 2 when a file cannot be read or has no package entries.
  */
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -109,7 +112,18 @@ export function packageIntegrities(text) {
 }
 
 /**
- * The entries both lockfiles have whose integrity the second lost, changed or gained.
+ * The package name of a packages-section key: the key up to the @ that starts its version or source
+ * ('@scope/name@1.0.0' is '@scope/name', 'libsignal@git+https://...' is 'libsignal').
+ * @param {string} key
+ */
+function packageName(key) {
+  const at = key.indexOf('@', key.startsWith('@') ? 1 : 0);
+  return at > 0 ? key.slice(0, at) : key;
+}
+
+/**
+ * The entries both lockfiles have whose integrity the second lost, changed or gained, and the entries the second
+ * removed and replaced with an entry of the same package that pins no integrity.
  * @param {Map<string, string | null>} before
  * @param {Map<string, string | null>} after
  */
@@ -120,14 +134,26 @@ export function compareIntegrities(before, after) {
   const changed = [];
   /** @type {Array<{ key: string, after: string }>} */
   const gained = [];
+  /** @type {Array<{ key: string, before: string, by: string }>} */
+  const replaced = [];
+  /** @type {Map<string, string[]>} the keys only the second has that pin no integrity, by package name */
+  const addedWithout = new Map();
+  for (const [key, now] of after) {
+    if (before.has(key) || now !== null) continue;
+    const name = packageName(key);
+    addedWithout.set(name, [...(addedWithout.get(name) ?? []), key]);
+  }
   for (const [key, was] of before) {
-    if (!after.has(key)) continue;
+    if (!after.has(key)) {
+      if (was !== null) for (const by of addedWithout.get(packageName(key)) ?? []) replaced.push({ key, before: was, by });
+      continue;
+    }
     const now = after.get(key) ?? null;
     if (was !== null && now === null) lost.push({ key, before: was });
     else if (was !== null && now !== null && was !== now) changed.push({ key, before: was, after: now });
     else if (was === null && now !== null) gained.push({ key, after: now });
   }
-  return { lost, changed, gained };
+  return { lost, changed, gained, replaced };
 }
 
 /**
@@ -164,11 +190,12 @@ function main(argv) {
     read.push(entries);
   }
   const [before, after] = read;
-  const { lost, changed, gained } = compareIntegrities(before, after);
+  const { lost, changed, gained, replaced } = compareIntegrities(before, after);
   for (const { key, after: now } of gained) console.log(`${key}: the refresh pins integrity ${now}, which ${argv[0]} did not have.`);
   const findings = [
     ...lost.map(({ key, before: was }) => `${key}: the refresh dropped integrity ${was}.`),
     ...changed.map(({ key, before: was, after: now }) => `${key}: the refresh changed integrity ${was} to ${now}.`),
+    ...replaced.map(({ key, before: was, by }) => `${key}: the refresh replaced it with ${by}, which pins no integrity, and dropped integrity ${was}.`),
   ];
   for (const message of findings) {
     console.log(message);
@@ -178,7 +205,8 @@ function main(argv) {
     console.error(
       `${findings.length} ${findings.length === 1 ? 'entry' : 'entries'} of ${argv[1]} lost or changed the integrity ${argv[0]} pins. ` +
         "pnpm writes a git-hosted tarball's integrity only when it downloads the tarball, so a refresh on a pnpm store that already " +
-        'holds the package leaves it out; refresh on an empty store. A changed integrity means the same entry came with other bytes.'
+        'holds the package leaves it out, and one that resolves the dependency as a git clone instead of the tarball writes none; ' +
+        'run the refresh again on an empty store. A changed integrity means the same entry came with other bytes.'
     );
     return 1;
   }
