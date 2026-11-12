@@ -1225,6 +1225,68 @@ describe('the run owner', () => {
     }
   });
 
+  it("marks again a record whose sign-out mark another tab's finish cleared between the stop's two listings, so that finish's next write is fenced", async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
+    const store = new MemoryKeyValueStore();
+    // A live record whose tab is gone: its lock is free, so another tab may finish it.
+    await store.set('lib/j/r12', { id: 'r12', key: KEY, account: ACCOUNT, kind: 'library', way: null, unit: 'sessions', chosen: null, counts: { total: 3, pending: 2, applied: 1, skipped: 0, failed: 0 }, items: [], state: 'running', cut: null, phase: null, began: 1, progressed: 2 });
+    const locks = memoryLocks();
+    const records = recordLocks();
+    // On channels of their own, so the finishing owner never hears the stop.
+    const a = owner(store, locks, bus(), { locks: records });
+    const b = owner(store, locks, bus(), { locks: records });
+    const reached = deferred();
+    const go = deferred();
+    const afterStop = deferred();
+    const set = store.set.bind(store);
+    const keys = store.keys.bind(store);
+    const get = store.get.bind(store);
+    let marks = 0;
+    let pause = false;
+    // The stop's second listing waits, once the first has marked the record, until the test lets it go.
+    store.set = (async (...args: Parameters<typeof set>) => {
+      await set(...args);
+      if (args[0] === 'lib/j/r12' && (args[1] as { cut?: unknown } | undefined)?.cut === 'signout' && marks++ === 0) pause = true;
+    }) as typeof store.set;
+    store.keys = (async (...args: Parameters<typeof keys>) => {
+      if (pause) {
+        pause = false;
+        reached.resolve();
+        await go.promise;
+      }
+      return keys(...args);
+    }) as typeof store.keys;
+    try {
+      let answer: unknown = null;
+      void a.stopAccount('signout').then((result) => { answer = result; });
+      await reached.promise;
+      expect((await get<RunRecord>('lib/j/r12'))?.cut).toBe('signout');
+      let wrote = false;
+      expect(await b.finish('r12', {
+        ...countingJob(1, []),
+        async run(context) {
+          await afterStop.promise;
+          const result = await context.write(async () => { wrote = true; return true; });
+          return { ended: typeof result === 'object' && 'fenced' in result ? 'fenced' : 'finished', counts: context.record().counts };
+        },
+      })).toEqual({ id: 'r12' });
+      expect((await get<RunRecord>('lib/j/r12'))?.cut).toBeNull(); // the finish cleared the mark
+      go.resolve();
+      await vi.advanceTimersByTimeAsync(10_500);
+      expect(answer).toEqual({ complete: true });
+      expect((await get<RunRecord>('lib/j/r12'))?.cut).toBe('signout');
+      afterStop.resolve();
+      await b.whenIdle();
+      expect(wrote).toBe(false);
+    } finally {
+      go.resolve();
+      afterStop.resolve();
+      a.close();
+      b.close();
+      vi.useRealTimers();
+    }
+  });
+
   it('refuses to finish from a copy it read earlier when the store refuses the read of the record under its lock', async () => {
     const store = new MemoryKeyValueStore();
     await store.set('lib/j/r11', { id: 'r11', key: KEY, account: ACCOUNT, kind: 'library', way: null, unit: 'sessions', chosen: null, counts: { total: 3, pending: 2, applied: 1, skipped: 0, failed: 0 }, items: [], state: 'running', cut: 'session', phase: null, began: 1, progressed: 2 });
