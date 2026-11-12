@@ -7,6 +7,8 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import pino from 'pino';
+import { resetLoggerFactory, setLogger } from '../../src/core/logging/loggerFactory';
 import type { PADState } from '../../src/cognition/memory/core/config';
 import type { MemoryTrace } from '../../src/cognition/memory/core/types';
 import { memoryTraceLineLength } from '../../src/cognition/memory/core/prompt/MemoryFormatters';
@@ -195,6 +197,74 @@ describe.each(ENGINES)('hybrid recall on %s', (engine, open) => {
     ]);
     expect(recall.lexicalBackend).toBe('none');
     await mem.close();
+    await db.close();
+  });
+
+  it('a memory question reserves the exact-words hit the cut left out; another question records it ranked and left out for the budget', async () => {
+    const logged: Array<Record<string, unknown>> = [];
+    setLogger(pino({ level: 'debug', base: undefined }, { write(line: string) { logged.push(JSON.parse(line)); } }));
+    try {
+      const db = await open();
+      const mem = await memoryWith({ retrieval: 'hybrid' }, new FlatEmbedder(), db.brain);
+      // The oldest: outside the dense leg's sixty, so only its words find it.
+      await plant(mem, 'gold', 'The bike shed code is XQ7Z, set in March.', at(0));
+      for (let i = 0; i < 65; i++) await plant(mem, `n${i}`, `Garden note ${i}: the tomatoes on row ${i} were watered.`, at(i + 1));
+      type Reserved = Capture & { memoryQuestionReserve: { fired: boolean; added: number }; candidates: Array<Capture['candidates'][number] & { reserve?: boolean }> };
+      const plain = await mem.manager.assembleForPrompt('What is the bike shed code?', 1600, NEUTRAL, { scopes: U1 });
+      const p = plain.capture as unknown as Reserved;
+      expect(p.memoryQuestionReserve).toEqual({ fired: false, added: 0 });
+      const left = p.candidates.find((c) => c.id === 'gold')!;
+      expect(left).toMatchObject({ ranks: { exact_words: 1 }, outcome: 'left_out', reason: 'budget' });
+      expect(left.ranks.dense).toBeUndefined();
+      expect(left.reserve).toBeUndefined();
+      expect(plain.contextText).not.toContain('XQ7Z');
+
+      const asked = await mem.manager.assembleForPrompt('Do you remember the bike shed code?', 1600, NEUTRAL, { scopes: U1 });
+      const a = asked.capture as unknown as Reserved;
+      expect(a.memoryQuestionReserve).toEqual({ fired: true, added: 1 });
+      expect(a.candidates.find((c) => c.id === 'gold')).toMatchObject({ reserve: true, outcome: 'included', section: 'recall' });
+      expect(asked.contextText).toContain('XQ7Z');
+      // The reserved line renders after the lines of the cut.
+      expect(asked.includedMemoryIds[asked.includedMemoryIds.length - 1]).toBe('gold');
+      expect(logged.filter((l) => l.event === 'memory.recall.reserve_fired')).toEqual([expect.objectContaining({ added: 1 })]);
+
+      const none = await mem.manager.reassembleForBudget!(asked, 0);
+      const n = none.capture as unknown as Reserved;
+      expect(n.memoryQuestionReserve).toEqual({ fired: true, added: 0 });
+      expect(n.candidates.find((c) => c.id === 'gold')).toMatchObject({ reserve: true, outcome: 'left_out', reason: 'budget' });
+
+      // With the capture off the block still reserves the room.
+      (mem.manager as unknown as { config: { recall: Record<string, unknown> } }).config.recall.capture = 'off';
+      const quiet = await mem.manager.assembleForPrompt('Do you remember the bike shed code?', 1600, NEUTRAL, { scopes: U1 });
+      expect(quiet.capture).toBeUndefined();
+      expect(quiet.contextText).toContain('XQ7Z');
+      await mem.close();
+      await db.close();
+    } finally {
+      resetLoggerFactory();
+    }
+  });
+
+  it("a host's memoryQuestion predicate replaces the rule, and one that throws is read as no", async () => {
+    const db = await open();
+    const always = await memoryWith({ retrieval: 'hybrid', memoryQuestion: () => true }, new FlatEmbedder(), db.brain);
+    await plant(always, 'one', 'The ferry leaves from pier 3.', at(0));
+    const fired = await always.manager.assembleForPrompt('hello', 1600, NEUTRAL, { scopes: U1 });
+    expect((fired.capture as unknown as { memoryQuestionReserve: { fired: boolean } }).memoryQuestionReserve.fired).toBe(true);
+    await always.close();
+    const broken = await memoryWith(
+      {
+        retrieval: 'hybrid',
+        memoryQuestion: () => {
+          throw new Error('boom');
+        },
+      },
+      new FlatEmbedder(),
+      db.brain,
+    );
+    const out = await broken.manager.assembleForPrompt('Do you remember?', 1600, NEUTRAL, { scopes: U1 });
+    expect((out.capture as unknown as { memoryQuestionReserve: unknown }).memoryQuestionReserve).toEqual({ fired: false, added: 0 });
+    await broken.close();
     await db.close();
   });
 
