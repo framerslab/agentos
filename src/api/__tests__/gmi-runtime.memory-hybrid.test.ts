@@ -180,6 +180,23 @@ describe("agent({ runtime: 'gmi' }) memory.recall.retrieval", () => {
     expect(hybrid.block).not.toContain('## Recent Experiences');
   });
 
+  it("retrieval 'dense' set outright on a GMI turn sends the block of no setting, byte for byte, from the dense leg alone", async () => {
+    vi.useFakeTimers({ toFake: ['Date'], shouldAdvanceTime: false });
+    vi.setSystemTime(Date.UTC(2026, 10, 10, 12, 0, 0));
+    try {
+      const unset = await turn(undefined);
+      const dense = await turn({ retrieval: 'dense' });
+      expect(unset.block).toContain('XQ7Z');
+      expect(dense.block).toBe(unset.block);
+      expect(dense.embedCalls).toBe(unset.embedCalls);
+      expect(dense.memoryRecall.retrieval).toBe('dense');
+      expect(dense.memoryRecall.legs.map((l) => l.leg)).toEqual(['dense']);
+      expect(dense.memoryRecall.candidates.every((c) => c.ranks.exact_words === undefined && c.ranks.recency === undefined)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('with memory.store the exact-words leg reads the durable index', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gmi-hybrid-'));
     try {
