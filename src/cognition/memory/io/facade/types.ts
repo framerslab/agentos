@@ -291,7 +291,8 @@ export interface MemoryConfig {
    *
    * With options, the ledger's table lives in the store's own database, and `copy` names the adapter of the second
    * copy kept outside it (`openForgottenCopy` opens one). The open is refused, and the store closed again, when the
-   * ledger does not open: its copy is missing, or its tombstones are keyed and the key is not given.
+   * ledger does not open: its copy is missing, or its tombstones are keyed and the key is not given. The open also
+   * compares the ledger identity the store holds with its copy's, and refuses a copy that belongs to another store.
    *
    * Tombstones are database-wide, including historical learner rows: brain ids do not isolate them. Give each
    * agent its own database or PostgreSQL schema and a separate copy outside restores.

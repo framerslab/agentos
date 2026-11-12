@@ -82,6 +82,8 @@ A tombstone outlives the deletion. It is a hash of the person's id, with no text
 
 The tombstones are kept twice: in the memory store, and in a copy outside it. Every open copies the copy back into the store and deletes again whatever the store holds of a forgotten person, before the agent serves anyone. So a store restored from a backup taken before a deletion does not bring the person back. A store whose copy is missing or unreadable does not open, and neither does a store whose tombstones are keyed when the key is not given: without the record of who was forgotten, no memory is served.
 
+Each store's tombstones carry a random identity, made once. An open compares the identity of the store with the identity of its copy and refuses a copy that belongs to another store (`LEDGER_IDENTITY_MISMATCH`). A store put back from an older backup takes its state from its copy; a copy put back from an older backup is repaired from its store.
+
 ### Retention
 
 `retention` sets how long traces are kept from the time they were stored, with a period of its own for anonymous sessions if you want one. A sweep deletes expired traces for good on `close()` and on `agent.sweepRetention()`. When a trace expires, a page compiled from it is deleted whole, or rebuilt from the traces that survive when you set `pages: 'rebuild'`. A store that holds, or would hold, more than one person or session refuses to open a session until you choose: a period, or `'until-deletion'`. Operator pages are never swept.

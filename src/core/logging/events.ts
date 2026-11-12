@@ -104,6 +104,8 @@ export const AGENTOS_EVENTS = {
   'memory.forget_done': { stores: 'int', unreached: 'int', pages: 'int', pagesFailed: 'int', drained: 'int', pendingAtDeadline: 'int', complete: { enum: ['yes', 'no'] } },
   // The tombstones were applied again, at an open or on demand: how many forgotten subjects the store still held something of (each deleted again, with a memory.forget_done line of its own), and how many tombstones came back from the ledger's copy into the store, as after a restore from an older backup. Written only when either is above 0.
   'memory.tombstone_reapplied': { subjects: 'int', reconciled: 'int' },
+  // A forgotten-user ledger refused to open, or refused a call on an open handle: its tombstone copy is missing or is another store's, a key it needs was not given, its identity or state rows are damaged, or the adapter has no transactions or the runtime no secure random source. Written once, where the refusal is thrown, with the error's listed type and code.
+  'memory.ledger_refused': { type: 'word', code: 'word' },
   // A retention sweep ran over at least one subject with a period: the traces it deleted for good, the pages compiled from them that it deleted, and the subjects it removed from the registry because nothing of them was left.
   'memory.retention_swept': { traces: 'int', pages: 'int', scopes: 'int' },
   // A single person's install attributed the memory a store held from before per-user scope to its one user (the legacyMemory option): the legacy traces and the legacy compiled pages it counted. Written once, when the attribution is made.

@@ -145,6 +145,15 @@ export interface MemoryRetention {
 const RETENTION_REQUIRED =
   "souledAgent: this store holds memory of more than one person or session; set retention: { traces: { days } } or { traces: 'until-deletion' }";
 
+/** Whether a tombstone copy's ledger table holds no row; false when the table cannot be read. */
+async function holdsNoLedgerRow(copy: StorageAdapter): Promise<boolean> {
+  try {
+    return (await copy.get('SELECT hash FROM agentos_learning_forgotten LIMIT 1')) == null;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Throws unless `retention` names a period for traces (and, when given, for sessions) that is `'until-deletion'` or a
  * positive number of days, and a page rule that is one of the two.
@@ -642,7 +651,10 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     try {
       ownCopy = await openForgottenCopy(copyPath);
     } catch {
-      throw copyUnavailableError();
+      // The ledger is not reached: the refusal's one line is written here.
+      const refused = copyUnavailableError();
+      memoryLog.warn('memory.ledger_refused', errorFields(refused));
+      throw refused;
     }
   }
   const copy = ownCopy?.adapter ?? (tombstoneCopy as { adapter: StorageAdapter }).adapter;
@@ -669,9 +681,11 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     });
   } catch (err) {
     // A store whose copy is missing or unreadable, or whose tombstones need a key not given, serves nothing. A copy
-    // file this open made is removed with it, so the next open still finds the copy missing.
+    // file this open made is removed with it while its ledger table holds no row, so the next open still finds the
+    // copy missing; a copy that already received the ledger, or that cannot be read, is kept for the next open.
+    const emptyNewCopy = ownCopy !== undefined && !ownCopy.existed && (await holdsNoLedgerRow(ownCopy.adapter));
     await closeCopy();
-    if (ownCopy && !ownCopy.existed && copyPath !== undefined) await fs.rm(copyPath, { force: true }).catch(() => undefined);
+    if (emptyNewCopy && copyPath !== undefined) await fs.rm(copyPath, { force: true }).catch(() => undefined);
     throw err;
   }
   /** The store's forgotten-user ledger: every write and read of a subject asks it. */
