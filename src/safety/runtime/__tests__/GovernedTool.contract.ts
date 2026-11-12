@@ -14,11 +14,12 @@ import { generateText } from '../../../api/generateText.js';
 import { globalLLMProviderHealth } from '../../../core/safety/LLMProviderHealthRegistry.js';
 import { resetLoggerFactory } from '../../../core/logging/loggerFactory.js';
 import type { ITool, ToolExecutionContext, ToolExecutionResult } from '../../../core/tools/ITool.js';
+import { verifyActionEvidence } from '../ActionEvidence.js';
 import { SqlActionLimiter, type ActionLimitRule } from '../ActionLimiter.js';
 import { governTool, governedActionOf, type ActionAuditSink, type ActionGovernance, type GovernedActionIds } from '../GovernedTool.js';
 import {
   DAY, MESSAGES, MUTE_POLICY, OPENAI, RULES, RULE_BOOK, auditSink, capture, message, messageStore, muteOf, muteTool, posted, serve, text, toolCall,
-  type Json, type Line, type MuteTool, type RecordingSink,
+  type Json, type Line, type MuteArgs, type MuteTool, type RecordingSink,
 } from './governedFixtures.js';
 
 /** The store a suite runs on. `prefix()` answers a table prefix no other test uses; `close()` removes what the test made. */
@@ -145,6 +146,120 @@ export function runGovernedToolSuite(name: string, open: () => Promise<StoreUnde
       for (let attempt = 0; attempt < 3; attempt += 1) expect(governance((await viaModel(governed, muteOf(message('m1')))).result).outcome).toBe('failed');
       expect(governance((await viaModel(governed, muteOf(message('m1')))).result)).toMatchObject({ outcome: 'limit_reached', code: 'RETRIES_EXHAUSTED' });
       expect(mute.execute).toHaveBeenCalledTimes(3);
+    });
+
+    it('repeated quotes cannot reset the three-attempt retry ceiling', async () => {
+      mute = muteTool(async () => ({ success: false, error: 'nothing changed' }));
+      const governed = governTool(mute, MUTE_POLICY, governanceOf(limiterOf()));
+      const args = muteOf(message('m1'));
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        expect(governance((await viaModel(governed, args)).result).outcome).toBe('failed');
+      }
+      args.evidence.quotes.push({ ...args.evidence.quotes[0] });
+      expect(governance((await viaModel(governed, args)).result)).toMatchObject({ outcome: 'limit_reached', code: 'RETRIES_EXHAUSTED' });
+      expect(mute.execute).toHaveBeenCalledTimes(3);
+    });
+
+    it('repeated quotes do not make an executed action new', async () => {
+      const rules = [RULES[0]];
+      const governed = governTool(mute, { ...MUTE_POLICY, limits: rules }, governanceOf(limiterOf(under.prefix(), rules)));
+      const args = muteOf(message('m1'));
+      expect(governance((await viaModel(governed, args)).result).outcome).toBe('executed');
+      args.evidence.quotes.push({ ...args.evidence.quotes[0] });
+      expect(governance((await viaModel(governed, args)).result).outcome).toBe('duplicate');
+      expect(mute.execute).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(['evidence', 'audit', 'limiter'] as const)('isolates arguments changed while awaiting %s', async (stage) => {
+      let callerArgs: MuteArgs | undefined;
+      const mutate = () => {
+        if (!callerArgs) throw new Error('missing call arguments');
+        callerArgs.userId = 'u_victim';
+        callerArgs.evidence.ruleId = 'not.in.the.book';
+      };
+      const limiter = limiterOf();
+      const reserve = limiter.reserve.bind(limiter);
+      if (stage === 'limiter') vi.spyOn(limiter, 'reserve').mockImplementation(async (request) => {
+        mutate();
+        return reserve(request);
+      });
+      const source = messageStore();
+      const governed = governTool(mute, MUTE_POLICY, governanceOf(limiter, {
+        evidenceSource: { ...source, getMessage: async (id) => {
+          if (stage === 'evidence') mutate();
+          return source.getMessage(id);
+        } },
+        audit: { finish: audit.finish, begin: async (record) => {
+          await audit.begin(record);
+          if (stage === 'audit') mutate();
+        } },
+      }));
+      const exposed: ITool<MuteArgs> = { ...governed, execute: (args, context) => {
+        callerArgs = args;
+        return governed.execute(args, context);
+      } };
+      expect(governance((await viaModel(exposed, muteOf(message('m1')))).result).outcome).toBe('executed');
+      expect(mute.execute).toHaveBeenCalledTimes(1);
+      expect(mute.execute.mock.calls[0][0]).toMatchObject({ userId: 'u_attacker', evidence: { ruleId: 'harassment.1' } });
+      expect(audit.begun[0]).toMatchObject({ target: { accountId: 'u_attacker' }, evidence: { ruleId: 'harassment.1' } });
+    });
+
+    it('the standalone evidence check keeps the evidence it started checking', async () => {
+      const evidence = muteOf(message('m1')).evidence;
+      const check = await verifyActionEvidence(evidence, { getMessage: async () => {
+        evidence.targetId = 'u_victim';
+        evidence.quotes[0].quote = 'a replacement that was never stored';
+        return message('m1');
+      } }, RULE_BOOK);
+      expect(check.ok).toBe(true);
+      expect(check.quotes).toEqual([expect.objectContaining({ messageId: 'm1', quoteLength: message('m1').text.length })]);
+    });
+
+    it.each([
+      { minQuotes: Number.NaN },
+      { minQuoteLength: Number.NaN },
+    ])('invalid evidence thresholds fail closed: %j', async (evidenceRule) => {
+      const limiter = limiterOf();
+      const reserve = vi.spyOn(limiter, 'reserve');
+      const args = muteOf(message('m1'), { quotes: 'minQuotes' in evidenceRule ? [] : [{ messageId: 'm1', quote: 'Y' }] });
+      const governed = governTool(mute, { ...MUTE_POLICY, evidence: evidenceRule }, governanceOf(limiter));
+      expect(governance((await viaModel(governed, args)).result)).toMatchObject({ outcome: 'refused_arguments', code: 'POLICY_ERROR' });
+      expect(mute.execute).not.toHaveBeenCalled();
+      expect(reserve).not.toHaveBeenCalled();
+      await expect(verifyActionEvidence(args.evidence, messageStore(), RULE_BOOK, evidenceRule)).rejects.toThrow(TypeError);
+    });
+
+    it('different target messages remain different actions with the same supporting evidence', async () => {
+      type HoldArgs = MuteArgs & { messageId: string };
+      const execute = vi.fn(async (_args: HoldArgs) => ({ success: true, output: { held: true } }));
+      const hold: ITool<HoldArgs, { held: boolean }> = { ...muteTool(), name: 'hold_message', execute };
+      const rules = [RULES[0]];
+      const governed = governTool(hold, {
+        action: 'hold_message', limits: rules,
+        target: (args) => ({ accountId: args.userId, roomId: args.roomId, messageId: args.messageId }),
+      }, governanceOf(limiterOf(under.prefix(), rules)));
+      const args = muteOf(message('m1'), { quotes: ['m1', 'm5'].map((id) => ({ messageId: id, quote: message(id).text })) });
+      for (const messageId of ['m1', 'm5']) {
+        expect(governance((await viaModel(governed, { ...args, messageId })).result).outcome).toBe('executed');
+      }
+      expect(governance((await viaModel(governed, { ...args, messageId: 'm5' })).result).outcome).toBe('duplicate');
+      expect(execute).toHaveBeenCalledTimes(2);
+    });
+
+    it('a failed result drops returned reversal data before reaching the caller', async () => {
+      mute = muteTool(async (args) => ({ success: false, error: 'nothing changed', details: {
+        reversalRef: args.evidence.quotes[0].quote,
+        reversal: { previousText: args.evidence.quotes[0].quote }, reversible: true, retryable: true,
+      } }));
+      const governed = governTool(mute, MUTE_POLICY, governanceOf(limiterOf()));
+      const { result } = await viaModel(governed, muteOf(message('m1')));
+      expect(governance(result)).toMatchObject({ outcome: 'failed', code: 'REVERSAL_DROPPED' });
+      expect(result.details).not.toHaveProperty('reversalRef');
+      expect(result.details).not.toHaveProperty('reversal');
+      expect(result.details?.retryable).toBe(true);
+      expect(audit.finished[0].end).toMatchObject({ outcome: 'failed', code: 'REVERSAL_DROPPED' });
+      expect(audit.finished[0].end).not.toHaveProperty('reversalRef');
+      expect(JSON.stringify(result)).not.toContain(message('m1').text);
     });
 
     it('(j) a limiter that never reserved forgets one target by exact key', async () => {

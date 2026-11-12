@@ -12,6 +12,7 @@ vi.stubGlobal('fetch', fetchMock);
 
 import { agency, runPostApprovalGuardrails } from '../agency.js';
 import { hitl } from '../hitl.js';
+import { APPROVAL_GRANTED, createApprovalGate, createApprovalSlot } from '../runtime/approval-gate.js';
 import type { ApprovalRequest } from '../types.js';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry.js';
 import { resetLoggerFactory } from '../../core/logging/loggerFactory.js';
@@ -96,5 +97,42 @@ describe("the post-approval check's guardrailResult callback, called with a host
     expect(result).toMatchObject({ passed: false, guardrailId: 'code-safety' });
     expect(lines.filter((line) => line.event === 'agency.callback_failed')).toEqual([expect.objectContaining({ callback: 'guardrailResult', type: 'Error', code: 'unknown' })]);
     expect(JSON.stringify([lines, warned.mock.calls])).not.toContain('worthless');
+  });
+});
+
+
+describe('asynchronous failures of callbacks supplied directly to approval helpers', () => {
+  afterEach(() => { resetLoggerFactory(); vi.restoreAllMocks(); });
+
+  it('records a rejecting post-approval callback without changing its block', async () => {
+    const lines = capture();
+    const warned = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const result = await runPostApprovalGuardrails('mute_in_room', { command: 'rm -rf /tmp/cache' }, ['code-safety'], {
+      guardrailResult: async () => { throw new Error(message('m1').text); },
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(result).toMatchObject({ passed: false, guardrailId: 'code-safety' });
+    expect(lines.filter((line) => line.event === 'agency.callback_failed')).toEqual([
+      expect.objectContaining({ callback: 'guardrailResult', type: 'Error', code: 'unknown' }),
+    ]);
+    expect(JSON.stringify([lines, warned.mock.calls])).not.toContain(message('m1').text);
+  });
+
+  it('records rejecting callbacks on a directly created approval gate', async () => {
+    const lines = capture();
+    const slot = createApprovalSlot();
+    const gate = createApprovalGate({
+      agentName: 'moderator', slot,
+      hitl: { approvals: { beforeTool: ['mute_in_room'] }, handler: hitl.autoApprove(), postApprovalGuardrails: [] },
+      on: {
+        approvalRequested: async () => { throw new Error(message('m1').text); },
+        approvalDecided: async () => { throw new Error(message('m1').text); },
+      },
+    });
+    expect(await gate({ name: 'mute_in_room', args: muteOf(message('m1')) as unknown as Record<string, unknown>, id: 'call_1', step: 0 })).toBe(APPROVAL_GRANTED);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(lines.filter((line) => line.event === 'agency.callback_failed').map((line) => line.callback)).toEqual(['approvalRequested', 'approvalDecided']);
+    expect(slot.error).toBeUndefined();
+    expect(JSON.stringify(lines)).not.toContain(message('m1').text);
   });
 });
