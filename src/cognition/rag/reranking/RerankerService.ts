@@ -157,6 +157,8 @@ export class RerankerService {
       maxDocuments: config?.maxDocuments ?? 100,
       // Unset when neither the call nor the provider's settings name one, so the provider's own default applies.
       timeoutMs: config?.timeoutMs ?? providerConfig?.defaultTimeoutMs,
+      // The caller's abort reaches the provider; one that reads it (Cohere's) ends its request there.
+      signal: config?.signal,
       params: config?.params,
     };
 
