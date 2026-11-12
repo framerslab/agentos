@@ -621,6 +621,32 @@ describe.each(STORES)('the compile per scope on %s', (store) => {
     expect(compiledAt.get(B)).toBe(b1.createdAt);
   });
 
+  it('two compiles at once send the traces of a scope to the model once', async () => {
+    const { memory } = await open(store);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const prompts = attachRows(memory, {
+      llm: async () => {
+        await gate;
+        return 'Merged notes.';
+      },
+    });
+    await memory.remember('Alice likes tea.', { scope: 'conversation', scopeId: A });
+    await memory.remember('Alice has a cat.', { scope: 'conversation', scopeId: A });
+
+    // The second compile reads the scopes to compile while the first one's model call is held.
+    const first = memory.compileWiki();
+    const second = memory.compileWiki();
+    for (let i = 0; i < 400 && prompts.length < 1; i += 1) await pause(5);
+    await pause(50);
+    release();
+    await Promise.all([first, second]);
+
+    expect(prompts).toHaveLength(1);
+  });
+
   it('compiles nothing a second time, and only the scope with a new trace the third', async () => {
     const { memory } = await open(store);
     const prompts = attachRows(memory);
@@ -1217,6 +1243,75 @@ describe.each(STORES)('scopes kept apart on every path, on %s', (store) => {
     expect(await traceIdsUnder(brain, A)).toEqual(chunkIdsOf(rows[0]!));
   });
 
+  /** A brain that holds alice's page, one message of hers and a compile watermark, exported as JSON text. */
+  const exportedJson = async (): Promise<{ json: string; scopes: Awaited<ReturnType<Memory['listScopes']>> }> => {
+    const { memory, brain } = await open(store);
+    await new UserWikiStore({ scopeId: A, pages: memory, chunk }).writePage(P('Alice likes tea.\n\nAlice has a cat.', ['t1']));
+    await memory.remember('Alice said she likes tea.', { scope: 'conversation', scopeId: A });
+    await brain.run('UPDATE memory_scopes SET compiled_at = ? WHERE brain_id = ? AND scope_id = ?', [1_700_000_000_000, brain.brainId, A]);
+    return { json: await memory.exportToString(), scopes: await memory.listScopes() };
+  };
+
+  it("a JSON export carries each subject's pages and the scope registry, and an import brings them back", async () => {
+    const { json, scopes } = await exportedJson();
+    const { memory, brain } = await open(store);
+
+    const result = await memory.importFromString(json, 'json');
+
+    expect(result.errors).toEqual([]);
+    const pages = new UserWikiStore({ scopeId: A, pages: memory, chunk });
+    const page = await pages.readPage('concepts/notes');
+    expect(bodyOf(page)).toBe('Alice likes tea.\n\nAlice has a cat.');
+    expect(page?.sources).toEqual(['t1']);
+    // The row lists the chunks the import wrote, so no chunk is left that no row lists.
+    const rows = await pageRows(brain);
+    expect(rows).toHaveLength(1);
+    expect(chunkIdsOf(rows[0]!)).toEqual(await chunkTraceIdsUnder(brain, A));
+    expect(chunkIdsOf(rows[0]!)).toHaveLength(2);
+    expect(await contentsUnder(brain, A)).toEqual(['Alice has a cat.', 'Alice likes tea.', 'Alice said she likes tea.']);
+    // The scope comes with its watermark, so its next compile does not read the same traces again.
+    expect(await memory.listScopes()).toEqual(scopes);
+    expect(scopes.map((row) => row.compiledAt)).toEqual([1_700_000_000_000]);
+
+    // The page's next rewrite takes the chunks the import wrote, and leaves what alice said.
+    await pages.writePage(P('Alice drinks espresso.'));
+    expect(await contentsUnder(brain, A)).toEqual(['Alice drinks espresso.', 'Alice said she likes tea.']);
+  });
+
+  it("a JSON import keeps a page the brain already holds, and brings none of the file's chunks for it", async () => {
+    const { json } = await exportedJson();
+    const { memory, brain } = await open(store);
+    const pages = new UserWikiStore({ scopeId: A, pages: memory, chunk });
+    await pages.writePage(P('Alice drinks espresso.'));
+    const held = await chunkTraceIdsUnder(brain, A);
+
+    const result = await memory.importFromString(json, 'json');
+
+    expect(result.errors).toEqual([]);
+    expect(bodyOf(await pages.readPage('concepts/notes'))).toBe('Alice drinks espresso.');
+    expect(await chunkTraceIdsUnder(brain, A)).toEqual(held);
+    expect(chunkIdsOf((await pageRows(brain))[0]!)).toEqual(held);
+    expect(await contentsUnder(brain, A)).toEqual(['Alice drinks espresso.', 'Alice said she likes tea.']);
+    // The brain keeps its own watermark for a scope it already holds.
+    expect((await memory.listScopes()).map((row) => [row.scopeId, row.compiledAt])).toEqual([[A, null]]);
+  });
+
+  it("a JSON-imported message with the text of one of the brain's page chunks is stored as a trace of its own", async () => {
+    const source = await open(store);
+    await source.memory.remember('Alice likes tea.', { scope: 'conversation', scopeId: A });
+    const json = await source.memory.exportToString();
+    const { memory, brain } = await open(store);
+    const pages = new UserWikiStore({ scopeId: A, pages: memory, chunk });
+    await pages.writePage(P('Alice likes tea.'));
+
+    const result = await memory.importFromString(json, 'json');
+
+    expect(result.errors).toEqual([]);
+    expect(await contentsUnder(brain, A)).toEqual(['Alice likes tea.', 'Alice likes tea.']);
+    await pages.writePage(P('Alice drinks espresso.'));
+    expect(await contentsUnder(brain, A)).toEqual(['Alice drinks espresso.', 'Alice likes tea.']);
+  });
+
   // These run the consolidation loop on a store of its own, or write and read a SQLite export file.
   if (store === 'sqlite') {
     /** A facade on a fresh SQLite file, with the options given. */
@@ -1357,6 +1452,31 @@ describe.each(STORES)('scopes kept apart on every path, on %s', (store) => {
 
       expect(result.errors.join('\n')).toContain('several brains');
       expect(await pageRows(brain)).toEqual([]);
+    });
+
+    it('a merge of a brain file whose pages and registry rows name another brain than its meta is refused', async () => {
+      const { memory: source, dir } = await openWith({ selfImprove: false });
+      await source.writePageRow(A, { pageId: 'concepts/notes', content: 'Alice likes tea.\n', contentHash: 'h-alice' });
+      const file = path.join(dir, 'pages.sqlite');
+      await source.export(file, { format: 'sqlite' });
+      await editFile(file, async (db) => {
+        await db.run(
+          `INSERT INTO memory_scopes (brain_id, scope, scope_id, kind, agent_id, created_at)
+           VALUES ('another-brain', 'conversation', ?, 'user', 'aria-1', 1)`,
+          [B],
+        );
+        await db.run(
+          `INSERT INTO memory_pages (brain_id, scope, scope_id, page_id, content, content_hash, chunk_ids, updated_at)
+           VALUES ('another-brain', 'conversation', ?, 'concepts/notes', 'Bob plays cello.', 'h-bob', '[]', 1)`,
+          [B],
+        );
+      });
+      const { brain } = await openWith({ selfImprove: false });
+
+      await expect(brain.importFromSqlite(file, { strategy: 'merge' })).rejects.toThrow('multiple brain_ids');
+
+      expect(await pageRows(brain)).toEqual([]);
+      expect(await scopeRows(brain)).toEqual([]);
     });
 
     it("an imported message with the text of one of the brain's page chunks is stored as a trace of its own", async () => {

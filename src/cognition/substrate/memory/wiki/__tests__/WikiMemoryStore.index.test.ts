@@ -92,6 +92,29 @@ describe('WikiMemoryStore.index', () => {
     expect(meta.pages).toEqual({});
   });
 
+  it("indexes every page again under the agent's own key when the folder's index names another agent's", async () => {
+    const port = fakePort();
+    const first = new WikiMemoryStore({ memoryDir, port, agentId: 'a1' });
+    await first.writePage({ id: 'concepts/ops', type: 'concept', summary: '', updated: '', sources: [], body: 'Open nine to five.', links: [] });
+    await first.index();
+    expect(port.remembered[0].options.scopeId).toBe('c1:o:2:a1:0:;');
+
+    // The same folder opened as another agent: its pages are unchanged, and their chunks sit under the first key.
+    const second = new WikiMemoryStore({ memoryDir, port, agentId: 'a2' });
+    const res = await second.index();
+
+    expect(res.indexed).toEqual(['concepts/ops']);
+    expect(port.remembered).toHaveLength(2);
+    expect(port.remembered[1].options).toMatchObject({ scope: 'conversation', scopeId: 'c1:o:2:a2:0:;' });
+    // The chunks under the first key, which no turn of this agent reads, are deleted.
+    expect(res.removed).toEqual(['t1']);
+    expect(port.deleted).toEqual([['t1']]);
+
+    // An unchanged page is skipped while the key stays the same.
+    expect((await second.index()).skipped).toEqual(['concepts/ops']);
+    expect(port.remembered).toHaveLength(2);
+  });
+
   it('indexes no page a compile wrote, and none whose sources it cannot read', async () => {
     const port = fakePort();
     const store = new WikiMemoryStore({ memoryDir, port, agentId: 'a1' });

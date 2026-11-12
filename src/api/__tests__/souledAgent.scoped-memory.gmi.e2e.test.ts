@@ -645,6 +645,24 @@ describe('sharedMemory, as it is given', () => {
   });
 });
 
+describe('a souled agent that cannot open', () => {
+  it('refuses an agent id no key can be built from before any store is made', async () => {
+    writeSoul('aria\u0000');
+    await expect(open()).rejects.toThrow(TypeError);
+    expect(fs.existsSync(path.join(dir, 'memory', '.store'))).toBe(false);
+  });
+
+  it('closes the store it opened when the agent is refused after it', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const closed = vi.spyOn(Memory.prototype, 'close');
+    // A default-runtime agent refuses agencies.launch, once the store is open.
+    await expect(souledAgent({ ...stubbed(key()), soul: dir, agencies: { launch: true } } as never)).rejects.toThrow(
+      'agencies.launch runs on the GMI path',
+    );
+    expect(closed).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("the folder a souled agent's store is kept in", () => {
   it('is kept out of version control', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
@@ -1663,6 +1681,27 @@ describe("a souled agent on runtime: 'gmi', beyond its own sessions", () => {
     }
   });
 
+  it("a seat session's page tool reads the operator's pages, never those of the user its session id names", async () => {
+    writePage('concepts/ops', OPS);
+    const { a, s } = await openedWith({ runtime: 'gmi' }, [...readsPage({ list: true }, 'c1'), ...readsPage({ id: 'concepts/notes' }, 'c2')]);
+    try {
+      await writeOwnPage(a, userKey('bob'), OWL_PAGE);
+      const seat = sessionSeat(a as never, { sessionId: 'bob' });
+
+      await seat.generate('What can I read?');
+      const listed = toolAnswerIn(lastCall(s));
+      expect(listed).toContain('concepts/ops');
+      expect(listed).not.toContain('concepts/notes');
+
+      await seat.generate('Open the notes.');
+      const answer = toolAnswerIn(lastCall(s));
+      expect(answer).toContain('No memory page found with id');
+      expect(answer).not.toContain(OWL_PAGE);
+    } finally {
+      await a.close();
+    }
+  });
+
   it("with cognitive memory on, a user reaches their pages through the listing and nobody else's", async () => {
     const embeddings = key();
     script('openai', embeddings, { replies: [] });
@@ -1694,7 +1733,7 @@ describe('the options cognitive memory does not reach', () => {
   it.each<[string, Record<string, unknown>]>([
     ['memoryPolicy', { memoryPolicy: () => ({ longTerm: 'off' }) }],
     ['screen', { screen: async (text: string) => text }],
-    ['sharedMemory', { sharedMemory: { as: 'johnny', reason: 'one-persons-machine' } }],
+    ['sharedMemory', { sharedMemory: { as: 'me', reason: 'one-persons-machine' } }],
   ])('%s is refused at the open of an agent whose cognitive memory is on', async (_name, hook) => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const embeddings = key();
