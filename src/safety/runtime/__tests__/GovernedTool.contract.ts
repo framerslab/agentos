@@ -232,7 +232,11 @@ export function runGovernedToolSuite(name: string, open: () => Promise<StoreUnde
     it('different target messages remain different actions with the same supporting evidence', async () => {
       type HoldArgs = MuteArgs & { messageId: string };
       const execute = vi.fn(async (_args: HoldArgs) => ({ success: true, output: { held: true } }));
-      const hold: ITool<HoldArgs, { held: boolean }> = { ...muteTool(), name: 'hold_message', execute };
+      const hold: ITool<HoldArgs, { held: boolean }> = {
+        id: 'hold-message-v1', name: 'hold_message', displayName: 'Hold message', description: 'Holds one message.',
+        inputSchema: { type: 'object', properties: { userId: { type: 'string' }, roomId: { type: 'string' }, messageId: { type: 'string' } }, required: ['userId', 'roomId', 'messageId'] },
+        execute,
+      };
       const rules = [RULES[0]];
       const governed = governTool(hold, {
         action: 'hold_message', limits: rules,
