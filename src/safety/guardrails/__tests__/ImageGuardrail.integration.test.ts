@@ -11,6 +11,7 @@ import { holdResult } from '../guardrailDispatcher';
 import { ImageGuardrail, type ImageCheck, type ImageUnderReview } from '../builtin/ImageGuardrail';
 import type { GuardrailContext, IGuardrailService } from '../IGuardrailService';
 import type { VisionInputData } from '../../../cognition/substrate/IGMI';
+import type { AgentOSInput } from '../../../api/types/AgentOSInput';
 import { resetLoggerFactory, setLogger } from '../../../core/logging/loggerFactory.js';
 
 type Line = Record<string, unknown>;
@@ -175,5 +176,69 @@ describe('the image guard: what ends a chain', () => {
     expect(model.check).not.toHaveBeenCalled();
     await moderateContent({ text: 'a message', images: [png(1)] }, { guards: [signal, guard], context });
     expect(model.check).toHaveBeenCalledTimes(1);
+  });
+
+  it('every match check runs on an image after an earlier one held, blocked or failed on it, so a later quarantine is never missed', async () => {
+    const model = passing('model', 'classify');
+    const earlier: ImageCheck['check'][] = [
+      async () => ({ verdict: 'hold', reviewCode: 'IMAGE_REVIEW' }),
+      async () => ({ verdict: 'block', reasonCode: 'OWN_LIST' }),
+      async () => { throw new Error('the list is down'); },
+    ];
+    for (const answer of earlier) {
+      const ownList = check('own_list', 'match', answer, { reasonCodes: ['IMAGE_REVIEW', 'OWN_LIST'] });
+      const hash = check('hash', 'match', async () => ({ verdict: 'block', reasonCode: 'KNOWN_MATERIAL', quarantine: true }), { reasonCodes: ['KNOWN_MATERIAL'] });
+      const guard = ImageGuardrail.create({ id: 'images', checks: [ownList, hash, model], requireMatch: true });
+      const decision = await moderateContent({ images: [png(1)] }, { guards: [guard], context });
+      expect(decision).toMatchObject({ outcome: 'refuse', unavailable: false, deciding: { reasonCode: 'KNOWN_MATERIAL', metadata: { imageIndex: 0, checkId: 'hash', quarantine: true } } });
+      expect(hash.check).toHaveBeenCalledTimes(1);
+    }
+    expect(model.check).not.toHaveBeenCalled();
+  });
+
+  it('a match check\'s block or failure still keeps its image from every model check, and the first block decides', async () => {
+    const model = passing('model', 'classify');
+    const ownList = check('own_list', 'match', async () => ({ verdict: 'block', reasonCode: 'OWN_LIST' }), { reasonCodes: ['OWN_LIST'] });
+    const secondList = check('second_list', 'match', async () => ({ verdict: 'block', reasonCode: 'SECOND_LIST' }), { reasonCodes: ['SECOND_LIST'] });
+    const blocked = await moderateContent({ images: [png(1)] }, { guards: [ImageGuardrail.create({ id: 'images', checks: [ownList, secondList, model] })], context });
+    expect(blocked).toMatchObject({ outcome: 'refuse', unavailable: false, deciding: { reasonCode: 'OWN_LIST', metadata: { checkId: 'own_list' } } });
+    expect(secondList.check).toHaveBeenCalledTimes(1);
+
+    const down = check('own_list', 'match', async () => { throw new Error('the list is down'); });
+    const hash = passing('hash', 'match');
+    const refused = await moderateContent({ images: [png(1)] }, { guards: [ImageGuardrail.create({ id: 'images', checks: [down, hash, model] })], context });
+    expect(refused).toMatchObject({ ...UNAVAILABLE, deciding: { metadata: { imageIndex: 0, checkId: 'own_list' } } });
+    expect(hash.check).toHaveBeenCalledTimes(1);
+    expect(model.check).not.toHaveBeenCalled();
+  });
+});
+
+describe('the image guard: its deadline', () => {
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  it('starts no capture or check past its deadline, though the dispatcher answered and stopped waiting for it', async () => {
+    const loadImage = vi.fn(async () => { await sleep(120); return { bytes: new Uint8Array([1, 2, 3]), mimeType: 'image/png' }; });
+    const hash = passing('hash', 'match');
+    const model = passing('model', 'classify');
+    const guard = ImageGuardrail.create({ id: 'images', checks: [hash, model], loadImage, timeoutMs: 40 });
+    const slow: VisionInputData = { type: 'image_url', data: 'https://images.example/slow.jpg' };
+    const decision = await moderateContent({ images: [slow, png(1)] }, { guards: [guard], context });
+    expect(decision).toMatchObject({ outcome: 'refuse', unavailable: true, deciding: { reasonCode: 'GUARDRAIL_ERROR', metadata: { cause: 'timeout' } } });
+    // the load resolves at 120 ms; the evaluation runs on to its end with nobody waiting
+    await sleep(200);
+    expect(loadImage).toHaveBeenCalledTimes(1);
+    expect(hash.check).not.toHaveBeenCalled();
+    expect(model.check).not.toHaveBeenCalled();
+  });
+
+  it('refuses as unavailable an image whose model checks had not all run by its deadline, a flag already given included', async () => {
+    const first = check('first', 'classify', async () => { await sleep(60); return { verdict: 'flag', reasonCode: 'IMAGE_SUGGESTIVE' }; }, { reasonCodes: ['IMAGE_SUGGESTIVE'] });
+    const strict = passing('strict', 'classify');
+    const guard = ImageGuardrail.create({ id: 'images', checks: [first, strict], timeoutMs: 40 });
+    // the guard's own answer, as a dispatcher with a longer deadline (a required guard's) reads it
+    const input = { userId: 'user-1', sessionId: 'session-1', textInput: null, visionInputs: [png(1)] } as unknown as AgentOSInput;
+    const answer = await guard.evaluateInput({ context, input });
+    expect(answer).toMatchObject({ action: 'block', reasonCode: 'IMAGE_CHECK_UNAVAILABLE', metadata: { failClosed: true, imageIndex: 0, checkId: 'strict' } });
+    expect(strict.check).not.toHaveBeenCalled();
   });
 });
