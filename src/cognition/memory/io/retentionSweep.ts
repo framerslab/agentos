@@ -43,18 +43,21 @@ const daysOf = (period: RetentionPeriod | undefined): number | undefined =>
   period !== undefined && period !== 'until-deletion' ? period.days : undefined;
 
 /**
- * Deletes for good what expired, one user or session scope at a time: the scope's traces stored longer ago than its
- * period (soft-deleted rows and the document chunks they were filed from included), and each page compiled from one
- * of them, whole. With `pages: 'rebuild'` the next compile builds such a page again from the traces of it that are
- * left. A page whose sources all survive is not touched, and a page's own age is no second clock. A scope left with
- * no trace and no page loses its registry row. The operator's pages and memory from before per-user scope are never
- * swept.
+ * Deletes for good what expired, one user or session scope at a time: each page compiled from an expired trace,
+ * whole, then the scope's traces stored longer ago than its period (soft-deleted rows and the document chunks they
+ * were filed from included). The pages go first: while a page is left, the expired traces it was built from are left
+ * too, so a sweep that stopped is finished by the next one. With `pages: 'rebuild'` the next compile builds such a
+ * page again from the traces of it that are left. A page whose sources all survive is not touched, and a page's own
+ * age is no second clock. A scope left with no trace and no page loses its registry row. The operator's pages and
+ * memory from before per-user scope are never swept.
  *
- * Once a trace was deleted the vector index is written again and the store's write-ahead log emptied. One
+ * Then the vector index is written again and the store's write-ahead log emptied, for this sweep's deletes and for
+ * any an earlier sweep or deletion could not finish ({@link Memory.finishErasure}), also when a scope failed. One
  * `memory.retention_swept` line counts what went, for a sweep in which at least one scope had a period.
  *
  * @returns How many traces and pages it deleted, and how many scopes it removed from the registry.
- * @throws What the store throws; the scopes swept before it keep what the sweep did.
+ * @throws What the store throws, once the index and the log were tried; the scopes swept before it keep what the
+ *   sweep did.
  */
 export async function sweepRetention(options: RetentionSweepOptions): Promise<{ traces: number; pages: number; scopes: number }> {
   const { memory, retention } = options;
@@ -62,32 +65,35 @@ export async function sweepRetention(options: RetentionSweepOptions): Promise<{ 
   const swept = { traces: 0, pages: 0, scopes: 0 };
   let anyPeriod = false;
 
-  for (const row of await memory.listScopes({ scope: CONVERSATION_SCOPE })) {
-    if (row.kind !== 'user' && row.kind !== 'session') continue;
+  /** Sweeps one registry row's scope, when it is a user's or a session's and has a period. */
+  const sweepOne = async (row: { kind: string; scopeId: string }): Promise<void> => {
+    if (row.kind !== 'user' && row.kind !== 'session') return;
     const scopeId = row.scopeId;
     const ofAgent = daysOf(row.kind === 'session' ? (retention.sessions ?? retention.traces) : retention.traces);
     const ofAccount = options.daysFor?.(scopeId);
     const shorter = typeof ofAccount === 'number' && Number.isFinite(ofAccount) && ofAccount > 0 ? ofAccount : undefined;
     const days = ofAgent === undefined ? shorter : shorter === undefined ? ofAgent : Math.min(ofAgent, shorter);
-    if (days === undefined) continue;
+    if (days === undefined) return;
     anyPeriod = true;
 
     const sweepScope = async (): Promise<void> => {
       const expired = await memory.tracesStoredBefore(CONVERSATION_SCOPE, scopeId, now() - days * DAY_MS);
-      if (expired.length > 0) swept.traces += (await memory.deleteTraces(expired, { documentChunks: 'delete' })).deleted;
       const store = options.wiki.storeFor(scopeId);
       const gone = new Set(expired);
+      // The pages first: a page is found by the expired traces it was built from, so they stay until it is gone.
       for (const page of gone.size > 0 ? await store.listPages() : []) {
         if (!page.sources.some((id) => gone.has(id))) continue;
-        await store.deletePage(page.id);
-        swept.pages += 1;
         if (retention.pages === 'rebuild') {
+          // Named before the page goes, so a page deleted is always rebuilt; a sweep made again names them once.
           await memory.addRebuildSources(
             scopeId,
             page.sources.filter((id) => !gone.has(id)),
           );
         }
+        await store.deletePage(page.id);
+        swept.pages += 1;
       }
+      if (expired.length > 0) swept.traces += (await memory.deleteTraces(expired, { documentChunks: 'delete' })).deleted;
       // A scope that holds nothing more is no longer named by the registry.
       const left = await memory.tracesStoredBefore(CONVERSATION_SCOPE, scopeId, Number.MAX_SAFE_INTEGER);
       if (left.length === 0 && (await memory.listPageRows(scopeId)).length === 0) {
@@ -96,13 +102,22 @@ export async function sweepRetention(options: RetentionSweepOptions): Promise<{ 
       }
     };
     await (options.onChain ? options.onChain(scopeId, sweepScope) : sweepScope());
-  }
+  };
 
-  if (swept.traces > 0) {
-    // A delete only marks a vector in the index, and the log still holds the pages written before the deletes.
-    await memory.rebuildVectorIndex();
-    await memory.checkpointLog();
+  let failure: unknown;
+  try {
+    for (const row of await memory.listScopes({ scope: CONVERSATION_SCOPE })) await sweepOne(row);
+  } catch (error) {
+    failure = error;
   }
+  try {
+    // A delete only marks a vector in the index, and the log still holds the pages written before the deletes: both
+    // are written out for this sweep's deletes, and for those an earlier sweep or deletion left unfinished.
+    await memory.finishErasure();
+  } catch (error) {
+    failure ??= error;
+  }
+  if (failure !== undefined) throw failure;
   if (anyPeriod) memoryLog.info('memory.retention_swept', { traces: swept.traces, pages: swept.pages, scopes: swept.scopes });
   return swept;
 }

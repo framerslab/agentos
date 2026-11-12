@@ -451,6 +451,13 @@ export class Memory {
    */
   private _vectorIndexWork: Promise<unknown> = Promise.resolve();
 
+  /**
+   * What deletes for good left to do in the store's files ({@link finishErasure}): the vector index is owed a rewrite
+   * from a delete until a rewrite succeeds, and from an open whose check of the index failed; the write-ahead log is
+   * owed a checkpoint while deletes were made after the last checkpoint that emptied it.
+   */
+  private readonly _erasureOwed = { vectorIndex: false, deletes: 0, checkpointed: 0 };
+
   /** Optional embedding function for vector search (set via config.embed). */
   private readonly _embed: ((text: string) => Promise<number[]>) | null;
 
@@ -1206,6 +1213,7 @@ export class Memory {
     // The chunks go while their rows still name the traces: once a trace is gone its chunk names nothing.
     if (options.documentChunks === 'delete') await this._deleteDocumentChunksOf(ids);
     const deleted = await deleteTraceRows(this._brain, this._brain.brainId, ids);
+    if (deleted > 0) this._erasureOwed.deletes += 1;
     for (const id of ids) {
       try {
         await this._memoryGraph.removeNode(id);
@@ -1218,6 +1226,8 @@ export class Memory {
     if (sidecar) {
       await this._onVectorIndex(async () => {
         for (const id of ids) sidecar.remove(id);
+        // After a rewrite already running: that rewrite may have written these vectors, so the next one is owed.
+        if (deleted > 0) this._erasureOwed.vectorIndex = true;
       });
     }
     // Postgres keeps the index in each row's own column, which went with the row.
@@ -1352,7 +1362,11 @@ export class Memory {
     await this._initPromise;
     const sidecar = this._hnswSidecar;
     if (!sidecar) return { vectors: 0 };
-    return this._onVectorIndex(async () => sidecar.rewrite(await this._ownEmbeddedTraces()));
+    return this._onVectorIndex(async () => {
+      const written = await sidecar.rewrite(await this._ownEmbeddedTraces());
+      this._erasureOwed.vectorIndex = false;
+      return written;
+    });
   }
 
   /**
@@ -1366,10 +1380,53 @@ export class Memory {
    */
   async checkpointLog(): Promise<{ log: 'emptied' | 'busy' | 'none' }> {
     await this._initPromise;
+    // The deletes made before the checkpoint starts are the ones it can empty from the log.
+    const before = this._erasureOwed.deletes;
     const checkpoint = this._brain.features.dialect.pragma('wal_checkpoint', 'TRUNCATE');
-    if (!checkpoint) return { log: 'none' };
+    if (!checkpoint) {
+      this._erasureOwed.checkpointed = Math.max(this._erasureOwed.checkpointed, before);
+      return { log: 'none' };
+    }
     const row = await this._brain.get<{ busy?: number | string | null }>(checkpoint);
-    return { log: Number(row?.busy ?? 0) === 0 ? 'emptied' : 'busy' };
+    const log = Number(row?.busy ?? 0) === 0 ? 'emptied' : 'busy';
+    if (log === 'emptied') this._erasureOwed.checkpointed = Math.max(this._erasureOwed.checkpointed, before);
+    return { log };
+  }
+
+  /**
+   * Finishes what deletes for good left in the store's files: the vector index is written again
+   * ({@link rebuildVectorIndex}) when a delete, or an open whose check of the index failed, left it naming a trace that
+   * is gone; the write-ahead log is emptied ({@link checkpointLog}) when deletes were made after the last checkpoint
+   * that emptied it. Nothing owed, nothing runs. A retention sweep, a correction and a re-application of the
+   * tombstones call it, so a rewrite or a checkpoint that failed in an earlier call runs again.
+   *
+   * @returns Whether the index was written again, and what the checkpoint answered; `'not owed'` for a step that had
+   *   nothing to do.
+   * @throws What the rewrite throws, once the checkpoint was tried as well, or what the checkpoint throws. A step that
+   *   fails, and a checkpoint another connection held (`'busy'`), stay owed.
+   */
+  async finishErasure(): Promise<{ vectorIndex: 'rewritten' | 'not owed'; log: 'emptied' | 'busy' | 'none' | 'not owed' }> {
+    await this._initPromise;
+    let failure: unknown;
+    let vectorIndex: 'rewritten' | 'not owed' = 'not owed';
+    if (this._erasureOwed.vectorIndex) {
+      try {
+        await this.rebuildVectorIndex();
+        vectorIndex = 'rewritten';
+      } catch (error) {
+        failure = error;
+      }
+    }
+    let log: 'emptied' | 'busy' | 'none' | 'not owed' = 'not owed';
+    if (this._erasureOwed.deletes > this._erasureOwed.checkpointed) {
+      try {
+        log = (await this.checkpointLog()).log;
+      } catch (error) {
+        failure ??= error;
+      }
+    }
+    if (failure !== undefined) throw failure;
+    return { vectorIndex, log };
   }
 
   /**
@@ -1920,6 +1977,8 @@ export class Memory {
         );
         if (result.changes > 0) {
           pages += 1;
+          // The page's text is in the log until a checkpoint.
+          this._erasureOwed.deletes += 1;
           break;
         }
         if (attempt >= PAGE_WRITE_ATTEMPTS) {
