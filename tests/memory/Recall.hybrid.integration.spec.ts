@@ -148,6 +148,21 @@ describe.each(ENGINES)('hybrid recall on %s', (engine, open) => {
     await db.close();
   });
 
+  it('a correction that changes a number in a long memory is shown beside the memory it corrects, never dropped as its duplicate', async () => {
+    const db = await open();
+    const mem = await memoryWith({ retrieval: 'hybrid' }, new FlatEmbedder(), db.brain);
+    // Ten words shared and the number apart: by the Jaccard index alone (10 / 12) the two would be one memory.
+    const office = 'The locker number for the downtown office beside the reception desk near the east entrance is';
+    await plant(mem, 'locker-old', `${office} 7.`, at(0));
+    await plant(mem, 'locker-new', `${office} 9.`, at(1));
+    const h = await mem.manager.assembleForPrompt('What is the locker number for the downtown office?', 1600, NEUTRAL, { scopes: U1 });
+    expect(h.contextText).toContain('entrance is 7');
+    expect(h.contextText).toContain('entrance is 9');
+    expect(captureOf(h).candidates.filter((x) => x.reason === 'dedupe')).toEqual([]);
+    await mem.close();
+    await db.close();
+  });
+
   it('a graph association that repeats a pooled memory is not shown twice', async () => {
     const { db, mem } = await fixture({ retrieval: 'hybrid' });
     // The association's trace is below the turn's minConfidence, so no leg returns it; the graph leads to it.

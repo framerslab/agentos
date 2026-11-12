@@ -79,6 +79,22 @@ describe('dedupePool', () => {
     expect(kept.map((e) => e.trace.id)).toEqual(['old', 'new']);
     expect(dropped).toEqual([]);
   });
+
+  it('keeps two memories that state different numbers or codes whatever else they share, so a correction in a long memory is never dropped for the value it corrects', () => {
+    // Ten words shared and one apart: an index of 10 / 12 (0.83), over the 0.80 at which two texts are one.
+    const office = 'The locker number for the downtown office beside the reception desk near the east entrance is';
+    expect(nearDuplicate(dedupeTokens(`${office} 7.`), dedupeTokens(`${office} 9.`), 0.8)).toBe(false);
+    expect(nearDuplicate(dedupeTokens(`${office} 4471.`), dedupeTokens(`${office} 4417.`), 0.8)).toBe(false);
+    // A code with a digit in it is a value too.
+    expect(nearDuplicate(dedupeTokens(`${office} B22.`), dedupeTokens(`${office} B27.`), 0.8)).toBe(false);
+    // The same number in both, or a number only one of them holds, leaves the index to decide.
+    expect(nearDuplicate(dedupeTokens(`${office} 7.`), dedupeTokens(`${office} 7!`), 0.8)).toBe(true);
+    expect(nearDuplicate(dedupeTokens(`${office} 7.`), dedupeTokens(`${office} 7, set in 2026.`), 0.8)).toBe(true);
+    // The old value holds the higher fused score (recalled lately): the newer one stays beside it.
+    const { kept, dropped } = dedupePool([entry('old', `${office} 7.`, 0.02, 100), entry('new', `${office} 9.`, 0.015, 200)], 0.8);
+    expect(kept.map((e) => e.trace.id)).toEqual(['old', 'new']);
+    expect(dropped).toEqual([]);
+  });
 });
 
 describe("the hybrid block's share", () => {
