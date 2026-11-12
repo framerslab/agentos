@@ -4,9 +4,10 @@
  *
  * Wraps {@link generateText} and {@link streamText} with per-session conversation
  * history, optional HEXACO-inspired personality shaping, and a named-agent system
- * prompt builder.  Guardrail identifiers are accepted and stored in config but
- * are not actively enforced in this lightweight layer — use the full AgentOS
- * runtime (`AgentOSOrchestrator`) or `agency()` for guardrail enforcement.
+ * prompt builder. Guardrail identifiers are accepted and stored in config and
+ * are not enforced here or by `agency()`. To enforce guards on a call, pass
+ * `guards` to `generate()`, `stream()` or a session's `send()` and `stream()`;
+ * the full AgentOS runtime enforces its own.
  *
  * With `runtime: 'gmi'` the agent is built by {@link gmi} instead: every session
  * is served by a Generalized Mind Instance (docs/GMI.md, "GMIs from agent()").
@@ -33,6 +34,8 @@ import { credentialsGoWith, modelNamesAnotherProvider } from './runtime/credenti
 import { lowerZodToJsonSchema } from '../orchestration/compiler/SchemaLowering.js';
 import { ObjectGenerationError } from './generateObject.js';
 import { streamText, type StreamTextResult } from './streamText.js';
+import type { TextGuardrailReport } from './runtime/textGuardrails.js';
+import { GuardrailAction } from '../safety/guardrails/IGuardrailService.js';
 import type { SeatInternals } from './runtime/pool/seating.js';
 import { isCallMask } from './runtime/pool/redact.js';
 import { maskStreamMembers } from './runtime/pool/maskedOutput.js';
@@ -514,6 +517,8 @@ export interface SessionSendOptions<S extends ZodType | undefined = undefined> {
   cacheDiagnostics?: GenerateTextOptions['cacheDiagnostics'];
   cache?: GenerateTextOptions['cache'];
   maxTokens?: number;
+  /** Guards enforced on this send, as on generateText(). */
+  guards?: GenerateTextOptions['guards'];
   /**
    * Ends this send when it aborts: the provider request in flight is cancelled, no further step, retry or fallback
    * hop starts, and the send rejects with the signal's reason. The session stays open. With the default runtime
@@ -585,10 +590,12 @@ export interface AgentSession {
    * @param input - User message as text string or MessageContent array.
    * @param opts - `abortSignal` ends this stream when it aborts, as {@link SessionSendOptions.abortSignal} ends a
    *   send: the provider's stream stops and the stream ends with an `error` part. The session stays open. `budget`
-   *   takes the agent's place for this stream, as {@link SessionSendOptions.budget} takes it for a send.
+   *   takes the agent's place for this stream, as {@link SessionSendOptions.budget} takes it for a send. `guards`
+   *   are enforced on this stream, as on streamText(); a turn whose input a guard rewrote or replaced is not added to
+   *   the history.
    * @returns A {@link StreamTextResult} with async iterables and awaitable aggregates.
    */
-  stream(input: MessageContent, opts?: { abortSignal?: AbortSignal; budget?: SpendBudget | SpendBudgetOptions }): StreamTextResult;
+  stream(input: MessageContent, opts?: { abortSignal?: AbortSignal; budget?: SpendBudget | SpendBudgetOptions; guards?: GenerateTextOptions['guards'] }): StreamTextResult;
   /**
    * Returns a snapshot of the current conversation transcript for this
    * session in provider-replayable shape (assistant tool_calls, tool
@@ -889,10 +896,19 @@ function pickSendGenerationOverrides(
   if (sendOpts.cacheDiagnostics !== undefined) out.cacheDiagnostics = sendOpts.cacheDiagnostics;
   if (sendOpts.cache !== undefined) out.cache = sendOpts.cache;
   if (sendOpts.maxTokens !== undefined) out.maxTokens = sendOpts.maxTokens;
+  if (sendOpts.guards !== undefined) out.guards = sendOpts.guards;
   if (sendOpts.abortSignal !== undefined) out.abortSignal = sendOpts.abortSignal;
   // Settings become one budget here, so a send's validation retries are charged to the same one.
   if (sendOpts.budget !== undefined) out.budget = asSpendBudget(sendOpts.budget);
   return out;
+}
+
+/**
+ * Whether an enforced guard rewrote or replaced the call's input: the turn as the caller gave it is then not what was
+ * sent, and neither the session's history nor its memory provider keeps it.
+ */
+function guardTookInput(report: TextGuardrailReport | undefined): boolean {
+  return report?.mode === 'enforce' && report.input.some((e) => e.action === GuardrailAction.SANITIZE || e.action === GuardrailAction.BLOCK);
 }
 
 /**
@@ -932,8 +948,8 @@ function observeStreamWhenDone(
   turn: MemoryTurn,
 ): StreamTextResult {
   if (!provider?.observe) return result;
-  const text = Promise.all([result.text, result.finishReason]).then(([replyText, finishReason]) => {
-    if (finishReason !== 'error') observeValidatedExchange(provider, turn, replyText);
+  const text = Promise.all([result.text, result.finishReason, result.guardReport]).then(([replyText, finishReason, report]) => {
+    if (finishReason !== 'error' && !guardTookInput(report)) observeValidatedExchange(provider, turn, replyText);
     return replyText;
   });
   void text.catch(() => undefined);
@@ -958,8 +974,9 @@ async function generateWithValidation(
     const result = await generateText(request);
     onResult(result);
     if (!schema) {
-      // The call's one observation: the user's text, and the reply the caller receives.
-      observeValidatedExchange(memory.provider, memory.turn, result.text);
+      // The call's one observation: the user's text, and the reply the caller receives. A turn whose input a guard
+      // rewrote or replaced is not observed.
+      if (!guardTookInput(result.guardReport)) observeValidatedExchange(memory.provider, memory.turn, result.text);
       return { result, object: undefined, retried: false };
     }
 
@@ -969,7 +986,7 @@ async function generateWithValidation(
       // A strict json_schema payload makes every optional property nullable: a `null` there means absent.
       const safe = schema.safeParse(dropNullsForOptionalFields(parsed, schema));
       if (safe.success) {
-        observeValidatedExchange(memory.provider, memory.turn, result.text);
+        if (!guardTookInput(result.guardReport)) observeValidatedExchange(memory.provider, memory.turn, result.text);
         return { result, object: safe.data, retried: attempt > 0 };
       }
       failure = new ObjectGenerationError('Response failed Zod validation', result.text, safe.error);
@@ -1472,20 +1489,24 @@ export function agent(opts: AgentOptions): Agent {
             _callerUser: callerUserOf(turn.context),
           };
 
+          let firstAttempt: GenerateTextResult | undefined;
           const { result, object, retried } = await generateWithValidation(
             generationOptions,
             sendOpts?.responseSchema,
             sendOpts?.maxValidationRetries ?? 0,
             false,
             (attempt) => {
+              firstAttempt ??= attempt;
               accumulateUsage(sessionUsageTally, attempt.usage);
               accumulateUsage(agentUsageTally, attempt.usage);
             },
             { provider: opts.memoryProvider, turn, options: memoryProviderOptions },
           );
           if (retried) {
+            // the user turn as the first attempt sent it: a guard may have rewritten it, or replaced the turn outright
+            const sent = firstAttempt?.transcriptDelta?.find((m) => (m as { role?: string }).role === 'user');
             result.transcriptDelta = [
-              userMessage as unknown as SessionTranscriptMessage,
+              ...(firstAttempt?.transcriptDelta && !sent ? [] : [(sent ?? userMessage) as unknown as SessionTranscriptMessage]),
               { role: 'assistant', content: result.text },
             ];
           }
@@ -1497,14 +1518,12 @@ export function agent(opts: AgentOptions): Agent {
             // Lossless delta when the call carried one; minimal user/assistant
             // pair otherwise (legacy generateText wrappers and test doubles
             // predating transcriptDelta keep the pre-0.10 history shape).
-            historyBuffer.appendSendDelta(
-              result.transcriptDelta ?? [
-                userMessage as unknown as SessionTranscriptMessage,
-                { role: 'assistant', content: result.text },
-              ],
-              sendOpts?.blockLabel,
-              epochAtStart,
-            );
+            const delta = result.transcriptDelta ?? [
+              userMessage as unknown as SessionTranscriptMessage,
+              { role: 'assistant', content: result.text },
+            ];
+            // An input a guard replaced made no request and leaves an empty delta: nothing of the turn is kept.
+            if (delta.length > 0) historyBuffer.appendSendDelta(delta, sendOpts?.blockLabel, epochAtStart);
           }
 
           // Backwards-compat: when no schema, return plain GenerateTextResult.
@@ -1516,7 +1535,7 @@ export function agent(opts: AgentOptions): Agent {
             : result;
         },
 
-        stream(input: MessageContent, streamOpts?: { abortSignal?: AbortSignal; budget?: SpendBudget | SpendBudgetOptions }): StreamTextResult {
+        stream(input: MessageContent, streamOpts?: { abortSignal?: AbortSignal; budget?: SpendBudget | SpendBudgetOptions; guards?: GenerateTextOptions['guards'] }): StreamTextResult {
           const textForMemory = typeof input === 'string' ? input : extractTextFromContent(input);
           const userMessage: Message = { role: 'user', content: input };
 
@@ -1536,6 +1555,7 @@ export function agent(opts: AgentOptions): Agent {
               ...(streamOpts?.abortSignal ? { abortSignal: streamOpts.abortSignal } : {}),
               // A stream's own budget takes the agent's place; without one the agent's applies.
               ...(streamOpts?.budget !== undefined ? { budget: streamOpts.budget } : {}),
+              ...(streamOpts?.guards ? { guards: streamOpts.guards } : {}),
               // The turn's tools run for the session's user.
               _callerUser: callerUserOf(turn.context),
             },
@@ -1566,13 +1586,16 @@ export function agent(opts: AgentOptions): Agent {
             // append the minimal user/assistant text pair, epoch-guarded so a
             // reseed during the stream discards the stale append.
             const epochAtStreamStart = historyBuffer.epoch();
-            const recorded = Promise.all([result.text, result.finishReason]).then(([replyText, finishReason]) => {
+            const recorded = Promise.all([result.text, result.finishReason, result.guardReport]).then(([replyText, finishReason, report]) => {
               // A stream that ended in an error (a refusal, a dropped
               // connection) is left out, as send() leaves out a call that
               // throws. An empty reply is not recorded as a turn: Anthropic
               // rejects a request whose history has an empty assistant
               // message.
               if (finishReason === 'error') return;
+              // The pair below is built from the input as it was given. A turn whose input a guard rewrote or
+              // replaced is left out, as a turn that ended in an error is: the history never holds what a guard took out.
+              if (guardTookInput(report)) return;
               historyBuffer.appendSendDelta(
                 [
                   { role: 'user', content: input } as SessionTranscriptMessage,

@@ -294,6 +294,20 @@ describe('(f) the transcript holds what was delivered', () => {
     expect(session.messages()).toEqual([]);
   });
 
+  it('a memory provider never observes a turn whose input a guard rewrote', async () => {
+    serve([text('Noted.'), textStream('Noted again.'), text('Sure.')]);
+    const observe = vi.fn(async (_role: 'user' | 'assistant', _text: string, _context?: unknown) => undefined);
+    const sanitizesInput: IGuardrailService = { id: 'in', config: { canSanitize: true }, evaluateInput: async () => ({ action: GuardrailAction.SANITIZE, modifiedText: 'my number is [removed]' }) };
+    const session = agent({ ...OPENAI, memory: false, instructions: 'You are brief.', memoryProvider: { observe } }).session('observed');
+    await session.send('my number is 555 0100', { guards: guards(sanitizesInput) });
+    const streamed = session.stream('my number is 555 0100', { guards: guards(sanitizesInput) });
+    await collect(streamed.fullStream);
+    await streamed.text;
+    await session.send('Thanks.');
+    await vi.waitFor(() => expect(observe).toHaveBeenCalledWith('user', 'Thanks.', expect.anything()));
+    expect(JSON.stringify(observe.mock.calls)).not.toContain('555 0100');
+  });
+
   it('(a) and (d) through an agent\'s own generate() and stream()', async () => {
     serve([textStream('the streamed reply')]);
     const helper = agent({ ...OPENAI, memory: false, instructions: 'You are brief.' });
