@@ -327,7 +327,7 @@ describe("agent({ runtime: 'gmi' }) memory.recall.retrieval", () => {
   });
 
   it("'hybrid' on a GMI turn: a memory question sends the exact-words hit the cut left out; the same words without the question leave it out for the budget", async () => {
-    type Reserved = Capture & { memoryQuestionReserve: { fired: boolean; added: number }; candidates: Array<Candidate & { reserve?: boolean }> };
+    type Reserved = Omit<Capture, 'candidates'> & { memoryQuestionReserve: { fired: boolean; added: number }; candidates: Array<Candidate & { reserve?: boolean }> };
     const GOLD = 'The bike shed code is XQ7Z.';
     // Filed first, then 64 notes whose words are the questions' stop words and a number: by meaning the notes are
     // nearer, so the dense leg's sixty are notes, and no note shares a word the exact-words leg reads. Only the code's
