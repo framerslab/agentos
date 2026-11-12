@@ -1101,8 +1101,9 @@ export class Memory {
    * rolling-summary sink filed. Account deletion calls it. A whole `'conversation'` scope loses its row of
    * `memory_scopes` with its traces; a delete of one user's traces in it (`turnUserId`) keeps the row, and so does a
    * scope that still holds a wiki page (`memory_pages`): this call deletes no page row, and the registry goes on
-   * naming the scope until its pages are deleted and the call is made again. With `documentChunks: 'delete'` the
-   * document chunks the scope's traces were filed from go with their text, as {@link deleteTraces} deletes them.
+   * naming the scope until its pages are deleted and the call is made again. A document chunk one of the scope's
+   * traces was filed from lets go of it and keeps its text: to delete those chunks too, delete the scope's traces
+   * first with {@link deleteTraces} and `documentChunks: 'delete'` ({@link tracesStoredBefore} lists them).
    *
    * It reads the rows by their `scope_id` column, after filing the brain's rows that hold `''` there while their
    * metadata names a scope id: a release older than the column writes those, to a Brain this facade holds open too.
@@ -1112,11 +1113,7 @@ export class Memory {
    * @throws When the knowledge graph cannot delete the copies: of the traces, before any row is deleted; of the scope,
    *   once the traces are deleted, so a second call finds the copies alone.
    */
-  async deleteScope(
-    scope: string,
-    scopeId: string,
-    options: { turnUserId?: string; documentChunks?: 'delete' } = {},
-  ): Promise<{ deleted: number }> {
+  async deleteScope(scope: string, scopeId: string, options: { turnUserId?: string } = {}): Promise<{ deleted: number }> {
     if (typeof scopeId !== 'string' || scopeId === '') {
       throw new TypeError('Memory.deleteScope: scopeId must be a non-empty string');
     }
@@ -1124,23 +1121,15 @@ export class Memory {
     if (only !== undefined && (typeof only !== 'string' || only === '')) {
       throw new TypeError('Memory.deleteScope: turnUserId must be a non-empty string');
     }
-    const chunks = options.documentChunks === 'delete' ? ({ documentChunks: 'delete' } as const) : {};
     await this._initPromise;
     // A conversation scope is deleted after a compile of it that is running, and a compile that comes after waits for
     // the delete: no page is written from traces the delete took.
-    if (scope === CONVERSATION_SCOPE) {
-      return this._oneScopeChangeAtATime(scopeId, () => this._deleteScope(scope, scopeId, only, chunks));
-    }
-    return this._deleteScope(scope, scopeId, only, chunks);
+    if (scope === CONVERSATION_SCOPE) return this._oneScopeChangeAtATime(scopeId, () => this._deleteScope(scope, scopeId, only));
+    return this._deleteScope(scope, scopeId, only);
   }
 
   /** {@link deleteScope}, its arguments checked. */
-  private async _deleteScope(
-    scope: string,
-    scopeId: string,
-    only: string | undefined,
-    chunks: { documentChunks?: 'delete' },
-  ): Promise<{ deleted: number }> {
+  private async _deleteScope(scope: string, scopeId: string, only: string | undefined): Promise<{ deleted: number }> {
     await fillScopeIds(this._brain.adapter, this._brain.brainId);
     const rows = await this._brain.all<{ id: string; metadata: string | null }>(
       'SELECT id, metadata FROM memory_traces WHERE brain_id = ? AND scope = ? AND scope_id = ?',
@@ -1149,7 +1138,7 @@ export class Memory {
     const ids = rows
       .filter((row) => only === undefined || traceNamesUser(row.metadata, only))
       .map((row) => row.id);
-    const result = await this.deleteTraces(ids, chunks);
+    const result = await this.deleteTraces(ids);
     // The per-trace deletes above took each trace's own copy. A copy filed under the scope whose trace is gone holds
     // the trace's words with no row to find them by: a graph that cannot delete it fails the call.
     if (only === undefined) await this._knowledgeGraph.deleteMemories({ scopes: [{ scope, scopeId }] });
@@ -1219,6 +1208,28 @@ export class Memory {
     // Postgres keeps the index in each row's own column, which went with the row.
     if (this._brain.features.dialect.name !== 'postgres') await this._rebuildFtsIndex();
     return { deleted };
+  }
+
+  /**
+   * The ids of one scope's traces stored before a time, live or soft-deleted, a wiki page's chunks left out: a chunk
+   * follows its page, never its own age. A person's deletion lists every trace of theirs with it (a bound past any
+   * time a trace was stored), and a retention sweep the traces that expired. Like {@link deleteScope}, it first files
+   * the brain's rows that hold `''` as their scope id while their metadata names one.
+   *
+   * @param beforeMs - Exclusive upper bound on the time a trace was stored (Unix ms).
+   * @throws TypeError when `scopeId` is empty.
+   */
+  async tracesStoredBefore(scope: string, scopeId: string, beforeMs: number): Promise<string[]> {
+    if (typeof scopeId !== 'string' || scopeId === '') {
+      throw new TypeError('Memory.tracesStoredBefore: scopeId must be a non-empty string');
+    }
+    await this._initPromise;
+    await fillScopeIds(this._brain.adapter, this._brain.brainId);
+    const rows = await this._brain.all<{ id: string; tags: string }>(
+      'SELECT id, tags FROM memory_traces WHERE brain_id = ? AND scope = ? AND scope_id = ? AND created_at < ?',
+      [this._brain.brainId, scope, scopeId, beforeMs],
+    );
+    return rows.filter((row) => !isPageChunkTags(row.tags)).map((row) => row.id);
   }
 
   /**

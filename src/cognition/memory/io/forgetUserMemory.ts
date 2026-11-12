@@ -85,6 +85,19 @@ const NEVER_REACHED: ForgetMemoryReport['stores'] = [
 ];
 
 /**
+ * Deletes every trace of one scope for good, the document chunks its traces were filed from with their text: the
+ * traces first, with their chunks, then whatever the scope still holds (a wiki page's chunks, the knowledge-graph
+ * copies filed under it) and, for a conversation scope with no page left, its registry row.
+ *
+ * @returns How many trace rows it deleted.
+ */
+export async function deleteScopeWithDocuments(memory: Memory, scope: string, scopeId: string): Promise<number> {
+  const ids = await memory.tracesStoredBefore(scope, scopeId, Number.MAX_SAFE_INTEGER);
+  const { deleted } = await memory.deleteTraces(ids, { documentChunks: 'delete' });
+  return deleted + (await memory.deleteScope(scope, scopeId)).deleted;
+}
+
+/**
  * Deletes one subject's memory from a store for good and keeps it deleted.
  *
  * In order: the subject's pending writes and compiles are waited for (`drain`); the tombstone is written to the
@@ -137,9 +150,7 @@ export async function forgetUserMemory(options: ForgetUserMemoryOptions): Promis
         if (!other || other.kind === 'operator') continue;
         if (other.kind === subject.kind && other.id === subject.id && !keys.includes(row.scopeId)) keys.push(row.scopeId);
       }
-      for (const key of keys) {
-        conversation += (await memory.deleteScope(CONVERSATION_SCOPE, key, { documentChunks: 'delete' })).deleted;
-      }
+      for (const key of keys) conversation += await deleteScopeWithDocuments(memory, CONVERSATION_SCOPE, key);
     } catch (error) {
       conversationFailure = messageOf(error);
     }
@@ -181,7 +192,7 @@ export async function forgetUserMemory(options: ForgetUserMemoryOptions): Promis
       // The scope's registry row goes once it holds no trace and no page: the delete made again removes it.
       if (!left && conversationFailure === undefined) {
         try {
-          conversation += (await memory.deleteScope(CONVERSATION_SCOPE, key, { documentChunks: 'delete' })).deleted;
+          conversation += (await memory.deleteScope(CONVERSATION_SCOPE, key)).deleted;
         } catch (error) {
           conversationFailure = messageOf(error);
         }
