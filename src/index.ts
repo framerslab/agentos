@@ -270,6 +270,7 @@ export {
   buildFallbackChain,
   buildPolicyAwareFallbackChain,
 } from './api/generateText.js';
+export { GuardrailStopError } from './api/errors.js';
 export { CONTEXT_WINDOW_EXCEEDED_CODE } from './core/llm/providers/errors/errorCodes.js';
 export { ContextWindowExceededError } from './core/llm/providers/errors/ContextWindowExceededError.js';
 export { checkContextFit, type ContextFit, type ContextFitRequest } from './api/runtime/contextWindowFit.js';
@@ -286,6 +287,9 @@ export type {
   ToolCallHookInfo,
   TokenUsage,
   SystemContentBlock,
+  TextGuardrailOptions,
+  TextGuardrailReport,
+  TextGuardrailVerdict,
 } from './api/generateText.js';
 export type {
   AttemptOutcome,
