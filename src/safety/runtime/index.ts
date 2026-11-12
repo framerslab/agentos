@@ -237,3 +237,14 @@ export {
   settleTimedTextBudget,
 } from './TimedTextBudget.js';
 export type { TimedTextBudgetView } from './TimedTextBudget.js';
+
+// Governed tools: evidence checked against the host's store, limits in a shared store, an audit record before and after.
+export { ACTION_EVIDENCE_SCHEMA, verifyActionEvidence } from './ActionEvidence.js';
+export type { ActionEvidence, ActionEvidenceQuote, EvidenceCheck, EvidenceFailure, EvidenceRule, EvidenceSource, RuleBook, StoredMessage } from './ActionEvidence.js';
+export { SqlActionLimiter, actionLimiterDdl } from './ActionLimiter.js';
+export type { ActionLimitAnswer, ActionLimitRule, ActionLimiter, SqlActionLimiterOptions } from './ActionLimiter.js';
+export { governTool, governedActionOf } from './GovernedTool.js';
+export type {
+  ActionActor, ActionAuditRecord, ActionAuditSink, ActionEndCode, ActionGovernance, ActionOutcome,
+  GovernedActionIds, GovernedToolContext, GovernedToolPolicy,
+} from './GovernedTool.js';
