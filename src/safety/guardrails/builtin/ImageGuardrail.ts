@@ -307,10 +307,12 @@ export class ImageGuardrail implements IGuardrailService {
   /**
    * Judges the input's images. An input with no images answers null.
    *
-   * @param payload - The input and its context; `context.vendorSignal` stops further `classify` checks once aborted.
+   * @param payload - The input and its context; `context.vendorSignal` stops further `classify` checks once aborted, and
+   *   `deadlineSignal` (the dispatcher's deadline, which a required guard's spec may set shorter than `timeoutMs`) stops
+   *   every further capture and check.
    * @returns A check's block, else a hold, else an image refused as unavailable, else a flag, else null.
    */
-  async evaluateInput({ context, input }: GuardrailInputPayload): Promise<GuardrailEvaluationResult | null> {
+  async evaluateInput({ context, input, deadlineSignal }: GuardrailInputPayload): Promise<GuardrailEvaluationResult | null> {
     const inputs = input.visionInputs ?? [];
     if (inputs.length === 0) return null;
     if (inputs.length > this.maxImages) {
@@ -318,10 +320,11 @@ export class ImageGuardrail implements IGuardrailService {
     }
 
     // The dispatcher answers at the deadline and does not stop this evaluation: past it, nothing further starts, so no
-    // image goes to a vendor after the decision. An image whose next step would start late is refused as unavailable.
+    // image goes to a vendor after the decision. The deadline is the guard's own and the dispatcher's, whichever comes
+    // first (a required guard runs under its spec's). An image whose next step would start late is refused as unavailable.
     const deadline = Date.now() + this.timeoutMs;
     const late = (state: ImageState, index: number, step: string): boolean => {
-      if (Date.now() < deadline) return false;
+      if (Date.now() < deadline && deadlineSignal?.aborted !== true) return false;
       state.open = false;
       if (state.rank < 2) { state.rank = 2; state.verdict = this.unavailable(index, step); }
       return true;

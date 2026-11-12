@@ -196,6 +196,13 @@ export interface GuardrailInputPayload {
 
   /** The user's input request to evaluate */
   input: AgentOSInput;
+
+  /**
+   * Aborted when the dispatcher stops waiting for this evaluation: the guard's deadline (`config.timeoutMs`, or the
+   * one a required guard's spec gives it) has passed and the dispatcher has already answered. A guard that sends the
+   * input to a vendor starts no further request once it is aborted. Absent when the guard runs with no deadline.
+   */
+  deadlineSignal?: AbortSignal;
 }
 
 /**

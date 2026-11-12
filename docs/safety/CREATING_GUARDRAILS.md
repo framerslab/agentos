@@ -127,6 +127,9 @@ interface GuardrailInputPayload {
 
   // The user's input. The most commonly inspected field is input.textInput.
   input: AgentOSInput;
+
+  // Aborted when the dispatcher stops waiting for this evaluation (its deadline passed). Absent with no deadline.
+  deadlineSignal?: AbortSignal;
 }
 
 interface GuardrailContext {
@@ -142,6 +145,8 @@ interface GuardrailContext {
 ```
 
 `context.moderation` holds `surface`, `roomId`, `rating`, `messageId` and `sender` (`{ id, kind? }`) as words and ids, checked by `moderateContent()` before any guard runs; read `context.moderation?.rating` and its siblings instead of keys in `metadata`. A guard that calls a vendor reads `context.vendorSignal` before each request and starts none once it is aborted: `moderateContent()` aborts it the moment any guard answers a code the host listed in `stopVendorsOn`. A request already sent finishes and is answered as usual, so the guard does not hand the signal to the request itself: a client that honours it would cancel that request and the guard would throw.
+
+`deadlineSignal` is the dispatcher's deadline for this evaluation: `config.timeoutMs`, or the shorter or longer one a required guard's spec gives it. At the deadline the dispatcher answers without the guard (a closed guard's timeout is a block) and aborts the signal, but the evaluation keeps running, so a guard that makes several requests reads it before each one and starts none once it is aborted.
 
 ```typescript
 async evaluateInput({ input, context }: GuardrailInputPayload) {
@@ -175,8 +180,9 @@ const visionCheck: ImageCheck = {
       if (context.vendorSignal?.aborted) break; // another guard answered a code that stops vendor requests
       parts.push(await visionModel.score(region, image.mimeType));
     }
-    // nothing scored is no judgment: throw, and the guard refuses the image or, with 'skip', asks the next check
-    if (parts.length === 0) throw new Error('no region of the image was scored');
+    // nothing scored, or a score that is not a number, is no judgment: throw, and the guard refuses the image or,
+    // with 'skip', asks the next check
+    if (parts.length === 0 || !parts.every(Number.isFinite)) throw new Error('no usable score for the image');
     const score = Math.max(...parts);
     if (score > 0.8) return { verdict: 'hold', reviewCode: 'IMAGE_REVIEW' };
     if (score > 0.5) return { verdict: 'flag', reasonCode: 'IMAGE_SUGGESTIVE', scores: { suggestive: score } };
