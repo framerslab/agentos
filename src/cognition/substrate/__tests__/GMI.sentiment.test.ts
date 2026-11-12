@@ -845,3 +845,26 @@ describe('GMI events from a StatisticalUtilityAI', () => {
     expect(events).toContain(GMIEventType.USER_SATISFIED);
   });
 });
+
+describe('GMI sentiment method forwarding', () => {
+  it.each([undefined, 'lexicon_based'] as const)('passes method %s unchanged', async (method) => {
+    const utility = createMockUtilityAI();
+    const gmi = new GMI('sentiment-method');
+    await gmi.initialize(createSentimentPersona({ enabled: true, ...(method ? { method } : {}) }), {
+      workingMemory: createMockWorkingMemory() as any,
+      promptEngine: mockPromptEngine,
+      llmProviderManager: mockLlmProviderManager,
+      utilityAI: utility as any,
+      toolOrchestrator: mockToolOrchestrator,
+      defaultLlmProviderId: 'mock-llm-provider', defaultLlmModelId: 'mock-model',
+    });
+    try {
+      for await (const chunk of gmi.processTurnStream({
+        interactionId: 'method', userId: 'user-1', type: GMIInteractionType.TEXT, content: 'Hello.',
+      })) void chunk;
+      expect((utility.analyzeSentiment as any).mock.calls[0]?.[1]).toMatchObject({ method });
+    } finally {
+      await gmi.shutdown();
+    }
+  });
+});

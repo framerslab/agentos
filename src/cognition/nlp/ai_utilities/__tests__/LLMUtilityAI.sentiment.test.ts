@@ -5,6 +5,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { LLMUtilityAI, LLMUtilityAIConfig } from '../LLMUtilityAI';
+import { StatisticalUtilityAI } from '../StatisticalUtilityAI';
 import type { IUtilityAI } from '../IUtilityAI';
 import type { AIModelProviderManager } from '../../../../core/llm/providers/AIModelProviderManager';
 import type { IProvider, ModelCompletionResponse } from '../../../../core/llm/providers/IProvider';
@@ -147,6 +148,27 @@ describe('LLMUtilityAI — analyzeSentiment', () => {
       negativeTokens: [],
       neutralTokens: [],
     });
+    expect(mockProvider.generateCompletion).toHaveBeenCalledTimes(1);
+  });
+
+  it('honors lexicon_based without asking the provider, including the call language and lexicon', async () => {
+    const statistical = new StatisticalUtilityAI('expected-lexicon');
+    await statistical.initialize({ defaultLanguage: 'en' });
+    const options = { method: 'lexicon_based', language: 'es', lexiconNameOrPath: 'afinn' };
+    const text = 'Gracias, es excelente y perfecto.';
+    const expected = await statistical.analyzeSentiment(text, options);
+    const actual = await llmUtility.analyzeSentiment(text, options);
+    expect(mockProvider.generateCompletion).not.toHaveBeenCalled();
+    expect(actual).toEqual(expected);
+    expect(actual.score).toBeGreaterThan(0.5);
+  });
+
+  it('keeps the model path when the method is unset', async () => {
+    vi.mocked(mockProvider.generateCompletion).mockResolvedValueOnce({
+      id: 'method-default', object: 'chat.completion', created: 0, modelId: 'default-llm-model',
+      choices: [{ index: 0, message: { role: 'assistant', content: '{"score":0.75}' }, finishReason: 'stop' }],
+    });
+    expect((await llmUtility.analyzeSentiment('Excellent.')).score).toBe(0.75);
     expect(mockProvider.generateCompletion).toHaveBeenCalledTimes(1);
   });
 });
