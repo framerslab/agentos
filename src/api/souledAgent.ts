@@ -30,7 +30,13 @@ import { generateText } from './generateText.js';
 import type { StreamTextResult } from './streamText.js';
 import { Memory, type AttachedWiki, type ScoredTrace } from '../cognition/memory/io/facade/Memory.js';
 import type { StorageAdapter } from '@framers/sql-storage-adapter';
-import { ForgottenLedger, copyUnavailableError, type TombstoneKey } from '../cognition/memory/suppression/ForgottenLedger.js';
+import {
+  ForgottenLedger,
+  copyUnavailableError,
+  type SuppressionSubject,
+  type TombstoneKey,
+} from '../cognition/memory/suppression/ForgottenLedger.js';
+import { forgetUserMemory, type ForgetMemoryReport } from '../cognition/memory/io/forgetUserMemory.js';
 import { openForgottenCopy } from '../cognition/memory/suppression/forgottenCopy.js';
 import { shareForgottenLedger } from '../cognition/memory/suppression/learnerTombstones.js';
 import { guardedWrite } from '../cognition/memory/suppression/guardedWrite.js';
@@ -355,11 +361,26 @@ export interface SouledAgentOptions extends AgentOptions {
 /**
  * Return type of {@link souledAgent}: an {@link Agent} with its backing
  * {@link Memory} store exposed as `memory`, so callers can fold conversation
- * into the wiki mid-session via `await agent.memory.compileWiki()`. `memory` is
- * present whenever the soul resolves to a workspace directory; it is absent for
+ * into the wiki mid-session via `await agent.memory.compileWiki()`. `memory` and the
+ * members below are present whenever the soul resolves to a workspace directory; they are absent for
  * inline souls that fall back to a plain agent.
  */
-export type SouledAgent = Agent & { memory?: Memory };
+export type SouledAgent = Agent & {
+  memory?: Memory;
+  /**
+   * Deletes one person's memory from this agent's store for good and keeps it deleted: it waits for the person's
+   * pending writes (up to `pendingWritesTimeoutMs`), records a tombstone, deletes their traces, document chunks,
+   * compiled pages and registry row, writes the vector index again, and clears the history of the sessions this
+   * handle holds open for them. With a learning layer, the layer's own `forgetUser` runs first. `linkedSessions`
+   * names the anonymous sessions the host has tied to the person: each is deleted the same way.
+   *
+   * @returns One report for the user and the linked sessions: each store with `reached` and a count or a reason,
+   *   the pages deleted and those that failed, `drained`, `pendingAtDeadline` and `complete`. It never holds the
+   *   user's id or any text.
+   * @throws TypeError when `userId`, or an entry of `linkedSessions`, is not a non-empty string; nothing is deleted.
+   */
+  forgetUser?(userId: string, options?: { linkedSessions?: readonly string[] }): Promise<ForgetMemoryReport>;
+};
 
 /**
  * Create an agent whose long-term memory is its soul-file `memory/` wiki.
@@ -1056,7 +1077,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   const chunker = new SemanticChunker();
   const priorTools = rest.tools;
   const memoryDir = loaded.memoryDir;
-  const { tools: augmentedTools } = await closingOnThrow(() => attachMemoryWiki({
+  const { tools: augmentedTools, store: operatorPages, storeFor: pagesOf } = await closingOnThrow(() => attachMemoryWiki({
     memory,
     memoryDir,
     agentId,
@@ -1099,6 +1120,23 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   built.stream = (prompt, extra) => awaitStreamOnClose(streamTurn(prompt, extra), extra?.abortSignal);
   const openSession = built.session.bind(built);
   const trackedSessions = new WeakSet<AgentSession>();
+  /** The sessions this handle gave out and has not closed, by the key of the subject each one's memory is kept under. */
+  const sessionsBySubject = new Map<string, Set<AgentSession>>();
+  /**
+   * The key a session's memory is kept under: its user's when it named one, else the session's own; undefined for an
+   * id no key can be built from, whose turns file nothing.
+   */
+  const sessionKeyOf = (sessionId: string, userId: unknown): string | undefined => {
+    const subject: MemorySubject =
+      typeof userId === 'string' && !isAnonymousUserId(userId, anonymousUserIds)
+        ? { kind: 'user', id: userId }
+        : { kind: 'session', id: sessionId };
+    try {
+      return conversationScopeKey(agentId, subjectOf(subject));
+    } catch {
+      return undefined;
+    }
+  };
   built.session = (id, sessionOptions) => {
     if (sharedUser !== undefined) {
       // One person's memory: a session runs as that user, by name or by naming nobody.
@@ -1108,6 +1146,12 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       }
     }
     const session = openSession(id, sessionOptions);
+    const subjectKey = sessionKeyOf(session.id, sessionOptions?.userId);
+    if (subjectKey !== undefined) {
+      const ofSubject = sessionsBySubject.get(subjectKey) ?? new Set<AgentSession>();
+      ofSubject.add(session);
+      sessionsBySubject.set(subjectKey, ofSubject);
+    }
     // A runtime that hands the same session object back is wrapped once.
     if (!trackedSessions.has(session)) {
       trackedSessions.add(session);
@@ -1120,6 +1164,10 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
           sessionPolicies.delete(session.id);
           offSaid.delete(session.id);
           sessionCloses.set(session.id, (sessionCloses.get(session.id) ?? 0) + 1);
+          for (const [key, held] of sessionsBySubject) {
+            held.delete(session);
+            if (held.size === 0) sessionsBySubject.delete(key);
+          }
           return closeSession(...args);
         };
       }
@@ -1127,6 +1175,111 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       session.stream = (input, streamOpts) => awaitStreamOnClose(streamSession(input, streamOpts), streamOpts?.abortSignal);
     }
     return session;
+  };
+
+  /** Waits for a subject's pending writes and compiles, up to the deadline close() waits by. */
+  const drainSubject = async (key: string): Promise<{ drained: number; pendingAtDeadline: number }> => {
+    const held = pendingBySubject.get(key);
+    if (!held || held.size === 0) return { drained: 0, pendingAtDeadline: 0 };
+    const before = held.size;
+    const left = await waitForWrites(held, waitMs);
+    return { drained: Math.max(before - left, 0), pendingAtDeadline: left };
+  };
+  /**
+   * Whether the store holds memory from before per-user scope that nobody attributed: traces under the agent's plain
+   * id, in either form it was written in, or page files under memory/ that are not the operator's.
+   */
+  const legacyUnattributed = async (): Promise<boolean> => {
+    if ((await memory.countScope('persona', agentId)) > 0) return true;
+    if (encodedAgentId !== agentId && (await memory.countScope('persona', encodedAgentId)) > 0) return true;
+    return (await operatorPages.withheldPages()).length > 0;
+  };
+  /**
+   * What a deletion of one subject reaches beside the store: the history of the sessions this handle holds open for
+   * the subject, which the default runtime keeps in this process. A gmi() session keeps its own messages.
+   */
+  const sessionHistoryOf = (key: string): ForgetMemoryReport['stores'][number] => {
+    if (rest.runtime === 'gmi') {
+      return {
+        store: "a gmi() session's history",
+        reached: false,
+        reason: 'a gmi() session keeps its messages until the host closes it',
+      };
+    }
+    let cleared = 0;
+    for (const session of sessionsBySubject.get(key) ?? []) {
+      session.clear();
+      cleared += 1;
+    }
+    return { store: 'session history in this process', reached: true, deleted: cleared };
+  };
+  /** Deletes one subject's memory on its own chain, after its pending writes. */
+  const forgetSubject = (
+    subject: SuppressionSubject,
+    extra: { stores: ForgetMemoryReport['stores']; incomplete: boolean },
+    writeTombstone = true,
+  ): Promise<ForgetMemoryReport> => {
+    const key = conversationScopeKey(agentId, subject);
+    return forgetUserMemory({
+      memory,
+      ledger: forgotten,
+      wiki: { storeFor: pagesOf },
+      subject,
+      agentId,
+      drain: () => drainSubject(key),
+      onChain: (work) => onSubject(key, work),
+      writeTombstone,
+      extraStores: [...extra.stores, sessionHistoryOf(key)],
+      alsoIncomplete: extra.incomplete,
+      legacyUnattributed,
+    });
+  };
+  /** What the agent's learning layer deleted of a user, as entries of a deletion report; none when it runs no layer. */
+  const forgetLearner = async (userId: string): Promise<{ stores: ForgetMemoryReport['stores']; incomplete: boolean }> => {
+    const forget = built.learning?.forgetUser;
+    if (!forget) {
+      return {
+        stores: [{ store: 'learning store', reached: false, reason: 'this agent runs no learning layer' }],
+        incomplete: false,
+      };
+    }
+    const learned = await forget.call(built.learning, userId);
+    const stores = learned.stores.map((entry): ForgetMemoryReport['stores'][number] =>
+      entry.reached
+        ? {
+            store: entry.store,
+            reached: true,
+            deleted: typeof entry.deleted === 'number' ? entry.deleted : Object.values(entry.deleted).reduce((sum, n) => sum + n, 0),
+          }
+        : { store: entry.store, reached: false, reason: entry.reason },
+    );
+    return { stores, incomplete: learned.stores.some((entry) => entry.store === 'learning store' && !entry.reached) };
+  };
+  built.forgetUser = (userId, options) => {
+    const linked: unknown = options?.linkedSessions ?? [];
+    if (typeof userId !== 'string' || userId === '') {
+      return Promise.reject(new TypeError('souledAgent: forgetUser needs a non-empty user id'));
+    }
+    if (!Array.isArray(linked) || linked.some((id) => typeof id !== 'string' || id === '')) {
+      return Promise.reject(new TypeError('souledAgent: forgetUser needs each linked session as a non-empty id'));
+    }
+    const sessions = [...new Set(linked as string[])];
+    const run = async (): Promise<ForgetMemoryReport> => {
+      const ofUser = await forgetSubject({ kind: 'user', id: userId }, await forgetLearner(userId));
+      const report: ForgetMemoryReport = { ...ofUser, stores: [...ofUser.stores], pages: { ...ofUser.pages, failed: [...ofUser.pages.failed] } };
+      for (const sessionId of sessions) {
+        const ofSession = await forgetSubject({ kind: 'session', id: sessionId }, { stores: [], incomplete: false });
+        report.stores.push(...ofSession.stores.map((entry) => ({ ...entry, store: `${entry.store} (linked session)` })));
+        report.pages.deleted += ofSession.pages.deleted;
+        report.pages.failed.push(...ofSession.pages.failed);
+        report.drained += ofSession.drained;
+        report.pendingAtDeadline += ofSession.pendingAtDeadline;
+        report.complete = report.complete && ofSession.complete;
+      }
+      return report;
+    };
+    // close() waits for a deletion that is running, as it waits for a write.
+    return awaitedOnClose(run());
   };
 
   // On teardown: close the agent (with runtime: 'gmi' that stops its running session turns and shuts its sessions

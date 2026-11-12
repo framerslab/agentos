@@ -100,6 +100,8 @@ export const AGENTOS_EVENTS = {
   'memory.write_refused': { reason: { enum: ['policy_off', 'policy_failed', 'screened', 'screen_failed', 'forgotten'] } },
   // read_memory_page answered a page as not found, or a call as invalid, for a page the asker may not read: another subject's page, a user's page asked with no user, a page an earlier version compiled asked by a user, a call that named a scope or a user, or any page or listing asked by a forgotten subject.
   'memory.page_read_refused': { reason: { enum: ['other_user', 'no_user', 'legacy', 'caller_filter', 'forgotten'] } },
+  // A subject's memory was deleted for good, or a deletion was run again for a subject already forgotten: how many stores the call reached and did not reach, the pages deleted and the pages that could not be, the subject's pending writes it waited for and those still running at its deadline, and whether the deletion is complete. Never the subject's id.
+  'memory.forget_done': { stores: 'int', unreached: 'int', pages: 'int', pagesFailed: 'int', drained: 'int', pendingAtDeadline: 'int', complete: { enum: ['yes', 'no'] } },
   // A translation failed, answered with no text, ran past the transcript translator's own timeout, stopped at its output cap or stopped for another reason (a content filter); it throws TranslationProviderError, and status is 0 when no HTTP status came back.
   'language.translation_failed': { provider: { enum: ['openai', 'deepl'] }, reason: { enum: ['request_failed', 'empty_output', 'timeout', 'truncated', 'incomplete'] }, status: 'int', type: 'word', code: 'word' },
   // A configured detection provider id LanguageService does not build (whisper_stub, or an id it does not know).
