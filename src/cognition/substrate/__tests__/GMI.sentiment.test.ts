@@ -868,3 +868,75 @@ describe('GMI sentiment method forwarding', () => {
     }
   });
 });
+
+describe('GMI sentiment beside the first model call', () => {
+  it('replaceHistory before each turn never joins a held sentiment analysis', async () => {
+    vi.useFakeTimers();
+    let release!: (value: SentimentResult) => void;
+    const utility = createMockUtilityAI();
+    utility.analyzeSentiment.mockImplementationOnce(() => new Promise<SentimentResult>((resolve) => { release = resolve; }));
+    const gmi = new GMI('replace-held');
+    const wm = createMockWorkingMemory();
+    await gmi.initialize(createSentimentPersona({ enabled: true }), {
+      workingMemory: wm as any, utilityAI: utility as any, promptEngine: mockPromptEngine,
+      llmProviderManager: mockLlmProviderManager, toolOrchestrator: mockToolOrchestrator,
+    });
+    const drain = async (id: string) => {
+      for await (const chunk of gmi.processTurnStream({ interactionId: id, userId: 'user-1', type: GMIInteractionType.TEXT, content: id })) void chunk;
+    };
+    try {
+      gmi.replaceHistory([]);
+      const before = vi.mocked(mockProvider.generateCompletionStream).mock.calls.length;
+      const first = drain('first');
+      await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+      // A bounded assertion before any wait on the turn, so the red run names the ordering instead of timing out.
+      await vi.waitFor(() => expect(vi.mocked(mockProvider.generateCompletionStream).mock.calls.length,
+        'main call must start while sentiment is held').toBeGreaterThan(before), { timeout: 500, interval: 10 });
+      await vi.advanceTimersByTimeAsync(2000); await first;
+      const calls = vi.mocked(mockProvider.generateCompletionStream).mock.calls.length;
+      gmi.replaceHistory([]);
+      const second = drain('second');
+      await vi.waitFor(() => expect(vi.mocked(mockProvider.generateCompletionStream).mock.calls.length).toBeGreaterThan(calls));
+      await second;
+      release({ score: -0.9, polarity: 'negative', intensity: 0.9 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(JSON.stringify(wm._store.get('gmi_sentiment_history'))).not.toContain('first');
+    } finally {
+      release?.({ score: 0, polarity: 'neutral' });
+      await gmi.shutdown(); vi.useRealTimers();
+    }
+  });
+
+  it('finishes an analysis whose writes began inside the budget instead of dropping half of it', async () => {
+    vi.useFakeTimers();
+    const utility = createMockUtilityAI({ score: -0.9, polarity: 'negative', intensity: 0.9 });
+    const wm = createMockWorkingMemory();
+    const write = wm.set.getMockImplementation()!;
+    let releaseWrite: (() => void) | undefined;
+    wm.set.mockImplementation((key: string, value: any) => key === 'gmi_sentiment_history'
+      ? new Promise<void>((resolve) => { releaseWrite = () => { void write(key, value); resolve(); }; })
+      : write(key, value));
+    const gmi = new GMI('committed-sentiment');
+    await gmi.initialize(createSentimentPersona({ enabled: true }), {
+      workingMemory: wm as any, utilityAI: utility as any, promptEngine: mockPromptEngine,
+      llmProviderManager: mockLlmProviderManager, toolOrchestrator: mockToolOrchestrator,
+    });
+    try {
+      const before = vi.mocked(mockProvider.generateCompletionStream).mock.calls.length;
+      const turn = (async () => {
+        for await (const chunk of gmi.processTurnStream({ interactionId: 'committed', userId: 'user-1', type: GMIInteractionType.TEXT, content: 'This is terrible.' })) void chunk;
+      })();
+      await vi.waitFor(() => expect(releaseWrite).toBeTypeOf('function'));
+      await vi.waitFor(() => expect(vi.mocked(mockProvider.generateCompletionStream).mock.calls.length,
+        'main call must start while the history write is held').toBeGreaterThan(before), { timeout: 500, interval: 10 });
+      await vi.advanceTimersByTimeAsync(2500);
+      releaseWrite!();
+      await turn;
+      expect(wm._store.get('gmi_sentiment_history')?.trends).toHaveLength(1);
+      expect((gmi as any).sentimentTracker.events.map((event: any) => event.eventType)).toContain(GMIEventType.USER_FRUSTRATED);
+    } finally {
+      releaseWrite?.();
+      await gmi.shutdown(); vi.useRealTimers();
+    }
+  });
+});
