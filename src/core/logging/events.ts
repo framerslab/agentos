@@ -102,6 +102,8 @@ export const AGENTOS_EVENTS = {
   'memory.page_read_refused': { reason: { enum: ['other_user', 'no_user', 'legacy', 'caller_filter', 'forgotten'] } },
   // A subject's memory was deleted for good, or a deletion was run again for a subject already forgotten: how many stores the call reached and did not reach, the pages deleted and the pages that could not be, the subject's pending writes it waited for and those still running at its deadline, and whether the deletion is complete. Never the subject's id.
   'memory.forget_done': { stores: 'int', unreached: 'int', pages: 'int', pagesFailed: 'int', drained: 'int', pendingAtDeadline: 'int', complete: { enum: ['yes', 'no'] } },
+  // The tombstones were applied again, at an open or on demand: how many forgotten subjects the store still held something of (each deleted again, with a memory.forget_done line of its own), and how many tombstones came back from the ledger's copy into the store, as after a restore from an older backup. Written only when either is above 0.
+  'memory.tombstone_reapplied': { subjects: 'int', reconciled: 'int' },
   // A translation failed, answered with no text, ran past the transcript translator's own timeout, stopped at its output cap or stopped for another reason (a content filter); it throws TranslationProviderError, and status is 0 when no HTTP status came back.
   'language.translation_failed': { provider: { enum: ['openai', 'deepl'] }, reason: { enum: ['request_failed', 'empty_output', 'timeout', 'truncated', 'incomplete'] }, status: 'int', type: 'word', code: 'word' },
   // A configured detection provider id LanguageService does not build (whisper_stub, or an id it does not know).

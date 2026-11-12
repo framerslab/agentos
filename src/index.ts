@@ -208,8 +208,13 @@ export type {
 export { ForgottenLedger, ForgottenLedgerError, openForgottenCopy, guardMemoryProvider } from './cognition/memory/suppression/index.js';
 export type { ForgottenLedgerOptions, SuppressionSubject, TombstoneKey } from './cognition/memory/suppression/index.js';
 // One person's memory deleted for good, with a report of every store reached and not reached
-export { forgetUserMemory } from './cognition/memory/io/forgetUserMemory.js';
-export type { ForgetMemoryReport, ForgetUserMemoryOptions, SubjectPages } from './cognition/memory/io/forgetUserMemory.js';
+export { forgetUserMemory, reapplyTombstones } from './cognition/memory/io/forgetUserMemory.js';
+export type {
+  ForgetMemoryReport,
+  ForgetUserMemoryOptions,
+  ReapplyTombstonesOptions,
+  SubjectPages,
+} from './cognition/memory/io/forgetUserMemory.js';
 // Query Router (classification, retrieval dispatch, grounded answer generation)
 export {
   QueryClassifier,

@@ -253,6 +253,15 @@ export class ForgottenLedger {
     return { added };
   }
 
+  /** How many tombstones either ledger holds, markers aside: 0 for a store that has forgotten nobody. */
+  async size(): Promise<number> {
+    const hashes = new Set<string>();
+    for (const adapter of this.copy ? [this.primary, this.copy] : [this.primary]) {
+      for (const row of await ForgottenLedger.rowsOf(adapter)) if (!isMarker(row.hash)) hashes.add(row.hash);
+    }
+    return hashes.size;
+  }
+
   /**
    * How many tombstones of either ledger, markers aside, are none of this subject's forms.
    *

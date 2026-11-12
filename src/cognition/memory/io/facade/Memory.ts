@@ -84,6 +84,7 @@ import {
 import { fillScopeIds } from '../../retrieval/store/migrations/v2-to-v3.js';
 import { ForgottenLedger, type SuppressionSubject } from '../../suppression/ForgottenLedger.js';
 import { CONVERSATION_SCOPE, parseConversationScopeKey } from '../../retrieval/store/conversationScopeKey.js';
+import { isMissingTableError } from '../../retrieval/store/missingTable.js';
 import { ensureScopeRow, registerUnregisteredConversationScopes } from '../../retrieval/store/conversationScopes.js';
 import { memoryLog } from '../../log.js';
 import { assertWikiPageId } from '../../../substrate/memory/wiki/WikiPageId.js';
@@ -1363,6 +1364,51 @@ export class Memory {
   /** The ledger the store was opened with; undefined for a store opened without one. */
   get forgotten(): ForgottenLedger | undefined {
     return this._forgotten;
+  }
+
+  /**
+   * Every subject this store holds anything of, each once: the users and sessions whose conversation key names a
+   * registry row, a trace or a wiki page of this brain (a registry row may be gone after a deletion that did not
+   * finish), the users a trace's metadata names as `turnUserId`, and, where the store's database holds the learning
+   * tables, the users of their session and chain-head rows. The operator's key names no subject. The re-application
+   * of the tombstones asks the ledger about each.
+   */
+  async listHeldSubjects(): Promise<SuppressionSubject[]> {
+    await this._initPromise;
+    const brainId = this._brain.brainId;
+    const held = new Map<string, SuppressionSubject>();
+    const hold = (subject: SuppressionSubject): void => {
+      held.set(`${subject.kind}\u0000${subject.id}`, subject);
+    };
+    for (const table of ['memory_scopes', 'memory_traces', 'memory_pages']) {
+      const rows = await this._brain.all<{ scope_id: string | null }>(
+        `SELECT DISTINCT scope_id FROM ${table} WHERE brain_id = ? AND scope = ?`,
+        [brainId, CONVERSATION_SCOPE],
+      );
+      for (const row of rows) {
+        const subject = typeof row.scope_id === 'string' ? parseConversationScopeKey(row.scope_id)?.subject : undefined;
+        if (subject && subject.kind !== 'operator') hold({ kind: subject.kind, id: subject.id });
+      }
+    }
+    const holdUser = (userId: unknown): void => {
+      if (typeof userId === 'number') hold({ kind: 'user', id: String(userId) });
+      else if (typeof userId === 'string' && userId !== '') hold({ kind: 'user', id: userId });
+    };
+    const named = await this._brain.all<{ user_id: unknown }>(
+      `SELECT DISTINCT ${this._brain.features.dialect.jsonExtract('metadata', '$.turnUserId')} AS user_id FROM memory_traces WHERE brain_id = ?`,
+      [brainId],
+    );
+    for (const row of named) holdUser(row.user_id);
+    for (const table of ['agentos_learning_sessions', 'agentos_learning_heads']) {
+      try {
+        const rows = await this._brain.all<{ user_id: unknown }>(`SELECT DISTINCT user_id FROM ${table} WHERE user_id IS NOT NULL`);
+        for (const row of rows) holdUser(row.user_id);
+      } catch (error) {
+        // A store whose database holds no learning tables has no learner to name.
+        if (!isMissingTableError(error)) throw error;
+      }
+    }
+    return [...held.values()];
   }
 
   /**

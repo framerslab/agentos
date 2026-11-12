@@ -36,7 +36,12 @@ import {
   type SuppressionSubject,
   type TombstoneKey,
 } from '../cognition/memory/suppression/ForgottenLedger.js';
-import { forgetUserMemory, type ForgetMemoryReport } from '../cognition/memory/io/forgetUserMemory.js';
+import {
+  forgetUserMemory,
+  reapplyTombstones,
+  type ForgetMemoryReport,
+  type ForgetUserMemoryOptions,
+} from '../cognition/memory/io/forgetUserMemory.js';
 import { openForgottenCopy } from '../cognition/memory/suppression/forgottenCopy.js';
 import { shareForgottenLedger } from '../cognition/memory/suppression/learnerTombstones.js';
 import { guardedWrite } from '../cognition/memory/suppression/guardedWrite.js';
@@ -380,6 +385,14 @@ export type SouledAgent = Agent & {
    * @throws TypeError when `userId`, or an entry of `linkedSessions`, is not a non-empty string; nothing is deleted.
    */
   forgetUser?(userId: string, options?: { linkedSessions?: readonly string[] }): Promise<ForgetMemoryReport>;
+  /**
+   * Applies the tombstones again, as every open does: brings the store's ledger up to date from its copy, then
+   * deletes again whatever the store holds of a forgotten user or session. For a restore runbook, and for a schedule
+   * when several processes share one store on PostgreSQL.
+   *
+   * @returns One report a subject deleted again; none on a store that holds nothing of a forgotten subject.
+   */
+  applyTombstones?(): Promise<ForgetMemoryReport[]>;
 };
 
 /**
@@ -1213,27 +1226,36 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     }
     return { store: 'session history in this process', reached: true, deleted: cleared };
   };
+  /**
+   * The parts of one subject's deletion that are this agent's: the wait for the subject's pending writes, its chain,
+   * and what the agent reached beside the store.
+   */
+  const deletionPartsOf = (
+    subject: SuppressionSubject,
+    extra: { stores: ForgetMemoryReport['stores']; incomplete: boolean },
+  ): Pick<ForgetUserMemoryOptions, 'drain' | 'onChain' | 'extraStores' | 'alsoIncomplete'> => {
+    const key = conversationScopeKey(agentId, subject);
+    return {
+      drain: () => drainSubject(key),
+      onChain: (work) => onSubject(key, work),
+      extraStores: [...extra.stores, sessionHistoryOf(key)],
+      alsoIncomplete: extra.incomplete,
+    };
+  };
   /** Deletes one subject's memory on its own chain, after its pending writes. */
   const forgetSubject = (
     subject: SuppressionSubject,
     extra: { stores: ForgetMemoryReport['stores']; incomplete: boolean },
-    writeTombstone = true,
-  ): Promise<ForgetMemoryReport> => {
-    const key = conversationScopeKey(agentId, subject);
-    return forgetUserMemory({
+  ): Promise<ForgetMemoryReport> =>
+    forgetUserMemory({
       memory,
       ledger: forgotten,
       wiki: { storeFor: pagesOf },
       subject,
       agentId,
-      drain: () => drainSubject(key),
-      onChain: (work) => onSubject(key, work),
-      writeTombstone,
-      extraStores: [...extra.stores, sessionHistoryOf(key)],
-      alsoIncomplete: extra.incomplete,
+      ...deletionPartsOf(subject, extra),
       legacyUnattributed,
     });
-  };
   /** What the agent's learning layer deleted of a user, as entries of a deletion report; none when it runs no layer. */
   const forgetLearner = async (userId: string): Promise<{ stores: ForgetMemoryReport['stores']; incomplete: boolean }> => {
     const forget = built.learning?.forgetUser;
@@ -1281,6 +1303,21 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     // close() waits for a deletion that is running, as it waits for a write.
     return awaitedOnClose(run());
   };
+  /**
+   * Brings the ledger up to date from its copy and deletes again whatever the store holds of a forgotten subject. A
+   * forgotten user's learner rows are deleted again by the learning layer first, when the agent runs one.
+   */
+  const applyTombstones = (): Promise<ForgetMemoryReport[]> =>
+    reapplyTombstones({
+      memory,
+      ledger: forgotten,
+      wiki: { storeFor: pagesOf },
+      agentId,
+      legacyUnattributed,
+      forSubject: async (subject) =>
+        deletionPartsOf(subject, subject.kind === 'user' ? await forgetLearner(subject.id) : { stores: [], incomplete: false }),
+    });
+  built.applyTombstones = () => awaitedOnClose(applyTombstones());
 
   // On teardown: close the agent (with runtime: 'gmi' that stops its running session turns and shuts its sessions
   // down); wait, within one deadline, for the turns still running and then for the memory writes of its turns; fold
@@ -1328,6 +1365,17 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   // Expose the store so callers can fold conversation into the wiki mid-session
   // (`await agent.memory.compileWiki()`) without waiting for close().
   built.memory = memory;
+
+  // Every open applies the tombstones again, before the agent serves a turn: a store put back from a backup taken
+  // before a deletion, and a deletion that did not finish, hold nothing of a forgotten subject once this returns. A
+  // ledger whose copy cannot be read fails the open, and no memory is served.
+  try {
+    await applyTombstones();
+  } catch (err) {
+    await originalClose().catch(() => undefined);
+    await closeStore().catch(() => undefined);
+    throw err;
+  }
 
   return built;
 }

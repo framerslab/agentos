@@ -259,3 +259,59 @@ export async function forgetUserMemory(options: ForgetUserMemoryOptions): Promis
   });
   return { tombstone, stores, pages, drained, pendingAtDeadline, complete };
 }
+
+export interface ReapplyTombstonesOptions
+  extends Pick<ForgetUserMemoryOptions, 'memory' | 'ledger' | 'wiki' | 'agentId' | 'legacyUnattributed'> {
+  /** The per-subject parts of one deletion: the subject's drain and chain, and what the caller reached itself. */
+  forSubject?: (
+    subject: SuppressionSubject,
+  ) => Promise<Pick<ForgetUserMemoryOptions, 'drain' | 'onChain' | 'extraStores' | 'alsoIncomplete'>>;
+}
+
+/**
+ * Brings the store's ledger up to date from its copy, then runs the deletion again, with no second tombstone, for
+ * every forgotten subject the store still holds: after a restore from a backup taken before a deletion, after a
+ * deletion that did not finish, and for what another process wrote after a tombstone. It deletes nothing of a subject
+ * the ledger does not hold, and never touches memory from before per-user scope that nobody attributed.
+ *
+ * One `memory.tombstone_reapplied` line is logged when a subject was re-applied or a tombstone came back from the copy.
+ *
+ * @returns One report a subject re-applied; none for a store that holds nothing of a forgotten subject.
+ * @throws Error when the store has no forgotten-user ledger.
+ * @throws What the ledger throws when its copy cannot be read: nothing is deleted.
+ */
+export async function reapplyTombstones(options: ReapplyTombstonesOptions): Promise<ForgetMemoryReport[]> {
+  const { memory, agentId, forSubject } = options;
+  const ledger = options.ledger ?? memory.forgotten;
+  if (!ledger) throw new Error('reapplyTombstones: the store has no forgotten-user ledger');
+  const { added } = await ledger.reconcile();
+  const reports: ForgetMemoryReport[] = [];
+  // A store that has forgotten nobody holds nothing to delete again, and its rows are not listed.
+  if ((await ledger.size()) > 0) {
+    for (const subject of await memory.listHeldSubjects()) {
+      try {
+        conversationScopeKey(agentId, subject);
+      } catch {
+        // An id no conversation key can be built from was never filed under one.
+        continue;
+      }
+      if (!(await ledger.isForgotten(subject))) continue;
+      reports.push(
+        await forgetUserMemory({
+          memory,
+          ledger,
+          wiki: options.wiki,
+          agentId,
+          ...(options.legacyUnattributed ? { legacyUnattributed: options.legacyUnattributed } : {}),
+          ...((await forSubject?.(subject)) ?? {}),
+          subject,
+          writeTombstone: false,
+        }),
+      );
+    }
+  }
+  if (reports.length > 0 || added.length > 0) {
+    memoryLog.info('memory.tombstone_reapplied', { subjects: reports.length, reconciled: added.length });
+  }
+  return reports;
+}
