@@ -155,10 +155,20 @@ traces it filed under the agent's plain id (one `memory.legacy_traces` log line 
 them at start), the chunks of the pages it indexed there, and the page files it
 compiled into the folder. A call with no user still reads those page files through
 `read_memory_page`. Nothing of it is moved, rewritten or deleted by the library, since
-whose words it holds is not recorded. To remove it,
-`await agent.memory.deleteScope('persona', '<agentId>')` deletes the earlier traces and
-chunks under the agent's plain id for good; then delete the compiled page files (the
-ones whose front matter lists `sources`), and the next start writes `index.md` again.
+whose words it holds is not recorded. To remove it, delete the earlier traces and
+chunks under the agent's plain id for good, in both forms the line counts (they are
+one id unless the agent id holds `/`, `%` or `:`):
+
+```ts
+import { encodePlainScopeId } from '@framers/agentos';
+
+await agent.memory.deleteScope('persona', agentId);
+const encoded = encodePlainScopeId('persona', agentId);
+if (encoded !== agentId) await agent.memory.deleteScope('persona', encoded);
+```
+
+Then delete the compiled page files (the ones whose front matter lists `sources`), and
+the next start writes `index.md` again and logs no `memory.legacy_traces` line.
 
 The memory index in the system prompt is rendered from the operator's page files and
 the text migrated from `MEMORY.md` (below), not read from `index.md`; `loadSoul()` and

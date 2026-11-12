@@ -154,6 +154,7 @@ export {
   type ConversationSubject,
 } from './retrieval/store/conversationScopeKey.js';
 export { ensureScopeRow, registerUnregisteredConversationScopes } from './retrieval/store/conversationScopes.js';
+export { encodePlainScopeId } from './retrieval/store/scopeIdForm.js';
 export { SqlKnowledgeGraph } from './retrieval/store/SqlKnowledgeGraph.js';
 export { HnswSidecar, type HnswSidecarConfig, type HnswQueryResult } from './retrieval/store/HnswSidecar.js';
 export { SqlMemoryGraph } from './retrieval/store/SqlMemoryGraph.js';
