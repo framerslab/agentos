@@ -166,7 +166,7 @@ A hook that throws (or an `onBeforeToolExecution` that resolves with nothing) is
 flowchart TD
     REQ["AgentOS.processRequest()"] --> MGR["GMIManager.getOrCreateGMIForSession()"]
     MGR --> TURN["GMI.processTurnStream()"]
-    TURN --> SENT["SentimentTracker scores the user message (when the persona enables it)"]
+    TURN --> SENT["SentimentTracker starts scoring the user message (when the persona enables it), and the turn goes on while it runs"]
     SENT --> RAG{"Retrieval needed?"}
     RAG -- yes --> RET["IRetrievalAugmentor.retrieveContext()"]
     RAG -- no --> MEM
