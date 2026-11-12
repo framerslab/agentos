@@ -257,6 +257,23 @@ describe('the image guard: what an input or a check may carry', () => {
     expect(() => ImageGuardrail.create({ id: 'images', checks: [{ ...model, reasonCodes: ['IMAGE_SUGGESTIVE'], onError: 'skip' }, passing('judge', 'classify')] })).not.toThrow();
   });
 
+  it('keeps the checks as they were when it was built: a later edit of a check object changes nothing', async () => {
+    const quarantining = async () => ({ verdict: 'block', reasonCode: 'KNOWN_MATERIAL', quarantine: true }) as const;
+    const hash = check('hash', 'match', quarantining, { reasonCodes: ['KNOWN_MATERIAL'] });
+    const original = hash.check;
+    const model = passing('model', 'classify');
+    const checks: ImageCheck[] = [hash, model];
+    const guard = ImageGuardrail.create({ id: 'images', checks, requireMatch: true });
+    // the host edits the objects it handed over, and the list
+    Object.assign(hash, { kind: 'classify', onError: 'skip', reasonCodes: [], check: vi.fn(async () => ({ verdict: 'pass' })) });
+    checks.length = 0;
+    const decision = await moderateContent({ images: [png(1)] }, { guards: [guard], context });
+    expect(decision).toMatchObject({ outcome: 'refuse', unavailable: false, deciding: { reasonCode: 'KNOWN_MATERIAL', metadata: { checkId: 'hash', quarantine: true } } });
+    expect(original).toHaveBeenCalledTimes(1);
+    expect(model.check).not.toHaveBeenCalled();
+    expect(guard.config.reasonCodes).toContain('KNOWN_MATERIAL');
+  });
+
   it('keeps only a flag\'s scores that are finite numbers under word keys', async () => {
     const judge = check('judge', 'classify', async () => ({ verdict: 'flag', reasonCode: 'IMAGE_SUGGESTIVE', scores: { sexual: 0.6, 'a red car on a beach': 0.9, nan: Number.NaN, label: 'beach' as never } }), { reasonCodes: ['IMAGE_SUGGESTIVE'] });
     const decision = await moderateContent({ images: [png(1)] }, { guards: [ImageGuardrail.create({ id: 'images', checks: [judge] })], context });
