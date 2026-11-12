@@ -691,6 +691,19 @@ describe('the turn, the reply and the report hold what the guards decided, on th
     const held = await collect(streamText({ ...OPENAI, prompt: 'hello', abortSignal: controller.signal, guards: guards(abortsOnReply) }).fullStream);
     expect(held.some((p) => p.type === 'text')).toBe(false);
     expect(held.some((p) => p.type === 'error')).toBe(true);
+
+    // a held reply the guards refused, and a dry run, end with the reason too, as generateText() rejects with it
+    controller = new AbortController();
+    const abortsAndRefuses: IGuardrailService = { id: 'out', evaluateOutput: async ({ chunk }) => { if (!isFinal(chunk)) return null; controller.abort(new Error('stopped by the caller')); return { action: GuardrailAction.BLOCK, reasonCode: 'RULE_OUT' }; } };
+    serve([textStream('the streamed reply')]);
+    const refused = await collect(streamText({ ...OPENAI, prompt: 'hello', abortSignal: controller.signal, guards: guards(abortsAndRefuses) }).fullStream);
+    expect(reasonOf(refused)).toBe('stopped by the caller');
+    controller = new AbortController();
+    const abortsQuietly: IGuardrailService = { id: 'out', evaluateOutput: async ({ chunk }) => { if (isFinal(chunk)) controller.abort(new Error('stopped by the caller')); return null; } };
+    serve([textStream('the streamed reply')]);
+    const dry = await collect(streamText({ ...OPENAI, prompt: 'hello', abortSignal: controller.signal, guards: { services: [abortsQuietly], context, mode: 'dryRun' as const } }).fullStream);
+    expect(dry.at(-1)?.type).toBe('error');
+    expect(reasonOf(dry)).toBe('stopped by the caller');
   });
 
   it('a refused call is not shown to a stream reader as a call; a passed one is, before its result', async () => {
