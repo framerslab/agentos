@@ -8,6 +8,8 @@ import { afterEach, describe, expect, it, vi, type Mock } from 'vitest';
 import pino from 'pino';
 import { moderateContent } from '../contentModeration';
 import { holdResult } from '../guardrailDispatcher';
+import { ParallelGuardrailDispatcher } from '../ParallelGuardrailDispatcher';
+import { withRequiredPosture } from '../requiredGuardrails';
 import { ImageGuardrail, type ImageCheck, type ImageUnderReview } from '../builtin/ImageGuardrail';
 import type { GuardrailContext, IGuardrailService } from '../IGuardrailService';
 import type { VisionInputData } from '../../../cognition/substrate/IGMI';
@@ -305,6 +307,21 @@ describe('the image guard: its deadline', () => {
     const decision = await moderateContent({ images: [slow, png(1)] }, { guards: [guard], context });
     expect(decision).toMatchObject({ outcome: 'refuse', unavailable: true, deciding: { reasonCode: 'GUARDRAIL_ERROR', metadata: { cause: 'timeout' } } });
     // the load resolves at 120 ms; the evaluation runs on to its end with nobody waiting
+    await sleep(200);
+    expect(loadImage).toHaveBeenCalledTimes(1);
+    expect(hash.check).not.toHaveBeenCalled();
+    expect(model.check).not.toHaveBeenCalled();
+  });
+
+  it('starts nothing once the dispatcher stops waiting, when a required guard\'s shorter deadline replaced its own', async () => {
+    const loadImage = vi.fn(async () => { await sleep(120); return { bytes: new Uint8Array([1, 2, 3]), mimeType: 'image/png' }; });
+    const hash = passing('hash', 'match');
+    const model = passing('model', 'classify');
+    // the guard's own deadline is the default 15 s; as a required guard it runs under 40 ms
+    const guard = withRequiredPosture('images', ImageGuardrail.create({ id: 'images', checks: [hash, model], loadImage }), { id: 'images', stages: ['input'], timeoutMs: 40 });
+    const input = { userId: 'user-1', sessionId: 'session-1', textInput: null, visionInputs: [{ type: 'image_url', data: 'https://images.example/slow.jpg' }, png(1)] } as unknown as AgentOSInput;
+    const outcome = await ParallelGuardrailDispatcher.evaluateInput([guard], input, context);
+    expect(outcome.evaluation).toMatchObject({ action: 'block', reasonCode: 'GUARDRAIL_ERROR', metadata: { cause: 'timeout' } });
     await sleep(200);
     expect(loadImage).toHaveBeenCalledTimes(1);
     expect(hash.check).not.toHaveBeenCalled();
