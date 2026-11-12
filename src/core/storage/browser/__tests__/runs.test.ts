@@ -256,15 +256,18 @@ describe('the run owner', () => {
     const locks = memoryLocks();
     const made = bus();
     const store = new MemoryKeyValueStore();
-    const a = owner(store, locks, made);
-    const b = owner(store, locks, made);
+    // One record lock queue for the two owners of the store, as a page's record locks are one set across its tabs.
+    const records = recordLocks();
+    const a = owner(store, locks, made, { locks: records });
+    const b = owner(store, locks, made, { locks: records });
     const c = owner(new MemoryKeyValueStore(), locks, made, { account: 'b'.repeat(32) });
     const heldB = deferred();
     await b.start(countingJob(2, [() => heldB.promise, async () => undefined]));
     const cRun = c.start({ ...countingJob(1, [async () => undefined]), key: 'e'.repeat(64) });
     const stop = a.stopAccount('signout');
     const marked = async () => (await store.get<{ cut: string }>((await store.keys('lib/j/'))[0] ?? ''))?.cut;
-    await vi.waitFor(async () => expect(await marked()).toBe('signout'));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(await marked()).toBeNull(); // the mark waits for the write b holds its record's lock for
     heldB.resolve();
     await stop;
     expect(await marked()).toBe('signout');
@@ -1179,6 +1182,132 @@ describe('the run owner', () => {
       stale.close();
       second.close();
       third.close();
+    }
+  });
+
+  it("fences the next attempt of a run when the account's removal began and ended while continueRun waited for the attempt before it", async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
+    const slow = deferred();
+    try {
+      const store = new MemoryKeyValueStore();
+      const own = owner(store, memoryLocks(), bus());
+      // The first attempt neither writes nor heeds its signal until the test lets it return.
+      const started = await own.start({
+        ...countingJob(1, []),
+        async run(context) {
+          await slow.promise;
+          return { ended: 'failed', counts: context.record().counts };
+        },
+      });
+      const first = 'id' in started ? started.id : '';
+      let wrote = false;
+      const next = own.continueRun(first, {
+        ...countingJob(1, []),
+        async run(context) {
+          const result = await context.write(async () => { wrote = true; return true; });
+          return { ended: typeof result === 'object' && 'fenced' in result ? 'fenced' : 'finished', counts: context.record().counts };
+        },
+      });
+      let answer: unknown = null;
+      void own.stopAccount('removal').then((result) => { answer = result; });
+      await vi.advanceTimersByTimeAsync(10_500);
+      expect(answer).not.toBeNull(); // the stop has answered while the first attempt still runs
+      slow.resolve();
+      expect('id' in (await next)).toBe(true);
+      await own.whenIdle();
+      expect(wrote).toBe(false);
+      expect(await store.keys('lib/j/')).toEqual([]);
+      own.close();
+    } finally {
+      slow.resolve();
+      vi.useRealTimers();
+    }
+  });
+
+  it("fences a finish whose read of the cut record was still in flight while the account's sign-out began and ended", async () => {
+    const store = new MemoryKeyValueStore();
+    await store.set('lib/j/r9', { id: 'r9', key: KEY, account: ACCOUNT, kind: 'library', way: null, unit: 'sessions', chosen: null, counts: { total: 3, pending: 2, applied: 1, skipped: 0, failed: 0 }, items: [], state: 'running', cut: null, phase: null, began: 1, progressed: 2 });
+    const reading = deferred();
+    const read = deferred();
+    const get = store.get.bind(store);
+    let lagFirst = true;
+    // The finish's read of the record answers only once the sign-out has marked it and answered.
+    store.get = (async (key: string) => {
+      if (!lagFirst || key !== 'lib/j/r9') return get(key);
+      lagFirst = false;
+      const value = await get(key);
+      reading.resolve();
+      await read.promise;
+      return value;
+    }) as typeof store.get;
+    const own = owner(store, memoryLocks(), bus());
+    try {
+      let wrote = false;
+      const finishing = own.finish('r9', {
+        ...countingJob(1, []),
+        async run(context) {
+          const result = await context.write(async () => { wrote = true; return true; });
+          return { ended: typeof result === 'object' && 'fenced' in result ? 'fenced' : 'finished', counts: context.record().counts };
+        },
+      });
+      await reading.promise;
+      await own.stopAccount('signout');
+      expect((await get<RunRecord>('lib/j/r9'))?.cut).toBe('signout');
+      read.resolve();
+      await finishing;
+      await own.whenIdle();
+      expect(wrote).toBe(false);
+      expect((await get<RunRecord>('lib/j/r9'))?.cut).toBe('signout');
+    } finally {
+      read.resolve();
+      own.close();
+    }
+  });
+
+  it("calls no end listener and posts no end for a run dismissed while its last record write was in flight", async () => {
+    const store = new MemoryKeyValueStore();
+    const base = recordLocks();
+    let lagNext = false;
+    const lagged = deferred();
+    const gate = deferred();
+    // The next record lock asked for after the job returns, the last write's, waits for the test.
+    const locks: RunOwnerOptions['locks'] = {
+      request: (name, work) => {
+        if (!lagNext) return base.request(name, work);
+        lagNext = false;
+        return base.request(name, async () => { lagged.resolve(); await gate.promise; await work(); });
+      },
+    };
+    const made = bus();
+    const own = owner(store, memoryLocks(), made, { locks });
+    const heard: RunMessage[] = [];
+    const listener = made('runs');
+    listener.listen((message) => { heard.push(message); });
+    const ends: string[] = [];
+    own.subscribeEnds((_read, ended) => { ends.push(ended); });
+    try {
+      const started = await own.start({
+        ...countingJob(1, []),
+        async run(context) {
+          await context.write(async () => true);
+          context.counts({ applied: 1, pending: 0 });
+          lagNext = true;
+          return { ended: 'finished', counts: context.record().counts };
+        },
+      });
+      const id = 'id' in started ? started.id : '';
+      await lagged.promise;
+      const dismissing = own.dismiss(id);
+      gate.resolve();
+      expect(await dismissing).toEqual({ ok: true });
+      await own.whenIdle();
+      expect(ends).toEqual([]);
+      expect(heard.filter((message) => 'ended' in message && message.ended !== undefined)).toEqual([]);
+      expect(await store.keys('lib/j/')).toEqual([]);
+    } finally {
+      gate.resolve();
+      listener.close();
+      own.close();
     }
   });
 
