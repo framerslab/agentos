@@ -32,6 +32,8 @@ import { HnswSidecar, hnswIndexPath } from '../../../retrieval/store/HnswSidecar
 import { PORTABLE_TABLES } from '../../../retrieval/store/portable-tables.js';
 import { ForgottenLedger, type SuppressionSubject } from '../../../suppression/ForgottenLedger.js';
 import { openForgottenCopy } from '../../../suppression/forgottenCopy.js';
+import { conversationScopeKey } from '../../../retrieval/store/conversationScopeKey.js';
+import { correctSubjectMemory } from '../../userMemoryExport.js';
 
 /** Whether the stand-in index refuses its next writes, as a full disk would. */
 const indexWrites = vi.hoisted(() => ({ fail: false }));
@@ -455,6 +457,29 @@ describe('the vector index after a delete', () => {
 
     // Both traces are in the index the store recalls from.
     expect((memory as unknown as { _hnswSidecar: HnswSidecar })._hnswSidecar.size).toBe(2);
+  });
+
+  it('leaves a corrected trace in no index file', async () => {
+    const { memory, indexFile, mapFile } = await embeddingFacade();
+    const subject = { kind: 'user' as const, id: 'alice' };
+    const filed = { type: 'episodic' as const, scope: 'conversation' as const, scopeId: conversationScopeKey('aria-1', subject) };
+    const wrong = await memory.remember('Ana keeps bees.', filed);
+    const kept = await memory.remember('Bo plays cello.', filed);
+    await memory.rebuildVectorIndex();
+    expect(idsIn(mapFile)).toContain(wrong.id);
+
+    const noPages = { storeFor: () => ({ listPages: async () => [], deletePage: async () => true }) };
+    const result = await correctSubjectMemory({
+      memory,
+      wiki: noPages,
+      agentId: 'aria-1',
+      subject,
+      correction: { traceIds: [wrong.id], text: 'Ana plays chess.' },
+    });
+
+    // The index was written again from the traces left: the correction's, and the one it did not name.
+    expect(idsIn(mapFile)).toEqual([kept.id, result.correctionTraceId].sort());
+    expect(vectorsIn(indexFile)).not.toContainEqual(vectorOf('bees'));
   });
 
   it('fails when the rebuilt index does not save', async () => {

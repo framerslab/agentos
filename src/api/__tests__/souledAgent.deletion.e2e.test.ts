@@ -1030,6 +1030,55 @@ describe('export and correction', () => {
     expect(pagesOf(keyOf(alice))).toHaveLength(1);
     expect(registry()).toEqual([{ rebuild_sources: null }]);
   });
+
+  /** Alice's turn and its compiled page; the id of what she said. */
+  async function correctable(): Promise<{ a: SouledAgent; t1: string }> {
+    const { a } = await open({}, [reply.text('A canary, lovely.'), reply.text('The user keeps a canary named LARK-7.')]);
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    const t1 = saidOf(keyOf(alice)).find((trace) => trace.content === 'My canary is LARK-7.')!.id;
+    await a.memory!.compileWiki();
+    expect(pagesOf(keyOf(alice))).toHaveLength(1);
+    return { a, t1 };
+  }
+  const correctionsOf = (key: string) => saidOf(key).filter((trace) => (JSON.parse(trace.tags) as string[]).includes('correction'));
+
+  it('finishes a correction whose page could not be deleted, when it is made again', async () => {
+    const { a, t1 } = await correctable();
+    vi.spyOn(a.memory!, 'deletePageRows').mockRejectedValueOnce(new Error('the page is held'));
+    const correction = { traceIds: [t1], text: 'My canary is WREN-9.' };
+    await expect(a.correctUserMemory!('alice', correction)).rejects.toThrow('the page is held');
+
+    // The same call made again is not refused: it deletes the page that still says what t1 said.
+    const again = await a.correctUserMemory!('alice', correction);
+    expect(again.deleted).toBe(1);
+    expect(pagesOf(keyOf(alice))).toEqual([]);
+    expect(rows(storeFile(), 'SELECT id FROM memory_traces WHERE id = ?', [t1])).toEqual([]);
+    expect(correctionsOf(keyOf(alice)).map((trace) => trace.content)).toEqual(['My canary is WREN-9.']);
+    expect(rows(storeFile(), "SELECT id FROM memory_traces WHERE content LIKE '%LARK-7%'")).toEqual([]);
+  });
+
+  it('finishes a correction whose new statement could not be filed, when it is made again', async () => {
+    const { a, t1 } = await correctable();
+    vi.spyOn(a.memory!, 'remember').mockRejectedValueOnce(new Error('the store is busy'));
+    const correction = { traceIds: [t1], text: 'My canary is WREN-9.' };
+    await expect(a.correctUserMemory!('alice', correction)).rejects.toThrow('the store is busy');
+
+    const again = await a.correctUserMemory!('alice', correction);
+    expect(again.deleted).toBe(1);
+    expect(pagesOf(keyOf(alice))).toEqual([]);
+    expect(rows(storeFile(), 'SELECT id FROM memory_traces WHERE id = ?', [t1])).toEqual([]);
+    expect(correctionsOf(keyOf(alice)).map((trace) => trace.content)).toEqual(['My canary is WREN-9.']);
+  });
+
+  it("leaves the corrected words in neither file of the store", async () => {
+    const { a, t1 } = await correctable();
+    await a.correctUserMemory!('alice', { traceIds: [t1], text: 'My canary is WREN-9.' });
+
+    // With the store still open: the log was emptied once the trace and the page were deleted.
+    expect(fs.readFileSync(storeFile()).includes('LARK-7')).toBe(false);
+    const log = `${storeFile()}-wal`;
+    expect(fs.existsSync(log) && fs.readFileSync(log).includes('LARK-7')).toBe(false);
+  });
 });
 
 describe('legacyMemory', () => {
