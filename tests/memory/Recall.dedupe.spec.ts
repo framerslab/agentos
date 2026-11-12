@@ -185,6 +185,46 @@ describe('dedupePool', () => {
       expect(kept[0].fusedScore).toBe(0.02);
       expect(dropped.map((d) => [d.entry.trace.id, d.duplicateOf])).toEqual([['A', 'B'], ['C', 'B']]);
     });
+
+    it('settles when a memory folded into a newer text is kept again, and the texts that repeat it name it', () => {
+      const common = 'w1 w2 w3 w4 w5 w6 w7 w8';
+      // Two texts are one memory when they share one of their two last words (9 of 11, 0.82), and two when they share
+      // neither (8 of 12, 0.67).
+      // A dedupe that never settles would hang the run: each read of a score is counted, and the case fails instead.
+      let reads = 0;
+      const counted = (id: string, last: string, score: number, createdAt: number) => ({
+        id,
+        trace: { id, content: `${common} ${last}`, createdAt },
+        get fusedScore(): number {
+          reads += 1;
+          if (reads > 5000) throw new Error('dedupePool did not settle');
+          return score;
+        },
+      });
+      // B, newer than A and C, takes A's place and C is folded into it; E, newer still, takes the place from B, and C
+      // does not repeat E: C is kept again, and X1 and X2, which repeat C alone, are dropped against it.
+      const { kept, dropped } = dedupePool(
+        [
+          counted('A', 'alpha beta', 0.05, 100),
+          counted('C', 'gamma delta', 0.04, 150),
+          counted('X1', 'delta zeta', 0.035, 120),
+          counted('X2', 'delta eta', 0.034, 110),
+          counted('B', 'beta gamma', 0.03, 200),
+          counted('E', 'beta epsilon', 0.02, 300),
+        ],
+        0.8,
+      );
+      expect(kept.map((e) => e.trace.id)).toEqual(['E', 'C']);
+      expect(kept[0].fusedScore).toBe(0.05);
+      expect(dropped.map((d) => [d.entry.trace.id, d.duplicateOf])).toEqual([['A', 'E'], ['X1', 'C'], ['X2', 'C'], ['B', 'E']]);
+      const byId = new Map(kept.map((e) => [e.trace.id, e]));
+      for (const d of dropped) {
+        expect(nearDuplicate(dedupeTokens(d.entry.trace.content), dedupeTokens(byId.get(d.duplicateOf)!.trace.content), 0.8)).toBe(true);
+      }
+      for (const [i, a] of kept.entries()) {
+        for (const b of kept.slice(i + 1)) expect(nearDuplicate(dedupeTokens(a.trace.content), dedupeTokens(b.trace.content), 0.8)).toBe(false);
+      }
+    });
   });
 });
 
