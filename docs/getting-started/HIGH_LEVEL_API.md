@@ -888,6 +888,9 @@ const live = session.stream(message, { guards });
 - The `guardrails` ids in an `agent()` or `agency()` config are stored and not
   applied: a call is guarded by its `guards`. A panel agency's call cannot
   carry `guards`.
+- An agent with `runtime: 'gmi'` does not enforce `guards`: its `generate()`,
+  `stream()` and a session's `send()` and `stream()` throw when a call
+  carries them, before any turn starts.
 
 ### Citation verification
 
