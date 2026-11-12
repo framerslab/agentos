@@ -94,12 +94,12 @@ export const AGENTOS_EVENTS = {
   'memory.legacy_traces': { count: 'int' },
   // A one-shot generate() or stream() on a souled agent names no user: nothing is filed for it and it recalls the operator's pages alone. Written once an agent.
   'memory.one_shot_unfiled': {},
-  // A scope's wiki compile did not run in a compile call: a spend budget refused its model call, the account's memory policy keeps raw traces only, the screen hook failed or had no turn of the scope to run for, or the agent compiles no wiki at all. The scope's traces wait for a later compile. Written once a reason a call, with no scope.
-  'memory.compile_skipped': { reason: { enum: ['budget', 'policy_raw', 'compile_off', 'screen_failed'] } },
-  // A souled agent did not file a turn's text, or left a trace out of a compile: the account's memory policy keeps no memory (said once a session), the policy hook failed, the screen hook dropped the text, or the screen hook failed.
-  'memory.write_refused': { reason: { enum: ['policy_off', 'policy_failed', 'screened', 'screen_failed'] } },
-  // read_memory_page answered a page as not found, or a call as invalid, for a page the asker may not read: another subject's page, a user's page asked with no user, a page an earlier version compiled asked by a user, or a call that named a scope or a user.
-  'memory.page_read_refused': { reason: { enum: ['other_user', 'no_user', 'legacy', 'caller_filter'] } },
+  // A scope's wiki compile did not run in a compile call: a spend budget refused its model call, the account's memory policy keeps raw traces only, the screen hook failed or had no turn of the scope to run for, the agent compiles no wiki at all, or the scope's subject is forgotten (its traces are not compiled, and a page a compile made after the tombstone is taken back). The scope's traces wait for a later compile, a forgotten subject's for its deletion. Written once a reason a call, and once for each page taken back, with no scope.
+  'memory.compile_skipped': { reason: { enum: ['budget', 'policy_raw', 'compile_off', 'screen_failed', 'forgotten'] } },
+  // A souled agent did not file a turn's text, or left a trace out of a compile: the account's memory policy keeps no memory (said once a session), the policy hook failed, the screen hook dropped the text, the screen hook failed, or the turn's subject is forgotten (a write that landed after the tombstone is taken back).
+  'memory.write_refused': { reason: { enum: ['policy_off', 'policy_failed', 'screened', 'screen_failed', 'forgotten'] } },
+  // read_memory_page answered a page as not found, or a call as invalid, for a page the asker may not read: another subject's page, a user's page asked with no user, a page an earlier version compiled asked by a user, a call that named a scope or a user, or any page or listing asked by a forgotten subject.
+  'memory.page_read_refused': { reason: { enum: ['other_user', 'no_user', 'legacy', 'caller_filter', 'forgotten'] } },
   // A translation failed, answered with no text, ran past the transcript translator's own timeout, stopped at its output cap or stopped for another reason (a content filter); it throws TranslationProviderError, and status is 0 when no HTTP status came back.
   'language.translation_failed': { provider: { enum: ['openai', 'deepl'] }, reason: { enum: ['request_failed', 'empty_output', 'timeout', 'truncated', 'incomplete'] }, status: 'int', type: 'word', code: 'word' },
   // A configured detection provider id LanguageService does not build (whisper_stub, or an id it does not know).

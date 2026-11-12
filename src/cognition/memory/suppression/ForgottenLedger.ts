@@ -107,7 +107,8 @@ function checked(subject: SuppressionSubject): SuppressionSubject {
 /** Whether a row is a marker and not a tombstone. */
 const isMarker = (hash: string): boolean => hash.includes(':');
 
-const copyUnavailable = (): ForgottenLedgerError =>
+/** The refusal of a store whose tombstone copy is missing or unreadable. @internal */
+export const copyUnavailableError = (): ForgottenLedgerError =>
   new ForgottenLedgerError(
     'COPY_UNAVAILABLE',
     "souledAgent: this store's tombstone copy is missing or unreadable; put the copy back (never from an older backup) or pass tombstoneCopy. No memory is served without it.",
@@ -165,7 +166,7 @@ export class ForgottenLedger {
         await copy.exec(FORGOTTEN_DDL);
         copyRows = await ForgottenLedger.rowsOf(copy);
       } catch {
-        throw copyUnavailable();
+        throw copyUnavailableError();
       }
     }
     const primaryRows = await ForgottenLedger.rowsOf(primary);
@@ -173,7 +174,7 @@ export class ForgottenLedger {
     const primaryPaired = primaryRows.some((row) => row.hash === COPY_MARKER);
     const copyPaired = copyRows.some((row) => row.hash === COPY_MARKER);
     // The store had a copy, and the copy given was lost, replaced by an empty database, or left out.
-    if (primaryPaired && !copyPaired) throw copyUnavailable();
+    if (primaryPaired && !copyPaired) throw copyUnavailableError();
 
     const held = [...primaryRows, ...copyRows].map((row) => row.hash).filter((hash) => hash.startsWith(KEY_MARKER_PREFIX));
     if (held.length > 0) {

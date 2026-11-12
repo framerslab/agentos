@@ -13,6 +13,8 @@ import { createStorageFeatures, resolveStorageAdapter, type StorageAdapter } fro
  *
  * The caller closes the adapter.
  *
+ * @throws When the file is there and is not a SQLite database; no handle is left open.
+ *
  * @example
  * const { adapter: copy } = await openForgottenCopy('./memory/.store/forgotten.sqlite');
  * const ledger = await ForgottenLedger.open({ primary: storeAdapter, copy });
@@ -20,7 +22,13 @@ import { createStorageFeatures, resolveStorageAdapter, type StorageAdapter } fro
 export async function openForgottenCopy(filePath: string): Promise<{ adapter: StorageAdapter; existed: boolean }> {
   const existed = fs.existsSync(filePath);
   const adapter = await resolveStorageAdapter({ filePath, priority: ['better-sqlite3', 'sqljs'], quiet: true });
-  const secure = createStorageFeatures(adapter).dialect.pragma('secure_delete', 'ON');
-  if (secure) await adapter.exec(secure);
+  try {
+    const secure = createStorageFeatures(adapter).dialect.pragma('secure_delete', 'ON');
+    if (secure) await adapter.exec(secure);
+  } catch (error) {
+    // A file that is not a database fails at its first statement: the handle it opened is not left behind.
+    await adapter.close().catch(() => undefined);
+    throw error;
+  }
   return { adapter, existed };
 }

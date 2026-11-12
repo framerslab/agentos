@@ -29,6 +29,12 @@ import {
 import { generateText } from './generateText.js';
 import type { StreamTextResult } from './streamText.js';
 import { Memory, type AttachedWiki, type ScoredTrace } from '../cognition/memory/io/facade/Memory.js';
+import type { StorageAdapter } from '@framers/sql-storage-adapter';
+import { ForgottenLedger, copyUnavailableError, type TombstoneKey } from '../cognition/memory/suppression/ForgottenLedger.js';
+import { openForgottenCopy } from '../cognition/memory/suppression/forgottenCopy.js';
+import { shareForgottenLedger } from '../cognition/memory/suppression/learnerTombstones.js';
+import { guardedWrite } from '../cognition/memory/suppression/guardedWrite.js';
+import { WriteChains } from '../cognition/learning/writeChains.js';
 import { conversationScopeKey, parseConversationScopeKey } from '../cognition/memory/retrieval/store/conversationScopeKey.js';
 import { encodePlainScopeId } from '../cognition/memory/retrieval/store/scopeIdForm.js';
 import { memoryLog } from '../cognition/memory/log.js';
@@ -332,6 +338,18 @@ export interface SouledAgentOptions extends AgentOptions {
    * answers anything else fails closed: the text is not filed, and a compile that needs it does not run.
    */
   screen?: (text: string, context: MemoryHookContext & { stage: 'file' | 'compile' }) => Promise<string | null>;
+  /**
+   * The secret that keys the tombstones (HMAC-SHA-256). Without it tombstones are unkeyed SHA-256 hashes, which can be
+   * matched by hashing a guessed id. After a rotation the previous keys are still needed to check the old tombstones.
+   * A store whose tombstones are keyed does not open without it.
+   */
+  tombstoneKey?: TombstoneKey | { current: TombstoneKey; previous?: ReadonlyArray<TombstoneKey> };
+  /**
+   * Where the second copy of the tombstones lives, out of what a restore of the store replaces: a SQLite file path, or
+   * an adapter (left open on close). Default: `memory/.store/forgotten.sqlite`. A store whose copy is missing or
+   * unreadable does not open.
+   */
+  tombstoneCopy?: { path: string } | { adapter: StorageAdapter };
 }
 
 /**
@@ -401,7 +419,7 @@ export type SouledAgent = Agent & { memory?: Memory };
  *   in a store of its own, which none of them reaches; nothing is opened.
  */
 export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent> {
-  const { pendingWritesTimeoutMs, sharedMemory, compile, memoryPolicy, screen, ...rest } = opts;
+  const { pendingWritesTimeoutMs, sharedMemory, compile, memoryPolicy, screen, tombstoneKey, tombstoneCopy, ...rest } = opts;
   /** The ids the agent itself reads as naming nobody, beside the built-in ones. */
   const anonymousUserIds =
     typeof rest.learning === 'object' && rest.learning !== null ? rest.learning.anonymousUserIds : undefined;
@@ -455,16 +473,65 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   await fs.mkdir(storeDir, { recursive: true });
   // The store holds what people said: it stays out of version control. A .gitignore already there is left as it is.
   createFileOutsideLinksSync(path.join(storeDir, '.gitignore'), '*\n');
-  const memory = await Memory.createSqlite(path.join(storeDir, 'memory.sqlite'), {
-    graph: true,
-    selfImprove: true,
-  });
+  // The tombstones' second copy, outside the store's database, so a restore of the store does not replace it. A copy
+  // the host passes as an adapter is the host's to close.
+  const copyPath =
+    tombstoneCopy && 'adapter' in tombstoneCopy
+      ? undefined
+      : (tombstoneCopy?.path ?? path.join(storeDir, 'forgotten.sqlite'));
+  let ownCopy: { adapter: StorageAdapter; existed: boolean } | undefined;
+  if (copyPath !== undefined) {
+    try {
+      ownCopy = await openForgottenCopy(copyPath);
+    } catch {
+      throw copyUnavailableError();
+    }
+  }
+  const copy = ownCopy?.adapter ?? (tombstoneCopy as { adapter: StorageAdapter }).adapter;
+  /** Closes the copy this function opened; an adapter the host passed is left open. */
+  const closeCopy = async (): Promise<void> => {
+    await ownCopy?.adapter.close().catch(() => undefined);
+  };
+  const key =
+    tombstoneKey === undefined
+      ? undefined
+      : typeof tombstoneKey === 'string' || tombstoneKey instanceof Uint8Array
+        ? { current: tombstoneKey }
+        : tombstoneKey;
+  // A learning layer gmi() builds writes tombstones under its namespace: the ledger reads it beside the store-wide one.
+  const learningConfig = typeof rest.learning === 'object' && rest.learning !== null ? rest.learning : undefined;
+  const namespaces =
+    rest.runtime === 'gmi' && (rest.learning === true || learningConfig !== undefined) ? [learningConfig?.namespace ?? ''] : [];
+  let memory: Memory;
+  try {
+    memory = await Memory.createSqlite(path.join(storeDir, 'memory.sqlite'), {
+      graph: true,
+      selfImprove: true,
+      forgotten: { copy, ...(key ? { key } : {}), namespaces },
+    });
+  } catch (err) {
+    // A store whose copy is missing or unreadable, or whose tombstones need a key not given, serves nothing. A copy
+    // file this open made is removed with it, so the next open still finds the copy missing.
+    await closeCopy();
+    if (ownCopy && !ownCopy.existed && copyPath !== undefined) await fs.rm(copyPath, { force: true }).catch(() => undefined);
+    throw err;
+  }
+  /** The store's forgotten-user ledger: every write and read of a subject asks it. */
+  const forgotten = memory.forgotten as ForgottenLedger;
+  /** Closes the store, then the copy. */
+  const closeStore = async (): Promise<void> => {
+    try {
+      await memory.close();
+    } finally {
+      await closeCopy();
+    }
+  };
   /** Runs a step of the open; a step that throws closes the store first, so a failed open leaves no handle open. */
   const closingOnThrow = async <T>(step: () => T | Promise<T>): Promise<T> => {
     try {
       return await step();
     } catch (err) {
-      await memory.close().catch(() => undefined);
+      await closeStore().catch(() => undefined);
       throw err;
     }
   };
@@ -479,7 +546,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       return !(subject?.kind === 'user' && subject.id === sharedUser);
     });
     if (others.length > 0) {
-      await memory.close();
+      await closeStore();
       throw new Error(
         "souledAgent: sharedMemory runs one person's memory, and this store already holds memory of another user or session",
       );
@@ -673,11 +740,18 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
    * lets the text through. Each write that is not made says why in one `memory.write_refused` line, except under an
    * `off` policy, the host's standing choice for the account, which is said once a session.
    */
-  const fileTurn = async (role: Speaker, text: string, context: MemoryHookContext): Promise<void> => {
-    const subject = turnSubjectOf(context);
-    if (!subject) return;
-    // An id no key can be built from rejects the write: the runtime logs the hook's failure and the turn goes on.
-    const scopeId = conversationScopeKey(agentId, subject);
+  const fileTurn = async (
+    role: Speaker,
+    text: string,
+    context: MemoryHookContext,
+    subject: MemorySubject,
+    scopeId: string,
+  ): Promise<void> => {
+    // A forgotten subject's text goes nowhere: not to the host's hooks, not to the store.
+    if (await forgotten.isForgotten(subject)) {
+      memoryLog.warn('memory.write_refused', { reason: 'forgotten' });
+      return;
+    }
     const policy = await turnPolicyOf(context, subject, scopeId, role);
     if (policy === 'failed') {
       memoryLog.warn('memory.write_refused', { reason: 'policy_failed' });
@@ -701,17 +775,37 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     }
     written.add(scopeId);
     // The user's message and the reply alike go under the subject's key. Who spoke goes in the trace's metadata:
-    // outside its text and its tags, which full-text search reads.
-    await memory.remember(filed, {
-      type: 'episodic',
-      scope: 'conversation',
-      scopeId,
-      metadata: {
-        [SPEAKER_METADATA_KEY]: role,
-        subject: { kind: subject.kind, id: subject.id },
-        ...(subject.kind === 'user' ? { turnUserId: subject.id } : {}),
+    // outside its text and its tags, which full-text search reads. The tombstone is read again once the trace is
+    // stored: a trace that landed after the subject was forgotten is deleted again.
+    let landed = false;
+    const outcome = await guardedWrite(
+      forgotten,
+      subject,
+      async () => {
+        const trace = await memory.remember(filed, {
+          type: 'episodic',
+          scope: 'conversation',
+          scopeId,
+          metadata: {
+            [SPEAKER_METADATA_KEY]: role,
+            subject: { kind: subject.kind, id: subject.id },
+            ...(subject.kind === 'user' ? { turnUserId: subject.id } : {}),
+          },
+        });
+        landed = true;
+        return trace;
       },
-    });
+      async (trace) => {
+        await memory.deleteTraces([trace.id]);
+      },
+    );
+    if (outcome.status !== 'refused') return;
+    memoryLog.warn('memory.write_refused', { reason: 'forgotten' });
+    if (landed) {
+      // The write landed after the subject's tombstone and is taken back. Its scope's registry row, which the write
+      // made again when the subject's deletion had already run, goes with whatever the scope still holds.
+      await memory.deleteScope('conversation', scopeId).catch(() => undefined);
+    }
   };
   /**
    * Asked before a scope's traces are compiled. Under a policy hook, a scope no turn of this process was served for,
@@ -755,6 +849,32 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     void work.then(settle, settle);
     return work;
   };
+  /**
+   * One promise chain per subject key: every write and compile of a subject runs on it, one after another, and a
+   * deletion of the subject takes it too. Each run is held in {@link pendingBySubject} from before it starts until it
+   * settles, so a deletion that waits for a subject's pending work sees a write before its first check.
+   */
+  const chains = new WriteChains();
+  const pendingBySubject = new Map<string, Set<Promise<unknown>>>();
+  /** Runs `work` on the subject's chain; close() waits for it. */
+  const onSubject = <T>(key: string, work: () => Promise<T>): Promise<T> => {
+    const run = chains.run(key, work);
+    let ofSubject = pendingBySubject.get(key);
+    if (!ofSubject) {
+      ofSubject = new Set();
+      pendingBySubject.set(key, ofSubject);
+    }
+    const held = ofSubject;
+    held.add(run);
+    const settle = () => {
+      held.delete(run);
+      if (held.size === 0 && pendingBySubject.get(key) === held) pendingBySubject.delete(key);
+    };
+    void run.then(settle, settle);
+    return awaitedOnClose(run);
+  };
+  /** True while close() compiles: what is stored by its deadline is compiled at once, past any write still running. */
+  let compilingOnClose = false;
   /**
    * A stream is settled once its usage and its text are known; its text settles after its observation has started.
    * On the default runtime a stream runs only once a consumer reads it, so one whose `signal` aborts before anything
@@ -805,8 +925,17 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     observe: (role, text, context) => {
       // Nothing is ever filed without the subject of its turn.
       if (!context) return Promise.reject(new TypeError('souledAgent: a memory write needs the hook context of its turn'));
-      // The whole write, its policy and its screening with it, is what close() waits for.
-      return awaitedOnClose(fileTurn(role, text, context));
+      const subject = turnSubjectOf(context);
+      if (!subject) return Promise.resolve();
+      let scopeId: string;
+      try {
+        scopeId = conversationScopeKey(agentId, subject);
+      } catch (err) {
+        // An id no key can be built from rejects the write: the runtime logs the hook's failure and the turn goes on.
+        return Promise.reject(err);
+      }
+      // The whole write, its policy and its screening with it, runs on the subject's chain, and close() waits for it.
+      return onSubject(scopeId, () => fileTurn(role, text, context, subject, scopeId));
     },
     getContext: async (text, options) => {
       // Two reads, each of one key, by equality: the turn's own subject, and the operator's pages. Nothing a caller
@@ -814,6 +943,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       // keeps no memory (or whose policy hook failed) read the operator's pages alone.
       const context = options?.context;
       const subject = context ? turnSubjectOf(context) : undefined;
+      // A forgotten subject is recalled nothing: neither their memory nor the operator's pages.
+      if (subject && (await forgotten.isForgotten(subject))) return null;
       let own: ScoredTrace[] = [];
       if (context && subject) {
         let scopeId: string | undefined;
@@ -941,6 +1072,10 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     ...(memoryPolicy || screen ? { beforeScopeCompile } : {}),
     // No compile at all: raw traces only, and no page is ever written.
     ...(compile === false ? { compile: false as const } : {}),
+    // A forgotten subject reads no page and is compiled no page.
+    isForgotten: (subject) => forgotten.isForgotten(subject),
+    // Each subject's compile runs on its chain, after its writes; close() compiles what is stored at its deadline.
+    runScope: (scopeId, work) => (compilingOnClose ? work() : onSubject(scopeId, work)),
   }));
   if (compile === false) memoryLog.warn('memory.compile_skipped', { reason: 'compile_off' });
 
@@ -951,9 +1086,10 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     priorTools && !Array.isArray(priorTools) ? priorTools : augmentedTools
   ) as AgentOptions['tools'];
 
-  const built = (await closingOnThrow(() =>
-    agent({ ...rest, ...(budget ? { budget } : {}), memoryProvider: provider, tools }),
-  )) as SouledAgent;
+  const agentOptions: AgentOptions = { ...rest, ...(budget ? { budget } : {}), memoryProvider: provider, tools };
+  // A learning layer gmi() builds from these options writes and reads the store's ledger.
+  shareForgottenLedger(agentOptions, forgotten);
+  const built = (await closingOnThrow(() => agent(agentOptions))) as SouledAgent;
 
   // Every turn joins what close() waits for: its promise, or a stream's settled usage. The default runtime's own close
   // does not wait for a running turn, and the GMI runtime's does not wait for a one-shot call.
@@ -1020,6 +1156,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       try {
         // The subjects this agent's turns wrote to; a trace stored another way waits for memory.compileWiki(). With
         // `compile: false` no wiki is attached, and this compiles nothing.
+        compilingOnClose = true;
         await memory.compileWiki({ reason: 'session-end', scopes: [...written] });
       } catch (err) {
         // A subject's watermark moves only past compiled traces, so the next compile takes these up again.
@@ -1030,7 +1167,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
         );
       }
     } finally {
-      await memory.close();
+      await closeStore();
     }
     if (closeFailed) throw closeError;
   };

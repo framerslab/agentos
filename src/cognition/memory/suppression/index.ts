@@ -8,3 +8,5 @@ export type { ForgottenLedgerOptions, SuppressionSubject, TombstoneKey } from '.
 export { openForgottenCopy } from './forgottenCopy.js';
 export { learnerTombstones, shareForgottenLedger, sharedForgottenLedgerOf } from './learnerTombstones.js';
 export type { LearnerTombstones, NamespacedUser } from './learnerTombstones.js';
+export { guardedWrite } from './guardedWrite.js';
+export { guardMemoryProvider } from './guardMemoryProvider.js';

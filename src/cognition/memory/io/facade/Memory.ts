@@ -115,7 +115,7 @@ import {
 // ---------------------------------------------------------------------------
 
 /** Why a scope's wiki compile did not run in a call, as its `memory.compile_skipped` line says it. */
-export type CompileSkipReason = 'budget' | 'policy_raw' | 'screen_failed';
+export type CompileSkipReason = 'budget' | 'policy_raw' | 'screen_failed' | 'forgotten';
 
 /** What {@link Memory.attachWiki} takes: a page store per conversation scope, a compiler, and two optional hooks. */
 export interface AttachedWiki {
@@ -136,7 +136,12 @@ export interface AttachedWiki {
   beforeScopeCompile?(
     scopeId: string,
     traces: MemoryTrace[],
-  ): Promise<{ traces: MemoryTrace[] } | { skip: 'policy_raw' | 'screen_failed' }>;
+  ): Promise<{ traces: MemoryTrace[] } | { skip: 'policy_raw' | 'screen_failed' | 'forgotten' }>;
+  /**
+   * Runs one scope's compile: a host that orders each subject's writes, compiles and deletion one after another
+   * passes it, and runs `work` in the subject's turn. Unset: the compile runs at once.
+   */
+  runScope?<T>(scopeId: string, work: () => Promise<T>): Promise<T>;
   /**
    * The reason to log for an error a scope's compile threw: `'budget'` for a spend budget's refusal. Undefined:
    * the error is the call's, thrown once every scope has run.
@@ -1875,7 +1880,9 @@ export class Memory {
     let failure: unknown;
     for (const target of await this._scopesToCompile(opts?.scopes)) {
       try {
-        const skip = await this._oneScopeChangeAtATime(target.scopeId, () => this._compileScope(wiki, target, reason, aggregate));
+        const compileScope = () =>
+          this._oneScopeChangeAtATime(target.scopeId, () => this._compileScope(wiki, target, reason, aggregate));
+        const skip = await (wiki.runScope ? wiki.runScope(target.scopeId, compileScope) : compileScope());
         if (skip) skipped.add(skip);
       } catch (error) {
         const why = wiki.compileSkipReasonOf?.(error);
