@@ -417,6 +417,14 @@ jobs:
         timeout-minutes: 10
         run: node --test scripts/logging-kit-package.test.mjs
 
+      # The moderation surface as an application installs it: the packed candidate in an empty project, imported through
+      # the package's public entry points, compiled against the installed declarations under NodeNext and run
+      # (scripts/fixtures/moderation-consumer.ts). moderation-published.yml runs the same fixture against a release.
+      - name: The moderation entry points run from the packed package
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 10
+        run: node --test scripts/moderation-package.test.mjs
+
       # Each file's figures, for a run that Codecov does not keep. A re-run of the job
       # replaces the artifact an earlier attempt kept.
       - name: Keep the coverage summary

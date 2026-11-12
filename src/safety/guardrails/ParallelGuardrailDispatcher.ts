@@ -5,9 +5,11 @@
  * (sequential, order-dependent) from classifiers (parallel, independent).
  *
  * **Phase 1 (Sequential):** Guardrails with `config.canSanitize === true`
- * run one-at-a-time in registration order. Each sanitizer receives the
- * cumulative output of all preceding sanitizers. A BLOCK here short-circuits
- * the entire pipeline.
+ * or `config.sequential === true` run one-at-a-time in registration order.
+ * Each sanitizer receives the cumulative output of all preceding sanitizers.
+ * A BLOCK here short-circuits the entire pipeline, so a screen that asks to
+ * run first keeps the text it refuses from every phase 2 guard. A SANITIZE
+ * from a phase 1 guard without `canSanitize` is downgraded to FLAG.
  *
  * **Phase 2 (Parallel):** Remaining guardrails run concurrently via
  * `Promise.allSettled`. They receive the fully-sanitized text from Phase 1.
@@ -48,10 +50,15 @@ import {
   serializeEvaluation,
   withGuardrailMetadata,
   createGuardrailBlockedStream,
+  guardrailOutcomeOf,
   hasEvaluateOutput,
+  isGuardrailHold,
 } from './guardrailDispatcher';
 import { renderPlainText } from '../../api/runtime/turnFinalResponse';
 import { sanitizedFinalResponse } from './sanitizedFinalResponse';
+import { listedErrorFields, safeWord } from '../../core/logging/events.js';
+import { carryGuardFailure, markGuardFailure } from './guardFailure';
+import { guardrailLog } from './log.js';
 
 // ---------------------------------------------------------------------------
 // Severity map used by worstAction — SANITIZE is excluded because it is
@@ -71,33 +78,51 @@ const ACTION_SEVERITY: Record<GuardrailAction, number> = {
 // ---------------------------------------------------------------------------
 
 /**
- * Race a promise against an optional timeout.
- *
- * If `timeoutMs` is not set (undefined / 0), the original promise is returned
- * unmodified. On timeout or error the function returns `null` (fail-open)
- * and logs a warning so operators can tune the timeout.
- *
- * @param fn        - The async function to execute
- * @param timeoutMs - Maximum milliseconds to wait (undefined = no limit)
- * @returns The evaluation result, or `null` on timeout / error
+ * Synthetic BLOCK returned when a fail-closed guardrail throws or times out. `metadata.cause` says which, and
+ * `metadata.guardrailId` names the guard when it has an id.
  */
-/** Synthetic BLOCK returned when a fail-closed guardrail throws or times out. */
-function guardrailErrorBlock(reason: string): GuardrailEvaluationResult {
-  return {
+function guardrailErrorBlock(reason: string, cause: 'error' | 'timeout', svc: IGuardrailService): GuardrailEvaluationResult {
+  return markGuardFailure({
     action: GuardrailAction.BLOCK,
     reason,
     reasonCode: 'GUARDRAIL_ERROR',
-    metadata: { failClosed: true },
-  };
+    metadata: { failClosed: true, cause, ...(svc.id ? { guardrailId: svc.id } : {}) },
+  });
 }
 
 const GUARDRAIL_TIMEOUT = Symbol('guardrail-timeout');
 
+/** The stage a guard judges at, as the `guardrail.*` events name it. */
+type GuardrailEventStage = 'input' | 'output' | 'tool_call';
+
+/** One `guardrail.failed` line. `error` is absent for a timeout. */
+function failed(svc: IGuardrailService, stage: GuardrailEventStage, cause: 'error' | 'timeout', error?: unknown): void {
+  guardrailLog.warn('guardrail.failed', {
+    guardrailId: safeWord(svc.id), stage, posture: svc.config?.failClosed ? 'closed' : 'open', cause,
+    ...(cause === 'error' ? listedErrorFields(error) : {}),
+  });
+}
+
+/**
+ * Race a guard's evaluation against its `config.timeoutMs`.
+ *
+ * Without a timeout (undefined / 0) the evaluation is awaited as it is. On a
+ * timeout or a throw the guard's `config.failClosed` decides: a synthetic BLOCK
+ * when it is set, else `null` (fail-open). Either way one `guardrail.failed`
+ * line names the guard, the stage and the cause, and never the error's message.
+ *
+ * @param fn    - The async function to execute
+ * @param svc   - The guard whose evaluation it is
+ * @param stage - The stage the guard judges at
+ * @returns The evaluation result, a synthetic BLOCK, or `null`
+ */
 async function callWithTimeout(
-  fn: () => Promise<GuardrailEvaluationResult | null>,
-  timeoutMs?: number,
-  failClosed?: boolean,
+  fn: (deadlineSignal?: AbortSignal) => Promise<GuardrailEvaluationResult | null>,
+  svc: IGuardrailService,
+  stage: GuardrailEventStage,
 ): Promise<GuardrailEvaluationResult | null> {
+  const timeoutMs = svc.config?.timeoutMs;
+  const failClosed = svc.config?.failClosed;
   try {
     if (!timeoutMs || timeoutMs <= 0) {
       return await fn();
@@ -105,31 +130,27 @@ async function callWithTimeout(
 
     // Race the evaluation against a timeout sentinel — kept distinct from a
     // guard that legitimately resolves `null` (= ALLOW), so a timeout can be
-    // handled per the fail-closed policy.
+    // handled per the fail-closed policy. The race does not stop the
+    // evaluation: at the deadline the signal handed to it is aborted, so a
+    // guard that reads it starts nothing more once nobody waits for it.
+    const deadline = new AbortController();
     const result = await Promise.race([
-      fn(),
+      fn(deadline.signal),
       new Promise<typeof GUARDRAIL_TIMEOUT>((resolve) => {
-        setTimeout(() => resolve(GUARDRAIL_TIMEOUT), timeoutMs);
+        // the timeout settles first: a guard that answers from an abort listener cannot win the race
+        setTimeout(() => { resolve(GUARDRAIL_TIMEOUT); deadline.abort(); }, timeoutMs);
       }),
     ]);
 
     if (result === GUARDRAIL_TIMEOUT) {
-      if (failClosed) {
-        console.warn('[AgentOS][Guardrails] callWithTimeout: guardrail timed out, failing CLOSED (block).');
-        return guardrailErrorBlock('Guardrail evaluation timed out');
-      }
-      console.warn('[AgentOS][Guardrails] callWithTimeout: guardrail timed out, failing open.');
-      return null;
+      failed(svc, stage, 'timeout');
+      return failClosed ? guardrailErrorBlock('Guardrail evaluation timed out', 'timeout', svc) : null;
     }
 
     return result;
   } catch (error) {
-    if (failClosed) {
-      console.warn('[AgentOS][Guardrails] callWithTimeout: guardrail threw, failing CLOSED (block).', error);
-      return guardrailErrorBlock('Guardrail evaluation threw an error');
-    }
-    console.warn('[AgentOS][Guardrails] callWithTimeout: guardrail threw, failing open.', error);
-    return null;
+    failed(svc, stage, 'error', error);
+    return failClosed ? guardrailErrorBlock('Guardrail evaluation threw an error', 'error', svc) : null;
   }
 }
 
@@ -156,26 +177,42 @@ function worstAction(evaluations: GuardrailEvaluationResult[]): GuardrailAction 
   return worst;
 }
 
+/** Phase 1 holds the guards that can sanitize and the guards that ask to run first. */
+function runsInPhaseOne(svc: IGuardrailService): boolean {
+  return svc.config?.canSanitize === true || svc.config?.sequential === true;
+}
+
+/** Of one phase's settled evaluations: the first BLOCK without a hold, else the first hold, else nothing. */
+function decidingBlock(evaluations: readonly GuardrailEvaluationResult[]): GuardrailEvaluationResult | undefined {
+  return evaluations.find((e) => e.action === GuardrailAction.BLOCK && !isGuardrailHold(e)) ?? evaluations.find((e) => isGuardrailHold(e));
+}
+
+/** The verdict fields a block's notification carries beside its text fields. */
+function blockVerdictOf(evaluation: GuardrailEvaluationResult): Pick<GuardrailOutputVerdict, 'action' | 'guardrailId' | 'reasonCode' | 'hold'> {
+  return { action: GuardrailAction.BLOCK, guardrailId: guardrailIdOf(evaluation), reasonCode: evaluation.reasonCode, ...(isGuardrailHold(evaluation) ? { hold: evaluation.hold } : {}) };
+}
+
 /**
- * If a Phase 2 guardrail returns SANITIZE, downgrade it to FLAG with a
- * warning. Concurrent sanitization is non-deterministic so we refuse it.
+ * If a Phase 2 guardrail, or a phase 1 guardrail without `canSanitize` (one
+ * that only asks to run first), returns SANITIZE, downgrade it to FLAG and
+ * write one `guardrail.sanitize_downgraded` line. Concurrent sanitization is
+ * non-deterministic so we refuse it.
  *
  * @param evaluation - The raw evaluation from Phase 2
- * @param svcIndex   - Registration index for logging
+ * @param svc        - The guard that answered it
+ * @param stage      - The stage the guard judged at
  * @returns The (potentially downgraded) evaluation
  */
 function downgradePhase2Sanitize(
   evaluation: GuardrailEvaluationResult,
-  svcIndex: number,
+  svc: IGuardrailService,
+  stage: 'input' | 'output',
 ): GuardrailEvaluationResult {
   if (evaluation.action !== GuardrailAction.SANITIZE) {
     return evaluation;
   }
 
-  console.warn(
-    `[AgentOS][Guardrails] Phase 2 guardrail at index ${svcIndex} returned SANITIZE — ` +
-    'downgrading to FLAG because concurrent sanitization is non-deterministic.',
-  );
+  guardrailLog.warn('guardrail.sanitize_downgraded', { guardrailId: safeWord(svc.id), stage });
 
   return {
     ...evaluation,
@@ -189,26 +226,25 @@ function downgradePhase2Sanitize(
 /**
  * A guard cannot rewrite a tool call: a SANITIZE on a TOOL_CALL_REQUEST chunk
  * is applied as a BLOCK that keeps the guard's reason, so the call never goes
- * out in a form no guard approved.
+ * out in a form no guard approved. A `hold` the SANITIZE carried was ignored,
+ * so the BLOCK is a refusal, not a hold. One `guardrail.sanitize_downgraded`
+ * line names the guard.
  *
  * @param evaluation - The raw evaluation of a tool-call chunk
- * @param svcIndex   - Registration index for logging
+ * @param svc        - The guard that answered it
  * @returns The evaluation, with a SANITIZE turned into a BLOCK
  */
 function sanitizeOfToolCallAsBlock(
   evaluation: GuardrailEvaluationResult,
-  svcIndex: number,
+  svc: IGuardrailService,
 ): GuardrailEvaluationResult {
   if (evaluation.action !== GuardrailAction.SANITIZE) {
     return evaluation;
   }
 
-  console.warn(
-    `[AgentOS][Guardrails] Guardrail at index ${svcIndex} returned SANITIZE for a tool call — ` +
-    'a tool call cannot be rewritten, so the call is blocked.',
-  );
+  guardrailLog.warn('guardrail.sanitize_downgraded', { guardrailId: safeWord(svc.id), stage: 'tool_call' });
 
-  const { modifiedText: _modifiedText, ...rest } = evaluation;
+  const { modifiedText: _modifiedText, hold: _hold, ...rest } = evaluation;
   return {
     ...rest,
     action: GuardrailAction.BLOCK,
@@ -216,6 +252,25 @@ function sanitizeOfToolCallAsBlock(
       ? `${evaluation.reason} [SANITIZE of a tool call applied as BLOCK]`
       : 'SANITIZE of a tool call applied as BLOCK: a tool call cannot be rewritten',
   };
+}
+
+const holdIgnoredFor = new Set<string>();
+const holdIgnoredByUnnamed = new WeakSet<IGuardrailService>();
+/**
+ * Writes `guardrail.hold_ignored` the first time a guard answers a hold on an action other than BLOCK. A guard with an
+ * id is remembered by it (at most 256 ids); one without is remembered as the object it is, though its line says `unknown`.
+ */
+function noteIgnoredHold(evaluation: GuardrailEvaluationResult, svc: IGuardrailService, stage: GuardrailEventStage): void {
+  if (evaluation.hold === undefined || evaluation.hold === null || evaluation.action === GuardrailAction.BLOCK) return;
+  const guardrailId = safeWord(svc.id);
+  if (guardrailId === 'unknown') {
+    if (holdIgnoredByUnnamed.has(svc)) return;
+    holdIgnoredByUnnamed.add(svc);
+  } else {
+    if (holdIgnoredFor.has(guardrailId) || holdIgnoredFor.size >= 256) return;
+    holdIgnoredFor.add(guardrailId);
+  }
+  guardrailLog.warn('guardrail.hold_ignored', { guardrailId, stage });
 }
 
 /** A guardrail that evaluates tool calls, with its place in the registration order. */
@@ -244,9 +299,12 @@ function toolCallGuardsOf(services: IGuardrailService[]): ToolCallGuard[] {
 }
 
 /**
- * The tool-call guards over one TOOL_CALL_REQUEST chunk, in parallel. Returns
- * the first BLOCK by registration order (a SANITIZE counts as one), or every
- * evaluation of a chunk they pass.
+ * The tool-call guards over one TOOL_CALL_REQUEST chunk. The guards with
+ * `config.sequential` answer first, one at a time in registration order, and
+ * the first BLOCK among them (a SANITIZE counts as one) is the verdict before
+ * any other guard is called. The rest run in parallel; once every guard has
+ * answered, returns the first BLOCK without a hold by registration order, else
+ * the first hold, or every evaluation of a chunk they pass.
  */
 async function evaluateToolCallGuards(
   guards: ToolCallGuard[],
@@ -254,34 +312,43 @@ async function evaluateToolCallGuards(
   chunk: AgentOSResponse,
   ragSources: GuardrailOutputPayload['ragSources'],
 ): Promise<GuardrailToolCallVerdict> {
-  const results = await Promise.allSettled(
-    guards.map(({ svc }) =>
-      callWithTimeout(
-        () => svc.evaluateOutput!({ context, chunk, ragSources }),
-        svc.config?.timeoutMs,
-        svc.config?.failClosed,
-      ),
-    ),
-  );
-
-  const evaluations: GuardrailEvaluationResult[] = [];
-  for (let j = 0; j < results.length; j++) {
-    const result = results[j];
+  const slots: (GuardrailEvaluationResult | null)[] = new Array(guards.length).fill(null);
+  const settle = (j: number, result: PromiseSettledResult<GuardrailEvaluationResult | null>): GuardrailEvaluationResult | null => {
+    const { svc } = guards[j];
     if (result.status === 'rejected') {
-      console.warn('[AgentOS][Guardrails] Tool-call evaluateOutput rejected.', result.reason);
-      continue;
+      failed(svc, 'tool_call', 'error', result.reason);
+      return null;
     }
     if (!result.value) {
-      continue;
+      return null;
     }
+    noteIgnoredHold(result.value, svc, 'tool_call');
+    const evaluation = stampGuardrailId(sanitizeOfToolCallAsBlock(result.value, svc), svc);
+    slots[j] = evaluation;
+    return evaluation;
+  };
+  const call = ({ svc }: ToolCallGuard): Promise<GuardrailEvaluationResult | null> =>
+    callWithTimeout(() => svc.evaluateOutput!({ context, chunk, ragSources }), svc, 'tool_call');
 
-    const { svc, registrationIndex } = guards[j];
-    const evaluation = stampGuardrailId(sanitizeOfToolCallAsBlock(result.value, registrationIndex), svc);
-    evaluations.push(evaluation);
-
-    if (evaluation.action === GuardrailAction.BLOCK) {
+  // Screens first: a call one of them refuses reaches no other guard.
+  for (let j = 0; j < guards.length; j++) {
+    if (guards[j].svc.config?.sequential !== true) continue;
+    const [result] = await Promise.allSettled([call(guards[j])]);
+    const evaluation = settle(j, result);
+    if (evaluation?.action === GuardrailAction.BLOCK) {
       return { outcome: 'block', evaluation };
     }
+  }
+
+  const rest = guards.map((guard, j) => ({ guard, j })).filter(({ guard }) => guard.svc.config?.sequential !== true);
+  const results = await Promise.allSettled(rest.map(({ guard }) => call(guard)));
+  results.forEach((result, k) => settle(rest[k].j, result));
+
+  const evaluations = slots.filter(Boolean) as GuardrailEvaluationResult[];
+  // Every guard has answered: a refusal outranks a hold wherever it sits in registration order.
+  const block = decidingBlock(evaluations);
+  if (block) {
+    return { outcome: 'block', evaluation: block };
   }
 
   return { outcome: 'pass', evaluations };
@@ -315,17 +382,20 @@ export class ParallelGuardrailDispatcher {
    * Evaluate user input through registered guardrails using two-phase execution.
    *
    * **Phase 1 (Sequential — sanitizers):**
-   * Guardrails with `config.canSanitize === true` run one-at-a-time in
-   * registration order. Each sees (and may modify) the cumulative sanitized
-   * input. A BLOCK result short-circuits immediately — Phase 2 never runs.
+   * Guardrails with `config.canSanitize === true` or `config.sequential === true`
+   * run one-at-a-time in registration order. Each sees (and, with `canSanitize`,
+   * may modify) the cumulative sanitized input. A BLOCK result short-circuits
+   * immediately — Phase 2 never runs.
    *
    * **Phase 2 (Parallel — classifiers):**
    * All remaining guardrails run concurrently via `Promise.allSettled` on
    * the text produced by Phase 1. A Phase 2 SANITIZE is downgraded to FLAG.
    *
    * **Aggregation:** worst-wins (BLOCK > FLAG > ALLOW). The singular
-   * `evaluation` field is set to the first BLOCK, else the worst-severity
-   * evaluation, else the last evaluation by registration order.
+   * `evaluation` field is set to the first BLOCK without a hold, else the
+   * first hold, else the worst-severity evaluation, else the last evaluation
+   * by registration order. `outcome` says what the evaluations amount to: a
+   * refusal outranks a hold, and a hold outranks the rest.
    *
    * @param services  - Array of guardrail services (already normalized)
    * @param input     - User input to evaluate
@@ -338,7 +408,7 @@ export class ParallelGuardrailDispatcher {
     context: GuardrailContext,
   ): Promise<GuardrailInputOutcome> {
     if (services.length === 0) {
-      return { sanitizedInput: input, evaluations: [] };
+      return { sanitizedInput: input, evaluations: [], outcome: 'allow' };
     }
 
     // -- Partition into sanitizers (Phase 1) and parallel classifiers (Phase 2)
@@ -347,7 +417,7 @@ export class ParallelGuardrailDispatcher {
 
     for (let i = 0; i < services.length; i++) {
       const svc = services[i];
-      if (svc.config?.canSanitize === true) {
+      if (runsInPhaseOne(svc)) {
         sanitizers.push(svc);
       } else {
         parallel.push({ svc, registrationIndex: i });
@@ -365,8 +435,8 @@ export class ParallelGuardrailDispatcher {
     // -----------------------------------------------------------------
     for (let i = 0; i < services.length; i++) {
       const svc = services[i];
-      // Only Phase 1 services (sanitizers) run sequentially
-      if (svc.config?.canSanitize !== true) {
+      // Only Phase 1 services (sanitizers and screens that run first) run sequentially
+      if (!runsInPhaseOne(svc)) {
         continue;
       }
 
@@ -374,23 +444,25 @@ export class ParallelGuardrailDispatcher {
         continue;
       }
 
-      const timeoutMs = svc.config?.timeoutMs;
-      const evaluation = await callWithTimeout(
-        () => svc.evaluateInput!({ context, input: sanitizedInput }),
-        timeoutMs,
-        svc.config?.failClosed,
+      let evaluation = await callWithTimeout(
+        (deadlineSignal) => svc.evaluateInput!({ context, input: sanitizedInput, ...(deadlineSignal ? { deadlineSignal } : {}) }),
+        svc,
+        'input',
       );
 
       if (!evaluation) {
         continue;
       }
 
+      noteIgnoredHold(evaluation, svc, 'input');
+      // a guard that only asks to run first cannot rewrite: its SANITIZE is a FLAG, as a phase 2 guard's is
+      if (svc.config?.canSanitize !== true) evaluation = downgradePhase2Sanitize(evaluation, svc, 'input');
       evaluationSlots[i] = evaluation;
 
       // BLOCK in Phase 1 short-circuits everything — Phase 2 never runs
       if (evaluation.action === GuardrailAction.BLOCK) {
         const evaluations = evaluationSlots.filter(Boolean) as GuardrailEvaluationResult[];
-        return { sanitizedInput, evaluation, evaluations };
+        return { sanitizedInput, evaluation, evaluations, outcome: guardrailOutcomeOf(evaluations) };
       }
 
       // SANITIZE: update the running sanitized input for the next sanitizer
@@ -412,11 +484,10 @@ export class ParallelGuardrailDispatcher {
             return Promise.resolve(null);
           }
 
-          const timeoutMs = svc.config?.timeoutMs;
           return callWithTimeout(
-            () => svc.evaluateInput!({ context, input: sanitizedInput }),
-            timeoutMs,
-            svc.config?.failClosed,
+            (deadlineSignal) => svc.evaluateInput!({ context, input: sanitizedInput, ...(deadlineSignal ? { deadlineSignal } : {}) }),
+            svc,
+            'input',
           );
         }),
       );
@@ -425,10 +496,7 @@ export class ParallelGuardrailDispatcher {
       for (let j = 0; j < parallel.length; j++) {
         const outcome = settled[j];
         if (outcome.status === 'rejected') {
-          console.warn(
-            '[AgentOS][Guardrails] Phase 2 evaluateInput rejected.',
-            outcome.reason,
-          );
+          failed(parallel[j].svc, 'input', 'error', outcome.reason);
           continue;
         }
 
@@ -437,8 +505,9 @@ export class ParallelGuardrailDispatcher {
           continue;
         }
 
+        noteIgnoredHold(evaluation, parallel[j].svc, 'input');
         // Downgrade SANITIZE → FLAG in Phase 2
-        evaluation = downgradePhase2Sanitize(evaluation, parallel[j].registrationIndex);
+        evaluation = downgradePhase2Sanitize(evaluation, parallel[j].svc, 'input');
 
         evaluationSlots[parallel[j].registrationIndex] = evaluation;
       }
@@ -450,13 +519,14 @@ export class ParallelGuardrailDispatcher {
     const evaluations = evaluationSlots.filter(Boolean) as GuardrailEvaluationResult[];
 
     if (evaluations.length === 0) {
-      return { sanitizedInput, evaluations: [] };
+      return { sanitizedInput, evaluations: [], outcome: 'allow' };
     }
 
-    // Pick the singular evaluation: first BLOCK, else worst severity, else last
-    const blockEval = evaluations.find((e) => e.action === GuardrailAction.BLOCK);
-    if (blockEval) {
-      return { sanitizedInput, evaluation: blockEval, evaluations };
+    // The singular evaluation: the first BLOCK without a hold, else the first hold, else the worst action, else the last.
+    const outcome = guardrailOutcomeOf(evaluations);
+    const block = decidingBlock(evaluations);
+    if (block) {
+      return { sanitizedInput, evaluation: block, evaluations, outcome };
     }
 
     const worst = worstAction(evaluations);
@@ -467,6 +537,7 @@ export class ParallelGuardrailDispatcher {
       sanitizedInput,
       evaluation: worstEval,
       evaluations,
+      outcome,
     };
   }
 
@@ -477,9 +548,11 @@ export class ParallelGuardrailDispatcher {
   /**
    * Evaluate one TOOL_CALL_REQUEST chunk with the guardrails that evaluate
    * tool calls (`config.evaluateToolCalls`), as {@link wrapOutput} evaluates
-   * the tool-call chunks of a stream: in parallel, a SANITIZE applied as a
-   * BLOCK, the first BLOCK in registration order the verdict. Services without
-   * the flag are not called.
+   * the tool-call chunks of a stream: the guards with `config.sequential`
+   * first, one at a time, and a BLOCK among them ends the evaluation; the rest
+   * in parallel, a SANITIZE applied as a BLOCK, the first refusal in
+   * registration order the verdict, else the first hold. Services without the
+   * flag are not called.
    *
    * @param services   - Array of guardrail services (already normalized)
    * @param context    - Conversational context for policy decisions
@@ -503,10 +576,12 @@ export class ParallelGuardrailDispatcher {
   /**
    * Wrap a response stream with two-phase guardrail filtering.
    *
-   * Partitions services into four groups (once, up front):
-   * 1. **Streaming sanitizers** (`canSanitize && evaluateStreamingChunks`)
-   * 2. **Streaming parallel** classifiers (`evaluateStreamingChunks && !canSanitize`)
-   * 3. **Final sanitizers** (`canSanitize && !evaluateStreamingChunks`)
+   * Partitions services into four groups (once, up front). "Phase 1" is a
+   * guard with `canSanitize` or `sequential`; a SANITIZE from one without
+   * `canSanitize` is downgraded to FLAG.
+   * 1. **Streaming sanitizers** (phase 1 and `evaluateStreamingChunks`)
+   * 2. **Streaming parallel** classifiers (`evaluateStreamingChunks`, not phase 1)
+   * 3. **Final sanitizers** (every phase 1 guard)
    * 4. **Final parallel** classifiers (the rest with `evaluateOutput`)
    *
    * For each TEXT_DELTA chunk: Phase 1 runs streaming sanitizers sequentially
@@ -548,7 +623,7 @@ export class ParallelGuardrailDispatcher {
 
     // -- Partition into 4 groups once --------------------------------
     /** Streaming sanitizers: Phase 1 for TEXT_DELTA chunks */
-    const streamingSanitizers: IGuardrailService[] = [];
+    const streamingSanitizers: { svc: IGuardrailService; registrationIndex: number }[] = [];
     /** Streaming classifiers: Phase 2 for TEXT_DELTA chunks */
     const streamingParallel: { svc: IGuardrailService; registrationIndex: number }[] = [];
     /** Final sanitizers: Phase 1 for isFinal chunks */
@@ -565,10 +640,11 @@ export class ParallelGuardrailDispatcher {
       }
 
       const isStreaming = svc.config?.evaluateStreamingChunks === true;
-      const isSanitizer = svc.config?.canSanitize === true;
+      // phase 1 of output: the guards that can sanitize and the guards that ask to run first
+      const isSanitizer = runsInPhaseOne(svc);
 
       if (isStreaming && isSanitizer) {
-        streamingSanitizers.push(svc);
+        streamingSanitizers.push({ svc, registrationIndex: i });
       } else if (isStreaming && !isSanitizer) {
         streamingParallel.push({ svc, registrationIndex: i });
       }
@@ -608,7 +684,7 @@ export class ParallelGuardrailDispatcher {
       try {
         await options.onVerdict(verdict);
       } catch (error) {
-        console.warn('[AgentOS][Guardrails] onVerdict threw; the verdict stands.', error);
+        guardrailLog.warn('guardrail.verdict_callback_failed', listedErrorFields(error));
       }
     };
 
@@ -633,18 +709,20 @@ export class ParallelGuardrailDispatcher {
           continue;
         }
 
-        const timeoutMs = svc.config?.timeoutMs;
         const raw = await callWithTimeout(
           () => svc.evaluateOutput!({ context, chunk: workingChunk, ragSources: currentRagSources }),
-          timeoutMs,
-          svc.config?.failClosed,
+          svc,
+          'output',
         );
 
         if (!raw) {
           continue;
         }
 
-        const evaluation = stampGuardrailId(raw, svc);
+        noteIgnoredHold(raw, svc, 'output');
+        let evaluation = stampGuardrailId(raw, svc);
+        // a guard that only asks to run first cannot rewrite: its SANITIZE is a FLAG, as a phase 2 guard's is
+        if (svc.config?.canSanitize !== true) evaluation = downgradePhase2Sanitize(evaluation, svc, 'output');
         outputEvaluations.push(evaluation);
 
         // BLOCK terminates the stream
@@ -673,38 +751,39 @@ export class ParallelGuardrailDispatcher {
             return Promise.resolve({ evaluation: null, registrationIndex, svc });
           }
 
-          const timeoutMs = svc.config?.timeoutMs;
           return callWithTimeout(
             () => svc.evaluateOutput!({ context, chunk: workingChunk, ragSources: currentRagSources }),
-            timeoutMs,
-            svc.config?.failClosed,
+            svc,
+            'output',
           ).then((evaluation) => ({ evaluation, registrationIndex, svc }));
         });
 
         const results = await Promise.allSettled(tasks);
+        const phase: GuardrailEvaluationResult[] = [];
 
-        for (const result of results) {
+        for (let k = 0; k < results.length; k++) {
+          const result = results[k];
           if (result.status === 'rejected') {
-            console.warn(
-              '[AgentOS][Guardrails] Phase 2 final evaluateOutput rejected.',
-              result.reason,
-            );
+            failed(finalParallel[k].svc, 'output', 'error', result.reason);
             continue;
           }
 
-          const { evaluation: rawEvaluation, registrationIndex, svc } = result.value;
+          const { evaluation: rawEvaluation, svc } = result.value;
           if (!rawEvaluation) {
             continue;
           }
 
+          noteIgnoredHold(rawEvaluation, svc, 'output');
           // Downgrade SANITIZE → FLAG in Phase 2
-          const evaluation = stampGuardrailId(downgradePhase2Sanitize(rawEvaluation, registrationIndex), svc);
+          const evaluation = stampGuardrailId(downgradePhase2Sanitize(rawEvaluation, svc, 'output'), svc);
           outputEvaluations.push(evaluation);
+          phase.push(evaluation);
+        }
 
-          // BLOCK terminates the stream
-          if (evaluation.action === GuardrailAction.BLOCK) {
-            return { outcome: 'block', evaluation };
-          }
+        // A BLOCK terminates the stream: a refusal outranks a hold wherever it sits in registration order
+        const block = decidingBlock(phase);
+        if (block) {
+          return { outcome: 'block', evaluation: block };
         }
       }
 
@@ -782,8 +861,9 @@ export class ParallelGuardrailDispatcher {
         let workingChunk = currentChunk;
 
         // Phase 1: sequential streaming sanitizers
-        for (const svc of streamingSanitizers) {
-          const svcId = svc.id || (svc as any).id || 'unknown';
+        for (const { svc, registrationIndex } of streamingSanitizers) {
+          // an unnamed guard is counted under its place in the registration order, as in phase 2
+          const svcId = svc.id || (svc as any).id || `svc-${registrationIndex}`;
           const currentCount = streamingEvaluationCounts.get(svcId) || 0;
           const maxEvals = svc.config?.maxStreamingEvaluations;
 
@@ -792,11 +872,10 @@ export class ParallelGuardrailDispatcher {
             continue;
           }
 
-          const timeoutMs = svc.config?.timeoutMs;
           const raw = await callWithTimeout(
             () => svc.evaluateOutput!({ context, chunk: workingChunk, ragSources: currentRagSources }),
-            timeoutMs,
-            svc.config?.failClosed,
+            svc,
+            'output',
           );
 
           streamingEvaluationCounts.set(svcId, currentCount + 1);
@@ -805,13 +884,16 @@ export class ParallelGuardrailDispatcher {
             continue;
           }
 
-          const evaluation = stampGuardrailId(raw, svc);
+          noteIgnoredHold(raw, svc, 'output');
+          let evaluation = stampGuardrailId(raw, svc);
+          // a guard that only asks to run first cannot rewrite: its SANITIZE is a FLAG, as a phase 2 guard's is
+          if (svc.config?.canSanitize !== true) evaluation = downgradePhase2Sanitize(evaluation, svc, 'output');
           outputEvaluations.push(evaluation);
 
           // BLOCK terminates the stream immediately
           if (evaluation.action === GuardrailAction.BLOCK) {
             held = [];
-            await notify({ streamId: options.streamId, action: GuardrailAction.BLOCK, guardrailId: guardrailIdOf(evaluation), reasonCode: evaluation.reasonCode, finalText: evaluation.replacementText ?? null, originalText: null });
+            await notify({ streamId: options.streamId, ...blockVerdictOf(evaluation), finalText: evaluation.replacementText ?? null, originalText: null });
             yield* blockedOutput(context, evaluation, options);
             return;
           }
@@ -837,11 +919,10 @@ export class ParallelGuardrailDispatcher {
               return Promise.resolve({ evaluation: null, registrationIndex, svcId, svc });
             }
 
-            const timeoutMs = svc.config?.timeoutMs;
             return callWithTimeout(
               () => svc.evaluateOutput!({ context, chunk: workingChunk, ragSources: currentRagSources }),
-              timeoutMs,
-              svc.config?.failClosed,
+              svc,
+              'output',
             ).then((evaluation) => {
               streamingEvaluationCounts.set(svcId, currentCount + 1);
               return { evaluation, registrationIndex, svcId, svc };
@@ -849,32 +930,34 @@ export class ParallelGuardrailDispatcher {
           });
 
           const results = await Promise.allSettled(tasks);
+          const phase: GuardrailEvaluationResult[] = [];
 
-          for (const result of results) {
+          for (let k = 0; k < results.length; k++) {
+            const result = results[k];
             if (result.status === 'rejected') {
-              console.warn(
-                '[AgentOS][Guardrails] Phase 2 streaming evaluateOutput rejected.',
-                result.reason,
-              );
+              failed(streamingParallel[k].svc, 'output', 'error', result.reason);
               continue;
             }
 
-            const { evaluation: rawEvaluation, registrationIndex, svc } = result.value;
+            const { evaluation: rawEvaluation, svc } = result.value;
             if (!rawEvaluation) {
               continue;
             }
 
+            noteIgnoredHold(rawEvaluation, svc, 'output');
             // Downgrade SANITIZE → FLAG in Phase 2
-            const evaluation = stampGuardrailId(downgradePhase2Sanitize(rawEvaluation, registrationIndex), svc);
+            const evaluation = stampGuardrailId(downgradePhase2Sanitize(rawEvaluation, svc, 'output'), svc);
             outputEvaluations.push(evaluation);
+            phase.push(evaluation);
+          }
 
-            // BLOCK terminates the stream immediately
-            if (evaluation.action === GuardrailAction.BLOCK) {
-              held = [];
-              await notify({ streamId: options.streamId, action: GuardrailAction.BLOCK, guardrailId: guardrailIdOf(evaluation), reasonCode: evaluation.reasonCode, finalText: evaluation.replacementText ?? null, originalText: null });
-              yield* blockedOutput(context, evaluation, options);
-              return;
-            }
+          // A BLOCK terminates the stream immediately: a refusal outranks a hold wherever it sits in registration order
+          const block = decidingBlock(phase);
+          if (block) {
+            held = [];
+            await notify({ streamId: options.streamId, ...blockVerdictOf(block), finalText: block.replacementText ?? null, originalText: null });
+            yield* blockedOutput(context, block, options);
+            return;
           }
         }
 
@@ -904,7 +987,7 @@ export class ParallelGuardrailDispatcher {
         const verdict = await evaluateToolCall(currentChunk);
         if (verdict.outcome === 'block') {
           held = [];
-          await notify({ streamId: options.streamId, action: GuardrailAction.BLOCK, guardrailId: guardrailIdOf(verdict.evaluation), reasonCode: verdict.evaluation.reasonCode, finalText: verdict.evaluation.replacementText ?? null, originalText: null, ...withheldCallsOf(chunk) });
+          await notify({ streamId: options.streamId, ...blockVerdictOf(verdict.evaluation), finalText: verdict.evaluation.replacementText ?? null, originalText: null, ...withheldCallsOf(chunk) });
           yield* blockedOutput(context, verdict.evaluation, options);
           return;
         }
@@ -929,7 +1012,7 @@ export class ParallelGuardrailDispatcher {
         const verdict = await evaluateFinal(synthetic);
         if (verdict.outcome === 'block') {
           held = [];
-          await notify({ streamId: options.streamId, action: GuardrailAction.BLOCK, guardrailId: guardrailIdOf(verdict.evaluation), reasonCode: verdict.evaluation.reasonCode, finalText: verdict.evaluation.replacementText ?? null, originalText: text, ...withheldCallsOf(chunk) });
+          await notify({ streamId: options.streamId, ...blockVerdictOf(verdict.evaluation), finalText: verdict.evaluation.replacementText ?? null, originalText: text, ...withheldCallsOf(chunk) });
           yield* blockedOutput(context, verdict.evaluation, options);
           return;
         }
@@ -953,7 +1036,7 @@ export class ParallelGuardrailDispatcher {
         const verdict = await evaluateFinal(currentChunk);
         if (verdict.outcome === 'block') {
           held = [];
-          await notify({ streamId: options.streamId, action: GuardrailAction.BLOCK, guardrailId: guardrailIdOf(verdict.evaluation), reasonCode: verdict.evaluation.reasonCode, finalText: verdict.evaluation.replacementText ?? null, originalText });
+          await notify({ streamId: options.streamId, ...blockVerdictOf(verdict.evaluation), finalText: verdict.evaluation.replacementText ?? null, originalText });
           yield* blockedOutput(context, verdict.evaluation, options);
           return;
         }
@@ -991,7 +1074,7 @@ function guardrailIdOf(evaluation: GuardrailEvaluationResult): string | undefine
 /** The evaluation with its guard's id in `metadata.guardrailId`, when the guard has an id. */
 function stampGuardrailId(evaluation: GuardrailEvaluationResult, svc: IGuardrailService): GuardrailEvaluationResult {
   if (!svc.id) return evaluation;
-  return { ...evaluation, metadata: { ...(evaluation.metadata ?? {}), guardrailId: svc.id } };
+  return carryGuardFailure(evaluation, { ...evaluation, metadata: { ...(evaluation.metadata ?? {}), guardrailId: svc.id } });
 }
 
 /**

@@ -23,6 +23,8 @@ import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory'
 import { reply, script, type ProviderScript } from './helpers/stubProviders';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 import { Brain } from '../../cognition/memory/retrieval/store/Brain';
+import { conversationScopeKey } from '../../cognition/memory/retrieval/store/conversationScopeKey';
+import { CognitiveMemoryManager } from '../../cognition/memory/CognitiveMemoryManager';
 import { InMemoryLearningStore } from '../../cognition/learning/store/InMemoryLearningStore';
 import { stableIdOfName } from '../../cognition/substrate/personas/stableId';
 
@@ -300,6 +302,9 @@ describe("a soul's identity on the GMI path", () => {
 });
 
 describe("the soul's id as the agent's key", () => {
+  /** The key the turns of the session `s` are filed under for an agent of that id. */
+  const sessionKeyOf = (agentId: string) => conversationScopeKey(agentId, { kind: 'session', id: 's' });
+
   it.each([['the default runtime', {}], ["runtime: 'gmi'", { runtime: 'gmi' }]] as const)(
     'souledAgent() on %s files its turns under the soul agentId, whatever the agent is named',
     async (_name, extra) => {
@@ -309,8 +314,8 @@ describe("the soul's id as the agent's key", () => {
       const a = await souledAgent({ ...stubbed(k, { ...extra, name: 'Support' }), soul: dir } as never);
       try {
         await a.session('s').send('I moved to Lisbon.');
-        await vi.waitFor(async () => expect((await a.memory!.recall('Lisbon', { scope: 'persona', scopeId: 'aria-1' })).length).toBe(2));
-        expect(await a.memory!.recall('Lisbon', { scope: 'persona', scopeId: 'Support' })).toEqual([]);
+        await vi.waitFor(async () => expect((await a.memory!.recall('Lisbon', { scope: 'conversation', scopeId: sessionKeyOf('aria-1') })).length).toBe(2));
+        expect(await a.memory!.recall('Lisbon', { scope: 'conversation', scopeId: sessionKeyOf('Support') })).toEqual([]);
       } finally {
         await a.close();
       }
@@ -324,7 +329,7 @@ describe("the soul's id as the agent's key", () => {
     const a = await souledAgent({ ...stubbed(k), soul: dir } as never);
     try {
       await a.session('s').send('I moved to Lisbon.');
-      await vi.waitFor(async () => expect((await a.memory!.recall('Lisbon', { scope: 'persona', scopeId: 'aria-stone' })).length).toBe(2));
+      await vi.waitFor(async () => expect((await a.memory!.recall('Lisbon', { scope: 'conversation', scopeId: sessionKeyOf('aria-stone') })).length).toBe(2));
     } finally {
       await a.close();
     }
@@ -339,7 +344,7 @@ describe("the soul's id as the agent's key", () => {
       const a = await souledAgent({ ...stubbed(k, extra), soul: dir } as never);
       try {
         await a.session('s').send('I moved to Lisbon.');
-        await vi.waitFor(async () => expect((await a.memory!.recall('Lisbon', { scope: 'persona', scopeId: stableIdOfName('アリア') })).length).toBe(2));
+        await vi.waitFor(async () => expect((await a.memory!.recall('Lisbon', { scope: 'conversation', scopeId: sessionKeyOf(stableIdOfName('アリア')) })).length).toBe(2));
       } finally {
         await a.close();
       }
@@ -379,6 +384,43 @@ describe("the soul's id as the agent's key", () => {
     expect(build).toThrow("set agentId in SOUL.md's front matter, and the soul's id names the brain.");
     // Without a soul the error is the one it was: it ends where it ended.
     expect(() => gmi(stubbed(key(), { memory: { store: { path: path.join(dir, 'y.sqlite') } }, learning: { mode: 'off' } }))).toThrow(/one agent to the learning layer\.$/);
+  });
+
+  it('gmi() with memory.store and learning.agentKey files the memory of an inline soul that gives no id under that key, before and after its text is edited', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const built = vi.spyOn(CognitiveMemoryManager.prototype, 'initialize');
+    const embeddingKey = key();
+    script('openai', embeddingKey, { replies: [] });
+    vi.stubEnv('OPENAI_API_KEY', embeddingKey);
+    const memory = { store: { path: path.join(dir, 'kept.sqlite') }, embedding: { provider: 'openai', model: 'text-embedding-3-small' } };
+    for (const body of ['Be kind.', 'Be kind and brief.']) {
+      const k = key();
+      script('openai', k, { replies: [reply.text('Noted.')] });
+      const a = gmi(stubbed(k, { soul: { content: `---\nrole: helper\n---\n${body}` }, memory, learning: { agentKey: 'k', mode: 'off' } }));
+      try {
+        await a.session('s').send('The deploy key lives in the vault.');
+      } finally {
+        await a.close();
+      }
+    }
+    // The memory's owner, which files its own traces and the persona scopes, is the host's key on both builds.
+    const owners = built.mock.calls.map(([config]) => config.agentId);
+    expect(owners.length).toBeGreaterThanOrEqual(2);
+    expect(new Set(owners)).toEqual(new Set(['k']));
+  });
+});
+
+describe('what the docs say about the id of a soul that gives none', () => {
+  const PACKAGE_ROOT = fileURLToPath(new URL('../../../', import.meta.url));
+  const doc = (file: string) => fs.readFileSync(path.join(PACKAGE_ROOT, file), 'utf8');
+
+  it('name learning.agentKey before the id derived from the text, and say an edit moves the derived one', () => {
+    const gmiDoc = doc('docs/GMI.md');
+    expect(gmiDoc).toContain(
+      "else `learning.agentKey`, else an id derived from the soul's text, which changes when that text changes, so an agent that keeps memory gives its soul an `agentId` or sets `learning.agentKey`",
+    );
+    expect(gmiDoc).toContain("under the persona's id: the soul's id, else a slug of the agent's `name`, else `learning.agentKey`");
   });
 });
 
@@ -465,10 +507,13 @@ describe('what the docs say about the limits closing the prompt', () => {
   const PACKAGE_ROOT = fileURLToPath(new URL('../../../', import.meta.url));
   const doc = (file: string) => fs.readFileSync(path.join(PACKAGE_ROOT, file), 'utf8');
 
-  it('name the system messages a turn can add after the limits', () => {
-    const exception = "on a turn where a memory provider's `getContext` returns text (the wiki's recall on a souled agent), that text is a system message after the limits, and so is the plan of a call with `planning` on";
-    expect(doc('docs/SOUL_FILES.md')).toContain(exception);
-    expect(doc('docs/safety/GUARDRAILS_USAGE.md')).toContain(exception);
+  it('name the system messages a turn can add after the limits, and say recall is not one', () => {
+    const exception = 'the plan of a call with `planning` on is a system message after the limits.';
+    const recall = "A memory provider's recall (the wiki's recall on a souled agent) is a data block in a user-role message, never a system message.";
+    for (const file of ['docs/SOUL_FILES.md', 'docs/safety/GUARDRAILS_USAGE.md']) {
+      expect(doc(file)).toContain(exception);
+      expect(doc(file)).toContain(recall);
+    }
     expect(doc('README.md')).not.toContain('Identity, voice, hard limits, and HEXACO scores');
     expect(doc('README.md')).toContain("With `systemBlocks`, the soul's prose and style are left out and its hard limits still close the prompt.");
   });

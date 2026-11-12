@@ -7,7 +7,7 @@
  * @module agentos/core/logging/kit/processHandlers
  */
 
-import { errorFields } from '../events.js';
+import { listedErrorFields } from '../events.js';
 import { getLoggingState } from '../state.js';
 
 /** What the process handlers write through: an allow-list kit whose map declares AgentOS's process events. */
@@ -49,7 +49,7 @@ export function installProcessHandlers(kit: ProcessKit, options: {
   if (state.removeProcessHandlers) return state.removeProcessHandlers;
   let ending = false;
   const fatal = (error: unknown) => {
-    try { kit.terminal('process.uncaught', errorFields(error)); }
+    try { kit.terminal('process.uncaught', listedErrorFields(error)); }
     finally { (options.onFatal ?? (() => process.exit(1)))(error); }
   };
   const shutdown = (signal: 'SIGTERM' | 'SIGINT') => {

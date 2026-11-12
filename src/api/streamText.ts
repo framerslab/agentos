@@ -62,7 +62,7 @@ import { StreamingReconstructor } from '../core/llm/streaming/StreamingReconstru
 import { globalLLMProviderHealth } from '../core/safety/LLMProviderHealthRegistry.js';
 import { recordAgentOSTurnMetrics, startAgentOSSpan } from '../safety/evaluation/observability/otel.js';
 import { moduleLogger } from '../core/logging/loggerFactory.js';
-import { errorFields, providerName, safePath } from '../core/logging/events.js';
+import { listedErrorFields, providerName, safePath } from '../core/logging/events.js';
 import { isCallMask } from './runtime/pool/redact.js';
 import { createContentSafeConsole } from '../core/logging/contentSafeConsole.js';
 
@@ -289,6 +289,15 @@ export interface StreamTextResult {
    */
   memoryRecall?: Promise<import('../cognition/memory/retrieval/recall/capture.js').MemoryRecallCapture | undefined>;
   /**
+   * On a `gmi()` or `agent({ runtime: 'gmi' })` session's `stream()`: the
+   * conversation history the turn's requests left out to fit the prompt
+   * engine's history budget, as `GenerateTextResult.historyOmitted` reports it
+   * on `send()`. Resolves when the stream ends, to `undefined` when every
+   * request carried the whole history or the turn ended before the GMI
+   * returned its output. Unset on `streamText()` and on the default runtime.
+   */
+  historyOmitted?: Promise<import('../core/llm/IPromptEngine.js').PromptHistoryOmission | undefined>;
+  /**
    * Resolves to the reason the FINAL model step stopped emitting, on the
    * same cadence as {@link usage} (when the stream completes):
    *
@@ -336,20 +345,24 @@ function buildHelperToolExecutionContext(
   runId: string,
   stepIndex: number,
   correlationId?: string,
+  callerUser?: GenerateTextOptions['_callerUser'],
 ): ToolExecutionContext {
   return {
     gmiId: `${source}:${runId}`,
     personaId: `${source}:persona`,
     userContext: {
-      userId: 'system',
+      // The session's user when an agent made the call; a direct call has none, and tools read `system` as no user.
+      userId: callerUser?.userId ?? 'system',
+      ...(callerUser ? { memorySubject: callerUser.subject } : {}),
       source,
     },
     correlationId: correlationId ?? `${source}:tool:${stepIndex + 1}:${randomUUID()}`,
     sessionData: {
-      sessionId: `${source}:${runId}`,
+      sessionId: callerUser?.sessionId ?? `${source}:${runId}`,
       source,
       stepIndex,
     },
+    ...(callerUser?.providerUserId !== undefined ? { callerTurn: { providerUserId: callerUser.providerUserId } } : {}),
   };
 }
 
@@ -1526,6 +1539,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
                 helperToolRunId,
                 step,
                 toolCallId || undefined,
+                opts._callerUser,
               ),
             );
             // One masked output serves the record, the tool-result part and
@@ -1780,7 +1794,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           // The run this leg reports as the one that answered, once it ended.
           let legAnswer: { provider: string; model: string } | undefined;
           try {
-            fallbackLogger.warn('llm.fallback_fired', { api: 'streamText', primaryProvider: providerName(recordedProviderId), fallbackProvider: providerName(legProvider), ...(legSentAs.model !== undefined ? { fallbackModel: safePath(legSentAs.model) } : {}), attempt, ...errorFields(lastFallbackError) });
+            fallbackLogger.warn('llm.fallback_fired', { api: 'streamText', primaryProvider: providerName(recordedProviderId), fallbackProvider: providerName(legProvider), ...(legSentAs.model !== undefined ? { fallbackModel: safePath(legSentAs.model) } : {}), attempt, ...listedErrorFields(lastFallbackError) });
             // A seat's callback is handed the error through the seat's mask, as it would leave the seat.
             opts.onFallback?.(opts.__maskError ? (opts.__maskError(lastFallbackError) as Error) : lastFallbackError, legProvider);
             const fallbackResult = streamText({
@@ -1960,7 +1974,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           const walkSignal = opts.abortSignal;
           const walkStoppedBy = walkSignal?.aborted ? abortReasonError(walkSignal) : undefined;
           if (!walkStoppedBy) {
-            fallbackLogger.error('llm.fallback_exhausted', { api: 'streamText', primaryProvider: providerName(recordedProviderId), attempts: attempt, ...errorFields(lastFallbackError) });
+            fallbackLogger.error('llm.fallback_exhausted', { api: 'streamText', primaryProvider: providerName(recordedProviderId), attempts: attempt, ...listedErrorFields(lastFallbackError) });
           }
           metricStatus = 'error';
           // No leg answered: the trail names this attempt's provider.

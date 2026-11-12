@@ -408,6 +408,75 @@ describe('generateText', () => {
     ]);
   });
 
+  it("tells its tools the caller an agent made the call for: the user, the session and the memory subject", async () => {
+    const observedContexts: any[] = [];
+    const toolTurn = {
+      modelId: 'gpt-4.1-mini',
+      usage: { promptTokens: 8, completionTokens: 2, totalTokens: 10 },
+      choices: [
+        {
+          message: {
+            role: 'assistant',
+            content: null,
+            tool_calls: [{ id: 'tool-1', type: 'function', function: { name: 'whoami', arguments: '{}' } }],
+          },
+          finishReason: 'tool_calls',
+        },
+      ],
+    };
+    const done = {
+      modelId: 'gpt-4.1-mini',
+      usage: { promptTokens: 6, completionTokens: 1, totalTokens: 7 },
+      choices: [{ message: { role: 'assistant', content: 'Done.' }, finishReason: 'stop' }],
+    };
+    hoisted.generateCompletion
+      .mockResolvedValueOnce(toolTurn)
+      .mockResolvedValueOnce(done)
+      .mockResolvedValueOnce(toolTurn)
+      .mockResolvedValueOnce(done);
+    const tools = new Map([
+      [
+        'whoami',
+        {
+          description: 'Says who is asking.',
+          inputSchema: { type: 'object', properties: {} },
+          execute: async (_args: unknown, context: any) => {
+            observedContexts.push(context);
+            return { ok: true };
+          },
+        },
+      ],
+    ]) as any;
+
+    // A session that named its user, then one that named none.
+    await generateText({
+      model: 'openai:gpt-4.1-mini',
+      prompt: 'Who am I?',
+      maxSteps: 2,
+      tools,
+      _callerUser: { userId: 'ana', sessionId: 's1', providerUserId: 'ana', subject: { kind: 'user', id: 'ana' } },
+    } as never);
+    await generateText({
+      model: 'openai:gpt-4.1-mini',
+      prompt: 'Who am I?',
+      maxSteps: 2,
+      tools,
+      _callerUser: { userId: 's2', sessionId: 's2', subject: { kind: 'session', id: 's2' } },
+    } as never);
+
+    expect(observedContexts).toHaveLength(2);
+    expect(observedContexts[0]).toMatchObject({
+      userContext: { userId: 'ana', memorySubject: { kind: 'user', id: 'ana' }, source: 'generateText' },
+      sessionData: { sessionId: 's1', source: 'generateText', stepIndex: 0 },
+      callerTurn: { providerUserId: 'ana' },
+    });
+    expect(observedContexts[1]).toMatchObject({
+      userContext: { userId: 's2', memorySubject: { kind: 'session', id: 's2' }, source: 'generateText' },
+      sessionData: { sessionId: 's2' },
+    });
+    expect(observedContexts[1].callerTurn).toBeUndefined();
+  });
+
   it('uses onAfterGeneration text rewrites when continuing a text-fallback tool loop', async () => {
     hoisted.generateCompletion
       .mockResolvedValueOnce({

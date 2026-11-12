@@ -18,7 +18,7 @@ import {
 import { OpenAITranslationProvider } from './providers/OpenAITranslationProvider';
 import { DeepLTranslationProvider } from './providers/DeepLTranslationProvider';
 import { languageLog } from './log';
-import { errorFields, safeWord } from '../../../core/logging/events.js';
+import { listedErrorFields, safeWord } from '../../../core/logging/events.js';
 
 export interface AgentOSLanguageConfig {
   defaultLanguage: string;
@@ -94,7 +94,7 @@ export class LanguageService implements ILanguageService {
         results.forEach(r => aggregated.push(r));
       } catch (err) {
         // One provider's failure leaves the others' results.
-        languageLog.warn('language.detection_failed', { detector: safeWord(provider.id), ...errorFields(err) });
+        languageLog.warn('language.detection_failed', { detector: safeWord(provider.id), ...listedErrorFields(err) });
       }
     }
     const byCode: Record<string, DetectedLanguageResult> = {};

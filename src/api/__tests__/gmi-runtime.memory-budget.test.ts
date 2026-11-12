@@ -10,6 +10,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import pino from 'pino';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
+vi.mock('../../core/llm/providers/implementations/AnthropicProvider', async () => ({ AnthropicProvider: (await import('./helpers/stubProviders')).stubProviderClass('anthropic') }));
 // Trace ids from a counter that each agent starts again: the block lists the ids of the traces in focus.
 const ids = vi.hoisted(() => ({ next: 0 }));
 vi.mock('../../cognition/memory/core/util/crossPlatformCrypto', async (importOriginal) => {
@@ -304,5 +305,153 @@ describe('agent() on the default runtime', () => {
     expect(() => agent({ provider: 'openai', model: 'stub-model', apiKey: key(), memory: { recall: { capture: 'metadata' } } } as unknown as AgentOptions))
       .toThrow(/memory\.recall\.capture.*runtime: 'gmi'/s);
     expect(events('memory.recall.option_rejected')).toEqual([expect.objectContaining({ option: 'capture', reason: 'unsupported_runtime' })]);
+  });
+});
+
+describe("agent({ runtime: 'gmi' }) memory.recall beside the other memory options", () => {
+  it("'metadata+stream' on a session records what 'metadata' records; the session's stream carries no memory part", async () => {
+    const k = key(); const emb = key();
+    script('openai', k, { replies: [reply.text('Noted.'), reply.text('Pier 3.')] });
+    script('openai', emb, { replies: [] });
+    vi.stubEnv('OPENAI_API_KEY', emb);
+    const a = withRecall(k, { capture: 'metadata+stream' });
+    try {
+      const session = a.session('s');
+      await session.send(STATEMENTS[0]);
+      const result = session.stream(QUESTION);
+      const types: string[] = [];
+      for await (const part of result.fullStream) types.push(part.type);
+      expect(new Set(types)).toEqual(new Set(['text']));
+      const record = await (result as { memoryRecall?: Promise<MemoryRecallCapture | undefined> }).memoryRecall;
+      expect(record?.version).toBe('memory-recall-capture/1');
+      expect(record?.candidates.length).toBeGreaterThan(0);
+    } finally {
+      await a.close();
+    }
+  });
+
+  it('memory.recall beside a cognition.memory of its own is not applied: one option_ignored line names it', async () => {
+    const k = key();
+    script('openai', k, { replies: [] });
+    const a = agent({
+      runtime: 'gmi', provider: 'openai', model: 'stub-model', apiKey: k, fallbackProviders: [],
+      memory: { recall: { budget: { totalTokens: 500 } } },
+      cognition: { memory: { embedding: { provider: 'openai' } }, mechanisms: false },
+    } as unknown as AgentOptions);
+    expect(events('memory.recall.option_ignored')).toEqual([expect.objectContaining({ option: 'memory_recall' })]);
+    await a.close();
+  });
+
+  it("memory.recall inside the cognition's own memory is applied, and writes no option_ignored line", async () => {
+    const k = key();
+    script('openai', k, { replies: [] });
+    const a = agent({
+      runtime: 'gmi', provider: 'openai', model: 'stub-model', apiKey: k, fallbackProviders: [],
+      cognition: { memory: { embedding: { provider: 'openai' }, recall: { budget: { totalTokens: 500 } } }, mechanisms: false },
+    } as unknown as AgentOptions);
+    expect(events('memory.recall.option_ignored')).toEqual([]);
+    await a.close();
+  });
+
+  it('memory: null is memory off, as everywhere else in the agent: memoryProviderOptions.tokenBudget is not reported beside cognitive memory', async () => {
+    const k = key();
+    script('openai', k, { replies: [] });
+    const a = agent({
+      runtime: 'gmi', provider: 'openai', model: 'stub-model', apiKey: k, fallbackProviders: [],
+      memory: null, memoryProviderOptions: { tokenBudget: 900 },
+    } as unknown as AgentOptions);
+    expect(events('memory.recall.option_ignored')).toEqual([]);
+    await a.close();
+  });
+});
+
+describe("agent({ runtime: 'gmi' }) memory budget across a fallback hop", () => {
+  const overloaded = () => Object.assign(new Error('overloaded'), { httpStatus: 529 });
+
+  /** The block in a provider request: from the preamble heading to where the prompt engine resumes with the query; '' when none. */
+  function blockIn(request: ProviderScript['seen'][number] | undefined): string {
+    expect(request, 'the model call').toBeDefined();
+    const holder = request!.messages.map(textOf).find((text) => text.includes(PREAMBLE_HEADING));
+    if (!holder) return '';
+    const start = holder.indexOf(PREAMBLE_HEADING);
+    const end = holder.indexOf('\n\nUser Query:', start);
+    return holder.slice(start, end === -1 ? undefined : end);
+  }
+
+  /**
+   * Files the statements through the primary, clears the history, and asks. With `fail`, the primary fails before
+   * any output on the question and the Anthropic fallback serves it. Returns the question's result, the embedding
+   * calls the question made, and both scripts.
+   */
+  async function turn(o: { primaryWindow: number; fallbackWindow: number; fail: boolean }) {
+    ids.next = 0;
+    const k = key(); const fb = key(); const emb = key();
+    const primary = script('openai', k, { window: o.primaryWindow, replies: [...STATEMENTS.map(() => reply.text('Noted.')), o.fail ? overloaded() : reply.text('Pier 3.')] });
+    const fallback = script('anthropic', fb, { window: o.fallbackWindow, replies: [reply.text('Pier 3.')] });
+    const embedder = script('openai', emb, { replies: [] });
+    vi.stubEnv('OPENAI_API_KEY', emb);
+    vi.stubEnv('ANTHROPIC_API_KEY', fb);
+    const a = agent({
+      runtime: 'gmi', name: 'Harbor', provider: 'openai', model: 'stub-model', apiKey: k,
+      fallbackProviders: [{ provider: 'anthropic', model: 'claude-x' }],
+      cognition: { memory: { embedding: { provider: 'openai' } }, mechanisms: false },
+    } as unknown as AgentOptions);
+    try {
+      const session = a.session('s');
+      for (const statement of STATEMENTS) await session.send(statement);
+      session.clear();
+      logged.length = 0;
+      const before = embedder.embedCalls;
+      const result = await session.send(QUESTION);
+      return { result, embedCalls: embedder.embedCalls - before, primary, fallback };
+    } finally {
+      await a.close();
+    }
+  }
+
+  it("the fallback hop's block is re-rendered at that hop's share from the turn's one recall", async () => {
+    const control = await turn({ primaryWindow: 128_000, fallbackWindow: 3_000, fail: false });
+    expect(control.result.provider).toBe('openai');
+    expect(control.result.memoryRecall!.budget).toMatchObject({ requested: 1600, effective: 1600, hop: 0 });
+    expect(control.result.memoryRecall!.budget.reassembled).toBeUndefined();
+    // What reached the serving model: PromptEngine's count of the block, and no other context on this agent.
+    expect(control.result.memoryRecall!.delivery).toEqual({ memoryBlockTokens: expect.any(Number) });
+    expect(control.result.memoryRecall!.delivery!.memoryBlockTokens).toBeGreaterThan(600);
+    expect(events('memory.recall.budget_clamped')).toEqual([]);
+
+    const fell = await turn({ primaryWindow: 128_000, fallbackWindow: 3_000, fail: true });
+    expect(fell.result.provider).toBe('anthropic');
+    // The re-render embeds nothing: the turn made the embedding calls a turn on one model makes.
+    expect(fell.embedCalls).toBe(control.embedCalls);
+    expect(fell.result.memoryRecall!.budget).toMatchObject({ requested: 1600, effective: 600, clampReason: 'prompt_share', promptShareTokens: 600, otherContextTokens: 0, hop: 1, reassembled: true });
+    expect(fell.result.memoryRecall!.tokensUsed).toBeLessThanOrEqual(600);
+    // The record's delivery is the fallback hop's: the re-rendered block as PromptEngine counted it for that model.
+    expect(fell.result.memoryRecall!.delivery).toEqual({ memoryBlockTokens: expect.any(Number) });
+    expect(fell.result.memoryRecall!.delivery!.memoryBlockTokens).toBeGreaterThan(0);
+    expect(fell.result.memoryRecall!.delivery!.memoryBlockTokens).toBeLessThanOrEqual(600);
+    // The failed primary hop was sent the first rendering; the fallback, the re-render.
+    expect(tokensOf(blockIn(fell.primary.seen.at(-1)))).toBeGreaterThan(600);
+    const block = blockIn(fell.fallback.seen[0]);
+    expect(block).toContain(PREAMBLE_HEADING);
+    expect(tokensOf(block)).toBeLessThanOrEqual(600);
+    expect(block).not.toContain('…[cut]');
+    expect(events('memory.recall.budget_clamped')).toEqual([expect.objectContaining({ requested: 1600, effective: 600, hop: 1, reason: 'prompt_share' })]);
+  });
+
+  it("a fallback whose share holds the block serves the turn's first rendering, and the record names it, not the failed hop's re-render", async () => {
+    const fell = await turn({ primaryWindow: 3_000, fallbackWindow: 128_000, fail: true });
+    expect(fell.result.provider).toBe('anthropic');
+    const record = fell.result.memoryRecall!;
+    expect(record.budget).toMatchObject({ requested: 1600, effective: 1600, promptShareTokens: 25_600, hop: 1 });
+    expect(record.budget.reassembled).toBeUndefined();
+    expect(record.budget.clampReason).toBeUndefined();
+    // The primary hop, which failed, was sent the re-render at 600; the fallback that served, the first rendering.
+    expect(tokensOf(blockIn(fell.primary.seen.at(-1)))).toBeLessThanOrEqual(600);
+    const served = blockIn(fell.fallback.seen[0]);
+    expect(tokensOf(served)).toBeGreaterThan(600);
+    expect(record.tokensUsed).toBeGreaterThan(600);
+    expect(record.delivery).toEqual({ memoryBlockTokens: expect.any(Number) });
+    expect(record.delivery!.memoryBlockTokens).toBeGreaterThan(0);
+    expect(events('memory.recall.budget_clamped')).toEqual([expect.objectContaining({ requested: 1600, effective: 600, hop: 0, reason: 'prompt_share' })]);
   });
 });

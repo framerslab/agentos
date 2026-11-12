@@ -559,6 +559,74 @@ describe('streamText', () => {
     });
   });
 
+  it("tells its tools the caller an agent made the call for: the user, the session and the memory subject", async () => {
+    const observedContexts: any[] = [];
+    hoisted.generateCompletionStream
+      .mockImplementationOnce(async function* () {
+        yield {
+          id: 'step-1',
+          object: 'chat.completion.chunk',
+          created: 1,
+          modelId: 'gpt-4.1-mini',
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: 'assistant',
+                content: null,
+                tool_calls: [{ id: 'tool-1', type: 'function', function: { name: 'whoami', arguments: '{}' } }],
+              },
+              finishReason: 'tool_calls',
+            },
+          ],
+          isFinal: true,
+          usage: { promptTokens: 8, completionTokens: 2, totalTokens: 10 },
+        };
+      })
+      .mockImplementationOnce(async function* () {
+        yield {
+          id: 'step-2',
+          object: 'chat.completion.chunk',
+          created: 2,
+          modelId: 'gpt-4.1-mini',
+          choices: [{ index: 0, message: { role: 'assistant', content: 'Done.' }, finishReason: 'stop' }],
+          responseTextDelta: 'Done.',
+          isFinal: true,
+          usage: { promptTokens: 6, completionTokens: 1, totalTokens: 7 },
+        };
+      });
+
+    const result = streamText({
+      model: 'openai:gpt-4.1-mini',
+      prompt: 'Who am I?',
+      maxSteps: 2,
+      tools: new Map([
+        [
+          'whoami',
+          {
+            description: 'Says who is asking.',
+            inputSchema: { type: 'object', properties: {} },
+            execute: async (_args: unknown, context: any) => {
+              observedContexts.push(context);
+              return { success: true, output: { ok: true } };
+            },
+          },
+        ],
+      ]),
+      _callerUser: { userId: 'ana', sessionId: 's1', providerUserId: 'ana', subject: { kind: 'user', id: 'ana' } },
+    } as never);
+    for await (const _part of result.fullStream) {
+      // drain
+    }
+
+    expect(observedContexts).toHaveLength(1);
+    expect(observedContexts[0]).toMatchObject({
+      userContext: { userId: 'ana', memorySubject: { kind: 'user', id: 'ana' }, source: 'streamText' },
+      sessionData: { sessionId: 's1', source: 'streamText', stepIndex: 0 },
+      callerTurn: { providerUserId: 'ana' },
+    });
+  });
+
   it('propagates cacheReadInputTokens + cacheCreationInputTokens onto result.usage', async () => {
     // Final chunk from the provider mirrors Anthropic's streaming shape:
     // cache_read_input_tokens + cache_creation_input_tokens ride on the

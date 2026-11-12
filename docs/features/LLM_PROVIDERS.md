@@ -59,14 +59,14 @@ AgentOS abstracts LLM access behind a unified [`IProvider`](https://github.com/f
 | **Together** | `TOGETHER_API_KEY` | `meta-llama/Llama-3.3-70B-Instruct-Turbo` | Yes | Yes | No | No | $1.04 / $1.04 |
 | **Mistral** | `MISTRAL_API_KEY` | `mistral-large-latest` | Yes | Yes | No | Yes | $0.50 / $1.50 |
 | **xAI** | `XAI_API_KEY` | `grok-2` | Yes | Yes | Yes | No | Not on xAI's model list |
-| **OpenRouter** | `OPENROUTER_API_KEY` | `openai/gpt-4o` | Yes | Yes | Yes* | Yes* | $2.50 / $10.00 |
+| **OpenRouter** | `OPENROUTER_API_KEY` | `openai/gpt-4o-mini` | Yes | Yes | Yes* | Yes* | $0.15 / $0.60 |
 | **Requesty** | `REQUESTY_API_KEY` | `openai/gpt-4o` | Yes | Yes | Yes* | Yes* | $2.50 / $10.00 |
 | **LiteLLM** | _(none read; pass `apiKey`)_ | _(none; pass `model`)_ | Yes | Yes* | Yes* | Yes* | Your proxy's upstream prices |
 | **Ollama** | `OLLAMA_BASE_URL` | `llama3.2` | Yes | Partial | Model-dep. | Yes | Free |
 | **Claude Code CLI** | _(PATH detection)_ | `claude-sonnet-4-6` | Yes | Yes | Yes | No | Free* |
 | **Gemini CLI** | _(PATH detection)_ | `gemini-3.5-flash` | Yes | Partial** | Yes | No | Free* |
 
-Prices are the vendors' list prices, read on 2026-10-12; [Prices and Cost Reporting](#prices-and-cost-reporting) links each source.
+Prices are the vendors' list prices, read on 2026-10-12 (OpenRouter's on 2026-11-11); [Prices and Cost Reporting](#prices-and-cost-reporting) links each source.
 
 *CLI providers use your existing subscription — $0 per token.
 **Gemini CLI tool calling uses XML prompt-based parsing (less reliable than native API tool calling).
@@ -316,18 +316,18 @@ Every provider reports each call's token usage. Whether the result also carries 
 
 Prices for a host: `openAIModelPricing(modelId)` and `anthropicModelPricing(modelId)`, exported from `@framers/agentos/safety/runtime` and from the package root with the types `OpenAIModelPrice` and `AnthropicModelPrice`, give a spend guard a call's list price in USD per 1K tokens before the call is made, without loading a provider: `{ input, output, cachedInput? }` for OpenAI, `cachedInput` being the cached-input rate [OpenAI's pricing page](https://developers.openai.com/api/docs/pricing) lists for the model (absent where it lists none, for the pro models, or no longer lists the model; such a model's cache reads are billed at `input`), and `{ input, output, cacheRead, cacheWrite, cacheWriteOneHour, longContext? }` for Claude, `cacheWrite` and `cacheWriteOneHour` being the 5-minute and 1-hour prompt-cache writes at 1.25x and 2x the input rate. `modelPricing(providerId, modelId)` reads both tables, and a table a host registers for any other provider with `registerModelPricing()`, in one shape in USD per million tokens with every tier a request can reach; `estimateMaxCallCostUSD()` bounds a call's cost with it ([Pricing a call before it is sent](../safety/SAFETY_PRIMITIVES.md#pricing-a-call-before-it-is-sent)). `anthropicModelPricing` resolves an exact catalog id, a dated snapshot of a bare id (`claude-sonnet-5-5-20261001`) and the bare alias of a dated row (`claude-opus-4-5`), and answers `undefined` for any other id (`claude-opus-4`, `claude-sonnet-4`, `claude`), never a prefix guess; a retired snapshot (`claude-opus-4-20250514`) prices by its exact id alone. `longContext` is present on a model priced by prompt length (Claude Haiku 5.5: `{ fromTokens: 100000, input, output, cacheRead, cacheWrite, cacheWriteOneHour }`) and names the prompt size above which its long `input`, `output` and `cacheRead` rates apply; `estimateAnthropicCostUSD` bills a response whose prompt, cached tokens included, is over that size at the same long rates.
 
-The list prices of the default text models, in USD per 1M tokens, as each vendor's page gave them on 2026-10-12. Each vendor's other models cost more or less; the linked pages list them.
+The list prices of the default text models, in USD per 1M tokens, as each vendor's page gave them on 2026-10-12 (OpenRouter's on 2026-11-11). Each vendor's other models cost more or less; the linked pages list them.
 
 | Provider | Default text model | Input | Output | Source |
 |----------|--------------------|-------|--------|--------|
 | Ollama | `llama3.2` | 0 | 0 | Runs on your machine |
 | Claude Code CLI | `claude-sonnet-4-6` | 0 | 0 | Uses your existing subscription |
 | Gemini CLI | `gemini-3.5-flash` | 0 | 0 | Uses your existing subscription |
+| OpenRouter | `openai/gpt-4o-mini` | $0.15 | $0.60 | [OpenRouter: GPT-4o-mini](https://openrouter.ai/openai/gpt-4o-mini) |
 | Gemini | `gemini-2.5-flash` | $0.30 ($1.00 for audio) | $2.50, thinking included | [Gemini API pricing](https://ai.google.dev/gemini-api/docs/pricing) |
 | Mistral | `mistral-large-latest` (Mistral Large 3) | $0.50 | $1.50 | [Mistral Large 3](https://docs.mistral.ai/models/mistral-large-3-25-12) |
 | Together | `meta-llama/Llama-3.3-70B-Instruct-Turbo` | $1.04 | $1.04 | [Together AI pricing](https://www.together.ai/pricing) |
 | OpenAI | `gpt-4o` | $2.50 | $10.00 | [OpenAI pricing](https://developers.openai.com/api/docs/pricing) |
-| OpenRouter | `openai/gpt-4o` | $2.50 | $10.00 | [OpenRouter: GPT-4o](https://openrouter.ai/openai/gpt-4o) |
 | Requesty | `openai/gpt-4o` | $2.50 | $10.00 | [Requesty model list](https://router.requesty.ai/v1/models) |
 | Anthropic | `claude-sonnet-4-6` | $3.00 | $15.00 | [Anthropic pricing](https://platform.claude.com/docs/en/about-claude/pricing) |
 | Groq | `llama-3.3-70b-versatile` | On request | On request | [Groq models](https://console.groq.com/docs/models): enterprise contracts only ([Groq](#groq)) |
@@ -537,6 +537,11 @@ Popular OpenRouter models:
 - `anthropic/claude-sonnet-4-5-20250929`
 - `google/gemini-2.5-flash`
 - `meta-llama/llama-3.3-70b-instruct`
+
+`provider: 'openrouter'` without a model uses `openai/gpt-4o-mini`, and so does
+a persona that names no model on an `AgentOS` runtime whose default provider is
+OpenRouter, unless the runtime's `gmiManagerConfig.defaultGMIBaseConfigDefaults`
+names another model. Name the model for a stronger one.
 
 ### Requesty
 
@@ -771,8 +776,8 @@ model, the id after a `provider:` or `provider/` prefix) or as it is sent; on
 a gateway that names models `vendor/model` (OpenRouter, Requesty) the sent id
 is also read after the vendor, and every id also without a `-YYYYMMDD` release
 date. So `claude-sonnet-4-6` and `anthropic:claude-sonnet-4-6` skip
-`{ provider: 'openrouter', model: 'anthropic/claude-sonnet-4-6' }`, `gpt-4o`
-skips `{ provider: 'openrouter' }` (sent as `openai/gpt-4o`),
+`{ provider: 'openrouter', model: 'anthropic/claude-sonnet-4-6' }`, `gpt-4o-mini`
+skips `{ provider: 'openrouter' }` (sent as `openai/gpt-4o-mini`),
 `anthropic/claude-sonnet-4-6` skips an Anthropic entry whether it is sent to
 Anthropic or rerouted to OpenRouter, and `claude-haiku-4-5` skips
 `claude-haiku-4-5-20251001` either way, while

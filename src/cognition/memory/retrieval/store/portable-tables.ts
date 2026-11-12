@@ -7,7 +7,8 @@
  * 2. `migrations/v1-to-v2.ts` (migration walk order: parents before children for FKs)
  * 3. `__tests__/Brain.postgres.test.ts` (cleanup between tests)
  *
- * Adding a new portable table requires editing only this file.
+ * Adding a new portable table requires editing only this file. The two tables of the conversation scopes
+ * (`CONVERSATION_SCOPE_TABLES`) are exported and imported with them.
  *
  * @module memory/retrieval/store/portable-tables
  */
@@ -33,6 +34,13 @@ export const PORTABLE_TABLES = [
 ] as const;
 
 /**
+ * The tables of the conversation scopes, which a SQLite export and import carry beside the portable tables: the
+ * registry of scopes, then each subject's wiki pages. They are a list of their own because the v1-to-v2 migration
+ * walks `PORTABLE_TABLES` and they are newer than the schema it migrates.
+ */
+export const CONVERSATION_SCOPE_TABLES = ['memory_scopes', 'memory_pages'] as const;
+
+/**
  * Composite primary key columns for each portable table, used by
  * `dialect.insertOrReplace` as the conflict target during merge import.
  *
@@ -54,6 +62,8 @@ export const PORTABLE_TABLE_PRIMARY_KEYS: Record<string, string> = {
   prospective_items: 'brain_id, id',
   archived_traces: 'brain_id, trace_id',
   archive_access_log: 'brain_id, trace_id, accessed_at',
+  memory_scopes: 'brain_id, scope, scope_id',
+  memory_pages: 'brain_id, scope, scope_id, page_id',
 };
 
 export type PortableTable = typeof PORTABLE_TABLES[number];

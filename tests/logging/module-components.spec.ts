@@ -46,6 +46,7 @@ const handles = {
   'src/api/server/AgentOSServer.ts': ['http', 'agentos_server'],
   'src/cognition/nlp/language/log.ts': ['language', 'language_service'],
   'src/cognition/memory/retrieval/recall/log.ts': ['memory.recall', 'cognitive_memory'],
+  'src/safety/guardrails/log.ts': ['guardrails', 'guardrails'],
 } as const;
 
 it('binds a fixed component at every covered source module', async () => {

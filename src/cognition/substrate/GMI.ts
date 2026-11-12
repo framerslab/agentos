@@ -50,10 +50,10 @@ import { applyTraitOverlay, droppedTraitPatchWarning, PERSONALITY_PROMPT_PRIORIT
 import type { GuardedMemoryWrite, ILearnerSession, ToolLearningContext, TurnScopes } from '../learning/types.js';
 import { explicitTurnUserOf, isTurnScopes, toolLearningContextFor } from '../learning/toolContext.js';
 import { IWorkingMemory } from './memory/IWorkingMemory';
-import { IPromptEngine, PromptExecutionContext, PromptComponents, PromptEngineResult, ModelTargetInfo } from '../../core/llm/IPromptEngine';
+import { IPromptEngine, PromptExecutionContext, PromptComponents, PromptEngineResult, ModelTargetInfo, type PromptHistoryOmission } from '../../core/llm/IPromptEngine';
 import { IRetrievalAugmentor, RagRetrievalOptions, RagDocumentInput, RagIngestionOptions, RagMemoryCategory } from '../rag/IRetrievalAugmentor';
 
-import { ChatMessage, ModelCompletionOptions, ModelCompletionResponse, ModelUsage, ThinkingBlock } from '../../core/llm/providers/IProvider';
+import { ChatMessage, IProvider, ModelCompletionOptions, ModelCompletionResponse, ModelUsage, ThinkingBlock } from '../../core/llm/providers/IProvider';
 import type { ZodType } from 'zod';
 import type { CompletionAttempt, CompletionOutcome, CompletionResolution, CompletionRoute } from '../../api/runtime/completionGateway.js';
 import { checkStructuredReply, resolveStructuredReply, structuredRepairMessage, StructuredReplyConfigError, type StructuredReplyOutput } from '../../api/runtime/structuredReply.js';
@@ -70,8 +70,9 @@ import { GMIError, GMIErrorCode, createGMIErrorFromError } from '../../core/util
 import type { ICognitiveMemoryManager } from '../memory/CognitiveMemoryManager.js';
 import type { AssembledMemoryContext } from '../memory/core/types.js';
 import type { MemoryRecallCapture } from '../memory/retrieval/recall/capture.js';
+import { effectiveRecallBudget, estimateMemoryTokens } from '../memory/retrieval/recall/budget.js';
 import { ConversationHistoryManager } from './ConversationHistoryManager';
-import { CognitiveMemoryBridge, type CognitiveMemoryTurnLearning, type CognitiveMemoryTurnScope } from './CognitiveMemoryBridge';
+import { CognitiveMemoryBridge, captureWithoutBlock, type CognitiveMemoryTurnLearning, type CognitiveMemoryTurnScope } from './CognitiveMemoryBridge';
 import { SentimentTracker } from './SentimentTracker';
 import { MetapromptExecutor } from './MetapromptExecutor';
 import { feedbackTraceMessage, type NormalizedUserFeedback } from './userFeedback';
@@ -497,12 +498,8 @@ export class GMI implements IGMI {
       utilityAI: this.utilityAI,
       getPersona: () => this.activePersona,
       addTraceEntry: (type, message, details) => this.addTraceEntry(type as ReasoningEntryType, message, details),
-      getModelAndProvider: (preferredModel, preferredProvider) => this.getModelAndProviderForLLMCall(
-        preferredModel,
-        preferredProvider,
-        this.activePersona.defaultModelId || this.config.defaultLlmModelId,
-        this.activePersona.defaultProviderId || this.config.defaultLlmProviderId,
-      ),
+      getModelAndProvider: (preferredModel, preferredProvider) =>
+        this.getModelAndProviderForLLMCall(preferredModel, preferredProvider),
       onMoodUpdate: (mood) => {
         this.currentGmiMood = mood;
         this.workingMemory.set('currentGmiMood', this.currentGmiMood);
@@ -798,10 +795,7 @@ export class GMI implements IGMI {
     const threadIds = this.turnMemoryScope?.sessionId
       ? [...new Set([memoryTurn.conversationId, memoryTurn.sessionId].filter((id): id is string => typeof id === 'string' && id.trim() !== ''))]
       : undefined;
-    const modelId =
-      this.modelSelectionFor(turnInput).modelId ||
-      this.activePersona.defaultModelId ||
-      this.config.defaultLlmModelId;
+    const modelId = this.resolveModelSelection(this.modelSelectionFor(turnInput)).modelId;
     const answer = await answerWithin(
       Promise.resolve().then(() =>
         session.prepareTurn({
@@ -1528,6 +1522,8 @@ export class GMI implements IGMI {
     // The recall capture of the turn's memory assembly, for the turn's output: the error output carries it too, so a
     // turn that fails after its memory was assembled still reports what that assembly recalled.
     let turnMemoryRecall: MemoryRecallCapture | undefined;
+    // The history the turn's requests left out: the report of the serving request that left the most messages out.
+    let turnHistoryOmitted: PromptHistoryOmission | undefined;
 
     // The turn's stop. The caller's abort signal (a session's close()) and this
     // GMI's shutdown() both abort it; the model call in progress then ends with
@@ -1827,22 +1823,18 @@ export class GMI implements IGMI {
           conversationHistory: promptConversation.conversationHistory,
           currentTurnMessageCount: promptConversation.currentTurnMessageCount,
           userInput: promptConversation.userInput,
-          retrievedContext: [
-            assembledMemoryContext?.contextText,
-            augmentedContextFromRAG,
-            injectedLongTermMemoryContext,
-          ].filter(Boolean).join("\n\n---\n\n"),
-          assembledMemoryContext: assembledMemoryContext ?? undefined,
+          // The RAG text and the long-term-memory text. The memory block goes to PromptEngine on its own, per model hop
+          // (`memoryContextText`), so that a reduction of the prompt never cuts or summarises it.
+          retrievedContext: [augmentedContextFromRAG, injectedLongTermMemoryContext].filter(Boolean).join("\n\n---\n\n"),
           // tools: this.activePersona.embeddedTools, // If ITool[] and PromptComponents.tools takes ITool[]
         };
 
         const gateway = this.config.completionGateway;
         // The turn's model and provider (AgentOSInput.options.preferredModelId and preferredProviderId) over the
         // persona's and the config's default: a host that picks a model of another provider names that provider with
-        // it. A tool continuation that names neither calls those of the turn it continues.
-        const modelIdToUse = streamSelection.modelId || this.activePersona.defaultModelId || this.config.defaultLlmModelId;
-        const providerIdForModel =
-          streamSelection.providerId || this.activePersona.defaultProviderId || this.config.defaultLlmProviderId;
+        // it, and a provider named without a model runs on its own default model. A tool continuation that names
+        // neither calls those of the turn it continues.
+        const { modelId: modelIdToUse, providerId: providerIdForModel } = this.resolveModelSelection(streamSelection);
 
         if (!modelIdToUse) {
             throw new GMIError("Could not determine modelId for LLM call.", GMIErrorCode.CONFIGURATION_ERROR, { turnId });
@@ -1989,6 +1981,8 @@ export class GMI implements IGMI {
         // The route the gateway's Anthropic hop took, read with it once the stream has ended.
         let stepSchemaRoute = undefined as CompletionAttempt['schemaRoute'];
         let modelTargetInfo!: ModelTargetInfo;
+        // The history the attempt's prompt left out, set with each hop's prompt; the serving hop's is the step's.
+        let stepHistoryOmitted: PromptHistoryOmission | undefined;
 
         // One attempt per hop. A failure before any output moves to the next
         // hop and rebuilds the prompt for that hop's model; after output
@@ -2008,11 +2002,76 @@ export class GMI implements IGMI {
               }
             : await this.legacyModelTargetInfo(modelIdToUse, providerIdForModel);
 
+          // The memory block for this hop's model: the turn's first rendering where the model's share of the prompt
+          // holds it, else the block rendered again at what the share leaves after the RAG and long-term-memory text
+          // (no second recall). Later calls of the turn (tool continuations) assembled nothing and send no block.
+          let hopMemoryContext: AssembledMemoryContext | null = assembledMemoryContext;
+          let hopCapture: MemoryRecallCapture | undefined = assembledMemoryContext?.capture;
+          const ragTokens = estimateMemoryTokens(augmentedContextFromRAG);
+          const longTermMemoryTokens = estimateMemoryTokens(injectedLongTermMemoryContext);
+          if (assembledMemoryContext && this.memoryBridge) {
+            const hop = resolution?.hop ?? 0;
+            const hopBudget = effectiveRecallBudget({
+              totalTokens: this.memoryBridge.budgetTokens(),
+              contextTokens: modelTargetInfo.optimalContextTokens || modelTargetInfo.maxContextTokens,
+              otherContextTokens: ragTokens + longTermMemoryTokens,
+            });
+            hopMemoryContext = await this.memoryBridge.contextForHop(assembledMemoryContext, hopBudget, hop);
+            hopCapture = hopMemoryContext
+              ? hopMemoryContext.capture
+              : assembledMemoryContext.capture && captureWithoutBlock(assembledMemoryContext.capture, hopBudget, hop);
+          }
+          // An engine that reads `memoryContextText` takes the block on its own; any other (a host's own IPromptEngine)
+          // takes it joined in front of the other retrieved context, as before the field existed, so it is still sent.
+          const hopMemoryText = hopMemoryContext?.contextText;
+          const hopComponents: PromptComponents = {
+            ...promptComponents,
+            ...(hopMemoryText
+              ? this.promptEngine.acceptsMemoryContextText === true
+                ? { memoryContextText: hopMemoryText }
+                : { retrievedContext: [hopMemoryText, promptComponents.retrievedContext].filter(Boolean).join("\n\n---\n\n") }
+              : {}),
+            ...(hopMemoryContext ? { assembledMemoryContext: hopMemoryContext } : {}),
+          };
+
           const promptEngineResult: PromptEngineResult = await this.promptEngine.constructPrompt(
-            promptComponents, modelTargetInfo, promptExecContext
+            hopComponents, modelTargetInfo, promptExecContext
           );
+          if (hopCapture) {
+            // What reached this hop's model: PromptEngine's own count of the block, and of the other context after it
+            // reduced the prompt (the block is never reduced), with the reduction named.
+            const counts = promptEngineResult.metadata?.contextTokens;
+            const details = promptEngineResult.modificationDetails;
+            const cutBy = details?.summarizedComponents?.includes('retrievedContext')
+              ? ('prompt_engine_summarize' as const)
+              : details?.truncatedComponents?.includes('retrievedContext') || details?.removedComponents?.includes('retrievedContext')
+                ? ('prompt_engine_truncate' as const)
+                : undefined;
+            const issueCodes = (promptEngineResult.issues ?? [])
+              .map((issue) => issue.code)
+              .filter((code) => code === 'RAG_SUMMARIZATION_FAILED' || code === 'TOKEN_BUDGET_EXCEEDED_POST_OPT');
+            // A fresh object for each hop (contextForHop copies), so the turn's first rendering is never written.
+            turnMemoryRecall = {
+              ...hopCapture,
+              delivery: {
+                memoryBlockTokens: counts?.memory ?? 0,
+                ...(ragTokens + longTermMemoryTokens > 0
+                  ? { otherContext: { ragTokens, longTermMemoryTokens, deliveredTokens: counts?.otherAfter ?? 0, ...(cutBy ? { cutBy } : {}) } }
+                  : {}),
+                ...(issueCodes.length > 0 ? { issueCodes } : {}),
+              },
+            };
+          }
 
           promptEngineResult.issues?.forEach(issue => this.addTraceEntry(ReasoningEntryType.WARNING, `Prompt Engine Issue: ${issue.message}`, issue as any));
+          stepHistoryOmitted = promptEngineResult.modificationDetails?.historyOmitted;
+          if (stepHistoryOmitted) {
+            this.addTraceEntry(
+              ReasoningEntryType.PROMPT_CONSTRUCTION_DETAIL,
+              `The prompt for model ${modelTargetInfo.modelId} leaves out the ${stepHistoryOmitted.messages} oldest history message(s), about ${stepHistoryOmitted.tokens} tokens, to fit the history budget.`,
+              { historyOmitted: { ...stepHistoryOmitted } },
+            );
+          }
           // A failed template leaves the prompt empty, and every provider takes
           // a non-empty ChatMessage[]; fail the turn rather than send nothing.
           const promptMessages = promptEngineResult.prompt;
@@ -2060,6 +2119,10 @@ export class GMI implements IGMI {
               if (Array.isArray(replaced)) {
                 if (replaced.length > 0) {
                   sendMessages = replaced;
+                  // The record's counts are of the prompt PromptEngine built: say the host's hook replaced it.
+                  if (hopCapture && turnMemoryRecall?.delivery) {
+                    turnMemoryRecall = { ...turnMemoryRecall, delivery: { ...turnMemoryRecall.delivery, promptReplacedByHook: true } };
+                  }
                 } else {
                   this.addTraceEntry(ReasoningEntryType.WARNING, 'beforeModelCall returned no messages; the built prompt is sent.');
                 }
@@ -2233,6 +2296,10 @@ export class GMI implements IGMI {
 
         // The step's usage, counted once.
         if (stepUsage) addUsage(aggregatedUsage, stepUsage);
+        // The serving request's cut counts toward the turn's report; a failed hop's prompt does not.
+        if (stepHistoryOmitted && (!turnHistoryOmitted || stepHistoryOmitted.messages > turnHistoryOmitted.messages)) {
+          turnHistoryOmitted = { ...stepHistoryOmitted };
+        }
 
         // The next step's diagnostics compare against this step's response.
         if (stepCacheDiagnostics) {
@@ -2448,6 +2515,7 @@ export class GMI implements IGMI {
         // its calls are judged with too
         ragSources: lastRagSources ?? continuedTurnSources,
         ...(turnMemoryRecall ? { memoryRecall: turnMemoryRecall } : {}),
+        ...(turnHistoryOmitted ? { historyOmitted: turnHistoryOmitted } : {}),
         ...(structuredResult ? { structuredOutput: structuredResult } : {}),
       };
       return finalTurnOutput; // Return the aggregated output
@@ -2474,6 +2542,7 @@ export class GMI implements IGMI {
         error: lastErrorForOutput,
         usage: aggregatedUsage, // Could be partial
         ...(turnMemoryRecall ? { memoryRecall: turnMemoryRecall } : {}),
+        ...(turnHistoryOmitted ? { historyOmitted: turnHistoryOmitted } : {}),
       };
     } finally {
       // The turn's work is done: shutdown() stops waiting for it, and the
@@ -2690,8 +2759,10 @@ export class GMI implements IGMI {
           desiredLength: ingestionProcessingConfig?.summarization?.targetLength || 'short',
           // The persona's 'extractive' is the statistical class's extractive method.
           method: configuredMethod === 'extractive' ? 'extractive_sentence_rank' : configuredMethod || 'abstractive_llm',
-          modelId: ingestionProcessingConfig?.summarization?.modelId || this.activePersona.defaultModelId || this.config.defaultLlmModelId,
-          providerId: ingestionProcessingConfig?.summarization?.providerId || this.activePersona.defaultProviderId || this.config.defaultLlmProviderId,
+          ...this.resolveModelSelection({
+            modelId: ingestionProcessingConfig?.summarization?.modelId,
+            providerId: ingestionProcessingConfig?.summarization?.providerId,
+          }),
         };
         this.addTraceEntry(ReasoningEntryType.RAG_INGESTION_DETAIL, "Summarizing turn for RAG ingestion.", { textLength: textToSummarize.length, options: summarizationOptions });
         try {
@@ -2742,25 +2813,82 @@ export class GMI implements IGMI {
   }
 
   /**
-   * Helper to determine model and provider for internal LLM calls.
+   * The model and the provider a call runs on, from three levels, most specific first: `selection` (what the turn or
+   * the call names), the persona's `defaultModelId` / `defaultProviderId`, and the GMI config's
+   * `defaultLlmModelId` / `defaultLlmProviderId`. Each comes from the first level that names it, except that a
+   * provider named at a more specific level than the model runs on its own `defaultModelId`: a persona that names
+   * `minimax` and no model is never sent the runtime's default model of another provider. A model whose own level
+   * names the same provider is kept, so a turn that repeats the persona's provider keeps the persona's model. When no level names a
+   * model, the named provider's default model is used, else the default provider with its default model. A provider
+   * that is not served here, or serves no default model, keeps the model of the less specific level.
+   *
+   * @param selection - The model and the provider the turn or the call names, if any.
+   * @returns The model and the provider; either is undefined when no level and no provider supplies it.
+   */
+  private resolveModelSelection(selection: TurnModelSelection = {}): TurnModelSelection {
+    const levels: TurnModelSelection[] = [
+      selection,
+      { modelId: this.activePersona.defaultModelId, providerId: this.activePersona.defaultProviderId },
+      { modelId: this.config.defaultLlmModelId, providerId: this.config.defaultLlmProviderId },
+    ];
+    const modelLevel = levels.findIndex((level) => Boolean(level.modelId));
+    const providerLevel = levels.findIndex((level) => Boolean(level.providerId));
+    const modelId = modelLevel >= 0 ? levels[modelLevel].modelId : undefined;
+    const providerId = providerLevel >= 0 ? levels[providerLevel].providerId : undefined;
+
+    // A model whose own level names the same provider, in any letter case, belongs to it and is kept.
+    const modelBelongsToProvider =
+      modelLevel >= 0 && levels[modelLevel].providerId?.toLowerCase() === providerId?.toLowerCase();
+    if (providerId && !modelBelongsToProvider && (modelLevel < 0 || providerLevel < modelLevel)) {
+      const providerDefault = this.servedProvider(providerId)?.defaultModelId;
+      return { modelId: providerDefault || modelId, providerId };
+    }
+    if (!modelId && !providerId) {
+      const defaultProvider = this.defaultServedProvider();
+      if (defaultProvider?.defaultModelId) {
+        return { modelId: defaultProvider.defaultModelId, providerId: defaultProvider.providerId };
+      }
+    }
+    return { modelId, providerId };
+  }
+
+  /** The provider `providerId` names when the manager serves it; undefined otherwise or before the manager is ready. */
+  private servedProvider(providerId: string): IProvider | undefined {
+    try {
+      return typeof this.llmProviderManager?.getProvider === 'function'
+        ? this.llmProviderManager.getProvider(providerId)
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** The manager's default provider; undefined when it has none or is not ready. */
+  private defaultServedProvider(): IProvider | undefined {
+    try {
+      return typeof this.llmProviderManager?.getDefaultProvider === 'function'
+        ? this.llmProviderManager.getDefaultProvider()
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * The model and the provider an internal LLM call runs on: {@link resolveModelSelection} over the call's preferred
+   * pair, then the provider inferred from the model when no level names one, and the provider prefix dropped from
+   * the model id.
    * @private
    */
   private getModelAndProviderForLLMCall(
     preferredModelId?: string, preferredProviderId?: string,
-    systemDefaultModelId?: string, systemDefaultProviderId?: string
   ): { modelId: string; providerId: string } {
-    let modelId = preferredModelId || this.activePersona.defaultModelId || systemDefaultModelId;
-    let providerId = preferredProviderId || this.activePersona.defaultProviderId || systemDefaultProviderId;
+    const resolved = this.resolveModelSelection({ modelId: preferredModelId, providerId: preferredProviderId });
+    let modelId = resolved.modelId;
+    let providerId = resolved.providerId;
 
     if (!modelId) {
-      const defaultProvider = this.llmProviderManager.getDefaultProvider();
-      modelId = defaultProvider?.defaultModelId;
-      if (!providerId && modelId) { // If modelId found from default provider, use that providerId
-          providerId = defaultProvider?.providerId;
-      }
-      if (!modelId) { // Still no modelId after all fallbacks
-        throw new GMIError("Cannot determine modelId for LLM call: No preferred, persona default, system default, or provider default found.", GMIErrorCode.CONFIGURATION_ERROR);
-      }
+      throw new GMIError("Cannot determine modelId for LLM call: No preferred, persona default, system default, or provider default found.", GMIErrorCode.CONFIGURATION_ERROR);
     }
 
     if (!providerId && modelId.includes('/')) {

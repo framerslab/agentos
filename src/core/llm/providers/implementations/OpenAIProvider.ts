@@ -63,7 +63,7 @@ import {
 } from './openaiPricing.js';
 import { isOpenAIReasoningModel, openAiReasoningContextWindow } from './openaiModelFamilies.js';
 import { moduleLogger } from '../../../logging/loggerFactory.js';
-import { errorFields } from '../../../logging/events.js';
+import { listedErrorFields } from '../../../logging/events.js';
 import { AttemptBudgetExhaustedError, CountingAttemptBudget } from '../../../../safety/runtime/ModelAttemptBudget.js';
 
 /** This module's events, under its fixed diagnostic origin; no runtime name enters telemetry. */
@@ -1020,7 +1020,7 @@ export class OpenAIProvider implements IProvider {
       log.debug('llm.provider_ready', { provider: 'openai', count: this.availableModelsCache.size });
     } catch (error: unknown) {
       this.isInitialized = false;
-      log.error('llm.provider_start_failed', { provider: 'openai', ...errorFields(error) });
+      log.error('llm.provider_start_failed', { provider: 'openai', ...listedErrorFields(error) });
       if (error instanceof OpenAIProviderError) {
         throw error; // Re-throw if already an OpenAIProviderError
       }
@@ -1822,7 +1822,7 @@ export class OpenAIProvider implements IProvider {
       try {
         await this.refreshAvailableModels();
       } catch (error) {
-        log.warn('llm.models_failed', { provider: 'openai', ...errorFields(error) });
+        log.warn('llm.models_failed', { provider: 'openai', ...listedErrorFields(error) });
       }
     }
 
@@ -1843,7 +1843,7 @@ export class OpenAIProvider implements IProvider {
         try {
             await this.refreshAvailableModels();
         } catch (error) {
-            log.warn('llm.models_failed', { provider: 'openai', ...errorFields(error) });
+            log.warn('llm.models_failed', { provider: 'openai', ...listedErrorFields(error) });
         }
     }
     return this.availableModelsCache.get(modelId);
@@ -3166,13 +3166,13 @@ export class OpenAIProvider implements IProvider {
         // A read that fails because the caller aborted is the abort, not a stream error.
         if (abortSignal?.aborted) return;
         const message = error instanceof Error ? error.message : 'Stream parsing error';
-        log.error('llm.stream_failed', { provider: 'openai', ...errorFields(error) });
+        log.error('llm.stream_failed', { provider: 'openai', ...listedErrorFields(error) });
         throw new OpenAIProviderError(message, 'STREAM_PARSING_ERROR', undefined, undefined, undefined, error);
     } finally {
       abortSignal?.removeEventListener('abort', cancelOnAbort);
       // Ensure stream is closed if `break` or `return` is called within the generator
       if (!reader.closed) {
-          await reader.cancel().catch(err => log.warn('llm.stream_cancel_failed', { provider: 'openai', ...errorFields(err) }));
+          await reader.cancel().catch(err => log.warn('llm.stream_cancel_failed', { provider: 'openai', ...listedErrorFields(err) }));
       }
       // console.log("OpenAIProvider: SSE Stream parsing finished.");
     }

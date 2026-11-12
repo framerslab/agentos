@@ -62,8 +62,9 @@ export interface CognitionInputs {
   learning?: boolean | LearningConfig | null;
 }
 
-function memoryOf(value: boolean | MemoryConfig | undefined): MemoryConfig | false {
-  if (value === undefined || value === false) return false;
+/** The memory config a `memory` option resolves to: `false` for off, unset or `null` (a JSON config's unset). */
+function memoryOf(value: boolean | MemoryConfig | null | undefined): MemoryConfig | false {
+  if (value === undefined || value === null || value === false) return false;
   return value === true ? {} : value;
 }
 
