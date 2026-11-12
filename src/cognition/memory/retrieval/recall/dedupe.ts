@@ -6,9 +6,17 @@
  */
 import { FTS_STOP_WORDS } from '../store/tracePersistence.js';
 
+/** Whether a word holds a digit: a number, a code, or part of a date or an amount. */
+function holdsDigit(token: string): boolean {
+  return /\p{N}/u.test(token);
+}
+
 /**
  * Whether two token sets are one memory: equal, or a Jaccard index (shared tokens over all tokens) of at least
- * `threshold`. Two empty sets are not.
+ * `threshold`. Two empty sets are not. Nor are two sets that each hold a word with a digit the other lacks: texts
+ * that state different numbers, codes, dates or amounts are two memories whatever else they share, so a correction
+ * of such a value is never dropped as the duplicate of the text it corrects, however long the text. A word with a
+ * digit that only one of them holds leaves the index to decide.
  *
  * @param a - One text's tokens ({@link dedupeTokens}).
  * @param b - The other's.
@@ -17,15 +25,21 @@ import { FTS_STOP_WORDS } from '../store/tracePersistence.js';
 export function nearDuplicate(a: ReadonlySet<string>, b: ReadonlySet<string>, threshold: number): boolean {
   if (a.size === 0 || b.size === 0) return false;
   let shared = 0;
-  for (const token of a) if (b.has(token)) shared += 1;
+  let digitOnlyInA = false;
+  for (const token of a) {
+    if (b.has(token)) shared += 1;
+    else if (!digitOnlyInA && holdsDigit(token)) digitOnlyInA = true;
+  }
+  if (digitOnlyInA) {
+    for (const token of b) if (!a.has(token) && holdsDigit(token)) return false;
+  }
   return shared / (a.size + b.size - shared) >= threshold;
 }
 
 /**
  * The words of a memory's text as the dedupe compares them: runs of letters, digits and `_`, lower-cased, with stop
  * words dropped unless nothing else is left. A one-character word stays (the exact-words leg's words drop it), so two
- * memories that differ in a one-digit or one-letter value ("locker 7" and "locker 9") are two, and a correction is
- * never dropped as the duplicate of the value it corrects.
+ * short memories that differ in a one-digit or one-letter value ("locker 7" and "locker 9") are two.
  */
 export function dedupeTokens(text: string): Set<string> {
   const raw = (text.match(/[\p{L}\p{N}_]+/gu) ?? []).map((token) => token.toLowerCase());
