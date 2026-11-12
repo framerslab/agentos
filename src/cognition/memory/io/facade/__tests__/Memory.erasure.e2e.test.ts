@@ -291,7 +291,7 @@ describe('the vector index after a delete', () => {
   };
 
   /** A facade that embeds what it remembers, with the paths of its index files. */
-  async function embeddingFacade(): Promise<Facade & { indexFile: string; mapFile: string }> {
+  async function embeddingFacade(): Promise<Facade & { file: string; indexFile: string; mapFile: string }> {
     const file = path.join(folder(), 'brain.sqlite');
     const memory = await Memory.createSqlite(file, {
       brainId: 'tools-brain',
@@ -300,7 +300,7 @@ describe('the vector index after a delete', () => {
     });
     memories.push(memory);
     const indexFile = hnswIndexPath({ sqlitePath: file, brainId: 'tools-brain' });
-    return { memory, brain: brainOf(memory), indexFile, mapFile: `${indexFile}.map.json` };
+    return { memory, brain: brainOf(memory), file, indexFile, mapFile: `${indexFile}.map.json` };
   }
 
   /** The trace ids the index's map file names. */
@@ -346,6 +346,24 @@ describe('the vector index after a delete', () => {
     await memory.remember('Ana keeps bees.');
 
     expect(await memory.rebuildVectorIndex()).toEqual({ vectors: 0 });
+  });
+
+  it('recovers vectors added after a rewrite when the store reopens', async () => {
+    const { memory, file, mapFile } = await embeddingFacade();
+    const first = await memory.remember('Ana keeps bees.');
+    await memory.rebuildVectorIndex();
+    const later = await memory.remember('Bo plays cello.');
+    await memory.close();
+    memories.splice(memories.indexOf(memory), 1);
+    const reopened = await Memory.createSqlite(file, {
+      brainId: 'tools-brain',
+      embed: async (text) => vectorOf(text),
+      embeddings: { provider: 'test', dimensions: 8 },
+    });
+    memories.push(reopened);
+    const index = (reopened as unknown as { _hnswSidecar: HnswSidecar })._hnswSidecar;
+    expect(index.size).toBe(2);
+    expect(idsIn(mapFile)).toEqual([first.id, later.id].sort());
   });
 
   it('can activate the index after a failed removal is repaired', async () => {
