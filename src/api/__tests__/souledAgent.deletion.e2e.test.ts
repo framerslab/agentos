@@ -14,6 +14,9 @@
  * - Every open applies the tombstones again from a copy a restore does not replace: a store put back from before a
  *   deletion forgets again, a page a deletion could not delete goes at the next open, and a store whose copy or key
  *   is missing does not open.
+ * - A store more than one user or session shares needs a retention choice; the sweep deletes expired traces and the
+ *   pages they fed (whole, or rebuilt from the traces that survive), on its own period for anonymous sessions, and
+ *   leaves operator pages and older memory.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
@@ -608,5 +611,168 @@ describe('tombstones after a restore', () => {
     expect(registryOf(keyOf(alice))).toEqual([]);
     expect(lines('memory.tombstone_reapplied')).toHaveLength(1);
     expect(lines('memory.tombstone_reapplied')[0]).toMatchObject({ subjects: 1 });
+  });
+});
+
+describe('retention', () => {
+  const DAY = 86_400_000;
+  const NEEDED = /more than one person or session/;
+  /** Moves the clock: only `Date` is faked, so the store's own timers and I/O run. */
+  const at = (ms: number) => vi.setSystemTime(ms);
+  const registryRow = (key: string) =>
+    rows<{ rebuild_sources: string | null }>(storeFile(), 'SELECT rebuild_sources FROM memory_scopes WHERE scope_id = ?', [key]);
+
+  it('needs retention at the second anonymous session', async () => {
+    const { a } = await open({ retention: undefined });
+    expect(a.session('s1').id).toBe('s1');
+    expect(a.session('s1').id).toBe('s1');
+    expect(() => a.session('s2')).toThrow(NEEDED);
+    expect(() => a.session()).toThrow(NEEDED);
+  });
+
+  it('needs retention at a second user', async () => {
+    const { a } = await open({ retention: undefined });
+    a.session('s1', { userId: 'alice' });
+    a.session('s9', { userId: 'alice' });
+    expect(() => a.session('s2', { userId: 'bob' })).toThrow(NEEDED);
+  });
+
+  it('one stable user needs none', async () => {
+    const { a } = await open({ retention: undefined });
+    await turn(a, 's1', 'me', 'one');
+    await turn(a, 's2', 'me', 'two');
+    expect(saidOf(keyOf({ kind: 'user', id: 'me' }))).toHaveLength(4);
+    expect(await a.sweepRetention!()).toEqual({ traces: 0, pages: 0, scopes: 0 });
+  });
+
+  it('does not open a store that already holds two subjects without retention', async () => {
+    const { a } = await open();
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await turn(a, 's2', 'bob', 'My canary is WREN-2.');
+    await a.close();
+    await expect(open({ retention: undefined })).rejects.toThrow(NEEDED);
+    const { a: again } = await open({ retention: { traces: 'until-deletion' } });
+    expect(saidOf(keyOf(alice))).toHaveLength(2);
+    await again.close();
+  });
+
+  it('refuses a period that is not a positive number', async () => {
+    await expect(open({ retention: { traces: { days: 0 } } })).rejects.toThrow(TypeError);
+    await expect(open({ retention: { traces: 'until-deletion', sessions: { days: Number.NaN } } })).rejects.toThrow(TypeError);
+    await expect(open({ retention: {} as never })).rejects.toThrow(/retention days must be a positive number/);
+    expect(fs.existsSync(storeFile())).toBe(false);
+  });
+
+  it('deletes expired traces and the page they fed, whole', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const start = Date.now();
+    const { a } = await open({ retention: { traces: { days: 1 } } });
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await a.memory!.compileWiki();
+    expect(pagesOf(keyOf(alice))).toHaveLength(1);
+
+    at(start + 2 * DAY);
+    expect(await a.sweepRetention!()).toEqual({ traces: 2, pages: 1, scopes: 1 });
+    expect(tracesOf(keyOf(alice))).toEqual([]);
+    expect(pagesOf(keyOf(alice))).toEqual([]);
+    expect(registryOf(keyOf(alice))).toEqual([]);
+    expect(lines('memory.retention_swept')).toHaveLength(1);
+    expect(lines('memory.retention_swept')[0]).toMatchObject({ traces: 2, pages: 1, scopes: 1 });
+  });
+
+  it('rebuilds a page from the traces that survive, in one model call', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const start = Date.now();
+    const { a, s } = await open({ retention: { traces: { days: 1 }, pages: 'rebuild' } });
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    at(start + 0.6 * DAY);
+    await turn(a, 's1', 'alice', 'My kettle is copper.');
+    await a.memory!.compileWiki();
+    const all = saidOf(keyOf(alice)).map((trace) => trace.id);
+    expect(all).toHaveLength(4);
+    const sourcesOf = () =>
+      rows<{ content: string }>(storeFile(), 'SELECT content FROM memory_pages WHERE scope_id = ?', [keyOf(alice)]).map((row) => row.content);
+    for (const id of all) expect(sourcesOf()[0]).toContain(id);
+
+    at(start + 1.2 * DAY);
+    expect(await a.sweepRetention!()).toEqual({ traces: 2, pages: 1, scopes: 0 });
+    expect(pagesOf(keyOf(alice))).toEqual([]);
+    const survivors = saidOf(keyOf(alice));
+    expect(survivors).toHaveLength(2);
+    expect(survivors.map((trace) => trace.content)).toContain('My kettle is copper.');
+    expect((JSON.parse(registryRow(keyOf(alice))[0].rebuild_sources!) as string[]).sort()).toEqual(survivors.map((trace) => trace.id).sort());
+
+    const calls = s.seen.length;
+    await a.memory!.compileWiki();
+    expect(s.seen).toHaveLength(calls + 1);
+    const merge = JSON.stringify(s.seen.at(-1)!.messages);
+    expect(merge).toContain('copper');
+    expect(merge).not.toContain('LARK-7');
+    expect(pagesOf(keyOf(alice))).toHaveLength(1);
+    for (const trace of survivors) expect(sourcesOf()[0]).toContain(trace.id);
+    for (const id of all.filter((one) => !survivors.some((trace) => trace.id === one))) expect(sourcesOf()[0]).not.toContain(id);
+    expect(registryRow(keyOf(alice))).toEqual([{ rebuild_sources: null }]);
+  });
+
+  it('sweeps sessions on their own period and leaves users, operator pages and older memory', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const start = Date.now();
+    const opsFile = path.join(dir, 'memory', 'concepts', 'ops.md');
+    const ops = '---\nid: concepts/ops\ntype: concept\nsummary: Opening hours.\n---\nOpen nine to five.\n';
+    fs.mkdirSync(path.dirname(opsFile), { recursive: true });
+    fs.writeFileSync(opsFile, ops);
+    const operatorKey = conversationScopeKey('aria-1', { kind: 'operator' });
+    const visitor = { kind: 'session' as const, id: 'visitor-1' };
+
+    const { a } = await open({ retention: { traces: 'until-deletion', sessions: { days: 1 } } });
+    await a.memory!.remember('old shared words', { type: 'episodic', scope: 'persona', scopeId: 'aria-1' });
+    await turn(a, 's-user', 'alice', 'user words');
+    await turn(a, 'visitor-1', undefined, 'visitor words');
+    const ofOperator = tracesOf(operatorKey);
+    expect(ofOperator.length).toBeGreaterThan(0);
+
+    at(start + 2 * DAY);
+    expect(await a.sweepRetention!()).toEqual({ traces: 2, pages: 0, scopes: 1 });
+    expect(tracesOf(keyOf(visitor))).toEqual([]);
+    expect(saidOf(keyOf(alice))).toHaveLength(2);
+    expect(tracesOf(operatorKey)).toEqual(ofOperator);
+    expect(fs.readFileSync(opsFile, 'utf8')).toBe(ops);
+    expect(rows(storeFile(), "SELECT content FROM memory_traces WHERE scope = 'persona'")).toEqual([{ content: 'old shared words' }]);
+  });
+
+  it('sweeps on close, before the compile', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const start = Date.now();
+    const { a, s } = await open({ retention: { traces: { days: 1 } } });
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    const calls = s.seen.length;
+
+    at(start + 2 * DAY);
+    await a.close();
+    expect(tracesOf(keyOf(alice))).toEqual([]);
+    expect(pagesOf(keyOf(alice))).toEqual([]);
+    expect(s.seen).toHaveLength(calls);
+  });
+
+  it("shortens one account's period by its policy, and never lengthens the agent's", async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const start = Date.now();
+    const { a } = await open({
+      retention: { traces: { days: 30 } },
+      memoryPolicy: (context) =>
+        context.userId === 'alice' ? { longTerm: 'compiled', retentionDays: 1 } : { longTerm: 'compiled', retentionDays: 365 },
+    });
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await turn(a, 's2', 'bob', 'My canary is WREN-2.');
+
+    at(start + 2 * DAY);
+    expect(await a.sweepRetention!()).toMatchObject({ traces: 2 });
+    expect(tracesOf(keyOf(alice))).toEqual([]);
+    expect(saidOf(keyOf(bob))).toHaveLength(2);
+
+    at(start + 31 * DAY);
+    expect(await a.sweepRetention!()).toMatchObject({ traces: 2 });
+    expect(tracesOf(keyOf(bob))).toEqual([]);
   });
 });
