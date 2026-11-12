@@ -155,6 +155,56 @@ describe.each(ENGINES)('hybrid recall on %s', (engine, open) => {
     await db.close();
   });
 
+  it("a manager's reranker scores the pool and leaves its fused order, in the block and the record", async () => {
+    const { db, mem } = await fixture({ retrieval: 'hybrid' });
+    // A reranker that ranks the answer last: blended and re-sorted, it would sink the exact-words hit.
+    (mem.manager as unknown as { rerankerService: unknown }).rerankerService = {
+      rerank: async ({ documents }: { documents: Array<{ id: string; originalScore?: number }> }) => ({
+        results: documents.map((d) => ({ id: d.id, content: '', relevanceScore: d.id === 'gold' ? 0 : 1, originalScore: d.originalScore })),
+        diagnostics: { providerId: 'stub', modelId: 'stub-model', documentsProcessed: documents.length },
+      }),
+    };
+    const h = await mem.manager.assembleForPrompt(QUESTION, 1600, NEUTRAL, { scopes: U1 });
+    const c = captureOf(h);
+    expect(c.candidates[0]).toMatchObject({ id: 'gold', outcome: 'included', rerankScore: 0 });
+    expect(h.includedMemoryIds[0]).toBe('gold');
+    expect(h.contextText.indexOf('XQ7Z')).toBeLessThan(h.contextText.indexOf('Garden note'));
+    await mem.close();
+    await db.close();
+  });
+
+  it('a recall the retrieval policy suppressed records no candidate, as under dense', async () => {
+    const { db, mem } = await fixture({ retrieval: 'hybrid' });
+    const h = await mem.manager.assembleForPrompt(QUESTION, 1600, NEUTRAL, { scopes: U1, policy: { minScore: 0.99 } });
+    expect(h.contextText).not.toContain('XQ7Z');
+    expect(captureOf(h).candidates).toEqual([]);
+    await mem.close();
+    await db.close();
+  });
+
+  it('a trace deleted while the legs run is not in the pool, the ranking or the result', async () => {
+    const { db, mem } = await fixture({ retrieval: 'hybrid' });
+    const store = mem.manager.getStore();
+    const load = store.loadTracesForRecall.bind(store);
+    let deleted = false;
+    vi.spyOn(store, 'loadTracesForRecall').mockImplementation(async (ids) => {
+      const out = await load(ids);
+      // The first leg that loads the answer returns it; the delete lands before the other legs are done.
+      if (!deleted && out.traces.has('gold')) {
+        deleted = true;
+        await store.softDelete('gold');
+      }
+      return out;
+    });
+    const result = await mem.manager.retrieve(QUESTION, NEUTRAL, { scopes: U1 });
+    expect(deleted).toBe(true);
+    expect(result.retrieved.map((t) => t.id)).not.toContain('gold');
+    expect((result.diagnostics.recall as unknown as { ranked: Array<{ id: string }> }).ranked.map((r) => r.id)).not.toContain('gold');
+    vi.restoreAllMocks();
+    await mem.close();
+    await db.close();
+  });
+
   it.each(['dense', 'hybrid'] as const)(
     'under %s the 500-character memory with no room for it is left out whole, and the 150-character one after it is shown whole',
     async (retrieval) => {
