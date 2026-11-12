@@ -924,9 +924,10 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
 
   const chunker = new SemanticChunker();
   const priorTools = rest.tools;
+  const memoryDir = loaded.memoryDir;
   const { tools: augmentedTools } = await closingOnThrow(() => attachMemoryWiki({
     memory,
-    memoryDir: loaded.memoryDir,
+    memoryDir,
     agentId,
     llm,
     chunk: (t) => chunker.chunk(t).map((c) => ({ text: c.text })),
