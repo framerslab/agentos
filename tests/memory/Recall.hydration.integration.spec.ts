@@ -277,6 +277,24 @@ describe.each(ENGINES)('loadTracesForRecall on %s', (_engine, open) => {
     await db.close();
   });
 
+  it('a cached trace whose row was stored again without a policy loses the one it held, as a store that loads the row would read it', async () => {
+    const db = await open();
+    const store = await storeOver(db.brain, new FlatEmbedder());
+    const noAuthorization = { usableForAuthorization: false, usableForPersonalization: true, usableForFactClaim: true };
+    await store.store(trace('pass', 'The harbor pass number is 7781.', { policy: noAuthorization }));
+    // Another writer stores the trace again with the same words and no policy.
+    const row = await db.brain.get<{ metadata: string }>('SELECT metadata FROM memory_traces WHERE brain_id = ? AND id = ?', [db.brain.brainId, 'pass']);
+    const { policy: _dropped, ...withoutPolicy } = JSON.parse(row!.metadata) as Record<string, unknown>;
+    await db.brain.run('UPDATE memory_traces SET metadata = ? WHERE brain_id = ? AND id = ?', [JSON.stringify(withoutPolicy), db.brain.brainId, 'pass']);
+
+    const { traces } = await store.loadTracesForRecall(['pass']);
+    expect(traces.get('pass')!.policy).toBeUndefined();
+    expect(isEligibleForRecall(traces.get('pass')!, { scopes: U1, now: NOW, usableFor: ['authorization'] })).toBe(true);
+    expect((await store.loadTracesForRecall(['pass'])).traces.get('pass')!.policy).toBeUndefined();
+    store.dispose();
+    await db.close();
+  });
+
   it("this process's own changes to a cached trace stay while its row is as this store wrote it: a verification count it persisted, a gist of its words", async () => {
     const db = await open();
     const store = await storeOver(db.brain, new FlatEmbedder());
