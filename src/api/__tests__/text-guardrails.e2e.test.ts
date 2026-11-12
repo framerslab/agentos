@@ -637,6 +637,29 @@ describe('the turn, the reply and the report hold what the guards decided, on th
     expect(search.execute).not.toHaveBeenCalled();
   });
 
+  it('a call aborted while the guards judge the reply rejects with the signal\'s reason', async () => {
+    const controller = new AbortController();
+    const aborting: IGuardrailService = { id: 'out', evaluateOutput: async ({ chunk }) => { if (isFinal(chunk)) controller.abort(new Error('stopped by the caller')); return null; } };
+    serve([text('the reply')]);
+    await expect(generateText({ ...OPENAI, prompt: 'hello', abortSignal: controller.signal, guards: guards(aborting) })).rejects.toThrow('stopped by the caller');
+  });
+
+  it('a dry-run stream with a tool step resolves text as the same call without guards does', async () => {
+    const stepThenAnswer = () => [
+      () => sse([delta({ role: 'assistant', content: 'Searching.' }), delta({ tool_calls: [{ index: 0, id: 'call_s1', type: 'function', function: { name: 'search', arguments: '{"q":"x"}' } }] }), delta({}, 'tool_calls'), '[DONE]']),
+      textStream('Answer.'),
+    ];
+    serve(stepThenAnswer());
+    const plain = streamText({ ...OPENAI, prompt: 'find x', tools: { search }, maxSteps: 3 });
+    await collect(plain.fullStream);
+    const expected = await plain.text;
+    expect(expected).toBe('Answer.');
+    serve(stepThenAnswer());
+    const dry = streamText({ ...OPENAI, prompt: 'find x', tools: { search }, maxSteps: 3, guards: { services: [blocksOutput], context, mode: 'dryRun' as const } });
+    await collect(dry.fullStream);
+    expect(await dry.text).toBe(expected);
+  });
+
   it('a refused call is not shown to a stream reader as a call; a passed one is, before its result', async () => {
     const oneCall = () =>
       sse([delta({ role: 'assistant', tool_calls: [{ index: 0, id: 'call_s1', type: 'function', function: { name: 'search', arguments: '{"q":"x"}' } }] }), delta({}, 'tool_calls'), '[DONE]']);
