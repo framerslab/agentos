@@ -19,6 +19,8 @@ import { StatisticalUtilityAI } from '../../nlp/ai_utilities/StatisticalUtilityA
 import { IToolOrchestrator } from '../../../core/tools/IToolOrchestrator';
 import { IRetrievalAugmentor } from '../../rag/IRetrievalAugmentor';
 import { GMIEventType, SentimentHistoryState } from '../GMIEvent';
+import { resetLoggerFactory, setLogger } from '../../../core/logging/loggerFactory';
+import { createConversationMessage, MessageRole } from '../../../core/conversation/ConversationMessage';
 import {
   ALL_METAPROMPT_PRESETS,
   mergeMetapromptPresets,
@@ -936,6 +938,112 @@ describe('GMI sentiment beside the first model call', () => {
       expect((gmi as any).sentimentTracker.events.map((event: any) => event.eventType)).toContain(GMIEventType.USER_FRUSTRATED);
     } finally {
       releaseWrite?.();
+      await gmi.shutdown(); vi.useRealTimers();
+    }
+  });
+
+  it('lets the first tool round read a committed sentiment while its store writes outlast the budget', async () => {
+    vi.useFakeTimers();
+    const utility = createMockUtilityAI();
+    const wm = createMockWorkingMemory();
+    const write = wm.set.getMockImplementation()!;
+    // From the analysis start on, the host store takes 2,500 ms for each sentiment write, longer than the budget.
+    let slow = false;
+    utility.analyzeSentiment.mockImplementation(async () => {
+      slow = true;
+      return { score: -0.9, polarity: 'negative', intensity: 0.9 } as SentimentResult;
+    });
+    wm.set.mockImplementation((key: string, value: any) => slow && (key === 'currentUserContext' || key === 'gmi_sentiment_history')
+      ? new Promise<void>((resolve) => { setTimeout(() => { void write(key, value); resolve(); }, 2500); })
+      : write(key, value));
+    let toolSaw: unknown;
+    let historyAtTool: unknown = 'unread';
+    vi.mocked(mockToolOrchestrator.processToolCall).mockImplementationOnce((async (details: any) => {
+      toolSaw = details.userContext?.currentSentiment;
+      historyAtTool = wm._store.get('gmi_sentiment_history');
+      return { toolCallId: 'sentiment-tool', toolName: 'readSentiment', output: 'read', isError: false };
+    }) as any);
+    vi.mocked(mockProvider.generateCompletionStream).mockImplementationOnce((async function* () {
+      yield { isFinal: true, choices: [{ index: 0, message: { role: 'assistant', content: null,
+        tool_calls: [{ id: 'sentiment-tool', type: 'function', function: { name: 'readSentiment', arguments: '{}' } }] },
+      finishReason: 'tool_calls' }] };
+    }) as any);
+    const gmi = new GMI('committed-tool-read');
+    await gmi.initialize(createSentimentPersona({ enabled: true }), {
+      workingMemory: wm as any, utilityAI: utility as any, promptEngine: mockPromptEngine,
+      llmProviderManager: mockLlmProviderManager, toolOrchestrator: mockToolOrchestrator,
+    });
+    try {
+      const turn = (async () => {
+        for await (const chunk of gmi.processTurnStream({ interactionId: 'committed-tool', userId: 'user-1', type: GMIInteractionType.TEXT, content: 'This is terrible.' })) void chunk;
+      })();
+      await vi.waitFor(() => expect(slow).toBe(true));
+      await vi.advanceTimersByTimeAsync(2100);
+      await vi.waitFor(() => expect(historyAtTool, 'the first tool round must run').not.toBe('unread'));
+      // The tool ran before the sentiment writes landed.
+      expect(historyAtTool).toBeUndefined();
+      expect(toolSaw, 'the first tool round reads the committed sentiment').toBe('negative');
+      await vi.advanceTimersByTimeAsync(5000);
+      await turn;
+      expect(wm._store.get('gmi_sentiment_history')?.trends).toHaveLength(1);
+    } finally {
+      await gmi.shutdown(); vi.useRealTimers();
+    }
+  });
+
+  it('takes back an abandoned analysis whose history write lands after its turn was forgotten', async () => {
+    const lines: Array<Record<string, unknown>> = [];
+    const capture: Record<string, unknown> = { child: () => capture };
+    for (const level of ['debug', 'info', 'warn', 'error', 'fatal']) {
+      capture[level] = (line: Record<string, unknown>) => { lines.push(line); };
+    }
+    setLogger(capture as any);
+    const utility = createMockUtilityAI({ score: -0.9, polarity: 'negative', intensity: 0.9 });
+    utility.analyzeSentiment.mockResolvedValueOnce({ score: 0, polarity: 'neutral', intensity: 0 } as SentimentResult);
+    const wm = createMockWorkingMemory();
+    const write = wm.set.getMockImplementation()!;
+    let holdHistory = false;
+    let releaseWrite: (() => void) | undefined;
+    // The host store holds the second turn's history write until the test releases it, past the shutdown bound.
+    wm.set.mockImplementation((key: string, value: any) => holdHistory && key === 'gmi_sentiment_history' && !releaseWrite
+      ? new Promise<void>((resolve) => { releaseWrite = () => { void write(key, value); resolve(); }; })
+      : write(key, value));
+    const gmi = new GMI('abandoned-write');
+    await gmi.initialize(createSentimentPersona({ enabled: true }), {
+      workingMemory: wm as any, utilityAI: utility as any, promptEngine: mockPromptEngine,
+      llmProviderManager: mockLlmProviderManager, toolOrchestrator: mockToolOrchestrator, shutdownTimeoutMs: 1000,
+    });
+    const drain = async (id: string, content: string) => {
+      for await (const chunk of gmi.processTurnStream({ interactionId: id, userId: 'user-1', type: GMIInteractionType.TEXT, content })) void chunk;
+    };
+    try {
+      await drain('kept', 'Hello there.');
+      const afterKept = structuredClone(wm._store.get('gmi_sentiment_history'));
+      expect(afterKept?.trends).toHaveLength(1);
+      vi.useFakeTimers();
+      holdHistory = true;
+      const dropped = drain('dropped', 'Forget-me: this is terrible.');
+      await vi.waitFor(() => expect(releaseWrite).toBeTypeOf('function'));
+      // The budget, then the shutdown bound: the post-turn check drops the analysis while its write is held.
+      await vi.advanceTimersByTimeAsync(3500);
+      await dropped;
+      gmi.replaceHistory([createConversationMessage(MessageRole.USER, 'Hello there.')]);
+      await vi.advanceTimersByTimeAsync(0);
+      releaseWrite!();
+      await vi.waitFor(() => expect(wm._store.get('gmi_sentiment_history'),
+        'an abandoned analysis leaves no trend and moves no counter').toEqual(afterKept), { timeout: 500, interval: 10 });
+      const recorded = JSON.stringify([
+        (gmi as any).reasoningTrace.entries,
+        (gmi as any).sentimentTracker.events,
+        wm._store.get('gmi_sentiment_history'),
+        (gmi as any).conversationHistoryManager.history,
+      ]);
+      expect(recorded).not.toContain('Forget-me');
+      expect(lines.filter((line) => line.event === 'gmi.sentiment_late')).toHaveLength(1);
+      expect(JSON.stringify(lines)).not.toContain('Forget-me');
+    } finally {
+      releaseWrite?.();
+      resetLoggerFactory();
       await gmi.shutdown(); vi.useRealTimers();
     }
   });
