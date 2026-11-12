@@ -8,6 +8,9 @@
  * - A forgotten user's writes are refused, or taken back when they land after the tombstone; recall and
  *   `read_memory_page` answer nothing for them, and a compile writes no page for them. A host's own memory provider
  *   is guarded the same way by `guardMemoryProvider`.
+ * - `forgetUser` deletes one user for good (traces, soft-deleted rows, document chunks, pages, the registry row, the
+ *   bytes in the store's files) and leaves everyone else; it waits for the user's writes in flight, goes on past its
+ *   deadline and says so, and its report names every store it did not reach and never the user.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
@@ -17,6 +20,7 @@ import * as path from 'node:path';
 import Database from 'better-sqlite3';
 import pino from 'pino';
 import { souledAgent, type SouledAgent, type SouledAgentOptions } from '../souledAgent';
+import type { Brain } from '../../cognition/memory/retrieval/store/Brain';
 import type { AgentMemoryProvider, MemoryHookContext } from '../agent';
 import { reply, script, type ProviderScript } from './helpers/stubProviders';
 import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory';
@@ -106,6 +110,25 @@ const tracesOf = (key: string) =>
   );
 /** What a subject and the agent said to each other, as the store holds it: the subject's traces without its pages' chunks. */
 const saidOf = (key: string) => tracesOf(key).filter((trace) => !(JSON.parse(trace.tags) as string[]).includes('wiki'));
+/** The page rows and the registry row the store holds under one key. */
+const pagesOf = (key: string) => rows<{ page_id: string }>(storeFile(), 'SELECT page_id FROM memory_pages WHERE scope_id = ?', [key]);
+const registryOf = (key: string) => rows<{ scope_id: string }>(storeFile(), 'SELECT scope_id FROM memory_scopes WHERE scope_id = ?', [key]);
+
+/** The Brain behind a souled agent's store, for the rows a case plants. */
+const brainOf = (a: SouledAgent): Brain => (a.memory as unknown as { _brain: Brain })._brain;
+
+/** Files one document with one chunk on a trace, by SQL: `Memory.ingest()` files its traces under no scope id. */
+async function plantDocument(a: SouledAgent, traceId: string): Promise<void> {
+  const brain = brainOf(a);
+  await brain.run(
+    'INSERT INTO documents (brain_id, id, path, format, content_hash, chunk_count, ingested_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    [brain.brainId, 'doc_1', 'handbook.md', 'md', 'h', 1, Date.now()],
+  );
+  await brain.run(
+    'INSERT INTO document_chunks (brain_id, id, document_id, trace_id, content, chunk_index) VALUES (?, ?, ?, ?, ?, ?)',
+    [brain.brainId, 'chunk_0', 'doc_1', traceId, 'the handbook she uploaded', 0],
+  );
+}
 
 /** One turn of a user, and a wait until both of its traces (the user's text and the reply) are stored. */
 async function turn(a: SouledAgent, sessionId: string, userId: string | undefined, text: string): Promise<void> {
@@ -245,5 +268,199 @@ describe('a forgotten subject', () => {
     await guarded.observe!('user', 'hello', forBob);
     expect(calls).toEqual([['user', 'hello', forBob]]);
     expect(await guarded.getContext!('q', { context: forBob })).toEqual({ contextText: 'x' });
+  });
+});
+
+describe('forgetUser', () => {
+  it('deletes one user for good and leaves the other', async () => {
+    const { a } = await open();
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await turn(a, 's2', 'bob', 'My canary is WREN-2.');
+    const said = tracesOf(keyOf(alice)).find((trace) => trace.content === 'My canary is LARK-7.')!;
+    const replied = tracesOf(keyOf(alice)).find((trace) => trace.id !== said.id)!;
+    await plantDocument(a, said.id);
+    await brainOf(a).run('UPDATE memory_traces SET deleted = 1 WHERE id = ?', [replied.id]);
+    await a.memory!.compileWiki();
+    expect(pagesOf(keyOf(alice))).toHaveLength(1);
+    expect(pagesOf(keyOf(bob))).toHaveLength(1);
+    const ofBob = tracesOf(keyOf(bob));
+
+    const report = await a.forgetUser!('alice');
+
+    // The bytes of what she said are in neither file of the store, with the store still open.
+    expect(fs.readFileSync(storeFile()).includes('LARK-7')).toBe(false);
+    const log = `${storeFile()}-wal`;
+    expect(fs.existsSync(log) && fs.readFileSync(log).includes('LARK-7')).toBe(false);
+
+    expect(tracesOf(keyOf(alice))).toEqual([]);
+    expect(rows(storeFile(), "SELECT id FROM memory_traces WHERE content LIKE '%LARK-7%'")).toEqual([]);
+    expect(rows(storeFile(), 'SELECT id FROM document_chunks')).toEqual([]);
+    expect(rows(storeFile(), 'SELECT id FROM documents')).toEqual([]);
+    expect(pagesOf(keyOf(alice))).toEqual([]);
+    expect(registryOf(keyOf(alice))).toEqual([]);
+    expect(await a.memory!.recall('canary', { scope: 'conversation', scopeId: keyOf(alice) })).toEqual([]);
+
+    expect(tracesOf(keyOf(bob))).toEqual(ofBob);
+    expect(pagesOf(keyOf(bob))).toHaveLength(1);
+    const recalled = await a.memory!.recall('canary', { scope: 'conversation', scopeId: keyOf(bob) });
+    expect(recalled.some(({ trace }) => trace.content.includes('WREN-2'))).toBe(true);
+
+    expect(report.tombstone).toEqual({ form: 'unkeyed', written: true });
+    expect(report.pages).toEqual({ deleted: 1, failed: [] });
+    const store = (name: string) => report.stores.find((entry) => entry.store === name);
+    expect(store('conversation memory')).toMatchObject({ reached: true });
+    expect((store('conversation memory') as { deleted: number }).deleted).toBeGreaterThanOrEqual(2);
+    expect(store('traces that name the user under other scopes')).toMatchObject({ reached: true });
+    expect(store('vector index')).toMatchObject({ reached: true });
+    expect(store('write-ahead log')).toMatchObject({ reached: true });
+    expect(store('learning store')).toMatchObject({ reached: false });
+    expect(store("a conversation's own history")).toMatchObject({ reached: false });
+    expect(store('session history in this process')).toEqual({ store: 'session history in this process', reached: true, deleted: 1 });
+    expect(a.session('s1', { userId: 'alice' }).messages()).toEqual([]);
+    expect(a.session('s2', { userId: 'bob' }).messages().length).toBeGreaterThanOrEqual(2);
+    expect(report.pendingAtDeadline).toBe(0);
+    expect(report.complete).toBe(true);
+    expect(JSON.stringify(report)).not.toContain('alice');
+    expect(JSON.stringify(report)).not.toContain('LARK-7');
+
+    const done = lines('memory.forget_done');
+    expect(done).toHaveLength(1);
+    expect(done[0]).toMatchObject({ complete: 'yes', pages: 1, pagesFailed: 0, pendingAtDeadline: 0 });
+    expect(JSON.stringify(events)).not.toContain('alice');
+    expect(JSON.stringify(events)).not.toContain('LARK-7');
+  });
+
+  it('keeps the user deleted, and writes no second tombstone', async () => {
+    const { a } = await open();
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    expect((await a.forgetUser!('alice')).complete).toBe(true);
+    await a.session('s3', { userId: 'alice' }).send('I am back.');
+    await a.close();
+    expect(tracesOf(keyOf(alice))).toEqual([]);
+    expect(rows(storeFile(), "SELECT id FROM memory_traces WHERE content LIKE '%I am back%'")).toEqual([]);
+
+    const { a: again } = await open();
+    const report = await again.forgetUser!('alice');
+    expect(report.tombstone.written).toBe(false);
+    expect(report.complete).toBe(true);
+  });
+
+  it('waits for the writes in flight', async () => {
+    const { a } = await open();
+    slowWrites(a.memory!, 100);
+    await a.session('s1', { userId: 'alice' }).send('My canary is LARK-7.');
+    const report = await a.forgetUser!('alice');
+    expect(report.drained).toBeGreaterThanOrEqual(1);
+    expect(report.pendingAtDeadline).toBe(0);
+    expect(report.complete).toBe(true);
+    await a.close();
+    expect(tracesOf(keyOf(alice))).toEqual([]);
+    expect(registryOf(keyOf(alice))).toEqual([]);
+  });
+
+  it('goes on past the deadline, says so, and the late write is taken back', async () => {
+    const { a } = await open({ pendingWritesTimeoutMs: 50 });
+    slowWrites(a.memory!, 400);
+    await a.session('s1', { userId: 'alice' }).send('My canary is LARK-7.');
+    const report = await a.forgetUser!('alice');
+    expect(report.pendingAtDeadline).toBeGreaterThanOrEqual(1);
+    expect(report.complete).toBe(false);
+    expect(lines('memory.forget_done')[0]).toMatchObject({ complete: 'no' });
+
+    // The write that was running lands after the tombstone and is taken back; the reply's write is refused.
+    await vi.waitFor(() => expect(lines('memory.write_refused')).toHaveLength(2), { timeout: 4_000 });
+    for (const line of lines('memory.write_refused')) expect(line).toMatchObject({ reason: 'forgotten' });
+    expect(tracesOf(keyOf(alice))).toEqual([]);
+    expect(registryOf(keyOf(alice))).toEqual([]);
+  });
+
+  it('reports a vector index it could not rewrite', async () => {
+    const { a } = await open();
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    vi.spyOn(a.memory!, 'rebuildVectorIndex').mockRejectedValueOnce(new Error('disk full'));
+    const report = await a.forgetUser!('alice');
+    expect(report.stores).toContainEqual({ store: 'vector index', reached: false, reason: 'disk full' });
+    expect(report.complete).toBe(false);
+    expect(tracesOf(keyOf(alice))).toEqual([]);
+  });
+
+  it('keeps a user and an anonymous session of one id apart, and deletes the sessions the host links', async () => {
+    const { a } = await open();
+    const sessionBob = { kind: 'session' as const, id: 'bob' };
+    const visitor = { kind: 'session' as const, id: 's1' };
+    await turn(a, 's-user', 'bob', 'user words');
+    await turn(a, 'bob', undefined, 'session words');
+    await turn(a, 's1', undefined, 'visitor words');
+
+    await a.forgetUser!('bob');
+    expect(tracesOf(keyOf(bob))).toEqual([]);
+    expect(tracesOf(keyOf(sessionBob))).toHaveLength(2);
+    expect(tracesOf(keyOf(visitor))).toHaveLength(2);
+
+    const report = await a.forgetUser!('bob', { linkedSessions: ['s1'] });
+    expect(tracesOf(keyOf(visitor))).toEqual([]);
+    expect(tracesOf(keyOf(sessionBob))).toHaveLength(2);
+    expect(await a.memory!.isForgotten(visitor)).toBe(true);
+    expect(await a.memory!.isForgotten(sessionBob)).toBe(false);
+    expect(report.stores).toContainEqual(expect.objectContaining({ store: 'conversation memory (linked session)', reached: true }));
+    expect(report.complete).toBe(true);
+    expect(lines('memory.forget_done')).toHaveLength(3);
+  });
+
+  it('a compile and a deletion started together leave no page', async () => {
+    const { a } = await open();
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await Promise.all([a.memory!.compileWiki(), a.forgetUser!('alice')]);
+    expect(pagesOf(keyOf(alice))).toEqual([]);
+    expect(tracesOf(keyOf(alice))).toEqual([]);
+  });
+
+  it('refuses an empty user id and deletes nothing', async () => {
+    const { a } = await open();
+    await turn(a, 's1', 'bob', 'I like tea.');
+    await expect(a.forgetUser!('')).rejects.toThrow(TypeError);
+    await expect(a.forgetUser!('bob', { linkedSessions: [''] })).rejects.toThrow(TypeError);
+    expect(tracesOf(keyOf(bob))).toHaveLength(2);
+    expect(await a.memory!.isForgotten(bob)).toBe(false);
+  });
+
+  it('shares one ledger with the learning layer', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { a } = await open({ runtime: 'gmi', learning: true });
+    await a.learning!.forgetUser!('alice');
+    await a.session('s1', { userId: 'alice' }).send('My canary is LARK-7.');
+    await a.close();
+    expect(tracesOf(keyOf(alice))).toEqual([]);
+    expect(lines('memory.write_refused').some((line) => line.reason === 'forgotten')).toBe(true);
+
+    const { a: again } = await open({ runtime: 'gmi', learning: true });
+    await turn(again, 's2', 'bob', 'My canary is WREN-2.');
+    const report = await again.forgetUser!('bob');
+    expect(report.stores).toContainEqual(expect.objectContaining({ store: 'learning store', reached: true }));
+    expect(report.stores).toContainEqual(expect.objectContaining({ store: "a gmi() session's history", reached: false }));
+    expect(tracesOf(keyOf(bob))).toEqual([]);
+  });
+
+  it('names legacy memory it did not reach until the host deletes it', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const oldFile = path.join(dir, 'memory', 'concepts', 'old.md');
+    const old = '---\nid: concepts/old\ntype: concept\nsummary: Old notes.\nsources:\n  - t-old\n---\nThe heron lives by the weir.\n';
+    fs.mkdirSync(path.dirname(oldFile), { recursive: true });
+    fs.writeFileSync(oldFile, old);
+    const { a } = await open();
+    await a.memory!.remember('old shared words', { type: 'episodic', scope: 'persona', scopeId: 'aria-1' });
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+
+    const report = await a.forgetUser!('alice');
+    expect(report.stores).toContainEqual({ store: 'legacy memory under the agent scope', reached: false, reason: 'unattributed' });
+    expect(report.complete).toBe(false);
+    expect(rows(storeFile(), "SELECT content FROM memory_traces WHERE scope = 'persona'")).toEqual([{ content: 'old shared words' }]);
+    expect(fs.readFileSync(oldFile, 'utf8')).toBe(old);
+
+    await a.memory!.deleteScope('persona', 'aria-1');
+    fs.rmSync(oldFile);
+    const again = await a.forgetUser!('alice');
+    expect(again.complete).toBe(true);
+    expect(again.stores.some((entry) => entry.store.startsWith('legacy memory'))).toBe(false);
   });
 });
