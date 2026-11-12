@@ -117,7 +117,7 @@ function failed(svc: IGuardrailService, stage: GuardrailEventStage, cause: 'erro
  * @returns The evaluation result, a synthetic BLOCK, or `null`
  */
 async function callWithTimeout(
-  fn: () => Promise<GuardrailEvaluationResult | null>,
+  fn: (deadlineSignal?: AbortSignal) => Promise<GuardrailEvaluationResult | null>,
   svc: IGuardrailService,
   stage: GuardrailEventStage,
 ): Promise<GuardrailEvaluationResult | null> {
@@ -130,11 +130,15 @@ async function callWithTimeout(
 
     // Race the evaluation against a timeout sentinel — kept distinct from a
     // guard that legitimately resolves `null` (= ALLOW), so a timeout can be
-    // handled per the fail-closed policy.
+    // handled per the fail-closed policy. The race does not stop the
+    // evaluation: at the deadline the signal handed to it is aborted, so a
+    // guard that reads it starts nothing more once nobody waits for it.
+    const deadline = new AbortController();
     const result = await Promise.race([
-      fn(),
+      fn(deadline.signal),
       new Promise<typeof GUARDRAIL_TIMEOUT>((resolve) => {
-        setTimeout(() => resolve(GUARDRAIL_TIMEOUT), timeoutMs);
+        // the timeout settles first: a guard that answers from an abort listener cannot win the race
+        setTimeout(() => { resolve(GUARDRAIL_TIMEOUT); deadline.abort(); }, timeoutMs);
       }),
     ]);
 
@@ -444,7 +448,7 @@ export class ParallelGuardrailDispatcher {
       }
 
       let evaluation = await callWithTimeout(
-        () => svc.evaluateInput!({ context, input: sanitizedInput }),
+        (deadlineSignal) => svc.evaluateInput!({ context, input: sanitizedInput, ...(deadlineSignal ? { deadlineSignal } : {}) }),
         svc,
         'input',
       );
@@ -484,7 +488,7 @@ export class ParallelGuardrailDispatcher {
           }
 
           return callWithTimeout(
-            () => svc.evaluateInput!({ context, input: sanitizedInput }),
+            (deadlineSignal) => svc.evaluateInput!({ context, input: sanitizedInput, ...(deadlineSignal ? { deadlineSignal } : {}) }),
             svc,
             'input',
           );

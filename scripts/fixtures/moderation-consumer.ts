@@ -2,11 +2,11 @@
 // the last line prints the count the package test reads. Nothing here calls a provider or the network.
 import assert from 'node:assert/strict';
 import {
-  GuardrailAction, ParallelGuardrailDispatcher, PhraseListGuardrail, StaticPhraseListSource, assertModerationContext,
+  GuardrailAction, ImageGuardrail, ParallelGuardrailDispatcher, PhraseListGuardrail, StaticPhraseListSource, assertModerationContext,
   frameUntrustedEvidence, guardrailOutcomeOf, holdResult, isGuardrailHold, moderateContent, toModerationEvaluation,
   withModerationPosture,
-  type GuardrailContext, type GuardrailEvaluationResult, type GuardrailHold, type IGuardrailService, type ModerationContext,
-  type ModerationDecision, type ModerationEvaluation,
+  type GuardrailContext, type GuardrailEvaluationResult, type GuardrailHold, type IGuardrailService, type ImageCheck,
+  type ModerationContext, type ModerationDecision, type ModerationEvaluation,
 } from '@framers/agentos/safety/guardrails';
 import type { AgentOSInput } from '@framers/agentos';
 import { GuardrailStopError, generateText, type TextGuardrailReport } from '@framers/agentos';
@@ -84,6 +84,20 @@ const guard = (id: string, evaluation: GuardrailEvaluationResult | null): IGuard
   const replaced = await generateText({ provider: 'openai', model: 'gpt-4.1', apiKey: 'sk-fixture-never-sent', prompt: 'a prompt', guards: { services: [replaces], context } });
   assert.equal(replaced.text, 'A fixed reply.');
   assert.equal(replaced.usage.totalTokens, 0);
+  items += 1;
+}
+
+// The image guard: a model check may not come before a match check, and a quarantine ends the evaluation before any model check.
+{
+  let modelCalls = 0;
+  const hash: ImageCheck = { id: 'hash', kind: 'match', check: async () => ({ verdict: 'block', reasonCode: 'KNOWN_MATERIAL', quarantine: true }) };
+  const model: ImageCheck = { id: 'model', kind: 'classify', check: async () => { modelCalls += 1; return { verdict: 'pass' }; } };
+  assert.throws(() => ImageGuardrail.create({ id: 'images', checks: [model, hash] }), TypeError);
+  const images = ImageGuardrail.create({ id: 'images', checks: [hash, model], requireMatch: true });
+  const refused = await moderateContent({ images: [{ type: 'base64', data: 'AAAA', mimeType: 'image/png' }] }, { guards: [images], context });
+  assert.equal(refused.outcome, 'refuse');
+  assert.equal(refused.deciding?.metadata?.quarantine, true);
+  assert.equal(modelCalls, 0);
   items += 1;
 }
 

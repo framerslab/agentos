@@ -88,6 +88,18 @@ export const AGENTOS_EVENTS = {
   'llm.fallback_succeeded': fallback,
   'llm.fallback_failed_after_output': fallback,
   'llm.fallback_exhausted': { api, primaryProvider: provider, attempts: 'int', type: 'word', code: 'word' },
+  // At start, a soul's memory/ folder holds page files that are not the operator's: pages a compile of an earlier version wrote, or pages whose front matter cannot be read. They stay on disk and are in no index, no prompt and no recall.
+  'memory.legacy_pages': { count: 'int' },
+  // At open, a souled agent's store holds traces an earlier version filed under the agent's plain id. They stay in the store and no turn reads them.
+  'memory.legacy_traces': { count: 'int' },
+  // A one-shot generate() or stream() on a souled agent names no user: nothing is filed for it and it recalls the operator's pages alone. Written once an agent.
+  'memory.one_shot_unfiled': {},
+  // A scope's wiki compile did not run in a compile call: a spend budget refused its model call, the account's memory policy keeps raw traces only, the screen hook failed or had no turn of the scope to run for, or the agent compiles no wiki at all. The scope's traces wait for a later compile. Written once a reason a call, with no scope.
+  'memory.compile_skipped': { reason: { enum: ['budget', 'policy_raw', 'compile_off', 'screen_failed'] } },
+  // A souled agent did not file a turn's text, or left a trace out of a compile: the account's memory policy keeps no memory (said once a session), the policy hook failed, the screen hook dropped the text, or the screen hook failed.
+  'memory.write_refused': { reason: { enum: ['policy_off', 'policy_failed', 'screened', 'screen_failed'] } },
+  // read_memory_page answered a page as not found, or a call as invalid, for a page the asker may not read: another subject's page, a user's page asked with no user, a page an earlier version compiled asked by a user, or a call that named a scope or a user.
+  'memory.page_read_refused': { reason: { enum: ['other_user', 'no_user', 'legacy', 'caller_filter'] } },
   // A translation failed, answered with no text, ran past the transcript translator's own timeout, stopped at its output cap or stopped for another reason (a content filter); it throws TranslationProviderError, and status is 0 when no HTTP status came back.
   'language.translation_failed': { provider: { enum: ['openai', 'deepl'] }, reason: { enum: ['request_failed', 'empty_output', 'timeout', 'truncated', 'incomplete'] }, status: 'int', type: 'word', code: 'word' },
   // A configured detection provider id LanguageService does not build (whisper_stub, or an id it does not know).
@@ -105,6 +117,8 @@ export const AGENTOS_EVENTS = {
   // A moderation entry point decided something other than allow. The code is written only when the deciding guard
   // lists it in config.reasonCodes or the library made it for a closed guard's failure; never for an allow.
   'guardrail.verdict': { guardrailId: 'word', stage: { enum: ['input', 'output', 'tool_call'] }, action: { enum: ['flag', 'sanitize', 'hold', 'block'] }, code: 'word', surface: 'word', mode: { enum: ['enforce', 'dry_run'] }, unavailable: { enum: ['yes', 'no'] } },
+  // An image check threw, or an image could not be captured (checkId: load). Never the image, its URL or an error's message.
+  'image_guard.check_failed': { guardrailId: 'word', checkId: 'word', posture: { enum: ['refuse', 'skip'] }, type: 'word', code: 'word' },
   // A soul given `optional: true` failed to load; the agent runs without it.
   'soul.load_failed': { optional: { enum: ['yes'] }, type: 'word', code: 'word' },
   // gmi() left out a front matter field that path cannot apply.

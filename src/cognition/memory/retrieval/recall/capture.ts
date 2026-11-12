@@ -173,6 +173,12 @@ export interface RetrievalRecallReport {
    * the graph's activation, not the co-activation the graph records after.
    */
   denseMs: number;
+  /**
+   * Each recall leg of the retrieval, as the capture reports it: whether it ran, why not (`no_embedder` when the
+   * embedding manager gave the query no vector), how many candidates it returned, how many the eligibility checks
+   * dropped (for the dense leg, the trust-policy filter), and its time. `CognitiveMemoryManager` always sets it.
+   */
+  legs?: MemoryRecallCapture['legs'];
   /** Each trace the reranker scored, with the score it gave before the blend. Absent when no rerank answered. */
   rerankScores?: Record<string, number>;
 }

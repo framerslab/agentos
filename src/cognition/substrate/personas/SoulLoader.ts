@@ -52,7 +52,7 @@
  */
 
 import * as fs from 'node:fs/promises';
-import { statSync } from 'node:fs';
+import { readdirSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 import { readFrontMatter, writeFrontMatter } from '../../../core/utils/frontMatter.js';
 import {
@@ -60,7 +60,10 @@ import {
   readFileOutsideLinksSync,
   type OpenRefusal,
 } from '../../../core/utils/linkFreeWrite.js';
-import { ensureMemoryDir, withoutMigratedEndMarker } from '../memory/wiki/migrateMemoryMd.js';
+import { ensureMemoryDir } from '../memory/wiki/migrateMemoryMd.js';
+import { listWikiPageIds, listWikiPageIdsSync } from '../memory/wiki/WikiMemoryStore.js';
+import { operatorIndexText, parsePage } from '../memory/wiki/WikiPageCodec.js';
+import type { WikiPage } from '../memory/wiki/types.js';
 import type { IPersonaDefinition } from './IPersonaDefinition.js';
 import { normalizeHexacoTraits } from './hexaco.js';
 import { stableIdOfName } from './stableId.js';
@@ -87,8 +90,12 @@ export interface LoadedSoul {
   /** Absolute path to the memory/ wiki dir (created/migrated on load). */
   memoryDir?: string;
   /**
-   * Contents of memory/index.md, trimmed, for system-prelude injection. The end marker that closes text migrated from
-   * a legacy MEMORY.md (`<!-- end of MEMORY.md -->`) is the wiki's own bookkeeping and is left out.
+   * The memory index for system-prelude injection, trimmed: the catalog of the operator's pages under memory/,
+   * rendered from the page files, after the text migrated from a legacy MEMORY.md that memory/index.md holds. A page
+   * a compile wrote (front matter that lists `sources`) and a page whose front matter cannot be read are left out,
+   * and so is anything else memory/index.md holds. The end marker that closes the migrated text
+   * (`<!-- end of MEMORY.md -->`) is the wiki's own bookkeeping and is left out. Undefined when memory/index.md gave
+   * no text.
    */
   wikiIndex?: string;
   /** Path to the agent's workspace dir. */
@@ -320,7 +327,7 @@ export async function loadSoul(options: SoulLoaderOptions): Promise<LoadedSoul> 
 
   // Resolve the markdown wiki memory dir (idempotent migration of legacy MEMORY.md).
   const memoryDir = ensureMemoryDir(workspaceDir);
-  const wikiIndex = indexText(await readSoulFile(folder, path.join('memory', 'index.md')));
+  const wikiIndex = await indexText(folder, await readSoulFile(folder, path.join('memory', 'index.md')));
 
   // Build IPersonaDefinition from frontmatter + soul body
   const personaDefinition = frontmatterToPersona(frontmatter, soulContent, styleContent);
@@ -382,7 +389,7 @@ export function loadSoulSync(options: SoulLoaderOptions): LoadedSoul {
 
   // Resolve the markdown wiki memory dir (idempotent migration of legacy MEMORY.md).
   const memoryDir = ensureMemoryDir(workspaceDir);
-  const wikiIndex = indexText(readSoulFileSync(folder, path.join('memory', 'index.md')));
+  const wikiIndex = indexTextSync(folder, readSoulFileSync(folder, path.join('memory', 'index.md')));
 
   const personaDefinition = frontmatterToPersona(frontmatter, soulContent, styleContent);
 
@@ -691,10 +698,47 @@ function trimmedText(read: SoulFileRead): string | undefined {
   return read !== null && 'text' in read ? read.text.trim() : undefined;
 }
 
-/** The text of memory/index.md that {@link LoadedSoul.wikiIndex} holds: trimmed, without the migrated block's end marker. */
-function indexText(read: SoulFileRead): string | undefined {
-  const text = trimmedText(read);
-  return text === undefined ? undefined : withoutMigratedEndMarker(text);
+/** The file of wiki page `id`, as a path below the soul's folder. */
+function pageFileOf(id: string): string {
+  return path.join('memory', ...id.split('/')) + '.md';
+}
+
+/** A page file's read as a page; undefined when the file gave no text or its front matter does not parse. */
+function pageOf(id: string, read: SoulFileRead): WikiPage | undefined {
+  if (read === null || !('text' in read)) return undefined;
+  try {
+    return parsePage(id, read.text);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The memory index {@link LoadedSoul.wikiIndex} holds, rendered from the page files under memory/ and the text
+ * migrated from MEMORY.md that memory/index.md holds (`operatorIndexText`); undefined when memory/index.md gave no
+ * text. Each page file is read as the soul's other files are, through no link (`readSoulFile`).
+ */
+async function indexText(folder: SoulFolder, index: SoulFileRead): Promise<string | undefined> {
+  if (index === null || !('text' in index)) return undefined;
+  const ids = await listWikiPageIds(path.join(folder.dir, 'memory'), (dir) => fs.readdir(dir, { withFileTypes: true }));
+  const pages: WikiPage[] = [];
+  for (const id of ids) {
+    const page = pageOf(id, await readSoulFile(folder, pageFileOf(id)));
+    if (page) pages.push(page);
+  }
+  return operatorIndexText(pages, index.text);
+}
+
+/** Sync companion to `indexText`, for `loadSoulSync`. */
+function indexTextSync(folder: SoulFolder, index: SoulFileRead): string | undefined {
+  if (index === null || !('text' in index)) return undefined;
+  const ids = listWikiPageIdsSync(path.join(folder.dir, 'memory'), (dir) => readdirSync(dir, { withFileTypes: true }));
+  const pages: WikiPage[] = [];
+  for (const id of ids) {
+    const page = pageOf(id, readSoulFileSync(folder, pageFileOf(id)));
+    if (page) pages.push(page);
+  }
+  return operatorIndexText(pages, index.text);
 }
 
 /** An error's message, or the value as text when it is not an Error. */

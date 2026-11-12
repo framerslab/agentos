@@ -122,6 +122,15 @@ export {
   type PhraseListSource,
 } from './builtin/PhraseListGuardrail';
 
+// A guard over an input's images: match checks first, one capture, a closed default
+export {
+  ImageGuardrail,
+  type ImageCheck,
+  type ImageCheckResult,
+  type ImageGuardrailOptions,
+  type ImageUnderReview,
+} from './builtin/ImageGuardrail';
+
 // Cross-agent guardrail interface and types
 export {
   type CrossAgentOutputPayload,
