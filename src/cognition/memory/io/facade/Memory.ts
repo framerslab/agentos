@@ -1827,8 +1827,15 @@ export class Memory {
   ): Promise<CompileSkipReason | undefined> {
     const BATCH = 500;
     const { scopeId } = target;
+    // The watermark is read here, in the scope's turn: a compile that waited for another compile of the scope starts
+    // where that one left it, and sends none of the same traces to the model again. A scope deleted meanwhile is done.
+    const current = await this._brain.get<{ compiled_at: number | string | null }>(
+      `SELECT compiled_at FROM memory_scopes WHERE brain_id = ? AND scope = ? AND scope_id = ?`,
+      [this._brain.brainId, CONVERSATION_SCOPE, scopeId],
+    );
+    if (!current) return undefined;
     const store = wiki.storeFor(scopeId);
-    let sinceMs = target.compiledAt;
+    let sinceMs = current.compiled_at === null || current.compiled_at === undefined ? 0 : Number(current.compiled_at);
     for (;;) {
       const belowMs = this._beginCompileRead();
       const read = await this._compileTraces(scopeId, { sinceMs, belowMs, limit: BATCH });
