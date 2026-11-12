@@ -27,37 +27,39 @@ export function dedupeTokens(text: string): Set<string> {
 }
 
 /**
- * Drops near-duplicate texts from a pool in fused order. Of two candidates that are one memory the higher fused score
- * stays; on equal scores the newer (`createdAt`) stays, in the older one's place. Each dropped candidate names, in
- * `duplicateOf`, the candidate that holds that place once the whole pool is read.
+ * Drops near-duplicate texts from a pool in fused order, so that no two candidates kept are one memory. Candidates are
+ * taken by fused score, then the newer (`createdAt`) first, and one is kept unless it repeats a candidate already
+ * kept: of two that are one memory the higher fused score stays, and on equal scores the newer, in the older one's
+ * place in the fused order. Each dropped candidate names, in `duplicateOf`, the kept candidate it repeats. Near-
+ * duplicates are not transitive (A and C can be two memories that B repeats both of), so a kept candidate can drop
+ * several that are apart from each other.
  *
  * @param pool - The pool, in fused order.
  * @param threshold - The Jaccard index at which two texts are one ({@link nearDuplicate}).
- * @returns The candidates kept, in fused order, and the ones dropped, in the order they were dropped.
+ * @returns The candidates kept, in fused order, and the ones dropped, in the pool's order.
  */
 export function dedupePool<E extends { trace: { id: string; content: string; createdAt: number }; fusedScore: number }>(
   pool: readonly E[],
   threshold: number,
 ): { kept: E[]; dropped: Array<{ entry: E; duplicateOf: string }> } {
-  const kept: Array<{ entry: E; tokens: Set<string> }> = [];
-  const dropped: Array<{ entry: E; slot: number }> = [];
-  for (const entry of pool) {
-    const tokens = dedupeTokens(entry.trace.content);
-    const slot = kept.findIndex((k) => nearDuplicate(k.tokens, tokens, threshold));
-    if (slot < 0) {
-      kept.push({ entry, tokens });
+  const items = pool.map((entry, index) => ({ entry, index, tokens: dedupeTokens(entry.trace.content) }));
+  const byPreference = [...items].sort(
+    (a, b) => b.entry.fusedScore - a.entry.fusedScore || b.entry.trace.createdAt - a.entry.trace.createdAt || a.index - b.index,
+  );
+  const kept: Array<(typeof items)[number] & { place: number }> = [];
+  const dropped: Array<{ entry: E; index: number; holder: { entry: E } }> = [];
+  for (const item of byPreference) {
+    const holder = kept.find((k) => nearDuplicate(k.tokens, item.tokens, threshold));
+    if (!holder) {
+      kept.push({ ...item, place: item.index });
       continue;
     }
-    const held = kept[slot].entry;
-    if (entry.fusedScore === held.fusedScore && entry.trace.createdAt > held.trace.createdAt) {
-      kept[slot] = { entry, tokens };
-      dropped.push({ entry: held, slot });
-    } else {
-      dropped.push({ entry, slot });
-    }
+    // A newer candidate of an equal score takes the place of the older one it repeats.
+    holder.place = Math.min(holder.place, item.index);
+    dropped.push({ entry: item.entry, index: item.index, holder });
   }
   return {
-    kept: kept.map((k) => k.entry),
-    dropped: dropped.map(({ entry, slot }) => ({ entry, duplicateOf: kept[slot].entry.trace.id })),
+    kept: kept.sort((a, b) => a.place - b.place).map((k) => k.entry),
+    dropped: dropped.sort((a, b) => a.index - b.index).map((d) => ({ entry: d.entry, duplicateOf: d.holder.entry.trace.id })),
   };
 }

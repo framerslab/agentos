@@ -189,7 +189,12 @@ export class RecallPipeline {
         const scored = byDense.get(trace.id) ?? scoredOthers.get(trace.id);
         return scored ? [scored] : [];
       });
-    const pool = fuseLegs({ dense: dense.traces, exactWords: asScored(words.traces), recency: asScored(recent.traces) }, c);
+    // A trace deleted while the legs ran (this process's soft delete, or a tombstone) leaves the pool.
+    const live = (trace: MemoryTrace): boolean => !store.isDeleted(trace.id) && store.getTrace(trace.id)?.isActive !== false;
+    const pool = fuseLegs(
+      { dense: dense.traces.filter(live), exactWords: asScored(words.traces).filter(live), recency: asScored(recent.traces).filter(live) },
+      c,
+    );
     const fuseMs = Math.round(performance.now() - fuseStarted);
 
     const dedupeStarted = performance.now();

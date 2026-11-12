@@ -990,7 +990,9 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
           }
         }
 
-        scored.sort((a, b) => b.retrievalScore - a.retrievalScore);
+        // Under `hybrid` the fused order stands: the blend sets each line's relevance, and re-sorting by it would sink a
+        // candidate only the exact words or the recency found, whose cognitive score has similarity 0.
+        if (run.retrieval !== 'hybrid') scored.sort((a, b) => b.retrievalScore - a.retrievalScore);
         if (capturing) {
           rerankerRecord = rerankerRecordOf(
             rerankerOutput.diagnostics?.providerId,
@@ -1278,8 +1280,9 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
       const assembledAt = performance.now();
       const recall = recallReport;
       // Under hybrid the whole pool, in fused order, the candidates the cut at topK and the dedupe left out included.
+      // A recall the retrieval policy suppressed returned nothing, so it records no candidate, as under dense.
       const ranked: RankedRecallCandidate[] =
-        hybrid && recall?.ranked
+        hybrid && recall?.ranked && !result.diagnostics.suppressed
           ? recall.ranked.map((candidate) => {
               const rerankScore = recall.rerankScores?.[candidate.id];
               return { ...candidate, ...(typeof rerankScore === 'number' ? { rerankScore } : {}) };

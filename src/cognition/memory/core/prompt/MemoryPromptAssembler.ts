@@ -537,7 +537,9 @@ function assemble(input: MemoryAssemblerInput, secondPass: boolean): AssembledMe
   const pooled = input.recallTraces ?? null;
   if (pooled) {
     const share = input.allocation?.recall;
-    alloc.semanticRecall = share != null ? share : alloc.semanticRecall + alloc.recentEpisodic;
+    // A share that counts as 0 (not a finite positive number) adds nothing to the one it is merged with.
+    const valid = (n: number): number => (Number.isFinite(n) && n > 0 ? n : 0);
+    alloc.semanticRecall = share != null ? share : valid(alloc.semanticRecall) + valid(alloc.recentEpisodic);
     alloc.recentEpisodic = 0;
   }
   /** A section the caller turned off by setting its share to exactly 0. */

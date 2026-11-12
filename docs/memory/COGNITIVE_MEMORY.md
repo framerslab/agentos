@@ -809,7 +809,7 @@ await manager.initialize({ ...config, recall: { retrieval: 'hybrid' } });
 
 The turn's scopes, types and `timeRange.after` are inside each leg's query, so another user's or organization's rows are never read, and a trace under `minConfidence` or one whose trust policy refuses the asked `usableFor` passes no leg (`legs[].ineligible` counts them, with no id). A `retrieve()` with no `scopes` gets the dense leg over the store's known scopes and nothing from the other two, which never read without a scope.
 
-**The pool.** Every candidate of every leg stays in the pool, an exact-words-only one included, ordered by reciprocal rank fusion: `0.7 / (60 + dense rank) + 0.3 / (60 + exact-words rank) + 0 / (60 + recency rank)`, a leg that did not return a trace adding nothing. Equal scores keep a fixed order: by exact-words rank, then by recency rank (newest first), then by id, so recency-only candidates follow every other candidate. A trace only the exact-words or recency leg found carries the store's cognitive score with similarity 0 (`MemoryStore.scoreForRecall`), which its line shows as its relevance. The pool is cut at `topK` (20) and shown as one section, `## Relevant Memories (facts and past events, most relevant first — use as background, don't announce)`, in fused order, on the `recall` share (unset: the Semantic Recall and Recent Episodic shares together; see [Default Budget Allocation](#default-budget-allocation)).
+**The pool.** Every candidate of every leg stays in the pool, an exact-words-only one included, ordered by reciprocal rank fusion: `0.7 / (60 + dense rank) + 0.3 / (60 + exact-words rank) + 0 / (60 + recency rank)`, a leg that did not return a trace adding nothing. Equal scores keep a fixed order: by exact-words rank, then by recency rank (newest first), then by id, so recency-only candidates follow every other candidate. A trace only the exact-words or recency leg found carries the store's cognitive score with similarity 0 (`MemoryStore.scoreForRecall`), which its line shows as its relevance. A trace deleted while the legs ran leaves the pool. A manager's `rerankerService` scores the cut pool as it scores the dense list, and its blend sets each line's relevance; the fused order stands. A recall the retrieval policy suppresses (`diagnostics.suppressed`) returns nothing and its capture records no candidate, as under `'dense'`. The pool is cut at `topK` (20) and shown as one section, `## Relevant Memories (facts and past events, most relevant first — use as background, don't announce)`, in fused order, on the `recall` share (unset: the Semantic Recall and Recent Episodic shares together; see [Default Budget Allocation](#default-budget-allocation)).
 
 | Constant | Start | |
 |---|---|---|
@@ -822,7 +822,7 @@ The turn's scopes, types and `timeRange.after` are inside each leg's query, so a
 | `nearDuplicate` | 0.80 | The token-set Jaccard index at which two memories are one |
 | `recentTopK` | 10 | The recency leg's size |
 
-They are `RECALL_CONSTANTS`; a manager's `recall.constants` lays values over them for a bench that tunes them, and they move only through measured runs.
+They are `RECALL_CONSTANTS`; a manager's `recall.constants` lays values over them by name, for a bench that tunes them, and they move only through measured runs. A name that is not one of the eight, a count (`topK`, `overFetch`, `recentTopK`) that is not an integer from 1 to 1,000, a `nearDuplicate` outside (0, 1], or any other value that is not a finite number of at least 0 is refused at construction.
 
 **When exact words changes the block.** At these constants an exact-words-only candidate does not reach the block of a large store: at exact-words rank 1 it scores 0.3 / 61 = 0.0049, below a dense-only candidate at rank 60 (0.7 / 120 = 0.0058), so with sixty dense candidates it sorts after them and the cut at 20 leaves it out (the capture records it `left_out`, reason `budget`). Exact words changes the block where a candidate is in both lists, since its two terms add, and where the dense leg returned fewer than sixty.
 
@@ -835,8 +835,10 @@ They are `RECALL_CONSTANTS`; a manager's `recall.constants` lays values over the
 | No `memory.store` (no Brain) | Meaning, exact words in process, recency | `lexicalBackend: 'in_process'` |
 | An embedder that gives the query no vector, or throws | Exact words and recency | `dense`: `no_embedder` |
 | A Brain with no full-text index | Meaning and recency | `exact_words`: `no_index`, `lexicalBackend: 'none'` |
-| A leg whose query fails | The other legs | that leg: `query_error` |
+| A leg whose query throws | The other legs | that leg: `query_error` |
 | Every leg | The other sections; no recall section | every leg absent, no candidates |
+
+The dense leg reads a scope whose vector query throws as a scope with no memories, under `'hybrid'` as under `'dense'`: the store's query cannot tell that failure from a scope that has no collection yet, so the leg runs with that scope's candidates missing and reports no reason.
 
 **No new call.** Hybrid embeds the query once, as dense does, and calls no vendor: the exact-words and recency legs read the store and the process.
 

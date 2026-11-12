@@ -12,8 +12,12 @@ export const DEFAULT_RECALL_BUDGET_TOKENS = 1600;
 
 const CAPTURE_MODES: readonly unknown[] = ['off', 'metadata', 'metadata+stream'];
 const RETRIEVAL_MODES: readonly unknown[] = ['dense', 'hybrid'];
-/** The hybrid recall's constants that count candidates, so must be whole numbers of at least 1. */
+/** The hybrid recall's constants that count candidates, so must be whole numbers from 1 to {@link MAX_RECALL_COUNT}. */
 const COUNT_CONSTANTS: readonly string[] = ['topK', 'recentTopK', 'overFetch'];
+/** The names of the hybrid recall's constants (`RECALL_CONSTANTS`). */
+const CONSTANT_NAMES: readonly string[] = ['rrfK', 'denseWeight', 'sparseWeight', 'recencyWeight', 'overFetch', 'topK', 'nearDuplicate', 'recentTopK'];
+/** The largest count constant: `topK × overFetch` rows stays a finite, bounded read. */
+const MAX_RECALL_COUNT = 1000;
 
 /** Why a recall setting was refused at construction. */
 export type RecallOptionRejection = 'conflict' | 'unsupported_provider' | 'unsupported_runtime' | 'invalid_value';
@@ -51,8 +55,9 @@ function isSettingsObject(value: unknown): boolean {
 /**
  * Checks a recall setting's values: the setting and its `budget` objects, `budget.totalTokens` an integer of at least
  * 0, `capture` one of its three modes, `retrieval` `'dense'` or `'hybrid'`, and a manager's `constants` an object
- * whose values are finite numbers of at least 0, `topK`, `recentTopK` and `overFetch` integers of at least 1, and
- * `nearDuplicate` above 0 and at most 1. A `null` or `undefined` setting, or field, is unset.
+ * of the hybrid recall's constants by name, each a finite number of at least 0, `topK`, `recentTopK` and `overFetch`
+ * integers from 1 to 1,000, and `nearDuplicate` above 0 and at most 1. A `null` or `undefined` setting, or field, is
+ * unset.
  *
  * @param recall - The setting.
  * @param where - What opens the message (`gmi()`, `agent()`, `CognitiveMemoryManager`).
@@ -84,16 +89,20 @@ export function assertRecallConfig(recall: ManagerRecallConfig | null | undefine
       rejectRecallOption('constants', 'invalid_value', `${where}: recall.constants must be an object of numbers.`);
     }
     for (const [name, value] of Object.entries(constants as Record<string, unknown>)) {
+      // A misspelt name would otherwise run on the starting value with nothing said.
+      if (!CONSTANT_NAMES.includes(name)) {
+        rejectRecallOption('constants', 'invalid_value', `${where}: recall.constants.${name} is not a recall constant (${CONSTANT_NAMES.join(', ')}).`);
+      }
       if (value == null) continue;
       const finite = typeof value === 'number' && Number.isFinite(value) && value >= 0;
       const fits = COUNT_CONSTANTS.includes(name)
-        ? finite && Number.isInteger(value) && value >= 1
+        ? finite && Number.isInteger(value) && value >= 1 && value <= MAX_RECALL_COUNT
         : name === 'nearDuplicate'
           ? finite && value > 0 && value <= 1
           : finite;
       if (!fits) {
         const rule = COUNT_CONSTANTS.includes(name)
-          ? 'an integer of at least 1'
+          ? `an integer from 1 to ${MAX_RECALL_COUNT}`
           : name === 'nearDuplicate'
             ? 'a number above 0 and at most 1'
             : 'a finite number of at least 0';
