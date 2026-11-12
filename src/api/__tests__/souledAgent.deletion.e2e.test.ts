@@ -11,9 +11,13 @@
  * - `forgetUser` deletes one user for good (traces, soft-deleted rows, document chunks, pages, the registry row, the
  *   bytes in the store's files) and leaves everyone else; it waits for the user's writes in flight, goes on past its
  *   deadline and says so, and its report names every store it did not reach and never the user.
+ * - Every open applies the tombstones again from a copy a restore does not replace: a store put back from before a
+ *   deletion forgets again, a page a deletion could not delete goes at the next open, and a store whose copy or key
+ *   is missing does not open.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
+import { createHmac } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -21,6 +25,10 @@ import Database from 'better-sqlite3';
 import pino from 'pino';
 import { souledAgent, type SouledAgent, type SouledAgentOptions } from '../souledAgent';
 import type { Brain } from '../../cognition/memory/retrieval/store/Brain';
+import { ForgottenLedger } from '../../cognition/memory/suppression/ForgottenLedger';
+import { canonicalJson } from '../../cognition/learning/ledger/canonical';
+import { tombstoneHash } from '../../cognition/learning/ledger/Ledger';
+import { UserWikiStore } from '../../cognition/substrate/memory/wiki/UserWikiStore';
 import type { AgentMemoryProvider, MemoryHookContext } from '../agent';
 import { reply, script, type ProviderScript } from './helpers/stubProviders';
 import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory';
@@ -462,5 +470,143 @@ describe('forgetUser', () => {
     const again = await a.forgetUser!('alice');
     expect(again.complete).toBe(true);
     expect(again.stores.some((entry) => entry.store.startsWith('legacy memory'))).toBe(false);
+  });
+});
+
+describe('tombstones after a restore', () => {
+  /** Puts a copy of the store's file back in its place, as a restore does; every agent on the folder is closed first. */
+  function swapStore(from: string): void {
+    fs.copyFileSync(from, storeFile());
+    for (const suffix of ['-wal', '-shm']) fs.rmSync(`${storeFile()}${suffix}`, { force: true });
+  }
+  const ledgerRows = () => rows<{ hash: string }>(storeFile(), 'SELECT hash FROM agentos_learning_forgotten').map((row) => row.hash);
+
+  it('cleans a store put back from before the deletion, at the next open', async () => {
+    const { a } = await open();
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await turn(a, 's2', 'bob', 'My canary is WREN-2.');
+    await a.memory!.compileWiki();
+    await a.close();
+    const backup = path.join(dir, 'backup.sqlite');
+    fs.copyFileSync(storeFile(), backup);
+
+    const { a: second } = await open();
+    expect((await second.forgetUser!('alice')).complete).toBe(true);
+    await second.close();
+    swapStore(backup);
+    expect(saidOf(keyOf(alice))).toHaveLength(2);
+    expect(ledgerRows()).not.toContain(await ForgottenLedger.hash('', alice));
+
+    events.length = 0;
+    await open();
+    expect(tracesOf(keyOf(alice))).toEqual([]);
+    expect(pagesOf(keyOf(alice))).toEqual([]);
+    expect(registryOf(keyOf(alice))).toEqual([]);
+    expect(saidOf(keyOf(bob))).toHaveLength(2);
+    expect(pagesOf(keyOf(bob))).toHaveLength(1);
+    expect(ledgerRows()).toContain(await ForgottenLedger.hash('', alice));
+    expect(lines('memory.tombstone_reapplied')).toHaveLength(1);
+    expect(lines('memory.tombstone_reapplied')[0]).toMatchObject({ subjects: 1, reconciled: 1 });
+  });
+
+  it('applies tombstones on demand, and does nothing on a clean store', async () => {
+    const { a } = await open();
+    await turn(a, 's1', 'bob', 'I like tea.');
+    expect(await a.applyTombstones!()).toEqual([]);
+    expect(lines('memory.tombstone_reapplied')).toEqual([]);
+
+    await a.memory!.markForgotten(alice);
+    // A trace another process stored after the tombstone.
+    const brain = brainOf(a);
+    await brain.run(
+      `INSERT INTO memory_traces
+         (brain_id, id, type, scope, content, embedding, strength, created_at,
+          last_accessed, retrieval_count, tags, emotions, metadata, deleted, scope_id)
+       VALUES (?, ?, 'episodic', 'conversation', ?, NULL, 1.0, ?, NULL, 0, '[]', '{}', '{}', 0, ?)`,
+      [brain.brainId, 'late-1', 'late words', Date.now(), keyOf(alice)],
+    );
+    expect(tracesOf(keyOf(alice))).toHaveLength(1);
+
+    const reports = await a.applyTombstones!();
+    expect(reports).toHaveLength(1);
+    expect(reports[0].tombstone.written).toBe(false);
+    expect(tracesOf(keyOf(alice))).toEqual([]);
+    expect(saidOf(keyOf(bob))).toHaveLength(2);
+    expect(lines('memory.tombstone_reapplied')).toHaveLength(1);
+    expect(lines('memory.tombstone_reapplied')[0]).toMatchObject({ subjects: 1, reconciled: 0 });
+  });
+
+  it('does not open without its tombstone copy', async () => {
+    const { a } = await open();
+    await a.close();
+    fs.rmSync(copyFile());
+    await expect(open()).rejects.toMatchObject({ name: 'ForgottenLedgerError', code: 'COPY_UNAVAILABLE' });
+    expect(fs.existsSync(copyFile())).toBe(false);
+
+    fs.writeFileSync(copyFile(), 'not a database');
+    await expect(open()).rejects.toMatchObject({ name: 'ForgottenLedgerError', code: 'COPY_UNAVAILABLE' });
+  });
+
+  it('keys the tombstones, keeps the old ones in force, and stays closed without the key', async () => {
+    const users = ['alice', 'bob', 'carol'];
+    const first = await open();
+    await first.a.forgetUser!('bob');
+    await first.a.close();
+
+    const { a } = await open({ tombstoneKey: 'k-one' });
+    await a.forgetUser!('alice');
+    // A tombstone in the learning layer's own form, as a release before the shared ledger wrote it.
+    await brainOf(a).run('INSERT INTO agentos_learning_forgotten (hash, namespace, forgotten_at) VALUES (?, ?, ?)', [
+      await tombstoneHash('', 'carol'),
+      '',
+      new Date().toISOString(),
+    ]);
+    const stored = ledgerRows();
+    expect(stored).toContain(createHmac('sha256', 'k-one').update(canonicalJson(['', 'user', 'alice'])).digest('hex'));
+    expect(stored.filter((hash) => hash.startsWith('k1:'))).toHaveLength(1);
+    for (const user of users) await a.session(`s-${user}`, { userId: user }).send(`I am ${user}.`);
+    await a.close();
+    for (const user of users) expect(tracesOf(keyOf({ kind: 'user', id: user }))).toEqual([]);
+
+    await expect(open()).rejects.toMatchObject({
+      name: 'ForgottenLedgerError',
+      code: 'KEY_REQUIRED',
+      message: expect.stringMatching(/tombstoneKey/),
+    });
+
+    const { a: rotated } = await open({ tombstoneKey: { current: 'k-two', previous: ['k-one'] } });
+    for (const user of users) await rotated.session(`t-${user}`, { userId: user }).send(`It is ${user} again.`);
+    await rotated.close();
+    for (const user of users) expect(tracesOf(keyOf({ kind: 'user', id: user }))).toEqual([]);
+  });
+
+  it('keeps a page it could not delete away from its user, and removes it at the next open', async () => {
+    const { a, s } = await open({}, [
+      reply.text('Noted.'),
+      reply.text('The user keeps a canary.'),
+      reply.tools([{ id: 'c1', name: 'read_memory_page', args: { id: 'concepts/notes' } }]),
+      reply.text('Done.'),
+    ]);
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await a.memory!.compileWiki();
+    vi.spyOn(UserWikiStore.prototype, 'deletePage').mockRejectedValueOnce(new Error('disk I/O error'));
+
+    const report = await a.forgetUser!('alice');
+    expect(report.pages.failed).toEqual([{ id: 'concepts/notes', reason: expect.any(String) }]);
+    expect(report.complete).toBe(false);
+    expect(pagesOf(keyOf(alice))).toHaveLength(1);
+
+    await a.session('s5', { userId: 'alice' }).send('Read my notes.');
+    expect(toolAnswerIn(s.seen.at(-1)!)).toContain('No memory page found with id');
+    expect(lines('memory.page_read_refused')).toHaveLength(1);
+    expect(lines('memory.page_read_refused')[0]).toMatchObject({ reason: 'forgotten' });
+    await a.close();
+
+    events.length = 0;
+    await open();
+    expect(pagesOf(keyOf(alice))).toEqual([]);
+    expect(registryOf(keyOf(alice))).toEqual([]);
+    expect(lines('memory.tombstone_reapplied')).toHaveLength(1);
+    expect(lines('memory.tombstone_reapplied')[0]).toMatchObject({ subjects: 1 });
   });
 });
