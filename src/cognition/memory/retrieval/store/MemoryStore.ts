@@ -1592,7 +1592,7 @@ export class MemoryStore {
    * A cached trace whose row holds what this store last wrote or read for it is answered from the cache, with what
    * this process changed on it since (a verification `persistTraceMetadata` kept beside the row, a gist of its
    * words). A row written since with another trust policy or statement (source, time, confidence, verification
-   * count) gives the cached trace its policy and provenance; a row written since with other words, type or creation
+   * count) gives the cached trace its policy (none, when the row holds none) and provenance; a row written since with other words, type or creation
    * time (stored again, or edited by `memory_update`) is returned as the row holds it, those and its trust together,
    * for this call only, and the cached copy keeps what it held. Such a row is read again inside the trace's turn before it is used, so a
    * `store()` of this process that wrote a newer row after the first read keeps what it wrote.
@@ -1670,7 +1670,9 @@ export class MemoryStore {
               return;
             }
             const statement = rowStatementOf(current);
+            // A row stored again without a policy holds none: the trace is read as a load of the row reads it.
             if (statement.policy) trace.policy = { ...statement.policy };
+            else delete trace.policy;
             if (statement.provenance) trace.provenance = { ...statement.provenance };
             this.rowSeen.set(trace, seenRowOf(rowFieldsOf(current), statement));
             traces.set(id, trace);
