@@ -42,8 +42,8 @@ export interface ImageCheck {
   /** `match`: compares the image with known material (a hash service). `classify`: sends it to a model. */
   kind: 'match' | 'classify';
   /**
-   * What a throw does. `refuse` (default): the image is refused as unavailable. `skip`: the check is a signal; its
-   * failure is written and the chain goes on. A `match` check is always `refuse`.
+   * What a throw, or an answer with no verdict, does. `refuse` (default): the image is refused as unavailable. `skip`:
+   * the check is a signal; its failure is written and the chain goes on. A `match` check is always `refuse`.
    */
   onError?: 'refuse' | 'skip';
   /**
@@ -201,11 +201,8 @@ export class ImageGuardrail implements IGuardrailService {
   /** Runs one check on one image and folds its answer into the image's state. A quarantine is returned at once. */
   private async run(check: ImageCheck, image: Captured, state: ImageState, context: GuardrailContext): Promise<GuardrailEvaluationResult | undefined> {
     const metadata = { guardrailId: this.id, imageIndex: image.index, checkId: check.id };
-    let answer: Awaited<ReturnType<ImageCheck['check']>>;
-    try {
-      // its own copy: a check cannot change what the next one reads
-      answer = await check.check({ index: image.index, bytes: new Uint8Array(image.bytes), mimeType: image.mimeType }, context);
-    } catch (error) {
+    // A throw, or an answer with no verdict: the image is refused as unavailable, or, for a signal, the chain goes on.
+    const couldNotAnswer = (error: unknown): undefined => {
       const skip = check.kind === 'classify' && check.onError === 'skip';
       this.failed(check.id, skip ? 'skip' : 'refuse', error);
       if (!skip) {
@@ -213,6 +210,13 @@ export class ImageGuardrail implements IGuardrailService {
         if (state.rank < 2) { state.rank = 2; state.verdict = this.unavailable(image.index, check.id); }
       }
       return undefined;
+    };
+    let answer: Awaited<ReturnType<ImageCheck['check']>>;
+    try {
+      // its own copy: a check cannot change what the next one reads
+      answer = await check.check({ index: image.index, bytes: new Uint8Array(image.bytes), mimeType: image.mimeType }, context);
+    } catch (error) {
+      return couldNotAnswer(error);
     }
     const verdict = (answer as { verdict?: unknown } | null | undefined)?.verdict;
     if (verdict === 'block') {
@@ -238,10 +242,7 @@ export class ImageGuardrail implements IGuardrailService {
       return undefined;
     }
     // an answer of another shape is a check that could not answer
-    this.failed(check.id, 'refuse', new TypeError('the check answered no verdict'));
-    state.open = false;
-    if (state.rank < 2) { state.rank = 2; state.verdict = this.unavailable(image.index, check.id); }
-    return undefined;
+    return couldNotAnswer(new TypeError('the check answered no verdict'));
   }
 
   /**
