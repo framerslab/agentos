@@ -4,13 +4,13 @@
  *
  * @module agentos/cognition/memory/retrieval/recall/dedupe
  */
-import { recallTokens } from './lexical.js';
+import { FTS_STOP_WORDS } from '../store/tracePersistence.js';
 
 /**
  * Whether two token sets are one memory: equal, or a Jaccard index (shared tokens over all tokens) of at least
  * `threshold`. Two empty sets are not.
  *
- * @param a - One text's tokens ({@link recallTokens}).
+ * @param a - One text's tokens ({@link dedupeTokens}).
  * @param b - The other's.
  * @param threshold - The index at which they are one (the recall's `nearDuplicate`, 0.80 to start).
  */
@@ -21,9 +21,16 @@ export function nearDuplicate(a: ReadonlySet<string>, b: ReadonlySet<string>, th
   return shared / (a.size + b.size - shared) >= threshold;
 }
 
-/** The words of a memory's text as the dedupe compares them. */
+/**
+ * The words of a memory's text as the dedupe compares them: runs of letters, digits and `_`, lower-cased, with stop
+ * words dropped unless nothing else is left. A one-character word stays (the exact-words leg's words drop it), so two
+ * memories that differ in a one-digit or one-letter value ("locker 7" and "locker 9") are two, and a correction is
+ * never dropped as the duplicate of the value it corrects.
+ */
 export function dedupeTokens(text: string): Set<string> {
-  return new Set(recallTokens(text));
+  const raw = (text.match(/[\p{L}\p{N}_]+/gu) ?? []).map((token) => token.toLowerCase());
+  const kept = raw.filter((token) => !FTS_STOP_WORDS.has(token));
+  return new Set(kept.length > 0 ? kept : raw);
 }
 
 /**

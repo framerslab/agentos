@@ -51,7 +51,7 @@ afterEach(() => {
 describe.each(ENGINES)('hybrid recall on %s', (engine, open) => {
   /**
    * Thirty traces a flat embedder cannot tell apart; the oldest holds the answer, so the dense leg's twenty newest leave
-   * it out. Each note names beds of its own, so no two notes are near-duplicates (a one-digit number is no token).
+   * it out. Each note names beds of its own, so no two notes are near-duplicates by their beds alone.
    */
   async function fixture(recall: Record<string, unknown> | undefined, embedder: WordHashEmbedder = new FlatEmbedder()) {
     const db = await open();
