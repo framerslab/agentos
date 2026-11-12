@@ -24,6 +24,7 @@ import {
   type GuardrailOutputPayload,
   type IGuardrailService,
 } from '../../src/safety/guardrails/IGuardrailService.js';
+import { ImageGuardrail, type ImageCheck, type ImageUnderReview } from '../../src/safety/guardrails/builtin/ImageGuardrail';
 
 class FakeStreamingManager {
   private readonly prepared = new Map<StreamId, AgentOSResponse[]>();
@@ -808,5 +809,60 @@ describe('AgentOS.processRequest with holds from guards a host registered', () =
     expect(orchestrator.callCount).toBe(1);
     expect(responses.map((r) => r.type)).toEqual([AgentOSResponseChunkType.FINAL_RESPONSE]);
     expect((responses[0] as AgentOSFinalResponseChunk).finalResponseText).toBe('a delivered reply');
+  });
+});
+
+describe('AgentOS.processRequest with the image guard a host registered', () => {
+  /** A three-byte image whose bytes are all `byte`. */
+  const image = (byte: number) => ({ type: 'base64' as const, data: Buffer.from([byte, byte, byte]).toString('base64'), mimeType: 'image/png' });
+
+  /** The agent with `guard` registered as an extension a host loaded, and a turn that would reply `a reply`. */
+  function agentWithImageGuard(streamId: StreamId, guard: IGuardrailService): { agent: AgentOS; orchestrator: StubOrchestrator } {
+    const streamingManager = new FakeStreamingManager();
+    const orchestrator = new StubOrchestrator(streamingManager, streamId, [buildFinalChunk(streamId, 'persona-default', 'a reply')]);
+    const agent = createAgentUnderTest(undefined, streamingManager, orchestrator);
+    (agent as unknown as { extensionManager: unknown }).extensionManager = { getRegistry: () => ({ listActive: () => [{ id: guard.id, payload: guard }] }) };
+    return { agent, orchestrator };
+  }
+
+  it('a quarantine on the second upload ends the turn before any model check or the agent sees the input', async () => {
+    const hash = vi.fn<ImageCheck['check']>(async (img) => (img.index === 1 ? { verdict: 'block', reasonCode: 'KNOWN_MATERIAL', quarantine: true } : { verdict: 'pass' }));
+    const model = vi.fn<ImageCheck['check']>(async () => ({ verdict: 'pass' }));
+    const guard = ImageGuardrail.create({ id: 'images', checks: [{ id: 'hash', kind: 'match', check: hash, reasonCodes: ['KNOWN_MATERIAL'] }, { id: 'model', kind: 'classify', check: model }], requireMatch: true, sequential: true });
+    const { agent, orchestrator } = agentWithImageGuard('stream-image-quarantine', guard);
+    const responses = await collectResponses(agent, { ...baseInput, visionInputs: [image(1), image(2)] });
+    expect(orchestrator.callCount).toBe(0);
+    expect(responses).toHaveLength(1);
+    const error = responses[0] as AgentOSErrorChunk;
+    expect(error.type).toBe(AgentOSResponseChunkType.ERROR);
+    expect(error.code).toBe('KNOWN_MATERIAL');
+    expect(hash).toHaveBeenCalledTimes(2);
+    expect(model).not.toHaveBeenCalled();
+    expect(JSON.stringify(responses)).not.toContain('a reply');
+  });
+
+  it('an image_url upload with no loadImage ends the turn as unavailable, and the URL reaches no check and no chunk', async () => {
+    const model = vi.fn<ImageCheck['check']>(async () => ({ verdict: 'pass' }));
+    const guard = ImageGuardrail.create({ id: 'images', checks: [{ id: 'model', kind: 'classify', check: model }] });
+    const { agent, orchestrator } = agentWithImageGuard('stream-image-url', guard);
+    const responses = await collectResponses(agent, { ...baseInput, visionInputs: [{ type: 'image_url', data: 'https://images.example/upload.jpg' }] });
+    expect(orchestrator.callCount).toBe(0);
+    expect(responses).toHaveLength(1);
+    expect((responses[0] as AgentOSErrorChunk).code).toBe('IMAGE_CHECK_UNAVAILABLE');
+    expect(model).not.toHaveBeenCalled();
+    expect(JSON.stringify(responses)).not.toContain('images.example');
+  });
+
+  it('an upload every check passes reaches the agent unchanged, and the model check judged the captured bytes', async () => {
+    const seen: ImageUnderReview[] = [];
+    const model = vi.fn<ImageCheck['check']>(async (img) => { seen.push(img); return { verdict: 'pass' }; });
+    const guard = ImageGuardrail.create({ id: 'images', checks: [{ id: 'hash', kind: 'match', check: async () => ({ verdict: 'pass' }) }, { id: 'model', kind: 'classify', check: model }], requireMatch: true });
+    const { agent, orchestrator } = agentWithImageGuard('stream-image-allowed', guard);
+    const upload = image(5);
+    const responses = await collectResponses(agent, { ...baseInput, visionInputs: [upload] });
+    expect(orchestrator.callCount).toBe(1);
+    expect(orchestrator.lastInput?.visionInputs).toEqual([upload]);
+    expect(responses.map((r) => r.type)).toEqual([AgentOSResponseChunkType.FINAL_RESPONSE]);
+    expect(seen.map((img) => [img.index, img.mimeType, [...img.bytes]])).toEqual([[0, 'image/png', [5, 5, 5]]]);
   });
 });
