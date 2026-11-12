@@ -3,7 +3,8 @@
  *
  * Reads a JSON file produced by `JsonExporter` (or a compatible schema) and
  * merges traces, graph rows, documents, document chunks/images, conversations,
- * and messages into a target `Brain`.
+ * messages, the registry of conversation scopes and each subject's wiki pages
+ * into a target `Brain`.
  *
  * Trace deduplication is performed inside the trace's scope and scope id by
  * default: a trace there whose text is the record's, or whose metadata names
@@ -28,6 +29,16 @@
  * of a trace the import merges into a trace the brain holds, writes under
  * another id because its id names another trace, or does not write, is
  * skipped, with the edges that name it.
+ *
+ * The registry of conversation scopes (`scopes`) and the wiki pages (`pages`)
+ * come in by the rules the SQLite import uses (`importPages.ts`): a scope the
+ * brain already registers keeps its own row and compile watermark; a page the
+ * brain already holds, by scope and page id, is kept, and the file's chunks of
+ * it stay out; any other page comes in with its chunks, written as traces of
+ * their own, and its row lists the ids they were written under. A message is
+ * never matched as a duplicate of a page chunk of the same text, and one stored
+ * under a scope the brain had compiled past its time moves the scope's
+ * watermark back to just before it.
  *
  * A Brain a learning layer serves holds its plain `user` and `persona` scope
  * ids in the encoded form (`scopeIdForm.ts`), and its export's `meta` names
@@ -64,6 +75,13 @@ import { fillScopeIds } from '../retrieval/store/migrations/v2-to-v3.js';
 import { keyTraceCopies, storedCopyTraceId } from '../retrieval/store/SqlKnowledgeGraph.js';
 import { parseTraceMetadata } from '../retrieval/store/tracePersistence.js';
 import {
+  conversationPagesOf,
+  type ImportedScopeRow,
+  mergeImportedScopesAndPages,
+  registeredConversationScopes,
+  splitImportedPages,
+} from './importPages.js';
+import {
   ENCODED_SCOPE_ID_FORM,
   encodedCopyProperties,
   encodePlainScopeId,
@@ -92,6 +110,10 @@ interface BrainExportPayload {
   images?: DocumentImageRecord[];
   conversations?: ConversationRecord[];
   messages?: MessageRecord[];
+  /** The registry of conversation scopes (`memory_scopes` rows). */
+  scopes?: unknown[];
+  /** Each subject's wiki pages (`memory_pages` rows). */
+  pages?: unknown[];
 }
 
 /** Serialised memory trace from the export file. */
@@ -199,6 +221,12 @@ interface ImportContext {
    */
   encodePlainIds: boolean;
   traceIds: Map<string, string>;
+  /** For each payload trace the import wrote: the id it was written under. */
+  writtenTraceIds: Map<string, string>;
+  /** The rows the import wrote to `memory_traces`: their scope, scope id, time and tags. */
+  storedTraces: Array<{ scope: string; scope_id: string; created_at: number; tags: string }>;
+  /** The payload ids of the chunks of the pages that come in: each is written as a trace of its own. */
+  pageChunks: ReadonlySet<string>;
   /** The payload's trace ids. */
   sourceTraceIds: Set<string>;
   /** The payload's trace ids the import wrote, or matched as a duplicate, under that same id. */
@@ -327,6 +355,9 @@ export class JsonImporter {
       dedup: options?.dedup ?? true,
       encodePlainIds: false,
       traceIds: new Map<string, string>(),
+      writtenTraceIds: new Map<string, string>(),
+      storedTraces: [],
+      pageChunks: new Set<string>(),
       sourceTraceIds: new Set<string>(),
       filedTraceIds: new Set<string>(),
       skippedNodeIds: new Set<string>(),
@@ -349,7 +380,32 @@ export class JsonImporter {
       if (decision.action === 'record') await writeScopeIdFormRecord(trx, this.brain);
       // A trace an older release wrote holds scope_id '': filed under its scope id first, it is found there.
       if (context.dedup) await fillScopeIds(trx, this.brain.brainId);
-      await this._importTraces(trx, payload.traces, result, context);
+      // A page this brain already holds is kept: the file's page of that scope and id is left out, its chunks with it.
+      // The chunks of a page that comes in are written as traces of their own.
+      const brainId = this.brain.brainId;
+      const split = await splitImportedPages(trx, brainId, conversationPagesOf(Array.isArray(payload.pages) ? payload.pages : []));
+      result.skipped += split.kept;
+      context.pageChunks = split.chunksIn;
+      // The scopes this brain registered before the import: a message stored under one of them older than its compile
+      // is read by its next compile.
+      const held = await registeredConversationScopes(trx, brainId);
+      const traces =
+        split.chunksLeftOut.size > 0
+          ? payload.traces.filter((t) => !(t !== null && typeof t === 'object' && typeof t.id === 'string' && split.chunksLeftOut.has(t.id)))
+          : payload.traces;
+      await this._importTraces(trx, traces, result, context);
+      result.imported += await mergeImportedScopesAndPages(
+        trx,
+        brainId,
+        {
+          held,
+          scopes: (Array.isArray(payload.scopes) ? payload.scopes : []) as ImportedScopeRow[],
+          pages: split.pagesIn,
+          written: context.writtenTraceIds,
+          stored: context.storedTraces,
+        },
+        result.errors,
+      );
       const memoryNodes = await this._importNodes(trx, payload.nodes ?? [], result, context);
       await this._importEdges(trx, payload.edges ?? [], result, context);
       // A trace's copy is found by its trace's key: one written under another node id gets the key here.
@@ -421,16 +477,26 @@ export class JsonImporter {
    * @param result - Mutable `ImportResult` to accumulate counts.
    */
   private async _importTraces(
-    trx: { run: Brain['run']; get: Brain['get'] },
+    trx: { run: Brain['run']; get: Brain['get']; all: Brain['all'] },
     traces: TraceRecord[],
     result: ImportResult,
     context: ImportContext,
   ): Promise<void> {
     const brainId = this.brain.brainId;
-    const checkSql = `SELECT id FROM memory_traces
+    // A chunk of a wiki page is its page's: a message of the same text is not one with it, or the page's next rewrite,
+    // which deletes its chunks, would take what a person said. The tags are a JSON array in text, tested below.
+    const checkSql = `SELECT id, tags FROM memory_traces
        WHERE brain_id = ? AND scope = ? AND scope_id = ?
          AND ${duplicateTraceCondition(this.brain)}
-       LIMIT 1`;
+       LIMIT 50 OFFSET ?`;
+    const isPageChunk = (tags: string): boolean => {
+      try {
+        const parsed: unknown = JSON.parse(tags);
+        return Array.isArray(parsed) && parsed.includes('wiki');
+      } catch {
+        return false;
+      }
+    };
 
     const insertSql = `INSERT INTO memory_traces
          (brain_id, id, type, scope, content, embedding, strength, created_at, last_accessed,
@@ -454,10 +520,23 @@ export class JsonImporter {
           if (scopeId !== '') meta.scopeId = scopeId;
         }
 
-        if (context.dedup) {
-          const existing = await trx.get<{ id: string }>(checkSql, [
-            brainId, scope, scopeId, ...duplicateTraceParams(hash, t.content, importedTurnUserId(meta)),
-          ]);
+        // A chunk of a page that comes in is a row of its own: merged into a trace the brain holds, the page would list
+        // a trace that is not its chunk, and its next rewrite would delete it.
+        if (context.dedup && !(sourceId && context.pageChunks.has(sourceId))) {
+          // Read 50 candidates at a time until one that is not a page chunk is found: any number of chunks of the same
+          // text can come first.
+          let existing: { id: string; tags: string } | undefined;
+          for (let offset = 0; ; offset += 50) {
+            const candidates = await trx.all<{ id: string; tags: string }>(checkSql, [
+              brainId,
+              scope,
+              scopeId,
+              ...duplicateTraceParams(hash, t.content, importedTurnUserId(meta)),
+              offset,
+            ]);
+            existing = candidates.find((candidate) => !isPageChunk(candidate.tags));
+            if (existing || candidates.length < 50) break;
+          }
           if (existing) {
             if (sourceId) context.traceIds.set(sourceId, existing.id);
             if (sourceId && existing.id === sourceId) context.filedTraceIds.add(sourceId);
@@ -481,6 +560,8 @@ export class JsonImporter {
           sourceId ?? `mt_${uuidv4()}`,
           'mt_',
         );
+        const createdAt = t.created_at ?? Date.now();
+        const tags = t.tags ?? '[]';
 
         await trx.run(insertSql, [
           brainId,
@@ -490,10 +571,10 @@ export class JsonImporter {
           t.content,
           embeddingBuf,
           t.strength ?? 1.0,
-          t.created_at ?? Date.now(),
+          createdAt,
           t.last_accessed ?? null,
           t.retrieval_count ?? 0,
-          t.tags ?? '[]',
+          tags,
           t.emotions ?? '{}',
           JSON.stringify(meta),
           t.deleted ?? 0,
@@ -501,7 +582,9 @@ export class JsonImporter {
         ]);
 
         if (sourceId) context.traceIds.set(sourceId, id);
+        if (sourceId) context.writtenTraceIds.set(sourceId, id);
         if (sourceId && id === sourceId) context.filedTraceIds.add(sourceId);
+        context.storedTraces.push({ scope, scope_id: scopeId, created_at: createdAt, tags });
         result.imported++;
       } catch (err) {
         result.errors.push(`Trace import error: ${String(err)}`);

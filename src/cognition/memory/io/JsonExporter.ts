@@ -2,7 +2,8 @@
  * @fileoverview JSON exporter for AgentOS memory brain.
  *
  * Serialises all memory traces, knowledge graph nodes/edges, document registry
- * rows, document chunks/images, conversations, and conversation messages from
+ * rows, document chunks/images, conversations, conversation messages, the
+ * registry of conversation scopes and each subject's wiki pages from
  * a `Brain` into a single structured JSON file.
  * Optionally includes raw embedding vectors encoded as base64 strings.
  *
@@ -17,9 +18,14 @@
  *   "chunks": [...],
  *   "images": [...],
  *   "conversations": [...],
- *   "messages": [...]
+ *   "messages": [...],
+ *   "scopes": [...],
+ *   "pages": [...]
  * }
  * ```
+ *
+ * `scopes` holds the brain's registry of conversation scopes (`memory_scopes`, each with its compile watermark) and
+ * `pages` each subject's wiki pages (`memory_pages`, each listing the ids of its chunks among `traces`).
  *
  * A Brain a learning layer serves writes its record of the encoded scope-id
  * form into `meta` (`scope_id_form`), which an import reads as the export's
@@ -131,6 +137,16 @@ interface MessageRow {
   content: string;
   created_at: number;
   metadata: string;
+}
+
+/** A registry or page row with its times as numbers: a BIGINT column can come back as text (Postgres). */
+function numericTimes(row: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...row };
+  for (const column of ['created_at', 'compiled_at', 'updated_at']) {
+    const value = out[column];
+    if (typeof value === 'string' && value !== '') out[column] = Number(value);
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -248,6 +264,19 @@ export class JsonExporter {
       ? await this.brain.all<MessageRow>('SELECT * FROM messages WHERE brain_id = ?', [brainId])
       : [];
 
+    // ---- memory_scopes, memory_pages ----
+    // The registry of conversation scopes and each subject's wiki pages: a page's row lists its chunks among the
+    // traces, so a restore without the rows would leave chunks no row lists.
+    const scopes = await this.brain.all<Record<string, unknown>>(
+      'SELECT scope, scope_id, kind, agent_id, created_at, compiled_at FROM memory_scopes WHERE brain_id = ?',
+      [brainId],
+    );
+    const pages = await this.brain.all<Record<string, unknown>>(
+      `SELECT scope, scope_id, page_id, content, content_hash, chunk_ids, updated_at
+         FROM memory_pages WHERE brain_id = ?`,
+      [brainId],
+    );
+
     return {
       meta,
       traces,
@@ -258,6 +287,8 @@ export class JsonExporter {
       images,
       conversations,
       messages,
+      scopes: scopes.map(numericTimes),
+      pages: pages.map(numericTimes),
     };
   }
 
