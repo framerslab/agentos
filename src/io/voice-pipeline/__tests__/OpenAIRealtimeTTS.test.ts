@@ -713,6 +713,57 @@ describe('OpenAIRealtimeTTS against a local Realtime server', () => {
       expect(log.errors.map((error) => error.message)).toEqual(['Refused']);
     });
 
+    describe("an 'error' listener that cancels", () => {
+      it('on a failed response leaves no flush_complete', async () => {
+        const session = await start();
+        const log = record(session);
+        session.on('error', () => session.cancel());
+        session.pushTokens('A reply.');
+        const flush = session.flush();
+        await until(() => server.running.size === 1, 'the response');
+        await delay(SOCKET_TURN_MS);
+
+        server.finish(server.responseId(0), 'failed', { type: 'failed', error: { code: 'server_error', message: 'The model failed' } });
+        await flush;
+        await delay(SOCKET_TURN_MS);
+
+        expect(log.errors.map((error) => error.message)).toEqual(['The model failed']);
+        expect(log.flushes).toBe(0);
+      });
+
+      it('on a request the server refuses leaves no flush_complete', async () => {
+        const session = await start();
+        const log = record(session);
+        session.on('error', () => session.cancel());
+        session.pushTokens('A reply.');
+        const flush = session.flush();
+        await until(() => server.sent('response.create').length === 1, 'the request');
+
+        server.send({
+          type: 'error',
+          error: { type: 'invalid_request_error', code: 'invalid_value', message: 'Refused', event_id: server.sent('response.create')[0]!.event_id },
+        });
+        await flush;
+        await delay(SOCKET_TURN_MS);
+
+        expect(log.errors.map((error) => error.message)).toEqual(['Refused']);
+        expect(log.flushes).toBe(0);
+      });
+
+      it('on a response that goes silent leaves no flush_complete', async () => {
+        tts = new OpenAIRealtimeTTS({ apiKey: 'test-key', baseUrl: server.url, responseTimeoutMs: 60 });
+        const session = await start();
+        const log = record(session);
+        session.on('error', () => session.cancel());
+        session.pushTokens('A reply.');
+        await session.flush();
+        await delay(SOCKET_TURN_MS);
+
+        expect(log.errors).toHaveLength(1);
+        expect(log.flushes).toBe(0);
+      });
+    });
+
     it('reports a response that goes silent, and settles its flush', async () => {
       tts = new OpenAIRealtimeTTS({ apiKey: 'test-key', baseUrl: server.url, responseTimeoutMs: 60 });
       const session = await start();
@@ -883,6 +934,44 @@ describe('OpenAIRealtimeTTS against a local Realtime server', () => {
       ]);
     });
 
+    it("a 'reply_transcript' listener that throws is reported as a warning, and the reply ends as it would have", async () => {
+      const session = await startWithTranscript();
+      const log = record(session);
+      session.on('reply_transcript', () => {
+        throw new Error('host bug');
+      });
+      session.pushTokens('A reply.');
+      const flush = watch(session.flush());
+      await until(() => server.running.size === 1, 'the response');
+      await delay(SOCKET_TURN_MS);
+
+      server.finish(server.responseId(0));
+      await until(() => flush.settled, 'the flush to settle');
+
+      expect(log.flushes).toBe(1);
+      expect(log.warnings.map((warning) => warning.message)).toEqual([expect.stringContaining('host bug')]);
+      expect(log.errors).toEqual([]);
+    });
+
+    for (const cut of ['cancel', 'close'] as const) {
+      it(`a 'reply_transcript' listener that calls ${cut}() ends the reply there, with no flush_complete`, async () => {
+        const session = await startWithTranscript();
+        const log = record(session);
+        session.on('reply_transcript', () => session[cut]());
+        session.pushTokens('A reply.');
+        const flush = watch(session.flush());
+        await until(() => server.running.size === 1, 'the response');
+        await delay(SOCKET_TURN_MS);
+
+        server.finish(server.responseId(0));
+        await until(() => flush.settled, 'the flush to settle');
+        await delay(SOCKET_TURN_MS);
+
+        expect(log.flushes).toBe(0);
+        expect(log.errors).toEqual([]);
+      });
+    }
+
     it('emits no transcript with the option unset', async () => {
       const session = await tts.startSession({ voice: 'shimmer', language: 'en' });
       open.push(session);
@@ -917,6 +1006,28 @@ describe('OpenAIRealtimeTTS against a local Realtime server', () => {
         });
         return session as unknown as StreamingTTSSession;
       }),
+    });
+
+    it("forwards each reply's transcript from the session in use", async () => {
+      tts = new OpenAIRealtimeTTS({ apiKey: 'test-key', baseUrl: server.url, outputTranscript: true });
+      const chain = new StreamingTTSChain([tts, backup()], { enableMidSynthesisFailover: true });
+      const session = await chain.startSession({ voice: 'shimmer', language: 'en' });
+      open.push(session);
+      const transcripts: OpenAIRealtimeReplyTranscript[] = [];
+      session.on('reply_transcript', (reply: OpenAIRealtimeReplyTranscript) => transcripts.push(reply));
+      session.pushTokens('We meet at three.');
+      const flush = session.flush();
+      await until(() => server.running.size === 1, 'the response');
+      await delay(SOCKET_TURN_MS);
+
+      server.audio(server.responseId(0));
+      server.transcript(server.responseId(0), 'We meet at 3.');
+      server.finish(server.responseId(0));
+      await flush;
+
+      expect(transcripts).toEqual([
+        { text: 'We meet at three.', transcript: 'We meet at 3.', verdict: { match: true, ratio: 1 } },
+      ]);
     });
 
     it('a barge-in followed at once by the next text starts no failover', async () => {

@@ -6,7 +6,7 @@
  * rules for each of the nine languages (spokenNumbers.fixture.json, whose first key names the CLDR commit).
  */
 import { readFileSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { spokenMatch, spokenWords } from '../spokenMatch.js';
 import { foldNumbers } from '../spokenNumbers.js';
 
@@ -46,6 +46,50 @@ describe('spokenMatch', () => {
   });
   it('answers no match for a reply with no transcript', () => {
     expect(spokenMatch('Hello', '', 'en')).toEqual({ match: false, ratio: 0 });
+  });
+  it('keeps a time, a date, a fraction, a sign, an amount and a percent as written', () => {
+    expect(spokenMatch('The appointment is 3:15', 'The appointment is 3/15', 'en').match).toBe(false);
+    expect(spokenMatch('Wait 1/2 hour', 'Wait one two hour', 'en').match).toBe(false);
+    expect(spokenMatch('-5', 'five', 'en').match).toBe(false);
+    expect(spokenMatch('$5', 'five', 'en').match).toBe(false);
+    expect(spokenMatch('5%', '5', 'en').match).toBe(false);
+    expect(spokenMatch('Meet at 3:15.', 'meet at 3:15', 'en').match).toBe(true);
+    // A hyphen after a letter is no sign.
+    expect(spokenMatch('covid-19', 'covid 19', 'en').match).toBe(true);
+  });
+  it('reads a compound spelling up to 999,999', () => {
+    expect(spokenMatch('999999', 'neunhundertneunundneunzigtausendneunhundertneunundneunzig', 'de').match).toBe(true);
+    expect(spokenMatch('777777', 'siebenhundertsiebenundsiebzigtausendsiebenhundertsiebenundsiebzig', 'de').match).toBe(true);
+    expect(spokenMatch('777777', 'settecentosettantasettemilasettecentosettantasette', 'it').match).toBe(true);
+  });
+  it('reads a grouped number in any script', () => {
+    expect(spokenMatch('१,०००', 'एक हज़ार', 'hi').match).toBe(true);
+  });
+  it('reads a word with an apostrophe as one word without it', () => {
+    expect(spokenMatch("don't", 'dont', 'en').match).toBe(true);
+    expect(spokenWords("Don’t stop, l'homme! 3:15", 'en')).toEqual(['dont', 'stop', 'lhomme', '3:15']);
+  });
+  it('cuts the same words where the platform has no Intl.Segmenter', async () => {
+    const intl = Intl as unknown as { Segmenter?: unknown };
+    const segmenter = intl.Segmenter;
+    vi.resetModules();
+    delete intl.Segmenter;
+    try {
+      const fallback = await import('../spokenMatch.js');
+      expect(fallback.spokenWords("Don’t stop, l'homme! 3:15", 'en')).toEqual(['dont', 'stop', 'lhomme', '3:15']);
+    } finally {
+      intl.Segmenter = segmenter;
+      vi.resetModules();
+    }
+  });
+  it('keeps the comparison of two long texts bounded', () => {
+    const words = Array.from({ length: 2000 }, (_, at) => `w${at}`);
+    // The shared start and end are counted; past a million pairs of words between them, nothing more is.
+    expect(spokenMatch([...words, 'x'].join(' '), ['y', ...words].join(' '), 'en')).toEqual({ match: false, ratio: 0 });
+    const long = Array.from({ length: 3000 }, (_, at) => `w${at}`);
+    const changed = long.map((word, at) => (at === 1500 ? 'other' : word));
+    expect(spokenMatch(long.join(' '), changed.join(' '), 'en').ratio).toBeCloseTo(2999 / 3000, 9);
+    expect(spokenMatch(long.join(' '), long.join(' '), 'en')).toEqual({ match: true, ratio: 1 });
   });
 });
 
