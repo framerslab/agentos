@@ -143,16 +143,23 @@ export interface RunOwner {
   /** A stopped or failed run's rest as a new attempt under the same lock, from the page's memory. */
   continueRun(id: string, job: RunJob): Promise<{ id: string } | { refused: 'another-tab' }>;
   /**
-   * A cut run's rest after a load, under the cut record's id, with the job the caller builds from the new pick. Refused
-   * when another tab removed the record, or finished it under another key since this owner read it: that record is drawn
-   * again as stored, and a second finish takes its current key's lock.
+   * A cut run's rest after a load, under the cut record's id, with the job the caller builds from the new pick. Refused,
+   * starting nothing, when the record cannot be found or read or another tab removed it, or when another tab finished it
+   * under another key since this owner read it: that record is drawn again as stored, and a second finish takes its
+   * current key's lock.
    */
   finish(id: string, job: RunJob): Promise<{ id: string } | { refused: 'another-tab' }>;
-  /** Deletes the record and drops the run, for a run this owner holds or a record whose lock is free. */
+  /**
+   * Deletes the record and drops the run, for a run this owner holds or a record whose lock is free. Refused, the record
+   * kept and drawn as stored, when another tab finished the run under another key since this owner read it.
+   */
   dismiss(id: string): Promise<{ ok: true } | { refused: 'another-tab' }>;
   /** Stops drawing a run in this page alone; the record and the run are untouched. */
   hide(id: string): void;
-  /** The end was drawn: the record goes and the lock is let go, unless the run is an unsaved export. */
+  /**
+   * The end was drawn: the record goes and the lock is let go, unless the run is an unsaved export. Another tab's failed
+   * record is kept, and drawn as stored, when another tab finished it under another key since this owner read it.
+   */
   shown(id: string): Promise<void>;
   /** An unsaved export was saved: its record goes and its lock is let go. */
   saved(id: string): Promise<void>;
@@ -669,7 +676,9 @@ class BrowserRunOwner implements RunOwner {
     // An account stop that begins and ends while the record is read fences this finish too.
     const since = this.stopCuts.length;
     const resume = this.seen.get(id)?.read.record ?? (await this.readOne(id));
-    return this.begin(job, resume ? { resume, since } : { since });
+    // A finish goes on from the cut record alone: one another tab removed, or one the store cannot read, starts nothing.
+    if (!resume) return { refused: 'another-tab' };
+    return this.begin(job, { resume, since });
   }
 
   /** Deletes the record and drops the run; another tab's record only while its lock can be held here. */
@@ -694,10 +703,16 @@ class BrowserRunOwner implements RunOwner {
         // Held while the record is deleted, so no tab can finish the run between the check and the deletion.
         const release = await this.hold(record.key);
         if (!release) return { refused: 'another-tab' };
+        let moved: unknown = null;
         try {
-          await this.deleteRecord(id);
+          moved = await this.deleteUnderKey(id, record.key);
         } finally {
           release();
+        }
+        if (moved !== null) {
+          // Another tab finished the run under another key since this owner read it: its record stays, drawn as stored.
+          await this.redraw(moved);
+          return { refused: 'another-tab' };
         }
       }
       this.seen.delete(id);
@@ -732,12 +747,15 @@ class BrowserRunOwner implements RunOwner {
       // deletion.
       const release = await this.hold(seen.read.record.key);
       if (!release) return;
+      let moved: unknown = null;
       try {
-        await this.deleteRecord(id);
+        moved = await this.deleteUnderKey(id, seen.read.record.key);
       } finally {
         release();
       }
-      seen.local = true;
+      // Another tab finished the run under another key since this owner read it: its record stays, drawn as stored.
+      if (moved !== null) await this.redraw(moved);
+      else seen.local = true;
     }
     this.ensureTimers();
     this.touch();
@@ -1085,8 +1103,8 @@ class BrowserRunOwner implements RunOwner {
       if (gone) {
         this.drop(held);
         // A record another tab moved on is drawn again as stored, so a second finish goes on from it.
-        if (isRunRecord(moved, this.isChosen) && moved.account === this.account) this.see(await this.classify(moved));
-        this.touch();
+        if (moved !== null) await this.redraw(moved);
+        else this.touch();
         return { refused: 'another-tab' };
       }
       // The account's stop came while the record was written: the record it could not see is fenced now.
@@ -1394,6 +1412,33 @@ class BrowserRunOwner implements RunOwner {
   private deleteRecord(id: string): Promise<void> {
     const key = this.keyPrefix + id;
     return this.locks.request(this.lockName(key), () => this.store.delete(key)).catch(() => undefined);
+  }
+
+  /**
+   * Deletes another tab's record under its lock while its key is still `runKey`, the key whose run lock this owner
+   * holds; answers the record as stored when another tab's finish has moved it to another key, and null otherwise.
+   */
+  private async deleteUnderKey(id: string, runKey: string): Promise<unknown> {
+    const key = this.keyPrefix + id;
+    let moved: unknown = null;
+    await this.locks
+      .request(this.lockName(key), async () => {
+        const current = await this.store.get<unknown>(key);
+        if (isPlain(current) && current.id === id && current.key !== runKey) {
+          moved = current;
+          return;
+        }
+        await this.store.delete(key);
+      })
+      .catch(() => undefined);
+    return moved;
+  }
+
+  /** Draws a record another tab moved on as stored, watched while its lock is held, and watches it from now on. */
+  private async redraw(stored: unknown): Promise<void> {
+    if (isRunRecord(stored, this.isChosen) && stored.account === this.account) this.see(await this.classify(stored));
+    this.ensureTimers();
+    this.touch();
   }
 
   /** The job returned: its end, its record's last write, its message and its listeners. */
