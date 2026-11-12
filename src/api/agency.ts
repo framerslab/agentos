@@ -65,7 +65,8 @@
  */
 
 import { compileStrategy, isAgent } from './runtime/strategies/index.js';
-import { maskedMessageOf, noSeatAnswered, seatMetadataOf } from './runtime/strategies/shared.js';
+import { noSeatAnswered, seatMetadataOf } from './runtime/strategies/shared.js';
+import { callbackFailed } from './runtime/agencyLog.js';
 import { validatePoolOptions, hasPoolSurface } from './runtime/pool/validate.js';
 import { createSeatingState, seatRoster, type SeatingState, type SeatedRoster } from './runtime/pool/seating.js';
 import { guardPerCallOptions } from './runtime/pool/guard.js';
@@ -279,20 +280,22 @@ export function agency(opts: AgencyOptions): AgencyInstance {
   const mask = createErrorMask(secretsHolder);
   // The list holds what the config writes, the defaults and the provider
   // variables from construction, before any seating: the agency's own
-  // `agentStart` fires before the first call is seated, and a callback that
-  // throws a configured key there is written to the host's logger masked.
+  // `agentStart` fires before the first call is seated, and the mask holds
+  // those values from then on.
   if (pooled) secretsHolder.list = collectCallSecrets(opts, []);
   /** A masked stand-in that never writes `error`: for an error someone else owns, a HITL handler's. */
   const maskedCopy = (error: unknown): unknown => (pooled ? maskedCopyOf(error, secretsHolder.list) : error);
   const toError = (error: unknown): Error => (error instanceof Error ? error : new Error(String(error)));
   /**
    * Runs one of this agency's own callbacks: a callback that throws, or an
-   * async one whose promise rejects, is written to the host's logger, masked,
-   * and never fails the call or leaves a rejection unhandled.
+   * async one whose promise rejects, is written to the host's logger as
+   * `agency.callback_failed`, with its name and the error's listed type and
+   * code, never its message, and never fails the call or leaves a rejection
+   * unhandled.
    */
   const fire = (name: string, call: () => unknown): void => {
     const threw = (err: unknown): void => {
-      agencyLogger.warn(`${name} callback threw`, { event: 'agency_callback_threw', callback: name, error: maskedMessageOf(err, mask) });
+      callbackFailed(name, err);
     };
     try {
       const returned = call();
@@ -305,8 +308,9 @@ export function agency(opts: AgencyOptions): AgencyInstance {
   };
   // Every callback runs through `fire`, whichever part of a run fires it:
   // this agency, its strategy, a gate or a HITL check. One that throws is
-  // written to the host's logger with its message through the call's mask,
-  // and never fails the call or changes what it returns. The guard reads the
+  // written to the host's logger as `agency.callback_failed`, with its name
+  // and the error's listed type and code, never its message, and never fails
+  // the call or changes what it returns. The guard reads the
   // host's `on` object at each event and never at construction, so a callback
   // set, replaced or deleted there after construction is the one that runs,
   // and a getter there that throws fails no construction. Wrapped before the trail's
@@ -2122,12 +2126,14 @@ export async function runPostApprovalGuardrails(
   const payload = `Tool: ${toolName}\nArguments: ${JSON.stringify(args, null, 2)}`;
 
   // A notification never changes the decision: a callback that throws is
-  // logged, and a block is returned whatever the callback did.
+  // written as `agency.callback_failed`, never its message (a callback can
+  // throw back the arguments it was shown), and a block is returned whatever
+  // the callback did.
   const notify = (event: GuardrailEvent): void => {
     try {
       callbacks?.guardrailResult?.(event);
     } catch (err) {
-      console.warn(`[Guardrail] guardrailResult callback threw for tool "${toolName}":`, err);
+      callbackFailed('guardrailResult', err);
     }
   };
 

@@ -15,6 +15,7 @@
 import type { AgencyOptions, ApprovalDecision, ApprovalRequest } from '../types.js';
 import { AgencyConfigError } from '../types.js';
 import { createContentSafeConsole } from '../../core/logging/contentSafeConsole.js';
+import { callbackFailed } from './agencyLog.js';
 
 /** This module's fixed diagnostic origin; no runtime name enters telemetry. */
 const console = createContentSafeConsole('approval_gate');
@@ -98,11 +99,16 @@ function isDecision(answer: unknown): answer is ApprovalDecision {
   return answer !== null && typeof answer === 'object' && typeof (answer as { approved?: unknown }).approved === 'boolean';
 }
 
-function safeCall<T>(fn: ((e: T) => void) | undefined, event: T): void {
+/**
+ * Calls one of the agency's callbacks. One that throws is written as `agency.callback_failed`, with its name and the
+ * error's listed type and code, never its message: a callback is handed the tool call's arguments and can throw them
+ * back.
+ */
+function safeCall<T>(name: string, fn: ((e: T) => void) | undefined, event: T): void {
   try {
     fn?.(event);
   } catch (err) {
-    console.warn('[agentos] agency callback threw:', err);
+    callbackFailed(name, err);
   }
 }
 
@@ -211,7 +217,7 @@ export function createApprovalGate(o: CreateApprovalGateOptions): ApprovalGateFn
       details: { tool: info.name, args: info.args, step: info.step, callId: info.id },
       context: { agentCalls: [], totalTokens: 0, totalCostUSD: 0, elapsedMs: 0 },
     };
-    safeCall(o.on?.approvalRequested, request);
+    safeCall('approvalRequested', o.on?.approvalRequested, request);
     /**
      * A handler error. Before settlement the first is stored in the slot and
      * each one goes to `on.error`; the model is told only that the handler
@@ -221,7 +227,7 @@ export function createApprovalGate(o: CreateApprovalGateOptions): ApprovalGateFn
       if (!o.slot.settled) {
         // A rejection with no reason still fails the call.
         if (o.slot.error === undefined) o.slot.error = err === undefined ? new AgencyConfigError('HITL approval failed') : err;
-        safeCall(o.on?.error, { agent: o.agentName, error: err instanceof Error ? err : new Error(String(err)), timestamp: Date.now() });
+        safeCall('error', o.on?.error, { agent: o.agentName, error: err instanceof Error ? err : new Error(String(err)), timestamp: Date.now() });
       }
       return refusal(HANDLER_FAILED);
     };
@@ -240,7 +246,7 @@ export function createApprovalGate(o: CreateApprovalGateOptions): ApprovalGateFn
     const late = stopped();
     if (late) return late;
     try {
-      safeCall(o.on?.approvalDecided, decision);
+      safeCall('approvalDecided', o.on?.approvalDecided, decision);
       if (!decision.approved) return refusal(decision.reason ?? 'rejected by the approval handler');
       // Arguments are rewritten in onBeforeToolExecution, never by a decision:
       // an approval that names other arguments is refused, so the call never
@@ -262,7 +268,7 @@ export function createApprovalGate(o: CreateApprovalGateOptions): ApprovalGateFn
         const afterGuardrails = stopped();
         if (afterGuardrails) return afterGuardrails;
         if (!result.passed) {
-          safeCall(o.on?.guardrailHitlOverride, { guardrailId: result.guardrailId!, reason: result.reason!, toolName: info.name, timestamp: Date.now() });
+          safeCall('guardrailHitlOverride', o.on?.guardrailHitlOverride, { guardrailId: result.guardrailId!, reason: result.reason!, toolName: info.name, timestamp: Date.now() });
           return refusal(`guardrail ${result.guardrailId}: ${result.reason}`);
         }
       }
