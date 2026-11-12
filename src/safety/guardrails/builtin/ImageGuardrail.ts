@@ -74,6 +74,11 @@ export interface ImageGuardrailOptions {
   /** The most images one input may carry; more are refused with `IMAGE_LIMIT` before any check runs. Default 4. */
   maxImages?: number;
   /**
+   * The most bytes one image may hold. A larger image is refused with `IMAGE_LIMIT` and no check runs on it: base64 is
+   * measured before it is decoded, `loadImage` bytes as they come back. Default 20 MiB (20971520).
+   */
+  maxBytes?: number;
+  /**
    * The deadline for one evaluation, every check of every image included. Default 15000 ms. Past it no further capture
    * or check starts, and an image whose checks had not all run is refused as unavailable.
    */
@@ -85,15 +90,25 @@ export interface ImageGuardrailOptions {
 const WORD = /^[A-Za-z0-9_.:-]{1,64}$/;
 const FIXED_CODES = ['IMAGE_LIMIT', 'IMAGE_CHECK_UNAVAILABLE'] as const;
 const positiveInteger = (value: unknown): boolean => typeof value === 'number' && Number.isInteger(value) && value > 0;
+const isWord = (value: unknown): value is string => typeof value === 'string' && WORD.test(value);
+/** An image over `maxBytes`: refused with `IMAGE_LIMIT`, not as a check that failed. */
+class ImageTooLarge extends Error {}
 interface Captured { index: number; bytes: Uint8Array; mimeType: string }
 /** What one image's checks amount to so far. `open` says whether a further check may still run on it. */
 interface ImageState { open: boolean; judged: boolean; verdict?: GuardrailEvaluationResult; rank: 0 | 1 | 2 | 3 | 4 }
 // rank: 4 a check's block, 3 a hold, 2 unavailable, 1 a flag, 0 nothing
 
-/** Decodes base64 (white space allowed), or throws when the text is not base64. */
-function decodeBase64(text: string): Uint8Array {
+/**
+ * Decodes base64 (white space allowed), or throws when the text is not base64 or would decode to more than `maxBytes`.
+ * The size is read from the text's length before any copy is made.
+ */
+function decodeBase64(text: string, maxBytes: number): Uint8Array {
+  // four characters carry three bytes; white space beyond the encoded length is allowed up to as much again
+  if (text.length > 2 * 4 * Math.ceil(maxBytes / 3)) throw new ImageTooLarge();
   const compact = text.replace(/\s+/g, '');
   if (compact.length === 0 || compact.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(compact)) throw new TypeError('the image is not base64');
+  const padding = compact.endsWith('==') ? 2 : compact.endsWith('=') ? 1 : 0;
+  if ((compact.length / 4) * 3 - padding > maxBytes) throw new ImageTooLarge();
   const binary = atob(compact);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
@@ -117,6 +132,7 @@ export class ImageGuardrail implements IGuardrailService {
   private readonly matches: ImageCheck[];
   private readonly classifies: ImageCheck[];
   private readonly maxImages: number;
+  private readonly maxBytes: number;
   private readonly timeoutMs: number;
 
   private constructor(private readonly opts: ImageGuardrailOptions) {
@@ -124,6 +140,7 @@ export class ImageGuardrail implements IGuardrailService {
     this.matches = opts.checks.filter((check) => check.kind === 'match');
     this.classifies = opts.checks.filter((check) => check.kind === 'classify');
     this.maxImages = opts.maxImages ?? 4;
+    this.maxBytes = opts.maxBytes ?? 20 * 1024 * 1024;
     this.timeoutMs = opts.timeoutMs ?? 15_000;
     this.config = {
       canSanitize: false,
@@ -139,7 +156,8 @@ export class ImageGuardrail implements IGuardrailService {
   /**
    * Builds the guard, or throws when the list could send an image to a model unchecked or could judge nothing: an
    * empty list, no `classify` check, a `classify` check before a `match` check, a `match` check with
-   * `onError: 'skip'`, and, with `requireMatch`, no `match` check.
+   * `onError: 'skip'`, an `onError` other than `refuse` or `skip`, a reason code that is not a word, and, with
+   * `requireMatch`, no `match` check.
    *
    * @param options - The id, the checks in order, and the guard's limits.
    * @returns The guard.
@@ -149,6 +167,7 @@ export class ImageGuardrail implements IGuardrailService {
     if (typeof options.id !== 'string' || !WORD.test(options.id)) throw new TypeError('ImageGuardrail: id must be a word: letters, digits and _ . : - (at most 64)');
     if (!Array.isArray(options.checks) || options.checks.length === 0) throw new TypeError('ImageGuardrail: at least one check is needed');
     if (options.maxImages !== undefined && !positiveInteger(options.maxImages)) throw new TypeError('ImageGuardrail: maxImages must be a whole number above 0');
+    if (options.maxBytes !== undefined && !positiveInteger(options.maxBytes)) throw new TypeError('ImageGuardrail: maxBytes must be a whole number above 0');
     if (options.timeoutMs !== undefined && !positiveInteger(options.timeoutMs)) throw new TypeError('ImageGuardrail: timeoutMs must be a whole number above 0');
     if (options.loadImage !== undefined && typeof options.loadImage !== 'function') throw new TypeError('ImageGuardrail: loadImage must be a function');
     let sawClassify = false;
@@ -158,7 +177,8 @@ export class ImageGuardrail implements IGuardrailService {
       ids.add(check.id);
       if (check.kind !== 'match' && check.kind !== 'classify') throw new TypeError(`ImageGuardrail: check ${check.id} needs a kind of match or classify`);
       if (typeof check.check !== 'function') throw new TypeError(`ImageGuardrail: check ${check.id} has no check function`);
-      if (check.reasonCodes !== undefined && (!Array.isArray(check.reasonCodes) || !check.reasonCodes.every((code) => typeof code === 'string'))) throw new TypeError(`ImageGuardrail: check ${check.id} lists reasonCodes that are not strings`);
+      if (check.reasonCodes !== undefined && (!Array.isArray(check.reasonCodes) || !check.reasonCodes.every(isWord))) throw new TypeError(`ImageGuardrail: check ${check.id} lists reasonCodes that are not words: letters, digits and _ . : - (at most 64)`);
+      if (check.onError !== undefined && check.onError !== 'refuse' && check.onError !== 'skip') throw new TypeError(`ImageGuardrail: check ${check.id} has an onError other than refuse or skip`);
       if (check.kind === 'classify') sawClassify = true;
       else if (sawClassify) throw new TypeError(`ImageGuardrail: match check ${check.id} is listed after a classify check; every match check comes first`);
       if (check.kind === 'match' && check.onError === 'skip') throw new TypeError(`ImageGuardrail: match check ${check.id} cannot be skipped when it fails`);
@@ -189,8 +209,10 @@ export class ImageGuardrail implements IGuardrailService {
   private async capture(image: VisionInputData, context: GuardrailContext): Promise<{ bytes: Uint8Array; mimeType: string }> {
     if (typeof image?.data !== 'string') throw new TypeError('the image carries no data');
     if (image.type === 'base64') {
-      const dataUrl = /^data:([^;,]*)(?:;[^,]*)?,(.*)$/s.exec(image.data);
-      const bytes = decodeBase64(dataUrl ? dataUrl[2] : image.data);
+      const dataUrl = /^data:([^;,]*)((?:;[^;,]*)*),(.*)$/s.exec(image.data);
+      // a data URL is base64 only when it says so; its other form is percent-encoded text
+      if (dataUrl && !dataUrl[2].split(';').includes('base64')) throw new TypeError('the data URL is not base64');
+      const bytes = decodeBase64(dataUrl ? dataUrl[3] : image.data, this.maxBytes);
       const mimeType = image.mimeType ?? (dataUrl && dataUrl[1] ? dataUrl[1] : undefined);
       if (!mimeType) throw new TypeError('the image names no mime type');
       return { bytes, mimeType };
@@ -200,6 +222,7 @@ export class ImageGuardrail implements IGuardrailService {
     const loaded = await this.opts.loadImage(image.data, context);
     const mimeType = image.mimeType ?? loaded?.mimeType;
     if (!(loaded?.bytes instanceof Uint8Array) || loaded.bytes.length === 0) throw new TypeError('loadImage returned no bytes');
+    if (loaded.bytes.length > this.maxBytes) throw new ImageTooLarge();
     if (!mimeType) throw new TypeError('the image names no mime type');
     return { bytes: new Uint8Array(loaded.bytes), mimeType };
   }
@@ -225,6 +248,9 @@ export class ImageGuardrail implements IGuardrailService {
       return couldNotAnswer(error);
     }
     const verdict = (answer as { verdict?: unknown } | null | undefined)?.verdict;
+    // a block, a flag or a hold carries a code that is a word, or it is no verdict: an answer nobody can route by code
+    const code = verdict === 'hold' ? (answer as { reviewCode?: unknown }).reviewCode : (answer as { reasonCode?: unknown } | null | undefined)?.reasonCode;
+    if ((verdict === 'block' || verdict === 'flag' || verdict === 'hold') && !isWord(code)) return couldNotAnswer(new TypeError('the check answered a verdict without a code'));
     if (verdict === 'block') {
       const blocked = answer as Extract<ImageCheckResult, { verdict: 'block' }>;
       const block: GuardrailEvaluationResult = { action: GuardrailAction.BLOCK, reasonCode: blocked.reasonCode, metadata: { ...metadata, ...(blocked.quarantine === true ? { quarantine: true } : {}) } };
@@ -241,7 +267,11 @@ export class ImageGuardrail implements IGuardrailService {
     if (verdict === 'flag') {
       const flagged = answer as Extract<ImageCheckResult, { verdict: 'flag' }>;
       if (check.kind === 'classify') state.judged = true;
-      if (state.rank < 1) { state.rank = 1; state.verdict = { action: GuardrailAction.FLAG, reasonCode: flagged.reasonCode, metadata: { ...metadata, ...(flagged.scores ? { scores: flagged.scores } : {}) } }; }
+      // only finite numbers under word keys reach the verdict: a score carries no text about the image
+      const scores = flagged.scores && typeof flagged.scores === 'object'
+        ? Object.fromEntries(Object.entries(flagged.scores).filter(([key, value]) => WORD.test(key) && typeof value === 'number' && Number.isFinite(value)))
+        : {};
+      if (state.rank < 1) { state.rank = 1; state.verdict = { action: GuardrailAction.FLAG, reasonCode: flagged.reasonCode, metadata: { ...metadata, ...(Object.keys(scores).length > 0 ? { scores } : {}) } }; }
       return undefined;
     }
     if (verdict === 'pass') {
@@ -284,6 +314,11 @@ export class ImageGuardrail implements IGuardrailService {
       try {
         images.push({ index, ...(await this.capture(image, context)) });
       } catch (error) {
+        if (error instanceof ImageTooLarge) {
+          // refused, as too many images are: no check runs on it, and the other images are still checked
+          states[index] = { open: false, judged: true, rank: 4, verdict: { action: GuardrailAction.BLOCK, reason: 'An image is too large.', reasonCode: 'IMAGE_LIMIT', metadata: { guardrailId: this.id, imageIndex: index } } };
+          continue;
+        }
         this.failed('load', 'refuse', error);
         states[index] = { open: false, judged: false, rank: 2, verdict: this.unavailable(index, 'load') };
       }

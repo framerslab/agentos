@@ -175,7 +175,9 @@ const visionCheck: ImageCheck = {
       if (context.vendorSignal?.aborted) break; // another guard answered a code that stops vendor requests
       parts.push(await visionModel.score(region, image.mimeType));
     }
-    const score = Math.max(0, ...parts);
+    // nothing scored is no judgment: throw, and the guard refuses the image or, with 'skip', asks the next check
+    if (parts.length === 0) throw new Error('no region of the image was scored');
+    const score = Math.max(...parts);
     if (score > 0.8) return { verdict: 'hold', reviewCode: 'IMAGE_REVIEW' };
     if (score > 0.5) return { verdict: 'flag', reasonCode: 'IMAGE_SUGGESTIVE', scores: { suggestive: score } };
     return { verdict: 'pass' };
@@ -184,10 +186,10 @@ const visionCheck: ImageCheck = {
 ```
 
 - **What a check receives.** An `ImageUnderReview`: the image's `index` in `visionInputs`, its `bytes` and its `mimeType`. The bytes are a copy the guard made of the image it captured once, so a check that changes them changes nothing the next check reads. A check never receives the URL: send the bytes to a vendor (as a data URL when its API takes one), never a link it would fetch again.
-- **The four verdicts.** `{ verdict: 'pass' }`; `{ verdict: 'flag', reasonCode, scores? }`, which lets the next check run; `{ verdict: 'hold', reviewCode }`, which keeps the content back for a person's review and ends this image's chain of `classify` checks; `{ verdict: 'block', reasonCode, quarantine? }`, which refuses the image and ends its chain of `classify` checks. The other `match` checks still run on an image a `match` check held, blocked or could not judge, so a later hash match is never hidden. A `match` check that finds known material answers `block` with `quarantine: true`, which ends the whole evaluation before any `classify` check sees any image of the input; from a `classify` check, a quarantine ends it before any further check runs. Any other answer, and a throw, is a check that could not answer: one `image_guard.check_failed` line, then the image is refused as unavailable, or, for a `classify` check with `onError: 'skip'`, the chain goes on.
-- **`reasonCodes`.** List every reason code and review code the check can answer. The guard's own `config.reasonCodes` is its two fixed codes (`IMAGE_LIMIT`, `IMAGE_CHECK_UNAVAILABLE`) and every check's list, and the `guardrail.verdict` line writes a code outside it as `unknown`.
+- **The four verdicts.** `{ verdict: 'pass' }`; `{ verdict: 'flag', reasonCode, scores? }`, which lets the next check run; `{ verdict: 'hold', reviewCode }`, which keeps the content back for a person's review and ends this image's chain of `classify` checks; `{ verdict: 'block', reasonCode, quarantine? }`, which refuses the image and ends its chain of `classify` checks. The other `match` checks still run on an image a `match` check held, blocked or could not judge, so a later hash match is never hidden. A `match` check that finds known material answers `block` with `quarantine: true`, which ends the whole evaluation before any `classify` check sees any image of the input; from a `classify` check, a quarantine ends it before any further check runs. Any other answer (a `block` or `flag` whose `reasonCode`, or a `hold` whose `reviewCode`, is not a word included), and a throw, is a check that could not answer: one `image_guard.check_failed` line, then the image is refused as unavailable, or, for a `classify` check with `onError: 'skip'`, the chain goes on.
+- **`reasonCodes`.** List every reason code and review code the check can answer, each a word (letters, digits and `_ . : -`, at most 64); `create()` throws on any other. The guard's own `config.reasonCodes` is its two fixed codes (`IMAGE_LIMIT`, `IMAGE_CHECK_UNAVAILABLE`) and every check's list, and the `guardrail.verdict` line writes a code outside it as `unknown`.
 - **`context.vendorSignal`.** The guard reads it before each `classify` check and starts none once it is aborted. A check that makes more than one request reads it before each one, as above, and does not hand it to a request already sent.
-- **Write nothing of the image.** Keep the bytes, the URL and any description out of a reason code, a review code, `scores` and your own log lines.
+- **Write nothing of the image.** Keep the bytes, the URL and any description out of a reason code, a review code, `scores` and your own log lines. The guard keeps a flag's `scores` only as finite numbers under keys that are words, and drops any other entry.
 
 ### evaluateOutput(payload)
 
