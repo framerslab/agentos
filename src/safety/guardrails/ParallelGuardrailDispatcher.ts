@@ -137,7 +137,8 @@ async function callWithTimeout(
     const result = await Promise.race([
       fn(deadline.signal),
       new Promise<typeof GUARDRAIL_TIMEOUT>((resolve) => {
-        setTimeout(() => { deadline.abort(); resolve(GUARDRAIL_TIMEOUT); }, timeoutMs);
+        // the timeout settles first: a guard that answers from an abort listener cannot win the race
+        setTimeout(() => { resolve(GUARDRAIL_TIMEOUT); deadline.abort(); }, timeoutMs);
       }),
     ]);
 
