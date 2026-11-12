@@ -6,7 +6,7 @@
 import { describe, expect, it } from 'vitest';
 import { assembleMemoryContext } from '../../src/cognition/memory/core/prompt/MemoryPromptAssembler';
 import { assertRecallConfig, RecallOptionError } from '../../src/cognition/memory/retrieval/recall/budget';
-import { dedupePool, nearDuplicate } from '../../src/cognition/memory/retrieval/recall/dedupe';
+import { dedupePool, dedupeTokens, nearDuplicate } from '../../src/cognition/memory/retrieval/recall/dedupe';
 import { fuseLegs, RECALL_CONSTANTS } from '../../src/cognition/memory/retrieval/recall/fuse';
 import { recallTokens } from '../../src/cognition/memory/retrieval/recall/lexical';
 import { trace } from './helpers/recallFixtures';
@@ -68,6 +68,16 @@ describe('dedupePool', () => {
     }
     expect(kept.map((e) => e.trace.id)).toEqual(['B']);
     expect(dropped.map((d) => [d.entry.trace.id, d.duplicateOf])).toEqual([['A', 'B'], ['C', 'B']]);
+  });
+
+  it('keeps two memories that differ in a one-character value, so a correction is never dropped for the value it corrects', () => {
+    expect(nearDuplicate(dedupeTokens('My locker number is 7.'), dedupeTokens('My locker number is 9.'), 0.8)).toBe(false);
+    expect(nearDuplicate(dedupeTokens('We meet in room B.'), dedupeTokens('We meet in room C.'), 0.8)).toBe(false);
+    expect(nearDuplicate(dedupeTokens('My locker number is 7.'), dedupeTokens('my locker number is 7'), 0.8)).toBe(true);
+    // The old value holds the higher fused score (recalled lately): with the value read as no word, the newer one is dropped.
+    const { kept, dropped } = dedupePool([entry('old', 'My locker number is 7.', 0.02, 100), entry('new', 'My locker number is 9.', 0.015, 200)], 0.8);
+    expect(kept.map((e) => e.trace.id)).toEqual(['old', 'new']);
+    expect(dropped).toEqual([]);
   });
 });
 

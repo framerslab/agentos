@@ -135,6 +135,19 @@ describe.each(ENGINES)('hybrid recall on %s', (engine, open) => {
     await db.close();
   });
 
+  it('a correction that changes a one-digit value is shown beside the memory it corrects, never dropped as its duplicate', async () => {
+    const db = await open();
+    const mem = await memoryWith({ retrieval: 'hybrid' }, new FlatEmbedder(), db.brain);
+    await plant(mem, 'locker-old', 'My locker number is 7.', at(0));
+    await plant(mem, 'locker-new', 'My locker number is 9.', at(1));
+    const h = await mem.manager.assembleForPrompt('What is my locker number?', 1600, NEUTRAL, { scopes: U1 });
+    expect(h.contextText).toContain('number is 7');
+    expect(h.contextText).toContain('number is 9');
+    expect(captureOf(h).candidates.filter((x) => x.reason === 'dedupe')).toEqual([]);
+    await mem.close();
+    await db.close();
+  });
+
   it('a graph association that repeats a pooled memory is not shown twice', async () => {
     const { db, mem } = await fixture({ retrieval: 'hybrid' });
     // The association's trace is below the turn's minConfidence, so no leg returns it; the graph leads to it.
