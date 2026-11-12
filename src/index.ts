@@ -209,6 +209,8 @@ export { ForgottenLedger, ForgottenLedgerError, openForgottenCopy, guardMemoryPr
 export type { ForgottenLedgerOptions, SuppressionSubject, TombstoneKey } from './cognition/memory/suppression/index.js';
 // One person's memory deleted for good, with a report of every store reached and not reached
 export { forgetUserMemory, reapplyTombstones } from './cognition/memory/io/forgetUserMemory.js';
+export { sweepRetention } from './cognition/memory/io/retentionSweep.js';
+export type { RetentionPeriod, RetentionSweepOptions } from './cognition/memory/io/retentionSweep.js';
 export type {
   ForgetMemoryReport,
   ForgetUserMemoryOptions,
@@ -323,7 +325,7 @@ export type {
 export { GatewayProviderManager } from './api/runtime/gatewayProviderManager.js';
 export { agent } from './api/agent.js';
 export { souledAgent } from './api/souledAgent.js';
-export type { SouledAgentOptions, SouledAgent, MemoryPolicy } from './api/souledAgent.js';
+export type { SouledAgentOptions, SouledAgent, MemoryPolicy, MemoryRetention } from './api/souledAgent.js';
 export type {
   Agent,
   AgentLearning,

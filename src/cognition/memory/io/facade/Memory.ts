@@ -336,6 +336,17 @@ function pageChangedUnderEveryAttempt(): Error {
   );
 }
 
+/** The trace ids a registry row's `rebuild_sources` holds: a JSON array of strings; anything else holds none. */
+function rebuildSourceIds(listed: string | null): string[] {
+  if (listed === null) return [];
+  try {
+    const parsed: unknown = JSON.parse(listed);
+    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string' && id !== '') : [];
+  } catch {
+    return [];
+  }
+}
+
 /** True for a trace's tags (a JSON array in text) that mark it a chunk of a wiki page. */
 function isPageChunkTags(tags: string): boolean {
   try {
@@ -1920,6 +1931,41 @@ export class Memory {
     return rows.map((row) => this._buildTrace(row));
   }
 
+  /**
+   * Names traces of a conversation scope for its next compile to read by id, beside the traces after its watermark:
+   * the traces a deleted page was built from that are still there, so the page is rebuilt from them. The ids are
+   * added to the scope's registry row (`rebuild_sources`), each once; a scope with no registry row takes none.
+   */
+  async addRebuildSources(scopeId: string, traceIds: readonly string[]): Promise<void> {
+    await this._initPromise;
+    const ids = traceIds.filter((id) => typeof id === 'string' && id !== '');
+    if (ids.length === 0) return;
+    const where = 'brain_id = ? AND scope = ? AND scope_id = ?';
+    const key = [this._brain.brainId, CONVERSATION_SCOPE, scopeId];
+    const row = await this._brain.get<{ rebuild_sources: string | null }>(`SELECT rebuild_sources FROM memory_scopes WHERE ${where}`, key);
+    if (!row) return;
+    const listed = [...new Set([...rebuildSourceIds(row.rebuild_sources ?? null), ...ids])];
+    await this._brain.run(`UPDATE memory_scopes SET rebuild_sources = ? WHERE ${where}`, [JSON.stringify(listed), ...key]);
+  }
+
+  /** The live traces of one scope a registry row lists in `rebuild_sources`, a page's chunks left out. */
+  private async _rebuildSourceTraces(scopeId: string, listed: string): Promise<MemoryTrace[]> {
+    const ids = rebuildSourceIds(listed);
+    const traces: MemoryTrace[] = [];
+    for (let offset = 0; offset < ids.length; offset += 400) {
+      const slice = ids.slice(offset, offset + 400);
+      const rows = await this._brain.all<TraceRow>(
+        `SELECT id, type, scope, content, embedding, strength, created_at,
+                last_accessed, retrieval_count, tags, emotions, metadata, deleted
+           FROM memory_traces
+          WHERE brain_id = ? AND deleted = 0 AND scope = ? AND scope_id = ? AND id IN (${slice.map(() => '?').join(', ')})`,
+        [this._brain.brainId, CONVERSATION_SCOPE, scopeId, ...slice],
+      );
+      for (const row of rows) if (!isPageChunkTags(row.tags)) traces.push(this._buildTrace(row));
+    }
+    return traces;
+  }
+
   /** The wiki attached by the agent at boot: a page store per conversation scope, and the compiler. */
   private _wiki?: AttachedWiki;
 
@@ -1988,7 +2034,8 @@ export class Memory {
 
   /**
    * The user and session scopes a compile runs over, each with its watermark: the scopes named, or, with none
-   * named, every one that holds a live trace newer than its watermark. A scope is matched by equality on its id.
+   * named, every one that holds a live trace newer than its watermark or names traces a page is to be rebuilt from
+   * (`rebuild_sources`). A scope is matched by equality on its id.
    */
   private async _scopesToCompile(scopes: readonly string[] | undefined): Promise<Array<{ scopeId: string; compiledAt: number }>> {
     const brainId = this._brain.brainId;
@@ -2000,10 +2047,10 @@ export class Memory {
         `SELECT s.scope_id AS scope_id, s.compiled_at AS compiled_at
            FROM memory_scopes s
           WHERE s.brain_id = ? AND s.scope = ? AND s.kind IN ('user', 'session')
-            AND EXISTS (
+            AND (s.rebuild_sources IS NOT NULL OR EXISTS (
               SELECT 1 FROM memory_traces t
                WHERE t.brain_id = s.brain_id AND t.scope = s.scope AND t.scope_id = s.scope_id
-                 AND t.deleted = 0 AND t.created_at > COALESCE(s.compiled_at, 0))
+                 AND t.deleted = 0 AND t.created_at > COALESCE(s.compiled_at, 0)))
           ORDER BY s.scope_id`,
         [brainId, CONVERSATION_SCOPE],
       );
@@ -2100,17 +2147,22 @@ export class Memory {
     const { scopeId } = target;
     // The watermark is read here, in the scope's turn: a compile that waited for another compile of the scope starts
     // where that one left it, and sends none of the same traces to the model again. A scope deleted meanwhile is done.
-    const current = await this._brain.get<{ compiled_at: number | string | null }>(
-      `SELECT compiled_at FROM memory_scopes WHERE brain_id = ? AND scope = ? AND scope_id = ?`,
+    const current = await this._brain.get<{ compiled_at: number | string | null; rebuild_sources: string | null }>(
+      `SELECT compiled_at, rebuild_sources FROM memory_scopes WHERE brain_id = ? AND scope = ? AND scope_id = ?`,
       [this._brain.brainId, CONVERSATION_SCOPE, scopeId],
     );
     if (!current) return undefined;
     const store = wiki.storeFor(scopeId);
     let sinceMs = current.compiled_at === null || current.compiled_at === undefined ? 0 : Number(current.compiled_at);
+    // The traces a deleted page is to be rebuilt from: read by id, beside the traces after the watermark, in the
+    // scope's first batch. They stay listed until a batch that holds them has compiled.
+    const listed = current.rebuild_sources ?? null;
+    let rebuild: MemoryTrace[] = listed === null ? [] : await this._rebuildSourceTraces(scopeId, listed);
+    let rebuildPending = listed !== null;
     for (;;) {
       const belowMs = this._beginCompileRead();
       const read = await this._compileTraces(scopeId, { sinceMs, belowMs, limit: BATCH });
-      if (read.length === 0) break;
+      if (read.length === 0 && !rebuildPending) break;
       const full = read.length === BATCH;
       let batch = read;
       if (full) {
@@ -2121,6 +2173,13 @@ export class Memory {
 
       // The scope's own page chunks are never compiled back into its pages.
       let traces = batch.filter((trace) => !trace.tags.includes('wiki'));
+      if (rebuildPending) {
+        // Each trace once, oldest first.
+        const inBatch = new Set(traces.map((trace) => trace.id));
+        traces = [...rebuild.filter((trace) => !inBatch.has(trace.id)), ...traces].sort(
+          (a, b) => Number(a.createdAt) - Number(b.createdAt) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+        );
+      }
       if (traces.length > 0) {
         if (wiki.beforeScopeCompile) {
           const answer = await wiki.beforeScopeCompile(scopeId, traces);
@@ -2132,6 +2191,19 @@ export class Memory {
         aggregate.tracesConsumed += result.tracesConsumed;
         aggregate.conflicts.push(...result.conflicts);
       }
+
+      if (rebuildPending) {
+        // The listed traces are compiled: the list is cleared while it still holds what was read, so ids another
+        // writer added meanwhile wait for the next compile.
+        await this._brain.run(
+          `UPDATE memory_scopes SET rebuild_sources = NULL
+            WHERE brain_id = ? AND scope = ? AND scope_id = ? AND rebuild_sources = ?`,
+          [this._brain.brainId, CONVERSATION_SCOPE, scopeId, listed],
+        );
+        rebuildPending = false;
+        rebuild = [];
+      }
+      if (batch.length === 0) break;
 
       // A trace stored meanwhile, by an import or another writer, under a time the batch spans is read next time: the
       // watermark stops just before the oldest such trace.

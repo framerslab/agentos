@@ -104,6 +104,8 @@ export const AGENTOS_EVENTS = {
   'memory.forget_done': { stores: 'int', unreached: 'int', pages: 'int', pagesFailed: 'int', drained: 'int', pendingAtDeadline: 'int', complete: { enum: ['yes', 'no'] } },
   // The tombstones were applied again, at an open or on demand: how many forgotten subjects the store still held something of (each deleted again, with a memory.forget_done line of its own), and how many tombstones came back from the ledger's copy into the store, as after a restore from an older backup. Written only when either is above 0.
   'memory.tombstone_reapplied': { subjects: 'int', reconciled: 'int' },
+  // A retention sweep ran over at least one subject with a period: the traces it deleted for good, the pages compiled from them that it deleted, and the subjects it removed from the registry because nothing of them was left.
+  'memory.retention_swept': { traces: 'int', pages: 'int', scopes: 'int' },
   // A translation failed, answered with no text, ran past the transcript translator's own timeout, stopped at its output cap or stopped for another reason (a content filter); it throws TranslationProviderError, and status is 0 when no HTTP status came back.
   'language.translation_failed': { provider: { enum: ['openai', 'deepl'] }, reason: { enum: ['request_failed', 'empty_output', 'timeout', 'truncated', 'incomplete'] }, status: 'int', type: 'word', code: 'word' },
   // A configured detection provider id LanguageService does not build (whisper_stub, or an id it does not know).

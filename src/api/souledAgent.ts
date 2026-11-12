@@ -45,6 +45,7 @@ import {
 import { openForgottenCopy } from '../cognition/memory/suppression/forgottenCopy.js';
 import { shareForgottenLedger } from '../cognition/memory/suppression/learnerTombstones.js';
 import { guardedWrite } from '../cognition/memory/suppression/guardedWrite.js';
+import { sweepRetention, type RetentionPeriod } from '../cognition/memory/io/retentionSweep.js';
 import { WriteChains } from '../cognition/learning/writeChains.js';
 import { conversationScopeKey, parseConversationScopeKey } from '../cognition/memory/retrieval/store/conversationScopeKey.js';
 import { encodePlainScopeId } from '../cognition/memory/retrieval/store/scopeIdForm.js';
@@ -104,7 +105,58 @@ const RECALL_LIMIT = 8;
  * - `{ longTerm: 'raw' }`: its turns are filed and recalled as traces, and no page is compiled for it.
  * - `{ longTerm: 'compiled' }`: its turns are filed, recalled and compiled into its pages. The default.
  */
-export type MemoryPolicy = { longTerm: 'off' } | { longTerm: 'raw' } | { longTerm: 'compiled' };
+export type MemoryPolicy =
+  | { longTerm: 'off' }
+  | { longTerm: 'raw'; retentionDays?: number }
+  | { longTerm: 'compiled'; retentionDays?: number };
+
+/**
+ * How long a souled agent's store keeps what people said.
+ *
+ * A store that holds, or would hold, the memory of more than one user or session does not open, and opens no second
+ * subject's session, without it.
+ */
+export interface MemoryRetention {
+  /**
+   * How long a subject's conversation traces are kept from the time they were stored, or until the subject's deletion
+   * by name.
+   */
+  traces: RetentionPeriod;
+  /** The same for the sessions that named no user; unset, `traces` applies to them too. Operator pages are exempt. */
+  sessions?: RetentionPeriod;
+  /**
+   * What happens to a per-user page when a trace it was compiled from expires. `'delete-whole'` (the default) deletes
+   * the page; `'rebuild'` deletes it and has the next compile build it again from the traces that are left, one model
+   * call a page, charged to the budget.
+   */
+  pages?: 'delete-whole' | 'rebuild';
+}
+
+/** What the open of a store more than one subject shares, and the open of a second subject's session, is refused with. */
+const RETENTION_REQUIRED =
+  "souledAgent: this store holds memory of more than one person or session; set retention: { traces: { days } } or { traces: 'until-deletion' }";
+
+/**
+ * Throws unless `retention` names a period for traces (and, when given, for sessions) that is `'until-deletion'` or a
+ * positive number of days, and a page rule that is one of the two.
+ *
+ * @throws TypeError naming what the option must hold.
+ */
+function assertRetention(retention: unknown): void {
+  const given = (retention !== null && typeof retention === 'object' ? retention : {}) as Record<string, unknown>;
+  const assertPeriod = (period: unknown): void => {
+    if (period === 'until-deletion') return;
+    const days = period !== null && typeof period === 'object' ? (period as { days?: unknown }).days : undefined;
+    if (typeof days !== 'number' || !Number.isFinite(days) || days <= 0) {
+      throw new TypeError('souledAgent: retention days must be a positive number');
+    }
+  };
+  assertPeriod(given.traces);
+  if (given.sessions !== undefined) assertPeriod(given.sessions);
+  if (given.pages !== undefined && given.pages !== 'delete-whole' && given.pages !== 'rebuild') {
+    throw new TypeError("souledAgent: retention pages must be 'delete-whole' or 'rebuild'");
+  }
+}
 
 /** The policy of an agent that names none. */
 const COMPILED: MemoryPolicy = { longTerm: 'compiled' };
@@ -142,13 +194,18 @@ async function within<T>(work: Promise<T>, ms: number): Promise<T | typeof TIMED
   }
 }
 
-/** True for an object whose only key is `longTerm`, holding one of the three words a policy takes. */
+/**
+ * True for an object that holds `longTerm`, one of the three words a policy takes, and nothing else but, on a policy
+ * that keeps memory, `retentionDays` as a positive number.
+ */
 function isMemoryPolicy(value: unknown): value is MemoryPolicy {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
-  const keys = Object.keys(value);
-  if (keys.length !== 1 || keys[0] !== 'longTerm') return false;
-  const { longTerm } = value as { longTerm?: unknown };
-  return longTerm === 'off' || longTerm === 'raw' || longTerm === 'compiled';
+  const { longTerm, retentionDays, ...others } = value as { longTerm?: unknown; retentionDays?: unknown };
+  if (Object.keys(others).length > 0) return false;
+  if (longTerm === 'off') return !Object.prototype.hasOwnProperty.call(value, 'retentionDays');
+  if (longTerm !== 'raw' && longTerm !== 'compiled') return false;
+  if (!Object.prototype.hasOwnProperty.call(value, 'retentionDays')) return true;
+  return typeof retentionDays === 'number' && Number.isFinite(retentionDays) && retentionDays > 0;
 }
 
 /** What `sharedMemory` must be, as the rejection of an option that is not says it. */
@@ -340,7 +397,8 @@ export interface SouledAgentOptions extends AgentOptions {
    * The host's policy for the account a turn serves; asked once a session and kept for it. A hook that throws,
    * rejects, does not answer within the memory hooks' timeout (`memoryProviderOptions.timeoutMs`) or answers anything
    * but one of the three policies fails closed: nothing is filed for that turn, it recalls the operator's pages alone,
-   * and the next turn asks again.
+   * and the next turn asks again. `retentionDays` on a policy that keeps memory shortens the agent's `retention`
+   * period for that account, in the sweeps of the process that asked; it never lengthens it.
    */
   memoryPolicy?: (context: MemoryHookContext) => MemoryPolicy | Promise<MemoryPolicy>;
   /**
@@ -349,6 +407,13 @@ export interface SouledAgentOptions extends AgentOptions {
    * answers anything else fails closed: the text is not filed, and a compile that needs it does not run.
    */
   screen?: (text: string, context: MemoryHookContext & { stage: 'file' | 'compile' }) => Promise<string | null>;
+  /**
+   * How long conversation traces, and the pages compiled from them, are kept. Required once the store holds, or would
+   * hold, the memory of a second user or session: a session that names no user is a subject of its own, so a product
+   * that opens one anonymous session a visitor chooses a period. One stable `userId`, or `sharedMemory`, is one subject
+   * and needs none. Expired memory is deleted by `close()` and by `agent.sweepRetention()`.
+   */
+  retention?: MemoryRetention;
   /**
    * The secret that keys the tombstones (HMAC-SHA-256). Without it tombstones are unkeyed SHA-256 hashes, which can be
    * matched by hashing a guessed id. After a rotation the previous keys are still needed to check the old tombstones.
@@ -393,6 +458,14 @@ export type SouledAgent = Agent & {
    * @returns One report a subject deleted again; none on a store that holds nothing of a forgotten subject.
    */
   applyTombstones?(): Promise<ForgetMemoryReport[]>;
+  /**
+   * Deletes for good what the agent's `retention` no longer keeps: each subject's traces older than its period, and
+   * the pages compiled from them (whole, or rebuilt from the traces that are left with `pages: 'rebuild'`). `close()`
+   * runs it too. Without `retention` it deletes nothing.
+   *
+   * @returns How many traces and pages it deleted, and how many subjects it removed from the registry.
+   */
+  sweepRetention?(): Promise<{ traces: number; pages: number; scopes: number }>;
 };
 
 /**
@@ -453,11 +526,13 @@ export type SouledAgent = Agent & {
  *   in a store of its own, which none of them reaches; nothing is opened.
  */
 export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent> {
-  const { pendingWritesTimeoutMs, sharedMemory, compile, memoryPolicy, screen, tombstoneKey, tombstoneCopy, ...rest } = opts;
+  const { pendingWritesTimeoutMs, sharedMemory, compile, memoryPolicy, screen, tombstoneKey, tombstoneCopy, retention, ...rest } =
+    opts;
   /** The ids the agent itself reads as naming nobody, beside the built-in ones. */
   const anonymousUserIds =
     typeof rest.learning === 'object' && rest.learning !== null ? rest.learning.anonymousUserIds : undefined;
   if (sharedMemory !== undefined) assertSharedMemory(sharedMemory, anonymousUserIds);
+  if (retention !== undefined) assertRetention(retention);
   // The two hooks and sharedMemory act on this agent's own store. A GMI's cognitive memory files and recalls in a store
   // of its own, which none of them reaches: an account the policy turns off would still be remembered there, and
   // sessions sharedMemory runs as one user would not share it. They are refused together, before the soul is loaded:
@@ -587,6 +662,19 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     }
   }
 
+  /**
+   * The key of every subject this store holds memory of, and of every session this process opened: read from the
+   * registry here, and kept current by the session wrapper. Without `retention`, a second one is refused.
+   */
+  const subjects = new Set<string>();
+  for (const row of await closingOnThrow(() => memory.listScopes())) {
+    if (row.kind === 'user' || row.kind === 'session') subjects.add(row.scopeId);
+  }
+  if (retention === undefined && subjects.size > 1) {
+    await closeStore();
+    throw new Error(RETENTION_REQUIRED);
+  }
+
   // Traces an earlier version filed under the agent's plain id, in either form it was written in: no turn reads
   // them, and nothing here deletes, moves or rewrites them.
   const encodedAgentId = encodePlainScopeId('persona', agentId);
@@ -655,6 +743,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   const offSaid = new Set<string>();
   /** For each scope a turn of this process served under a policy that keeps memory: the policy and the turn's context. */
   const served = new Map<string, { policy: MemoryPolicy; context: MemoryHookContext }>();
+  /** For each scope, the shortest `retentionDays` the host's policy answered in this process: its sweep's own period. */
+  const policyDays = new Map<string, number>();
 
   /**
    * Asks the host's policy for the account a turn serves. A throw, a rejection, no answer in time or any answer but
@@ -700,6 +790,9 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       // A failed answer is the latest: no compile reads an earlier permission for the subject.
       if (latest) served.delete(scopeId);
       return policy;
+    }
+    if (policy.longTerm !== 'off' && policy.retentionDays !== undefined) {
+      policyDays.set(scopeId, Math.min(policyDays.get(scopeId) ?? Number.POSITIVE_INFINITY, policy.retentionDays));
     }
     // Kept only where a hook reads it later: the session's answer for its next turns, the scope's for its compile. An
     // answer that came after its session closed is not kept for the session's next opening.
@@ -907,8 +1000,11 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     void run.then(settle, settle);
     return awaitedOnClose(run);
   };
-  /** True while close() compiles: what is stored by its deadline is compiled at once, past any write still running. */
-  let compilingOnClose = false;
+  /**
+   * True once close() has waited for the pending writes: it then sweeps and compiles what is stored at once, past any
+   * write still running, which holds its subject's chain.
+   */
+  let closing = false;
   /**
    * A stream is settled once its usage and its text are known; its text settles after its observation has started.
    * On the default runtime a stream runs only once a consumer reads it, so one whose `signal` aborts before anything
@@ -1109,7 +1205,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     // A forgotten subject reads no page and is compiled no page.
     isForgotten: (subject) => forgotten.isForgotten(subject),
     // Each subject's compile runs on its chain, after its writes; close() compiles what is stored at its deadline.
-    runScope: (scopeId, work) => (compilingOnClose ? work() : onSubject(scopeId, work)),
+    runScope: (scopeId, work) => (closing ? work() : onSubject(scopeId, work)),
   }));
   if (compile === false) memoryLog.warn('memory.compile_skipped', { reason: 'compile_off' });
 
@@ -1158,9 +1254,17 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
         throw new Error('souledAgent: sharedMemory runs every session as one user; this session named another');
       }
     }
+    if (retention === undefined) {
+      // A second subject needs a retention choice. A session opened with no id is a new session, and so a new
+      // subject, unless it names a user or runs as the one user of sharedMemory.
+      const asked = sessionKeyOf(id ?? '', sessionOptions?.userId);
+      const held = asked !== undefined && subjects.has(asked);
+      if (!held && subjects.size > 0) throw new Error(RETENTION_REQUIRED);
+    }
     const session = openSession(id, sessionOptions);
     const subjectKey = sessionKeyOf(session.id, sessionOptions?.userId);
     if (subjectKey !== undefined) {
+      subjects.add(subjectKey);
       const ofSubject = sessionsBySubject.get(subjectKey) ?? new Set<AgentSession>();
       ofSubject.add(session);
       sessionsBySubject.set(subjectKey, ofSubject);
@@ -1288,6 +1392,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     const sessions = [...new Set(linked as string[])];
     const run = async (): Promise<ForgetMemoryReport> => {
       const ofUser = await forgetSubject({ kind: 'user', id: userId }, await forgetLearner(userId));
+      // A subject the store holds nothing more of no longer counts toward the retention requirement.
+      const forgottenSubjects: SuppressionSubject[] = [{ kind: 'user', id: userId }, ...sessions.map((id) => ({ kind: 'session' as const, id }))];
       const report: ForgetMemoryReport = { ...ofUser, stores: [...ofUser.stores], pages: { ...ofUser.pages, failed: [...ofUser.pages.failed] } };
       for (const sessionId of sessions) {
         const ofSession = await forgetSubject({ kind: 'session', id: sessionId }, { stores: [], incomplete: false });
@@ -1298,6 +1404,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
         report.pendingAtDeadline += ofSession.pendingAtDeadline;
         report.complete = report.complete && ofSession.complete;
       }
+      if (report.complete) for (const subject of forgottenSubjects) subjects.delete(conversationScopeKey(agentId, subject));
       return report;
     };
     // close() waits for a deletion that is running, as it waits for a write.
@@ -1318,6 +1425,18 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
         deletionPartsOf(subject, subject.kind === 'user' ? await forgetLearner(subject.id) : { stores: [], incomplete: false }),
     });
   built.applyTombstones = () => awaitedOnClose(applyTombstones());
+  /** Deletes what the agent's retention no longer keeps, each subject on its own chain. */
+  const sweep = async (): Promise<{ traces: number; pages: number; scopes: number }> => {
+    if (retention === undefined) return { traces: 0, pages: 0, scopes: 0 };
+    return sweepRetention({
+      memory,
+      wiki: { storeFor: pagesOf },
+      retention,
+      daysFor: (scopeId) => policyDays.get(scopeId),
+      onChain: (scopeId, work) => (closing ? work() : onSubject(scopeId, work)),
+    });
+  };
+  built.sweepRetention = () => awaitedOnClose(sweep());
 
   // On teardown: close the agent (with runtime: 'gmi' that stops its running session turns and shuts its sessions
   // down); wait, within one deadline, for the turns still running and then for the memory writes of its turns; fold
@@ -1343,10 +1462,21 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
             'reaches the store once it is closed is not stored.',
         );
       }
+      closing = true;
+      if (retention !== undefined) {
+        try {
+          // Expired memory goes before the compile, so no page is built from it.
+          await sweep();
+        } catch {
+          // A failed sweep never blocks the close. No error text: it may hold what a store said.
+          console.warn(
+            '[agentos] souledAgent: the retention sweep on close failed; expired memory stays in the store until the next sweep.',
+          );
+        }
+      }
       try {
         // The subjects this agent's turns wrote to; a trace stored another way waits for memory.compileWiki(). With
         // `compile: false` no wiki is attached, and this compiles nothing.
-        compilingOnClose = true;
         await memory.compileWiki({ reason: 'session-end', scopes: [...written] });
       } catch (err) {
         // A subject's watermark moves only past compiled traces, so the next compile takes these up again.
