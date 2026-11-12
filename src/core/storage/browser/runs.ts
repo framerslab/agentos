@@ -165,9 +165,10 @@ export interface RunOwner {
   saved(id: string): Promise<void>;
   /**
    * Deletes (a removal) or marks (a sign-out, a session's end) every record, stops the account's runs in every tab and
-   * waits for their locks, then lists the records again for a run another tab started meanwhile, and waits for this
-   * owner's starts in flight; the whole stop answers within ten seconds. Answers `{ complete: true }` once the store
-   * listed the records and every record of the account was deleted or marked, and `{ complete: false }` when the store
+   * waits for their locks, then lists the records again and fences each once more, for a run another tab started
+   * meanwhile or a mark another tab's finish cleared, and waits for this owner's starts in flight; the whole stop
+   * answers within ten seconds. Answers `{ complete: true }` once the store listed the records and every record of the
+   * account was deleted or marked, and `{ complete: false }` when the store
    * refused a listing, a read, a deletion or a mark, or a listing had not answered by the ten seconds, or a write or a
    * start was still in flight then (that record is deleted or marked once the write returns), a write of a run kept in
    * memory alone among them: call it again. The last
@@ -791,16 +792,18 @@ class BrowserRunOwner implements RunOwner {
     // A start's fence that the store refuses while the stop runs leaves a record, whenever that start settles.
     const failuresBefore = this.fenceFailures;
     const names = new Set<string>();
-    const first = await this.fenceListed(cut, deadline, names, new Set());
+    const first = await this.fenceListed(cut, deadline, names);
     for (const held of this.held.values()) if (held.release !== null) names.add(this.runName(held.job.key));
     // A BroadcastChannel never delivers to its sender, so this owner's own runs are stopped here, directly.
     this.stopHeld(cut);
     this.channel?.post({ account: this.account, stop: cut });
     await this.waitRuns(names, deadline);
-    // A run another tab started after the first listing and before the message wrote a record that listing missed: a
-    // second listing fences it, and its run's lock is awaited in what is left of the ten seconds.
+    // A run another tab started after the first listing and before the message wrote a record that listing missed, and
+    // a finish in a tab that has not heard the stop clears a mark the first listing made: a second listing fences every
+    // record again (a mark already made stays as it is), and their runs' locks are awaited in what is left of the ten
+    // seconds.
     const found = new Set<string>();
-    const second = await this.fenceListed(cut, deadline, found, new Set(first.keys));
+    const second = await this.fenceListed(cut, deadline, found);
     await this.waitRuns(found, deadline);
     // A start of this owner still taking its lock or writing its record when the stop began fences that record itself
     // once it is written; the stop waits for it in what is left of the ten seconds.
@@ -818,11 +821,11 @@ class BrowserRunOwner implements RunOwner {
   }
 
   /**
-   * Lists the records and deletes or marks each one of the account that `skip` does not name, under its lock, within
-   * the deadline; the names of their runs' locks go into `names`. Answers whether the store listed the records and
-   * every fence landed in time, with the keys it listed.
+   * Lists the records and deletes or marks each one of the account under its lock, within the deadline; the names of
+   * their runs' locks go into `names`. Answers whether the store listed the records and every fence landed in time,
+   * with the keys it listed.
    */
-  private async fenceListed(cut: AccountStop, deadline: number, names: Set<string>, skip: ReadonlySet<string>): Promise<{ complete: boolean; keys: string[] }> {
+  private async fenceListed(cut: AccountStop, deadline: number, names: Set<string>): Promise<{ complete: boolean; keys: string[] }> {
     let listing: Promise<string[]>;
     try {
       listing = this.store.keys(this.keyPrefix);
@@ -834,24 +837,22 @@ class BrowserRunOwner implements RunOwner {
     if (keys === null) return { complete: false, keys: [] };
     // A write in flight holds its record's lock until it returns, so its record's fence waits for it; one still waiting
     // at the deadline stays asked for and lands once the write returns, while the stop goes on.
-    const fences = keys
-      .filter((key) => !skip.has(key))
-      .map((key) =>
-        this.locks
-          .request(this.lockName(key), async () => {
-            const current = await this.store.get<unknown>(key);
-            // Another account's record under the same prefix is that account's to stop.
-            if (isPlain(current) && typeof current.account === 'string' && current.account !== this.account) return;
-            if (isPlain(current) && typeof current.key === 'string') names.add(this.runName(current.key));
-            if (cut === 'removal') await this.store.delete(key);
-            else if (isPlain(current) && LIVE.includes(current.state as RunState) && current.cut === null) await this.store.set(key, { ...current, cut });
-          })
-          .then(
-            () => true,
-            // This record could not be reached: the stops still end its run.
-            () => false,
-          ),
-      );
+    const fences = keys.map((key) =>
+      this.locks
+        .request(this.lockName(key), async () => {
+          const current = await this.store.get<unknown>(key);
+          // Another account's record under the same prefix is that account's to stop.
+          if (isPlain(current) && typeof current.account === 'string' && current.account !== this.account) return;
+          if (isPlain(current) && typeof current.key === 'string') names.add(this.runName(current.key));
+          if (cut === 'removal') await this.store.delete(key);
+          else if (isPlain(current) && LIVE.includes(current.state as RunState) && current.cut === null) await this.store.set(key, { ...current, cut });
+        })
+        .then(
+          () => true,
+          // This record could not be reached: the stops still end its run.
+          () => false,
+        ),
+    );
     if (fences.length === 0) return { complete: true, keys };
     const fenced = await within(Promise.all(fences), deadline - Date.now());
     return { complete: fenced !== null && !fenced.includes(false), keys };
