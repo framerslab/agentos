@@ -213,6 +213,69 @@ describe('the image guard: what ends a chain', () => {
   });
 });
 
+describe('the image guard: what an input or a check may carry', () => {
+  const sized = (length: number): VisionInputData => ({ type: 'base64', data: Buffer.alloc(length, 1).toString('base64'), mimeType: 'image/png' });
+
+  it('refuses an image over maxBytes with IMAGE_LIMIT and runs no check on it, while the other images are still checked', async () => {
+    const hash = passing('hash', 'match');
+    const model = passing('model', 'classify');
+    const guard = ImageGuardrail.create({ id: 'images', checks: [hash, model], maxBytes: 8 });
+    expect((await moderateContent({ images: [sized(8)] }, { guards: [guard], context })).outcome).toBe('allow');
+    hash.check.mockClear();
+    const decision = await moderateContent({ images: [png(1), sized(9)] }, { guards: [guard], context });
+    expect(decision).toMatchObject({ outcome: 'refuse', unavailable: false, deciding: { reasonCode: 'IMAGE_LIMIT', metadata: { guardrailId: 'images', imageIndex: 1 } } });
+    expect(hash.check.mock.calls.map(([image]) => (image as ImageUnderReview).index)).toEqual([0]);
+
+    // the bytes a host's loadImage returns are held to the same limit
+    const loadImage = vi.fn(async () => ({ bytes: new Uint8Array(9), mimeType: 'image/png' }));
+    const loaded = await moderateContent({ images: [{ type: 'image_url', data: 'https://images.example/big.png' }] }, { guards: [ImageGuardrail.create({ id: 'images', checks: [model], loadImage, maxBytes: 8 })], context });
+    expect(loaded).toMatchObject({ outcome: 'refuse', unavailable: false, deciding: { reasonCode: 'IMAGE_LIMIT', metadata: { imageIndex: 0 } } });
+    expect(() => ImageGuardrail.create({ id: 'images', checks: [model], maxBytes: 0 })).toThrow(TypeError);
+  });
+
+  it('counts a block, a flag or a hold without a code that is a word as a check that could not answer', async () => {
+    const answers = [
+      { verdict: 'hold' },
+      { verdict: 'block', reasonCode: 42 },
+      { verdict: 'flag', reasonCode: '' },
+    ];
+    for (const answer of answers) {
+      const model = check('model', 'classify', async () => answer as never);
+      const refused = await moderateContent({ images: [png(1)] }, { guards: [ImageGuardrail.create({ id: 'images', checks: [model] })], context });
+      expect(refused).toMatchObject({ ...UNAVAILABLE, deciding: { metadata: { checkId: 'model', imageIndex: 0 } } });
+    }
+    const judge = passing('judge', 'classify');
+    const skipped = await moderateContent({ images: [png(1)] }, { guards: [ImageGuardrail.create({ id: 'images', checks: [check('signal', 'classify', async () => ({ verdict: 'hold' }) as never, { onError: 'skip' }), judge] })], context });
+    expect(skipped.outcome).toBe('allow');
+  });
+
+  it('refuses to be built with reason codes that are not words or an onError it does not know', () => {
+    const model = passing('model', 'classify');
+    expect(() => ImageGuardrail.create({ id: 'images', checks: [{ ...model, reasonCodes: [''] }] })).toThrow(TypeError);
+    expect(() => ImageGuardrail.create({ id: 'images', checks: [{ ...model, reasonCodes: ['X'.repeat(65)] }] })).toThrow(TypeError);
+    expect(() => ImageGuardrail.create({ id: 'images', checks: [{ ...model, onError: 'ignore' as never }] })).toThrow(TypeError);
+    expect(() => ImageGuardrail.create({ id: 'images', checks: [{ ...model, reasonCodes: ['IMAGE_SUGGESTIVE'], onError: 'skip' }, passing('judge', 'classify')] })).not.toThrow();
+  });
+
+  it('keeps only a flag\'s scores that are finite numbers under word keys', async () => {
+    const judge = check('judge', 'classify', async () => ({ verdict: 'flag', reasonCode: 'IMAGE_SUGGESTIVE', scores: { sexual: 0.6, 'a red car on a beach': 0.9, nan: Number.NaN, label: 'beach' as never } }), { reasonCodes: ['IMAGE_SUGGESTIVE'] });
+    const decision = await moderateContent({ images: [png(1)] }, { guards: [ImageGuardrail.create({ id: 'images', checks: [judge] })], context });
+    expect(decision.outcome).toBe('flag');
+    expect((decision as unknown as { deciding: { metadata: Record<string, unknown> } }).deciding.metadata.scores).toEqual({ sexual: 0.6 });
+  });
+
+  it('decodes a data URL as base64 only when it says ;base64', async () => {
+    const model = passing('model', 'classify');
+    const guard = ImageGuardrail.create({ id: 'images', checks: [model] });
+    const plain = await moderateContent({ images: [{ type: 'base64', data: 'data:image/png,AAAA' }] }, { guards: [guard], context });
+    expect(plain).toMatchObject({ ...UNAVAILABLE, deciding: { metadata: { checkId: 'load' } } });
+    expect(model.check).not.toHaveBeenCalled();
+    const encoded = await moderateContent({ images: [{ type: 'base64', data: 'data:image/png;base64,AAAA' }] }, { guards: [guard], context });
+    expect(encoded.outcome).toBe('allow');
+    expect([...(model.check.mock.calls[0][0] as ImageUnderReview).bytes]).toEqual([0, 0, 0]);
+  });
+});
+
 describe('the image guard: its deadline', () => {
   const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
