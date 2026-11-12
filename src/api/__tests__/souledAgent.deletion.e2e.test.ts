@@ -557,6 +557,69 @@ describe('tombstones after a restore', () => {
     await expect(open()).rejects.toMatchObject({ name: 'ForgottenLedgerError', code: 'COPY_UNAVAILABLE' });
   });
 
+  it("refuses another store's tombstone copy before it serves anyone", async () => {
+    const { a } = await open();
+    await turn(a, 's1', 'bob', 'I like tea.');
+    await a.close();
+    const other = fs.mkdtempSync(path.join(os.tmpdir(), 'souled-deletion-other-'));
+    try {
+      fs.writeFileSync(path.join(other, 'SOUL.md'), '---\nname: Aria\nagentId: aria-1\n---\nYou are Aria.');
+      const { a: elsewhere } = await open({ soul: other });
+      await elsewhere.close();
+      fs.copyFileSync(path.join(other, 'memory', '.store', 'forgotten.sqlite'), copyFile());
+    } finally {
+      fs.rmSync(other, { recursive: true, force: true });
+    }
+    const ledgerOf = (file: string) => rows(file, 'SELECT hash, namespace, forgotten_at FROM agentos_learning_forgotten ORDER BY hash');
+    const before = { store: ledgerOf(storeFile()), copy: ledgerOf(copyFile()), said: saidOf(keyOf(bob)) };
+
+    events.length = 0;
+    await expect(open()).rejects.toMatchObject({ name: 'ForgottenLedgerError', code: 'LEDGER_IDENTITY_MISMATCH' });
+
+    expect(lines('memory.ledger_refused')).toEqual([expect.objectContaining({ type: 'ForgottenLedgerError', code: 'LEDGER_IDENTITY_MISMATCH' })]);
+    // The refused open left no handle on the store's file and changed nothing in it or in the copy.
+    const db = new Database(storeFile());
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      db.exec('ROLLBACK');
+    } finally {
+      db.close();
+    }
+    expect({ store: ledgerOf(storeFile()), copy: ledgerOf(copyFile()), said: saidOf(keyOf(bob)) }).toEqual(before);
+    expect(before.said).toHaveLength(2);
+  });
+
+  it("keeps a copy file that received the ledger when the store's open then fails", async () => {
+    // The store's file exists before the first open, and its ledger table refuses the identity row.
+    fs.mkdirSync(path.dirname(storeFile()), { recursive: true });
+    const handwritten = new Database(storeFile());
+    try {
+      handwritten.exec(`CREATE TABLE IF NOT EXISTS agentos_learning_forgotten (
+        hash TEXT PRIMARY KEY,
+        namespace TEXT NOT NULL DEFAULT '',
+        forgotten_at TEXT NOT NULL
+      );
+      CREATE TRIGGER refuse_identity BEFORE INSERT ON agentos_learning_forgotten WHEN NEW.hash = 'i1:identity'
+      BEGIN SELECT RAISE(ABORT, 'refused'); END;`);
+    } finally {
+      handwritten.close();
+    }
+
+    await expect(open()).rejects.toThrow();
+    expect(fs.existsSync(copyFile())).toBe(true);
+    const copied = rows<{ forgotten_at: string }>(copyFile(), "SELECT forgotten_at FROM agentos_learning_forgotten WHERE hash = 'i1:identity'");
+    expect(copied).toEqual([{ forgotten_at: expect.stringMatching(/^[0-9a-f]{32}$/) }]);
+
+    const store = new Database(storeFile());
+    try {
+      store.exec('DROP TRIGGER refuse_identity');
+    } finally {
+      store.close();
+    }
+    await open();
+    expect(rows(storeFile(), "SELECT forgotten_at FROM agentos_learning_forgotten WHERE hash = 'i1:identity'")).toEqual(copied);
+  });
+
   it('keys the tombstones, keeps the old ones in force, and stays closed without the key', async () => {
     const users = ['alice', 'bob', 'carol'];
     const first = await open();

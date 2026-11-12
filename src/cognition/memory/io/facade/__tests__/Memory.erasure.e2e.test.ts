@@ -540,6 +540,50 @@ describe("the store's forgotten-user ledger", () => {
     memories.push(again);
     expect(await again.isForgotten(ALICE)).toBe(true);
   });
+
+  it('adds the identity and the state to a store whose ledger was made without them', async () => {
+    const file = path.join(folder(), 'brain.sqlite');
+    // The ledger's table as a release before the identity and state rows wrote it: one tombstone, no copy marker.
+    const handwritten = await resolveStorageAdapter({ filePath: file, priority: ['better-sqlite3'], quiet: true });
+    await handwritten.exec(
+      'CREATE TABLE IF NOT EXISTS agentos_learning_forgotten (hash TEXT PRIMARY KEY, namespace TEXT NOT NULL DEFAULT \'\', forgotten_at TEXT NOT NULL);',
+    );
+    const tombstone = { hash: 'd'.repeat(64), namespace: '', forgotten_at: '2026-10-12T11:00:00.000Z' };
+    await handwritten.run('INSERT INTO agentos_learning_forgotten (hash, namespace, forgotten_at) VALUES (?, ?, ?)', [
+      tombstone.hash,
+      tombstone.namespace,
+      tombstone.forgotten_at,
+    ]);
+    await handwritten.close();
+
+    const memory = await Memory.createSqlite(file, { brainId: 'tools-brain', forgotten: {} });
+    memories.push(memory);
+
+    const rows = await brainOf(memory).all<{ hash: string; namespace: string; forgotten_at: string }>(
+      'SELECT hash, namespace, forgotten_at FROM agentos_learning_forgotten ORDER BY hash',
+    );
+    expect(rows).toEqual([
+      tombstone,
+      { hash: 'i1:identity', namespace: '', forgotten_at: expect.stringMatching(/^[0-9a-f]{32}$/) },
+      { hash: 's1:state', namespace: '', forgotten_at: expect.stringMatching(/^[0-9a-f]{64}$/) },
+    ]);
+  });
+
+  it('opens a store that holds a user\'s memory and no ledger', async () => {
+    const dir = folder();
+    const file = path.join(dir, 'brain.sqlite');
+    const before = await Memory.createSqlite(file, { brainId: 'tools-brain' });
+    const trace = await before.remember('Ana keeps a canary named Lark.', { scope: 'user', scopeId: 'ana' });
+    await before.close();
+
+    const { adapter: copy } = await openForgottenCopy(path.join(dir, 'forgotten.sqlite'));
+    adapters.push(copy);
+    const memory = await Memory.createSqlite(file, { brainId: 'tools-brain', forgotten: { copy } });
+    memories.push(memory);
+
+    expect(await brainOf(memory).all('SELECT id FROM memory_traces WHERE id = ?', [trace.id])).toEqual([{ id: trace.id }]);
+    expect(await memory.forgotten!.size()).toBe(0);
+  });
 });
 
 describe.skipIf(!POSTGRES_URL)('erasure on Postgres', () => {

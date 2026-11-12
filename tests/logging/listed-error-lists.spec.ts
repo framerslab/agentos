@@ -183,6 +183,10 @@ describe('the two lists', () => {
     }
     expect([...missing]).toEqual([]);
   });
+  it("hold the ledger's refusal codes", () => {
+    const codes = ['LEDGER_IDENTITY_MISMATCH', 'LEDGER_STATE_INVALID', 'LEDGER_UNAVAILABLE'];
+    expect(codes.filter((code) => !LISTED_ERROR_CODES.has(code))).toEqual([]);
+  });
   it('hold only values a line may carry', () => {
     expect([...LISTED_ERROR_TYPES].filter((type) => !valid('word', type, 'type'))).toEqual([]);
     expect([...LISTED_ERROR_CODES].filter((code) => !valid('word', code, 'code'))).toEqual([]);
