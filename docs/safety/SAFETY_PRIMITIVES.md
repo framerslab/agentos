@@ -1,5 +1,5 @@
 ---
-description: "Operational safety primitives in AgentOS: circuit breaker, provider health registry, action deduplicator, stuck detector, cost guard, spend meter and tool execution guard. The provider health registry, the spend meter and a spend budget's cost guard run inside the runtime; a host composes the others around its own calls."
+description: "Operational safety primitives in AgentOS: circuit breaker, provider health registry, action deduplicator, stuck detector, cost guard, spend meter, governed tools and tool execution guard. The provider health registry, the spend meter and a spend budget's cost guard run inside the runtime; a host composes the others around its own calls."
 keywords: [agent safety, llm circuit breaker, provider health, llm fallback router, status-aware breaker, cost guard, spend meter, stuck detector, runaway agent, ai cost cap, agentos safety, operational guardrails]
 ---
 
@@ -9,7 +9,7 @@ Autonomous agents with LLM access can incur unbounded cost when a vendor API fla
 
 Each has defaults and works alone or composed with the others ([How they work together](#how-they-work-together)).
 
-These are operational guards — they don't read message content. For content-level safety (toxicity, PII, prompt injection, folder-level filesystem permissions) see [Guardrails](./GUARDRAILS_USAGE.md).
+These are operational guards. Apart from a [governed tool](#governed-tools)'s evidence check, which compares a quote with the message the host stored, they don't read message content. For content-level safety (toxicity, PII, prompt injection, folder-level filesystem permissions) see [Guardrails](./GUARDRAILS_USAGE.md).
 
 ## A host's guard chain
 
@@ -529,6 +529,118 @@ if (held.status === 'reserved') {
 
 With credit funding, the scoped voice factory uses `ModelAttemptBudget` below provider request and retry loops; a call with local funding counts its attempts with `CountingAttemptBudget`, which holds no money. The OpenAI provider's request loop counts every call's attempts with `CountingAttemptBudget` as well, at the call's `maxAttempts` or the provider's configured count, so an attempt past the count is refused before it is sent ([Attempts](../getting-started/HIGH_LEVEL_API.md#attempts)). Call minutes remain quantity-only in `CallMinuteMeter`; rational-rate arithmetic and final component rounding belong to the ledger. Stop evidence, final supplier quantities and the hold's rate snapshots and lot allocations determine settlement. Do not release a deferred hold because its process stopped reporting. `marginReport` aggregates the ledger's recorded revenue and supplier cost with the measured runtime the host supplies; it neither invents a tariff nor makes unknown supplier cost zero.
 
+## Governed tools
+
+`governTool()` turns a tool into a governed tool, for an agent whose tools act on people: hold a message for review, mute an account in a room. A call acts only when its evidence holds, only inside limits counted in a shared store, and only with an audit record written before and after. The wrapper is the tool's own `execute()`, so a call is governed wherever the tool runs: the tool loops of `generateText()` and `streamText()`, `agent()`, `agency()`, the full runtime, or a host's own executor.
+
+```typescript
+import { governTool, SqlActionLimiter, type ActionLimitRule } from '@framers/agentos/safety/runtime';
+
+const limits: ActionLimitRule[] = [
+  { id: 'mute_room_hour', scope: 'room', windowMs: 3_600_000, max: 3 },
+  { id: 'mute_target_day', scope: 'target', windowMs: 86_400_000, max: 1 },
+  { id: 'mute_all_hour', scope: 'platform', windowMs: 3_600_000, max: 20 },
+];
+const limiter = new SqlActionLimiter({ db, rules: limits }); // a Postgres adapter every process shares
+limiter.startReconciler();                                  // in one process
+
+const mute = governTool(muteInRoomTool, {
+  action: 'mute_in_room',
+  target: (args) => ({ accountId: args.userId, roomId: args.roomId }),
+  limits,
+  dryRunOutput: () => ({ muted: true }),
+}, {
+  actor: { id: 'moderation-service', kind: 'system' },
+  mode: 'enforce',
+  limiter,
+  evidenceSource: messages, // the host's store: getMessage(id), and hasVerdict(id) when calls cite verdicts
+  ruleBook: { '2026-11': ['harassment.1', 'spam.2'] },
+  audit,                    // the host's sink: begin(record), finish(recordId, end)
+});
+```
+
+The governed tool keeps every member of the tool, sets `hasSideEffects: true`, and requires `evidence` in its input schema (`ACTION_EVIDENCE_SCHEMA`). A call runs in this order:
+
+| Step | What happens | How it can end |
+|---|---|---|
+| 1. Arguments | `evidence` is checked for shape in code, every id in it an id (letters, digits and `_ . : / -`, at most 128). Then the policy's own `target()`, `expiresAt()`, `idempotencyKey()` and, in a dry run, `dryRunOutput()` run, before anything is reserved | `refused_arguments` with `ARGUMENT_SHAPE`, or `POLICY_ERROR` when one of them throws or answers another shape |
+| 2. Evidence | The tool's own target must be the evidence's: its account, its room, and a message it names among the quoted ones. Then `verifyActionEvidence()` holds the evidence to the host's store and rule book | `voided_evidence` with `TARGET_MISMATCH` or the check's failure |
+| 3. Audit, first half | `audit.begin(record)`, with the values step 2 confirmed. Nothing is reserved yet, and nothing runs unrecorded | `audit_unavailable` when the sink throws |
+| 4. Limits | One unit under every rule, in the order given | `limit_reached`, `duplicate`, `refused_arguments` with `LIMIT_SCOPE_MISSING`, or `limiter_unavailable` |
+| 5. The action | The tool's own `execute()`, with the caller's context and `governedAction`. In a dry run, `dryRunOutput()` takes its place | `executed`, `would_execute` or `failed` |
+| 6. Audit, second half | `audit.finish(recordId, end)` | A sink that throws is written as `action.audit_failed`, and the outcome stands |
+
+Every refusal answers `{ success: false, error, details: { governance: { outcome, code, recordId } } }`, with a fixed sentence per outcome as `error`: no argument, code or id is ever part of it. A call that ran answers the tool's own result with `details.governance` set the same way. A tool that throws is answered with the fixed sentence of `failed`, never what it threw, and a tool that answers a failure keeps its own result. A failed action is released and not counted, so a governed tool reports a failure only when it changed nothing; the same action may be asked for three times in all, and the fourth ask ends `limit_reached` with `RETRIES_EXHAUSTED` for a person to decide.
+
+Between the reservations and the tool's start the wrapper awaits nothing but the limiter. When the reservations outlived their lease before the tool could start (a store that slow), the units are given back and the call ends `limiter_unavailable` with `LEASE_EXPIRED`: a reservation past its lease may already be settled by a reconcile pass, and a unit counts from the time it was reserved.
+
+`refusalBeforeApproval()` answers the shape refusal, so on the full runtime, whose tool orchestrator asks it, nobody is asked to approve a call that cannot act. The tool loops of `generateText()` and `streamText()` and `agency()`'s approval gate do not ask it ([Human in the loop](./HUMAN_IN_THE_LOOP.md#guardrail-override-post-approval-safety-net)).
+
+### The evidence
+
+| Field | What it is |
+|---|---|
+| `targetId` | The account the action is about: the author of every quoted message |
+| `roomId` | The room the quoted messages are in |
+| `ruleId`, `policyVersion` | The rule the action rests on, and the version of the policy text it was read from |
+| `quotes` | `{ messageId, quote }` for each message the action rests on |
+| `verdictRefs` | The host's ids of the guard verdicts that led here |
+
+`verifyActionEvidence(evidence, source, ruleBook, rule?)` holds it to the host's store and rule book, each comparison exact:
+
+- `policyVersion` is an own key of the rule book and `ruleId` one of that version's ids (`UNKNOWN_POLICY_VERSION`, `UNKNOWN_RULE`). A governed call cites only rules in the host's rule book, so a rule id copied from a message is refused however well it fits an id's shape.
+- Each `verdictRefs` entry is confirmed by the source's `hasVerdict()` (`VERDICT_NOT_FOUND`, for any entry when the source has none).
+- At least `minQuotes` quotes, 1 by default (`NO_QUOTES`).
+- Each quoted message exists under exactly the id asked for (`MESSAGE_NOT_FOUND`), the account the action is about wrote it (`AUTHOR_MISMATCH`), and it is in the given room; a stored message with no room fails a given room (`ROOM_MISMATCH`).
+- Each quote is in its message character for character, with no trimming, no case folding and no Unicode normalisation (`QUOTE_MISMATCH`), and is at least `minQuoteLength` code units, 12 by default, unless it is the whole message (`QUOTE_TOO_SHORT`).
+- A store that throws answers `SOURCE_UNAVAILABLE`.
+
+The check proves that the quote is real and who wrote it, and that the rule and the verdicts it cites exist. It does not prove the rule applies. Its answer keeps a SHA-256 and a length of each quote, never the quote, and names a failed quote by its index, never by an id the store did not confirm.
+
+### The limiter
+
+`SqlActionLimiter` keeps one [spend meter](#spend-meter) per distinct `windowMs`, each counting over a rolling window under the table prefix `<tablePrefix>_w<windowMs>`. A rule counts under the key `<rule id>|r:<room id>`, `<rule id>|t:<account id>` or `<rule id>|p`, and reserves the operation `<idempotency key>:<rule id>`; the idempotency key is the SHA-256 of the policy's `idempotencyKey(args)`, by default of the actor, the action, the target, the room and the sorted message ids.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `db` | required | The store. It must offer transactions, persistence and concurrent access unless `requireShared: false` |
+| `rules` | required | Every rule the host uses, so a process that never reserves (a deletion job, a nightly purge) still knows every window and every key. A rule id is a lower-case letter and at most 18 more lower-case letters, digits or underscores. The constructor refuses one id with two sets of numbers, and `reserve()` throws for a rule that is not listed, which a governed tool ends as `limiter_unavailable` |
+| `tablePrefix` | `'agentos_action'` | The start of each window's prefix. `<tablePrefix>_w<windowMs>` must pass the spend meter's prefix rule, 38 characters at most, or the constructor throws |
+| `leaseMs` | `60000` | How long a reservation lives while its tool runs. It must be shorter than every rule's window |
+| `requireShared`, `ensureSchema` | `true` | As the spend meter's |
+
+No limit has a default: `governTool()` refuses a tool with no limit, since an unlimited automatic action is a configuration error. The counts are rows in the host's database, so they are shared between processes and survive a restart only on a shared store; a SQLite file per process gives each process limits of its own. They are not atomic across two rules: each rule reserves in its own transaction, and a denial gives back the units taken before it. A crash between a reservation and its end counts the action.
+
+Someone must run `reconcile()`. A reservation whose lease ran out still counts against its window, and keeps its action a duplicate, until a pass settles it as used: a host calls `startReconciler()` in one process, or `reconcile()` from a job, and the limiter starts nothing by itself. `purge(before)` deletes settled reservations, each meter only those settled before both `before` and one of its own windows back, so no unit a window still counts is deleted; an action whose rows are gone is no longer a duplicate. `forgetTarget(accountId)` deletes the rows of every target-scoped rule under the account's exact key, for a host's account deletion. A host that runs its own migrations creates the tables from `actionLimiterDdl(windowsMs, tablePrefix)` and passes `ensureSchema: false`.
+
+### The audit record
+
+The host's sink takes two halves: `begin(record)` before the action runs, where a throw refuses the action, and `finish(recordId, end)` when it has ended, where a throw is written as an event and the outcome stands.
+
+A record holds its own id (`act_` and a random UUID, the `recordId` of the tool result), the actor, the action, the tool's name, the mode, the target's account, room and message ids, the rule, the policy version and the verdict ids, each quote's SHA-256 and length, the SHA-256 of the idempotency key, and an `expiresAt` the library wrote from the instant `policy.expiresAt()` returned. It holds no quote, and no tool call id: a model or a provider supplies that id, so it is never recorded. A refusal at step 1 or 2 records nothing taken from the arguments or the call's context (its target and evidence are empty, and its idempotency key is the SHA-256 of its own record id), because a steered model may have filled any of them with text. A quote's hash is unsalted, so a short quote can be matched to a guessed text: it is personal data derived from the message and follows the record's retention and deletion.
+
+The end holds the outcome, its code, `endedAt`, and `reversalRef` when the tool filed a reversal. The wrapper mints that key (`rev_` and a random UUID) before the tool runs and hands it to the tool with the record's id; the tool reads both with `governedActionOf(context)`, files what undoing needs under the key in its own store, and answers `details.reversible: true`. A key or a reversal the tool returns as `details.reversalRef` or `details.reversal` is passed on to neither the sink nor the caller, and its presence puts `REVERSAL_DROPPED` on the end.
+
+### The dry run
+
+With `mode: 'dryRun'` the tool is not called. The units are committed under dry keys, every key and operation id starting with `dry:`, so dry and real counts never mix and a dry run meets the same ceilings. The model receives `dryRunOutput(args)` (default `{ dryRun: true }`) as a successful result with `details.dryRun`, and the call ends `would_execute`. A second dry run over the same messages meets the first run's keys and reads every action as a duplicate, so each run gets a limiter with a `tablePrefix` of its own.
+
+### Outcomes
+
+| Outcome | Codes |
+|---|---|
+| `executed` | none, or `REVERSAL_DROPPED` |
+| `would_execute` | none |
+| `failed` | none |
+| `refused_arguments` | `ARGUMENT_SHAPE`, `POLICY_ERROR`, `LIMIT_SCOPE_MISSING` |
+| `voided_evidence` | `TARGET_MISMATCH`, `NO_QUOTES`, `QUOTE_TOO_SHORT`, `MESSAGE_NOT_FOUND`, `AUTHOR_MISMATCH`, `ROOM_MISMATCH`, `QUOTE_MISMATCH`, `SOURCE_UNAVAILABLE`, `UNKNOWN_POLICY_VERSION`, `UNKNOWN_RULE`, `VERDICT_NOT_FOUND` |
+| `limit_reached` | The id of the tool's own rule that had no room left, or `RETRIES_EXHAUSTED` |
+| `duplicate` | none: the same idempotency key already ran or is running |
+| `limiter_unavailable` | none, or `LEASE_EXPIRED` |
+| `audit_unavailable` | none |
+
+Three things can be down, and in each the tool does not run: the evidence source throws (`voided_evidence` with `SOURCE_UNAVAILABLE`), the limiter's store does not answer (`limiter_unavailable`), or the audit sink's `begin()` throws (`audit_unavailable`). Every end writes one `action.ended` line ([Logging](../observability/LOGGING.md#governed-action-events)).
+
 ## ToolExecutionGuard
 
 Wraps tool execution with a timeout and per-tool circuit breaker, so a hung tool returns a timeout result and a tool that keeps failing is refused while its breaker is open. Each tool gets its own circuit breaker instance and health tracking. `execute()` never throws: a timeout, an error or an open breaker comes back as `{ success: false }`. A timed-out call is not cancelled; its promise runs on and its result is dropped.
@@ -615,6 +727,7 @@ async function guardedCall(agentId: string, prompt: string) {
 | StuckDetector | Flags repeated output or oscillation | 3 identical outputs in 5 min | `{ isStuck: true, reason }` |
 | ToolExecutionGuard | Timeout + per-tool circuit breaker | 30s timeout | `{ success: false, timedOut }` |
 | ActionDeduplicator | Prevent duplicate actions within window | 1 hr window, 10k entries | Boolean check |
+| Governed tools | A tool that acts on people runs only with evidence the host's store confirms, inside limits in a shared store, with an audit record | the host's limits; none by default | `{ success: false, details: { governance } }` from the tool |
 
 ## Imports
 
@@ -631,6 +744,10 @@ import {
   ToolExecutionGuard,
   ToolTimeoutError,
   SqlSpendMeter,
+  governTool,
+  governedActionOf,
+  verifyActionEvidence,
+  SqlActionLimiter,
 } from '@framers/agentos';
 import { globalLLMProviderHealth, LLMProviderHealthRegistry } from '@framers/agentos/core/safety';
 ```
@@ -662,4 +779,5 @@ Killswitches, social rate limits and an action audit log (`SafetyEngine`, `Actio
 - [`src/safety/runtime/CostGuard.ts`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/CostGuard.ts) — per-agent cost caps in memory
 - [`src/safety/runtime/StuckDetector.ts`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/StuckDetector.ts) — repeated-output and oscillation detection
 - [`src/safety/runtime/SqlSpendMeter.ts`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/SqlSpendMeter.ts) — the persisted spend meter
+- [`src/safety/runtime/GovernedTool.ts`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/GovernedTool.ts), [`ActionEvidence.ts`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/ActionEvidence.ts) and [`ActionLimiter.ts`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/ActionLimiter.ts) — governed tools, the evidence check and the action limiter
 - [`src/core/safety/LLMProviderHealthRegistry.ts`](https://github.com/framerslab/agentos/blob/master/src/core/safety/LLMProviderHealthRegistry.ts) — per-provider health for the fallback router
