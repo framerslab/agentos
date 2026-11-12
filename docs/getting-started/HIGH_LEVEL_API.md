@@ -883,8 +883,9 @@ const live = session.stream(message, { guards });
   the rewritten turn, and a send whose input a guard replaced adds nothing. A
   stream turn whose input a guard rewrote or replaced is not added to the
   history.
-- A memory provider's `observe()` is not called for a turn whose input an
-  enforced guard rewrote or replaced.
+- A memory provider's `getContext()` recalls for the turn as it was sent, a
+  rewritten turn's text included, and its `observe()` is not called for a turn
+  whose input an enforced guard rewrote or replaced.
 - The `guardrails` ids in an `agent()` or `agency()` config are stored and not
   applied: a call is guarded by its `guards`. A panel agency's call cannot
   carry `guards`.
