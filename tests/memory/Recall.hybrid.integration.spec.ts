@@ -186,11 +186,11 @@ describe.each(ENGINES)('hybrid recall on %s', (engine, open) => {
   it('a memory the dedupe dropped that Related Context shows is recorded as shown, with its line', async () => {
     const db = await open();
     const mem = await memoryWith({ retrieval: 'hybrid' }, new FlatEmbedder(), db.brain);
-    // The answer is the newest, so the flat dense leg ranks it first, and it holds the most of the question's words, so
-    // the exact-words leg does too. The two key notes are one memory to the dedupe and share only the question's words
-    // with it, so the cut at topK 1 leaves the kept one out and the graph can still lead to either.
-    await plant(mem, 'key-a', 'The bike shed key hangs on the north wall hook.', at(0));
-    await plant(mem, 'key-b', 'The bike shed key hangs on the north wall hook!', at(1));
+    // Only the answer holds the question's words, so its exact-words term puts it first whatever its dense rank:
+    // 0.7 / 63 + 0.3 / 61 at worst against 0.7 / 61. The two hose notes are one memory to the dedupe, so the cut at
+    // topK 1 leaves the kept one out and the graph can still lead to either.
+    await plant(mem, 'key-a', 'Garden hose hangs on north wall hook.', at(0));
+    await plant(mem, 'key-b', 'Garden hose hangs on north wall hook!', at(1));
     await plant(mem, 'gold', 'The bike shed code is XQ7Z.', at(2));
     (mem.manager as unknown as { graph: unknown }).graph = {
       spreadingActivation: async () => [
