@@ -402,6 +402,17 @@ describe('forgetUser', () => {
     expect(tracesOf(keyOf(alice))).toEqual([]);
   });
 
+  it('rewrites at the next applyTombstones() the vector index a deletion could not', async () => {
+    const { a } = await open();
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    const rewrite = vi.spyOn(a.memory!, 'rebuildVectorIndex').mockRejectedValueOnce(new Error('disk full'));
+    expect((await a.forgetUser!('alice')).complete).toBe(false);
+
+    // The store holds nothing of her to delete again; the rewrite her deletion left is still run.
+    expect(await a.applyTombstones!()).toEqual([]);
+    expect(rewrite).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps a user and an anonymous session of one id apart, and deletes the sessions the host links', async () => {
     const { a } = await open();
     const sessionBob = { kind: 'session' as const, id: 'bob' };

@@ -34,6 +34,8 @@ import { ForgottenLedger, type SuppressionSubject } from '../../../suppression/F
 import { openForgottenCopy } from '../../../suppression/forgottenCopy.js';
 import { conversationScopeKey } from '../../../retrieval/store/conversationScopeKey.js';
 import { correctSubjectMemory } from '../../userMemoryExport.js';
+import pino from 'pino';
+import { resetLoggerFactory, setLogger } from '../../../../../core/logging/loggerFactory.js';
 
 /** Whether the stand-in index refuses its next writes, as a full disk would. */
 const indexWrites = vi.hoisted(() => ({ fail: false }));
@@ -92,6 +94,7 @@ const adapters: StorageAdapter[] = [];
 afterEach(async () => {
   indexWrites.fail = false;
   vi.restoreAllMocks();
+  resetLoggerFactory();
   while (memories.length) {
     const memory = memories.pop()!;
     const brain = brainOf(memory);
@@ -367,6 +370,92 @@ describe('the vector index after a delete', () => {
     const index = (reopened as unknown as { _hnswSidecar: HnswSidecar })._hnswSidecar;
     expect(index.size).toBe(2);
     expect(idsIn(mapFile)).toEqual([first.id, later.id].sort());
+  });
+
+  /** The same store opened again, as a host's next start opens it. */
+  async function reopenEmbedding(file: string): Promise<Memory> {
+    const reopened = await Memory.createSqlite(file, {
+      brainId: 'tools-brain',
+      embed: async (text) => vectorOf(text),
+      embeddings: { provider: 'test', dimensions: 8 },
+    });
+    memories.push(reopened);
+    return reopened;
+  }
+
+  /** Closes a facade the case opened, so the next open starts from its files. */
+  async function closeFacade(memory: Memory): Promise<void> {
+    await memory.close();
+    memories.splice(memories.indexOf(memory), 1);
+  }
+
+  /** Every line the library logs from now on, by event. */
+  function logLines(): (event: string) => Array<Record<string, unknown>> {
+    const seen: Array<Record<string, unknown>> = [];
+    setLogger(
+      pino(
+        { level: 'debug', base: undefined },
+        {
+          write(line: string) {
+            seen.push(JSON.parse(line) as Record<string, unknown>);
+          },
+        },
+      ),
+    );
+    return (event) => seen.filter((line) => line.event === event);
+  }
+
+  it('opens an index that names exactly the live traces without building it again', async () => {
+    const { memory, file } = await embeddingFacade();
+    await memory.remember('Ana keeps bees.');
+    await memory.remember('Bo plays cello.');
+    await memory.rebuildVectorIndex();
+    await closeFacade(memory);
+
+    const rewrite = vi.spyOn(HnswSidecar.prototype, 'rewrite');
+    const rebuild = vi.spyOn(HnswSidecar.prototype, 'rebuildFromData');
+    const reopened = await reopenEmbedding(file);
+    await reopened.recall('bees');
+
+    // The index loaded from its files is the store's: the open reads the ids, finds nothing to change, and builds nothing.
+    expect(rewrite).not.toHaveBeenCalled();
+    expect(rebuild).not.toHaveBeenCalled();
+    expect((reopened as unknown as { _hnswSidecar: HnswSidecar })._hnswSidecar.size).toBe(2);
+  });
+
+  it('writes the index again at open when its files name a trace the store no longer holds', async () => {
+    const { memory, file, indexFile, mapFile } = await embeddingFacade();
+    const bees = await memory.remember('Ana keeps bees.');
+    const cello = await memory.remember('Bo plays cello.');
+    await memory.rebuildVectorIndex();
+    // Deleted for good with no rewrite after it: the files still hold the trace's vector.
+    await memory.deleteTraces([cello.id]);
+    await closeFacade(memory);
+
+    const reopened = await reopenEmbedding(file);
+    await reopened.recall('bees');
+    expect(idsIn(mapFile)).toEqual([bees.id]);
+    expect(vectorsIn(indexFile)).not.toContainEqual(vectorOf('cello'));
+  });
+
+  it('keeps the index it loaded when the rewrite at open fails, and owes that rewrite', async () => {
+    const { memory, file, mapFile } = await embeddingFacade();
+    const bees = await memory.remember('Ana keeps bees.');
+    const cello = await memory.remember('Bo plays cello.');
+    await memory.rebuildVectorIndex();
+    await memory.deleteTraces([cello.id]);
+    await closeFacade(memory);
+
+    const logged = logLines();
+    vi.spyOn(HnswSidecar.prototype, 'rewrite').mockRejectedValueOnce(Object.assign(new Error('the index file is locked'), { code: 'EPERM' }));
+    const reopened = await reopenEmbedding(file);
+    await reopened.recall('bees');
+    expect(idsIn(mapFile)).toContain(cello.id);
+
+    // The rewrite is not dropped with the index: the next call runs it, and a deletion's report can rest on it.
+    expect(await reopened.rebuildVectorIndex()).toEqual({ vectors: 1 });
+    expect(idsIn(mapFile)).toEqual([bees.id]);
+    expect(logged('memory.erasure_unfinished')).toHaveLength(1);
   });
 
   it('can activate the index after a failed removal is repaired', async () => {
