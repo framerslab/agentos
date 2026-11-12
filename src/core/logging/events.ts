@@ -108,6 +108,8 @@ export const AGENTOS_EVENTS = {
   'memory.ledger_refused': { type: 'word', code: 'word' },
   // A retention sweep ran over at least one subject with a period: the traces it deleted for good, the pages compiled from them that it deleted, and the subjects it removed from the registry because nothing of them was left.
   'memory.retention_swept': { traces: 'int', pages: 'int', scopes: 'int' },
+  // A rewrite of the vector index, or a checkpoint of the store's write-ahead log, that deletes for good left owed failed where no report names it: in a correction, in a re-application of the tombstones, or at an open whose check of the index file found a trace that is gone. The deleted vectors or bytes stay in the files until the next deletion, sweep or re-application of the tombstones runs it. Written once a failure, with the error's listed type and code.
+  'memory.erasure_unfinished': { type: 'word', code: 'word' },
   // A single person's install attributed the memory a store held from before per-user scope to its one user (the legacyMemory option): the legacy traces and the legacy compiled pages it counted. Written once, when the attribution is made.
   'memory.legacy_attributed': { traces: 'int', pages: 'int' },
   // A translation failed, answered with no text, ran past the transcript translator's own timeout, stopped at its output cap or stopped for another reason (a content filter); it throws TranslationProviderError, and status is 0 when no HTTP status came back.

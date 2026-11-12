@@ -92,7 +92,7 @@ The memory hooks fire once per turn, so one turn is filed once.
 
 ### Export and correction
 
-`await agent.exportUserMemory(userId)` returns one person's traces and pages as JSON, each page with its sources and dates. It reads the person's own scope alone. `await agent.correctUserMemory(userId, { traceIds, text })` deletes the wrong traces for good, files the corrected statement, and has the next compile rebuild the pages from what is left, so a later compile cannot bring the wrong statement back. It refuses, and changes nothing, when any trace named is not that person's.
+`await agent.exportUserMemory(userId)` returns one person's traces and pages as JSON, each page with its sources and dates. It reads the person's own scope alone. `await agent.correctUserMemory(userId, { traceIds, text })` deletes the wrong traces for good, files the corrected statement, and has the next compile rebuild the pages from what is left, so a later compile cannot bring the wrong statement back. A correction that failed partway is finished by the same call made again. It refuses, and changes nothing, when any trace named is not that person's.
 
 ### Recalled text as data
 

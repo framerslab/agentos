@@ -5,6 +5,7 @@
  * deleted for good and the corrected statement is filed in their place.
  */
 import type { WikiPage } from '../../substrate/memory/wiki/types.js';
+import { errorFields } from '../../../core/logging/events.js';
 import { memoryLog } from '../log.js';
 import { CONVERSATION_SCOPE, conversationScopeKey } from '../retrieval/store/conversationScopeKey.js';
 import { parseTraceMetadata } from '../retrieval/store/tracePersistence.js';
@@ -117,10 +118,15 @@ export async function exportSubjectMemory(options: {
 }
 
 /**
- * Corrects one subject's memory: the named traces are deleted for good, the corrected statement is filed as a trace
- * tagged `correction`, and each page compiled from a deleted trace is deleted and built again by the subject's next
- * compile, from the traces of it that are left and the correction. A deleted trace cannot come back in a later
- * compile, which is why a correction deletes instead of editing a page.
+ * Corrects one subject's memory: each page compiled from a named trace is deleted and built again by the subject's
+ * next compile, from the traces of it that are left and the correction; the corrected statement is filed as a trace
+ * tagged `correction`; the named traces are deleted for good; and the vector index and the store's write-ahead log
+ * are written out ({@link Memory.finishErasure}). A deleted trace cannot come back in a later compile, which is why a
+ * correction deletes instead of editing a page.
+ *
+ * The named traces go last, so a correction that failed partway is finished by the same call made again: it still
+ * finds them. An index rewrite or a log checkpoint that fails does not fail the call; one
+ * `memory.erasure_unfinished` line says so, and the next deletion, sweep or re-application of the tombstones runs it.
  *
  * Every named id must be one of the subject's own live traces (a page's chunk is not one): when any is another
  * subject's, unknown or already deleted, the call rejects with a count and nothing is changed.
@@ -166,7 +172,22 @@ export async function correctSubjectMemory(options: {
       throw new Error(`correctUserMemory: ${missing} of ${ids.length} trace ids are not this user's live traces`);
     }
 
-    const { deleted } = await memory.deleteTraces(ids);
+    // A page built from a named trace still says what the trace said: it goes whole, and the next compile builds it
+    // again from the traces of it that are left, read by id, beside the correction. Those are named before the page
+    // goes, so a page deleted is always rebuilt.
+    const gone = new Set(ids);
+    const store = options.wiki.storeFor(key);
+    let pagesDeleted = 0;
+    for (const page of await store.listPages()) {
+      if (!page.sources.some((id) => gone.has(id))) continue;
+      await memory.addRebuildSources(
+        key,
+        page.sources.filter((id) => !gone.has(id)),
+      );
+      await store.deletePage(page.id);
+      pagesDeleted += 1;
+    }
+
     const filed = await guardedWrite(
       { isForgotten: (who) => (memory.forgotten ? memory.isForgotten(who) : Promise.resolve(false)) },
       subject,
@@ -191,19 +212,13 @@ export async function correctSubjectMemory(options: {
       throw new Error('correctUserMemory: the subject is forgotten; nothing is written for them again');
     }
 
-    // A page built from a deleted trace still says what the trace said: it goes whole, and the next compile builds it
-    // again from the traces of it that are left, read by id, beside the correction.
-    const gone = new Set(ids);
-    const store = options.wiki.storeFor(key);
-    const survivors: string[] = [];
-    let pagesDeleted = 0;
-    for (const page of await store.listPages()) {
-      if (!page.sources.some((id) => gone.has(id))) continue;
-      await store.deletePage(page.id);
-      pagesDeleted += 1;
-      survivors.push(...page.sources.filter((id) => !gone.has(id)));
+    const { deleted } = await memory.deleteTraces(ids);
+    try {
+      // A delete only marks a vector in the index, and the log still holds the pages written before the delete.
+      await memory.finishErasure();
+    } catch (error) {
+      memoryLog.warn('memory.erasure_unfinished', errorFields(error));
     }
-    await memory.addRebuildSources(key, survivors);
     return { deleted, pagesDeleted, correctionTraceId: filed.result.id };
   };
   return options.onChain ? options.onChain(correct) : correct();
