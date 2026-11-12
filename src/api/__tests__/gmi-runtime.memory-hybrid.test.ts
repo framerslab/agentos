@@ -12,6 +12,13 @@ import path from 'node:path';
 import pino from 'pino';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
 vi.mock('../../core/llm/providers/implementations/AnthropicProvider', async () => ({ AnthropicProvider: (await import('./helpers/stubProviders')).stubProviderClass('anthropic') }));
+// Trace ids from a counter that `turn()` starts again for each agent: the block's Active Context lists the ids of the
+// traces in focus, so two agents fed the same statements send the same block only when their ids match.
+const ids = vi.hoisted(() => ({ next: 0 }));
+vi.mock('../../cognition/memory/core/util/crossPlatformCrypto', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../cognition/memory/core/util/crossPlatformCrypto')>();
+  return { ...actual, uuid: () => `trace-${String(++ids.next).padStart(4, '0')}` };
+});
 import { agent, type AgentOptions } from '../agent';
 import { reply, script, type ProviderScript } from './helpers/stubProviders';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
@@ -85,6 +92,7 @@ const STATEMENTS = ['The bike shed code is XQ7Z.', 'I water the tomatoes every s
 
 /** Files the statements, clears the history, asks the code, and returns the last request's block, the turn's embedding calls and its record. */
 async function turn(recall: Record<string, unknown> | undefined, extra: Record<string, unknown> = {}, memory: Record<string, unknown> = {}) {
+  ids.next = 0;
   const k = key();
   const emb = key();
   const s = script('openai', k, { replies: [...STATEMENTS.map(() => reply.text('Noted.')), reply.text('XQ7Z.')] });
