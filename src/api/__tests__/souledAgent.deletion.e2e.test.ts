@@ -912,6 +912,28 @@ describe('legacyMemory', () => {
     await a.close();
   }
 
+  it('counts an attributed owner without turns when opening a second subject', async () => {
+    await seedLegacy();
+    const { a } = await open({ legacyMemory: legacy, retention: undefined });
+    expect(() => a.session('second', { userId: 'bob' })).toThrow(/set retention/);
+  });
+
+  it('counts an attributed owner after reopening without the attribution option', async () => {
+    await seedLegacy();
+    const earlier = await open({ legacyMemory: legacy, retention: undefined });
+    await earlier.a.close();
+    const { a } = await open({ retention: undefined });
+    expect(() => a.session('second', { userId: 'bob' })).toThrow(/set retention/);
+  });
+
+  it('requires retention at open when a stored subject joins an attributed owner', async () => {
+    await seedLegacy();
+    const earlier = await open({ legacyMemory: legacy });
+    await turn(earlier.a, 'second', 'bob', 'new words from another person');
+    await earlier.a.close();
+    await expect(open({ retention: undefined })).rejects.toThrow(/set retention/);
+  });
+
   it('attributes old memory to the one user, who recalls, reads, lists and exports it', async () => {
     await seedLegacy();
     const { a, s } = await open({ legacyMemory: legacy, retention: undefined }, [

@@ -348,6 +348,18 @@ describe('the vector index after a delete', () => {
     expect(await memory.rebuildVectorIndex()).toEqual({ vectors: 0 });
   });
 
+  it('can activate the index after a failed removal is repaired', async () => {
+    const { memory, indexFile } = await embeddingFacade();
+    fs.mkdirSync(indexFile);
+    fs.writeFileSync(path.join(indexFile, 'held'), 'x');
+    await expect(memory.rebuildVectorIndex()).rejects.toThrow();
+    fs.rmSync(indexFile, { recursive: true });
+    for (let n = 0; n < 1000; n += 1) await memory.remember(`distinct trace ${n}`);
+    const index = (memory as unknown as { _hnswSidecar: HnswSidecar })._hnswSidecar;
+    expect(index.isActive).toBe(true);
+    expect(index.size).toBe(1000);
+  }, 30_000);
+
   it('fails when an index file cannot be removed', async () => {
     const { memory, indexFile } = await embeddingFacade();
     await memory.remember('Ana keeps bees.');
@@ -440,6 +452,17 @@ describe('the vector index after a delete', () => {
     indexWrites.fail = false;
     expect(await memory.rebuildVectorIndex()).toEqual({ vectors: 1 });
     expect(fs.existsSync(indexFile)).toBe(true);
+  });
+});
+
+describe('user metadata written by an earlier importer', () => {
+  it('deletes a numeric turnUserId by its textual user id', async () => {
+    const { memory } = await facade();
+    const numeric = await memory.remember('earlier imported words', { metadata: { turnUserId: 42 } });
+    const other = await memory.remember('another person', { metadata: { turnUserId: '420' } });
+    expect(await memory.deleteTracesNamingUser('42')).toEqual({ deleted: 1 });
+    expect(await brainOf(memory).get('SELECT id FROM memory_traces WHERE id = ?', [numeric.id])).toBeFalsy();
+    expect(await brainOf(memory).get('SELECT id FROM memory_traces WHERE id = ?', [other.id])).toBeTruthy();
   });
 });
 

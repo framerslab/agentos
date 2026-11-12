@@ -145,6 +145,71 @@ describe('the forgotten-user ledger', () => {
     await writesOneUnkeyedRowAndFindsIt(primary, copy);
   });
 
+  it('refuses the primary adapter as its own copy', async () => {
+    const primary = await sqliteAt(path.join(folder(), 'memory.sqlite'));
+    await expect(ForgottenLedger.open({ primary, copy: primary })).rejects.toMatchObject({ code: 'COPY_UNAVAILABLE' });
+  });
+
+  it('refuses a second connection to the primary file as its copy', async () => {
+    const file = path.join(folder(), 'memory.sqlite');
+    const primary = await sqliteAt(file);
+    const copy = await sqliteAt(file);
+    await expect(ForgottenLedger.open({ primary, copy })).rejects.toMatchObject({ code: 'COPY_UNAVAILABLE' });
+  });
+
+  it.each(['', new Uint8Array(0)])('refuses an empty current key (%s)', async (current) => {
+    const pair = await openPair(folder());
+    await expect(ForgottenLedger.open({ ...pair, key: { current } })).rejects.toThrow(TypeError);
+  });
+
+  it('refuses an empty previous key', async () => {
+    const pair = await openPair(folder());
+    await expect(ForgottenLedger.open({ ...pair, key: { current: 'secret', previous: [''] } })).rejects.toThrow(TypeError);
+  });
+
+  it('repairs an older copy before a later restore of the primary', async () => {
+    const dir = folder();
+    const copyFile = path.join(dir, 'forgotten.sqlite');
+    const primaryFile = path.join(dir, 'memory.sqlite');
+    const oldCopy = path.join(dir, 'old-copy.sqlite');
+    const oldPrimary = path.join(dir, 'old-primary.sqlite');
+    let pair = await openPair(dir);
+    await ForgottenLedger.open(pair);
+    await closePair(pair);
+    fs.copyFileSync(copyFile, oldCopy);
+    fs.copyFileSync(primaryFile, oldPrimary);
+    pair = await openPair(dir);
+    await (await ForgottenLedger.open(pair)).markForgotten(ALICE);
+    await closePair(pair);
+    fs.copyFileSync(oldCopy, copyFile);
+    pair = await openPair(dir);
+    const reopened = await ForgottenLedger.open(pair);
+    expect(await tombstonesOf(pair.copy)).toEqual(await tombstonesOf(pair.primary));
+    await reopened.reconcile();
+    expect(await tombstonesOf(pair.copy)).toEqual(await tombstonesOf(pair.primary));
+    await closePair(pair);
+    fs.copyFileSync(oldPrimary, primaryFile);
+    pair = await openPair(dir);
+    const restored = await ForgottenLedger.open(pair);
+    await restored.reconcile();
+    expect(await restored.isForgotten(ALICE)).toBe(true);
+  });
+
+  it('reconciles a copy that loses a tombstone while the ledger is open', async () => {
+    const pair = await openPair(folder());
+    const ledger = await ForgottenLedger.open(pair);
+    await ledger.markForgotten(ALICE);
+    await pair.copy.run('DELETE FROM agentos_learning_forgotten WHERE hash = ?', [await ForgottenLedger.hash('', ALICE)]);
+    await ledger.reconcile();
+    expect(await tombstonesOf(pair.copy)).toEqual(await tombstonesOf(pair.primary));
+  });
+
+  it('names the ledger in errors outside a souled agent', async () => {
+    const pair = await openPair(folder());
+    await (await ForgottenLedger.open({ ...pair, key: { current: 'secret' } })).markForgotten(ALICE);
+    await expect(ForgottenLedger.open(pair)).rejects.toThrow(/^ForgottenLedger:/);
+  });
+
   it('keeps a session and a user of one id apart', async () => {
     const { primary, copy } = await openPair(folder());
     const ledger = await ForgottenLedger.open({ primary, copy });
