@@ -490,6 +490,9 @@ describe('tombstones after a restore', () => {
     for (const suffix of ['-wal', '-shm']) fs.rmSync(`${storeFile()}${suffix}`, { force: true });
   }
   const ledgerRows = () => rows<{ hash: string }>(storeFile(), 'SELECT hash FROM agentos_learning_forgotten').map((row) => row.hash);
+  /** The state mark a ledger file holds, as the number it is. */
+  const stateIn = (file: string): bigint =>
+    BigInt(`0x${rows<{ forgotten_at: string }>(file, "SELECT forgotten_at FROM agentos_learning_forgotten WHERE hash = 's1:state'")[0]?.forgotten_at ?? ''}`);
 
   it('cleans a store put back from before the deletion, at the next open', async () => {
     const { a } = await open();
@@ -517,6 +520,26 @@ describe('tombstones after a restore', () => {
     expect(ledgerRows()).toContain(await ForgottenLedger.hash('', alice));
     expect(lines('memory.tombstone_reapplied')).toHaveLength(1);
     expect(lines('memory.tombstone_reapplied')[0]).toMatchObject({ subjects: 1, reconciled: 1 });
+    expect(stateIn(storeFile())).toBe(stateIn(copyFile()));
+    expect(stateIn(storeFile()) > stateIn(backup)).toBe(true);
+  });
+
+  it('raises the mark on forgetUser and leaves it on a re-apply', async () => {
+    const { a } = await open();
+    const start = stateIn(storeFile());
+
+    expect((await a.forgetUser!('alice')).tombstone.written).toBe(true);
+    const forgotten = stateIn(storeFile());
+    expect(forgotten > start).toBe(true);
+
+    // A re-apply on a clean store writes no tombstone and leaves the mark.
+    expect(await a.applyTombstones!()).toEqual([]);
+    expect(stateIn(storeFile())).toBe(forgotten);
+
+    // A second deletion of the same person writes no row and still raises the mark.
+    expect((await a.forgetUser!('alice')).tombstone.written).toBe(false);
+    expect(stateIn(storeFile()) > forgotten).toBe(true);
+    expect(stateIn(copyFile())).toBe(stateIn(storeFile()));
   });
 
   it('applies tombstones on demand, and does nothing on a clean store', async () => {

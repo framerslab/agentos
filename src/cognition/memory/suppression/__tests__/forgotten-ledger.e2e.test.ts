@@ -186,6 +186,25 @@ interface StateReader {
 }
 const reader = (ledger: ForgottenLedger): StateReader => ledger as unknown as StateReader;
 
+/** The state mark's first case, on whatever database holds the store: every tombstone write raises it, a repeat too. */
+async function advancesOnEveryTombstone(pair: Pair): Promise<void> {
+  const ledger = await ForgottenLedger.open(pair);
+  const marks: bigint[] = [await markOf(pair.primary)];
+  for (const subject of [ALICE, BOB]) {
+    expect((await ledger.markForgotten(subject)).written).toBe(true);
+    marks.push(await markOf(pair.primary));
+    expect(await stateOf(pair.copy)).toBe(await stateOf(pair.primary));
+  }
+  const hash = await ForgottenLedger.hash('', ALICE);
+  const forgottenAt = await valueOf(pair.primary, hash);
+  // A repeat writes no row and keeps the tombstone's time, and still raises the mark.
+  expect(await ledger.markForgotten(ALICE)).toEqual({ form: 'unkeyed', written: false });
+  marks.push(await markOf(pair.primary));
+  expect(await stateOf(pair.copy)).toBe(await stateOf(pair.primary));
+  expect([await valueOf(pair.primary, hash), await valueOf(pair.copy, hash)]).toEqual([forgottenAt, forgottenAt]);
+  for (const [index, mark] of marks.entries()) if (index > 0) expect(mark > marks[index - 1], `write ${index} raises the mark`).toBe(true);
+}
+
 /** The first case's body, on whatever database holds the store. */
 async function writesOneUnkeyedRowAndFindsIt(primary: StorageAdapter, copy: StorageAdapter): Promise<void> {
   const ledger = await ForgottenLedger.open({ primary, copy });
@@ -798,6 +817,214 @@ describe("the ledger's identity", () => {
   });
 });
 
+describe("the ledger's state mark", () => {
+  /** A fixed time, set before a ledger opens so the ledger's first mark follows the fake clock. */
+  const T = Date.UTC(2026, 9, 12, 12);
+  const CY: SuppressionSubject = { kind: 'session', id: 'cy' };
+  const numberOf = (mark: string | undefined): bigint => BigInt(`0x${mark ?? ''}`);
+  /** A trigger that makes the database refuse one hash's insert, as a failed write. */
+  const refusing = (hash: string): string =>
+    `CREATE TRIGGER refuse_one BEFORE INSERT ON agentos_learning_forgotten WHEN NEW.hash = '${hash}' BEGIN SELECT RAISE(ABORT, 'refused'); END;`;
+
+  it('advances on every tombstone, and again for a repeat', async () => {
+    await advancesOnEveryTombstone(await openPair(folder()));
+  });
+
+  it('advances with a stalled clock and with a clock set back', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(T);
+    const pair = await openPair(folder());
+    const ledger = await ForgottenLedger.open(pair);
+
+    vi.setSystemTime(T + 5);
+    await ledger.markForgotten(ALICE);
+    const first = await markOf(pair.primary);
+    expect(timeOf(await stateOf(pair.primary))).toBe(T + 5);
+
+    // The same millisecond again.
+    await ledger.markForgotten(BOB);
+    const second = await markOf(pair.primary);
+    expect(second > first).toBe(true);
+
+    // A clock set back an hour.
+    vi.setSystemTime(T - 3_600_000);
+    await ledger.markForgotten(CY);
+    expect((await markOf(pair.primary)) > second).toBe(true);
+    expect(await stateOf(pair.copy)).toBe(await stateOf(pair.primary));
+  });
+
+  it('gives two ledgers different marks for the same writes at the same times', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(T);
+    const pairs = [await openPair(folder()), await openPair(folder())];
+    const ledgers = [await ForgottenLedger.open(pairs[0]), await ForgottenLedger.open(pairs[1])];
+    let now = T;
+    for (const subject of [ALICE, BOB, CY]) {
+      now += 10;
+      vi.setSystemTime(now);
+      for (const ledger of ledgers) await ledger.markForgotten(subject);
+    }
+    const [one, two] = [await stateOf(pairs[0].primary), await stateOf(pairs[1].primary)];
+    expect(timeOf(one)).toBe(now);
+    expect(one?.slice(0, 16)).toBe(two?.slice(0, 16));
+    expect(one?.slice(16)).not.toBe(two?.slice(16));
+  });
+
+  it("leaves the copy as it was when the copy's write fails", async () => {
+    const pair = await openPair(folder());
+    const ledger = await ForgottenLedger.open(pair);
+    await pair.copy.exec(refusing(await ForgottenLedger.hash('', ALICE)));
+    const before = await bothSides(pair);
+
+    await expect(ledger.markForgotten(ALICE)).rejects.toThrow(/refused/);
+
+    expect(await bothSides(pair)).toEqual(before);
+  });
+
+  it('recovers when the copy committed and the store did not', async () => {
+    const dir = folder();
+    let pair = await openPair(dir);
+    let ledger = await ForgottenLedger.open(pair);
+    const hash = await ForgottenLedger.hash('', ALICE);
+    const copyMark = await markOf(pair.copy);
+    await pair.primary.exec(refusing(hash));
+    const store = await everyRowOf(pair.primary);
+
+    await expect(ledger.markForgotten(ALICE)).rejects.toThrow(/refused/);
+
+    expect(await tombstonesOf(pair.copy)).toEqual([{ hash, namespace: '' }]);
+    expect((await markOf(pair.copy)) > copyMark).toBe(true);
+    expect(await everyRowOf(pair.primary)).toEqual(store);
+    expect(await ledger.isForgotten(ALICE)).toBe(true);
+
+    await pair.primary.exec('DROP TRIGGER refuse_one');
+    await closePair(pair);
+    pair = await openPair(dir);
+    ledger = await ForgottenLedger.open(pair);
+    // The open repairs the copy and leaves the store; the reconcile brings the store up.
+    expect(await everyRowOf(pair.primary)).toEqual(store);
+    expect(await ledger.reconcile()).toEqual({ added: [hash] });
+    expect(await stateOf(pair.primary)).toBe(await stateOf(pair.copy));
+    expect(await tombstonesOf(pair.primary)).toEqual([{ hash, namespace: '' }]);
+  });
+
+  it('brings an older store up to its copy', async () => {
+    const dir = folder();
+    const memoryFile = path.join(dir, 'memory.sqlite');
+    const backupFile = path.join(dir, 'before.sqlite');
+    let pair = await openPair(dir);
+    await ForgottenLedger.open(pair);
+    const backupState = await stateOf(pair.primary);
+    await closePair(pair);
+    fs.copyFileSync(memoryFile, backupFile);
+
+    pair = await openPair(dir);
+    await (await ForgottenLedger.open(pair)).markForgotten(ALICE);
+    const copyState = await stateOf(pair.copy);
+    await closePair(pair);
+    expect(numberOf(copyState) > numberOf(backupState)).toBe(true);
+    fs.copyFileSync(backupFile, memoryFile);
+
+    pair = await openPair(dir);
+    const ledger = await ForgottenLedger.open(pair);
+    expect(await stateOf(pair.primary)).toBe(backupState);
+    await ledger.reconcile();
+    expect(await stateOf(pair.primary)).toBe(copyState);
+    expect(await stateOf(pair.copy)).toBe(copyState);
+  });
+
+  it('brings an older copy up to its store', async () => {
+    const dir = folder();
+    const copyFile = path.join(dir, 'forgotten.sqlite');
+    const oldCopy = path.join(dir, 'old-copy.sqlite');
+    let pair = await openPair(dir);
+    await ForgottenLedger.open(pair);
+    const oldState = await stateOf(pair.copy);
+    await closePair(pair);
+    fs.copyFileSync(copyFile, oldCopy);
+
+    pair = await openPair(dir);
+    await (await ForgottenLedger.open(pair)).markForgotten(ALICE);
+    const storeState = await stateOf(pair.primary);
+    await closePair(pair);
+    expect(numberOf(storeState) > numberOf(oldState)).toBe(true);
+    fs.copyFileSync(oldCopy, copyFile);
+
+    pair = await openPair(dir);
+    await ForgottenLedger.open(pair);
+    expect(await tombstonesOf(pair.copy)).toEqual(await tombstonesOf(pair.primary));
+    expect(await stateOf(pair.copy)).toBe(storeState);
+  });
+
+  it('advances once for a tombstone written outside the ledger', async () => {
+    const pair = await openPair(folder());
+    const ledger = await ForgottenLedger.open(pair);
+    const start = await markOf(pair.primary);
+    const outside = 'e'.repeat(64);
+    await insertRow(pair.primary, outside, '');
+
+    await ledger.reconcile();
+
+    expect(await tombstonesOf(pair.copy)).toEqual([{ hash: outside, namespace: '' }]);
+    expect(await stateOf(pair.copy)).toBe(await stateOf(pair.primary));
+    expect((await markOf(pair.primary)) > start).toBe(true);
+    // Once: a second reconcile finds both sides alike and changes nothing.
+    const united = await bothSides(pair);
+    await ledger.reconcile();
+    expect(await bothSides(pair)).toEqual(united);
+  });
+
+  it('reads its identity and mark in one call, and nothing else', async () => {
+    const dir = folder();
+    const memoryFile = path.join(dir, 'memory.sqlite');
+    const backupFile = path.join(dir, 'before.sqlite');
+    let pair = await openPair(dir);
+    let ledger = await ForgottenLedger.open(pair);
+    const first = await reader(ledger).readState();
+    expect(Object.keys(first).sort()).toEqual(['identity', 'mark']);
+    expect(first).toEqual({ identity: await identityOf(pair.primary), mark: await stateOf(pair.primary) });
+    await closePair(pair);
+    fs.copyFileSync(memoryFile, backupFile);
+
+    pair = await openPair(dir);
+    ledger = await ForgottenLedger.open(pair);
+    await ledger.markForgotten(ALICE);
+    const next = await reader(ledger).readState();
+    expect(next.identity).toBe(first.identity);
+    expect(numberOf(next.mark) > numberOf(first.mark)).toBe(true);
+    await closePair(pair);
+
+    // A store put back behind its copy: the state read brings its rows and mark up, and the next reconcile still
+    // reports the tombstone that came back.
+    fs.copyFileSync(backupFile, memoryFile);
+    pair = await openPair(dir);
+    ledger = await ForgottenLedger.open(pair);
+    const hash = await ForgottenLedger.hash('', ALICE);
+    const caughtUp = await reader(ledger).readState();
+    expect(caughtUp).toEqual({ identity: first.identity, mark: await stateOf(pair.copy) });
+    expect(await stateOf(pair.primary)).toBe(caughtUp.mark);
+    expect(await tombstonesOf(pair.primary)).toEqual([{ hash, namespace: '' }]);
+    expect(await ledger.reconcile()).toEqual({ added: [hash] });
+  });
+
+  it('refuses a state read when the copy under an open handle was replaced', async () => {
+    const pair = await openPair(folder());
+    const ledger = await ForgottenLedger.open(pair);
+    await pair.copy.run(`UPDATE agentos_learning_forgotten SET forgotten_at = ? WHERE hash = '${IDENTITY}'`, ['f'.repeat(32)]);
+    logged.length = 0;
+
+    await expect(reader(ledger).readState()).rejects.toMatchObject({ name: 'ForgottenLedgerError', code: 'LEDGER_IDENTITY_MISMATCH' });
+    await expect(ledger.markForgotten(ALICE)).rejects.toMatchObject({ name: 'ForgottenLedgerError', code: 'LEDGER_IDENTITY_MISMATCH' });
+
+    expect(refusals()).toEqual([
+      expect.objectContaining({ code: 'LEDGER_IDENTITY_MISMATCH' }),
+      expect.objectContaining({ code: 'LEDGER_IDENTITY_MISMATCH' }),
+    ]);
+    expect(await tombstonesOf(pair.primary)).toEqual([]);
+    expect(await tombstonesOf(pair.copy)).toEqual([]);
+  });
+});
+
 describe("the tombstone copy's file", () => {
   it('opens the copy file with secure_delete on, and says whether it was there', async () => {
     const file = path.join(folder(), 'forgotten.sqlite');
@@ -973,6 +1200,33 @@ describe("the learning layer's route", () => {
     ).rejects.toThrow(/has no trait row/);
   });
 
+  it('raises the mark when the layer forgets a user through a shared ledger', async () => {
+    const dir = folder();
+    const { store } = await learningStoreIn(dir);
+    const shared = await sharedLedgerIn(dir);
+    const before = await markOf(shared.primary);
+
+    await learnerTombstones(shared.ledger).mark(store, ANA, NOW);
+
+    expect((await markOf(shared.primary)) > before).toBe(true);
+    expect(await stateOf(shared.copy)).toBe(await stateOf(shared.primary));
+  });
+
+  it("raises the mark at the next reconcile for a row the layer wrote into the ledger's own table", async () => {
+    const pair = await openPair(folder());
+    const ledger = await ForgottenLedger.open({ ...pair, namespaces: ['A'] });
+    // The layer's own store sits on the ledger's store adapter, and no shared ledger is handed to its route.
+    const store = new SqlLearningStore({ adapter: pair.primary });
+    const before = await markOf(pair.primary);
+
+    await learnerTombstones().mark(store, ANA, NOW);
+    await ledger.reconcile();
+
+    expect((await tombstonesOf(pair.copy)).map((row) => row.hash)).toEqual([await tombstoneHash('A', 'ana')]);
+    expect(await stateOf(pair.copy)).toBe(await stateOf(pair.primary));
+    expect((await markOf(pair.primary)) > before).toBe(true);
+  });
+
   it('shares a ledger by the options object, weakly', async () => {
     const shared = await sharedLedgerIn(folder());
     const options = { runtime: 'gmi' };
@@ -1017,9 +1271,7 @@ describe.skipIf(!POSTGRES_URL)('the forgotten-user ledger with the store on Post
   }
 
   /** Two handles' worth of adapters on one store schema and one copy schema, sharing no adapter object. */
-  async function twoProcesses(): Promise<[Pair, Pair]> {
-    const store = newSchema();
-    const copy = newSchema();
+  async function twoProcesses(store: string = newSchema(), copy: string = newSchema()): Promise<[Pair, Pair]> {
     const first: Pair = { primary: await openPostgres(store), copy: await openPostgres(copy) };
     const second: Pair = { primary: await openPostgres(store), copy: await openPostgres(copy) };
     return [first, second];
@@ -1070,5 +1322,45 @@ describe.skipIf(!POSTGRES_URL)('the forgotten-user ledger with the store on Post
     await openTogether(pairs);
     await expectOneIdentity(pairs[0]);
     expect(await tombstonesOf(pairs[1].primary)).toEqual([{ hash: await ForgottenLedger.hash('', ALICE), namespace: '' }]);
+  });
+
+  it('advances on every tombstone with the store on Postgres', async () => {
+    await advancesOnEveryTombstone({ primary: await openPostgres(), copy: await sqliteAt(path.join(folder(), 'forgotten.sqlite')) });
+  });
+
+  it('two writers on one store and copy lose no tombstone and never lower the mark', async () => {
+    const storeSchema = newSchema();
+    const copySchema = newSchema();
+    const pairs = await twoProcesses(storeSchema, copySchema);
+    // Opened one after the other: the race of two first opens is the case above.
+    const ledgers = [await ForgottenLedger.open(pairs[0]), await ForgottenLedger.open(pairs[1])];
+    const start = await markOf(pairs[0].primary);
+    const users = (prefix: string): SuppressionSubject[] => Array.from({ length: 10 }, (_, index) => ({ kind: 'user', id: `${prefix}-${index}` }));
+
+    // A third connection pool reads the store's state row while the writers run.
+    const watcher = await openPostgres(storeSchema);
+    const seen: bigint[] = [];
+    let writing = true;
+    const watching = (async () => {
+      while (writing) {
+        const state = await stateOf(watcher);
+        if (state !== undefined) seen.push(BigInt(`0x${state}`));
+        await new Promise((resolve) => setTimeout(resolve, 2));
+      }
+    })();
+    try {
+      await Promise.all([...users('one').map((user) => ledgers[0].markForgotten(user)), ...users('two').map((user) => ledgers[1].markForgotten(user))]);
+    } finally {
+      writing = false;
+      await watching;
+    }
+
+    expect(await tombstonesOf(pairs[0].primary)).toHaveLength(20);
+    expect(await tombstonesOf(pairs[0].copy)).toHaveLength(20);
+    expect(await stateOf(pairs[0].copy)).toBe(await stateOf(pairs[0].primary));
+    expect((await markOf(pairs[0].primary)) > start).toBe(true);
+    for (const [index, mark] of seen.entries()) if (index > 0) expect(mark >= seen[index - 1], `read ${index} is not lower`).toBe(true);
+    const third = await ForgottenLedger.open({ primary: await openPostgres(storeSchema), copy: await openPostgres(copySchema) });
+    expect((await reader(third).readState()).mark).toBe(await stateOf(pairs[0].primary));
   });
 });
