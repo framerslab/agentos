@@ -174,7 +174,10 @@ recall under a key of their own, the operator's conversation scope of the agent
 the version of that key as `keyVersion`. A folder an earlier version indexed has no
 `keyVersion`: its operator pages are indexed again under the operator key at the first
 start, and the chunks the earlier version filed under the agent's plain scope are left
-in the store. When an operator page is edited, its old chunks are deleted from the
+in the store. It records the key itself as `operatorKey`: a folder opened under another
+agent id (its `agentId` or `name` changed, or another agent opened it) has its operator
+pages indexed again under the current agent's key, and the chunks filed under the other
+key are deleted. When an operator page is edited, its old chunks are deleted from the
 store for good and the page is indexed again; the chunks of a page whose file is gone
 are deleted the same way.
 

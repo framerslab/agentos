@@ -348,12 +348,18 @@ export class WikiMemoryStore implements WikiPageStorePort {
    *
    * An index written before the operator key existed (no `keyVersion`) names chunks filed under the agent's plain
    * scope: its entries are not used, every operator page is indexed afresh, and those earlier chunks are left where
-   * they are.
+   * they are. An index whose entries were filed under another operator key (the folder's agent id changed, or another
+   * agent opened the folder) is not used either: every operator page is indexed afresh under this agent's key, and
+   * the chunks its entries name, which no turn of this agent reads, are deleted.
    */
   async index(opts?: { force?: boolean }): Promise<IndexResult> {
     const pages = (await this.load()).filter((page) => originOfPage(page) === 'operator');
-    const meta = await this.currentMeta();
+    const { meta, stale } = await this.currentMeta();
     const result: IndexResult = { indexed: [], skipped: [], removed: [] };
+    if (stale.length > 0) {
+      await this._port.deleteTraces(stale);
+      result.removed.push(...stale);
+    }
 
     for (const page of pages) {
       const hash = createHash('sha256').update(page.body).digest('hex');
@@ -398,21 +404,31 @@ export class WikiMemoryStore implements WikiPageStorePort {
 
   /** Full rebuild: delete every indexed page's chunks, clear the meta map and re-embed everything. */
   async rebuildIndex(): Promise<IndexResult> {
-    const meta = await this.currentMeta();
-    const traceIds = Object.values(meta.pages).flatMap((entry) => entry.traceIds);
+    const { meta, stale } = await this.currentMeta();
+    const traceIds = [...stale, ...Object.values(meta.pages).flatMap((entry) => entry.traceIds)];
     if (traceIds.length > 0) await this._port.deleteTraces(traceIds);
     await this.writeMeta({ ...meta, pages: {} });
     return this.index({ force: true });
   }
 
   /**
-   * `.meta/index.json` as an index of chunks filed under the operator key: the file as it is when it carries that
-   * key's version, and otherwise the file with no page entry, marked with the version for its next write.
+   * `.meta/index.json` as an index of chunks filed under this agent's operator key: the file as it is when it carries
+   * that key's version and names that key, and otherwise the file with no page entry, marked with the version and the
+   * key for its next write.
+   *
+   * @returns The index, and the chunks of the entries it left out that were filed under another operator key, for the
+   *   caller to delete; an index of the agent's plain scope leaves its chunks where they are.
    */
-  private async currentMeta(): Promise<MetaIndex> {
+  private async currentMeta(): Promise<{ meta: MetaIndex; stale: string[] }> {
     const meta = await this.readMeta();
-    if (meta.keyVersion === META_KEY_VERSION) return meta;
-    return { ...meta, keyVersion: META_KEY_VERSION, pages: Object.create(null) as MetaIndex['pages'] };
+    const operatorKey = this.operatorKey;
+    if (meta.keyVersion === META_KEY_VERSION && meta.operatorKey === operatorKey) return { meta, stale: [] };
+    const stale =
+      meta.keyVersion === META_KEY_VERSION ? Object.values(meta.pages).flatMap((entry) => entry.traceIds) : [];
+    return {
+      meta: { ...meta, keyVersion: META_KEY_VERSION, operatorKey, pages: Object.create(null) as MetaIndex['pages'] },
+      stale,
+    };
   }
 
   /** The conversation key the operator's pages are filed under for this store's agent. */

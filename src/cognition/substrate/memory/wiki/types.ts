@@ -50,6 +50,12 @@ export interface MetaIndex {
    * filed under the agent's plain scope: they are not used, and the next index replaces them.
    */
   keyVersion?: string;
+  /**
+   * The operator key the pages' chunks are filed under (`conversationScopeKey(agentId, { kind: 'operator' })`). An
+   * index that names another key, or none, was written for another agent id: its entries are not used, and the next
+   * index deletes their chunks and files every page again under the current key.
+   */
+  operatorKey?: string;
 }
 
 export interface IndexResult {
