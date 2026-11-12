@@ -447,6 +447,9 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     );
   }
 
+  /** The key the operator's own pages are indexed under; an id no key can be built from is refused before any store is made. */
+  const operatorKey = conversationScopeKey(agentId, { kind: 'operator' });
+
   // The operator's pages under memory/ are markdown files; what people said to the agent lives in the store.
   const storeDir = path.join(loaded.memoryDir, '.store');
   await fs.mkdir(storeDir, { recursive: true });
@@ -456,12 +459,21 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     graph: true,
     selfImprove: true,
   });
+  /** Runs a step of the open; a step that throws closes the store first, so a failed open leaves no handle open. */
+  const closingOnThrow = async <T>(step: () => T | Promise<T>): Promise<T> => {
+    try {
+      return await step();
+    } catch (err) {
+      await memory.close().catch(() => undefined);
+      throw err;
+    }
+  };
 
   /** The user every session that names none, and every one-shot call, runs as; undefined without `sharedMemory`. */
   const sharedUser = sharedMemory?.as;
   if (sharedUser !== undefined) {
     // One person's memory: a store that holds another user's, or a session's, is not opened as theirs.
-    const others = (await memory.listScopes()).filter((row) => {
+    const others = (await closingOnThrow(() => memory.listScopes())).filter((row) => {
       if (row.kind === 'operator') return false;
       const subject = parseConversationScopeKey(row.scopeId)?.subject;
       return !(subject?.kind === 'user' && subject.id === sharedUser);
@@ -477,13 +489,13 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   // Traces an earlier version filed under the agent's plain id, in either form it was written in: no turn reads
   // them, and nothing here deletes, moves or rewrites them.
   const encodedAgentId = encodePlainScopeId('persona', agentId);
-  const earlierTraces =
-    (await memory.countScope('persona', agentId)) +
-    (encodedAgentId !== agentId ? await memory.countScope('persona', encodedAgentId) : 0);
+  const earlierTraces = await closingOnThrow(
+    async () =>
+      (await memory.countScope('persona', agentId)) +
+      (encodedAgentId !== agentId ? await memory.countScope('persona', encodedAgentId) : 0),
+  );
   if (earlierTraces > 0) memoryLog.warn('memory.legacy_traces', { count: earlierTraces });
 
-  /** The key the operator's own pages are indexed under. */
-  const operatorKey = conversationScopeKey(agentId, { kind: 'operator' });
   /** The subject a turn's memory is kept under: the one user of `sharedMemory` for a subject that names none. */
   const subjectOf = (subject: MemorySubject): MemorySubject =>
     sharedUser !== undefined && subject.kind === 'session' ? { kind: 'user', id: sharedUser } : subject;
@@ -912,7 +924,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
 
   const chunker = new SemanticChunker();
   const priorTools = rest.tools;
-  const { tools: augmentedTools } = await attachMemoryWiki({
+  const { tools: augmentedTools } = await closingOnThrow(() => attachMemoryWiki({
     memory,
     memoryDir: loaded.memoryDir,
     agentId,
@@ -928,7 +940,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     ...(memoryPolicy || screen ? { beforeScopeCompile } : {}),
     // No compile at all: raw traces only, and no page is ever written.
     ...(compile === false ? { compile: false as const } : {}),
-  });
+  }));
   if (compile === false) memoryLog.warn('memory.compile_skipped', { reason: 'compile_off' });
 
   // attachMemoryWiki appends read_memory_page to an array. Use the augmented
@@ -938,7 +950,9 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     priorTools && !Array.isArray(priorTools) ? priorTools : augmentedTools
   ) as AgentOptions['tools'];
 
-  const built = agent({ ...rest, ...(budget ? { budget } : {}), memoryProvider: provider, tools }) as SouledAgent;
+  const built = (await closingOnThrow(() =>
+    agent({ ...rest, ...(budget ? { budget } : {}), memoryProvider: provider, tools }),
+  )) as SouledAgent;
 
   // Every turn joins what close() waits for: its promise, or a stream's settled usage. The default runtime's own close
   // does not wait for a running turn, and the GMI runtime's does not wait for a one-shot call.
