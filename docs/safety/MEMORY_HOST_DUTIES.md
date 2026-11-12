@@ -23,6 +23,8 @@ This page describes the library's behaviour. It is not legal advice. Whether a l
 
 With `souledAgent()` the memory store is a SQLite file, `memory/.store/memory.sqlite`, and the tombstone copy is a second file beside it, `memory/.store/forgotten.sqlite`. A `.gitignore` in that folder keeps both out of version control, so a soul folder you keep in git never carries a person's conversation. A host that wires the wiki onto its own storage adapter (`Memory.createWithAdapter`, `Memory.createPostgres`) gets the same tables in its own database.
 
+The forgotten-user ledger is database-wide, including older learning-layer tombstones. Give each agent its own database, or its own PostgreSQL schema, and a separate tombstone copy outside restores. Different brain ids do not isolate tombstones: forgetting a user in a shared ledger applies to every brain that reads it.
+
 ## What leaves your process
 
 Memory makes these calls out of your process, and no others:

@@ -293,6 +293,9 @@ export interface MemoryConfig {
    * copy kept outside it (`openForgottenCopy` opens one). The open is refused, and the store closed again, when the
    * ledger does not open: its copy is missing, or its tombstones are keyed and the key is not given.
    *
+   * Tombstones are database-wide, including historical learner rows: brain ids do not isolate them. Give each
+   * agent its own database or PostgreSQL schema and a separate copy outside restores.
+   *
    * @example
    * ```typescript
    * const { adapter: copy } = await openForgottenCopy('./data/forgotten.sqlite');
