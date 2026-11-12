@@ -66,7 +66,7 @@
 
 import { compileStrategy, isAgent } from './runtime/strategies/index.js';
 import { noSeatAnswered, seatMetadataOf } from './runtime/strategies/shared.js';
-import { callbackFailed } from './runtime/agencyLog.js';
+import { callAgencyCallback } from './runtime/agencyLog.js';
 import { validatePoolOptions, hasPoolSurface } from './runtime/pool/validate.js';
 import { createSeatingState, seatRoster, type SeatingState, type SeatedRoster } from './runtime/pool/seating.js';
 import { guardPerCallOptions } from './runtime/pool/guard.js';
@@ -293,19 +293,7 @@ export function agency(opts: AgencyOptions): AgencyInstance {
    * code, never its message, and never fails the call or leaves a rejection
    * unhandled.
    */
-  const fire = (name: string, call: () => unknown): void => {
-    const threw = (err: unknown): void => {
-      callbackFailed(name, err);
-    };
-    try {
-      const returned = call();
-      if ((typeof returned === 'object' || typeof returned === 'function') && returned !== null && typeof (returned as PromiseLike<unknown>).then === 'function') {
-        Promise.resolve(returned).then(undefined, threw);
-      }
-    } catch (err) {
-      threw(err);
-    }
-  };
+  const fire = callAgencyCallback;
   // Every callback runs through `fire`, whichever part of a run fires it:
   // this agency, its strategy, a gate or a HITL check. One that throws is
   // written to the host's logger as `agency.callback_failed`, with its name
@@ -2130,11 +2118,7 @@ export async function runPostApprovalGuardrails(
   // throw back the arguments it was shown), and a block is returned whatever
   // the callback did.
   const notify = (event: GuardrailEvent): void => {
-    try {
-      callbacks?.guardrailResult?.(event);
-    } catch (err) {
-      callbackFailed('guardrailResult', err);
-    }
+    callAgencyCallback('guardrailResult', () => callbacks?.guardrailResult?.(event));
   };
 
   for (const guardId of guardrailIds) {

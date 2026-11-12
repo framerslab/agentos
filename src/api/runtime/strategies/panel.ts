@@ -29,7 +29,7 @@ import {
   callRecordExtras,
 } from './shared.js';
 import { lazyLogger } from '../lazyLogger.js';
-import { callbackFailed } from '../agencyLog.js';
+import { callAgencyCallback } from '../agencyLog.js';
 import type { SeatedRoster, SeatedConfig } from '../pool/seating.js';
 import { vendorOf, makerOfHostedModel, isHostProvider } from '../pool/vendor.js';
 import { seatHealthId } from '../pool/resolve.js';
@@ -153,14 +153,11 @@ function panelCallbacks(on: AgencyOptions['on'], mask: (error: unknown) => unkno
   for (const [name, fn] of Object.entries(on ?? {})) {
     if (typeof fn !== 'function') continue;
     out[name] = (event: unknown) => {
-      try {
+      callAgencyCallback(name, () => {
         const payload =
           name === 'error' && isRecord(event) ? { ...event, error: freshError(event.error, mask) } : event;
-        (fn as Notify).call(on, payload);
-      } catch (err) {
-        // Never the message: a callback's error can quote what the call sent.
-        callbackFailed(name, err);
-      }
+        return (fn as Notify).call(on, payload);
+      });
     };
   }
   return out as Callbacks;

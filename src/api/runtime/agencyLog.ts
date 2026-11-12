@@ -25,3 +25,20 @@ export function callbackFailed(name: string, error: unknown): void {
   const callback = (CALLBACKS as readonly string[]).includes(name) ? (name as (typeof CALLBACKS)[number]) : undefined;
   agencyLog.warn('agency.callback_failed', { ...(callback !== undefined ? { callback } : {}), ...listedErrorFields(error) });
 }
+
+/**
+ * Fires a notification without waiting for it. Synchronous throws and rejected promises both produce one safe event.
+ * @param name - The callback's name.
+ * @param call - Invokes the callback, including reading it from the host's object.
+ */
+export function callAgencyCallback(name: string, call: () => unknown): void {
+  const failed = (error: unknown): void => callbackFailed(name, error);
+  try {
+    const returned = call();
+    if ((typeof returned === 'object' || typeof returned === 'function') && returned !== null && typeof (returned as PromiseLike<unknown>).then === 'function') {
+      void Promise.resolve(returned).then(undefined, failed);
+    }
+  } catch (error) {
+    failed(error);
+  }
+}

@@ -11,7 +11,7 @@ import type { ITool, JSONSchemaObject, ToolExecutionContext, ToolExecutionResult
 import { listedErrorFields } from '../../core/logging/events.js';
 import { isModerationId } from '../guardrails/ModerationContext.js';
 import {
-  ACTION_EVIDENCE_SCHEMA, isActionEvidence, verifyActionEvidence,
+  ACTION_EVIDENCE_SCHEMA, assertEvidenceRule, isActionEvidence, verifyActionEvidence,
   type ActionEvidence, type EvidenceCheck, type EvidenceFailure, type EvidenceRule, type EvidenceSource, type RuleBook,
 } from './ActionEvidence.js';
 import type { ActionLimitAnswer, ActionLimiter, ActionLimitRule } from './ActionLimiter.js';
@@ -96,7 +96,7 @@ export interface GovernedToolPolicy<TInput> {
   /** What the model receives in a dry run in place of the tool's output. Default `{ dryRun: true }`. Never recorded. */
   dryRunOutput?(args: TInput): unknown;
   /**
-   * Default: the actor, the action, the target, the room and the sorted message ids. The limiter and the record hold
+   * Default: the actor, action, account, room, unique sorted evidence ids and optional target message. The limiter and the record hold
    * the SHA-256 of the string, never the string.
    */
   idempotencyKey?(args: TInput): string;
@@ -149,12 +149,17 @@ async function quietly(step: () => unknown): Promise<void> {
 }
 
 /**
- * The default idempotency key: the actor, the action, the target, the room and the sorted message ids.
+ * The default idempotency key: the actor, action, account, room, unique sorted evidence ids and optional target message.
  *
  * @internal Not exported from the folder's index.
  */
-export function defaultIdempotencyKey(actor: ActionActor, action: string, target: { accountId: string; roomId?: string }, messageIds: readonly string[]): string {
-  return JSON.stringify([actor.kind, actor.id, action, target.accountId, target.roomId ?? null, [...messageIds].sort()]);
+export function defaultIdempotencyKey(actor: ActionActor, action: string, target: { accountId: string; roomId?: string; messageId?: string }, messageIds: readonly string[]): string {
+  // Repeating a quote cannot create a fresh operation or reset its retry allowance.
+  // Keep the original key format for account actions; message actions also name the message they change.
+  return JSON.stringify([
+    actor.kind, actor.id, action, target.accountId, target.roomId ?? null, [...new Set(messageIds)].sort(),
+    ...(target.messageId !== undefined ? [target.messageId] : []),
+  ]);
 }
 
 /**
@@ -248,6 +253,7 @@ export function governTool<TInput extends { evidence: ActionEvidence }, TOutput>
   /** What the policy's own functions answer for a call, or undefined when one throws or answers another shape. */
   const readPolicy = (args: TInput, evidence: ActionEvidence): PolicyAnswers | undefined => {
     try {
+      assertEvidenceRule(policy.evidence);
       const target = policy.target(args);
       if (!isModerationId(target?.accountId) || (target.roomId !== undefined && !isModerationId(target.roomId)) || (target.messageId !== undefined && !isModerationId(target.messageId))) return undefined;
       let expiresAt: string | undefined;
@@ -274,6 +280,13 @@ export function governTool<TInput extends { evidence: ActionEvidence }, TOutput>
   async function execute(args: TInput, context: ToolExecutionContext): Promise<ToolExecutionResult<TOutput>> {
     const recordId = `act_${randomUUID()}`;
     const startedAt = instant();
+
+    // The caller may retain its arguments across the store and audit awaits. Execute only the copy we check.
+    try {
+      args = structuredClone(args);
+    } catch {
+      return refuseEarly(recordId, startedAt, 'refused_arguments', 'ARGUMENT_SHAPE');
+    }
 
     // 1. Arguments: the evidence's shape in code, then the policy's own functions, before anything is reserved.
     const evidence = (args as { evidence?: unknown } | null | undefined)?.evidence;
@@ -362,20 +375,20 @@ export function governTool<TInput extends { evidence: ActionEvidence }, TOutput>
       // the thrown value is the tool's: it reaches neither the record, the line nor the model
       result = undefined;
     }
+    // Strip returned reversal payloads on both success and failure. Only the minted key may reach the audit.
+    const resultDetails = result?.details;
+    const returned: Record<string, any> = isPlainRecord(resultDetails) ? resultDetails : {};
+    const { reversalRef: returnedKey, reversal: returnedReversal, ...details } = returned;
+    const code: ActionEndCode | undefined = returnedKey !== undefined || returnedReversal !== undefined ? 'REVERSAL_DROPPED' : undefined;
     if (result === null || typeof result !== 'object' || result.success !== true) {
       // released and not counted: a governed tool reports failure only when it changed nothing
       await quietly(() => reserved.release());
-      await finish(recordId, 'failed', undefined);
-      if (result === null || typeof result !== 'object') return refusal('failed', undefined, recordId);
-      return { ...result, details: { ...(isPlainRecord(result.details) ? result.details : {}), governance: governanceOf('failed', undefined, recordId) } };
+      await finish(recordId, 'failed', code);
+      if (result === null || typeof result !== 'object') return refusal('failed', code, recordId);
+      return { ...result, details: { ...details, governance: governanceOf('failed', code, recordId) } };
     }
     // a commit that fails leaves the reservation to its lease, and a reconcile pass counts it
     await quietly(() => reserved.commit());
-    // Of the tool's details the wrapper reads `reversible` alone. A key or a reversal the tool returns is never passed
-    // on, to the sink or to the caller, whatever its type or shape: the key in the record is the one minted above.
-    const returned: Record<string, any> = isPlainRecord(result.details) ? result.details : {};
-    const { reversalRef: returnedKey, reversal: returnedReversal, ...details } = returned;
-    const code: ActionEndCode | undefined = returnedKey !== undefined || returnedReversal !== undefined ? 'REVERSAL_DROPPED' : undefined;
     await finish(recordId, 'executed', code, details.reversible === true ? reversalRef : undefined);
     return { ...result, details: { ...details, governance: governanceOf('executed', code, recordId) } };
   }

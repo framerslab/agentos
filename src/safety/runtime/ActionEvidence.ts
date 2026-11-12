@@ -120,6 +120,18 @@ export function isActionEvidence(value: unknown): value is ActionEvidence {
 }
 
 /**
+ * Rejects evidence thresholds that could disable a comparison, including NaN.
+ * @internal Shared with the governed wrapper's policy check; not exported from the folder's index.
+ */
+export function assertEvidenceRule(rule: EvidenceRule = {}): void {
+  for (const value of [rule.minQuotes, rule.minQuoteLength]) {
+    if (value !== undefined && (!Number.isSafeInteger(value) || value < 1)) {
+      throw new TypeError('Evidence thresholds must be positive safe integers.');
+    }
+  }
+}
+
+/**
  * Holds evidence to the host's store and rule book. Every comparison is exact: no trimming, no case folding, no
  * Unicode normalisation. The answer keeps a hash and a length of each quote, never the quote, and names a failed
  * quote by its index, never by an id the store did not confirm.
@@ -129,10 +141,14 @@ export function isActionEvidence(value: unknown): value is ActionEvidence {
  * @param ruleBook - The policy versions a call may cite, each with its rule ids.
  * @param rule - `minQuotes` (default 1) and `minQuoteLength` in code units (default 12).
  * @returns Whether the evidence holds, and why not when it does not.
+ * @throws TypeError when an evidence threshold is not a positive safe integer.
  */
 export async function verifyActionEvidence(evidence: ActionEvidence, source: EvidenceSource, ruleBook: RuleBook, rule: EvidenceRule = {}): Promise<EvidenceCheck> {
-  const minQuotes = Math.max(1, Math.trunc(rule.minQuotes ?? 1));
-  const minQuoteLength = Math.max(1, Math.trunc(rule.minQuoteLength ?? 12));
+  assertEvidenceRule(rule);
+  // A host can retain and change the input while its store is answering. Check one snapshot throughout.
+  evidence = structuredClone(evidence);
+  const minQuotes = rule.minQuotes ?? 1;
+  const minQuoteLength = rule.minQuoteLength ?? 12;
   const fail = (failure: EvidenceFailure, failedQuoteIndex?: number): EvidenceCheck =>
     ({ ok: false, failure, ...(failedQuoteIndex !== undefined ? { failedQuoteIndex } : {}), quotes: [] });
 

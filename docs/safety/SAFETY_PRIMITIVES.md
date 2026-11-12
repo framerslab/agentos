@@ -572,6 +572,8 @@ The governed tool keeps every member of the tool, sets `hasSideEffects: true`, a
 
 Every refusal answers `{ success: false, error, details: { governance: { outcome, code, recordId } } }`, with a fixed sentence per outcome as `error`: no argument, code or id is ever part of it. A call that ran answers the tool's own result with `details.governance` set the same way. A tool that throws is answered with the fixed sentence of `failed`, never what it threw, and a tool that answers a failure keeps its own result. A failed action is released and not counted, so a governed tool reports a failure only when it changed nothing; the same action may be asked for three times in all, and the fourth ask ends `limit_reached` with `RETRIES_EXHAUSTED` for a person to decide.
 
+The wrapper copies the call's arguments before checking them and gives that copy to the tool. Changes to the caller's arguments while evidence, audit or limit requests are pending cannot change the checked target or evidence. Arguments that cannot be copied are refused as `ARGUMENT_SHAPE`. The standalone `verifyActionEvidence()` also checks a copy of its input.
+
 Between the reservations and the tool's start the wrapper awaits nothing but the limiter. When the reservations outlived their lease before the tool could start (a store that slow), the units are given back and the call ends `limiter_unavailable` with `LEASE_EXPIRED`: a reservation past its lease may already be settled by a reconcile pass, and a unit counts from the time it was reserved.
 
 `refusalBeforeApproval()` answers the shape refusal, so on the full runtime, whose tool orchestrator asks it, nobody is asked to approve a call that cannot act. The tool loops of `generateText()` and `streamText()` and `agency()`'s approval gate do not ask it ([Human in the loop](./HUMAN_IN_THE_LOOP.md#guardrail-override-post-approval-safety-net)).
@@ -590,7 +592,7 @@ Between the reservations and the tool's start the wrapper awaits nothing but the
 
 - `policyVersion` is an own key of the rule book and `ruleId` one of that version's ids (`UNKNOWN_POLICY_VERSION`, `UNKNOWN_RULE`). A governed call cites only rules in the host's rule book, so a rule id copied from a message is refused however well it fits an id's shape.
 - Each `verdictRefs` entry is confirmed by the source's `hasVerdict()` (`VERDICT_NOT_FOUND`, for any entry when the source has none).
-- At least `minQuotes` quotes, 1 by default (`NO_QUOTES`).
+- At least `minQuotes` quotes, 1 by default (`NO_QUOTES`). Both `minQuotes` and `minQuoteLength`, when supplied, must be positive safe integers. Invalid thresholds, including `NaN`, cause a governed call to return `POLICY_ERROR` before reservation; the standalone checker throws `TypeError`.
 - Each quoted message exists under exactly the id asked for (`MESSAGE_NOT_FOUND`), the account the action is about wrote it (`AUTHOR_MISMATCH`), and it is in the given room; a stored message with no room fails a given room (`ROOM_MISMATCH`).
 - Each quote is in its message character for character, with no trimming, no case folding and no Unicode normalisation (`QUOTE_MISMATCH`), and is at least `minQuoteLength` code units, 12 by default, unless it is the whole message (`QUOTE_TOO_SHORT`).
 - A store that throws answers `SOURCE_UNAVAILABLE`.
@@ -599,7 +601,7 @@ The check proves that the quote is real and who wrote it, and that the rule and 
 
 ### The limiter
 
-`SqlActionLimiter` keeps one [spend meter](#spend-meter) per distinct `windowMs`, each counting over a rolling window under the table prefix `<tablePrefix>_w<windowMs>`. A rule counts under the key `<rule id>|r:<room id>`, `<rule id>|t:<account id>` or `<rule id>|p`, and reserves the operation `<idempotency key>:<rule id>`; the idempotency key is the SHA-256 of the policy's `idempotencyKey(args)`, by default of the actor, the action, the target, the room and the sorted message ids.
+`SqlActionLimiter` keeps one [spend meter](#spend-meter) per distinct `windowMs`, each counting over a rolling window under the table prefix `<tablePrefix>_w<windowMs>`. A rule counts under the key `<rule id>|r:<room id>`, `<rule id>|t:<account id>` or `<rule id>|p`, and reserves the operation `<idempotency key>:<rule id>`; the idempotency key is the SHA-256 of the policy's `idempotencyKey(args)`, by default of the actor, action, account, room and unique sorted evidence message ids, plus the target message id when the policy names one. Repeating a quote cannot create a new action or reset its three-attempt retry ceiling. Two different target messages remain different actions even when they cite the same supporting messages. Account actions without repeated evidence retain their existing key format.
 
 | Option | Default | Description |
 |--------|---------|-------------|
@@ -619,7 +621,7 @@ The host's sink takes two halves: `begin(record)` before the action runs, where 
 
 A record holds its own id (`act_` and a random UUID, the `recordId` of the tool result), the actor, the action, the tool's name, the mode, the target's account, room and message ids, the rule, the policy version and the verdict ids, each quote's SHA-256 and length, the SHA-256 of the idempotency key, and an `expiresAt` the library wrote from the instant `policy.expiresAt()` returned. It holds no quote, and no tool call id: a model or a provider supplies that id, so it is never recorded. A refusal at step 1 or 2 records nothing taken from the arguments or the call's context (its target and evidence are empty, and its idempotency key is the SHA-256 of its own record id), because a steered model may have filled any of them with text. A quote's hash is unsalted, so a short quote can be matched to a guessed text: it is personal data derived from the message and follows the record's retention and deletion.
 
-The end holds the outcome, its code, `endedAt`, and `reversalRef` when the tool filed a reversal. The wrapper mints that key (`rev_` and a random UUID) before the tool runs and hands it to the tool with the record's id; the tool reads both with `governedActionOf(context)`, files what undoing needs under the key in its own store, and answers `details.reversible: true`. A key or a reversal the tool returns as `details.reversalRef` or `details.reversal` is passed on to neither the sink nor the caller, and its presence puts `REVERSAL_DROPPED` on the end.
+The end holds the outcome, its code, `endedAt`, and `reversalRef` when the tool filed a reversal. The wrapper mints that key (`rev_` and a random UUID) before the tool runs and hands it to the tool with the record's id; the tool reads both with `governedActionOf(context)`, files what undoing needs under the key in its own store, and answers `details.reversible: true`. On success and failure alike, a key or a reversal the tool returns as `details.reversalRef` or `details.reversal` is passed on to neither the sink nor the caller, and its presence puts `REVERSAL_DROPPED` on the end. A failed action never records a reversal reference.
 
 ### The dry run
 
@@ -631,7 +633,7 @@ With `mode: 'dryRun'` the tool is not called. The units are committed under dry 
 |---|---|
 | `executed` | none, or `REVERSAL_DROPPED` |
 | `would_execute` | none |
-| `failed` | none |
+| `failed` | none, or `REVERSAL_DROPPED` |
 | `refused_arguments` | `ARGUMENT_SHAPE`, `POLICY_ERROR`, `LIMIT_SCOPE_MISSING` |
 | `voided_evidence` | `TARGET_MISMATCH`, `NO_QUOTES`, `QUOTE_TOO_SHORT`, `MESSAGE_NOT_FOUND`, `AUTHOR_MISMATCH`, `ROOM_MISMATCH`, `QUOTE_MISMATCH`, `SOURCE_UNAVAILABLE`, `UNKNOWN_POLICY_VERSION`, `UNKNOWN_RULE`, `VERDICT_NOT_FOUND` |
 | `limit_reached` | The id of the tool's own rule that had no room left, or `RETRIES_EXHAUSTED` |
