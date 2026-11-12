@@ -142,7 +142,11 @@ export interface RunOwner {
   stop(id: string): void;
   /** A stopped or failed run's rest as a new attempt under the same lock, from the page's memory. */
   continueRun(id: string, job: RunJob): Promise<{ id: string } | { refused: 'another-tab' }>;
-  /** A cut run's rest after a load, under the cut record's id, with the job the caller builds from the new pick. */
+  /**
+   * A cut run's rest after a load, under the cut record's id, with the job the caller builds from the new pick. Refused
+   * when another tab removed the record, or finished it under another key since this owner read it: that record is drawn
+   * again as stored, and a second finish takes its current key's lock.
+   */
   finish(id: string, job: RunJob): Promise<{ id: string } | { refused: 'another-tab' }>;
   /** Deletes the record and drops the run, for a run this owner holds or a record whose lock is free. */
   dismiss(id: string): Promise<{ ok: true } | { refused: 'another-tab' }>;
@@ -162,7 +166,7 @@ export interface RunOwner {
    * memory alone among them: call it again. The last
    * read of the rows after a sign-out or a session's end redraws them and leaves the answer as it is. A start made in
    * another tab within the ten seconds after that tab heard the stop is fenced there from its start, its record deleted
-   * or marked by that tab.
+   * or marked by that tab; a deletion or a mark the store refuses there is not in this answer.
    */
   stopAccount(cut: 'removal' | 'signout' | 'session'): Promise<{ complete: boolean }>;
   /**
@@ -1035,6 +1039,8 @@ class BrowserRunOwner implements RunOwner {
       }
       const key = this.keyPrefix + id;
       let gone = false as boolean;
+      // The record as stored when another tab's finish gave it a key other than the one whose run lock this finish took.
+      let moved: unknown = null;
       try {
         await this.locks.request(this.lockName(key), async () => {
           if (from.resume) {
@@ -1042,6 +1048,13 @@ class BrowserRunOwner implements RunOwner {
             const current = await this.store.get<unknown>(key);
             if (!isPlain(current) || current.id !== id) {
               gone = true;
+              return;
+            }
+            // The run lock held here guards the key of the copy read earlier: once another tab's finish has changed the
+            // record's key, that tab's attempt, or a later one, may run under locks this finish does not hold.
+            if (current.key !== from.resume.key) {
+              gone = true;
+              moved = current;
               return;
             }
             // The stored progress wins over the copy read earlier, which another tab's finish and cut may have moved on.
@@ -1061,6 +1074,8 @@ class BrowserRunOwner implements RunOwner {
       }
       if (gone) {
         this.drop(held);
+        // A record another tab moved on is drawn again as stored, so a second finish goes on from it.
+        if (isRunRecord(moved, this.isChosen) && moved.account === this.account) this.see(await this.classify(moved));
         this.touch();
         return { refused: 'another-tab' };
       }
