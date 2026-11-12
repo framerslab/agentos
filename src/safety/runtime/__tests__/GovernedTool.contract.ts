@@ -329,9 +329,12 @@ export function runGovernedToolSuite(name: string, open: () => Promise<StoreUnde
       expect(governance(atTwo.result)).toMatchObject({ outcome: 'voided_evidence', code: 'UNKNOWN_RULE' });
       expect(audit.begun).toHaveLength(2);
       expect(audit.begun[0].id).toMatch(RECORD_ID);
+      expect(audit.begun[1].id).toMatch(RECORD_ID);
       expect(audit.begun[0].id).toBe(governance(atOne.result).recordId);
       expect(audit.begun[1].id).toBe(governance(atTwo.result).recordId);
+      expect(audit.finished.map((f) => f.recordId)).toEqual(audit.begun.map((record) => record.id));
       for (const record of audit.begun) expect(Object.keys(record).some((key) => /call|correlation/i.test(key))).toBe(false);
+      for (const { end } of audit.finished) expect(Object.keys(end).some((key) => /call|correlation/i.test(key))).toBe(false);
       expect(mute.execute).not.toHaveBeenCalled();
       expect(everything()).not.toContain('MeetMeAt221BakerStreet');
     });

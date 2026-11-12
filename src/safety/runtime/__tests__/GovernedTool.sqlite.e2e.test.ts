@@ -47,7 +47,8 @@ describe('a governed tool and the clock, SQLite', () => {
     vi.setSystemTime(START);
     const limiter = new SqlActionLimiter({ db, rules: ROOM_HOUR, tablePrefix: 'gt_i', requireShared: false });
     const policy: GovernedToolPolicy<MuteArgs> = { ...MUTE_POLICY, limits: ROOM_HOUR, idempotencyKey: (args) => `mute:${args.userId}` };
-    const governed = governTool(muteTool(), policy, governanceOf(limiter));
+    const mute = muteTool();
+    const governed = governTool(mute, policy, governanceOf(limiter));
     // a process reserved this action and died before it settled it
     const key = createHash('sha256').update('mute:u_attacker', 'utf8').digest('hex');
     expect((await limiter.reserve({ rules: ROOM_HOUR, target: { accountId: 'u_attacker', roomId: 'r1' }, operationId: key, dryRun: false })).status).toBe('reserved');
@@ -59,9 +60,12 @@ describe('a governed tool and the clock, SQLite', () => {
     await limiter.reconcile();
     expect(governance(await governed.execute(muteOf(message('m1')), CONTEXT)).outcome).toBe('duplicate');
     expect(governance(await governed.execute(muteOf(message('m2')), CONTEXT)).outcome).toBe('limit_reached');
+    // none of the four refusals ran the tool
+    expect(mute.execute).not.toHaveBeenCalled();
 
     vi.setSystemTime(START + HOUR + 1);
     expect(governance(await governed.execute(muteOf(message('m2')), CONTEXT)).outcome).toBe('executed');
+    expect(mute.execute).toHaveBeenCalledTimes(1);
   });
 
   it('(o) a slow audit sink cannot stretch a window: a unit counts from just before its action', async () => {
