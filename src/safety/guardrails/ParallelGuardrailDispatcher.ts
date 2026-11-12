@@ -802,7 +802,9 @@ export class ParallelGuardrailDispatcher {
         });
       }
 
-      return { outcome: 'pass', chunk: workingChunk, sanitized, worst: worstAction(outputEvaluations) };
+      // the reply goes out: a BLOCK the caller's picker declined did not decide it, so the verdict is the worst of the rest
+      const delivered = outputEvaluations.filter((evaluation) => evaluation.action !== GuardrailAction.BLOCK);
+      return { outcome: 'pass', chunk: workingChunk, sanitized, worst: worstAction(delivered) };
     };
 
     /**
