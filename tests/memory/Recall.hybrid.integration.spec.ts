@@ -183,6 +183,39 @@ describe.each(ENGINES)('hybrid recall on %s', (engine, open) => {
     await db.close();
   });
 
+  it('a memory the dedupe dropped that Related Context shows is recorded as shown, with its line', async () => {
+    const db = await open();
+    const mem = await memoryWith({ retrieval: 'hybrid' }, new WordHashEmbedder(), db.brain);
+    // The answer is first on every leg. The two key notes are one memory to the dedupe and share none of its words but
+    // the question's, so the cut at topK 1 leaves the kept one out and the graph can still lead to either.
+    await plant(mem, 'key-a', 'The bike shed key hangs on the north wall hook.', at(0));
+    await plant(mem, 'key-b', 'The bike shed key hangs on the north wall hook!', at(1));
+    await plant(mem, 'gold', 'The bike shed code is XQ7Z.', at(2));
+    (mem.manager as unknown as { graph: unknown }).graph = {
+      spreadingActivation: async () => [
+        { memoryId: 'key-a', activation: 0.9, depth: 1, activatedBy: [] },
+        { memoryId: 'key-b', activation: 0.8, depth: 1, activatedBy: [] },
+      ],
+      recordCoActivation: async () => undefined,
+      shutdown: async () => undefined,
+    };
+    const h = await mem.manager.assembleForPrompt(QUESTION, 1600, NEUTRAL, { scopes: U1, topK: 1 });
+    expect(h.includedMemoryIds).toEqual(['gold']);
+    const dropped = captureOf(h).candidates.filter((x) => x.duplicateOf !== undefined);
+    expect(dropped).toHaveLength(1);
+    const line = (h.lineOutcomes ?? []).find((l) => l.id === dropped[0].id);
+    // Related Context shows the dropped memory through its association.
+    expect(line).toMatchObject({ outcome: 'included', section: 'graphAssociations' });
+    expect(dropped[0]).toMatchObject({ outcome: 'included', section: 'graphAssociations', tokens: line!.tokens });
+    expect(dropped[0].reason).toBeUndefined();
+    // Every line the block shows is an included candidate.
+    for (const shown of (h.lineOutcomes ?? []).filter((l) => l.outcome === 'included')) {
+      expect(captureOf(h).candidates.find((x) => x.id === shown.id)).toMatchObject({ outcome: 'included', section: shown.section });
+    }
+    await mem.close();
+    await db.close();
+  });
+
   it("a manager's reranker scores the pool and leaves its fused order, in the block and the record", async () => {
     const { db, mem } = await fixture({ retrieval: 'hybrid' });
     // A reranker that ranks the answer last: blended and re-sorted, it would sink the exact-words hit.
