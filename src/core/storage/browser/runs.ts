@@ -145,13 +145,14 @@ export interface RunOwner {
   /**
    * A cut run's rest after a load, under the cut record's id, with the job the caller builds from the new pick. Refused,
    * starting nothing, when the record cannot be found or read or another tab removed it, or when another tab finished it
-   * under another key since this owner read it: that record is drawn again as stored, and a second finish takes its
-   * current key's lock.
+   * under another key or its cut mark changed since this owner read it: that record is drawn again as stored, and a
+   * second finish goes on from it.
    */
   finish(id: string, job: RunJob): Promise<{ id: string } | { refused: 'another-tab' }>;
   /**
    * Deletes the record and drops the run, for a run this owner holds or a record whose lock is free. Refused, the record
-   * kept and drawn as stored, when another tab finished the run under another key since this owner read it.
+   * kept and drawn as stored, when another tab finished the run under another key since this owner read it, and refused
+   * with the row kept for another try when the store refuses the deletion.
    */
   dismiss(id: string): Promise<{ ok: true } | { refused: 'another-tab' }>;
   /** Stops drawing a run in this page alone; the record and the run are untouched. */
@@ -175,7 +176,8 @@ export interface RunOwner {
    * read of the rows after a sign-out or a session's end redraws them and leaves the answer as it is. A start made in
    * another tab within the ten seconds after that tab heard the stop is fenced there from its start, its record deleted
    * or marked by that tab; a deletion or a mark the store refuses there is not in this answer. With no channel, a
-   * start in another tab that writes its record after the second listing is neither fenced nor in this answer.
+   * start in another tab that writes its record after the second listing is neither fenced nor in this answer. The
+   * answer speaks for the records alone: a job that does not end at its signal's abort can still be running.
    */
   stopAccount(cut: 'removal' | 'signout' | 'session'): Promise<{ complete: boolean }>;
   /**
@@ -549,6 +551,8 @@ interface Held {
 }
 
 /** A run this owner does not hold: watched in another tab, cut, or failed with its lock free. */
+/** How a deletion of another tab's record went: deleted, kept because another tab moved it on, or refused by the store. */
+type Deletion = { deleted: true } | { moved: unknown } | { failed: true };
 interface Seen {
   read: RunRead;
   /** When its last message came, by the owner's clock. */
@@ -704,17 +708,19 @@ class BrowserRunOwner implements RunOwner {
         // Held while the record is deleted, so no tab can finish the run between the check and the deletion.
         const release = await this.hold(record.key);
         if (!release) return { refused: 'another-tab' };
-        let moved: unknown = null;
+        let outcome: Deletion;
         try {
-          moved = await this.deleteUnderKey(id, record.key);
+          outcome = await this.deleteUnderKey(id, record.key);
         } finally {
           release();
         }
-        if (moved !== null) {
+        if ('moved' in outcome) {
           // Another tab finished the run under another key since this owner read it: its record stays, drawn as stored.
-          await this.redraw(moved);
+          await this.redraw(outcome.moved);
           return { refused: 'another-tab' };
         }
+        // The store could not delete the record: the row stays for another try.
+        if ('failed' in outcome) return { refused: 'another-tab' };
       }
       this.seen.delete(id);
     }
@@ -748,15 +754,16 @@ class BrowserRunOwner implements RunOwner {
       // deletion.
       const release = await this.hold(seen.read.record.key);
       if (!release) return;
-      let moved: unknown = null;
+      let outcome: Deletion;
       try {
-        moved = await this.deleteUnderKey(id, seen.read.record.key);
+        outcome = await this.deleteUnderKey(id, seen.read.record.key);
       } finally {
         release();
       }
-      // Another tab finished the run under another key since this owner read it: its record stays, drawn as stored.
-      if (moved !== null) await this.redraw(moved);
-      else seen.local = true;
+      // Another tab finished the run under another key since this owner read it: its record stays, drawn as stored. A
+      // deletion the store refused leaves the row as it is, so the next call tries again.
+      if ('moved' in outcome) await this.redraw(outcome.moved);
+      else if ('deleted' in outcome) seen.local = true;
     }
     this.ensureTimers();
     this.touch();
@@ -1082,8 +1089,10 @@ class BrowserRunOwner implements RunOwner {
               return;
             }
             // The run lock held here guards the key of the copy read earlier: once another tab's finish has changed the
-            // record's key, that tab's attempt, or a later one, may run under locks this finish does not hold.
-            if (current.key !== from.resume.key) {
+            // record's key, that tab's attempt, or a later one, may run under locks this finish does not hold. A cut mark
+            // made since that copy was read, such as another tab's sign-out whose message has not reached this owner,
+            // stays on the record: this finish starts nothing over it.
+            if (current.key !== from.resume.key || current.cut !== from.resume.cut) {
               gone = true;
               moved = current;
               return;
@@ -1423,22 +1432,25 @@ class BrowserRunOwner implements RunOwner {
 
   /**
    * Deletes another tab's record under its lock while its key is still `runKey`, the key whose run lock this owner
-   * holds; answers the record as stored when another tab's finish has moved it to another key, and null otherwise.
+   * holds. Answers `moved` with the record as stored when another tab's finish has moved it to another key, and
+   * `failed` when the record's lock, its read or its deletion failed, so the record may remain.
    */
-  private async deleteUnderKey(id: string, runKey: string): Promise<unknown> {
+  private async deleteUnderKey(id: string, runKey: string): Promise<Deletion> {
     const key = this.keyPrefix + id;
     let moved: unknown = null;
-    await this.locks
-      .request(this.lockName(key), async () => {
+    try {
+      await this.locks.request(this.lockName(key), async () => {
         const current = await this.store.get<unknown>(key);
         if (isPlain(current) && current.id === id && current.key !== runKey) {
           moved = current;
           return;
         }
         await this.store.delete(key);
-      })
-      .catch(() => undefined);
-    return moved;
+      });
+    } catch {
+      return { failed: true };
+    }
+    return moved === null ? { deleted: true } : { moved };
   }
 
   /** Draws a record another tab moved on as stored, watched while its lock is held, and watches it from now on. */
