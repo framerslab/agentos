@@ -99,11 +99,13 @@ function rows<T>(file: string, sql: string, params: unknown[] = []): T[] {
   }
 }
 const tracesOf = (key: string) =>
-  rows<{ id: string; content: string; deleted: number }>(
+  rows<{ id: string; content: string; deleted: number; tags: string }>(
     storeFile(),
-    "SELECT id, content, deleted FROM memory_traces WHERE scope = 'conversation' AND scope_id = ?",
+    "SELECT id, content, deleted, tags FROM memory_traces WHERE scope = 'conversation' AND scope_id = ? ORDER BY created_at, id",
     [key],
   );
+/** What a subject and the agent said to each other, as the store holds it: the subject's traces without its pages' chunks. */
+const saidOf = (key: string) => tracesOf(key).filter((trace) => !(JSON.parse(trace.tags) as string[]).includes('wiki'));
 
 /** One turn of a user, and a wait until both of its traces (the user's text and the reply) are stored. */
 async function turn(a: SouledAgent, sessionId: string, userId: string | undefined, text: string): Promise<void> {
@@ -121,6 +123,12 @@ function slowWrites(memory: NonNullable<SouledAgent['memory']>, ms: number): voi
     return remember(...args);
   });
 }
+
+/** The recall block one model call was sent: the user-role message that opens with `<memory_recall>`; none when the turn recalled nothing. */
+const recallBlockIn = (call: ProviderScript['seen'][number]): string | undefined => {
+  const block = call.messages.find((m) => m.role === 'user' && typeof m.content === 'string' && m.content.startsWith('<memory_recall>'));
+  return block ? (block.content as unknown as string) : undefined;
+};
 
 /** The text of every tool message one model call was sent, joined. */
 const toolAnswerIn = (call: ProviderScript['seen'][number]): string =>
@@ -150,7 +158,7 @@ describe('a forgotten subject', () => {
     const refused = lines('memory.write_refused');
     expect(refused).toHaveLength(2);
     for (const line of refused) expect(line).toMatchObject({ reason: 'forgotten' });
-    expect(tracesOf(keyOf(bob))).toHaveLength(2);
+    expect(saidOf(keyOf(bob))).toHaveLength(2);
   });
 
   it('takes back a write that passed its first check before the tombstone', async () => {
@@ -173,14 +181,11 @@ describe('a forgotten subject', () => {
     await a.memory!.markForgotten(alice);
 
     await a.session('s3', { userId: 'alice' }).send('What is my canary?');
-    const forAlice = JSON.stringify(s.seen.at(-1)!.messages);
-    expect(forAlice).not.toContain('memory_recall');
-    expect(forAlice).not.toContain('LARK-7');
+    expect(recallBlockIn(s.seen.at(-1)!)).toBeUndefined();
+    expect(JSON.stringify(s.seen.at(-1)!.messages)).not.toContain('LARK-7');
 
     await a.session('s4', { userId: 'bob' }).send('What is my canary?');
-    const forBob = JSON.stringify(s.seen.at(-1)!.messages);
-    expect(forBob).toContain('memory_recall');
-    expect(forBob).toContain('WREN-2');
+    expect(recallBlockIn(s.seen.at(-1)!)).toContain('WREN-2');
   });
 
   it('answers the page tool as not found for a forgotten asker', async () => {
