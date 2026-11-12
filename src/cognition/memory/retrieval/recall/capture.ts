@@ -132,7 +132,11 @@ export interface MemoryRecallCapture {
   /** The embedder of the dense leg, when known. */
   embedder?: { provider: string; model: string };
   reranker: MemoryRecallReranker;
-  /** Whether the memory-question reserve added candidates, and how many. */
+  /**
+   * Whether the turn was a memory question (`fired`: the rule, or the manager's `recall.memoryQuestion`, said yes,
+   * whatever it found to reserve), and how many reserved candidates the block shows (`added`). Under `dense` it never
+   * fires.
+   */
   memoryQuestionReserve: { fired: boolean; added: number };
   /** Every candidate, in the order recall ranked them, then any memory the block shows that no leg returned. */
   candidates: MemoryRecallCandidate[];
@@ -198,6 +202,13 @@ export interface RetrievalRecallReport {
   lexicalBackend?: MemoryRecallCapture['lexicalBackend'];
   /** Under `hybrid`: milliseconds of the legs (run together), the fusion and the dedupe. */
   timings?: { legsMs: number; fuseMs: number; dedupeMs: number };
+  /**
+   * Under `hybrid`: whether the turn was a memory question (`fired`), and the ids of the exact-words candidates past
+   * the cut it reserved room for, in reserve order (they follow the cut in `retrieved`).
+   */
+  reserve?: { fired: boolean; ids: string[] };
+  /** Counts of the call's supplied candidates that were refused, set only when one was; never their ids. */
+  suppliedRejected?: { outOfScope: number; ineligible: number };
 }
 
 /** A ranked candidate before assembly. */
@@ -208,6 +219,8 @@ export interface RankedRecallCandidate {
   rerankScore?: number;
   /** Set when the hybrid recall's dedupe dropped it: the candidate that holds the same memory. */
   duplicateOf?: string;
+  /** Set when a memory-question reserve added it past the cut. */
+  reserve?: boolean;
 }
 
 /**

@@ -20,6 +20,7 @@ import type {
   CognitiveRetrievalOptions,
   CognitiveRetrievalResult,
   AssembledMemoryContext,
+  AssembledLineOutcome,
   MemoryHealthReport,
   ContentFeatures,
 } from './core/types.js';
@@ -53,6 +54,7 @@ import { assertRecallConfig } from './retrieval/recall/budget.js';
 import { dedupeTokens, nearDuplicate } from './retrieval/recall/dedupe.js';
 import { RECALL_CONSTANTS } from './retrieval/recall/fuse.js';
 import { RecallPipeline } from './retrieval/recall/pipeline.js';
+import { recallLog } from './retrieval/recall/log.js';
 import { CognitiveWorkingMemory } from './core/working/CognitiveWorkingMemory.js';
 import {
   assembleMemoryContext,
@@ -388,6 +390,12 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
    * budget the turn asked for and the context's capture. Keyed by the context object, so an entry goes with it.
    */
   private readonly rendered = new WeakMap<AssembledMemoryContext, { input: MemoryAssemblerInput; requested: number; capture?: MemoryRecallCapture }>();
+
+  /**
+   * What the block needs of each result `retrieveWith` returned, whatever `recall.capture` says: the candidates a
+   * memory question reserved room for, and the supplied ones, which seed no graph walk. Keyed by the result object.
+   */
+  private readonly recallSelections = new WeakMap<CognitiveRetrievalResult, { reserveFired: boolean; reservedIds: string[]; suppliedIds: string[] }>();
 
   // Memory archive for write-ahead verbatim preservation
   private archive: import('./archive/IMemoryArchive.js').IMemoryArchive | null = null;
@@ -1019,8 +1027,13 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
           ...(run.ranked ? { ranked: run.ranked } : {}),
           ...(run.lexicalBackend ? { lexicalBackend: run.lexicalBackend } : {}),
           ...(run.timings ? { timings: run.timings } : {}),
+          ...(run.retrieval === 'hybrid' ? { reserve: { fired: run.reserve.fired, ids: [...run.reserve.ids] } } : {}),
+          ...(run.suppliedRejected ? { suppliedRejected: { ...run.suppliedRejected } } : {}),
         }
       : undefined;
+    const selection = { reserveFired: run.reserve.fired, reservedIds: run.reserve.ids, suppliedIds: run.suppliedIds };
+    // A supplied candidate is the caller's data: never recorded as accessed, focused or used to seed the graph.
+    const suppliedIds = new Set(run.suppliedIds);
 
     const confidence = evaluateRetrievalConfidence(scored, {
       adaptive: resolvedPolicy?.adaptive ?? false,
@@ -1030,7 +1043,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     if (resolvedPolicy && confidence.suppressResults) {
       await workingMemory.decayActivations();
       const totalTime = Date.now() - startTime;
-      return {
+      const suppressed: CognitiveRetrievalResult = {
         retrieved: [],
         partiallyRetrieved: partial,
         diagnostics: {
@@ -1046,6 +1059,8 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
           ...(recallReport ? { recall: recallReport } : {}),
         },
       };
+      this.recallSelections.set(suppressed, { reserveFired: selection.reserveFired, reservedIds: [], suppliedIds: [] });
+      return suppressed;
     }
 
     // --- Stage E: typed-network retrieval (optional, 'full' variant only) ---
@@ -1086,7 +1101,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     }
 
     // Record access for retrieved memories (spaced repetition)
-    for (const trace of scored.slice(0, 5)) {
+    for (const trace of scored.filter((t) => !suppliedIds.has(t.id)).slice(0, 5)) {
       await this.store.recordAccess(trace.id);
       await workingMemory.focus(trace.id, trace.retrievalScore);
     }
@@ -1096,7 +1111,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
 
     const totalTime = Date.now() - startTime;
 
-    return {
+    const result: CognitiveRetrievalResult = {
       retrieved: scored,
       partiallyRetrieved: partial,
       diagnostics: {
@@ -1112,6 +1127,8 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
         ...(recallReport ? { recall: recallReport } : {}),
       },
     };
+    this.recallSelections.set(result, selection);
+    return result;
   }
 
   // =========================================================================
@@ -1227,10 +1244,17 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
       return pooledTokens.some((pooled) => nearDuplicate(pooled, tokens, nearDuplicateAt));
     };
 
+    // The reserve and the supplied candidates of this recall; none for a result another retrieve returned.
+    const selection = this.recallSelections.get(result);
+    const suppliedIds = new Set(selection?.suppliedIds ?? []);
+    const reservedIds = hybrid ? (selection?.reservedIds ?? []).filter((id) => result.retrieved.some((trace) => trace.id === id)) : [];
+
     // --- Batch 2: Graph associations ---
     const graphContext: MemoryGraphAssociation[] = [];
-    if (this.graph && result.retrieved.length > 0) {
-      const seedIds = result.retrieved.slice(0, 3).map((t) => t.id);
+    // A supplied candidate seeds no walk: it is the caller's data, not a memory the graph holds.
+    const seeds = result.retrieved.filter((trace) => !suppliedIds.has(trace.id));
+    if (this.graph && seeds.length > 0) {
+      const seedIds = seeds.slice(0, 3).map((t) => t.id);
       try {
         const activated = await this.graph.spreadingActivation(seedIds, { maxResults: 5 });
         // An association may lead to a trace of another scope (traces of several
@@ -1270,12 +1294,19 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
       persistentMemoryText,
       retrievedTraces: result.retrieved,
       ...(hybrid ? { recallTraces: result.retrieved } : {}),
+      ...(reservedIds.length > 0 ? { reservedIds } : {}),
       prospectiveAlerts,
       graphContext,
       observationNotes: [], // Filled externally by the GMI turn loop
     };
 
     const context = assembleMemoryContext(input);
+    // How many reserved lines the block shows, read from its lines, so the count is the same with the capture off.
+    const reserveAdded = (lines: readonly AssembledLineOutcome[] | undefined): number => {
+      const ids = new Set(reservedIds);
+      return (lines ?? []).filter((line) => ids.has(line.id) && line.outcome === 'included').length;
+    };
+    if (hybrid && selection?.reserveFired) recallLog.debug('memory.recall.reserve_fired', { added: reserveAdded(context.lineOutcomes) });
     if (capturing) {
       const assembledAt = performance.now();
       const recall = recallReport;
@@ -1310,7 +1341,8 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
         lexicalBackend: hybrid ? (recall?.lexicalBackend ?? 'none') : 'none',
         ...(this.config.recall?.embedder ? { embedder: { ...this.config.recall.embedder } } : {}),
         reranker: result.diagnostics.reranker ?? { provider: 'none', reason: 'none_configured' },
-        memoryQuestionReserve: { fired: false, added: 0 },
+        memoryQuestionReserve: { fired: hybrid && (recall?.reserve?.fired ?? false), added: hybrid ? reserveAdded(context.lineOutcomes) : 0 },
+        ...(recall?.suppliedRejected ? { suppliedRejected: { ...recall.suppliedRejected } } : {}),
         candidates: candidatesFrom(ranked, context.lineOutcomes ?? []),
         timings: {
           legsMs: Math.round(recalledAt - startedAt),
@@ -1333,23 +1365,30 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     const startedAt = performance.now();
     const next = assembleMemoryContext({ ...kept.input, totalTokenBudget: tokenBudget });
     if (kept.capture) {
+      // The same candidates in the same order, with this rendering's outcomes: one no section had a line for is left
+      // out for the budget.
+      const candidates = candidatesFrom(
+        kept.capture.candidates.map(({ id, ranks, fusedScore, rerankScore, duplicateOf, reserve }) => ({
+          id,
+          ranks,
+          fusedScore,
+          ...(rerankScore !== undefined ? { rerankScore } : {}),
+          ...(duplicateOf !== undefined ? { duplicateOf } : {}),
+          ...(reserve ? { reserve } : {}),
+        })),
+        next.lineOutcomes ?? [],
+      );
       next.capture = {
         ...kept.capture,
         budget: { requested: kept.requested, effective: tokenBudget, reassembled: true },
         tokensUsed: next.tokensUsed,
         allocation: next.allocation,
-        // The same candidates in the same order, with this rendering's outcomes: one no section had a line for is
-        // left out for the budget.
-        candidates: candidatesFrom(
-          kept.capture.candidates.map(({ id, ranks, fusedScore, rerankScore, duplicateOf }) => ({
-            id,
-            ranks,
-            fusedScore,
-            ...(rerankScore !== undefined ? { rerankScore } : {}),
-            ...(duplicateOf !== undefined ? { duplicateOf } : {}),
-          })),
-          next.lineOutcomes ?? [],
-        ),
+        // Whether the turn was a memory question stays; how many reserved lines this rendering shows is its own.
+        memoryQuestionReserve: {
+          fired: kept.capture.memoryQuestionReserve.fired,
+          added: candidates.filter((candidate) => candidate.reserve && candidate.outcome === 'included').length,
+        },
+        candidates,
         timings: { ...kept.capture.timings, assembleMs: Math.round(performance.now() - startedAt) },
       };
     }

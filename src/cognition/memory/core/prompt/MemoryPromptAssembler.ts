@@ -175,6 +175,13 @@ export interface MemoryAssemblerInput {
    * Experiences section, and `retrievedTraces` is not read.
    */
   recallTraces?: ScoredMemoryTrace[];
+  /**
+   * Ids among `recallTraces` a memory question reserved room for (`retrieval: 'hybrid'`). Their whole lines are set
+   * aside in the recall section first, in this order, while they fit; the other lines fill what is left, in their
+   * order. A reserved line takes its place in `recallTraces`, so the caller puts them last to render them last. A
+   * reserved line that does not fit whole is left out like any other. Not read without `recallTraces`.
+   */
+  reservedIds?: string[];
   /** Prospective memory alerts (Batch 2). */
   prospectiveAlerts?: string[];
   /**
@@ -672,12 +679,19 @@ function assemble(input: MemoryAssemblerInput, secondPass: boolean): AssembledMe
     }
     return undefined;
   };
+  /** The recall section's reserved lines (a hybrid block's memory question). */
+  const reserved = new Set(pooled ? (input.reservedIds ?? []) : []);
   /** Gives section `key` up to `extra` tokens beyond what it shows, and returns the tokens it took of them. */
   const grow = (key: SectionKey, extra: number): number => {
     if (off(key)) return 0;
     const section = sections[key];
     const before = shownTokens(section);
-    fillSection(section, before + extra, skipFor(key));
+    const skip = skipFor(key);
+    if (key === 'semanticRecall' && reserved.size > 0) {
+      // Room for the reserved lines first, then the rest of the section in order with what they left.
+      fillSection(section, before + extra, (candidate) => candidate.id === undefined || !reserved.has(candidate.id) || Boolean(skip?.(candidate)));
+    }
+    fillSection(section, before + extra, skip);
     return shownTokens(section) - before;
   };
 

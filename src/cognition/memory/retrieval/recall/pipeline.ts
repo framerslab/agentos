@@ -10,13 +10,15 @@ import type { IMemoryGraph } from '../graph/IMemoryGraph.js';
 import { isQueryEmbeddingFailure, type MemoryStore } from '../store/MemoryStore.js';
 import type { MemoryRecallCapture, RankedRecallCandidate } from './capture.js';
 import { dedupePool } from './dedupe.js';
-import { fuseLegs, RECALL_CONSTANTS, type RecallConstants } from './fuse.js';
+import { fuseLegs, RECALL_CONSTANTS, type PoolEntry, type RecallConstants } from './fuse.js';
 import { ScopedLexicalIndex } from './lexical.js';
 import { denseLeg, type DenseLegResult } from './legs/dense.js';
 import { exactWordsLeg, lexicalBackendOf } from './legs/exactWords.js';
 import type { LegQuery } from './legs/leg.js';
 import { recencyLeg } from './legs/recency.js';
 import { oncePerProcess, recallLog } from './log.js';
+import { isMemoryQuestion, reserveFor } from './memoryQuestion.js';
+import { admitSupplied } from './supplied.js';
 
 /** What a pipeline reads, each at every run: a manager's store, graph and settings can change after it is made. */
 export interface RecallPipelineDeps {
@@ -29,7 +31,10 @@ export interface RecallPipelineDeps {
 
 /** What one recall run returns. */
 export interface RecallRun {
-  /** The recalled traces, best first: under `hybrid`, the deduped pool cut at `topK`. */
+  /**
+   * The recalled traces, best first: under `hybrid`, the deduped pool cut at `topK`, then the candidates a memory
+   * question reserved room for (`reserve.ids`).
+   */
   scored: ScoredMemoryTrace[];
   /** The store's partially retrieved traces. */
   partial: PartiallyRetrievedTrace[];
@@ -45,6 +50,17 @@ export interface RecallRun {
   lexicalBackend?: MemoryRecallCapture['lexicalBackend'];
   /** Under `hybrid`: milliseconds of the legs (run together), the fusion and the dedupe. */
   timings?: { legsMs: number; fuseMs: number; dedupeMs: number };
+  /** Whether the turn was a memory question, and the ids `scored` holds past the cut for it, in reserve order. */
+  reserve: { fired: boolean; ids: string[] };
+  /** The ids in `scored` of supplied candidates (`CognitiveRetrievalOptions.supplied`): written nowhere. */
+  suppliedIds: string[];
+  /** Counts of the call's supplied candidates that were refused, set only when one was. */
+  suppliedRejected?: { outOfScope: number; ineligible: number };
+}
+
+/** Writes the line for refused supplied candidates: counts, never an id. */
+function logSuppliedRejected(outOfScope: number, ineligible: number): void {
+  if (outOfScope + ineligible > 0) recallLog.warn('memory.recall.supplied_rejected', { out_of_scope: outOfScope, ineligible });
 }
 
 /** The defined values of a manager's `recall.constants`, over the starting ones. */
@@ -90,7 +106,7 @@ export class RecallPipeline {
    */
   async run(input: { denseQuery: string; query?: string; mood: PADState; options: CognitiveRetrievalOptions }): Promise<RecallRun> {
     const settings = this.deps.recall?.();
-    if (settings?.retrieval === 'hybrid') return this.runHybrid(input, constantsOf(settings));
+    if (settings?.retrieval === 'hybrid') return this.runHybrid(input, constantsOf(settings), settings);
     const dense = await denseLeg(
       { store: this.deps.store(), graph: this.deps.graph(), graphConfig: this.deps.graphConfig() },
       input.denseQuery,
@@ -101,12 +117,18 @@ export class RecallPipeline {
       const reason = dense.reason;
       oncePerProcess(`dense:${reason}`, () => recallLog.warn('memory.recall.leg_absent', { leg: 'dense', reason }));
     }
+    // Dense recall has no pool: supplied candidates are not read, and are counted so the call is never silent.
+    const supplied = Array.isArray(input.options.supplied) ? input.options.supplied.length : 0;
+    logSuppliedRejected(0, supplied);
     return {
       scored: dense.traces,
       partial: dense.partial,
       storeTimings: dense.storeTimings,
       legs: [legEntry(dense)],
       retrieval: 'dense',
+      reserve: { fired: false, ids: [] },
+      suppliedIds: [],
+      ...(supplied > 0 ? { suppliedRejected: { outOfScope: 0, ineligible: supplied } } : {}),
     };
   }
 
@@ -129,6 +151,7 @@ export class RecallPipeline {
   private async runHybrid(
     input: { denseQuery: string; query?: string; mood: PADState; options: CognitiveRetrievalOptions },
     c: RecallConstants,
+    settings: ManagerRecallConfig,
   ): Promise<RecallRun> {
     const { options } = input;
     const store = this.deps.store();
@@ -191,10 +214,26 @@ export class RecallPipeline {
       });
     // A trace deleted while the legs ran (this process's soft delete, or a tombstone) leaves the pool.
     const live = (trace: MemoryTrace): boolean => !store.isDeleted(trace.id) && store.getTrace(trace.id)?.isActive !== false;
-    const pool = fuseLegs(
+    const pool: Array<PoolEntry<ScoredMemoryTrace> & { undated?: boolean }> = fuseLegs(
       { dense: dense.traces.filter(live), exactWords: asScored(words.traces).filter(live), recency: asScored(recent.traces).filter(live) },
       c,
     );
+    // Supplied candidates join the pool before the dedupe and the cut, each at its own score or the pool's lowest. One
+    // whose id the pool holds is not added again.
+    const supplied = Array.isArray(options.supplied) && options.supplied.length > 0 ? admitSupplied(options, now) : null;
+    const suppliedIds: string[] = [];
+    if (supplied) {
+      const held = new Set(pool.map((entry) => entry.id));
+      const floor = pool.reduce((low, entry) => Math.min(low, entry.fusedScore), pool.length > 0 ? Number.POSITIVE_INFINITY : 0);
+      for (const { trace, score, undated } of supplied.kept) {
+        if (held.has(trace.id)) continue;
+        suppliedIds.push(trace.id);
+        pool.push({ id: trace.id, trace, ranks: { supplied: suppliedIds.length }, fusedScore: score ?? floor, ...(undated ? { undated: true } : {}) });
+      }
+      // Stable: equal scores keep the fused order, the supplied ones after it.
+      pool.sort((a, b) => b.fusedScore - a.fusedScore);
+      logSuppliedRejected(supplied.outOfScope, supplied.ineligible);
+    }
     const fuseMs = Math.round(performance.now() - fuseStarted);
 
     const dedupeStarted = performance.now();
@@ -204,11 +243,28 @@ export class RecallPipeline {
     // A newer text that took an older one's place carries that one's fused score and ranks.
     const keptAs = new Map(kept.map((entry) => [entry.id, entry]));
 
+    // A memory question reserves room for the exact-words hits the cut left out. A predicate that throws is a no.
+    let asked = false;
+    try {
+      asked = (settings.memoryQuestion ?? isMemoryQuestion)(legQuery.query) === true;
+    } catch {
+      asked = false;
+    }
+    const reserved = asked ? reserveFor(kept, topK) : [];
+    const reservedIds = new Set(reserved.map((entry) => entry.id));
+    const rejected = supplied && supplied.outOfScope + supplied.ineligible > 0 ? { outOfScope: supplied.outOfScope, ineligible: supplied.ineligible } : null;
+    const shownSupplied = new Set(suppliedIds);
+
     return {
-      scored: kept.slice(0, topK).map((entry) => entry.trace),
+      scored: [...kept.slice(0, topK), ...reserved].map((entry) => entry.trace),
       partial: dense.partial,
       storeTimings: dense.storeTimings,
-      legs: [legEntry(dense), legEntry(words), legEntry(recent)],
+      legs: [
+        legEntry(dense),
+        legEntry(words),
+        legEntry(recent),
+        ...(supplied ? [{ leg: 'supplied' as const, ran: true, candidates: suppliedIds.length, ineligible: supplied.ineligible, ms: 0 }] : []),
+      ],
       retrieval: 'hybrid',
       // The whole pool by fused score, a kept candidate with the score it holds; equal scores keep the pool's order.
       ranked: pool
@@ -217,10 +273,15 @@ export class RecallPipeline {
           ranks: keptAs.get(id)?.ranks ?? ranks,
           fusedScore: keptAs.get(id)?.fusedScore ?? fusedScore,
           ...(duplicateOf.has(id) ? { duplicateOf: duplicateOf.get(id)! } : {}),
+          ...(reservedIds.has(id) ? { reserve: true } : {}),
         }))
         .sort((a, b) => b.fusedScore - a.fusedScore),
       lexicalBackend: words.ran ? lexicalBackendOf(store, lexical) : 'none',
       timings: { legsMs, fuseMs, dedupeMs },
+      reserve: { fired: asked, ids: [...reservedIds] },
+      // The supplied candidates the call shows or may show: those the dedupe kept.
+      suppliedIds: kept.filter((entry) => shownSupplied.has(entry.id)).map((entry) => entry.id),
+      ...(rejected ? { suppliedRejected: rejected } : {}),
     };
   }
 }
