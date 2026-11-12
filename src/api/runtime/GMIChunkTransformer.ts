@@ -41,7 +41,8 @@ import { CapabilityContextAssembler } from '../../cognition/discovery/Capability
 import { filterCapabilityDiscoveryResultByDisabledSkills } from './selfImprovementRuntime.js';
 import { multimodalTurnParts } from '../../cognition/substrate/turnContent';
 import { streamedToolCalls, toolCallChunkMode } from './externalToolPause';
-import { finalResponseFieldsOf } from './turnFinalResponse';
+import { finalResponseFieldsOf, memoryRecallFieldOf } from './turnFinalResponse';
+import type { MemoryRecallCapture } from '../../cognition/memory/retrieval/recall/capture.js';
 
 /**
  * Minimal stream context shape needed by the transformer.
@@ -60,6 +61,11 @@ export interface TransformerStreamContext {
   languageNegotiation?: any;
   /** The sources the stream announced last, which the transformer records as it streams them. */
   ragSources?: import('../../cognition/rag/IRetrievalAugmentor.js').RagRetrievedChunk[];
+  /**
+   * The recall capture the stream announced for its turn (the memory manager's `recall.capture` is
+   * `'metadata+stream'`): the turn's `FINAL_RESPONSE`, or its continuation's, then carries it as `memoryRecall`.
+   */
+  streamedMemoryRecall?: MemoryRecallCapture;
 }
 
 /**
@@ -249,6 +255,7 @@ export class GMIChunkTransformer {
         true,
         {
           ...finalResponseFieldsOf(gmiOutput),
+          ...memoryRecallFieldOf(gmiOutput, streamContext),
           updatedConversationContext: conversationContext.toJSON(),
           activePersonaDetails: snapshotPersonaDetails(gmi.getPersona?.()),
         },
@@ -393,6 +400,24 @@ export class GMIChunkTransformer {
             personaId,
             false,
             { updates: { ragSources } },
+          );
+        }
+        break;
+      }
+      case GMIOutputChunkType.MEMORY_SOURCES_AVAILABLE: {
+        // The GMI sends a turn's recall capture only when the memory manager's `recall.capture` is
+        // 'metadata+stream': ids, ranks, scores, counts and timings, never a memory's text. It reaches the stream as a
+        // METADATA_UPDATE before the reply's text, and the turn's FINAL_RESPONSE carries it as `memoryRecall`.
+        const memorySources = (gmiChunk.content as { memorySources?: MemoryRecallCapture } | undefined)?.memorySources;
+        if (memorySources) {
+          streamContext.streamedMemoryRecall = memorySources;
+          await this.chunks.pushChunk(
+            agentOSStreamId,
+            AgentOSResponseChunkType.METADATA_UPDATE,
+            gmiInstanceIdForChunks,
+            personaId,
+            false,
+            { updates: { memorySources } },
           );
         }
         break;

@@ -27,13 +27,14 @@ export const CUSTOM_MODEL_PARAMS_DENIED_POOL = ['model', 'models'] as const;
  * requests of each seat's call and of the chair's, each on its own count, and
  * `onAttempt` is told of every one of them with its number, status and
  * success, nothing more. `accountIdOf` names the account a seat's usage
- * event reports and changes nothing the seat sends.
+ * event reports and changes nothing the seat sends. `store` says whether
+ * OpenAI keeps each seat's output and moves no seat off its seating.
  */
 export const PANEL_ALLOWED_KEYS = [
   'temperature', 'topP', 'frequencyPenalty', 'presencePenalty', 'maxTokens', 'thinking', 'effort', 'requestTimeout', 'cache',
   'promptCacheKey', 'promptCacheRetention', 'serviceTier', 'cacheDiagnostics', 'sessionId', 'usageLedger', 'source', 'toolChoice',
   'chainOfThought', 'planning', 'onAfterGeneration', 'onBeforeToolExecution', '__approvalGate', '__panelDeadline', 'customModelParams',
-  'budget', 'hookErrors', 'abortSignal', 'maxAttempts', 'onAttempt', 'accountIdOf',
+  'budget', 'hookErrors', 'abortSignal', 'maxAttempts', 'onAttempt', 'accountIdOf', 'store',
 ] as const;
 
 /** `customModelParams` keys a panel call may not carry: each would give every seat one shared prompt, tool set or model. */

@@ -27,7 +27,7 @@ function processEnv(): Record<string, string | undefined> {
  * YAML writes one.
  *
  * @throws {Error} Naming the field, when a field has a value of the wrong type, `mode` is not a known mode, or
- *   `agentKey` or `ledgerKey` is blank.
+ *   `agentKey`, `learnerKey` or `ledgerKey` is blank.
  */
 export function resolveLearningConfig(config: LearningConfig, profile: LearningProfile): ResolvedLearning {
   if (config === null || typeof config !== 'object' || Array.isArray(config)) {
@@ -44,12 +44,12 @@ export function resolveLearningConfig(config: LearningConfig, profile: LearningP
       throw new Error(`learning.${key} must be true or false.`);
     }
   }
-  for (const key of ['agentKey', 'namespace', 'ledgerKey'] as const) {
+  for (const key of ['agentKey', 'learnerKey', 'namespace', 'ledgerKey'] as const) {
     if (field(key) !== undefined && typeof field(key) !== 'string') {
       throw new Error(`learning.${key} must be a string.`);
     }
   }
-  for (const key of ['agentKey', 'ledgerKey'] as const) {
+  for (const key of ['agentKey', 'learnerKey', 'ledgerKey'] as const) {
     const value = field(key);
     if (value !== undefined && value.trim() === '') throw new Error(`learning.${key} must not be blank.`);
   }

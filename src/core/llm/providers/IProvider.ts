@@ -299,6 +299,20 @@ export interface ModelCompletionOptions {
    */
   serviceTier?: 'auto' | 'default' | 'flex' | 'priority';
   /**
+   * Whether OpenAI keeps the request's output, sent as `store` on the request
+   * body, on `/v1/chat/completions` and `/v1/responses` alike. Left out, a
+   * chat completion sends no `store` key and a Responses request sends
+   * `store: false`. OpenAI's rule: "Responses are stored by default. Chat
+   * completions are stored by default for new accounts. To disable storage
+   * when using either API, set store: false."
+   * (https://developers.openai.com/api/docs/guides/migrate-to-responses).
+   * The providers built on the OpenAI provider (Groq, xAI, Together,
+   * Mistral, LiteLLM, MiniMax) send it to their own endpoint too; the other
+   * providers ignore it. A `store` key in `customModelParams` replaces it, as
+   * the passthrough does for every typed field.
+   */
+  store?: boolean;
+  /**
    * Positive values penalize new tokens based on whether they appear in the text so far,
    * increasing the model's likelihood to talk about new topics.
    */

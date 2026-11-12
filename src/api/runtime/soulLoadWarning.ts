@@ -1,23 +1,23 @@
 /**
  * @file soulLoadWarning.ts
- * The warning for a soul that fails to load, written once per agent build.
+ * The `soul.load_failed` line for a soul given `optional: true` that fails to load, written once per agent build.
  *
- * One build can load the same soul more than once: a GMI agent builds two
- * personas from the agent's options on its first turn, and each builds the
- * system prompt, which loads the soul. A build runs those loads inside
- * {@link withOneSoulWarning}, and the same failure is warned about once there.
- * Outside such a scope every failure is warned about, so two builds each warn.
+ * A soul that is not optional throws when it fails to load. One build can load an optional soul more than once; a
+ * build runs those loads inside {@link withOneSoulWarning}, and the same failure is logged once there. Outside such a
+ * scope every failure is logged, so two builds each log.
  *
  * @module api/runtime/soulLoadWarning
  */
+import { soulLog } from '../../cognition/substrate/personas/soulLog.js';
+import { listedErrorFields } from '../../core/logging/events.js';
 
-/** The failures warned about in the running scope, as `source + NUL + message`; null outside a scope. */
+/** The failures logged in the running scope, as `source + NUL + message`; null outside a scope. */
 let warnedInScope: Set<string> | null = null;
 
 /**
- * Run `build` with soul-load warnings deduplicated: a failure warned about
- * once inside it is not warned about again until it returns. `build` must be
- * synchronous; a scope already running is joined.
+ * Run `build` with soul-load lines deduplicated: a failure logged once inside
+ * it is not logged again until it returns. `build` must be synchronous; a
+ * scope already running is joined.
  *
  * @param build - The synchronous work that may load the soul several times.
  * @returns What `build` returns.
@@ -33,10 +33,10 @@ export function withOneSoulWarning<T>(build: () => T): T {
 }
 
 /**
- * Warn that a soul failed to load and the agent runs without it, in every
- * environment, once per {@link withOneSoulWarning} scope.
+ * Logs that a soul given `optional: true` failed to load and the agent runs without it: one `soul.load_failed` line,
+ * with the error's type and code and no path or message, once per {@link withOneSoulWarning} scope.
  *
- * @param source - What names the soul: its path, or `inline soul` for `{ content }`.
+ * @param source - What names the soul: its path, or `inline soul` for `{ content }`. Used only to log a failure once.
  * @param error - Why it failed.
  */
 export function warnSoulLoadFailed(source: string, error: unknown): void {
@@ -46,7 +46,7 @@ export function warnSoulLoadFailed(source: string, error: unknown): void {
     if (warnedInScope.has(key)) return;
     warnedInScope.add(key);
   }
-  console.warn(`[@framers/agentos] Failed to load soul: ${message}. Agent will boot without SOUL.md identity.`);
+  soulLog.warn('soul.load_failed', { optional: 'yes', ...listedErrorFields(error) });
 }
 
 /**

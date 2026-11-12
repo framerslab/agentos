@@ -10,6 +10,7 @@ import {
   PhraseListGuardrail,
   StaticPhraseListSource,
   normalizePhraseText,
+  type PhraseEntry,
   type PhraseJudge,
   type PhraseListSnapshot,
   type PhraseListSource,
@@ -119,5 +120,14 @@ describe('PhraseListGuardrail', () => {
     expect(guard.config).toMatchObject({ failClosed: true, timeoutMs: 1234, canSanitize: false });
     expect(await guard.evaluateInput({ context, input: { userId: 'u', sessionId: 's', textInput: 'x' } })).toBeNull();
     expect(await guard.evaluateOutput({ context, chunk: finalChunk('x') })).toMatchObject({ action: GuardrailAction.BLOCK, reasonCode: 'PHRASE_LIST' });
+  });
+
+  it('lists the rule ids it can answer, and lists them again after a reload', async () => {
+    let entries: PhraseEntry[] = [{ phrase: 'alpha', match: 'word', onMatch: 'block', ruleId: 'RULE_A' }, { phrase: 'beta', match: 'word', onMatch: 'block' }];
+    const guard = await PhraseListGuardrail.create({ id: 'list', source: { load: async () => ({ version: '1', reviewedAt: '2026-11-10', reviewedBy: 'fixture', entries }) } });
+    expect([...(guard.config.reasonCodes ?? [])].sort()).toEqual(['PHRASE_LIST', 'RULE_A']);
+    entries = [{ phrase: 'gamma', match: 'word', onMatch: 'block', ruleId: 'RULE_C' }];
+    await guard.reload();
+    expect(guard.config.reasonCodes).toEqual(['RULE_C']);
   });
 });

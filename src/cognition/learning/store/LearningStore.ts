@@ -180,6 +180,12 @@ export interface LearningStoreTx {
    * host's own store written against an earlier release still opens; `forgetUser` names those scopes unreached on it.
    */
   sessionRowsIn?(namespace: string, agentKey: string, sessionId: string): Promise<SessionRow[]>;
+  /**
+   * Whether the store holds a learner row for an agent key in a namespace: a session row, or the ledger head of a
+   * learner's chain. Optional: `gmi()` asks it to keep learners under the key they were first filed under, and a
+   * store without it is taken to hold none.
+   */
+  agentHasLearners?(namespace: string, agentKey: string): Promise<boolean>;
 
   isForgotten(hash: string): Promise<boolean>;
   /** Idempotent. */

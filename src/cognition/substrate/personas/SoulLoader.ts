@@ -52,7 +52,7 @@
  */
 
 import * as fs from 'node:fs/promises';
-import { statSync } from 'node:fs';
+import { readdirSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 import { readFrontMatter, writeFrontMatter } from '../../../core/utils/frontMatter.js';
 import {
@@ -60,9 +60,13 @@ import {
   readFileOutsideLinksSync,
   type OpenRefusal,
 } from '../../../core/utils/linkFreeWrite.js';
-import { ensureMemoryDir, withoutMigratedEndMarker } from '../memory/wiki/migrateMemoryMd.js';
+import { ensureMemoryDir } from '../memory/wiki/migrateMemoryMd.js';
+import { listWikiPageIds, listWikiPageIdsSync } from '../memory/wiki/WikiMemoryStore.js';
+import { operatorIndexText, parsePage } from '../memory/wiki/WikiPageCodec.js';
+import type { WikiPage } from '../memory/wiki/types.js';
 import type { IPersonaDefinition } from './IPersonaDefinition.js';
 import { normalizeHexacoTraits } from './hexaco.js';
+import { stableIdOfName } from './stableId.js';
 
 /**
  * Result of loading a soul workspace. The `personaDefinition` is suitable for
@@ -86,8 +90,12 @@ export interface LoadedSoul {
   /** Absolute path to the memory/ wiki dir (created/migrated on load). */
   memoryDir?: string;
   /**
-   * Contents of memory/index.md, trimmed, for system-prelude injection. The end marker that closes text migrated from
-   * a legacy MEMORY.md (`<!-- end of MEMORY.md -->`) is the wiki's own bookkeeping and is left out.
+   * The memory index for system-prelude injection, trimmed: the catalog of the operator's pages under memory/,
+   * rendered from the page files, after the text migrated from a legacy MEMORY.md that memory/index.md holds. A page
+   * a compile wrote (front matter that lists `sources`) and a page whose front matter cannot be read are left out,
+   * and so is anything else memory/index.md holds. The end marker that closes the migrated text
+   * (`<!-- end of MEMORY.md -->`) is the wiki's own bookkeeping and is left out. Undefined when memory/index.md gave
+   * no text.
    */
   wikiIndex?: string;
   /** Path to the agent's workspace dir. */
@@ -116,9 +124,10 @@ export interface SoulFrontmatter {
   /** Allowed mood transitions. Subset of agentos GMI moods. */
   allowedMoods?: string[];
   /**
-   * Hard behavioral limits, carried on the persona (`personaDefinition.hardLimits`). A GMI renders them as the
-   * closing "Hard limits" block of its system prompt. `agent()` and `gmi()` do not apply a soul's front matter, so
-   * there they reach no prompt. They are words for the model: PersonaOverlayManager runs no guardrail check on them.
+   * Hard behavioral limits, carried on the persona (`personaDefinition.hardLimits`). Every path renders them as the
+   * closing "Hard limits" block of the system prompt: a GMI from its persona, `agent()` and `souledAgent()` after their
+   * own prompt. A memory provider's recall and a planned call's plan are system messages after the block. They are
+   * words for the model: PersonaOverlayManager runs no guardrail check on them.
    */
   hardLimits?: string[];
   /** Avatar config for visual surfaces. Maps to PersonaAvatarConfig. */
@@ -127,6 +136,81 @@ export interface SoulFrontmatter {
   metadata?: Record<string, unknown>;
   /** Reasoning-trace limits; maps to `IPersonaDefinition.reasoningTraceConfig`. */
   reasoningTrace?: { maxEntries?: number; maxMessageLength?: number };
+}
+
+/** Thrown when a soul cannot be loaded: its file is missing or was not read, or its front matter has a field of the wrong type. */
+export class SoulLoadError extends Error {
+  readonly code = 'SOUL_LOAD_FAILED' as const;
+  /** What names the soul: its path as given, or `inline soul` for inline content. */
+  readonly source: string;
+  /** The error this one wraps, when the failure came from another error. */
+  readonly cause?: unknown;
+
+  /**
+   * @param source - What names the soul: its path as given, or `inline soul`.
+   * @param reason - Why it failed; the message ends with it.
+   * @param options - `cause`: the error this one wraps.
+   */
+  constructor(source: string, reason: string, options?: { cause?: unknown }) {
+    super(`The soul failed to load (${source}): ${reason}`);
+    this.name = 'SoulLoadError';
+    this.source = source;
+    if (options?.cause !== undefined) this.cause = options.cause;
+  }
+}
+
+const STRING_FIELDS = ['name', 'agentId', 'role', 'defaultMood'] as const;
+const STRING_LIST_FIELDS = ['allowedMoods', 'hardLimits'] as const;
+const OBJECT_FIELDS = ['voice', 'avatar', 'reasoningTrace', 'metadata'] as const;
+const DECLARED_FIELDS: readonly string[] = [...STRING_FIELDS, ...STRING_LIST_FIELDS, ...OBJECT_FIELDS, 'hexaco'];
+
+/** True for a value YAML reads as a mapping: an object that is not a list and not a date. */
+function isMapping(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) && !(value instanceof Date);
+}
+
+/**
+ * Checks the declared fields of a soul's front matter and returns it. A declared field set to `null` (an empty YAML
+ * value) counts as not set and is left out; keys the loader does not declare are kept as they are.
+ *
+ * @param data - The front matter as parsed.
+ * @param source - What names the soul in the error: its path, or `inline soul`.
+ * @throws {SoulLoadError} Naming the field, when a declared field has a value of the wrong type.
+ */
+export function validateSoulFrontmatter(data: Record<string, unknown>, source = 'inline soul'): SoulFrontmatter {
+  const out: Record<string, unknown> = { ...data };
+  for (const field of DECLARED_FIELDS) if (out[field] === null) delete out[field];
+  const refuse = (field: string, expected: string): never => {
+    throw new SoulLoadError(source, `front matter field '${field}' must be ${expected}`);
+  };
+  for (const field of STRING_FIELDS) {
+    if (out[field] !== undefined && typeof out[field] !== 'string') refuse(field, 'a string');
+  }
+  for (const field of STRING_LIST_FIELDS) {
+    const value = out[field];
+    if (value !== undefined && !(Array.isArray(value) && value.every((entry) => typeof entry === 'string'))) refuse(field, 'a list of strings');
+  }
+  for (const field of OBJECT_FIELDS) {
+    if (out[field] !== undefined && !isMapping(out[field])) refuse(field, 'an object');
+  }
+  if (isMapping(out.reasoningTrace)) {
+    // A member set to null (an empty YAML value) counts as not set, as a declared field does.
+    const trace: Record<string, unknown> = { ...out.reasoningTrace };
+    for (const member of ['maxEntries', 'maxMessageLength']) {
+      const value = trace[member];
+      if (value === null) delete trace[member];
+      else if (value !== undefined && !(typeof value === 'number' && Number.isFinite(value))) refuse(`reasoningTrace.${member}`, 'a finite number');
+    }
+    out.reasoningTrace = trace;
+  }
+  const hexaco = out.hexaco;
+  if (hexaco !== undefined) {
+    const scores = isMapping(hexaco) ? Object.values(hexaco) : undefined;
+    if (!scores || scores.some((score) => typeof score !== 'number' || !Number.isFinite(score) || score < 0 || score > 1)) {
+      refuse('hexaco', 'an object of numbers between 0 and 1');
+    }
+  }
+  return out as SoulFrontmatter;
 }
 
 /**
@@ -232,7 +316,7 @@ export async function loadSoul(options: SoulLoaderOptions): Promise<LoadedSoul> 
 
   // Parse frontmatter + body. The frontmatter is read as data, never evaluated.
   const parsed = soulRaw ? readFrontMatter(soulRaw) : { data: {}, content: '' };
-  const frontmatter = parsed.data as SoulFrontmatter;
+  const frontmatter = validateSoulFrontmatter(parsed.data as Record<string, unknown>, options.source);
   const soulContent = parsed.content.trim();
 
   // Read optional companion files
@@ -243,7 +327,7 @@ export async function loadSoul(options: SoulLoaderOptions): Promise<LoadedSoul> 
 
   // Resolve the markdown wiki memory dir (idempotent migration of legacy MEMORY.md).
   const memoryDir = ensureMemoryDir(workspaceDir);
-  const wikiIndex = indexText(await readSoulFile(folder, path.join('memory', 'index.md')));
+  const wikiIndex = await indexText(folder, await readSoulFile(folder, path.join('memory', 'index.md')));
 
   // Build IPersonaDefinition from frontmatter + soul body
   const personaDefinition = frontmatterToPersona(frontmatter, soulContent, styleContent);
@@ -295,7 +379,7 @@ export function loadSoulSync(options: SoulLoaderOptions): LoadedSoul {
   const soulRaw = soulText(soulPath, readSoulFileSync(folder, path.basename(soulPath)), requireSoul);
 
   const parsed = soulRaw ? readFrontMatter(soulRaw) : { data: {}, content: '' };
-  const frontmatter = parsed.data as SoulFrontmatter;
+  const frontmatter = validateSoulFrontmatter(parsed.data as Record<string, unknown>, options.source);
   const soulContent = parsed.content.trim();
 
   const styleContent = trimmedText(readSoulFileSync(folder, 'STYLE.md'));
@@ -305,7 +389,7 @@ export function loadSoulSync(options: SoulLoaderOptions): LoadedSoul {
 
   // Resolve the markdown wiki memory dir (idempotent migration of legacy MEMORY.md).
   const memoryDir = ensureMemoryDir(workspaceDir);
-  const wikiIndex = indexText(readSoulFileSync(folder, path.join('memory', 'index.md')));
+  const wikiIndex = indexTextSync(folder, readSoulFileSync(folder, path.join('memory', 'index.md')));
 
   const personaDefinition = frontmatterToPersona(frontmatter, soulContent, styleContent);
 
@@ -332,7 +416,7 @@ export function loadSoulSync(options: SoulLoaderOptions): LoadedSoul {
  */
 export function parseSoul(soulMarkdown: string): LoadedSoul {
   const parsed = readFrontMatter(soulMarkdown);
-  const frontmatter = parsed.data as SoulFrontmatter;
+  const frontmatter = validateSoulFrontmatter(parsed.data as Record<string, unknown>);
   const soulContent = parsed.content.trim();
   return {
     personaDefinition: frontmatterToPersona(frontmatter, soulContent),
@@ -342,34 +426,22 @@ export function parseSoul(soulMarkdown: string): LoadedSoul {
   };
 }
 
-/**
- * Convert SoulFrontmatter + markdown body into an IPersonaDefinition that
- * the existing PersonaOverlayManager and persona overlays can consume.
- */
-export function frontmatterToPersona(
-  frontmatter: SoulFrontmatter,
-  soulBody: string,
-  styleBody?: string,
-): IPersonaDefinition {
-  const baseSystemPrompt = [soulBody, styleBody && `## Style\n\n${styleBody}`]
-    .filter(Boolean)
-    .join('\n\n')
-    .trim();
+/** The persona fields a soul's front matter sets, with no prompt: the one mapping every path consumes. */
+export type SoulPersonaFields = Pick<
+  IPersonaDefinition,
+  'id' | 'name' | 'description' | 'personalityTraits' | 'reasoningTraceConfig' | 'moodAdaptation' | 'voiceConfig' | 'avatarConfig' | 'hardLimits'
+> & { metadata?: Record<string, unknown> };
 
-  const definition: IPersonaDefinition = {
-    id: frontmatter.agentId ?? slugify(frontmatter.name ?? 'unnamed-agent'),
+/** The persona fields of a soul's front matter: id, name, role, traits, reasoning-trace limits, mood, voice, avatar, hard limits and metadata. */
+export function personaFieldsOf(frontmatter: SoulFrontmatter): SoulPersonaFields {
+  return {
+    id: soulAgentIdOf(frontmatter) ?? 'unnamed-agent',
     name: frontmatter.name ?? 'Unnamed Agent',
     description: frontmatter.role ?? '',
-    version: '1.0.0',
-    baseSystemPrompt,
     // Runtime readers key Honesty-Humility as `honesty`; the frontmatter may
     // use either spelling.
     personalityTraits: frontmatter.hexaco ? normalizeHexacoTraits(frontmatter.hexaco) : undefined,
-    // Kept as given (an object is copied; anything else passes through) so PersonaValidation can report a malformed value.
-    reasoningTraceConfig:
-      frontmatter.reasoningTrace && typeof frontmatter.reasoningTrace === 'object' && !Array.isArray(frontmatter.reasoningTrace)
-        ? { ...frontmatter.reasoningTrace }
-        : (frontmatter.reasoningTrace as IPersonaDefinition['reasoningTraceConfig']),
+    reasoningTraceConfig: frontmatter.reasoningTrace ? { ...frontmatter.reasoningTrace } : undefined,
     moodAdaptation: frontmatter.defaultMood
       ? {
           enabled: true,
@@ -393,9 +465,41 @@ export function frontmatterToPersona(
       : undefined,
     hardLimits: frontmatter.hardLimits,
     metadata: frontmatter.metadata,
-  } as IPersonaDefinition;
+  } as SoulPersonaFields;
+}
 
-  return definition;
+/**
+ * The one stable id of a soul: `agentId` trimmed, else the slug of the soul's `name` (for a name with no Latin letters
+ * or digits, `agent-` and a hash of the name), else an id from the agent option's `name`; undefined when the soul has
+ * neither and the agent has no name. Never a random id.
+ *
+ * @param frontmatter - The soul's front matter.
+ * @param agentName - The agent's `name` option, used only when the soul names no id and no name.
+ */
+export function soulAgentIdOf(frontmatter: SoulFrontmatter, agentName?: string): string | undefined {
+  const agentId = typeof frontmatter.agentId === 'string' ? frontmatter.agentId.trim() : '';
+  if (agentId) return agentId;
+  // The loader's slug first, so the id a Latin name had does not move; a name it leaves empty is hashed.
+  const soulName = typeof frontmatter.name === 'string' ? frontmatter.name.trim() : '';
+  if (soulName) return slugify(soulName) || stableIdOfName(soulName);
+  const name = agentName?.trim();
+  return name ? stableIdOfName(name) : undefined;
+}
+
+/**
+ * Convert SoulFrontmatter + markdown body into an IPersonaDefinition that
+ * the existing PersonaOverlayManager and persona overlays can consume.
+ */
+export function frontmatterToPersona(
+  frontmatter: SoulFrontmatter,
+  soulBody: string,
+  styleBody?: string,
+): IPersonaDefinition {
+  const baseSystemPrompt = [soulBody, styleBody && `## Style\n\n${styleBody}`]
+    .filter(Boolean)
+    .join('\n\n')
+    .trim();
+  return { ...personaFieldsOf(frontmatter), version: '1.0.0', baseSystemPrompt } as IPersonaDefinition;
 }
 
 /**
@@ -594,10 +698,47 @@ function trimmedText(read: SoulFileRead): string | undefined {
   return read !== null && 'text' in read ? read.text.trim() : undefined;
 }
 
-/** The text of memory/index.md that {@link LoadedSoul.wikiIndex} holds: trimmed, without the migrated block's end marker. */
-function indexText(read: SoulFileRead): string | undefined {
-  const text = trimmedText(read);
-  return text === undefined ? undefined : withoutMigratedEndMarker(text);
+/** The file of wiki page `id`, as a path below the soul's folder. */
+function pageFileOf(id: string): string {
+  return path.join('memory', ...id.split('/')) + '.md';
+}
+
+/** A page file's read as a page; undefined when the file gave no text or its front matter does not parse. */
+function pageOf(id: string, read: SoulFileRead): WikiPage | undefined {
+  if (read === null || !('text' in read)) return undefined;
+  try {
+    return parsePage(id, read.text);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The memory index {@link LoadedSoul.wikiIndex} holds, rendered from the page files under memory/ and the text
+ * migrated from MEMORY.md that memory/index.md holds (`operatorIndexText`); undefined when memory/index.md gave no
+ * text. Each page file is read as the soul's other files are, through no link (`readSoulFile`).
+ */
+async function indexText(folder: SoulFolder, index: SoulFileRead): Promise<string | undefined> {
+  if (index === null || !('text' in index)) return undefined;
+  const ids = await listWikiPageIds(path.join(folder.dir, 'memory'), (dir) => fs.readdir(dir, { withFileTypes: true }));
+  const pages: WikiPage[] = [];
+  for (const id of ids) {
+    const page = pageOf(id, await readSoulFile(folder, pageFileOf(id)));
+    if (page) pages.push(page);
+  }
+  return operatorIndexText(pages, index.text);
+}
+
+/** Sync companion to `indexText`, for `loadSoulSync`. */
+function indexTextSync(folder: SoulFolder, index: SoulFileRead): string | undefined {
+  if (index === null || !('text' in index)) return undefined;
+  const ids = listWikiPageIdsSync(path.join(folder.dir, 'memory'), (dir) => readdirSync(dir, { withFileTypes: true }));
+  const pages: WikiPage[] = [];
+  for (const id of ids) {
+    const page = pageOf(id, readSoulFileSync(folder, pageFileOf(id)));
+    if (page) pages.push(page);
+  }
+  return operatorIndexText(pages, index.text);
 }
 
 /** An error's message, or the value as text when it is not an Error. */

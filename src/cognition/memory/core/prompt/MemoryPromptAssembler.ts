@@ -64,6 +64,12 @@ function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
 }
 
+/**
+ * The assembler's token estimate: about four characters a token, rounded up; 0 for an empty text. The GMI sizes the
+ * turn's other retrieved context with it when it clamps the memory block's budget to a model's share.
+ */
+export const estimateMemoryTokens = (text: string): number => estimateTokens(text ?? '');
+
 // ---------------------------------------------------------------------------
 // Personality → formatting style
 // ---------------------------------------------------------------------------

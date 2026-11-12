@@ -599,7 +599,7 @@ A share is the least a section with content gets, not a cap (see [Overflow Redis
 await memory.initialize({ ...deps, tokenBudget: { recentEpisodic: 0 } });
 ```
 
-A persona sets the same shares in `cognitiveMemoryConfig.tokenBudget`. [`createAgentCognitiveMemory`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/agentCognitiveMemory.ts) passes the shares of the persona it is given to the manager it builds as `tokenBudget`, and the persona's `encoding`, `decay`, `workingMemoryCapacity`, `observer`, `reflector`, `graph` and `infiniteContext` under the same names. A host that builds its manager from a persona itself, in `gmiManagerConfig.cognitiveMemoryFactory`, passes `persona.cognitiveMemoryConfig?.tokenBudget` the same way. `agent({ runtime: 'gmi' })` and `gmi()` build their persona from their options, which set no `cognitiveMemoryConfig`, so their memory runs on the default shares.
+A persona sets the same shares in `cognitiveMemoryConfig.tokenBudget`. [`createAgentCognitiveMemory`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/agentCognitiveMemory.ts) passes the shares of the persona it is given to the manager it builds as `tokenBudget`, and the persona's `encoding`, `decay`, `workingMemoryCapacity`, `observer`, `reflector`, `graph` and `infiniteContext` under the same names. A host that builds its manager from a persona itself, in `gmiManagerConfig.cognitiveMemoryFactory`, passes `persona.cognitiveMemoryConfig?.tokenBudget` the same way. `agent({ runtime: 'gmi' })` and `gmi()` build their persona from their options, which set only `cognitiveMemoryConfig.recall` (from `memory.recall`) and no shares, so their memory runs on the default shares.
 
 ```typescript
 const persona: IPersonaDefinition = {
@@ -621,7 +621,7 @@ const { manager } = await createAgentCognitiveMemory({ persona, memory: { embedd
 
 ### Overflow Redistribution
 
-Budget a section leaves unused (it is empty, or its content is shorter than its share) flows to the sections that still have content, in `MEMORY_BUDGET_SPILL_ORDER`: Semantic Recall, Recent Episodic, Persistent Memory, Working Memory, Prospective Alerts, Graph Associations, Observation Notes. Each section in that order renders with its own share plus whatever the sections before it left unspent. A second pass in the same order gives what is still unspent (for example the share of a working memory too long for it) to the sections that still have content left out, so the block can fill the whole budget. The second pass only adds to the block. It adds a later line that now fits whole, at its place in the order, adds lines to a section that rendered none, and lengthens the persistent-memory text when the first pass cut it. Every line the first pass rendered stays, in its section and its order. A store that holds only episodic traces, assembled with the 1600 tokens the GMI's memory bridge asks for, fills the block with episodic traces rather than stopping at their 25%. Sections still appear in the block in the order shown under [Output Sections](#output-sections). When a host passes the mechanisms engine, the involuntary memory is chosen first, from the traces the turn did not retrieve, and a tenth of the budget after the preamble is set aside for it before the sections are granted theirs. A memory that does not fit that tenth whole is tried again on what the sections leave unspent, and is left out when it does not fit that whole either.
+Budget a section leaves unused (it is empty, or its content is shorter than its share) flows to the sections that still have content, in `MEMORY_BUDGET_SPILL_ORDER`: Semantic Recall, Recent Episodic, Persistent Memory, Working Memory, Prospective Alerts, Graph Associations, Observation Notes. Each section in that order renders with its own share plus whatever the sections before it left unspent. A second pass in the same order gives what is still unspent (for example the share of a working memory too long for it) to the sections that still have content left out, so the block can fill the whole budget. The second pass only adds to the block. It adds a later line that now fits whole, at its place in the order, adds lines to a section that rendered none, and lengthens the persistent-memory text when the first pass cut it. Every line the first pass rendered stays, in its section and its order. A store that holds only episodic traces, assembled with the 1600 tokens the GMI's memory bridge asks for by default ([Recall Budget](#recall-budget)), fills the block with episodic traces rather than stopping at their 25%. Sections still appear in the block in the order shown under [Output Sections](#output-sections). When a host passes the mechanisms engine, the involuntary memory is chosen first, from the traces the turn did not retrieve, and a tenth of the budget after the preamble is set aside for it before the sections are granted theirs. A memory that does not fit that tenth whole is tried again on what the sections leave unspent, and is left out when it does not fit that whole either.
 
 ### Overflow: whole memories only
 
@@ -709,6 +709,36 @@ The preamble appears when the budget has room for it and 100 more tokens. `assem
 
 Token estimation uses ~4 chars per token heuristic.
 
+### Upgrading from 0.16.0 or earlier
+
+- A trace's trust policy is written into its Brain row's metadata (`policy`) and read back when a store loads the row. Through 0.16.0 a trace loaded from the Brain (a fresh store's hydration) had no policy, so a `retrieve()` with `usableFor` let it through whatever policy it was stored with; a user statement, stored with `usableForAuthorization: false`, passed an `authorization` check after a restart. A row an earlier release wrote holds no policy and loads as before.
+- A recall whose query the embedding manager gives no vector reports the dense leg as `{ ran: false, reason: 'no_embedder' }` in the recall capture's `legs`, and the process writes one `memory.recall.leg_absent` line (`leg: 'dense'`, `reason: 'no_embedder'`). Through 0.16.0 the leg read `ran: true` with no candidates. The recall returns no traces, as before. `MemoryStore.query` sets `emptyQueryVector: true` on its result then, and an error the embedding call throws is rethrown unchanged, known by `isQueryEmbeddingFailure(error)`.
+- The capture's dense leg counts in `ineligible` the traces the `usableFor` trust-policy check dropped; through 0.16.0 it read 0. `retrieve()`'s `diagnostics.recall` carries the `legs` the capture reports.
+- A Brain row whose metadata names no `scopeId` loads under its `scope_id` column; through 0.16.0 it loaded under `''`, so a recall of its scope did not return it. Rows this store and the `Memory` facade write name both, and load as before.
+- `MemoryStore` gains `loadTracesForRecall(ids)` and `addTraceListener(listener)`; see [Lexical and Hybrid Search](../text/LEXICAL_AND_HYBRID_SEARCH.md#reading-memory-traces-by-id-and-following-a-store). The ranking `retrieve()` returns and the block are unchanged.
+- A GMI turn sizes the memory block for the model each hop is sent to. When what the model's retrieved-context share (20% of its context) leaves after the turn's RAG and long-term-memory text is smaller than the block, the block is rendered again at that remainder from the turn's one recall: no second retrieval and no embedding call, and memories drop whole. Through 0.16.0 every model was sent the block assembled at the full budget, joined to the other context, and PromptEngine cut or summarised the joined text when the share was smaller. A model whose share holds the block gets the same block as before. See [Budget and the prompt share](#budget-and-the-prompt-share).
+- PromptEngine takes the memory block as `PromptComponents.memoryContextText`, counts it into the prompt and never reduces it: when the prompt must be reduced, only `retrievedContext` is summarised or truncated, to what the share leaves beside the block. Through 0.16.0 the GMI joined the block into `retrievedContext`, so a reduction could cut or summarise it. A prompt nothing was reduced in is the same byte for byte: the block goes first, joined to the other context with `\n\n---\n\n`, as the GMI joined it.
+- For a host that calls PromptEngine itself: the `anthropic_messages` and `generic_completion` templates send `retrievedContext`, and with it the memory block, in front of the query (`Context:`), as `openai_chat` does; through 0.16.0 they left it out. A prompt over its budget whose other context already fits beside the block leaves that context as it is and reports no cut.
+- For a host that calls PromptEngine itself: on a prompt over its budget, `retrievedContext` is truncated to what the summariser is asked for (the share less the overrun), where through 0.16.0 the truncation kept the whole share; a target of 0 removes it (`removedComponents`) instead of asking the summariser for an empty summary. `PromptEngineResult.metadata.contextTokens` holds PromptEngine's counts of the memory block and of the other context before and after the budget step.
+- A GMI turn's recall record (`GMIOutput.memoryRecall`, a session's `memoryRecall`) is the record of the hop that served the turn: its `budget` names the hop, the share and any clamp or re-render, and `delivery` says what reached the model. The `MEMORY_SOURCES_AVAILABLE` chunk and the runtime stream's `memorySources` update carry the assembly's record, without those fields. See [Recall Capture](#recall-capture).
+- `ICognitiveMemoryManager` gains the optional `reassembleForBudget(context, tokenBudget)`, which `CognitiveMemoryManager` implements; the bridge asks a manager without it through `assembleForPrompt` again, at the lower budget, with the turn's query and scopes. A manager whose `reassembleForBudget` rejects is not asked again: the hop is sent no block.
+- `IPromptEngine` gains the optional `acceptsMemoryContextText`, which PromptEngine sets. A host's own prompt engine without it is handed the memory block joined in front of `retrievedContext` with `\n\n---\n\n`, as through 0.16.0, so it still sends the block; such an engine can cut or summarise the block, and the record's `delivery.memoryBlockTokens` is 0, since only PromptEngine reports its counts.
+- The bridge's trace entries "Cognitive memory assembly failed." and "Cognitive memory re-render for a model hop failed." carry the error's class (`errorName`), not its message, which can quote the turn's words. Through 0.16.0 the first carried `error` with the message.
+- On `agent({ runtime: 'gmi' })` and `gmi()`, a `memory.recall` set beside a `cognition.memory` of the agent's own is not applied, as through 0.16.0, and the construction now writes one `memory.recall.option_ignored` line (`option: 'memory_recall'`). Set `recall` inside `cognition.memory`.
+- On `gmi()`, `memory: null` is the option unset, as on the rest of `agent()`: on the `'light'` profile, and on a `CognitionConfig` that sets no memory, it leaves cognitive memory off. Through 0.16.0 the sessions ran without memory while the learning manifest reported the memory loop live, and a `memoryProviderOptions.tokenBudget` beside it wrote a `token_budget` `option_ignored` line.
+
+### Upgrading from 0.15.124 or earlier
+
+- `memory.recall` on `agent()` and `gmi()` sets the memory block's budget (`budget.totalTokens`, the whole block, 1,600 by default) and the capture (`capture`, `'metadata'` by default), and the GMI's memory bridge asks for the manager's `recall.budget.totalTokens` in place of a fixed 1,600. With none set the block is the same byte for byte. See [Recall Budget](#recall-budget).
+- `CognitiveMemoryManager.initialize()` and `createAgentCognitiveMemory()` refuse a `recall` that holds a value of the wrong kind, or that is not an object or holds a `budget` that is not one, with a `RecallOptionError` naming the field. Through 0.15.124 they took any value.
+- `createAgentCognitiveMemory()` puts `memory.recall` over the persona's `cognitiveMemoryConfig.recall` field by field, `budget.totalTokens` included: an agent budget that leaves the total unset keeps the persona's.
+- On a GMI agent with cognitive memory on, `memoryProviderOptions.tokenBudget` never sized the memory block; when it is set and no `memoryProvider.getContext` reads it, the agent's construction writes one `memory.recall.option_ignored` line (`option: 'token_budget'`). On the default runtime, or with memory off, a `memory.recall.budget.totalTokens` that no `memoryProvider.getContext` reads writes one with `option: 'recall_budget'`.
+- A GMI turn that fails after its memory assembly carries that assembly's capture on its error output (`GMIOutput.memoryRecall`), so a session's `stream()` settles `memoryRecall` with it. Through 0.15.124 the error output carried none.
+- The capture record's `embedder` names the embedding provider and model of a memory `agent()` or `gmi()` builds.
+- The GMI's reasoning-trace entry "Cognitive memory context assembled." no longer lists `includedMemoryIds`. It carries `tokensUsed`, `candidates`, `included`, `leftOut`, `retrieval`, `reranker` and `legsAbsent`, and lists the ids again with `recall: { traceIds: true }` on the memory manager's configuration. See [Recall Capture](#recall-capture).
+- `assembleForPrompt()` returns a recall capture on `capture` unless the manager's `recall.capture` is `'off'`, and a GMI turn carries it as `GMIOutput.memoryRecall` and on a session's `send()` result as `memoryRecall`. The fields are optional, so a memory manager or an `IGMI` that sets none compiles unchanged. The runtime stream carries the record only under `'metadata+stream'`, so a stream consumer sees nothing new by default. The block is the same byte for byte with any capture setting.
+- `LlmJudgeReranker` answers with `diagnostics` (`providerId: 'llm-judge'`, its `rankingModel` or `''`, latency, the passages it scored), so the capture names it `llm`. A manager's memory recall passes `maxDocuments: 100` on its rerank call, the limit `RerankerService` applied when the call named none.
+
 ### Upgrading from 0.15.122 or earlier
 
 - A memory line that does not fit whole in what is left of its section is left out and its room goes to the next line that fits; no memory line carries ` …[cut]` (the persistent-memory text keeps its own `<!-- truncated -->` marker). The rule covers a retrieved trace, a graph association and the involuntary memory, for every caller of `assembleMemoryContext()` and `assembleForPrompt()`. In 0.15.121 and 0.15.122 such a line was cut at a word boundary to fit and ended with `…[cut]`, so a block that held a cut line now holds one memory fewer, or a shorter one that fits in its place. A block whose memories all fit is unchanged. See [Overflow: whole memories only](#overflow-whole-memories-only).
@@ -737,6 +767,120 @@ What callers see differently in the memory block and its formatters:
 - A `tokenBudget` share of exactly 0 turns its section off. With the budget other sections leave unused flowing to the sections with content, a 0 share would otherwise still render its section. The default allocation has no zero share, so a host that sets none sees no change.
 - Each line carries the UTC date the trace was stored after its age, and an age from a week on reads `N days ago`. Through 0.15.120 a line carried no date and an age from a week on read `Nw ago`. Ages of a day or more count UTC calendar days between the stored date and the turn's date, so the age and the date agree: a trace stored at 23:00 UTC on 2026-10-12 reads `27 days ago, 2026-10-12` at 00:30 UTC on 2026-11-08, one more than the whole 24-hour periods between them.
 - The returned `allocation` holds the shares the assembly used, not the configured ones.
+
+## Recall Budget
+
+A GMI's memory bridge assembles each turn's block within the manager's `recall.budget.totalTokens`: the whole block, the preamble included, in tokens of about four characters. Unset, it is 1,600 (`DEFAULT_RECALL_BUDGET_TOKENS`), the budget the bridge asked for before the setting existed, so a manager that sets none assembles the same block. At 0 the turn sends no block and its capture records every candidate left out with the reason `budget`; the turn goes on.
+
+```typescript
+await manager.initialize({ ...config, recall: { budget: { totalTokens: 2400 } } });
+
+// The same setting on an agent's memory:
+const assistant = agent({ runtime: 'gmi', provider: 'openai', memory: { embedding: { provider: 'openai' }, recall: { budget: { totalTokens: 2400 } } } });
+```
+
+`initialize()` checks the recall settings before it builds anything: a `budget.totalTokens` that is not an integer of at least 0, or a `capture` other than `'off'`, `'metadata'` and `'metadata+stream'`, is refused with a `RecallOptionError` naming the field (`option`, with `reason: 'invalid_value'`), after one `memory.recall.option_rejected` line. A host of `AgentOS.create` sets `recall` on the manager its `gmiManagerConfig.cognitiveMemoryFactory` builds; `agent()` and `gmi()` set it from `memory.recall` ([GMIs from agent()](../GMI.md#gmis-from-agent)). The bridge reads it at each turn, so a change to a built manager's configuration applies from its next turn. A direct `assembleForPrompt()` call passes a budget of its own, and `AgentMemory.getContext()` passes its caller's `tokenBudget`, 2,000 by default.
+
+### Budget and the prompt share
+
+PromptEngine gives retrieved context 20% of a model's context (`PROMPT_CONTEXT_SHARE`; the context is the model's `optimalContextTokens`, else its `maxContextTokens`). The memory block shares that room with the turn's other retrieved context, the RAG text and the long-term-memory text, which the share holds first. For each model hop of a turn, the GMI works out the block's budget with `effectiveRecallBudget`:
+
+```
+effective = max(0, min(budget.totalTokens, floor(0.20 × context) − other context))
+```
+
+An 8,000-token model has a share of 1,600 tokens. A turn with 1,400 tokens of long-term-memory text leaves 200 for memory, so the block, assembled at 1,600, is rendered again at 200: the same candidates and sections through the assembler alone (`reassembleForBudget`), with no retrieval, embedding or rerank call, and the memories that do not fit drop whole. The other context is sized with the assembler's estimate of about four characters a token. PromptEngine counts with its own estimate, 3.8 characters a token for a model id containing `gpt-4` and 4.2 for one containing `claude`, so on a `gpt-4` model a block and other context that the clamp fit into the share can be over it by PromptEngine's count: the difference comes from the other context, never the block, and the record's `delivery.otherContext.cutBy` names the cut.
+
+- A hop whose share holds the block gets the turn's first rendering unchanged.
+- Each fallback hop is sized for its own model, always from the turn's first rendering and its one recall: a turn whose primary fails before any output and whose fallback has a smaller context sends the fallback a smaller block, and a fallback with a larger context gets the first rendering whole.
+- A remainder of 0 sends the hop no block; the record lists every candidate left out for the budget.
+- A manager without `reassembleForBudget` is asked through `assembleForPrompt()` again, at the lower budget, with the turn's query and scopes. A re-render that fails, a rejected `reassembleForBudget` included, sends the hop no block and starts no second recall, and the turn goes on: the record's `budget` has `renderFailed: true` and no `reassembled`, and each memory the first rendering showed is left out with the reason `render_failed`.
+- A context size or count that is not a finite number in range skips the clamp, and the block is sent as assembled.
+
+PromptEngine counts the block into the prompt and never reduces it. When a prompt is over its budget, or the block and the other context are over the share, only the other context is summarised or truncated, to what the share leaves beside the block less the prompt's overrun, and a target of 0 removes it.
+
+Each clamp writes one `memory.recall.budget_clamped` line (`requested`, `effective`, `hop`, `reason`: `prompt_share`, `zero_remaining`, or `invalid` for a skipped clamp), and a remainder of 0 also one `memory.recall.allocation_exhausted` line (`requested`, `candidates`). The turn's recall record names the clamp ([Recall Capture](#recall-capture)).
+
+## Recall Capture
+
+Every `assembleForPrompt()` returns, beside the block, a record of what the assembly recalled and what became of each candidate: `context.capture`, a [`MemoryRecallCapture`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/recall/capture.ts) of version `memory-recall-capture/1`.
+
+```typescript
+const context = await manager.assembleForPrompt('which locker holds the stove?', 1600, mood, { scopes });
+
+context.capture;
+// {
+//   version: 'memory-recall-capture/1',
+//   retrieval: 'dense',
+//   budget: { requested: 1600, effective: 1600 },
+//   tokensUsed: 412,
+//   allocation: { workingMemory: 0.15, semanticRecall: 0.4, ... },
+//   legs: [{ leg: 'dense', ran: true, candidates: 6, ineligible: 0, ms: 3 }],
+//   lexicalBackend: 'none',
+//   reranker: { provider: 'none', reason: 'none_configured' },
+//   memoryQuestionReserve: { fired: false, added: 0 },
+//   candidates: [
+//     { id: 'mt_7', ranks: { dense: 1 }, fusedScore: 0.71, outcome: 'included', tokens: 38, section: 'semanticRecall' },
+//     { id: 'mt_2', ranks: { dense: 2 }, fusedScore: 0.64, outcome: 'left_out', reason: 'section_full', tokens: 126, section: 'semanticRecall' },
+//     ...
+//   ],
+//   timings: { legsMs: 4, fuseMs: 0, dedupeMs: 0, rerankMs: 0, assembleMs: 1, totalMs: 5 },
+// }
+```
+
+Each candidate is a memory the recall returned, in the order it ranked them:
+
+| Field | Value |
+|-------|-------|
+| `id` | The trace's id |
+| `ranks` | Its 1-based rank in each leg that returned it: `{ dense: n }`, the rank the vector recall's cognitive scores gave it, before any rerank |
+| `fusedScore` | The score the candidates were ordered by: the trace's retrieval score, after the `rerankerService` blend when the manager has one |
+| `rerankScore` | The score the reranker gave it before the blend; set only for a candidate a rerank scored |
+| `outcome` | `included` when the block shows it, `left_out` otherwise |
+| `reason` | Set only for a candidate left out: `section_full` when its line did not fit whole in what its section was offered, `budget` when its section was offered no tokens (or no section had a line for it), `render_failed` on a GMI hop sent no block because rendering it again for the hop failed |
+| `tokens` | Tokens of its line, about 4 characters a token: as rendered when included, as it would render whole when left out |
+| `section` | The section of the block its line belongs to, as in [`lineOutcomes`](#overflow-whole-memories-only) |
+
+The included candidates are every memory the block shows. A memory the block shows that the recall did not return (a trace reached only through its graph association) comes after the ranked ones, with empty `ranks` and a `fusedScore` of 0.
+
+The rest of the record:
+
+| Field | Value |
+|-------|-------|
+| `retrieval` | `dense`: the vector recall `assembleForPrompt()` runs |
+| `budget` | `requested` and `effective`: the token budget the block was asked for and assembled in. A GMI turn's record adds the serving hop's sizing ([Budget and the prompt share](#budget-and-the-prompt-share)): `hop` (0 for the route's primary), `promptShareTokens` and `otherContextTokens` (the model's share and the other context it holds first), `clampReason` (`prompt_share`, or `zero_remaining` when nothing was left) when `effective` is below `requested`, `reassembled: true` when the block was rendered again at `effective`, and `renderFailed: true` when rendering it again failed and the hop was sent no block |
+| `delivery` | A GMI turn's record only: what reached the model. `memoryBlockTokens` (PromptEngine's count of the block, which it never reduces); `otherContext`, when the turn had RAG or long-term-memory text, with `ragTokens` and `longTermMemoryTokens` (the assembler's estimate), `deliveredTokens` (PromptEngine's count of what it sent) and `cutBy` (`prompt_engine_truncate` or `prompt_engine_summarize`) when PromptEngine reduced it; `issueCodes`, PromptEngine's `RAG_SUMMARIZATION_FAILED` or `TOKEN_BUDGET_EXCEEDED_POST_OPT`; `promptReplacedByHook: true` when the host's `beforeModelCall` replaced the hop's prompt, so the counts are of the prompt PromptEngine built |
+| `tokensUsed`, `allocation` | As on the assembled context |
+| `legs` | Each recall leg: whether it ran, why not (`reason`), how many candidates it returned, how many the eligibility checks dropped (`ineligible`, a count with no id) and how long it took. The vector recall is one leg, `dense`; its time covers the query's embedding, the vector search, the scoring and the memory graph's activation, not the rerank, and its `ineligible` counts the traces the `usableFor` trust-policy check dropped. When the embedding manager gives the query no vector, the dense leg is `{ ran: false, reason: 'no_embedder' }` with no candidates, and the process writes one `memory.recall.leg_absent` line for it |
+| `lexicalBackend` | The full-text backend an exact-words leg read: `none`, as the vector recall reads none |
+| `reranker` | The reranker that scored the candidates: `{ provider: 'none', reason: 'none_configured' }` without a `rerankerService`; with one, `local` (the cross-encoder), `llm` (the LLM judge) or `other` (any other provider, Cohere's API among them, which received the query and the candidates' texts), with the `model` it reported, the `candidates` it was sent (the provider's own count, else at most 100: the manager sends the dense leg's first 100) and its `ms`; `{ provider: 'none', reason: 'error' }` when the rerank failed and the cognitive scores stood |
+| `memoryQuestionReserve` | `{ fired: false, added: 0 }` |
+| `timings` | Milliseconds of each stage, rounded: `legsMs` (recall, the persistent-memory read and the prospective check, which run together), `rerankMs`, `assembleMs` (the graph walk and the assembler), `totalMs` |
+
+`embedder` is the manager's `recall.embedder`, a label of the embedding provider and model the memory was built with: `agent()` and `gmi()` set it to the ones their memory resolved, and it is unset on a manager that names none. The type also holds `suppliedRejected`, which this recall leaves unset.
+
+**Which stage a record shows.** `assembleForPrompt()` returns the assembly's record. A GMI turn's record (`GMIOutput.memoryRecall`, a session's `memoryRecall`, a runtime stream's `FINAL_RESPONSE.memoryRecall`) is the record of the hop that served the turn: the same candidates, with that hop's `budget` and its `delivery`, and, when the block was rendered again for the hop, that rendering's outcomes and `tokensUsed`. The stream's `MEMORY_SOURCES_AVAILABLE` chunk, and the `memorySources` update it becomes, carry the assembly's record, sent before the model call, so they hold neither `hop` nor `delivery`. A hop whose share held the block was sent the first rendering: its record has no `reassembled`, even when an earlier hop of the turn was sent a re-render.
+
+**What it holds.** Ids, ranks, scores, counts and timings, never a memory's text or the query's. Ids and scores can concern memories of other scopes the turn reads (an organization's, a persona's), so the host decides who sees a capture, under its logging allow-list. Whether ids and scores alone expose anything across those scopes is not established; evidence that they do turns the default to `'off'`.
+
+**Where it goes.** The manager's `recall.capture` decides; on `agent()` and `gmi()` it is `memory.recall.capture`:
+
+| `recall.capture` | `AssembledMemoryContext.capture` | GMI turn: `GMIOutput.memoryRecall`, a session's `send()` result `memoryRecall`, its `stream()` result's `memoryRecall` promise | Runtime stream: `METADATA_UPDATE` with `memorySources`, `FINAL_RESPONSE.memoryRecall` |
+|---|---|---|---|
+| `'metadata'` (default) | Set | Set | Not sent |
+| `'metadata+stream'` | Set | Set | Sent, the update before the reply's text; a turn that stops for the host's tool calls ends, after the host's results, with a `FINAL_RESPONSE` that carries the capture the turn announced. The runtime stream is the one `AgentOS.create()`'s `processRequest()` returns: a session of `agent({ runtime: 'gmi' })` or `gmi()` records under `'metadata+stream'` what it records under `'metadata'`, and its `stream()` parts carry no memory part |
+| `'off'` | Unset | Unset | Not sent |
+
+```typescript
+await manager.initialize({ ...config, recall: { capture: 'metadata+stream' } });
+
+// The same setting on an agent's memory:
+const assistant = agent({ runtime: 'gmi', provider: 'openai', memory: { embedding: { provider: 'openai' }, recall: { capture: 'off' } } });
+```
+
+The setting is read at each `assembleForPrompt()` and `retrieve()`, so a change to a built manager's configuration applies from its next turn. The block is the same byte for byte whatever it says. Under `'off'` the manager builds no part of the record: a `retrieve()` result carries neither `diagnostics.recall` (the dense ranks, the reranker's scores, the dense leg's time, the `legs` the capture reports) nor `diagnostics.reranker`, and the assembly takes no timings. A configured reranker still orders the traces.
+
+**The reasoning trace.** With a memory block assembled, the GMI's reasoning trace gets the entry "Cognitive memory context assembled." with `tokensUsed`, `candidates`, `included`, `leftOut`, `retrieval`, `reranker` (the provider) and `legsAbsent` (each leg that did not run, with its reason). `recall: { traceIds: true }` adds `includedMemoryIds`. With the capture `'off'` the counts come from the block's `lineOutcomes`, so `leftOut` still counts the memories the block left out. The entry never holds text.
 
 ---
 
@@ -808,6 +952,14 @@ interface CognitiveMemoryConfig {
   enableGraphActivation?: boolean;
   brain?: Brain;
   persistAccessState?: boolean;                // Default: true (see Access state across restarts)
+  recall?: ManagerRecallConfig;               // See Recall Budget and Recall Capture
+}
+
+interface ManagerRecallConfig {
+  budget?: { totalTokens?: number };           // Default: 1600, the whole block (see Recall Budget)
+  capture?: 'metadata' | 'metadata+stream' | 'off'; // Default: 'metadata' (see Recall Capture)
+  traceIds?: boolean;                          // Default: false
+  embedder?: { provider: string; model: string }; // A label for the capture record
 }
 ```
 
@@ -938,7 +1090,7 @@ A GMI with cognitive memory calls the manager through [`CognitiveMemoryBridge`](
 // Before the turn's first model call, with the user's message as the query:
 const memoryContext = await cognitiveMemory.assembleForPrompt(
   userMessage,
-  1600, // token budget
+  cognitiveMemory.getConfig().recall?.budget?.totalTokens ?? 1600, // token budget: the configured budget, 1,600 by default
   mood,
   { scopes }, // the scopes of the turn's user, session, conversation, persona and organization
 );

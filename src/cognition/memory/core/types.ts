@@ -24,8 +24,11 @@ import type {
 /** Long-term memory subtypes (Tulving's taxonomy + extensions). */
 export type MemoryType = 'episodic' | 'semantic' | 'procedural' | 'prospective' | 'relational';
 
-/** Visibility / ownership scope for a memory trace. */
-export type MemoryScope = 'thread' | 'user' | 'persona' | 'organization';
+/**
+ * Visibility / ownership scope for a memory trace. `conversation` holds one subject's conversation traces and wiki
+ * page chunks with one agent, under a scope id `conversationScopeKey()` builds.
+ */
+export type MemoryScope = 'thread' | 'user' | 'persona' | 'organization' | 'conversation';
 
 /**
  * How the content of this memory was originally produced.
@@ -545,6 +548,19 @@ export interface CognitiveRetrievalResult {
      * merged ranking. See `2026-04-26-hindsight-4network-observer-design.md`.
      */
     retrievedTypedTraces?: ScoredMemoryTrace[];
+    /**
+     * The rerank of this retrieval, when the manager holds a
+     * `rerankerService`: its provider and model with the candidates and the
+     * time it took, or `provider: 'none'` with the reason when no scores were
+     * applied. Absent when the manager holds no reranker.
+     */
+    reranker?: import('../retrieval/recall/capture.js').MemoryRecallReranker;
+    /**
+     * Set by `CognitiveMemoryManager`: each returned trace's dense rank from
+     * before any rerank, the dense leg's time, and the reranker's own scores,
+     * which the recall capture reports.
+     */
+    recall?: import('../retrieval/recall/capture.js').RetrievalRecallReport;
   };
 }
 
@@ -627,6 +643,14 @@ export interface AssembledMemoryContext {
    * it out.
    */
   lineOutcomes?: AssembledLineOutcome[];
+  /**
+   * The recall capture of this assembly: every candidate with its ranks,
+   * scores and outcome, the legs, the reranker, the budget and the timings,
+   * with no memory text and no query text. `CognitiveMemoryManager` sets it
+   * unless its `recall.capture` is `'off'`; a memory manager that builds its
+   * context another way may leave it out.
+   */
+  capture?: import('../retrieval/recall/capture.js').MemoryRecallCapture;
 }
 
 // ---------------------------------------------------------------------------

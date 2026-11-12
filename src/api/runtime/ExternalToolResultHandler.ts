@@ -42,7 +42,7 @@ import { refusedToolCallResult } from '../../cognition/substrate/toolCallGate';
 import type { GuardrailToolCallGate } from '../../safety/guardrails/guardrailDispatcher';
 import { gmiToolCallGateFor } from './toolCallGate';
 import { externalToolPauseCalls } from './externalToolPause';
-import { addReplyToConversation, finalResponseFieldsOf } from './turnFinalResponse';
+import { addReplyToConversation, finalResponseFieldsOf, keepPausedMemoryRecall, memoryRecallFieldOf } from './turnFinalResponse';
 import { GMIError, GMIErrorCode } from '../../core/utils/errors.js';
 import { snapshotPersonaDetails } from '../../orchestration/turn-planner/helpers';
 import {
@@ -74,6 +74,11 @@ export interface ActiveStreamContext {
    * unset while it announced none. A continuation of the turn gives them to a GMI that does not hold them.
    */
   ragSources?: RagRetrievedChunk[];
+  /**
+   * The recall capture the stream announced for its turn (`METADATA_UPDATE.updates.memorySources`): the continuation's
+   * FINAL_RESPONSE carries it as `memoryRecall`, as the turn's would have. A resumed stream announced none.
+   */
+  streamedMemoryRecall?: import('../../cognition/memory/retrieval/recall/capture.js').MemoryRecallCapture;
   /**
    * The GMI's own history of the paused turn's conversation, with the pause's calls, read when the turn (or a
    * continuation) stopped for the host: the GMI's whole history while it held that conversation alone, and otherwise
@@ -786,6 +791,7 @@ export class ExternalToolResultHandler {
           // calls a final output lists, which the GMI ran or refused itself, end the turn with the final response.
           const pauseCalls = externalToolPauseCalls(gmiOutputAfterTool);
           if (pauseCalls) {
+            keepPausedMemoryRecall(gmiOutputAfterTool, streamContext);
             await this.persistPendingExternalToolRequest(
               agentOSStreamId,
               streamContext,
@@ -836,6 +842,7 @@ export class ExternalToolResultHandler {
               true,
               {
                 ...finalResponseFieldsOf(gmiOutputAfterTool),
+                ...memoryRecallFieldOf(gmiOutputAfterTool, streamContext),
                 updatedConversationContext: conversationContext.toJSON(),
                 activePersonaDetails: snapshotPersonaDetails(gmi.getPersona?.()),
               },

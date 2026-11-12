@@ -97,9 +97,11 @@ export class LlmJudgeReranker implements IRerankerProvider {
    * scored document: the ones the ranking names, in its order (an id it repeats once, an id it was not given passed
    * over), then the rest by score, the input order breaking a tie. When the ranking call fails, runs past the
    * timeout or does not answer a JSON array, the scores order them all. With `topN` the answer is cut to that many.
-   * `relevanceScore` is `1 - i / n` for the answer's `i`-th document (from 0) of `n`.
+   * `relevanceScore` is `1 - i / n` for the answer's `i`-th document (from 0) of `n`. The diagnostics name this
+   * provider (`llm-judge`), `rankingModel` (else `''`) and the documents it scored.
    */
   async rerank(input: RerankerInput, config: RerankerRequestConfig): Promise<RerankerOutput> {
+    const startedAt = Date.now();
     const timeoutMs = config.timeoutMs ?? this.timeoutMs;
     const documents = input.documents.slice(0, this.maxPointwiseDocuments);
 
@@ -130,6 +132,13 @@ export class LlmJudgeReranker implements IRerankerProvider {
         originalScore: doc.originalScore,
         metadata: doc.metadata,
       })),
+      // The ranking model ordered the answer; without one llmCallFn picked a model the judge cannot name.
+      diagnostics: {
+        modelId: this.rankingModel ?? '',
+        providerId: this.providerId,
+        latencyMs: Date.now() - startedAt,
+        documentsProcessed: documents.length,
+      },
     };
   }
 

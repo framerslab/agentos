@@ -70,7 +70,7 @@ import { GMIChunkTransformer } from './GMIChunkTransformer';
 import { TurnExecutionPipeline } from './TurnExecutionPipeline';
 import { gmiToolCallGateFor } from './toolCallGate';
 import { externalToolPauseCalls, streamedRequestForPause, streamsActionableToolCalls } from './externalToolPause';
-import { addReplyToConversation, finalResponseFieldsOf } from './turnFinalResponse';
+import { addReplyToConversation, finalResponseFieldsOf, keepPausedMemoryRecall, memoryRecallFieldOf } from './turnFinalResponse';
 
 // Public config types extracted to types/OrchestratorConfig.ts
 export type {
@@ -224,6 +224,8 @@ interface ActiveStreamContext {
   languageNegotiation?: any; // multilingual negotiation metadata
   /** The sources the stream's turn retrieved, as the stream announced them; a continuation of the turn reads them. */
   ragSources?: import('../../cognition/rag/IRetrievalAugmentor.js').RagRetrievedChunk[];
+  /** The recall capture the stream announced for its turn; the turn's FINAL_RESPONSE (or its continuation's) carries it. */
+  streamedMemoryRecall?: import('../../cognition/memory/retrieval/recall/capture.js').MemoryRecallCapture;
   // Iterator is managed within the orchestrateTurn method directly
 }
 
@@ -950,6 +952,8 @@ export class AgentOSOrchestrator {
       const pauseCalls = externalToolPauseCalls(finalGMIStateForResponse);
       if (pauseCalls) {
         keepStreamContextActive = true;
+        // The continuation's FINAL_RESPONSE carries the record of the hop that served this output.
+        keepPausedMemoryRecall(finalGMIStateForResponse, streamContext);
 
         if (conversationContext) {
           await this.toolResultHandler.persistPendingExternalToolRequest(
@@ -1137,6 +1141,7 @@ export class AgentOSOrchestrator {
         {
           // built from the output as a continuation's final response is
           ...finalResponseFieldsOf(finalGMIStateForResponse),
+          ...memoryRecallFieldOf(finalGMIStateForResponse, streamContext),
           updatedConversationContext: conversationContext
             ? conversationContext.toJSON()
             : undefined,

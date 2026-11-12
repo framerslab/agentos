@@ -9,6 +9,7 @@ import { MessageRole } from '../../core/conversation/ConversationMessage';
 import type { GMIOutput } from '../../cognition/substrate/IGMI';
 import { normalizeUsage } from '../../orchestration/turn-planner/helpers';
 import type { AgentOSFinalResponseChunk } from '../types/AgentOSResponse';
+import type { MemoryRecallCapture } from '../../cognition/memory/retrieval/recall/capture.js';
 
 /**
  * The plain text of a Markdown reply, for voice output and logs: fenced and inline code keep their text, links and
@@ -86,6 +87,37 @@ export function finalResponseFieldsOf(output: GMIOutput): FinalResponseOutputFie
     ragSources: output.ragSources,
     ...(output.structuredOutput ? { structured: output.structuredOutput } : {}),
   };
+}
+
+/**
+ * The `FINAL_RESPONSE`'s `memoryRecall`, set only when the stream announced its turn's recall capture (a
+ * `METADATA_UPDATE` with `memorySources`, sent only when the memory manager's `recall.capture` is
+ * `'metadata+stream'`): the output's capture, else the stream's, so a continuation, whose GMI retrieves nothing, ends
+ * with the record of the output that stopped for the host ({@link keepPausedMemoryRecall}), else the announced one. A host that did not ask for the capture on the
+ * stream finds it on neither.
+ *
+ * @param output - The GMI's output that ends the turn or the continuation.
+ * @param stream - The turn's stream, which holds the capture it announced.
+ */
+export function memoryRecallFieldOf(
+  output: GMIOutput,
+  stream: { streamedMemoryRecall?: MemoryRecallCapture },
+): Pick<AgentOSFinalResponseChunk, 'memoryRecall'> {
+  const announced = stream.streamedMemoryRecall;
+  return announced ? { memoryRecall: output.memoryRecall ?? announced } : {};
+}
+
+/**
+ * Keeps, when a turn or a continuation stops for the host's tools, the recall capture of the output that stopped it
+ * (the record of the model hop that served it, with that hop's `budget` and `delivery`) in place of the one the stream
+ * announced, so the continuation, whose GMI retrieves nothing and returns no capture, ends with the serving hop's
+ * record. Only a stream that announced a capture keeps one; an output without a capture leaves the stream's as it is.
+ *
+ * @param output - The GMI's output that stops for the host.
+ * @param stream - The turn's stream, which holds the capture it announced.
+ */
+export function keepPausedMemoryRecall(output: GMIOutput, stream: { streamedMemoryRecall?: MemoryRecallCapture }): void {
+  if (stream.streamedMemoryRecall && output.memoryRecall) stream.streamedMemoryRecall = output.memoryRecall;
 }
 
 /**

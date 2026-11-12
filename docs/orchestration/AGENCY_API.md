@@ -455,7 +455,7 @@ Per call, a pooled agency rejects `model`, `provider`, `apiKey`, `baseUrl`,
 `AgencyConfigError`, since each would move every seat off its seating. Under
 `panel` a call accepts only `temperature`, `topP`, `frequencyPenalty`,
 `presencePenalty`, `maxTokens`, `thinking`, `effort`, `requestTimeout`,
-`cache`, `promptCacheKey`, `promptCacheRetention`, `serviceTier`,
+`cache`, `promptCacheKey`, `promptCacheRetention`, `serviceTier`, `store`,
 `cacheDiagnostics`, `sessionId`, `usageLedger`, `source`, `toolChoice`,
 `chainOfThought`, `planning`, `onAfterGeneration`, `onBeforeToolExecution`,
 `customModelParams` (without `model`, `models`, `system`, `messages`, `tools`,
@@ -1124,7 +1124,7 @@ roster, and a member can carry a `soul` file the same way.
 import { agent, agency, type AgentMemoryProvider } from '@framers/agentos';
 
 const myMemory: AgentMemoryProvider = {
-  getContext: async (text) => ({ contextText: await lookupNotes(text) }),   // injected as a system message before the call
+  getContext: async (text) => ({ contextText: await lookupNotes(text) }),   // sent as a data block before the turn's message
   observe: async (turn) => { await saveNotes(turn); },                       // runs after the reply
 };
 

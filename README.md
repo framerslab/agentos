@@ -17,6 +17,8 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.4+-3178c6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![License](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fregistry.npmjs.org%2F%40framers%2Fagentos%2Flatest&query=%24.license&label=license&color=blue&style=flat-square)](https://github.com/framerslab/agentos/blob/master/LICENSE)
 [![NVIDIA Inception](https://img.shields.io/badge/NVIDIA_Inception-Member-76B900?style=flat-square&logo=nvidia&logoColor=white)](https://www.nvidia.com/en-us/startups/)
+[![LongMemEval-S](https://img.shields.io/badge/LongMemEval--S-85.6%25-2ea043?style=flat-square)](https://docs.agentos.sh/blog/2026/04/27/longmemeval-s-83-with-semantic-embedder)
+[![LongMemEval-M](https://img.shields.io/badge/LongMemEval--M-70.2%25-2ea043?style=flat-square)](https://docs.agentos.sh/blog/2026/04/29/longmemeval-m-70-with-topk5)
 [![agentos-bench](https://img.shields.io/badge/bench-public-blue?style=flat-square)](https://github.com/framerslab/agentos-bench)
 [![Discord](https://img.shields.io/badge/Discord-Join%20Us-5865F2?style=flat-square&logo=discord)](https://wilds.ai/discord)
 
@@ -28,7 +30,7 @@
 
 AgentOS is an open-source TypeScript framework for AI agents that **remember, adapt, and write their own tools**.
 
-- **Public memory benchmarks:** the LongMemEval-S and LongMemEval-M results are being re-run without a remote reranker, in the public [agentos-bench](https://github.com/framerslab/agentos-bench) harness.
+- **Top open-source memory benchmarks:** [85.6% on LongMemEval-S](https://github.com/framerslab/agentos-bench/blob/master/results/LEADERBOARD.md) at $0.0090/correct (`gpt-4o` and `gpt-5-mini` readers, routed per question type), and 70.2% on LongMemEval-M, the only open-source library above 65% on M with reproducible methodology.
 - **Runtime tool forging.** An agent writes a JavaScript function with JSON Schemas for its input and output, the declared test cases run it, an LLM judge reviews the result, and on approval the tool joins the session's tool list. Forged code runs in an in-process `node:vm` context or, with `QuickJSExecutor`, in a QuickJS WebAssembly instance of its own for each call.
 - **Persistent [cognitive memory](https://docs.agentos.sh/features/cognitive-memory)** with Ebbinghaus decay and 8 neuroscience-backed mechanisms, among them retrieval-induced forgetting, reconsolidation and source-confidence decay.
 - **Optional [HEXACO personality](https://docs.agentos.sh/features/hexaco-personality)**, [7 orchestration strategies](https://docs.agentos.sh/features/agency-collaboration), [guardrails](https://docs.agentos.sh/features/guardrails-architecture), and [voice](https://docs.agentos.sh/features/voice-pipeline) across **13 LLM providers**; 100+ extensions and 88 skills ship as separate packages with registries that load them.
@@ -79,7 +81,7 @@ Three things accumulate across a session and compose into behavior: **memory** (
 
 **HEXACO personality (optional).** Off by default. `agent()` writes the trait values into the system prompt as directives, one for each trait above 0.65 or below 0.35. A cognitive memory manager given the same traits scales its encoding and seven of its eight mechanisms by them, and an `AgentGraph` branches on a trait with `addPersonalityEdge()`. [HEXACO docs ->](https://docs.agentos.sh/features/hexaco-personality)
 
-**Soul files.** Identity, voice, hard limits, and HEXACO scores can live in a `SOUL.md` workspace. Its `memory/` directory is a markdown wiki (an `index.md` catalog plus `entities/`, `concepts/`, `log/` pages with `[[wikilinks]]`) that *is* the agent's long-term memory: markdown is the source of truth, the vector/graph index is rebuilt from it, and [`souledAgent()`](https://docs.agentos.sh/getting-started/high-level-api) wires it end to end. [Soul Files ->](https://docs.agentos.sh/features/soul-files)
+**Soul files.** An agent's identity, writing style, hard limits and HEXACO scores can live in a `SOUL.md` workspace. Every way of building an agent applies the identity and the hard limits: the hard limits close the system prompt, and the soul's `agentId` is the agent's one id. With `systemBlocks`, the soul's prose and style are left out and its hard limits still close the prompt. Its `memory/` directory holds the operator's markdown wiki (an `index.md` catalog plus `entities/`, `concepts/`, `log/` pages with `[[wikilinks]]`), shared by everyone the agent talks with. A souled agent's conversation memory is kept per user (the session's `userId`, else the session) in a store beside it, and compiled into that user's own pages; [`souledAgent()`](https://docs.agentos.sh/getting-started/high-level-api) wires it end to end. [Soul Files ->](https://docs.agentos.sh/features/soul-files)
 
 ```ts
 import { souledAgent } from '@framers/agentos';
@@ -135,9 +137,12 @@ await session.send('Explain recursion with an analogy.');
 
 ## Memory Benchmarks
 
-The LongMemEval-S and LongMemEval-M results are being re-run without a remote reranker. New figures appear here when those runs finish. The harness and its methodology are public in [agentos-bench](https://github.com/framerslab/agentos-bench).
+Both headline results use a per-category reader router (`gpt-4o` answers temporal-reasoning and single-session-user questions, `gpt-5-mini` the other four types), with the `gpt-4o-2024-08-06` judge, full N=500, single-CLI reproduction with bootstrap 95% CIs and per-benchmark judge-FPR probes.
 
-[Transparency audit ->](https://agentos.sh/en/blog/memory-benchmark-transparency-audit/) * [LongMemEval paper](https://arxiv.org/abs/2410.10813) (Wu et al., ICLR 2025)
+- **LongMemEval-S: 85.6%** at $0.0090/correct, 3,558 ms p50. With `gpt-4o` reading every question, the same retrieval scores 84.2%, level with Mastra OM with a `gpt-4o` actor (84.23%; Mastra uses `gemini-2.5-flash` as its observer and reflector); Mastra OM reports 94.87% with a `gpt-5-mini` actor. Full table and methodology: [LEADERBOARD.md](https://github.com/framerslab/agentos-bench/blob/master/results/LEADERBOARD.md).
+- **LongMemEval-M: 70.2%** (1.5M-token haystacks, 500 sessions): the only open-source library above 65% on M with reproducible methodology.
+
+[Full leaderboard ->](https://github.com/framerslab/agentos-bench/blob/master/results/LEADERBOARD.md) * [Transparency audit ->](https://agentos.sh/en/blog/memory-benchmark-transparency-audit/) * [LongMemEval paper](https://arxiv.org/abs/2410.10813) (Wu et al., ICLR 2025)
 
 ---
 
@@ -147,7 +152,7 @@ The LongMemEval-S and LongMemEval-M results are being re-run without a remote re
 |---|---|
 | **LangChain / LangGraph** | Cognitive memory ([8 neuroscience-backed mechanisms](https://docs.agentos.sh/features/cognitive-memory)), HEXACO personality, runtime tool forging |
 | **Vercel AI SDK** | Multi-agent teams (7 strategies), 7 vector backends, [guardrails](https://docs.agentos.sh/features/guardrails-architecture), voice/telephony, [zero-config prompt caching](https://docs.agentos.sh/features/prompt-caching) |
-| **CrewAI / Mastra** | Unified orchestration (DAGs + graphs + missions), personality-driven routing, **a public LongMemEval benchmark harness with full methodology disclosure** |
+| **CrewAI / Mastra** | Unified orchestration (DAGs + graphs + missions), personality-driven routing, **published reproducible numbers on LongMemEval-S (85.6%) and LongMemEval-M (70.2%) with full methodology disclosure** |
 
 [Full framework comparison ->](https://docs.agentos.sh/blog/2026/02/20/agentos-vs-langgraph-vs-crewai)
 
@@ -243,7 +248,7 @@ Provider fallback is on by default for `generateText()`, `streamText()`, `agent(
 - **[Library Index](https://docs.agentos.sh/features/library-index)**: sources over any vector store, and a browser entry for a page's own search and records, transcript files from other notetakers (SubRip, WebVTT, Otter, Fireflies, Word) read to turns with the speakers kept apart, and the plan of an archive's entries
 - **[Text Processing & Search](https://docs.agentos.sh/text)**: tokenizers and stemming, BM25, fuzzy and hybrid search, text statistics, chunking, reranking
 - **[Reranking](https://docs.agentos.sh/text/reranking)**: one `RerankerService` over a local Transformers.js cross-encoder (scoring stays in the process), Cohere's rerank API, an LLM judge on any model your function calls, or a provider of your own
-- **[Guardrails](https://docs.agentos.sh/features/guardrails-architecture)**: two-phase dispatcher, four verdicts, fail-open and fail-closed guards
+- **[Guardrails](https://docs.agentos.sh/features/guardrails-architecture)**: two-phase dispatcher, four verdicts, a hold on a BLOCK that keeps content back for a person's review, fail-open and fail-closed guards
 - **[Voice Pipeline](https://docs.agentos.sh/features/voice-pipeline)**: TTS, STT, telephony
 - **[Blog](https://docs.agentos.sh/blog)**: engineering posts, benchmark publications, transparency audits
 - **[Discord](https://wilds.ai/discord)** * **[GitHub Issues](https://github.com/framerslab/agentos/issues)** * **[Wilds.ai](https://wilds.ai)** (AI game worlds powered by AgentOS)

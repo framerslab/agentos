@@ -11,6 +11,10 @@
  * @module agentos/core/logging/events
  */
 
+import { LISTED_ERROR_CODES, LISTED_ERROR_TYPES } from './listedErrors.js';
+
+export { LISTED_ERROR_CODES, LISTED_ERROR_TYPES };
+
 /** The kind of one field: an integer, a word, a path, or one of a declared list. */
 export type FieldKind = 'int' | 'word' | 'path' | { readonly enum: readonly string[] };
 
@@ -84,12 +88,60 @@ export const AGENTOS_EVENTS = {
   'llm.fallback_succeeded': fallback,
   'llm.fallback_failed_after_output': fallback,
   'llm.fallback_exhausted': { api, primaryProvider: provider, attempts: 'int', type: 'word', code: 'word' },
+  // At start, a soul's memory/ folder holds page files that are not the operator's: pages a compile of an earlier version wrote, or pages whose front matter cannot be read. They stay on disk and are in no index, no prompt and no recall.
+  'memory.legacy_pages': { count: 'int' },
+  // At open, a souled agent's store holds traces an earlier version filed under the agent's plain id. They stay in the store and no turn reads them.
+  'memory.legacy_traces': { count: 'int' },
+  // A one-shot generate() or stream() on a souled agent names no user: nothing is filed for it and it recalls the operator's pages alone. Written once an agent.
+  'memory.one_shot_unfiled': {},
+  // A scope's wiki compile did not run in a compile call: a spend budget refused its model call, the account's memory policy keeps raw traces only, the screen hook failed or had no turn of the scope to run for, or the agent compiles no wiki at all. The scope's traces wait for a later compile. Written once a reason a call, with no scope.
+  'memory.compile_skipped': { reason: { enum: ['budget', 'policy_raw', 'compile_off', 'screen_failed'] } },
+  // A souled agent did not file a turn's text, or left a trace out of a compile: the account's memory policy keeps no memory (said once a session), the policy hook failed, the screen hook dropped the text, or the screen hook failed.
+  'memory.write_refused': { reason: { enum: ['policy_off', 'policy_failed', 'screened', 'screen_failed'] } },
+  // read_memory_page answered a page as not found, or a call as invalid, for a page the asker may not read: another subject's page, a user's page asked with no user, a page an earlier version compiled asked by a user, or a call that named a scope or a user.
+  'memory.page_read_refused': { reason: { enum: ['other_user', 'no_user', 'legacy', 'caller_filter'] } },
   // A translation failed, answered with no text, ran past the transcript translator's own timeout, stopped at its output cap or stopped for another reason (a content filter); it throws TranslationProviderError, and status is 0 when no HTTP status came back.
   'language.translation_failed': { provider: { enum: ['openai', 'deepl'] }, reason: { enum: ['request_failed', 'empty_output', 'timeout', 'truncated', 'incomplete'] }, status: 'int', type: 'word', code: 'word' },
   // A configured detection provider id LanguageService does not build (whisper_stub, or an id it does not know).
   'language.detector_unsupported': { detector: 'word' },
   // A detection provider threw; LanguageService goes on with the others.
   'language.detection_failed': { detector: 'word', type: 'word', code: 'word' },
+  // A guard threw, timed out or answered no recognised action. No guard text and no error message is ever a field.
+  'guardrail.failed': { guardrailId: 'word', stage: { enum: ['input', 'output', 'tool_call'] }, posture: { enum: ['open', 'closed'] }, cause: { enum: ['error', 'timeout', 'malformed'] }, type: 'word', code: 'word' },
+  // A SANITIZE the dispatcher could not apply: a phase 2 answer became a FLAG, a tool call's a BLOCK.
+  'guardrail.sanitize_downgraded': { guardrailId: 'word', stage: { enum: ['input', 'output', 'tool_call'] } },
+  // A hold came with an action other than BLOCK and was ignored; written once per guard.
+  'guardrail.hold_ignored': { guardrailId: 'word', stage: { enum: ['input', 'output', 'tool_call'] } },
+  // An onVerdict callback threw; the verdict stands.
+  'guardrail.verdict_callback_failed': { type: 'word', code: 'word' },
+  // A moderation entry point decided something other than allow. The code is written only when the deciding guard
+  // lists it in config.reasonCodes or the library made it for a closed guard's failure; never for an allow.
+  'guardrail.verdict': { guardrailId: 'word', stage: { enum: ['input', 'output', 'tool_call'] }, action: { enum: ['flag', 'sanitize', 'hold', 'block'] }, code: 'word', surface: 'word', mode: { enum: ['enforce', 'dry_run'] }, unavailable: { enum: ['yes', 'no'] } },
+  // An image check threw, or an image could not be captured (checkId: load). Never the image, its URL or an error's message.
+  'image_guard.check_failed': { guardrailId: 'word', checkId: 'word', posture: { enum: ['refuse', 'skip'] }, type: 'word', code: 'word' },
+  // A soul given `optional: true` failed to load; the agent runs without it.
+  'soul.load_failed': { optional: { enum: ['yes'] }, type: 'word', code: 'word' },
+  // gmi() left out a front matter field that path cannot apply.
+  'soul.field_ignored': { field: { enum: ['voice', 'avatar'] } },
+  // A gmi() agent's learners stay under the slug of its name: the learning store holds learner rows under it and none under the soul's id.
+  'soul.id_fallback': { reason: { enum: ['old_slug_learner'] } },
+  // A session was opened with an anonymous id as its user id; the session is the memory subject.
+  'memory.anonymous_user': { path: { enum: ['plain', 'gmi'] } },
+  // A host's memory hook threw, rejected or timed out; the turn went on without it.
+  'memory.hook_failed': { hook: { enum: ['getContext', 'observe', 'memoryPolicy', 'screen'] }, type: 'word', code: 'word' },
+  // Cognitive memory's recall (src/cognition/memory/retrieval/recall). No memory text, query text or id is ever a field.
+  'memory.recall.leg_absent': { leg: { enum: ['dense', 'exact_words', 'recency'] }, reason: { enum: ['no_store', 'no_embedder', 'no_index', 'no_scope_filter', 'query_error', 'disabled'] } },
+  'memory.recall.rerank_skipped': { provider: { enum: ['local', 'llm'] }, reason: { enum: ['loading', 'timeout', 'error', 'backoff'] } },
+  'memory.recall.rerank_unavailable': { provider: { enum: ['local'] }, reason: { enum: ['missing_dependency', 'load_failed'] } },
+  'memory.recall.budget_clamped': { requested: 'int', effective: 'int', hop: 'int', reason: { enum: ['prompt_share', 'zero_remaining', 'invalid'] } },
+  'memory.recall.allocation_exhausted': { requested: 'int', candidates: 'int' },
+  // A recall-related option that was set and is applied nowhere (`token_budget`: memoryProviderOptions.tokenBudget on a GMI agent whose cognitive memory supplies the block; `recall_budget`: memory.recall.budget.totalTokens with neither cognitive memory nor a memoryProvider.getContext; `memory_recall`: the agent's memory.recall beside a cognition.memory of its own).
+  'memory.recall.option_ignored': { option: { enum: ['token_budget', 'recall_budget', 'memory_recall', 'remote_provider'] } },
+  // A `memory.recall` setting refused at construction, before the throw; `option` is the field under `memory.recall`.
+  'memory.recall.option_rejected': { option: 'word', reason: { enum: ['conflict', 'unsupported_provider', 'unsupported_runtime', 'invalid_value'] } },
+  'memory.recall.reserve_fired': { added: 'int' },
+  'memory.recall.supplied_rejected': { out_of_scope: 'int', ineligible: 'int' },
+  'memory.recall.rerank_failed_scoring': { provider: { enum: ['local', 'llm'] }, failures: 'int' },
 } as const satisfies EventMap;
 
 /** The type of {@link AGENTOS_EVENTS}, which `lazyLogger`'s handles are typed over. */
@@ -174,26 +226,36 @@ function fieldWord(value: unknown, key: 'type' | 'code'): string {
   return valid('word', value, key) ? value as string : 'unknown';
 }
 
+const TYPEOF_WORDS: ReadonlySet<string> = new Set(['undefined', 'object', 'boolean', 'number', 'bigint', 'string', 'symbol', 'function']);
+
 /**
- * The fields an error is written as: its type and its code, never its message or its stack.
- * Either is `unknown` when it is not a valid word. A class name ending in `Error` or
- * `Exception` and an upper-case constant code such as `STREAM_PARSING_ERROR` are kept at any
- * length up to 64 characters, while a value with the shape of a credential is still `unknown`.
- * Reading the error never throws: a property whose getter throws is written as `unknown`.
+ * The fields an error is written as: `type`, its `name` when it is in {@link LISTED_ERROR_TYPES} (or the value's
+ * `typeof` when it is not an `Error`), and `code`, its `code` when it is in {@link LISTED_ERROR_CODES}. Anything
+ * else, and an error with no code, is `unknown`: a name or a code is set by whoever threw the error, so one that only
+ * has the right shape is never written. Never the message or the stack. Reading never throws.
  *
  * @param error - The caught value.
- * @returns `type`, the error's name (or the value's `typeof` when it is not an `Error`), and `code`, its `code` property.
+ * @returns The listed type and code, or `unknown` for each.
+ */
+export function listedErrorFields(error: unknown): { type: string; code: string } {
+  const named = read(() => (error instanceof Error ? { name: error.name as unknown, isError: true } : { name: typeof error as unknown, isError: false })) as { name: unknown; isError: boolean } | undefined;
+  const code = read(() => (typeof error === 'object' && error !== null ? (error as Record<string, unknown>).code : undefined));
+  const type = named !== undefined && typeof named.name === 'string' && (named.isError ? LISTED_ERROR_TYPES.has(named.name) : TYPEOF_WORDS.has(named.name)) ? named.name : 'unknown';
+  return {
+    type: fieldWord(type, 'type'),
+    code: typeof code === 'string' && LISTED_ERROR_CODES.has(code) ? fieldWord(code, 'code') : 'unknown',
+  };
+}
+
+/**
+ * Kept as a name for deep imports (`@framers/agentos/core/logging/events`). It returns {@link listedErrorFields}'s
+ * answer.
  *
- * @example
- * ```ts
- * errorFields(Object.assign(new Error('text that is never written'), { code: 'ECONNRESET' }));
- * // { type: 'Error', code: 'ECONNRESET' }
- * ```
+ * @param error - The caught value.
+ * @returns The listed type and code, or `unknown` for each.
  */
 export function errorFields(error: unknown): { type: string; code: string } {
-  const type = read(() => (error instanceof Error ? error.name : typeof error));
-  const code = read(() => (typeof error === 'object' && error !== null ? (error as Record<string, unknown>).code : undefined));
-  return { type: fieldWord(type, 'type'), code: fieldWord(code, 'code') };
+  return listedErrorFields(error);
 }
 
 /**

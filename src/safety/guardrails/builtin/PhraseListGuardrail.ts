@@ -83,6 +83,12 @@ export interface PhraseListGuardrailOptions {
   replacementFor?(ruleId: string): string | undefined;
   /** The deadline for one evaluation, judge included. Default 8 seconds. */
   timeoutMs?: number;
+  /**
+   * Run the list in phase 1, before every phase 2 guard: a text it blocks reaches none of them. Phase 1 runs in
+   * registration order, so register the list ahead of any sanitizer that calls a vendor. A list with `judge` entries
+   * still calls its judge's model from inside the screen. Default false.
+   */
+  sequential?: boolean;
   /** Replaces the built-in normalisation. */
   normalize?(text: string): string;
 }
@@ -168,7 +174,7 @@ export class PhraseListGuardrail implements IGuardrailService {
 
   private constructor(private readonly opts: PhraseListGuardrailOptions) {
     this.id = opts.id;
-    this.config = { failClosed: true, timeoutMs: opts.timeoutMs ?? 8_000, canSanitize: false, evaluateStreamingChunks: false };
+    this.config = { failClosed: true, timeoutMs: opts.timeoutMs ?? 8_000, canSanitize: false, evaluateStreamingChunks: false, ...(opts.sequential === true ? { sequential: true } : {}) };
     this.normalize = opts.normalize ?? normalizePhraseText;
     this.stages = [...(opts.stages ?? ['input', 'output'])];
     this.stageSet = new Set(this.stages);
@@ -202,6 +208,8 @@ export class PhraseListGuardrail implements IGuardrailService {
     // the swap happens only once the whole list compiled
     this.compiled = compiled;
     this.loaded = snapshot;
+    // every code this guard can answer: the rule ids of the list it holds now
+    (this.config as { reasonCodes?: readonly string[] }).reasonCodes = Object.freeze([...new Set(snapshot.entries.map((e) => e.ruleId ?? 'PHRASE_LIST'))]);
   }
 
   async evaluateInput({ input, context }: GuardrailInputPayload): Promise<GuardrailEvaluationResult | null> {

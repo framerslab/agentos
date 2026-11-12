@@ -32,6 +32,14 @@ const persona: IPersonaDefinition = {
   baseSystemPrompt: 'You review pull requests.',
   personalityTraits: { honesty: 0.9, extraversion: 0.5 },
 };
+/** A persona with no traits. */
+const traitless: IPersonaDefinition = {
+  id: 'plain-reviewer',
+  name: 'Plain reviewer',
+  description: 'A persona without traits.',
+  version: '1.0.0',
+  baseSystemPrompt: 'You review pull requests.',
+};
 const turn = (over: Partial<TurnInputForLearning> = {}): TurnInputForLearning => ({
   turnId: 't',
   userId: 'user-1',
@@ -47,8 +55,8 @@ const managers: GMIManager[] = [];
 async function managerWith(learningLayer?: ILearningLayer, extra: Partial<GMIManagerConfig> = {}): Promise<GMIManager> {
   const personaLoader: IPersonaLoader = {
     initialize: async () => undefined,
-    loadPersonaById: async (id: string) => (id === persona.id ? persona : undefined),
-    loadAllPersonaDefinitions: async () => [persona],
+    loadPersonaById: async (id: string) => [persona, traitless].find((known) => known.id === id),
+    loadAllPersonaDefinitions: async () => [persona, traitless],
   };
   const conversationManager = {
     getOrCreateConversationContext: async () => new ConversationContext('conv-1'),
@@ -429,5 +437,17 @@ describe('a runtime without a learning layer', () => {
     const manager = await managerWith();
     const { gmi } = await manager.getOrCreateGMIForSession('user-1', 'session-1', persona.id, undefined, undefined, undefined, undefined, undefined, 'A');
     expect(gmi.getLearnerSession!()).toBeUndefined();
+  });
+
+  it("gives a persona's GMI its traits, which the GMI renders itself, and a persona with none no traits", async () => {
+    const initialize = vi.spyOn(GMI.prototype, 'initialize');
+    const manager = await managerWith();
+    await manager.getOrCreateGMIForSession('user-1', 'session-1', persona.id, undefined, undefined, undefined, undefined, undefined, 'A');
+    await manager.getOrCreateGMIForSession('user-1', 'session-2', traitless.id, undefined, undefined, undefined, undefined, undefined, 'A');
+    const [withTraits, without] = initialize.mock.calls.map(([, config]) => config);
+    expect(withTraits.personaTraits).toEqual({ authored: { honesty: 0.9, extraversion: 0.5 } });
+    expect(withTraits.learning).toBeUndefined();
+    expect(without.personaTraits).toBeUndefined();
+    expect(without.learning).toBeUndefined();
   });
 });

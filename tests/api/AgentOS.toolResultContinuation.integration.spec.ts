@@ -436,6 +436,58 @@ function hostToolGmi(continuation: GMIOutput = { isFinal: true, responseText: 'D
   };
 }
 
+/** A recall capture as a memory manager's assembly returns it: ids, ranks, scores, counts and timings. */
+const RECALL_CAPTURE = {
+  version: 'memory-recall-capture/1',
+  retrieval: 'dense',
+  budget: { requested: 1600, effective: 1600 },
+  tokensUsed: 120,
+  allocation: { workingMemory: 0.1, semanticRecall: 0.4, recentEpisodic: 0.25, prospectiveAlerts: 0.05, graphAssociations: 0.05, observationNotes: 0.05, persistentMemory: 0.1 },
+  legs: [{ leg: 'dense', ran: true, candidates: 1, ineligible: 0, ms: 2 }],
+  lexicalBackend: 'none',
+  reranker: { provider: 'none', reason: 'none_configured' },
+  memoryQuestionReserve: { fired: false, added: 0 },
+  candidates: [{ id: 'mt-notes', ranks: { dense: 1 }, fusedScore: 0.7, outcome: 'included', tokens: 20, section: 'semanticRecall' }],
+  timings: { legsMs: 2, fuseMs: 0, dedupeMs: 0, rerankMs: 0, assembleMs: 1, totalMs: 3 },
+};
+
+/** The record of the model hop that served the paused turn: the assembly's record with the hop's budget and delivery. */
+const HOP_RECALL_CAPTURE = {
+  ...RECALL_CAPTURE,
+  budget: { requested: 1600, effective: 1600, promptShareTokens: 25_600, otherContextTokens: 0, hop: 0 },
+  delivery: { memoryBlockTokens: 118 },
+};
+
+/**
+ * A GMI whose turn streams the assembly's recall capture first (as a GMI does when its memory manager's
+ * `recall.capture` is 'metadata+stream') when `announce` is set, returns the serving hop's record, and then stops for
+ * READ_CALL as `hostToolGmi` does; its continuation, like the shipped GMI's, retrieves nothing and returns no capture.
+ */
+function memoryRecallToolGmi(announce: boolean) {
+  return {
+    ...hostToolGmi(),
+    getGMIId: () => 'gmi-memory-recall',
+    processTurnStream: async function* (): AsyncGenerator<any, GMIOutput, undefined> {
+      if (announce) {
+        yield {
+          type: GMIOutputChunkType.MEMORY_SOURCES_AVAILABLE,
+          content: { memorySources: RECALL_CAPTURE },
+          interactionId: 'interaction-memory-recall',
+          timestamp: new Date(),
+        };
+      }
+      yield {
+        type: GMIOutputChunkType.TOOL_CALL_REQUEST,
+        content: [READ_CALL],
+        interactionId: 'interaction-memory-recall',
+        timestamp: new Date(),
+        metadata: { executionMode: 'external', requiresExternalToolResult: true },
+      };
+      return { isFinal: false, responseText: 'I need the notes file first.', toolCalls: [READ_CALL], memoryRecall: HOP_RECALL_CAPTURE as any };
+    },
+  };
+}
+
 /**
  * A GMI that runs LOOKUP_CALL itself, streaming it as a call the runtime runs, and then stops the user's turn for
  * READ_CALL without streaming that call.
@@ -1236,6 +1288,25 @@ describe('AgentOS tool-result continuations', () => {
     expect(final.finalResponseTextPlain).toBe('Standup moved to 10:00.');
     const stored = (final.updatedConversationContext as unknown as { messages: Array<{ role: string; content: unknown }> }).messages;
     expect(stored.at(-1)).toMatchObject({ role: 'assistant', content: reply });
+  });
+
+  it.each([
+    ['streamed its recall capture', 'conv-recall-streamed', true],
+    ['streamed no recall capture', 'conv-recall-quiet', false],
+  ])("a turn that %s and stopped for the host: the continuation's FINAL_RESPONSE carries the serving hop's record only when the stream announced a capture", async (_label, conversationId, announce) => {
+    const rt = await runtime(conversationId);
+    const { request } = await rt.pauseOnRead(memoryRecallToolGmi(announce) as unknown as ReturnType<typeof hostToolGmi>);
+
+    const continuation = await collect(
+      rt.agentos.handleToolResult(request.streamId, READ_CALL.id, READ_CALL.name, READ_RESULT.toolOutput, true),
+    );
+
+    const final = continuation.at(-1) as AgentOSFinalResponseChunk;
+    expect(final.type).toBe(AgentOSResponseChunkType.FINAL_RESPONSE);
+    expect(final.finalResponseText).toBe('Done.');
+    // The paused output's record, with the hop's budget and delivery, not the assembly's record the stream announced.
+    if (announce) expect(final.memoryRecall).toEqual(HOP_RECALL_CAPTURE);
+    else expect('memoryRecall' in final).toBe(false);
   });
 
   it('a turn ends with a FINAL_RESPONSE that holds the reply as plain text', async () => {

@@ -6,16 +6,18 @@ produce a plausible answer, then embeds *that* answer for vector search. The
 hypothesis is semantically closer to actual stored documents than a question is,
 yielding better recall.
 
-![HyDE retrieval flow: standard retrieval embeds the question directly (large embedding-space gap to answer-style documents); HyDE retrieval embeds an LLM-generated hypothetical answer instead (small gap); benchmark sidebar shows -1.9 points on LongMemEval-S and +1.0 point on LongMemEval-M](/img/diagrams/hyde-retrieval-flow.svg)
+![HyDE retrieval flow: standard retrieval embeds the question directly (large embedding-space gap to answer-style documents); HyDE retrieval embeds an LLM-generated hypothetical answer instead (small gap); benchmark sidebar shows -5.6 points on LongMemEval-S (54-case Phase A sample) and +1.0 point on LongMemEval-M](/img/diagrams/hyde-retrieval-flow.svg)
 
 **HyDE is opt-in (`enabled: false` by default).** The
 [`agentos-bench`](https://github.com/framerslab/agentos-bench) runs measured it
 both ways:
 
 - **LongMemEval-S (115K tokens, 50 sessions)**: the 85.6% headline
-  configuration runs with HyDE **off**. In a 54-case probe of the bench's
-  reader-router configuration, adding HyDE scored 83.3% against 85.2% without
-  it (-1.9 points).
+  configuration (N=500) runs with HyDE **off**. On that same configuration, a
+  Phase A sample (N=54 stratified, 9 cases per category) scores 85.2% with HyDE
+  off and 79.6% with it on (-5.6 points). On the earlier policy-router plus
+  reader-router configuration, the same Phase A sample scores 83.3% with HyDE
+  against that configuration's own 85.2% baseline (-1.9 points).
 - **LongMemEval-M (1.5M tokens, 500 sessions)**: the 70.2% headline
   configuration runs with HyDE **on**. The same run without HyDE scored 69.2%
   (-1.0 point, with overlapping confidence intervals) at an average of 35

@@ -3,11 +3,15 @@
  * The persona of a GMI built from agent options (`agent({ runtime: 'gmi' })`).
  *
  * The base system prompt is the text the legacy path sends: `buildSystemPrompt(opts)`
- * (or the joined `systemBlocks`). With the agent's `learning` option on, the
- * personality section is left out of it: a GMI given a learner session or the
- * persona's traits (`GMIBaseConfig.learning`, `GMIBaseConfig.personaTraits`), as
- * `gmi()` gives its GMIs both, sends that section as a system prompt of its own on
- * every turn. The chain-of-thought instruction is not part of
+ * (or the joined `systemBlocks`). Whenever the GMI renders the personality section
+ * itself, the section is left out of it: with the agent's `learning` option on, or
+ * for a persona that has traits, `gmi()` gives its GMIs the persona's traits
+ * (`GMIBaseConfig.personaTraits`, and with learning a learner session,
+ * `GMIBaseConfig.learning`), and the GMI sends that section as a system prompt of
+ * its own on every turn. With a soul, the persona carries the soul's fields through
+ * the loader's one mapping (`personaFieldsOf`): its id, role, traits, mood,
+ * reasoning-trace limits, hard limits and metadata; an option set in code wins for
+ * the name and the traits. The chain-of-thought instruction is not part of
  * it: `gmi()` puts it first in the system prompt of each model call that offers
  * tools, as `generateText` does. The completion options are the
  * ones `agent()` forwards on every call. Sentiment presets are expanded into
@@ -15,31 +19,21 @@
  * persona's `metaPrompts`.
  */
 import { createHash, randomUUID } from 'node:crypto';
-import { buildSystemPrompt, type AgentOptions } from '../agent.js';
+import { buildSystemPrompt, loadSoulFromOption, type AgentOptions } from '../agent.js';
 import { resolveModelOption } from '../model.js';
 import { normalizeHexacoTraits } from '../../cognition/substrate/personas/hexaco.js';
+import { stableIdOfName } from '../../cognition/substrate/personas/stableId.js';
 import { normalizePersonaDefinition } from '../../cognition/substrate/personas/personaNormalization.js';
 import type { IPersonaDefinition, SentimentTrackingConfig } from '../../cognition/substrate/personas/IPersonaDefinition.js';
+import { personaFieldsOf, soulAgentIdOf, type LoadedSoul } from '../../cognition/substrate/personas/SoulLoader.js';
+import { canonicalJson } from '../../cognition/learning/ledger/canonical.js';
 import type { ITool } from '../../core/tools/ITool.js';
 import type { ModelCompletionOptions } from '../../core/llm/providers/IProvider.js';
 import type { ResolvedCognition } from './gmiCognition.js';
+import { MEMORY_RECALL_SYSTEM_LINE } from './memoryDataBlock.js';
 
 /** The session store bounds history, so the GMI's own count window stays out of the way. */
 export const GMI_SESSION_MAX_HISTORY_MESSAGES = 100_000;
-
-/**
- * A stable persona id from the agent's name: a lowercase ASCII slug, or, for a
- * name with no Latin letters or digits, `agent-` and a hash of the name.
- */
-function personaIdFor(name: string): string {
-  const slug = name
-    .normalize('NFKD')
-    .replace(/[̀-ͯ]/g, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-  return slug || `agent-${createHash('sha256').update(name).digest('hex').slice(0, 12)}`;
-}
 
 /**
  * The persona id of a named agent, which is the same at every build (the slug of its name); `undefined` for an agent
@@ -48,7 +42,7 @@ function personaIdFor(name: string): string {
  */
 export function stablePersonaIdOf(opts: Pick<AgentOptions, 'name'>): string | undefined {
   const name = opts.name?.trim();
-  return name ? personaIdFor(name) : undefined;
+  return name ? stableIdOfName(name) : undefined;
 }
 
 /**
@@ -74,38 +68,100 @@ function completionOptionsOf(opts: AgentOptions): Partial<ModelCompletionOptions
 }
 
 /**
- * The persona's base prompt. With learning on, the personality section stays out of it, so the section the GMI
- * sends each turn appears once; `systemBlocks` never carry one.
+ * The `learning.agentKey` the host set, trimmed; undefined when `learning` is not a config or the key is unset or blank.
+ * It names the persona of an agent whose soul gives no id, and of an unnamed agent with no soul, so the memory that
+ * files under the persona id keeps the host's key across builds.
  */
-function basePrompt(opts: AgentOptions, learningOn: boolean): string {
-  if (opts.systemBlocks) return opts.systemBlocks.map((block) => block.text).filter(Boolean).join('\n\n');
-  return buildSystemPrompt(learningOn ? { ...opts, personality: undefined } : opts) ?? '';
+function hostAgentKeyOf(opts: Pick<AgentOptions, 'learning'>): string | undefined {
+  const learning = opts.learning;
+  if (!learning || typeof learning !== 'object') return undefined;
+  const key = typeof learning.agentKey === 'string' ? learning.agentKey.trim() : '';
+  return key || undefined;
+}
+
+/**
+ * The persona id of a soul that gives no id (no `agentId`, no `name`, on an agent with no name and no
+ * `learning.agentKey`): `soul-` and the first 16 hex characters of SHA-256 over the canonical JSON of its front matter
+ * and body. The same at every build of the same soul; it changes with the soul's text. It is never a learner or brain
+ * key (`memory.store` refuses such a soul without `learning.agentKey`, and with one the key names the persona), but
+ * in-process cognitive memory files the persona and owner scopes under the persona id, so editing such a soul starts
+ * those scopes afresh; set `agentId` or `learning.agentKey` to keep them.
+ */
+export function derivedSoulPersonaId(soul: Pick<LoadedSoul, 'frontmatter' | 'soulContent'>): string {
+  return `soul-${createHash('sha256').update(canonicalJson([soul.frontmatter, soul.soulContent])).digest('hex').slice(0, 16)}`;
+}
+
+/**
+ * The agent's stable id: with a soul, the soul's id rule (`soulAgentIdOf`); with none, a named agent's id. Undefined
+ * for an agent that has neither.
+ */
+export function agentStableIdOf(opts: Partial<AgentOptions>, soul: LoadedSoul | null | undefined): string | undefined {
+  return soul ? soulAgentIdOf(soul.frontmatter, opts.name) : stablePersonaIdOf(opts);
+}
+
+/**
+ * The persona's base prompt. The personality section stays out of it whenever the GMI renders one itself (learning
+ * on, or a persona with traits), so the section appears once; `systemBlocks` never carry one. With a `memoryProvider`
+ * that recalls, its last line is the one that explains the recall block.
+ *
+ * @param soul - The soul loaded from `opts.soul`, or `null` for none.
+ */
+function basePrompt(opts: AgentOptions, leaveOutPersonality: boolean, soul: LoadedSoul | null): string {
+  const prompt = opts.systemBlocks
+    ? opts.systemBlocks.map((block) => block.text).filter(Boolean).join('\n\n')
+    : (buildSystemPrompt(opts, soul, leaveOutPersonality ? { personality: false } : undefined) ?? '');
+  // The static line that explains the recall block is the base prompt's last line, so it renders before the limits.
+  return opts.memoryProvider?.getContext ? [prompt, MEMORY_RECALL_SYSTEM_LINE].filter(Boolean).join('\n\n') : prompt;
 }
 
 /**
  * Builds the persona of a GMI from agent options.
  *
  * @param opts - The agent's options.
- * @param cognition - The resolved profile ({@link resolveCognition}): sentiment tracking, metaprompts, and whether learning is on.
+ * @param cognition - The resolved profile ({@link resolveCognition}): sentiment tracking, metaprompts, the memory
+ *   config and whether learning is on.
  * @param tools - The agent's tools, adapted: they decide the persona's capabilities.
- * @returns The persona. With `cognition.learning` set its base prompt has no personality section: a GMI built from it
- *   sends the section only when it is given a learner session (`GMIBaseConfig.learning`) or the persona's traits
- *   (`GMIBaseConfig.personaTraits`), as `gmi()` gives it.
+ * @param soul - The soul the caller loaded from `opts.soul`, `null` for none; not passed, `opts.soul` is loaded here.
+ * @returns The persona. With `cognition.learning` set, or when the persona has traits, its base prompt has no
+ *   personality section: a GMI built from it sends the section only when it is given a learner session
+ *   (`GMIBaseConfig.learning`) or the persona's traits (`GMIBaseConfig.personaTraits`), as `gmi()` gives it. With a
+ *   soul the persona carries the soul's id, role, traits, mood, reasoning-trace limits, hard limits and metadata, and
+ *   never its voice or avatar. With memory on and `memory.recall` set, its `cognitiveMemoryConfig` holds `recall` and
+ *   nothing else.
  * @throws {Error} When no provider or model can be resolved, as `generateText` throws.
+ * @throws {SoulLoadError} When the soul is loaded here, fails to load and is not optional.
  */
-export function personaFromAgentOptions(opts: AgentOptions, cognition: ResolvedCognition, tools: ITool[]): IPersonaDefinition {
+export function personaFromAgentOptions(
+  opts: AgentOptions,
+  cognition: ResolvedCognition,
+  tools: ITool[],
+  soul?: LoadedSoul | null,
+): IPersonaDefinition {
+  const loaded = soul === undefined ? (opts.soul ? loadSoulFromOption(opts.soul) : null) : soul;
+  const fields = loaded ? personaFieldsOf(loaded.frontmatter) : undefined;
   const { providerId, modelId } = resolveModelOption({ provider: opts.provider, model: opts.model, baseUrl: opts.baseUrl }, 'text');
-  const name = opts.name?.trim() || 'Agent';
+  // An option set in code wins over the soul's file; the id is the soul's.
+  const name = opts.name?.trim() || loaded?.frontmatter.name?.trim() || 'Agent';
   const firstLine = opts.instructions?.split('\n').map((line) => line.trim()).find(Boolean);
+  const traitSource = opts.personality ?? loaded?.frontmatter.hexaco;
+  const traits = normalizeHexacoTraits(traitSource);
+  const hasTraits = Object.keys(traits).length > 0;
   const completion = completionOptionsOf(opts);
   const presets: SentimentTrackingConfig['presets'] = cognition.metaprompts === 'all' ? ['all'] : cognition.metaprompts || [];
-  const persona: IPersonaDefinition = {
-    id: stablePersonaIdOf(opts) ?? `agent-${randomUUID()}`,
+  const persona = {
+    id: loaded
+      ? (soulAgentIdOf(loaded.frontmatter, opts.name) ?? hostAgentKeyOf(opts) ?? derivedSoulPersonaId(loaded))
+      : (stablePersonaIdOf(opts) ?? hostAgentKeyOf(opts) ?? `agent-${randomUUID()}`),
     name,
-    description: firstLine ?? name,
+    description: loaded?.frontmatter.role?.trim() || firstLine || name,
     version: '1.0.0',
-    baseSystemPrompt: basePrompt(opts, cognition.learning !== undefined),
-    ...(opts.personality ? { personalityTraits: normalizeHexacoTraits(opts.personality) } : {}),
+    baseSystemPrompt: basePrompt(opts, cognition.learning !== undefined || hasTraits, loaded),
+    ...(traitSource ? { personalityTraits: traits } : {}),
+    ...(fields?.hardLimits ? { hardLimits: fields.hardLimits } : {}),
+    ...(fields?.moodAdaptation ? { moodAdaptation: fields.moodAdaptation } : {}),
+    ...(fields?.reasoningTraceConfig ? { reasoningTraceConfig: fields.reasoningTraceConfig } : {}),
+    // The persona type has no top-level metadata member; the loader carries it the same way.
+    ...(fields?.metadata ? { metadata: fields.metadata } : {}),
     defaultProviderId: providerId,
     defaultModelId: modelId,
     ...(Object.keys(completion).length > 0 ? { defaultModelCompletionOptions: completion } : {}),
@@ -113,6 +169,8 @@ export function personaFromAgentOptions(opts: AgentOptions, cognition: ResolvedC
     conversationContextConfig: { maxMessages: GMI_SESSION_MAX_HISTORY_MESSAGES },
     sentimentTracking: cognition.sentiment ? { enabled: true, presets } : { enabled: false },
     ...(cognition.metaprompts === false ? { metaPrompts: [] } : {}),
-  };
+    // The memory's recall settings (memory.recall): the only memory setting the persona carries.
+    ...(cognition.memory && cognition.memory.recall ? { cognitiveMemoryConfig: { recall: cognition.memory.recall } } : {}),
+  } as IPersonaDefinition;
   return normalizePersonaDefinition(persona);
 }

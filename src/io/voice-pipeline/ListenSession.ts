@@ -10,6 +10,7 @@
 import { EventEmitter } from 'node:events';
 import { ReconnectingSTT, type ReconnectingSTTOptions, type SttGapEvent, type SttReconnectedEvent } from './ReconnectingSTT.js';
 import { describeReason, isError } from './describeReason.js';
+import { speechEdgeItem, sttSpeechEvent } from './speechEdgeItem.js';
 import type { AudioFrame, IEndpointDetector, IStreamingSTT, IStreamTransport, ITranscriptInputSink, StreamingSTTConfig, StreamingSTTSession, TranscriptEvent, TranscriptInput, TranscriptTurn, TurnCompleteEvent, VadEvent } from './types.js';
 import { createContentSafeConsole } from '../../core/logging/contentSafeConsole.js';
 import { consumeReturnedRejection, isContentSafeTelemetryEnabled } from '../../core/logging/contentSafeTelemetry.js';
@@ -361,8 +362,9 @@ export async function startListenSession(transport: IStreamTransport, sink: ITra
   };
   sttSession.on('vad', onVad);
   // the transcriber's own speech events reach the detector as voice activity, as the orchestrator gives them
-  sttSession.on('speech_start', () => onVad({ type: 'speech_start', timestamp: Date.now(), source: 'stt' }));
-  sttSession.on('speech_end', () => onVad({ type: 'speech_end', timestamp: Date.now(), source: 'stt' }));
+  // with the item each names, so a detector pairs a speech end with that item's final alone
+  sttSession.on('speech_start', (edge?: unknown) => onVad(sttSpeechEvent('speech_start', speechEdgeItem(edge))));
+  sttSession.on('speech_end', (edge?: unknown) => onVad(sttSpeechEvent('speech_end', speechEdgeItem(edge))));
   sttSession.on('stt:reconnected', (e: SttReconnectedEvent) => {
     reconnects += 1;
     emitter.emit('stt:reconnected', e);

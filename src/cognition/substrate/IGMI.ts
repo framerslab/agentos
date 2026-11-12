@@ -61,6 +61,8 @@ export enum GMIPrimeState {
  */
 export interface UserContext {
   userId: string;
+  /** The subject the turn's conversation memory is keyed by: the session's user, else the session. Set by `agent()` and `gmi()`. */
+  memorySubject?: { kind: 'user' | 'session'; id: string };
   skillLevel?: string;
   preferences?: Record<string, any>;
   pastInteractionSummary?: string;
@@ -427,6 +429,13 @@ export enum GMIOutputChunkType {
    */
   RAG_SOURCES_AVAILABLE = 'rag_sources_available',
   /**
+   * Emitted once a user turn's memory block is assembled, only when the
+   * memory manager's `recall.capture` is `'metadata+stream'`. The chunk
+   * content is `{ memorySources: MemoryRecallCapture }`: ids, ranks, scores,
+   * counts and timings, never a memory's text or the query's.
+   */
+  MEMORY_SOURCES_AVAILABLE = 'memory_sources_available',
+  /**
    * One per model step that completes: the step's text, finish reason, provider, model, hop and usage.
    * A step that fails emits none: a USAGE_UPDATE with `metadata.attemptFailed: true` reports what it was
    * billed, when the provider reported that, and the turn's ERROR chunk follows. Content: StepFinishedChunkPayload.
@@ -573,6 +582,24 @@ export interface GMIOutput {
      * the same sources the model saw.
      */
     ragSources?: import('../rag/IRetrievalAugmentor.js').RagRetrievedChunk[];
+    /**
+     * The recall capture of the turn, when the GMI assembled a memory block and
+     * the memory manager's `recall.capture` is not `'off'`, on a turn that
+     * fails after the assembly as on one that completes: the record of the last
+     * model hop the turn's prompt was built for (on a completed turn, the hop
+     * that served it), with that hop's `budget` and `delivery`; the assembly's
+     * record when the turn failed before a prompt was built. The
+     * `MEMORY_SOURCES_AVAILABLE` chunk carries the assembly's record. A tool
+     * continuation assembles none and carries none.
+     */
+    memoryRecall?: import('../memory/retrieval/recall/capture.js').MemoryRecallCapture;
+    /**
+     * The conversation history the turn's requests left out to fit the prompt engine's history budget: of the
+     * requests that served the turn's steps, the one that left the most messages out (a fallback hop's prompt that
+     * served nothing does not count). Unset when every one of them carried the whole history. Set on a turn that
+     * fails after such a step too.
+     */
+    historyOmitted?: import('../../core/llm/IPromptEngine.js').PromptHistoryOmission;
     /** On a structured turn: the parsed value and its check (see `api/runtime/structuredReply`). */
     structuredOutput?: import('../../api/runtime/structuredReply.js').StructuredReplyOutput;
 }

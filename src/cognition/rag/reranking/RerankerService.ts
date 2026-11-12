@@ -206,6 +206,10 @@ export class RerankerService {
    * @param chunks - Retrieved chunks to rerank
    * @param config - Request configuration
    * @returns Reranked chunks sorted by relevance
+   * @throws The provider's error, after logging it to the service's logger when the service has one, as
+   * `rerank()` does; also an error of its own, which it does not log: no provider named and no default, a
+   * provider not registered, or a result id that is not among the chunks. A caller that wants its order on a
+   * failure catches the error, records it and returns `chunks`; `rerankChain()` does this for each stage.
    */
   public async rerankChunks(
     query: string,
@@ -259,7 +263,9 @@ export class RerankerService {
   /**
    * Run chunks through a multi-stage reranker pipeline.
    * Each stage's output feeds into the next, narrowing the result set.
-   * Unavailable providers are silently skipped.
+   * A stage whose provider is not registered or not available is skipped. A stage whose provider throws
+   * (a local model that fails to load included) is skipped with a warning to the logger, and the chunks keep
+   * the order and scores they had; it never throws for a stage's failure.
    *
    * @param query - The search query.
    * @param chunks - Input chunks to rerank.

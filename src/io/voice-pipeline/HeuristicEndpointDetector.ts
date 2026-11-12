@@ -59,10 +59,16 @@
  *    that `speech_end` without waiting. A `speech_end` with
  *    `source: 'vad'` (a standalone VAD, or the orchestrator's turn-duration
  *    watchdog) is none of the provider's utterances, so it decides the turn
- *    on the finals held. Finals answer the transcriber's `speech_end` events
- *    in the order they arrive, so a final that comes more than the silence
- *    timeout after its own `speech_end` can answer a later one and end the
- *    turn without that utterance's words. After a reset (each
+ *    on the finals held. A `speech_end` that names its item
+ *    (`VadEvent.itemId`, which `OpenAIRealtimeTranscriptionSTT` passes and
+ *    the orchestrator and listen sessions forward) is answered by that
+ *    item's final alone: a final that comes more than the silence timeout
+ *    after its own `speech_end` joins the turn and answers no later one, and
+ *    a final of an item whose `speech_end` a completed turn held is that
+ *    turn's late final whenever it arrives (see below). A `speech_end` that
+ *    names no item is answered by the finals in the order they arrive, so
+ *    there a final that comes more than the silence timeout after its own
+ *    `speech_end` can answer a later one. After a reset (each
  *    `turn_complete` makes one) of a turn in which speech started, an
  *    item-keyed final that arrives before speech ends again is that turn's
  *    late final: it is dropped instead of joining the next turn's text, and
@@ -71,7 +77,9 @@
  *    final after that utterance's end of speech
  *    (`OpenAIRealtimeTranscriptionSTT` does), so a final that arrives during
  *    it belongs to the turn that ended, and pays none of the next turn's
- *    `speech_end` events. A `speech_start` from a standalone VAD
+ *    `speech_end` events. A final of an item whose `speech_end` (one that
+ *    named it) came in a turn that has ended is that turn's late final too,
+ *    after the next `speech_end` as well. A `speech_start` from a standalone VAD
  *    (`source: 'vad'`) ends that window, as a `speech_end` does: its speech
  *    events say nothing about when the transcriber's finals come. So does a
  *    reset with `'session'`, which a session makes as it starts on the
@@ -131,6 +139,13 @@ const DEFAULT_SILENCE_TIMEOUT_MS = 1_500;
  * rarely indicate turn completion in spoken language.
  */
 const TERMINAL_PUNCTUATION = /[.?!]$/;
+
+/**
+ * How many items of turns that have ended the detector remembers (see
+ * `completedItems`), so a final that arrives long after its turn ended is
+ * still known as that turn's, while a long session holds a bounded set.
+ */
+const COMPLETED_ITEMS_KEPT = 256;
 
 /**
  * Normalised backchannel phrases that indicate the listener is acknowledging
@@ -240,8 +255,10 @@ export interface HeuristicEndpointDetectorOptions {
  * arrived after a reset ended its turn (each `turn_complete` makes one) and
  * before the next `speech_end`, a standalone VAD's next `speech_start` or a
  * session's start (`reset('session')`), while the transcriber's next
- * utterance was spoken included, once per such final; a final its provider
- * marks `beforeSpeechEnd` is never one. The detector drops it from its
+ * utterance was spoken included, once per such final, and a final of an
+ * item whose `speech_end` named it in a turn that has ended, whenever it
+ * arrives before a session's start; a final its provider marks
+ * `beforeSpeechEnd` is never one. The detector drops it from its
  * turns, so it never joins the next turn's text. Each listener gets
  * it: one that throws or rejects is written as a console warning, and the
  * listeners after it still run, so nothing is thrown into the code that
@@ -337,29 +354,57 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
   private readonly itemFinals = new Map<string, { text: string; startMs?: number }>();
 
   /**
-   * When the turn's `speech_end` events from the transcriber (any `source`
-   * but `'vad'`) that no item-keyed final has answered yet arrived, on this
-   * detector's own clock, oldest first. A new item's final answers the
-   * oldest; one that has waited the silence timeout is dropped, stops
-   * holding the turn and is counted in {@link expiredSpeechEnds}.
+   * The turn's `speech_end` events from the transcriber (any `source` but
+   * `'vad'`) that no item-keyed final has answered yet, oldest first: when
+   * each arrived, on this detector's own clock, and the item it named
+   * (`VadEvent.itemId`), if any. One that names an item is answered by that
+   * item's final alone; a new item's final whose item no `speech_end` named
+   * answers the oldest that names none. One that has waited the silence
+   * timeout is dropped, stops holding the turn, and is kept in
+   * {@link expiredSpeechEndItems} or counted in {@link expiredSpeechEnds}.
    */
-  private unansweredSpeechEnds: number[] = [];
+  private unansweredSpeechEnds: Array<{ at: number; itemId?: string }> = [];
 
   /**
-   * How many of the turn's `speech_end` events from the transcriber stopped
-   * waiting (see {@link unansweredSpeechEnds}) before an item-keyed final
-   * answered them. A new item's final that finds no `speech_end` waiting
-   * answers one of these, as its late final.
+   * How many of the turn's `speech_end` events from the transcriber that
+   * named no item stopped waiting (see {@link unansweredSpeechEnds}) before an
+   * item-keyed final answered them. A new item's final that finds no
+   * `speech_end` waiting answers one of these, as its late final.
    */
   private expiredSpeechEnds = 0;
 
   /**
-   * How many of the turn's item-keyed finals answered no `speech_end`: each
-   * came before its end of speech, marked `beforeSpeechEnd` or with none
-   * waiting and none expired. The transcriber's next `speech_end` pairs with
-   * the earliest of them at once instead of waiting for a final.
+   * The items whose `speech_end` in this turn stopped waiting (see
+   * {@link unansweredSpeechEnds}) before their final came. That final, when it
+   * comes, joins the turn and answers no other `speech_end`.
    */
-  private finalsWithoutSpeechEnd = 0;
+  private readonly expiredSpeechEndItems = new Set<string>();
+
+  /**
+   * The turn's item-keyed finals that answered no `speech_end`, by item, in
+   * the order they came: each came before its end of speech, marked
+   * `beforeSpeechEnd` or with none waiting and none expired. The
+   * transcriber's `speech_end` that names one of these items pairs with it at
+   * once; one that names no item pairs with the earliest.
+   */
+  private finalsWithoutSpeechEnd: string[] = [];
+
+  /**
+   * The items the transcriber's `speech_end` events named in this turn. A
+   * reset with `'turn'` moves them to {@link completedItems}.
+   */
+  private readonly turnSpeechEndItems = new Set<string>();
+
+  /**
+   * The items a `speech_end` named in a turn that has ended, the newest
+   * {@link COMPLETED_ITEMS_KEPT} of them. A final of one of these items,
+   * unless its provider marks it `beforeSpeechEnd`, is its turn's late final
+   * whenever it arrives: it is dropped and reported as `'late_final'`, and
+   * never joins a later turn or answers a later `speech_end`. A reset with
+   * `'session'` forgets them: a new session's transcriber sends no final of
+   * an earlier session's items.
+   */
+  private readonly completedItems = new Set<string>();
 
   /**
    * Set when a reset ends a turn in which speech started, and cleared by the
@@ -532,7 +577,7 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
     this.lastConfidence = transcript.confidence;
     // The latest final replaces the turn's item-keyed finals as well.
     this.itemFinals.clear();
-    this.finalsWithoutSpeechEnd = 0;
+    this.finalsWithoutSpeechEnd = [];
 
     // The speech already ended without a transcript: decide the turn now. The
     // silence began at that end of speech, so what has passed since counts.
@@ -610,8 +655,7 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
         const transcriberEnd = event.source !== 'vad';
         if (transcriberEnd) {
           this._dropExpiredSpeechEnds(at);
-          if (this.finalsWithoutSpeechEnd > 0) this.finalsWithoutSpeechEnd -= 1;
-          else this.unansweredSpeechEnds.push(at);
+          this._pairSpeechEnd(at, event.itemId);
         }
 
         // A turn of item-keyed finals is decided once each of the transcriber's speech ends has its final.
@@ -678,6 +722,10 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
     this.awaitingNextSpeechEnd = scope === 'turn' && (this.awaitingNextSpeechEnd || this.turnStartMs !== null);
     // The caller reports who holds the floor, so a turn's end leaves it as it was; a new session has reported none.
     if (scope === 'session') this.agentContext = null;
+    // The items whose speech ended in the turn are done: a final of one that comes later is the turn's late final. A
+    // new session's transcriber sends no final of an earlier session's items.
+    if (scope === 'session') this.completedItems.clear();
+    else for (const itemId of this.turnSpeechEndItems) this._rememberCompletedItem(itemId);
     this._clearSilenceTimer();
     this.accumulatedText = '';
     this.speechActive = false;
@@ -687,7 +735,9 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
     this.itemFinals.clear();
     this.unansweredSpeechEnds = [];
     this.expiredSpeechEnds = 0;
-    this.finalsWithoutSpeechEnd = 0;
+    this.expiredSpeechEndItems.clear();
+    this.finalsWithoutSpeechEnd = [];
+    this.turnSpeechEndItems.clear();
     this.lastSpeechEnd = null;
   }
 
@@ -745,7 +795,9 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
     const beforeSpeechEnd = transcript.beforeSpeechEnd === true;
     // The late final of a turn that has ended stays out of the next turn. It is
     // reported for a listener that keeps every final, such as a listen session.
-    if (this.awaitingNextSpeechEnd && !beforeSpeechEnd) {
+    // A final of an item whose speech end a completed turn held is that turn's,
+    // whenever it arrives.
+    if ((this.awaitingNextSpeechEnd || this.completedItems.has(itemId)) && !beforeSpeechEnd) {
       this._emitLateFinal(transcript);
       return;
     }
@@ -755,17 +807,24 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
 
     if (!this.itemFinals.has(itemId)) {
       this._dropExpiredSpeechEnds(Date.now());
+      const own = this.unansweredSpeechEnds.findIndex((end) => end.itemId === itemId);
+      const unnamed = this.unansweredSpeechEnds.findIndex((end) => end.itemId === undefined);
       if (beforeSpeechEnd) {
         // Its own end of speech is still to come: the transcriber's next speech_end pairs with it at once.
-        this.finalsWithoutSpeechEnd += 1;
-      } else if (this.unansweredSpeechEnds.length > 0) {
-        this.unansweredSpeechEnds.shift();
+        this.finalsWithoutSpeechEnd.push(itemId);
+      } else if (own >= 0) {
+        // The speech end that named this item waits for it.
+        this.unansweredSpeechEnds.splice(own, 1);
+      } else if (this.expiredSpeechEndItems.delete(itemId)) {
+        // Its own speech end stopped waiting before it came: it answers no other.
+      } else if (unnamed >= 0) {
+        this.unansweredSpeechEnds.splice(unnamed, 1);
       } else if (this.expiredSpeechEnds > 0) {
-        // A speech end stopped waiting before its final came: this is that late final.
+        // A speech end that named no item stopped waiting before its final came: this is that late final.
         this.expiredSpeechEnds -= 1;
       } else {
         // No speech end waits for it yet: the transcriber's next one pairs with it at once.
-        this.finalsWithoutSpeechEnd += 1;
+        this.finalsWithoutSpeechEnd.push(itemId);
       }
     }
     const text = hasWords && !backchannel ? transcript.text : '';
@@ -842,7 +901,7 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
 
     if (this.unansweredSpeechEnds.length > 0) {
       // Decide again when the oldest waiting speech end has waited the silence timeout.
-      const waitMs = this.unansweredSpeechEnds[0] + this.silenceTimeoutMs - now;
+      const waitMs = this.unansweredSpeechEnds[0].at + this.silenceTimeoutMs - now;
       this.silenceTimer = setTimeout(() => {
         this.silenceTimer = null;
         this._decideItemTurn();
@@ -864,13 +923,57 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
    * @param now - The current time on this detector's clock.
    */
   private _dropExpiredSpeechEnds(now: number): void {
-    this.unansweredSpeechEnds = this.unansweredSpeechEnds.map((at) => Math.min(at, now));
+    this.unansweredSpeechEnds = this.unansweredSpeechEnds.map((end) => ({ ...end, at: Math.min(end.at, now) }));
     while (
       this.unansweredSpeechEnds.length > 0 &&
-      now - this.unansweredSpeechEnds[0] >= this.silenceTimeoutMs
+      now - this.unansweredSpeechEnds[0].at >= this.silenceTimeoutMs
     ) {
-      this.unansweredSpeechEnds.shift();
-      this.expiredSpeechEnds += 1;
+      const expired = this.unansweredSpeechEnds.shift();
+      if (expired?.itemId !== undefined) this.expiredSpeechEndItems.add(expired.itemId);
+      else this.expiredSpeechEnds += 1;
+    }
+  }
+
+  /**
+   * Pair a `speech_end` from the transcriber with the turn's item-keyed
+   * finals. One that names an item pairs with that item's final alone: at
+   * once when it came before this end of speech, or else it waits for it. One
+   * that names no item pairs with the earliest final that answered no
+   * `speech_end`, or else waits for the next new item's final, as before
+   * speech ends named their items.
+   *
+   * @param at - When the `speech_end` arrived, on this detector's clock.
+   * @param itemId - The item it named (`VadEvent.itemId`), if any.
+   */
+  private _pairSpeechEnd(at: number, itemId: string | undefined): void {
+    if (itemId === undefined) {
+      if (this.finalsWithoutSpeechEnd.length > 0) this.finalsWithoutSpeechEnd.shift();
+      else this.unansweredSpeechEnds.push({ at });
+      return;
+    }
+    this.turnSpeechEndItems.add(itemId);
+    const early = this.finalsWithoutSpeechEnd.indexOf(itemId);
+    if (early >= 0) {
+      this.finalsWithoutSpeechEnd.splice(early, 1);
+      return;
+    }
+    // Its final already came and answered a speech end that named no item: nothing waits.
+    if (this.itemFinals.has(itemId)) return;
+    this.unansweredSpeechEnds.push({ at, itemId });
+  }
+
+  /**
+   * Remember an item whose speech ended in a turn that has ended, keeping the
+   * newest {@link COMPLETED_ITEMS_KEPT}.
+   *
+   * @param itemId - The item.
+   */
+  private _rememberCompletedItem(itemId: string): void {
+    this.completedItems.delete(itemId);
+    this.completedItems.add(itemId);
+    if (this.completedItems.size > COMPLETED_ITEMS_KEPT) {
+      const oldest = this.completedItems.values().next().value;
+      if (oldest !== undefined) this.completedItems.delete(oldest);
     }
   }
 

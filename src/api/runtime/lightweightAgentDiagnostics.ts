@@ -36,7 +36,7 @@ export function isMeaningfullyConfigured(value: unknown): boolean {
  * The config fields that are set but that `surface` accepts without enforcing
  * (`accepted_but_deferred` in {@link BASE_AGENT_CONFIG_CAPABILITY_CONTRACT}),
  * plus, on the `agent` surface, memory settings beyond the default runtime's
- * working callback and a set `voice` (`agent()` passes its config without a
+ * working callback and `recall` and a set `voice` (`agent()` passes its config without a
  * configured `voice.session`, the one voice binding it applies).
  */
 export function getDeferredCapabilities(
@@ -49,9 +49,14 @@ export function getDeferredCapabilities(
     if (key === 'voice' && surface === 'agent') return isMeaningfullyConfigured(config.voice);
     if (key === 'memory' && surface === 'agent') {
       const memory = config.memory;
-      if (typeof memory === 'object' && memory !== null && typeof memory.working === 'function') {
-        const { working: _working, ...deferred } = memory;
-        return isMeaningfullyConfigured(deferred);
+      if (typeof memory === 'object' && memory !== null) {
+        // `recall` is applied (its budget) or refused at construction (capture), and so is never deferred.
+        const { recall: _recall, ...rest } = memory;
+        if (typeof rest.working === 'function') {
+          const { working: _working, ...deferred } = rest;
+          return isMeaningfullyConfigured(deferred);
+        }
+        return isMeaningfullyConfigured(rest);
       }
       return isMeaningfullyConfigured(memory);
     }
@@ -94,7 +99,7 @@ const APPLIED_BY_AGENCY: ReadonlySet<CapabilityKey> = new Set<CapabilityKey>(['h
  * it points to `voice.session` with `voiceSession()` or to
  * `VoiceSessionFactory`, the fields it points to the full runtime or
  * `agency()`, those it points to the full runtime alone, the memory settings
- * other than the working callback, `agencies`, which only `runtime: 'gmi'`
+ * other than the working callback and `recall`, `agencies`, which only `runtime: 'gmi'`
  * applies on `agent()`, and `security` and `permissions`, which no surface
  * enforces. `agent()` without `runtime: 'gmi'` calls it once at construction,
  * after the check that refuses `agencies.launch`.

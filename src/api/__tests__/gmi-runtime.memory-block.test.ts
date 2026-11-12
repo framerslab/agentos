@@ -14,7 +14,8 @@
  * finds in the block reached the prompt through recall, not through history.
  *
  * agent() builds the persona from its options, which set no
- * `cognitiveMemoryConfig`; a case that needs one sets `personaMemory.config`,
+ * `cognitiveMemoryConfig` but `recall` (from `memory.recall`, which these cases
+ * leave unset); a case that needs one sets `personaMemory.config`,
  * and the persona agent() builds carries it, so the case reads what
  * createAgentCognitiveMemory makes of a persona's memory settings on this path.
  */

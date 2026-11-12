@@ -37,6 +37,58 @@ describe('DeepgramAuraBatchTTS', () => {
     expect(opts.signal).toBeInstanceOf(AbortSignal);
   });
 
+  it('leaves the Model Improvement Program opt-out off by default', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      arrayBuffer: () => Promise.resolve(new Uint8Array([1]).buffer),
+    });
+
+    await tts.synthesize('hello world');
+
+    const params = new URL(String(mockFetch.mock.calls[0][0])).searchParams;
+    expect(params.has('mip_opt_out')).toBe(false);
+  });
+
+  it('sends mip_opt_out on every chunk request when the provider opts out', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      arrayBuffer: () => Promise.resolve(new Uint8Array([1]).buffer),
+    });
+    const optedOut = new DeepgramAuraBatchTTS({ apiKey: 'dg_key', mipOptOut: true });
+
+    await optedOut.synthesize('Sentence one. '.repeat(200)); // ~2800 chars -> 2 chunks
+
+    expect(mockFetch.mock.calls.length).toBeGreaterThan(1);
+    for (const [url] of mockFetch.mock.calls) {
+      expect(new URL(String(url)).searchParams.get('mip_opt_out')).toBe('true');
+    }
+  });
+
+  it('sends mip_opt_out when a single request opts out through providerOptions', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      arrayBuffer: () => Promise.resolve(new Uint8Array([1]).buffer),
+    });
+
+    await tts.synthesize('hello world', { providerOptions: { mip_opt_out: true } });
+
+    const params = new URL(String(mockFetch.mock.calls[0][0])).searchParams;
+    expect(params.get('mip_opt_out')).toBe('true');
+  });
+
+  it('keeps the provider opt-out when a request passes mip_opt_out: false', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      arrayBuffer: () => Promise.resolve(new Uint8Array([1]).buffer),
+    });
+    const optedOut = new DeepgramAuraBatchTTS({ apiKey: 'dg_key', mipOptOut: true });
+
+    await optedOut.synthesize('hello world', { providerOptions: { mip_opt_out: false } });
+
+    const params = new URL(String(mockFetch.mock.calls[0][0])).searchParams;
+    expect(params.get('mip_opt_out')).toBe('true');
+  });
+
   it('chunks text over 2000 chars into multiple requests and concatenates audio', async () => {
     mockFetch.mockResolvedValue({
       ok: true,

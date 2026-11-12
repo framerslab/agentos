@@ -1,5 +1,6 @@
 import type { AgentOSInput } from '../../api/types/AgentOSInput';
 import type { AgentOSResponse } from '../../api/types/AgentOSResponse';
+import type { ModerationContext } from './ModerationContext';
 
 /**
  * High-level outcome emitted by a guardrail evaluation.
@@ -91,6 +92,21 @@ export interface GuardrailContext {
 
   /** Additional context for guardrail evaluation */
   metadata?: Record<string, unknown>;
+
+  /** Where the content appears and who wrote it: ids and words, checked by the moderation entry points before any guard runs. */
+  moderation?: ModerationContext;
+
+  /**
+   * Set by `moderateContent()`, one per call: aborted once a guard's answer names a code the host listed in
+   * `stopVendorsOn`. A guard that calls a vendor reads it before each request and starts none once it is aborted.
+   */
+  vendorSignal?: AbortSignal;
+}
+
+/** Asks for a person's review of content a guard keeps back. */
+export interface GuardrailHold {
+  /** Why a person must look: a code the host maps to its review queue. Letters, digits and underscores, at most 64. */
+  reviewCode: string;
 }
 
 /**
@@ -159,6 +175,12 @@ export interface GuardrailEvaluationResult {
    * answer this way, so a person reads a fixed text and never a raw failure.
    */
   replacementText?: string;
+
+  /**
+   * With BLOCK only: the content is kept back for a person's review, not refused. Every enforcement point treats
+   * the result as the BLOCK it is, so nothing it keeps back is delivered. On any other action it is ignored.
+   */
+  hold?: GuardrailHold;
 }
 
 /**
@@ -174,6 +196,13 @@ export interface GuardrailInputPayload {
 
   /** The user's input request to evaluate */
   input: AgentOSInput;
+
+  /**
+   * Aborted when the dispatcher stops waiting for this evaluation: the guard's deadline (`config.timeoutMs`, or the
+   * one a required guard's spec gives it) has passed and the dispatcher has already answered. A guard that sends the
+   * input to a vendor starts no further request once it is aborted. Absent when the guard runs with no deadline.
+   */
+  deadlineSignal?: AbortSignal;
 }
 
 /**
@@ -378,6 +407,26 @@ export interface GuardrailConfig {
    * @default 'per-chunk'
    */
   streamingMode?: 'per-chunk' | 'sentence-buffered';
+
+  /**
+   * Run this guard in phase 1, one at a time in registration order, though it does not sanitize. Its BLOCK ends the
+   * evaluation before any phase 2 guard is called, so content it refuses never reaches a phase 2 guard that calls a
+   * vendor. A phase 1 guard registered before it still runs before it. On a tool call (`evaluateToolCalls`) the
+   * sequential guards answer before the other tool-call guards, and a BLOCK among them ends that evaluation too.
+   * A SANITIZE it returns is applied only when `canSanitize` is also true; otherwise it is downgraded to FLAG.
+   * @default false
+   */
+  sequential?: boolean;
+
+  /**
+   * Every reason code and review code this guard can answer: a closed list. The `guardrail.verdict` line that
+   * `moderateContent()` writes takes a code only when it is in the deciding guard's list, or is one the library made
+   * itself for a closed guard's failure (`GUARDRAIL_ERROR`, `GUARDRAIL_MALFORMED`), and writes `unknown` otherwise. The
+   * decision keeps the code as `toModerationEvaluation()` left it. A guard that lists none has its verdict lines
+   * written with `unknown`.
+   * @default undefined
+   */
+  reasonCodes?: readonly string[];
 }
 
 /**

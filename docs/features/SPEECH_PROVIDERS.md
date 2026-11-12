@@ -115,6 +115,8 @@ Preferred providers receive priorities 50, 51, 52, … (lower number = higher pr
 | `bark` | Bark | — | Yes | No | local, tts _(unavailable — not yet integrated)_ |
 | `styletts2` | StyleTTS2 | — | Yes | No | local, tts _(unavailable — not yet integrated)_ |
 
+A Deepgram request takes part in its [Model Improvement Program](https://developers.deepgram.com/docs/the-deepgram-model-improvement-partnership-program) unless it carries `mip_opt_out=true`; Deepgram keeps an opted-out request's data "only for the duration necessary to process the request". `DeepgramAuraBatchTTS` and `DeepgramAuraStreamingTTS` send it on every request when constructed with `mipOptOut: true`, and on one request or session whose `providerOptions.mip_opt_out` is `true`; both default to off, like the Deepgram speech-to-text providers. [Voice pipeline](./VOICE_PIPELINE.md) gives the details.
+
 ### VAD
 
 | ID | Label | Env Vars | Local | Features |
