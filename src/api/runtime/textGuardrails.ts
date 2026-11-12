@@ -336,7 +336,9 @@ class GuardRun implements TextGuardRun {
    */
   guardOutput(source: AsyncIterable<StreamPart>, hold: boolean): { parts: AsyncGenerator<StreamPart, void, undefined>; end(): OutputEnd } {
     let end: OutputEnd = { kind: 'passed' };
-    const run = this;
+    // the nested generator below cannot see `this`
+    const { mode, report, context, streamId, outputGuards } = this;
+    const emit = this.emit.bind(this);
     const base = { streamId: this.streamId, gmiInstanceId: 'text-guardrails', personaId: this.context.personaId ?? 'text-guardrails' };
     async function* parts(): AsyncGenerator<StreamPart, void, undefined> {
       let original = '';
@@ -359,7 +361,7 @@ class GuardRun implements TextGuardRun {
           yield { ...base, type: AgentOSResponseChunkType.FINAL_RESPONSE, isFinal: true, timestamp: new Date().toISOString(), finalResponseText: original } as AgentOSResponse;
         }
       }
-      if (run.outputGuards.length === 0) {
+      if (outputGuards.length === 0) {
         for await (const chunk of chunks()) {
           if (chunk.type === AgentOSResponseChunkType.TEXT_DELTA) yield { type: 'text', text: (chunk as AgentOSTextDeltaChunk).textDelta };
           else if (chunk.type === AgentOSResponseChunkType.METADATA_UPDATE) yield (chunk as AgentOSMetadataUpdateChunk).updates.streamPart as StreamPart;
@@ -374,8 +376,8 @@ class GuardRun implements TextGuardRun {
       const attached: GuardrailEvaluationResult[] = [];
       let replacement: string | undefined;
       let rewritten: string | undefined;
-      const guarded = wrapOutputGuardrails(run.outputGuards, run.context, chunks(), {
-        streamId: run.streamId,
+      const guarded = wrapOutputGuardrails(outputGuards, context, chunks(), {
+        streamId,
         holdUntilFinal: hold,
         onVerdict: (v) => { verdict = v; },
         pickBlock: (evaluations) => {
@@ -402,30 +404,30 @@ class GuardRun implements TextGuardRun {
           // a block that carries a fixed reply; in stream mode the text is already out and nothing can take its place
           if (hold) {
             replacement = finalText;
-            if (run.mode === 'enforce') yield { type: 'text', text: finalText };
+            if (mode === 'enforce') yield { type: 'text', text: finalText };
           }
         } else if (verdict?.action === GuardrailAction.SANITIZE) {
           // the held deltas were dropped; the rewritten reply is one part. In stream mode the original is already out.
           if (hold) {
             rewritten = finalText;
-            if (run.mode === 'enforce') yield { type: 'text', text: finalText };
+            if (mode === 'enforce') yield { type: 'text', text: finalText };
           }
         }
       }
 
-      run.report.output.push(...(blocked ? phase : attached).map(toModerationEvaluation));
+      report.output.push(...(blocked ? phase : attached).map(toModerationEvaluation));
       const judged = verdict?.originalText ?? null;
       if (blocked) {
         const decided = decide(phase) as Decided;
-        await run.emit('output', blocked, GuardrailAction.BLOCK, decided.unavailable, { originalText: judged, finalText: replacement ?? null });
+        await emit('output', blocked, GuardrailAction.BLOCK, decided.unavailable, { originalText: judged, finalText: replacement ?? null });
         end = replacement !== undefined ? { kind: 'replaced' } : { kind: 'stopped', decided };
       } else if (verdict?.action === GuardrailAction.SANITIZE) {
         const rewrite = attached.find((e) => e.action === GuardrailAction.SANITIZE);
-        if (rewrite) await run.emit('output', rewrite, GuardrailAction.SANITIZE, false, { originalText: judged, finalText: verdict.finalText, ...(rewritten === undefined ? { enforced: false } : {}) });
+        if (rewrite) await emit('output', rewrite, GuardrailAction.SANITIZE, false, { originalText: judged, finalText: verdict.finalText, ...(rewritten === undefined ? { enforced: false } : {}) });
         if (rewritten !== undefined) end = { kind: 'sanitized' };
       } else {
         const flagged = decide(attached);
-        if (flagged) await run.emit('output', flagged.evaluation, GuardrailAction.FLAG, false, { originalText: judged, finalText: judged });
+        if (flagged) await emit('output', flagged.evaluation, GuardrailAction.FLAG, false, { originalText: judged, finalText: judged });
       }
       if (failed) end = { kind: 'failed', error: failed };
     }
