@@ -5,7 +5,7 @@
  * nothing, and a transcript that holds what was delivered. Real generateText, streamText, agent() and providers;
  * only fetch is stubbed.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 const fetchMock = vi.fn();
@@ -198,6 +198,109 @@ describe('guards under streamText', () => {
     const parts = await collect(tooled.fullStream);
     expect(search.execute).not.toHaveBeenCalled();
     expect(parts.find((p) => p.type === 'tool-result')).toMatchObject({ result: { refused: true, reasonCode: 'RULE_TOOL' } });
+  });
+});
+
+describe('(c) every tool loop refuses alike: no hook, no run, and the model is told no reason', () => {
+  const hook = vi.fn(async (info: { args: Json }) => ({ args: info.args }));
+  beforeEach(() => { hook.mockClear(); });
+  /** The request after the refused call: it holds the fixed sentence and the code, never the guard's reason. */
+  function toldWithoutReason(): void {
+    const next = JSON.stringify(posted()[1]);
+    expect(next).toContain('This tool call was refused by a guardrail.');
+    expect(next).toContain('RULE_TOOL');
+    expect(next).not.toContain('the guard said why');
+  }
+
+  it('the prompt-tool loop of generateText()', async () => {
+    serve([text('<tool_call>{"name":"search","arguments":{"q":"y"}}</tool_call>'), text('done')]);
+    const result = await generateText({ ...OPENAI, prompt: 'find y', tools: { search }, toolMode: 'prompt', guards: guards(toolGuard(GuardrailAction.BLOCK)), onBeforeToolExecution: hook as never });
+    expect(result.text).toBe('done');
+    expect(search.execute).not.toHaveBeenCalled();
+    expect(hook).not.toHaveBeenCalled();
+    toldWithoutReason();
+  });
+
+  it('the native loop of streamText()', async () => {
+    serve([
+      () => sse([delta({ role: 'assistant', tool_calls: [{ index: 0, id: 'call_s1', type: 'function', function: { name: 'search', arguments: '' } }] }), delta({ tool_calls: [{ index: 0, function: { arguments: '{"q":"x"}' } }] }), delta({}, 'tool_calls'), '[DONE]']),
+      textStream('done'),
+    ]);
+    const result = streamText({ ...OPENAI, prompt: 'find x', tools: { search }, maxSteps: 3, guards: guards(toolGuard(GuardrailAction.BLOCK)), onBeforeToolExecution: hook as never });
+    await collect(result.fullStream);
+    expect(await result.text).toBe('done');
+    expect(search.execute).not.toHaveBeenCalled();
+    expect(hook).not.toHaveBeenCalled();
+    const told = posted()[1].messages.find((m: Json) => m.role === 'tool');
+    expect(JSON.parse(told.content)).toEqual({ refused: true, error: 'This tool call was refused by a guardrail.', reasonCode: 'RULE_TOOL' });
+    toldWithoutReason();
+    expect((await result.guardReport)?.toolCalls).toEqual([{ toolCallId: 'tc_1_0', toolName: 'search', evaluations: [expect.objectContaining({ reasonCode: 'RULE_TOOL' })] }]);
+    expect(JSON.stringify(await result.guardReport)).not.toContain('call_s1');
+  });
+
+  it('the prompt-tool loop of streamText()', async () => {
+    serve([text('<tool_call>{"name":"search","arguments":{"q":"y"}}</tool_call>'), text('done')]);
+    const result = streamText({ ...OPENAI, prompt: 'find y', tools: { search }, toolMode: 'prompt', guards: guards(toolGuard(GuardrailAction.BLOCK)), onBeforeToolExecution: hook as never });
+    await collect(result.fullStream);
+    expect(await result.text).toBe('done');
+    expect(search.execute).not.toHaveBeenCalled();
+    expect(hook).not.toHaveBeenCalled();
+    toldWithoutReason();
+    expect((await result.guardReport)?.toolCalls[0]).toMatchObject({ toolCallId: 'tc_1_0', toolName: 'search' });
+  });
+});
+
+describe('guards on a call with a fallback chain', () => {
+  const anthropicSpendLimit = () =>
+    new Response(JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: 'You have reached your specified workspace API usage limits.' } }), { status: 400, headers: { 'content-type': 'application/json' } });
+  const savedOpenRouterKey = process.env.OPENROUTER_API_KEY;
+  // Without this the resolver could send the Anthropic call through OpenRouter.
+  beforeEach(() => { delete process.env.OPENROUTER_API_KEY; });
+  afterEach(() => { if (savedOpenRouterKey !== undefined) process.env.OPENROUTER_API_KEY = savedOpenRouterKey; });
+  const toOpenAI = (): Json[] => fetchMock.mock.calls.filter(([url, init]) => /api\.openai\.com/.test(String(url)) && (init as { method?: string } | undefined)?.method === 'POST').map(([, init]) => JSON.parse(String((init as { body?: unknown }).body)) as Json);
+
+  it('the input is judged once, and the fallback leg\'s tool loop refuses the call', async () => {
+    const queue = [toolCall('search', { q: 'x' }), text('done')];
+    fetchMock.mockImplementation(async (url: unknown, init?: { method?: string }) => {
+      if ((init?.method ?? 'GET') === 'GET') return jsonResponse({ object: 'list', data: [{ id: 'gpt-4.1', object: 'model', created: 1, owned_by: 'openai' }] });
+      if (/api\.anthropic\.com/.test(String(url))) return anthropicSpendLimit();
+      const next = queue.shift();
+      if (!next) throw new Error(`script exhausted at ${String(url)}`);
+      return next();
+    });
+    const evaluateInput = vi.fn(async () => null);
+    const onFallback = vi.fn();
+    const result = await generateText({
+      provider: 'anthropic', model: 'claude-opus-5-5', apiKey: 'sk-ant-guards-test-0002', prompt: 'find x', tools: { search }, maxSteps: 3,
+      fallbackProviders: [{ provider: 'openai', model: 'gpt-4.1', apiKey: 'sk-guards-test-0002' }], onFallback,
+      guards: guards({ id: 'in', evaluateInput }, toolGuard(GuardrailAction.BLOCK)),
+    });
+    expect(onFallback).toHaveBeenCalled();
+    expect(result.text).toBe('done');
+    expect(evaluateInput).toHaveBeenCalledTimes(1);
+    expect(search.execute).not.toHaveBeenCalled();
+    expect(toOpenAI()).toHaveLength(2);
+    expect(JSON.parse(toOpenAI()[1].messages.find((m: Json) => m.role === 'tool').content)).toMatchObject({ refused: true, reasonCode: 'RULE_TOOL' });
+    expect(result.guardReport?.toolCalls).toHaveLength(1);
+  });
+
+  it('a stop is not tried on a fallback provider and never counts against the provider\'s health', async () => {
+    serve([text('the model reply')]);
+    const onFallback = vi.fn();
+    const chain = { fallbackProviders: [{ provider: 'anthropic', model: 'claude-opus-5-5', apiKey: 'sk-ant-guards-test-0003' }], onFallback };
+    const stopped = await generateText({ ...OPENAI, ...chain, prompt: 'hello', guards: guards(blocksOutput) }).catch((e) => e);
+    expect(stopped).toBeInstanceOf(GuardrailStopError);
+
+    serve([textStream('the streamed reply')]);
+    const streamed = streamText({ ...OPENAI, ...chain, prompt: 'hello', guards: guards(blocksOutput) });
+    expect((await collect(streamed.fullStream)).map((p) => p.type)).toEqual(['error']);
+
+    expect(onFallback).not.toHaveBeenCalled();
+    // one request each, both to the primary
+    expect(posted()).toHaveLength(2);
+    expect(fetchMock.mock.calls.some(([url]) => /api\.anthropic\.com/.test(String(url)))).toBe(false);
+    expect(globalLLMProviderHealth.isOpen('openai')).toBe(false);
+    expect(globalLLMProviderHealth.getStats('openai')?.failureCount ?? 0).toBe(0);
   });
 });
 
