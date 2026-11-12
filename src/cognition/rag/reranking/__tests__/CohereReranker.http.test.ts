@@ -203,6 +203,29 @@ describe("CohereReranker: the request's signal", () => {
     expect(received).toHaveLength(0);
   });
 
+  it('rejects with the reason of a signal aborted while the request is built, and sends nothing', async () => {
+    const controller = new AbortController();
+    const reason = new Error('stopped while the request was built');
+    // The passage's text is read as the request body is built, and reading it stops the call.
+    const stopping: RerankerInput = {
+      query: input.query,
+      documents: [
+        {
+          id: 'refund',
+          get content() {
+            controller.abort(reason);
+            return 'A refund takes five to ten business days.';
+          },
+        },
+      ],
+    };
+    const config = { providerId: 'cohere', modelId: 'rerank-v3.5', signal: controller.signal };
+
+    await expect(within(cohereAt('answer').rerank(stopping, config), 3000)).rejects.toBe(reason);
+    await delay(100);
+    expect(received).toHaveLength(0);
+  });
+
   it('answers as before with no signal', async () => {
     const output = await within(cohereAt('answer').rerank(input, { providerId: 'cohere', modelId: 'rerank-v3.5' }), 3000);
     expect(output.results.map((doc) => doc.id)).toEqual(['refund', 'ship']);
