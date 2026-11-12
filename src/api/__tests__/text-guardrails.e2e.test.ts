@@ -507,3 +507,127 @@ describe('nothing a guard took out reaches the history, memory or a retriever on
     expect(second).not.toContain('Hello there.');
   });
 });
+
+describe('the turn, the reply and the report hold what the guards decided, on the edges of a call', () => {
+  const removesTurn: IGuardrailService = { id: 'in', config: { canSanitize: true }, evaluateInput: async () => ({ action: GuardrailAction.SANITIZE, modifiedText: null as unknown as string }) };
+  const keepsTurn: IGuardrailService = { id: 'in', config: { canSanitize: true }, evaluateInput: async ({ input }) => ({ action: GuardrailAction.SANITIZE, modifiedText: input.textInput ?? '' }) };
+  /** Rewrites the number in every streamed piece of the reply, and answers nothing on the whole reply. */
+  const redactsPieces: IGuardrailService = {
+    id: 'pieces',
+    config: { canSanitize: true, evaluateStreamingChunks: true },
+    evaluateOutput: async ({ chunk }) => (chunk.type === AgentOSResponseChunkType.TEXT_DELTA ? { action: GuardrailAction.SANITIZE, modifiedText: String((chunk as { textDelta?: string }).textDelta).replace('555 0100', '[number]') } : null),
+  };
+
+  it('a prompt a sanitizer emptied is sent as an empty user turn, never dropped', async () => {
+    serve([text('Noted.')]);
+    await generateText({ ...OPENAI, messages: [{ role: 'user', content: 'Earlier.' }, { role: 'assistant', content: 'Yes.' }], prompt: 'my number is 555 0100', guards: guards(removesTurn) });
+    // without the empty turn the request would end on the earlier assistant entry
+    expect(posted()[0].messages.at(-1)).toMatchObject({ role: 'user' });
+    expect(JSON.stringify(posted()[0].messages.at(-1))).not.toContain('Yes.');
+    expect(JSON.stringify(posted())).not.toContain('555 0100');
+
+    serve([textStream('Noted.')]);
+    await collect(streamText({ ...OPENAI, prompt: 'my number is 555 0100', guards: guards(removesTurn) }).fullStream);
+    expect(posted()[1].messages.at(-1)).toMatchObject({ role: 'user' });
+    expect(JSON.stringify(posted()[1])).not.toContain('555 0100');
+  });
+
+  it('a reply whose streamed pieces a sanitizer rewrote is delivered rewritten', async () => {
+    serve([text('call 555 0100')]);
+    const result = await generateText({ ...OPENAI, prompt: 'hi', guards: guards(redactsPieces) });
+    expect(result.text).toBe('call [number]');
+    expect(result.guardReport?.result).toBe('sanitized');
+    expect(JSON.stringify(result.transcriptDelta)).not.toContain('555 0100');
+
+    serve([textStream('call 555 0100')]);
+    const streamed = streamText({ ...OPENAI, prompt: 'hi', guards: guards(redactsPieces) });
+    await collect(streamed.fullStream);
+    expect(await streamed.text).toBe('call [number]');
+    expect((await streamed.guardReport)?.result).toBe('sanitized');
+  });
+
+  it('a reader that stops after the replacement still finds the report and the verdict', async () => {
+    serve([textStream('the streamed reply')]);
+    const verdicts: TextGuardrailVerdict[] = [];
+    const result = streamText({ ...OPENAI, prompt: 'hello', guards: { services: [replacesOutput], context, onVerdict: (v: TextGuardrailVerdict) => { verdicts.push(v); } } });
+    for await (const part of result.fullStream) if (part.type === 'text') break;
+    expect(await result.guardReport).toMatchObject({ result: 'replaced', output: [expect.objectContaining({ action: GuardrailAction.BLOCK, reasonCode: 'RULE_OUT' })] });
+    expect(verdicts.map((v) => [v.stage, v.action])).toEqual([['output', GuardrailAction.BLOCK]]);
+  });
+
+  it('a blocked reply\'s report keeps what the guards before the block answered', async () => {
+    serve([text('the model reply')]);
+    const stopped = await generateText({ ...OPENAI, prompt: 'hello', guards: guards(sanitizesOutput, blocksOutput) }).catch((e) => e);
+    expect(stopped).toBeInstanceOf(GuardrailStopError);
+    expect(stopped.report.output).toEqual([
+      expect.objectContaining({ action: GuardrailAction.SANITIZE }),
+      expect.objectContaining({ action: GuardrailAction.BLOCK, reasonCode: 'RULE_OUT' }),
+    ]);
+  });
+
+  it('a reader can await the provider and the model while the reply is still open', async () => {
+    serve([textStream('the streamed reply')]);
+    const result = streamText({ ...OPENAI, prompt: 'hello', guards: guards({ id: 'quiet', evaluateOutput: async () => null }) });
+    const stuck = (): Promise<string> => new Promise((resolve) => setTimeout(() => resolve('still waiting'), 1000));
+    const seen: string[] = [];
+    for await (const part of result.fullStream) {
+      if (part.type === 'text' && seen.length === 0) seen.push(await Promise.race([result.provider, stuck()]), await Promise.race([result.model, stuck()]));
+    }
+    expect(seen[0]).toBe('openai');
+    expect(seen[1]).not.toBe('still waiting');
+  });
+
+  it('a call aborted while the guards judge a tool call runs no tool, in every tool loop', async () => {
+    const abortingGuard = (controller: AbortController): IGuardrailService => ({
+      id: 'tools',
+      config: { evaluateToolCalls: true },
+      evaluateOutput: async ({ chunk }) => {
+        if (chunk.type === AgentOSResponseChunkType.TOOL_CALL_REQUEST) controller.abort();
+        return null;
+      },
+    });
+    let controller = new AbortController();
+    serve([toolCall('search', { q: 'x' }), text('done')]);
+    await expect(generateText({ ...OPENAI, prompt: 'find x', tools: { search }, maxSteps: 3, abortSignal: controller.signal, guards: guards(abortingGuard(controller)) })).rejects.toBeDefined();
+    expect(search.execute).not.toHaveBeenCalled();
+
+    controller = new AbortController();
+    serve([text('<tool_call>{"name":"search","arguments":{"q":"y"}}</tool_call>'), text('done')]);
+    await expect(generateText({ ...OPENAI, prompt: 'find y', tools: { search }, toolMode: 'prompt', abortSignal: controller.signal, guards: guards(abortingGuard(controller)) })).rejects.toBeDefined();
+    expect(search.execute).not.toHaveBeenCalled();
+
+    controller = new AbortController();
+    serve([
+      () => sse([delta({ role: 'assistant', tool_calls: [{ index: 0, id: 'call_s1', type: 'function', function: { name: 'search', arguments: '{"q":"x"}' } }] }), delta({}, 'tool_calls'), '[DONE]']),
+      textStream('done'),
+    ]);
+    const streamed = streamText({ ...OPENAI, prompt: 'find x', tools: { search }, maxSteps: 3, abortSignal: controller.signal, guards: guards(abortingGuard(controller)) });
+    await collect(streamed.fullStream).catch(() => []);
+    expect(search.execute).not.toHaveBeenCalled();
+  });
+
+  it('a refused call is not shown to a stream reader as a call; a passed one is, before its result', async () => {
+    const oneCall = () =>
+      sse([delta({ role: 'assistant', tool_calls: [{ index: 0, id: 'call_s1', type: 'function', function: { name: 'search', arguments: '{"q":"x"}' } }] }), delta({}, 'tool_calls'), '[DONE]']);
+    serve([oneCall, textStream('done')]);
+    const refused = await collect(streamText({ ...OPENAI, prompt: 'find x', tools: { search }, maxSteps: 3, guards: guards(toolGuard(GuardrailAction.BLOCK)) }).fullStream);
+    expect(refused.some((p) => p.type === 'tool-call')).toBe(false);
+    expect(refused.find((p) => p.type === 'tool-result')).toMatchObject({ result: { refused: true } });
+
+    serve([oneCall, textStream('done')]);
+    const passed = await collect(streamText({ ...OPENAI, prompt: 'find x', tools: { search }, maxSteps: 3, guards: guards(toolGuard(GuardrailAction.FLAG)) }).fullStream);
+    const kinds = passed.map((p) => p.type).filter((t) => t === 'tool-call' || t === 'tool-result');
+    expect(kinds).toEqual(['tool-call', 'tool-result']);
+  });
+
+  it('a turn a sanitizer returned unchanged is kept in the history and observed', async () => {
+    serve([textStream('Noted.'), text('Sure.')]);
+    const observe = vi.fn(async (_role: 'user' | 'assistant', _text: string, _context?: unknown) => undefined);
+    const session = agent({ ...OPENAI, memory: false, instructions: 'You are brief.', memoryProvider: { observe } }).session('unchanged');
+    const streamed = session.stream('hello there', { guards: guards(keepsTurn) });
+    await collect(streamed.fullStream);
+    await streamed.text;
+    await vi.waitFor(() => expect(JSON.stringify(session.messages())).toContain('hello there'));
+    await vi.waitFor(() => expect(observe).toHaveBeenCalledWith('user', 'hello there', expect.anything()));
+  });
+});
