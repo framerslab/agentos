@@ -908,6 +908,25 @@ describe("the ledger's state mark", () => {
     expect(await tombstonesOf(pair.primary)).toEqual([{ hash, namespace: '' }]);
   });
 
+  it('keeps the time a tombstone first got when its write is tried again after the store failed', async () => {
+    const dir = folder();
+    let pair = await openPair(dir);
+    const ledger = await ForgottenLedger.open(pair);
+    const hash = await ForgottenLedger.hash('', ALICE);
+    await pair.primary.exec(refusing(hash));
+    await expect(ledger.markForgotten(ALICE)).rejects.toThrow(/refused/);
+    await pair.primary.exec('DROP TRIGGER refuse_one');
+    // The call is tried again at a later millisecond.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    expect(await ledger.markForgotten(ALICE)).toEqual({ form: 'unkeyed', written: true });
+
+    expect(await valueOf(pair.primary, hash)).toBe(await valueOf(pair.copy, hash));
+    await closePair(pair);
+    pair = await openPair(dir);
+    await expect(ForgottenLedger.open(pair)).resolves.toBeInstanceOf(ForgottenLedger);
+  });
+
   it('brings an older store up to its copy', async () => {
     const dir = folder();
     const memoryFile = path.join(dir, 'memory.sqlite');
