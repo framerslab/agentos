@@ -174,6 +174,17 @@ describe('a hold on a block, on output and tool calls', () => {
     expect(shown).toEqual([[expect.objectContaining({ reasonCode: 'RULE_1' })]]);
   });
 
+  it('a reply a picker lets pass is never reported as blocked', async () => {
+    const declines = () => undefined;
+    const flagging = answering('flagger', { action: GuardrailAction.FLAG, reasonCode: 'NOTE' });
+    const verdicts: GuardrailAction[] = [];
+    const flagged = await collect(wrapOutputGuardrails([answering('refuser', REFUSE), flagging], context, reply('the reply'), { streamId: 's1', pickBlock: declines, onVerdict: (v) => { verdicts.push(v.action); } }));
+    expect(flagged.at(-1)?.type).toBe(AgentOSResponseChunkType.FINAL_RESPONSE);
+    const allowed = await collect(wrapOutputGuardrails([answering('refuser', REFUSE)], context, reply('the reply'), { streamId: 's2', pickBlock: declines, onVerdict: (v) => { verdicts.push(v.action); } }));
+    expect(allowed.at(-1)?.type).toBe(AgentOSResponseChunkType.FINAL_RESPONSE);
+    expect(verdicts).toEqual([GuardrailAction.FLAG, GuardrailAction.ALLOW]);
+  });
+
   it('is carried by the serialised entry and the blocked stream', async () => {
     expect(serializeEvaluation(holdResult('REVIEW', { reasonCode: 'NEEDS_REVIEW' }))).toMatchObject({ action: GuardrailAction.BLOCK, reasonCode: 'NEEDS_REVIEW', hold: { reviewCode: 'REVIEW' } });
     const [chunk] = await collect(createGuardrailBlockedStream(context, HOLD, { streamId: 's1' }));
