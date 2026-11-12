@@ -15,6 +15,8 @@
 import { IUtilityAI } from '../nlp/ai_utilities/IUtilityAI';
 import { IWorkingMemory } from './memory/IWorkingMemory';
 import { ChatMessage } from '../../core/llm/providers/IProvider';
+import { moduleLogger } from '../../core/logging/loggerFactory';
+import { errorFields } from '../../core/logging/events';
 import {
   GMIEventType,
   GMIEvent,
@@ -27,6 +29,19 @@ import type {
   UserContext,
 } from './IGMI';
 import type { IPersonaDefinition } from './personas/IPersonaDefinition';
+
+const sentimentLog = moduleLogger('SentimentTracker', 'library');
+
+/**
+ * What event detection reads, copied when a turn's analysis starts: the persona's sentiment settings, the last ten
+ * reasoning-trace entries and the last five history messages. Work the turn does while the analysis runs does not
+ * change the events it raises.
+ */
+type SentimentSnapshot = {
+  config: IPersonaDefinition['sentimentTracking'];
+  trace: readonly ReasoningTraceEntry[];
+  history: readonly ChatMessage[];
+};
 
 /**
  * Tracks user sentiment, detects emotional patterns, and emits GMI events.
@@ -57,7 +72,9 @@ export class SentimentTracker {
    * @param getUserContext - Callback returning the current user context.
    * @param setUserContext - Callback to persist updated user context.
    * @param addTraceEntry - Callback to add entries to the GMI's reasoning trace.
-   * @param getGmiId - Callback returning the GMI instance ID (for logging).
+   * @param _getGmiId - Kept in its position for existing callers; not read.
+   * @param holdsTurn - Whether the GMI holds a turn: false once a replaced or cleared history dropped the
+   *   turn's input, or the GMI is shutting down. An analysis of a turn it does not hold writes nothing more.
    */
   constructor(
     private readonly utilityAI: IUtilityAI,
@@ -68,7 +85,8 @@ export class SentimentTracker {
     private readonly getUserContext: () => UserContext,
     private readonly setUserContext: (ctx: UserContext) => Promise<void>,
     private readonly addTraceEntry: (type: string, message: string, details?: Record<string, any>) => void,
-    private readonly getGmiId: () => string,
+    _getGmiId: () => string,
+    private readonly holdsTurn: (turnId: string) => boolean = () => true,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -132,37 +150,57 @@ export class SentimentTracker {
    * 4. Updates consecutive frustration/confusion/satisfaction counters.
    * 5. Triggers event detection based on detected patterns.
    *
-   * Failures are caught and logged — sentiment analysis never blocks a turn.
+   * Event detection reads the persona's settings, the reasoning trace and the history as they were when the
+   * analysis started. After each wait the analysis checks that its result may be applied (`mayApply`, and the
+   * GMI holding the turn) and stops writing when it may not. A failure is logged as one `gmi.sentiment_failed`
+   * event with the error's type and code and a trace warning; it never fails the turn.
    *
    * @param turnId - Current turn identifier.
    * @param userInput - The user's input text to analyze.
+   * @param mayApply - Whether the turn takes this analysis' result: false once the turn dropped it, ended or
+   *   stopped.
+   * @param onCommit - Called once the result is in and its writes begin.
    */
-  public async analyzeTurnSentiment(turnId: string, userInput: string): Promise<void> {
-    if (!userInput || typeof userInput !== 'string') {
-      return;
-    }
+  public async analyzeTurnSentiment(
+    turnId: string,
+    userInput: string,
+    mayApply: () => boolean = () => true,
+    onCommit: () => void = () => {},
+  ): Promise<void> {
+    if (!userInput || typeof userInput !== 'string') return;
+    const live = () => mayApply() && this.holdsTurn(turnId);
+    const persona = this.getPersona();
+    const stConfig = persona.sentimentTracking ? { ...persona.sentimentTracking } : undefined;
+    // The user's language, else the persona's; with neither, the utility class scores in its own default.
+    const language = (this.getUserContext().language as string) || persona.defaultLanguage || undefined;
+    const snapshot: SentimentSnapshot = {
+      config: stConfig,
+      trace: this.getReasoningTraceEntries().slice(-10).map((entry) => ({ ...entry })),
+      history: this.getConversationHistory().slice(-5).map((message) => ({
+        ...message,
+        content: Array.isArray(message.content) ? message.content.map((part) => ({ ...part })) : message.content,
+      })),
+    };
 
     try {
-      const persona = this.getPersona();
-      const stConfig = persona.sentimentTracking;
-      const userCtx = this.getUserContext();
-
       const sentimentResult = await this.utilityAI.analyzeSentiment(userInput, {
         method: stConfig?.method,
         modelId: stConfig?.modelId || persona.defaultModelId,
         providerId: stConfig?.providerId || persona.defaultProviderId,
-        // The user's language, else the persona's; with neither, the utility class scores in its own default.
-        language: (userCtx.language as string) || persona.defaultLanguage || undefined,
+        language,
       });
-
-      // Update UserContext with current sentiment
-      userCtx.currentSentiment = sentimentResult.polarity;
-      await this.setUserContext(userCtx);
+      if (!live()) return;
 
       // Get or initialize sentiment history
       let sentimentHistory = await this.workingMemory.get<SentimentHistoryState>(
         'gmi_sentiment_history',
       );
+      if (!live()) return;
+      // Work on a copy: a discarded result never mutates the stored history by alias.
+      if (sentimentHistory) sentimentHistory = {
+        ...sentimentHistory,
+        trends: [...sentimentHistory.trends],
+      };
 
       if (!sentimentHistory) {
         sentimentHistory = {
@@ -211,8 +249,18 @@ export class SentimentTracker {
 
       sentimentHistory.lastAnalyzedTurnId = turnId;
 
-      // Store updated sentiment history
+      if (!live()) return;
+      // The writes begin here. The GMI's post-turn check finishes a committed analysis instead of dropping it halfway;
+      // a forgotten turn, an abort or a shutdown still stops it at the checks below.
+      onCommit();
+      await this.setUserContext({ ...this.getUserContext(), currentSentiment: sentimentResult.polarity });
+      if (!live()) return;
       await this.workingMemory.set('gmi_sentiment_history', sentimentHistory);
+      if (!live()) {
+        // A replacement may have run while the store was writing: scrub against the current turn set again.
+        await this.forgetTurnsExcept(new Set(sentimentHistory.trends.map((trend) => trend.turnId).filter((id) => this.holdsTurn(id))));
+        return;
+      }
 
       this.addTraceEntry(
         'DEBUG',
@@ -232,14 +280,12 @@ export class SentimentTracker {
       );
 
       // Detect and emit events based on sentiment patterns
-      await this.detectAndEmitEvents(turnId, userInput, sentimentResult, sentimentHistory);
-    } catch (error: any) {
-      console.error(`GMI (ID: ${this.getGmiId()}): Sentiment analysis error:`, error);
-      this.addTraceEntry(
-        'WARNING',
-        'Sentiment analysis failed',
-        { error: error.message },
-      );
+      await this.detectAndEmitEvents(turnId, userInput, sentimentResult, sentimentHistory, snapshot);
+    } catch (error: unknown) {
+      if (!live()) return;
+      const fields = errorFields(error);
+      sentimentLog.warn('gmi.sentiment_failed', fields);
+      this.addTraceEntry('WARNING', 'Sentiment analysis failed', fields);
     }
   }
 
@@ -258,15 +304,16 @@ export class SentimentTracker {
    * @param userInput - The user's input text.
    * @param sentimentResult - The sentiment analysis result.
    * @param sentimentHistory - The historical sentiment data.
+   * @param snapshot - The settings, trace and history copied when the analysis started; the live ones without it.
    */
   public async detectAndEmitEvents(
     turnId: string,
     userInput: string,
     sentimentResult: { score: number; polarity: 'positive' | 'negative' | 'neutral'; intensity?: number; negativeTokens?: any[] },
     sentimentHistory: SentimentHistoryState,
+    snapshot?: SentimentSnapshot,
   ): Promise<void> {
-    const persona = this.getPersona();
-    const stConfig = persona.sentimentTracking;
+    const stConfig = snapshot ? snapshot.config : this.getPersona().sentimentTracking;
     const frustThreshold = stConfig?.frustrationThreshold ?? -0.3;
     const satisThreshold = stConfig?.satisfactionThreshold ?? 0.3;
     const consecutiveRequired = stConfig?.consecutiveTurnsForTrigger ?? 2;
@@ -359,7 +406,7 @@ export class SentimentTracker {
     }
 
     // Error threshold detection (check reasoning trace for recent errors)
-    const traceEntries = this.getReasoningTraceEntries();
+    const traceEntries = snapshot?.trace ?? this.getReasoningTraceEntries();
     const recentErrors = traceEntries
       .slice(-10)
       .filter((entry) => entry.type === ('ERROR' as ReasoningEntryType));
@@ -380,7 +427,7 @@ export class SentimentTracker {
     }
 
     // Low engagement detection (consecutive neutral with short responses)
-    const conversationHistory = this.getConversationHistory();
+    const conversationHistory = snapshot?.history ?? this.getConversationHistory();
     const recentUserMessages = conversationHistory
       .slice(-5)
       .filter((msg) => msg.role === 'user');
