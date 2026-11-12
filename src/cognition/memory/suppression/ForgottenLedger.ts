@@ -152,7 +152,7 @@ const keyRequired = (): ForgottenLedgerError =>
 const identityMismatch = (): ForgottenLedgerError =>
   new ForgottenLedgerError(
     'LEDGER_IDENTITY_MISMATCH',
-    "ForgottenLedger: the store and its tombstone copy do not hold the same ledger identity; put the store's own current copy back. No memory is served.",
+    'ForgottenLedger: the store and copy do not have a checked common identity; restore the current matching copy. No memory is served.',
   );
 
 const stateInvalid = (): ForgottenLedgerError =>
