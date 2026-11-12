@@ -29,6 +29,9 @@ export {
   type Message,
   type ToolCallRecord,
   type TokenUsage,
+  type TextGuardrailOptions,
+  type TextGuardrailReport,
+  type TextGuardrailVerdict,
 } from './generateText.js';
 export { normalizeHostLLMPolicy } from './runtime/hostPolicy.js';
 export { ContextWindowExceededError } from '../core/llm/providers/errors/ContextWindowExceededError.js';

@@ -57,6 +57,7 @@ import {
   type SpendBudgetOptions,
 } from './runtime/spendBudget.js';
 import { isCallerStop, markHookStop } from './runtime/callerStop.js';
+import { guardedGenerateText, type TextGuardRun, type TextGuardrailOptions, type TextGuardrailReport, type TextGuardrailVerdict } from './runtime/textGuardrails.js';
 
 /**
  * The `fallback` component's events, to the target current when each is
@@ -135,6 +136,7 @@ const console = createContentSafeConsole('generate_text');
 // Re-export multimodal types for downstream consumers
 export type { MessageContent, MessageContentPart };
 export type { HostLLMPolicy } from './runtime/hostPolicy.js';
+export type { TextGuardrailOptions, TextGuardrailReport, TextGuardrailVerdict };
 
 async function recordAgentOSUsageLazy(
   input: Parameters<typeof import('./runtime/usageLedger.js')['recordAgentOSUsage']>[0]
@@ -915,6 +917,20 @@ export interface GenerateTextOptions {
    */
   onBeforeToolExecution?: (info: ToolCallHookInfo) => Promise<ToolCallHookInfo | null>;
   /**
+   * Guards enforced on this call: the call's own user turn before the first provider request, every tool call before
+   * any hook, and the whole reply before it is returned. A guard runs closed unless its config says
+   * `failClosed: false`. A stop rejects with `GuardrailStopError`; `mode: 'dryRun'` evaluates and reports and changes
+   * nothing. Named `guards` because an agent's `guardrails` field is a list of ids that nothing enforces.
+   */
+  guards?: TextGuardrailOptions;
+  /**
+   * Internal: the run of a call that carries `guards`, set by the wrapper and carried by every fallback leg so each
+   * tool loop can ask it about a call. Not part of the public API.
+   *
+   * @internal
+   */
+  __guardRun?: TextGuardRun;
+  /**
    * Internal — DO NOT set from application code. The tool-approval gate,
    * set by `agency()` when `hitl.approvals.beforeTool` is listed, or
    * forwarded from a parent agency. Every tool loop calls it after
@@ -1168,6 +1184,8 @@ export interface GenerateTextResult {
    * `undefined` only on legacy code paths that predate the field.
    */
   fallback?: FallbackSignal;
+  /** With `guards`: what each stage's guards answered, as codes and ids, and whether the reply passed, was rewritten or was replaced. */
+  guardReport?: TextGuardrailReport;
 }
 
 /** @see {@link GenerateTextResult.fallback} */
@@ -2441,6 +2459,8 @@ function buildHelperToolExecutionContext(
 export async function generateText(opts: GenerateTextOptions): Promise<GenerateTextResult> {
   // A call whose signal has already aborted is refused before anything is set up or sent.
   opts.abortSignal?.throwIfAborted();
+  // A call with guards runs its input and output stages once, around every leg (runtime/textGuardrails).
+  if (opts.guards && !opts.__guardRun) return guardedGenerateText(opts, generateText);
   // One budget instance for the whole call: every options object built from
   // `opts` below (a fallback hop, a continuation leg) carries it, so each hop
   // is charged to the same budget.
@@ -2908,6 +2928,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           onBeforeToolExecution: opts.onBeforeToolExecution,
           hookErrors: opts.hookErrors,
           approvalGate: opts.__approvalGate,
+          // The guards of the call judge each parsed call before the hook.
+          judgeToolCall: opts.__guardRun ? (call) => opts.__guardRun!.judgeToolCall(call) : undefined,
           // A seat's mask reaches the shim's tool errors too, and a successful
           // output passes the listed values alone.
           maskToolError: opts.__maskError ? maskToolText : undefined,
@@ -3397,7 +3419,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
               : {}),
           } as any);
 
-          for (const tc of toolCallsInChoice) {
+          for (const [callIndex, tc] of toolCallsInChoice.entries()) {
             const fnName = (tc as any).function?.name ?? (tc as any).name ?? '';
             const fnArgs = (tc as any).function?.arguments ?? '{}';
             const tcId = (tc as any).id ?? '';
@@ -3421,6 +3443,17 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
               } as any);
               allToolCalls.push(record);
               continue;
+            }
+
+            // --- guards: judged before any hook, on the arguments the model sent ---
+            if (opts.__guardRun) {
+              const refusal = await opts.__guardRun.judgeToolCall({ name: fnName, args: parsedArgs, step: runStep, index: callIndex, registered: tool !== undefined });
+              if (refusal) {
+                record.error = refusal.error;
+                messages.push({ role: 'tool', tool_call_id: tcId, content: JSON.stringify(refusal.result) } as any);
+                allToolCalls.push(record);
+                continue;
+              }
             }
 
             // --- onBeforeToolExecution hook ---

@@ -53,6 +53,7 @@ import { ContextWindowExceededError } from '../core/llm/providers/errors/Context
 import { checkContextFit } from './runtime/contextWindowFit.js';
 import { asSpendBudget, costOfUsageUSD, holdCall, withReservation, type HelperCall } from './runtime/spendBudget.js';
 import { isCallerStop, markHookStop } from './runtime/callerStop.js';
+import { guardedStreamText, type TextGuardrailReport } from './runtime/textGuardrails.js';
 import type { CacheDiagnostics } from '../core/llm/providers/IProvider.js';
 import { toProviderReplayMessage } from './sessionTranscript.js';
 import type { ModelRouteParams } from '../core/llm/routing/IModelRouter.js';
@@ -279,6 +280,11 @@ export interface StreamTextResult {
    */
   fallback?: Promise<FallbackSignal | undefined>;
   /**
+   * With `guards`: resolves when the stream ends to what each stage's guards answered. After a stop it is the report
+   * the error part carries. Unset on a call without `guards`.
+   */
+  guardReport?: Promise<TextGuardrailReport | undefined>;
+  /**
    * On a `gmi()` or `agent({ runtime: 'gmi' })` session's `stream()` with
    * cognitive memory: the recall capture of the turn's memory assembly, as
    * `GenerateTextResult.memoryRecall` carries it on `send()`. Resolves when the
@@ -397,6 +403,8 @@ function formatPlanForPrompt(plan: Plan): string {
  * ```
  */
 export function streamText(opts: GenerateTextOptions): StreamTextResult {
+  // A call with guards runs its input and output stages once, around every leg (runtime/textGuardrails).
+  if (opts.guards && !opts.__guardRun) return guardedStreamText(opts, streamText);
   // One budget instance for the whole stream: every options object built from
   // `opts` below (a fallback hop) carries it, so each hop is charged to the
   // same budget.
@@ -897,6 +905,8 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           onBeforeToolExecution: opts.onBeforeToolExecution,
           hookErrors: opts.hookErrors,
           approvalGate: opts.__approvalGate,
+          // The guards of the call judge each parsed call before the hook.
+          judgeToolCall: opts.__guardRun ? (call) => opts.__guardRun!.judgeToolCall(call) : undefined,
           // A seat's mask reaches the shim's tool errors too, and a successful
           // output passes the listed values alone.
           maskToolError: opts.__maskError ? maskToolText : undefined,
@@ -1415,7 +1425,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             : {}),
         } as any);
 
-        for (const toolCall of streamedToolCalls) {
+        for (const [callIndex, toolCall] of streamedToolCalls.entries()) {
           const fnName = toolCall.function?.name ?? '';
           const rawArgs = toolCall.function?.arguments ?? '{}';
           const toolCallId = toolCall.id ?? '';
@@ -1448,6 +1458,20 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           const requestPart: StreamPart = { type: 'tool-call', toolName: fnName, args: parsedArgs };
           parts.push(requestPart);
           yield requestPart;
+
+          // --- guards: judged before any hook, on the arguments the model sent ---
+          if (opts.__guardRun) {
+            const refusal = await opts.__guardRun.judgeToolCall({ name: fnName, args: parsedArgs, step, index: callIndex, registered: toolMap.has(fnName) });
+            if (refusal) {
+              toolCallRecord.error = refusal.error;
+              const resultPart: StreamPart = { type: 'tool-result', toolName: fnName, result: refusal.result };
+              parts.push(resultPart);
+              yield resultPart;
+              messages.push({ role: 'tool', tool_call_id: toolCallId, content: JSON.stringify(refusal.result) } as any);
+              allToolCalls.push(toolCallRecord);
+              continue;
+            }
+          }
 
           const tool = toolMap.get(fnName);
           if (!tool) {
