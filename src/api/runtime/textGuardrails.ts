@@ -494,6 +494,8 @@ class GuardRun implements TextGuardRun {
 export async function guardedGenerateText(opts: GenerateTextOptions, inner: (opts: GenerateTextOptions) => Promise<GenerateTextResult>): Promise<GenerateTextResult> {
   const run = new GuardRun(opts.guards as TextGuardrailOptions);
   const input = await run.judgeInput(userTurnOf(opts));
+  // a caller's abort while the guards judged the prompt ends the call, before a replacement or any request
+  opts.abortSignal?.throwIfAborted();
   if (input.kind === 'stopped') throw input.error;
   if (input.kind === 'replaced') {
     // no request was made: nothing was spent and nothing of the refused turn goes into a history
@@ -510,8 +512,9 @@ export async function guardedGenerateText(opts: GenerateTextOptions, inner: (opt
 }
 
 /**
- * streamText() with `guards`: the same three stages over a stream. `text` resolves with what was delivered and nothing
- * else; in a dry run, as the same call without guards resolves it.
+ * streamText() with `guards`: the same three stages over a stream. `text` resolves as the same call without guards
+ * resolves it when the guards changed nothing (a dry run, a reply they passed), else with what was delivered and
+ * nothing else.
  */
 export function guardedStreamText(opts: GenerateTextOptions, inner: (opts: GenerateTextOptions) => StreamTextResult): StreamTextResult {
   const guards = opts.guards as TextGuardrailOptions;
@@ -537,6 +540,8 @@ export function guardedStreamText(opts: GenerateTextOptions, inner: (opts: Gener
     try {
       run = new GuardRun(guards);
       const input = await run.judgeInput(userTurnOf(opts));
+      // a caller's abort while the guards judged the prompt ends the stream with the reason, before any text or request
+      opts.abortSignal?.throwIfAborted();
       if (input.kind === 'stopped') {
         finish = 'error';
         yield { type: 'error', error: input.error };
@@ -571,7 +576,12 @@ export function guardedStreamText(opts: GenerateTextOptions, inner: (opts: Gener
         return;
       }
       const out = run.guardOutput(source.fullStream, hold);
+      let inText = false;
       for await (const part of out.parts) {
+        // held text goes out only once the guards judged it: a caller's abort while they judged ends the stream before
+        // the first piece, and is not checked again while the reader takes the rest
+        if (hold && part.type === 'text' && !inText) opts.abortSignal?.throwIfAborted();
+        inText = part.type === 'text';
         if (part.type === 'text') delivered += part.text;
         yield part;
       }
@@ -584,6 +594,9 @@ export function guardedStreamText(opts: GenerateTextOptions, inner: (opts: Gener
         yield { type: 'error', error: end.error };
       } else if (end.kind !== 'passed') {
         run.report.result = end.kind;
+      } else {
+        // the guards changed nothing: text is the call's own (the last step's), as the same call without guards resolves it
+        delivered = await source.text.catch(() => delivered);
       }
     } catch (error) {
       // a configuration error (a mode or a context field the guards cannot take), or a fault of the pipe itself

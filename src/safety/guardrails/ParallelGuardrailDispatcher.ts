@@ -177,6 +177,11 @@ function worstAction(evaluations: GuardrailEvaluationResult[]): GuardrailAction 
   return worst;
 }
 
+/** Evaluations answered in phase order, put back in the order their guards were registered, as a picker reads them. */
+function inRegistrationOrder(evaluations: GuardrailEvaluationResult[], order: number[]): GuardrailEvaluationResult[] {
+  return evaluations.map((evaluation, k) => ({ evaluation, at: order[k] })).sort((a, b) => a.at - b.at).map(({ evaluation }) => evaluation);
+}
+
 /** Phase 1 holds the guards that can sanitize and the guards that ask to run first. */
 function runsInPhaseOne(svc: IGuardrailService): boolean {
   return svc.config?.canSanitize === true || svc.config?.sequential === true;
@@ -338,8 +343,9 @@ async function evaluateToolCallGuards(
     const [result] = await Promise.allSettled([call(guards[j])]);
     const evaluation = settle(j, result);
     if (evaluation?.action === GuardrailAction.BLOCK) {
-      // a caller's picker is shown the screen's BLOCK too; it ends the evaluation whatever the picker answers
-      return { outcome: 'block', evaluation: pick([evaluation]) ?? evaluation };
+      // a caller's picker is shown the screen's BLOCK after every answer before it; it ends the evaluation whatever
+      // the picker answers
+      return { outcome: 'block', evaluation: pick(slots.filter(Boolean) as GuardrailEvaluationResult[]) ?? evaluation };
     }
   }
 
@@ -633,7 +639,7 @@ export class ParallelGuardrailDispatcher {
     /** Streaming classifiers: Phase 2 for TEXT_DELTA chunks */
     const streamingParallel: { svc: IGuardrailService; registrationIndex: number }[] = [];
     /** Final sanitizers: Phase 1 for isFinal chunks */
-    const finalSanitizers: IGuardrailService[] = [];
+    const finalSanitizers: { svc: IGuardrailService; registrationIndex: number }[] = [];
     /** Final classifiers: Phase 2 for isFinal chunks */
     const finalParallel: { svc: IGuardrailService; registrationIndex: number }[] = [];
     /** Tool-call guards: the services that opted in to TOOL_CALL_REQUEST chunks */
@@ -657,7 +663,7 @@ export class ParallelGuardrailDispatcher {
 
       // All services with evaluateOutput participate in final evaluation
       if (isSanitizer) {
-        finalSanitizers.push(svc);
+        finalSanitizers.push({ svc, registrationIndex: i });
       } else {
         finalParallel.push({ svc, registrationIndex: i });
       }
@@ -709,11 +715,13 @@ export class ParallelGuardrailDispatcher {
       | { outcome: 'pass'; chunk: AgentOSResponse; sanitized: boolean; worst: GuardrailAction }
     > => {
       const outputEvaluations: GuardrailEvaluationResult[] = [];
+      // the registration index of each answer, so the picker and the metadata read them in registration order
+      const outputOrder: number[] = [];
       let workingChunk = chunkIn;
       let sanitized = false;
 
       // Phase 1: sequential final sanitizers
-      for (const svc of finalSanitizers) {
+      for (const { svc, registrationIndex } of finalSanitizers) {
         if (!svc.evaluateOutput) {
           continue;
         }
@@ -733,6 +741,7 @@ export class ParallelGuardrailDispatcher {
         // a guard that only asks to run first cannot rewrite: its SANITIZE is a FLAG, as a phase 2 guard's is
         if (svc.config?.canSanitize !== true) evaluation = downgradePhase2Sanitize(evaluation, svc, 'output');
         outputEvaluations.push(evaluation);
+        outputOrder.push(registrationIndex);
 
         // BLOCK terminates the stream; a caller's picker is shown it after what the guards before it answered
         if (evaluation.action === GuardrailAction.BLOCK) {
@@ -776,7 +785,7 @@ export class ParallelGuardrailDispatcher {
             continue;
           }
 
-          const { evaluation: rawEvaluation, svc } = result.value;
+          const { evaluation: rawEvaluation, svc, registrationIndex } = result.value;
           if (!rawEvaluation) {
             continue;
           }
@@ -785,11 +794,13 @@ export class ParallelGuardrailDispatcher {
           // Downgrade SANITIZE → FLAG in Phase 2
           const evaluation = stampGuardrailId(downgradePhase2Sanitize(rawEvaluation, svc, 'output'), svc);
           outputEvaluations.push(evaluation);
+          outputOrder.push(registrationIndex);
         }
 
         // A BLOCK terminates the stream: a refusal outranks a hold wherever it sits in registration order. The picker
-        // is shown phase 1's answers too; none of them is a BLOCK, so the default picks from this phase.
-        const block = pick(outputEvaluations);
+        // is shown phase 1's answers too, in registration order; none of them is a BLOCK, so the default picks from
+        // this phase.
+        const block = pick(inRegistrationOrder(outputEvaluations, outputOrder));
         if (block) {
           return { outcome: 'block', evaluation: block };
         }
@@ -798,7 +809,7 @@ export class ParallelGuardrailDispatcher {
       // Attach output evaluation metadata
       if (outputEvaluations.length > 0) {
         workingChunk = withGuardrailMetadata(workingChunk, {
-          output: outputEvaluations.map(serializeEvaluation),
+          output: inRegistrationOrder(outputEvaluations, outputOrder).map(serializeEvaluation),
         });
       }
 
@@ -868,6 +879,7 @@ export class ParallelGuardrailDispatcher {
         (streamingSanitizers.length > 0 || streamingParallel.length > 0)
       ) {
         const outputEvaluations: GuardrailEvaluationResult[] = [];
+        const outputOrder: number[] = [];
         let workingChunk = currentChunk;
 
         // Phase 1: sequential streaming sanitizers
@@ -899,6 +911,7 @@ export class ParallelGuardrailDispatcher {
           // a guard that only asks to run first cannot rewrite: its SANITIZE is a FLAG, as a phase 2 guard's is
           if (svc.config?.canSanitize !== true) evaluation = downgradePhase2Sanitize(evaluation, svc, 'output');
           outputEvaluations.push(evaluation);
+          outputOrder.push(registrationIndex);
 
           // BLOCK terminates the stream immediately; a caller's picker is shown it after what the guards before it answered
           if (evaluation.action === GuardrailAction.BLOCK) {
@@ -949,7 +962,7 @@ export class ParallelGuardrailDispatcher {
               continue;
             }
 
-            const { evaluation: rawEvaluation, svc } = result.value;
+            const { evaluation: rawEvaluation, svc, registrationIndex } = result.value;
             if (!rawEvaluation) {
               continue;
             }
@@ -958,10 +971,11 @@ export class ParallelGuardrailDispatcher {
             // Downgrade SANITIZE → FLAG in Phase 2
             const evaluation = stampGuardrailId(downgradePhase2Sanitize(rawEvaluation, svc, 'output'), svc);
             outputEvaluations.push(evaluation);
+            outputOrder.push(registrationIndex);
           }
 
           // A BLOCK terminates the stream immediately: a refusal outranks a hold wherever it sits in registration order
-          const block = pick(outputEvaluations);
+          const block = pick(inRegistrationOrder(outputEvaluations, outputOrder));
           if (block) {
             held = [];
             await notify({ streamId: options.streamId, ...blockVerdictOf(block), finalText: block.replacementText ?? null, originalText: null });
@@ -973,7 +987,7 @@ export class ParallelGuardrailDispatcher {
         // Attach output evaluation metadata
         if (outputEvaluations.length > 0) {
           workingChunk = withGuardrailMetadata(workingChunk, {
-            output: outputEvaluations.map(serializeEvaluation),
+            output: inRegistrationOrder(outputEvaluations, outputOrder).map(serializeEvaluation),
           });
         }
 

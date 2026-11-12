@@ -212,7 +212,7 @@ const result = await generateText({
   provider: 'openai',
   prompt,
   tools,
-  guards: { services: [hardBan, classifier], context: { userId: user.id, moderation: { surface: 'agent_turn' } } },
+  guards: { services: [hardBan, classifier], context: { userId: user.id, sessionId: thread.id, moderation: { surface: 'agent_turn' } } },
 });
 ```
 
