@@ -555,7 +555,7 @@ await mem.export('./backup.sqlite', { format: 'sqlite' });
 
 ### JSON (Programmatic)
 
-A single structured JSON document containing the full portable brain payload, with the registry of conversation scopes (`scopes`, each with its compile watermark) and each subject's wiki pages (`pages`, each listing its chunks among `traces`). Designed for programmatic consumption, browser-safe transfer, and cross-runtime restore. Its import brings the scopes and the pages back by the rules of the SQLite import ([Memory storage](memory/MEMORY_STORAGE.md#export-and-backup)).
+A single structured JSON document containing the full portable brain payload, with the registry of conversation scopes (`scopes`, each with its compile watermark) and each subject's wiki pages (`pages`, each listing its chunks among `traces`). Designed for programmatic consumption, browser-safe transfer, and cross-runtime restore. Its rows are read from one consistent view of the database, as the SQLite export's are, so a page rewritten while the export reads comes out with its chunks or not at all. Its import brings the scopes and the pages back by the rules of the SQLite import ([Memory storage](memory/MEMORY_STORAGE.md#export-and-backup)).
 
 ```ts
 await mem.export('./memories.json', { format: 'json' });

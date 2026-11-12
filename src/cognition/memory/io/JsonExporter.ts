@@ -37,6 +37,7 @@
 
 import type { ExportOptions } from './facade/types.js';
 import type { Brain } from '../retrieval/store/Brain.js';
+import type { StorageAdapter } from '@framers/sql-storage-adapter';
 import { asBinaryBytes, bytesToBase64 } from './base64.js';
 import { brainHoldsScopeIdFormRecord, readInOneScopeIdForm } from '../retrieval/store/scopeIdForm.js';
 
@@ -209,20 +210,25 @@ export class JsonExporter {
     // the export reads is wholly in what it reads or wholly out of it.
     const { value } = await readInOneScopeIdForm(
       () => brainHoldsScopeIdFormRecord(this.brain),
-      () => this._readPayload(options),
+      // One consistent view of the database: a page rewritten while the export reads is wholly in it, its chunks
+      // with it, or wholly out of it.
+      () => this.brain.readConsistently((source) => this._readPayload(options, source)),
     );
     return value;
   }
 
-  /** Reads the payload's rows, {@link _buildPayload}'s one pass. */
-  private async _readPayload(options?: ExportOptions): Promise<Record<string, unknown>> {
+  /** Reads the payload's rows from `source`, {@link _buildPayload}'s one pass. */
+  private async _readPayload(
+    options: ExportOptions | undefined,
+    source: Pick<StorageAdapter, 'all'>,
+  ): Promise<Record<string, unknown>> {
     const includeEmbeddings = options?.includeEmbeddings ?? false;
     const includeConversations = options?.includeConversations ?? true;
 
     const brainId = this.brain.brainId;
 
     // Collect brain_meta as a plain object for the `meta` field.
-    const metaRows = await this.brain.all<{ key: string; value: string }>(
+    const metaRows = await source.all<{ key: string; value: string }>(
       'SELECT key, value FROM brain_meta WHERE brain_id = ?',
       [brainId],
     );
@@ -233,45 +239,45 @@ export class JsonExporter {
     meta['exported_at'] = String(Date.now());
 
     // ---- memory_traces ----
-    const rawTraces = await this.brain.all<TraceRow>('SELECT * FROM memory_traces WHERE brain_id = ?', [brainId]);
+    const rawTraces = await source.all<TraceRow>('SELECT * FROM memory_traces WHERE brain_id = ?', [brainId]);
     const traces = rawTraces.map((row) => this._serializeTrace(row, includeEmbeddings));
 
     // ---- knowledge_nodes ----
-    const rawNodes = await this.brain.all<NodeRow>('SELECT * FROM knowledge_nodes WHERE brain_id = ?', [brainId]);
+    const rawNodes = await source.all<NodeRow>('SELECT * FROM knowledge_nodes WHERE brain_id = ?', [brainId]);
     const nodes = rawNodes.map((row) => this._serializeNode(row, includeEmbeddings));
 
     // ---- knowledge_edges ----
-    const edges = await this.brain.all<EdgeRow>('SELECT * FROM knowledge_edges WHERE brain_id = ?', [brainId]);
+    const edges = await source.all<EdgeRow>('SELECT * FROM knowledge_edges WHERE brain_id = ?', [brainId]);
 
     // ---- documents ----
-    const documents = await this.brain.all<DocumentRow>('SELECT * FROM documents WHERE brain_id = ?', [brainId]);
+    const documents = await source.all<DocumentRow>('SELECT * FROM documents WHERE brain_id = ?', [brainId]);
 
     // ---- document_chunks ----
-    const rawChunks = await this.brain.all<DocumentChunkRow>('SELECT * FROM document_chunks WHERE brain_id = ?', [brainId]);
+    const rawChunks = await source.all<DocumentChunkRow>('SELECT * FROM document_chunks WHERE brain_id = ?', [brainId]);
     const chunks = rawChunks.map((row) => this._serializeChunk(row, includeEmbeddings));
 
     // ---- document_images ----
-    const rawImages = await this.brain.all<DocumentImageRow>('SELECT * FROM document_images WHERE brain_id = ?', [brainId]);
+    const rawImages = await source.all<DocumentImageRow>('SELECT * FROM document_images WHERE brain_id = ?', [brainId]);
     const images = rawImages.map((row) => this._serializeImage(row, includeEmbeddings));
 
     // ---- conversations ----
     const conversations: ConversationRow[] = includeConversations
-      ? await this.brain.all<ConversationRow>('SELECT * FROM conversations WHERE brain_id = ?', [brainId])
+      ? await source.all<ConversationRow>('SELECT * FROM conversations WHERE brain_id = ?', [brainId])
       : [];
 
     // ---- messages ----
     const messages: MessageRow[] = includeConversations
-      ? await this.brain.all<MessageRow>('SELECT * FROM messages WHERE brain_id = ?', [brainId])
+      ? await source.all<MessageRow>('SELECT * FROM messages WHERE brain_id = ?', [brainId])
       : [];
 
     // ---- memory_scopes, memory_pages ----
     // The registry of conversation scopes and each subject's wiki pages: a page's row lists its chunks among the
     // traces, so a restore without the rows would leave chunks no row lists.
-    const scopes = await this.brain.all<Record<string, unknown>>(
+    const scopes = await source.all<Record<string, unknown>>(
       'SELECT scope, scope_id, kind, agent_id, created_at, compiled_at FROM memory_scopes WHERE brain_id = ?',
       [brainId],
     );
-    const pages = await this.brain.all<Record<string, unknown>>(
+    const pages = await source.all<Record<string, unknown>>(
       `SELECT scope, scope_id, page_id, content, content_hash, chunk_ids, updated_at
          FROM memory_pages WHERE brain_id = ?`,
       [brainId],

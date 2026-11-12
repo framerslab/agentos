@@ -1644,6 +1644,11 @@ export class Brain {
    *
    * @param read - Reads the view; its result is returned.
    */
+  async readConsistently<T>(read: (source: StorageAdapter) => Promise<T>): Promise<T> {
+    return this._readSnapshot(read);
+  }
+
+  /** {@link readConsistently}, which an export of this brain reads through. */
   private async _readSnapshot<T>(read: (source: StorageAdapter) => Promise<T>): Promise<T> {
     if (this._features.dialect.name === 'postgres') {
       return this._adapter.transaction(async (trx) => {
