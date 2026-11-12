@@ -45,10 +45,13 @@ import {
   rerankerRecordOf,
   type MemoryRecallCapture,
   type MemoryRecallReranker,
+  type RankedRecallCandidate,
   type RecallCaptureMode,
   type RetrievalRecallReport,
 } from './retrieval/recall/capture.js';
 import { assertRecallConfig } from './retrieval/recall/budget.js';
+import { dedupeTokens, nearDuplicate } from './retrieval/recall/dedupe.js';
+import { RECALL_CONSTANTS } from './retrieval/recall/fuse.js';
 import { RecallPipeline } from './retrieval/recall/pipeline.js';
 import { CognitiveWorkingMemory } from './core/working/CognitiveWorkingMemory.js';
 import {
@@ -377,6 +380,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     store: () => this.store,
     graph: () => this.graph,
     graphConfig: () => this.config?.graph,
+    recall: () => this.config?.recall,
   });
 
   /**
@@ -929,10 +933,12 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     }
 
     // The recall pipeline: the dense leg (the store's vector query, the trust-policy filter and the graph's
-    // activation), with each leg's report for the recall capture.
+    // activation), and under `retrieval: 'hybrid'` the exact-words and recency legs fused with it into one deduped
+    // pool, with each leg's report for the recall capture.
     const hydeMs = capturing ? performance.now() - denseStartedAt : 0;
     const run = await this.recall.run({
       denseQuery: effectiveQuery,
+      query,
       mood,
       options: { ...options, topK: effectiveTopK },
     });
@@ -949,9 +955,12 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     let rerankerRecord: MemoryRecallReranker | undefined;
     let rerankScores: Record<string, number> | undefined;
     // Each trace's rank in the dense leg, before a rerank reorders them: the capture reports it beside the final order.
-    const denseRanks: Record<string, number> | undefined = capturing
-      ? Object.fromEntries(scored.map((trace, i) => [trace.id, i + 1]))
-      : undefined;
+    // Under `hybrid` the pool holds them, beside the other legs' ranks.
+    const denseRanks: Record<string, number> | undefined = !capturing
+      ? undefined
+      : run.ranked
+        ? Object.fromEntries(run.ranked.flatMap((candidate) => (candidate.ranks.dense !== undefined ? [[candidate.id, candidate.ranks.dense]] : [])))
+        : Object.fromEntries(scored.map((trace, i) => [trace.id, i + 1]));
     if (capturing && this.rerankerService && scored.length === 0) {
       rerankerRecord = { provider: 'none', candidates: 0, ms: 0 };
     }
@@ -981,7 +990,9 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
           }
         }
 
-        scored.sort((a, b) => b.retrievalScore - a.retrievalScore);
+        // Under `hybrid` the fused order stands: the blend sets each line's relevance, and re-sorting by it would sink a
+        // candidate only the exact words or the recency found, whose cognitive score has similarity 0.
+        if (run.retrieval !== 'hybrid') scored.sort((a, b) => b.retrievalScore - a.retrievalScore);
         if (capturing) {
           rerankerRecord = rerankerRecordOf(
             rerankerOutput.diagnostics?.providerId,
@@ -999,7 +1010,16 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
       }
     }
     const recallReport: RetrievalRecallReport | undefined = denseRanks
-      ? { denseRanks, denseMs, legs: run.legs, ...(rerankScores ? { rerankScores } : {}) }
+      ? {
+          denseRanks,
+          denseMs,
+          legs: run.legs,
+          ...(rerankScores ? { rerankScores } : {}),
+          retrieval: run.retrieval,
+          ...(run.ranked ? { ranked: run.ranked } : {}),
+          ...(run.lexicalBackend ? { lexicalBackend: run.lexicalBackend } : {}),
+          ...(run.timings ? { timings: run.timings } : {}),
+        }
       : undefined;
 
     const confidence = evaluateRetrievalConfidence(scored, {
@@ -1193,6 +1213,20 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     // focus/decay updates retrieval just applied — same order as before).
     const wmText = workingMemory.formatForPrompt();
 
+    // A hybrid recall's pool is shown as one Relevant Memories section. Its report says which recall ran; under
+    // `recall.capture: 'off'` there is none, and the setting says.
+    const recallReport = result.diagnostics.recall;
+    const hybrid = (recallReport?.retrieval ?? this.config.recall?.retrieval) === 'hybrid';
+    // Under hybrid an association whose memory the pool already holds, in other words or the same ones, is left out,
+    // so a memory the dedupe made one is not shown again through the graph.
+    const pooledTokens = hybrid ? result.retrieved.map((trace) => dedupeTokens(trace.content)) : [];
+    const nearDuplicateAt = hybrid ? (this.config.recall?.constants?.nearDuplicate ?? RECALL_CONSTANTS.nearDuplicate) : 0;
+    const repeatsPooled = (content: string): boolean => {
+      if (!hybrid) return false;
+      const tokens = dedupeTokens(content);
+      return pooledTokens.some((pooled) => nearDuplicate(pooled, tokens, nearDuplicateAt));
+    };
+
     // --- Batch 2: Graph associations ---
     const graphContext: MemoryGraphAssociation[] = [];
     if (this.graph && result.retrieved.length > 0) {
@@ -1211,7 +1245,8 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
           if (
             trace?.isActive &&
             recallableIds.has(node.memoryId) &&
-            !this.store.isDeleted(node.memoryId)
+            !this.store.isDeleted(node.memoryId) &&
+            !repeatsPooled(trace.content)
           ) {
             // Whole: the assembler shows an association whole or leaves it out when it does not fit its section, and
             // leaves it out when the block already holds its trace (a retrieved trace past the three seeds may be
@@ -1234,6 +1269,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
       workingMemoryText: wmText,
       persistentMemoryText,
       retrievedTraces: result.retrieved,
+      ...(hybrid ? { recallTraces: result.retrieved } : {}),
       prospectiveAlerts,
       graphContext,
       observationNotes: [], // Filled externally by the GMI turn loop
@@ -1242,10 +1278,28 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     const context = assembleMemoryContext(input);
     if (capturing) {
       const assembledAt = performance.now();
-      const recall = result.diagnostics.recall;
+      const recall = recallReport;
+      // Under hybrid the whole pool, in fused order, the candidates the cut at topK and the dedupe left out included.
+      // A recall the retrieval policy suppressed returned nothing, so it records no candidate, as under dense.
+      const ranked: RankedRecallCandidate[] =
+        hybrid && recall?.ranked && !result.diagnostics.suppressed
+          ? recall.ranked.map((candidate) => {
+              const rerankScore = recall.rerankScores?.[candidate.id];
+              return { ...candidate, ...(typeof rerankScore === 'number' ? { rerankScore } : {}) };
+            })
+          : result.retrieved.map((trace, i) => {
+              const dense = recall?.denseRanks[trace.id];
+              const rerankScore = recall?.rerankScores?.[trace.id];
+              return {
+                id: trace.id,
+                ranks: { dense: typeof dense === 'number' ? dense : i + 1 },
+                fusedScore: trace.retrievalScore,
+                ...(typeof rerankScore === 'number' ? { rerankScore } : {}),
+              };
+            });
       context.capture = {
         version: MEMORY_RECALL_CAPTURE_VERSION,
-        retrieval: 'dense',
+        retrieval: hybrid ? 'hybrid' : 'dense',
         budget: { requested: tokenBudget, effective: tokenBudget },
         tokensUsed: context.tokensUsed,
         allocation: context.allocation,
@@ -1253,27 +1307,15 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
         legs: recall?.legs
           ? recall.legs.map((leg) => (leg.leg === 'dense' ? { ...leg, ms: Math.round(recall.denseMs) } : { ...leg }))
           : [{ leg: 'dense', ran: true, candidates: result.retrieved.length, ineligible: 0, ms: Math.round(recall?.denseMs ?? result.diagnostics.totalTimeMs) }],
-        lexicalBackend: 'none',
+        lexicalBackend: hybrid ? (recall?.lexicalBackend ?? 'none') : 'none',
         ...(this.config.recall?.embedder ? { embedder: { ...this.config.recall.embedder } } : {}),
         reranker: result.diagnostics.reranker ?? { provider: 'none', reason: 'none_configured' },
         memoryQuestionReserve: { fired: false, added: 0 },
-        candidates: candidatesFrom(
-          result.retrieved.map((trace, i) => {
-            const dense = recall?.denseRanks[trace.id];
-            const rerankScore = recall?.rerankScores?.[trace.id];
-            return {
-              id: trace.id,
-              ranks: { dense: typeof dense === 'number' ? dense : i + 1 },
-              fusedScore: trace.retrievalScore,
-              ...(typeof rerankScore === 'number' ? { rerankScore } : {}),
-            };
-          }),
-          context.lineOutcomes ?? [],
-        ),
+        candidates: candidatesFrom(ranked, context.lineOutcomes ?? []),
         timings: {
           legsMs: Math.round(recalledAt - startedAt),
-          fuseMs: 0,
-          dedupeMs: 0,
+          fuseMs: recall?.timings?.fuseMs ?? 0,
+          dedupeMs: recall?.timings?.dedupeMs ?? 0,
           rerankMs: result.diagnostics.reranker?.ms ?? 0,
           assembleMs: Math.round(assembledAt - recalledAt),
           totalMs: Math.round(assembledAt - startedAt),
@@ -1299,11 +1341,12 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
         // The same candidates in the same order, with this rendering's outcomes: one no section had a line for is
         // left out for the budget.
         candidates: candidatesFrom(
-          kept.capture.candidates.map(({ id, ranks, fusedScore, rerankScore }) => ({
+          kept.capture.candidates.map(({ id, ranks, fusedScore, rerankScore, duplicateOf }) => ({
             id,
             ranks,
             fusedScore,
             ...(rerankScore !== undefined ? { rerankScore } : {}),
+            ...(duplicateOf !== undefined ? { duplicateOf } : {}),
           })),
           next.lineOutcomes ?? [],
         ),
@@ -1948,6 +1991,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
       }
     } finally {
       try {
+        this.recall.dispose();
         store?.dispose();
       } finally {
         this.initialized = false;

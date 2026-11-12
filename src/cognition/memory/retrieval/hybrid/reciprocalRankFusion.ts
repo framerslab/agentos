@@ -128,3 +128,56 @@ export function reciprocalRankFusion(
   });
   return merged;
 }
+
+/** One fused document of {@link fuseRankedLists}: its score and its rank in each list, in the lists' order. */
+export interface FusedDoc {
+  id: string;
+  score: number;
+  /** The document's rank in each list, `undefined` where a list did not hold it. */
+  ranks: Array<number | undefined>;
+}
+
+/**
+ * Reciprocal Rank Fusion over any number of weighted ranked lists:
+ *
+ * ```
+ * score(d) = Σ weight_i / (k + rank_i(d))
+ * ```
+ *
+ * A list that holds an id twice counts it once, at its first rank. A list of weight 0 adds its ids at no score and
+ * moves no other score. With two lists of weights 0.7 and 0.3, and no id repeated within a list, it equals
+ * {@link reciprocalRankFusion} id for id and score for score.
+ *
+ * @param lists - The ranked lists (1-based ranks) and their weights.
+ * @param options.k - Smoothing constant (default 60).
+ * @returns Sorted by score descending, equal scores by id ascending.
+ *
+ * @example
+ * ```ts
+ * fuseRankedLists([
+ *   { ranked: [{ id: 'a', rank: 1 }, { id: 'b', rank: 2 }], weight: 0.7 },
+ *   { ranked: [{ id: 'b', rank: 1 }], weight: 0.3 },
+ * ]);
+ * // => [{ id: 'b', score: 0.0162, ranks: [2, 1] }, { id: 'a', score: 0.0115, ranks: [1, undefined] }]
+ * ```
+ */
+export function fuseRankedLists(
+  lists: ReadonlyArray<{ ranked: ReadonlyArray<RankedDoc>; weight: number }>,
+  options: { k?: number } = {},
+): FusedDoc[] {
+  const k = options.k ?? 60;
+  const byId = new Map<string, FusedDoc>();
+  lists.forEach(({ ranked, weight }, list) => {
+    for (const { id, rank } of ranked) {
+      let doc = byId.get(id);
+      if (!doc) {
+        doc = { id, score: 0, ranks: lists.map(() => undefined) };
+        byId.set(id, doc);
+      }
+      if (doc.ranks[list] !== undefined) continue;
+      doc.ranks[list] = rank;
+      doc.score += weight / (k + rank);
+    }
+  });
+  return [...byId.values()].sort((a, b) => b.score - a.score || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+}
