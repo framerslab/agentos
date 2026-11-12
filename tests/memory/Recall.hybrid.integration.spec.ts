@@ -49,13 +49,16 @@ afterEach(() => {
 });
 
 describe.each(ENGINES)('hybrid recall on %s', (engine, open) => {
-  /** Thirty traces a flat embedder cannot tell apart; the oldest holds the answer, so the dense leg's twenty newest leave it out. */
+  /**
+   * Thirty traces a flat embedder cannot tell apart; the oldest holds the answer, so the dense leg's twenty newest leave
+   * it out. Each note names beds of its own, so no two notes are near-duplicates (a one-digit number is no token).
+   */
   async function fixture(recall: Record<string, unknown> | undefined, embedder: WordHashEmbedder = new FlatEmbedder()) {
     const db = await open();
     const mem = await memoryWith(recall, embedder, db.brain);
     await plant(mem, 'gold', 'The bike shed code is XQ7Z, set in March.', at(0));
     for (let i = 0; i < 29; i++) {
-      await plant(mem, `n${i}`, `Garden note ${i}: the tomatoes on row ${i} were watered and the hose was coiled by the east fence.`, at(i + 1));
+      await plant(mem, `n${i}`, `Garden note ${i}: beds g${i}a, g${i}b, g${i}c and g${i}d were watered by the east fence.`, at(i + 1));
     }
     return { db, mem, embedder };
   }
