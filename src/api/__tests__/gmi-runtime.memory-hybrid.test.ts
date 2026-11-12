@@ -205,6 +205,24 @@ describe("agent({ runtime: 'gmi' }) memory.recall.retrieval", () => {
     }
   });
 
+  it("'hybrid' with capture 'off' on a GMI turn records nothing and still sends the one recall section, byte for byte as with a record", async () => {
+    vi.useFakeTimers({ toFake: ['Date'], shouldAdvanceTime: false });
+    vi.setSystemTime(Date.UTC(2026, 10, 10, 12, 0, 0));
+    try {
+      const recorded = await turn({ retrieval: 'hybrid', capture: 'metadata' });
+      const off = await turn({ retrieval: 'hybrid', capture: 'off' });
+      // With no record the manager reads the setting itself: the pool is still shown as one section.
+      expect(off.memoryRecall).toBeUndefined();
+      expect(off.block).toContain('XQ7Z');
+      expect(off.block.match(/^## Relevant Memories/gm)).toHaveLength(1);
+      expect(off.block).not.toContain('## Recent Experiences');
+      expect(off.block).toBe(recorded.block);
+      expect(off.embedCalls).toBe(recorded.embedCalls);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('with memory.store the exact-words leg reads the durable index', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gmi-hybrid-'));
     try {
