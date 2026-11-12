@@ -152,8 +152,11 @@ export class SentimentTracker {
    *
    * Event detection reads the persona's settings, the reasoning trace and the history as they were when the
    * analysis started. After each wait the analysis checks that its result may be applied (`mayApply`, and the
-   * GMI holding the turn) and stops writing when it may not. A failure is logged as one `gmi.sentiment_failed`
-   * event with the error's type and code and a trace warning; it never fails the turn.
+   * GMI holding the turn) and stops writing when it may not. `currentSentiment` is set on the user context the
+   * moment the writes begin, before the store has saved it. A store write cannot be cancelled: when the history
+   * write lands once the result may not be applied, the analysis takes it back.
+   * A failure is logged as one `gmi.sentiment_failed` event with the error's type and code and a trace warning;
+   * it never fails the turn.
    *
    * @param turnId - Current turn identifier.
    * @param userInput - The user's input text to analyze.
@@ -201,6 +204,8 @@ export class SentimentTracker {
         ...sentimentHistory,
         trends: [...sentimentHistory.trends],
       };
+      // The history this analysis replaces, put back if its write lands once the result may not be applied.
+      const replaced = sentimentHistory ? { ...sentimentHistory, trends: [...sentimentHistory.trends] } : undefined;
 
       if (!sentimentHistory) {
         sentimentHistory = {
@@ -251,14 +256,14 @@ export class SentimentTracker {
 
       if (!live()) return;
       // The writes begin here. The GMI's post-turn check finishes a committed analysis instead of dropping it halfway;
-      // a forgotten turn, an abort or a shutdown still stops it at the checks below.
+      // a forgotten turn, an abort or a shutdown stops it at the checks below.
       onCommit();
       await this.setUserContext({ ...this.getUserContext(), currentSentiment: sentimentResult.polarity });
       if (!live()) return;
       await this.workingMemory.set('gmi_sentiment_history', sentimentHistory);
       if (!live()) {
-        // A replacement may have run while the store was writing: scrub against the current turn set again.
-        await this.forgetTurnsExcept(new Set(sentimentHistory.trends.map((trend) => trend.turnId).filter((id) => this.holdsTurn(id))));
+        // The turn dropped the result, ended, stopped or was forgotten while the store was writing.
+        await this.takeBackHistoryWrite(turnId, replaced);
         return;
       }
 
@@ -287,6 +292,35 @@ export class SentimentTracker {
       sentimentLog.warn('gmi.sentiment_failed', fields);
       this.addTraceEntry('WARNING', 'Sentiment analysis failed', fields);
     }
+  }
+
+  /**
+   * Takes back the history write of an analysis whose result may not be applied, for a write the store
+   * finished after the turn dropped the result (its post-turn check stopped waiting, or it ended, stopped or was
+   * forgotten). While that write is the stored history's latest, the history it replaced is put back, or the key
+   * is deleted when there was none; after a later analysis wrote, only this turn's trend is removed. Either way the
+   * excerpts of turns the GMI does not hold are cleared, as `forgetTurnsExcept` does: the write may carry
+   * excerpts a forgotten-turn scrub cleared while it was in flight.
+   *
+   * @param turnId - The turn whose analysis wrote.
+   * @param replaced - The history the write replaced, as the analysis read it.
+   */
+  private async takeBackHistoryWrite(turnId: string, replaced: SentimentHistoryState | undefined): Promise<void> {
+    const stored = await this.workingMemory.get<SentimentHistoryState>('gmi_sentiment_history');
+    if (!stored) return;
+    const restored = stored.lastAnalyzedTurnId === turnId
+      ? replaced
+      : { ...stored, trends: stored.trends.filter((trend) => trend.turnId !== turnId) };
+    if (!restored) {
+      await this.workingMemory.delete('gmi_sentiment_history');
+      return;
+    }
+    await this.workingMemory.set('gmi_sentiment_history', {
+      ...restored,
+      trends: restored.trends.map((trend) => (
+        (this.holdsTurn(trend.turnId) || !trend.context) ? trend : { ...trend, context: '' }
+      )),
+    });
   }
 
   /**

@@ -1568,6 +1568,7 @@ export class GMI implements IGMI {
       if (postTurn && !sentimentSettled && sentimentCommitted && !stop.signal.aborted) {
         // The reply came in time and its writes have begun: finish them (store writes and event detection, no model
         // call), at most the shutdown bound, so the check consumes the turn's own events and nothing is half written.
+        // A history write that outlasts the bound lands after the drop below, and the tracker takes it back.
         if (await settlesWithin(sentimentWork, shutdownTimeoutOrDefault(this.config?.shutdownTimeoutMs))) return;
       }
       if (postTurn && !sentimentSettled) {
