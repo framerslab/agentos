@@ -319,11 +319,11 @@ describe("agent({ runtime: 'gmi' }) memory.recall.retrieval", () => {
     const hybrid = await ask({ retrieval: 'hybrid' }, statements, question);
     expect(hybrid.block).toContain('lives in Lisbon');
     expect(hybrid.block).not.toContain('lives in Porto');
-    const dropped = hybrid.memoryRecall.candidates.filter((c) => c.reason === 'dedupe');
-    expect(dropped).toHaveLength(1);
-    // The old text ranks first by exact words (the question names its city) and is the one dropped.
-    expect(dropped[0].ranks.exact_words).toBe(1);
-    expect(hybrid.memoryRecall.candidates.find((c) => c.id === dropped[0].duplicateOf)).toMatchObject({ outcome: 'included', section: 'recall' });
+    // The old text ranks first by exact words (the question names its city) and is the one dropped. (The session's
+    // three "Noted." replies are one memory too, so they are not the only candidates the dedupe drops.)
+    const old = hybrid.memoryRecall.candidates.find((c) => c.ranks.exact_words === 1)!;
+    expect(old).toMatchObject({ outcome: 'left_out', reason: 'dedupe' });
+    expect(hybrid.memoryRecall.candidates.find((c) => c.id === old.duplicateOf)).toMatchObject({ outcome: 'included', section: 'recall' });
   });
 
   it("'hybrid' on a GMI turn whose question the embedding provider fails on: the dense leg is absent, exact words still put the memory in the block", async () => {
