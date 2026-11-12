@@ -898,17 +898,42 @@ function refileAroundRead(
   matches: (sql: string) => boolean,
   when: 'before' | 'after',
 ): { refiled: () => boolean; restore: () => void } {
-  const all = brain.all.bind(brain);
   let refiled = false;
-  const spy = vi.spyOn(brain, 'all').mockImplementation((async (sql: string, params?: Parameters<ReadAll>[1]) => {
-    const now = !refiled && matches(sql);
-    if (now) refiled = true;
-    if (now && when === 'before') await refileBrainScopeIds(brain);
-    const rows = await all(sql, params);
-    if (now && when === 'after') await refileBrainScopeIds(brain);
-    return rows;
-  }) as ReadAll);
-  return { refiled: () => refiled, restore: () => spy.mockRestore() };
+  /** `all`, the re-file run around its first read whose statement `matches`. */
+  const hooked = (all: ReadAll): ReadAll =>
+    (async (sql: string, params?: Parameters<ReadAll>[1]) => {
+      const now = !refiled && matches(sql);
+      if (now) refiled = true;
+      if (now && when === 'before') await refileBrainScopeIds(brain);
+      const rows = await all(sql, params);
+      if (now && when === 'after') await refileBrainScopeIds(brain);
+      return rows;
+    }) as ReadAll;
+  const all = hooked(brain.all.bind(brain));
+  const spy = vi.spyOn(brain, 'all').mockImplementation(all);
+  // An export that reads one consistent view reads it through readConsistently: the view's reads are hooked too.
+  const readConsistently = brain.readConsistently.bind(brain);
+  const viewSpy = vi.spyOn(brain, 'readConsistently').mockImplementation(((
+    read: (source: Parameters<Parameters<Brain['readConsistently']>[0]>[0]) => Promise<unknown>,
+  ) =>
+    readConsistently((source) =>
+      read(
+        new Proxy(source, {
+          get(target, property) {
+            if (property === 'all') return hooked(target.all.bind(target) as ReadAll);
+            const value: unknown = Reflect.get(target, property, target);
+            return typeof value === 'function' ? value.bind(target) : value;
+          },
+        }),
+      ),
+    )) as Brain['readConsistently']);
+  return {
+    refiled: () => refiled,
+    restore: () => {
+      spy.mockRestore();
+      viewSpy.mockRestore();
+    },
+  };
 }
 
 /** Runs `run`, then removes the hook, whether `run` settles or throws. */

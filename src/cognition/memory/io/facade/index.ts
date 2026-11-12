@@ -9,10 +9,12 @@
  */
 
 export { Memory } from './Memory.js';
-export type { ScoredTrace } from './Memory.js';
+export type { ScoredTrace, MemoryScopeRow, AttachedWiki, CompileSkipReason } from './Memory.js';
 
 export type {
   MemoryConfig,
+  MemoryPageRow,
+  MemoryPageChunk,
   EmbeddingConfig,
   ExtendedConsolidationConfig,
   IngestionConfig,

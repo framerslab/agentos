@@ -45,6 +45,16 @@
  * - **knowledge_edges**: deduplicated by `source_id` + `target_id` + `type`.
  *   - New edges are inserted; existing edges are left unchanged.
  *
+ * - **memory_scopes** and **memory_pages**: the registry of conversation scopes
+ *   and each subject's wiki pages (a file older than them holds neither).
+ *   - A scope the brain already registers keeps its own row and compile
+ *     watermark; any other comes in with the source's.
+ *   - A page the brain already holds, by scope and page id, is kept: the
+ *     source's page is skipped, and so are its chunks, which no row here would
+ *     list. Any other page comes in with its chunks, which are written as
+ *     traces of their own, never merged into a trace the brain holds, and the
+ *     row lists the ids they were written under.
+ *
  * ## Full-text index
  * The brain's full-text index covers each trace's content and tags. Once the
  * import has committed, the importer rebuilds it, once, when the import
@@ -99,6 +109,12 @@ import { fillScopeIds } from '../retrieval/store/migrations/v2-to-v3.js';
 import { keyTraceCopies, storedCopyTraceId } from '../retrieval/store/SqlKnowledgeGraph.js';
 import { parseTraceMetadata } from '../retrieval/store/tracePersistence.js';
 import {
+  conversationPagesOf,
+  mergeImportedScopesAndPages,
+  registeredConversationScopes,
+  splitImportedPages,
+} from './importPages.js';
+import {
   encodedCopyProperties,
   encodePlainScopeId,
   holdsScopeIdsTheFormChanges,
@@ -151,6 +167,16 @@ interface EdgeRow {
   bidirectional: number;
   metadata: string;
   created_at: number;
+}
+
+/** One row of the source's registry of conversation scopes. */
+interface ScopeRow {
+  scope: string;
+  scope_id: string;
+  kind: string;
+  agent_id: string;
+  created_at: number;
+  compiled_at: number | null;
 }
 
 /** The tables the importer reads. */
@@ -243,6 +269,33 @@ export class SqliteImporter {
       // without the record keeps its plain form.
       const sourceEncoded = sourceRecord && holdsScopeIdsTheFormChanges(rows.traces ?? [], rows.nodes ?? []);
 
+      // The registry of conversation scopes and the wiki pages. A file older than the two tables holds neither; a
+      // table the file holds and that cannot be read stops the import before anything is written, so no page is
+      // left behind unsaid.
+      const readOwn = async <T>(table: 'memory_scopes' | 'memory_pages'): Promise<T[] | undefined> => {
+        let columns: Array<{ name: string }> = [];
+        try {
+          columns = await sourceAdapter.all<{ name: string }>(`PRAGMA table_info(${table})`);
+        } catch {
+          columns = [];
+        }
+        if (columns.length === 0) return [];
+        try {
+          return sourceBrainId !== undefined
+            ? await sourceAdapter.all<T>(`SELECT * FROM ${table} WHERE brain_id = ?`, [sourceBrainId])
+            : await sourceAdapter.all<T>(`SELECT * FROM ${table}`);
+        } catch (err) {
+          result.errors.push(`Cannot read ${table} of the source SQLite (${String(err)}); nothing was imported.`);
+          return undefined;
+        }
+      };
+      const ownScopes = await readOwn<ScopeRow>('memory_scopes');
+      if (ownScopes === undefined) return result;
+      const ownPages = await readOwn<unknown>('memory_pages');
+      if (ownPages === undefined) return result;
+      const sourceScopes = ownScopes;
+      const sourcePages = conversationPagesOf(ownPages);
+
       let traces = { inserted: 0, retagged: 0 };
       await this.brain.transaction(async (trx) => {
         // The Brain's form is read in the transaction the import writes in, so a re-file or another import that
@@ -256,8 +309,29 @@ export class SqliteImporter {
         const encodePlainIds = decision.action === 'encode';
         // A trace an older release wrote holds scope_id '': filed under its scope id first, it is matched there.
         if (options?.dedup ?? true) await fillScopeIds(trx, this.brain.brainId);
-        const merged = await this._mergeTraces(rows.traces, result, trx, options, encodePlainIds);
+        // A page this brain already holds is kept: the source's page of that scope and id is left out, its chunks
+        // with it. The chunks of a page that comes in are written as traces of their own.
+        const { pagesIn, chunksIn, chunksLeftOut, kept } = await splitImportedPages(trx, this.brain.brainId, sourcePages);
+        result.skipped += kept;
+        // The scopes this brain registered before the import: a message stored under one of them older than its
+        // compile is read by its next compile.
+        const held = await registeredConversationScopes(trx, this.brain.brainId);
+        const sourceTraces =
+          rows.traces && chunksLeftOut.size > 0 ? rows.traces.filter((row) => !chunksLeftOut.has(row.id)) : rows.traces;
+        const merged = await this._mergeTraces(sourceTraces, result, trx, options, encodePlainIds, chunksIn);
         traces = merged;
+        result.imported += await mergeImportedScopesAndPages(
+          trx,
+          this.brain.brainId,
+          {
+            held,
+            scopes: sourceScopes,
+            pages: pagesIn,
+            written: merged.written,
+            stored: (sourceTraces ?? []).filter((row) => merged.written.has(row.id)),
+          },
+          result.errors,
+        );
         const nodes = await this._mergeNodes(rows.nodes, result, trx, merged.unfiled, encodePlainIds);
         await this._mergeEdges(rows.edges, result, trx, nodes.skipped);
         // A trace's copy is found by its trace's key: one the file holds under another node id gets the key here.
@@ -300,6 +374,21 @@ export class SqliteImporter {
         if (row.brain_id != null) brainIds.add(row.brain_id);
       }
     }
+    // A brain's scope registry and pages name it too: a file of pages alone, of two brains, is a file of two brains.
+    for (const table of ['memory_scopes', 'memory_pages'] as const) {
+      let rows: { brain_id: string | null }[];
+      try {
+        const columns = await src.all<{ name: string }>(`PRAGMA table_info(${table})`);
+        if (!columns.some((column) => column.name === 'brain_id')) continue;
+        rows = await src.all<{ brain_id: string | null }>(`SELECT DISTINCT brain_id FROM ${table}`);
+      } catch {
+        // A table that cannot be read is refused when its rows are read.
+        continue;
+      }
+      for (const row of rows) {
+        if (row.brain_id != null) brainIds.add(row.brain_id);
+      }
+    }
     return { brainIds: [...brainIds].sort(), scoped };
   }
 
@@ -334,23 +423,36 @@ export class SqliteImporter {
   private async _mergeTraces(
     sourceRows: TraceRow[] | null,
     result: ImportResult,
-    trx: { run: Brain['run']; get: Brain['get'] },
+    trx: { run: Brain['run']; get: Brain['get']; all: Brain['all'] },
     options: Pick<ImportOptions, 'dedup'> | undefined,
     encodePlainIds: boolean,
-  ): Promise<{ inserted: number; retagged: number; unfiled: Set<string> }> {
+    pageChunks: ReadonlySet<string> = new Set(),
+  ): Promise<{ inserted: number; retagged: number; unfiled: Set<string>; written: Map<string, string> }> {
     let inserted = 0;
     let retagged = 0;
     const seen = new Set<string>();
     const filed = new Set<string>();
+    /** For each source trace this import wrote: the id it was written under. */
+    const written = new Map<string, string>();
     const unfiledOf = (): Set<string> => new Set([...seen].filter((id) => !filed.has(id)));
-    if (!sourceRows) return { inserted, retagged, unfiled: unfiledOf() };
+    if (!sourceRows) return { inserted, retagged, unfiled: unfiledOf(), written };
 
     const brainId = this.brain.brainId;
+    // A chunk of a wiki page is its page's: a message of the same text is not one with it, or the page's next rewrite,
+    // which deletes its chunks, would take what a person said. The tags are a JSON array in text, tested below.
     const checkSql = `SELECT id, created_at, tags
        FROM memory_traces
        WHERE brain_id = ? AND scope = ? AND scope_id = ?
          AND ${duplicateTraceCondition(this.brain)}
-       LIMIT 1`;
+       LIMIT 50 OFFSET ?`;
+    const tagsOf = (tags: string): string[] => {
+      try {
+        const parsed: unknown = JSON.parse(tags);
+        return Array.isArray(parsed) ? parsed.filter((tag): tag is string => typeof tag === 'string') : [];
+      } catch {
+        return [];
+      }
+    };
 
     const insertSql = `INSERT INTO memory_traces
          (brain_id, id, type, scope, content, embedding, strength, created_at, last_accessed,
@@ -374,10 +476,23 @@ export class SqliteImporter {
           if (scopeId !== '') meta.scopeId = scopeId;
         }
 
-        if (options?.dedup ?? true) {
-          const existing = await trx.get<{ id: string; created_at: number; tags: string }>(
-            checkSql, [brainId, scope, scopeId, ...duplicateTraceParams(hash, row.content, importedTurnUserId(meta))],
-          );
+        // A chunk of a page that comes in is a row of its own: merged into a trace the brain holds, the page would
+        // list a trace that is not its chunk, and its next rewrite would delete it.
+        if ((options?.dedup ?? true) && !(row.id && pageChunks.has(row.id))) {
+          // Read 50 candidates at a time until one that is not a page chunk is found: any number of chunks of the
+          // same text can come first.
+          let existing: { id: string; created_at: number; tags: string } | undefined;
+          for (let offset = 0; ; offset += 50) {
+            const candidates = await trx.all<{ id: string; created_at: number; tags: string }>(checkSql, [
+              brainId,
+              scope,
+              scopeId,
+              ...duplicateTraceParams(hash, row.content, importedTurnUserId(meta)),
+              offset,
+            ]);
+            existing = candidates.find((candidate) => !tagsOf(candidate.tags).includes('wiki'));
+            if (existing || candidates.length < 50) break;
+          }
 
           if (existing) {
             const newerAt = Math.max(existing.created_at, row.created_at);
@@ -417,13 +532,14 @@ export class SqliteImporter {
         ]);
 
         if (row.id && id === row.id) filed.add(row.id);
+        if (row.id) written.set(row.id, id);
         inserted++;
         result.imported++;
       } catch (err) {
         result.errors.push(`Trace merge error: ${String(err)}`);
       }
     }
-    return { inserted, retagged, unfiled: unfiledOf() };
+    return { inserted, retagged, unfiled: unfiledOf(), written };
   }
 
   /**

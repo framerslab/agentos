@@ -1575,6 +1575,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
       user: 0,
       persona: 0,
       organization: 0,
+      conversation: 0,
     };
     let weakestStrength = 1;
 

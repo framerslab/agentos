@@ -300,7 +300,7 @@ export interface RememberOptions {
 
   /**
    * Visibility scope of the trace.
-   * @example 'thread' | 'user' | 'persona' | 'organization'
+   * @example 'thread' | 'user' | 'persona' | 'organization' | 'conversation'
    */
   scope?: string;
 
@@ -309,7 +309,9 @@ export interface RememberOptions {
    * under it, in the `scope_id` column and in its metadata, and a trace of the
    * same text, type and scope counts as its duplicate only under the same
    * scope id. A call that names none files the trace under `''`, whatever its
-   * `scope`.
+   * `scope`. Under the `'conversation'` scope it must be a key
+   * `conversationScopeKey` built: any other id is refused and nothing is
+   * stored.
    */
   scopeId?: string;
 
@@ -347,6 +349,37 @@ export interface RememberOptions {
 }
 
 // ---------------------------------------------------------------------------
+// Wiki page rows
+// ---------------------------------------------------------------------------
+
+/**
+ * One wiki page of one conversation scope, as a row of `memory_pages`: what `Memory.readPageRow()` and
+ * `Memory.listPageRows()` return.
+ */
+export interface MemoryPageRow {
+  /** The page's id within its scope, e.g. `'concepts/notes'`. */
+  pageId: string;
+  /** The page as a page file holds it: front matter (`summary`, `updated`, `sources`), then the body. */
+  content: string;
+  /** The SHA-256 of the page's body, in hex. */
+  contentHash: string;
+  /** The ids of the page's chunks in `memory_traces`. */
+  chunkIds: string[];
+  /** When the row was last written, in Unix milliseconds. */
+  updatedAt: number;
+}
+
+/** One chunk of a wiki page's body, as `Memory.writePageRow()` files it. */
+export interface MemoryPageChunk {
+  /** The chunk's text. */
+  text: string;
+  /** The trace type the chunk is stored as. */
+  type: 'episodic' | 'semantic';
+  /** The entities the chunk's trace names. */
+  entities?: readonly string[];
+}
+
+// ---------------------------------------------------------------------------
 // recall() options
 // ---------------------------------------------------------------------------
 
@@ -371,7 +404,8 @@ export interface RecallOptions {
   scope?: string;
 
   /**
-   * Filter by scope ID.
+   * Filter by scope ID: equality on the trace's `scope_id` column, never a
+   * prefix or a pattern.
    */
   scopeId?: string;
 

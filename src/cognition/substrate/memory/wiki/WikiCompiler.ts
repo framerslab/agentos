@@ -34,7 +34,11 @@ export interface WikiCompilerStorePort {
 }
 
 export interface WikiCompilerOptions {
-  store: WikiCompilerStorePort;
+  /**
+   * The page store a compile reads and writes through when its input names none. A compiler that serves several
+   * scopes is built without one and is given each scope's store with the compile.
+   */
+  store?: WikiCompilerStorePort;
   /** LLM merge call: given a prompt, return the full updated page body. */
   llm: (prompt: string) => Promise<string>;
   /** Group traces into target pages. Injected (LLM- or heuristic-backed). */
@@ -97,12 +101,20 @@ export class WikiCompiler {
    * it would fail the same way on every compile. Its traces are not counted as consumed. Any other failed
    * write, such as a full disk or a missing permission, rejects the compile, so a caller that keeps a
    * watermark compiles the same traces again.
+   *
+   * The pages are read and written through `input.store`, the store of the scope the traces are of, else through
+   * the store the compiler was built with.
+   *
+   * @throws TypeError when neither the input nor the compiler's options name a page store.
    */
   async compile(input: {
     traces: TraceLike[];
     reason: 'consolidation' | 'session-end' | 'explicit';
+    store?: WikiCompilerStorePort;
   }): Promise<CompileResult> {
     const result: CompileResult = { pagesWritten: [], tracesConsumed: 0, conflicts: [] };
+    const store = input.store ?? this.opts.store;
+    if (!store) throw new TypeError('WikiCompiler.compile: no page store was given');
 
     // Never consume the wiki's own indexed chunks — avoids a feedback loop.
     const traces = input.traces.filter((t) => !t.tags.includes('wiki'));
@@ -123,7 +135,7 @@ export class WikiCompiler {
       try {
         // Checked before the read, so a refused id costs no merge call and is never written.
         assertWikiPageId(a.pageId);
-        current = await this.opts.store.readPage(a.pageId);
+        current = await store.readPage(a.pageId);
       } catch (err) {
         if (!(err instanceof InvalidWikiPageIdError)) throw err;
         result.conflicts.push({ pageId: String(a.pageId), note: err.message });
@@ -135,7 +147,7 @@ export class WikiCompiler {
       const newSources = [...new Set([...(current?.sources ?? []), ...a.traceIds])];
 
       try {
-        await this.opts.store.writePage({
+        await store.writePage({
           id: a.pageId,
           type,
           // A page that has a summary keeps it, whoever wrote it. A new page's summary is named from its id alone:

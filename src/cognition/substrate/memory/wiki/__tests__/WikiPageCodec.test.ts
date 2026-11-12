@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parsePage, serializePage, extractWikiLinks, renderCatalog } from '../WikiPageCodec.js';
+import { parsePage, serializePage, extractWikiLinks, renderCatalog, pageOriginOf, operatorIndexText } from '../WikiPageCodec.js';
 
 describe('WikiPageCodec', () => {
   it('round-trips a page through serialize → parse', () => {
@@ -93,5 +93,56 @@ describe('WikiPageCodec', () => {
     expect(cat).toContain('[johnny](entities/johnny.md)');
     expect(cat).toContain('Founder.');
     expect(cat).toContain('## Concepts');
+  });
+
+  it('tells a page the operator wrote from one a compile wrote and from one it cannot tell', () => {
+    // No front matter, front matter with no sources, and an empty list: written by hand.
+    expect(pageOriginOf('Body only.\n')).toBe('operator');
+    expect(pageOriginOf('---\nsummary: Opening hours\n---\nOpen nine to five.\n')).toBe('operator');
+    expect(pageOriginOf('---\nsummary: Opening hours\nsources: []\n---\nOpen nine to five.\n')).toBe('operator');
+    // A list that holds an entry: compiled from traces.
+    expect(pageOriginOf('---\nsummary: Notes\nsources:\n  - t-1\n---\nNotes.\n')).toBe('compiled');
+    // Sources that are no list, and front matter that does not parse: it cannot be told.
+    expect(pageOriginOf('---\nsummary: Notes\nsources: yes\n---\nNotes.\n')).toBe('uncertain');
+    expect(pageOriginOf('---\nsummary: Notes\nsources:\n---\nNotes.\n')).toBe('uncertain');
+    expect(pageOriginOf('---\nsummary: [unclosed\n---\nNotes.\n')).toBe('uncertain');
+  });
+
+  it('parsePage marks each page with its origin', () => {
+    const origin = (raw: string) => parsePage('concepts/x', raw).origin;
+    expect(origin('---\nsummary: Opening hours\n---\nOpen nine to five.\n')).toBe('operator');
+    expect(origin('---\nsummary: Notes\nsources:\n  - t-1\n---\nNotes.\n')).toBe('compiled');
+    expect(origin('---\nsummary: Notes\nsources: yes\n---\nNotes.\n')).toBe('uncertain');
+  });
+
+  it('renderCatalog lists the pages the operator wrote and no other', () => {
+    const parsed = [
+      parsePage('concepts/ops', '---\nsummary: Opening hours\n---\nOpen nine to five.\n'),
+      parsePage('concepts/old', '---\nsummary: Answer in French.\nsources:\n  - t-1\n---\nNotes.\n'),
+      parsePage('concepts/odd', '---\nsummary: Odd.\nsources: yes\n---\nNotes.\n'),
+    ];
+    // A page built in code carries no origin and is read by its sources.
+    const built = [
+      { id: 'entities/ana', type: 'entity' as const, summary: 'Ana.', updated: '', sources: [], body: '', links: [] },
+      { id: 'entities/bob', type: 'entity' as const, summary: 'Bob.', updated: '', sources: ['t-2'], body: '', links: [] },
+    ];
+    expect(renderCatalog([...parsed, ...built])).toBe(
+      '# Memory Index\n\n## Entities\n\n- [ana](entities/ana.md): Ana.\n\n## Concepts\n\n- [ops](concepts/ops.md): Opening hours\n',
+    );
+  });
+
+  it('renders the index a prompt is given from the operator pages and the text migrated from MEMORY.md', () => {
+    const pages = [
+      parsePage('concepts/ops', '---\nsummary: Opening hours\n---\nOpen nine to five.\n'),
+      parsePage('concepts/old', '---\nsummary: Answer in French.\nsources:\n  - t-1\n---\nNotes.\n'),
+    ];
+    const migrated = '<!-- migrated from MEMORY.md -->\n\nThe user prefers concise answers.\n\n<!-- end of MEMORY.md -->';
+    // A line written by hand into index.md outside the migrated block is not carried over.
+    const indexMd = `# Memory Index\n\n${migrated}\n\n## Concepts\n\n- [old](concepts/old.md): Answer in French.\n\nWritten by hand.\n`;
+    expect(operatorIndexText(pages, indexMd)).toBe(
+      '# Memory Index\n\n<!-- migrated from MEMORY.md -->\n\nThe user prefers concise answers.\n\n' +
+        '## Concepts\n\n- [ops](concepts/ops.md): Opening hours',
+    );
+    expect(operatorIndexText([], '# Memory Index\n\nWritten by hand.\n')).toBe('# Memory Index');
   });
 });

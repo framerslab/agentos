@@ -77,6 +77,21 @@ export function withoutMigratedEndMarker(index: string): string {
   return (after ? `${before}\n\n${after}` : before).trim();
 }
 
+/** The heading `renderCatalog` opens index.md with. */
+const CATALOG_HEADING = '# Memory Index\n';
+
+/**
+ * An index with the migrated `MEMORY.md` block under its heading and the catalog's sections after it.
+ *
+ * @param catalog - The catalog `renderCatalog` wrote.
+ * @param migrated - The migrated block, both markers included (see {@link migratedBlockOf}).
+ * @returns The text of `memory/index.md`.
+ */
+export function withMigratedText(catalog: string, migrated: string): string {
+  const sections = (catalog.startsWith(CATALOG_HEADING) ? catalog.slice(CATALOG_HEADING.length) : catalog).replace(/^\n+/, '');
+  return `${CATALOG_HEADING}\n${migrated}\n${sections ? `\n${sections}` : ''}`;
+}
+
 /** What a new `.meta/index.json` holds. */
 const META_INDEX = JSON.stringify({ lastCompiledAt: null, pages: {} }, null, 2);
 
