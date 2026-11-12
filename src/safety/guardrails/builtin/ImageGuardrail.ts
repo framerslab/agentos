@@ -52,6 +52,10 @@ export interface ImageCheck {
    * and every check's list. A vendor's check lists its category codes.
    */
   reasonCodes?: readonly string[];
+  /**
+   * Judges one image: receives the guard's own copy of its bytes (never a URL) and the call's context, and answers an
+   * {@link ImageCheckResult}. A throw, or any other answer, is a check that could not answer.
+   */
   check(image: ImageUnderReview, context: GuardrailContext): Promise<ImageCheckResult>;
 }
 
@@ -125,7 +129,12 @@ function decodeBase64(text: string, maxBytes: number): Uint8Array {
  * ```
  */
 export class ImageGuardrail implements IGuardrailService {
+  /** The id given to `create()`, a word. */
   readonly id: string;
+  /**
+   * Fail-closed, never a sanitizer, with the guard's deadline; `sequential` when asked; `reasonCodes` is the guard's two
+   * fixed codes (`IMAGE_LIMIT`, `IMAGE_CHECK_UNAVAILABLE`) and every check's list.
+   */
   readonly config: GuardrailConfig;
   /** The guard judges what a person sends: the input stage. */
   readonly stages: ReadonlyArray<'input' | 'output'> = ['input'];
@@ -185,7 +194,19 @@ export class ImageGuardrail implements IGuardrailService {
     }
     if (!sawClassify) throw new TypeError('ImageGuardrail: at least one classify check is needed, or every image would be refused as unjudged');
     if (options.requireMatch === true && !options.checks.some((check) => check.kind === 'match')) throw new TypeError('ImageGuardrail: requireMatch is set and no match check is listed');
-    return new ImageGuardrail({ ...options, checks: [...options.checks] });
+    // The guard keeps its own copy of each check as validated: a host that edits a check object later changes nothing.
+    const checks = options.checks.map((check): ImageCheck => {
+      const run = check.check;
+      return Object.freeze({
+        id: check.id,
+        kind: check.kind,
+        ...(check.onError !== undefined ? { onError: check.onError } : {}),
+        ...(check.reasonCodes !== undefined ? { reasonCodes: Object.freeze([...check.reasonCodes]) } : {}),
+        // called on the host's own object, so a check that reads `this` still works
+        check: (image: ImageUnderReview, context: GuardrailContext) => run.call(check, image, context),
+      });
+    });
+    return new ImageGuardrail({ ...options, checks });
   }
 
   private failed(checkId: string, posture: 'refuse' | 'skip', error: unknown): void {
