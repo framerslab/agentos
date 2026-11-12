@@ -193,6 +193,27 @@ fuseRanked([notes, call], { idOf: (item) => item.id, weights: [1, 0.8], groupOf:
 - The SQLite brain keeps an FTS5 index over its memory traces, which `recall()` and the `memory_search` tool query ([SQLite Brain Storage](../memory/MEMORY_STORAGE.md)).
 - The `QueryRouter` falls back to keyword matching over its corpus when it has no embeddings ([Query Router](../QUERY_ROUTER.md)).
 
+## Reading memory traces by id and following a store
+
+A memory search that finds traces outside the vector index, such as a full-text query over the brain's `memory_traces`, reads the traces it found through the store, and an index kept beside a store follows the store's writes:
+
+```typescript
+const { traces, unread } = await store.loadTracesForRecall(['mt_7', 'mt_9']);
+
+// The listener reports what changes after it is added: seed the index with what the store holds first.
+for (const trace of store.listTraces({ activeOnly: true })) {
+  if (!store.isDeleted(trace.id)) index.add(trace.id, trace.content);
+}
+const stop = store.addTraceListener((event) => {
+  if (event.kind === 'filed') index.add(event.trace.id, event.trace.content);
+  else index.remove(event.traceId);
+});
+```
+
+`MemoryStore.loadTracesForRecall(ids)` answers each id from the store's cache, and reads the ones the cache lacks by id from the attached brain. With a brain it first checks every id against its row, as a vector query checks its hits, so a delete or a move made by another process counts: a trace whose row is gone or deleted is left out, and so is a cached trace whose row a move filed under another scope id. A cached trace whose row holds what the store last wrote or read for it is answered from the cache, with what this process changed on it since (a verification `persistTraceMetadata` kept beside the row, a gist of its words). A row written since with another trust policy or statement (source, time, confidence or verification count) gives the cached trace its policy (none, when the row was stored again without one) and provenance; a row written since with other words, type or creation time (stored again, or edited by `memory_update`) is returned as the row holds it, those and its trust together, for that call only, so the eligibility check reads what the leg's query selected, and the cached copy, whose vector is of the words the store saw, keeps what it held. Such a row is read again inside the trace's turn before it is used, so a `store()` this process ran after the first read keeps what it wrote. It also leaves out an id with no row, a trace that is inactive or being deleted, and one a delete reached while the call waited on a later id. A row with a usable embedding is filed in the cache and the vector index, as the store's first read from the brain files its rows; a row without one is returned for that call only and not cached, and is read again when a delete or a move ran after the first read; when a `store()` of the same id ran first, the trace it filed is returned. It never throws: when the brain cannot be read, it returns no trace and `unread` counts the ids.
+
+`MemoryStore.addTraceListener(listener)` calls `listener` with `{ kind: 'filed', trace }` when the store files an active trace in its cache (a store, a revival, a load from the brain or the vector index, a move to another scope id by `refileScope` or a brain's re-file, which files it again under the new id, or a `persistTraceMetadata` of a trace whose tags a caller changed) and with `{ kind: 'removed', traceId }` when it stops serving one (a soft delete, a delete, or a delete in another store on the same brain or vector index). A listener that throws is ignored; the call returns the function that removes the listener, and `dispose()` removes them all.
+
 ## Where it runs
 
 `LexicalIndex` and `FuzzyIndex`, through `@framers/agentos/cognition/library/browser`, run in a browser; nothing that entry reaches imports a Node module, and the one package it reaches, `@framers/sql-storage-adapter/kv`, imports no adapter. `BM25Index`, `HybridSearcher`, `InMemoryVectorStore` and `@framers/agentos/cognition/rag` run in Node. No index calls a model; `HybridSearcher` calls the embedder it is given once per search, and a hosted embedder needs its provider's key.

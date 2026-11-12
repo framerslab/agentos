@@ -142,8 +142,8 @@ export { ReadWorkingMemoryTool } from './core/working/ReadWorkingMemoryTool.js';
 // ---------------------------------------------------------------------------
 
 // --- Store ---
-export { MemoryStore } from './retrieval/store/MemoryStore.js';
-export type { MemoryStoreConfig } from './retrieval/store/MemoryStore.js';
+export { MemoryStore, isQueryEmbeddingFailure } from './retrieval/store/MemoryStore.js';
+export type { MemoryStoreConfig, MemoryStoreTraceEvent } from './retrieval/store/MemoryStore.js';
 
 // --- SQLite Storage ---
 export { Brain } from './retrieval/store/Brain.js';

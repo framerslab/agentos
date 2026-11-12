@@ -37,6 +37,11 @@ export interface ProviderScript {
    * own words.
    */
   embedded: string[];
+  /**
+   * Fails an embedding request when any of its texts matches: the provider throws, as an embedding endpoint that is
+   * down does. Unset, every request is embedded.
+   */
+  failEmbedding?: (text: string) => boolean;
   /** How many requests ended because the caller aborted them: held ones (see `reply.hold`) and ones aborted before they started. */
   aborts: number;
   /**
@@ -293,6 +298,8 @@ export function stubProviderClass(providerId: string) {
       if (providerId === 'anthropic') throw Object.assign(new Error('embeddings not supported'), { code: 'EMBEDDINGS_NOT_SUPPORTED' });
       this.script!.embedCalls += 1;
       this.script!.embedded.push(...texts);
+      const fail = this.script!.failEmbedding;
+      if (fail && texts.some(fail)) throw new Error('embedding provider down');
       return {
         object: 'list',
         data: texts.map((t, index) => ({ object: 'embedding', embedding: hashEmbed(t), index })),

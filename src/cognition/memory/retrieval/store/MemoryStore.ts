@@ -238,6 +238,117 @@ function traceToMetadata(trace: MemoryTrace, accessState: boolean): Record<strin
   };
 }
 
+/** Whether a row's metadata holds a trust policy ({@link MemoryTrace.policy}) of the shape `store()` writes. */
+function isTrustPolicy(value: unknown): value is NonNullable<MemoryTrace['policy']> {
+  if (!isJsonObject(value)) return false;
+  return (
+    typeof value.usableForAuthorization === 'boolean' &&
+    typeof value.usableForPersonalization === 'boolean' &&
+    typeof value.usableForFactClaim === 'boolean'
+  );
+}
+
+/** Whether two trust policies allow the same uses. */
+function sameTrustPolicy(a: MemoryTrace['policy'], b: MemoryTrace['policy']): boolean {
+  if (!a || !b) return a === b;
+  return (
+    a.usableForAuthorization === b.usableForAuthorization &&
+    a.usableForPersonalization === b.usableForPersonalization &&
+    a.usableForFactClaim === b.usableForFactClaim &&
+    a.requiresReverificationAfterMs === b.requiresReverificationAfterMs
+  );
+}
+
+/** Whether a row's metadata holds a provenance ({@link MemoryTrace.provenance}) of the shape `store()` writes. */
+function isStoredProvenance(value: unknown): value is MemoryTrace['provenance'] {
+  if (!isJsonObject(value)) return false;
+  return typeof value.sourceType === 'string' && typeof value.sourceTimestamp === 'number' && typeof value.confidence === 'number';
+}
+
+/**
+ * Whether two provenances record the same statement: the fields a `store()` writes. A verification a process records
+ * after it (`lastVerifiedAt`, `contradictedBy`) is not compared.
+ */
+function sameStatement(a: MemoryTrace['provenance'], b: MemoryTrace['provenance']): boolean {
+  return (
+    a.sourceType === b.sourceType &&
+    a.sourceId === b.sourceId &&
+    a.sourceTimestamp === b.sourceTimestamp &&
+    a.confidence === b.confidence &&
+    (a.verificationCount ?? 0) === (b.verificationCount ?? 0)
+  );
+}
+
+/** The trust policy and provenance a Brain row's metadata holds, each where it has the shape `store()` writes. */
+interface RowStatement {
+  policy?: NonNullable<MemoryTrace['policy']>;
+  provenance?: MemoryTrace['provenance'];
+}
+
+function rowStatementOf(row: Pick<MemoryTraceRow, 'metadata'>): RowStatement {
+  const { policy, provenance } = parseTraceMetadata(row.metadata);
+  return {
+    policy: isTrustPolicy(policy) ? policy : undefined,
+    provenance: isStoredProvenance(provenance) ? provenance : undefined,
+  };
+}
+
+/**
+ * Whether a row names another trust policy or another statement than `trace` holds, so the trace was stored again
+ * after `trace` was. A row that differs only in `lastVerifiedAt` or `contradictedBy` does not: those are what a
+ * process records after its own store, and `persistTraceMetadata` writes them to the vector store, not the row.
+ */
+function rowRestatesTrace(row: RowStatement, trace: MemoryTrace): boolean {
+  return Boolean(
+    (row.policy && !sameTrustPolicy(row.policy, trace.policy)) ||
+      (row.provenance && !sameStatement(row.provenance, trace.provenance)),
+  );
+}
+
+/** The columns of a row a recall leg selects by or returns: its words, its type and its creation time. */
+interface RowFields {
+  content: string;
+  type: string;
+  createdAt: number;
+}
+
+/** What a row held for a trace when a store last wrote or read it: its words, type, creation time, policy and statement, copied. */
+interface SeenRow extends RowStatement, RowFields {}
+
+function rowFieldsOf(row: Pick<MemoryTraceRow, 'content' | 'type' | 'created_at'>): RowFields {
+  return { content: row.content, type: row.type, createdAt: row.created_at };
+}
+
+/** Whether two rows hold the same words, type and creation time. */
+function sameRowFields(a: RowFields, b: RowFields): boolean {
+  return a.content === b.content && a.type === b.type && a.createdAt === b.createdAt;
+}
+
+function seenRowOf(fields: RowFields, statement: RowStatement): SeenRow {
+  return {
+    content: fields.content,
+    type: fields.type,
+    createdAt: fields.createdAt,
+    ...(statement.policy ? { policy: { ...statement.policy } } : {}),
+    ...(statement.provenance ? { provenance: { ...statement.provenance } } : {}),
+  };
+}
+
+/** Whether two rows hold the same words, type, creation time, policy and statement. */
+function sameSeenRow(a: SeenRow, b: SeenRow): boolean {
+  return (
+    sameRowFields(a, b) &&
+    (a.policy && b.policy ? sameTrustPolicy(a.policy, b.policy) : !a.policy && !b.policy) &&
+    (a.provenance && b.provenance ? sameStatement(a.provenance, b.provenance) : !a.provenance && !b.provenance)
+  );
+}
+
+/** The live row of one trace, read again where a write may have run since the first read. */
+const LIVE_TRACE_ROW_SQL = `SELECT id, type, scope, content, embedding, strength, created_at,
+        last_accessed, retrieval_count, tags, emotions, metadata, deleted, scope_id
+   FROM memory_traces
+  WHERE brain_id = ? AND id = ? AND deleted = 0`;
+
 /** Parse a JSON string and return `undefined` on any failure. */
 function safeParseJson<T>(raw: string): T | undefined {
   try {
@@ -1012,6 +1123,20 @@ async function indexStoredTrace(
   await syncTraceFullTextIndex(brain, trace);
 }
 
+/** What a store tells its listeners: a trace it now serves, or one it no longer serves. */
+export type MemoryStoreTraceEvent = { kind: 'filed'; trace: MemoryTrace } | { kind: 'removed'; traceId: string };
+
+/** The errors a `MemoryStore.query` embedding call threw, as thrown: the same objects, so their identity is kept. */
+const queryEmbeddingFailures = new WeakSet<object>();
+
+/**
+ * Whether `error` was thrown by the embedding call of a {@link MemoryStore.query}: the embedder failed, not the store.
+ * The error is the embedder's own object, rethrown unchanged.
+ */
+export function isQueryEmbeddingFailure(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && queryEmbeddingFailures.has(error);
+}
+
 export class MemoryStore {
   /** Max traces hydrated from the Brain per instance (most-recent first); bounds the per-request load. */
   private static readonly HYDRATION_LIMIT = 1000;
@@ -1057,6 +1182,14 @@ export class MemoryStore {
    * after a measurement that failed.
    */
   private measuredVectorSize: Promise<number | undefined> | undefined;
+  /**
+   * What each trace's row held when this store last wrote or read it, by the trace object it cached. A row that
+   * still holds it was not written since: the cached trace, with what this process changed on it (a verification,
+   * a gist of its words), stands.
+   */
+  private readonly rowSeen = new WeakMap<MemoryTrace, SeenRow>();
+  /** The callers told when this store files or stops serving a trace ({@link addTraceListener}). */
+  private readonly traceListeners = new Set<(event: MemoryStoreTraceEvent) => void>();
 
   constructor(config: MemoryStoreConfig) {
     this.config = config;
@@ -1145,7 +1278,48 @@ export class MemoryStore {
       unregisterCoordinationTarget(this.coordinationRegistration);
       this.coordinationRegistration = null;
     }
+    this.traceListeners.clear();
     this.disposed = true;
+  }
+
+  /**
+   * Calls `listener` whenever this store files an active trace in its cache (a store, a revival, a hydration, a read
+   * that loads it, a move to another scope id by {@link refileScope} or a Brain's re-file, which files it again under
+   * the new id, a {@link persistTraceMetadata} of a trace a caller changed) or stops serving one (a soft delete, a delete, a delete in a sibling store on the same backing
+   * resource). A listener that throws is ignored.
+   *
+   * @returns The call that removes the listener.
+   */
+  addTraceListener(listener: (event: MemoryStoreTraceEvent) => void): () => void {
+    this.traceListeners.add(listener);
+    return () => {
+      this.traceListeners.delete(listener);
+    };
+  }
+
+  private notify(event: MemoryStoreTraceEvent): void {
+    for (const listener of this.traceListeners) {
+      try {
+        listener(event);
+      } catch {
+        // A listener never breaks a write.
+      }
+    }
+  }
+
+  /** Files `trace` in the cache and tells the listeners whether the store now serves it. */
+  private cacheTrace(trace: MemoryTrace): void {
+    this.traceCache.set(trace.id, trace);
+    this.notifyServing(trace);
+  }
+
+  /** Tells the listeners whether the store serves `trace` as its cache now holds it. */
+  private notifyServing(trace: MemoryTrace): void {
+    this.notify(
+      trace.isActive && !this.tombstonedTraceIds.has(trace.id)
+        ? { kind: 'filed', trace }
+        : { kind: 'removed', traceId: trace.id },
+    );
   }
 
   private assertNotDisposed(): void {
@@ -1171,6 +1345,7 @@ export class MemoryStore {
       trace.isActive = false;
       trace.updatedAt = Date.now();
     }
+    this.notify({ kind: 'removed', traceId });
   }
 
   private async evictDeletedLocally(
@@ -1204,7 +1379,7 @@ export class MemoryStore {
     const trace = this.traceCache.get(traceId);
     if (trace?.isActive) return;
     this.embeddingCache.delete(traceId);
-    if (trace) this.traceCache.set(traceId, withoutWords(trace));
+    if (trace) this.cacheTrace(withoutWords(trace));
   }
 
   private async reviveLocally(
@@ -1218,6 +1393,7 @@ export class MemoryStore {
       if (cached) cached.isActive = true;
       this.tombstonedTraceIds.delete(trace.id);
       this.authoritativeTombstoneIds.delete(trace.id);
+      if (cached) this.notify({ kind: 'filed', trace: cached });
       return true;
     }
 
@@ -1244,11 +1420,11 @@ export class MemoryStore {
       };
       const synced = syncedDecayStates.get(trace);
       if (synced) syncedDecayStates.set(revivedTrace, synced);
-      this.traceCache.set(trace.id, revivedTrace);
-      this.embeddingCache.set(trace.id, [...embedding]);
-      this.registerScope(trace.scope, trace.scopeId);
       this.tombstonedTraceIds.delete(trace.id);
       this.authoritativeTombstoneIds.delete(trace.id);
+      this.cacheTrace(revivedTrace);
+      this.embeddingCache.set(trace.id, [...embedding]);
+      this.registerScope(trace.scope, trace.scopeId);
       return true;
     } catch {
       // Keep the sibling tombstone when its vector index cannot be revived.
@@ -1407,6 +1583,170 @@ export class MemoryStore {
   }
 
   /**
+   * The traces with these ids, for a recall leg that found them outside the vector index (the Brain's full-text index,
+   * its newest rows). Without a Brain they come from the cache. With one, every id is checked against its row first,
+   * as a vector query checks its hits: a trace whose row is gone or deleted, by this process or another, is left out
+   * (and fenced in every store on the Brain), and a cached trace whose row a move filed under another scope id is left
+   * out until this store follows the move.
+   *
+   * A cached trace whose row holds what this store last wrote or read for it is answered from the cache, with what
+   * this process changed on it since (a verification `persistTraceMetadata` kept beside the row, a gist of its
+   * words). A row written since with another trust policy or statement (source, time, confidence, verification
+   * count) gives the cached trace its policy (none, when the row holds none) and provenance; a row written since with other words, type or creation
+   * time (stored again, or edited by `memory_update`) is returned as the row holds it, those and its trust together,
+   * for this call only, and the cached copy keeps what it held. Such a row is read again inside the trace's turn before it is used, so a
+   * `store()` of this process that wrote a newer row after the first read keeps what it wrote.
+   *
+   * A live row with a usable embedding is filed in the cache and the vector index as the store's hydration files
+   * one; a row without one is returned for this call only and not cached, since the store holds no vector for it,
+   * and is read again when a delete or a move ran after the first read (a `store()` of the same id that ran first
+   * answers with the trace it filed). A trace that is inactive, tombstoned or delete-pending is left out, and so is
+   * one a delete reached while this call waited on a later id.
+   *
+   * Never throws: when the Brain cannot be read, no trace is returned and `unread` counts the ids.
+   *
+   * @param traceIds - The ids, in any order; repeats are read once.
+   * @returns The traces found, by id, and how many ids a failed read left out.
+   */
+  async loadTracesForRecall(traceIds: readonly string[]): Promise<{ traces: Map<string, MemoryTrace>; unread: number }> {
+    this.beginOperation();
+    const namespace = this.coordinationNamespace;
+    const brain = this.brain;
+    const ids = [...new Set(traceIds)];
+    const traces = new Map<string, MemoryTrace>();
+    const served = (id: string): MemoryTrace | undefined => {
+      if (this.tombstonedTraceIds.has(id) || isTraceDeletePending(namespace, id) || hasDeletedTrace(namespace, id)) {
+        return undefined;
+      }
+      const trace = this.traceCache.get(id);
+      return trace?.isActive ? trace : undefined;
+    };
+    if (!brain) {
+      for (const id of ids) {
+        const trace = served(id);
+        if (trace) traces.set(id, trace);
+      }
+      return { traces, unread: 0 };
+    }
+    if (ids.length === 0) return { traces, unread: 0 };
+
+    const epochs = hydrationEpochs(namespace);
+    // The rows decide, as they do for a vector query's hits: a delete or a move another process made reaches no cache.
+    const durable = await this.reconcileDurableTraceStates(ids, namespace, brain);
+    if (!durable.ok) return { traces, unread: ids.length };
+    const uncached: MemoryTraceRow[] = [];
+    let unread = 0;
+    for (const id of ids) {
+      const row = durable.rows.get(id);
+      if (!row || Number(row.deleted ?? 0) !== 0) continue;
+      const cached = served(id);
+      if (cached) {
+        if (rowFiledElsewhere(row, cached.scope, cached.scopeId)) continue;
+        // A row that holds what this store last wrote or read for the trace was not written since: the cached trace,
+        // with what this process changed on it, stands. A row written since with another policy or statement is the
+        // trace's now, so neither a confidence nor a verification of the earlier copy carries over.
+        if (!this.rowChangedSince(cached, row)) {
+          traces.set(id, cached);
+          continue;
+        }
+        // The row was read outside the trace's turn, so a store() of this process may have written a newer row and
+        // filed its trace since. Inside the turn, behind any store() in flight, the row is read again and the trace
+        // the cache holds then takes what that row holds.
+        try {
+          await withTraceOperation(namespace, id, 'normal', async ({ blockedByDelete }) => {
+            if (blockedByDelete) return;
+            const current = await brain.get<MemoryTraceRow>(LIVE_TRACE_ROW_SQL, [brain.brainId, id]);
+            const trace = served(id);
+            if (!current || !trace || rowFiledElsewhere(current, trace.scope, trace.scopeId)) return;
+            if (!this.rowChangedSince(trace, current)) {
+              traces.set(id, trace);
+              return;
+            }
+            if (!sameRowFields(rowFieldsOf(current), this.rowSeen.get(trace) ?? trace)) {
+              // Written again with other words, type or creation time (stored again, or edited by `memory_update`):
+              // the row's fields and its trust go together, for this call only, so the gate reads what the leg's query
+              // selected. The cached copy and its vector hold what this store wrote or read, with the trust it came with.
+              traces.set(id, this.rowToTrace(current));
+              return;
+            }
+            const statement = rowStatementOf(current);
+            // A row stored again without a policy holds none: the trace is read as a load of the row reads it.
+            if (statement.policy) trace.policy = { ...statement.policy };
+            else delete trace.policy;
+            if (statement.provenance) trace.provenance = { ...statement.provenance };
+            this.rowSeen.set(trace, seenRowOf(rowFieldsOf(current), statement));
+            traces.set(id, trace);
+          });
+        } catch {
+          unread += 1;
+        }
+        continue;
+      }
+      if (!this.traceCache.has(id) && !this.tombstonedTraceIds.has(id)) uncached.push(row);
+    }
+    const withVector = uncached.filter((row) => {
+      const embedding = blobToEmbedding(row.embedding);
+      return embedding != null && isUsableEmbedding(embedding);
+    });
+    try {
+      await this.hydrateRows(withVector, brain, namespace, epochs);
+    } catch {
+      // A row that did not file is read below as one with no vector.
+    }
+    for (const row of uncached) {
+      const filed = served(row.id);
+      if (filed) {
+        traces.set(row.id, filed);
+        continue;
+      }
+      if (this.traceCache.has(row.id)) continue;
+      try {
+        await withTraceOperation(namespace, row.id, 'normal', async ({ blockedByDelete }) => {
+          if (blockedByDelete || this.tombstonedTraceIds.has(row.id) || hasDeletedTrace(namespace, row.id)) return;
+          // A store() of this id that held the turn before this one has filed its own trace and row: that is the trace.
+          const stored = served(row.id);
+          if (stored) {
+            traces.set(row.id, stored);
+            return;
+          }
+          // A delete or a move may have run since the read: the row is read again, as hydration reads one.
+          let current: MemoryTraceRow | null = row;
+          const now = hydrationEpochs(namespace);
+          if (now.deletes !== epochs.deletes || now.refiles !== epochs.refiles) {
+            current = await brain.get<MemoryTraceRow>(LIVE_TRACE_ROW_SQL, [brain.brainId, row.id]);
+          }
+          if (current) traces.set(row.id, this.rowToTrace(current));
+        });
+      } catch {
+        unread += 1;
+      }
+    }
+    // A delete that ran while this call waited on a later id: a trace it took is not returned, whether this call read
+    // it as the cache's or as its row.
+    for (const id of [...traces.keys()]) {
+      if (this.tombstonedTraceIds.has(id) || isTraceDeletePending(namespace, id) || hasDeletedTrace(namespace, id)) {
+        traces.delete(id);
+      }
+    }
+    return { traces, unread };
+  }
+
+  /**
+   * Whether a trace's row was written since this store last wrote or read it: its words, type, creation time, trust
+   * policy or statement differ from what the store saw. What this process changed on the cached trace alone (a
+   * verification it persisted, a gist of its words) does not count. A trace this store never saw a row for is
+   * compared as it is, a policy the row no longer holds included.
+   */
+  private rowChangedSince(trace: MemoryTrace, row: MemoryTraceRow): boolean {
+    const now = seenRowOf(rowFieldsOf(row), rowStatementOf(row));
+    const seen = this.rowSeen.get(trace);
+    if (seen) return !sameSeenRow(seen, now);
+    // A trace filed here from another store's write (a sibling's revival): its row held what it holds now, so a row
+    // that names another policy or statement, other fields, or no policy where the trace has one was written since.
+    return rowRestatesTrace(now, trace) || !sameRowFields(now, trace) || (!now.policy && Boolean(trace.policy));
+  }
+
+  /**
    * Hydrate the in-memory vector store + scope registry from the attached
    * Brain on first use. The Brain is the durable backing store, but the vector
    * index is per-instance and starts cold — without this, a host that opens a
@@ -1549,7 +1889,7 @@ export class MemoryStore {
             return;
           }
 
-          this.traceCache.set(trace.id, trace);
+          this.cacheTrace(trace);
           this.embeddingCache.set(trace.id, embedding);
           this.registerScope(trace.scope, trace.scopeId);
           loaded += 1;
@@ -1581,7 +1921,8 @@ export class MemoryStore {
       id: row.id,
       type: row.type as MemoryType,
       scope: row.scope as MemoryScope,
-      scopeId: typeof meta.scopeId === 'string' ? meta.scopeId : '',
+      // The metadata's copy, else the `scope_id` column, for a row whose metadata names none.
+      scopeId: typeof meta.scopeId === 'string' ? meta.scopeId : typeof row.scope_id === 'string' ? row.scope_id : '',
       content: row.content,
       entities: Array.isArray(meta.entities) ? (meta.entities as string[]) : [],
       tags,
@@ -1608,8 +1949,10 @@ export class MemoryStore {
       importance: typeof meta.importance === 'number' ? meta.importance : undefined,
       structuredData: meta.structuredData,
       ...(typeof meta.turnUserId === 'string' && meta.turnUserId ? { turnUserId: meta.turnUserId } : {}),
+      ...(isTrustPolicy(meta.policy) ? { policy: meta.policy } : {}),
     } as MemoryTrace;
     syncedDecayStates.set(trace, decay);
+    this.rowSeen.set(trace, seenRowOf(rowFieldsOf(row), rowStatementOf(row)));
     return trace;
   }
 
@@ -1738,6 +2081,8 @@ export class MemoryStore {
           associatedTraceIds: trace.associatedTraceIds,
           structuredData: trace.structuredData,
           turnUserId: trace.turnUserId,
+          // The trust policy, so a store that loads the row (a hydration, a recall leg's by-id read) still gates it.
+          policy: trace.policy,
         };
         const insertParams = [
           brain.brainId,
@@ -1780,6 +2125,13 @@ export class MemoryStore {
       // next open: by the exact check in Brain on SQLite, by the fill of a
       // null `_tsv` on Postgres.
       await indexStoredTrace(brain, trace, revived);
+      this.rowSeen.set(
+        trace,
+        seenRowOf(trace, {
+          policy: isTrustPolicy(trace.policy) ? trace.policy : undefined,
+          provenance: isStoredProvenance(trace.provenance) ? trace.provenance : undefined,
+        }),
+      );
     }
 
     trace.isActive = true;
@@ -1796,7 +2148,7 @@ export class MemoryStore {
     }
 
     // Cache trace and its embedding (avoids re-generation on recordAccess)
-    this.traceCache.set(trace.id, trace);
+    this.cacheTrace(trace);
     this.embeddingCache.set(trace.id, embedding);
     this.registerScope(trace.scope, trace.scopeId);
     return embedding;
@@ -1825,6 +2177,8 @@ export class MemoryStore {
       vectorSearchMs: number;
       scoringMs: number;
     };
+    /** The embedding manager returned no usable vector for the query: nothing was searched. */
+    emptyQueryVector?: true;
   }> {
     this.beginOperation();
     const now = Date.now();
@@ -1843,10 +2197,17 @@ export class MemoryStore {
       return { scored: [], partial: [], timings: { vectorSearchMs: 0, scoringMs: 0 } };
     }
 
-    // Generate query embedding
-    const embeddingResponse = await this.config.embeddingManager.generateEmbeddings({
-      texts: queryText,
-    });
+    // Generate query embedding. An error the embedder throws is rethrown as it is, marked so that a caller can tell
+    // the embedder failed ({@link isQueryEmbeddingFailure}).
+    let embeddingResponse: Awaited<ReturnType<IEmbeddingManager['generateEmbeddings']>>;
+    try {
+      embeddingResponse = await this.config.embeddingManager.generateEmbeddings({
+        texts: queryText,
+      });
+    } catch (error) {
+      if (typeof error === 'object' && error !== null) queryEmbeddingFailures.add(error);
+      throw error;
+    }
     const queryEmbedding = embeddingResponse.embeddings[0];
     if (!isUsableEmbedding(queryEmbedding)) {
       // CR4: the embedding manager failed to embed the query (returned []).
@@ -1857,7 +2218,7 @@ export class MemoryStore {
         'MemoryStore.query: embedding manager returned an empty query vector; ' +
           'returning no results rather than issuing a corrupt similarity search.',
       );
-      return { scored: [], partial: [], timings: { vectorSearchMs: 0, scoringMs: 0 } };
+      return { scored: [], partial: [], timings: { vectorSearchMs: 0, scoringMs: 0 }, emptyQueryVector: true };
     }
 
     // Build metadata filter
@@ -2002,7 +2363,7 @@ export class MemoryStore {
 
           if (!cached) {
             syncedDecayStates.set(trace, decayStateOf(trace));
-            this.traceCache.set(trace.id, trace);
+            this.cacheTrace(trace);
           }
           if (trace.scope && trace.scopeId) {
             this.registerScope(trace.scope, trace.scopeId);
@@ -2357,7 +2718,7 @@ export class MemoryStore {
             const trace: MemoryTrace = { ...this.traceFromVectorDocument(doc), scope, scopeId };
             if (!trace.isActive) continue;
             syncedDecayStates.set(trace, decayStateOf(trace));
-            this.traceCache.set(trace.id, trace);
+            this.cacheTrace(trace);
             results.push(trace);
           }
         }
@@ -2618,6 +2979,8 @@ export class MemoryStore {
     held.updatedAt = Date.now();
     if (embedding) this.embeddingCache.set(moved.id, embedding);
     if (held.isActive) this.registerScope(scope, moved.to);
+    // The copy moved in place: a listener files it again under the new id.
+    this.notifyServing(held);
     if (live) await this.followGraphCopy(trace, embedding);
     return true;
   }
@@ -2746,6 +3109,8 @@ export class MemoryStore {
       held.updatedAt = Date.now();
       if (embedding) this.embeddingCache.set(traceId, embedding);
       if (held.isActive) this.registerScope(scope, toScopeId);
+      // The copy moved in place: a listener files it again under the new id.
+      this.notifyServing(held);
     }
 
     // The copy follows its trace where the graph holds one; a trace with no copy gets none.
@@ -2956,6 +3321,8 @@ export class MemoryStore {
       if (isDeletePending() || !trace.isActive) {
         await this.config.vectorStore.delete(collection, [traceId]);
       }
+      // A caller may have changed what an index of the trace holds (its tags) before persisting it.
+      if (!isDeletePending()) this.notifyServing(trace);
     } catch {
       // Best-effort persistence — the in-memory mutation already
       // happened, so a vector-store failure should not kill the caller.
@@ -3010,7 +3377,7 @@ export class MemoryStore {
           // A tombstoned row is loaded solely to name the collection for
           // (re-)eviction — never recached, so it cannot re-enter recall.
           if (row.deleted !== 1) {
-            this.traceCache.set(trace.id, trace);
+            this.cacheTrace(trace);
             const embedding = blobToEmbedding(row.embedding);
             if (embedding && isUsableEmbedding(embedding)) {
               this.embeddingCache.set(trace.id, embedding);
@@ -3447,7 +3814,7 @@ export class MemoryStore {
       const isActive = trace.isActive && !this.tombstonedTraceIds.has(document.id);
       const filed: MemoryTrace = { ...trace, scope, scopeId, isActive };
       syncedDecayStates.set(filed, decayStateOf(filed));
-      this.traceCache.set(document.id, filed);
+      this.cacheTrace(filed);
     }
     return { traceIds, staleIds, read: documents.length, nextCursor };
   }
