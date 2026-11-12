@@ -305,6 +305,28 @@ function rowRestatesTrace(row: RowStatement, trace: MemoryTrace): boolean {
   );
 }
 
+/** What a row held for a trace when a store last wrote or read it: its words, policy and statement, copied. */
+interface SeenRow extends RowStatement {
+  content: string;
+}
+
+function seenRowOf(content: string, statement: RowStatement): SeenRow {
+  return {
+    content,
+    ...(statement.policy ? { policy: { ...statement.policy } } : {}),
+    ...(statement.provenance ? { provenance: { ...statement.provenance } } : {}),
+  };
+}
+
+/** Whether two rows hold the same words, policy and statement. */
+function sameSeenRow(a: SeenRow, b: SeenRow): boolean {
+  return (
+    a.content === b.content &&
+    (a.policy && b.policy ? sameTrustPolicy(a.policy, b.policy) : !a.policy && !b.policy) &&
+    (a.provenance && b.provenance ? sameStatement(a.provenance, b.provenance) : !a.provenance && !b.provenance)
+  );
+}
+
 /** The live row of one trace, read again where a write may have run since the first read. */
 const LIVE_TRACE_ROW_SQL = `SELECT id, type, scope, content, embedding, strength, created_at,
         last_accessed, retrieval_count, tags, emotions, metadata, deleted, scope_id
@@ -1144,6 +1166,12 @@ export class MemoryStore {
    * after a measurement that failed.
    */
   private measuredVectorSize: Promise<number | undefined> | undefined;
+  /**
+   * What each trace's row held when this store last wrote or read it, by the trace object it cached. A row that
+   * still holds it was not written since: the cached trace, with what this process changed on it (a verification,
+   * a gist of its words), stands.
+   */
+  private readonly rowSeen = new WeakMap<MemoryTrace, SeenRow>();
   /** The callers told when this store files or stops serving a trace ({@link addTraceListener}). */
   private readonly traceListeners = new Set<(event: MemoryStoreTraceEvent) => void>();
 
@@ -1543,17 +1571,21 @@ export class MemoryStore {
    * its newest rows). Without a Brain they come from the cache. With one, every id is checked against its row first,
    * as a vector query checks its hits: a trace whose row is gone or deleted, by this process or another, is left out
    * (and fenced in every store on the Brain), and a cached trace whose row a move filed under another scope id is left
-   * out until this store follows the move. A cached trace is answered from the cache; when its row names another
-   * trust policy or another statement (source, time, confidence, verification count: another process stored the trace
-   * again), it takes the row's policy and provenance, and a verification this process recorded since its own store
-   * (`lastVerifiedAt`, `contradictedBy`, which the row does not hold) stays when the statement is the same. That row is
-   * read again inside the trace's turn before it is applied, so a `store()` of this process that wrote a newer row
-   * after the first read keeps what it wrote; a row stored again with other words is returned as the row holds it,
-   * words and trust together, for this call only, and the cached copy keeps the words and trust it was stored with. A live row with a usable embedding is filed in the cache and the vector
-   * index as the store's hydration files one; a row without one is returned for this call only and not cached, since
-   * the store holds no vector for it, and is read again when a delete or a move ran after the first read (a `store()`
-   * of the same id that ran first answers with the trace it filed). A trace that is inactive, tombstoned or
-   * delete-pending is left out.
+   * out until this store follows the move.
+   *
+   * A cached trace whose row holds what this store last wrote or read for it is answered from the cache, with what
+   * this process changed on it since (a verification `persistTraceMetadata` kept beside the row, a gist of its
+   * words). A row written since with another trust policy or statement (source, time, confidence, verification
+   * count) gives the cached trace its policy and provenance; a row written since with other words (stored again, or
+   * edited by `memory_update`) is returned as the row holds it, words and trust together, for this call only, and
+   * the cached copy keeps what it held. Such a row is read again inside the trace's turn before it is used, so a
+   * `store()` of this process that wrote a newer row after the first read keeps what it wrote.
+   *
+   * A live row with a usable embedding is filed in the cache and the vector index as the store's hydration files
+   * one; a row without one is returned for this call only and not cached, since the store holds no vector for it,
+   * and is read again when a delete or a move ran after the first read (a `store()` of the same id that ran first
+   * answers with the trace it filed). A trace that is inactive, tombstoned or delete-pending is left out, and so is
+   * one a delete reached while this call waited on a later id.
    *
    * Never throws: when the Brain cannot be read, no trace is returned and `unread` counts the ids.
    *
@@ -1594,12 +1626,10 @@ export class MemoryStore {
       const cached = served(id);
       if (cached) {
         if (rowFiledElsewhere(row, cached.scope, cached.scopeId)) continue;
-        // The row holds what the last `store()` of the trace wrote. A row whose trust policy or statement (source,
-        // time, confidence, verification count) differs was stored again since: its policy and provenance are the
-        // trace's now, so neither a confidence nor a verification of the earlier copy carries over. A row that differs
-        // only in `lastVerifiedAt` or `contradictedBy` holds less than this process verified since, which
-        // `persistTraceMetadata` writes to the vector store and not the row: the cached provenance stands.
-        if (!rowRestatesTrace(rowStatementOf(row), cached)) {
+        // A row that holds what this store last wrote or read for the trace was not written since: the cached trace,
+        // with what this process changed on it, stands. A row written since with another policy or statement is the
+        // trace's now, so neither a confidence nor a verification of the earlier copy carries over.
+        if (!this.rowChangedSince(cached, row)) {
           traces.set(id, cached);
           continue;
         }
@@ -1612,19 +1642,21 @@ export class MemoryStore {
             const current = await brain.get<MemoryTraceRow>(LIVE_TRACE_ROW_SQL, [brain.brainId, id]);
             const trace = served(id);
             if (!current || !trace || rowFiledElsewhere(current, trace.scope, trace.scopeId)) return;
-            const statement = rowStatementOf(current);
-            if (!rowRestatesTrace(statement, trace)) {
+            if (!this.rowChangedSince(trace, current)) {
               traces.set(id, trace);
               return;
             }
-            if (current.content !== trace.content) {
-              // Stored again with other words: the row's words and its trust go together, for this call only. The
-              // cached copy and its vector hold the words this process stored, and keep the trust they were stored with.
+            if (current.content !== (this.rowSeen.get(trace)?.content ?? trace.content)) {
+              // Written again with other words (stored again, or edited by `memory_update`): the row's words and its
+              // trust go together, for this call only. The cached copy and its vector hold the words this store wrote
+              // or read, and keep the trust they came with.
               traces.set(id, this.rowToTrace(current));
               return;
             }
+            const statement = rowStatementOf(current);
             if (statement.policy) trace.policy = { ...statement.policy };
             if (statement.provenance) trace.provenance = { ...statement.provenance };
+            this.rowSeen.set(trace, seenRowOf(current.content, statement));
             traces.set(id, trace);
           });
         } catch {
@@ -1671,7 +1703,26 @@ export class MemoryStore {
         unread += 1;
       }
     }
+    // A delete that ran while this call waited on a later id: a trace it took is not returned, whether this call read
+    // it as the cache's or as its row.
+    for (const id of [...traces.keys()]) {
+      if (this.tombstonedTraceIds.has(id) || isTraceDeletePending(namespace, id) || hasDeletedTrace(namespace, id)) {
+        traces.delete(id);
+      }
+    }
     return { traces, unread };
+  }
+
+  /**
+   * Whether a trace's row was written since this store last wrote or read it: its words, trust policy or statement
+   * differ from what the store saw. What this process changed on the cached trace alone (a verification it
+   * persisted, a gist of its words) does not count. A trace this store never saw a row for is compared as it is.
+   */
+  private rowChangedSince(trace: MemoryTrace, row: MemoryTraceRow): boolean {
+    const now = seenRowOf(row.content, rowStatementOf(row));
+    const seen = this.rowSeen.get(trace);
+    if (seen) return !sameSeenRow(seen, now);
+    return rowRestatesTrace(now, trace) || row.content !== trace.content;
   }
 
   /**
@@ -1880,6 +1931,7 @@ export class MemoryStore {
       ...(isTrustPolicy(meta.policy) ? { policy: meta.policy } : {}),
     } as MemoryTrace;
     syncedDecayStates.set(trace, decay);
+    this.rowSeen.set(trace, seenRowOf(row.content, rowStatementOf(row)));
     return trace;
   }
 
@@ -2052,6 +2104,13 @@ export class MemoryStore {
       // next open: by the exact check in Brain on SQLite, by the fill of a
       // null `_tsv` on Postgres.
       await indexStoredTrace(brain, trace, revived);
+      this.rowSeen.set(
+        trace,
+        seenRowOf(trace.content, {
+          policy: isTrustPolicy(trace.policy) ? trace.policy : undefined,
+          provenance: isStoredProvenance(trace.provenance) ? trace.provenance : undefined,
+        }),
+      );
     }
 
     trace.isActive = true;
