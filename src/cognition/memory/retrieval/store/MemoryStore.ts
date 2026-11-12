@@ -305,23 +305,39 @@ function rowRestatesTrace(row: RowStatement, trace: MemoryTrace): boolean {
   );
 }
 
-/** What a row held for a trace when a store last wrote or read it: its words, policy and statement, copied. */
-interface SeenRow extends RowStatement {
+/** The columns of a row a recall leg selects by or returns: its words, its type and its creation time. */
+interface RowFields {
   content: string;
+  type: string;
+  createdAt: number;
 }
 
-function seenRowOf(content: string, statement: RowStatement): SeenRow {
+/** What a row held for a trace when a store last wrote or read it: its words, type, creation time, policy and statement, copied. */
+interface SeenRow extends RowStatement, RowFields {}
+
+function rowFieldsOf(row: Pick<MemoryTraceRow, 'content' | 'type' | 'created_at'>): RowFields {
+  return { content: row.content, type: row.type, createdAt: row.created_at };
+}
+
+/** Whether two rows hold the same words, type and creation time. */
+function sameRowFields(a: RowFields, b: RowFields): boolean {
+  return a.content === b.content && a.type === b.type && a.createdAt === b.createdAt;
+}
+
+function seenRowOf(fields: RowFields, statement: RowStatement): SeenRow {
   return {
-    content,
+    content: fields.content,
+    type: fields.type,
+    createdAt: fields.createdAt,
     ...(statement.policy ? { policy: { ...statement.policy } } : {}),
     ...(statement.provenance ? { provenance: { ...statement.provenance } } : {}),
   };
 }
 
-/** Whether two rows hold the same words, policy and statement. */
+/** Whether two rows hold the same words, type, creation time, policy and statement. */
 function sameSeenRow(a: SeenRow, b: SeenRow): boolean {
   return (
-    a.content === b.content &&
+    sameRowFields(a, b) &&
     (a.policy && b.policy ? sameTrustPolicy(a.policy, b.policy) : !a.policy && !b.policy) &&
     (a.provenance && b.provenance ? sameStatement(a.provenance, b.provenance) : !a.provenance && !b.provenance)
   );
@@ -1576,9 +1592,9 @@ export class MemoryStore {
    * A cached trace whose row holds what this store last wrote or read for it is answered from the cache, with what
    * this process changed on it since (a verification `persistTraceMetadata` kept beside the row, a gist of its
    * words). A row written since with another trust policy or statement (source, time, confidence, verification
-   * count) gives the cached trace its policy and provenance; a row written since with other words (stored again, or
-   * edited by `memory_update`) is returned as the row holds it, words and trust together, for this call only, and
-   * the cached copy keeps what it held. Such a row is read again inside the trace's turn before it is used, so a
+   * count) gives the cached trace its policy and provenance; a row written since with other words, type or creation
+   * time (stored again, or edited by `memory_update`) is returned as the row holds it, those and its trust together,
+   * for this call only, and the cached copy keeps what it held. Such a row is read again inside the trace's turn before it is used, so a
    * `store()` of this process that wrote a newer row after the first read keeps what it wrote.
    *
    * A live row with a usable embedding is filed in the cache and the vector index as the store's hydration files
@@ -1646,17 +1662,17 @@ export class MemoryStore {
               traces.set(id, trace);
               return;
             }
-            if (current.content !== (this.rowSeen.get(trace)?.content ?? trace.content)) {
-              // Written again with other words (stored again, or edited by `memory_update`): the row's words and its
-              // trust go together, for this call only. The cached copy and its vector hold the words this store wrote
-              // or read, and keep the trust they came with.
+            if (!sameRowFields(rowFieldsOf(current), this.rowSeen.get(trace) ?? trace)) {
+              // Written again with other words, type or creation time (stored again, or edited by `memory_update`):
+              // the row's fields and its trust go together, for this call only, so the gate reads what the leg's query
+              // selected. The cached copy and its vector hold what this store wrote or read, with the trust it came with.
               traces.set(id, this.rowToTrace(current));
               return;
             }
             const statement = rowStatementOf(current);
             if (statement.policy) trace.policy = { ...statement.policy };
             if (statement.provenance) trace.provenance = { ...statement.provenance };
-            this.rowSeen.set(trace, seenRowOf(current.content, statement));
+            this.rowSeen.set(trace, seenRowOf(rowFieldsOf(current), statement));
             traces.set(id, trace);
           });
         } catch {
@@ -1714,15 +1730,15 @@ export class MemoryStore {
   }
 
   /**
-   * Whether a trace's row was written since this store last wrote or read it: its words, trust policy or statement
-   * differ from what the store saw. What this process changed on the cached trace alone (a verification it
+   * Whether a trace's row was written since this store last wrote or read it: its words, type, creation time, trust
+   * policy or statement differ from what the store saw. What this process changed on the cached trace alone (a verification it
    * persisted, a gist of its words) does not count. A trace this store never saw a row for is compared as it is.
    */
   private rowChangedSince(trace: MemoryTrace, row: MemoryTraceRow): boolean {
-    const now = seenRowOf(row.content, rowStatementOf(row));
+    const now = seenRowOf(rowFieldsOf(row), rowStatementOf(row));
     const seen = this.rowSeen.get(trace);
     if (seen) return !sameSeenRow(seen, now);
-    return rowRestatesTrace(now, trace) || row.content !== trace.content;
+    return rowRestatesTrace(now, trace) || !sameRowFields(now, trace);
   }
 
   /**
@@ -1931,7 +1947,7 @@ export class MemoryStore {
       ...(isTrustPolicy(meta.policy) ? { policy: meta.policy } : {}),
     } as MemoryTrace;
     syncedDecayStates.set(trace, decay);
-    this.rowSeen.set(trace, seenRowOf(row.content, rowStatementOf(row)));
+    this.rowSeen.set(trace, seenRowOf(rowFieldsOf(row), rowStatementOf(row)));
     return trace;
   }
 
@@ -2106,7 +2122,7 @@ export class MemoryStore {
       await indexStoredTrace(brain, trace, revived);
       this.rowSeen.set(
         trace,
-        seenRowOf(trace.content, {
+        seenRowOf(trace, {
           policy: isTrustPolicy(trace.policy) ? trace.policy : undefined,
           provenance: isStoredProvenance(trace.provenance) ? trace.provenance : undefined,
         }),
