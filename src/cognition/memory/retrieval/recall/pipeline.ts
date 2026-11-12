@@ -201,6 +201,8 @@ export class RecallPipeline {
     const { kept, dropped } = dedupePool(pool, c.nearDuplicate);
     const dedupeMs = Math.round(performance.now() - dedupeStarted);
     const duplicateOf = new Map(dropped.map((d) => [d.entry.id, d.duplicateOf]));
+    // A newer text that took an older one's place carries that one's fused score and ranks.
+    const keptAs = new Map(kept.map((entry) => [entry.id, entry]));
 
     return {
       scored: kept.slice(0, topK).map((entry) => entry.trace),
@@ -208,12 +210,15 @@ export class RecallPipeline {
       storeTimings: dense.storeTimings,
       legs: [legEntry(dense), legEntry(words), legEntry(recent)],
       retrieval: 'hybrid',
-      ranked: pool.map(({ id, ranks, fusedScore }) => ({
-        id,
-        ranks,
-        fusedScore,
-        ...(duplicateOf.has(id) ? { duplicateOf: duplicateOf.get(id)! } : {}),
-      })),
+      // The whole pool by fused score, a kept candidate with the score it holds; equal scores keep the pool's order.
+      ranked: pool
+        .map(({ id, ranks, fusedScore }) => ({
+          id,
+          ranks: keptAs.get(id)?.ranks ?? ranks,
+          fusedScore: keptAs.get(id)?.fusedScore ?? fusedScore,
+          ...(duplicateOf.has(id) ? { duplicateOf: duplicateOf.get(id)! } : {}),
+        }))
+        .sort((a, b) => b.fusedScore - a.fusedScore),
       lexicalBackend: words.ran ? lexicalBackendOf(store, lexical) : 'none',
       timings: { legsMs, fuseMs, dedupeMs },
     };

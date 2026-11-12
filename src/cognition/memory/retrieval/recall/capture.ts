@@ -23,8 +23,11 @@ export const MEMORY_RECALL_CAPTURE_VERSION = 'memory-recall-capture/1' as const;
 /** A recall leg: one way of finding candidates for a turn. */
 export type RecallLeg = 'dense' | 'exact_words' | 'recency' | 'supplied';
 
-/** Why a recall leg did not run. */
-export type LegAbsentReason = 'no_store' | 'no_embedder' | 'no_index' | 'no_scope_filter' | 'query_error' | 'disabled';
+/**
+ * Why a recall leg did not run. `no_scopes`: the turn passed no `scopes`, so the exact-words and recency legs, which
+ * read only inside a turn's scopes, had nothing they may read.
+ */
+export type LegAbsentReason = 'no_store' | 'no_embedder' | 'no_index' | 'no_scope_filter' | 'no_scopes' | 'query_error' | 'disabled';
 
 /** Why no rerank scores were applied to a turn's candidates. */
 export type RerankSkipReason = 'loading' | 'unavailable' | 'timeout' | 'error' | 'backoff' | 'none_configured';

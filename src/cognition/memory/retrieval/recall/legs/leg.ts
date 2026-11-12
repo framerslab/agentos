@@ -11,7 +11,7 @@ import type { LegAbsentReason, RecallLeg } from '../capture.js';
 export interface LegQuery {
   /** The turn's text. */
   query: string;
-  /** The scopes the turn may read, as the turn passes them. A leg asked with none returns nothing. */
+  /** The scopes the turn may read, as the turn passes them. A leg asked with none does not run (`no_scopes`). */
   scopes: ReadonlyArray<{ scope: MemoryScope; scopeId: string }>;
   /** `CognitiveRetrievalOptions.types`. */
   types?: MemoryType[];
