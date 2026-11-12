@@ -1548,6 +1548,7 @@ export class Memory {
    * @throws TypeError when `scopeId` is not the conversation key of a user or of a session.
    * @throws InvalidWikiPageIdError for a refused page id.
    * @throws When the knowledge graph cannot delete the chunks' copies: no row is deleted.
+   * @throws When other writers rewrote a page's row under each of its attempts to delete it: that row is kept.
    */
   async deletePageRows(scopeId: string, pageId?: string): Promise<{ pages: number; chunks: number }> {
     assertPageOwnerKey(scopeId);
@@ -1559,25 +1560,38 @@ export class Memory {
     );
   }
 
-  /** {@link deletePageRows}, once the scope's earlier page writes have settled. */
+  /**
+   * {@link deletePageRows}, once the scope's earlier page writes have settled. Each row is deleted only while it holds
+   * the text and the chunk list read with it: a row another process rewrote between the read and the delete lists
+   * chunks this call has not deleted, so it is read again and its chunks go first.
+   */
   private async _deletePageRows(scopeId: string, pageId?: string): Promise<{ pages: number; chunks: number }> {
-    let rows: MemoryPageRow[];
-    if (pageId === undefined) {
-      rows = await this.listPageRows(scopeId);
-    } else {
-      const row = await this.readPageRow(scopeId, pageId);
-      rows = row ? [row] : [];
+    // The rows that are there now, by their ids: a page another writer adds meanwhile keeps its row with its chunks.
+    const ids = pageId === undefined ? (await this.listPageRows(scopeId)).map((row) => row.pageId) : [pageId];
+    let pages = 0;
+    let chunks = 0;
+    for (const id of ids) {
+      for (let attempt = 1; ; attempt += 1) {
+        const record = await this._readPageRecord(scopeId, id);
+        if (!record) break;
+        chunks += (await this.deleteTraces(pageRowOf(record).chunkIds)).deleted;
+        const result = await this._brain.run(
+          `DELETE FROM memory_pages
+            WHERE brain_id = ? AND scope = ? AND scope_id = ? AND page_id = ? AND content = ? AND chunk_ids = ?`,
+          [this._brain.brainId, CONVERSATION_SCOPE, scopeId, id, record.content, record.chunk_ids],
+        );
+        if (result.changes > 0) {
+          pages += 1;
+          break;
+        }
+        if (attempt >= PAGE_WRITE_ATTEMPTS) {
+          throw new Error(
+            `Memory: the page row changed under each of ${PAGE_WRITE_ATTEMPTS} attempts to delete it; its row is kept`,
+          );
+        }
+      }
     }
-    if (rows.length === 0) return { pages: 0, chunks: 0 };
-    const { deleted } = await this.deleteTraces(rows.flatMap((row) => row.chunkIds));
-    // The rows that were read, by their ids: a page another writer added meanwhile keeps its row with its chunks.
-    for (const row of rows) {
-      await this._brain.run(
-        'DELETE FROM memory_pages WHERE brain_id = ? AND scope = ? AND scope_id = ? AND page_id = ?',
-        [this._brain.brainId, CONVERSATION_SCOPE, scopeId, row.pageId],
-      );
-    }
-    return { pages: rows.length, chunks: deleted };
+    return { pages, chunks };
   }
 
   /**
