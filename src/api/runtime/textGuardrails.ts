@@ -501,13 +501,18 @@ export async function guardedGenerateText(opts: GenerateTextOptions, inner: (opt
   }
   const result = await inner({ ...(input.text !== undefined ? withTurnText(opts, input.text) : opts), guards: undefined, __guardRun: run });
   const judged = await run.judgeReply(result.text);
+  // a caller's abort while the guards judged the reply ends the call, as it does while they judge a tool call
+  opts.abortSignal?.throwIfAborted();
   if (run.mode === 'dryRun' || judged.end.kind === 'passed' || judged.end.kind === 'failed') return { ...result, guardReport: run.report };
   if (judged.end.kind === 'stopped') throw run.stop('output', judged.end.decided, result.usage);
   run.report.result = judged.end.kind;
   return { ...result, text: judged.text, transcriptDelta: deliveredDelta(result.transcriptDelta, judged.text), guardReport: run.report };
 }
 
-/** streamText() with `guards`: the same three stages over a stream. `text` resolves with what was delivered and nothing else. */
+/**
+ * streamText() with `guards`: the same three stages over a stream. `text` resolves with what was delivered and nothing
+ * else; in a dry run, as the same call without guards resolves it.
+ */
 export function guardedStreamText(opts: GenerateTextOptions, inner: (opts: GenerateTextOptions) => StreamTextResult): StreamTextResult {
   const guards = opts.guards as TextGuardrailOptions;
   const hold = guards.output !== 'stream';
@@ -561,6 +566,8 @@ export function guardedStreamText(opts: GenerateTextOptions, inner: (opts: Gener
           yield part;
         }
         if (finish !== 'error') await run.judgeReply(whole);
+        // the call's own text (the last step's), as the same call without guards resolves it
+        delivered = await source.text.catch(() => delivered);
         return;
       }
       const out = run.guardOutput(source.fullStream, hold);
