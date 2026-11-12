@@ -34,7 +34,7 @@ import { credentialsGoWith, modelNamesAnotherProvider } from './runtime/credenti
 import { lowerZodToJsonSchema } from '../orchestration/compiler/SchemaLowering.js';
 import { ObjectGenerationError } from './generateObject.js';
 import { streamText, type StreamTextResult } from './streamText.js';
-import type { TextGuardrailReport } from './runtime/textGuardrails.js';
+import { inputDecisionOf, type TextGuardrailReport } from './runtime/textGuardrails.js';
 import { GuardrailAction } from '../safety/guardrails/IGuardrailService.js';
 import type { SeatInternals } from './runtime/pool/seating.js';
 import { isCallMask } from './runtime/pool/redact.js';
@@ -908,12 +908,19 @@ function pickSendGenerationOverrides(
  * sent, and neither the session's history nor its memory provider keeps it.
  */
 function guardTookInput(report: TextGuardrailReport | undefined): boolean {
-  return report?.mode === 'enforce' && report.input.some((e) => e.action === GuardrailAction.SANITIZE || e.action === GuardrailAction.BLOCK);
+  if (report?.mode !== 'enforce') return false;
+  // what the input stage did, when the report says: a sanitizer that returned the text unchanged took nothing
+  const decided = inputDecisionOf(report);
+  if (decided !== undefined) return decided !== 'passed';
+  return report.input.some((e) => e.action === GuardrailAction.SANITIZE || e.action === GuardrailAction.BLOCK);
 }
 
 /** Whether an enforced guard replaced the call's input: no request was made and the reply is the guard's fixed text. */
 function guardReplacedInput(report: TextGuardrailReport | undefined): boolean {
-  return report?.mode === 'enforce' && report.input.some((e) => e.action === GuardrailAction.BLOCK);
+  if (report?.mode !== 'enforce') return false;
+  const decided = inputDecisionOf(report);
+  if (decided !== undefined) return decided === 'replaced' || decided === 'stopped';
+  return report.input.some((e) => e.action === GuardrailAction.BLOCK);
 }
 
 /**

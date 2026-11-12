@@ -769,7 +769,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       // thinking fields (see toProviderReplayMessage).
       if (opts.messages)
         for (const m of opts.messages) messages.push(toProviderReplayMessage(m));
-      if (opts.prompt) messages.push({ role: 'user', content: opts.prompt });
+      if (opts.prompt || (opts.prompt === '' && opts.__emptyPrompt)) messages.push({ role: 'user', content: opts.prompt });
 
       rootSpan?.setAttribute('agentos.api.tool_count', tools.length);
 
@@ -906,7 +906,14 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           hookErrors: opts.hookErrors,
           approvalGate: opts.__approvalGate,
           // The guards of the call judge each parsed call before the hook.
-          judgeToolCall: opts.__guardRun ? (call) => opts.__guardRun!.judgeToolCall(call) : undefined,
+          // A caller's abort while the guards were judging ends the round before any tool runs.
+          judgeToolCall: opts.__guardRun
+            ? async (call) => {
+                const refusal = await opts.__guardRun!.judgeToolCall(call);
+                opts.abortSignal?.throwIfAborted();
+                return refusal;
+              }
+            : undefined,
           // A seat's mask reaches the shim's tool errors too, and a successful
           // output passes the listed values alone.
           maskToolError: opts.__maskError ? maskToolText : undefined,
@@ -1455,13 +1462,12 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             allToolCalls.push(toolCallRecord);
             continue;
           }
-          const requestPart: StreamPart = { type: 'tool-call', toolName: fnName, args: parsedArgs };
-          parts.push(requestPart);
-          yield requestPart;
-
-          // --- guards: judged before any hook, on the arguments the model sent ---
+          // --- guards: judged before any hook, on the arguments the model sent, and before a reader sees the call ---
           if (opts.__guardRun) {
             const refusal = await opts.__guardRun.judgeToolCall({ name: fnName, args: parsedArgs, step, index: callIndex, registered: toolMap.has(fnName) });
+            // a caller's abort while the guards were judging: no hook and no tool runs
+            opts.abortSignal?.throwIfAborted();
+            // a refused call is not shown as a call: its result says it was refused, as a call with bad arguments is shown by its result alone
             if (refusal) {
               toolCallRecord.error = refusal.error;
               const resultPart: StreamPart = { type: 'tool-result', toolName: fnName, result: refusal.result };
@@ -1472,6 +1478,9 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               continue;
             }
           }
+          const requestPart: StreamPart = { type: 'tool-call', toolName: fnName, args: parsedArgs };
+          parts.push(requestPart);
+          yield requestPart;
 
           const tool = toolMap.get(fnName);
           if (!tool) {

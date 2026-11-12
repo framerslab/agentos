@@ -931,6 +931,13 @@ export interface GenerateTextOptions {
    */
   __guardRun?: TextGuardRun;
   /**
+   * Internal: set by the guards when a sanitizer removed the whole text of `prompt`. The empty prompt is then sent as
+   * an empty user turn, where an empty prompt a caller passes adds none. Not part of the public API.
+   *
+   * @internal
+   */
+  __emptyPrompt?: boolean;
+  /**
    * Internal — DO NOT set from application code. The tool-approval gate,
    * set by `agency()` when `hitl.approvals.beforeTool` is listed, or
    * forwarded from a parent agency. Every tool loop calls it after
@@ -2778,7 +2785,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       // The plan's system message, when planning adds one; a continuation
       // leaves it out (the fallback plans again if planning is on).
       let planMessage: Record<string, unknown> | undefined;
-      if (opts.prompt) messages.push({ role: 'user', content: opts.prompt });
+      if (opts.prompt || (opts.prompt === '' && opts.__emptyPrompt)) messages.push({ role: 'user', content: opts.prompt });
 
       span?.setAttribute('agentos.api.tool_count', tools.length);
 
@@ -2929,7 +2936,15 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           hookErrors: opts.hookErrors,
           approvalGate: opts.__approvalGate,
           // The guards of the call judge each parsed call before the hook.
-          judgeToolCall: opts.__guardRun ? (call) => opts.__guardRun!.judgeToolCall(call) : undefined,
+          // The step is the call's own (a continuation's shim starts after the rounds before it), and a caller's
+          // abort while the guards were judging ends the round before any tool runs.
+          judgeToolCall: opts.__guardRun
+            ? async (call) => {
+                const refusal = await opts.__guardRun!.judgeToolCall({ ...call, step: stepOffset + call.step });
+                opts.abortSignal?.throwIfAborted();
+                return refusal;
+              }
+            : undefined,
           // A seat's mask reaches the shim's tool errors too, and a successful
           // output passes the listed values alone.
           maskToolError: opts.__maskError ? maskToolText : undefined,
@@ -3448,6 +3463,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             // --- guards: judged before any hook, on the arguments the model sent ---
             if (opts.__guardRun) {
               const refusal = await opts.__guardRun.judgeToolCall({ name: fnName, args: parsedArgs, step: runStep, index: callIndex, registered: tool !== undefined });
+              // a caller's abort while the guards were judging: no hook and no tool runs
+              opts.abortSignal?.throwIfAborted();
               if (refusal) {
                 record.error = refusal.error;
                 messages.push({ role: 'tool', tool_call_id: tcId, content: JSON.stringify(refusal.result) } as any);

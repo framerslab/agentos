@@ -127,9 +127,10 @@ export interface GuardrailOutputOptions {
   onVerdict?: (verdict: GuardrailOutputVerdict) => void | Promise<void>;
 
   /**
-   * Picks which of a phase's evaluations ends the reply, or answers undefined when none does. Called with every
-   * settled evaluation of a parallel phase, and with the one evaluation of a phase 1 guard that answered a BLOCK (that
-   * BLOCK ends the reply whatever the picker answers). Default: the first BLOCK without a hold, else the first hold.
+   * Picks which evaluation ends the reply, or answers undefined when none does. Called with every evaluation the
+   * guards have answered on the chunk so far, in registration order: once the parallel phase has settled (a picker
+   * that answers undefined lets the chunk pass), and when a phase 1 guard answers a BLOCK, which is then the last entry
+   * and ends the reply whatever the picker answers. Default: the first BLOCK without a hold, else the first hold.
    */
   pickBlock?: (evaluations: readonly GuardrailEvaluationResult[]) => GuardrailEvaluationResult | undefined;
 }

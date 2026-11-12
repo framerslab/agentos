@@ -109,6 +109,17 @@ interface UserTurn { text: string; images: VisionInputData[] }
 
 const NO_USAGE: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
 
+/** What the input stage did with the turn, by report: an answer that left the text as it was is `passed`. */
+const inputDecisions = new WeakMap<TextGuardrailReport, 'passed' | 'sanitized' | 'replaced' | 'stopped'>();
+/**
+ * @internal What an enforced input stage did with the call's turn: `sanitized` (the text sent is not the caller's),
+ * `replaced`, `stopped`, or `passed` (sent as given, a sanitizer that returned the same text included). Undefined for
+ * a report this module did not make.
+ */
+export function inputDecisionOf(report: TextGuardrailReport | undefined): 'passed' | 'sanitized' | 'replaced' | 'stopped' | undefined {
+  return report ? inputDecisions.get(report) : undefined;
+}
+
 /** What decides a list in the moderation order (a rule's BLOCK, else a hold, else a closed guard's failure, else a FLAG). */
 function decide(evaluations: readonly GuardrailEvaluationResult[]): Decided | undefined {
   const pick = pickModerationOutcome(evaluations);
@@ -147,7 +158,8 @@ function userTurnOf(opts: GenerateTextOptions): UserTurn | undefined {
 }
 /** The options with the user turn's text replaced. In multi-part content one text part takes the place of the text parts; the other parts stay. */
 function withTurnText(opts: GenerateTextOptions, text: string): GenerateTextOptions {
-  if (typeof opts.prompt === 'string' && opts.prompt.length > 0) return { ...opts, prompt: text };
+  // an emptied prompt is still the turn: the text functions send it, where a caller's empty prompt adds none
+  if (typeof opts.prompt === 'string' && opts.prompt.length > 0) return { ...opts, prompt: text, ...(text.length === 0 ? { __emptyPrompt: true } : {}) };
   const messages = [...(opts.messages ?? [])];
   const last = messages[messages.length - 1];
   if (!last) return opts;
@@ -265,7 +277,10 @@ class GuardRun implements TextGuardRun {
 
   /** The input stage: once per call, before the first provider request. */
   async judgeInput(turn: UserTurn | undefined): Promise<{ kind: 'pass'; text?: string } | { kind: 'replaced'; text: string } | { kind: 'stopped'; error: GuardrailStopError }> {
-    if (!turn || this.inputGuards.length === 0) return { kind: 'pass' };
+    if (!turn || this.inputGuards.length === 0) {
+      inputDecisions.set(this.report, 'passed');
+      return { kind: 'pass' };
+    }
     const input = {
       userId: this.context.userId,
       sessionId: this.context.sessionId,
@@ -282,8 +297,10 @@ class GuardRun implements TextGuardRun {
       const replacement = decided.evaluation.replacementText;
       if (typeof replacement === 'string' && replacement.length > 0) {
         this.report.result = 'replaced';
+        inputDecisions.set(this.report, 'replaced');
         return { kind: 'replaced', text: replacement };
       }
+      inputDecisions.set(this.report, 'stopped');
       return { kind: 'stopped', error: this.stop('input', decided) };
     }
     // a sanitizer that removed the whole text (`modifiedText: null`) leaves the turn with no text, never the original
@@ -294,9 +311,11 @@ class GuardRun implements TextGuardRun {
       await this.emit('input', rewrite, GuardrailAction.SANITIZE, false);
       if (this.mode === 'dryRun') return { kind: 'pass' };
       this.report.result = 'sanitized';
+      inputDecisions.set(this.report, 'sanitized');
       return { kind: 'pass', text: rewritten };
     }
     if (decided) await this.emit('input', decided.evaluation, GuardrailAction.FLAG, false);
+    inputDecisions.set(this.report, 'passed');
     return { kind: 'pass' };
   }
 
@@ -382,6 +401,36 @@ class GuardRun implements TextGuardRun {
       const attached: GuardrailEvaluationResult[] = [];
       let replacement: string | undefined;
       let rewritten: string | undefined;
+      // the text as it went out, which a sanitizer of the streamed deltas may have changed
+      let out = '';
+      let finished = false;
+      // The report and the verdict are settled before the text that follows from them goes out, so a reader that stops
+      // after that text still finds them.
+      const finish = async (): Promise<void> => {
+        if (finished) return;
+        finished = true;
+        // what every guard answered: the evaluations carried by the chunks that went out, then the phase that decided a block
+        report.output.push(...(blocked ? [...attached, ...phase] : attached).map(toModerationEvaluation));
+        const judged = verdict?.originalText ?? null;
+        if (blocked) {
+          const decided = decide(phase) as Decided;
+          await emit('output', blocked, GuardrailAction.BLOCK, decided.unavailable, { originalText: judged, finalText: replacement ?? null });
+          end = replacement !== undefined ? { kind: 'replaced' } : { kind: 'stopped', decided };
+        } else if (verdict?.action === GuardrailAction.SANITIZE) {
+          const rewrite = attached.find((e) => e.action === GuardrailAction.SANITIZE);
+          if (rewrite) await emit('output', rewrite, GuardrailAction.SANITIZE, false, { originalText: judged, finalText: verdict.finalText, ...(rewritten === undefined ? { enforced: false } : {}) });
+          if (rewritten !== undefined) end = { kind: 'sanitized' };
+        } else if (!failed && out !== original && attached.some((e) => e.action === GuardrailAction.SANITIZE)) {
+          // a sanitizer rewrote the streamed deltas and the final guards passed: the reply is what went out
+          const rewrite = attached.find((e) => e.action === GuardrailAction.SANITIZE) as GuardrailEvaluationResult;
+          await emit('output', rewrite, GuardrailAction.SANITIZE, false, { originalText: original, finalText: out });
+          end = { kind: 'sanitized' };
+        } else {
+          const flagged = decide(attached);
+          if (flagged) await emit('output', flagged.evaluation, GuardrailAction.FLAG, false, { originalText: judged, finalText: judged });
+        }
+        if (mode === 'enforce' && (end.kind === 'replaced' || end.kind === 'sanitized')) report.result = end.kind;
+      };
       const guarded = wrapOutputGuardrails(outputGuards, context, chunks(), {
         streamId,
         holdUntilFinal: hold,
@@ -396,7 +445,9 @@ class GuardRun implements TextGuardRun {
         const entries = (chunk.metadata?.guardrail as { output?: unknown } | undefined)?.output;
         if (Array.isArray(entries) && !blocked) attached.push(...(entries as GuardrailEvaluationResult[]));
         if (chunk.type === AgentOSResponseChunkType.TEXT_DELTA) {
-          yield { type: 'text', text: (chunk as AgentOSTextDeltaChunk).textDelta };
+          const delta = (chunk as AgentOSTextDeltaChunk).textDelta;
+          out += delta;
+          yield { type: 'text', text: delta };
           continue;
         }
         if (chunk.type === AgentOSResponseChunkType.METADATA_UPDATE) {
@@ -410,31 +461,20 @@ class GuardRun implements TextGuardRun {
           // a block that carries a fixed reply; in stream mode the text is already out and nothing can take its place
           if (hold) {
             replacement = finalText;
+            await finish();
             if (mode === 'enforce') yield { type: 'text', text: finalText };
           }
         } else if (verdict?.action === GuardrailAction.SANITIZE) {
           // the held deltas were dropped; the rewritten reply is one part. In stream mode the original is already out.
           if (hold) {
             rewritten = finalText;
+            await finish();
             if (mode === 'enforce') yield { type: 'text', text: finalText };
           }
         }
       }
 
-      report.output.push(...(blocked ? phase : attached).map(toModerationEvaluation));
-      const judged = verdict?.originalText ?? null;
-      if (blocked) {
-        const decided = decide(phase) as Decided;
-        await emit('output', blocked, GuardrailAction.BLOCK, decided.unavailable, { originalText: judged, finalText: replacement ?? null });
-        end = replacement !== undefined ? { kind: 'replaced' } : { kind: 'stopped', decided };
-      } else if (verdict?.action === GuardrailAction.SANITIZE) {
-        const rewrite = attached.find((e) => e.action === GuardrailAction.SANITIZE);
-        if (rewrite) await emit('output', rewrite, GuardrailAction.SANITIZE, false, { originalText: judged, finalText: verdict.finalText, ...(rewritten === undefined ? { enforced: false } : {}) });
-        if (rewritten !== undefined) end = { kind: 'sanitized' };
-      } else {
-        const flagged = decide(attached);
-        if (flagged) await emit('output', flagged.evaluation, GuardrailAction.FLAG, false, { originalText: judged, finalText: judged });
-      }
+      await finish();
       if (failed) end = { kind: 'failed', error: failed };
     }
     return { parts: parts(), end: () => end };
@@ -504,6 +544,11 @@ export function guardedStreamText(opts: GenerateTextOptions, inner: (opts: Gener
         return;
       }
       source = inner({ ...(input.text !== undefined ? withTurnText(opts, input.text) : opts), guards: undefined, __guardRun: run });
+      // the call's routing settles as the inner stream routes, so a reader can await it while the reply is still open
+      provider.resolve(source.provider);
+      model.resolve(source.model);
+      responseModel.resolve(source.responseModel);
+      serviceTier.resolve(source.serviceTier);
       if (run.mode === 'dryRun') {
         // nothing is held and nothing is changed; the whole reply is judged once it has been delivered
         let whole = '';

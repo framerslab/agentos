@@ -258,8 +258,8 @@ A `mode` other than `enforce` or `dryRun`, a `services` that is not an array or 
 The guards run in three stages:
 
 - **Input, once, before the first provider request.** The call's own user turn is judged: `prompt`, else the last message when its role is `user`. A call whose messages end on another role has no input stage. The guards with `evaluateInput` read the turn's text and its images (a `data:` URL as its bytes, any other URL as a URL). A `BLOCK` stops the call before any request is made. A `BLOCK` whose evaluation carries a non-empty `replacementText` is the reply instead: no request is made, `text` is that text, `usage` is zero and `transcriptDelta` is empty. A rewrite sends the rewritten text in the turn's place; in multi-part content one text part takes the place of the text parts and the images stay. A text a guard removed (`modifiedText: null`) is sent as an empty turn, never as the original.
-- **Tool calls, each one, in every tool loop.** The guards with `evaluateOutput` and `config.evaluateToolCalls: true` judge each call the model makes, in the native tool loop and the prompt-tool loop of every leg, on the arguments the model sent, before `onBeforeToolExecution` and before any approval gate. A refused call does not run and no hook sees it: the model reads `This tool call was refused by a guardrail.` as its result, with the guard's `reasonCode` when it gave one, and the loop goes on. A hold refuses the call too. A refused tool call is not a stop.
-- **Output, the whole reply, before the caller receives it.** A `BLOCK` stops the call. A `BLOCK` that carries a `replacementText` puts that text in the reply's place, and a rewrite replaces the reply. An empty reply is not judged.
+- **Tool calls, each one, in every tool loop.** The guards with `evaluateOutput` and `config.evaluateToolCalls: true` judge each call the model makes, in the native tool loop and the prompt-tool loop of every leg, on the arguments the model sent, before `onBeforeToolExecution` and before any approval gate. A refused call does not run and no hook sees it: the model reads `This tool call was refused by a guardrail.` as its result, with the guard's `reasonCode` when it gave one, and the loop goes on. In `streamText()` a call's `tool-call` part goes out after the guards passed it; a refused call shows as its `tool-result` part alone. A caller's `abortSignal` that fires while the guards are judging ends the call before any hook or tool runs. A hold refuses the call too. A refused tool call is not a stop.
+- **Output, the whole reply, before the caller receives it.** A `BLOCK` stops the call. A `BLOCK` that carries a `replacementText` puts that text in the reply's place, and a rewrite replaces the reply, a rewrite of the reply's streamed pieces by a guard with `evaluateStreamingChunks` included. An empty reply is not judged.
 
 What decides a stage is what decides `moderateContent()`: a rule's `BLOCK`, else a hold, else a closed guard's failure, else a `FLAG`. A screen with `sequential: true` answers first, as it does there.
 
@@ -280,13 +280,13 @@ Its message is one fixed sentence: it holds no guard's reason, no prompt and no 
 | Field | Meaning |
 |---|---|
 | `mode` | `enforce` or `dryRun` |
-| `input`, `output` | Each stage's evaluations, as `toModerationEvaluation()` reports them |
+| `input`, `output` | Each stage's evaluations, as `toModerationEvaluation()` reports them. After a block, `output` holds what every guard that ran answered, the guards before the one that blocked included |
 | `toolCalls` | `{ toolCallId, toolName, evaluations }` for each judged call. `toolCallId` is the call's own number, `tc_<step>_<index>` (the step from 1, the index from 0 in the order the model listed the step's calls), never the provider's or the model's id. `toolName` is the registered tool's name, or `unregistered` when the model named no tool of the call's list |
 | `result` | `passed`, `sanitized` (a guard rewrote the input or the reply), `replaced` (a fixed reply took its place) or `stopped` |
 
 The report carries codes, ids and scores: no guard's `reason`, no prompt, no reply and no call id from a provider. An evaluation's `metadata` is the guard's own and passes through as the guard wrote it, as in `moderateContent()`.
 
-After a reply was rewritten or replaced, `text` is what the caller receives and the last entry of `transcriptDelta` is `{ role: 'assistant', content: <that text> }`, so a next turn built from the delta never sends what a guard took out. When `maxSteps` ended the call on a tool step, the reply is that step's text: its assistant entry keeps its tool calls and holds the delivered text. After the input was rewritten, the delta's user turn is the rewritten one, as it was sent.
+After a reply was rewritten or replaced, `text` is what the caller receives and the last assistant entry of `transcriptDelta` holds that text, so a next turn built from the delta never sends what a guard took out. When the reply ended the call, that entry is the delta's last, `{ role: 'assistant', content: <that text> }`. When `maxSteps` ended the call on a tool step, the reply is that step's text: its assistant entry keeps its tool calls and holds the delivered text, and the step's tool results follow it. After the input was rewritten, the delta's user turn is the rewritten one, as it was sent.
 
 `onVerdict` receives one verdict per stage decision: `stage` (`input`, `toolCall` or `output`), `action`, `enforced`, `unavailable`, `guardrailId`, `reasonCode`, `hold`, and on a tool call `toolCallId` and `toolName`. On the output stage `originalText` and `finalText` hold the reply as the guards judged it and as the caller receives it, so a host keeps them out of its logs. Each verdict also writes one `guardrail.verdict` line ([Logging](../observability/LOGGING.md#guardrail-events)).
 
@@ -879,12 +879,15 @@ const live = session.stream(message, { guards });
 - A schema retry is a call of its own: the retry's input stage judges its
   correction turn, and the turns it repeats hold the text that was delivered.
   A send whose input a guard replaced is not retried: no request is made and
-  it rejects with `ObjectGenerationError`, whose `rawText` is the replacement.
+  the replacement is validated as the reply. It resolves when the replacement
+  fits the schema, and rejects with `ObjectGenerationError`, whose `rawText` is
+  the replacement, when it does not.
 - A session's history holds what was delivered. A reply a guard rewrote or
   replaced is stored as delivered, a send whose input a guard rewrote stores
   the rewritten turn, and a send whose input a guard replaced adds nothing. A
   stream turn whose input a guard rewrote or replaced is not added to the
-  history.
+  history. A sanitizer that returned the turn's text unchanged rewrote
+  nothing: the turn is kept and observed as any other.
 - A memory provider's `getContext()` recalls for the turn as it was sent, a
   rewritten turn's text included, and its `observe()` is not called for a turn
   whose input an enforced guard rewrote or replaced, a turn whose schema retry
