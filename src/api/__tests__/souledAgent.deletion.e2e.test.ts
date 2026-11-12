@@ -20,6 +20,9 @@
  * - A person's memory is exported as JSON from their own scope alone, and corrected: the wrong traces are deleted for
  *   good, the correction is filed, and the pages built from them are rebuilt by the next compile; a correction that
  *   names a trace that is not the person's own changes nothing.
+ * - On one person's own machine, `legacyMemory` attributes memory stored before per-user scope to its one user, who
+ *   recalls, reads, lists, exports and deletes it; nobody else does. The store refuses the attribution when it
+ *   records anyone else, never moves it, and never attributes a page it cannot read.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
@@ -41,6 +44,7 @@ import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory'
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 import { conversationScopeKey } from '../../cognition/memory/retrieval/store/conversationScopeKey';
 import { guardMemoryProvider } from '../../cognition/memory/suppression/guardMemoryProvider';
+import { LEARNING_SCHEMA_DDL } from '../../cognition/learning/store/schema';
 
 let n = 0;
 let dir: string;
@@ -884,5 +888,179 @@ describe('export and correction', () => {
     expect(merge).not.toContain('LARK-7');
     expect(pagesOf(keyOf(alice))).toHaveLength(1);
     expect(registry()).toEqual([{ rebuild_sources: null }]);
+  });
+});
+
+describe('legacyMemory', () => {
+  const me = { kind: 'user' as const, id: 'me' };
+  const legacy = { attributeTo: 'me', reason: 'one-persons-machine' as const };
+  const oldFile = () => path.join(dir, 'memory', 'concepts', 'old.md');
+  const OLD = '---\nid: concepts/old\ntype: concept\nsummary: Old notes.\nsources:\n  - t-old\n---\nThe heron lives by the weir.\n';
+  const owners = () => rows<{ owner_key: string }>(storeFile(), 'SELECT owner_key FROM memory_legacy_owner');
+  const NOT_FOUND = 'No memory page found with id';
+
+  beforeEach(() => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  });
+
+  /** A store an earlier version wrote: one compiled page under memory/, and one trace under the agent's plain scope. */
+  async function seedLegacy(): Promise<void> {
+    fs.mkdirSync(path.dirname(oldFile()), { recursive: true });
+    fs.writeFileSync(oldFile(), OLD);
+    const { a } = await open();
+    await a.memory!.remember('old shared words about a heron', { type: 'episodic', scope: 'persona', scopeId: 'aria-1' });
+    await a.close();
+  }
+
+  it('attributes old memory to the one user, who recalls, reads, lists and exports it', async () => {
+    await seedLegacy();
+    const { a, s } = await open({ legacyMemory: legacy, retention: undefined }, [
+      reply.text('Noted.'),
+      reply.tools([{ id: 'c1', name: 'read_memory_page', args: { id: 'concepts/old' } }]),
+      reply.text('Read.'),
+      reply.tools([{ id: 'c2', name: 'read_memory_page', args: { list: true } }]),
+      reply.text('Listed.'),
+    ]);
+    expect(owners()).toEqual([{ owner_key: keyOf(me) }]);
+    const attributed = lines('memory.legacy_attributed');
+    expect(attributed).toHaveLength(1);
+    expect(attributed[0]).toMatchObject({ traces: 1, pages: 1 });
+
+    const first = s.seen.length;
+    await a.session('s1', { userId: 'me' }).send('What do you know about the heron?');
+    expect(recallBlockIn(s.seen[first])).toContain('old^shared^words^about^a^heron');
+    await a.session('s2', { userId: 'me' }).send('Read the old notes.');
+    expect(toolAnswerIn(s.seen.at(-1)!)).toContain('The heron lives by the weir.');
+    await a.session('s3', { userId: 'me' }).send('Which pages are there?');
+    expect(toolAnswerIn(s.seen.at(-1)!)).toContain('concepts/old');
+
+    const doc = await a.exportUserMemory!('me');
+    expect(doc.traces.map((trace) => trace.text)).toContain('old shared words about a heron');
+    expect(doc.pages.map((page) => page.id)).toContain('concepts/old');
+  });
+
+  it("gives none of it to a user who comes later, and that user's deletion does not name it", async () => {
+    await seedLegacy();
+    const earlier = await open({ legacyMemory: legacy });
+    await turn(earlier.a, 's1', 'me', 'hello');
+    await earlier.a.close();
+
+    const { a, s } = await open({ legacyMemory: legacy }, [
+      reply.text('Nothing yet.'),
+      reply.tools([{ id: 'c1', name: 'read_memory_page', args: { id: 'concepts/old' } }]),
+      reply.text('Done.'),
+    ]);
+    expect(owners()).toEqual([{ owner_key: keyOf(me) }]);
+    const first = s.seen.length;
+    await a.session('s2', { userId: 'bob' }).send('What do you remember about the heron?');
+    expect(recallBlockIn(s.seen[first]) ?? '').not.toContain('heron');
+    await a.session('s3', { userId: 'bob' }).send('Read the old notes.');
+    const answered = toolAnswerIn(s.seen.at(-1)!);
+    expect(answered).toContain(NOT_FOUND);
+    expect(answered).not.toContain('weir');
+    expect((await a.exportUserMemory!('bob')).traces.map((trace) => trace.text)).not.toContain('old shared words about a heron');
+
+    const report = await a.forgetUser!('bob');
+    expect(report.stores.some((entry) => entry.store.startsWith('legacy memory'))).toBe(false);
+    expect(report.complete).toBe(true);
+    expect(fs.readFileSync(oldFile(), 'utf8')).toBe(OLD);
+  });
+
+  it("the owner's deletion takes the old memory", async () => {
+    await seedLegacy();
+    const { a } = await open({ legacyMemory: legacy });
+    await turn(a, 's1', 'me', 'hello');
+
+    const report = await a.forgetUser!('me');
+    expect(rows(storeFile(), "SELECT id FROM memory_traces WHERE scope = 'persona'")).toEqual([]);
+    expect(fs.existsSync(oldFile())).toBe(false);
+    expect(owners()).toEqual([]);
+    expect(report.stores).toContainEqual(expect.objectContaining({ store: 'legacy memory attributed to the user', reached: true }));
+    expect(JSON.stringify(report.stores)).not.toContain('unattributed');
+    expect(report.complete).toBe(true);
+  });
+
+  it.each<[string, (a: SouledAgent) => Promise<unknown>]>([
+    ['an anonymous session', (a) => turn(a, 's1', undefined, 'hello')],
+    [
+      'a trace that names another user',
+      (a) => a.memory!.remember('bob said this', { type: 'episodic', scope: 'persona', scopeId: 'aria-1', metadata: { turnUserId: 'bob' } }),
+    ],
+    ['another forgotten subject', (a) => a.memory!.markForgotten(bob)],
+  ])('refuses a store that records %s', async (_case, plant) => {
+    await seedLegacy();
+    const earlier = await open();
+    await plant(earlier.a);
+    await earlier.a.close();
+
+    await expect(open({ legacyMemory: legacy })).rejects.toThrow(/records memory of another person or session/);
+    expect(owners()).toEqual([]);
+  });
+
+  it('refuses a store that records another learner', async () => {
+    await seedLegacy();
+    const db = new Database(storeFile());
+    try {
+      db.exec(LEARNING_SCHEMA_DDL);
+      db.prepare(
+        `INSERT INTO agentos_learning_sessions
+           (namespace, agent_key, session_id, user_id, kind, persona_id, conversation_ids, brain_ids, started_at, version)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run('', 'aria-1', 's', 'bob', 'learner', 'p', '[]', '[]', new Date().toISOString(), 1);
+    } finally {
+      db.close();
+    }
+
+    await expect(open({ legacyMemory: legacy })).rejects.toThrow(/records memory of another person or session/);
+    expect(owners()).toEqual([]);
+  });
+
+  it('does not move an attribution', async () => {
+    await seedLegacy();
+    const earlier = await open({ legacyMemory: legacy });
+    await earlier.a.close();
+
+    await expect(open({ legacyMemory: { attributeTo: 'you', reason: 'one-persons-machine' } })).rejects.toThrow(
+      /attributed to another user/,
+    );
+    expect(owners()).toEqual([{ owner_key: keyOf(me) }]);
+  });
+
+  it('never attributes a page it cannot read', async () => {
+    await seedLegacy();
+    const brokenFile = path.join(dir, 'memory', 'concepts', 'broken.md');
+    const broken = '---\nsources: [\n---\nbody';
+    fs.writeFileSync(brokenFile, broken);
+    const { a, s } = await open({ legacyMemory: legacy }, [
+      reply.tools([{ id: 'c1', name: 'read_memory_page', args: { id: 'concepts/broken' } }]),
+      reply.text('Done.'),
+    ]);
+    expect(lines('memory.legacy_attributed')[0]).toMatchObject({ traces: 1, pages: 1 });
+
+    await a.session('s1', { userId: 'me' }).send('Read the broken page.');
+    expect(toolAnswerIn(s.seen.at(-1)!)).toContain(NOT_FOUND);
+
+    const report = await a.forgetUser!('me');
+    expect(report.stores).toContainEqual({ store: 'legacy memory under the agent scope', reached: false, reason: 'unattributed' });
+    expect(report.complete).toBe(false);
+    expect(fs.readFileSync(brokenFile, 'utf8')).toBe(broken);
+    expect(fs.existsSync(oldFile())).toBe(false);
+  });
+
+  it('refuses a name that is no one, and a forgotten one', async () => {
+    await seedLegacy();
+    for (const legacyMemory of [
+      { attributeTo: 'guest', reason: 'one-persons-machine' },
+      { attributeTo: '', reason: 'one-persons-machine' },
+      { attributeTo: 'me', reason: 'shared' },
+    ]) {
+      await expect(open({ legacyMemory: legacyMemory as never })).rejects.toThrow(/an id that names one person/);
+    }
+
+    const earlier = await open();
+    await earlier.a.memory!.markForgotten(me);
+    await earlier.a.close();
+    await expect(open({ legacyMemory: legacy })).rejects.toThrow(/has forgotten/);
+    expect(owners()).toEqual([]);
   });
 });
