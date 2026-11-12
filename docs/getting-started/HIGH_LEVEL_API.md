@@ -34,7 +34,7 @@ import {
 | `embedText()` | Generate embeddings | `await embedText({ input: ['hello'] })` |
 | `agent()` | Multi-turn sessions with history, tools and hooks | `const a = agent({ provider: 'openai' })` |
 | `gmi()` | `agent({ runtime: 'gmi' })`: sessions served by GMIs, with cognitive memory, sentiment tracking and metaprompts per profile | `const a = gmi({ provider: 'openai', cognition: 'full' })` |
-| `souledAgent()` | Soul-file agent whose long-term memory is its `memory/` wiki | `await souledAgent({ provider: 'anthropic', soul: '~/.agentos/agents/aria' })` |
+| `souledAgent()` | Soul-file agent with the operator's `memory/` wiki and memory kept per user | `await souledAgent({ provider: 'anthropic', soul: '~/.agentos/agents/aria' })` |
 | `agency()` | Multi-agent teams | `const team = agency({ agents: {...}, strategy: 'parallel' })` |
 | `probeProviderKey()` | Whether one API key is live, out of credit, rejected or throttled, by its provider's billing probe | `await probeProviderKey({ provider: 'anthropic', apiKey })` |
 
@@ -220,6 +220,78 @@ await generateObject({ provider: 'openai', schema, prompt: transcript, store: fa
 
 `store` is sent to OpenAI as `store` on the request body, on `/v1/chat/completions` and `/v1/responses` alike. OpenAI's [migration guide](https://developers.openai.com/api/docs/guides/migrate-to-responses) says "Responses are stored by default. Chat completions are stored by default for new accounts. To disable storage when using either API, set `store: false`." `streamText()` takes it too. Every request the call makes carries the option, which covers each step of the tool loop, the planning request, each attempt of `generateObject()` and a fallback leg to OpenAI. Left out, a chat completion sends no `store` key and a Responses request sends `store: false`. The providers built on the OpenAI provider (Groq, xAI, Together, Mistral, LiteLLM, MiniMax) send it to their own endpoint too; the other providers ignore it. `ModelCompletionOptions.store` sets it on a direct `generateCompletion()` call.
 
+### Guards on a call
+
+```ts
+import { GuardrailStopError, generateText } from '@framers/agentos';
+
+const guards = {
+  services: [hardBan, classifier],
+  context: { userId: user.id, sessionId: thread.id, moderation: { surface: 'agent_turn' } },
+};
+
+try {
+  const { text, guardReport } = await generateText({ provider: 'openai', prompt, tools, guards });
+  show(text);
+} catch (error) {
+  if (!(error instanceof GuardrailStopError)) throw error;
+  if (error.code === 'GUARDRAIL_UNAVAILABLE') askToRetry();
+  else if (error.code === 'GUARDRAIL_HELD') queueForReview(error.hold?.reviewCode);
+  else refuse(error.reasonCode);
+}
+```
+
+`guards` enforces a host's guards on the call itself:
+
+| Field | Meaning |
+|---|---|
+| `services` | The guards, in registration order. Each runs as `moderateContent()` runs it: closed unless its config says `failClosed: false`, with a deadline |
+| `context` | The `GuardrailContext` every guard receives. `context.moderation` is checked as `moderateContent()` checks it |
+| `mode` | `enforce` (default) applies every verdict. `dryRun` runs every guard, reports each verdict with `enforced: false` and changes nothing |
+| `stages` | Any of `input`, `toolCalls` and `output`. Default: every stage some guard implements |
+| `output` | `streamText()` only: `hold` (default) or `stream` (see [Guards on a stream](#guards-on-a-stream)) |
+| `timeoutMs` | The deadline of a guard whose config sets none. Default 8000 |
+| `onVerdict` | Called with each stage decision other than an allow, enforced or not. A callback that throws writes `guardrail.verdict_callback_failed`, and the verdict stands |
+
+A `mode` other than `enforce` or `dryRun`, a `services` that is not an array or a `context.moderation` that fails its check is a `TypeError` before any guard runs: `generateText()` rejects with it and `streamText()` yields it as an `error` part.
+
+The guards run in three stages:
+
+- **Input, once, before the first provider request.** The call's own user turn is judged: `prompt`, else the last message when its role is `user`. A call whose messages end on another role has no input stage. The guards with `evaluateInput` read the turn's text and its images (a `data:` URL as its bytes, any other URL as a URL). A `BLOCK` stops the call before any request is made. A `BLOCK` whose evaluation carries a non-empty `replacementText` is the reply instead: no request is made, `text` is that text, `usage` is zero and `transcriptDelta` is empty. A rewrite sends the rewritten text in the turn's place; in multi-part content one text part takes the place of the text parts and the images stay. A text a guard removed (`modifiedText: null`) is sent as an empty turn, never as the original.
+- **Tool calls, each one, in every tool loop.** The guards with `evaluateOutput` and `config.evaluateToolCalls: true` judge each call the model makes, in the native tool loop and the prompt-tool loop of every leg, on the arguments the model sent, before `onBeforeToolExecution` and before any approval gate. A refused call does not run and no hook sees it: the model reads `This tool call was refused by a guardrail.` as its result, with the guard's `reasonCode` when it gave one, and the loop goes on. In `streamText()` a call's `tool-call` part goes out after the guards passed it; a refused call shows as its `tool-result` part alone. A caller's `abortSignal` that fires while the guards are judging ends the call before any hook or tool runs. A hold refuses the call too. A refused tool call is not a stop.
+- **Output, the whole reply, before the caller receives it.** A `BLOCK` stops the call. A `BLOCK` that carries a `replacementText` puts that text in the reply's place, and a rewrite replaces the reply, a rewrite of the reply's streamed pieces by a guard with `evaluateStreamingChunks` included. An empty reply is not judged. A caller's `abortSignal` that fires while the guards judge the prompt or the reply rejects `generateText()` with the signal's reason; `streamText()` ends with an `error` part that carries it, before any held text goes out.
+
+What decides a stage is what decides `moderateContent()`: a rule's `BLOCK`, else a hold, else a closed guard's failure, else a `FLAG`. A screen with `sequential: true` answers first, as it does there.
+
+A stop rejects with `GuardrailStopError`:
+
+| Field | Meaning |
+|---|---|
+| `code` | `GUARDRAIL_BLOCKED` (a rule), `GUARDRAIL_HELD` (held for a person's review; `hold` is set) or `GUARDRAIL_UNAVAILABLE` (nothing but a closed guard that threw, ran late or answered no recognised action decided it) |
+| `stage` | `input`: no request was made. `output`: the reply was withheld |
+| `reasonCode`, `guardrailId`, `hold` | The deciding evaluation's |
+| `report` | The call's report, below |
+| `usage` | What the call had spent, on the output stage |
+
+Its message is one fixed sentence: it holds no guard's reason, no prompt and no reply. The input and output stages run once per call, outside the fallback chain, so a stop is not retried on a fallback provider and does not count against a provider's health.
+
+`result.guardReport`, and `error.report` after a stop:
+
+| Field | Meaning |
+|---|---|
+| `mode` | `enforce` or `dryRun` |
+| `input`, `output` | Each stage's evaluations, as `toModerationEvaluation()` reports them. After a block, `output` holds what every guard that ran answered, the guards before the one that blocked included |
+| `toolCalls` | `{ toolCallId, toolName, evaluations }` for each judged call. `toolCallId` is the call's own number, `tc_<step>_<index>` (the step from 1, the index from 0 in the order the model listed the step's calls), never the provider's or the model's id. `toolName` is the registered tool's name, or `unregistered` when the model named no tool of the call's list |
+| `result` | `passed`, `sanitized` (a guard rewrote the input or the reply), `replaced` (a fixed reply took its place) or `stopped` |
+
+The report carries codes, ids and scores: no guard's `reason`, no prompt, no reply and no call id from a provider. An evaluation's `metadata` is the guard's own and passes through as the guard wrote it, as in `moderateContent()`.
+
+After a reply was rewritten or replaced, `text` is what the caller receives and the last assistant entry of `transcriptDelta` holds that text, so a next turn built from the delta never sends what a guard took out. When the reply ended the call, that entry is the delta's last, `{ role: 'assistant', content: <that text> }`. When `maxSteps` ended the call on a tool step, the reply is that step's text: its assistant entry keeps its tool calls and holds the delivered text, and the step's tool results follow it. After the input was rewritten, the delta's user turn is the rewritten one, as it was sent.
+
+`onVerdict` receives one verdict per stage decision: `stage` (`input`, `toolCall` or `output`), `action`, `enforced`, `unavailable`, `guardrailId`, `reasonCode`, `hold`, and on a tool call `toolCallId` and `toolName`. On the output stage `originalText` and `finalText` hold the reply as the guards judged it and as the caller receives it, so a host keeps them out of its logs. Each verdict also writes one `guardrail.verdict` line ([Logging](../observability/LOGGING.md#guardrail-events)).
+
+With `mode: 'dryRun'` every guard runs as it does in enforcement and every verdict reaches `onVerdict` with `enforced: false`; the input is sent as given, tools run and the reply is returned as the model wrote it.
+
 ## `streamText()`
 
 ```ts
@@ -236,6 +308,15 @@ for await (const delta of result.textStream) {
 
 console.log(await result.text);
 ```
+
+### Guards on a stream
+
+`streamText()` takes the same `guards` as [`generateText()`](#guards-on-a-call), and `result.guardReport` resolves to the report when the stream ends.
+
+- **`output: 'hold'`** (the default). No text part is delivered before the output guards have judged the whole reply; tool calls and the other parts pass as they come. A stop yields no text part and one `error` part carrying the `GuardrailStopError`; `await result.text` is the empty string and `finishReason` is `error`.
+- **`output: 'stream'`.** Text flows as it arrives, and only a guard with `evaluateStreamingChunks` can stop it mid-stream. The final guards still judge the whole reply: a `BLOCK` arrives as an `error` part after the text, one that carries a `replacementText` included, since the text is already out and nothing can take its place. A rewrite is reported with `enforced: false` and not applied.
+
+`text` resolves with what was delivered and nothing else when a guard stopped, replaced or rewrote the reply; when they passed it, `text` resolves as it does for the same call without guards (the last step's text). An input stop ends the stream the same way, before any request. The `error` part is in `fullStream`: a caller that reads `textStream` alone sees the text stop and no error, so it also reads `finishReason` or `guardReport`. In a dry run the reply streams as it arrives, the output guards judge it whole once it was delivered, and `text` resolves as it does for the same call without guards (the last step's text).
 
 ## Cancellation
 
@@ -785,6 +866,41 @@ A tool an agent calls receives the session's user in `context.userContext.userId
 and `stream()`) and the subject its memory is keyed by in
 `context.userContext.memorySubject`; a direct `generateText()` call passes `system`.
 
+### Guards on an agent's calls
+
+`generate()`, `stream()` and a session's `send()` and `stream()` take `guards` per
+call, as [`generateText()`](#guards-on-a-call) and [`streamText()`](#guards-on-a-stream) do:
+
+```ts
+const reply = await session.send(message, { guards });
+const live = session.stream(message, { guards });
+```
+
+- A schema retry is a call of its own: the retry's input stage judges its
+  correction turn, and the turns it repeats hold the text that was delivered.
+  A send whose input a guard replaced is not retried: no request is made and
+  the replacement is validated as the reply. It resolves when the replacement
+  fits the schema, and rejects with `ObjectGenerationError`, whose `rawText` is
+  the replacement, when it does not.
+- A session's history holds what was delivered. A reply a guard rewrote or
+  replaced is stored as delivered, a send whose input a guard rewrote stores
+  the rewritten turn, and a send whose input a guard replaced adds nothing. A
+  stream turn whose input a guard rewrote or replaced is not added to the
+  history. A sanitizer that returned the turn's text unchanged rewrote
+  nothing: the turn is kept and observed as any other.
+- A memory provider's `getContext()` recalls for the turn as it was sent, a
+  rewritten turn's text included, and its `observe()` is not called for a turn
+  whose input an enforced guard rewrote or replaced, a turn whose schema retry
+  then passed included.
+- `verifyCitations` retrieves with the turn as it was sent, a rewritten turn's
+  text included, and does not run for a turn a guard replaced.
+- The `guardrails` ids in an `agent()` or `agency()` config are stored and not
+  applied: a call is guarded by its `guards`. A panel agency's call cannot
+  carry `guards`.
+- An agent with `runtime: 'gmi'` does not enforce `guards`: its `generate()`,
+  `stream()` and a session's `send()` and `stream()` throw when a call
+  carries them, before any turn starts.
+
 ### Citation verification
 
 Set `verifyCitations: { embedFn, retrieve }` to check generated claims against
@@ -936,7 +1052,7 @@ agent({ provider: 'openai', soul: { content: SOUL_MARKDOWN_STRING } });
 
 ### `souledAgent()`: soul plus a `memory/` wiki
 
-`agent({ soul })` loads identity but leaves long-term memory to you. `souledAgent()` is the async factory that wires the whole loop in one call: it loads the soul, opens one `Memory` store under the workspace's `memory/.store/`, and attaches the soul's `memory/` markdown wiki as the agent's long-term memory.
+`agent({ soul })` loads identity but leaves long-term memory to you. `souledAgent()` is the async factory that wires the whole loop in one call: it loads the soul, opens one `Memory` store under the workspace's `memory/.store/`, indexes the operator's pages under `memory/`, and keeps what each subject says (the session's `userId`, else the session) in that store, apart from every other subject's.
 
 ```ts
 import { souledAgent } from '@framers/agentos';
@@ -950,13 +1066,23 @@ const aria = await souledAgent({
 
 What it wires:
 
-- **Read:** the `memory/index.md` catalog is injected into the system prelude, and the agent opens any page on demand with the `read_memory_page` tool. The tool is added when `tools` is absent or an array; a named tool map is passed through as given, without it.
-- **Recall:** once per turn, before its first model call, up to eight traces from the store that match the user's message are sent with the turn as data: a `<memory_recall>` block of JSON in a user-role message right before the turn's own, one record each with who spoke it (`user`, `assistant`, or `note` and the page id for a chunk of a wiki page; none for a trace stored before speakers were recorded), the date it was stored (`26 days ago, 2026-10-14`) and its text, with `^` in place of each run of whitespace (a line break included), kept to the turn's memory token budget (`memoryProviderOptions.tokenBudget`, 2,000 tokens by default, estimated at about four characters a token): whole lines in rank order while they fit, and the first trace's text cut at a word boundary when its line alone is larger (never inside a character). The budget caps the recalled text; the block adds its tags, a note, each record's keys and the escapes of `<`, `>` and `&` beyond it. A budget of 0 adds no recall block. Recall is full-text search unless the store is given an embedder. The block is marked as data and the system prompt says so in one line; that lowers the chance that a stored sentence is followed as an instruction and does not remove it.
-- **Capture:** conversation the agent observes is written to the same store as episodic traces, each recording who spoke it in its metadata (`speaker: 'user'` or `speaker: 'assistant'`), outside its text and tags, so recall never matches a trace by its speaker. These traces carry no entities, so the default clusterer merges them all into the page `concepts/notes`. Entity pages come from traces stored with entities through `agent.memory.remember()`, or from a clusterer passed to `attachMemoryWiki()`.
-- **Fold:** those traces are merged into wiki pages when memory consolidates, and each page written is dated with the time of the compile. `souledAgent` runs this on the agent's `close()`; call `await aria.memory.compileWiki()` to fold mid-session. Merges integrate new facts without clobbering human edits. The compile's prompt quotes the traces as JSON records under a line that says they are conversation data, not instructions. A page the compile creates gets a summary named from its page id (`Notes compiled from conversations` for `concepts/notes`), never copied from a trace, so no sentence a user says becomes a line of `index.md` and of the system prompt (an entity page's id, `entities/johnny`, still carries the name the compile found in the conversation); a page that has a summary keeps it. `close()` first closes the agent (on `runtime: 'gmi'` that stops its session turns), then waits up to 5 seconds (`pendingWritesTimeoutMs`), one deadline, for the turns still running (a `generate()`, a `stream()`, a session's `send()` or `stream()`, on either runtime) and then for the memory writes of its turns, then compiles, then closes the store; turns or writes still pending when the wait ends are counted in one warning line and are not folded into the wiki, a stream whose `abortSignal` aborted before anything was read from it is not waited for, and on the default runtime a stream nobody reads and nobody aborts keeps the wait until the deadline. The compile's model calls use the agent's route, fallback settings, completion cap (`maxTokens`) and `budget`, and are written to its usage ledger under the source `souledAgent.compileWiki`. A compile that fails on `close()`, a budget refusal among the reasons, logs a warning naming the error; the conversation traces stay in the store for the next compile, and `close()` still closes the agent and the store.
+- **Read:** the index of the operator's pages is injected into the system prelude, and the agent opens a page on demand with the `read_memory_page` tool: `{ "id": "<page id>" }` reads one, and `{ "list": true }` lists what the asker can read. The tool answers the asker's own pages and the operator's; another user's page answers as a page that does not exist, and a call that names a scope or a user is refused. The tool is added when `tools` is absent or an array; a named tool map is passed through as given, without it.
+- **Recall:** once per turn, before its first model call, the traces that match the user's message are read from two places and no other: up to eight from the memory of the turn's subject (the user the session named with `userId`, else the session itself) and up to eight from the operator's pages. Nothing another user or another session said is read. They are sent with the turn as data, best match first: a `<memory_recall>` block of JSON in a user-role message right before the turn's own, one record each with who spoke it (`user`, `assistant`, or `note` and the page id for a chunk of a wiki page; none for a trace stored before speakers were recorded), the date it was stored (`26 days ago, 2026-10-14`) and its text, with `^` in place of each run of whitespace (a line break included), kept to the turn's memory token budget (`memoryProviderOptions.tokenBudget`, 2,000 tokens by default, estimated at about four characters a token): whole lines in rank order while they fit, and the first trace's text cut at a word boundary when its line alone is larger (never inside a character). The budget caps the recalled text; the block adds its tags, a note, each record's keys and the escapes of `<`, `>` and `&` beyond it. A budget of 0 adds no recall block. Recall is full-text search unless the store is given an embedder. The block is marked as data and the system prompt says so in one line; that lowers the chance that a stored sentence is followed as an instruction and does not remove it.
+- **Capture:** conversation the agent observes is written to the same store as episodic traces, each filed under the key of its turn's subject, the user's message and the reply alike: the user the session named with `userId`, else the session itself (`agent.session(id, { userId })`; an id that names nobody, such as `system` or `guest`, counts as none). A one-shot `generate()` or `stream()` names no user, so nothing is filed for it and it recalls the operator's pages alone; one `memory.one_shot_unfiled` log line an agent says so. Each trace records who spoke it in its metadata (`speaker: 'user'` or `speaker: 'assistant'`), outside its text and tags, so recall never matches a trace by its speaker. These traces carry no entities, so the default clusterer merges them all into the page `concepts/notes`. Entity pages come from traces stored with entities through `agent.memory.remember()`, or from a clusterer passed to `attachMemoryWiki()`.
+- **Fold:** those traces are merged into wiki pages when memory consolidates, once a subject: each subject with new traces is compiled from its own traces alone into its own pages, which are rows of the store and never files under `memory/`, and each subject has its own watermark. Each page written is dated with the time of the compile. `souledAgent` compiles the subjects its turns wrote to on the agent's `close()`; call `await aria.memory.compileWiki()` to fold every subject with new traces mid-session. A merge integrates new facts into the subject's page; a page the operator wrote under `memory/` is never read or rewritten by a compile. The compile's prompt quotes the traces as JSON records under a line that says they are conversation data, not instructions. A page the compile creates gets a summary named from its page id (`Notes compiled from conversations` for `concepts/notes`), never copied from a trace, so no sentence a user says becomes a line of `index.md` and of the system prompt (an entity page's id, `entities/johnny`, still carries the name the compile found in the conversation); a page that has a summary keeps it. `close()` first closes the agent (on `runtime: 'gmi'` that stops its session turns), then waits up to 5 seconds (`pendingWritesTimeoutMs`), one deadline, for the turns still running (a `generate()`, a `stream()`, a session's `send()` or `stream()`, on either runtime) and then for the memory writes of its turns, then compiles, then closes the store; turns or writes still pending when the wait ends are counted in one warning line and are not folded into the wiki, a stream whose `abortSignal` aborted before anything was read from it is not waited for, and on the default runtime a stream nobody reads and nobody aborts keeps the wait until the deadline. The compile's model calls use the agent's route, fallback settings, completion cap (`maxTokens`) and `budget`, and are written to its usage ledger under the source `souledAgent.compileWiki`. A call the budget refuses skips that subject with one `memory.compile_skipped` log line (`reason: 'budget'`): its traces wait for the next compile, and the other subjects compile. A compile that fails on `close()` for any other reason logs a warning naming the error; the conversation traces stay in the store for the next compile, and `close()` still closes the agent and the store.
+- **One person's memory:** `sharedMemory: { as: 'me', reason: 'one-persons-machine' }` (or `reason: 'operators-notes'`) is for one person's own machine, or an operator's own notes: every session that names no user, and every one-shot call, runs as the user `as`, so they share one memory, and `read_memory_page` reads that user's pages. It has three refusals: a session that names another user throws, opening a store that already holds the memory of another user or session rejects (the store is closed first), and an agent with cognitive memory on is refused it, since the GMI's cognitive memory keeps a store of its own. Without the option, pass one stable `userId` on every session to the same end.
+- **The store's folder:** `memory/.store/` gets a `.gitignore` holding `*` when it is made, so what people said stays out of version control; a `.gitignore` already there is left as it is. Traces an earlier version filed under the agent's plain id stay in the store, are read by no turn, and are counted in one `memory.legacy_traces` log line at start.
 - **Legacy `MEMORY.md`:** its text is copied once into `memory/index.md` between the markers `<!-- migrated from MEMORY.md -->` and `<!-- end of MEMORY.md -->`, right under its `# Memory Index` heading, with an end marker that `MEMORY.md` itself holds copied as `<!-- end of MEMORY.md (quoted) -->` so it closes nothing; a start marker anywhere else, such as in a page summary, is catalog text. The catalog the wiki writes goes after that block, so the text stays in the index and in the system prompt; `MEMORY.md` itself is never changed.
 
-One `Memory` facade backs both the live memory and the wiki, so the markdown stays the source of truth and the vector/graph index is rebuilt from it. `souledAgent()` accepts every `agent()` option and returns the same `Agent`, plus `agent.memory` (the store) when the soul resolves to a workspace directory. An inline soul (`{ content }`) has no workspace, so it falls back to a plain `agent()` and says so in one warning line. Closing the agent also closes the store. What applies on each way of loading a soul is tabled in [Soul Files](../SOUL_FILES.md#what-applies-on-each-path).
+Three options say what is kept and where it goes:
+
+- **`compile`** names where the compile's model calls go. Unset, they go on the agent's own provider and model, with its route, budget and ledger. An object (`{ provider?, model?, apiKey?, baseUrl? }`) names another provider or model, a local one included: the compile's text then goes to that provider alone, with no fallback and no router. A `model` whose `provider:` prefix names another provider (`'anthropic:claude-sonnet-4-6'` on an OpenAI agent) takes the compile there, and the agent's own key and base URL go with it only when the compile's call resolves to the provider they were set for, whether the agent names that provider or only its model does; otherwise the compile runs on the target's own `apiKey`, or that provider's key from the environment. A target that names a provider alone runs on that provider's default model, unless it is the agent's own provider, whose model it keeps. `compile: false` runs no compile: turns are kept as raw traces, no per-user page is ever written, and one `memory.compile_skipped` log line (`reason: 'compile_off'`) says so at start.
+- **`memoryPolicy`** is the host's policy for the account a turn serves: a function of the turn's context (`sessionId`, `userId`, `subject`, `call`) that answers `{ longTerm: 'off' }` (nothing is filed for the account and its turns recall the operator's pages alone; one `memory.write_refused` line, `reason: 'policy_off'`, a session), `{ longTerm: 'raw' }` (its turns are filed and recalled, and no page is compiled for it; a compile that meets it writes `memory.compile_skipped` with `reason: 'policy_raw'`) or `{ longTerm: 'compiled' }` (the default). It is asked once a session and its answer is kept for that session's subject until the session closes; an answer that comes after the session closed is kept for nothing, so a session id opened again for another user asks again. Each turn keeps the answer it began with until its reply is filed, even when another turn of its session overlaps it. The page tool and the compile follow the host's latest answer for the account: under `off`, or when the hook failed, `read_memory_page` serves the account none of its own pages, in reading or in its listing (the operator's pages alone), and no compile runs for it, whatever answer an older session keeps. The latest answer is the one asked for last: an answer the host gives late to an earlier ask decides that ask's turn and nothing more. A compile reads the latest answer again once the `screen` hook has answered for its traces, so an `off` answer given meanwhile stops it. A hook that throws, rejects, does not answer within the memory hooks' timeout (`memoryProviderOptions.timeoutMs`, 5 seconds by default) or answers anything else fails closed: one `memory.hook_failed` line (`hook: 'memoryPolicy'`), nothing is filed for that turn (`memory.write_refused`, `reason: 'policy_failed'`, a write), the turn recalls the operator's pages alone, and the next turn asks again.
+- **`screen`** is given each text before it is filed, and so before it is embedded (`stage: 'file'`), and each trace's text again before it is sent to a compile (`stage: 'compile'`). The string it returns is what is filed or compiled; `null` drops the text (`memory.write_refused`, `reason: 'screened'`). Any string it returns is text, the word `failed` among them. A hook that throws, rejects, times out or answers anything else fails closed: `memory.hook_failed` (`hook: 'screen'`), the text is not filed (`reason: 'screen_failed'`), and a compile it fails for does not run (`memory.compile_skipped`, `reason: 'screen_failed'`), its traces waiting with their watermark where it was.
+
+A compile started in a process that served no turn of a subject has no policy answer and no hook context for that subject: with `memoryPolicy` set it is not compiled (`policy_raw`), and with `screen` set neither (`screen_failed`); its traces wait for a process that serves the subject. No log line of these carries a user id, a page id or any text. The hooks decide what is kept and compiled; they are not a check that a text is free of personal data. They act on the souled agent's own store alone, as `sharedMemory` does: `souledAgent()` refuses any of the three, with a `TypeError` and nothing opened, on `runtime: 'gmi'` with cognitive memory on (`cognition.memory`, the `full` profile, or the `memory` option), whose GMI files and recalls in a store of its own.
+
+One `Memory` facade backs both the live memory and the wiki. The operator's pages are markdown files and the source of truth for themselves: their index entries in the store are rebuilt from them. Per-user traces and pages live in the store alone. `souledAgent()` accepts every `agent()` option and returns the same `Agent`, plus `agent.memory` (the store) when the soul resolves to a workspace directory. An inline soul (`{ content }`) has no workspace, so it falls back to a plain `agent()` and says so in one warning line. Closing the agent also closes the store. What applies on each way of loading a soul is tabled in [Soul Files](../SOUL_FILES.md#what-applies-on-each-path).
 
 Runnable examples in the package source:
 

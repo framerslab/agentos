@@ -52,7 +52,10 @@ vi.mock('../../cognition/memory/core/prompt/MemoryPromptAssembler', async (impor
     },
   };
 });
+import pino from 'pino';
 import { agent, type AgentOptions } from '../agent';
+import { resetRecallLogOnce } from '../../cognition/memory/retrieval/recall/log';
+import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory';
 import { reply, script, type ProviderScript } from './helpers/stubProviders';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 import type { ChatMessage } from '../../core/llm/providers/IProvider';
@@ -278,6 +281,56 @@ describe("agent({ runtime: 'gmi' }) recall capture on the turn result", () => {
       expect(json).not.toContain('camping');
     } finally {
       await a.close();
+    }
+  });
+});
+
+describe("agent({ runtime: 'gmi' }) recall when the question cannot be embedded", () => {
+  const STATEMENTS = [
+    'The parcel locker for the camping stove is number 14.',
+    'The code of the camping stove parcel locker is 5832.',
+  ];
+  /** A word only the questions carry: the embedding provider fails every request that holds it. */
+  const MARK = 'tarpaulin';
+
+  it("a turn whose question the embedding provider fails on still answers; its memoryRecall reports the dense leg absent with no_embedder and no ranked memory, and two such turns write one leg_absent line", async () => {
+    const k = key(); const emb = key();
+    script('openai', k, { replies: [...STATEMENTS.map(() => reply.text('Noted.')), reply.text('I cannot recall that.'), reply.text('Still nothing.')] });
+    const embeddings = script('openai', emb, { replies: [], failEmbedding: (text) => text.includes(MARK) });
+    vi.stubEnv('OPENAI_API_KEY', emb);
+    const logged: Array<Record<string, unknown>> = [];
+    resetRecallLogOnce();
+    setLogger(pino({ level: 'debug', base: undefined }, { write(line: string) { logged.push(JSON.parse(line)); } }));
+    const a = withMemory(k);
+    try {
+      const session = a.session('s');
+      for (const statement of STATEMENTS) await session.send(statement);
+      session.clear();
+      const first = await session.send(`Which parcel locker holds the ${MARK} and the camping stove?`);
+      const second = await session.send(`What is the code of the ${MARK} locker?`);
+
+      // The provider was asked to embed the questions, and the turns answered anyway.
+      expect(embeddings.embedded.some((text) => text.includes(MARK))).toBe(true);
+      expect(first.text).toBe('I cannot recall that.');
+      expect(second.text).toBe('Still nothing.');
+
+      for (const [turn, result] of [['first', first], ['second', second]] as const) {
+        const recall = result.memoryRecall;
+        expect(recall?.version, `${turn} turn`).toBe('memory-recall-capture/1');
+        expect(recall!.retrieval, `${turn} turn`).toBe('dense');
+        expect(recall!.legs, `${turn} turn`).toEqual([{ leg: 'dense', ran: false, reason: 'no_embedder', candidates: 0, ineligible: 0, ms: expect.any(Number) }]);
+        // Nothing was ranked: no candidate carries a dense rank.
+        expect(recall!.candidates.filter((c) => c.ranks.dense !== undefined), `${turn} turn`).toEqual([]);
+      }
+
+      // One line for the process, not one a turn; it names the leg and the reason and no words of the turn.
+      const absent = logged.filter((line) => line.event === 'memory.recall.leg_absent');
+      expect(absent).toEqual([expect.objectContaining({ leg: 'dense', reason: 'no_embedder' })]);
+      expect(JSON.stringify(absent)).not.toContain(MARK);
+    } finally {
+      await a.close();
+      resetLoggerFactory();
+      resetRecallLogOnce();
     }
   });
 });

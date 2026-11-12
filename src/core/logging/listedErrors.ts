@@ -52,7 +52,7 @@ export const LISTED_ERROR_TYPES: ReadonlySet<string> = closedList([
   'MemoryRouterAugmentedTableMissingError', 'MemoryRouterBudgetExceededError', 'MemoryRouterDispatcherMissingError',
   'MemoryRouterUnknownCategoryError', 'MissingStageError', 'ModelRouterError', 'NoCapacityError',
   'NoVoiceProvidersAvailableError', 'NotFoundError', 'ObjectGenerationError', 'OllamaProviderError',
-  'OpenAIProviderError', 'OpenRouterProviderError', 'PromptEngineError', 'ProvenanceViolationError', 'ProviderError',
+  'OpenAIProviderError', 'OpenRouterProviderError', 'PageRowChangedError', 'PromptEngineError', 'ProvenanceViolationError', 'ProviderError',
   'ProviderInitializationError', 'QuickJSUnavailableError', 'ReadRouterBudgetExceededError',
   'ReadRouterDispatcherMissingError', 'ReadRouterUnknownIntentError', 'ReaderRouterUnknownCategoryError',
   'ReaderRouterUnknownPresetError', 'RecallOptionError', 'ReferenceHttpError', 'RequestyProviderError',

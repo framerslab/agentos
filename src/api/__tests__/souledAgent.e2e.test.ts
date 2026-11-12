@@ -6,7 +6,8 @@
  *   too.
  * - The recall block a souled agent adds to a turn keeps to the turn's memory token budget.
  * - Text migrated from a legacy MEMORY.md stays in memory/index.md, and so in the system prompt, after the wiki
- *   writes its catalog, even when it holds the end marker itself.
+ *   writes its catalog, even when it holds the end marker itself. The catalog lists the operator's own pages; a page
+ *   compiled from a conversation is in no catalog.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
@@ -18,6 +19,7 @@ import { agent, buildSystemPrompt, type AgentOptions } from '../agent';
 import { souledAgent } from '../souledAgent';
 import { reply, script, type ProviderScript } from './helpers/stubProviders';
 import { loadSoulSync } from '../../cognition/substrate/personas/SoulLoader';
+import { conversationScopeKey } from '../../cognition/memory/retrieval/store/conversationScopeKey';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory';
 
@@ -95,10 +97,19 @@ describe("souledAgent()'s recall", () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const k = key();
     const s = script('openai', k, { whole: true, replies: [reply.text('Noted.'), reply.text('Tea notes.')] });
-    const a = await souledAgent({ ...stubbed(k, memoryProviderOptions ? { memoryProviderOptions } : {}), soul: dir } as never);
+    // A one-shot call recalls a user's memory only on an agent that runs as one user.
+    const a = await souledAgent({
+      ...stubbed(k, memoryProviderOptions ? { memoryProviderOptions } : {}),
+      soul: dir,
+      sharedMemory: { as: 'me', reason: 'one-persons-machine' },
+    } as never);
     try {
       for (const text of stored) {
-        await a.memory!.remember(text, { type: 'episodic', scope: 'persona', scopeId: 'aria-1' });
+        await a.memory!.remember(text, {
+          type: 'episodic',
+          scope: 'conversation',
+          scopeId: conversationScopeKey('aria-1', { kind: 'user', id: 'me' }),
+        });
       }
       await a.generate('What do I know about green tea?');
     } finally {
@@ -156,6 +167,16 @@ describe("souledAgent()'s recall", () => {
 
 describe('text migrated from a legacy MEMORY.md', () => {
   const sentence = 'The user prefers concise answers.';
+  /** The catalog line of the page `writeTeaPage` writes. */
+  const TEA_LINE = '- [tea](concepts/tea.md): Tea notes';
+  /** A page the operator wrote by hand under memory/: no `sources`, so the catalog lists it. */
+  const writeTeaPage = () => {
+    fs.mkdirSync(path.join(dir, 'memory', 'concepts'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'memory', 'concepts', 'tea.md'),
+      '---\nid: concepts/tea\ntype: concept\nsummary: Tea notes\n---\nGreen tea is brewed at 80 degrees.\n',
+    );
+  };
 
   it('stays in the system prompt after the wiki writes its catalog', async () => {
     fs.writeFileSync(path.join(dir, 'MEMORY.md'), `${sentence}\n`);
@@ -168,29 +189,23 @@ describe('text migrated from a legacy MEMORY.md', () => {
         `# Memory Index\n\n<!-- migrated from MEMORY.md -->\n\n${sentence}\n\nAssistant name: Aria.`,
     );
 
+    // The operator writes a page by hand; the wiki lists it in the catalog when the souled agent starts.
+    writeTeaPage();
     const k = key();
-    script('openai', k, { whole: true, replies: [reply.text('Johnny likes green tea.'), reply.text('Johnny likes green tea and oolong.')] });
+    script('openai', k, { whole: true });
     const a = await souledAgent({ ...stubbed(k), soul: dir } as never);
-    try {
-      await a.memory!.remember('Johnny likes green tea', { type: 'episodic', scope: 'persona', scopeId: 'aria-1' });
-      expect((await a.memory!.compileWiki()).pagesWritten).toEqual(['concepts/notes']);
-      // The compile takes traces stored after the newest one it took, so the second one is stored a moment later.
-      await new Promise((resolve) => setTimeout(resolve, 5));
-      await a.memory!.remember('Johnny likes oolong too', { type: 'episodic', scope: 'persona', scopeId: 'aria-1' });
-      expect((await a.memory!.compileWiki()).pagesWritten).toEqual(['concepts/notes']);
-    } finally {
-      await a.close();
-    }
+    await a.close();
 
     const index = fs.readFileSync(path.join(dir, 'memory', 'index.md'), 'utf8');
     expect(index).toContain(sentence);
-    expect(index).toContain('[notes](concepts/notes.md)');
+    expect(index).toContain(TEA_LINE);
     expect(index.split('<!-- end of MEMORY.md -->')).toHaveLength(2);
-    expect(index.indexOf(sentence)).toBeLessThan(index.indexOf('[notes](concepts/notes.md)'));
+    expect(index.indexOf(sentence)).toBeLessThan(index.indexOf(TEA_LINE));
 
     const prompt = buildSystemPrompt({ soul: dir } as AgentOptions) ?? '';
     expect(prompt).toContain(sentence);
-    expect(prompt).toContain('[notes](concepts/notes.md)');
+    expect(prompt).toContain(TEA_LINE);
+    expect(prompt.indexOf(sentence)).toBeLessThan(prompt.indexOf(TEA_LINE));
     expect(fs.readFileSync(path.join(dir, 'MEMORY.md'), 'utf8')).toBe(`${sentence}\n`);
   });
 
@@ -202,20 +217,19 @@ describe('text migrated from a legacy MEMORY.md', () => {
     script('openai', k, { whole: true, replies: [reply.text('Notes.'), reply.text('More notes.')] });
     const a = await souledAgent({ ...stubbed(k), soul: dir } as never);
     try {
-      // What the user said is folded into a page, whose summary is named from its id alone.
-      await a.memory!.remember(said, { type: 'episodic', scope: 'persona', scopeId: 'aria-1' });
+      // What the user said is folded into that user's page, which is a row of the store and in no catalog.
+      const user = conversationScopeKey('aria-1', { kind: 'user', id: 'u1' });
+      await a.memory!.remember(said, { type: 'episodic', scope: 'conversation', scopeId: user });
       expect((await a.memory!.compileWiki()).pagesWritten).toEqual(['concepts/notes']);
       await new Promise((resolve) => setTimeout(resolve, 5));
-      await a.memory!.remember('Johnny likes oolong too', { type: 'episodic', scope: 'persona', scopeId: 'aria-1' });
+      await a.memory!.remember('Johnny likes oolong too', { type: 'episodic', scope: 'conversation', scopeId: user });
       expect((await a.memory!.compileWiki()).pagesWritten).toEqual(['concepts/notes']);
     } finally {
       await a.close();
     }
 
-    // The catalog carries none of it, and makes no migrated block.
-    expect(fs.readFileSync(path.join(dir, 'memory', 'index.md'), 'utf8')).toBe(
-      '# Memory Index\n\n## Concepts\n\n- [notes](concepts/notes.md): Notes compiled from conversations\n',
-    );
+    // The catalog carries none of it, lists no page compiled from it, and makes no migrated block.
+    expect(fs.readFileSync(path.join(dir, 'memory', 'index.md'), 'utf8')).toBe('# Memory Index\n');
   });
   it('keeps all of it when MEMORY.md itself holds the end marker', async () => {
     const legacy = 'Fact A.\n<!-- end of MEMORY.md -->\nFact B.\n';
@@ -228,24 +242,22 @@ describe('text migrated from a legacy MEMORY.md', () => {
     expect(before).toContain('Fact B.');
     expect(before).not.toContain('<!-- end of MEMORY.md -->');
 
+    writeTeaPage();
     const k = key();
-    script('openai', k, { whole: true, replies: [reply.text('Johnny likes green tea.')] });
+    script('openai', k, { whole: true });
     const a = await souledAgent({ ...stubbed(k), soul: dir } as never);
-    try {
-      await a.memory!.remember('Johnny likes green tea', { type: 'episodic', scope: 'persona', scopeId: 'aria-1' });
-      expect((await a.memory!.compileWiki()).pagesWritten).toEqual(['concepts/notes']);
-    } finally {
-      await a.close();
-    }
+    await a.close();
 
     const index = fs.readFileSync(path.join(dir, 'memory', 'index.md'), 'utf8');
     expect(index).toContain('Fact A.');
     expect(index).toContain('Fact B.');
-    expect(index.indexOf('Fact B.')).toBeLessThan(index.indexOf('[notes](concepts/notes.md)'));
+    expect(index).toContain(TEA_LINE);
+    expect(index.indexOf('Fact B.')).toBeLessThan(index.indexOf(TEA_LINE));
     const after = buildSystemPrompt({ soul: dir } as AgentOptions) ?? '';
     expect(after).toContain('Fact A.');
     expect(after).toContain('Fact B.');
-    expect(after).toContain('[notes](concepts/notes.md)');
+    expect(after).toContain(TEA_LINE);
+    expect(after.indexOf('Fact B.')).toBeLessThan(after.indexOf(TEA_LINE));
     expect(after).not.toContain('<!-- end of MEMORY.md -->');
     expect(fs.readFileSync(path.join(dir, 'MEMORY.md'), 'utf8')).toBe(legacy);
   });

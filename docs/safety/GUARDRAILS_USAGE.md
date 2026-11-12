@@ -142,7 +142,7 @@ else if (decision.outcome === 'hold') queueForReview(decision.hold?.reviewCode);
 else deliver(decision.sanitizedText ?? message.text);
 ```
 
-- **Four outcomes.** `allow`, `flag`, `refuse` and `hold`. A `refuse` with `unavailable: true` means nothing but a guard that threw, ran late or answered no recognised action kept the content back: no rule refused it and no guard held it. A host tells the sender and does not count it as a policy refusal.
+- **Four outcomes.** `allow`, `flag`, `refuse` and `hold`. A `refuse` with `unavailable: true` means nothing but a guard that threw, ran late or answered no recognised action, or an image the [image guard](#images-imageguardrail) could not have checked, kept the content back: no rule refused it and no guard held it. A host tells the sender and does not count it as a policy refusal.
 - **Every guard runs closed** unless its config says `failClosed: false`, with a deadline of 8 seconds when neither its config nor the call's `timeoutMs` names one. A closed guard that throws, runs late or answers no recognised action (`undefined` included; `null` is an allow) becomes a `BLOCK` with `metadata.failClosed: true` and `metadata.cause` (`error`, `timeout` or `malformed`), and writes one `guardrail.failed` line with `posture: closed`. The library marks that `BLOCK` outside the answer: a guard that writes `failClosed`, `cause` or a library code into its own answer gives a rule's refusal, never an outage. A guard with `failClosed: false` is skipped and writes the same line with `posture: open`.
 - **What decides,** in this order: the first `BLOCK` a rule gave (not a hold, not a closed guard's failure); else the first hold; else the first closed guard's failure; else the first `FLAG`; else nothing. So among the guards that ran, one guard's outage never hides another guard's refusal or hold. A screen with `sequential: true` that fails ends the evaluation as its `BLOCK` would, so no phase 2 guard sees that text: a screen that is down cannot say the text is not one it refuses. `deciding` is that evaluation, `evaluations` holds every evaluation in registration order, and `hold` is set when the outcome (or `wouldBe`) is `hold`. `guardrailOutcomeOf()` keeps the plainer order of the older entry points, where any refusal comes first.
 - **No content in the decision but two fields.** It carries codes, ids and scores: each evaluation as `toModerationEvaluation()` reports it, without the guard's `reason` and `details`. Two fields can hold a person's text: `sanitizedText`, and an evaluation's `metadata`, which is the guard's own and passes through as the guard wrote it. A guard keeps the text out of its `metadata`, and a host keeps `sanitizedText` out of its logs.
@@ -200,6 +200,93 @@ const { text } = frameUntrustedEvidence(message.text, { label: `message:${messag
 ```
 
 The two markers share a random boundary of 16 hexadecimal characters, new on every call. Any copy of it in the text is removed, null bytes are dropped, and chat-template tokens (`<|...|>`, `[INST]`, `[/INST]`, `<s>`, `</s>`) are broken with a space, in the text and in the label's line (a label `INST` is written `[ INST]`). The label, when given, must be an id. Framing lowers how often instructions planted in the text work; it does not make a model ignore them, so an agent that acts on such text is also held to limits and checked evidence.
+
+## Guards Under the Text Functions
+
+`generateText()` and `streamText()` take `guards`, and so do an agent's `generate()`, `stream()` and a session's `send()` and `stream()`:
+
+```typescript
+import { GuardrailStopError, generateText } from '@framers/agentos';
+
+const result = await generateText({
+  provider: 'openai',
+  prompt,
+  tools,
+  guards: { services: [hardBan, classifier], context: { userId: user.id, sessionId: thread.id, moderation: { surface: 'agent_turn' } } },
+});
+```
+
+- **Three stages.** The call's own user turn is judged once, before the first provider request. Each tool call the model makes is judged by the guards that set `evaluateToolCalls`, on the arguments the model sent, before `onBeforeToolExecution` and so before any approval. The whole reply is judged before the caller receives it. `stages` picks among `input`, `toolCalls` and `output`.
+- **Closed by default.** Each guard runs as `moderateContent()` runs it: closed unless its config says `failClosed: false`, with a deadline, and what decides a stage is what decides `moderateContent()`.
+- **A stop** rejects with `GuardrailStopError` (`GUARDRAIL_BLOCKED`, `GUARDRAIL_HELD` or `GUARDRAIL_UNAVAILABLE`); a stream yields it as one `error` part. The input and output stages run once per call, outside the fallback chain, so a stop is not retried on a fallback provider. A refused tool call is not a stop: the tool does not run, the model reads the refusal as the call's result and the loop goes on.
+- **A replacement reply.** A `BLOCK` that carries a non-empty `replacementText` on the input is the reply, and no request is made; on the output it takes the reply's place.
+- **The report.** `guardReport` carries codes and ids: no guard's reason, no prompt, no reply, and no call id from a provider.
+
+[Guards on a call](../getting-started/HIGH_LEVEL_API.md#guards-on-a-call) has the options, the error, the report and what a stream delivers after a stop.
+
+## The Dry Run
+
+`mode: 'dryRun'` on `moderateContent()` and on `guards` runs every guard as enforcement would, and changes nothing:
+
+- Every verdict is reported with `enforced: false`: `moderateContent()` answers `allow` with `wouldBe`, and `guards` passes each verdict to `onVerdict` and writes its `guardrail.verdict` line with `mode: dry_run`.
+- Under `guards` the input is sent as given, tools run and text passes. A stream's output guards judge the whole reply once it was delivered.
+- A screen's `BLOCK` still ends its evaluation, so a dry run calls the guards enforcement would call and no others.
+
+## Images: `ImageGuardrail`
+
+`ImageGuardrail` judges the images of an input (`visionInputs`, which `moderateContent()` fills from `content.images`). It holds the order of the checks and no vendor code: the host hands it its checks.
+
+```typescript
+import { ImageGuardrail, moderateContent, type ImageCheck } from '@framers/agentos/safety/guardrails';
+
+const hashCheck: ImageCheck = {
+  id: 'hash',
+  kind: 'match',
+  reasonCodes: ['KNOWN_MATERIAL'],
+  async check(image) {
+    return (await hashService.lookup(image.bytes)) ? { verdict: 'block', reasonCode: 'KNOWN_MATERIAL', quarantine: true } : { verdict: 'pass' };
+  },
+};
+const visionCheck: ImageCheck = {
+  id: 'vision',
+  kind: 'classify',
+  reasonCodes: ['IMAGE_EXPLICIT', 'IMAGE_REVIEW'],
+  async check(image) {
+    const score = await visionModel.score(image.bytes, image.mimeType);
+    if (score > 0.9) return { verdict: 'block', reasonCode: 'IMAGE_EXPLICIT' };
+    if (score > 0.6) return { verdict: 'hold', reviewCode: 'IMAGE_REVIEW' };
+    return { verdict: 'pass' };
+  },
+};
+
+const images = ImageGuardrail.create({
+  id: 'images',
+  checks: [hashCheck, visionCheck], // every match check first
+  requireMatch: true,               // a surface that takes people's uploads
+  sequential: true,                 // the image checks finish before any vendor guard reads the text
+  loadImage: (url) => fetchUnderEgressRules(url),
+});
+
+const decision = await moderateContent({ text: message.text, images: message.images }, { guards: [images, textClassifier], context });
+```
+
+- **Two kinds of check, in a fixed order.** A `match` check compares an image with known material (a hash service). A `classify` check sends it to a model. The guard runs every `match` check on every image (images in order, checks in list order) before it runs any `classify` check on any image. `create()` keeps its own copy of each check as it was validated, so editing a check object afterwards changes nothing. It throws a `TypeError` on an empty list, on a list with no `classify` check, on a `classify` check listed before a `match` check, on a `match` check with `onError: 'skip'`, on an `onError` other than `refuse` or `skip`, on a reason code that is not a word (letters, digits and `_ . : -`, at most 64), on two checks with one id or a check whose id is `load`, and, with `requireMatch: true`, on a list with no `match` check.
+- **A quarantine ends the evaluation.** A `block` with `quarantine: true` on any image ends the whole evaluation there. From a `match` check, no `classify` check has run on any image of the input, and none runs, so nothing of it reaches a model. From a `classify` check, no further check runs on that image or any other. The decision is a `refuse` whose `deciding.metadata` carries `quarantine: true`.
+- **What ends one image's chain.** Any other `block`, a `hold`, or a check that could not answer keeps that image from every `classify` check still to run; the other images go on. The other `match` checks still run on it, so a later one can still find known material and quarantine it: a list that holds or blocks, or is down, never hides a hash match. The first `block` on an image decides it. A `flag` and a `pass` let the next check run.
+- **`requireMatch`.** For a surface that takes people's uploads: the guard cannot be built until a `match` check exists. Without it a list of `classify` checks alone is allowed, for a host's own generated images.
+- **A check that fails.** A check that throws, or answers no verdict, writes one `image_guard.check_failed` line. With `onError: 'refuse'` (the default) the image is refused as unavailable and goes to no `classify` check, though the other `match` checks still run on it. A `classify` check with `onError: 'skip'` is a signal: its failure is written with `posture: skip` and the chain goes on. A `match` check is never skipped.
+- **An image nobody judged is refused.** An image counts as judged only when a `classify` check answered for it, or a check held or blocked it. A `match` check's `pass` says the image is not known material; it says nothing of what the image shows. An image no `classify` check answered for (each one that ran was skipped, or `context.vendorSignal` stopped them) is refused as unavailable, whatever the `match` checks answered.
+- **Unavailable.** An image refused as unavailable is a `BLOCK` with `reasonCode: 'IMAGE_CHECK_UNAVAILABLE'`, `metadata.failClosed: true` and the id of the check that could not answer (`classify` when none answered). `moderateContent()` reports it `unavailable: true` and ranks it below another guard's refusal or hold, as it ranks a closed guard's failure. The host tells the sender the image could not be checked.
+- **One capture, the same bytes for every check.** Before any check runs, the guard captures each image once: a `base64` input is decoded (a `data:` URL is allowed when it says `;base64`, and gives the mime type when `mimeType` is unset); an `image_url` input is handed to the host's `loadImage`, which fetches it under the host's own egress rules. The guard fetches nothing itself. The mime type is the input's `mimeType`, else the one `loadImage` returns. The guard judges the bytes it captured and leaves the input as it came: on the agent's own path (`processRequest()`) an `image_url` input still goes to the model as its URL, which the model's provider fetches again. Where a URL's server could answer differently the second time, hand the turn the bytes (a `base64` input, or a URL of storage you control whose content does not change). Each check receives its own copy of those bytes as an `ImageUnderReview` (`index`, `bytes`, `mimeType`) and never the URL, so a server that would answer the hash service and a model with different bytes gets no second request. An `image_url` input with no `loadImage`, a `loadImage` that throws or returns no bytes, a `base64` input that does not decode (a `data:` URL without `;base64` included), and an image with no mime type are refused as unavailable, with one `image_guard.check_failed` line whose `checkId` is `load`.
+- **Store what was judged.** A host that passes `loadImage` stores and serves the bytes it loaded, and never the URL again: the guard cannot see what a viewer later fetches from it.
+- **`maxImages`** (default 4). An input with more images is refused with `IMAGE_LIMIT` before any check runs. An input with no images is not judged by this guard.
+- **`maxBytes`** (default 20971520, 20 MiB). An image larger than this is refused with `IMAGE_LIMIT` (`metadata.imageIndex` names it) and no check runs on it; the input's other images are still checked, so a quarantine on one of them still decides. `base64` text is measured before it is decoded, and the bytes `loadImage` returns as they come back; a `loadImage` that can fetch large files limits its own download too.
+- **`sequential`.** With `sequential: true` the guard runs in phase 1 (see [Screens That Run First](#screens-that-run-first)), so the image checks finish before any phase 2 guard sees the input's text, and a quarantine keeps the text from the vendor guards too. Without it the text guards run beside the image checks.
+- **`timeoutMs`** (default 15000) is the deadline for the whole evaluation, every check of every image included. As a required guard the guard runs under its spec's `timeoutMs` instead, and the guard keeps whichever deadline comes first: its own, or the dispatcher's (`deadlineSignal`). The dispatcher answers at the deadline and does not wait for the guard; past it the guard starts no further capture or check, so no image goes to a vendor after the decision, and an image whose checks had not all run is refused as unavailable, named by the step that did not start (`load` or a check's id). A request a check had already sent is not stopped. Images and checks run one after another, so size the deadline for the slowest input you accept: with `maxImages` 4, a hash check of 0.5 s and a model check of 4 s need about 18 s, past the default.
+- **The verdict over all images.** A check's `block`, then a `hold`, then an image refused as unavailable, then a `flag`; the first image wins a tie. `metadata` is `{ guardrailId, imageIndex, checkId }`, with `quarantine` on a quarantine and the check's `scores` on a flag (only finite numbers under keys that are words; any other entry is dropped). A `block` or `flag` whose `reasonCode`, or a `hold` whose `reviewCode`, is not a word counts as a check that could not answer. `config.reasonCodes` lists `IMAGE_LIMIT`, `IMAGE_CHECK_UNAVAILABLE` and every code the checks list in their `reasonCodes`, so the `guardrail.verdict` line names the code.
+- **Generated images** are judged the same way: the host passes the image to `moderateContent()` with `context.moderation.surface: 'generated_media'`.
+
+No check is built in, and a host that registers no `ImageGuardrail` has no image guard. The library writes no image data, URL or description to a verdict or a log line: a verdict carries the guard's and the check's ids, the image's index and the check's codes and scores. The codes and score keys are the check's own words, so a check keeps anything about the image out of them. To write a check of your own, see [Writing an image check](./CREATING_GUARDRAILS.md#writing-an-image-check).
 
 ## Mid-Stream Decision Override ("Changing Mind")
 

@@ -23,7 +23,7 @@ import type {
   MemoryHealthReport,
   ContentFeatures,
 } from './core/types.js';
-import { DEFAULT_TRUST_POLICY_BY_SOURCE, canUseFor } from './core/types.js';
+import { DEFAULT_TRUST_POLICY_BY_SOURCE } from './core/types.js';
 import type { CognitiveMemoryConfig, PADState, HexacoTraits } from './core/config.js';
 import {
   DEFAULT_ENCODING_CONFIG,
@@ -49,6 +49,7 @@ import {
   type RetrievalRecallReport,
 } from './retrieval/recall/capture.js';
 import { assertRecallConfig } from './retrieval/recall/budget.js';
+import { RecallPipeline } from './retrieval/recall/pipeline.js';
 import { CognitiveWorkingMemory } from './core/working/CognitiveWorkingMemory.js';
 import {
   assembleMemoryContext,
@@ -370,6 +371,13 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
 
   // Optional neural reranker for post-retrieval quality improvement
   private rerankerService: import('../rag/reranking/RerankerService.js').RerankerService | null = null;
+
+  /** The recall legs a retrieval runs ({@link RecallPipeline}), over this manager's store and graph as they are at each run. */
+  private readonly recall = new RecallPipeline({
+    store: () => this.store,
+    graph: () => this.graph,
+    graphConfig: () => this.config?.graph,
+  });
 
   /**
    * What each context `assembleWith` or `reassembleForBudget` returned was rendered from: the assembler's input, the
@@ -920,92 +928,16 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
       }
     }
 
-    const { scored, partial, timings: storeTimings } = await this.store.query(
-      effectiveQuery,
+    // The recall pipeline: the dense leg (the store's vector query, the trust-policy filter and the graph's
+    // activation), with each leg's report for the recall capture.
+    const hydeMs = capturing ? performance.now() - denseStartedAt : 0;
+    const run = await this.recall.run({
+      denseQuery: effectiveQuery,
       mood,
-      {
-        ...options,
-        topK: effectiveTopK,
-      },
-    );
-
-    // --- Trust-policy capability filter ---
-    // When the caller requested specific capabilities (e.g. `usableFor:
-    // 'authorization'`), drop traces whose policy doesn't permit them or
-    // whose `requiresReverificationAfterMs` window has expired. Filtering
-    // post-store rather than pre-store keeps the policy logic out of the
-    // vector layer at the cost of trimming results after the topK cut.
-    if (options.usableFor !== undefined) {
-      const required = Array.isArray(options.usableFor) ? options.usableFor : [options.usableFor];
-      const allowed: typeof scored = [];
-      const now = Date.now();
-      for (const trace of scored) {
-        if (required.every((cap) => canUseFor(trace, cap, now))) {
-          allowed.push(trace);
-        }
-      }
-      scored.length = 0;
-      scored.push(...allowed);
-    }
-    let denseMs = capturing ? performance.now() - denseStartedAt : 0;
-
-    // --- Batch 2: Spreading activation ---
-    if (this.graph && scored.length > 0) {
-      const seedIds = scored.slice(0, 5).map((t) => t.id);
-      // The activation orders the dense ranks, so its time is the dense leg's; the co-activation write after is not.
-      const graphStartedAt = capturing ? performance.now() : 0;
-      let graphRankedAt: number | undefined;
-      try {
-        const activated = await this.graph.spreadingActivation(seedIds, {
-          maxDepth: this.config.graph?.maxDepth,
-          decayPerHop: this.config.graph?.decayPerHop,
-          activationThreshold: this.config.graph?.activationThreshold,
-        });
-
-        // Boost graph activation scores in scored results
-        for (const node of activated) {
-          const match = scored.find((s) => s.id === node.memoryId);
-          if (match) {
-            match.scoreBreakdown.graphActivationScore = node.activation;
-            // Re-compute composite score with graph activation
-            const w = {
-              strength: 0.25,
-              similarity: 0.35,
-              recency: 0.1,
-              emotionalCongruence: 0.15,
-              graphActivation: 0.1,
-              importance: 0.05,
-            };
-            match.retrievalScore = Math.max(
-              0,
-              Math.min(
-                1,
-                w.strength * match.scoreBreakdown.strengthScore +
-                  w.similarity * match.scoreBreakdown.similarityScore +
-                  w.recency * match.scoreBreakdown.recencyScore +
-                  w.emotionalCongruence * match.scoreBreakdown.emotionalCongruenceScore +
-                  w.graphActivation * node.activation +
-                  w.importance * match.scoreBreakdown.importanceScore
-              )
-            );
-          }
-        }
-
-        // Re-sort after graph activation adjustment
-        scored.sort((a, b) => b.retrievalScore - a.retrievalScore);
-        if (capturing) graphRankedAt = performance.now();
-
-        // Record co-activation for Hebbian learning
-        const retrievedIds = scored.slice(0, 5).map((t) => t.id);
-        await this.graph.recordCoActivation(
-          retrievedIds,
-          this.config.graph?.hebbianLearningRate ?? 0.1
-        );
-      } catch {
-        // Graph operations are non-critical
-      }
-      if (capturing) denseMs += (graphRankedAt ?? performance.now()) - graphStartedAt;
-    }
+      options: { ...options, topK: effectiveTopK },
+    });
+    const { scored, partial, storeTimings } = run;
+    const denseMs = capturing ? hydeMs + (run.legs.find((leg) => leg.leg === 'dense')?.ms ?? 0) : 0;
 
     // --- Optional neural reranking ---
     // Blends the scores of the service's default provider (local
@@ -1067,7 +999,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
       }
     }
     const recallReport: RetrievalRecallReport | undefined = denseRanks
-      ? { denseRanks, denseMs, ...(rerankScores ? { rerankScores } : {}) }
+      ? { denseRanks, denseMs, legs: run.legs, ...(rerankScores ? { rerankScores } : {}) }
       : undefined;
 
     const confidence = evaluateRetrievalConfidence(scored, {
@@ -1317,7 +1249,10 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
         budget: { requested: tokenBudget, effective: tokenBudget },
         tokensUsed: context.tokensUsed,
         allocation: context.allocation,
-        legs: [{ leg: 'dense', ran: true, candidates: result.retrieved.length, ineligible: 0, ms: Math.round(recall?.denseMs ?? result.diagnostics.totalTimeMs) }],
+        // The recall's own report of its legs; the dense leg's time takes in a HyDE hypothesis, as its embedding does.
+        legs: recall?.legs
+          ? recall.legs.map((leg) => (leg.leg === 'dense' ? { ...leg, ms: Math.round(recall.denseMs) } : { ...leg }))
+          : [{ leg: 'dense', ran: true, candidates: result.retrieved.length, ineligible: 0, ms: Math.round(recall?.denseMs ?? result.diagnostics.totalTimeMs) }],
         lexicalBackend: 'none',
         ...(this.config.recall?.embedder ? { embedder: { ...this.config.recall.embedder } } : {}),
         reranker: result.diagnostics.reranker ?? { provider: 'none', reason: 'none_configured' },
@@ -1640,6 +1575,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
       user: 0,
       persona: 0,
       organization: 0,
+      conversation: 0,
     };
     let weakestStrength = 1;
 

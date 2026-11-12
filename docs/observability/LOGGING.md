@@ -37,7 +37,7 @@ Both lists are read-only views with no `add`, `delete` or `clear`, so a host can
 
 ### Guardrail events
 
-The guardrail dispatchers and `moderateContent()` write five events through the `guardrails` component. None carries a guard's reason, the content it judged or an error's message.
+The guardrail dispatchers, `moderateContent()` and the image guard write six events through the `guardrails` component. None carries a guard's reason, the content it judged or an error's message.
 
 | Event | Level | Fields | Written when |
 |---|---|---|---|
@@ -45,11 +45,12 @@ The guardrail dispatchers and `moderateContent()` write five events through the 
 | `guardrail.sanitize_downgraded` | warn | `guardrailId`, `stage` | A phase 2 SANITIZE became a FLAG, or a tool call's SANITIZE a BLOCK |
 | `guardrail.hold_ignored` | warn | `guardrailId`, `stage` | A guard answered `hold` with an action other than BLOCK; written once per guard |
 | `guardrail.verdict_callback_failed` | warn | `type`, `code` | An `onVerdict` callback threw; the verdict stands |
-| `guardrail.verdict` | info | `guardrailId`, `stage` (`input`, `output`, `tool_call`), `action` (`flag`, `sanitize`, `hold`, `block`), `code`, `surface`, `mode` (`enforce`, `dry_run`), `unavailable` (`yes`, `no`) | `moderateContent()` decided something other than an allow, or a guard rewrote the text of an allow (`action: sanitize`). `guardrailId` is the deciding guard; `unavailable` is `yes` when only a closed guard's failure kept the content back |
+| `guardrail.verdict` | info | `guardrailId`, `stage` (`input`, `output`, `tool_call`), `action` (`flag`, `sanitize`, `hold`, `block`), `code`, `surface`, `mode` (`enforce`, `dry_run`), `unavailable` (`yes`, `no`) | `moderateContent()` decided something other than an allow, or a guard rewrote the text of an allow (`action: sanitize`). `guardrailId` is the deciding guard; `unavailable` is `yes` when only a closed guard's failure, or an image the image guard could not have checked, kept the content back |
+| `image_guard.check_failed` | warn | `guardrailId`, `checkId`, `posture` (`refuse`, `skip`), `type`, `code` | A check of an `ImageGuardrail` threw or answered no verdict, or an image could not be captured (`checkId: load`: an `image_url` input with no `loadImage`, a `loadImage` that threw or returned no bytes, base64 that did not decode, no mime type). `posture` says whether the image was refused as unavailable (`refuse`) or the check was skipped as a signal (`skip`). Never the image, its URL, its description or an error's message |
 
 `type` and `code` come from `listedErrorFields()`. A guard's id that is not a valid word is written `unknown`.
 
-The `code` of `guardrail.verdict` is the deciding evaluation's reason code, or a hold's review code. It is written only when the deciding guard lists it in `config.reasonCodes` or the library made the evaluation for a closed guard's failure (`GUARDRAIL_ERROR`, `GUARDRAIL_MALFORMED`; a guard that answers one of those codes itself does not count); any other code, a model's answer or a vendor's label included, is written `unknown`. `surface` is the word from `context.moderation.surface`. A plain allow writes no line, and no line carries the content.
+The `code` of `guardrail.verdict` is the deciding evaluation's reason code, or a hold's review code. It is written only when the deciding guard lists it in `config.reasonCodes` or the library made the evaluation for a closed guard's failure (`GUARDRAIL_ERROR`, `GUARDRAIL_MALFORMED`; a guard that answers one of those codes itself does not count); any other code, a model's answer or a vendor's label included, is written `unknown`. `surface` is the word from `context.moderation.surface`. A plain allow writes no line, and no line carries the content. The `guards` option of `generateText()` and `streamText()` writes the same line for each stage decision, with `stage` `input`, `output` or `tool_call`.
 
 ### One line per server request
 

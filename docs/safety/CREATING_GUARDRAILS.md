@@ -127,6 +127,9 @@ interface GuardrailInputPayload {
 
   // The user's input. The most commonly inspected field is input.textInput.
   input: AgentOSInput;
+
+  // Aborted when the dispatcher stops waiting for this evaluation (its deadline passed). Absent with no deadline.
+  deadlineSignal?: AbortSignal;
 }
 
 interface GuardrailContext {
@@ -143,6 +146,8 @@ interface GuardrailContext {
 
 `context.moderation` holds `surface`, `roomId`, `rating`, `messageId` and `sender` (`{ id, kind? }`) as words and ids, checked by `moderateContent()` before any guard runs; read `context.moderation?.rating` and its siblings instead of keys in `metadata`. A guard that calls a vendor reads `context.vendorSignal` before each request and starts none once it is aborted: `moderateContent()` aborts it the moment any guard answers a code the host listed in `stopVendorsOn`. A request already sent finishes and is answered as usual, so the guard does not hand the signal to the request itself: a client that honours it would cancel that request and the guard would throw.
 
+`deadlineSignal` is the dispatcher's deadline for this evaluation: `config.timeoutMs`, or the shorter or longer one a required guard's spec gives it. At the deadline the dispatcher answers without the guard (a closed guard's timeout is a block) and aborts the signal, but the evaluation keeps running, so a guard that makes several requests reads it before each one and starts none once it is aborted.
+
 ```typescript
 async evaluateInput({ input, context }: GuardrailInputPayload) {
   const scores: number[] = [];
@@ -153,6 +158,44 @@ async evaluateInput({ input, context }: GuardrailInputPayload) {
   return Math.max(0, ...scores) > 0.9 ? { action: GuardrailAction.BLOCK, reasonCode: 'VENDOR_HIGH' } : null;
 }
 ```
+
+`input.visionInputs` carries the input's images, in order: each is `{ type: 'base64' | 'image_url', data, mimeType?, description? }`, where `data` is the base64 text (a `data:` URL included) or the image's URL. `moderateContent()` fills it from `content.images`. A guard of your own that reads images decodes `base64` data itself and decides how an `image_url` is fetched; a guard that only reads text ignores the field. For checks over images, prefer the built-in `ImageGuardrail` (see [Images](./GUARDRAILS_USAGE.md#images-imageguardrail)): it captures each image once, under the host's `loadImage` for a URL, runs every `match` check before any `classify` check, and refuses an image nobody judged. You then write the checks alone.
+
+### Writing an image check
+
+An `ImageCheck` is one step of `ImageGuardrail`'s chain:
+
+```typescript
+import type { ImageCheck } from '@framers/agentos/safety/guardrails';
+
+const visionCheck: ImageCheck = {
+  id: 'vision',      // a word of its own, never 'load'
+  kind: 'classify',  // 'match' for a hash service, 'classify' for a model
+  onError: 'skip',   // 'refuse' (default) refuses the image as unavailable; 'skip' makes the check a signal
+  reasonCodes: ['IMAGE_SUGGESTIVE', 'IMAGE_REVIEW'],
+  async check(image, context) {
+    // image: { index, bytes, mimeType }; the bytes are this check's own copy
+    const parts: number[] = [];
+    for (const region of regionsOf(image.bytes)) {
+      if (context.vendorSignal?.aborted) break; // another guard answered a code that stops vendor requests
+      parts.push(await visionModel.score(region, image.mimeType));
+    }
+    // nothing scored, or a score that is not a number, is no judgment: throw, and the guard refuses the image or,
+    // with 'skip', asks the next check
+    if (parts.length === 0 || !parts.every(Number.isFinite)) throw new Error('no usable score for the image');
+    const score = Math.max(...parts);
+    if (score > 0.8) return { verdict: 'hold', reviewCode: 'IMAGE_REVIEW' };
+    if (score > 0.5) return { verdict: 'flag', reasonCode: 'IMAGE_SUGGESTIVE', scores: { suggestive: score } };
+    return { verdict: 'pass' };
+  },
+};
+```
+
+- **What a check receives.** An `ImageUnderReview`: the image's `index` in `visionInputs`, its `bytes` and its `mimeType`. The bytes are a copy the guard made of the image it captured once, so a check that changes them changes nothing the next check reads. A check never receives the URL: send the bytes to a vendor (as a data URL when its API takes one), never a link it would fetch again.
+- **The four verdicts.** `{ verdict: 'pass' }`; `{ verdict: 'flag', reasonCode, scores? }`, which lets the next check run; `{ verdict: 'hold', reviewCode }`, which keeps the content back for a person's review and ends this image's chain of `classify` checks; `{ verdict: 'block', reasonCode, quarantine? }`, which refuses the image and ends its chain of `classify` checks. The other `match` checks still run on an image a `match` check held, blocked or could not judge, so a later hash match is never hidden. A `match` check that finds known material answers `block` with `quarantine: true`, which ends the whole evaluation before any `classify` check sees any image of the input; from a `classify` check, a quarantine ends it before any further check runs. Any other answer (a `block` or `flag` whose `reasonCode`, or a `hold` whose `reviewCode`, is not a word included), and a throw, is a check that could not answer: one `image_guard.check_failed` line, then the image is refused as unavailable, or, for a `classify` check with `onError: 'skip'`, the chain goes on.
+- **`reasonCodes`.** List every reason code and review code the check can answer, each a word (letters, digits and `_ . : -`, at most 64); `create()` throws on any other. The guard's own `config.reasonCodes` is its two fixed codes (`IMAGE_LIMIT`, `IMAGE_CHECK_UNAVAILABLE`) and every check's list, and the `guardrail.verdict` line writes a code outside it as `unknown`.
+- **`context.vendorSignal`.** The guard reads it before each `classify` check and starts none once it is aborted. A check that makes more than one request reads it before each one, as above, and does not hand it to a request already sent.
+- **Write nothing of the image.** Keep the bytes, the URL and any description out of a reason code, a review code, `scores` and your own log lines. The guard keeps a flag's `scores` only as finite numbers under keys that are words, and drops any other entry.
 
 ### evaluateOutput(payload)
 

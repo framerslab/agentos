@@ -1017,6 +1017,7 @@ export class AgentMemory {
         user: health.tracesPerScope.user ?? 0,
         persona: health.tracesPerScope.persona ?? 0,
         organization: health.tracesPerScope.organization ?? 0,
+        conversation: health.tracesPerScope.conversation ?? 0,
       },
     };
   }

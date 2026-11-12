@@ -117,7 +117,7 @@ function failed(svc: IGuardrailService, stage: GuardrailEventStage, cause: 'erro
  * @returns The evaluation result, a synthetic BLOCK, or `null`
  */
 async function callWithTimeout(
-  fn: () => Promise<GuardrailEvaluationResult | null>,
+  fn: (deadlineSignal?: AbortSignal) => Promise<GuardrailEvaluationResult | null>,
   svc: IGuardrailService,
   stage: GuardrailEventStage,
 ): Promise<GuardrailEvaluationResult | null> {
@@ -130,11 +130,15 @@ async function callWithTimeout(
 
     // Race the evaluation against a timeout sentinel — kept distinct from a
     // guard that legitimately resolves `null` (= ALLOW), so a timeout can be
-    // handled per the fail-closed policy.
+    // handled per the fail-closed policy. The race does not stop the
+    // evaluation: at the deadline the signal handed to it is aborted, so a
+    // guard that reads it starts nothing more once nobody waits for it.
+    const deadline = new AbortController();
     const result = await Promise.race([
-      fn(),
+      fn(deadline.signal),
       new Promise<typeof GUARDRAIL_TIMEOUT>((resolve) => {
-        setTimeout(() => resolve(GUARDRAIL_TIMEOUT), timeoutMs);
+        // the timeout settles first: a guard that answers from an abort listener cannot win the race
+        setTimeout(() => { resolve(GUARDRAIL_TIMEOUT); deadline.abort(); }, timeoutMs);
       }),
     ]);
 
@@ -171,6 +175,11 @@ function worstAction(evaluations: GuardrailEvaluationResult[]): GuardrailAction 
     }
   }
   return worst;
+}
+
+/** Evaluations answered in phase order, put back in the order their guards were registered, as a picker reads them. */
+function inRegistrationOrder(evaluations: GuardrailEvaluationResult[], order: number[]): GuardrailEvaluationResult[] {
+  return evaluations.map((evaluation, k) => ({ evaluation, at: order[k] })).sort((a, b) => a.at - b.at).map(({ evaluation }) => evaluation);
 }
 
 /** Phase 1 holds the guards that can sanitize and the guards that ask to run first. */
@@ -307,7 +316,9 @@ async function evaluateToolCallGuards(
   context: GuardrailContext,
   chunk: AgentOSResponse,
   ragSources: GuardrailOutputPayload['ragSources'],
+  pickBlock?: GuardrailOutputOptions['pickBlock'],
 ): Promise<GuardrailToolCallVerdict> {
+  const pick = pickBlock ?? decidingBlock;
   const slots: (GuardrailEvaluationResult | null)[] = new Array(guards.length).fill(null);
   const settle = (j: number, result: PromiseSettledResult<GuardrailEvaluationResult | null>): GuardrailEvaluationResult | null => {
     const { svc } = guards[j];
@@ -332,7 +343,9 @@ async function evaluateToolCallGuards(
     const [result] = await Promise.allSettled([call(guards[j])]);
     const evaluation = settle(j, result);
     if (evaluation?.action === GuardrailAction.BLOCK) {
-      return { outcome: 'block', evaluation };
+      // a caller's picker is shown the screen's BLOCK after every answer before it; it ends the evaluation whatever
+      // the picker answers
+      return { outcome: 'block', evaluation: pick(slots.filter(Boolean) as GuardrailEvaluationResult[]) ?? evaluation };
     }
   }
 
@@ -341,8 +354,8 @@ async function evaluateToolCallGuards(
   results.forEach((result, k) => settle(rest[k].j, result));
 
   const evaluations = slots.filter(Boolean) as GuardrailEvaluationResult[];
-  // Every guard has answered: a refusal outranks a hold wherever it sits in registration order.
-  const block = decidingBlock(evaluations);
+  // Every guard has answered: a refusal outranks a hold wherever it sits in registration order, unless the caller picks.
+  const block = pick(evaluations);
   if (block) {
     return { outcome: 'block', evaluation: block };
   }
@@ -441,7 +454,7 @@ export class ParallelGuardrailDispatcher {
       }
 
       let evaluation = await callWithTimeout(
-        () => svc.evaluateInput!({ context, input: sanitizedInput }),
+        (deadlineSignal) => svc.evaluateInput!({ context, input: sanitizedInput, ...(deadlineSignal ? { deadlineSignal } : {}) }),
         svc,
         'input',
       );
@@ -481,7 +494,7 @@ export class ParallelGuardrailDispatcher {
           }
 
           return callWithTimeout(
-            () => svc.evaluateInput!({ context, input: sanitizedInput }),
+            (deadlineSignal) => svc.evaluateInput!({ context, input: sanitizedInput, ...(deadlineSignal ? { deadlineSignal } : {}) }),
             svc,
             'input',
           );
@@ -554,6 +567,8 @@ export class ParallelGuardrailDispatcher {
    * @param context    - Conversational context for policy decisions
    * @param chunk      - The tool-call chunk to evaluate
    * @param ragSources - RAG sources to pass to the guardrails, when the caller has them
+   * @param pickBlock  - Picks which evaluation blocks the call, as {@link GuardrailOutputOptions.pickBlock} does for
+   *                     a reply. Default: the first BLOCK without a hold, else the first hold.
    * @returns The blocking evaluation, or every evaluation of a chunk the guardrails pass
    */
   static async evaluateToolCall(
@@ -561,8 +576,9 @@ export class ParallelGuardrailDispatcher {
     context: GuardrailContext,
     chunk: AgentOSResponse,
     ragSources?: GuardrailOutputPayload['ragSources'],
+    pickBlock?: GuardrailOutputOptions['pickBlock'],
   ): Promise<GuardrailToolCallVerdict> {
-    return evaluateToolCallGuards(toolCallGuardsOf(services), context, chunk, ragSources);
+    return evaluateToolCallGuards(toolCallGuardsOf(services), context, chunk, ragSources, pickBlock);
   }
 
   // -----------------------------------------------------------------------
@@ -623,7 +639,7 @@ export class ParallelGuardrailDispatcher {
     /** Streaming classifiers: Phase 2 for TEXT_DELTA chunks */
     const streamingParallel: { svc: IGuardrailService; registrationIndex: number }[] = [];
     /** Final sanitizers: Phase 1 for isFinal chunks */
-    const finalSanitizers: IGuardrailService[] = [];
+    const finalSanitizers: { svc: IGuardrailService; registrationIndex: number }[] = [];
     /** Final classifiers: Phase 2 for isFinal chunks */
     const finalParallel: { svc: IGuardrailService; registrationIndex: number }[] = [];
     /** Tool-call guards: the services that opted in to TOOL_CALL_REQUEST chunks */
@@ -647,7 +663,7 @@ export class ParallelGuardrailDispatcher {
 
       // All services with evaluateOutput participate in final evaluation
       if (isSanitizer) {
-        finalSanitizers.push(svc);
+        finalSanitizers.push({ svc, registrationIndex: i });
       } else {
         finalParallel.push({ svc, registrationIndex: i });
       }
@@ -675,6 +691,9 @@ export class ParallelGuardrailDispatcher {
     const hold = options.holdUntilFinal === true;
     let held: AgentOSResponse[] = [];
 
+    // Which evaluation of a phase ends the reply: the caller's picker, else the first refusal, else the first hold.
+    const pick = options.pickBlock ?? decidingBlock;
+
     const notify = async (verdict: GuardrailOutputVerdict): Promise<void> => {
       if (!options.onVerdict) return;
       try {
@@ -696,11 +715,13 @@ export class ParallelGuardrailDispatcher {
       | { outcome: 'pass'; chunk: AgentOSResponse; sanitized: boolean; worst: GuardrailAction }
     > => {
       const outputEvaluations: GuardrailEvaluationResult[] = [];
+      // the registration index of each answer, so the picker and the metadata read them in registration order
+      const outputOrder: number[] = [];
       let workingChunk = chunkIn;
       let sanitized = false;
 
       // Phase 1: sequential final sanitizers
-      for (const svc of finalSanitizers) {
+      for (const { svc, registrationIndex } of finalSanitizers) {
         if (!svc.evaluateOutput) {
           continue;
         }
@@ -720,10 +741,11 @@ export class ParallelGuardrailDispatcher {
         // a guard that only asks to run first cannot rewrite: its SANITIZE is a FLAG, as a phase 2 guard's is
         if (svc.config?.canSanitize !== true) evaluation = downgradePhase2Sanitize(evaluation, svc, 'output');
         outputEvaluations.push(evaluation);
+        outputOrder.push(registrationIndex);
 
-        // BLOCK terminates the stream
+        // BLOCK terminates the stream; a caller's picker is shown it after what the guards before it answered
         if (evaluation.action === GuardrailAction.BLOCK) {
-          return { outcome: 'block', evaluation };
+          return { outcome: 'block', evaluation: pick(outputEvaluations) ?? evaluation };
         }
 
         // SANITIZE: modify every text field of the final response, or the textDelta
@@ -755,7 +777,6 @@ export class ParallelGuardrailDispatcher {
         });
 
         const results = await Promise.allSettled(tasks);
-        const phase: GuardrailEvaluationResult[] = [];
 
         for (let k = 0; k < results.length; k++) {
           const result = results[k];
@@ -764,7 +785,7 @@ export class ParallelGuardrailDispatcher {
             continue;
           }
 
-          const { evaluation: rawEvaluation, svc } = result.value;
+          const { evaluation: rawEvaluation, svc, registrationIndex } = result.value;
           if (!rawEvaluation) {
             continue;
           }
@@ -773,11 +794,13 @@ export class ParallelGuardrailDispatcher {
           // Downgrade SANITIZE → FLAG in Phase 2
           const evaluation = stampGuardrailId(downgradePhase2Sanitize(rawEvaluation, svc, 'output'), svc);
           outputEvaluations.push(evaluation);
-          phase.push(evaluation);
+          outputOrder.push(registrationIndex);
         }
 
-        // A BLOCK terminates the stream: a refusal outranks a hold wherever it sits in registration order
-        const block = decidingBlock(phase);
+        // A BLOCK terminates the stream: a refusal outranks a hold wherever it sits in registration order. The picker
+        // is shown phase 1's answers too, in registration order; none of them is a BLOCK, so the default picks from
+        // this phase.
+        const block = pick(inRegistrationOrder(outputEvaluations, outputOrder));
         if (block) {
           return { outcome: 'block', evaluation: block };
         }
@@ -786,11 +809,13 @@ export class ParallelGuardrailDispatcher {
       // Attach output evaluation metadata
       if (outputEvaluations.length > 0) {
         workingChunk = withGuardrailMetadata(workingChunk, {
-          output: outputEvaluations.map(serializeEvaluation),
+          output: inRegistrationOrder(outputEvaluations, outputOrder).map(serializeEvaluation),
         });
       }
 
-      return { outcome: 'pass', chunk: workingChunk, sanitized, worst: worstAction(outputEvaluations) };
+      // the reply goes out: a BLOCK the caller's picker declined did not decide it, so the verdict is the worst of the rest
+      const delivered = outputEvaluations.filter((evaluation) => evaluation.action !== GuardrailAction.BLOCK);
+      return { outcome: 'pass', chunk: workingChunk, sanitized, worst: worstAction(delivered) };
     };
 
     /**
@@ -804,7 +829,7 @@ export class ParallelGuardrailDispatcher {
       | { outcome: 'block'; evaluation: GuardrailEvaluationResult }
       | { outcome: 'pass'; chunk: AgentOSResponse }
     > => {
-      const verdict = await evaluateToolCallGuards(toolCallGuards, context, chunkIn, currentRagSources);
+      const verdict = await evaluateToolCallGuards(toolCallGuards, context, chunkIn, currentRagSources, options.pickBlock);
       if (verdict.outcome === 'block') {
         return verdict;
       }
@@ -854,6 +879,7 @@ export class ParallelGuardrailDispatcher {
         (streamingSanitizers.length > 0 || streamingParallel.length > 0)
       ) {
         const outputEvaluations: GuardrailEvaluationResult[] = [];
+        const outputOrder: number[] = [];
         let workingChunk = currentChunk;
 
         // Phase 1: sequential streaming sanitizers
@@ -885,12 +911,14 @@ export class ParallelGuardrailDispatcher {
           // a guard that only asks to run first cannot rewrite: its SANITIZE is a FLAG, as a phase 2 guard's is
           if (svc.config?.canSanitize !== true) evaluation = downgradePhase2Sanitize(evaluation, svc, 'output');
           outputEvaluations.push(evaluation);
+          outputOrder.push(registrationIndex);
 
-          // BLOCK terminates the stream immediately
+          // BLOCK terminates the stream immediately; a caller's picker is shown it after what the guards before it answered
           if (evaluation.action === GuardrailAction.BLOCK) {
+            const block = pick(outputEvaluations) ?? evaluation;
             held = [];
-            await notify({ streamId: options.streamId, ...blockVerdictOf(evaluation), finalText: evaluation.replacementText ?? null, originalText: null });
-            yield* blockedOutput(context, evaluation, options);
+            await notify({ streamId: options.streamId, ...blockVerdictOf(block), finalText: block.replacementText ?? null, originalText: null });
+            yield* blockedOutput(context, block, options);
             return;
           }
 
@@ -926,7 +954,6 @@ export class ParallelGuardrailDispatcher {
           });
 
           const results = await Promise.allSettled(tasks);
-          const phase: GuardrailEvaluationResult[] = [];
 
           for (let k = 0; k < results.length; k++) {
             const result = results[k];
@@ -935,7 +962,7 @@ export class ParallelGuardrailDispatcher {
               continue;
             }
 
-            const { evaluation: rawEvaluation, svc } = result.value;
+            const { evaluation: rawEvaluation, svc, registrationIndex } = result.value;
             if (!rawEvaluation) {
               continue;
             }
@@ -944,11 +971,11 @@ export class ParallelGuardrailDispatcher {
             // Downgrade SANITIZE → FLAG in Phase 2
             const evaluation = stampGuardrailId(downgradePhase2Sanitize(rawEvaluation, svc, 'output'), svc);
             outputEvaluations.push(evaluation);
-            phase.push(evaluation);
+            outputOrder.push(registrationIndex);
           }
 
           // A BLOCK terminates the stream immediately: a refusal outranks a hold wherever it sits in registration order
-          const block = decidingBlock(phase);
+          const block = pick(inRegistrationOrder(outputEvaluations, outputOrder));
           if (block) {
             held = [];
             await notify({ streamId: options.streamId, ...blockVerdictOf(block), finalText: block.replacementText ?? null, originalText: null });
@@ -960,7 +987,7 @@ export class ParallelGuardrailDispatcher {
         // Attach output evaluation metadata
         if (outputEvaluations.length > 0) {
           workingChunk = withGuardrailMetadata(workingChunk, {
-            output: outputEvaluations.map(serializeEvaluation),
+            output: inRegistrationOrder(outputEvaluations, outputOrder).map(serializeEvaluation),
           });
         }
 

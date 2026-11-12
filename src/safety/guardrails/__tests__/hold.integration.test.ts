@@ -149,6 +149,54 @@ describe('a hold on a block, on output and tool calls', () => {
     expect(refused.outcome === 'block' && refused.evaluation.reasonCode).toBe('RULE_1');
   });
 
+  it('a caller can rank a closed guard\'s failure under a hold; the default order is unchanged', async () => {
+    const failing: IGuardrailService = { id: 'down', config: { failClosed: true }, evaluateOutput: async () => { throw new Error('down'); } };
+    const holding: IGuardrailService = { id: 'holder', evaluateOutput: async () => HOLD };
+    const byDefault = await collect(wrapOutputGuardrails([failing, holding], context, reply('the reply'), { streamId: 's1' }));
+    expect((byDefault[0] as AgentOSErrorChunk).code).toBe('GUARDRAIL_ERROR');
+    const holdsFirst = (evaluations: readonly GuardrailEvaluationResult[]) => evaluations.find((e) => isGuardrailHold(e)) ?? evaluations.find((e) => e.action === GuardrailAction.BLOCK);
+    const picked = await collect(wrapOutputGuardrails([failing, holding], context, reply('the reply'), { streamId: 's1', pickBlock: holdsFirst }));
+    expect(((picked[0] as AgentOSErrorChunk).details as { hold?: { reviewCode: string } }).hold?.reviewCode).toBe('REVIEW');
+    const tools = { evaluateToolCalls: true, failClosed: true };
+    const call = await ParallelGuardrailDispatcher.evaluateToolCall([{ ...failing, config: tools }, { ...holding, config: { evaluateToolCalls: true } }], context, toolCallChunk(), undefined, holdsFirst);
+    expect(call.outcome === 'block' && call.evaluation.hold?.reviewCode).toBe('REVIEW');
+  });
+
+  it('a caller\'s picker is shown the BLOCK of a screen that runs first', async () => {
+    const shown: GuardrailEvaluationResult[][] = [];
+    const picker = (evaluations: readonly GuardrailEvaluationResult[]) => { shown.push([...evaluations]); return evaluations.find((e) => e.action === GuardrailAction.BLOCK); };
+    const call = await ParallelGuardrailDispatcher.evaluateToolCall([answering('screen', REFUSE, { evaluateToolCalls: true, sequential: true }), answering('later', HOLD, { evaluateToolCalls: true })], context, toolCallChunk(), undefined, picker);
+    expect(call.outcome === 'block' && call.evaluation.reasonCode).toBe('RULE_1');
+    expect(shown).toEqual([[expect.objectContaining({ reasonCode: 'RULE_1' })]]);
+    shown.length = 0;
+    const chunks = await collect(wrapOutputGuardrails([answering('screen', REFUSE, { sequential: true })], context, reply('the reply'), { streamId: 's1', pickBlock: picker }));
+    expect((chunks[0] as AgentOSErrorChunk).code).toBe('RULE_1');
+    expect(shown).toEqual([[expect.objectContaining({ reasonCode: 'RULE_1' })]]);
+  });
+
+  it('a reply a picker lets pass is never reported as blocked', async () => {
+    const declines = () => undefined;
+    const flagging = answering('flagger', { action: GuardrailAction.FLAG, reasonCode: 'NOTE' });
+    const verdicts: GuardrailAction[] = [];
+    const flagged = await collect(wrapOutputGuardrails([answering('refuser', REFUSE), flagging], context, reply('the reply'), { streamId: 's1', pickBlock: declines, onVerdict: (v) => { verdicts.push(v.action); } }));
+    expect(flagged.at(-1)?.type).toBe(AgentOSResponseChunkType.FINAL_RESPONSE);
+    const allowed = await collect(wrapOutputGuardrails([answering('refuser', REFUSE)], context, reply('the reply'), { streamId: 's2', pickBlock: declines, onVerdict: (v) => { verdicts.push(v.action); } }));
+    expect(allowed.at(-1)?.type).toBe(AgentOSResponseChunkType.FINAL_RESPONSE);
+    expect(verdicts).toEqual([GuardrailAction.FLAG, GuardrailAction.ALLOW]);
+  });
+
+  it('a caller\'s picker is shown every answer before a screen\'s BLOCK, in registration order', async () => {
+    const shown: string[][] = [];
+    const picker = (evaluations: readonly GuardrailEvaluationResult[]) => { shown.push(evaluations.map((e) => e.reasonCode ?? '')); return evaluations.find((e) => e.action === GuardrailAction.BLOCK); };
+    const NOTE: GuardrailEvaluationResult = { action: GuardrailAction.FLAG, reasonCode: 'NOTE' };
+    await ParallelGuardrailDispatcher.evaluateToolCall([answering('first', NOTE, { evaluateToolCalls: true, sequential: true }), answering('screen', REFUSE, { evaluateToolCalls: true, sequential: true })], context, toolCallChunk(), undefined, picker);
+    expect(shown).toEqual([['NOTE', 'RULE_1']]);
+    shown.length = 0;
+    // a guard of the parallel phase registered before a screen is shown before the screen's answer
+    await collect(wrapOutputGuardrails([answering('classifier', REFUSE), answering('screen', NOTE, { sequential: true })], context, reply('the reply'), { streamId: 's1', pickBlock: picker }));
+    expect(shown).toEqual([['RULE_1', 'NOTE']]);
+  });
+
   it('is carried by the serialised entry and the blocked stream', async () => {
     expect(serializeEvaluation(holdResult('REVIEW', { reasonCode: 'NEEDS_REVIEW' }))).toMatchObject({ action: GuardrailAction.BLOCK, reasonCode: 'NEEDS_REVIEW', hold: { reviewCode: 'REVIEW' } });
     const [chunk] = await collect(createGuardrailBlockedStream(context, HOLD, { streamId: 's1' }));
