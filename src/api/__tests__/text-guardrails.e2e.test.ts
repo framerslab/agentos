@@ -14,6 +14,7 @@ vi.stubGlobal('fetch', fetchMock);
 import { agent } from '../agent.js';
 import { GuardrailStopError } from '../errors.js';
 import { generateText, type TextGuardrailVerdict } from '../generateText.js';
+import { ObjectGenerationError } from '../generateObject.js';
 import { streamText, type StreamPart } from '../streamText.js';
 import { AgentOSResponseChunkType } from '../types/AgentOSResponse.js';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry.js';
@@ -432,5 +433,77 @@ describe('(f) the transcript holds what was delivered', () => {
     expect(posted()).toHaveLength(0);
     const parts = await collect(helper.stream('hello', { guards: guards(blocksOutput) }).fullStream);
     expect(parts.map((p) => p.type)).toEqual(['error']);
+  });
+});
+
+describe('nothing a guard took out reaches the history, memory or a retriever on the paths around the call', () => {
+  /** Rewrites a turn that holds the number, and passes every other turn (a schema retry's correction turn included). */
+  const redactsNumber: IGuardrailService = {
+    id: 'in',
+    config: { canSanitize: true },
+    evaluateInput: async ({ input }) => (input.textInput?.includes('555 0100') ? { action: GuardrailAction.SANITIZE, modifiedText: 'my number is [removed]' } : null),
+  };
+  /** Replaces a refused turn with a fixed reply, and passes every other turn. */
+  const replacesRefused: IGuardrailService = {
+    id: 'in',
+    evaluateInput: async ({ input }) => (input.textInput?.includes('refused') ? { action: GuardrailAction.BLOCK, reasonCode: 'RULE_IN', replacementText: 'Here is who can help.' } : null),
+  };
+  const observer = () => vi.fn(async (_role: 'user' | 'assistant', _text: string, _context?: unknown) => undefined);
+  const schema = z.object({ ok: z.boolean() });
+
+  it('a schema retry after a rewritten turn never hands the original to the memory provider', async () => {
+    serve([text('not json'), text('{"ok":true}'), text('Sure.')]);
+    const observe = observer();
+    const session = agent({ ...OPENAI, memory: false, instructions: 'Answer in JSON.', memoryProvider: { observe } }).session('schema-rewritten');
+    const reply = await session.send('my number is 555 0100', { responseSchema: schema, maxValidationRetries: 1, guards: guards(redactsNumber) });
+    expect((reply as { object?: unknown }).object).toEqual({ ok: true });
+    expect(posted()).toHaveLength(2);
+    await session.send('Thanks.');
+    await vi.waitFor(() => expect(observe).toHaveBeenCalledWith('user', 'Thanks.', expect.anything()));
+    expect(JSON.stringify(observe.mock.calls)).not.toContain('555 0100');
+    expect(JSON.stringify(posted())).not.toContain('555 0100');
+  });
+
+  it('a schema send whose turn a guard replaced is not retried: no request, nothing kept, nothing observed', async () => {
+    serve([text('{"ok":true}')]);
+    const observe = observer();
+    const session = agent({ ...OPENAI, memory: false, instructions: 'Answer in JSON.', memoryProvider: { observe } }).session('schema-replaced');
+    const error = await session.send('a refused prompt', { responseSchema: schema, maxValidationRetries: 1, guards: guards(replacesRefused) }).catch((e) => e);
+    expect(error).toBeInstanceOf(ObjectGenerationError);
+    expect(error.rawText).toBe('Here is who can help.');
+    expect(posted()).toHaveLength(0);
+    expect(session.messages()).toEqual([]);
+    expect(observe).not.toHaveBeenCalled();
+  });
+
+  it('citation verification retrieves with the turn as it was sent, and not at all for a turn a guard replaced', async () => {
+    serve([text('Noted.'), text('Noted again.'), textStream('Noted once more.')]);
+    const retrieve = vi.fn(async (_query: string) => []);
+    const embedFn = vi.fn(async (texts: string[]) => texts.map(() => [1, 0]));
+    const helper = agent({ ...OPENAI, memory: false, instructions: 'You are brief.', verifyCitations: { retrieve, embedFn } });
+    await helper.generate('my number is 555 0100', { guards: guards(redactsNumber) });
+    const session = helper.session('cited');
+    await session.send('my number is 555 0100', { guards: guards(redactsNumber) });
+    const streamed = session.stream('my number is 555 0100', { guards: guards(redactsNumber) });
+    await collect(streamed.fullStream);
+    await streamed.grounding;
+    const replaced = await session.send('a refused prompt', { guards: guards(replacesRefused) });
+    expect(replaced.text).toBe('Here is who can help.');
+    expect(retrieve.mock.calls.map(([query]) => query)).toEqual(['my number is [removed]', 'my number is [removed]', 'my number is [removed]']);
+  });
+
+  it('a reply the step limit ended on a tool step is kept as delivered, never as the model wrote it', async () => {
+    const textWithCall = () =>
+      jsonResponse({ id: 'c', object: 'chat.completion', created: 1, model: 'gpt-4.1', choices: [{ index: 0, message: { role: 'assistant', content: 'Hello there.', tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'search', arguments: '{"q":"x"}' } }] }, finish_reason: 'tool_calls' }], usage: USAGE });
+    serve([textWithCall, text('Sure.')]);
+    const session = agent({ ...OPENAI, memory: false, instructions: 'You are brief.', tools: { search }, maxSteps: 1 }).session('capped');
+    const first = await session.send('Hi', { guards: guards(replacesOutput) });
+    expect(first.finishReason).toBe('tool-calls');
+    expect(first.text).toBe('A fixed reply.');
+    expect(JSON.stringify(first.transcriptDelta)).not.toContain('Hello there.');
+    await session.send('And again?');
+    const second = JSON.stringify(posted()[1]);
+    expect(second).toContain('A fixed reply.');
+    expect(second).not.toContain('Hello there.');
   });
 });
