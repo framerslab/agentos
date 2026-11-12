@@ -18,6 +18,10 @@
  * created, and `s1:state`, the ledger's state mark. Opening compares the identity of the store with the identity of
  * its copy and refuses a copy that belongs to another store; a side whose identity or state row is missing beside the
  * other, malformed, or in conflict does not open. A ledger made before these rows existed gains them at its next open.
+ * The state mark rises with every tombstone written, and `readState()` returns the identity and the mark.
+ *
+ * Each step that changes rows runs two short transactions, the copy's and then the store's, never one inside the
+ * other; each takes the table's write lock with its first statement. A handle's steps run one at a time.
  */
 import type { StorageAdapter } from '@framers/sql-storage-adapter';
 import { listedErrorFields } from '../../../core/logging/events.js';
@@ -27,6 +31,7 @@ import {
   IDENTITY_MARKER,
   STATE_MARKER,
   advanceStateMark,
+  compareStateMarks,
   isLedgerIdentity,
   isReservedLedgerKey,
   isStateMark,
@@ -215,6 +220,21 @@ function checkAgreement(store: LedgerSide, copy: LedgerSide): void {
   }
 }
 
+/** The higher of two valid marks of one ledger. */
+const higherMark = (a: string, b: string): string => (compareStateMarks(a, b) >= 0 ? a : b);
+
+/**
+ * Whether a side holds a tombstone the other lacks without holding the strictly higher mark. A side's rows and mark
+ * commit together, so such a row was written outside the ledger: a learning layer's own insert, an older version, or
+ * SQL by hand.
+ */
+function foundOutside(store: LedgerSide, copy: LedgerSide): boolean {
+  const order = compareStateMarks(store.mark!, copy.mark!);
+  const holdsMore = (side: LedgerSide, other: LedgerSide): boolean =>
+    [...side.rows.keys()].some((hash) => !isMarker(hash) && !other.rows.has(hash));
+  return (order <= 0 && holdsMore(store, copy)) || (order >= 0 && holdsMore(copy, store));
+}
+
 /** Whether `whole` holds every tombstone and key marker `part` holds; the copy marker aside. */
 const holdsAllOf = (whole: LedgerSide, part: LedgerSide): boolean =>
   [...part.rows.keys()].every((hash) => hash === COPY_MARKER || whole.rows.has(hash));
@@ -282,6 +302,12 @@ export class ForgottenLedger {
   readonly keyed: boolean;
   /** The tombstones an open or a step brought from the copy into the store, for the next `reconcile()` to report. */
   private readonly broughtBack = new Set<string>();
+  /** The identity the open found or made; every later step checks both sides still hold it. */
+  private identity = '';
+  /** The end of the handle's last step: the handle's work on rows runs one step at a time. */
+  private queue: Promise<void> = Promise.resolve();
+  /** The key markers of the keys this handle was given, made once. */
+  private givenMarkers: Promise<Set<string>> | undefined;
 
   private constructor(
     private readonly primary: StorageAdapter,
@@ -396,7 +422,7 @@ export class ForgottenLedger {
     const copy = this.copy;
     if (!copy) {
       // A store with no copy keeps its rows, or gains its identity and state alone.
-      if (store.identity === undefined) await this.writeStore(store, []);
+      this.identity = store.identity ?? (await this.writeStore({ rows: [] })).identity;
       return;
     }
     const plan = await locked(copy, async (trx) => {
@@ -409,7 +435,9 @@ export class ForgottenLedger {
         // Both sides are named: the same ledger, or not one to open.
         if (store.identity !== held.identity) throw identityMismatch();
         identity = store.identity;
-        mark = held.mark!;
+        // The copy takes the higher mark, and one more advance for a tombstone a side holds without the higher mark.
+        mark = higherMark(store.mark!, held.mark!);
+        if (foundOutside(store, held)) mark = nextMark(mark);
       } else if (store.identity !== undefined) {
         // A copy without the two rows: an empty new copy of an unpaired store, or an older copy of this store.
         if (held.rows.size > 0 && (!storePaired || !holdsAllOf(store, held))) throw identityMismatch();
@@ -431,36 +459,150 @@ export class ForgottenLedger {
       const union = new Map<string, LedgerRow>([[COPY_MARKER, pairing], ...held.rows, ...store.rows]);
       for (const row of markersFirst(union.values())) if (!held.rows.has(row.hash)) await ForgottenLedger.insert(trx, row);
       if (held.identity === undefined) await ForgottenLedger.writeNames(trx, identity, mark);
+      else if (mark !== held.mark) await ForgottenLedger.setMark(trx, held.mark!, mark);
       return { identity, mark, union: [...union.values()] };
     });
+    this.identity = plan.identity;
     if (store.identity === undefined) {
-      await this.writeStore({ rows: new Map(), identity: plan.identity, mark: plan.mark }, plan.union);
+      // The store's first state row comes with every row under it.
+      await this.writeStore({ identity: plan.identity, mark: plan.mark, rows: plan.union });
     } else if (!store.rows.has(COPY_MARKER)) {
-      await this.writeStore({ rows: new Map(), identity: plan.identity, mark: plan.mark }, [plan.union.find((row) => row.hash === COPY_MARKER)!]);
+      // The store is not filled at an open; it is paired.
+      await this.writeStore({ identity: plan.identity, rows: [plan.union.find((row) => row.hash === COPY_MARKER)!] });
     }
   }
 
   /**
-   * The store's part of a step: under the store's own lock its rows are read again, `rows` it lacks are written, and
-   * a store without the two rows gets the identity and mark of `plan` (a new ledger's when `plan` has none). The
-   * tombstones it gains are kept for the next `reconcile()`.
+   * The store's part of a step, in a transaction of its own after the copy's has committed: under the store's lock its
+   * rows are read again, the `rows` it lacks are written, and its state is set to the higher of its own and `mark`. A
+   * store without the two rows gets `identity` and `mark` (a new ledger's when they are not given), unless `named`
+   * says it must hold the handle's identity already. The tombstones it gains, `own` aside, are kept for the next
+   * `reconcile()`.
    *
-   * @throws {ForgottenLedgerError} `LEDGER_IDENTITY_MISMATCH` when the store holds another identity than `plan`.
+   * @returns The identity and the mark the store holds once the step commits.
+   * @throws {ForgottenLedgerError} `LEDGER_IDENTITY_MISMATCH` when the store holds another identity, or none where it
+   *   must hold one; `KEY_REQUIRED` for a key marker of a key the handle was not given.
    */
-  private async writeStore(plan: LedgerSide, rows: readonly LedgerRow[]): Promise<void> {
-    const added = await locked(this.primary, async (trx) => {
+  private async writeStore(step: {
+    identity?: string;
+    mark?: string;
+    rows: readonly LedgerRow[];
+    own?: string;
+    named?: boolean;
+  }): Promise<{ identity: string; mark: string }> {
+    const done = await locked(this.primary, async (trx) => {
       const held = sideOf(await ForgottenLedger.rowsOf(trx));
-      if (held.identity !== undefined && plan.identity !== undefined && held.identity !== plan.identity) throw identityMismatch();
+      if (step.named) await this.checkHeld(held);
+      if (held.identity !== undefined && step.identity !== undefined && held.identity !== step.identity) throw identityMismatch();
       const gained: string[] = [];
-      for (const row of markersFirst(rows)) {
-        if (!held.rows.has(row.hash) && (await ForgottenLedger.insert(trx, row)) && !isMarker(row.hash)) gained.push(row.hash);
+      for (const row of markersFirst(step.rows)) {
+        if (held.rows.has(row.hash) || !(await ForgottenLedger.insert(trx, row))) continue;
+        if (!isMarker(row.hash) && row.hash !== step.own) gained.push(row.hash);
       }
       if (held.identity === undefined) {
-        await ForgottenLedger.writeNames(trx, plan.identity ?? freshIdentity(), plan.mark ?? nextMark(undefined));
+        const named = { identity: step.identity ?? freshIdentity(), mark: step.mark ?? nextMark(undefined) };
+        await ForgottenLedger.writeNames(trx, named.identity, named.mark);
+        return { gained, identity: named.identity, mark: named.mark };
       }
-      return gained;
+      // A late store commit never lowers the store's mark.
+      const mark = step.mark === undefined ? held.mark! : higherMark(held.mark!, step.mark);
+      if (mark !== held.mark) await ForgottenLedger.setMark(trx, held.mark!, mark);
+      return { gained, identity: held.identity, mark };
     });
-    for (const hash of added) this.broughtBack.add(hash);
+    for (const hash of done.gained) this.broughtBack.add(hash);
+    return { identity: done.identity, mark: done.mark };
+  }
+
+  /**
+   * Sets a side's state mark from the value read under the lock to a new one: an update by equality, never a
+   * comparison in SQL.
+   *
+   * @throws {ForgottenLedgerError} `LEDGER_UNAVAILABLE` when it does not change exactly one row: the lock was not held.
+   */
+  private static async setMark(trx: StorageAdapter, from: string, to: string): Promise<void> {
+    const result = await trx.run(`UPDATE agentos_learning_forgotten SET forgotten_at = ? WHERE hash = '${STATE_MARKER}' AND forgotten_at = ?`, [to, from]);
+    if (result.changes !== 1) throw unavailable();
+  }
+
+  /**
+   * Refuses a side, read under its lock, that no longer holds this handle's identity (the database was replaced
+   * under the open handle), or that holds the marker of a key the handle was not given.
+   */
+  private async checkHeld(side: LedgerSide): Promise<void> {
+    if (side.identity !== this.identity) throw identityMismatch();
+    this.givenMarkers ??= Promise.all(this.keys.map((key) => ForgottenLedger.keyMarker(key))).then((markers) => new Set(markers));
+    const given = await this.givenMarkers;
+    for (const hash of side.rows.keys()) if (hash.startsWith(KEY_MARKER_PREFIX) && !given.has(hash)) throw keyRequired();
+  }
+
+  /**
+   * Runs one step of this handle's work on rows after the steps before it, and writes the line of a refusal it throws.
+   */
+  private step<T>(work: () => Promise<T>): Promise<T> {
+    const run = this.queue.then(work);
+    this.queue = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run.catch((error: unknown) => {
+      logRefusal(error);
+      throw error;
+    });
+  }
+
+  /**
+   * Unites the two sides, and writes a tombstone when one is given: the copy's transaction, then the store's, never one
+   * inside the other.
+   *
+   * 1. The store's rows and state are read with plain reads.
+   * 2. In the copy's transaction, under its lock, the copy is read; both sides must hold this handle's identity and no
+   *    key marker it was not given. The rows of either side go to the copy, and the mark is decided: the higher of the
+   *    two, advanced once when a side holds a tombstone the other lacks without holding the strictly higher mark (a
+   *    row written outside the ledger), and once more for the tombstone written.
+   * 3. In the store's transaction, under its lock, the store is read again and gains the rows it lacks; its state is
+   *    set to the higher of its own and the decided mark.
+   *
+   * With no copy the store's transaction does it all.
+   */
+  private async unite(write?: { tombstone: LedgerRow; marker?: LedgerRow }): Promise<{ written: boolean; identity: string; mark: string }> {
+    const copy = this.copy;
+    if (!copy) {
+      return locked(this.primary, async (trx) => {
+        const held = sideOf(await ForgottenLedger.rowsOf(trx));
+        await this.checkHeld(held);
+        let written = false;
+        let mark = held.mark!;
+        if (write) {
+          if (write.marker && !held.rows.has(write.marker.hash)) await ForgottenLedger.insert(trx, write.marker);
+          if (!held.rows.has(write.tombstone.hash)) written = await ForgottenLedger.insert(trx, write.tombstone);
+          mark = nextMark(mark);
+          await ForgottenLedger.setMark(trx, held.mark!, mark);
+        }
+        return { written, identity: held.identity!, mark };
+      });
+    }
+    const store = sideOf(await ForgottenLedger.rowsOf(this.primary));
+    await this.checkHeld(store);
+    const plan = await locked(copy, async (trx) => {
+      const held = sideOf(await ForgottenLedger.rowsOf(trx));
+      await this.checkHeld(held);
+      checkAgreement(store, held);
+      const union = new Map<string, LedgerRow>([...held.rows, ...store.rows]);
+      let mark = higherMark(store.mark!, held.mark!);
+      if (foundOutside(store, held)) mark = nextMark(mark);
+      let written = false;
+      if (write) {
+        written = !store.rows.has(write.tombstone.hash) || !held.rows.has(write.tombstone.hash);
+        // A tombstone either side already holds keeps its row and its time.
+        for (const row of write.marker ? [write.marker, write.tombstone] : [write.tombstone]) if (!union.has(row.hash)) union.set(row.hash, row);
+        mark = nextMark(mark);
+      }
+      for (const row of markersFirst(union.values())) if (!held.rows.has(row.hash)) await ForgottenLedger.insert(trx, row);
+      if (mark !== held.mark) await ForgottenLedger.setMark(trx, held.mark!, mark);
+      return { written, mark, rows: [...union.values()] };
+    });
+    const done = await this.writeStore({ identity: this.identity, mark: plan.mark, rows: plan.rows, own: write?.tombstone.hash, named: true });
+    return { written: plan.written, ...done };
   }
 
   /** Writes a side's identity row and state row. */
@@ -481,25 +623,25 @@ export class ForgottenLedger {
   }
 
   /**
-   * Writes the tombstone to the copy, then to the primary. `written` is false when both held it. Rejects when either
-   * write fails: a caller deletes nothing without the tombstone in both.
+   * Writes the tombstone to the copy, then to the primary, each with its key's marker and a new state mark in one
+   * transaction, after uniting the two sides' rows. `written` is false when both held it; the mark rises either way.
+   * Rejects when either side's transaction fails: a caller deletes nothing without the tombstone in both.
    *
    * @throws {TypeError} For a subject with another kind or no id.
+   * @throws {ForgottenLedgerError} `LEDGER_IDENTITY_MISMATCH` when a side no longer holds the ledger's identity,
+   *   `LEDGER_STATE_INVALID` when a side's identity or state row is damaged, `KEY_REQUIRED` for a key marker of a key
+   *   the handle was not given; nothing is written.
    */
   async markForgotten(subject: SuppressionSubject): Promise<{ form: 'keyed' | 'unkeyed'; written: boolean }> {
     const who = checked(subject);
     const current = this.keys[0];
     const forgottenAt = new Date().toISOString();
-    if (current !== undefined) {
-      // The key's marker goes in before the first tombstone it writes, so no keyed tombstone is without one.
-      const marker: LedgerRow = { hash: await ForgottenLedger.keyMarker(current), namespace: '', forgotten_at: forgottenAt };
-      if (this.copy) await ForgottenLedger.insert(this.copy, marker);
-      await ForgottenLedger.insert(this.primary, marker);
-    }
+    // The key's marker goes in with the first tombstone it writes, so no keyed tombstone is without one.
+    const marker: LedgerRow | undefined =
+      current === undefined ? undefined : { hash: await ForgottenLedger.keyMarker(current), namespace: '', forgotten_at: forgottenAt };
     const tombstone: LedgerRow = { hash: await ForgottenLedger.hash('', who, current), namespace: '', forgotten_at: forgottenAt };
-    const inCopy = this.copy ? await ForgottenLedger.insert(this.copy, tombstone) : false;
-    const inPrimary = await ForgottenLedger.insert(this.primary, tombstone);
-    return { form: current === undefined ? 'unkeyed' : 'keyed', written: inCopy || inPrimary };
+    const { written } = await this.step(() => this.unite({ tombstone, marker }));
+    return { form: current === undefined ? 'unkeyed' : 'keyed', written };
   }
 
   /**
@@ -515,25 +657,37 @@ export class ForgottenLedger {
   }
 
   /**
-   * Fills missing rows in both directions. `added` lists the tombstones brought back into the primary since the
-   * last `reconcile()` on this handle, its own and an open's, markers left out. With no copy there is nothing to
-   * bring back.
+   * Fills missing rows in both directions and leaves both sides at the higher state mark; it never lowers one. A
+   * tombstone one side holds without holding the higher mark was written outside the ledger, and raises the mark
+   * once. `added` lists the tombstones brought back into the primary since the last `reconcile()` on this handle, its
+   * own and those of an open, a deletion or a state read on the way, markers and a deletion's own tombstone left out.
+   * With no copy there is nothing to bring back.
    */
   async reconcile(): Promise<{ added: string[] }> {
-    if (!this.copy) return { added: [] };
-    // The identity and the state are not rows to copy: the open checked and wrote them.
-    const primaryRows = (await ForgottenLedger.rowsOf(this.primary)).filter((row) => !isReservedLedgerKey(row.hash));
-    const copyRows = (await ForgottenLedger.rowsOf(this.copy)).filter((row) => !isReservedLedgerKey(row.hash));
-    const held = new Set(primaryRows.map((row) => row.hash));
-    for (const row of primaryRows) await ForgottenLedger.insert(this.copy, row);
-    const added: string[] = [];
-    for (const row of copyRows) {
-      if (held.has(row.hash)) continue;
-      if ((await ForgottenLedger.insert(this.primary, row)) && !isMarker(row.hash)) added.push(row.hash);
-    }
-    const reported = [...new Set([...this.broughtBack, ...added])];
-    this.broughtBack.clear();
-    return { added: reported };
+    return this.step(async () => {
+      if (this.copy) await this.unite();
+      const added = [...this.broughtBack];
+      this.broughtBack.clear();
+      return { added };
+    });
+  }
+
+  /**
+   * Brings both sides up to date, as `reconcile()` does, and returns the ledger's identity and the state mark the
+   * store holds after it: two strings, and nothing else. Read fresh from storage on every call.
+   *
+   * @throws {ForgottenLedgerError} `LEDGER_IDENTITY_MISMATCH` when a side no longer holds the identity the open found
+   *   (its database was replaced under the open handle), `LEDGER_STATE_INVALID` when a side's rows are damaged.
+   *
+   * @example
+   * const { identity, mark } = await ledger.readState();
+   * // Two marks of one identity: equal means no tombstone was written between the two reads.
+   */
+  async readState(): Promise<Readonly<{ identity: string; mark: string }>> {
+    return this.step(async () => {
+      const { identity, mark } = await this.unite();
+      return Object.freeze({ identity, mark });
+    });
   }
 
   /** How many tombstones either ledger holds, markers aside: 0 for a store that has forgotten nobody. */

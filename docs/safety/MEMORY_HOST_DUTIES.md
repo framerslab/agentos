@@ -155,6 +155,7 @@ The library keeps no backups. Yours hold every deleted person's words until they
 
 - Treat backup data as beyond use: held only until the schedule replaces it, and read for no other purpose.
 - When you restore, restore the memory store (`memory.sqlite`, or your database) and never the tombstone copy from an older backup. Keep the copy outside what a restore replaces; `tombstoneCopy` moves it.
+- The library cannot tell when the store and the copy were both put back to an older state, or when two running stores use byte copies of one copy: both look valid. Keep the copy outside everything a restore replaces. On PostgreSQL a point-in-time restore replaces the whole cluster, so a copy in another database of the same cluster is inside it. Where the copy lives does not by itself make it durable.
 - Put `await agent.applyTombstones()` in your restore runbook. An open through `souledAgent()` runs it for you; a restore that bypasses the library's open does not get that for free.
 - Keep the tombstone key in your secret store, with the previous keys after a rotation. A keyed store does not open without them.
 - A host that holds the health data of people in Washington state should check with counsel its reading of that state's rule for deletions delayed by backups; the common reading is that such a delay may not run past six months, which means rotating or scrubbing those backups within six months.
@@ -176,6 +177,8 @@ One session is one user. If you put several people into one conversation, pass o
 ### One process per store
 
 Run one process per `souledAgent()` store on SQLite. Where several processes share one store on PostgreSQL, a process learns of another's tombstone at its next open or at `agent.applyTombstones()`: call it on a schedule.
+
+On PostgreSQL each tombstone write and each `applyTombstones()` takes a lock on the ledger table for one short transaction on each side, so two processes cannot lose each other's tombstones or lower the state mark. Give each part of your program that opens transactions its own adapter object, or run their transactions one at a time.
 
 ### Children
 
