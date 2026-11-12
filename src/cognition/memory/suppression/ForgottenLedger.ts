@@ -34,11 +34,11 @@ export type SuppressionSubject = { kind: 'user' | 'session'; id: string };
 export type TombstoneKey = string | Uint8Array;
 
 export interface ForgottenLedgerOptions {
-  /** The store's own adapter: the table lives beside `memory_traces`. */
+  /** The store's own adapter: the table lives beside `memory_traces`, database-wide rather than per brain. */
   primary: StorageAdapter;
   /** The copy a restore of the store does not replace. */
   copy?: StorageAdapter;
-  /** `current` writes; `previous` are read after it. */
+  /** `current` writes; `previous` are read after it. Every key must contain at least one byte. */
   key?: { current: TombstoneKey; previous?: ReadonlyArray<TombstoneKey> };
   /** The namespaces a check reads: the store-wide `''` always; an agent that runs a learning layer adds the layer's. */
   namespaces?: readonly string[];
@@ -111,14 +111,28 @@ const isMarker = (hash: string): boolean => hash.includes(':');
 export const copyUnavailableError = (): ForgottenLedgerError =>
   new ForgottenLedgerError(
     'COPY_UNAVAILABLE',
-    "souledAgent: this store's tombstone copy is missing or unreadable; put the copy back (never from an older backup) or pass tombstoneCopy. No memory is served without it.",
+    "ForgottenLedger: this store's tombstone copy is missing or unreadable; put the copy back (never from an older backup) or pass tombstoneCopy. No memory is served without it.",
   );
 
 const keyRequired = (): ForgottenLedgerError =>
   new ForgottenLedgerError(
     'KEY_REQUIRED',
-    "souledAgent: this store's tombstones are keyed; pass tombstoneKey (the current key, or the current and previous keys after a rotation)",
+    "ForgottenLedger: this store's tombstones are keyed; pass tombstoneKey (the current key, or the current and previous keys after a rotation)",
   );
+
+/** Whether two native SQLite connections name the same file, including links to it. */
+async function sameSqliteFile(primary: StorageAdapter, copy: StorageAdapter): Promise<boolean> {
+  if (primary.kind !== 'better-sqlite3' || copy.kind !== 'better-sqlite3') return false;
+  const fileOf = async (adapter: StorageAdapter): Promise<string | undefined> =>
+    (await adapter.all<{ name: string; file: string }>('PRAGMA database_list')).find((row) => row.name === 'main')?.file;
+  const [primaryFile, copyFile] = await Promise.all([fileOf(primary), fileOf(copy)]);
+  // An in-memory database has no filename; separate adapters then hold separate databases.
+  if (!primaryFile || !copyFile) return false;
+  if (primaryFile === copyFile) return true;
+  const { stat } = await import('node:fs/promises');
+  const [primaryStat, copyStat] = await Promise.all([stat(primaryFile), stat(copyFile)]);
+  return primaryStat.ino !== 0 && primaryStat.dev === copyStat.dev && primaryStat.ino === copyStat.ino;
+}
 
 /**
  * The forgotten subjects of one store.
@@ -148,15 +162,32 @@ export class ForgottenLedger {
   /**
    * Creates the table where missing on each adapter, then checks the copy marker and the key markers.
    *
-   * A store that never had a copy and is given one has its tombstones copied into it, and both are marked as a pair.
+   * A store that never had a copy and is given one has both marked as a pair. An existing copy is repaired from
+   * the primary too, after marker validation, so replacing the copy with an older backup cannot lose tombstones.
    *
-   * @throws {ForgottenLedgerError} `COPY_UNAVAILABLE` when the copy cannot be read, or when the store had a copy and
-   *   the copy given does not know it (or none is given); `KEY_REQUIRED` when either ledger holds the marker of a key
+   * @throws {TypeError} When any current or previous key is empty.
+   *
+   * @throws {ForgottenLedgerError} `COPY_UNAVAILABLE` when the copy is the primary database, cannot be read, or when
+   *   the store had a copy and the copy given does not know it (or none is given); `KEY_REQUIRED` when either ledger holds the marker of a key
    *   that was not passed. Nothing is copied or marked by an open that is refused.
    */
   static async open(options: ForgottenLedgerOptions): Promise<ForgottenLedger> {
     const { primary, copy } = options;
     const keys = options.key ? [options.key.current, ...(options.key.previous ?? [])] : [];
+    if (keys.some((key) => bytesOf(key).byteLength === 0)) {
+      throw new TypeError('ForgottenLedger: each current or previous key must contain at least one byte');
+    }
+    if (copy) {
+      let same: boolean;
+      try {
+        same = copy === primary || (await sameSqliteFile(primary, copy));
+      } catch {
+        throw copyUnavailableError();
+      }
+      if (same) {
+        throw new ForgottenLedgerError('COPY_UNAVAILABLE', 'ForgottenLedger: the tombstone copy must use a separate database from the primary');
+      }
+    }
     const namespaces = [...new Set(['', ...(options.namespaces ?? [])])];
 
     await primary.exec(FORGOTTEN_DDL);
@@ -182,10 +213,10 @@ export class ForgottenLedger {
       if (held.some((marker) => !given.has(marker))) throw keyRequired();
     }
 
+    // Repair an older copy too: primary tombstones must survive a later restore of the primary. Do this only
+    // after both ledgers' markers have been checked, so a refused open still copies nothing.
+    if (copy) for (const row of primaryRows) await ForgottenLedger.insert(copy, row);
     if (copy && !primaryPaired && !copyPaired) {
-      // This store never had a copy: what it already holds goes into the new one, so tombstones written before the
-      // copy existed survive a later restore.
-      for (const row of primaryRows) await ForgottenLedger.insert(copy, row);
       const marker: LedgerRow = { hash: COPY_MARKER, namespace: '', forgotten_at: new Date().toISOString() };
       await ForgottenLedger.insert(copy, marker);
       await ForgottenLedger.insert(primary, marker);
@@ -239,14 +270,17 @@ export class ForgottenLedger {
   }
 
   /**
-   * Copies into the primary every row the copy holds and the primary lacks. `added` lists the tombstones among them,
-   * markers left out. With no copy there is nothing to bring back.
+   * Fills missing rows in both directions. `added` lists the tombstones brought back into the primary, markers
+   * left out. With no copy there is nothing to bring back.
    */
   async reconcile(): Promise<{ added: string[] }> {
     if (!this.copy) return { added: [] };
-    const held = new Set((await ForgottenLedger.rowsOf(this.primary)).map((row) => row.hash));
+    const primaryRows = await ForgottenLedger.rowsOf(this.primary);
+    const copyRows = await ForgottenLedger.rowsOf(this.copy);
+    const held = new Set(primaryRows.map((row) => row.hash));
+    for (const row of primaryRows) await ForgottenLedger.insert(this.copy, row);
     const added: string[] = [];
-    for (const row of await ForgottenLedger.rowsOf(this.copy)) {
+    for (const row of copyRows) {
       if (held.has(row.hash)) continue;
       if ((await ForgottenLedger.insert(this.primary, row)) && !isMarker(row.hash)) added.push(row.hash);
     }
@@ -300,7 +334,9 @@ export class ForgottenLedger {
   }
 
   /** Every row of a ledger, markers included. */
-  private static rowsOf(adapter: StorageAdapter): Promise<LedgerRow[]> {
-    return adapter.all<LedgerRow>('SELECT hash, namespace, forgotten_at FROM agentos_learning_forgotten');
+  private static async rowsOf(adapter: StorageAdapter): Promise<LedgerRow[]> {
+    const rows = await adapter.all<LedgerRow>('SELECT hash, namespace, forgotten_at FROM agentos_learning_forgotten');
+    // A copied keyed tombstone must never precede the marker that requires its key on the next open.
+    return rows.sort((a, b) => Number(isMarker(b.hash)) - Number(isMarker(a.hash)));
   }
 }

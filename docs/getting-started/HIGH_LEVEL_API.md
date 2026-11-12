@@ -1088,9 +1088,9 @@ Retention:
 
 Options for deletion:
 
-- **`tombstoneKey`** is a secret from your secret store. With it the tombstones that record who was forgotten are keyed hashes (HMAC-SHA-256); without it they are plain SHA-256 hashes, which anyone who holds the store can match by hashing a guessed id. A store whose tombstones are keyed does not open without the key, and after a rotation pass `{ current, previous }`: the previous keys still check the old tombstones.
+- **`tombstoneKey`** is a secret from your secret store. With it the tombstones that record who was forgotten are keyed hashes (HMAC-SHA-256); without it they are plain SHA-256 hashes, which anyone who holds the store can match by hashing a guessed id. A store whose tombstones are keyed does not open without the key, and after a rotation pass `{ current, previous }`: the previous keys still check the old tombstones. Each current or previous key must contain at least one byte.
 - **`tombstoneCopy`** is where the second copy of the tombstones lives: `{ path }` for a SQLite file, or `{ adapter }` for a database of your own (left open on `close()`). By default it is `memory/.store/forgotten.sqlite`. Keep it out of what a restore replaces: a store whose copy is missing or unreadable does not open.
-- **`legacyMemory: { attributeTo, reason: 'one-persons-machine' }`** attributes the memory a store holds from before per-user scope to the one user of a single person's own machine, who then recalls, reads, exports and deletes it; the store refuses it when it records anyone else. [The `memory/` wiki](../SOUL_FILES.md#the-memory-wiki) has the rules.
+- **`legacyMemory: { attributeTo, reason: 'one-persons-machine' }`** attributes the memory a store holds from before per-user scope to the one user of a single person's own machine, who then recalls, reads, exports and deletes it; the store refuses it when it records anyone else. An attributed owner counts toward the retention requirement before their first turn and on later opens without the option. [The `memory/` wiki](../SOUL_FILES.md#the-memory-wiki) has the rules.
 
 A host that wires memory onto its own adapter must give each agent its own ledger database or PostgreSQL schema and an independent copy. The ledger is database-wide: different brain ids do not isolate tombstones.
 

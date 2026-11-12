@@ -512,6 +512,9 @@ export class Memory {
           brainId: this._brain.brainId,
         });
         await this._hnswSidecar.init();
+        // The database is authoritative: adds made after the last saved rewrite may be absent from the sidecar.
+        // Refresh a loaded index before recall can use it, including small stores whose index was built explicitly.
+        if (this._hnswSidecar.isActive) await this._hnswSidecar.rewrite(await this._ownEmbeddedTraces());
       } catch {
         // hnswlib-node not installed or init failed — HNSW stays null.
         // Recall will use FTS5 only (still works, just O(n) for vectors).
@@ -1324,7 +1327,7 @@ export class Memory {
     }
     await this._initPromise;
     const rows = await this._brain.all<{ id: string }>(
-      `SELECT id FROM memory_traces WHERE brain_id = ? AND ${this._brain.features.dialect.jsonExtract('metadata', '$.turnUserId')} = ?`,
+      `SELECT id FROM memory_traces WHERE brain_id = ? AND CAST(${this._brain.features.dialect.jsonExtract('metadata', '$.turnUserId')} AS TEXT) = ?`,
       [this._brain.brainId, userId],
     );
     return this.deleteTraces(

@@ -232,9 +232,11 @@ export class HnswSidecar {
   async rewrite(data: { id: string; embedding: number[] }[]): Promise<{ vectors: number }> {
     const dim = this._config.dimensions;
     const filtered = data.filter((item) => item.embedding.length === dim);
-    this._delegate = new HnswIndexSidecar();
+    // Keep the initialized delegate if removal fails, so later adds and threshold rebuilds still work. The caller
+    // receives the failure and can retry erasure once the file is writable.
     rmSync(this._indexPath, { force: true });
     rmSync(this._mapPath, { force: true });
+    this._delegate = new HnswIndexSidecar();
     await this.init();
     if (filtered.length === 0) return { vectors: 0 };
     await this._delegate.rebuildFromData(filtered);

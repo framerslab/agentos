@@ -1644,6 +1644,9 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       });
     }
     legacyOwnerKey = await memory.legacyOwner(agentId);
+    // An attributed owner already has memory even if no turn has registered their conversation scope yet.
+    if (legacyOwnerKey !== undefined) subjects.add(legacyOwnerKey);
+    if (retention === undefined && subjects.size > 1) throw new Error(RETENTION_REQUIRED);
   } catch (err) {
     await originalClose().catch(() => undefined);
     await closeStore().catch(() => undefined);
