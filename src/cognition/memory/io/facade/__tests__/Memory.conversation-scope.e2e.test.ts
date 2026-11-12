@@ -1107,6 +1107,52 @@ describe.each(STORES)('scopes kept apart on every path, on %s', (store) => {
     expect(await traceIdsUnder(brain, A)).toEqual(chunkIdsOf(rows[0]!));
   });
 
+  it('a page delete leaves no chunk of the page when another process rewrites it meanwhile', async () => {
+    const { memory, brain } = await open(store);
+    const pages = new UserWikiStore({ scopeId: A, pages: memory, chunk });
+    await pages.writePage(P('Alice likes tea.'));
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let held = false;
+    const facade = memory as unknown as {
+      deleteTraces: Memory['deleteTraces'];
+      _writePageRow: UserWikiPagesPort['writePageRow'];
+    };
+    const deleteTraces = memory.deleteTraces.bind(memory);
+    // The delete's first chunk delete waits: the row it read is rewritten before it deletes the row.
+    facade.deleteTraces = async (ids) => {
+      if (!held) {
+        held = true;
+        await gate;
+      }
+      return deleteTraces(ids);
+    };
+    // A writer in another process: the same rows, and none of this process's ordering of page writes.
+    const otherProcess = new UserWikiStore({
+      scopeId: A,
+      chunk,
+      pages: {
+        readPageRow: (scopeId, pageId) => memory.readPageRow(scopeId, pageId),
+        listPageRows: (scopeId) => memory.listPageRows(scopeId),
+        writePageRow: (scopeId, page) => facade._writePageRow.call(memory, scopeId, page),
+        reindexPageRow: (scopeId, pageId, chunksOf) => memory.reindexPageRow(scopeId, pageId, chunksOf),
+        deletePageRows: (scopeId, pageId) => memory.deletePageRows(scopeId, pageId),
+      },
+    });
+
+    const deleting = memory.deletePageRows(A, 'concepts/notes');
+    for (let i = 0; i < 400 && !held; i += 1) await pause(5);
+    expect(held).toBe(true);
+    await otherProcess.writePage(P('Alice keeps a ferret.'));
+    release();
+    await deleting;
+
+    expect(await pageRows(brain)).toEqual([]);
+    expect(await traceIdsUnder(brain, A)).toEqual([]);
+  });
+
   it('deleteScope keeps the registry row of a scope a message is stored under while it deletes', async () => {
     const { memory, brain } = await open(store);
     await memory.remember('Alice likes tea.', { scope: 'conversation', scopeId: A });
