@@ -52,12 +52,14 @@ const AFTER = '(?:[%\\u2030]|\\p{Sc})';
  * Digits written with a separator between them ("3:15", "1/2", "1,000"), with a sign or a currency before them ("-5",
  * "$5"), or with a percent or currency after them ("5%"): one word, compared as written, so a time, a date, a fraction,
  * a signed number and an amount never fold to bare numbers. A dash after a letter or a digit is no sign ("covid-19").
+ * The two forms that begin with a digit begin at a digit run's first digit: a match from inside a run is also one from
+ * its start, and a scan that tried each digit of a long bare run again took time that grew with the run's square.
  */
 const NUMERIC_SPAN = new RegExp(
   [
     `(?:(?<![\\p{L}\\p{M}\\p{Nd}])[+\\u002D\\u2212]|\\p{Sc})\\p{Nd}+(?:${SEPARATOR}\\p{Nd}+)*${AFTER}?`,
-    `\\p{Nd}+(?:${SEPARATOR}\\p{Nd}+)+${AFTER}?`,
-    `\\p{Nd}+${AFTER}`,
+    `(?<!\\p{Nd})\\p{Nd}+(?:${SEPARATOR}\\p{Nd}+)+${AFTER}?`,
+    `(?<!\\p{Nd})\\p{Nd}+${AFTER}`,
   ].join('|'),
   'gu'
 );
