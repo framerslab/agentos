@@ -148,7 +148,7 @@ export class SentimentTracker {
       const userCtx = this.getUserContext();
 
       const sentimentResult = await this.utilityAI.analyzeSentiment(userInput, {
-        method: stConfig?.method || 'lexicon_based',
+        method: stConfig?.method,
         modelId: stConfig?.modelId || persona.defaultModelId,
         providerId: stConfig?.providerId || persona.defaultProviderId,
         // The user's language, else the persona's; with neither, the utility class scores in its own default.

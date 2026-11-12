@@ -38,6 +38,7 @@ import { uuidv4 } from '../../../core/utils/uuid';
 import { checkValue, type SchemaCheck } from '../../../core/utils/schemaChecks';
 import { targetSchemaChecks } from './targetSchemaChecks';
 import { parseReplyJson } from './replyJson';
+import { StatisticalUtilityAI } from './StatisticalUtilityAI';
 
 /**
  * A number in a reply: a number, or a string that holds one (`"0.8"`); `NaN` for anything else, `null`, a boolean,
@@ -107,6 +108,8 @@ export class LLMUtilityAI implements IUtilityAI, IPromptEngineUtilityAI {
   private config!: LLMUtilityAIConfig;
   private llmProviderManager!: AIModelProviderManager;
   private isInitialized: boolean = false;
+  /** The lexicon an explicit `lexicon_based` sentiment call scores with, built at the first such call. */
+  private sentimentLexicon?: Promise<StatisticalUtilityAI>;
 
   constructor(utilityId?: string) {
     this.utilityId = utilityId || `llm-utility-${uuidv4()}`;
@@ -478,6 +481,16 @@ Respond with ONLY a JSON object with one key, "keywords", whose value is an arra
 
   public async analyzeSentiment(text: string, options?: SentimentAnalysisOptions): Promise<SentimentResult> {
     this.ensureInitialized();
+    // An explicit lexicon method scores with a statistical lexicon and makes no model call. The promise is stored
+    // before any await, so concurrent first calls share one instance; each call forwards its own options.
+    if (options?.method === 'lexicon_based') {
+      this.sentimentLexicon ??= (async () => {
+        const utility = new StatisticalUtilityAI(`${this.utilityId}-sentiment`);
+        await utility.initialize({ defaultLanguage: this.config.defaultLanguage || 'en' });
+        return utility;
+      })();
+      return (await this.sentimentLexicon).analyzeSentiment(text, options);
+    }
     const systemPrompt = `Analyze the sentiment of the following text.
 Respond with ONLY a JSON object containing "score" (float, -1.0 to 1.0, where -1 is very negative, 1 is very positive), "polarity" ("positive", "negative", or "neutral"), and optionally "intensity" (float 0-1). Provide "positiveTokens" and "negativeTokens" as arrays of strings if identifiable.`;
 
