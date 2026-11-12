@@ -10,7 +10,9 @@
 import { describe, expect, it } from 'vitest';
 import type { Brain } from '../../src/cognition/memory/retrieval/store/Brain';
 import { exactWordsLeg, isEligibleForRecall } from '../../src/cognition/memory/retrieval/recall';
-import { ENGINES, FlatEmbedder, U1, storeOver, trace } from './helpers/recallFixtures';
+import { ENGINES, FlatEmbedder, NOOP_GRAPH, U1, storeOver, trace } from './helpers/recallFixtures';
+import { MemoryStore } from '../../src/cognition/memory/retrieval/store/MemoryStore';
+import { InMemoryVectorStore } from '../../src/cognition/rag/vector_stores/InMemoryVectorStore';
 import { MemoryUpdateTool } from '../../src/cognition/memory/io/tools/MemoryUpdateTool';
 import type { ToolExecutionContext } from '../../src/core/tools/ITool';
 
@@ -292,6 +294,35 @@ describe.each(ENGINES)('loadTracesForRecall on %s', (_engine, open) => {
     expect(isEligibleForRecall(traces.get('pass')!, { scopes: U1, now: NOW, usableFor: ['authorization'] })).toBe(true);
     expect((await store.loadTracesForRecall(['pass'])).traces.get('pass')!.policy).toBeUndefined();
     store.dispose();
+    await db.close();
+  });
+
+  it('a trace a sibling store revived, whose row was stored again without a policy, loses the one it held there too', async () => {
+    const db = await open();
+    // Two stores on one vector index and one Brain: a revival in one is filed in the other, which never read the row.
+    const vectorStore = new InMemoryVectorStore();
+    await vectorStore.initialize({ id: `recall-${Math.random().toString(36).slice(2)}`, type: 'in_memory', defaultEmbeddingDimension: 32, similarityMetric: 'cosine' } as never);
+    const make = () => {
+      const made = new MemoryStore({ vectorStore, embeddingManager: new FlatEmbedder() as never, knowledgeGraph: NOOP_GRAPH as never, collectionPrefix: 'cogmem' });
+      made.setBrain(db.brain);
+      return made;
+    };
+    const writer = make();
+    const sibling = make();
+    const noAuthorization = { usableForAuthorization: false, usableForPersonalization: true, usableForFactClaim: true };
+    await writer.store(trace('pass', 'The harbor pass number is 7781.', { policy: noAuthorization }));
+    await writer.softDelete('pass');
+    await writer.store(trace('pass', 'The harbor pass number is 7781.', { policy: noAuthorization }));
+    expect(sibling.getTrace('pass')?.policy).toEqual(noAuthorization);
+    const row = await db.brain.get<{ metadata: string }>('SELECT metadata FROM memory_traces WHERE brain_id = ? AND id = ?', [db.brain.brainId, 'pass']);
+    const { policy: _dropped, ...withoutPolicy } = JSON.parse(row!.metadata) as Record<string, unknown>;
+    await db.brain.run('UPDATE memory_traces SET metadata = ? WHERE brain_id = ? AND id = ?', [JSON.stringify(withoutPolicy), db.brain.brainId, 'pass']);
+
+    const { traces } = await sibling.loadTracesForRecall(['pass']);
+    expect(traces.get('pass')!.policy).toBeUndefined();
+    expect(isEligibleForRecall(traces.get('pass')!, { scopes: U1, now: NOW, usableFor: ['authorization'] })).toBe(true);
+    writer.dispose();
+    sibling.dispose();
     await db.close();
   });
 
