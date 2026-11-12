@@ -26,7 +26,7 @@ export const RECALL_CONSTANTS = {
 } as const;
 
 /** The hybrid recall's constants, as numbers ({@link RECALL_CONSTANTS} holds the starting ones). */
-export type RecallConstants = { [K in keyof typeof RECALL_CONSTANTS]: number };
+export type RecallConstants = { -readonly [K in keyof typeof RECALL_CONSTANTS]: number };
 
 /** One candidate of the recall pool: its trace, its 1-based rank in each leg that returned it, and its fused score. */
 export interface PoolEntry<T extends MemoryTrace = MemoryTrace> {
