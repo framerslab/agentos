@@ -143,7 +143,7 @@ export async function verifyActionEvidence(evidence: ActionEvidence, source: Evi
 
   for (const ref of evidence.verdictRefs ?? []) {
     if (typeof source.hasVerdict !== 'function') return fail('VERDICT_NOT_FOUND');
-    let known = false;
+    let known: boolean;
     try {
       known = (await source.hasVerdict(ref)) === true;
     } catch {
