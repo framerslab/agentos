@@ -11,9 +11,12 @@ import { describe, expect, it } from 'vitest';
 import type { Brain } from '../../src/cognition/memory/retrieval/store/Brain';
 import { exactWordsLeg, isEligibleForRecall } from '../../src/cognition/memory/retrieval/recall';
 import { ENGINES, FlatEmbedder, U1, storeOver, trace } from './helpers/recallFixtures';
+import { MemoryUpdateTool } from '../../src/cognition/memory/io/tools/MemoryUpdateTool';
+import type { ToolExecutionContext } from '../../src/core/tools/ITool';
 
 const NOW = Date.UTC(2026, 10, 10);
 const NEUTRAL = { valence: 0, arousal: 0, dominance: 0 };
+const TOOL_CONTEXT = { gmiId: 'recall-test', personaId: 'recall-test', userContext: { userId: 'u1' } } as unknown as ToolExecutionContext;
 
 /** Writes a row with no embedding, as an older release or another writer may hold one, and indexes its words. */
 async function insertVectorlessRow(brain: Brain, id: string, content: string, at: number, metadata = '{"scopeId":"u1"}'): Promise<void> {
@@ -242,6 +245,82 @@ describe.each(ENGINES)('loadTracesForRecall on %s', (_engine, open) => {
     expect(traces.get('pass')).toMatchObject({ content: 'The harbor pass on file is 9900.', policy: everything, provenance: looked });
     // The cached copy and its vector are of the words this process stored: its trust is not replaced by another text's.
     expect(store.getTrace('pass')).toMatchObject({ content: 'The harbor pass number is 7781.', policy: narrow, provenance: said });
+    store.dispose();
+    await db.close();
+  });
+
+  it('a cached trace whose words memory_update changed is returned with the words its row holds, so exact words return the text they matched', async () => {
+    const db = await open();
+    const store = await storeOver(db.brain, new FlatEmbedder());
+    await store.store(trace('pass', 'The harbor pass number is 7781.'));
+    const result = await new MemoryUpdateTool(db.brain).execute({ traceId: 'pass', content: 'The ferry ticket number is 5520.' }, TOOL_CONTEXT);
+    expect(result).toMatchObject({ success: true, output: { updated: true } });
+
+    const leg = await exactWordsLeg({ store, lexical: null }, { query: 'ferry ticket', scopes: U1, limit: 5, now: NOW });
+    expect(leg.traces.map((t) => [t.id, t.content])).toEqual([['pass', 'The ferry ticket number is 5520.']]);
+    store.dispose();
+    await db.close();
+  });
+
+  it("this process's own changes to a cached trace stay while its row is as this store wrote it: a verification count it persisted, a gist of its words", async () => {
+    const db = await open();
+    const store = await storeOver(db.brain, new FlatEmbedder());
+    const hourly = { usableForAuthorization: true, usableForPersonalization: true, usableForFactClaim: true, requiresReverificationAfterMs: 3_600_000 };
+    const stated = { sourceType: 'user_statement' as const, sourceTimestamp: NOW - 172_800_000, confidence: 1, verificationCount: 0 };
+    await store.store(trace('pass', 'The harbor pass number is 7781, renewed at the east office.', { policy: hourly, provenance: stated }));
+    const cached = store.getTrace('pass')!;
+    cached.provenance.verificationCount = 1;
+    cached.provenance.lastVerifiedAt = NOW - 60_000;
+    await store.persistTraceMetadata('pass');
+    cached.content = 'Harbor pass 7781.';
+
+    const { traces } = await store.loadTracesForRecall(['pass']);
+    expect(traces.get('pass')).toBe(cached);
+    expect(traces.get('pass')).toMatchObject({ content: 'Harbor pass 7781.', provenance: { verificationCount: 1, lastVerifiedAt: NOW - 60_000 } });
+    expect(isEligibleForRecall(traces.get('pass')!, { scopes: U1, now: NOW, usableFor: ['authorization'] })).toBe(true);
+    store.dispose();
+    await db.close();
+  });
+
+  it('a trace deleted while the load waits on a later id is not returned', async () => {
+    const db = await open();
+    let release: () => void = () => undefined;
+    let gate: Promise<void> | null = null;
+    class HeldEmbedder extends FlatEmbedder {
+      override async generateEmbeddings(input: { texts: string | string[] }) {
+        if (gate) await gate;
+        return super.generateEmbeddings(input);
+      }
+    }
+    const store = await storeOver(db.brain, new HeldEmbedder());
+    await insertVectorlessRow(db.brain, 'first', 'The harbor pass number is 7781.', NOW - 120_000);
+    await insertVectorlessRow(db.brain, 'second', 'The ferry ticket number is 5520.', NOW - 60_000);
+    let armed = true;
+    let stored: Promise<void> | undefined;
+    let deleted: Promise<unknown> | undefined;
+    (store as unknown as { brain: Brain }).brain = new Proxy(db.brain, {
+      get: (b, p) =>
+        p === 'all'
+          ? async (sql: string, params?: unknown[]) => {
+              const rows = await b.all(sql, params as never);
+              if (armed && sql.includes('id IN')) {
+                armed = false;
+                // A store() of `second` holds its turn; while the load waits on it, `first` (already read) is deleted.
+                gate = new Promise<void>((resolve) => { release = resolve; });
+                stored = store.store(trace('second', 'The ferry ticket number is 5520.'));
+                setTimeout(() => { deleted = store.deleteTraces(['first']); }, 50);
+                setTimeout(() => release(), 150);
+              }
+              return rows;
+            }
+          : Reflect.get(b, p, b),
+    });
+
+    const { traces } = await store.loadTracesForRecall(['first', 'second']);
+    await stored;
+    await deleted;
+    expect(armed).toBe(false);
+    expect([...traces.keys()]).toEqual(['second']);
     store.dispose();
     await db.close();
   });
