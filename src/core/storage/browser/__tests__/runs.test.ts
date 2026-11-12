@@ -1177,11 +1177,72 @@ describe('the run owner', () => {
       expect(stale.snapshot().runs).toEqual([expect.objectContaining({ status: 'watched', record: expect.objectContaining({ id: 'r8', key: 'c'.repeat(64) }) })]);
       hold.resolve();
       await third.whenIdle();
+      // The watched row is read again once the third tab lets the run go, though no message reaches this owner.
+      await third.shown('r8');
+      clock += 3_000;
+      await vi.waitFor(() => expect(stale.snapshot().runs).toEqual([]), { timeout: 3_000 });
     } finally {
       hold.resolve();
       stale.close();
       second.close();
       third.close();
+    }
+  });
+
+  it.each(['dismiss', 'shown'] as const)("%s keeps a record another tab finished under another key since this owner read it, while a third tab runs it", async (call) => {
+    const store = new MemoryKeyValueStore();
+    // A cut record for the dismissal; a failed one for shown, whose lock is free.
+    await store.set('lib/j/r8', { id: 'r8', key: KEY, account: ACCOUNT, kind: 'library', way: null, unit: 'sessions', chosen: null, counts: { total: 5, pending: 5, applied: 0, skipped: 0, failed: 0 }, items: [], state: call === 'dismiss' ? 'running' : 'failed', cut: call === 'dismiss' ? 'session' : null, phase: null, began: 1, progressed: 2 });
+    const locks = memoryLocks();
+    const stale = owner(store, locks, bus());
+    const second = owner(store, locks, bus());
+    const third = owner(store, locks, bus());
+    const hold = deferred();
+    try {
+      await stale.records();
+      expect(stale.snapshot().runs[0]?.status).toBe(call === 'dismiss' ? 'cut' : 'failed');
+      expect(await second.finish('r8', {
+        ...countingJob(5, []),
+        key: 'b'.repeat(64),
+        async run(context) {
+          await context.cut('session');
+          return { ended: 'finished', counts: context.record().counts };
+        },
+      })).toEqual({ id: 'r8' });
+      await second.whenIdle();
+      expect(await third.finish('r8', { ...countingJob(2, [() => hold.promise, async () => undefined]), key: 'c'.repeat(64) })).toEqual({ id: 'r8' });
+      if (call === 'dismiss') expect(await stale.dismiss('r8')).toEqual({ refused: 'another-tab' });
+      else await stale.shown('r8');
+      expect((await store.get<RunRecord>('lib/j/r8'))?.key).toBe('c'.repeat(64));
+      expect(stale.snapshot().runs).toEqual([expect.objectContaining({ status: 'watched', record: expect.objectContaining({ key: 'c'.repeat(64) }) })]);
+      hold.resolve();
+      expect((await third.whenIdle()).get('r8')?.ended).toBe('finished');
+    } finally {
+      hold.resolve();
+      stale.close();
+      second.close();
+      third.close();
+    }
+  });
+
+  it('refuses to finish a record it cannot find, and starts nothing in its place', async () => {
+    const store = new MemoryKeyValueStore();
+    const own = owner(store, memoryLocks(), bus());
+    try {
+      let wrote = false;
+      const finished = await own.finish('r10', {
+        ...countingJob(1, []),
+        async run(context) {
+          await context.write(async () => { wrote = true; return true; });
+          return { ended: 'finished', counts: context.record().counts };
+        },
+      });
+      await own.whenIdle();
+      expect(finished).toEqual({ refused: 'another-tab' });
+      expect(wrote).toBe(false);
+      expect(await store.keys('lib/j/')).toEqual([]);
+    } finally {
+      own.close();
     }
   });
 
