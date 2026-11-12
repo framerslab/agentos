@@ -308,6 +308,20 @@ describe('(f) the transcript holds what was delivered', () => {
     expect(JSON.stringify(observe.mock.calls)).not.toContain('555 0100');
   });
 
+  it('a memory provider recalls for a rewritten turn with the text as it was sent, never the original', async () => {
+    serve([text('Noted.'), textStream('Noted again.'), text('Once more.')]);
+    const getContext = vi.fn(async (_text: string) => null);
+    const sanitizesInput: IGuardrailService = { id: 'in', config: { canSanitize: true }, evaluateInput: async () => ({ action: GuardrailAction.SANITIZE, modifiedText: 'my number is [removed]' }) };
+    const helper = agent({ ...OPENAI, memory: false, instructions: 'You are brief.', memoryProvider: { getContext } });
+    const session = helper.session('recalled');
+    await session.send('my number is 555 0100', { guards: guards(sanitizesInput) });
+    const streamed = session.stream('my number is 555 0100', { guards: guards(sanitizesInput) });
+    await collect(streamed.fullStream);
+    await helper.generate('my number is 555 0100', { guards: guards(sanitizesInput) });
+    expect(getContext.mock.calls.map(([recallText]) => recallText)).toEqual(['my number is [removed]', 'my number is [removed]', 'my number is [removed]']);
+    expect(JSON.stringify(posted())).not.toContain('555 0100');
+  });
+
   it('(a) and (d) through an agent\'s own generate() and stream()', async () => {
     serve([textStream('the streamed reply')]);
     const helper = agent({ ...OPENAI, memory: false, instructions: 'You are brief.' });
