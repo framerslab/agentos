@@ -12,8 +12,9 @@ export type {
   HybridRetrieveOptions,
 } from './HybridRetriever.js';
 
-export { reciprocalRankFusion } from './reciprocalRankFusion.js';
+export { reciprocalRankFusion, fuseRankedLists } from './reciprocalRankFusion.js';
 export type {
+  FusedDoc,
   RankedDoc,
   RRFOptions,
   RRFResult,

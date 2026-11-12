@@ -178,6 +178,8 @@ function blockSections(block: string): Map<string, string[]> {
 /** The header each memory-line section of the block starts with, by the section `lineOutcomes` names. */
 const OUTCOME_HEADERS: Record<AssembledLineOutcome['section'], string | undefined> = {
   semanticRecall: '## Relevant Memories',
+  // A hybrid block's one recall section.
+  recall: '## Relevant Memories',
   recentEpisodic: '## Recent Experiences',
   graphAssociations: '## Related Context',
   involuntary: '## Something This Reminds Me Of',

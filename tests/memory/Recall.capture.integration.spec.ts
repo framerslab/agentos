@@ -388,6 +388,15 @@ describe("recall capture 'off'", () => {
     });
   });
 
+  it("the bridge's trace entry names the hybrid recall the manager is set to run, with no record to read it from", async () => {
+    const off = await managerWith({ recall: { capture: 'off', retrieval: 'hybrid' } } as Partial<CognitiveMemoryConfig>);
+    const offBridge = bridgeOver(off, 1600);
+    const context = await offBridge.bridge.assembleContext(QUERY);
+    expect(context?.capture).toBeUndefined();
+    expect(offBridge.entries).toHaveLength(1);
+    expect(offBridge.entries[0].retrieval).toBe('hybrid');
+  });
+
   it('a retrieval builds no recall report and no rerank record, and the rerank still orders the traces', async () => {
     const on = await managerWith({ recall: { capture: 'metadata' }, rerankerService: serviceOf(lastFirstReranker('cohere')) } as Partial<CognitiveMemoryConfig>);
     const off = await managerWith({ recall: { capture: 'off' }, rerankerService: serviceOf(lastFirstReranker('cohere')) } as Partial<CognitiveMemoryConfig>);

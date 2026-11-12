@@ -1004,7 +1004,7 @@ await tutor.close();
 
 With `runtime: 'gmi'` (or [`gmi()`](https://github.com/framerslab/agentos/blob/master/src/api/gmi.ts), the same function under its own name), every session is a Generalized Mind Instance built from the options, and `memory` turns on cognitive memory: one manager for the sessions, scoped per user, embedding with `memory.embedding` (unset, a model picked from the global default provider or the environment's keys). `cognition: 'full'` adds sentiment tracking and the metaprompt presets. Of the `MemoryConfig` fields, this path reads `embedding`, `consolidation`, `persistAccessState`, `store` and `recall`; it does not read `types`, `working` or `shared`. `memory.store` (`{ path }`, a SQLite file, or `{ adapter, brainId? }`, a host's storage adapter) keeps the agent's memory and its learning store there, so an agent built again on it recalls what its users said; it needs `learning.agentKey`. The default runtime reads only the `memory.working` callback described above and `memory.recall.budget.totalTokens` (below). [GMIs from agent()](../GMI.md#gmis-from-agent) lists what each option does on this path.
 
-`memory.recall` sets the memory block's budget and what each turn records of its recall:
+`memory.recall` sets the memory block's budget, how each turn finds its memories and what it records of its recall:
 
 ```ts
 const tutor = agent({
@@ -1012,7 +1012,7 @@ const tutor = agent({
   provider: 'openai',
   memory: {
     embedding: { provider: 'openai' },
-    recall: { budget: { totalTokens: 2400 }, capture: 'off' },
+    recall: { budget: { totalTokens: 2400 }, retrieval: 'hybrid', capture: 'off' },
   },
 });
 ```
@@ -1020,14 +1020,15 @@ const tutor = agent({
 | Field | Default | What it does |
 |---|---|---|
 | `budget.totalTokens` | 1600 | The budget of the whole memory block a turn sends, its preamble included, in tokens of about four characters. An integer of at least 0; at 0 the turn sends no block. A model whose share of the prompt for retrieved context (20% of its context, less the turn's RAG and long-term-memory text) is smaller is sent the block rendered again at that remainder, from the same recall ([Budget and the prompt share](../memory/COGNITIVE_MEMORY.md#budget-and-the-prompt-share)). |
+| `retrieval` | `'dense'` | How a turn finds its memories. `'dense'`: by meaning, shown in Relevant Memories and Recent Experiences. `'hybrid'`: by meaning, by the turn's exact words (the store's full-text index with `memory.store`, an in-process index without it) and by recency, fused into one deduped pool and shown as one Relevant Memories section. Both embed the query once and call no other vendor ([Recall](../memory/COGNITIVE_MEMORY.md#recall)). |
 | `capture` | `'metadata'` | What a turn records of its recall: `'metadata'` puts the record on a session's `send()` result (`memoryRecall`) and on its `stream()` result (a `memoryRecall` promise, which also settles with the record when the turn fails after its memory assembly), `'off'` records nothing. `'metadata+stream'` records the same on these sessions, whose `stream()` parts carry no memory part; the record goes on a runtime stream only for a host of `AgentOS.create()` whose memory manager sets that value. The record holds ids, ranks, scores, counts and timings, never a memory's text ([Recall Capture](../memory/COGNITIVE_MEMORY.md#recall-capture)). |
 
 The construction rules:
 
-- With `runtime: 'gmi'` and memory on, both fields go to the agent's memory manager, and `memoryProviderOptions.tokenBudget` does not size the block. When it is set and no `memoryProvider.getContext` reads it, the agent writes one `memory.recall.option_ignored` line at construction (`generate()` and `stream()` run without cognitive memory and still pass it to a provider's `getContext`).
+- With `runtime: 'gmi'` and memory on, the fields go to the agent's memory manager, and `memoryProviderOptions.tokenBudget` does not size the block. When it is set and no `memoryProvider.getContext` reads it, the agent writes one `memory.recall.option_ignored` line at construction (`generate()` and `stream()` run without cognitive memory and still pass it to a provider's `getContext`).
 - A `cognition.memory` of the agent's own replaces `memory` for cognitive memory, its `recall` included: set `recall` inside `cognition.memory`. A `memory.recall` set beside it is applied nowhere, and the agent writes one `memory.recall.option_ignored` line at construction (`option: 'memory_recall'`).
-- Without `runtime: 'gmi'`, or with memory off, `budget.totalTokens` is the `tokenBudget` handed to `memoryProvider.getContext` when `memoryProviderOptions.tokenBudget` is unset; the two set to different values throw at construction naming both, and `capture` throws: no cognitive memory runs to record anything. With no `memoryProvider.getContext` to read it, a set `budget.totalTokens` is applied nowhere, and the agent writes one `memory.recall.option_ignored` line at construction (`option: 'recall_budget'`).
-- A `budget.totalTokens` that is not an integer of at least 0, a `capture` outside its three values, or a `recall` or `budget` that is not an object (`recall: 'off'`, `budget: 2400`), throws a `RecallOptionError` at construction naming the field.
+- Without `runtime: 'gmi'`, or with memory off, `budget.totalTokens` is the `tokenBudget` handed to `memoryProvider.getContext` when `memoryProviderOptions.tokenBudget` is unset; the two set to different values throw at construction naming both, and `capture` and `retrieval` throw: no cognitive memory runs to record or recall anything. With no `memoryProvider.getContext` to read it, a set `budget.totalTokens` is applied nowhere, and the agent writes one `memory.recall.option_ignored` line at construction (`option: 'recall_budget'`).
+- A `budget.totalTokens` that is not an integer of at least 0, a `capture` outside its three values, a `retrieval` other than `'dense'` and `'hybrid'`, or a `recall` or `budget` that is not an object (`recall: 'off'`, `budget: 2400`), throws a `RecallOptionError` at construction naming the field.
 
 Each refusal writes one `memory.recall.option_rejected` line before the throw.
 

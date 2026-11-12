@@ -18,6 +18,10 @@ export class WordHashEmbedder {
   calls = 0;
   empty = false;
   fail = false;
+  /** The vector size, for a memory built over this embedder (`createAgentCognitiveMemory`). */
+  async getEmbeddingDimension() {
+    return 32;
+  }
   async generateEmbeddings(input: { texts: string | string[] }) {
     this.calls += 1;
     if (this.fail) throw new Error('embedding provider down');
