@@ -1324,6 +1324,56 @@ describe.each(STORES)('scopes kept apart on every path, on %s', (store) => {
     expect(await contentsUnder(brain, A)).toEqual(['Alice drinks espresso.', 'Alice said she likes tea.']);
   });
 
+  it('a JSON export made while a page is rewritten lists, for each page, chunks it carries', async () => {
+    const { memory, brain } = await open(store);
+    const pages = new UserWikiStore({ scopeId: A, pages: memory, chunk });
+    await pages.writePage(P('Alice likes tea.'));
+    // Right after the export has read the traces, the page is rewritten: new chunks, a new row.
+    const TRACES = 'SELECT * FROM memory_traces WHERE brain_id = ?';
+    let fired = false;
+    const rewriteAfterTraces = (all: Brain['all']): Brain['all'] =>
+      (async (sql: string, params?: unknown) => {
+        const rows = await all(sql, params as never);
+        if (!fired && sql.trim() === TRACES) {
+          fired = true;
+          await pages.writePage(P('Alice keeps a ferret.'));
+        }
+        return rows;
+      }) as unknown as Brain['all'];
+    const handle = brain as unknown as {
+      all: Brain['all'];
+      readConsistently?: <T>(read: (source: { all: Brain['all'] }) => Promise<T>) => Promise<T>;
+    };
+    handle.all = rewriteAfterTraces(brain.all.bind(brain));
+    const readConsistently = handle.readConsistently?.bind(brain);
+    if (readConsistently) {
+      handle.readConsistently = (read) =>
+        readConsistently((source) =>
+          read(
+            new Proxy(source, {
+              get(target, property) {
+                if (property === 'all') return rewriteAfterTraces(target.all.bind(target));
+                const value = Reflect.get(target, property, target);
+                return typeof value === 'function' ? value.bind(target) : value;
+              },
+            }),
+          ),
+        );
+    }
+
+    const exported = JSON.parse(await memory.exportToString()) as {
+      traces: Array<{ id: string }>;
+      pages: Array<{ chunk_ids: string }>;
+    };
+
+    expect(fired).toBe(true);
+    const traceIds = new Set(exported.traces.map((trace) => trace.id));
+    expect(exported.pages).toHaveLength(1);
+    for (const page of exported.pages) {
+      for (const id of JSON.parse(page.chunk_ids) as string[]) expect(traceIds.has(id)).toBe(true);
+    }
+  });
+
   it("a JSON import keeps a page the brain already holds, and brings none of the file's chunks for it", async () => {
     const { json } = await exportedJson();
     const { memory, brain } = await open(store);
