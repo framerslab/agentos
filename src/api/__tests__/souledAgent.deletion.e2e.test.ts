@@ -773,6 +773,46 @@ describe('retention', () => {
     expect(lines('memory.retention_swept')[0]).toMatchObject({ traces: 2, pages: 1, scopes: 1 });
   });
 
+  it('finishes at the next sweep what a page that could not be deleted stopped', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const start = Date.now();
+    const { a } = await open({ retention: { traces: { days: 1 } } });
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await a.memory!.compileWiki();
+    expect(pagesOf(keyOf(alice))).toHaveLength(1);
+
+    at(start + 2 * DAY);
+    // The page's rows cannot be deleted once: the sweep stops there.
+    vi.spyOn(a.memory!, 'deletePageRows').mockRejectedValueOnce(new Error('the page is held'));
+    await expect(a.sweepRetention!()).rejects.toThrow('the page is held');
+
+    // The next sweep still finds the page by the expired traces it was built from, and deletes both.
+    expect(await a.sweepRetention!()).toEqual({ traces: 2, pages: 1, scopes: 1 });
+    expect(tracesOf(keyOf(alice))).toEqual([]);
+    expect(pagesOf(keyOf(alice))).toEqual([]);
+    expect(registryOf(keyOf(alice))).toEqual([]);
+    expect(JSON.stringify(rows(storeFile(), 'SELECT content FROM memory_traces'))).not.toContain('LARK-7');
+  });
+
+  it('rewrites the vector index at the next sweep when the rewrite after its deletes failed', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const start = Date.now();
+    const { a } = await open({ retention: { traces: { days: 1 } } });
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+
+    at(start + 2 * DAY);
+    const rewrite = vi.spyOn(a.memory!, 'rebuildVectorIndex').mockRejectedValueOnce(new Error('the index file is held'));
+    const checkpoint = vi.spyOn(a.memory!, 'checkpointLog');
+    await expect(a.sweepRetention!()).rejects.toThrow('the index file is held');
+    expect(tracesOf(keyOf(alice))).toEqual([]);
+    // The log is emptied of the deleted text all the same.
+    expect(checkpoint).toHaveBeenCalledTimes(1);
+
+    // Nothing more expired, and the rewrite the deletes left is still owed: the next sweep runs it.
+    expect(await a.sweepRetention!()).toEqual({ traces: 0, pages: 0, scopes: 0 });
+    expect(rewrite).toHaveBeenCalledTimes(2);
+  });
+
   it('rebuilds a page from the traces that survive, in one model call', async () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     const start = Date.now();
