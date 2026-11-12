@@ -65,6 +65,28 @@ describe('spokenMatch', () => {
   it('reads a grouped number in any script', () => {
     expect(spokenMatch('१,०००', 'एक हज़ार', 'hi').match).toBe(true);
   });
+  it('compares a digit run with a leading zero as written, so a dropped zero of a code does not match', () => {
+    expect(spokenMatch('Your code is 0100', 'Your code is one hundred', 'en').match).toBe(false);
+    expect(spokenMatch('Agent 007', 'Agent seven', 'en').match).toBe(false);
+    expect(spokenMatch('Agent 007', 'Agent 007', 'en').match).toBe(true);
+    expect(foldNumbers(['0100', '0', '००७'], 'en')).toEqual(['0100', '0', '007']);
+    expect(spokenMatch('0', 'zero', 'en').match).toBe(true);
+  });
+  it("reads a grouped number in the grouping of the tag's own region", () => {
+    // French groups with a narrow no-break space, which NFKC makes a space; written as an escape for the lint step.
+    expect(spokenMatch('1 000 personnes', 'mille personnes', 'fr').match).toBe(true);
+    expect(spokenMatch('1 000 personnes', 'mille personnes', 'fr-FR').match).toBe(true);
+    expect(spokenMatch('12 345', 'douze mille trois cent quarante-cinq', 'fr').match).toBe(true);
+    expect(spokenMatch('Tengo 1,000 gatos', 'Tengo mil gatos', 'es-MX').match).toBe(true);
+    expect(spokenMatch('Tengo 1.000 gatos', 'Tengo mil gatos', 'es').match).toBe(true);
+    expect(spokenMatch('10 000', 'dez mil', 'pt-PT').match).toBe(true);
+    // Where a region writes the other point as its decimal mark, the number compares as written.
+    expect(spokenMatch('Tengo 1,000 gatos', 'Tengo mil gatos', 'es-ES').match).toBe(false);
+    expect(spokenMatch('Tengo 1.000 gatos', 'Tengo mil gatos', 'es-MX').match).toBe(false);
+    // A language that does not group with spaces keeps two numbers written side by side apart.
+    expect(spokenMatch('We need 3 100 chairs', 'We need three thousand one hundred chairs', 'en').match).toBe(false);
+    expect(spokenMatch('We need 3 100 chairs', 'We need three one hundred chairs', 'en').match).toBe(true);
+  });
   it('reads a word with an apostrophe as one word without it', () => {
     expect(spokenMatch("don't", 'dont', 'en').match).toBe(true);
     expect(spokenWords("Don’t stop, l'homme! 3:15", 'en')).toEqual(['dont', 'stop', 'lhomme', '3:15']);

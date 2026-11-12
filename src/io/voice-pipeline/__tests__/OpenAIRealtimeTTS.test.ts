@@ -972,6 +972,58 @@ describe('OpenAIRealtimeTTS against a local Realtime server', () => {
       });
     }
 
+    for (const status of ['completed', 'failed'] as const) {
+      it(`a 'reply_transcript' listener that flushes no text gets one end for a ${status} reply, read from its status`, async () => {
+        const session = await startWithTranscript();
+        const events: string[] = [];
+        session.on('flush_complete', () => events.push('flush_complete'));
+        session.on('error', (error: Error) => events.push(`error: ${error.message}`));
+        let nested: { settled: boolean } | undefined;
+        session.on('reply_transcript', () => {
+          nested = watch(session.flush());
+        });
+        session.pushTokens('A reply.');
+        const flush = watch(session.flush());
+        await until(() => server.running.size === 1, 'the response');
+        await delay(SOCKET_TURN_MS);
+
+        if (status === 'completed') server.finish(server.responseId(0));
+        else server.finish(server.responseId(0), 'failed', { type: 'failed', error: { code: 'server_error', message: 'The model failed' } });
+        await until(() => flush.settled && nested?.settled === true, 'both flushes to settle');
+        await delay(SOCKET_TURN_MS);
+
+        expect(events).toEqual(status === 'completed' ? ['flush_complete'] : ['error: The model failed']);
+        expect(server.sent('response.create')).toHaveLength(1);
+      });
+    }
+
+    it("a 'reply_transcript' listener that flushes text starts that reply, and the two end once", async () => {
+      const session = await startWithTranscript();
+      const log = record(session);
+      let spoke = false;
+      session.on('reply_transcript', () => {
+        if (spoke) return;
+        spoke = true;
+        session.pushTokens('Second reply.');
+        void session.flush();
+      });
+      session.pushTokens('First reply.');
+      const flush = watch(session.flush());
+      await until(() => server.running.size === 1, 'the first response');
+      await delay(SOCKET_TURN_MS);
+
+      server.finish(server.responseId(0));
+      await until(() => server.sent('response.create').length === 2, 'the second response');
+      await delay(SOCKET_TURN_MS);
+      expect(log.flushes).toBe(0);
+      server.finish(server.responseId(1));
+      await until(() => flush.settled, 'the flush to settle');
+      await delay(SOCKET_TURN_MS);
+
+      expect(log.flushes).toBe(1);
+      expect(log.errors).toEqual([]);
+    });
+
     it('emits no transcript with the option unset', async () => {
       const session = await tts.startSession({ voice: 'shimmer', language: 'en' });
       open.push(session);
