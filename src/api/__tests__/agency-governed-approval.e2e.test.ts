@@ -10,7 +10,7 @@ import { resolveStorageAdapter, type StorageAdapter } from '@framers/sql-storage
 const fetchMock = vi.fn();
 vi.stubGlobal('fetch', fetchMock);
 
-import { agency } from '../agency.js';
+import { agency, runPostApprovalGuardrails } from '../agency.js';
 import { hitl } from '../hitl.js';
 import type { ApprovalRequest } from '../types.js';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry.js';
@@ -79,5 +79,22 @@ describe('(n) an approval callback that throws what it was shown', () => {
     expect(warned.mock.calls.filter(([first]) => /callback threw/.test(String(first)))).toEqual([]);
     expect(mute.execute).toHaveBeenCalledTimes(4);
     expect(audit.outcomes()).toEqual(['executed', 'executed', 'executed', 'executed']);
+  });
+});
+
+describe("the post-approval check's guardrailResult callback, called with a host's own callbacks", () => {
+  afterEach(() => { resetLoggerFactory(); vi.restoreAllMocks(); });
+
+  it('a callback that throws what it was shown writes one typed line and nothing to the console, and the check still blocks', async () => {
+    const lines = capture();
+    const warned = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const quote = message('m1').text;
+    const args = { evidence: { quotes: [{ messageId: 'm1', quote }] }, command: 'rm -rf /tmp/cache' };
+    const result = await runPostApprovalGuardrails('mute_in_room', args, ['code-safety'], {
+      guardrailResult: () => { throw new Error(`the check saw ${quote}`); },
+    });
+    expect(result).toMatchObject({ passed: false, guardrailId: 'code-safety' });
+    expect(lines.filter((line) => line.event === 'agency.callback_failed')).toEqual([expect.objectContaining({ callback: 'guardrailResult', type: 'Error', code: 'unknown' })]);
+    expect(JSON.stringify([lines, warned.mock.calls])).not.toContain('worthless');
   });
 });
