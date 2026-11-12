@@ -1131,6 +1131,57 @@ describe('the run owner', () => {
     }
   });
 
+  it("refuses to finish a cut run from a copy whose key another tab's finish has changed while a third tab runs it, and draws the run from its record as stored", async () => {
+    const store = new MemoryKeyValueStore();
+    await store.set('lib/j/r8', { id: 'r8', key: KEY, account: ACCOUNT, kind: 'library', way: null, unit: 'sessions', chosen: null, counts: { total: 5, pending: 5, applied: 0, skipped: 0, failed: 0 }, items: [], state: 'running', cut: 'session', phase: null, began: 1, progressed: 2 });
+    const locks = memoryLocks();
+    // On channels of their own, so the first owner keeps the copy it read, under the first key.
+    const stale = owner(store, locks, bus());
+    const second = owner(store, locks, bus());
+    const third = owner(store, locks, bus());
+    const hold = deferred();
+    try {
+      await stale.records();
+      expect(stale.snapshot().runs[0]?.status).toBe('cut');
+      // The second tab finishes the run under another pick's key and is cut again.
+      const moved = await second.finish('r8', {
+        ...countingJob(5, []),
+        key: 'b'.repeat(64),
+        async run(context) {
+          context.counts({ applied: 1, pending: 4 });
+          await context.cut('session');
+          return { ended: 'finished', counts: context.record().counts };
+        },
+      });
+      expect(moved).toEqual({ id: 'r8' });
+      await second.whenIdle();
+      expect((await store.get<RunRecord>('lib/j/r8'))?.key).toBe('b'.repeat(64));
+      // A third tab finishes it under a third key and is still running it.
+      expect(await third.finish('r8', { ...countingJob(1, [() => hold.promise]), key: 'c'.repeat(64) })).toEqual({ id: 'r8' });
+      let wrote = false;
+      const late = await stale.finish('r8', {
+        ...countingJob(1, []),
+        key: 'd'.repeat(64),
+        async run(context) {
+          await context.write(async () => { wrote = true; return true; });
+          return { ended: 'finished', counts: context.record().counts };
+        },
+      });
+      await stale.whenIdle();
+      expect(late).toEqual({ refused: 'another-tab' });
+      expect(wrote).toBe(false);
+      expect((await store.get<RunRecord>('lib/j/r8'))?.key).toBe('c'.repeat(64));
+      expect(stale.snapshot().runs).toEqual([expect.objectContaining({ status: 'watched', record: expect.objectContaining({ id: 'r8', key: 'c'.repeat(64) }) })]);
+      hold.resolve();
+      await third.whenIdle();
+    } finally {
+      hold.resolve();
+      stale.close();
+      second.close();
+      third.close();
+    }
+  });
+
   it("draws a cut run that another tab finishes as running again, and counts its finish", async () => {
     const store = new MemoryKeyValueStore();
     const locks = memoryLocks();
