@@ -416,6 +416,8 @@ The exceptions:
 - A soul that fails to load throws `SoulLoadError` when the agent is built, unless it is given as `{ path, optional: true }` or `{ content, optional: true }`.
 - On the full runtime, the trait paragraph from the `hexaco:` scores reaches the prompt with or without a learning layer; with one, the layer prepares it each turn ([GMI.md](./GMI.md#learning)).
 
+A product that serves other people with a souled agent is the controller of what memory holds: [Your Duties as the Controller](./safety/MEMORY_HOST_DUTIES.md) says what the library does and what is yours.
+
 ## Loading Order at Agent Boot
 
 1. **SOUL.md** → the first section of the system prompt (the "character sheet")

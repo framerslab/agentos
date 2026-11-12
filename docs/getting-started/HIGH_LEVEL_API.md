@@ -1101,6 +1101,8 @@ A person's own memory: **`await agent.exportUserMemory(userId)`** returns their 
 
 One `Memory` facade backs both the live memory and the wiki. The operator's pages are markdown files and the source of truth for themselves: their index entries in the store are rebuilt from them. Per-user traces and pages live in the store alone. `souledAgent()` accepts every `agent()` option and returns the same `Agent`, plus `agent.memory` (the store) when the soul resolves to a workspace directory. An inline soul (`{ content }`) has no workspace, so it falls back to a plain `agent()` and says so in one warning line. Closing the agent also closes the store. What applies on each way of loading a soul is tabled in [Soul Files](../SOUL_FILES.md#what-applies-on-each-path).
 
+Before you serve other people with memory on, read [Your Duties as the Controller](../safety/MEMORY_HOST_DUTIES.md).
+
 Runnable examples in the package source:
 
 - [`examples/high-level-api.mjs`](https://github.com/framerslab/agentos/blob/master/examples/high-level-api.mjs)

@@ -72,7 +72,7 @@ Read the report. `complete: false` means the deletion is not finished: a write w
 
 Deletion never uses `Memory.forget()`, which is a soft delete that keeps the text. The library never asks a model to take one person out of a page: a page is deleted whole.
 
-Every SQLite memory store the library opens from a file path, and the tombstone copy, are opened with `secure_delete` on, so a deleted row is overwritten in the file. There is no option to turn it off. On PostgreSQL a deleted row stays in the table file until `VACUUM` removes it; the schedule is yours. A store on an adapter you pass is opened by you: set the pragma yourself.
+Every SQLite memory store the library opens from a file path, and the tombstone copy, are opened with `secure_delete` on, so a deleted row is overwritten in the file once the deletion checkpoints the write-ahead log. The deletion report names a log it could not empty. There is no option to turn it off. On PostgreSQL a deleted row stays in the table file until `VACUUM` removes it; the schedule is yours. A store on an adapter you pass is opened by you: set the pragma yourself.
 
 ### Tombstones that survive a restore
 
@@ -96,7 +96,7 @@ Remembered text enters the prompt as data: a user-role block of JSON, marked, la
 
 ### Hard limits last
 
-The soul's `hardLimits` are the last block of the system prompt on every path, after your own `systemBlocks` too. A configured soul that fails to load throws; `soul: { path, optional: true }` is the option for an agent that may run without one. Hard limits are prompt text the model reads, not a check that enforces them.
+The soul's `hardLimits` close the assembled system prompt, after your own `systemBlocks` too. A call with `planning` on adds its plan as a system message after the limits. A configured soul that fails to load throws; `soul: { path, optional: true }` is the option for an agent that may run without one. Hard limits are prompt text the model reads, not a check that enforces them.
 
 ### A policy per account, and a screen
 
