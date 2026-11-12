@@ -55,6 +55,11 @@ describe('the image guard: known material first', () => {
     expect(() => ImageGuardrail.create({ id: 'images', checks: [] })).toThrow(TypeError);
     expect(() => ImageGuardrail.create({ id: 'images', checks: [{ ...hash, onError: 'skip' }, model] })).toThrow(TypeError);   // a match check is never a signal
     expect(() => ImageGuardrail.create({ id: 'images', checks: [model] })).not.toThrow();                                      // a host's own generated images
+    // options that would make a guard that cannot judge what it lets through
+    expect(() => ImageGuardrail.create({ id: 'images', checks: [model], maxImages: 0 })).toThrow(TypeError);
+    expect(() => ImageGuardrail.create({ id: 'images', checks: [model], timeoutMs: 1.5 })).toThrow(TypeError);
+    expect(() => ImageGuardrail.create({ id: 'images', checks: [{ ...model, check: undefined as never }] })).toThrow(TypeError);
+    expect(() => ImageGuardrail.create({ id: 'images', checks: [model], loadImage: 'https://images.example/' as never })).toThrow(TypeError);
   });
 
   it('(h) captures an image once and hands every check its own copy of the same bytes, never the URL', async () => {
@@ -102,6 +107,18 @@ describe('the image guard: a check that cannot answer', () => {
     expect(alone).toMatchObject(UNAVAILABLE);
   });
 
+  it('a check that answers no verdict counts as a check that threw: refused, or skipped when it is a signal', async () => {
+    const lines = capture();
+    const noVerdict = (id: string, extra: Partial<ImageCheck> = {}) => check(id, 'classify', async () => ({}) as never, extra);
+    const refused = await moderateContent({ images: [png(1)] }, { guards: [ImageGuardrail.create({ id: 'images', checks: [noVerdict('model')] })], context });
+    expect(refused).toMatchObject({ ...UNAVAILABLE, deciding: { reasonCode: 'IMAGE_CHECK_UNAVAILABLE', metadata: { checkId: 'model', imageIndex: 0 } } });
+    const judge = passing('judge', 'classify');
+    const skipped = await moderateContent({ images: [png(1)] }, { guards: [ImageGuardrail.create({ id: 'images', checks: [noVerdict('signal', { onError: 'skip' }), judge] })], context });
+    expect(skipped.outcome).toBe('allow');
+    expect(judge.check).toHaveBeenCalledTimes(1);
+    expect(events(lines, 'image_guard.check_failed').map((line) => [line.checkId, line.posture])).toEqual([['model', 'refuse'], ['signal', 'skip']]);
+  });
+
   it('(g) a passing match check does not judge an image: with the only model check skipped, the image is refused', async () => {
     const guard = ImageGuardrail.create({ id: 'images', checks: [passing('hash', 'match'), failing('signal', { onError: 'skip' })], requireMatch: true });
     const decision = await moderateContent({ images: [png(1)] }, { guards: [guard], context });
@@ -126,6 +143,26 @@ describe('the image guard: what ends a chain', () => {
     const decision = await moderateContent({ images: [png(1), png(2), png(3)] }, { guards: [ImageGuardrail.create({ id: 'images', checks: [first, second] })], context });
     expect(decision).toMatchObject({ outcome: 'hold', unavailable: false, hold: { reviewCode: 'IMAGE_REVIEW' }, deciding: { metadata: { imageIndex: 0, checkId: 'first' } } });
     expect(second.check.mock.calls.map(([image]) => (image as ImageUnderReview).index)).toEqual([1, 2]);
+  });
+
+  it('a model check\'s quarantine ends the evaluation too: no further check runs on that image or any other', async () => {
+    const first = check('first', 'classify', async (image) => (image.index === 0 ? { verdict: 'block', reasonCode: 'KNOWN_MATERIAL', quarantine: true } : { verdict: 'pass' }), { reasonCodes: ['KNOWN_MATERIAL'] });
+    const second = passing('second', 'classify');
+    const decision = await moderateContent({ images: [png(1), png(2)] }, { guards: [ImageGuardrail.create({ id: 'images', checks: [first, second] })], context });
+    expect(decision).toMatchObject({ outcome: 'refuse', unavailable: false, deciding: { reasonCode: 'KNOWN_MATERIAL', metadata: { imageIndex: 0, checkId: 'first', quarantine: true } } });
+    expect(first.check).toHaveBeenCalledTimes(1);
+    expect(second.check).not.toHaveBeenCalled();
+  });
+
+  it('an image of a kind the guard cannot capture is refused at load and never handed to loadImage', async () => {
+    const lines = capture();
+    const loadImage = vi.fn(async () => ({ bytes: new Uint8Array([1]), mimeType: 'image/png' }));
+    const model = passing('model', 'classify');
+    const decision = await moderateContent({ images: [{ type: 'file', data: '/etc/hosts' } as unknown as VisionInputData] }, { guards: [ImageGuardrail.create({ id: 'images', checks: [model], loadImage })], context });
+    expect(decision).toMatchObject({ ...UNAVAILABLE, deciding: { reasonCode: 'IMAGE_CHECK_UNAVAILABLE', metadata: { checkId: 'load', imageIndex: 0 } } });
+    expect(loadImage).not.toHaveBeenCalled();
+    expect(model.check).not.toHaveBeenCalled();
+    expect(events(lines, 'image_guard.check_failed')).toEqual([expect.objectContaining({ checkId: 'load', posture: 'refuse' })]);
   });
 
   it('a code the host listed in stopVendorsOn stops every further model check, and the hold decides', async () => {
