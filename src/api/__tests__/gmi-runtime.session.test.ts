@@ -55,7 +55,7 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
     const k = key(); script('openai', k, { replies: [reply.text('Unguarded.')] });
     const a = agent({ ...base(k), instructions: 'Be brief.' });
     const s = a.session('guarded');
-    const guards = { services: [], context: { userId: 'u1' } };
+    const guards = { services: [], context: { userId: 'u1', sessionId: 'guarded' } };
     await expect(s.send('hi', { guards })).rejects.toThrow("the per-call option 'guards' is not supported on the GMI path");
     expect(() => s.stream('hi', { guards })).toThrow("the per-call option 'guards' is not supported on the GMI path");
     expect(() => a.stream('hi', { guards })).toThrow("the per-call option 'guards' is not supported on the GMI path");
