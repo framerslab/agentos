@@ -581,6 +581,14 @@ export interface MemoryBudgetAllocation {
   graphAssociations: number;
   observationNotes: number;
   persistentMemory: number;
+  /**
+   * The share of the one Relevant Memories section `retrieval: 'hybrid'`
+   * renders in place of Semantic Recall and Recent Episodic. Unset, it is
+   * `semanticRecall + recentEpisodic`. Read only under `'hybrid'`; a hybrid
+   * block's returned allocation sets it, with `semanticRecall` and
+   * `recentEpisodic` at 0.
+   */
+  recall?: number;
 }
 
 /**

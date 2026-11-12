@@ -9,6 +9,7 @@ import type { IVectorStore } from '../../../core/vector-store/IVectorStore.js';
 import type { IEmbeddingManager } from '../../../core/embeddings/IEmbeddingManager.js';
 import type { MemoryBudgetAllocation } from './types.js';
 import type { RecallCaptureMode } from '../retrieval/recall/capture.js';
+import type { RecallConstants } from '../retrieval/recall/fuse.js';
 import type { InfiniteContextConfig } from '../pipeline/context/types.js';
 
 // ---------------------------------------------------------------------------
@@ -499,6 +500,18 @@ export interface MemoryRecallConfig {
    * @default 'metadata'
    */
   capture?: RecallCaptureMode;
+  /**
+   * How a turn finds its memories. `'dense'`: by meaning (the vector query
+   * and its six-signal ranking), shown in Relevant Memories and Recent
+   * Experiences. `'hybrid'`: by meaning, by the turn's exact words (the
+   * store's full-text index through the storage adapter, or an in-process
+   * index where memory has no store) and by recency, fused into one deduped
+   * pool and shown as one Relevant Memories section. Both embed the query
+   * once, and neither calls any other vendor.
+   *
+   * @default 'dense'
+   */
+  retrieval?: 'dense' | 'hybrid';
 }
 
 /**
@@ -521,6 +534,14 @@ export interface ManagerRecallConfig extends MemoryRecallConfig {
    * memory resolved.
    */
   embedder?: { provider: string; model: string };
+  /**
+   * The hybrid recall's fusion and pool constants, each over its starting
+   * value in `RECALL_CONSTANTS` (`rrfK` 60, `denseWeight` 0.7,
+   * `sparseWeight` 0.3, `recencyWeight` 0, `overFetch` 3, `topK` 20,
+   * `nearDuplicate` 0.8, `recentTopK` 10). Read under `retrieval: 'hybrid'`
+   * only. For a bench that tunes them; a product leaves them.
+   */
+  constants?: Partial<RecallConstants>;
 }
 
 /**

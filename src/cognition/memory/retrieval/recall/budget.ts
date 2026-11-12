@@ -11,13 +11,16 @@ import { recallLog } from './log.js';
 export const DEFAULT_RECALL_BUDGET_TOKENS = 1600;
 
 const CAPTURE_MODES: readonly unknown[] = ['off', 'metadata', 'metadata+stream'];
+const RETRIEVAL_MODES: readonly unknown[] = ['dense', 'hybrid'];
+/** The hybrid recall's constants that count candidates, so must be whole numbers of at least 1. */
+const COUNT_CONSTANTS: readonly string[] = ['topK', 'recentTopK', 'overFetch'];
 
 /** Why a recall setting was refused at construction. */
 export type RecallOptionRejection = 'conflict' | 'unsupported_provider' | 'unsupported_runtime' | 'invalid_value';
 
 /**
  * A recall setting refused at construction. `option` is the field under `memory.recall` (`budget.totalTokens`,
- * `budget`, `capture`), or `recall` for the setting itself.
+ * `budget`, `capture`, `retrieval`, a manager's `constants`), or `recall` for the setting itself.
  */
 export class RecallOptionError extends Error {
   constructor(
@@ -47,7 +50,9 @@ function isSettingsObject(value: unknown): boolean {
 
 /**
  * Checks a recall setting's values: the setting and its `budget` objects, `budget.totalTokens` an integer of at least
- * 0, `capture` one of its three modes. A `null` or `undefined` setting, or field, is unset.
+ * 0, `capture` one of its three modes, `retrieval` `'dense'` or `'hybrid'`, and a manager's `constants` an object
+ * whose values are finite numbers of at least 0, `topK`, `recentTopK` and `overFetch` integers of at least 1, and
+ * `nearDuplicate` above 0 and at most 1. A `null` or `undefined` setting, or field, is unset.
  *
  * @param recall - The setting.
  * @param where - What opens the message (`gmi()`, `agent()`, `CognitiveMemoryManager`).
@@ -69,6 +74,32 @@ export function assertRecallConfig(recall: ManagerRecallConfig | null | undefine
   }
   if (recall.capture != null && !CAPTURE_MODES.includes(recall.capture)) {
     rejectRecallOption('capture', 'invalid_value', `${where}: memory.recall.capture must be 'off', 'metadata' or 'metadata+stream'.`);
+  }
+  if (recall.retrieval != null && !RETRIEVAL_MODES.includes(recall.retrieval)) {
+    rejectRecallOption('retrieval', 'invalid_value', `${where}: memory.recall.retrieval must be 'dense' or 'hybrid'.`);
+  }
+  const constants: unknown = recall.constants;
+  if (constants != null) {
+    if (!isSettingsObject(constants)) {
+      rejectRecallOption('constants', 'invalid_value', `${where}: recall.constants must be an object of numbers.`);
+    }
+    for (const [name, value] of Object.entries(constants as Record<string, unknown>)) {
+      if (value == null) continue;
+      const finite = typeof value === 'number' && Number.isFinite(value) && value >= 0;
+      const fits = COUNT_CONSTANTS.includes(name)
+        ? finite && Number.isInteger(value) && value >= 1
+        : name === 'nearDuplicate'
+          ? finite && value > 0 && value <= 1
+          : finite;
+      if (!fits) {
+        const rule = COUNT_CONSTANTS.includes(name)
+          ? 'an integer of at least 1'
+          : name === 'nearDuplicate'
+            ? 'a number above 0 and at most 1'
+            : 'a finite number of at least 0';
+        rejectRecallOption('constants', 'invalid_value', `${where}: recall.constants.${name} must be ${rule}.`);
+      }
+    }
   }
 }
 

@@ -181,6 +181,17 @@ export interface RetrievalRecallReport {
   legs?: MemoryRecallCapture['legs'];
   /** Each trace the reranker scored, with the score it gave before the blend. Absent when no rerank answered. */
   rerankScores?: Record<string, number>;
+  /** `hybrid` when the retrieval fused the dense, exact-words and recency legs; `dense` (or absent) otherwise. */
+  retrieval?: 'dense' | 'hybrid';
+  /**
+   * Under `hybrid`: the whole recall pool in fused order, the candidates the cut at `topK` left out and the ones the
+   * dedupe dropped (`duplicateOf`) included, each with its ranks and fused score.
+   */
+  ranked?: RankedRecallCandidate[];
+  /** Under `hybrid`: the full-text backend the exact-words leg read, or `none` when that leg did not run. */
+  lexicalBackend?: MemoryRecallCapture['lexicalBackend'];
+  /** Under `hybrid`: milliseconds of the legs (run together), the fusion and the dedupe. */
+  timings?: { legsMs: number; fuseMs: number; dedupeMs: number };
 }
 
 /** A ranked candidate before assembly. */
@@ -189,13 +200,17 @@ export interface RankedRecallCandidate {
   ranks: MemoryRecallCandidate['ranks'];
   fusedScore: number;
   rerankScore?: number;
+  /** Set when the hybrid recall's dedupe dropped it: the candidate that holds the same memory. */
+  duplicateOf?: string;
 }
 
 /**
  * The candidates' outcomes from the assembler's line report.
  *
- * Each ranked candidate takes its line's outcome, reason, tokens and section;
- * one the assembler gave no line is left out for `budget`, with 0 tokens. A
+ * A ranked candidate the dedupe dropped (`duplicateOf`) is left out for
+ * `dedupe`, with 0 tokens, whatever the lines say. Each other ranked candidate
+ * takes its line's outcome, reason, tokens and section; one the assembler gave
+ * no line is left out for `budget`, with 0 tokens. A
  * line for a memory no leg returned (an association's trace, the involuntary
  * memory) is added after the ranked candidates, with empty `ranks` and a
  * `fusedScore` of 0, so the included candidates are every memory the block
@@ -210,6 +225,7 @@ export function candidatesFrom(
 ): MemoryRecallCandidate[] {
   const byId = new Map(lines.map((line) => [line.id, line]));
   const candidates: MemoryRecallCandidate[] = ranked.map((candidate) => {
+    if (candidate.duplicateOf !== undefined) return { ...candidate, outcome: 'left_out' as const, reason: 'dedupe' as const, tokens: 0 };
     const line = byId.get(candidate.id);
     return line
       ? { ...candidate, outcome: line.outcome, ...(line.reason ? { reason: line.reason } : {}), tokens: line.tokens, section: line.section }
