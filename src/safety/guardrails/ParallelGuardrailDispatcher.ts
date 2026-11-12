@@ -5,9 +5,11 @@
  * (sequential, order-dependent) from classifiers (parallel, independent).
  *
  * **Phase 1 (Sequential):** Guardrails with `config.canSanitize === true`
- * run one-at-a-time in registration order. Each sanitizer receives the
- * cumulative output of all preceding sanitizers. A BLOCK here short-circuits
- * the entire pipeline.
+ * or `config.sequential === true` run one-at-a-time in registration order.
+ * Each sanitizer receives the cumulative output of all preceding sanitizers.
+ * A BLOCK here short-circuits the entire pipeline, so a screen that asks to
+ * run first keeps the text it refuses from every phase 2 guard. A SANITIZE
+ * from a phase 1 guard without `canSanitize` is downgraded to FLAG.
  *
  * **Phase 2 (Parallel):** Remaining guardrails run concurrently via
  * `Promise.allSettled`. They receive the fully-sanitized text from Phase 1.
@@ -55,6 +57,7 @@ import {
 import { renderPlainText } from '../../api/runtime/turnFinalResponse';
 import { sanitizedFinalResponse } from './sanitizedFinalResponse';
 import { listedErrorFields, safeWord } from '../../core/logging/events.js';
+import { carryGuardFailure, markGuardFailure } from './guardFailure';
 import { guardrailLog } from './log.js';
 
 // ---------------------------------------------------------------------------
@@ -74,14 +77,17 @@ const ACTION_SEVERITY: Record<GuardrailAction, number> = {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Synthetic BLOCK returned when a fail-closed guardrail throws or times out. */
-function guardrailErrorBlock(reason: string): GuardrailEvaluationResult {
-  return {
+/**
+ * Synthetic BLOCK returned when a fail-closed guardrail throws or times out. `metadata.cause` says which, and
+ * `metadata.guardrailId` names the guard when it has an id.
+ */
+function guardrailErrorBlock(reason: string, cause: 'error' | 'timeout', svc: IGuardrailService): GuardrailEvaluationResult {
+  return markGuardFailure({
     action: GuardrailAction.BLOCK,
     reason,
     reasonCode: 'GUARDRAIL_ERROR',
-    metadata: { failClosed: true },
-  };
+    metadata: { failClosed: true, cause, ...(svc.id ? { guardrailId: svc.id } : {}) },
+  });
 }
 
 const GUARDRAIL_TIMEOUT = Symbol('guardrail-timeout');
@@ -134,13 +140,13 @@ async function callWithTimeout(
 
     if (result === GUARDRAIL_TIMEOUT) {
       failed(svc, stage, 'timeout');
-      return failClosed ? guardrailErrorBlock('Guardrail evaluation timed out') : null;
+      return failClosed ? guardrailErrorBlock('Guardrail evaluation timed out', 'timeout', svc) : null;
     }
 
     return result;
   } catch (error) {
     failed(svc, stage, 'error', error);
-    return failClosed ? guardrailErrorBlock('Guardrail evaluation threw an error') : null;
+    return failClosed ? guardrailErrorBlock('Guardrail evaluation threw an error', 'error', svc) : null;
   }
 }
 
@@ -167,6 +173,11 @@ function worstAction(evaluations: GuardrailEvaluationResult[]): GuardrailAction 
   return worst;
 }
 
+/** Phase 1 holds the guards that can sanitize and the guards that ask to run first. */
+function runsInPhaseOne(svc: IGuardrailService): boolean {
+  return svc.config?.canSanitize === true || svc.config?.sequential === true;
+}
+
 /** Of one phase's settled evaluations: the first BLOCK without a hold, else the first hold, else nothing. */
 function decidingBlock(evaluations: readonly GuardrailEvaluationResult[]): GuardrailEvaluationResult | undefined {
   return evaluations.find((e) => e.action === GuardrailAction.BLOCK && !isGuardrailHold(e)) ?? evaluations.find((e) => isGuardrailHold(e));
@@ -178,8 +189,9 @@ function blockVerdictOf(evaluation: GuardrailEvaluationResult): Pick<GuardrailOu
 }
 
 /**
- * If a Phase 2 guardrail returns SANITIZE, downgrade it to FLAG and write one
- * `guardrail.sanitize_downgraded` line. Concurrent sanitization is
+ * If a Phase 2 guardrail, or a phase 1 guardrail without `canSanitize` (one
+ * that only asks to run first), returns SANITIZE, downgrade it to FLAG and
+ * write one `guardrail.sanitize_downgraded` line. Concurrent sanitization is
  * non-deterministic so we refuse it.
  *
  * @param evaluation - The raw evaluation from Phase 2
@@ -283,10 +295,12 @@ function toolCallGuardsOf(services: IGuardrailService[]): ToolCallGuard[] {
 }
 
 /**
- * The tool-call guards over one TOOL_CALL_REQUEST chunk, in parallel. Once
- * every guard has answered, returns the first BLOCK without a hold by
- * registration order (a SANITIZE counts as one), else the first hold, or every
- * evaluation of a chunk they pass.
+ * The tool-call guards over one TOOL_CALL_REQUEST chunk. The guards with
+ * `config.sequential` answer first, one at a time in registration order, and
+ * the first BLOCK among them (a SANITIZE counts as one) is the verdict before
+ * any other guard is called. The rest run in parallel; once every guard has
+ * answered, returns the first BLOCK without a hold by registration order, else
+ * the first hold, or every evaluation of a chunk they pass.
  */
 async function evaluateToolCallGuards(
   guards: ToolCallGuard[],
@@ -294,33 +308,39 @@ async function evaluateToolCallGuards(
   chunk: AgentOSResponse,
   ragSources: GuardrailOutputPayload['ragSources'],
 ): Promise<GuardrailToolCallVerdict> {
-  const results = await Promise.allSettled(
-    guards.map(({ svc }) =>
-      callWithTimeout(
-        () => svc.evaluateOutput!({ context, chunk, ragSources }),
-        svc,
-        'tool_call',
-      ),
-    ),
-  );
-
-  const evaluations: GuardrailEvaluationResult[] = [];
-  for (let j = 0; j < results.length; j++) {
-    const result = results[j];
+  const slots: (GuardrailEvaluationResult | null)[] = new Array(guards.length).fill(null);
+  const settle = (j: number, result: PromiseSettledResult<GuardrailEvaluationResult | null>): GuardrailEvaluationResult | null => {
     const { svc } = guards[j];
     if (result.status === 'rejected') {
       failed(svc, 'tool_call', 'error', result.reason);
-      continue;
+      return null;
     }
     if (!result.value) {
-      continue;
+      return null;
     }
-
     noteIgnoredHold(result.value, svc, 'tool_call');
     const evaluation = stampGuardrailId(sanitizeOfToolCallAsBlock(result.value, svc), svc);
-    evaluations.push(evaluation);
+    slots[j] = evaluation;
+    return evaluation;
+  };
+  const call = ({ svc }: ToolCallGuard): Promise<GuardrailEvaluationResult | null> =>
+    callWithTimeout(() => svc.evaluateOutput!({ context, chunk, ragSources }), svc, 'tool_call');
+
+  // Screens first: a call one of them refuses reaches no other guard.
+  for (let j = 0; j < guards.length; j++) {
+    if (guards[j].svc.config?.sequential !== true) continue;
+    const [result] = await Promise.allSettled([call(guards[j])]);
+    const evaluation = settle(j, result);
+    if (evaluation?.action === GuardrailAction.BLOCK) {
+      return { outcome: 'block', evaluation };
+    }
   }
 
+  const rest = guards.map((guard, j) => ({ guard, j })).filter(({ guard }) => guard.svc.config?.sequential !== true);
+  const results = await Promise.allSettled(rest.map(({ guard }) => call(guard)));
+  results.forEach((result, k) => settle(rest[k].j, result));
+
+  const evaluations = slots.filter(Boolean) as GuardrailEvaluationResult[];
   // Every guard has answered: a refusal outranks a hold wherever it sits in registration order.
   const block = decidingBlock(evaluations);
   if (block) {
@@ -358,9 +378,10 @@ export class ParallelGuardrailDispatcher {
    * Evaluate user input through registered guardrails using two-phase execution.
    *
    * **Phase 1 (Sequential — sanitizers):**
-   * Guardrails with `config.canSanitize === true` run one-at-a-time in
-   * registration order. Each sees (and may modify) the cumulative sanitized
-   * input. A BLOCK result short-circuits immediately — Phase 2 never runs.
+   * Guardrails with `config.canSanitize === true` or `config.sequential === true`
+   * run one-at-a-time in registration order. Each sees (and, with `canSanitize`,
+   * may modify) the cumulative sanitized input. A BLOCK result short-circuits
+   * immediately — Phase 2 never runs.
    *
    * **Phase 2 (Parallel — classifiers):**
    * All remaining guardrails run concurrently via `Promise.allSettled` on
@@ -392,7 +413,7 @@ export class ParallelGuardrailDispatcher {
 
     for (let i = 0; i < services.length; i++) {
       const svc = services[i];
-      if (svc.config?.canSanitize === true) {
+      if (runsInPhaseOne(svc)) {
         sanitizers.push(svc);
       } else {
         parallel.push({ svc, registrationIndex: i });
@@ -410,8 +431,8 @@ export class ParallelGuardrailDispatcher {
     // -----------------------------------------------------------------
     for (let i = 0; i < services.length; i++) {
       const svc = services[i];
-      // Only Phase 1 services (sanitizers) run sequentially
-      if (svc.config?.canSanitize !== true) {
+      // Only Phase 1 services (sanitizers and screens that run first) run sequentially
+      if (!runsInPhaseOne(svc)) {
         continue;
       }
 
@@ -419,7 +440,7 @@ export class ParallelGuardrailDispatcher {
         continue;
       }
 
-      const evaluation = await callWithTimeout(
+      let evaluation = await callWithTimeout(
         () => svc.evaluateInput!({ context, input: sanitizedInput }),
         svc,
         'input',
@@ -430,6 +451,8 @@ export class ParallelGuardrailDispatcher {
       }
 
       noteIgnoredHold(evaluation, svc, 'input');
+      // a guard that only asks to run first cannot rewrite: its SANITIZE is a FLAG, as a phase 2 guard's is
+      if (svc.config?.canSanitize !== true) evaluation = downgradePhase2Sanitize(evaluation, svc, 'input');
       evaluationSlots[i] = evaluation;
 
       // BLOCK in Phase 1 short-circuits everything — Phase 2 never runs
@@ -521,9 +544,11 @@ export class ParallelGuardrailDispatcher {
   /**
    * Evaluate one TOOL_CALL_REQUEST chunk with the guardrails that evaluate
    * tool calls (`config.evaluateToolCalls`), as {@link wrapOutput} evaluates
-   * the tool-call chunks of a stream: in parallel, a SANITIZE applied as a
-   * BLOCK, the first refusal in registration order the verdict, else the first hold. Services without
-   * the flag are not called.
+   * the tool-call chunks of a stream: the guards with `config.sequential`
+   * first, one at a time, and a BLOCK among them ends the evaluation; the rest
+   * in parallel, a SANITIZE applied as a BLOCK, the first refusal in
+   * registration order the verdict, else the first hold. Services without the
+   * flag are not called.
    *
    * @param services   - Array of guardrail services (already normalized)
    * @param context    - Conversational context for policy decisions
@@ -547,10 +572,12 @@ export class ParallelGuardrailDispatcher {
   /**
    * Wrap a response stream with two-phase guardrail filtering.
    *
-   * Partitions services into four groups (once, up front):
-   * 1. **Streaming sanitizers** (`canSanitize && evaluateStreamingChunks`)
-   * 2. **Streaming parallel** classifiers (`evaluateStreamingChunks && !canSanitize`)
-   * 3. **Final sanitizers** (`canSanitize && !evaluateStreamingChunks`)
+   * Partitions services into four groups (once, up front). "Phase 1" is a
+   * guard with `canSanitize` or `sequential`; a SANITIZE from one without
+   * `canSanitize` is downgraded to FLAG.
+   * 1. **Streaming sanitizers** (phase 1 and `evaluateStreamingChunks`)
+   * 2. **Streaming parallel** classifiers (`evaluateStreamingChunks`, not phase 1)
+   * 3. **Final sanitizers** (every phase 1 guard)
    * 4. **Final parallel** classifiers (the rest with `evaluateOutput`)
    *
    * For each TEXT_DELTA chunk: Phase 1 runs streaming sanitizers sequentially
@@ -592,7 +619,7 @@ export class ParallelGuardrailDispatcher {
 
     // -- Partition into 4 groups once --------------------------------
     /** Streaming sanitizers: Phase 1 for TEXT_DELTA chunks */
-    const streamingSanitizers: IGuardrailService[] = [];
+    const streamingSanitizers: { svc: IGuardrailService; registrationIndex: number }[] = [];
     /** Streaming classifiers: Phase 2 for TEXT_DELTA chunks */
     const streamingParallel: { svc: IGuardrailService; registrationIndex: number }[] = [];
     /** Final sanitizers: Phase 1 for isFinal chunks */
@@ -609,10 +636,11 @@ export class ParallelGuardrailDispatcher {
       }
 
       const isStreaming = svc.config?.evaluateStreamingChunks === true;
-      const isSanitizer = svc.config?.canSanitize === true;
+      // phase 1 of output: the guards that can sanitize and the guards that ask to run first
+      const isSanitizer = runsInPhaseOne(svc);
 
       if (isStreaming && isSanitizer) {
-        streamingSanitizers.push(svc);
+        streamingSanitizers.push({ svc, registrationIndex: i });
       } else if (isStreaming && !isSanitizer) {
         streamingParallel.push({ svc, registrationIndex: i });
       }
@@ -688,7 +716,9 @@ export class ParallelGuardrailDispatcher {
         }
 
         noteIgnoredHold(raw, svc, 'output');
-        const evaluation = stampGuardrailId(raw, svc);
+        let evaluation = stampGuardrailId(raw, svc);
+        // a guard that only asks to run first cannot rewrite: its SANITIZE is a FLAG, as a phase 2 guard's is
+        if (svc.config?.canSanitize !== true) evaluation = downgradePhase2Sanitize(evaluation, svc, 'output');
         outputEvaluations.push(evaluation);
 
         // BLOCK terminates the stream
@@ -827,8 +857,9 @@ export class ParallelGuardrailDispatcher {
         let workingChunk = currentChunk;
 
         // Phase 1: sequential streaming sanitizers
-        for (const svc of streamingSanitizers) {
-          const svcId = svc.id || (svc as any).id || 'unknown';
+        for (const { svc, registrationIndex } of streamingSanitizers) {
+          // an unnamed guard is counted under its place in the registration order, as in phase 2
+          const svcId = svc.id || (svc as any).id || `svc-${registrationIndex}`;
           const currentCount = streamingEvaluationCounts.get(svcId) || 0;
           const maxEvals = svc.config?.maxStreamingEvaluations;
 
@@ -850,7 +881,9 @@ export class ParallelGuardrailDispatcher {
           }
 
           noteIgnoredHold(raw, svc, 'output');
-          const evaluation = stampGuardrailId(raw, svc);
+          let evaluation = stampGuardrailId(raw, svc);
+          // a guard that only asks to run first cannot rewrite: its SANITIZE is a FLAG, as a phase 2 guard's is
+          if (svc.config?.canSanitize !== true) evaluation = downgradePhase2Sanitize(evaluation, svc, 'output');
           outputEvaluations.push(evaluation);
 
           // BLOCK terminates the stream immediately
@@ -1037,7 +1070,7 @@ function guardrailIdOf(evaluation: GuardrailEvaluationResult): string | undefine
 /** The evaluation with its guard's id in `metadata.guardrailId`, when the guard has an id. */
 function stampGuardrailId(evaluation: GuardrailEvaluationResult, svc: IGuardrailService): GuardrailEvaluationResult {
   if (!svc.id) return evaluation;
-  return { ...evaluation, metadata: { ...(evaluation.metadata ?? {}), guardrailId: svc.id } };
+  return carryGuardFailure(evaluation, { ...evaluation, metadata: { ...(evaluation.metadata ?? {}), guardrailId: svc.id } });
 }
 
 /**

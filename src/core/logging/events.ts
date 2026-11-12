@@ -114,6 +114,9 @@ export const AGENTOS_EVENTS = {
   'guardrail.hold_ignored': { guardrailId: 'word', stage: { enum: ['input', 'output', 'tool_call'] } },
   // An onVerdict callback threw; the verdict stands.
   'guardrail.verdict_callback_failed': { type: 'word', code: 'word' },
+  // A moderation entry point decided something other than allow. The code is written only when the deciding guard
+  // lists it in config.reasonCodes or the library made it for a closed guard's failure; never for an allow.
+  'guardrail.verdict': { guardrailId: 'word', stage: { enum: ['input', 'output', 'tool_call'] }, action: { enum: ['flag', 'sanitize', 'hold', 'block'] }, code: 'word', surface: 'word', mode: { enum: ['enforce', 'dry_run'] }, unavailable: { enum: ['yes', 'no'] } },
   // A soul given `optional: true` failed to load; the agent runs without it.
   'soul.load_failed': { optional: { enum: ['yes'] }, type: 'word', code: 'word' },
   // gmi() left out a front matter field that path cannot apply.
