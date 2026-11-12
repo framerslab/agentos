@@ -219,14 +219,20 @@ export class RecallPipeline {
       c,
     );
     // Supplied candidates join the pool before the dedupe and the cut, each at its own score or the pool's lowest. One
-    // whose id the pool holds is not added again.
+    // whose id names a memory the pool or the store holds is that memory, and is not added: it would otherwise share
+    // the id of a stored trace, and hide that trace's graph association. At most `topK × overFetch` are added, as many
+    // as a leg returns, the best-scored first (an unscored one after every scored one); the rest count as ineligible.
     const supplied = Array.isArray(options.supplied) && options.supplied.length > 0 ? admitSupplied(options, now) : null;
     const suppliedIds: string[] = [];
     if (supplied) {
       const held = new Set(pool.map((entry) => entry.id));
       const floor = pool.reduce((low, entry) => Math.min(low, entry.fusedScore), pool.length > 0 ? Number.POSITIVE_INFINITY : 0);
-      for (const { trace, score, undated } of supplied.kept) {
-        if (held.has(trace.id)) continue;
+      const fresh = supplied.kept
+        .filter(({ trace }) => !held.has(trace.id) && store.getTrace(trace.id) === undefined)
+        .sort((a, b) => (b.score ?? Number.NEGATIVE_INFINITY) - (a.score ?? Number.NEGATIVE_INFINITY) || 0);
+      const admitted = fresh.slice(0, fetch);
+      supplied.ineligible += fresh.length - admitted.length;
+      for (const { trace, score, undated } of admitted) {
         suppliedIds.push(trace.id);
         pool.push({ id: trace.id, trace, ranks: { supplied: suppliedIds.length }, fusedScore: score ?? floor, ...(undated ? { undated: true } : {}) });
       }
@@ -240,8 +246,8 @@ export class RecallPipeline {
     const { kept, dropped } = dedupePool(pool, c.nearDuplicate);
     const dedupeMs = Math.round(performance.now() - dedupeStarted);
     const duplicateOf = new Map(dropped.map((d) => [d.entry.id, d.duplicateOf]));
-    // A newer text that took an older one's place carries that one's fused score and ranks.
-    const keptAs = new Map(kept.map((entry) => [entry.id, entry]));
+    // A newer text that took an older one's place carries that one's fused score.
+    const keptScore = new Map(kept.map((entry) => [entry.id, entry.fusedScore]));
 
     // A memory question reserves room for the exact-words hits the cut left out. A predicate that throws is a no.
     let asked = false;
@@ -270,8 +276,8 @@ export class RecallPipeline {
       ranked: pool
         .map(({ id, ranks, fusedScore }) => ({
           id,
-          ranks: keptAs.get(id)?.ranks ?? ranks,
-          fusedScore: keptAs.get(id)?.fusedScore ?? fusedScore,
+          ranks,
+          fusedScore: keptScore.get(id) ?? fusedScore,
           ...(duplicateOf.has(id) ? { duplicateOf: duplicateOf.get(id)! } : {}),
           ...(reservedIds.has(id) ? { reserve: true } : {}),
         }))

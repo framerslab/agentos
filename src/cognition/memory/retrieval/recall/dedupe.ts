@@ -59,7 +59,6 @@ function sameWords(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
 export interface DedupeEntry {
   trace: { id: string; content: string; createdAt: number };
   fusedScore: number;
-  ranks?: unknown;
   undated?: boolean;
 }
 
@@ -68,76 +67,87 @@ function dated(entry: DedupeEntry): boolean {
   return entry.undated !== true && Number.isFinite(entry.trace.createdAt);
 }
 
+/** An entry's time for ordering: none (below every time) when it is undated. */
+function timeOf(entry: DedupeEntry): number {
+  return dated(entry) ? entry.trace.createdAt : Number.NEGATIVE_INFINITY;
+}
+
+/** How many passes may let a newer text take a held place; the pass after them only keeps or drops. */
+const TAKEOVER_PASSES = 3;
+
 /**
  * Drops near-duplicate texts from a pool in fused order, so that no two candidates kept are one memory
  * ({@link nearDuplicate}). Of two that are one memory:
  *
  * - When their words differ and both carry a `createdAt`, the newer stays: a near-duplicate that differs is most often
  *   the same memory after a correction or a rewrite, and the later text is its current state. It takes the better of
- *   the two fused scores, with that candidate's ranks, and the higher-ranked one's place in the fused order.
- * - Otherwise (the same words, or a candidate with no `createdAt`), the higher fused score stays, and on equal scores
- *   the newer, in the older one's place.
+ *   the two fused scores and the higher-ranked one's place in the fused order, and keeps its own `ranks`, the legs'
+ *   ranks of its own text.
+ * - Otherwise (the same words, or a candidate with no `createdAt`), the higher fused score stays; on equal scores the
+ *   newer, in the older one's place, and with no time to compare, the one earlier in the pool.
  *
- * Each dropped candidate names, in `duplicateOf`, the kept candidate that holds its place at the end. Near-duplicates
- * are not transitive (A and C can be two memories that B repeats both of), so a kept candidate can drop several that
- * are apart from each other.
+ * Each dropped candidate names, in `duplicateOf`, the kept candidate that holds its place at the end, and repeats it:
+ * a candidate dropped against a text that a newer one then replaced is looked at again, and is kept when it repeats
+ * no kept text. Near-duplicates are not transitive (A and C can be two memories that B repeats both of), so a kept
+ * candidate can drop several that are apart from each other.
  *
  * @param pool - The pool, in fused order.
  * @param threshold - The Jaccard index at which two texts are one ({@link nearDuplicate}).
- * @returns The candidates kept, in fused order (one that took another's place carries that one's `fusedScore` and
- *   `ranks`), and the ones dropped, in the pool's order.
+ * @returns The candidates kept, in fused order (one that took another's place carries that one's `fusedScore`), and
+ *   the ones dropped, in the pool's order.
  */
 export function dedupePool<E extends DedupeEntry>(
   pool: readonly E[],
   threshold: number,
 ): { kept: E[]; dropped: Array<{ entry: E; duplicateOf: string }> } {
   type Item = { entry: E; index: number; tokens: Set<string> };
-  /** A kept memory: the text it shows, the candidate whose score and ranks it carries, and its place. */
+  /** A kept memory: the text it shows, the candidate whose score it carries, and its place. */
   type Slot = Item & { best: E; place: number; mergedInto?: Slot };
   const items: Item[] = pool.map((entry, index) => ({ entry, index, tokens: dedupeTokens(entry.trace.content) }));
-  const byPreference = [...items].sort(
-    (a, b) => b.entry.fusedScore - a.entry.fusedScore || b.entry.trace.createdAt - a.entry.trace.createdAt || a.index - b.index,
-  );
+  const byPreference = (list: readonly Item[]): Item[] =>
+    [...list].sort((a, b) => b.entry.fusedScore - a.entry.fusedScore || timeOf(b.entry) - timeOf(a.entry) || a.index - b.index);
   const kept: Slot[] = [];
-  const dropped: Array<{ entry: E; index: number; holder: Slot }> = [];
+  let dropped: Array<{ item: Item; holder: Slot }> = [];
 
   /** Whether `x`'s text stays over `y`'s, the two being one memory. */
-  const staysOver = (x: { entry: E; tokens: Set<string>; best: E; place: number }, y: { entry: E; tokens: Set<string>; best: E; place: number }): boolean => {
-    if (dated(x.entry) && dated(y.entry) && x.entry.trace.createdAt !== y.entry.trace.createdAt && !sameWords(x.tokens, y.tokens)) {
-      return x.entry.trace.createdAt > y.entry.trace.createdAt;
-    }
-    const xs = x.best.fusedScore;
-    const ys = y.best.fusedScore;
-    if (xs !== ys) return xs > ys;
+  const staysOver = (x: Slot, y: Slot): boolean => {
     const xt = x.entry.trace.createdAt;
     const yt = y.entry.trace.createdAt;
-    if (xt !== yt && Number.isFinite(xt) && Number.isFinite(yt)) return xt > yt;
+    const bothDated = dated(x.entry) && dated(y.entry);
+    if (bothDated && xt !== yt && !sameWords(x.tokens, y.tokens)) return xt > yt;
+    if (x.best.fusedScore !== y.best.fusedScore) return x.best.fusedScore > y.best.fusedScore;
+    if (bothDated && xt !== yt) return xt > yt;
     return x.place <= y.place;
   };
-  /** Folds `loser` into `winner`: the better score and ranks, the higher place, and the loser's text dropped. */
+  const finalHolder = (slot: Slot): Slot => {
+    let at = slot;
+    while (at.mergedInto) at = at.mergedInto;
+    return at;
+  };
+  /** Folds `loser` into `winner`: the better score, the higher place, and the loser's text dropped. */
   const fold = (winner: Slot, loser: Slot): void => {
     if (loser.best.fusedScore > winner.best.fusedScore) winner.best = loser.best;
     winner.place = Math.min(winner.place, loser.place);
     loser.mergedInto = winner;
-    dropped.push({ entry: loser.entry, index: loser.index, holder: winner });
+    dropped.push({ item: loser, holder: winner });
     kept.splice(kept.indexOf(loser), 1);
   };
-
-  for (const item of byPreference) {
+  /** Keeps `item`, drops it against the kept text it repeats, or lets it take that text's place. */
+  const insert = (item: Item, mayTakeOver: boolean): void => {
     const holder = kept.find((k) => nearDuplicate(k.tokens, item.tokens, threshold));
     if (!holder) {
       kept.push({ ...item, best: item.entry, place: item.index });
-      continue;
+      return;
     }
     const challenger: Slot = { ...item, best: item.entry, place: item.index };
-    if (!staysOver(challenger, holder)) {
+    if (!mayTakeOver || !staysOver(challenger, holder)) {
       // A newer candidate of an equal score takes the place of the older one it repeats.
       holder.place = Math.min(holder.place, item.index);
-      dropped.push({ entry: item.entry, index: item.index, holder });
-      continue;
+      dropped.push({ item, holder });
+      return;
     }
-    // The newer text takes the holder's place, score and ranks; the holder's text is dropped against it.
-    dropped.push({ entry: holder.entry, index: holder.index, holder });
+    // The newer text takes the holder's place and score; the holder's text is dropped against it.
+    dropped.push({ item: { entry: holder.entry, index: holder.index, tokens: holder.tokens }, holder });
     if (item.entry.fusedScore >= holder.best.fusedScore) holder.best = item.entry;
     holder.entry = item.entry;
     holder.index = item.index;
@@ -153,16 +163,23 @@ export function dedupePool<E extends DedupeEntry>(
         break;
       }
     }
-  }
-  const finalHolder = (slot: Slot): Slot => {
-    let at = slot;
-    while (at.mergedInto) at = at.mergedInto;
-    return at;
   };
+
+  let queue = byPreference(items);
+  for (let pass = 0; queue.length > 0; pass++) {
+    for (const item of queue) insert(item, pass < TAKEOVER_PASSES);
+    // A drop whose holder's text changed since may no longer repeat it: look at it again. A pass that lets no text
+    // take a place changes no holder's text, so the loop ends after it at the latest.
+    const stale = dropped.filter((d) => !nearDuplicate(d.item.tokens, finalHolder(d.holder).tokens, threshold));
+    dropped = dropped.filter((d) => !stale.includes(d));
+    queue = byPreference(stale.map((d) => d.item));
+  }
   return {
     kept: kept
       .sort((a, b) => a.place - b.place)
-      .map((k) => (k.best === k.entry ? k.entry : { ...k.entry, fusedScore: k.best.fusedScore, ...(k.best.ranks !== undefined ? { ranks: k.best.ranks } : {}) })),
-    dropped: dropped.sort((a, b) => a.index - b.index).map((d) => ({ entry: d.entry, duplicateOf: finalHolder(d.holder).entry.trace.id })),
+      .map((k) => (k.best === k.entry || k.best.fusedScore === k.entry.fusedScore ? k.entry : { ...k.entry, fusedScore: k.best.fusedScore })),
+    dropped: dropped
+      .sort((a, b) => a.item.index - b.item.index)
+      .map((d) => ({ entry: d.item.entry, duplicateOf: finalHolder(d.holder).entry.trace.id })),
   };
 }
