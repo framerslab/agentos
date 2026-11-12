@@ -1069,6 +1069,8 @@ class BrowserRunOwner implements RunOwner {
       let gone = false as boolean;
       // The record as stored when another tab's finish gave it a key other than the one whose run lock this finish took.
       let moved: unknown = null;
+      // A finish read the record as stored under its lock: until then, it has only the copy read earlier.
+      let checked = false as boolean;
       try {
         await this.locks.request(this.lockName(key), async () => {
           if (from.resume) {
@@ -1093,12 +1095,16 @@ class BrowserRunOwner implements RunOwner {
               record.began = current.began;
             }
           }
+          checked = true;
           await this.store.set(key, copyRecord(record));
           held.written = true;
         });
         held.lastWrite = this.now();
       } catch {
-        this.toMemory(held);
+        // A finish whose record lock or read failed never runs from the copy read earlier alone; a start, or a finish
+        // whose record was read and could not be written, goes on in memory.
+        if (from.resume && !checked) gone = true;
+        else this.toMemory(held);
       }
       if (gone) {
         this.drop(held);
