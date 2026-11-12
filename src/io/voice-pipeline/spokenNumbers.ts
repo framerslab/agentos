@@ -8,9 +8,13 @@
  * The tables are built from CLDR's spell-out rules (https://github.com/unicode-org/cldr/tree/main/common/rbnf) for
  * en, es, fr, de, pt, it, ko, zh and hi, one table a language keyed by its primary subtag, with the common spellings
  * beside CLDR's (the feminine forms, "zwo", Brazilian and European Portuguese teens, Belgian and Swiss French tens).
- * A language with no table folds digit runs alone. Digits of any script count (Devanagari digits read as ASCII), a
- * grouped digit string counts in the language's own grouping ("1,000" in English, "1.000" in German), and a word that
- * mixes digits and letters is cut where they meet ("365일" is "365" and "일", "3pm" is "3" and "pm").
+ * A language with no table folds digit runs alone. Digits of any script count (Devanagari digits read as ASCII), and a
+ * digit run with a leading zero ("0100", "007") is a code, compared as written, so a voice that drops its zero does not
+ * match. A grouped digit string counts in the grouping of the tag's region, read from the platform's CLDR data
+ * (`Intl.NumberFormat`): "1,000" in English and in es-MX, "1.000" in German and in es, "1 000" in French and in pt-PT,
+ * whose narrow no-break space NFKC makes a space, so the groups arrive as words of their own and are joined; a runtime
+ * with no data for the language keeps the table's grouping. A word that mixes digits and letters is cut where they meet
+ * ("365일" is "365" and "일", "3pm" is "3" and "pm").
  *
  * German and Italian write a number as one word ("dreihundertfünfundsechzig", "trecentosessantacinque"), so a word of
  * those languages is read when it splits wholly into number words; Korean's native numbers ("스물하나") the same. Chinese
@@ -40,6 +44,9 @@ type After = 'empty' | 'more' | number;
 
 /** What the last item read was, which a joining word ("and", "y", "e", "et") may follow. */
 type Role = 'unit' | 'tens' | 'hundreds' | 'times' | 'big';
+
+/** How a digit string is grouped: one word a pattern accepts, or groups of three digits written as words of their own. */
+type Grouping = RegExp | 'space';
 
 /** A place-value table: Chinese, and Korean's Sino-Korean numbers. */
 interface Places {
@@ -72,8 +79,8 @@ interface Source {
   /** The word between a unit and its tens inside a compound (German "einundzwanzig"). */
   unitAndTens?: string;
   places?: Places;
-  /** A digit string grouped in the language's way. */
-  grouping?: RegExp;
+  /** A digit string grouped in the language's way, where the platform has no data for it. */
+  grouping?: Grouping;
 }
 
 /** A built table. */
@@ -83,7 +90,7 @@ interface Language {
   compound: boolean;
   joins: Map<string, Role[]>;
   places?: Places;
-  grouping?: RegExp;
+  grouping?: Grouping;
 }
 
 /** One word of the text, or one part of a word cut where digits meet letters; `digits` holds a digit part in ASCII. */
@@ -144,6 +151,7 @@ const SOURCES: Record<string, Source> = {
     // "quatre-vingts" is four twenties; a value up to nineteen follows it, as one does "soixante".
     times: [['vingt/vingts', 20, 20, 4], ['cent/cents', 100, 100], ['mille/mil', 1000, 1000]],
     joins: { et: ['tens'] },
+    grouping: 'space',
   },
   de: {
     adds: [
@@ -280,10 +288,45 @@ function digitValue(char: string): number {
   return (point - start) % 10;
 }
 
-/** A digit string in ASCII without leading zeros. */
+/** A digit string in ASCII, its leading zeros kept: "0100" reads as no number and compares as written. */
 function asciiDigits(text: string): string {
-  const ascii = [...text].filter((char) => ND.test(char)).map(digitValue).join('');
-  return ascii.replace(/^0+(?=\d)/, '');
+  return [...text].filter((char) => ND.test(char)).map(digitValue).join('');
+}
+
+/** A grouping's parts: the first group of a number grouped with spaces, and each group after it. */
+const SPACED_HEAD = /^\p{Nd}{1,3}$/u;
+const SPACED_GROUP = /^\p{Nd}{3}$/u;
+
+const groupings = new Map<string, Grouping | undefined>();
+const MAX_GROUPINGS = 64;
+
+/**
+ * How a BCP-47 tag's region groups a digit string, from the platform's CLDR data: the separator `Intl.NumberFormat`
+ * writes between groups, and the Indian grouping where it writes groups of two ("12,34,567"). A separator that is no
+ * comma, point or space (Swiss German's apostrophe) needs no rule, since the word rule keeps "1'000" one word and drops
+ * the apostrophe. A tag the platform refuses, or a language it has no data for, keeps the table's grouping.
+ */
+function groupingOf(language: string, table: Language | undefined): Grouping | undefined {
+  if (groupings.has(language)) return groupings.get(language);
+  let grouping = table?.grouping;
+  try {
+    const format = new Intl.NumberFormat(language);
+    const primary = (tag: string): string => (tag.split(/[-_]/)[0] ?? '').toLowerCase();
+    if (primary(format.resolvedOptions().locale) === primary(language)) {
+      const parts = format.formatToParts(1_234_567);
+      const group = parts.find((part) => part.type === 'group')?.value.normalize('NFKC');
+      const sizes = parts.filter((part) => part.type === 'integer').map((part) => part.value.length);
+      if (group === ',') grouping = sizes.length > 2 && sizes[sizes.length - 2] === 2 ? INDIAN : COMMA;
+      else if (group === '.') grouping = DOT;
+      else if (group !== undefined && /^\s$/u.test(group)) grouping = 'space';
+      else if (group !== undefined) grouping = undefined;
+    }
+  } catch {
+    // A tag the platform refuses keeps the table's grouping.
+  }
+  if (groupings.size >= MAX_GROUPINGS) groupings.clear();
+  groupings.set(language, grouping);
+  return grouping;
 }
 
 /** Whether a character is one of a place-value table's numerals. */
@@ -309,12 +352,22 @@ function cutNumerals(run: string, places: Places): string[] {
   return parts;
 }
 
-/** The text's words as pieces: a digit word as its digits, and a word that mixes digits and letters cut where they meet. */
-function piecesOf(words: readonly string[], language: Language | undefined): Piece[] {
+/**
+ * The text's words as pieces: a digit word as its digits, a number grouped with spaces as one piece, and a word that
+ * mixes digits and letters cut where they meet.
+ */
+function piecesOf(words: readonly string[], language: Language | undefined, grouping: Grouping | undefined): Piece[] {
   const pieces: Piece[] = [];
   const places = language?.places;
-  words.forEach((word, index) => {
-    if (language?.grouping?.test(word) || ALL_DIGITS.test(word)) {
+  for (let index = 0; index < words.length; index += 1) {
+    const word = words[index]!;
+    if (grouping === 'space' && SPACED_HEAD.test(word) && SPACED_GROUP.test(words[index + 1] ?? '')) {
+      let end = index + 1;
+      while (end < words.length && SPACED_GROUP.test(words[end]!)) end += 1;
+      const text = words.slice(index, end).join(' ');
+      pieces.push({ text, digits: asciiDigits(text), word: index });
+      index = end - 1;
+    } else if ((grouping instanceof RegExp && grouping.test(word)) || ALL_DIGITS.test(word)) {
       pieces.push({ text: word, digits: asciiDigits(word), word: index });
     } else if (LETTERS_AND_DIGITS.test(word)) {
       for (const run of word.match(DIGIT_RUNS) ?? []) {
@@ -326,7 +379,7 @@ function piecesOf(words: readonly string[], language: Language | undefined): Pie
       // Inner punctuation makes a decimal, a time or a code: the word compares as written.
       pieces.push({ text: word, word: index });
     }
-  });
+  }
   return pieces;
 }
 
@@ -632,7 +685,7 @@ function readPlaces(
  */
 export function foldNumbers(words: readonly string[], language: string): string[] {
   const table = languageOf(language);
-  const pieces = piecesOf(words, table);
+  const pieces = piecesOf(words, table, groupingOf(language, table));
   const cache = new Map<Piece, Item[][]>();
   const folded: string[] = [];
   for (let at = 0; at < pieces.length; ) {

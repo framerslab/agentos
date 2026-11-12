@@ -161,6 +161,14 @@ class OpenAIRealtimeTTSSession extends EventEmitter implements StreamingTTSSessi
    * since the cut has settled every flush, and no `'flush_complete'` follows it.
    */
   private cuts = 0;
+  /**
+   * True while a reply's `'reply_transcript'` is dispatched, before its status is read. A flush its listener makes with
+   * no text then leaves the queue empty, and the drain that ends it waits for the reply's own end, so the flushes end
+   * once and by that reply's status.
+   */
+  private endingReply = false;
+  /** Whether a drain came while `endingReply` held. */
+  private drainDeferred = false;
   private lastTag = 0;
 
   constructor(
@@ -339,6 +347,10 @@ class OpenAIRealtimeTTSSession extends EventEmitter implements StreamingTTSSessi
       this.requests.shift();
     }
     if (this.requests.length) return;
+    if (this.endingReply) {
+      this.drainDeferred = true;
+      return;
+    }
     const spoken = this.lastReplySpoken;
     this.lastReplySpoken = true;
     // The flushes this drain ends are taken before the event: a flush a 'flush_complete' listener starts asks for a
@@ -478,14 +490,28 @@ class OpenAIRealtimeTTSSession extends EventEmitter implements StreamingTTSSessi
   /**
    * Ends the reply at its `response.done`: `completed` is spoken, `incomplete` warns and counts what was said, and any
    * other status fails it. With `outputTranscript` the reply's transcript is emitted first. A listener that cuts the
-   * session (`cancel()` or `close()`) ends the reply there.
+   * session (`cancel()` or `close()`) ends the reply there. A listener's flush with text starts its reply at once; the
+   * drain a flush with no text would start waits for this reply's status, so the flushes end once.
    */
   private endReply(request: SpeechRequest, msg: RealtimeServerEvent): void {
     const cuts = this.cuts;
     this.requests.shift();
     this.stopTimer(request);
-    if (this.config.outputTranscript) this.emitTranscript(request);
-    if (this.cuts !== cuts) return;
+    if (this.config.outputTranscript) {
+      this.endingReply = true;
+      try {
+        this.emitTranscript(request);
+      } finally {
+        this.endingReply = false;
+      }
+    }
+    const deferred = this.drainDeferred;
+    this.drainDeferred = false;
+    if (this.cuts !== cuts) {
+      // A flush made after the cut ends as it would have outside the dispatch.
+      if (deferred && !this.closed) this.startNext();
+      return;
+    }
     const status = msg.response?.status;
     this.lastReplySpoken = status === 'completed' || status === 'incomplete';
     if (status === 'incomplete') {
