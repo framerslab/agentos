@@ -46,6 +46,7 @@ import { openForgottenCopy } from '../cognition/memory/suppression/forgottenCopy
 import { shareForgottenLedger } from '../cognition/memory/suppression/learnerTombstones.js';
 import { guardedWrite } from '../cognition/memory/suppression/guardedWrite.js';
 import { sweepRetention, type RetentionPeriod } from '../cognition/memory/io/retentionSweep.js';
+import { correctSubjectMemory, exportSubjectMemory, type UserMemoryExport } from '../cognition/memory/io/userMemoryExport.js';
 import { WriteChains } from '../cognition/learning/writeChains.js';
 import { conversationScopeKey, parseConversationScopeKey } from '../cognition/memory/retrieval/store/conversationScopeKey.js';
 import { encodePlainScopeId } from '../cognition/memory/retrieval/store/scopeIdForm.js';
@@ -466,6 +467,26 @@ export type SouledAgent = Agent & {
    * @returns How many traces and pages it deleted, and how many subjects it removed from the registry.
    */
   sweepRetention?(): Promise<{ traces: number; pages: number; scopes: number }>;
+  /**
+   * One person's memory as JSON: their conversation traces (id, time, speaker, text, tags) and their compiled pages
+   * (id, summary, updated, sources, body), read from their own scope alone. Operator pages, other people's memory and
+   * a gmi() session's history are not in it; a forgotten person's export is empty.
+   *
+   * @throws TypeError when `userId` is not a non-empty string.
+   */
+  exportUserMemory?(userId: string): Promise<UserMemoryExport>;
+  /**
+   * Corrects one person's memory: deletes the named traces for good, files `text` as a trace tagged `correction`,
+   * deletes each page built from a deleted trace and has the next compile build it again from the traces that are
+   * left. It rejects, and changes nothing, when any id is not one of that person's live traces.
+   *
+   * @returns How many traces and pages it deleted, and the id of the correction's trace.
+   * @throws TypeError when `userId`, the trace ids or the text is missing.
+   */
+  correctUserMemory?(
+    userId: string,
+    correction: { traceIds: readonly string[]; text: string },
+  ): Promise<{ deleted: number; pagesDeleted: number; correctionTraceId: string }>;
 };
 
 /**
@@ -1437,6 +1458,31 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     });
   };
   built.sweepRetention = () => awaitedOnClose(sweep());
+  built.exportUserMemory = (userId) => {
+    if (typeof userId !== 'string' || userId === '') {
+      return Promise.reject(new TypeError('souledAgent: exportUserMemory needs a non-empty user id'));
+    }
+    return awaitedOnClose(
+      exportSubjectMemory({ memory, wiki: { storeFor: pagesOf }, agentId, subject: { kind: 'user', id: userId } }),
+    );
+  };
+  built.correctUserMemory = (userId, correction) => {
+    if (typeof userId !== 'string' || userId === '') {
+      return Promise.reject(new TypeError('souledAgent: correctUserMemory needs a non-empty user id'));
+    }
+    const subject: SuppressionSubject = { kind: 'user', id: userId };
+    // The change runs on the person's chain, after their writes and compiles; close() waits for it.
+    return awaitedOnClose(
+      correctSubjectMemory({
+        memory,
+        wiki: { storeFor: pagesOf },
+        agentId,
+        subject,
+        correction,
+        onChain: (work) => onSubject(conversationScopeKey(agentId, subject), work),
+      }),
+    );
+  };
 
   // On teardown: close the agent (with runtime: 'gmi' that stops its running session turns and shuts its sessions
   // down); wait, within one deadline, for the turns still running and then for the memory writes of its turns; fold

@@ -1245,6 +1245,33 @@ export class Memory {
   }
 
   /**
+   * Which of the given ids are live traces of one scope, a wiki page's chunks left out: a chunk is not a statement a
+   * person made. A correction checks with it that every trace it names is the person's own before it changes anything.
+   * The scope id is matched by equality, 400 ids a statement.
+   *
+   * @returns The ids found, each once, in no set order.
+   * @throws TypeError when `scopeId` is empty.
+   */
+  async liveTraceIdsOf(scope: string, scopeId: string, traceIds: readonly string[]): Promise<string[]> {
+    if (typeof scopeId !== 'string' || scopeId === '') {
+      throw new TypeError('Memory.liveTraceIdsOf: scopeId must be a non-empty string');
+    }
+    await this._initPromise;
+    const ids = [...new Set(traceIds)];
+    const found: string[] = [];
+    for (let offset = 0; offset < ids.length; offset += 400) {
+      const slice = ids.slice(offset, offset + 400);
+      const rows = await this._brain.all<{ id: string; tags: string }>(
+        `SELECT id, tags FROM memory_traces
+          WHERE brain_id = ? AND scope = ? AND scope_id = ? AND deleted = 0 AND id IN (${slice.map(() => '?').join(', ')})`,
+        [this._brain.brainId, scope, scopeId, ...slice],
+      );
+      for (const row of rows) if (!isPageChunkTags(row.tags)) found.push(row.id);
+    }
+    return found;
+  }
+
+  /**
    * Deletes the document chunks the given traces were filed from, with their text: first the pictures of those
    * chunks, as the foreign key of `document_images` on `document_chunks` requires, then the chunks, 400 ids a
    * statement. A document left with no chunk is deleted with the pictures filed under it; a document that still has

@@ -211,6 +211,9 @@ export type { ForgottenLedgerOptions, SuppressionSubject, TombstoneKey } from '.
 export { forgetUserMemory, reapplyTombstones } from './cognition/memory/io/forgetUserMemory.js';
 export { sweepRetention } from './cognition/memory/io/retentionSweep.js';
 export type { RetentionPeriod, RetentionSweepOptions } from './cognition/memory/io/retentionSweep.js';
+// One person's memory exported as JSON, and corrected with a trace later compiles keep
+export { exportSubjectMemory, correctSubjectMemory } from './cognition/memory/io/userMemoryExport.js';
+export type { UserMemoryExport } from './cognition/memory/io/userMemoryExport.js';
 export type {
   ForgetMemoryReport,
   ForgetUserMemoryOptions,

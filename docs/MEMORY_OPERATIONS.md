@@ -761,6 +761,20 @@ content,type,tags
 A row's scope id is its `metadata` cell's `scopeId`, else its `scope_id` cell, which is then written into the metadata too. The `metadata` cell is read before the duplicate check: a cell that is not valid JSON, or whose JSON is not an object (an array or `null`, say), makes the row an error, listed in `errors` and not imported, even when a trace of the same scope already holds the row's text.
 
 
+### One person's memory
+
+`await agent.exportUserMemory(userId)` on a `souledAgent()` returns that person's conversation traces (id, time, speaker, text, tags) and compiled pages (id, summary, updated, sources, body) as one JSON object. It reads the person's own scope alone: operator pages, other people's memory and a `gmi()` session's history are not in it. A person the store has forgotten gets an empty export.
+
+`await agent.correctUserMemory(userId, { traceIds, text })` deletes the named traces for good, files `text` as a trace tagged `correction`, deletes each page built from a deleted trace and has the next compile rebuild it from the traces that are left. It rejects, and changes nothing, when any id is not one of that person's live traces; the rejection gives a count and no id, and one `memory.write_refused` line (`reason: 'foreign_trace'`) says so.
+
+```ts
+const doc = await agent.exportUserMemory('user-42');
+const wrong = doc.traces.find((trace) => trace.text.includes('LARK-7'))!;
+await agent.correctUserMemory('user-42', { traceIds: [wrong.id], text: 'My canary is WREN-9.' });
+```
+
+Outside a souled agent, `exportSubjectMemory()` and `correctSubjectMemory()` (in `userMemoryExport.ts`) take the store, its page stores and the subject.
+
 ### SHA-256 Deduplication
 
 All import paths deduplicate traces by their text and its SHA-256:
@@ -870,3 +884,4 @@ All under [`src/cognition/memory/io/`](https://github.com/framerslab/agentos/tre
 | `SqliteImporter.ts` | Merge of one brain's SQLite file, with dedup + tag union |
 | `ChatGptImporter.ts` | ChatGPT `conversations.json` parser |
 | `CsvImporter.ts` | CSV import with required `content` column |
+| `userMemoryExport.ts` | One person's memory as JSON, and a correction of it |
