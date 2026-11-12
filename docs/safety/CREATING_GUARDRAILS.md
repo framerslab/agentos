@@ -154,6 +154,41 @@ async evaluateInput({ input, context }: GuardrailInputPayload) {
 }
 ```
 
+`input.visionInputs` carries the input's images, in order: each is `{ type: 'base64' | 'image_url', data, mimeType?, description? }`, where `data` is the base64 text (a `data:` URL included) or the image's URL. `moderateContent()` fills it from `content.images`. A guard of your own that reads images decodes `base64` data itself and decides how an `image_url` is fetched; a guard that only reads text ignores the field. For checks over images, prefer the built-in `ImageGuardrail` (see [Images](./GUARDRAILS_USAGE.md#images-imageguardrail)): it captures each image once, under the host's `loadImage` for a URL, runs every `match` check before any `classify` check, and refuses an image nobody judged. You then write the checks alone.
+
+### Writing an image check
+
+An `ImageCheck` is one step of `ImageGuardrail`'s chain:
+
+```typescript
+import type { ImageCheck } from '@framers/agentos/safety/guardrails';
+
+const visionCheck: ImageCheck = {
+  id: 'vision',      // a word of its own, never 'load'
+  kind: 'classify',  // 'match' for a hash service, 'classify' for a model
+  onError: 'skip',   // 'refuse' (default) refuses the image as unavailable; 'skip' makes the check a signal
+  reasonCodes: ['IMAGE_SUGGESTIVE', 'IMAGE_REVIEW'],
+  async check(image, context) {
+    // image: { index, bytes, mimeType }; the bytes are this check's own copy
+    const parts: number[] = [];
+    for (const region of regionsOf(image.bytes)) {
+      if (context.vendorSignal?.aborted) break; // another guard answered a code that stops vendor requests
+      parts.push(await visionModel.score(region, image.mimeType));
+    }
+    const score = Math.max(0, ...parts);
+    if (score > 0.8) return { verdict: 'hold', reviewCode: 'IMAGE_REVIEW' };
+    if (score > 0.5) return { verdict: 'flag', reasonCode: 'IMAGE_SUGGESTIVE', scores: { suggestive: score } };
+    return { verdict: 'pass' };
+  },
+};
+```
+
+- **What a check receives.** An `ImageUnderReview`: the image's `index` in `visionInputs`, its `bytes` and its `mimeType`. The bytes are a copy the guard made of the image it captured once, so a check that changes them changes nothing the next check reads. A check never receives the URL: send the bytes to a vendor (as a data URL when its API takes one), never a link it would fetch again.
+- **The four verdicts.** `{ verdict: 'pass' }`; `{ verdict: 'flag', reasonCode, scores? }`, which lets the next check run; `{ verdict: 'hold', reviewCode }`, which keeps the content back for a person's review and ends this image's chain; `{ verdict: 'block', reasonCode, quarantine? }`, which refuses the image and ends its chain. A `match` check that finds known material answers `block` with `quarantine: true`, which ends the whole evaluation before any `classify` check sees any image of the input. Any other answer, and a throw, is a check that could not answer: one `image_guard.check_failed` line, then the image is refused as unavailable, or, for a `classify` check with `onError: 'skip'`, the chain goes on.
+- **`reasonCodes`.** List every reason code and review code the check can answer. The guard's own `config.reasonCodes` is its two fixed codes (`IMAGE_LIMIT`, `IMAGE_CHECK_UNAVAILABLE`) and every check's list, and the `guardrail.verdict` line writes a code outside it as `unknown`.
+- **`context.vendorSignal`.** The guard reads it before each `classify` check and starts none once it is aborted. A check that makes more than one request reads it before each one, as above, and does not hand it to a request already sent.
+- **Write nothing of the image.** Keep the bytes, the URL and any description out of a reason code, a review code, `scores` and your own log lines.
+
 ### evaluateOutput(payload)
 
 Called for chunks of the streams the runtime passes through the output guardrails: the one `processRequest()` returns, and the continuation streams that `handleToolResult()`, `handleToolResults()` and `resumeExternalToolRequest()` return after an external tool call. Which chunks depends on `config.evaluateStreamingChunks`:
