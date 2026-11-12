@@ -573,6 +573,8 @@ export function guardedStreamText(opts: GenerateTextOptions, inner: (opts: Gener
         if (finish !== 'error') await run.judgeReply(whole);
         // the call's own text (the last step's), as the same call without guards resolves it
         delivered = await source.text.catch(() => delivered);
+        // a caller's abort while the guards judged the reply ends the stream with the reason, as generateText() rejects
+        if (finish !== 'error') opts.abortSignal?.throwIfAborted();
         return;
       }
       const out = run.guardOutput(source.fullStream, hold);
@@ -586,6 +588,9 @@ export function guardedStreamText(opts: GenerateTextOptions, inner: (opts: Gener
         yield part;
       }
       const end = out.end();
+      // a caller's abort while the guards judged a reply they refused, or could not judge, ends the stream with the
+      // reason, as generateText() rejects with it
+      if (end.kind === 'stopped' || end.kind === 'failed') opts.abortSignal?.throwIfAborted();
       if (end.kind === 'stopped') {
         finish = 'error';
         yield { type: 'error', error: run.stop('output', end.decided, await source.usage) };
