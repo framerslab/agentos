@@ -163,6 +163,12 @@ export class CohereReranker implements IRerankerProvider {
     callerSignal?.addEventListener('abort', onCallerAbort, { once: true });
 
     try {
+      // A signal fires its abort event once: one that aborted while the body was built, before the listener
+      // above, ends the call here, and nothing is sent.
+      if (callerSignal?.aborted) {
+        throw callerSignal.reason;
+      }
+
       const response = await untilAborted(
         fetch(`${this.baseUrl}/v1/rerank`, {
           method: 'POST',

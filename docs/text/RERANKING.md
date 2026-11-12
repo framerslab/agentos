@@ -99,7 +99,7 @@ new CohereReranker({
 - `COHERE_RERANKER_MODELS` lists seven model ids: `rerank-v4.0-pro`, `rerank-v4.0-fast`, `rerank-v3.5`, `rerank-english-v3.0`, `rerank-multilingual-v3.0`, `rerank-english-v2.0` and `rerank-multilingual-v2.0`.
 - The request body is `{ model, query, documents, top_n, return_documents: false }` with the request's `params` merged in; `top_n` is the request's `topN`, else the number of passages. The headers carry `Authorization: Bearer <apiKey>` and `X-Client-Name: agentos`.
 - A response that is not 2xx throws `Cohere API error (<status>): <body>`. The timeout covers the whole call, the response's body included: a response not read whole by then, headers and body, is aborted, its connection closed, and the call throws `CohereReranker: Request timed out after <ms>ms`. The timer is cleared once the call settles.
-- The request's `signal` ends the call at its abort, which `RerankerService.rerank()` passes on. A signal aborted before the call sends nothing; one that aborts while the request or its body read runs aborts the request and closes its connection. Either way the call throws the signal's reason.
+- The request's `signal` ends the call at its abort, which `RerankerService.rerank()` passes on. A signal aborted before the request is sent, the building of its body included, sends nothing; one that aborts while the request or its body read runs aborts the request and closes its connection. Either way the call throws the signal's reason.
 - The diagnostics carry the model, the latency, Cohere's billed search units (`tokensUsed`), its request id and its API version.
 
 ### `llm-judge`: an LLM as the judge
