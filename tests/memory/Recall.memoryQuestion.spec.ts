@@ -10,6 +10,7 @@ import { memoryTraceLineLength } from '../../src/cognition/memory/core/prompt/Me
 import type { ScoredMemoryTrace } from '../../src/cognition/memory/core/types';
 import { isMemoryQuestion, reserveFor } from '../../src/cognition/memory/retrieval/recall/memoryQuestion';
 import { assertRecallConfig, RecallOptionError } from '../../src/cognition/memory/retrieval/recall/budget';
+import { dedupePool } from '../../src/cognition/memory/retrieval/recall/dedupe';
 
 describe('isMemoryQuestion', () => {
   it.each([
@@ -51,6 +52,19 @@ describe('reserveFor', () => {
     // max(1, floor(9 / 10))
     expect(reserveFor(pool, 9).map((p: { id: string }) => p.id)).toEqual(['w1']);
     expect(reserveFor(pool.slice(0, 20), 20)).toEqual([]);
+  });
+
+  it("a newer exact-words-only correction that took a dense candidate's place past the cut is reserved by its own legs", () => {
+    const sister = 'My sister Ana moved out of the old riverside flat last spring and now lives in';
+    const t = (id: string, content: string, createdAt: number) => ({ id, content, createdAt });
+    const pool = [
+      ...Array.from({ length: 20 }, (_, i) => ({ id: `d${i}`, trace: t(`d${i}`, `Garden note ${i} on row ${i}`, 50), ranks: { dense: i + 1 }, fusedScore: 0.7 / (61 + i) })),
+      { id: 'old', trace: t('old', `${sister} Porto`, 100), ranks: { dense: 21 }, fusedScore: 0.7 / 81 },
+      { id: 'new', trace: t('new', `${sister} Lisbon`, 200), ranks: { exact_words: 1 }, fusedScore: 0.3 / 61 },
+    ];
+    const { kept } = dedupePool(pool, 0.8);
+    expect(kept.slice(20).map((e) => e.id)).toEqual(['new']);
+    expect(reserveFor(kept, 20).map((e) => e.id)).toEqual(['new']);
   });
 });
 

@@ -1035,7 +1035,9 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     // A supplied candidate is the caller's data: never recorded as accessed, focused or used to seed the graph.
     const suppliedIds = new Set(run.suppliedIds);
 
-    const confidence = evaluateRetrievalConfidence(scored, {
+    // The confidence policy reads the recalled memories alone: a supplied score is on the caller's scale, so it neither
+    // lifts weak hits past the policy nor is suppressed with them.
+    const confidence = evaluateRetrievalConfidence(suppliedIds.size > 0 ? scored.filter((t) => !suppliedIds.has(t.id)) : scored, {
       adaptive: resolvedPolicy?.adaptive ?? false,
       minScore: resolvedPolicy?.minScore ?? 0,
     });
@@ -1043,8 +1045,10 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     if (resolvedPolicy && confidence.suppressResults) {
       await workingMemory.decayActivations();
       const totalTime = Date.now() - startTime;
+      // A suppressed recall returns the caller's supplied candidates alone.
+      const keptSupplied = scored.filter((t) => suppliedIds.has(t.id));
       const suppressed: CognitiveRetrievalResult = {
-        retrieved: [],
+        retrieved: keptSupplied,
         partiallyRetrieved: partial,
         diagnostics: {
           candidatesScanned: scored.length + partial.length,
@@ -1059,7 +1063,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
           ...(recallReport ? { recall: recallReport } : {}),
         },
       };
-      this.recallSelections.set(suppressed, { reserveFired: selection.reserveFired, reservedIds: [], suppliedIds: [] });
+      this.recallSelections.set(suppressed, { reserveFired: selection.reserveFired, reservedIds: [], suppliedIds: keptSupplied.map((t) => t.id) });
       return suppressed;
     }
 
@@ -1311,10 +1315,12 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
       const assembledAt = performance.now();
       const recall = recallReport;
       // Under hybrid the whole pool, in fused order, the candidates the cut at topK and the dedupe left out included.
-      // A recall the retrieval policy suppressed returned nothing, so it records no candidate, as under dense.
+      // A recall the retrieval policy suppressed returned no memory, so it records no recalled candidate, as under
+      // dense: only the supplied candidates it returned.
+      const returned = new Set(result.retrieved.map((trace) => trace.id));
       const ranked: RankedRecallCandidate[] =
-        hybrid && recall?.ranked && !result.diagnostics.suppressed
-          ? recall.ranked.map((candidate) => {
+        hybrid && recall?.ranked
+          ? (result.diagnostics.suppressed ? recall.ranked.filter((candidate) => returned.has(candidate.id)) : recall.ranked).map((candidate) => {
               const rerankScore = recall.rerankScores?.[candidate.id];
               return { ...candidate, ...(typeof rerankScore === 'number' ? { rerankScore } : {}) };
             })

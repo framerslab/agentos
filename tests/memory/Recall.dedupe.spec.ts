@@ -105,7 +105,7 @@ describe('dedupePool', () => {
   describe('of two near-duplicates whose words differ, the newer stays', () => {
     const sister = 'My sister Ana moved out of the old riverside flat last spring and now lives in';
 
-    it('in the higher-ranked one\'s place, with its fused score and ranks, and the older is recorded against it', () => {
+    it('in the higher-ranked one\'s place, with its fused score, keeping its own ranks, and the older is recorded against it', () => {
       // 11 of 13 words shared (0.85): one memory, and the newer text is its current state.
       expect(nearDuplicate(dedupeTokens(`${sister} Porto`), dedupeTokens(`${sister} Lisbon`), 0.8)).toBe(true);
       const { kept, dropped } = dedupePool(
@@ -117,7 +117,9 @@ describe('dedupePool', () => {
         0.8,
       );
       expect(kept.map((e) => e.trace.id)).toEqual(['new', 'mid']);
-      expect(kept[0]).toMatchObject({ id: 'new', fusedScore: 0.02, ranks: { dense: 1, exact_words: 1 } });
+      // The score orders it; its ranks stay the legs' ranks of its own text.
+      expect(kept[0]).toMatchObject({ id: 'new', fusedScore: 0.02 });
+      expect(kept[0].ranks).toEqual({ dense: 3 });
       expect(kept[0].trace.content).toContain('Lisbon');
       expect(dropped).toEqual([{ entry: expect.objectContaining({ id: 'old', fusedScore: 0.02 }), duplicateOf: 'new' }]);
     });
@@ -140,6 +142,33 @@ describe('dedupePool', () => {
       expect(noTime.kept.map((e) => e.trace.id)).toEqual(['old']);
       const flagged = dedupePool([entry('old', `${sister} Porto`, 0.02, 100), { ...entry('new', `${sister} Lisbon`, 0.015, 200), undated: true }], 0.8);
       expect(flagged.kept.map((e) => e.trace.id)).toEqual(['old']);
+    });
+
+    it('an undated candidate is never the newer: on equal scores and the same words the one earlier in the pool stays', () => {
+      const { kept, dropped } = dedupePool(
+        [entry('stored', 'The ferry leaves at nine', 0.01, 100), { ...entry('sup', 'The ferry leaves at nine.', 0.01, 200), undated: true }],
+        0.8,
+      );
+      expect(kept.map((e) => e.trace.id)).toEqual(['stored']);
+      expect(dropped.map((d) => [d.entry.trace.id, d.duplicateOf])).toEqual([['sup', 'stored']]);
+    });
+
+    it('a candidate dropped against a text a newer one then replaced is kept when it does not repeat the newer text', () => {
+      const common = 'w1 w2 w3 w4 w5 w6 w7 w8';
+      // A repeats D and B (9 of 11 words each); D and B share 8 of 12 (0.67) and are two memories.
+      const { kept, dropped } = dedupePool(
+        [entry('A', `${common} alpha gamma`, 0.02, 100), entry('D', `${common} alpha beta`, 0.015, 90), entry('B', `${common} gamma delta`, 0.01, 200)],
+        0.8,
+      );
+      expect(kept.map((e) => e.trace.id)).toEqual(['B', 'D']);
+      expect(dropped.map((d) => [d.entry.trace.id, d.duplicateOf])).toEqual([['A', 'B']]);
+      const byId = new Map(kept.map((e) => [e.trace.id, e]));
+      for (const d of dropped) {
+        expect(nearDuplicate(dedupeTokens(d.entry.trace.content), dedupeTokens(byId.get(d.duplicateOf)!.trace.content), 0.8)).toBe(true);
+      }
+      for (const [i, a] of kept.entries()) {
+        for (const b of kept.slice(i + 1)) expect(nearDuplicate(dedupeTokens(a.trace.content), dedupeTokens(b.trace.content), 0.8)).toBe(false);
+      }
     });
 
     it('leaves no two near-duplicates kept when the newer text that takes a place repeats another kept memory', () => {

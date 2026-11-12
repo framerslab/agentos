@@ -153,6 +153,43 @@ describe('supplied candidates', () => {
     await mem.close();
   });
 
+  it('a retrieval policy reads recalled memories only: a supplied score neither lifts weak hits nor is suppressed with them', async () => {
+    const empty = await memoryWith({ retrieval: 'hybrid' }, new WordHashEmbedder());
+    const shown = await empty.manager.assembleForPrompt('Which plan am I on?', 1600, NEUTRAL, {
+      scopes: ORG_A,
+      policy: { minScore: 0.99 },
+      supplied: [fact('acct-plan', 'The account is on the Team plan.', { score: 0.02 })],
+    } as never);
+    expect(shown.contextText).toContain('The account is on the Team plan.');
+    expect(captureOf(shown).candidates).toEqual([expect.objectContaining({ id: 'acct-plan', outcome: 'included' })]);
+    await empty.close();
+
+    const mem = await memoryWith({ retrieval: 'hybrid' }, new WordHashEmbedder());
+    await plant(mem, 'ferry', 'The ferry leaves from pier 3.');
+    const result = await mem.manager.retrieve('Which ferry leaves?', NEUTRAL, {
+      scopes: ORG_A,
+      policy: { minScore: 0.99 },
+      supplied: [fact('acct-plan', 'The account is on the Team plan.', { score: 1 })],
+    } as never);
+    // The weak recalled hit is suppressed as without the supplied fact; the fact stays.
+    expect(result.diagnostics.suppressed).toBe('weak_hits');
+    expect(result.retrieved.map((t) => t.id)).toEqual(['acct-plan']);
+    await mem.close();
+  });
+
+  it('a call admits at most topK × overFetch supplied candidates, the best-scored first; the rest are counted as ineligible', async () => {
+    const mem = await memoryWith({ retrieval: 'hybrid' }, new WordHashEmbedder());
+    const many = Array.from({ length: 70 }, (_, i) => fact(`s${i}`, `Supplied fact number ${i} about the plan.`, { score: i }));
+    const result = await mem.manager.retrieve('plan', NEUTRAL, { scopes: ORG_A, supplied: many } as never);
+    const recall = result.diagnostics.recall as unknown as Capture;
+    expect(recall.legs.find((l) => l.leg === 'supplied')).toMatchObject({ ran: true, candidates: 60, ineligible: 10 });
+    expect(recall.suppliedRejected).toEqual({ outOfScope: 0, ineligible: 10 });
+    const ids = new Set((result.diagnostics.recall as unknown as { ranked: Array<{ id: string }> }).ranked.map((r) => r.id));
+    expect(ids.has('s69')).toBe(true);
+    expect(ids.has('s9')).toBe(false);
+    await mem.close();
+  });
+
   it("under retrieval 'dense' supplied candidates are not read and are counted, with the line", async () => {
     const mem = await memoryWith(undefined, new WordHashEmbedder());
     const context = await mem.manager.assembleForPrompt('plan', 1600, NEUTRAL, {

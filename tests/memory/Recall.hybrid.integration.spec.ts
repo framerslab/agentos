@@ -245,6 +245,30 @@ describe.each(ENGINES)('hybrid recall on %s', (engine, open) => {
     }
   });
 
+  it("a supplied candidate whose id names a stored memory is not added, so it never hides that memory's graph association", async () => {
+    const db = await open();
+    const mem = await memoryWith({ retrieval: 'hybrid' }, new FlatEmbedder(), db.brain);
+    // The oldest, in words the question does not hold: no leg returns it, and the graph leads to it.
+    await plant(mem, 'assoc', 'The red kayak hangs in the boathouse.', at(0));
+    for (let i = 0; i < 65; i++) await plant(mem, `n${i}`, `Garden note ${i}: the tomatoes on row ${i} were watered.`, at(i + 1));
+    (mem.manager as unknown as { graph: unknown }).graph = {
+      spreadingActivation: async () => [{ memoryId: 'assoc', activation: 0.9, depth: 1, activatedBy: [] }],
+      recordCoActivation: async () => undefined,
+      shutdown: async () => undefined,
+    };
+    const h = await mem.manager.assembleForPrompt(QUESTION, 1600, NEUTRAL, {
+      scopes: U1,
+      supplied: [{ id: 'assoc', text: 'The account is on the Team plan.', scope: { scope: 'user', scopeId: 'u1' }, score: 0.5 }],
+    } as never);
+    expect(h.contextText).toContain('The red kayak hangs in the boathouse.');
+    expect(h.contextText).not.toContain('Team plan');
+    const c = captureOf(h) as Capture & { legs: Array<{ leg: string; candidates?: number }> };
+    expect(c.candidates.filter((x) => x.id === 'assoc').every((x) => x.ranks.supplied === undefined)).toBe(true);
+    expect(c.legs.find((l) => l.leg === 'supplied')).toMatchObject({ ran: true, candidates: 0 });
+    await mem.close();
+    await db.close();
+  });
+
   it("a host's memoryQuestion predicate replaces the rule, and one that throws is read as no", async () => {
     const db = await open();
     const always = await memoryWith({ retrieval: 'hybrid', memoryQuestion: () => true }, new FlatEmbedder(), db.brain);
