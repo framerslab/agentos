@@ -1681,22 +1681,25 @@ describe("a souled agent on runtime: 'gmi', beyond its own sessions", () => {
     }
   });
 
-  it("a seat session's page tool reads the operator's pages, never those of the user its session id names", async () => {
+  it("a seat whose session id is a user's id never reads that user's pages: a seat runs no page tool", async () => {
     writePage('concepts/ops', OPS);
     const { a, s } = await openedWith({ runtime: 'gmi' }, [...readsPage({ list: true }, 'c1'), ...readsPage({ id: 'concepts/notes' }, 'c2')]);
     try {
       await writeOwnPage(a, userKey('bob'), OWL_PAGE);
       const seat = sessionSeat(a as never, { sessionId: 'bob' });
+      // The seat's own session id is prefixed, so it is never the user's.
+      expect(seat.seatId).toBe('seat:bob');
 
       await seat.generate('What can I read?');
       const listed = toolAnswerIn(lastCall(s));
-      expect(listed).toContain('concepts/ops');
+      expect(listed).toContain('not available in this seat');
       expect(listed).not.toContain('concepts/notes');
 
       await seat.generate('Open the notes.');
       const answer = toolAnswerIn(lastCall(s));
-      expect(answer).toContain('No memory page found with id');
+      expect(answer).toContain('not available in this seat');
       expect(answer).not.toContain(OWL_PAGE);
+      expect(lines('memory.page_read_refused')).toEqual([]);
     } finally {
       await a.close();
     }
