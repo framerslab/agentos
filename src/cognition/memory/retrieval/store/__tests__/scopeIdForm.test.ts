@@ -909,7 +909,8 @@ function refileAroundRead(
       if (now && when === 'after') await refileBrainScopeIds(brain);
       return rows;
     }) as ReadAll;
-  const spy = vi.spyOn(brain, 'all').mockImplementation(hooked(brain.all.bind(brain)));
+  const all = hooked(brain.all.bind(brain));
+  const spy = vi.spyOn(brain, 'all').mockImplementation(all);
   // An export that reads one consistent view reads it through readConsistently: the view's reads are hooked too.
   const readConsistently = brain.readConsistently.bind(brain);
   const viewSpy = vi.spyOn(brain, 'readConsistently').mockImplementation(((
