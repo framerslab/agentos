@@ -285,6 +285,37 @@ describe('guards on a call with a fallback chain', () => {
     expect(result.guardReport?.toolCalls).toHaveLength(1);
   });
 
+  it('a continuation that moves to the prompt-tool loop numbers its calls after the rounds before it', async () => {
+    // Claude runs one native tool round, then hits its spend limit; the OpenAI leg refuses native tools and continues in the prompt-tool loop.
+    const claudeToolUse = () =>
+      sse([
+        { type: 'message_start', message: { id: 'msg_t', type: 'message', role: 'assistant', model: 'claude-opus-5-5', content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 25, output_tokens: 1 } } },
+        { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'toolu_1', name: 'search', input: {} } },
+        { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"q":"x"}' } },
+        { type: 'content_block_stop', index: 0 },
+        { type: 'message_delta', delta: { stop_reason: 'tool_use', stop_sequence: null }, usage: { output_tokens: 9 } },
+        { type: 'message_stop' },
+      ]);
+    const noNativeTools = () =>
+      new Response(JSON.stringify({ error: { message: 'This model does not support tools.', type: 'invalid_request_error', code: null } }), { status: 400, headers: { 'content-type': 'application/json' } });
+    const toClaude = [claudeToolUse, anthropicSpendLimit];
+    const toOpenAIQueue = [noNativeTools, text('<tool_call>{"name":"search","arguments":{"q":"y"}}</tool_call>'), text('done')];
+    fetchMock.mockImplementation(async (url: unknown, init?: { method?: string }) => {
+      if ((init?.method ?? 'GET') === 'GET') return jsonResponse({ object: 'list', data: [{ id: 'gpt-4.1', object: 'model', created: 1, owned_by: 'openai' }] });
+      const next = (/api\.anthropic\.com/.test(String(url)) ? toClaude : toOpenAIQueue).shift();
+      if (!next) throw new Error(`script exhausted at ${String(url)}`);
+      return next();
+    });
+    const result = await generateText({
+      provider: 'anthropic', model: 'claude-opus-5-5', apiKey: 'sk-ant-guards-test-0004', prompt: 'find x', tools: { search }, maxSteps: 4,
+      fallbackProviders: [{ provider: 'openai', model: 'gpt-4.1', apiKey: 'sk-guards-test-0004' }],
+      guards: guards(toolGuard(GuardrailAction.FLAG)),
+    });
+    expect(result.text).toBe('done');
+    expect(search.execute).toHaveBeenCalledTimes(2);
+    expect(result.guardReport?.toolCalls.map((c) => c.toolCallId)).toEqual(['tc_1_0', 'tc_2_0']);
+  });
+
   it('a stop is not tried on a fallback provider and never counts against the provider\'s health', async () => {
     serve([text('the model reply')]);
     const onFallback = vi.fn();
