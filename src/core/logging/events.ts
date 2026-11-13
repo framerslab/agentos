@@ -119,6 +119,13 @@ export const AGENTOS_EVENTS = {
   'guardrail.verdict': { guardrailId: 'word', stage: { enum: ['input', 'output', 'tool_call'] }, action: { enum: ['flag', 'sanitize', 'hold', 'block'] }, code: 'word', surface: 'word', mode: { enum: ['enforce', 'dry_run'] }, unavailable: { enum: ['yes', 'no'] } },
   // An image check threw, or an image could not be captured (checkId: load). Never the image, its URL or an error's message.
   'image_guard.check_failed': { guardrailId: 'word', checkId: 'word', posture: { enum: ['refuse', 'skip'] }, type: 'word', code: 'word' },
+  // A governed tool call ended. The code is one the wrapper built: an evidence failure, a fixed code, or the id of one
+  // of the tool's own limit rules. Absent when the end has none.
+  'action.ended': { action: 'word', outcome: { enum: ['executed', 'failed', 'would_execute', 'refused_arguments', 'voided_evidence', 'limit_reached', 'duplicate', 'limiter_unavailable', 'audit_unavailable'] }, code: 'word', mode: { enum: ['enforce', 'dry_run'] } },
+  // A half of a governed call's audit record could not be written: the host's sink threw. Never its message.
+  'action.audit_failed': { action: 'word', half: { enum: ['begin', 'finish'] }, type: 'word', code: 'word' },
+  // A callback of agency() threw or rejected: its name, and the error's listed type and code. Never its message.
+  'agency.callback_failed': { callback: { enum: ['agentStart', 'agentEnd', 'handoff', 'toolCall', 'error', 'emergentForge', 'guardrailResult', 'limitReached', 'approvalRequested', 'approvalDecided', 'guardrailHitlOverride'] }, type: 'word', code: 'word' },
   // A soul given `optional: true` failed to load; the agent runs without it.
   'soul.load_failed': { optional: { enum: ['yes'] }, type: 'word', code: 'word' },
   // gmi() left out a front matter field that path cannot apply.
