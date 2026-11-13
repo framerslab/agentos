@@ -717,6 +717,10 @@ The preamble appears when the budget has room for it and 100 more tokens. `assem
 
 Token estimation uses ~4 chars per token heuristic.
 
+### Upgrading from 0.17.2 or earlier
+
+- `recall.rerank` refuses at construction two values 0.17.2 accepted, with a `RecallOptionError` (reason `invalid_value`) and one `memory.recall.option_rejected` line naming the field. A `local` one's `revision` in upper or mixed case (`rerank.revision`): give the commit id in lower case, as Hugging Face Hub shows it; 0.17.2 matched the id case-insensitively and loaded the files from the id as written, which finds the lower-case folder on a case-insensitive file system and misses it on a case-sensitive one. A `timeoutMs` above 2,147,483,647 (`rerank.timeoutMs`): a timer set past it runs after 1 ms, so on 0.17.2 such a rerank timed out on every turn and the turns answered unreranked. `agent()`, `gmi()`, a persona's `cognitiveMemoryConfig.recall`, `CognitiveMemoryManager.initialize()` and `applyRecallConfig()` all refuse them.
+
 ### Upgrading from 0.17.1 or earlier
 
 - `CognitiveMemoryConfig.rerankerService` is no longer read for memory recall: set `recall.rerank` (`'none'`, the default; `{ kind: 'local', model, revision }`; `{ kind: 'llm', invoke, model }`; see [Recall](#recall)). Through 0.17.1 a manager given a `rerankerService` reranked every recall with the service's default provider, a remote one included. It now calls no provider but the one `recall.rerank` names, writes one `memory.recall.option_ignored` line (`option: 'remote_provider'`) when it initialises with a service, and returns the service from `getRerankerService()` as before. The capture's `reranker.provider` is `none`, `local` or `llm`; the manager no longer records `other`. A reranked recall scores the best 20 candidates (`maxCandidates`; through 0.17.1, the first 100), and under `retrieval: 'hybrid'` the rerank now orders the cut and leaves each line's relevance as it was.
