@@ -264,6 +264,11 @@ interface ParticipantChunk {
   holds: number;
   /** Settles once the chunk's frames are captured; rejects when its announcement or a capture failed or it was discarded. */
   captured: Promise<void>;
+  /**
+   * For a chunk with a mark, resolves as the chunk is announced, once its mark is confirmed, or as its send ends
+   * without an announcement: a playback wait's deadline starts then, as the receipt's does.
+   */
+  announced?: Promise<void>;
 }
 /**
  * One published track of the agent's speech. In native playout chunks queue on the track in order, as fast as its
@@ -668,8 +673,11 @@ export class LiveKitAudioPublisher {
     const pcm = this.decode(chunk); const mark = this.markOf(chunk);
     const generation = { ...chunk.generation }; const captured = this.cancellation;
     const receipt: PlaybackReceipt = { generation, sequence: chunk.sequence, playedSamples: pcm.samples, sampleRate: pcm.sampleRate };
-    const acks = this.acks; acks.begin(receipt);
-    const pending: ParticipantChunk = { playout: 'participant', receipt, acks, holds: this.holds, captured: Promise.resolve() }; this.pending = pending;
+    // A marked chunk is announced once its mark is confirmed: its receipt's deadline starts then, not at admission.
+    const acks = this.acks; acks.begin(receipt, !mark);
+    let announce = (): void => {};
+    const announced = mark ? new Promise<void>((resolve) => { announce = resolve; }) : undefined;
+    const pending: ParticipantChunk = { playout: 'participant', receipt, acks, holds: this.holds, captured: Promise.resolve(), announced }; this.pending = pending;
     const work = (async () => {
       await this.prepare(); this.live(generation, captured); const rtc = this.rtc!;
       const { frames, publishedSamples } = this.convert(rtc, pcm);
@@ -683,8 +691,8 @@ export class LiveKitAudioPublisher {
           throw error;
         }
         this.live(generation, captured);
-        // The receipt's deadline starts again as the chunk is announced: the time its mark took is not the page's.
-        acks.rearm(receipt);
+        // The receipt's deadline starts as the chunk is announced: the time its publication and its mark took is not the page's.
+        acks.arm(receipt); announce();
       }
       // The chunk is announced to the participant it was admitted for; once another is linked, the track alone plays it.
       if (acks === this.acks) await this.send({ type: 'audio', scopeId: this.options.scopeId, callId: this.options.callId, generation, sequence: receipt.sequence,
@@ -698,11 +706,12 @@ export class LiveKitAudioPublisher {
         this.moved(); this.live(generation, captured);
       }
     })(); this.sending = work; pending.captured = work;
-    try { await work; } finally { if (this.sending === work) this.sending = undefined; }
+    try { await work; } finally { announce(); if (this.sending === work) this.sending = undefined; }
   }
   /**
    * Resolves with the chunk's receipt once it has played, within `receiptTimeoutMs` (`publisher drain timeout`);
-   * an aborted `signal`, a clear, a close or a newer generation rejects it with `publisher cancelled`.
+   * an aborted `signal`, a clear, a close or a newer generation rejects it with `publisher cancelled`. The deadline
+   * runs from the call, or for a marked chunk in participant playout from its announcement when that comes later.
    *
    * In native playout the wait is for the last chunk admitted: once its frames are captured, the track's native queue
    * must play out (`AudioSource.waitForPlayout()`), and the receipt is the publisher's own, with the chunk's samples
@@ -765,12 +774,16 @@ export class LiveKitAudioPublisher {
   private async waitForReceipt(pending: ParticipantChunk, generation: VoiceGeneration, sequence: number, signal: AbortSignal): Promise<PlaybackReceipt> {
     const captured = this.cancellation;
     if (!this.source) throw new Error('missing publisher receipt');
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const deadline = new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error('publisher drain timeout')), this.options.receiptTimeoutMs); });
+    let timer: ReturnType<typeof setTimeout> | undefined; let ended = false;
+    // The deadline of a wait begun before a marked chunk is announced starts at the announcement, as the receipt's does.
+    const deadline = new Promise<never>((_resolve, reject) => {
+      const start = (): void => { if (!ended) timer = setTimeout(() => reject(new Error('publisher drain timeout')), this.options.receiptTimeoutMs); };
+      if (pending.announced) void pending.announced.then(start); else start();
+    });
     try {
       const receipt = await Promise.race([this.played(pending, generation, sequence, signal), deadline]);
       this.live(generation, captured); if (signal.aborted || pending.holds !== this.holds) throw new Error('publisher cancelled'); return receipt;
-    } finally { if (timer) clearTimeout(timer); if (this.pending === pending) this.pending = undefined; }
+    } finally { ended = true; if (timer) clearTimeout(timer); if (this.pending === pending) this.pending = undefined; }
   }
   /**
    * What proves a chunk participant playout admitted played: the participant's receipt with the native drain, or, once

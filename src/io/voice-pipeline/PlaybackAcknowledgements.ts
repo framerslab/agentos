@@ -10,11 +10,12 @@ export const PlaybackAcknowledgementSchema = z.discriminatedUnion('type', [
 ]);
 /** Publisher-to-receiver discard fence; acknowledgement is mandatory while the path is open. */
 export interface PlaybackClear { type: 'clear'; generation: VoiceGeneration; clearId: number }
-interface Deferred<T> { promise: Promise<T>; resolve(value: T): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }
-function deferred<T>(timeoutMs: number): Deferred<T> {
+interface Deferred<T> { promise: Promise<T>; resolve(value: T): void; reject(error: Error): void; timer?: ReturnType<typeof setTimeout> }
+/** A result that rejects with `receipt timeout` once `timeoutMs` has passed; with no `timeoutMs`, it has no deadline yet. */
+function deferred<T>(timeoutMs?: number): Deferred<T> {
   let resolve!: (value: T) => void; let reject!: (error: Error) => void;
   const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; }); promise.catch(() => {});
-  const timer = setTimeout(() => reject(new Error('receipt timeout')), timeoutMs);
+  const timer = timeoutMs === undefined ? undefined : setTimeout(() => reject(new Error('receipt timeout')), timeoutMs);
   return { promise, resolve, reject, timer };
 }
 /** One audio receipt and one discard handshake, with fixed memory and explicit deadlines. */
@@ -27,12 +28,15 @@ export class PlaybackAcknowledgements {
   constructor(private readonly timeoutMs: number) {
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30000) throw new Error('invalid receipt deadline');
   }
-  /** Reserves the sole receipt before any bytes leave, so a fast receiver cannot race registration. */
-  begin(receipt: PlaybackReceipt): void {
+  /**
+   * Reserves the sole receipt before any bytes leave, so a fast receiver cannot race registration. Its deadline starts
+   * now, or with `armed` false at `arm()`, for audio announced only after a wait of the publisher's own.
+   */
+  begin(receipt: PlaybackReceipt, armed = true): void {
     if (this.closed || this.audio || this.clearing) throw new Error('playback outstanding or closed');
     PlaybackAcknowledgementSchema.parse({ type: 'playback', ...receipt });
     if (this.cleared && sameVoiceGeneration(this.cleared, receipt.generation)) throw new Error('cancelled generation');
-    this.audio = { receipt: { ...receipt, generation: { ...receipt.generation } }, result: deferred(this.timeoutMs), acknowledged: false };
+    this.audio = { receipt: { ...receipt, generation: { ...receipt.generation } }, result: deferred(armed ? this.timeoutMs : undefined), acknowledged: false };
   }
   /**
    * Withdraws the receipt `begin()` reserved for audio that never left, so the next can be reserved at once; a wait on
@@ -44,10 +48,10 @@ export class PlaybackAcknowledgements {
     clearTimeout(audio.result.timer); audio.result.reject(new Error('playback cancelled')); this.audio = undefined;
   }
   /**
-   * Starts the deadline of the receipt `begin()` reserved again, from now, as its audio is announced after a wait of the
-   * publisher's own; another receipt, or one already acknowledged, is left as it is.
+   * Starts the deadline of the receipt `begin()` reserved, from now, as its audio is announced; a deadline it had is
+   * started again. Another receipt, or one already acknowledged, is left as it is.
    */
-  rearm(receipt: PlaybackReceipt): void {
+  arm(receipt: PlaybackReceipt): void {
     const audio = this.audio;
     if (!audio || audio.acknowledged || !sameVoiceGeneration(audio.receipt.generation, receipt.generation) || audio.receipt.sequence !== receipt.sequence) return;
     clearTimeout(audio.result.timer); audio.result.timer = setTimeout(() => audio.result.reject(new Error('receipt timeout')), this.timeoutMs);
