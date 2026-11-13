@@ -829,7 +829,8 @@ describe('an OpenAI refusal beside a tool call', () => {
       });
     route([
       [/api\.openai\.com\/v1\/models/, modelList],
-      [/api\.openai\.com\/v1\/chat\/completions/, inOrder(refusalWithCallBlock, chatAnswer, refusalWithCallBlock, chatAnswer)],
+      // Every request gets the same reply: a second request or a run tool would show in the counts below.
+      [/api\.openai\.com\/v1\/chat\/completions/, refusalWithCallBlock],
     ]);
     const lookup = tool();
     const call = { provider: 'openai', model: CHAT_MODEL, apiKey: 'sk-refusal-e2e', prompt: 'A request.', fallbackProviders: [], tools: { lookup }, toolMode: 'prompt' as const, maxSteps: 3 };
@@ -931,6 +932,7 @@ describe('a Responses stream whose terminal output disagrees with its refusal pi
   };
 
   it('reads the refusal from the terminal output, as the same body read whole does', async () => {
+    route([[/api\.openai\.com\/v1\/models/, modelList]]);
     const provider = new OpenAIProvider();
     await provider.initialize({ apiKey: 'sk-refusal-e2e', maxRetries: 1 });
     const finalChoice = async () => {
