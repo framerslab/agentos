@@ -27,9 +27,9 @@ import {
   accumulateExtraUsage,
   buildAgentCallUsage,
   callRecordExtras,
-  maskedMessageOf,
 } from './shared.js';
 import { lazyLogger } from '../lazyLogger.js';
+import { callAgencyCallback } from '../agencyLog.js';
 import type { SeatedRoster, SeatedConfig } from '../pool/seating.js';
 import { vendorOf, makerOfHostedModel, isHostProvider } from '../pool/vendor.js';
 import { seatHealthId } from '../pool/resolve.js';
@@ -143,8 +143,9 @@ function freshError(error: unknown, mask: (error: unknown) => unknown): Error {
 
 /**
  * The callbacks the panel and its gates fire. Each runs inside a try/catch,
- * so a callback that throws is written to the host's logger, masked, and
- * changes no status, and every
+ * so a callback that throws is written to the host's logger as
+ * `agency.callback_failed` (its name and the error's listed type and code,
+ * never its message) and changes no status, and every
  * `error` event carries a new Error built from the redacted message and stack.
  */
 function panelCallbacks(on: AgencyOptions['on'], mask: (error: unknown) => unknown): Callbacks {
@@ -152,14 +153,11 @@ function panelCallbacks(on: AgencyOptions['on'], mask: (error: unknown) => unkno
   for (const [name, fn] of Object.entries(on ?? {})) {
     if (typeof fn !== 'function') continue;
     out[name] = (event: unknown) => {
-      try {
+      callAgencyCallback(name, () => {
         const payload =
           name === 'error' && isRecord(event) ? { ...event, error: freshError(event.error, mask) } : event;
-        (fn as Notify).call(on, payload);
-      } catch (err) {
-        // To the host's logger, with the message through the call's mask: a callback's error can quote what the call sent.
-        agencyLogger.warn(`${name} callback threw`, { event: 'agency_callback_threw', callback: name, error: maskedMessageOf(err, mask) });
-      }
+        return (fn as Notify).call(on, payload);
+      });
     };
   }
   return out as Callbacks;

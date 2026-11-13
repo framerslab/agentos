@@ -5,7 +5,10 @@
  * into a LiveKit room as LiveKit's own transcription text streams, their
  * translations written to the participants that read them, a room
  * participant's audio as `AudioFrame`s, and an `IStreamTransport` over a
- * room, which with a publisher also speaks into it. The transcription output
+ * room, which with a publisher also speaks into it, and with the publisher's
+ * `mark` option sets a machine-readable mark for synthetic speech on the
+ * publishing participant's attributes (`SpeechMark`,
+ * `LIVEKIT_SPEECH_MARK_ATTRIBUTES`). The transcription output
  * takes the host's connected `@livekit/rtc-node` `Room`, described by a
  * structural type. The audio source and the transport are Node only and run
  * on the optional peer `@livekit/rtc-node`, loaded on first use or passed in
@@ -54,7 +57,9 @@ export {
 export {
   isLiveKitSipParticipant,
   LIVEKIT_PLAYOUT_ATTRIBUTE,
+  LIVEKIT_SPEECH_MARK_ATTRIBUTES,
   type LiveKitAudioPublisherOptions,
   type LiveKitPlayout,
   type LiveKitPlayoutParticipant,
+  type SpeechMark,
 } from '../voice-pipeline/LiveKitAudioPublisher.js';

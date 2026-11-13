@@ -29,7 +29,7 @@ import type { ChatMessage } from '../../core/llm/providers/IProvider';
 let n = 0;
 const key = () => `k-memory-hybrid-${++n}`;
 
-type Candidate = { id: string; ranks: { dense?: number; exact_words?: number; recency?: number }; outcome: string; reason?: string; duplicateOf?: string; section?: string };
+type Candidate = { id: string; ranks: { dense?: number; exact_words?: number; recency?: number }; outcome: string; reason?: string; duplicateOf?: string; reserve?: boolean; section?: string };
 type Capture = {
   retrieval: string;
   lexicalBackend: string;
@@ -116,6 +116,7 @@ async function turn(recall: Record<string, unknown> | undefined, extra: Record<s
     const before = embedder.embedCalls;
     const result = await session.send('What is the bike shed code?');
     return {
+      text: (result as unknown as { text: string }).text,
       block: memoryBlockOf(s, STATEMENTS.length),
       embedCalls: embedder.embedCalls - before,
       memoryRecall: (result as unknown as { memoryRecall?: Capture }).memoryRecall!,
@@ -307,6 +308,127 @@ describe("agent({ runtime: 'gmi' }) memory.recall.retrieval", () => {
     for (const c of included) expect(c.section, c.id).toBe('recall');
   });
 
+  it("'hybrid' on a GMI turn: a correction that changes one word in a longer memory is sent in place of the text it corrects", async () => {
+    const sister = 'My sister Ana moved out of the old riverside flat last spring and now lives in';
+    const statements = [`${sister} Porto.`, 'I water the tomatoes every second day.', `${sister} Lisbon.`];
+    const question = 'Does my sister Ana still live in Porto?';
+    const dense = await ask(undefined, statements, question);
+    // Precondition: dense recall shows both texts, so the hybrid block showing one is the dedupe's doing.
+    expect(dense.block).toContain('lives in Porto');
+    expect(dense.block).toContain('lives in Lisbon');
+
+    const hybrid = await ask({ retrieval: 'hybrid' }, statements, question);
+    expect(hybrid.block).toContain('lives in Lisbon');
+    expect(hybrid.block).not.toContain('lives in Porto');
+    // The old text ranks first by exact words (the question names its city) and is the one dropped. (The session's
+    // three "Noted." replies are one memory too, so they are not the only candidates the dedupe drops.)
+    const old = hybrid.memoryRecall.candidates.find((c) => c.ranks.exact_words === 1)!;
+    expect(old).toMatchObject({ outcome: 'left_out', reason: 'dedupe' });
+    expect(hybrid.memoryRecall.candidates.find((c) => c.id === old.duplicateOf)).toMatchObject({ outcome: 'included', section: 'recall' });
+  });
+
+  it("'hybrid' on a GMI turn: a memory question sends the exact-words hit the cut left out; the same words without the question leave it out for the budget", async () => {
+    type Reserved = Omit<Capture, 'candidates'> & { memoryQuestionReserve: { fired: boolean; added: number }; candidates: Array<Candidate & { reserve?: boolean }> };
+    const GOLD = 'The bike shed code is XQ7Z.';
+    // Filed first, then 64 notes whose words are the questions' stop words and a number: by meaning the notes are
+    // nearer, so the dense leg's sixty are notes, and no note shares a word the exact-words leg reads. Only the code's
+    // exact word finds the oldest memory, and its fused score sorts it after every note the dense leg returned.
+    const statements = [GOLD, ...Array.from({ length: 64 }, (_, i) => `Note ${i + 10}: what it is you and I are on, and where it is.`)];
+    const k = key();
+    const emb = key();
+    const s = script('openai', k, { replies: [...statements.map(() => reply.text('Noted.')), reply.text('Noted.'), reply.text('Noted.')] });
+    script('openai', emb, { replies: [] });
+    vi.stubEnv('OPENAI_API_KEY', emb);
+    const a = agent({
+      runtime: 'gmi',
+      name: 'Shed',
+      provider: 'openai',
+      model: 'stub-model',
+      apiKey: k,
+      fallbackProviders: [],
+      cognition: { memory: { embedding: { provider: 'openai' }, recall: { retrieval: 'hybrid' } }, mechanisms: false },
+    } as unknown as AgentOptions);
+    try {
+      const session = a.session('s');
+      for (const statement of statements) await session.send(statement);
+      session.clear();
+      const plain = (await session.send('What is it you and I are on, and where is XQ7Z?')) as unknown as { memoryRecall: Reserved };
+      session.clear();
+      const asked = (await session.send('Do you remember what it is you and I are on, and where is XQ7Z?')) as unknown as { memoryRecall: Reserved };
+      const plainBlock = memoryBlockOf(s, statements.length);
+      const askedBlock = memoryBlockOf(s, statements.length + 1);
+
+      // Without a memory question: ranked first by exact words, never by meaning, and cut for the budget.
+      expect(plain.memoryRecall.memoryQuestionReserve).toEqual({ fired: false, added: 0 });
+      const left = plain.memoryRecall.candidates.find((c) => c.ranks.exact_words === 1)!;
+      expect(left).toMatchObject({ outcome: 'left_out', reason: 'budget' });
+      expect(left.ranks.dense).toBeUndefined();
+      expect(left.reserve).toBeUndefined();
+      expect(plainBlock).not.toContain(GOLD.slice(0, -1));
+
+      // With one: the same memory is reserved, shown in the recall section, and the model receives it.
+      expect(asked.memoryRecall.memoryQuestionReserve).toEqual({ fired: true, added: 1 });
+      expect(asked.memoryRecall.candidates.find((c) => c.id === left.id)).toMatchObject({ reserve: true, outcome: 'included', section: 'recall' });
+      expect(asked.memoryRecall.candidates.filter((c) => c.reserve)).toHaveLength(1);
+      expect(askedBlock).toContain(GOLD.slice(0, -1));
+      expect(askedBlock.match(/^## Relevant Memories/gm)).toHaveLength(1);
+      expect(events('memory.recall.reserve_fired')).toEqual([expect.objectContaining({ added: 1 })]);
+    } finally {
+      await a.close();
+    }
+  });
+
+  it("'hybrid' with capture 'off' on a GMI turn: a memory question still sends the reserved memory, as with a record", async () => {
+    const GOLD = 'The bike shed code is XQ7Z.';
+    // The fixture of the case above: only the code's exact word finds the oldest memory, and the cut leaves it out.
+    const statements = [GOLD, ...Array.from({ length: 64 }, (_, i) => `Note ${i + 10}: what it is you and I are on, and where it is.`)];
+    const run = async (capture: 'metadata' | 'off') => {
+      logged.length = 0;
+      const k = key();
+      const emb = key();
+      const s = script('openai', k, { replies: [...statements.map(() => reply.text('Noted.')), reply.text('Noted.'), reply.text('Noted.')] });
+      script('openai', emb, { replies: [] });
+      vi.stubEnv('OPENAI_API_KEY', emb);
+      const a = agent({
+        runtime: 'gmi',
+        name: 'Shed',
+        provider: 'openai',
+        model: 'stub-model',
+        apiKey: k,
+        fallbackProviders: [],
+        cognition: { memory: { embedding: { provider: 'openai' }, recall: { retrieval: 'hybrid', capture } }, mechanisms: false },
+      } as unknown as AgentOptions);
+      try {
+        const session = a.session('s');
+        for (const statement of statements) await session.send(statement);
+        session.clear();
+        await session.send('What is it you and I are on, and where is XQ7Z?');
+        session.clear();
+        const asked = (await session.send('Do you remember what it is you and I are on, and where is XQ7Z?')) as unknown as { memoryRecall?: unknown };
+        return {
+          plainBlock: memoryBlockOf(s, statements.length),
+          askedBlock: memoryBlockOf(s, statements.length + 1),
+          memoryRecall: asked.memoryRecall,
+          reserveFired: events('memory.recall.reserve_fired'),
+        };
+      } finally {
+        await a.close();
+      }
+    };
+    const recorded = await run('metadata');
+    const off = await run('off');
+    // Precondition: with a record the memory question reserved the memory and the plain question left it out.
+    expect(recorded.askedBlock).toContain(GOLD.slice(0, -1));
+    expect(recorded.plainBlock).not.toContain(GOLD.slice(0, -1));
+    // With no record the block still reserves the same room: the model receives the memory, and the line counts it.
+    expect(off.memoryRecall).toBeUndefined();
+    expect(off.plainBlock).not.toContain(GOLD.slice(0, -1));
+    expect(off.askedBlock).toContain(GOLD.slice(0, -1));
+    expect(off.askedBlock.match(/^## Relevant Memories/gm)).toHaveLength(1);
+    expect(off.reserveFired).toEqual([expect.objectContaining({ added: 1 })]);
+    expect(recorded.reserveFired).toEqual([expect.objectContaining({ added: 1 })]);
+  });
+
   it("'hybrid' on a GMI turn whose question the embedding provider fails on: the dense leg is absent, exact words still put the memory in the block", async () => {
     const MARK = 'tarpaulin';
     const statements = ['The bike shed code is XQ7Z.', 'I water the tomatoes every second day.', 'My sister Ana lives in Porto.'];
@@ -342,5 +464,139 @@ describe("agent({ runtime: 'gmi' }) memory.recall.retrieval", () => {
     const absent = events('memory.recall.leg_absent');
     expect(absent).toEqual([expect.objectContaining({ leg: 'dense', reason: 'no_embedder' })]);
     expect(JSON.stringify(absent)).not.toContain(MARK);
+  });
+});
+
+describe("agent({ runtime: 'gmi' }) memory.recall.rerank", () => {
+  const emptyRanking = async (): Promise<string> => '[]';
+
+  const refused: Array<[Record<string, unknown>, string, string]> = [
+    [{ rerank: { kind: 'cohere', apiKey: 'k' } }, 'rerank', 'unsupported_provider'],
+    [{ rerank: { kind: 'local', model: 'cross-encoder/ms-marco-MiniLM-L6-v2' } }, 'rerank.revision', 'invalid_value'],
+    [{ rerank: { kind: 'local', model: ' ', revision: 'abc' } }, 'rerank.model', 'invalid_value'],
+    [{ rerank: { kind: 'llm', model: 'm' } }, 'rerank.invoke', 'invalid_value'],
+    [{ rerank: { kind: 'llm', invoke: emptyRanking, model: 'm', timeoutMs: 0 } }, 'rerank.timeoutMs', 'invalid_value'],
+    [{ rerank: { kind: 'llm', invoke: emptyRanking, model: 'm', timeoutMs: 2_147_483_648 } }, 'rerank.timeoutMs', 'invalid_value'],
+    [{ rerank: { kind: 'local', model: 'cross-encoder/ms-marco-MiniLM-L6-v2', revision: '233902D25C440F23AF6F7D6E94D2946BAC0BEE0A' } }, 'rerank.revision', 'invalid_value'],
+    [{ rerank: { kind: 'llm', invoke: emptyRanking, model: 'm', maxCandidates: 2.5 } }, 'rerank.maxCandidates', 'invalid_value'],
+    [{ rerank: 'cohere' }, 'rerank', 'invalid_value'],
+  ];
+  it.each(refused)('rejects %j at construction, naming memory.recall.%s', (recall, field, reason) => {
+    expect(() =>
+      agent({
+        runtime: 'gmi', provider: 'openai', model: 'stub-model', apiKey: key(),
+        cognition: { memory: { embedding: { provider: 'openai' }, recall }, mechanisms: false },
+      } as unknown as AgentOptions),
+    ).toThrow(`memory.recall.${field}`);
+    expect(events('memory.recall.option_rejected')).toEqual([expect.objectContaining({ option: field, reason })]);
+  });
+
+  const anyValue: Array<[unknown]> = [[{ kind: 'llm', invoke: emptyRanking, model: 'm' }], ['none']];
+  it.each(anyValue)('rerank %j on the default runtime is refused: any value, the default included', (rerank) => {
+    expect(() => agent({ provider: 'openai', model: 'stub-model', apiKey: key(), memory: { recall: { rerank } } } as unknown as AgentOptions)).toThrow(
+      /memory\.recall\.rerank.*runtime: 'gmi'/s,
+    );
+    expect(events('memory.recall.option_rejected')).toEqual([expect.objectContaining({ option: 'rerank', reason: 'unsupported_runtime' })]);
+  });
+
+  it('an llm rerank set on agent() reaches the turn: the record names the provider and the model, and the judge saw the candidates', async () => {
+    const seen: string[] = [];
+    const invoke = async (system: string, user: string): Promise<string> => {
+      seen.push(user);
+      // A score for each memory sent, the first the highest; then a ranking of them in the order it was given.
+      return system.includes('relevance scorer')
+        ? JSON.stringify((user.match(/^\[\d+\]/gm) ?? []).map((_, i) => (i === 0 ? 9 : 1)))
+        : JSON.stringify([...user.matchAll(/^\[([^\]]+)\]/gm)].map((m) => m[1]));
+    };
+    const out = await turn({ rerank: { kind: 'llm', model: 'judge-model', invoke } });
+    const record = out.memoryRecall as unknown as { reranker: Record<string, unknown>; candidates: Array<{ rerankScore?: number }> };
+    expect(record.reranker).toMatchObject({ provider: 'llm', model: 'judge-model' });
+    expect(record.candidates.some((c) => typeof c.rerankScore === 'number')).toBe(true);
+    expect(seen.join('\n')).toContain('XQ7Z');
+    expect(out.block).toContain('XQ7Z');
+  });
+
+  // The largest timeoutMs the setting takes is a delay a timer keeps: a judge that answers 30 ms into each call of the
+  // question's rerank is waited for, by the rerank's own deadline and by the judge's. One past it, which construction
+  // refuses above, a Node timer runs after 1 ms and every rerank would end in 'timeout'.
+  it('an llm rerank at the largest timeoutMs (2,147,483,647) on a GMI turn waits for a judge that answers after 30 ms', async () => {
+    const QUESTION = 'Query: "What is the bike shed code?"';
+    let late = 0;
+    const invoke = async (system: string, user: string): Promise<string> => {
+      if (user.includes(QUESTION)) {
+        late += 1;
+        await new Promise<void>((resolve) => setTimeout(resolve, 30));
+      }
+      return system.includes('relevance scorer')
+        ? JSON.stringify((user.match(/^\[\d+\]/gm) ?? []).map((_, i) => (i === 0 ? 9 : 1)))
+        : JSON.stringify([...user.matchAll(/^\[([^\]]+)\]/gm)].map((m) => m[1]));
+    };
+    const out = await turn({ rerank: { kind: 'llm', model: 'judge-model', invoke, timeoutMs: 2_147_483_647 } });
+    // Precondition: the judge was asked about the question and answered late.
+    expect(late).toBeGreaterThan(0);
+    const record = out.memoryRecall as unknown as { reranker: Record<string, unknown>; candidates: Array<{ rerankScore?: number }> };
+    expect(record.reranker).toMatchObject({ provider: 'llm', model: 'judge-model' });
+    expect(record.candidates.some((c) => typeof c.rerankScore === 'number')).toBe(true);
+    expect(out.text).toBe('XQ7Z.');
+    expect(out.block).toContain('XQ7Z');
+    expect(events('memory.recall.rerank_skipped')).toEqual([]);
+    expect(events('memory.recall.option_rejected')).toEqual([]);
+  });
+
+  it("rerank 'none' set outright on a GMI turn sends the block of no setting, byte for byte", async () => {
+    vi.useFakeTimers({ toFake: ['Date'], shouldAdvanceTime: false });
+    vi.setSystemTime(Date.UTC(2026, 10, 10, 12, 0, 0));
+    try {
+      const unset = await turn(undefined);
+      const none = await turn({ rerank: 'none' });
+      expect(unset.block).toContain('XQ7Z');
+      expect(none.block).toBe(unset.block);
+      expect((none.memoryRecall as unknown as { reranker: unknown }).reranker).toEqual({ provider: 'none', reason: 'none_configured' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // Fail-open on the real path: a judge that rejects, or one that never answers inside its timeout, leaves the block
+  // the model receives as it is with no rerank, and the turn still answers.
+  const failing: Array<['dense' | 'hybrid', 'error' | 'timeout']> = [
+    ['dense', 'error'],
+    ['hybrid', 'error'],
+    ['dense', 'timeout'],
+    ['hybrid', 'timeout'],
+  ];
+  it.each(failing)("under %s a judge that ends in %s on a GMI turn sends the block of no rerank, byte for byte, and the turn answers", async (retrieval, mode) => {
+    vi.useFakeTimers({ toFake: ['Date'], shouldAdvanceTime: false });
+    vi.setSystemTime(Date.UTC(2026, 10, 10, 12, 0, 0));
+    try {
+      const plain = await turn({ retrieval });
+      const QUESTION = 'Query: "What is the bike shed code?"';
+      const asked: string[] = [];
+      // The turns that file the statements recall too: there the judge answers, every memory scored alike and ranked
+      // as sent, so their order stands and no failure counts toward a back-off. Only the question's rerank fails.
+      const invoke = (system: string, user: string): Promise<string> => {
+        if (!user.includes(QUESTION)) {
+          return Promise.resolve(
+            system.includes('relevance scorer')
+              ? JSON.stringify((user.match(/^\[\d+\]/gm) ?? []).map(() => 5))
+              : JSON.stringify([...user.matchAll(/^\[([^\]]+)\]/gm)].map((m) => m[1])),
+          );
+        }
+        asked.push(user);
+        return mode === 'error' ? Promise.reject(new Error('provider down')) : new Promise<string>(() => undefined);
+      };
+      const judged = await turn({ retrieval, rerank: { kind: 'llm', model: 'judge-model', invoke, ...(mode === 'timeout' ? { timeoutMs: 50 } : {}) } });
+      // Precondition: the judge was asked about the question, with the turn's own text as its query.
+      expect(asked.length).toBeGreaterThan(0);
+      expect(plain.block).toContain('XQ7Z');
+      expect(judged.block).toBe(plain.block);
+      expect(judged.text).toBe('XQ7Z.');
+      const record = judged.memoryRecall as unknown as { reranker: unknown; candidates: Array<{ rerankScore?: number }> };
+      expect(record.reranker).toEqual({ provider: 'none', reason: mode });
+      expect(record.candidates.every((c) => c.rerankScore === undefined)).toBe(true);
+      expect(events('memory.recall.rerank_skipped')).toEqual([expect.objectContaining({ provider: 'llm', reason: mode })]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

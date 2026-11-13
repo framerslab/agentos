@@ -32,6 +32,7 @@
 
 import type { IAudioGenerator } from '../IAudioGenerator.js';
 import type { MusicGenerateRequest, SFXGenerateRequest, AudioResult } from '../types.js';
+import { importOptional } from '../../../../core/utils/importOptional.js';
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -279,7 +280,7 @@ export class MusicGenLocalProvider implements IAudioGenerator {
 
     let transformers: { pipeline: (...args: unknown[]) => Promise<unknown> };
     try {
-      transformers = await import('@huggingface/transformers');
+      transformers = await importOptional('@huggingface/transformers');
     } catch {
       throw new Error(
         'MusicGen local provider requires @huggingface/transformers. '

@@ -174,11 +174,13 @@ const visionCheck: ImageCheck = {
   onError: 'skip',   // 'refuse' (default) refuses the image as unavailable; 'skip' makes the check a signal
   reasonCodes: ['IMAGE_SUGGESTIVE', 'IMAGE_REVIEW'],
   async check(image, context) {
-    // image: { index, bytes, mimeType }; the bytes are this check's own copy
+    // image: { index, bytes, mimeType, deadlineSignal }; the bytes are this check's own copy
     const parts: number[] = [];
     for (const region of regionsOf(image.bytes)) {
+      if (image.deadlineSignal?.aborted) throw new Error('past the guard deadline'); // nobody waits for the answer
       if (context.vendorSignal?.aborted) break; // another guard answered a code that stops vendor requests
-      parts.push(await visionModel.score(region, image.mimeType));
+      // the deadline goes to the request itself, so a request in flight stops when it passes
+      parts.push(await visionModel.score(region, image.mimeType, { signal: image.deadlineSignal }));
     }
     // nothing scored, or a score that is not a number, is no judgment: throw, and the guard refuses the image or,
     // with 'skip', asks the next check
@@ -191,10 +193,11 @@ const visionCheck: ImageCheck = {
 };
 ```
 
-- **What a check receives.** An `ImageUnderReview`: the image's `index` in `visionInputs`, its `bytes` and its `mimeType`. The bytes are a copy the guard made of the image it captured once, so a check that changes them changes nothing the next check reads. A check never receives the URL: send the bytes to a vendor (as a data URL when its API takes one), never a link it would fetch again.
+- **What a check receives.** An `ImageUnderReview`: the image's `index` in `visionInputs`, its `bytes`, its `mimeType` and the guard's `deadlineSignal`. The bytes are a copy the guard made of the image it captured once, so a check that changes them changes nothing the next check reads. A check never receives the URL: send the bytes to a vendor (as a data URL when its API takes one), never a link it would fetch again.
 - **The four verdicts.** `{ verdict: 'pass' }`; `{ verdict: 'flag', reasonCode, scores? }`, which lets the next check run; `{ verdict: 'hold', reviewCode }`, which keeps the content back for a person's review and ends this image's chain of `classify` checks; `{ verdict: 'block', reasonCode, quarantine? }`, which refuses the image and ends its chain of `classify` checks. The other `match` checks still run on an image a `match` check held, blocked or could not judge, so a later hash match is never hidden. A `match` check that finds known material answers `block` with `quarantine: true`, which ends the whole evaluation before any `classify` check sees any image of the input; from a `classify` check, a quarantine ends it before any further check runs. Any other answer (a `block` or `flag` whose `reasonCode`, or a `hold` whose `reviewCode`, is not a word included), and a throw, is a check that could not answer: one `image_guard.check_failed` line, then the image is refused as unavailable, or, for a `classify` check with `onError: 'skip'`, the chain goes on.
 - **`reasonCodes`.** List every reason code and review code the check can answer, each a word (letters, digits and `_ . : -`, at most 64); `create()` throws on any other. The guard's own `config.reasonCodes` is its two fixed codes (`IMAGE_LIMIT`, `IMAGE_CHECK_UNAVAILABLE`) and every check's list, and the `guardrail.verdict` line writes a code outside it as `unknown`.
 - **`context.vendorSignal`.** The guard reads it before each `classify` check and starts none once it is aborted. A check that makes more than one request reads it before each one, as above, and does not hand it to a request already sent.
+- **`image.deadlineSignal`.** Aborted once the guard's deadline has passed (its `timeoutMs`, or the dispatcher's when a required guard's spec gives a shorter one) or the guard has answered: the caller has its decision and nobody waits for the check's answer. The guard sets it on every call, one signal for the whole evaluation. Send nothing once it is aborted, whatever the check was waiting on (a key lookup, a queue), and hand it to a request in flight (`fetch(url, { signal: image.deadlineSignal })`) so the request stops. Unlike `context.vendorSignal`, it goes to the request itself: a request it stops throws, which the guard counts as a check that could not answer. Whatever a check answers once the deadline has passed, `onError: 'skip'` included, the image is refused as unavailable unless a check blocked or held it. A check that ignores it is run all the same, and a request it sent runs until the check's own timer ends it.
 - **Write nothing of the image.** Keep the bytes, the URL and any description out of a reason code, a review code, `scores` and your own log lines. The guard keeps a flag's `scores` only as finite numbers under keys that are words, and drops any other entry.
 
 ### evaluateOutput(payload)
