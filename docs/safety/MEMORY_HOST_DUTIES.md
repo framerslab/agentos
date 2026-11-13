@@ -23,7 +23,7 @@ This page describes the library's behaviour. It is not legal advice. Whether a l
 
 With `souledAgent()` the memory store is a SQLite file, `memory/.store/memory.sqlite`, and the tombstone copy is a second file beside it, `memory/.store/forgotten.sqlite`. A `.gitignore` in that folder keeps both out of version control, so a soul folder you keep in git never carries a person's conversation. A host that wires the wiki onto its own storage adapter (`Memory.createWithAdapter`, `Memory.createPostgres`) gets the same tables in its own database.
 
-The forgotten-user ledger is database-wide, including older learning-layer tombstones. Give each agent its own database, or its own PostgreSQL schema, and a separate tombstone copy outside restores. Different brain ids do not isolate tombstones: forgetting a user in a shared ledger applies to every brain that reads it.
+The forgotten-user ledger is database-wide, including older learning-layer tombstones. Give each agent its own database, or its own PostgreSQL schema, and a separate tombstone copy outside restores. Different brain ids do not isolate tombstones: forgetting a user in a shared ledger applies to every brain that reads it. The open refuses a copy that is the store's own database with `COPY_UNAVAILABLE`: the same adapter, the same native SQLite file, or on PostgreSQL the same database and schema through a second pool. It cannot tell two handles of another kind on one file apart (sql.js among them), so give the copy a file of its own.
 
 ## What leaves your process
 

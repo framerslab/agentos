@@ -287,6 +287,34 @@ async function sameSqliteFile(primary: StorageAdapter, copy: StorageAdapter): Pr
   return primaryStat.ino !== 0 && primaryStat.dev === copyStat.dev && primaryStat.ino === copyStat.ino;
 }
 
+/** Where an unqualified ledger table resolves on a Postgres connection: its database, and the table's oid there. */
+const TABLE_PLACE_POSTGRES = "SELECT current_database() AS db, 'agentos_learning_forgotten'::regclass::oid AS oid";
+
+/**
+ * Whether two Postgres adapters reach one ledger table. The copy takes a transaction-level advisory lock on a random
+ * key, which the primary cannot take while the copy's transaction holds it when both are on one server and database;
+ * the database's name and the table's oid then tell a second schema of that database apart. Nothing is written, and
+ * the lock ends with the copy's transaction.
+ */
+async function samePostgresTable(primary: StorageAdapter, copy: StorageAdapter): Promise<boolean> {
+  if (!primary.kind.includes('postgres') || !copy.kind.includes('postgres')) return false;
+  const tryLock = (key: number): string => `SELECT pg_try_advisory_xact_lock(${key}) AS held`;
+  return copy.transaction(async (trx) => {
+    // A key another session holds proves nothing: the next one is tried.
+    let key = 0;
+    for (let attempt = 0; attempt < 3 && key === 0; attempt += 1) {
+      const candidate = 1 + Math.floor(Math.random() * 2 ** 52);
+      if ((await trx.get<{ held: boolean }>(tryLock(candidate)))?.held === true) key = candidate;
+    }
+    if (key === 0) throw copyUnavailableError();
+    if ((await primary.get<{ held: boolean }>(tryLock(key)))?.held !== false) return false;
+    const copyPlace = await trx.get<{ db: string; oid: unknown }>(TABLE_PLACE_POSTGRES);
+    const primaryPlace = await primary.get<{ db: string; oid: unknown }>(TABLE_PLACE_POSTGRES);
+    if (!copyPlace || !primaryPlace) return false;
+    return copyPlace.db === primaryPlace.db && String(copyPlace.oid) === String(primaryPlace.oid);
+  });
+}
+
 /**
  * The forgotten subjects of one store.
  *
@@ -335,7 +363,9 @@ export class ForgottenLedger {
    *
    * @throws {TypeError} When any current or previous key is empty.
    *
-   * @throws {ForgottenLedgerError} `COPY_UNAVAILABLE` when the copy is the primary database, cannot be read, or when
+   * @throws {ForgottenLedgerError} `COPY_UNAVAILABLE` when the copy is the primary database (the same adapter, the same
+   *   native SQLite file, or on Postgres the same table: one database and schema, through any pool; two adapters of
+   *   another kind on one file, sql.js among them, are not told apart), cannot be read, or when
    *   the store had a copy and the copy given does not know it (or none is given); `KEY_REQUIRED` when either ledger holds the marker of a key
    *   that was not passed; `LEDGER_IDENTITY_MISMATCH` when the store and the copy hold different identities, or the
    *   side without an identity holds a tombstone or key marker the other lacks; `LEDGER_STATE_INVALID` when a side
@@ -376,11 +406,17 @@ export class ForgottenLedger {
     await primary.exec(FORGOTTEN_DDL);
     let copyRows: LedgerRow[] = [];
     if (copy) {
+      let sameTable: boolean;
       try {
         await copy.exec(FORGOTTEN_DDL);
-        copyRows = await ForgottenLedger.rowsOf(copy);
+        // Two pools on one Postgres database and schema are one table: a restore of the store would replace both.
+        sameTable = await samePostgresTable(primary, copy);
+        if (!sameTable) copyRows = await ForgottenLedger.rowsOf(copy);
       } catch {
         throw copyUnavailableError();
+      }
+      if (sameTable) {
+        throw new ForgottenLedgerError('COPY_UNAVAILABLE', 'ForgottenLedger: the tombstone copy must use a separate database from the primary');
       }
     }
     const primaryRows = await ForgottenLedger.rowsOf(primary);
