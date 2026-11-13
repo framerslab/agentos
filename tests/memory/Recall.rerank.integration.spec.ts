@@ -237,6 +237,22 @@ describe('RecallReranker', () => {
     expect(events('memory.recall.rerank_skipped')).toEqual([]);
   });
 
+  it('a rerank whose reranker is stopped while its provider has not answered settles at once, before its deadline', async () => {
+    const r = new RecallReranker(LOCAL, { createProvider: () => provider(() => new Promise(() => undefined)) as never });
+    r.start();
+    await r.ready();
+    let outcome: unknown;
+    void r.rerank('q', docs(3)).then((value) => {
+      outcome = value;
+    });
+    await flush();
+    await r.dispose();
+    await flush();
+    // No timer has moved: the deadline is still ahead, and the rerank has settled.
+    expect(outcome).toEqual({ record: { provider: 'none', reason: 'unavailable' }, scores: new Map() });
+    expect(events('memory.recall.rerank_skipped')).toEqual([]);
+  });
+
   it('a judge the turn stopped waiting for starts no further model call', async () => {
     // The first scoring call never answers. The rerank's deadline and the judge's own wait for that call end together.
     let calls = 0;
@@ -531,6 +547,30 @@ describe('rerank in a turn', () => {
     await mem.close();
     expect(pipeline.reranker).toBeNull();
     await expect(mem.manager.retrieve('which switchback had the best view', NEUTRAL, { scopes: U1 })).rejects.toThrow('not initialized');
+  });
+
+  it.each(['dense', 'hybrid'] as const)('under %s a memory deleted while the rerank runs is not in the result or the ranking', async (retrieval) => {
+    // The judge deletes the first candidate of its ranking call before it answers, then ranks them as it was sent them.
+    let mem: Awaited<ReturnType<typeof memoryWith>> | undefined;
+    let deleted: string | undefined;
+    const invoke = async (system: string, user: string): Promise<string> => {
+      if (system.includes('relevance scorer')) return JSON.stringify((user.match(/^\[\d+\]/gm) ?? []).map(() => 5));
+      const ids = [...user.matchAll(/^\[([^\]]+)\]/gm)].map((m) => m[1]);
+      if (deleted === undefined) {
+        deleted = ids[0];
+        await mem!.manager.getStore().softDelete(ids[0]);
+      }
+      return JSON.stringify(ids);
+    };
+    mem = await memoryWith({ retrieval, rerank: { kind: 'llm', invoke, model: 'judge-model' } }, new WordHashEmbedder());
+    for (let i = 0; i < 8; i++) await plant(mem, `t${i}`, NOTE(i), at(i));
+    const result = await mem.manager.retrieve('which switchback had the best view', NEUTRAL, { scopes: U1 });
+    expect(deleted).toBeDefined();
+    expect(result.diagnostics.reranker).toMatchObject({ provider: 'llm', model: 'judge-model' });
+    expect(result.retrieved.length).toBeGreaterThan(0);
+    expect(result.retrieved.map((t) => t.id)).not.toContain(deleted);
+    if (retrieval === 'hybrid') expect(result.diagnostics.recall!.ranked!.map((c) => c.id)).not.toContain(deleted);
+    await mem.close();
   });
 
   it('supplying an invoker for rerank attaches no HyDE retriever', async () => {
