@@ -27,6 +27,7 @@ import { streamText } from '../streamText.js';
 import { OpenAIProvider } from '../../core/llm/providers/implementations/OpenAIProvider.js';
 import type { ModelCompletionResponse } from '../../core/llm/providers/IProvider.js';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry.js';
+import type { GuardrailContext, IGuardrailService } from '../../safety/guardrails/IGuardrailService.js';
 
 const REFUSAL = "I'm sorry, I cannot assist with that request.";
 const REFUSAL_PARTS = ["I'm sorry, ", 'I cannot assist with that request.'];
@@ -294,5 +295,48 @@ describe('an OpenAI refusal with a fallback provider set', () => {
     expect(result.provider).toBe('openai');
     const requested = fetchMock.mock.calls.map(([url]) => String(url));
     expect(requested.filter((url) => !/api\.openai\.com/.test(url))).toEqual([]);
+  });
+});
+
+describe('an OpenAI refusal on a call with guards', () => {
+  /** A guard that passes every reply. */
+  const passes: IGuardrailService = { id: 'passes', evaluateOutput: async () => null };
+  const context: GuardrailContext = { userId: 'user-1', sessionId: 'session-1' };
+  const call = {
+    provider: 'openai',
+    model: CHAT_MODEL,
+    apiKey: 'sk-refusal-e2e',
+    prompt: 'A request.',
+    fallbackProviders: [],
+    guards: { services: [passes], context },
+  };
+
+  it('comes back from generateText as it does without them', async () => {
+    route([
+      [/api\.openai\.com\/v1\/models/, modelList],
+      [/api\.openai\.com\/v1\/chat\/completions/, chatRefusal],
+    ]);
+
+    const result = await generateText(call);
+
+    expect(result.finishReason).toBe('refusal');
+    expect(result.refusal).toBe(REFUSAL);
+    expect(result.text).toBe('');
+  });
+
+  it('comes back from streamText as it does without them', async () => {
+    route([
+      [/api\.openai\.com\/v1\/models/, modelList],
+      [/api\.openai\.com\/v1\/chat\/completions/, chatRefusalStream],
+    ]);
+
+    const result = streamText(call);
+
+    let streamed = '';
+    for await (const delta of result.textStream) streamed += delta;
+    expect(streamed).toBe('');
+    expect(await result.finishReason).toBe('refusal');
+    expect(await result.refusal).toBe(REFUSAL);
+    expect(await result.text).toBe('');
   });
 });
