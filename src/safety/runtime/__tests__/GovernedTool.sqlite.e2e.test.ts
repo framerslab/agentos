@@ -169,4 +169,19 @@ describe('a governed tool and the clock, SQLite', () => {
     expect(await db.all<{ state: string }>(`SELECT state FROM gt_r_w${HOUR}_reservations WHERE account_id = 'mute_room_hour|r:r1'`)).toEqual([{ state: 'reserved' }]);
     expect(await db.all<{ state: string }>(`SELECT state FROM gt_r_w${DAY}_reservations`)).toEqual([{ state: 'released' }]);
   });
+
+  it('a purge deletes every settled reservation past retention, more than one page of them', async () => {
+    const limiter = new SqlActionLimiter({ db, rules: ROOM_HOUR, tablePrefix: 'gt_d', requireShared: false });
+    // the first purge makes the tables
+    await limiter.purge(Date.now());
+    const long = Date.now() - 2 * HOUR;
+    await db.run(
+      `WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 1001)
+       INSERT INTO gt_d_w${HOUR}_reservations (operation_id, account_id, period, units, state, outcome, attempts, reserved_at, expires_at, settled_at)
+       SELECT 'op_' || i, 'mute_room_hour|r:r1', 'window', 1, 'released', 'released', 1, ?, ?, ? FROM n`,
+      [long, long, long],
+    );
+    await limiter.purge(Date.now());
+    expect(await db.get<{ rows_left: number }>(`SELECT COUNT(*) AS rows_left FROM gt_d_w${HOUR}_reservations`)).toEqual({ rows_left: 0 });
+  });
 });
