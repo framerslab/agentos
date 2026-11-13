@@ -1,0 +1,58 @@
+{
+  "id": "plain-security-review",
+  "set": "plain",
+  "kind": "document",
+  "language": "en",
+  "title": "Quarterly access review",
+  "headings": [
+    "Scope",
+    "What we found",
+    "What we changed",
+    "Next review"
+  ],
+  "path": "docs/security/access-review.md",
+  "text": "# Scope\n\nEach quarter the security team reviews who can reach the production systems, the admin console, the cloud accounts and the finance tools. This review covered all four. For each system we exported the list of accounts with access, and each team lead confirmed or removed the people in their team.\n\n# What we found\n\nMost access was as expected. We found eleven accounts that belonged to people who had left the company. Their access had been removed from the identity provider, so they could not sign in, but local accounts remained on two older systems that do not use single sign-on. We also found four people with admin access to the cloud accounts who did not need it after moving to other teams, and one shared account used by a build script, whose password had not changed in two years.\n\n# What we changed\n\nThe eleven local accounts were deleted the same day. The two older systems will move behind single sign-on this quarter, so leaving the company removes access everywhere at once. The four admin rights were reduced to read-only access. The shared account was replaced by a service identity with a short-lived token, and the build script now asks for a new token on each run. Every change is recorded in the access log with the date and the person who approved it.\n\n# Next review\n\nThe next access review is due at the start of next quarter. Before then, the security team will add a monthly report of admin rights to the dashboard, so team leads can spot changes between reviews. We will also check that the offboarding checklist includes the older systems until they move behind single sign-on.\n",
+  "vocabulary": [
+    {
+      "label": "security",
+      "uses": 9,
+      "lastUsed": 1762300800000
+    },
+    {
+      "label": "access review",
+      "uses": 8,
+      "lastUsed": 1762214400000
+    },
+    {
+      "label": "audits",
+      "uses": 7,
+      "lastUsed": 1762128000000
+    },
+    {
+      "label": "single sign-on",
+      "uses": 6,
+      "lastUsed": 1762041600000
+    },
+    {
+      "label": "offboarding",
+      "uses": 5,
+      "lastUsed": 1761955200000
+    }
+  ],
+  "typed": [
+    "access review"
+  ],
+  "expected": {
+    "existing": [
+      "security",
+      "accessreview",
+      "singlesignon",
+      "offboarding"
+    ],
+    "new": [
+      "admin"
+    ]
+  },
+  "mustNot": [],
+  "asks": []
+}

@@ -1,0 +1,256 @@
+{
+  "id": "plain-marketing-launch-brief",
+  "set": "plain",
+  "kind": "document",
+  "language": "en",
+  "title": "Launch brief: the spring release",
+  "headings": [
+    "What we are launching",
+    "Who it is for",
+    "Channels",
+    "Measures"
+  ],
+  "path": null,
+  "text": "# What we are launching\n\nThe spring release brings shared reports, a faster search page and a new mobile app for tablets. The launch is on the second Tuesday of April. Shared reports lead the message, because they answer the request we hear most from teams, and the other two features support it.\n\n# Who it is for\n\nThe launch speaks first to team leads at companies of fifty to five hundred people who already use the app. They are the ones who asked for shared reports and who decide whether a team upgrades to the business plan. The second audience is people who tried the app last year and left; the email to them leads with search speed, since slow search was the reason many gave for leaving.\n\n# Channels\n\nThe launch post on the blog goes out at nine in the morning, followed by the email to current customers at ten and the email to former trial users the next day. The product team records a three-minute video of shared reports for the blog and for social media. Sales gets a one-page summary and a short demo script a week before launch. Support gets the help pages and the release notes at the same time, so they can answer questions on the day. We are not buying ads for this launch; the budget goes to the video and to a webinar two weeks later.\n\n# Measures\n\nThe launch is a success if a quarter of the active team leads open a shared report within a month, if upgrades to the business plan rise by a tenth over the previous month, and if the former users' email brings back a measurable number of accounts. The marketing team reports the numbers at four weeks, and the brief is updated with what we learned.\n",
+  "vocabulary": [
+    {
+      "label": "Launches",
+      "uses": 9,
+      "lastUsed": 1762300800000
+    },
+    {
+      "label": "launch",
+      "uses": 8,
+      "lastUsed": 1762214400000
+    },
+    {
+      "label": "Product Launch",
+      "uses": 7,
+      "lastUsed": 1762128000000
+    },
+    {
+      "label": "product-launch",
+      "uses": 6,
+      "lastUsed": 1762041600000
+    },
+    {
+      "label": "Marketing",
+      "uses": 5,
+      "lastUsed": 1761955200000
+    },
+    {
+      "label": "marketing-team",
+      "uses": 4,
+      "lastUsed": 1761868800000
+    },
+    {
+      "label": "Campaigns",
+      "uses": 3,
+      "lastUsed": 1761782400000
+    },
+    {
+      "label": "Email Campaigns",
+      "uses": 2,
+      "lastUsed": 1761696000000
+    },
+    {
+      "label": "email_campaign",
+      "uses": 1,
+      "lastUsed": 1761609600000
+    },
+    {
+      "label": "Blog",
+      "uses": 9,
+      "lastUsed": 1761523200000
+    },
+    {
+      "label": "Blog Posts",
+      "uses": 8,
+      "lastUsed": 1761436800000
+    },
+    {
+      "label": "Social Media",
+      "uses": 7,
+      "lastUsed": 1761350400000
+    },
+    {
+      "label": "social",
+      "uses": 6,
+      "lastUsed": 1761264000000
+    },
+    {
+      "label": "Video",
+      "uses": 5,
+      "lastUsed": 1761177600000
+    },
+    {
+      "label": "Webinars",
+      "uses": 4,
+      "lastUsed": 1761091200000
+    },
+    {
+      "label": "webinar",
+      "uses": 3,
+      "lastUsed": 1761004800000
+    },
+    {
+      "label": "Sales Enablement",
+      "uses": 2,
+      "lastUsed": 1760918400000
+    },
+    {
+      "label": "Demo",
+      "uses": 1,
+      "lastUsed": 1760832000000
+    },
+    {
+      "label": "Pricing",
+      "uses": 9,
+      "lastUsed": 1760745600000
+    },
+    {
+      "label": "Business Plan",
+      "uses": 8,
+      "lastUsed": 1760659200000
+    },
+    {
+      "label": "Upgrades",
+      "uses": 7,
+      "lastUsed": 1760572800000
+    },
+    {
+      "label": "Churn",
+      "uses": 6,
+      "lastUsed": 1760486400000
+    },
+    {
+      "label": "Win-back",
+      "uses": 5,
+      "lastUsed": 1760400000000
+    },
+    {
+      "label": "Audience",
+      "uses": 4,
+      "lastUsed": 1760313600000
+    },
+    {
+      "label": "Messaging",
+      "uses": 3,
+      "lastUsed": 1760227200000
+    },
+    {
+      "label": "Positioning",
+      "uses": 2,
+      "lastUsed": 1760140800000
+    },
+    {
+      "label": "Release Notes",
+      "uses": 1,
+      "lastUsed": 1760054400000
+    },
+    {
+      "label": "Help Pages",
+      "uses": 9,
+      "lastUsed": 1759968000000
+    },
+    {
+      "label": "Tablet App",
+      "uses": 8,
+      "lastUsed": 1759881600000
+    },
+    {
+      "label": "Shared Reports",
+      "uses": 7,
+      "lastUsed": 1759795200000
+    },
+    {
+      "label": "Search",
+      "uses": 6,
+      "lastUsed": 1759708800000
+    },
+    {
+      "label": "Spring",
+      "uses": 5,
+      "lastUsed": 1759622400000
+    },
+    {
+      "label": "Q2",
+      "uses": 4,
+      "lastUsed": 1759536000000
+    },
+    {
+      "label": "Metrics",
+      "uses": 3,
+      "lastUsed": 1759449600000
+    },
+    {
+      "label": "KPIs",
+      "uses": 2,
+      "lastUsed": 1759363200000
+    },
+    {
+      "label": "Ads",
+      "uses": 1,
+      "lastUsed": 1759276800000
+    },
+    {
+      "label": "Paid Ads",
+      "uses": 9,
+      "lastUsed": 1759190400000
+    },
+    {
+      "label": "Budget",
+      "uses": 8,
+      "lastUsed": 1759104000000
+    },
+    {
+      "label": "Brand",
+      "uses": 7,
+      "lastUsed": 1759017600000
+    },
+    {
+      "label": "Design",
+      "uses": 6,
+      "lastUsed": 1758931200000
+    },
+    {
+      "label": "Copywriting",
+      "uses": 5,
+      "lastUsed": 1758844800000
+    },
+    {
+      "label": "Customers",
+      "uses": 4,
+      "lastUsed": 1758758400000
+    },
+    {
+      "label": "Trials",
+      "uses": 3,
+      "lastUsed": 1758672000000
+    },
+    {
+      "label": "Onboarding",
+      "uses": 2,
+      "lastUsed": 1758585600000
+    }
+  ],
+  "typed": [
+    "Launches",
+    "Marketing",
+    "Shared Reports"
+  ],
+  "expected": {
+    "existing": [
+      "launches",
+      "marketing",
+      "sharedreports",
+      "webinars",
+      "upgrades"
+    ],
+    "new": [
+      "springrelease"
+    ]
+  },
+  "mustNot": [],
+  "asks": []
+}

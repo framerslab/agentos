@@ -1,0 +1,323 @@
+[
+  {
+    "label": "budget",
+    "quotes": [
+      "The budget for the spring campaign is fixed."
+    ],
+    "held": true,
+    "why": "its words stand in the quote"
+  },
+  {
+    "label": "vendor contract",
+    "quotes": [
+      "We signed the vendor contract after legal review."
+    ],
+    "held": true,
+    "why": "its words stand in the quote"
+  },
+  {
+    "label": "q3 planning",
+    "quotes": [
+      "Q3 planning starts once the board approves the targets."
+    ],
+    "held": true,
+    "why": "its words and its number stand in the quote"
+  },
+  {
+    "label": "office move",
+    "quotes": [
+      "The office move is planned for the last week of May."
+    ],
+    "held": true,
+    "why": "its words stand in the quote"
+  },
+  {
+    "label": "release checklist",
+    "quotes": [
+      "Follow the release checklist before every deploy."
+    ],
+    "held": true,
+    "why": "its words stand in the quote"
+  },
+  {
+    "label": "customer feedback",
+    "quotes": [
+      "Customer feedback from the pilot was mostly about speed."
+    ],
+    "held": true,
+    "why": "its words stand in the quote"
+  },
+  {
+    "label": "data retention",
+    "quotes": [
+      "Our data retention period for logs is ninety days."
+    ],
+    "held": true,
+    "why": "its words stand in the quote"
+  },
+  {
+    "label": "security review",
+    "quotes": [
+      "The security review covers every admin account.",
+      "Each finding gets an owner and a date."
+    ],
+    "held": true,
+    "why": "its words stand in the first of two quotes"
+  },
+  {
+    "label": "3 vendors",
+    "quotes": [
+      "We compared 4 vendors before choosing one."
+    ],
+    "held": false,
+    "why": "its number is not the quote's"
+  },
+  {
+    "label": "q4 planning",
+    "quotes": [
+      "Q3 planning starts in July."
+    ],
+    "held": false,
+    "why": "its number is not the quote's"
+  },
+  {
+    "label": "2026 budget",
+    "quotes": [
+      "The 2027 budget is under review."
+    ],
+    "held": false,
+    "why": "its year is not the quote's"
+  },
+  {
+    "label": "two offices",
+    "quotes": [
+      "The company opened three offices this year."
+    ],
+    "held": false,
+    "why": "its number word is not the quote's"
+  },
+  {
+    "label": "version 2",
+    "quotes": [
+      "Version 3 of the app ships in March."
+    ],
+    "held": false,
+    "why": "its version is not the quote's"
+  },
+  {
+    "label": "10 percent raise",
+    "quotes": [
+      "Staff get a 5 percent raise in April."
+    ],
+    "held": false,
+    "why": "its figure is not the quote's"
+  },
+  {
+    "label": "top 5 accounts",
+    "quotes": [
+      "The top 50 accounts get a named manager."
+    ],
+    "held": false,
+    "why": "its number is not the quote's"
+  },
+  {
+    "label": "phase 1",
+    "quotes": [
+      "Phase 2 begins after the pilot ends."
+    ],
+    "held": false,
+    "why": "its phase is not the quote's"
+  },
+  {
+    "label": "approved",
+    "quotes": [
+      "The budget was not approved by the board."
+    ],
+    "held": false,
+    "why": "it drops the quote's negation"
+  },
+  {
+    "label": "renewal",
+    "quotes": [
+      "We will not renew the contract this year."
+    ],
+    "held": false,
+    "why": "it drops the quote's negation"
+  },
+  {
+    "label": "not approved",
+    "quotes": [
+      "The design was approved on Friday."
+    ],
+    "held": false,
+    "why": "it adds a negation the quote lacks"
+  },
+  {
+    "label": "signed contract",
+    "quotes": [
+      "The contract was never signed."
+    ],
+    "held": false,
+    "why": "it drops the quote's negation"
+  },
+  {
+    "label": "remote work",
+    "quotes": [
+      "Remote work is not offered for this role."
+    ],
+    "held": false,
+    "why": "it drops the quote's negation"
+  },
+  {
+    "label": "with travel",
+    "quotes": [
+      "The role comes without travel."
+    ],
+    "held": false,
+    "why": "it drops the quote's negation"
+  },
+  {
+    "label": "launch ready",
+    "quotes": [
+      "The app isn't ready for launch."
+    ],
+    "held": false,
+    "why": "it drops the quote's negation"
+  },
+  {
+    "label": "budget cut",
+    "quotes": [
+      "Nobody asked for a budget cut."
+    ],
+    "held": false,
+    "why": "it drops the quote's negation"
+  },
+  {
+    "label": "hiring",
+    "quotes": [
+      "We hired two engineers in October."
+    ],
+    "held": true,
+    "why": "another form of the quote's word"
+  },
+  {
+    "label": "contract renewals",
+    "quotes": [
+      "The renewal of the cleaning contract is due next month."
+    ],
+    "held": true,
+    "why": "another form of the quote's words"
+  },
+  {
+    "label": "launched",
+    "quotes": [
+      "We launch the beta after the review."
+    ],
+    "held": true,
+    "why": "another form of the quote's word"
+  },
+  {
+    "label": "budgets",
+    "quotes": [
+      "Each team keeps its own budget for travel."
+    ],
+    "held": true,
+    "why": "another form of the quote's word"
+  },
+  {
+    "label": "testing",
+    "quotes": [
+      "The team will test the import on staging first."
+    ],
+    "held": true,
+    "why": "another form of the quote's word"
+  },
+  {
+    "label": "reviewed designs",
+    "quotes": [
+      "Every design gets a review before it ships."
+    ],
+    "held": true,
+    "why": "other forms of the quote's words"
+  },
+  {
+    "label": "audits",
+    "quotes": [
+      "The auditor asked for the audit trail of the vendor payments."
+    ],
+    "held": true,
+    "why": "another form of the quote's word"
+  },
+  {
+    "label": "onboarding",
+    "quotes": [
+      "New staff onboard during their first week."
+    ],
+    "held": true,
+    "why": "another form of the quote's word"
+  },
+  {
+    "label": "Acme renewal",
+    "quotes": [
+      "The renewal is due at the end of March."
+    ],
+    "held": false,
+    "why": "it names a company the quote does not"
+  },
+  {
+    "label": "Berlin office",
+    "quotes": [
+      "The new office opens in the spring."
+    ],
+    "held": false,
+    "why": "it names a place the quote does not"
+  },
+  {
+    "label": "Northwind contract",
+    "quotes": [
+      "The contract covers support and hosting."
+    ],
+    "held": false,
+    "why": "it names a company the quote does not"
+  },
+  {
+    "label": "Jira migration",
+    "quotes": [
+      "The migration of the tickets finished on Monday."
+    ],
+    "held": false,
+    "why": "it names a product the quote does not"
+  },
+  {
+    "label": "Lisbon offsite",
+    "quotes": [
+      "The offsite is planned for October."
+    ],
+    "held": false,
+    "why": "it names a place the quote does not"
+  },
+  {
+    "label": "Globex audit",
+    "quotes": [
+      "The audit found two missing receipts."
+    ],
+    "held": false,
+    "why": "it names a company the quote does not"
+  },
+  {
+    "label": "Atlas launch",
+    "quotes": [
+      "The launch moved to the second week of June."
+    ],
+    "held": false,
+    "why": "it names a project the quote does not"
+  },
+  {
+    "label": "Contoso pilot",
+    "quotes": [
+      "The pilot ran for six weeks."
+    ],
+    "held": false,
+    "why": "it names a company the quote does not"
+  }
+]

@@ -1,0 +1,57 @@
+{
+  "id": "plain-research-note-search",
+  "set": "plain",
+  "kind": "document",
+  "language": "en",
+  "title": "Research note: how people search their files",
+  "headings": [
+    "Question",
+    "Method",
+    "Findings",
+    "What to do next"
+  ],
+  "path": null,
+  "text": "# Question\n\nHow do people look for a file they saved weeks ago? The search team wanted to know which clues people remember, and whether the filters we plan to build match those clues.\n\n# Method\n\nWe ran twelve remote sessions of forty minutes each. In each session the participant tried to find six of their own files, chosen at random from those they had not opened in a month, while thinking aloud. We noted the first clue they reached for, every query they typed, and whether they found the file. We did not record their screens or keep the names of their files; the notes hold only the kind of clue and the outcome.\n\n# Findings\n\nThe clue people reached for first was a word from the title in about half the attempts. A rough date came next, phrased as a season or an event, such as the week before the holiday. Fewer people used the file's type, and almost no one used the folder. When the first query failed, most participants changed one word rather than adding a filter. They found the file in four attempts out of five, but the failed attempts took three times as long as the others and ended in frustration.\n\n# What to do next\n\nThe date filter should accept rough ranges, not only exact days. Search should try near spellings and other forms of a word before giving up, because changing one word was the main way people recovered. The type filter can wait. We also want a second, larger study with a survey, to check whether these clues hold for teams that share folders. The full notes and the session plan are in the research folder, and the team will discuss them at the next search review.\n",
+  "vocabulary": [
+    {
+      "label": "research",
+      "uses": 9,
+      "lastUsed": 1762300800000
+    },
+    {
+      "label": "user research",
+      "uses": 8,
+      "lastUsed": 1762214400000
+    },
+    {
+      "label": "search",
+      "uses": 7,
+      "lastUsed": 1762128000000
+    },
+    {
+      "label": "filters",
+      "uses": 6,
+      "lastUsed": 1762041600000
+    },
+    {
+      "label": "surveys",
+      "uses": 5,
+      "lastUsed": 1761955200000
+    }
+  ],
+  "typed": [
+    "user research"
+  ],
+  "expected": {
+    "existing": [
+      "research",
+      "search",
+      "filters"
+    ],
+    "new": [
+      "study"
+    ]
+  },
+  "mustNot": [],
+  "asks": []
+}

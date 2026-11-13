@@ -1,0 +1,41 @@
+{
+  "id": "languages-es-presupuesto",
+  "set": "languages",
+  "kind": "document",
+  "language": "es",
+  "title": "Revisión del presupuesto del tercer trimestre",
+  "headings": [
+    "Resumen",
+    "Próximos pasos"
+  ],
+  "path": null,
+  "text": "# Resumen\n\nEl tercer trimestre terminó con un gasto total cercano al presupuesto aprobado. La mayoría de los equipos se mantuvo dentro de sus partidas, y el ahorro vino sobre todo de los viajes y de las licencias de programas que dejamos de renovar en agosto. El equipo de ingeniería gastó casi toda su asignación, principalmente en servidores en la nube y en dos contratistas que terminaron la migración de datos. El equipo de diseño gastó menos de lo previsto porque el estudio con clientes se aplazó a octubre.\n\nPara el cuarto trimestre el presupuesto mantiene la misma forma, con un cambio: la partida de contratación crece y la de eventos se reduce para cubrirla. Se abrirán tres puestos nuevos, un ingeniero, una diseñadora y una segunda persona en el equipo de atención al cliente.\n\n# Próximos pasos\n\nFinanzas pide a cada responsable de equipo que cierre las órdenes de compra abiertas antes de fin de mes, para que las cuentas reflejen lo que realmente se gastó. Quedan dos preguntas abiertas: si el contrato de servidores debe pasar a un compromiso anual, y si conviene guardar una reserva para una conferencia en primavera. Ambas se tratarán en la reunión de dirección de la semana que viene.\n",
+  "vocabulary": [
+    {
+      "label": "presupuesto",
+      "uses": 9,
+      "lastUsed": 1762300800000
+    },
+    {
+      "label": "finance",
+      "uses": 8,
+      "lastUsed": 1762214400000
+    },
+    {
+      "label": "hiring",
+      "uses": 7,
+      "lastUsed": 1762128000000
+    }
+  ],
+  "typed": [
+    "presupuesto"
+  ],
+  "expected": {
+    "existing": [
+      "presupuesto"
+    ],
+    "new": []
+  },
+  "mustNot": [],
+  "asks": []
+}

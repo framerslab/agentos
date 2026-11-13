@@ -1,0 +1,58 @@
+{
+  "id": "plain-onboarding-guide",
+  "set": "plain",
+  "kind": "document",
+  "language": "en",
+  "title": "Onboarding guide for new engineers",
+  "headings": [
+    "Your first day",
+    "Your first week",
+    "Your first month",
+    "Who to ask"
+  ],
+  "path": "handbook/onboarding.md",
+  "text": "# Your first day\n\nWelcome. On your first day you collect your laptop from the office desk or receive it by courier if you work remotely. Follow the setup guide in the handbook to install the development tools and get access to the code repositories. Your manager will meet you in the afternoon to walk through the team's current work, and you will be paired with an onboarding buddy who has been here at least a year.\n\n# Your first week\n\nSpend the week reading and running things rather than building. Clone the main repository, run the app on your machine, and run the test suite. Read the architecture overview and the last three design documents of your team. Join the team's daily standup and the weekly planning meeting. By the end of the week, make one small change, such as a fix to a typo in the documentation or a small bug, and take it through review and deploy with your buddy. The point is to learn the path a change takes, not the size of the change.\n\n# Your first month\n\nTake on a real task from the team's board, chosen with your manager to touch one part of the system in depth. Shadow the on-call engineer for one shift and read the runbooks for the alerts your team owns. Write down anything in this guide or the handbook that was wrong, missing or confusing, and fix it; the next person will thank you. At the end of the month your manager will hold a short check-in about how things are going and what you need.\n\n# Who to ask\n\nYour buddy is your first stop for any question, however small. For access problems, ask the IT desk. For questions about the codebase, ask in your team's channel; someone always answers. Nobody expects you to know everything in the first month, and asking early is better than guessing.\n",
+  "vocabulary": [
+    {
+      "label": "onboarding",
+      "uses": 9,
+      "lastUsed": 1762300800000
+    },
+    {
+      "label": "handbook",
+      "uses": 8,
+      "lastUsed": 1762214400000
+    },
+    {
+      "label": "new hires",
+      "uses": 7,
+      "lastUsed": 1762128000000
+    },
+    {
+      "label": "engineering",
+      "uses": 6,
+      "lastUsed": 1762041600000
+    },
+    {
+      "label": "on-call",
+      "uses": 5,
+      "lastUsed": 1761955200000
+    }
+  ],
+  "typed": [
+    "onboarding"
+  ],
+  "expected": {
+    "existing": [
+      "onboarding",
+      "handbook",
+      "engineering",
+      "oncall"
+    ],
+    "new": [
+      "buddy"
+    ]
+  },
+  "mustNot": [],
+  "asks": []
+}
