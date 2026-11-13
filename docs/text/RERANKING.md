@@ -71,7 +71,7 @@ new LocalCrossEncoderReranker({
 });
 ```
 
-- Needs Transformers.js: `@huggingface/transformers` 3.x, an optional dependency of the package, else `@xenova/transformers` 2.x. `isAvailable()` answers whether one of them imports; `rerank()` throws when neither does.
+- Needs Transformers.js: `@huggingface/transformers` 3.x, an optional dependency of the package, else `@xenova/transformers` 2.x. `isAvailable()` answers whether one of them imports; `rerank()` throws when neither does. Both are imported at run time by a specifier a bundler does not follow, and memory recall imports the provider itself only when a `{ kind: 'local' }` rerank loads, so a host that bundles the package builds without either one.
 - `LOCAL_RERANKER_MODELS` lists three Hugging Face model ids, each with the licence its repository states (read on 13 November 2026):
 
   | Model | Licence |

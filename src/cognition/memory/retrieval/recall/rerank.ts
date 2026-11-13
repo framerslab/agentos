@@ -9,7 +9,6 @@
 import type { IRerankerProvider } from '../../../rag/reranking/IRerankerService.js';
 import { RerankerService } from '../../../rag/reranking/RerankerService.js';
 import { LlmJudgeReranker } from '../../../rag/reranking/providers/LlmJudgeReranker.js';
-import { LocalCrossEncoderReranker } from '../../../rag/reranking/providers/LocalCrossEncoderReranker.js';
 import type { MemoryRecallConfig } from '../../core/config.js';
 import type { MemoryRecallReranker, RerankSkipReason } from './capture.js';
 import { oncePerProcess, recallLog } from './log.js';
@@ -82,6 +81,37 @@ function judgeProvider(setting: Extract<RerankSetting, { kind: 'llm' }>): Recall
   };
 }
 
+/**
+ * The local cross-encoder as memory rerank's provider. Its module is imported the first time the reranker asks for it
+ * (the load `start()` begins), not when this module loads, so a host that never names `{ kind: 'local' }` does not
+ * load it; the provider in turn loads Transformers.js by a specifier a bundler does not follow. Each call is the
+ * provider's own.
+ */
+function localProvider(setting: Extract<RerankSetting, { kind: 'local' }>, deps: RecallRerankerDeps): RecallRerankProvider {
+  let loaded: Promise<RecallRerankProvider> | undefined;
+  const provider = (): Promise<RecallRerankProvider> =>
+    (loaded ??= import('../../../rag/reranking/providers/LocalCrossEncoderReranker.js').then(
+      ({ LocalCrossEncoderReranker }) =>
+        new LocalCrossEncoderReranker({
+          providerId: 'local',
+          defaultModelId: setting.model,
+          revision: setting.revision,
+          ...(deps.cacheDir ? { cacheDir: deps.cacheDir } : {}),
+          ...(deps.localFilesOnly ? { localFilesOnly: true } : {}),
+        }),
+    ));
+  return {
+    providerId: 'local',
+    isAvailable: async () => (await provider()).isAvailable(),
+    initialize: async (modelId) => (await provider()).initialize?.(modelId),
+    rerank: async (input, config) => (await provider()).rerank(input, config),
+    // Nothing to release when the provider was never loaded.
+    dispose: async () => {
+      if (loaded) await (await loaded).dispose?.();
+    },
+  };
+}
+
 /** Whether a load failed because Transformers.js is missing or too old to load a model. */
 function isMissingDependency(error: unknown): boolean {
   return error instanceof Error && /Transformers\.js is not installed|installed Transformers\.js has no/.test(error.message);
@@ -130,15 +160,7 @@ export class RecallReranker {
     this.kind = setting.kind;
     this.provider =
       deps.createProvider?.() ??
-      (setting.kind === 'local'
-        ? new LocalCrossEncoderReranker({
-            providerId: 'local',
-            defaultModelId: setting.model,
-            revision: setting.revision,
-            ...(deps.cacheDir ? { cacheDir: deps.cacheDir } : {}),
-            ...(deps.localFilesOnly ? { localFilesOnly: true } : {}),
-          })
-        : judgeProvider(setting));
+      (setting.kind === 'local' ? localProvider(setting, deps) : judgeProvider(setting));
     this.service = new RerankerService({
       config: { providers: [{ providerId: this.provider.providerId, defaultModelId: setting.model }], defaultProviderId: this.provider.providerId },
     });

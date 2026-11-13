@@ -12,6 +12,12 @@ import type {
   RerankerRequestConfig,
   RerankerProviderConfig,
 } from '../IRerankerService';
+import { importOptional } from '../../../../core/utils/importOptional.js';
+
+/** Transformers.js 3.x, the preferred package. */
+const TRANSFORMERS = '@huggingface/transformers';
+/** Transformers.js 2.x, the fallback. */
+const TRANSFORMERS_V2 = '@xenova/transformers';
 
 /**
  * Transformers.js 3.x data types. The dtype picks the suffix Transformers.js
@@ -498,14 +504,14 @@ export class LocalCrossEncoderReranker implements IRerankerProvider {
     /** Transformers.js 2.x (`@xenova/transformers`), which reads `quantized` and not `dtype`. */
     let version2 = false;
     try {
-      // Dynamic import to avoid bundling issues and allow optional dependency.
+      // Loaded at run time by a specifier a bundler does not follow, so a host bundles this module without them.
       // Prefer `@huggingface/transformers` (Transformers.js v3+) but support `@xenova/transformers` for back-compat.
       transformers = await (async () => {
         try {
-          return await import('@huggingface/transformers');
+          return await importOptional(TRANSFORMERS);
         } catch {
           version2 = true;
-          return await import('@xenova/transformers');
+          return await importOptional(TRANSFORMERS_V2);
         }
       })();
     } catch {
@@ -602,11 +608,11 @@ export class LocalCrossEncoderReranker implements IRerankerProvider {
   public async isAvailable(): Promise<boolean> {
     try {
       // Check if transformers.js is available
-      await import('@huggingface/transformers');
+      await importOptional(TRANSFORMERS);
       return true;
     } catch {
       try {
-        await import('@xenova/transformers');
+        await importOptional(TRANSFORMERS_V2);
         return true;
       } catch {
         return false;
