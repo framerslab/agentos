@@ -229,6 +229,8 @@ export class LearnerSession implements ILearnerSession {
     await this.writeLearnerRow();
     if (this.host.modeFor(this.targetFor(true)) !== 'off') {
       await this.loadTraits();
+      // The open reads the tombstone as a turn does: a trait row a restore put back beside it never renders.
+      if (this.traits?.status === 'ok' && (await this.learnerForgotten())) this.traits = { status: 'forgotten' };
       if (this.traits?.status === 'ok') this.lastTraits = this.learnerRender(this.traits).traits;
     }
     await this.host.recoverPending(this.key);
@@ -416,9 +418,9 @@ export class LearnerSession implements ILearnerSession {
   }
 
   /**
-   * Whether the learner's tombstone stands, read at each of the learner's turns while its trait row is loaded, as the
-   * freezes are: a `forgetUser` of this process also tells the session at once, and one of another process reaches it
-   * here. A store that cannot be read answers no, and the next turn reads it again.
+   * Whether the learner's tombstone stands, read at the session's open and at each of the learner's turns while its
+   * trait row is loaded, as the freezes are: a `forgetUser` of this process also tells the session at once, and one
+   * of another process reaches it here. A store that cannot be read answers no, and the next turn reads it again.
    */
   private async learnerForgotten(): Promise<boolean> {
     const key = this.key!;
