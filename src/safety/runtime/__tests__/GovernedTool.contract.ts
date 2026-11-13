@@ -115,6 +115,21 @@ export function runGovernedToolSuite(name: string, open: () => Promise<StoreUnde
       expect(mute.execute).toHaveBeenCalledTimes(1);
     });
 
+    it("(d) a dry run whose answer does not meet the tool's output schema is refused before anything is counted", async () => {
+      const limiter = limiterOf();
+      const reserve = vi.spyOn(limiter, 'reserve');
+      const typed: MuteTool = { ...mute, outputSchema: { type: 'object', properties: { muted: { type: 'boolean' } }, required: ['muted'] } };
+      // the default answer, { dryRun: true }, has no `muted`
+      const dry = governTool(typed, { ...MUTE_POLICY, dryRunOutput: undefined }, governanceOf(limiter, { mode: 'dryRun' }));
+      expect(governance((await viaModel(dry, muteOf(message('m1')))).result)).toMatchObject({ outcome: 'refused_arguments', code: 'POLICY_ERROR' });
+      expect(reserve).not.toHaveBeenCalled();
+      expect(audit.outcomes()).toEqual(['refused_arguments']);
+      // an answer that meets it is the dry run's
+      const answered = governTool(typed, MUTE_POLICY, governanceOf(limiter, { mode: 'dryRun' }));
+      expect((await viaModel(answered, muteOf(message('m1')))).result).toMatchObject({ success: true, output: { muted: true } });
+      expect(mute.execute).not.toHaveBeenCalled();
+    });
+
     it('(e) an audit sink that cannot write refuses the action, and nothing was reserved', async () => {
       const limiter = limiterOf();
       const reserve = vi.spyOn(limiter, 'reserve');
