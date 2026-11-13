@@ -1028,7 +1028,9 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             // its usage is counted above, and the stream stops here.
             opts.abortSignal?.throwIfAborted();
             const cc = r.choices?.[0]?.message?.content;
-            const refused = r.choices?.[0]?.refusal;
+            // A whole refusal message, not one the output cap cut off.
+            const answer = r.choices?.[0];
+            const refused = answer?.finishReason === 'refusal' ? answer.refusal : undefined;
             return {
               text: typeof cc === 'string' ? cc : ((cc as any)?.text ?? ''),
               usage: { totalTokens: r.usage?.totalTokens ?? 0 },
@@ -1190,6 +1192,9 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         // The model's refusal message for this step: its streamed pieces, or
         // the whole message a chunk that ends the answer carries.
         let stepRefusal = '';
+        // The finish reason of the chunk that carried the whole message: a
+        // message the output cap cut off ends the step on that reason instead.
+        let stepRefusalReason: string | null = null;
         stepTextSoFar = '';
 
         try {
@@ -1199,7 +1204,10 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             }
             if (chunk.refusalDelta) stepRefusal += chunk.refusalDelta;
             const chunkRefusal = chunk.choices?.[0]?.refusal;
-            if (typeof chunkRefusal === 'string' && chunkRefusal) stepRefusal = chunkRefusal;
+            if (typeof chunkRefusal === 'string' && chunkRefusal) {
+              stepRefusal = chunkRefusal;
+              stepRefusalReason = chunk.choices?.[0]?.finishReason ?? null;
+            }
             // Capture the provider-reported identity from EVERY chunk (not
             // only the usage-final one) so an error or abandonment after a
             // model-bearing chunk still resolves responseModel/serviceTier.
@@ -1433,7 +1441,11 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           // A step that holds the model's refusal message ends on the refusal.
           // The OpenAI chat stream's last final chunk is its usage-only chunk,
           // which names no reason, so the message decides it, not that chunk.
-          if (stepRefusal) {
+          // A message the output cap or a content filter cut off is a cut
+          // answer: the step ends on the reason the provider gave with it.
+          if (stepRefusal && stepRefusalReason !== null && stepRefusalReason !== 'refusal') {
+            lastStepFinishReason = stepRefusalReason;
+          } else if (stepRefusal) {
             lastStepFinishReason = 'refusal';
             finalRefusal = stepRefusal;
           }

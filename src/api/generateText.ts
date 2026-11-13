@@ -3046,7 +3046,9 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             // its usage is counted above, and the call stops here.
             opts.abortSignal?.throwIfAborted();
             const cc = r.choices?.[0]?.message?.content;
-            const refused = r.choices?.[0]?.refusal;
+            // A whole refusal message, not one the output cap cut off.
+            const answer = r.choices?.[0];
+            const refused = answer?.finishReason === 'refusal' ? answer.refusal : undefined;
             return {
               text: typeof cc === 'string' ? cc : ((cc as any)?.text ?? ''),
               usage: { totalTokens: r.usage?.totalTokens ?? 0 },
@@ -3422,7 +3424,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             usage: totalUsage,
             toolCalls: allToolCalls,
             finishReason: (choice.finishReason ?? 'stop') as GenerateTextResult['finishReason'],
-            ...(typeof choice.refusal === 'string' ? { refusal: choice.refusal } : {}),
+            ...(choice.finishReason === 'refusal' && typeof choice.refusal === 'string' ? { refusal: choice.refusal } : {}),
             plan: resolvedPlan,
           };
         }
@@ -3645,8 +3647,9 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           usage: totalUsage,
           toolCalls: allToolCalls,
           finishReason: (choice.finishReason ?? 'stop') as GenerateTextResult['finishReason'],
-          // A refused answer: the refusal message beside finish reason 'refusal' (the provider set both).
-          ...(typeof choice.refusal === 'string' ? { refusal: choice.refusal } : {}),
+          // A refused answer: the refusal message beside finish reason 'refusal' (the provider set both). A message the
+          // output cap cut off is a cut answer: its finish reason is 'length' and no refusal is returned.
+          ...(choice.finishReason === 'refusal' && typeof choice.refusal === 'string' ? { refusal: choice.refusal } : {}),
           plan: resolvedPlan,
         };
       }
