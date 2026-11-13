@@ -1288,4 +1288,41 @@ describe('GMI sentiment writes that land after their turn dropped them', () => {
       await gmi.shutdown();
     }
   });
+
+  it('moves no counter when two dropped analyses take their writes back in turn', async () => {
+    const utility = createMockUtilityAI();
+    // Below the frustration threshold, with too little intensity to raise an event on its own.
+    utility.analyzeSentiment.mockResolvedValue({ score: -0.5, polarity: 'negative', intensity: 0.3 } as SentimentResult);
+    const wm = createMockWorkingMemory();
+    const write = wm.set.getMockImplementation()!;
+    let holds = 0;
+    const releases: Array<() => void> = [];
+    // The host store holds the next `holds` sentiment history writes, each until the test releases it.
+    wm.set.mockImplementation((key: string, value: any) => {
+      if (key !== 'gmi_sentiment_history' || holds === 0) return write(key, value);
+      holds -= 1;
+      return new Promise<void>((resolve) => { releases.push(() => { void write(key, value); resolve(); }); });
+    });
+    const gmi = await startGmi('two-dropped', utility, wm);
+    try {
+      holds = 1;
+      await dropWhileHeld(gmi, 'first', 'This is bad.', () => releases.length === 1);
+      holds = 1;
+      await dropWhileHeld(gmi, 'second', 'This is bad too.', () => releases.length === 2);
+      releases[0]();
+      await settle(); await settle();
+      releases[1]();
+      await settle(); await settle();
+      const stored = wm._store.get('gmi_sentiment_history');
+      expect(stored?.consecutiveFrustration ?? 0, 'two dropped analyses move no counter').toBe(0);
+      expect(stored?.trends ?? []).toEqual([]);
+      await drainTurn(gmi, 'third', 'Bad again.');
+      expect((gmi as any).sentimentTracker.events.map((event: any) => event.eventType),
+        'a turn after two dropped ones counts one frustrated turn').not.toContain(GMIEventType.USER_FRUSTRATED);
+    } finally {
+      for (const release of releases) release();
+      vi.useRealTimers();
+      await gmi.shutdown();
+    }
+  });
 });
