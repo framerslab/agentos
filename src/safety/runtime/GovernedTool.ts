@@ -384,11 +384,14 @@ export function governTool<TInput extends { evidence: ActionEvidence }, TOutput>
     const reversalRef = `rev_${randomUUID()}`;
     const governed: GovernedToolContext = { ...context, governedAction: { recordId, reversalRef } };
     let result: ToolExecutionResult<TOutput> | undefined;
+    const stopRenewal = renewWhileRunning(reserved);
     try {
       result = await tool.execute(args, governed);
     } catch {
       // the thrown value is the tool's: it reaches neither the record, the line nor the model
       result = undefined;
+    } finally {
+      stopRenewal();
     }
     // Strip returned reversal payloads on both success and failure. Only the minted key may reach the audit.
     const resultDetails = result?.details;
@@ -438,6 +441,21 @@ export function governTool<TInput extends { evidence: ActionEvidence }, TOutput>
     execute,
     refusalBeforeApproval,
   };
+}
+
+/**
+ * Renews a reservation's lease three times a lease while its tool runs, so a reconcile pass does not count as used an
+ * action that is still running and may yet fail. A renewal that fails is dropped: the next one tries again, and a lease
+ * that runs out is counted, the cautious reading. A limiter without `renew()` or without a lease is not renewed.
+ *
+ * @returns The function that stops the renewals.
+ */
+function renewWhileRunning(reserved: Extract<ActionLimitAnswer, { status: 'reserved' }>): () => void {
+  if (typeof reserved.renew !== 'function' || reserved.expiresAt === undefined || !Number.isFinite(reserved.expiresAt)) return () => undefined;
+  const every = Math.max(50, Math.floor((reserved.expiresAt - Date.now()) / 3));
+  const timer = setInterval(() => { void quietly(() => reserved.renew?.()); }, every);
+  timer.unref?.();
+  return () => clearInterval(timer);
 }
 
 /** Whether a value is an object a tool's `details` may be read from. */

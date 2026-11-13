@@ -33,6 +33,12 @@ export type ActionLimitAnswer =
        * is released instead.
        */
       cancel?(): Promise<void>;
+      /**
+       * Extends every reservation's lease by the limiter's lease from now, so a reconcile pass does not count an action
+       * whose tool is still running. A governed tool calls it while its tool runs. A reservation settled already is left
+       * as it is.
+       */
+      renew?(): Promise<void>;
       /** When the earliest of the reservations runs out of its lease, epoch milliseconds. A limiter without leases leaves it out. */
       expiresAt?: number;
     }
@@ -64,8 +70,9 @@ export interface SqlActionLimiterOptions {
    */
   tablePrefix?: string;
   /**
-   * How long a reservation lives while its tool runs. Default 60000. The constructor refuses one that is not shorter
-   * than every rule's `windowMs`.
+   * How long a reservation lives without a renewal. Default 60000. A governed tool renews it three times a lease while
+   * its tool runs, so it runs out only when the process that holds it stopped. The constructor refuses one that is not
+   * shorter than every rule's `windowMs`.
    */
   leaseMs?: number;
   /** As `SqlSpendMeterOptions.requireShared`: refuse a store several processes cannot share. Default true. */
@@ -247,6 +254,18 @@ export class SqlActionLimiter implements ActionLimiter {
       commit: () => settle('consumed'),
       release: () => settle('released'),
       cancel: () => settle('released', true),
+      renew: async () => {
+        // each lease is renewed whatever became of the one before it
+        let failure: { error: unknown } | undefined;
+        for (const unit of taken) {
+          try {
+            await unit.meter.heartbeat(unit.operationId);
+          } catch (error) {
+            failure ??= { error };
+          }
+        }
+        if (failure) throw failure.error;
+      },
     };
   }
 
