@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
+import { DEFAULT_RECALL_BUDGET_TOKENS } from '../../../cognition/memory/retrieval/recall/budget';
+import { RECALL_CONSTANTS } from '../../../cognition/memory/retrieval/recall/fuse';
+import { RERANK_DEFAULTS } from '../../../cognition/memory/retrieval/recall/rerank';
 
 /** A docs page, by its path from the package root. */
 function doc(fromPackageRoot: string): string {
@@ -37,5 +40,34 @@ describe('memory recall docs', () => {
     expect(step).toContain("Under `'hybrid'` the blend sets the order alone");
     expect(step).toContain('keeps its fused score');
     expect(step).not.toContain('their final score blends 0.7 cognitive and 0.3 reranker');
+  });
+
+  it('state the numbers the source holds: the default budget, the hybrid recall constants and the rerank bounds', () => {
+    // A constant a measured run moves (RECALL_CONSTANTS, RERANK_DEFAULTS) must move in these tables with it.
+    const cell = (row: string, n: number) => row.split('|')[n].trim();
+    const thousands = (n: number) => n.toLocaleString('en-US');
+
+    const memory = 'docs/memory/COGNITIVE_MEMORY.md';
+    expect(cell(lineOf(memory, '| `budget.totalTokens` | '), 3)).toBe(thousands(DEFAULT_RECALL_BUDGET_TOKENS));
+    expect(cell(lineOf('docs/getting-started/HIGH_LEVEL_API.md', '| `budget.totalTokens` | '), 2)).toBe(String(DEFAULT_RECALL_BUDGET_TOKENS));
+    for (const [name, value] of Object.entries(RECALL_CONSTANTS)) {
+      // The near-duplicate index is written to two places, as the dedupe rule states it.
+      expect(cell(lineOf(memory, `| \`${name}\` | `), 2), name).toBe(name === 'nearDuplicate' ? value.toFixed(2) : String(value));
+    }
+    const legSize = `\`topK × overFetch\` (${RECALL_CONSTANTS.topK * RECALL_CONSTANTS.overFetch})`;
+    expect(cell(lineOf(memory, '| `dense` | The vector index'), 3)).toBe(legSize);
+    expect(cell(lineOf(memory, '| `exact_words` | '), 3)).toBe(legSize);
+    expect(cell(lineOf(memory, '| `recency` | The newest traces'), 3)).toBe(`\`recentTopK\` (${RECALL_CONSTANTS.recentTopK})`);
+
+    const reranking = 'docs/text/RERANKING.md';
+    const timeouts = lineOf(reranking, '| `timeoutMs` (one rerank) | ');
+    expect([cell(timeouts, 3), cell(timeouts, 4)]).toEqual([thousands(RERANK_DEFAULTS.localTimeoutMs), thousands(RERANK_DEFAULTS.llmTimeoutMs)]);
+    const candidates = lineOf(reranking, "| `maxCandidates` (the recall's best) | ");
+    expect([cell(candidates, 3), cell(candidates, 4)]).toEqual([String(RERANK_DEFAULTS.maxCandidates), String(RERANK_DEFAULTS.maxCandidates)]);
+    expect(lineOf(reranking, '**What a turn does.**')).toContain(
+      `\`${RERANK_DEFAULTS.blendScore} × the score each holds + ${RERANK_DEFAULTS.blendRerank} × its rerank score\``,
+    );
+    expect(RERANK_DEFAULTS.failuresToBackOff).toBe(3);
+    expect(lineOf(reranking, '| `backoff` | ')).toContain(`Three failures or timeouts in a row: the provider is not called for ${RERANK_DEFAULTS.backoffMs / 1000} seconds`);
   });
 });
