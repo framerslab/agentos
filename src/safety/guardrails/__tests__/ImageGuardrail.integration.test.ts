@@ -497,4 +497,32 @@ describe('the image guard: the deadline every check receives', () => {
     expect(requests).toHaveBeenCalledTimes(2);
     expect(stopped()).toBe(2);
   });
+
+  it('keeps a block or a hold the last check answers past the deadline, and refuses a flag it answers then', async () => {
+    const begun = arrivals();
+    const stoppedThen: boolean[] = [];
+    // checks that ignore the signal: each answers 100 ms after it starts, long past the guard's own 10 ms deadline
+    const lateAnswer = (id: string, answer: Awaited<ReturnType<ImageCheck['check']>>, code: string) => check(id, 'classify', async (image) => {
+      begun.arrive();
+      await sleep(100);
+      stoppedThen.push(image.deadlineSignal?.aborted === true);
+      return answer;
+    }, { reasonCodes: [code] });
+    const first = passing('first', 'classify');
+    const cases: [ImageCheck, Record<string, unknown>][] = [
+      [lateAnswer('blocking', { verdict: 'block', reasonCode: 'IMAGE_EXPLICIT' }, 'IMAGE_EXPLICIT'), { action: 'block', reasonCode: 'IMAGE_EXPLICIT', metadata: { imageIndex: 0, checkId: 'blocking' } }],
+      [lateAnswer('holding', { verdict: 'hold', reviewCode: 'IMAGE_REVIEW' }, 'IMAGE_REVIEW'), { action: 'block', hold: { reviewCode: 'IMAGE_REVIEW' }, metadata: { imageIndex: 0, checkId: 'holding' } }],
+      [lateAnswer('flagging', { verdict: 'flag', reasonCode: 'IMAGE_SUGGESTIVE' }, 'IMAGE_SUGGESTIVE'), { action: 'block', reasonCode: 'IMAGE_CHECK_UNAVAILABLE', metadata: { failClosed: true, imageIndex: 0, checkId: 'flagging' } }],
+    ];
+    for (const [n, [last, expected]] of cases.entries()) {
+      // the dispatcher waits 1 s, so what is read is the guard's own answer, given 100 ms in
+      const answered = ParallelGuardrailDispatcher.evaluateInput([required(ImageGuardrail.create({ id: 'images', timeoutMs: 10, checks: [first, last] }), 1_000)], oneImage(), context);
+      await begun.reached(n + 1);
+      await vi.advanceTimersByTimeAsync(100);
+      // a check's block or hold outranks an image nobody could judge; a flag past the deadline is no judgment
+      expect((await answered).evaluation).toMatchObject(expected);
+    }
+    // every answer came after the deadline had stopped its check
+    expect(stoppedThen).toEqual([true, true, true]);
+  });
 });
