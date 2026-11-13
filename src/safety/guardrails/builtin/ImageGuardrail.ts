@@ -334,16 +334,23 @@ export class ImageGuardrail implements IGuardrailService {
 
     // The checks' signal, one per evaluation: aborted at the guard's own deadline, at the dispatcher's when that comes
     // first, and once the guard has answered. A check still waiting then sends nothing, and a request in flight stops.
+    // Stopping also clears the guard's own timer and lets go of the dispatcher's signal: a check that never settles
+    // keeps no timer alive once the dispatcher has answered.
     const checks = new AbortController();
-    const stop = (): void => checks.abort();
-    const timer = setTimeout(stop, this.timeoutMs);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const stop = (): void => {
+      clearTimeout(timer);
+      deadlineSignal?.removeEventListener('abort', stop);
+      checks.abort();
+    };
     if (deadlineSignal?.aborted) stop();
-    else deadlineSignal?.addEventListener('abort', stop, { once: true });
+    else {
+      timer = setTimeout(stop, this.timeoutMs);
+      deadlineSignal?.addEventListener('abort', stop, { once: true });
+    }
     try {
       return await this.judge(inputs, context, checks.signal);
     } finally {
-      clearTimeout(timer);
-      deadlineSignal?.removeEventListener('abort', stop);
       stop();
     }
   }
