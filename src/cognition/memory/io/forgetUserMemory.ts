@@ -5,6 +5,7 @@
  * index, then a report that names every store reached and every store not reached.
  */
 import { messageOf } from '../../../api/runtime/memoryObserveFailures.js';
+import { errorFields } from '../../../core/logging/events.js';
 import { memoryLog } from '../log.js';
 import { CONVERSATION_SCOPE, conversationScopeKey, parseConversationScopeKey } from '../retrieval/store/conversationScopeKey.js';
 import type { ForgottenLedger, SuppressionSubject } from '../suppression/ForgottenLedger.js';
@@ -326,6 +327,10 @@ export interface ReapplyTombstonesOptions
  * deletion that did not finish, and for what another process wrote after a tombstone. It deletes nothing of a subject
  * the ledger does not hold, and never touches memory from before per-user scope that nobody attributed.
  *
+ * Then it runs what earlier deletes left owed in the store's files ({@link Memory.finishErasure}): a vector index
+ * rewrite or a log checkpoint a deletion could not finish, which no held subject would lead it back to; a failure
+ * there writes one `memory.erasure_unfinished` line and stays owed.
+ *
  * One `memory.tombstone_reapplied` line is logged when a subject was re-applied or a tombstone came back from the copy.
  *
  * @returns One report a subject re-applied; none for a store that holds nothing of a forgotten subject.
@@ -361,6 +366,13 @@ export async function reapplyTombstones(options: ReapplyTombstonesOptions): Prom
         }),
       );
     }
+  }
+  try {
+    // A rewrite of the vector index or a checkpoint of the log that a deletion could not finish runs again, though
+    // the store may hold nothing more of the subject to find it by.
+    await memory.finishErasure();
+  } catch (error) {
+    memoryLog.warn('memory.erasure_unfinished', errorFields(error));
   }
   if (reports.length > 0 || added.length > 0) {
     memoryLog.info('memory.tombstone_reapplied', { subjects: reports.length, reconciled: added.length });

@@ -117,6 +117,11 @@ export class HnswIndexSidecar {
     return this.dirty;
   }
 
+  /** The ids of the vectors the index holds, a removed one left out. */
+  ids(): string[] {
+    return [...this.idToLabel.keys()];
+  }
+
   /** Get statistics about the sidecar. */
   getStats(): HnswSidecarStats {
     return {

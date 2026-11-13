@@ -244,6 +244,30 @@ export class HnswSidecar {
     return { vectors: this._delegate.getStats().vectorCount };
   }
 
+  /** The ids of the traces the index holds. */
+  ids(): string[] {
+    return this._delegate.ids();
+  }
+
+  /**
+   * Adds the vectors of traces the index lacks, as a store's open does for the traces stored after the last save, and
+   * then saves the index once, so the next load holds them. A vector of another dimension is skipped, as a rewrite
+   * skips it.
+   *
+   * @returns How many vectors it added.
+   */
+  async addMissing(items: { id: string; embedding: number[] }[]): Promise<number> {
+    const dim = this._config.dimensions;
+    let added = 0;
+    for (const item of items) {
+      if (item.embedding.length !== dim) continue;
+      await this._delegate.add(item.id, item.embedding);
+      added += 1;
+    }
+    if (added > 0) await this._delegate.save();
+    return added;
+  }
+
   /**
    * Persist index and label map to disk.
    * Called after rebuildFromData() and periodically after adds.

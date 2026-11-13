@@ -87,6 +87,7 @@ import { CONVERSATION_SCOPE, parseConversationScopeKey } from '../../retrieval/s
 import { isMissingTableError } from '../../retrieval/store/missingTable.js';
 import { ensureScopeRow, registerUnregisteredConversationScopes } from '../../retrieval/store/conversationScopes.js';
 import { memoryLog } from '../../log.js';
+import { errorFields } from '../../../../core/logging/events.js';
 import { assertWikiPageId } from '../../../substrate/memory/wiki/WikiPageId.js';
 import { refileBrainScopeIds, snapshotInEncodedForm, takeScopeIdFormLock } from '../../retrieval/store/scopeIdForm.js';
 import { SqlKnowledgeGraph } from '../../retrieval/store/SqlKnowledgeGraph.js';
@@ -510,22 +511,34 @@ export class Memory {
     // available. Falls back to FTS5-only recall if hnswlib-node is not
     // installed or no embeddings exist.
     this._initPromise = this._initPromise.then(async () => {
+      let sidecar: import('../../retrieval/store/HnswSidecar.js').HnswSidecar | undefined;
       try {
         const { HnswSidecar } = await import('../../retrieval/store/HnswSidecar.js');
         const dims = this._config.embeddings?.dimensions ?? 1536;
-        this._hnswSidecar = new HnswSidecar({
+        sidecar = new HnswSidecar({
           sqlitePath: this._config.path!,
           dimensions: dims,
           brainId: this._brain.brainId,
         });
-        await this._hnswSidecar.init();
-        // The database is authoritative: adds made after the last saved rewrite may be absent from the sidecar.
-        // Refresh a loaded index before recall can use it, including small stores whose index was built explicitly.
-        if (this._hnswSidecar.isActive) await this._hnswSidecar.rewrite(await this._ownEmbeddedTraces());
+        await sidecar.init();
       } catch {
         // hnswlib-node not installed or init failed — HNSW stays null.
         // Recall will use FTS5 only (still works, just O(n) for vectors).
         this._hnswSidecar = null;
+        return;
+      }
+      this._hnswSidecar = sidecar ?? null;
+      if (!sidecar?.isActive) return;
+      try {
+        // The database is authoritative: an index loaded from its files is brought up to date with it before recall
+        // uses it, including a small store whose index was built explicitly.
+        await this._checkLoadedVectorIndex(sidecar);
+      } catch (error) {
+        // The files may still name a trace that is gone: their rewrite is owed, and the next deletion, sweep or
+        // re-application of the tombstones runs it. Recall keeps the index as it loaded: a vector of a trace that is
+        // gone finds no row.
+        this._erasureOwed.vectorIndex = true;
+        memoryLog.warn('memory.erasure_unfinished', errorFields(error));
       }
     });
   }
@@ -3529,6 +3542,43 @@ export class Memory {
   }
 
   /**
+   * Brings a vector index loaded from its files up to date with the store at open, and builds nothing when nothing
+   * differs. The files are written by a whole build and by this check's adds, never after a delete, so they hold the
+   * vectors of the ids their map names and no other. An id that is no live trace with an embedding any more leaves a
+   * deleted trace's vector in the files: the index is written again from the store. A live trace the map lacks, stored
+   * after the last write, is read and added, and the files are saved.
+   */
+  private async _checkLoadedVectorIndex(sidecar: import('../../retrieval/store/HnswSidecar.js').HnswSidecar): Promise<void> {
+    const rows = await this._brain.all<{ id: string }>(
+      'SELECT id FROM memory_traces WHERE brain_id = ? AND deleted = 0 AND embedding IS NOT NULL',
+      [this._brain.brainId],
+    );
+    const live = new Set(rows.map((row) => row.id));
+    const indexed = sidecar.ids();
+    if (indexed.some((id) => !live.has(id))) {
+      await sidecar.rewrite(await this._ownEmbeddedTraces());
+      return;
+    }
+    const held = new Set(indexed);
+    const missing = [...live].filter((id) => !held.has(id));
+    if (missing.length === 0) return;
+    const items: { id: string; embedding: number[] }[] = [];
+    for (let offset = 0; offset < missing.length; offset += 400) {
+      const slice = missing.slice(offset, offset + 400);
+      items.push(
+        ...this._decodedEmbeddings(
+          await this._brain.all<{ id: string; embedding: Uint8Array | string | null }>(
+            `SELECT id, embedding FROM memory_traces
+              WHERE brain_id = ? AND deleted = 0 AND embedding IS NOT NULL AND id IN (${slice.map(() => '?').join(', ')})`,
+            [this._brain.brainId, ...slice],
+          ),
+        ),
+      );
+    }
+    await sidecar.addMissing(items);
+  }
+
+  /**
    * This brain's live traces that carry an embedding, decoded for the HNSW
    * sidecar. A database can hold several brains; the sidecar is this brain's,
    * so it is built from this brain's vectors only.
@@ -3538,7 +3588,13 @@ export class Memory {
       'SELECT id, embedding FROM memory_traces WHERE brain_id = ? AND deleted = 0 AND embedding IS NOT NULL',
       [this._brain.brainId],
     );
+    return this._decodedEmbeddings(rows);
+  }
 
+  /** Embedding rows decoded into vectors; an empty embedding is left out. */
+  private _decodedEmbeddings(
+    rows: { id: string; embedding: Uint8Array | string | null }[],
+  ): { id: string; embedding: number[] }[] {
     const { blobCodec } = this._brain.features;
     return rows
       .filter((row) => row.embedding && row.embedding.length > 0)
