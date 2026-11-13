@@ -1560,20 +1560,23 @@ export class GMI implements IGMI {
     let sentimentSettled = false;
     let sentimentAbandoned = false;
     let sentimentCommitted = false;
+    let sentimentApplied = false;
     let firstToolSentimentRead = false;
+    // The readers wait until the result is applied; a scrub the tracker runs again after a forget may go on after it.
+    const sentimentDone = (): boolean => sentimentSettled || sentimentApplied;
     const settleSentiment = async (postTurn: boolean): Promise<void> => {
-      if (!sentimentWork || sentimentSettled || sentimentAbandoned) return;
+      if (!sentimentWork || sentimentDone() || sentimentAbandoned) return;
       const remaining = Math.max(0, SENTIMENT_SETTLE_BUDGET_MS - (Date.now() - sentimentStartedAt));
       // An abort or a shutdown during either wait ends it at once.
       if (remaining > 0 && !stop.signal.aborted) await settlesWithin(sentimentWork, remaining, stop.signal);
-      if (postTurn && !sentimentSettled && sentimentCommitted && !stop.signal.aborted) {
+      if (postTurn && !sentimentDone() && sentimentCommitted && !stop.signal.aborted) {
         // The reply came in time and its writes have begun: finish them (store writes and event detection, no model
         // call), at most the shutdown bound, so the check consumes the turn's own events and nothing is half written.
         // A history write that outlasts the bound lands after the drop below, and the tracker takes it back.
         const bound = shutdownTimeoutOrDefault(this.config?.shutdownTimeoutMs);
         if (await settlesWithin(sentimentWork, bound, stop.signal)) return;
       }
-      if (postTurn && !sentimentSettled) {
+      if (postTurn && !sentimentDone()) {
         sentimentAbandoned = true;
         sentimentTurnLog.warn('gmi.sentiment_late', {
           waitedMs: Math.max(0, Math.round(Date.now() - sentimentStartedAt)),
@@ -1661,10 +1664,14 @@ export class GMI implements IGMI {
           sentimentStartedAt = Date.now();
           // The result applies while the turn owns the lifecycle state: a newer turn, or shutdown, takes it, and the
           // reasoning trace then records another turn's entries.
-          sentimentWork = this.sentimentTracker.analyzeTurnSentiment(
+          let markApplied: () => void = () => {};
+          const applied = new Promise<void>((resolve) => { markApplied = resolve; });
+          const analysis = this.sentimentTracker.analyzeTurnSentiment(
             turnId, userInputText, () => !sentimentAbandoned && !stop.signal.aborted && ownsState(),
             () => { sentimentCommitted = true; },
+            () => { sentimentApplied = true; markApplied(); },
           ).finally(() => { sentimentSettled = true; });
+          sentimentWork = Promise.race([analysis, applied]);
         }
       }
 
