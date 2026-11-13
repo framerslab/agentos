@@ -516,6 +516,33 @@ describe("agent({ runtime: 'gmi' }) memory.recall.rerank", () => {
     expect(out.block).toContain('XQ7Z');
   });
 
+  // The largest timeoutMs the setting takes is a delay a timer keeps: a judge that answers 30 ms into each call of the
+  // question's rerank is waited for, by the rerank's own deadline and by the judge's. One past it, which construction
+  // refuses above, a Node timer runs after 1 ms and every rerank would end in 'timeout'.
+  it('an llm rerank at the largest timeoutMs (2,147,483,647) on a GMI turn waits for a judge that answers after 30 ms', async () => {
+    const QUESTION = 'Query: "What is the bike shed code?"';
+    let late = 0;
+    const invoke = async (system: string, user: string): Promise<string> => {
+      if (user.includes(QUESTION)) {
+        late += 1;
+        await new Promise<void>((resolve) => setTimeout(resolve, 30));
+      }
+      return system.includes('relevance scorer')
+        ? JSON.stringify((user.match(/^\[\d+\]/gm) ?? []).map((_, i) => (i === 0 ? 9 : 1)))
+        : JSON.stringify([...user.matchAll(/^\[([^\]]+)\]/gm)].map((m) => m[1]));
+    };
+    const out = await turn({ rerank: { kind: 'llm', model: 'judge-model', invoke, timeoutMs: 2_147_483_647 } });
+    // Precondition: the judge was asked about the question and answered late.
+    expect(late).toBeGreaterThan(0);
+    const record = out.memoryRecall as unknown as { reranker: Record<string, unknown>; candidates: Array<{ rerankScore?: number }> };
+    expect(record.reranker).toMatchObject({ provider: 'llm', model: 'judge-model' });
+    expect(record.candidates.some((c) => typeof c.rerankScore === 'number')).toBe(true);
+    expect(out.text).toBe('XQ7Z.');
+    expect(out.block).toContain('XQ7Z');
+    expect(events('memory.recall.rerank_skipped')).toEqual([]);
+    expect(events('memory.recall.option_rejected')).toEqual([]);
+  });
+
   it("rerank 'none' set outright on a GMI turn sends the block of no setting, byte for byte", async () => {
     vi.useFakeTimers({ toFake: ['Date'], shouldAdvanceTime: false });
     vi.setSystemTime(Date.UTC(2026, 10, 10, 12, 0, 0));
