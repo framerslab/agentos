@@ -97,12 +97,19 @@ describe('resolveRecallOptions', () => {
       [{ kind: 'local', model: 'm', revision: COMMIT.slice(0, 7) }, 'rerank.revision', 'invalid_value'],
       [{ kind: 'local', model: 'm', revision: `${COMMIT}0` }, 'rerank.revision', 'invalid_value'],
       [{ kind: 'local', model: 'm', revision: 42 }, 'rerank.revision', 'invalid_value'],
+      // Transformers.js keys a pinned revision's cache folder by the string as given: an upper-case id misses the
+      // lower-case folder on a case-sensitive file system, and the record would name the commit in another case.
+      [{ kind: 'local', model: 'm', revision: COMMIT.toUpperCase() }, 'rerank.revision', 'invalid_value'],
+      [{ kind: 'local', model: 'm', revision: `${COMMIT.slice(0, 20).toUpperCase()}${COMMIT.slice(20)}` }, 'rerank.revision', 'invalid_value'],
       [{ kind: 'llm', model: 'm' }, 'rerank.invoke', 'invalid_value'],
       [{ kind: 'llm', invoke: 'call', model: 'm' }, 'rerank.invoke', 'invalid_value'],
       [{ kind: 'llm', invoke, model: '' }, 'rerank.model', 'invalid_value'],
       [{ kind: 'llm', invoke, model: 'm', timeoutMs: 0 }, 'rerank.timeoutMs', 'invalid_value'],
       [{ kind: 'llm', invoke, model: 'm', timeoutMs: 1.5 }, 'rerank.timeoutMs', 'invalid_value'],
       [{ kind: 'local', model: 'm', revision: COMMIT, timeoutMs: Number.POSITIVE_INFINITY }, 'rerank.timeoutMs', 'invalid_value'],
+      // Node runs a timer set past 2^31 - 1 ms after 1 ms, so every rerank would time out at once.
+      [{ kind: 'llm', invoke, model: 'm', timeoutMs: 2_147_483_648 }, 'rerank.timeoutMs', 'invalid_value'],
+      [{ kind: 'local', model: 'm', revision: COMMIT, timeoutMs: 1e12 }, 'rerank.timeoutMs', 'invalid_value'],
       [{ kind: 'local', model: 'm', revision: COMMIT, maxCandidates: 0 }, 'rerank.maxCandidates', 'invalid_value'],
       [{ kind: 'local', model: 'm', revision: COMMIT, maxCandidates: '20' }, 'rerank.maxCandidates', 'invalid_value'],
     ];
@@ -116,8 +123,8 @@ describe('resolveRecallOptions', () => {
     }
   });
 
-  it('a null or undefined rerank is unset, and its optional fields may be null', () => {
-    for (const rerank of [null, undefined, { kind: 'local', model: 'm', revision: COMMIT, timeoutMs: null, maxCandidates: null }, { kind: 'local', model: 'm', revision: COMMIT.toUpperCase() }]) {
+  it('a null or undefined rerank is unset, its optional fields may be null, and timeoutMs may be as large as a timer takes', () => {
+    for (const rerank of [null, undefined, { kind: 'local', model: 'm', revision: COMMIT, timeoutMs: null, maxCandidates: null }, { kind: 'local', model: 'm', revision: COMMIT, timeoutMs: 2_147_483_647, maxCandidates: 1 }]) {
       expect(thrown(() => resolveRecallOptions({ recall: { rerank } as never, cognitiveMemory: true, providerTokenBudget: undefined, providerContext: false, where: 'gmi()' }))).toBeUndefined();
     }
     expect(thrown(() => resolveRecallOptions({ recall: { rerank: null } as never, cognitiveMemory: false, providerTokenBudget: undefined, providerContext: false, where: 'agent()' }))).toBeUndefined();
