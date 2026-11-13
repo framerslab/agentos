@@ -318,7 +318,10 @@ export class SqlActionLimiter implements ActionLimiter {
   /**
    * Deletes the rows of every target-scoped rule whose key is exactly `<rule id>|t:<accountId>` (and its `dry:` twin),
    * in each meter's two tables, for a host's account deletion. An exact comparison per rule, never a pattern: an id
-   * may hold `_`, which a LIKE reads as any character.
+   * may hold `_`, which a LIKE reads as any character. A reservation still reserved stays, with its key's window row,
+   * so the action that holds it settles its own row and the same action cannot be reserved again while it runs; a
+   * host calls this again once that action has ended, or one lease and a reconcile pass later for a process that
+   * stopped.
    */
   async forgetTarget(accountId: string): Promise<void> {
     for (const rule of this.rules.values()) {
@@ -327,8 +330,11 @@ export class SqlActionLimiter implements ActionLimiter {
       await meter.ensureSchema();
       for (const key of [`${rule.id}|t:${accountId}`, `dry:${rule.id}|t:${accountId}`]) {
         await this.db.transaction(async (trx) => {
-          await trx.run(`DELETE FROM ${prefix}_reservations WHERE account_id = ?`, [key]);
-          await trx.run(`DELETE FROM ${prefix}_meter WHERE account_id = ?`, [key]);
+          await trx.run(`DELETE FROM ${prefix}_reservations WHERE account_id = ? AND state <> 'reserved'`, [key]);
+          await trx.run(
+            `DELETE FROM ${prefix}_meter WHERE account_id = ? AND NOT EXISTS (SELECT 1 FROM ${prefix}_reservations WHERE account_id = ? AND state = 'reserved')`,
+            [key, key],
+          );
         });
       }
     }
