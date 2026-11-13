@@ -569,7 +569,14 @@ describe('rerank in a turn', () => {
     expect(result.diagnostics.reranker).toMatchObject({ provider: 'llm', model: 'judge-model' });
     expect(result.retrieved.length).toBeGreaterThan(0);
     expect(result.retrieved.map((t) => t.id)).not.toContain(deleted);
-    if (retrieval === 'hybrid') expect(result.diagnostics.recall!.ranked!.map((c) => c.id)).not.toContain(deleted);
+    if (retrieval === 'hybrid') {
+      // The record lists every other candidate once, the reranked cut in the order the result shows it.
+      const ranked = result.diagnostics.recall!.ranked!.map((c) => c.id);
+      expect(ranked).not.toContain(deleted);
+      expect(new Set(ranked).size).toBe(ranked.length);
+      const shown = result.retrieved.map((t) => t.id);
+      expect(ranked.filter((id) => shown.includes(id))).toEqual(shown);
+    }
     await mem.close();
   });
 
