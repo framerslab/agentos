@@ -89,11 +89,19 @@ const postgres = (url: string): Engine => ({
       close: async () => {
         const cleaner = adapters[0];
         if (cleaner) {
-          // Children before parents; a table the run never made is passed over.
-          for (const table of [...CONVERSATION_SCOPE_TABLES, ...[...PORTABLE_TABLES].reverse()]) {
-            await cleaner.run(`DELETE FROM ${table} WHERE brain_id = ?`, [brainId]).catch(() => undefined);
-          }
-          for (const table of LEARNING_TABLES) await cleaner.run(`DELETE FROM ${table} WHERE namespace = ?`, [run]).catch(() => undefined);
+          // A table the run never made is passed over. Any other failure is written out, so rows left behind in a
+          // shared database are never silent; it does not fail the case, whose assertions have run.
+          const wipe = async (table: string, column: 'brain_id' | 'namespace', value: string): Promise<void> => {
+            try {
+              await cleaner.run(`DELETE FROM ${table} WHERE ${column} = ?`, [value]);
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              if (!/does not exist|no such table/i.test(message)) process.stderr.write(`[memory-recall e2e cleanup] ${table}: ${message}\n`);
+            }
+          };
+          // Children before parents.
+          for (const table of [...CONVERSATION_SCOPE_TABLES, ...[...PORTABLE_TABLES].reverse()]) await wipe(table, 'brain_id', brainId);
+          for (const table of LEARNING_TABLES) await wipe(table, 'namespace', run);
         }
         for (const adapter of adapters) await adapter.close().catch(() => undefined);
       },
@@ -239,13 +247,11 @@ describe.each(ENGINES)("agent({ runtime: 'gmi' }) memory.recall over a durable s
       const c = out.memoryRecall!;
       expect(c).toBeDefined();
 
-      // Hybrid retrieval: the three legs ran, the exact-words leg on the store's own full-text index.
-      expect(c).toMatchObject({
-        version: 'memory-recall-capture/1',
-        retrieval: 'hybrid',
-        lexicalBackend: name === 'postgres' ? 'postgres_tsvector' : 'fts5',
-        memoryQuestionReserve: { fired: true },
-      });
+      // Hybrid retrieval: the three legs ran, the exact-words leg on the store's own full-text index: Postgres's
+      // tsvector, and on a SQLite file FTS5, or FTS4 where the file opened through sql.js (no better-sqlite3).
+      expect(c).toMatchObject({ version: 'memory-recall-capture/1', retrieval: 'hybrid', memoryQuestionReserve: { fired: true } });
+      if (name === 'postgres') expect(c.lexicalBackend).toBe('postgres_tsvector');
+      else expect(['fts5', 'fts4']).toContain(c.lexicalBackend);
       expect(c.legs.map((l) => [l.leg, l.ran])).toEqual([['dense', true], ['exact_words', true], ['recency', true]]);
       expect(events('memory.recall.leg_absent')).toEqual([]);
 
