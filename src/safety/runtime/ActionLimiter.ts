@@ -7,7 +7,7 @@
  * not.
  */
 import type { StorageAdapter } from '@framers/sql-storage-adapter';
-import { SqlSpendMeter, spendMeterDdl } from './SqlSpendMeter.js';
+import { SqlSpendMeter, spendMeterDdl, type SpendPurgeResult } from './SqlSpendMeter.js';
 
 /** One limit: at most `max` actions per `windowMs` in a room, against one account, or in all. */
 export interface ActionLimitRule {
@@ -72,6 +72,8 @@ const RULE_ID = /^[a-z][a-z0-9_]{0,18}$/;
 const METER_PREFIX = /^[a-z][a-z0-9_]{0,37}$/;
 const DEFAULT_PREFIX = 'agentos_action';
 const SCOPES: ReadonlySet<string> = new Set(['room', 'target', 'platform']);
+/** The rows one purge pass deletes from each of a meter's tables at most. */
+const PURGE_PAGE = 1_000;
 
 /**
  * The key a rule counts under: `<rule id>|r:<room>`, `<rule id>|t:<account>` or `<rule id>|p`, with `dry:` in front
@@ -254,11 +256,18 @@ export class SqlActionLimiter implements ActionLimiter {
   /**
    * Deletes settled reservations. Each meter deletes only those settled before both `before` and one of its own
    * windows back, so no unit a window still counts is deleted and an allowance never reopens early. An action whose
-   * rows are gone is no longer a duplicate, so `before` is also how long a repeated action reads as one.
+   * rows are gone is no longer a duplicate, so `before` is also how long a repeated action reads as one. A meter
+   * deletes a page of rows a pass, and is asked again until a pass deletes less than a page.
    */
   async purge(before: number): Promise<void> {
     const now = Date.now();
-    for (const [windowMs, { meter }] of this.meters) await meter.purge({ before: Math.min(Math.trunc(before), now - windowMs) });
+    for (const [windowMs, { meter }] of this.meters) {
+      const cutoff = Math.min(Math.trunc(before), now - windowMs);
+      let pass: SpendPurgeResult;
+      do {
+        pass = await meter.purge({ before: cutoff, limit: PURGE_PAGE });
+      } while (pass.reservations >= PURGE_PAGE || pass.periods >= PURGE_PAGE);
+    }
   }
 
   /**
