@@ -315,6 +315,8 @@ export interface StreamTextResult {
    * - `'tool-calls'` — the run ended with outstanding tool calls and no
    *   final text (maxSteps exhaustion).
    * - `'error'` — the stream emitted an `error` part.
+   * - `'refusal'` — the model declined with an explicit refusal message,
+   *   which {@link refusal} resolves to; the text stream carried none of it.
    *
    * Historically the streaming surface discarded the provider's reason
    * and fabricated `'stop'`; the provider layer always had it (final
@@ -327,6 +329,14 @@ export interface StreamTextResult {
    * do not thread per-step reasons).
    */
   finishReason: Promise<StreamFinishReason>;
+  /**
+   * The model's refusal message when the final step declined the request
+   * with one: resolves with {@link finishReason}, to the message when that is
+   * `'refusal'` and to `undefined` otherwise. The message never goes out as a
+   * `text` part. Set by `streamText()`; other surfaces that return this
+   * shape may leave it unset.
+   */
+  refusal?: Promise<string | undefined>;
   /**
    * Cache-diagnostics verdict of the FINAL step (Anthropic beta; see
    * {@link GenerateTextOptions.cacheDiagnostics}). Resolves when the stream

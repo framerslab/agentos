@@ -1133,8 +1133,16 @@ export interface GenerateTextResult {
    * - `"length"`: `maxTokens` limit reached.
    * - `"tool-calls"`: loop exhausted `maxSteps` while still calling tools.
    * - `"error"`: provider returned an error.
+   * - `"refusal"`: the model declined with an explicit refusal message, which
+   *   is in {@link GenerateTextResult.refusal} (OpenAI's refusal).
    */
-  finishReason: 'stop' | 'length' | 'tool-calls' | 'error';
+  finishReason: 'stop' | 'length' | 'tool-calls' | 'error' | 'refusal';
+  /**
+   * The model's refusal message when it declined the request with one;
+   * `finishReason` is then `'refusal'` and `text` holds no answer. Undefined
+   * on every other result.
+   */
+  refusal?: string;
   /**
    * Ordered records of every sub-agent call made during an `agency()` run.
    * `undefined` for plain `generateText` / `agent()` calls.
