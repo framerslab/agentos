@@ -115,8 +115,11 @@ describe('the tag suggestion fixture texts', () => {
       (fixture.report ?? []).some((tag) => tag.quotes.some((quote) => !fold(fixture.text).includes(fold(quote)))),
     );
     expect(absent).toHaveLength(2);
+    // Each quote is counted, not each tag, so a tag with a second absent quote fails here.
     const quotesAbsent = absent.flatMap((fixture) =>
-      (fixture.report ?? []).filter((tag) => tag.quotes.some((quote) => !fold(fixture.text).includes(fold(quote)))),
+      (fixture.report ?? []).flatMap((tag) =>
+        tag.quotes.filter((quote) => !fold(fixture.text).includes(fold(quote))).map((quote) => `${fixture.id}: ${quote}`),
+      ),
     );
     expect(quotesAbsent).toHaveLength(2);
     expect(fixtures.filter((fixture) => fixture.set !== 'sessions' && fixture.report !== undefined).map((f) => f.id)).toEqual([]);
