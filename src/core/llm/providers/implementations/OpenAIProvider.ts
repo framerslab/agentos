@@ -124,6 +124,8 @@ namespace OpenAIAPITypes {
   export interface ChatMessage {
     role: string;
     content: string | null;
+    /** The model's refusal message, when it declined the request (the content then holds no answer). */
+    refusal?: string | null;
     reasoning_content?: string;
     tool_calls?: ToolCall[];
   }
@@ -150,6 +152,8 @@ namespace OpenAIAPITypes {
   export interface StreamDelta {
     role?: string;
     content?: string | null;
+    /** A piece of the model's refusal message. */
+    refusal?: string | null;
     reasoning_content?: string;
     tool_calls?: ToolCallDelta[];
   }
@@ -220,8 +224,10 @@ namespace OpenAIAPITypes {
     input_tokens_details?: CacheTokenDetails;
   }
   export interface ResponsesOutputContentPart {
-    type: string; // 'output_text' | …
+    type: string; // 'output_text' | 'refusal' | …
     text?: string;
+    /** On a `refusal` part: the model's refusal message. */
+    refusal?: string;
   }
   export interface ResponsesOutputItem {
     type: string; // 'message' | 'function_call' | 'reasoning' | …
@@ -266,8 +272,10 @@ namespace OpenAIAPITypes {
     item?: ResponsesOutputItem;
     /** Item id on the delta and done events. */
     item_id?: string;
-    /** output_text.delta and function_call_arguments.delta. */
+    /** output_text.delta, refusal.delta and function_call_arguments.delta. */
     delta?: string;
+    /** refusal.done: the complete refusal message. */
+    refusal?: string;
     /** function_call_arguments.done: the complete argument text. */
     arguments?: string;
     /** The `error` event. */
@@ -746,10 +754,12 @@ export function shouldRouteToOpenAiResponsesApi(
   );
 }
 
-/** Assistant text, function calls and item count read from a `/v1/responses` `output` array. */
+/** Assistant text, refusal, function calls and item count read from a `/v1/responses` `output` array. */
 interface ResponsesOutputSummary {
   /** Concatenated `output_text` of every message item. */
   text: string;
+  /** Concatenated `refusal` parts of every message item: the model's refusal message, or '' when it sent none. */
+  refusal: string;
   /** Function calls in output order. */
   toolCalls: Array<{ id: string; type: 'function'; function: { name: string; arguments: string } }>;
   /** Number of output items of any type, reasoning included. */
@@ -758,20 +768,23 @@ interface ResponsesOutputSummary {
 
 /**
  * Reads a `/v1/responses` `output` array: assistant text from the
- * `output_text` parts of message items and tool calls from `function_call`
- * items (`call_id` becomes the call id). Reasoning and other item types count
- * toward `itemCount` only.
+ * `output_text` parts of message items, the refusal message from their
+ * `refusal` parts, and tool calls from `function_call` items (`call_id`
+ * becomes the call id). Reasoning and other item types count toward
+ * `itemCount` only.
  */
 function summarizeResponsesOutput(
   output: ReadonlyArray<OpenAIAPITypes.ResponsesOutputItem> | undefined,
 ): ResponsesOutputSummary {
   const items = output ?? [];
   let text = '';
+  let refusal = '';
   const toolCalls: ResponsesOutputSummary['toolCalls'] = [];
   for (const item of items) {
     if (item.type === 'message') {
       for (const part of item.content ?? []) {
         if (part.type === 'output_text' && typeof part.text === 'string') text += part.text;
+        else if (part.type === 'refusal' && typeof part.refusal === 'string') refusal += part.refusal;
       }
     } else if (item.type === 'function_call') {
       toolCalls.push({
@@ -781,7 +794,22 @@ function summarizeResponsesOutput(
       });
     }
   }
-  return { text, toolCalls, itemCount: items.length };
+  return { text, refusal, toolCalls, itemCount: items.length };
+}
+
+/**
+ * The finish reason and refusal fields of a choice whose answer may hold the
+ * model's refusal message. A refusal message, which OpenAI sends beside an
+ * ordinary `stop` (Chat Completions) or in a `completed` response (Responses),
+ * makes the finish reason `refusal` and is kept in `refusal`, so a caller can
+ * tell a declined request from an empty answer. Without one, the finish reason
+ * is the one given and no `refusal` field is set.
+ */
+function withRefusal(
+  finishReason: string | null,
+  refusal: string | null | undefined,
+): Pick<ModelCompletionChoice, 'finishReason' | 'refusal'> {
+  return typeof refusal === 'string' && refusal.length > 0 ? { finishReason: 'refusal', refusal } : { finishReason };
 }
 
 /**
@@ -1426,7 +1454,8 @@ export class OpenAIProvider implements IProvider {
   /**
    * Maps a `/v1/chat/completions` SSE stream onto
    * {@link ModelCompletionResponse} chunks, accumulating streamed tool calls
-   * by index. A caller abort ends the stream with the abort chunk.
+   * by index and the streamed refusal message. A caller abort ends the stream
+   * with the abort chunk.
    * @private
    */
   private async *mapChatStream(
@@ -1435,6 +1464,7 @@ export class OpenAIProvider implements IProvider {
     abortSignal: AbortSignal | undefined,
   ): AsyncGenerator<ModelCompletionResponse, void, undefined> {
     const accumulatedToolCalls: Map<number, { id?: string; type?: 'function'; function?: { name?: string; arguments?: string; } }> = new Map();
+    const accumulatedRefusal = { text: '' };
 
     for await (const data of this.parseSseStream(stream, abortSignal)) {
       if (abortSignal?.aborted) break;
@@ -1443,7 +1473,7 @@ export class OpenAIProvider implements IProvider {
       let mapped: ModelCompletionResponse;
       try {
         const apiChunk = JSON.parse(data) as OpenAIAPITypes.ChatCompletionStreamResponse;
-        mapped = this.mapApiToStreamChunkResponse(apiChunk, accumulatedToolCalls);
+        mapped = this.mapApiToStreamChunkResponse(apiChunk, accumulatedToolCalls, accumulatedRefusal);
       } catch {
         log.warn('llm.stream_invalid', { provider: 'openai', bytes: new TextEncoder().encode(data).byteLength, reason: 'json' });
         continue;
@@ -1461,6 +1491,10 @@ export class OpenAIProvider implements IProvider {
    * chunks the chat stream produces.
    *
    *   - `response.output_text.delta` yields a text chunk.
+   *   - `response.refusal.delta` yields a chunk carrying the piece of the
+   *     model's refusal message in `refusalDelta`; the final chunk of a
+   *     refused answer has finish reason `refusal` and the whole message in
+   *     `refusal`.
    *   - A `function_call` item yields a tool-call delta with its id and name
    *     (`response.output_item.added`), then its argument fragments
    *     (`response.function_call_arguments.delta`). Tool-call indexes are
@@ -1468,15 +1502,15 @@ export class OpenAIProvider implements IProvider {
    *     leaves no gap.
    *   - The item's final form (`response.function_call_arguments.done`,
    *     `response.output_item.done`) and the terminal response are
-   *     authoritative. Text, a call id or name, or an argument suffix that the
-   *     deltas did not carry goes out as one more delta, exactly once, before
-   *     the final chunk. A consumer that rebuilds the turn from deltas
+   *     authoritative. Text, refusal text, a call id or name, or an argument
+   *     suffix that the deltas did not carry goes out as one more delta,
+   *     exactly once, before the final chunk. A consumer that rebuilds the turn from deltas
    *     (StreamingReconstructor) and one that reads the final chunk
    *     (streamText, GMI) therefore see the same text and calls, including
    *     when a proxy strips the delta events.
    *   - `response.completed` and `response.incomplete` yield exactly one final
    *     chunk with the finish reason, tool calls and usage.
-   *   - Before any text or tool call has gone out, `response.failed`, an
+   *   - Before any text, refusal or tool call has gone out, `response.failed`, an
    *     `error` event, and a body that ends or fails to read before a terminal
    *     event throw an {@link OpenAIProviderError}, as a failed HTTP request
    *     does: the status of a retryable error code
@@ -1487,8 +1521,8 @@ export class OpenAIProvider implements IProvider {
    *     chunk carrying an error instead, so the partial answer stays with the
    *     caller.
    *
-   * Reasoning summaries, content-part events and refusals carry nothing this
-   * mapping surfaces and are skipped.
+   * Reasoning summaries, content-part events and `response.refusal.done` carry
+   * nothing this mapping surfaces and are skipped.
    * @private
    */
   private async *mapResponsesStream(
@@ -1500,11 +1534,12 @@ export class OpenAIProvider implements IProvider {
     let created = Math.floor(Date.now() / 1000);
     let responseModel = modelId;
     let emittedText = '';
+    let emittedRefusal = '';
     const calls: StreamedResponsesCall[] = [];
     const callByOutputIndex = new Map<number, StreamedResponsesCall>();
     const callByItemId = new Map<string, StreamedResponsesCall>();
-    // Whether any text or tool call has gone out to the caller.
-    const deliveredOutput = (): boolean => emittedText.length > 0 || calls.length > 0;
+    // Whether any text, refusal or tool call has gone out to the caller.
+    const deliveredOutput = (): boolean => emittedText.length > 0 || emittedRefusal.length > 0 || calls.length > 0;
     // A read that failed mid-body (a dropped connection) ends the event loop
     // like a body cut off before its terminal event.
     const reading: { failure?: OpenAIProviderError } = {};
@@ -1573,6 +1608,13 @@ export class OpenAIProvider implements IProvider {
           }
           break;
 
+        case 'response.refusal.delta':
+          if (typeof event.delta === 'string' && event.delta) {
+            emittedRefusal += event.delta;
+            yield chunk({ refusalDelta: event.delta });
+          }
+          break;
+
         case 'response.output_item.added':
         case 'response.output_item.done': {
           const item = event.item;
@@ -1638,12 +1680,23 @@ export class OpenAIProvider implements IProvider {
             if (corrections.length > 0) correction.toolCallsDeltas = corrections;
             yield correction;
           }
+          // The refusal message too: what the refusal deltas left out goes out once, before the final chunk.
+          if (summary.refusal && summary.refusal !== emittedRefusal) {
+            if (summary.refusal.startsWith(emittedRefusal)) {
+              const missingRefusal = summary.refusal.slice(emittedRefusal.length);
+              emittedRefusal = summary.refusal;
+              yield chunk({ refusalDelta: missingRefusal });
+            } else {
+              log.warn('llm.output_mismatch', { provider: 'openai', reason: 'refusal' });
+            }
+          }
+          const refusal = summary.refusal || emittedRefusal;
 
           const usage = response?.usage
             ? this.mapResponsesUsage(response.usage, response.model ?? modelId)
             : undefined;
           const status = response?.status ?? (event.type === 'response.incomplete' ? 'incomplete' : 'completed');
-          if (summary.itemCount === 0 && emittedText.length === 0 && calls.length === 0) {
+          if (summary.itemCount === 0 && emittedText.length === 0 && refusal.length === 0 && calls.length === 0) {
             // Nothing streamed and nothing in the output: the malformed body
             // the non-streamed mapping throws INVALID_RESPONSE for.
             yield chunk({
@@ -1670,7 +1723,7 @@ export class OpenAIProvider implements IProvider {
             response?.incomplete_details?.reason,
             toolCalls.length > 0,
           );
-          if (emittedText.length === 0 && toolCalls.length === 0) {
+          if (emittedText.length === 0 && toolCalls.length === 0 && refusal.length === 0) {
             this.warnReasoningOnlyOutput(response ?? { id: responseId, status });
           }
           yield chunk({
@@ -1682,7 +1735,7 @@ export class OpenAIProvider implements IProvider {
                 content: null,
                 tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
               },
-              finishReason,
+              ...withRefusal(finishReason, refusal),
               logprobs: null,
             }],
             usage,
@@ -1735,7 +1788,7 @@ export class OpenAIProvider implements IProvider {
         }
 
         default:
-          // Reasoning summaries, content parts, output_text.done, refusals.
+          // Reasoning summaries, content parts, output_text.done, refusal.done (the terminal output holds the refusal).
           break;
       }
     }
@@ -2323,7 +2376,7 @@ export class OpenAIProvider implements IProvider {
     if (apiResponse.status === 'failed') {
       throw responsesFailedError(apiResponse, usage);
     }
-    const { text: assistantText, toolCalls, itemCount } = summarizeResponsesOutput(apiResponse.output);
+    const { text: assistantText, refusal, toolCalls, itemCount } = summarizeResponsesOutput(apiResponse.output);
     const finishReason = responsesFinishReason(
       apiResponse.status,
       apiResponse.incomplete_details?.reason,
@@ -2356,7 +2409,7 @@ export class OpenAIProvider implements IProvider {
       );
     }
 
-    if (assistantText.length === 0 && toolCalls.length === 0) {
+    if (assistantText.length === 0 && toolCalls.length === 0 && refusal.length === 0) {
       this.warnReasoningOnlyOutput(apiResponse);
     }
 
@@ -2373,7 +2426,7 @@ export class OpenAIProvider implements IProvider {
           content: assistantText.length > 0 ? assistantText : null,
           tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
         },
-        finishReason,
+        ...withRefusal(finishReason, refusal),
         logprobs: null,
       }],
       usage,
@@ -2443,7 +2496,8 @@ export class OpenAIProvider implements IProvider {
             ? { reasoningText: c.message.reasoning_content } : {}),
           tool_calls: c.message.tool_calls,
         },
-        finishReason: c.finish_reason,
+        // An explicit refusal comes with an ordinary stop and no content; it is kept as finish reason `refusal`.
+        ...withRefusal(c.finish_reason, c.message.refusal),
         logprobs: c.logprobs,
       })),
       usage: apiResponse.usage ? this.calculateUsage(apiResponse.usage, apiResponse.model) : undefined,
@@ -2454,15 +2508,20 @@ export class OpenAIProvider implements IProvider {
 
     /**
      * Maps an OpenAI API stream chunk to a ModelCompletionResponse chunk.
-     * Handles accumulation of tool calls.
+     * Handles accumulation of tool calls, and of the refusal message the
+     * model streams as `delta.refusal` pieces: each piece goes out as
+     * `refusalDelta`, and the chunk that carries the finish reason ends the
+     * answer with finish reason `refusal` and the whole message in `refusal`.
      * @private
      */
     private mapApiToStreamChunkResponse(
         apiChunk: OpenAIAPITypes.ChatCompletionStreamResponse,
-        accumulatedToolCalls: Map<number, { id?: string; type?: 'function'; function?: { name?: string; arguments?: string; } }>
+        accumulatedToolCalls: Map<number, { id?: string; type?: 'function'; function?: { name?: string; arguments?: string; } }>,
+        accumulatedRefusal: { text: string } = { text: '' },
     ): ModelCompletionResponse {
         const choice = apiChunk.choices?.[0];
         let responseTextDelta: string | undefined;
+        let refusalDelta: string | undefined;
         let toolCallsDeltas: ModelCompletionResponse['toolCallsDeltas'];
         let finalUsage: ModelUsage | undefined;
 
@@ -2502,6 +2561,11 @@ export class OpenAIProvider implements IProvider {
 
         if (choice?.delta?.content) {
             responseTextDelta = choice.delta.content;
+        }
+
+        if (typeof choice?.delta?.refusal === 'string' && choice.delta.refusal) {
+            refusalDelta = choice.delta.refusal;
+            accumulatedRefusal.text += refusalDelta;
         }
 
         if (choice?.delta?.tool_calls) {
@@ -2557,7 +2621,10 @@ export class OpenAIProvider implements IProvider {
                     }
                 })).filter(tc => tc.id && tc.function.name) : undefined, // Only include if valid
             },
-            finishReason: choice.finish_reason || null,
+            // The chunk that ends a refused answer reports the refusal and its whole message.
+            ...(isFinal
+              ? withRefusal(choice.finish_reason || null, accumulatedRefusal.text)
+              : { finishReason: choice.finish_reason || null }),
             logprobs: choice.logprobs,
         };
 
@@ -2569,6 +2636,7 @@ export class OpenAIProvider implements IProvider {
             modelId: apiChunk.model,
             choices: [responseChoice],
             responseTextDelta,
+            ...(refusalDelta !== undefined ? { refusalDelta } : {}),
             ...(this.providerId === 'minimax' && choice.delta.reasoning_content !== undefined
               ? { reasoningTextDelta: choice.delta.reasoning_content } : {}),
             toolCallsDeltas,

@@ -194,9 +194,11 @@ export type StreamFinishReason = 'stop' | 'length' | 'tool-calls' | 'error' | 'r
  * `length` / `tool_calls` / `stop`; Anthropic's adapter maps its raw
  * `stop_reason` before it reaches this layer but raw `max_tokens` /
  * `tool_use` / `end_turn` are accepted here too so a provider that
- * skips that mapping still normalizes. Unknown strings and null/undefined
- * degrade to `'stop'` — the pre-existing semantics of the streaming
- * surface, which fabricated `'stop'` unconditionally.
+ * skips that mapping still normalizes. `refusal` (the OpenAI provider's
+ * reason for an answer that holds the model's refusal message) stays
+ * `refusal`. Unknown strings and null/undefined degrade to `'stop'` — the
+ * pre-existing semantics of the streaming surface, which fabricated
+ * `'stop'` unconditionally.
  */
 export function normalizeStreamFinishReason(
   raw: string | null | undefined,
@@ -214,6 +216,8 @@ export function normalizeStreamFinishReason(
       return 'tool-calls';
     case 'error':
       return 'error';
+    case 'refusal':
+      return 'refusal';
     default:
       return 'stop';
   }
@@ -471,6 +475,11 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
   const finishReasonPromise = new Promise<StreamFinishReason>((r) => {
     resolveFinishReason = r;
   });
+  // The refusal message of the step (or fallback leg) that ended the stream
+  // on a refusal, set before the finish reason settles; the refusal promise
+  // follows the finish reason, so every terminal path settles both.
+  let finalRefusal: string | undefined;
+  const refusalPromise = finishReasonPromise.then((reason) => (reason === 'refusal' ? finalRefusal : undefined));
   // The failover trail, settled at every terminal and in the generator's
   // finally (first settle wins): who answered, and every hop tried.
   let resolveFallback: (v: FallbackSignal | undefined) => void;
@@ -1169,6 +1178,9 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
 
         const reconstructor = new StreamingReconstructor();
         let stepReasoningText = '';
+        // The model's refusal message for this step: its streamed pieces, or
+        // the whole message a chunk that ends the answer carries.
+        let stepRefusal = '';
         stepTextSoFar = '';
 
         try {
@@ -1176,6 +1188,9 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             if (resolved.providerId === 'minimax' && chunk.reasoningTextDelta) {
               stepReasoningText += chunk.reasoningTextDelta;
             }
+            if (chunk.refusalDelta) stepRefusal += chunk.refusalDelta;
+            const chunkRefusal = chunk.choices?.[0]?.refusal;
+            if (typeof chunkRefusal === 'string' && chunkRefusal) stepRefusal = chunkRefusal;
             // Capture the provider-reported identity from EVERY chunk (not
             // only the usage-final one) so an error or abandonment after a
             // model-bearing chunk still resolves responseModel/serviceTier.
@@ -1406,6 +1421,13 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         stepTextSoFar = '';
 
         if (!streamedToolCalls || streamedToolCalls.length === 0) {
+          // A step that holds the model's refusal message ends on the refusal.
+          // The OpenAI chat stream's last final chunk is its usage-only chunk,
+          // which names no reason, so the message decides it, not that chunk.
+          if (stepRefusal) {
+            lastStepFinishReason = 'refusal';
+            finalRefusal = stepRefusal;
+          }
           const stepFinish = normalizeStreamFinishReason(lastStepFinishReason);
           rootSpan?.setAttribute('agentos.api.finish_reason', stepFinish);
           rootSpan?.setAttribute('agentos.api.tool_calls', allToolCalls.length);
@@ -1951,6 +1973,8 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             // The recursive leg computed its own reason; the stream was
             // drained above, so the promise is already settled.
             fallbackFinishReason = await fallbackResult.finishReason;
+            // A leg that ended on a refusal hands its refusal message on.
+            finalRefusal = fallbackFinishReason === 'refusal' ? await fallbackResult.refusal : undefined;
             if (opts.cacheDiagnostics) {
               // Adopt the leg's verdict + thread key. Resolving with the
               // child promises locks ours to follow them; the outer
@@ -2238,6 +2262,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
     model: modelPromise,
     fallback: fallbackPromise,
     finishReason: finishReasonPromise,
+    refusal: refusalPromise,
     cacheDiagnostics: cacheDiagnosticsPromise,
     providerMessageId: providerMessageIdPromise,
   };

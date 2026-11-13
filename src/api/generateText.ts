@@ -1140,7 +1140,8 @@ export interface GenerateTextResult {
   /**
    * The model's refusal message when it declined the request with one;
    * `finishReason` is then `'refusal'` and `text` holds no answer. Undefined
-   * on every other result.
+   * on every other result. Set by `generateText()`; other surfaces that
+   * return this shape may report the finish reason and leave it unset.
    */
   refusal?: string;
   /**
@@ -3417,6 +3418,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             usage: totalUsage,
             toolCalls: allToolCalls,
             finishReason: (choice.finishReason ?? 'stop') as GenerateTextResult['finishReason'],
+            ...(typeof choice.refusal === 'string' ? { refusal: choice.refusal } : {}),
             plan: resolvedPlan,
           };
         }
@@ -3639,6 +3641,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           usage: totalUsage,
           toolCalls: allToolCalls,
           finishReason: (choice.finishReason ?? 'stop') as GenerateTextResult['finishReason'],
+          // A refused answer: the refusal message beside finish reason 'refusal' (the provider set both).
+          ...(typeof choice.refusal === 'string' ? { refusal: choice.refusal } : {}),
           plan: resolvedPlan,
         };
       }

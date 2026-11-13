@@ -521,6 +521,7 @@ export function guardedStreamText(opts: GenerateTextOptions, inner: (opts: Gener
   const hold = guards.output !== 'stream';
   const text = deferred<string>();
   const finishReason = deferred<StreamFinishReason>();
+  const refusal = deferred<string | undefined>();
   const guardReport = deferred<TextGuardrailReport | undefined>();
   const usage = deferred<TokenUsage>();
   const toolCalls = deferred<ToolCallRecord[]>();
@@ -611,6 +612,8 @@ export function guardedStreamText(opts: GenerateTextOptions, inner: (opts: Gener
       text.resolve(delivered);
       guardReport.resolve(run?.report);
       finishReason.resolve(finish ?? source?.finishReason ?? 'stop');
+      // the call's refusal message, when the guards did not end the stream themselves
+      refusal.resolve(finish === undefined ? source?.refusal : undefined);
       usage.resolve(source ? source.usage : { ...NO_USAGE });
       toolCalls.resolve(source ? source.toolCalls : []);
       provider.resolve(source ? source.provider : '');
@@ -654,6 +657,7 @@ export function guardedStreamText(opts: GenerateTextOptions, inner: (opts: Gener
     model: model.promise,
     fallback: fallback.promise,
     finishReason: finishReason.promise,
+    refusal: refusal.promise,
     cacheDiagnostics: cacheDiagnostics.promise,
     providerMessageId: providerMessageId.promise,
     guardReport: guardReport.promise,
