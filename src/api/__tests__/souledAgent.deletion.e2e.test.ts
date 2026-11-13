@@ -470,6 +470,43 @@ describe('forgetUser', () => {
     expect(tracesOf(keyOf(bob))).toEqual([]);
   });
 
+  it('keeps the session history when the tombstone cannot be written, and clears it on the retry', async () => {
+    const { a } = await open();
+    const session = a.session('s1', { userId: 'alice' });
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    const held = session.messages().length;
+    expect(held).toBeGreaterThan(0);
+    vi.spyOn(a.memory!.forgotten!, 'markForgotten').mockRejectedValueOnce(new Error('the copy cannot be written'));
+
+    await expect(a.forgetUser!('alice')).rejects.toThrow('the copy cannot be written');
+
+    // Nothing is deleted without the tombstone, the history this process holds included.
+    expect(session.messages()).toHaveLength(held);
+    expect((await a.forgetUser!('alice')).complete).toBe(true);
+    expect(session.messages()).toEqual([]);
+  });
+
+  it("deletes again a forgotten learner's rows that no session or head row names", async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { a } = await open({ runtime: 'gmi', learning: true });
+    expect((await a.forgetUser!('alice')).stores).toContainEqual(expect.objectContaining({ store: 'learning store', reached: true }));
+    // A restore put back a trait row of hers, and no other row of her learning.
+    const db = new Database(storeFile());
+    try {
+      db.exec(LEARNING_SCHEMA_DDL);
+      db.prepare(
+        'INSERT INTO agentos_learning_traits (namespace, agent_key, user_id, persona_id, state, version, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      ).run('', 'aria-1', 'alice', 'p', '{}', 1, new Date().toISOString());
+    } finally {
+      db.close();
+    }
+    const forgetLearner = vi.spyOn(a.learning!, 'forgetUser');
+
+    await a.applyTombstones!();
+
+    expect(forgetLearner).toHaveBeenCalledWith('alice');
+  });
+
   it('names legacy memory it did not reach until the host deletes it', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const oldFile = path.join(dir, 'memory', 'concepts', 'old.md');

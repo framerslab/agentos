@@ -266,6 +266,20 @@ describe('forgetUser', () => {
     expect(session.currentTraits()).toMatchObject({ extraversion: 0.8 });
   });
 
+  it("answers the persona's traits, never a forgotten learner's kept ones, from a session opened on a store that holds both", async () => {
+    quiet();
+    const store = new InMemoryLearningStore();
+    const before = createLearningLayer({ store });
+    await before.operatorSet({ learner: KEY, traits: { extraversion: 0.6 }, by: 'ops' });
+    // The learner's trait row and her tombstone, as a restore of the rows beside a later deletion leaves them.
+    await store.insertForgotten(await tombstoneHash('A', '42'), new Date().toISOString());
+
+    const session = await createLearningLayer({ store }).forLearner(KEY, context());
+
+    // Before any turn: the open checks the tombstone as a turn does.
+    expect(session.currentTraits()).toMatchObject({ extraversion: 0.8 });
+  });
+
   it("keeps the user's learning rows while a memory store fails, so a second call deletes what the first could not", async () => {
     quiet();
     const { memory: tools, brain } = await facadeAt(tempFile(), 'tools-brain');
