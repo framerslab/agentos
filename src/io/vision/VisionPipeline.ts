@@ -26,7 +26,9 @@
  * ## Dependency loading
  *
  * All heavy ML dependencies (ppu-paddle-ocr, tesseract.js,
- * \@huggingface/transformers) are loaded lazily via dynamic `import()`.
+ * \@huggingface/transformers) are loaded lazily via dynamic `import()`;
+ * Transformers.js by a specifier a bundler does not follow, so a host
+ * that bundles this module does not bundle it.
  * If a dependency is missing, the pipeline throws a helpful error
  * with installation instructions — it never crashes on missing
  * optional peer deps at module load time.
@@ -65,6 +67,7 @@
  */
 
 import { bufferToBlobPart } from '../media/images/blobPart.js';
+import { importOptional } from '../../core/utils/importOptional.js';
 import type {
   VisionPipelineConfig,
   VisionResult,
@@ -1219,7 +1222,7 @@ export class VisionPipeline {
   /** The load of {@link _loadTrOcr}, which runs one at a time. */
   private async _startTrOcr(): Promise<any> {
     try {
-      const { pipeline } = await import('@huggingface/transformers');
+      const { pipeline } = await importOptional('@huggingface/transformers');
       // TrOCR base, fine-tuned on handwriting: an image-to-text
       // (vision-encoder-decoder) model.
       this._trOcrPipeline = await (pipeline as any)('image-to-text', HANDWRITING_MODEL);
@@ -1252,7 +1255,7 @@ export class VisionPipeline {
   /** The load of {@link _loadFlorence2}, which runs one at a time. */
   private async _startFlorence2(): Promise<{ model: any; processor: any; RawImage: any }> {
     try {
-      const { AutoProcessor, Florence2ForConditionalGeneration, RawImage } = await import('@huggingface/transformers');
+      const { AutoProcessor, Florence2ForConditionalGeneration, RawImage } = await importOptional('@huggingface/transformers');
       // The processor first: a model loaded before a processor that failed
       // would hold an ONNX session that nothing releases.
       const processor = await AutoProcessor.from_pretrained(LAYOUT_MODEL);
@@ -1285,7 +1288,7 @@ export class VisionPipeline {
   /** The load of {@link _loadClip}, which runs one at a time. */
   private async _startClip(): Promise<any> {
     try {
-      const { pipeline } = await import('@huggingface/transformers');
+      const { pipeline } = await importOptional('@huggingface/transformers');
       // CLIP ViT-B/32. The image-feature-extraction task runs its vision
       // tower with the projection, which gives 512 numbers in the space of
       // CLIP's text embeddings, for cross-modal search; the

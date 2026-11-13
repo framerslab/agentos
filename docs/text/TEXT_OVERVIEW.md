@@ -49,7 +49,7 @@ flowchart LR
 | `BM25Index`, `HybridSearcher`, `SemanticChunker` | `@framers/agentos/cognition/rag` | Node | `HybridSearcher` calls the embedder you give it |
 | `reciprocalRankFusion` | `@framers/agentos/cognition/memory` | Node | No |
 | `fuseRanked` | `@framers/agentos/cognition/rag` | Node | No |
-| Rerankers | `@framers/agentos/cognition/rag/reranking` | Node or a browser: no reranking module imports a Node module. Cohere sends its requests with the global `fetch`, and the local cross-encoder imports Transformers.js on its first call | The local cross-encoder scores in process (it downloads its model once); Cohere sends the query and passages to Cohere; the LLM judge calls the model your `llmCallFn` calls |
+| Rerankers | `@framers/agentos/cognition/rag/reranking` | Node or a browser: no reranking module imports a Node module. Cohere sends its requests with the global `fetch`, and the local cross-encoder imports Transformers.js on its first call (a bundled page passes it in `providerOptions.transformers`) | The local cross-encoder scores in process (it downloads its model once); Cohere sends the query and passages to Cohere; the LLM judge calls the model your `llmCallFn` calls |
 
 ## Examples
 
