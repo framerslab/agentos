@@ -1247,4 +1247,45 @@ describe('GMI sentiment writes that land after their turn dropped them', () => {
       await gmi.shutdown();
     }
   });
+
+  it("keeps a dropped turn's trend out of a newer write that read the store before the take-back landed", async () => {
+    const utility = createMockUtilityAI(negative);
+    const wm = createMockWorkingMemory();
+    const write = wm.set.getMockImplementation()!;
+    let holds = 0;
+    const releases: Array<() => void> = [];
+    // The host store holds the next `holds` sentiment history writes, each until the test releases it.
+    wm.set.mockImplementation((key: string, value: any) => {
+      if (key !== 'gmi_sentiment_history' || holds === 0) return write(key, value);
+      holds -= 1;
+      return new Promise<void>((resolve) => { releases.push(() => { void write(key, value); resolve(); }); });
+    });
+    const gmi = await startGmi('newer-reads-dropped', utility, wm);
+    try {
+      await drainTurn(gmi, 'kept', 'Hello there.');
+      holds = 1;
+      await dropWhileHeld(gmi, 'dropped', 'My PIN is 1234.', () => releases.length === 1);
+      gmi.replaceHistory([createConversationMessage(MessageRole.USER, 'Hello there.')]);
+      await settle();
+      // The dropped write lands; the write that takes it back is held.
+      holds = 1;
+      releases[0]();
+      await vi.waitFor(() => expect(releases, 'the dropped write is taken back').toHaveLength(2), { timeout: 500, interval: 10 });
+      // The next turn reads the store while it holds the dropped write. Its own write lands after the take-back, as
+      // it does on a store that applies writes in order.
+      holds = 1;
+      const next = drainTurn(gmi, 'next', 'Next question.');
+      await vi.waitFor(() => expect(releases, 'the next turn writes').toHaveLength(3), { timeout: 500, interval: 10 });
+      releases[1]();
+      releases[2]();
+      await next;
+      const stored = wm._store.get('gmi_sentiment_history');
+      expect(JSON.stringify(stored), "a newer write keeps a dropped turn's text out of the store").not.toContain('1234');
+      expect(stored?.trends.map((trend: any) => trend.turnId)).toEqual(['kept', 'next']);
+    } finally {
+      for (const release of releases) release();
+      vi.useRealTimers();
+      await gmi.shutdown();
+    }
+  });
 });
