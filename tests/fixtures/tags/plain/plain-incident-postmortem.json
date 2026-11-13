@@ -1,0 +1,161 @@
+{
+  "id": "plain-incident-postmortem",
+  "set": "plain",
+  "kind": "document",
+  "language": "en",
+  "title": "Postmortem: search outage on a Tuesday afternoon",
+  "headings": [
+    "Summary",
+    "Timeline",
+    "Root cause",
+    "What we will change"
+  ],
+  "path": null,
+  "text": "# Summary\n\nSearch was unavailable for fifty-two minutes on Tuesday afternoon. Every other part of the app worked, but any search returned an error page. No data was lost. This postmortem is blameless: it describes what the systems and the process did, so we can change them.\n\n# Timeline\n\nAt two in the afternoon a scheduled job began rebuilding the search index for the largest workspace. Ten minutes later the search cluster's memory use reached its limit, and the nodes started to restart one after another. The alert fired at a quarter past two and paged the on-call engineer, who saw the restarts and first suspected a bad deploy, since one had gone out that morning. Rolling back the deploy did not help. At half past two a second engineer noticed the rebuild job in the job queue. They paused it at twenty to three, the nodes stopped restarting, and search answered normally again by six minutes to three.\n\n# Root cause\n\nThe rebuild job loads a workspace's whole index into memory before writing it out. That was fine when the largest workspace was small, but it has grown five times in a year. The job had no limit on memory and ran on the same nodes that answer searches. Our capacity review looked at the size of searches, not at the size of rebuilds, so nobody saw the risk.\n\n# What we will change\n\nThe rebuild job will stream the index in parts instead of loading it whole, and it will run on separate nodes. The alert will say which process is using the memory, so the on-call engineer does not have to guess. The capacity review will include background jobs. The runbook for search errors gets a first step: check the job queue. Each change has an owner and a date in the incident tracker, and we will review progress in four weeks.\n",
+  "vocabulary": [
+    {
+      "label": "Postmortems",
+      "uses": 9,
+      "lastUsed": 1762300800000
+    },
+    {
+      "label": "post-mortem",
+      "uses": 8,
+      "lastUsed": 1762214400000
+    },
+    {
+      "label": "Incidents",
+      "uses": 7,
+      "lastUsed": 1762128000000
+    },
+    {
+      "label": "incident",
+      "uses": 6,
+      "lastUsed": 1762041600000
+    },
+    {
+      "label": "Outages",
+      "uses": 5,
+      "lastUsed": 1761955200000
+    },
+    {
+      "label": "outage",
+      "uses": 4,
+      "lastUsed": 1761868800000
+    },
+    {
+      "label": "Search",
+      "uses": 3,
+      "lastUsed": 1761782400000
+    },
+    {
+      "label": "search-index",
+      "uses": 2,
+      "lastUsed": 1761696000000
+    },
+    {
+      "label": "Search Index",
+      "uses": 1,
+      "lastUsed": 1761609600000
+    },
+    {
+      "label": "On-Call",
+      "uses": 9,
+      "lastUsed": 1761523200000
+    },
+    {
+      "label": "On Call",
+      "uses": 8,
+      "lastUsed": 1761436800000
+    },
+    {
+      "label": "Alerts",
+      "uses": 7,
+      "lastUsed": 1761350400000
+    },
+    {
+      "label": "alerting",
+      "uses": 6,
+      "lastUsed": 1761264000000
+    },
+    {
+      "label": "Runbooks",
+      "uses": 5,
+      "lastUsed": 1761177600000
+    },
+    {
+      "label": "runbook",
+      "uses": 4,
+      "lastUsed": 1761091200000
+    },
+    {
+      "label": "Capacity",
+      "uses": 3,
+      "lastUsed": 1761004800000
+    },
+    {
+      "label": "capacity planning",
+      "uses": 2,
+      "lastUsed": 1760918400000
+    },
+    {
+      "label": "Memory",
+      "uses": 1,
+      "lastUsed": 1760832000000
+    },
+    {
+      "label": "Jobs",
+      "uses": 9,
+      "lastUsed": 1760745600000
+    },
+    {
+      "label": "Background Jobs",
+      "uses": 8,
+      "lastUsed": 1760659200000
+    },
+    {
+      "label": "Queues",
+      "uses": 7,
+      "lastUsed": 1760572800000
+    },
+    {
+      "label": "Deploys",
+      "uses": 6,
+      "lastUsed": 1760486400000
+    },
+    {
+      "label": "Rollback",
+      "uses": 5,
+      "lastUsed": 1760400000000
+    },
+    {
+      "label": "SRE",
+      "uses": 4,
+      "lastUsed": 1760313600000
+    },
+    {
+      "label": "Reliability",
+      "uses": 3,
+      "lastUsed": 1760227200000
+    }
+  ],
+  "typed": [
+    "Postmortems",
+    "Outages",
+    "Search Index"
+  ],
+  "expected": {
+    "existing": [
+      "postmortems",
+      "outages",
+      "searchindex",
+      "runbooks",
+      "capacity"
+    ],
+    "new": [
+      "rebuild"
+    ]
+  },
+  "mustNot": [],
+  "asks": []
+}

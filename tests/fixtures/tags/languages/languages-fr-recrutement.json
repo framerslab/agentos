@@ -1,0 +1,42 @@
+{
+  "id": "languages-fr-recrutement",
+  "set": "languages",
+  "kind": "document",
+  "language": "fr",
+  "title": "Plan de recrutement de l'équipe support",
+  "headings": [
+    "Contexte",
+    "Le processus"
+  ],
+  "path": null,
+  "text": "# Contexte\n\nL'équipe support reçoit deux fois plus de demandes qu'il y a un an, alors que le nombre de personnes n'a pas changé. Les délais de réponse se sont allongés, et plusieurs clients importants s'en sont plaints lors de leur renouvellement. Ce plan de recrutement prévoit deux postes de conseiller et un poste de responsable d'équipe pour le semestre qui vient.\n\n# Le processus\n\nChaque candidat rencontre quatre personnes : une personne des ressources humaines, la future responsable, deux membres de l'équipe et quelqu'un d'une équipe produit. L'entretien pratique consiste à répondre par écrit à trois demandes de clients, dont une demande difficile, dans un temps limité. Nous notons chaque entretien selon une grille écrite avant la réunion de décision, afin que le premier avis exprimé ne décide pas du résultat.\n\nLe recrutement commence par les deux postes de conseiller. Le poste de responsable ouvrira dès que le premier conseiller aura accepté une offre, pour que la nouvelle responsable puisse participer aux derniers entretiens. Les candidats reçoivent une réponse dans les cinq jours ouvrés qui suivent leur dernier entretien. Le budget de recrutement couvre une recherche par un cabinet pour le poste de responsable, et nous ferons le point chaque mois lors de la réunion sur les effectifs.\n",
+  "vocabulary": [
+    {
+      "label": "recrutement",
+      "uses": 9,
+      "lastUsed": 1762300800000
+    },
+    {
+      "label": "support",
+      "uses": 8,
+      "lastUsed": 1762214400000
+    },
+    {
+      "label": "interviews",
+      "uses": 7,
+      "lastUsed": 1762128000000
+    }
+  ],
+  "typed": [
+    "recrutement"
+  ],
+  "expected": {
+    "existing": [
+      "recrutement",
+      "support"
+    ],
+    "new": []
+  },
+  "mustNot": [],
+  "asks": []
+}

@@ -1,0 +1,58 @@
+{
+  "id": "plain-product-roadmap",
+  "set": "plain",
+  "kind": "document",
+  "language": "en",
+  "title": "Product roadmap for 2027",
+  "headings": [
+    "Themes",
+    "First half",
+    "Second half",
+    "What we are not doing"
+  ],
+  "path": "docs/roadmap/2027.md",
+  "text": "# Themes\n\nThe roadmap for 2027 has three themes: faster search, offline use on mobile, and reports a team can share. Each theme came from the customer interviews and the support tickets of the last year. Search speed was the most common complaint, offline use the most common request from field teams, and shared reports the reason two large accounts gave for looking at other tools.\n\n# First half\n\nSearch comes first. The index moves to the new storage engine in the first quarter, and the search page gets filters by date, by owner and by type. The goal is an answer in under half a second for nine searches in ten. In the second quarter the mobile app learns to keep a chosen set of documents on the phone, to edit them without a connection, and to send the changes when it is back online. Conflicts show both versions side by side and let the person choose.\n\n# Second half\n\nShared reports take the third quarter. A report is a saved search with a layout, and a team can pin it, comment on it and get a weekly digest of what changed. The fourth quarter is kept for polish, for the accessibility review, and for whatever the first three quarters taught us. We keep that quarter light on purpose, because the last two roadmaps ran late and the slack was spent on fixes.\n\n# What we are not doing\n\nWe are not building a chat feature, a calendar, or a public API for reports this year. Each of those came up more than once, and each would pull the team away from the three themes. The roadmap is reviewed at the start of each quarter, and a change to it is written down here with the reason.\n",
+  "vocabulary": [
+    {
+      "label": "roadmap",
+      "uses": 9,
+      "lastUsed": 1762300800000
+    },
+    {
+      "label": "search",
+      "uses": 8,
+      "lastUsed": 1762214400000
+    },
+    {
+      "label": "mobile",
+      "uses": 7,
+      "lastUsed": 1762128000000
+    },
+    {
+      "label": "reports",
+      "uses": 6,
+      "lastUsed": 1762041600000
+    },
+    {
+      "label": "customer interviews",
+      "uses": 5,
+      "lastUsed": 1761955200000
+    }
+  ],
+  "typed": [
+    "roadmap"
+  ],
+  "expected": {
+    "existing": [
+      "roadmap",
+      "search",
+      "mobile",
+      "reports"
+    ],
+    "new": [
+      "offline"
+    ]
+  },
+  "mustNot": [],
+  "asks": []
+}

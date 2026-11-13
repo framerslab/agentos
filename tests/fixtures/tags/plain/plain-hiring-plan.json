@@ -1,0 +1,156 @@
+{
+  "id": "plain-hiring-plan",
+  "set": "plain",
+  "kind": "document",
+  "language": "en",
+  "title": "Hiring plan for the platform team",
+  "headings": [
+    "Why we are hiring",
+    "Roles",
+    "Interview loop",
+    "Timeline"
+  ],
+  "path": null,
+  "text": "# Why we are hiring\n\nThe platform team carries the build system, the deploy pipeline and the shared libraries every product team uses. Over the last two quarters the number of services doubled, and the team stayed the same size. On-call pages rose, and work on the new deploy pipeline slipped twice. This plan asks for two engineers and one engineering manager.\n\n# Roles\n\nThe first role is a senior engineer who has run a build system at a company of our size. They will own the migration of the remaining services to the new pipeline. The second role is an engineer with two or three years of experience, who will work on the shared libraries and on developer tooling. The manager role is new. Today the team reports to the director of engineering, who has eight other reports and cannot give the team the time it needs.\n\n# Interview loop\n\nEvery candidate meets four people: a recruiter, the hiring manager, two engineers from the team, and someone from a product team that depends on the platform. The technical interview is a working session on a small change to a real build file, not a puzzle. We score each interview on a written rubric before the debrief, so the first opinion spoken does not set the result. Candidates get an answer within five working days of their last interview.\n\n# Timeline\n\nRecruiting opens the senior role first. The other engineer role opens two weeks later, and the manager role opens once the senior engineer has accepted an offer, so the new manager can help shape the team. The recruiting budget covers one agency search for the manager role. We review progress at the monthly staffing meeting and adjust the plan if the first role takes longer than eight weeks to fill.\n",
+  "vocabulary": [
+    {
+      "label": "Hiring",
+      "uses": 9,
+      "lastUsed": 1762300800000
+    },
+    {
+      "label": "hiring",
+      "uses": 8,
+      "lastUsed": 1762214400000
+    },
+    {
+      "label": "Recruiting",
+      "uses": 7,
+      "lastUsed": 1762128000000
+    },
+    {
+      "label": "Interviews",
+      "uses": 6,
+      "lastUsed": 1762041600000
+    },
+    {
+      "label": "interview-loop",
+      "uses": 5,
+      "lastUsed": 1761955200000
+    },
+    {
+      "label": "Platform",
+      "uses": 4,
+      "lastUsed": 1761868800000
+    },
+    {
+      "label": "platform team",
+      "uses": 3,
+      "lastUsed": 1761782400000
+    },
+    {
+      "label": "Build System",
+      "uses": 2,
+      "lastUsed": 1761696000000
+    },
+    {
+      "label": "build-system",
+      "uses": 1,
+      "lastUsed": 1761609600000
+    },
+    {
+      "label": "Deploy Pipeline",
+      "uses": 9,
+      "lastUsed": 1761523200000
+    },
+    {
+      "label": "deploy_pipeline",
+      "uses": 8,
+      "lastUsed": 1761436800000
+    },
+    {
+      "label": "On-Call",
+      "uses": 7,
+      "lastUsed": 1761350400000
+    },
+    {
+      "label": "oncall",
+      "uses": 6,
+      "lastUsed": 1761264000000
+    },
+    {
+      "label": "Engineering",
+      "uses": 5,
+      "lastUsed": 1761177600000
+    },
+    {
+      "label": "Staffing",
+      "uses": 4,
+      "lastUsed": 1761091200000
+    },
+    {
+      "label": "Headcount",
+      "uses": 3,
+      "lastUsed": 1761004800000
+    },
+    {
+      "label": "Tooling",
+      "uses": 2,
+      "lastUsed": 1760918400000
+    },
+    {
+      "label": "Developer Tools",
+      "uses": 1,
+      "lastUsed": 1760832000000
+    },
+    {
+      "label": "Q4",
+      "uses": 9,
+      "lastUsed": 1760745600000
+    },
+    {
+      "label": "Roadmap",
+      "uses": 8,
+      "lastUsed": 1760659200000
+    },
+    {
+      "label": "road map",
+      "uses": 7,
+      "lastUsed": 1760572800000
+    },
+    {
+      "label": "Budget",
+      "uses": 6,
+      "lastUsed": 1760486400000
+    },
+    {
+      "label": "Onboarding",
+      "uses": 5,
+      "lastUsed": 1760400000000
+    },
+    {
+      "label": "Managers",
+      "uses": 4,
+      "lastUsed": 1760313600000
+    }
+  ],
+  "typed": [
+    "Hiring",
+    "Recruiting",
+    "Build System"
+  ],
+  "expected": {
+    "existing": [
+      "hiring",
+      "recruiting",
+      "platform",
+      "buildsystem",
+      "deploypipeline"
+    ],
+    "new": [
+      "candidates"
+    ]
+  },
+  "mustNot": [],
+  "asks": []
+}

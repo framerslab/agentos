@@ -1,0 +1,231 @@
+{
+  "id": "plain-support-escalation",
+  "set": "plain",
+  "kind": "document",
+  "language": "en",
+  "title": "Support escalation: duplicate charges after the plan change",
+  "headings": [
+    "What happened",
+    "Who is affected",
+    "Cause",
+    "Fix and follow-up"
+  ],
+  "path": null,
+  "text": "# What happened\n\nOn Monday morning support began receiving tickets from customers who changed their plan over the weekend and were charged twice. By noon there were forty tickets on the same problem, so the support lead raised it to the billing team as a priority escalation and opened an incident channel.\n\n# Who is affected\n\nEvery customer who moved from a monthly plan to a yearly plan between Saturday morning and Monday at ten was charged both the remaining monthly amount and the full yearly amount. Customers who moved the other way were not affected. Billing found the affected accounts by comparing plan changes with charges in that window.\n\n# Cause\n\nA change to the billing service, released on Friday evening, created the new yearly charge before cancelling the monthly one. When the cancellation step failed on a timeout, the code did not undo the new charge, and the retry ran the whole sequence again. The test suite covered the success path and the cancellation failure, but not a timeout followed by a retry.\n\n# Fix and follow-up\n\nThe billing team rolled the change back at eleven, and no new duplicate charges have appeared since. Every affected customer gets a refund of the duplicate amount within two working days, and support is sending each of them a short message that explains the error and the refund. The billing team will add a test for a timeout followed by a retry before the change goes out again. Support will add a macro for any ticket that arrives after the messages go out, so answers stay the same. The escalation stays open until the refunds are confirmed, and the review of the incident is on Thursday.\n",
+  "vocabulary": [
+    {
+      "label": "Escalations",
+      "uses": 9,
+      "lastUsed": 1762300800000
+    },
+    {
+      "label": "escalation",
+      "uses": 8,
+      "lastUsed": 1762214400000
+    },
+    {
+      "label": "Billing",
+      "uses": 7,
+      "lastUsed": 1762128000000
+    },
+    {
+      "label": "billing-service",
+      "uses": 6,
+      "lastUsed": 1762041600000
+    },
+    {
+      "label": "Refunds",
+      "uses": 5,
+      "lastUsed": 1761955200000
+    },
+    {
+      "label": "refund",
+      "uses": 4,
+      "lastUsed": 1761868800000
+    },
+    {
+      "label": "Incidents",
+      "uses": 3,
+      "lastUsed": 1761782400000
+    },
+    {
+      "label": "incident review",
+      "uses": 2,
+      "lastUsed": 1761696000000
+    },
+    {
+      "label": "Incident-Review",
+      "uses": 1,
+      "lastUsed": 1761609600000
+    },
+    {
+      "label": "Support",
+      "uses": 9,
+      "lastUsed": 1761523200000
+    },
+    {
+      "label": "Support Macros",
+      "uses": 8,
+      "lastUsed": 1761436800000
+    },
+    {
+      "label": "macros",
+      "uses": 7,
+      "lastUsed": 1761350400000
+    },
+    {
+      "label": "Tickets",
+      "uses": 6,
+      "lastUsed": 1761264000000
+    },
+    {
+      "label": "Plans",
+      "uses": 5,
+      "lastUsed": 1761177600000
+    },
+    {
+      "label": "Pricing",
+      "uses": 4,
+      "lastUsed": 1761091200000
+    },
+    {
+      "label": "Payments",
+      "uses": 3,
+      "lastUsed": 1761004800000
+    },
+    {
+      "label": "Customers",
+      "uses": 2,
+      "lastUsed": 1760918400000
+    },
+    {
+      "label": "Churn",
+      "uses": 1,
+      "lastUsed": 1760832000000
+    },
+    {
+      "label": "Timeouts",
+      "uses": 9,
+      "lastUsed": 1760745600000
+    },
+    {
+      "label": "Retries",
+      "uses": 8,
+      "lastUsed": 1760659200000
+    },
+    {
+      "label": "Testing",
+      "uses": 7,
+      "lastUsed": 1760572800000
+    },
+    {
+      "label": "QA",
+      "uses": 6,
+      "lastUsed": 1760486400000
+    },
+    {
+      "label": "Releases",
+      "uses": 5,
+      "lastUsed": 1760400000000
+    },
+    {
+      "label": "Rollback",
+      "uses": 4,
+      "lastUsed": 1760313600000
+    },
+    {
+      "label": "roll-back",
+      "uses": 3,
+      "lastUsed": 1760227200000
+    },
+    {
+      "label": "On Call",
+      "uses": 2,
+      "lastUsed": 1760140800000
+    },
+    {
+      "label": "Status Page",
+      "uses": 1,
+      "lastUsed": 1760054400000
+    },
+    {
+      "label": "Weekend",
+      "uses": 9,
+      "lastUsed": 1759968000000
+    },
+    {
+      "label": "SLA",
+      "uses": 8,
+      "lastUsed": 1759881600000
+    },
+    {
+      "label": "Priority",
+      "uses": 7,
+      "lastUsed": 1759795200000
+    },
+    {
+      "label": "Accounts",
+      "uses": 6,
+      "lastUsed": 1759708800000
+    },
+    {
+      "label": "Finance",
+      "uses": 5,
+      "lastUsed": 1759622400000
+    },
+    {
+      "label": "Chargebacks",
+      "uses": 4,
+      "lastUsed": 1759536000000
+    },
+    {
+      "label": "Invoices",
+      "uses": 3,
+      "lastUsed": 1759449600000
+    },
+    {
+      "label": "Subscriptions",
+      "uses": 2,
+      "lastUsed": 1759363200000
+    },
+    {
+      "label": "Yearly Plans",
+      "uses": 1,
+      "lastUsed": 1759276800000
+    },
+    {
+      "label": "Monthly Plans",
+      "uses": 9,
+      "lastUsed": 1759190400000
+    },
+    {
+      "label": "Q2",
+      "uses": 8,
+      "lastUsed": 1759104000000
+    },
+    {
+      "label": "Postmortems",
+      "uses": 7,
+      "lastUsed": 1759017600000
+    }
+  ],
+  "typed": [
+    "Escalations",
+    "Billing",
+    "Refunds"
+  ],
+  "expected": {
+    "existing": [
+      "escalations",
+      "billing",
+      "refunds",
+      "incidentreview",
+      "rollback"
+    ],
+    "new": [
+      "duplicatecharges"
+    ]
+  },
+  "mustNot": [],
+  "asks": []
+}
