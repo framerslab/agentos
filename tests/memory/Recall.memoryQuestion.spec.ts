@@ -22,6 +22,7 @@ describe('isMemoryQuestion', () => {
     'What did I tell you about the trip',
     'What was my old address',
     "What's my sister's name?",
+    'What’s my sister’s name?',
     'What is my favourite tea',
     'What is my favorite tea',
     'Last time we spoke you had a plan',

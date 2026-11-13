@@ -264,7 +264,9 @@ describe.each(ENGINES)('hybrid recall on %s', (engine, open) => {
     expect(h.contextText).not.toContain('Team plan');
     const c = captureOf(h) as Capture & { legs: Array<{ leg: string; candidates?: number }> };
     expect(c.candidates.filter((x) => x.id === 'assoc').every((x) => x.ranks.supplied === undefined)).toBe(true);
-    expect(c.legs.find((l) => l.leg === 'supplied')).toMatchObject({ ran: true, candidates: 0 });
+    expect(c.legs.find((l) => l.leg === 'supplied')).toMatchObject({ ran: true, candidates: 0, ineligible: 1 });
+    // The stored memory is outside the pool, so the caller's text is refused and counted, never dropped unseen.
+    expect((c as unknown as { suppliedRejected?: unknown }).suppliedRejected).toEqual({ outOfScope: 0, ineligible: 1 });
     await mem.close();
     await db.close();
   });
@@ -289,6 +291,31 @@ describe.each(ENGINES)('hybrid recall on %s', (engine, open) => {
     const out = await broken.manager.assembleForPrompt('Do you remember?', 1600, NEUTRAL, { scopes: U1 });
     expect((out.capture as unknown as { memoryQuestionReserve: unknown }).memoryQuestionReserve).toEqual({ fired: false, added: 0 });
     await broken.close();
+    // A predicate that returns a rejected promise, which the type forbids, is read as no and its rejection is handled.
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const rejecting = await memoryWith(
+        {
+          retrieval: 'hybrid',
+          memoryQuestion: (async () => {
+            throw new Error('boom');
+          }) as never,
+        },
+        new FlatEmbedder(),
+        db.brain,
+      );
+      const late = await rejecting.manager.assembleForPrompt('Do you remember?', 1600, NEUTRAL, { scopes: U1 });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect((late.capture as unknown as { memoryQuestionReserve: unknown }).memoryQuestionReserve).toEqual({ fired: false, added: 0 });
+      expect(unhandled).toEqual([]);
+      await rejecting.close();
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
     await db.close();
   });
 

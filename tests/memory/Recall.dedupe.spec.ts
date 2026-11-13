@@ -225,6 +225,45 @@ describe('dedupePool', () => {
         for (const b of kept.slice(i + 1)) expect(nearDuplicate(dedupeTokens(a.trace.content), dedupeTokens(b.trace.content), 0.8)).toBe(false);
       }
     });
+
+    it('a candidate dropped on a later pass against a kept memory gives it its better score and its place', () => {
+      const common = 'w1 w2 w3 w4 w5 w6 w7 w8';
+      // N, the newest, takes H1's place; S repeated H1 alone, so it no longer repeats a kept text and is dropped
+      // against K, the older-scored memory it also repeats.
+      const { kept, dropped } = dedupePool(
+        [
+          entry('H1', `${common} alpha beta`, 0.05, 100),
+          entry('S', `${common} beta gamma`, 0.04, 50),
+          entry('M', 'an unrelated memory about the garden', 0.035, 10),
+          entry('K', `${common} gamma delta`, 0.03, 150),
+          entry('N', `${common} alpha epsilon`, 0.02, 300),
+        ],
+        0.8,
+      );
+      expect(kept.map((e) => [e.trace.id, e.fusedScore])).toEqual([
+        ['N', 0.05],
+        ['K', 0.04],
+        ['M', 0.035],
+      ]);
+      expect(dropped.map((d) => [d.entry.trace.id, d.duplicateOf])).toEqual([
+        ['H1', 'N'],
+        ['S', 'K'],
+      ]);
+    });
+
+    it('a memory folded into a newer text and kept again takes its score and place back from that text', () => {
+      const common = 'w1 w2 w3 w4 w5 w6 w7 w8';
+      // B takes A's place, E takes B's, and A, which does not repeat E, is kept again: E stands for B and itself.
+      const { kept, dropped } = dedupePool(
+        [entry('A', `${common} alpha beta`, 0.05, 100), entry('B', `${common} beta gamma`, 0.03, 200), entry('E', `${common} gamma epsilon`, 0.02, 300)],
+        0.8,
+      );
+      expect(kept.map((e) => [e.trace.id, e.fusedScore])).toEqual([
+        ['A', 0.05],
+        ['E', 0.03],
+      ]);
+      expect(dropped.map((d) => [d.entry.trace.id, d.duplicateOf])).toEqual([['B', 'E']]);
+    });
   });
 });
 

@@ -48,6 +48,8 @@ describe('supplied candidates', () => {
     } as never);
     expect(context.contextText).toContain('The account is on the Team plan');
     expect(context.contextText).toContain('2026-10-01');
+    // Its line reads the relevance of a fact the caller vouches for, never the caller's ranking score.
+    expect(context.contextText).toMatch(/Team plan[^\n]*relevance: 1\.00/);
     const c = captureOf(context);
     expect(c.candidates[0]).toMatchObject({ id: 'acct-plan', ranks: { supplied: 1 }, fusedScore: 0.5, outcome: 'included', section: 'recall' });
     expect(c.legs.find((l) => l.leg === 'supplied')).toMatchObject({ ran: true, candidates: 1, ineligible: 0 });
