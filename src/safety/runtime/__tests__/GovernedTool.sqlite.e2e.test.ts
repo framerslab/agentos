@@ -115,7 +115,8 @@ describe('a governed tool and the clock, SQLite', () => {
     const result = await settled(governTool(mute, MUTE_POLICY, governanceOf(limiter)).execute(muteOf(message('m1')), CONTEXT), 61_000);
     expect(governance(result)).toMatchObject({ outcome: 'limiter_unavailable', code: 'LEASE_EXPIRED' });
     expect(mute.execute).not.toHaveBeenCalled();
-    expect(await db.all<{ state: string }>(`SELECT state FROM gt_s_w${HOUR}_reservations WHERE account_id = 'mute_room_hour|r:r1'`)).toEqual([{ state: 'released' }]);
+    // given back without taking one of the action's three attempts: its tool never started
+    expect(await db.all<{ state: string; attempts: number }>(`SELECT state, attempts FROM gt_s_w${HOUR}_reservations WHERE account_id = 'mute_room_hour|r:r1'`)).toEqual([{ state: 'released', attempts: 0 }]);
   });
 
   it('(p) a purge one hour back, two hours after a daily limit was used, keeps the unit the day still counts', async () => {
@@ -183,5 +184,22 @@ describe('a governed tool and the clock, SQLite', () => {
     );
     await limiter.purge(Date.now());
     expect(await db.get<{ rows_left: number }>(`SELECT COUNT(*) AS rows_left FROM gt_d_w${HOUR}_reservations`)).toEqual({ rows_left: 0 });
+  });
+
+  it('an action a later rule refuses keeps its three attempts, and runs once that rule has room again', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(START);
+    const limiter = new SqlActionLimiter({ db, rules: RULES, tablePrefix: 'gt_l', requireShared: false });
+    const mute = muteTool();
+    const governed = governTool(mute, MUTE_POLICY, governanceOf(limiter));
+    expect(governance(await governed.execute(muteOf(message('m1')), CONTEXT)).outcome).toBe('executed');
+    // the author's one mute a day is used: a mute for another of their messages is refused by the second rule, each
+    // time after the first rule reserved and gave back its unit
+    for (let ask = 0; ask < 4; ask += 1) {
+      expect(governance(await governed.execute(muteOf(message('m5')), CONTEXT))).toMatchObject({ outcome: 'limit_reached', code: 'mute_target_day' });
+    }
+    vi.setSystemTime(START + DAY + 1);
+    expect(governance(await governed.execute(muteOf(message('m5')), CONTEXT)).outcome).toBe('executed');
+    expect(mute.execute).toHaveBeenCalledTimes(2);
   });
 });
