@@ -8,8 +8,10 @@ import {
   type GuardrailContext, type GuardrailEvaluationResult, type GuardrailHold, type IGuardrailService, type ImageCheck,
   type ModerationContext, type ModerationDecision, type ModerationEvaluation,
 } from '@framers/agentos/safety/guardrails';
-import type { AgentOSInput } from '@framers/agentos';
+import type { AgentOSInput, ITool } from '@framers/agentos';
 import { GuardrailStopError, generateText, type TextGuardrailReport } from '@framers/agentos';
+import { governTool, governedActionOf, type ActionAuditRecord, type ActionLimiter, type EvidenceSource } from '@framers/agentos/safety/runtime';
+import { INJECTION_PROBES, runInjectionProbes } from '@framers/agentos/safety/evaluation';
 
 let items = 0;
 const context: GuardrailContext = { userId: 'user-1', sessionId: 'session-1' };
@@ -98,6 +100,52 @@ const guard = (id: string, evaluation: GuardrailEvaluationResult | null): IGuard
   assert.equal(refused.outcome, 'refuse');
   assert.equal(refused.deciding?.metadata?.quarantine, true);
   assert.equal(modelCalls, 0);
+  items += 1;
+}
+
+// A governed tool: a quote the store does not hold voids the call, and a call that runs is recorded without its quote.
+{
+  const stored = { id: 'm1', authorId: 'u1', roomId: 'r1', text: 'You are worthless and everyone here knows it' };
+  const source: EvidenceSource = { getMessage: async (id) => (id === stored.id ? stored : null) };
+  // a limiter of the fixture's own: the packed package is exercised here, not a store
+  const limiter: ActionLimiter = { reserve: async () => ({ status: 'reserved', commit: async () => undefined, release: async () => undefined }) };
+  const begun: ActionAuditRecord[] = [];
+  let ran = 0;
+  let handed: string | undefined;
+  const hold: ITool<{ messageId: string; evidence: { targetId: string; roomId?: string; ruleId: string; policyVersion: string; quotes: Array<{ messageId: string; quote: string }> } }> = {
+    id: 'hold-message-v1', name: 'hold_message', displayName: 'Hold message', description: 'Holds one message for review.',
+    inputSchema: { type: 'object', properties: { messageId: { type: 'string' } }, required: ['messageId'] },
+    execute: async (_args, toolContext) => { ran += 1; handed = governedActionOf(toolContext)?.recordId; return { success: true, output: { held: true } }; },
+  };
+  const governed = governTool(hold, {
+    action: 'hold_message',
+    target: (args) => ({ accountId: args.evidence.targetId, roomId: args.evidence.roomId, messageId: args.messageId }),
+    limits: [{ id: 'hold_room_hour', scope: 'room', windowMs: 3_600_000, max: 10 }],
+  }, { actor: { id: 'moderator-1', kind: 'agent' }, mode: 'enforce', limiter, evidenceSource: source, ruleBook: { '2026-11': ['harassment.1'] }, audit: { begin: async (record) => { begun.push(record); }, finish: async () => undefined } });
+  const toolContext = { gmiId: 'g', personaId: 'p', userContext: { userId: 'system' } } as Parameters<typeof governed.execute>[1];
+  const evidence = { targetId: 'u1', roomId: 'r1', ruleId: 'harassment.1', policyVersion: '2026-11', quotes: [{ messageId: 'm1', quote: 'You are worthless and everyone here knows iT' }] };
+
+  const voided = await governed.execute({ messageId: 'm1', evidence }, toolContext);
+  assert.equal(voided.success, false);
+  assert.equal(voided.details?.governance.code, 'QUOTE_MISMATCH');
+  assert.equal(ran, 0);
+  items += 1;
+
+  const executed = await governed.execute({ messageId: 'm1', evidence: { ...evidence, quotes: [{ messageId: 'm1', quote: stored.text }] } }, toolContext);
+  assert.equal(executed.details?.governance.outcome, 'executed');
+  assert.equal(handed, executed.details?.governance.recordId);
+  assert.equal(JSON.stringify(begun).includes('worthless'), false);
+  items += 1;
+}
+
+// The probes: two or more per technique, and a run in which nothing ran passes with every ask counted.
+{
+  const perTechnique = new Map<string, number>();
+  for (const probe of INJECTION_PROBES) perTechnique.set(probe.technique, (perTechnique.get(probe.technique) ?? 0) + 1);
+  assert.equal(perTechnique.size, 10);
+  assert.ok([...perTechnique.values()].every((count) => count >= 2));
+  const report = await runInjectionProbes({ run: async () => ({ executed: [], proposed: 1 }), authorOf: () => undefined, allowedActions: ['hold_message'], maxExecuted: 1 });
+  assert.deepEqual(report, { passed: true, findings: [], proposed: INJECTION_PROBES.length, executed: 0 });
   items += 1;
 }
 

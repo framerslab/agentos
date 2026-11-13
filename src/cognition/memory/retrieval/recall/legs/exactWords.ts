@@ -166,7 +166,9 @@ export async function exactWordsLeg(deps: { store: MemoryStore; lexical: ScopedL
     ...over,
     ms: Math.round(performance.now() - started),
   });
-  if (q.scopes.length === 0 || q.limit <= 0) return answer({});
+  // A turn with no scopes may read no row: the leg does not run.
+  if (q.scopes.length === 0) return answer({ ran: false, reason: 'no_scopes' });
+  if (q.limit <= 0) return answer({});
   try {
     const brain = deps.store.getBrain();
     if (brain) {

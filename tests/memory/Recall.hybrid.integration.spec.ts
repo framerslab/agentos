@@ -7,12 +7,14 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import pino from 'pino';
+import { resetLoggerFactory, setLogger } from '../../src/core/logging/loggerFactory';
 import type { PADState } from '../../src/cognition/memory/core/config';
 import type { MemoryTrace } from '../../src/cognition/memory/core/types';
 import { memoryTraceLineLength } from '../../src/cognition/memory/core/prompt/MemoryFormatters';
 import { resetRecallLogOnce } from '../../src/cognition/memory/retrieval/recall/log';
 import { ENGINES, FlatEmbedder, U1, WordHashEmbedder } from './helpers/recallFixtures';
-import { memoryWith, plant } from './helpers/recallMemory';
+import { memoryWith, plant, rerankWith } from './helpers/recallMemory';
 
 const NEUTRAL: PADState = { valence: 0, arousal: 0, dominance: 0 };
 const QUESTION = 'What is the bike shed code?';
@@ -163,6 +165,160 @@ describe.each(ENGINES)('hybrid recall on %s', (engine, open) => {
     await db.close();
   });
 
+  it('a correction that changes one word in a longer memory is shown in place of the text it corrects: the newer stays', async () => {
+    const db = await open();
+    const mem = await memoryWith({ retrieval: 'hybrid' }, new WordHashEmbedder(), db.brain);
+    const sister = 'My sister Ana moved out of the old riverside flat last spring and now lives in';
+    await plant(mem, 'ana-old', `${sister} Porto.`, at(0));
+    await plant(mem, 'ana-new', `${sister} Lisbon.`, at(1));
+    // The question holds the old text's last word, so the old text ranks first by exact words.
+    const h = await mem.manager.assembleForPrompt('Does my sister Ana still live in Porto?', 1600, NEUTRAL, { scopes: U1 });
+    expect(h.contextText).toContain('lives in Lisbon');
+    expect(h.contextText).not.toContain('lives in Porto');
+    const c = captureOf(h);
+    const old = c.candidates.find((x) => x.id === 'ana-old')!;
+    const kept = c.candidates.find((x) => x.id === 'ana-new')!;
+    expect(old).toMatchObject({ ranks: { exact_words: 1 }, outcome: 'left_out', reason: 'dedupe', duplicateOf: 'ana-new', tokens: 0 });
+    expect(kept).toMatchObject({ outcome: 'included', section: 'recall' });
+    // The newer takes the better of the two fused scores.
+    expect(kept.fusedScore).toBeGreaterThanOrEqual(old.fusedScore);
+    await mem.close();
+    await db.close();
+  });
+
+  it('a retrieve() with no scopes reads the dense leg alone: exact words and recency are absent for no_scopes, and no backend is named', async () => {
+    const { db, mem } = await fixture({ retrieval: 'hybrid' });
+    const result = await mem.manager.retrieve(QUESTION, NEUTRAL, {});
+    const recall = result.diagnostics.recall as unknown as Capture;
+    expect(recall.legs.map((l) => [l.leg, l.ran, l.reason])).toEqual([
+      ['dense', true, undefined],
+      ['exact_words', false, 'no_scopes'],
+      ['recency', false, 'no_scopes'],
+    ]);
+    expect(recall.lexicalBackend).toBe('none');
+    await mem.close();
+    await db.close();
+  });
+
+  it('a memory question reserves the exact-words hit the cut left out; another question records it ranked and left out for the budget', async () => {
+    const logged: Array<Record<string, unknown>> = [];
+    setLogger(pino({ level: 'debug', base: undefined }, { write(line: string) { logged.push(JSON.parse(line)); } }));
+    try {
+      const db = await open();
+      const mem = await memoryWith({ retrieval: 'hybrid' }, new FlatEmbedder(), db.brain);
+      // The oldest: outside the dense leg's sixty, so only its words find it.
+      await plant(mem, 'gold', 'The bike shed code is XQ7Z, set in March.', at(0));
+      for (let i = 0; i < 65; i++) await plant(mem, `n${i}`, `Garden note ${i}: the tomatoes on row ${i} were watered.`, at(i + 1));
+      type Reserved = Capture & { memoryQuestionReserve: { fired: boolean; added: number }; candidates: Array<Capture['candidates'][number] & { reserve?: boolean }> };
+      const plain = await mem.manager.assembleForPrompt('What is the bike shed code?', 1600, NEUTRAL, { scopes: U1 });
+      const p = plain.capture as unknown as Reserved;
+      expect(p.memoryQuestionReserve).toEqual({ fired: false, added: 0 });
+      const left = p.candidates.find((c) => c.id === 'gold')!;
+      expect(left).toMatchObject({ ranks: { exact_words: 1 }, outcome: 'left_out', reason: 'budget' });
+      expect(left.ranks.dense).toBeUndefined();
+      expect(left.reserve).toBeUndefined();
+      expect(plain.contextText).not.toContain('XQ7Z');
+
+      const asked = await mem.manager.assembleForPrompt('Do you remember the bike shed code?', 1600, NEUTRAL, { scopes: U1 });
+      const a = asked.capture as unknown as Reserved;
+      expect(a.memoryQuestionReserve).toEqual({ fired: true, added: 1 });
+      expect(a.candidates.find((c) => c.id === 'gold')).toMatchObject({ reserve: true, outcome: 'included', section: 'recall' });
+      expect(asked.contextText).toContain('XQ7Z');
+      // The reserved line renders after the lines of the cut.
+      expect(asked.includedMemoryIds[asked.includedMemoryIds.length - 1]).toBe('gold');
+      expect(logged.filter((l) => l.event === 'memory.recall.reserve_fired')).toEqual([expect.objectContaining({ added: 1 })]);
+
+      const none = await mem.manager.reassembleForBudget!(asked, 0);
+      const n = none.capture as unknown as Reserved;
+      expect(n.memoryQuestionReserve).toEqual({ fired: true, added: 0 });
+      expect(n.candidates.find((c) => c.id === 'gold')).toMatchObject({ reserve: true, outcome: 'left_out', reason: 'budget' });
+
+      // With the capture off the block still reserves the room.
+      (mem.manager as unknown as { config: { recall: Record<string, unknown> } }).config.recall.capture = 'off';
+      const quiet = await mem.manager.assembleForPrompt('Do you remember the bike shed code?', 1600, NEUTRAL, { scopes: U1 });
+      expect(quiet.capture).toBeUndefined();
+      expect(quiet.contextText).toContain('XQ7Z');
+      await mem.close();
+      await db.close();
+    } finally {
+      resetLoggerFactory();
+    }
+  });
+
+  it("a supplied candidate whose id names a stored memory is not added, so it never hides that memory's graph association", async () => {
+    const db = await open();
+    const mem = await memoryWith({ retrieval: 'hybrid' }, new FlatEmbedder(), db.brain);
+    // The oldest, in words the question does not hold: no leg returns it, and the graph leads to it.
+    await plant(mem, 'assoc', 'The red kayak hangs in the boathouse.', at(0));
+    for (let i = 0; i < 65; i++) await plant(mem, `n${i}`, `Garden note ${i}: the tomatoes on row ${i} were watered.`, at(i + 1));
+    (mem.manager as unknown as { graph: unknown }).graph = {
+      spreadingActivation: async () => [{ memoryId: 'assoc', activation: 0.9, depth: 1, activatedBy: [] }],
+      recordCoActivation: async () => undefined,
+      shutdown: async () => undefined,
+    };
+    const h = await mem.manager.assembleForPrompt(QUESTION, 1600, NEUTRAL, {
+      scopes: U1,
+      supplied: [{ id: 'assoc', text: 'The account is on the Team plan.', scope: { scope: 'user', scopeId: 'u1' }, score: 0.5 }],
+    } as never);
+    expect(h.contextText).toContain('The red kayak hangs in the boathouse.');
+    expect(h.contextText).not.toContain('Team plan');
+    const c = captureOf(h) as Capture & { legs: Array<{ leg: string; candidates?: number }> };
+    expect(c.candidates.filter((x) => x.id === 'assoc').every((x) => x.ranks.supplied === undefined)).toBe(true);
+    expect(c.legs.find((l) => l.leg === 'supplied')).toMatchObject({ ran: true, candidates: 0, ineligible: 1 });
+    // The stored memory is outside the pool, so the caller's text is refused and counted, never dropped unseen.
+    expect((c as unknown as { suppliedRejected?: unknown }).suppliedRejected).toEqual({ outOfScope: 0, ineligible: 1 });
+    await mem.close();
+    await db.close();
+  });
+
+  it("a host's memoryQuestion predicate replaces the rule, and one that throws is read as no", async () => {
+    const db = await open();
+    const always = await memoryWith({ retrieval: 'hybrid', memoryQuestion: () => true }, new FlatEmbedder(), db.brain);
+    await plant(always, 'one', 'The ferry leaves from pier 3.', at(0));
+    const fired = await always.manager.assembleForPrompt('hello', 1600, NEUTRAL, { scopes: U1 });
+    expect((fired.capture as unknown as { memoryQuestionReserve: { fired: boolean } }).memoryQuestionReserve.fired).toBe(true);
+    await always.close();
+    const broken = await memoryWith(
+      {
+        retrieval: 'hybrid',
+        memoryQuestion: () => {
+          throw new Error('boom');
+        },
+      },
+      new FlatEmbedder(),
+      db.brain,
+    );
+    const out = await broken.manager.assembleForPrompt('Do you remember?', 1600, NEUTRAL, { scopes: U1 });
+    expect((out.capture as unknown as { memoryQuestionReserve: unknown }).memoryQuestionReserve).toEqual({ fired: false, added: 0 });
+    await broken.close();
+    // A predicate that returns a rejected promise, which the type forbids, is read as no and its rejection is handled.
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const rejecting = await memoryWith(
+        {
+          retrieval: 'hybrid',
+          memoryQuestion: (async () => {
+            throw new Error('boom');
+          }) as never,
+        },
+        new FlatEmbedder(),
+        db.brain,
+      );
+      const late = await rejecting.manager.assembleForPrompt('Do you remember?', 1600, NEUTRAL, { scopes: U1 });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect((late.capture as unknown as { memoryQuestionReserve: unknown }).memoryQuestionReserve).toEqual({ fired: false, added: 0 });
+      expect(unhandled).toEqual([]);
+      await rejecting.close();
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+    await db.close();
+  });
+
   it('a graph association that repeats a pooled memory is not shown twice', async () => {
     const { db, mem } = await fixture({ retrieval: 'hybrid' });
     // The association's trace is below the turn's minConfidence, so no leg returns it; the graph leads to it.
@@ -217,20 +373,35 @@ describe.each(ENGINES)('hybrid recall on %s', (engine, open) => {
     await db.close();
   });
 
-  it("a manager's reranker scores the pool and leaves its fused order, in the block and the record", async () => {
+  it('a rerank orders the cut by the blend of each fused score, as its share of the best, and its rerank score, and leaves every fused score as it was', async () => {
     const { db, mem } = await fixture({ retrieval: 'hybrid' });
-    // A reranker that ranks the answer last: blended and re-sorted, it would sink the exact-words hit.
-    (mem.manager as unknown as { rerankerService: unknown }).rerankerService = {
-      rerank: async ({ documents }: { documents: Array<{ id: string; originalScore?: number }> }) => ({
-        results: documents.map((d) => ({ id: d.id, content: '', relevanceScore: d.id === 'gold' ? 0 : 1, originalScore: d.originalScore })),
-        diagnostics: { providerId: 'stub', modelId: 'stub-model', documentsProcessed: documents.length },
+    // A reranker that scores the answer 0 and every other memory 1.
+    await rerankWith(mem.manager, {
+      providerId: 'local',
+      isAvailable: async () => true,
+      rerank: async ({ documents }) => ({
+        results: documents.map((d) => ({ id: d.id, content: d.content, relevanceScore: d.id === 'gold' ? 0 : 1 })),
+        diagnostics: { providerId: 'local', modelId: 'stub-model', latencyMs: 1, documentsProcessed: documents.length },
       }),
-    };
-    const h = await mem.manager.assembleForPrompt(QUESTION, 1600, NEUTRAL, { scopes: U1 });
-    const c = captureOf(h);
-    expect(c.candidates[0]).toMatchObject({ id: 'gold', outcome: 'included', rerankScore: 0 });
-    expect(h.includedMemoryIds[0]).toBe('gold');
-    expect(h.contextText.indexOf('XQ7Z')).toBeLessThan(h.contextText.indexOf('Garden note'));
+    });
+    const h = await mem.manager.assembleForPrompt(QUESTION, 4000, NEUTRAL, { scopes: U1 });
+    const c = captureOf(h) as Capture & { reranker: Record<string, unknown>; candidates: Array<Capture['candidates'][number] & { rerankScore?: number }> };
+    expect(c.reranker).toMatchObject({ provider: 'local', model: 'stub-model', revision: 'r1', candidates: 20 });
+    // The cut was scored: the answer holds the best fused score, with the reranker's 0 beside it.
+    const scored = c.candidates.filter((x) => typeof x.rerankScore === 'number');
+    expect(scored).toHaveLength(20);
+    const best = Math.max(...scored.map((x) => x.fusedScore));
+    expect(scored.find((x) => x.id === 'gold')).toMatchObject({ outcome: 'included', rerankScore: 0, fusedScore: best });
+    // The block shows the cut in the blend's order: the answer, scored 0, after the others.
+    const blend = (x: { fusedScore: number; rerankScore?: number }) => 0.7 * (x.fusedScore / best) + 0.3 * x.rerankScore!;
+    const expected = [...scored].sort((x, y) => blend(y) - blend(x)).map((x) => x.id);
+    expect(expected.at(-1)).toBe('gold');
+    expect(h.includedMemoryIds.filter((id) => expected.includes(id))).toEqual(expected);
+    expect(h.contextText.indexOf('Garden note')).toBeLessThan(h.contextText.indexOf('XQ7Z'));
+    // The record lists the cut in that order too, ahead of the candidates the cut left out, which keep their fused order.
+    expect(c.candidates.slice(0, 20).map((x) => x.id)).toEqual(expected);
+    const rest = c.candidates.slice(20).filter((x) => Object.keys(x.ranks).length > 0).map((x) => x.fusedScore);
+    expect(rest).toEqual([...rest].sort((x, y) => y - x));
     await mem.close();
     await db.close();
   });

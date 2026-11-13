@@ -1,5 +1,5 @@
 ---
-description: "Reranking retrieved passages in AgentOS: RerankerService and its three built-in providers, a local Transformers.js cross-encoder, Cohere's rerank API and a two-phase LLM judge on any model you call, compared side by side, plus the provider interface and where the retrievers take a reranker."
+description: "Reranking retrieved passages in AgentOS: RerankerService and its three built-in providers, a local Transformers.js cross-encoder, Cohere's rerank API and a two-phase LLM judge on any model you call, compared side by side, plus the provider interface, where the retrievers take a reranker, and memory rerank, which runs on a local model or your own model call and never on a remote reranking service."
 ---
 
 # Reranking
@@ -58,19 +58,30 @@ A provider implements [`IRerankerProvider`](../../src/cognition/rag/reranking/IR
 ```typescript
 new LocalCrossEncoderReranker({
   providerId: 'local',
-  defaultModelId: 'cross-encoder/ms-marco-MiniLM-L-6-v2', // the default
+  defaultModelId: 'cross-encoder/ms-marco-MiniLM-L6-v2',  // the default
+  revision: '233902d25c440f23af6f7d6e94d2946bac0bee0a',   // a commit of the model's repository; unset: its main
   batchSize: 32,                                          // pairs per forward pass, the default
   maxSequenceLength: 512,                                 // tokens per pair, the default
   modelFileName: 'model',                                 // onnx/model.onnx; unset: the model's default file
   cacheDir: '/var/cache/agentos-models',                  // Transformers.js's own cache when unset
+  localFilesOnly: true,                                   // load from the cache alone; unset: fetch what it lacks
   device: 'cpu',                                          // the default
   intraOpNumThreads: 2,                                   // threads per operator; unset: onnxruntime sizes its pool for the machine
   pieceMaxChars: 300,                                     // score long passages by their best piece; unset: one pair per passage
 });
 ```
 
-- Needs Transformers.js: `@huggingface/transformers` 3.x, an optional dependency of the package, else `@xenova/transformers` 2.x. `isAvailable()` answers whether one of them imports; `rerank()` throws when neither does.
-- `LOCAL_RERANKER_MODELS` lists five Hugging Face model ids: `cross-encoder/ms-marco-MiniLM-L-6-v2`, `cross-encoder/ms-marco-MiniLM-L-12-v2`, `BAAI/bge-reranker-base`, `BAAI/bge-reranker-large` and `sentence-transformers/ce-ms-marco-TinyBERT-L-4`.
+- Needs Transformers.js: `@huggingface/transformers` 3.x, an optional dependency of the package, else `@xenova/transformers` 2.x. `isAvailable()` answers whether one of them imports; `rerank()` throws when neither does. The provider imports both at run time by a specifier that is not a literal, which a bundler leaves out, so a host that bundles the package builds without either one. Memory recall imports the provider module only when a `{ kind: 'local' }` rerank loads; that saves loading it at run time, and a bundler still takes the provider module in. That import resolves in Node and on a page with an import map. A bundled browser page passes Transformers.js in `providerOptions.transformers`, as the module or a function that imports it, so its own bundler takes the package in: `new LocalCrossEncoderReranker({ providerId: 'local', providerOptions: { transformers: () => import('@huggingface/transformers') } })`. With it set, the provider uses only that module, and `isAvailable()` answers whether it loads.
+- `LOCAL_RERANKER_MODELS` lists three Hugging Face model ids, each with the licence its repository states (read on 13 November 2026):
+
+  | Model | Licence |
+  |---|---|
+  | [`cross-encoder/ms-marco-MiniLM-L6-v2`](https://huggingface.co/cross-encoder/ms-marco-MiniLM-L6-v2) (the default) | apache-2.0 |
+  | [`cross-encoder/ms-marco-MiniLM-L12-v2`](https://huggingface.co/cross-encoder/ms-marco-MiniLM-L12-v2) | apache-2.0 |
+  | [`BAAI/bge-reranker-base`](https://huggingface.co/BAAI/bge-reranker-base) | mit |
+
+  The provider loads any other id a host passes; checking that model's licence is then the host's. The two MiniLM repositories' earlier ids, `cross-encoder/ms-marco-MiniLM-L-6-v2` and `cross-encoder/ms-marco-MiniLM-L-12-v2`, redirect to these and load as before. No Jina reranker is listed or a default: `jinaai/jina-reranker-v2-base-multilingual` is under a non-commercial licence ([cc-by-nc-4.0](https://huggingface.co/jinaai/jina-reranker-v2-base-multilingual), read on 13 November 2026).
+- `revision` pins what each load reads to a branch, a tag or a commit of the model's repository; unset, a load reads `main`. `localFilesOnly` loads from the cache alone and fails when a file is missing, so a process that must not download at run time fetches the files when it is built. Transformers.js keeps a pinned revision's files under `<cache>/<model id>/<revision>/` and `main`'s under `<cache>/<model id>/` ([`getModelFile`](https://github.com/huggingface/transformers.js/blob/3.8.1/src/utils/hub.js#L467-L489)), so files fetched ahead for a pinned revision go in the folder named for it.
 - The model loads on the first `rerank()` (or `initialize(modelId)`) as a tokenizer (`AutoTokenizer`) and a sequence-classification model (`AutoModelForSequenceClassification`), and serves every later request. A request's `modelId` picks the model only on that first load; `initialize(otherModelId)` loads another, and `initialize()` with no id loads `defaultModelId` in place of any other model loaded. `dispose()` unloads it. Loads and unloads run one at a time in the order asked, so concurrent `initialize()` calls never load two models at once and the last one asked for stays loaded. A `rerank()` already running scores all its batches with the model it started with; a model replaced or unloaded meanwhile is disposed when the last rerank using it ends.
 - What loads: the model's `config.json`, `tokenizer.json` and `tokenizer_config.json`, and one ONNX file from its `onnx/` folder, `onnx/<modelFileName><dtype suffix>.onnx`. `modelFileName` takes the bare name (`'model_quint8_avx2'`), a path in that folder (`'onnx/model_quint8_avx2.onnx'`) or the name with `.onnx`; all three load `onnx/model_quint8_avx2.onnx`. With neither `modelFileName` nor `dtype` set, a model listed in `LOCAL_RERANKER_DEFAULT_WEIGHTS` loads the file named there and any other model loads `onnx/model.onnx` (full precision). The default model loads `onnx/model_quint8_avx2.onnx`, the repository's 8-bit dynamically quantized file (22 MB, against 87 MB for `onnx/model.onnx`): it ranks as the full-precision file does and scores a batch in about half the time on a 2-vCPU x86 host. It loads and runs on ARM hosts too; the repository also holds `onnx/model_qint8_arm64.onnx`, the file quantized for ARM, which `modelFileName: 'model_qint8_arm64'` names. For full precision, name `model`.
 - `dtype` (Transformers.js 3.x) adds a suffix to the file name: `'fp32'` (the default) none, `'q8'` `_quantized`, `'fp16'` `_fp16`, `'int8'` `_int8`, `'uint8'` `_uint8`, `'q4'` `_q4`, `'bnb4'` `_bnb4`, `'q4f16'` `_q4f16`. The `cross-encoder/*` repositories hold no `onnx/model_quantized.onnx`, so `dtype: 'q8'` fails to load there; name their quantized files with `modelFileName`. The provider always passes a dtype (`'fp32'` when unset), and an explicit dtype overrides Transformers.js's browser default: in a browser, where Transformers.js 3.x would load a model on its WASM backend at `'q8'` when given none ([`DEFAULT_DEVICE_DTYPE_MAPPING`](https://github.com/huggingface/transformers.js/blob/3.8.1/src/utils/dtypes.js#L48-L51)), the file is still `onnx/<modelFileName>.onnx`. Transformers.js 2.x reads `quantized` and no dtype, so there `'q8'` loads `onnx/<modelFileName>_quantized.onnx` and every other value loads `onnx/<modelFileName>.onnx`.
@@ -125,11 +136,11 @@ new LlmJudgeReranker({
 
 - The judge names no model and calls no provider. It hands `scoringModel` to `llmCallFn` on each scoring call and `rankingModel` on the ranking call, and `undefined` when one is not set, so `llmCallFn` decides. Any provider `generateText` serves fits: `PROVIDER_DEFAULTS` holds a `cheap` model for each (`gpt-4o-mini` for `openai`, `claude-haiku-4-5-20251001` for `anthropic`, `gemini-2.5-flash-lite` for `gemini`, `llama3.2` for `ollama`, among others). The request's `modelId` and `params` are not read, so a chain stage's `model` does not reach the judge.
 - `isAvailable()` answers whether `llmCallFn` is a function. It is not built from a config entry: register it with `registerProvider()`.
-- The answer's `diagnostics` name the provider (`llm-judge`), the model (`rankingModel`, else `''`, since `llmCallFn` then picks the ranking call's model), the latency and the passages it scored (`documentsProcessed`); no token count, since `llmCallFn` returns text alone.
+- The answer's `diagnostics` name the provider (`llm-judge`), the model (`rankingModel`, else `''`, since `llmCallFn` then picks the ranking call's model), the latency and the passages it scored (`documentsProcessed`); no token count, since `llmCallFn` returns text alone. `diagnostics.providerMetrics` counts what the judge put in for an answer the model did not give: `scoringFailures`, the passages scored 0 because their batch's call failed, ran past the timeout or answered no JSON array, or because their own entry was missing or not a number; and `listwiseFailed`, true when the ranking call failed or named none of the passages it was given, so the scores ordered the answer.
 
 `LlmJudgeReranker.rerank(input, config)` scores the first `maxPointwiseDocuments` passages, has the ranking call order the `pointwiseTopK` best of them, and answers every passage it scored: the ones the ranking names, in its order, each once (an id the ranking repeats counts once, and an id it was not given is passed over), then the rest by score, a tie in the order the passages came. A request's `topN` cuts the answer to that many, past `pointwiseTopK` too; without one, the answer holds every scored passage, and the passages past `maxPointwiseDocuments` are left out. An answer's `relevanceScore` is `1 - i / n` for its place `i`, from 0, among the `n` it answers.
 
-Each call of `llmCallFn` waits up to the request's `timeoutMs`, else the judge's own, 30 seconds unless given; through `RerankerService`, the request's is the call's, else the provider settings' `defaultTimeoutMs`. Past it the judge stops waiting, and the call it made runs on to its end, since `llmCallFn` takes no abort signal. A scoring call that fails, runs past it or answers no JSON array scores its batch 0, and a score that is not a number counts 0. A ranking call that fails, runs past it or answers something other than a JSON array leaves the order to the scores. The judge does not throw for a model's failure.
+Each call of `llmCallFn` waits up to the request's `timeoutMs`, else the judge's own, 30 seconds unless given; through `RerankerService`, the request's is the call's, else the provider settings' `defaultTimeoutMs`. Past it the judge stops waiting, and the call it made runs on to its end, since `llmCallFn` takes no abort signal. A scoring call that fails, runs past it or answers no JSON array scores its batch 0, and a score that is not a number counts 0. A ranking call that fails, runs past it, answers something other than a JSON array or names none of the passages it was given leaves the order to the scores. The judge does not throw for a model's failure.
 
 ### A provider of your own
 
@@ -190,7 +201,8 @@ const { results } = await service.rerank(
 | `LlmJudgeReranker` | Does not throw for a model's failure: a failed scoring batch scores 0, a failed ranking call leaves the order to the scores |
 | `rerankChain()` | Skips the stage and keeps the order it was given |
 | `RetrievalAugmentor` | Returns the chunks without reranking and adds the error to `diagnostics.messages` |
-| `CognitiveMemoryManager`, `HybridRetriever`, `SessionRetriever` | Keep the scores they had before reranking and write no log line of their own; the service logs a provider's error to its `logger`. They call the service's default provider, so a service without `defaultProviderId` fails every call this way, logged nowhere |
+| `HybridRetriever`, `SessionRetriever` | Keep the scores they had before reranking and write no log line of their own; the service logs a provider's error to its `logger`. They call the service's default provider, so a service without `defaultProviderId` fails every call this way, logged nowhere |
+| Memory rerank (`recall.rerank` on `CognitiveMemoryManager`) | Keeps the order the recall had; the turn's capture records `reranker: { provider: 'none', reason }` and a `memory.recall.rerank_skipped`, `rerank_unavailable` or `rerank_failed_scoring` line is written ([Memory rerank](#memory-rerank)) |
 | `WebSearchService` | Keeps the fused order |
 
 A host that calls `rerankChunks()` keeps its order on a failure by catching, and records the error there. The service logs a provider's error only when it was built with a `logger`, and never logs its own errors: no provider named and no default, a provider not registered, a result id that is not among the chunks.
@@ -206,10 +218,88 @@ const ranked = await service.rerankChunks(query, chunks).catch((error) => {
 
 ## Where a reranker plugs in
 
-- `RetrievalAugmentor` builds a `RerankerService` from `rerankerServiceConfig`. It registers the `cohere` provider (when its entry has an `apiKey`) and the `local` one for the entries that config names; register `llm-judge` and providers of your own with `registerRerankerProvider()`. It reranks a request that sets `rerankerConfig.enabled`, with `rerankerConfig.providerId` (else `defaultRerankerProviderId`) picking the provider, or one with no `rerankerConfig` whose retrieval `policy` sets `reranker: 'always'` ([RAG Memory Configuration](../memory/RAG_MEMORY_CONFIGURATION.md#reranker-chain)).
-- `CognitiveMemoryManager` takes a `rerankerService` and calls it with no provider id, so the service's `defaultProviderId` picks one; without a `defaultProviderId` every call throws and retrieval runs without reranking, with no log line. It blends 0.7 of each trace's cognitive score with 0.3 of the rerank score ([Memory retrieval reranking](../memory/RAG_MEMORY_CONFIGURATION.md#memory-retrieval-reranking)).
+- `RetrievalAugmentor` builds a `RerankerService` from `rerankerServiceConfig`. It registers the `cohere` provider (when its entry has an `apiKey`) and the `local` one for the entries that config names; register `llm-judge` and providers of your own with `registerRerankerProvider()`. It reranks a request that sets `rerankerConfig.enabled`, with `rerankerConfig.providerId` (else `defaultRerankerProviderId`) picking the provider, or one with no `rerankerConfig` whose retrieval `policy` sets `reranker: 'always'` ([RAG Memory Configuration](../memory/RAG_MEMORY_CONFIGURATION.md#reranker-chain)). Its reranker serves document retrieval and is never used for memory recall.
+- `CognitiveMemoryManager` reranks recalled memories with the provider its `recall.rerank` names, in a service of its own: [Memory rerank](#memory-rerank). It never calls a `rerankerService` passed on its configuration; `getRerankerService()` returns that service for a retriever the caller builds.
 - `HybridRetriever` and `SessionRetriever` take a `rerankerService`, call its default provider over their pool and blend the scores the same way ([Hybrid BM25 + Dense Retriever](../architecture/hybrid-retriever.md), [Session Retriever](../architecture/session-retriever.md)).
 - `WebSearchService` takes `reranker` and `rerankChain` and runs the chain over its fused results, unless a search passes `rerank: false`.
+
+## Memory rerank
+
+Memory recall (`CognitiveMemoryManager`, and through it a `gmi()` or `agent({ runtime: 'gmi' })` agent's memory block) reranks with `recall.rerank`, on `memory.recall` of `agent()` and `gmi()` and on a manager's `recall`:
+
+```typescript
+import { agent, generateText } from '@framers/agentos';
+
+// No reranker: the default.
+agent({ runtime: 'gmi', provider: 'openai', memory: { recall: { rerank: 'none' } } });
+
+// A cross-encoder in this process, at a pinned commit of its repository. The memories never leave the process.
+agent({
+  runtime: 'gmi',
+  provider: 'openai',
+  memory: {
+    recall: {
+      rerank: { kind: 'local', model: 'cross-encoder/ms-marco-MiniLM-L6-v2', revision: '233902d25c440f23af6f7d6e94d2946bac0bee0a' },
+    },
+  },
+});
+
+// Your own model call as the judge. The candidate memories go to that model's provider.
+agent({
+  runtime: 'gmi',
+  provider: 'openai',
+  memory: {
+    recall: {
+      rerank: {
+        kind: 'llm',
+        model: 'gpt-4o-mini',
+        invoke: async (system, prompt, model) => (await generateText({ provider: 'openai', model, system, prompt, fallbackProviders: [] })).text,
+      },
+    },
+  },
+});
+```
+
+| | `'none'` (default) | `{ kind: 'local' }` | `{ kind: 'llm' }` |
+|---|---|---|---|
+| Provider | none | [`LocalCrossEncoderReranker`](#local-a-cross-encoder-in-process) on `model` at `revision`, both required | [`LlmJudgeReranker`](#llm-judge-an-llm-as-the-judge) over `invoke`, called with `model` for both phases; both required |
+| What leaves the process | nothing | nothing while scoring; the model's files are downloaded from Hugging Face Hub on the first load unless Transformers.js's cache holds them | the turn's text and the first 200 characters of each candidate memory, to the provider `invoke` calls |
+| `timeoutMs` (one rerank) | | 1,500 | 10,000 |
+| `maxCandidates` (the recall's best) | | 20 | 20 |
+
+No other `kind` exists: a remote reranking service is not offered for memories, and `agent()`, `gmi()` and `CognitiveMemoryManager.initialize()` refuse one at construction (`memory.recall.rerank`, reason `unsupported_provider`). A blank `model`, a `local` whose `revision` is not a whole commit id in lower case (40 hexadecimal characters; a branch, a tag or a shortened id can name other weights later, so it pins nothing, and Transformers.js names the cache folder by the string as given, so an upper-case id misses the files on a case-sensitive file system), an `llm` without an `invoke`, a `timeoutMs` or `maxCandidates` that is not a positive integer, and a `timeoutMs` above 2,147,483,647 (a timer's longest delay; Node runs a timer set past it after 1 ms) are refused the same way, naming the field. No environment variable turns memory rerank on, and a `rerankerService` on the manager's configuration is not read for it (one `memory.recall.option_ignored` line, `option: 'remote_provider'`, when the manager initialises). On `agent()` without `runtime: 'gmi'` the setting is refused: that agent's memory comes from its `memoryProvider`.
+
+**What a turn does.** The reranker scores the recall's best `maxCandidates` candidates against the turn's own text, never a HyDE hypothesis, and they are reordered by `0.7 × the score each holds + 0.3 × its rerank score`; candidates past `maxCandidates` keep their order after them. Under `retrieval: 'dense'` the score is the trace's retrieval score, and the blend replaces it. Under `'hybrid'` it is the candidate's fused score as a share of the best fused score among the cut's recalled candidates, at most 1, so both terms run from 0 to 1; the fused scores and each line's relevance stay, and a memory question's reserved candidates follow the reranked cut, unscored. A supplied candidate in the cut is scored with the rest, and its score, which is on the caller's own scale, is never read as the best. A memory deleted while the reranker runs leaves the recall and its record. The turn's capture names the reranker (`reranker: { provider, model, revision, candidates, ms }`) and each scored candidate's `rerankScore` ([Recall Capture](../memory/COGNITIVE_MEMORY.md#recall-capture)).
+
+**A rerank never fails a turn.** When it does not answer, the order stands and the capture says why:
+
+| `reranker.reason` | When | Log line |
+|---|---|---|
+| `none_configured` | `rerank` is `'none'` or unset | none |
+| `loading` | The local model's load has not settled. It starts when the manager initialises, never inside a turn; `recallReady()` resolves when it has settled, for a deploy step that warms the model before the process reports healthy | `memory.recall.rerank_skipped` |
+| `unavailable` | The load failed, or Transformers.js is not installed: the load is not tried again and nothing else is downloaded. Also a rerank whose reranker was stopped while it ran, by `applyRecallConfig()` or the manager's shutdown | `memory.recall.rerank_unavailable` (`load_failed` or `missing_dependency`), once per process for each; none for a stopped reranker |
+| `timeout` | The rerank ran past `timeoutMs`. Its answer is dropped when it arrives: Transformers.js offers no cancellation, and the judge's `invoke` takes no abort signal, so a call already made runs to its end. The judge starts no further model call for that rerank | `memory.recall.rerank_skipped` |
+| `error` | The provider threw, left out a candidate it was sent, or put a score in for one it could not compute (the judge's `scoringFailures`, or `listwiseFailed` for a ranking call that failed or named none of the candidates) | `memory.recall.rerank_skipped`; `memory.recall.rerank_failed_scoring` with the count for a substituted score |
+| `backoff` | Three failures or timeouts in a row: the provider is not called for 60 seconds | one `memory.recall.rerank_skipped` when the back-off begins |
+
+The lines carry the provider, the reason and a count, never a memory's text, the turn's text or an id.
+
+**On a built manager**, change the setting with `applyRecallConfig({ rerank })`: the provider is built once, so a value written to the manager's configuration is not read. It resolves when the new model's load has settled. A rerank the earlier reranker was running is dropped at once, without waiting for its provider or its deadline, and that turn's order stands.
+
+**The local model's files.** The setting takes no cache folder: the model loads through Transformers.js's own cache (`env.cacheDir` of `@huggingface/transformers`), which holds a pinned revision's files under `<cache>/<model id>/<revision>/`. A host that must not download at run time fetches the files when it is built (`config.json`, `tokenizer.json`, `tokenizer_config.json` and the weights file, for the default model `onnx/model_quint8_avx2.onnx`), puts them in that folder, and sets `env.cacheDir` and `env.allowRemoteModels = false` before the manager initialises. Both are process-wide: every Transformers.js model in the process reads them.
+
+**The judge's load.** With the defaults, 20 candidates are two scoring calls of ten and one ranking call of twenty, each holding the turn's text and the first 200 characters of every candidate it judges, on every turn that recalls. A larger `maxCandidates` adds a scoring call for every ten candidates; the ranking call orders the 20 best-scored. Size `maxCandidates` and the model to that, and prefer `local` where the latency of three model calls a turn is too much.
+
+## Memories and remote rerankers
+
+AgentOS offers no remote reranker for memories. A person's stored memories are personal data, and a host that sends them to a reranking service itself (through a `RerankerService` of its own over the traces it retrieved) checks these first:
+
+- **The service's terms may forbid it.** Cohere's standard SaaS agreement, for one, does not allow personal information other than business contact details to be sent without a separate agreement (section 5(b), "Prohibited Data"), and its grant lets Cohere use what it receives to improve its services and share it with third parties (section 3(a)(iii)) ([Cohere SaaS Agreement](https://cohere.com/saas-agreement), read on 9 November 2026). Memories need an agreement that covers them before they go to such a service.
+- **The host is the controller.** Under the GDPR the host decides why its users' memories are processed, so a vendor that ranks them is its processor and needs a written agreement with the terms Article 28(3) lists ([GDPR, Article 28](https://eur-lex.europa.eu/eli/reg/2016/679/oj)).
+- **Users are told.** The host's privacy notice names the vendor, the purpose ("ranking which of your stored memories to include in a reply"), the data sent (the message and the candidate memories), and the vendor's location and retention.
+- **Special categories stay local.** A host whose memories can hold health data or data about a person's sex life keeps memory rerank in the process (`kind: 'local'`); Article 9 of the GDPR forbids processing such data without one of its conditions.
+
+`{ kind: 'llm' }` sends the candidates to the model provider `invoke` calls, so the same points apply to that provider, which a host that already sends its users' turns there has answered.
 
 ## Where it runs
 

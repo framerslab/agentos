@@ -24,7 +24,8 @@ export type RecallOptionRejection = 'conflict' | 'unsupported_provider' | 'unsup
 
 /**
  * A recall setting refused at construction. `option` is the field under `memory.recall` (`budget.totalTokens`,
- * `budget`, `capture`, `retrieval`, a manager's `constants`), or `recall` for the setting itself.
+ * `budget`, `capture`, `retrieval`, `rerank` and its fields such as `rerank.revision`, a manager's `constants`), or
+ * `recall` for the setting itself.
  */
 export class RecallOptionError extends Error {
   constructor(
@@ -52,22 +53,94 @@ function isSettingsObject(value: unknown): boolean {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/** Whether `value` is a string with something in it besides spaces. */
+function isNonBlank(value: unknown): boolean {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+/**
+ * A whole commit id in lower case: 40 hexadecimal characters (SHA-1), or 64 (SHA-256). Upper case is refused, not
+ * folded: Transformers.js keeps a pinned revision's files under `<cache>/<model id>/<revision>/`, the string as given,
+ * so on a case-sensitive file system an upper-case id misses the folder Hugging Face Hub's lower-case id names, and the
+ * recall record, which keeps the setting as written, would name the commit in another case.
+ */
+const COMMIT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
+/**
+ * The largest `rerank.timeoutMs`: the longest delay a timer takes (2^31 - 1 ms, about 24.8 days). Node runs a timer set
+ * past it after 1 ms, so a larger value would time every rerank out at once.
+ */
+const MAX_TIMEOUT_MS = 2_147_483_647;
+
+/**
+ * Checks `recall.rerank`: `'none'`, or an object whose `kind` is `'local'` (a non-blank `model`, and a `revision` that
+ * is a whole commit id in lower case) or `'llm'` (a non-blank `model` and an `invoke` function), with `timeoutMs`
+ * (at most {@link MAX_TIMEOUT_MS}) and `maxCandidates`, when given, positive integers. Any other `kind` names a provider
+ * memory rerank does not offer. A branch, a tag or a shortened id is refused as a `revision`: it can name other weights
+ * later, so it pins nothing.
+ *
+ * @throws {RecallOptionError} `unsupported_provider` for another `kind`, else `invalid_value`, naming the field.
+ */
+function assertRerankSetting(rerank: unknown, where: string): void {
+  if (rerank == null || rerank === 'none') return;
+  if (!isSettingsObject(rerank)) {
+    rejectRecallOption('rerank', 'invalid_value', `${where}: memory.recall.rerank must be 'none', { kind: 'local', model, revision } or { kind: 'llm', invoke, model }.`);
+  }
+  const setting = rerank as Record<string, unknown>;
+  if (setting.kind !== 'local' && setting.kind !== 'llm') {
+    rejectRecallOption(
+      'rerank',
+      'unsupported_provider',
+      `${where}: memory.recall.rerank.kind must be 'local' or 'llm'; a remote reranker is not offered for memories. Use { kind: 'local', model, revision } or { kind: 'llm', invoke, model }.`,
+    );
+  }
+  if (!isNonBlank(setting.model)) {
+    rejectRecallOption('rerank.model', 'invalid_value', `${where}: memory.recall.rerank.model must be a non-blank string (the model's id).`);
+  }
+  if (setting.kind === 'local' && !(typeof setting.revision === 'string' && COMMIT_ID.test(setting.revision))) {
+    rejectRecallOption(
+      'rerank.revision',
+      'invalid_value',
+      `${where}: memory.recall.rerank.revision must be a commit id of the model's repository (40 hexadecimal characters, in lower case). A branch, a tag or a shortened id can name other weights later.`,
+    );
+  }
+  if (setting.kind === 'llm' && typeof setting.invoke !== 'function') {
+    rejectRecallOption('rerank.invoke', 'invalid_value', `${where}: memory.recall.rerank.invoke must be a function (system, user, model) that returns the model's reply.`);
+  }
+  for (const field of ['timeoutMs', 'maxCandidates'] as const) {
+    const value = setting[field];
+    if (value != null && !(typeof value === 'number' && Number.isInteger(value) && value >= 1)) {
+      rejectRecallOption(`rerank.${field}`, 'invalid_value', `${where}: memory.recall.rerank.${field} must be a positive integer.`);
+    }
+  }
+  const timeoutMs = setting.timeoutMs;
+  if (typeof timeoutMs === 'number' && timeoutMs > MAX_TIMEOUT_MS) {
+    rejectRecallOption(
+      'rerank.timeoutMs',
+      'invalid_value',
+      `${where}: memory.recall.rerank.timeoutMs must be at most ${MAX_TIMEOUT_MS} (a timer's longest delay); a timer set past it runs after 1 ms.`,
+    );
+  }
+}
+
 /**
  * Checks a recall setting's values: the setting and its `budget` objects, `budget.totalTokens` an integer of at least
- * 0, `capture` one of its three modes, `retrieval` `'dense'` or `'hybrid'`, and a manager's `constants` an object
- * of the hybrid recall's constants by name, each a finite number of at least 0, `topK`, `recentTopK` and `overFetch`
- * integers from 1 to 1,000, and `nearDuplicate` above 0 and at most 1. A `null` or `undefined` setting, or field, is
- * unset.
+ * 0, `capture` one of its three modes, `retrieval` `'dense'` or `'hybrid'`, `rerank` `'none'` or a `local` or `llm`
+ * setting with its fields (a non-blank `model`; `local`'s `revision`, a whole commit id in lower case; `llm`'s `invoke`;
+ * `timeoutMs` and `maxCandidates` positive integers, `timeoutMs` at most 2,147,483,647), and a manager's `constants` an object of the hybrid recall's constants by name,
+ * each a finite number of at least 0, `topK`, `recentTopK` and `overFetch` integers from 1 to 1,000, and
+ * `nearDuplicate` above 0 and at most 1. A `null` or `undefined` setting, or field, is unset.
  *
  * @param recall - The setting.
  * @param where - What opens the message (`gmi()`, `agent()`, `CognitiveMemoryManager`).
- * @throws {RecallOptionError} With the reason `invalid_value`, naming the field, after one `memory.recall.option_rejected` line.
+ * @throws {RecallOptionError} Naming the field, after one `memory.recall.option_rejected` line: with the reason
+ *   `unsupported_provider` for a `rerank` whose `kind` is neither `'local'` nor `'llm'`, else `invalid_value`.
  */
 export function assertRecallConfig(recall: ManagerRecallConfig | null | undefined, where: string): void {
   if (recall == null) return;
   // A JavaScript caller's `recall: 'off'` or `budget: 2400` would otherwise read as unset and build on the defaults.
   if (!isSettingsObject(recall)) {
-    rejectRecallOption('recall', 'invalid_value', `${where}: memory.recall must be an object ({ budget?, capture? }).`);
+    rejectRecallOption('recall', 'invalid_value', `${where}: memory.recall must be an object ({ budget?, capture?, retrieval?, rerank? }).`);
   }
   const budget: unknown = recall.budget;
   if (budget != null && !isSettingsObject(budget)) {
@@ -82,6 +155,11 @@ export function assertRecallConfig(recall: ManagerRecallConfig | null | undefine
   }
   if (recall.retrieval != null && !RETRIEVAL_MODES.includes(recall.retrieval)) {
     rejectRecallOption('retrieval', 'invalid_value', `${where}: memory.recall.retrieval must be 'dense' or 'hybrid'.`);
+  }
+  assertRerankSetting(recall.rerank, where);
+  const memoryQuestion: unknown = recall.memoryQuestion;
+  if (memoryQuestion != null && typeof memoryQuestion !== 'function') {
+    rejectRecallOption('memoryQuestion', 'invalid_value', `${where}: recall.memoryQuestion must be a function of the turn's text.`);
   }
   const constants: unknown = recall.constants;
   if (constants != null) {

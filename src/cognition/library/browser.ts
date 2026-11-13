@@ -8,6 +8,19 @@
 
 export { countWords, foldText, lexicalTokens, snippetAround, type FoldedText, type Snippet } from './tokens.js';
 export { chunkTurns, type ChunkTurnsOptions, type LibraryTurn, type TurnChunk } from './chunkTurns.js';
+// The shapes of a grouped search and its answer, for a page that shows one: types alone, so the index stays out of the page.
+export type {
+  LibraryGroup,
+  LibraryGroupAnswer,
+  LibraryGroupHit,
+  LibraryGroupItem,
+  LibraryGroupResult,
+  LibraryGroupSearch,
+  LibraryPartKind,
+  LibraryPassage,
+  LibraryRankProfile,
+  LibraryScope,
+} from './LibraryIndex.js';
 export {
   LexicalIndex,
   type BM25Result,
