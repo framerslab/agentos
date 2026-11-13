@@ -58,14 +58,26 @@ function isNonBlank(value: unknown): boolean {
   return typeof value === 'string' && value.trim().length > 0;
 }
 
-/** A whole commit id: 40 hexadecimal characters (SHA-1), or 64 (SHA-256). */
-const COMMIT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
+/**
+ * A whole commit id in lower case: 40 hexadecimal characters (SHA-1), or 64 (SHA-256). Upper case is refused, not
+ * folded: Transformers.js keeps a pinned revision's files under `<cache>/<model id>/<revision>/`, the string as given,
+ * so on a case-sensitive file system an upper-case id misses the folder Hugging Face Hub's lower-case id names, and the
+ * recall record, which keeps the setting as written, would name the commit in another case.
+ */
+const COMMIT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
+/**
+ * The largest `rerank.timeoutMs`: the longest delay a timer takes (2^31 - 1 ms, about 24.8 days). Node runs a timer set
+ * past it after 1 ms, so a larger value would time every rerank out at once.
+ */
+const MAX_TIMEOUT_MS = 2_147_483_647;
 
 /**
  * Checks `recall.rerank`: `'none'`, or an object whose `kind` is `'local'` (a non-blank `model`, and a `revision` that
- * is a whole commit id) or `'llm'` (a non-blank `model` and an `invoke` function), with `timeoutMs` and
- * `maxCandidates`, when given, positive integers. Any other `kind` names a provider memory rerank does not offer. A
- * branch, a tag or a shortened id is refused as a `revision`: it can name other weights later, so it pins nothing.
+ * is a whole commit id in lower case) or `'llm'` (a non-blank `model` and an `invoke` function), with `timeoutMs`
+ * (at most {@link MAX_TIMEOUT_MS}) and `maxCandidates`, when given, positive integers. Any other `kind` names a provider
+ * memory rerank does not offer. A branch, a tag or a shortened id is refused as a `revision`: it can name other weights
+ * later, so it pins nothing.
  *
  * @throws {RecallOptionError} `unsupported_provider` for another `kind`, else `invalid_value`, naming the field.
  */
@@ -89,7 +101,7 @@ function assertRerankSetting(rerank: unknown, where: string): void {
     rejectRecallOption(
       'rerank.revision',
       'invalid_value',
-      `${where}: memory.recall.rerank.revision must be a commit id of the model's repository (40 hexadecimal characters). A branch, a tag or a shortened id can name other weights later.`,
+      `${where}: memory.recall.rerank.revision must be a commit id of the model's repository (40 hexadecimal characters, in lower case). A branch, a tag or a shortened id can name other weights later.`,
     );
   }
   if (setting.kind === 'llm' && typeof setting.invoke !== 'function') {
@@ -101,13 +113,21 @@ function assertRerankSetting(rerank: unknown, where: string): void {
       rejectRecallOption(`rerank.${field}`, 'invalid_value', `${where}: memory.recall.rerank.${field} must be a positive integer.`);
     }
   }
+  const timeoutMs = setting.timeoutMs;
+  if (typeof timeoutMs === 'number' && timeoutMs > MAX_TIMEOUT_MS) {
+    rejectRecallOption(
+      'rerank.timeoutMs',
+      'invalid_value',
+      `${where}: memory.recall.rerank.timeoutMs must be at most ${MAX_TIMEOUT_MS} (a timer's longest delay); a timer set past it runs after 1 ms.`,
+    );
+  }
 }
 
 /**
  * Checks a recall setting's values: the setting and its `budget` objects, `budget.totalTokens` an integer of at least
  * 0, `capture` one of its three modes, `retrieval` `'dense'` or `'hybrid'`, `rerank` `'none'` or a `local` or `llm`
- * setting with its fields (a non-blank `model`; `local`'s `revision`, a whole commit id; `llm`'s `invoke`; `timeoutMs`
- * and `maxCandidates` positive integers), and a manager's `constants` an object of the hybrid recall's constants by name,
+ * setting with its fields (a non-blank `model`; `local`'s `revision`, a whole commit id in lower case; `llm`'s `invoke`;
+ * `timeoutMs` and `maxCandidates` positive integers, `timeoutMs` at most 2,147,483,647), and a manager's `constants` an object of the hybrid recall's constants by name,
  * each a finite number of at least 0, `topK`, `recentTopK` and `overFetch` integers from 1 to 1,000, and
  * `nearDuplicate` above 0 and at most 1. A `null` or `undefined` setting, or field, is unset.
  *
