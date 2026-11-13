@@ -93,8 +93,8 @@ export interface ImageGuardrailOptions {
   maxBytes?: number;
   /**
    * The deadline for one evaluation, every check of every image included. Default 15000 ms. Past it no further capture
-   * or check starts, an image whose checks had not all run is refused as unavailable, and the `deadlineSignal` every
-   * check received is aborted.
+   * or check starts, an image whose checks had not all run, or whose last check was still running, is refused as
+   * unavailable unless a check blocked or held it, and the `deadlineSignal` every check received is aborted.
    */
   timeoutMs?: number;
   /** Sets `config.sequential`: the image checks finish before any phase 2 guard sees the input's text. Default false. */
@@ -358,8 +358,9 @@ export class ImageGuardrail implements IGuardrailService {
     // image goes to a vendor after the decision. The deadline is the guard's own and the dispatcher's, whichever comes
     // first (a required guard runs under its spec's). An image whose next step would start late is refused as unavailable.
     const deadline = Date.now() + this.timeoutMs;
+    const past = (): boolean => Date.now() >= deadline || deadlineSignal.aborted;
     const late = (state: ImageState, index: number, step: string): boolean => {
-      if (Date.now() < deadline && !deadlineSignal.aborted) return false;
+      if (!past()) return false;
       state.open = false;
       if (state.rank < 2) { state.rank = 2; state.verdict = this.unavailable(index, step); }
       return true;
@@ -398,10 +399,12 @@ export class ImageGuardrail implements IGuardrailService {
     // The model checks, image by image. Once the call's signal says stop, no further one runs.
     for (const image of images) {
       const state = states[image.index];
+      let last = 'classify';
       for (const check of this.classifies) {
         if (!state.open || context.vendorSignal?.aborted) break;
         // a model check that never ran past the deadline leaves the image refused, whatever an earlier one answered
         if (late(state, image.index, check.id)) break;
+        last = check.id;
         const quarantine = await this.run(check, image, state, context, deadlineSignal);
         // a model check's quarantine ends the evaluation too: no further image goes to a model
         if (quarantine) return quarantine;
@@ -409,6 +412,10 @@ export class ImageGuardrail implements IGuardrailService {
       // A match check's pass says the image is not known material, not what it shows: an image no model check
       // answered for, and no check held or blocked, was judged by nobody.
       if (!state.judged && state.rank < 2) { state.rank = 2; state.verdict = this.unavailable(image.index, 'classify'); }
+      // A check still running when the deadline passed (the deadline stopped it, or it answered late, a skipped signal
+      // included) leaves the image refused unless a check blocked or held it: the guard's answer past its deadline is
+      // never an allow or a flag, which would otherwise come before the dispatcher's fail-closed timeout.
+      else if (state.rank < 2 && past()) { state.rank = 2; state.verdict = this.unavailable(image.index, last); }
     }
 
     // Over all images: a check's block, then a hold, then unavailable, then a flag; the first image wins a tie.
