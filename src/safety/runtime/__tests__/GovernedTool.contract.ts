@@ -329,17 +329,18 @@ export function runGovernedToolSuite(name: string, open: () => Promise<StoreUnde
       const limiter = limiterOf(prefix, rules);
       let again: ToolExecutionResult | undefined;
       let nested = false;
-      let governed: ITool<MuteArgs> | undefined;
+      const held: { governed?: ITool<MuteArgs> } = {};
       // while the action runs, the host deletes the account's rows and the same action is asked for again
       mute = muteTool(async (args, context) => {
         if (!nested) {
           nested = true;
           await limiter.forgetTarget('u_attacker');
-          again = await (governed as ITool<MuteArgs>).execute(structuredClone(args), context);
+          again = await (held.governed as ITool<MuteArgs>).execute(structuredClone(args), context);
         }
         return { success: true, output: { muted: true } };
       });
-      governed = governTool(mute, { ...MUTE_POLICY, limits: rules }, governanceOf(limiter));
+      const governed = governTool(mute, { ...MUTE_POLICY, limits: rules }, governanceOf(limiter));
+      held.governed = governed;
       expect(governance((await viaModel(governed, muteOf(message('m1')))).result).outcome).toBe('executed');
       expect(governance(again as ToolExecutionResult).outcome).toBe('duplicate');
       expect(mute.execute).toHaveBeenCalledTimes(1);
