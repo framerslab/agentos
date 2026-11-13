@@ -170,6 +170,20 @@ export function runGovernedToolSuite(name: string, open: () => Promise<StoreUnde
       expect(mute.execute).toHaveBeenCalledTimes(1);
     });
 
+    it('two quotes of one message count as one toward minQuotes', async () => {
+      const governed = governTool(mute, { ...MUTE_POLICY, evidence: { minQuotes: 2 } }, governanceOf(limiterOf()));
+      const twice = muteOf(message('m1'));
+      twice.evidence.quotes.push({ ...twice.evidence.quotes[0] });
+      expect(governance((await viaModel(governed, twice)).result)).toMatchObject({ outcome: 'voided_evidence', code: 'NO_QUOTES' });
+      const twoParts = muteOf(message('m1'));
+      twoParts.evidence.quotes.push({ messageId: 'm1', quote: 'everyone here knows it' });
+      expect(governance((await viaModel(governed, twoParts)).result)).toMatchObject({ outcome: 'voided_evidence', code: 'NO_QUOTES' });
+      expect(mute.execute).not.toHaveBeenCalled();
+      // two messages of the same author meet the rule
+      const two = muteOf(message('m1'), { quotes: ['m1', 'm5'].map((id) => ({ messageId: id, quote: message(id).text })) });
+      expect(governance((await viaModel(governed, two)).result).outcome).toBe('executed');
+    });
+
     it.each(['evidence', 'audit', 'limiter'] as const)('isolates arguments changed while awaiting %s', async (stage) => {
       let callerArgs: MuteArgs | undefined;
       const mutate = () => {
