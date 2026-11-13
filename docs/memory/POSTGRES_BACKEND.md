@@ -242,6 +242,8 @@ await store.hybridSearch('chunks', embedding, 'what did we decide about the budg
 
 `hybridSearch()` takes the same `match` and `prefix` for its lexical leg, with `match` `'any'` when only `prefix` is given, and a query with no word then runs the dense search alone. Without either option its lexical leg reads the query with `plainto_tsquery`, which asks for every word.
 
+`lexicalGroupSearch()` searches the `tsv` column over the items of one list a caller hands, where an item is the passages whose `sourceId` metadata key is its id: an item matches when every word matches in at least one of its passages, and the answer counts the items that match, ranks them by the weight of the field each word matched in and the kind of match, with no `ts_rank`, pages them by a key and gives each item's best passage. It can widen a word to the stored words one edit away, read with `ts_stat` from the passages the search admits and no other. `LibraryIndex.searchGroups` calls it, one call a group: see [Grouped search](../features/LIBRARY_INDEX.md#grouped-search).
+
 ### Filtered searches and iterative scans
 
 pgvector applies a filter after it scans an HNSW index, so a filtered `query()` or `hybridSearch()` can return fewer than `topK` rows: the scan holds `hnsw.ef_search` candidates (40 by default) whether or not they pass the filter ([pgvector: iterative index scans](https://github.com/pgvector/pgvector#iterative-index-scans)). With `iterativeScan` (pgvector 0.8.0 and later) the scan goes on until the filtered search has its rows or has visited `hnsw.max_scan_tuples` (20,000 by default):
