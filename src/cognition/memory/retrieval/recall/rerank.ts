@@ -113,8 +113,11 @@ export class RecallReranker {
   private disposed = false;
   private failures = 0;
   private backoffUntil = 0;
-  /** The reranks running now, each aborted at its deadline or when the reranker is stopped. */
-  private readonly running = new Set<AbortController>();
+  /**
+   * The reranks running now: each one's signal, aborted at its deadline or when the reranker is stopped, and what
+   * settles it when the reranker is stopped.
+   */
+  private readonly running = new Map<AbortController, () => void>();
 
   /**
    * @param setting - The `recall.rerank` setting, already checked (`assertRecallConfig`).
@@ -178,15 +181,18 @@ export class RecallReranker {
   }
 
   /**
-   * Stops the reranker: later calls, and the calls running now, keep the order (`unavailable`), the judge starts no
-   * further model call for them, and the local model is released once its load and the reranks using it have ended.
-   * Never rejects.
+   * Stops the reranker: later calls, and the calls running now, keep the order (`unavailable`); a call running now
+   * settles at once, without waiting for its provider or its deadline. The judge starts no further model call for
+   * them, and the local model is released once its load and the reranks using it have ended. Never rejects.
    */
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
     this.state = 'unavailable';
-    for (const running of this.running) running.abort();
+    for (const [signal, stop] of this.running) {
+      signal.abort();
+      stop();
+    }
     try {
       await this.settled;
       await this.provider.dispose?.();
@@ -239,7 +245,12 @@ export class RecallReranker {
     // Aborted at the deadline, or when the reranker is stopped, so the judge starts no further model call for a
     // rerank nobody waits for.
     const abandoned = new AbortController();
-    this.running.add(abandoned);
+    // Settled when the reranker is stopped, so a rerank nobody can use waits neither for its provider nor its deadline.
+    let stop!: () => void;
+    const stopped = new Promise<'stopped'>((resolve) => {
+      stop = () => resolve('stopped');
+    });
+    this.running.set(abandoned, stop);
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       // The deadline is set before the provider is called: of two timers due together, a provider's own and this one,
@@ -257,10 +268,10 @@ export class RecallReranker {
       );
       // The loser of the race must not reject unhandled.
       call.catch(() => undefined);
-      const output = await Promise.race([call, deadline]);
+      const output = await Promise.race([call, deadline, stopped]);
       // Stopped while it ran (the setting changed, or the manager shut down): its answer orders nothing, and the
       // provider is not at fault.
-      if (this.disposed) return kept('unavailable');
+      if (this.disposed || output === 'stopped') return kept('unavailable');
       // The provider's work is abandoned; its late answer is dropped.
       if (output === 'timeout') return failed('timeout');
 

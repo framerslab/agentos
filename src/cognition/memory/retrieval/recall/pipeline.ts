@@ -76,6 +76,11 @@ function logSuppliedRejected(outOfScope: number, ineligible: number): void {
 }
 
 /** The defined values of a manager's `recall.constants`, over the starting ones. */
+/** False for a memory deleted while recall ran (this process's soft delete, or a tombstone). */
+function isLive(store: MemoryStore, id: string): boolean {
+  return !store.isDeleted(id) && store.getTrace(id)?.isActive !== false;
+}
+
 function constantsOf(settings: ManagerRecallConfig | undefined): RecallConstants {
   const c: RecallConstants = { ...RECALL_CONSTANTS };
   for (const [name, value] of Object.entries(settings?.constants ?? {})) {
@@ -140,7 +145,7 @@ export class RecallPipeline {
   /**
    * Reorders the head of `cut`, the candidates the reranker scored, by the blend of each one's score and its rerank
    * score; the rest keep their order after it. With no reranker, or one that did not answer, `cut` is returned as it
-   * was, with the reason.
+   * was, with the reason. Either way, a candidate whose memory was deleted while the reranker ran is left out.
    *
    * @param query - The turn's own text.
    * @param cut - The candidates, best first.
@@ -161,13 +166,16 @@ export class RecallPipeline {
     );
     // The reranker's own time when it answered; the time the attempt took when it did not.
     const ms = record.ms ?? Math.round(performance.now() - started);
-    if (scores.size === 0) return { cut, record, scores, ms };
-    const head = cut.filter((entry) => scores.has(entry.id));
+    // A memory deleted while the reranker ran leaves the recall, as one deleted while the legs ran does.
+    const store = this.deps.store();
+    const live = cut.filter((entry) => isLive(store, entry.id));
+    if (scores.size === 0) return { cut: live, record, scores, ms };
+    const head = live.filter((entry) => scores.has(entry.id));
     const blended = new Map(head.map((entry) => [entry.id, RERANK_DEFAULTS.blendScore * scoreOf(entry) + RERANK_DEFAULTS.blendRerank * scores.get(entry.id)!]));
     for (const entry of head) apply(entry, blended.get(entry.id)!);
     // Stable: equal blends keep the order the candidates came in.
     head.sort((a, b) => blended.get(b.id)! - blended.get(a.id)!);
-    return { cut: [...head, ...cut.filter((entry) => !scores.has(entry.id))], record, scores, ms };
+    return { cut: [...head, ...live.filter((entry) => !scores.has(entry.id))], record, scores, ms };
   }
 
   /**
@@ -395,9 +403,13 @@ export class RecallPipeline {
       let next = 0;
       ranked = byFused.map((candidate) => (inCut.has(candidate.id) && next < order.length ? order[next++] : candidate));
     }
+    // A memory deleted while the reranker ran is in neither the result nor the record, as one deleted while the legs
+    // ran is in neither.
+    const shownReserved = reserved.filter((entry) => live(entry.trace));
+    ranked = ranked.filter((candidate) => isLive(store, candidate.id));
 
     return {
-      scored: [...reranked.cut, ...reserved].map((entry) => entry.trace),
+      scored: [...reranked.cut, ...shownReserved].map((entry) => entry.trace),
       reranker: reranked.record,
       ...(reranked.scores.size > 0 ? { rerankScores: Object.fromEntries(reranked.scores) } : {}),
       rerankMs: reranked.ms,
@@ -413,7 +425,7 @@ export class RecallPipeline {
       ranked,
       lexicalBackend: words.ran ? lexicalBackendOf(store, lexical) : 'none',
       timings: { legsMs, fuseMs, dedupeMs },
-      reserve: { fired: asked, ids: [...reservedIds] },
+      reserve: { fired: asked, ids: shownReserved.map((entry) => entry.id) },
       // The supplied candidates the call shows or may show: those the dedupe kept.
       suppliedIds: kept.filter((entry) => shownSupplied.has(entry.id)).map((entry) => entry.id),
       ...(rejected ? { suppliedRejected: rejected } : {}),
