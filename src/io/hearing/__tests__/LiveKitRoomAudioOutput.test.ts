@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type * as Rtc from '@livekit/rtc-node';
 import { LIVEKIT_SPEECH_MARK_ATTRIBUTES, type SpeechMark } from '../../voice-pipeline/LiveKitAudioPublisher.js';
 import {
   LiveKitRoomAudioOutput,
   ROOM_AUDIO_NO_SUBSCRIBER,
   pcmChunks,
   type LiveKitRoomAudioOutputOptions,
+  type LiveKitRoomAudioOutputRoomLike,
 } from '../LiveKitRoomAudioOutput.js';
 import {
   FakeAudioSource,
@@ -16,6 +18,12 @@ import {
   fakePublishingRtc,
   settle,
 } from './livekit-fakes.js';
+
+// A real @livekit/rtc-node Room, its local participant publishing and marking, fits the room the output takes, so a
+// host passes it as it is.
+type Expect<T extends true> = T;
+type RoomFits = Expect<Rtc.Room extends LiveKitRoomAudioOutputRoomLike ? true : false>;
+const conformance: [RoomFits] = [true];
 
 /** The clip's rate and the track's: 24,000 samples a second, so no chunk is resampled. */
 const RATE = 24_000;
@@ -119,7 +127,6 @@ describe('LiveKitRoomAudioOutput', () => {
     const output = outputOn(room, { receiptTimeoutMs: 50 });
     const refused = output.play({ audio: clip(1_000), sampleRate: RATE });
     await expect(refused).rejects.toMatchObject({ code: ROOM_AUDIO_NO_SUBSCRIBER });
-    expect(ROOM_AUDIO_NO_SUBSCRIBER).toBe('ROOM_AUDIO_NO_SUBSCRIBER');
     expect(capturedSamples()).toBe(0);
     await output.close();
   });
@@ -320,6 +327,64 @@ describe('LiveKitRoomAudioOutput', () => {
     await expect(output.play({ audio: Buffer.alloc(4), sampleRate: 24_000.5 })).rejects.toThrow(RangeError);
     expect(room.localParticipant.publishTrack).not.toHaveBeenCalled();
     await output.close();
+  });
+
+  it('plays nothing of a second clip stopped while the clear of the first is still under way', async () => {
+    const room = new FakeRoom();
+    const output = outputOn(room);
+    await output.open();
+    let release!: () => void;
+    source().gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const first = output.play({ audio: clip(1_000), sampleRate: RATE });
+    first.catch(() => {});
+    await settle();
+    // The first clip's chunk is on its way to the track, so its clear waits for that capture.
+    const firstCleared = output.clear();
+    await expect(first).rejects.toThrow('room audio cleared');
+    // A second clip, every sample 0x0707 (1799), is asked for and stopped before that clear has finished.
+    const second = output.play({ audio: Buffer.alloc(48_000, 7), sampleRate: RATE });
+    second.catch(() => {});
+    await settle();
+    const secondCleared = output.clear();
+    await expect(second).rejects.toThrow('room audio cleared');
+    release();
+    source().gate = undefined;
+    await Promise.all([firstCleared, secondCleared]);
+    await settle();
+    // The first clip's frame landed and was cleared; nothing of the second reached the track.
+    expect(source().captured.map((frame) => frame.data[0])).toEqual([1]);
+
+    const third = output.play({ audio: clip(1_000), sampleRate: RATE });
+    await until(() => source().captured.length === 2);
+    source().playOut();
+    await expect(third).resolves.toEqual({ playedMs: 1_000 });
+    await output.close();
+  });
+
+  it('closes once a capture stalls, so no later clip goes to the retired track', async () => {
+    const room = new FakeRoom();
+    const output = outputOn(room, { maxDurationMs: 100, receiptTimeoutMs: 30 });
+    await output.open();
+    let release!: () => void;
+    source().gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // The capture never returns: past receiptTimeoutMs plus maxDurationMs the publisher gives the track up.
+    await expect(output.play({ audio: clip(100), sampleRate: RATE })).rejects.toThrow('room audio output stalled');
+    await expect(output.play({ audio: clip(100), sampleRate: RATE })).rejects.toThrow('room audio output stalled');
+    await expect(output.open()).rejects.toThrow('room audio output stalled');
+    await until(() => room.localParticipant.unpublishTrack.mock.calls.length > 0);
+    expect(room.localParticipant.unpublishTrack).toHaveBeenCalledWith('TR_AGENT', false);
+    // The given-up capture returns late, on a closed source: nothing lands.
+    release();
+    await settle();
+    expect(source().captured).toHaveLength(0);
+  });
+
+  it('takes a real rtc-node Room as it is', () => {
+    expect(conformance).toEqual([true]);
   });
 
   it('is exported from the LiveKit entry beside the room audio source', async () => {
