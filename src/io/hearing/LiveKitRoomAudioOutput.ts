@@ -192,8 +192,16 @@ export class LiveKitRoomAudioOutput {
   private readonly publisher: LiveKitAudioPublisher;
   /** Each chunk's mark, read by the publisher once, as the chunk is handed to it. */
   private readonly marks = new WeakMap<EncodedAudioChunk, SpeechMark>();
-  /** Settles `true` once a participant has subscribed to the published track; `false` when it cannot tell. Unset before the track is published. */
-  private subscribed?: Promise<boolean>;
+  /** Whether the track was published, so a wait for a subscriber has a publication to read. */
+  private published = false;
+  /** `true` once a participant has subscribed to the published track, `false` when the output cannot tell; unset before. */
+  private subscriber?: boolean;
+  /**
+   * Each wait for a subscriber, and each wait that a close ends, until the wait ends. A wait leaves its list as it
+   * ends, so an output that plays clip after clip keeps none of the waits it finished.
+   */
+  private readonly subscriberWaits = new Set<(subscribed: boolean) => void>();
+  private readonly closeWaits = new Set<(error: Error) => void>();
   private run?: Run;
   /**
    * The last clear asked of the publisher, until it settles. A play hands the track nothing before it has: the
@@ -203,8 +211,6 @@ export class LiveKitRoomAudioOutput {
   private closed = false;
   /** What a call on the closed output rejects with: closed by the host, or retired by a stalled capture. */
   private closedMessage = 'room audio output closed';
-  /** Rejects once the output is closed, so a wait for a subscriber ends then. */
-  private readonly ended: Run = startRun();
 
   /**
    * @throws {Error} `livekit publishing participant required` when the room's local participant cannot publish a
@@ -218,12 +224,17 @@ export class LiveKitRoomAudioOutput {
             // The publication is kept, so a play and an open read whether anyone subscribed to the track.
             publishTrack: async (track: unknown, publishOptions: unknown): Promise<LiveKitLocalPublicationLike> => {
               const publication = await local.publishTrack(track, publishOptions);
-              this.subscribed = Promise.resolve()
+              this.published = true;
+              void Promise.resolve()
                 .then(() => {
                   if (typeof publication.waitForSubscription !== 'function') return false;
                   return publication.waitForSubscription().then(() => true);
                 })
-                .catch(() => false);
+                .catch(() => false)
+                .then((subscribed) => {
+                  this.subscriber = subscribed;
+                  for (const wait of this.subscriberWaits) wait(subscribed);
+                });
               return publication;
             },
             unpublishTrack: (trackSid: string, stopOnUnpublish?: boolean) => local.unpublishTrack(trackSid, stopOnUnpublish),
@@ -382,7 +393,7 @@ export class LiveKitRoomAudioOutput {
       this.closedMessage = message;
       const closed = failure(message);
       this.run?.stop(closed);
-      this.ended.stop(closed);
+      for (const stop of this.closeWaits) stop(closed);
     }
     return this.publisher.close();
   }
@@ -416,19 +427,43 @@ export class LiveKitRoomAudioOutput {
    * @throws {Error} With the code {@link ROOM_AUDIO_NO_SUBSCRIBER} when nobody did.
    */
   private async listener(started: number): Promise<void> {
-    await Promise.race([this.publisher.ready(), this.ended.stopped]);
-    const subscribed = this.subscribed ?? Promise.resolve(false);
-    const left = Math.max(0, started + this.options.publisher.receiptTimeoutMs - Date.now());
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const late = new Promise<false>((resolve) => {
-      timer = setTimeout(() => resolve(false), left);
+    await this.untilClosed(this.publisher.ready());
+    if (this.subscriber === true) return;
+    let settle!: (subscribed: boolean) => void;
+    const subscribed = new Promise<boolean>((resolve) => {
+      settle = resolve;
     });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    // Without a publication, or once the output knows it cannot tell, nobody is waited for.
+    if (!this.published || this.subscriber === false) {
+      settle(false);
+    } else {
+      this.subscriberWaits.add(settle);
+      const left = Math.max(0, started + this.options.publisher.receiptTimeoutMs - Date.now());
+      timer = setTimeout(() => settle(false), left);
+    }
     try {
-      if (!(await Promise.race([subscribed, late, this.ended.stopped]))) {
+      if (!(await this.untilClosed(subscribed))) {
         throw failure('nobody subscribed to the room audio track in time', { code: ROOM_AUDIO_NO_SUBSCRIBER });
       }
     } finally {
       clearTimeout(timer);
+      this.subscriberWaits.delete(settle);
+    }
+  }
+
+  /** Waits for `work`, or rejects once the output closes; the wait leaves the close's list as it ends. */
+  private async untilClosed<T>(work: Promise<T>): Promise<T> {
+    if (this.closed) throw failure(this.closedMessage);
+    let stop!: (error: Error) => void;
+    const closed = new Promise<never>((_resolve, reject) => {
+      stop = reject;
+    });
+    this.closeWaits.add(stop);
+    try {
+      return await Promise.race([work, closed]);
+    } finally {
+      this.closeWaits.delete(stop);
     }
   }
 }
