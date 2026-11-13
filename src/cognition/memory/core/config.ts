@@ -518,9 +518,11 @@ export interface MemoryRecallConfig {
    * Reranks the recalled memories before they are shown. `'none'`: no
    * reranker. `{ kind: 'local' }`: a cross-encoder that runs in this
    * process, named by `model` (a Hugging Face model id) and a pinned
-   * `revision`, a whole commit id of the model's repository (40 hexadecimal
-   * characters; a branch, a tag or a shortened id is refused, since it can
-   * name other weights later); the query and the memories never leave the
+   * `revision`, a whole commit id of the model's repository in lower case
+   * (40 hexadecimal characters; a branch, a tag, a shortened id or an
+   * upper-case id is refused: the first three can name other weights later,
+   * and Transformers.js finds a pinned revision's cached files under the id
+   * as written); the query and the memories never leave the
    * process. The model's files load through Transformers.js's own cache. `{ kind: 'llm' }`: the host's own
    * model call (`invoke(system, user, model)`, called with `model`) scores
    * and ranks them, which sends the query and the first 200 characters of
@@ -533,7 +535,8 @@ export interface MemoryRecallConfig {
    * it has); a load that fails is not retried. `timeoutMs` bounds one
    * rerank (default 1500 for `local`, 10000 for `llm`); `maxCandidates` is
    * how many of the best candidates are scored (default 20). Both are
-   * positive integers. After three failures or timeouts in a row the rerank
+   * positive integers, and `timeoutMs` is at most 2,147,483,647, the longest
+   * delay a timer keeps (a timer set past it runs after 1 ms). After three failures or timeouts in a row the rerank
    * is skipped for 60 seconds. Under `'dense'` the reranked candidates'
    * scores become `0.7 × retrieval score + 0.3 × rerank score` and order
    * them; under `'hybrid'` they are ordered by `0.7 × fused score / the
