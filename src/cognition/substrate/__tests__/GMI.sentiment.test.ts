@@ -1048,3 +1048,203 @@ describe('GMI sentiment beside the first model call', () => {
     }
   });
 });
+
+describe('GMI sentiment writes that land after their turn dropped them', () => {
+  const startGmi = async (
+    id: string,
+    utility: ReturnType<typeof createMockUtilityAI>,
+    wm: ReturnType<typeof createMockWorkingMemory>,
+  ): Promise<GMI> => {
+    const gmi = new GMI(id);
+    await gmi.initialize(createSentimentPersona({ enabled: true }), {
+      workingMemory: wm as any, utilityAI: utility as any, promptEngine: mockPromptEngine,
+      llmProviderManager: mockLlmProviderManager, toolOrchestrator: mockToolOrchestrator, shutdownTimeoutMs: 1000,
+    });
+    return gmi;
+  };
+  const drainTurn = async (gmi: GMI, id: string, content: string, extra: Record<string, unknown> = {}) => {
+    for await (const chunk of gmi.processTurnStream({
+      interactionId: id, userId: 'user-1', type: GMIInteractionType.TEXT, content, ...extra,
+    } as any)) void chunk;
+  };
+  // Runs a turn whose sentiment write the host store holds, past the budget and the shutdown bound, so the
+  // post-turn check drops the analysis while that write is still in flight.
+  const dropWhileHeld = async (gmi: GMI, id: string, content: string, held: () => boolean) => {
+    vi.useFakeTimers();
+    const turn = drainTurn(gmi, id, content);
+    await vi.waitFor(() => expect(held()).toBe(true));
+    await vi.advanceTimersByTimeAsync(3500);
+    await turn;
+    vi.useRealTimers();
+  };
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+  const negative = { score: -0.9, polarity: 'negative', intensity: 0.9 } as SentimentResult;
+
+  it("keeps the next turn's analysis when a dropped history write lands over it", async () => {
+    const utility = createMockUtilityAI();
+    utility.analyzeSentiment.mockResolvedValueOnce(negative);
+    const wm = createMockWorkingMemory();
+    const write = wm.set.getMockImplementation()!;
+    let releaseWrite: (() => void) | undefined;
+    // The host store holds the first sentiment history write until the test releases it.
+    wm.set.mockImplementation((key: string, value: any) => key === 'gmi_sentiment_history' && !releaseWrite
+      ? new Promise<void>((resolve) => { releaseWrite = () => { void write(key, value); resolve(); }; })
+      : write(key, value));
+    const gmi = await startGmi('late-over-newer', utility, wm);
+    try {
+      await dropWhileHeld(gmi, 'dropped', 'This is terrible.', () => releaseWrite !== undefined);
+      await drainTurn(gmi, 'next', 'Fine, thanks.');
+      const afterNext = structuredClone(wm._store.get('gmi_sentiment_history'));
+      expect(afterNext?.lastAnalyzedTurnId).toBe('next');
+      releaseWrite!();
+      await settle(); await settle();
+      expect(wm._store.get('gmi_sentiment_history'), "a dropped history write keeps the next turn's analysis")
+        .toEqual(afterNext);
+    } finally {
+      releaseWrite?.();
+      vi.useRealTimers();
+      await gmi.shutdown();
+    }
+  });
+
+  it('keeps a forgotten excerpt cleared when the write that takes a dropped analysis back lands after the forget', async () => {
+    const utility = createMockUtilityAI(negative);
+    const wm = createMockWorkingMemory();
+    const write = wm.set.getMockImplementation()!;
+    let hold = false;
+    const releases: Array<() => void> = [];
+    // Once holding starts, the host store holds two sentiment history writes: the dropped turn's, then the one
+    // that takes it back.
+    wm.set.mockImplementation((key: string, value: any) => hold && key === 'gmi_sentiment_history' && releases.length < 2
+      ? new Promise<void>((resolve) => { releases.push(() => { void write(key, value); resolve(); }); })
+      : write(key, value));
+    const gmi = await startGmi('take-back-after-forget', utility, wm);
+    try {
+      await drainTurn(gmi, 'pin', 'My PIN is 1234.');
+      expect(JSON.stringify(wm._store.get('gmi_sentiment_history'))).toContain('1234');
+      hold = true;
+      await dropWhileHeld(gmi, 'dropped', 'This is terrible.', () => releases.length === 1);
+      releases[0]();
+      await vi.waitFor(() => expect(releases, 'the dropped write is taken back').toHaveLength(2), { timeout: 500, interval: 10 });
+      gmi.clearHistory();
+      await vi.waitFor(() => expect(JSON.stringify(wm._store.get('gmi_sentiment_history'))).not.toContain('1234'),
+        { timeout: 500, interval: 10 });
+      releases[1]();
+      await settle(); await settle();
+      expect(JSON.stringify(wm._store.get('gmi_sentiment_history')),
+        'a take-back that lands after a forget leaves the forgotten excerpt cleared').not.toContain('1234');
+    } finally {
+      for (const release of releases) release();
+      vi.useRealTimers();
+      await gmi.shutdown();
+    }
+  });
+
+  it('saves the newer user context again when a dropped context write lands after it', async () => {
+    const utility = createMockUtilityAI();
+    utility.analyzeSentiment.mockResolvedValueOnce(negative);
+    const wm = createMockWorkingMemory();
+    const write = wm.set.getMockImplementation()!;
+    let releaseWrite: (() => void) | undefined;
+    // The host store holds the dropped turn's sentiment write of the user context until the test releases it.
+    wm.set.mockImplementation((key: string, value: any) =>
+      key === 'currentUserContext' && value?.currentSentiment === 'negative' && !releaseWrite
+        ? new Promise<void>((resolve) => { releaseWrite = () => { void write(key, value); resolve(); }; })
+        : write(key, value));
+    const gmi = await startGmi('late-context', utility, wm);
+    try {
+      await dropWhileHeld(gmi, 'dropped', 'This is terrible.', () => releaseWrite !== undefined);
+      await drainTurn(gmi, 'next', 'Bonjour.', {
+        userContextOverride: { language: 'fr', preferences: { verbosity: 'detailed' } },
+      });
+      expect(wm._store.get('currentUserContext')).toMatchObject({ language: 'fr' });
+      releaseWrite!();
+      await settle(); await settle();
+      expect(wm._store.get('currentUserContext'), 'a dropped context write must not leave the store older than the GMI')
+        .toMatchObject({ language: 'fr', preferences: { verbosity: 'detailed' }, currentSentiment: 'neutral' });
+    } finally {
+      releaseWrite?.();
+      vi.useRealTimers();
+      await gmi.shutdown();
+    }
+  });
+
+  it("applies nothing of a failed turn's analysis when the host starts the next turn at the error chunk", async () => {
+    let release: ((value: SentimentResult) => void) | undefined;
+    const utility = createMockUtilityAI();
+    utility.analyzeSentiment.mockImplementationOnce(() => new Promise<SentimentResult>((resolve) => { release = resolve; }));
+    const wm = createMockWorkingMemory();
+    const gmi = await startGmi('failed-stream', utility, wm);
+    vi.mocked(mockProvider.generateCompletionStream).mockImplementationOnce((async function* () {
+      throw new Error('scripted main failure');
+    }) as any);
+    const failed = gmi.processTurnStream({
+      interactionId: 'failed', userId: 'user-1', type: GMIInteractionType.TEXT, content: "My PIN is 1234; I'm confused",
+    });
+    try {
+      // The host reads the failed turn's stream up to its error chunk and leaves it there.
+      let chunk = await failed.next();
+      for (let read = 0; read < 50 && !chunk.done && (chunk.value as any)?.type !== GMIOutputChunkType.ERROR; read += 1) {
+        chunk = await failed.next();
+      }
+      expect((chunk.value as any)?.type).toBe(GMIOutputChunkType.ERROR);
+      expect(release).toBeTypeOf('function');
+      await drainTurn(gmi, 'next', 'Next question.');
+      release!(negative);
+      await settle(); await settle();
+      expect((gmi as any).currentUserContext.currentSentiment,
+        "a failed turn's late analysis must not apply after the next turn").toBe('neutral');
+      gmi.replaceHistory([createConversationMessage(MessageRole.USER, 'Next question.')]);
+      await settle(); await settle();
+      const recorded = JSON.stringify([
+        (gmi as any).reasoningTrace.entries,
+        (gmi as any).sentimentTracker.events,
+        wm._store.get('gmi_sentiment_history'),
+      ]);
+      expect(recorded, "the failed turn's input reaches no record the next turn keeps").not.toContain('1234');
+    } finally {
+      release?.(negative);
+      for await (const rest of failed) void rest;
+      await gmi.shutdown();
+    }
+  });
+
+  it('logs a take-back write that fails, with no message text', async () => {
+    const lines: Array<Record<string, unknown>> = [];
+    const capture: Record<string, unknown> = { child: () => capture };
+    for (const level of ['debug', 'info', 'warn', 'error', 'fatal']) {
+      capture[level] = (line: Record<string, unknown>) => { lines.push(line); };
+    }
+    setLogger(capture as any);
+    const utility = createMockUtilityAI(negative);
+    const wm = createMockWorkingMemory();
+    const write = wm.set.getMockImplementation()!;
+    let hold = false;
+    let releaseWrite: (() => void) | undefined;
+    // Once holding starts, the host store holds the next sentiment history write, and every later one fails.
+    wm.set.mockImplementation((key: string, value: any) => {
+      if (!hold || key !== 'gmi_sentiment_history') return write(key, value);
+      if (!releaseWrite) return new Promise<void>((resolve) => { releaseWrite = () => { void write(key, value); resolve(); }; });
+      return Promise.reject(new Error('Forget-me store failure'));
+    });
+    wm.delete.mockImplementation(() => Promise.reject(new Error('Forget-me store failure')));
+    const gmi = await startGmi('take-back-fails', utility, wm);
+    try {
+      await drainTurn(gmi, 'kept', 'Hello there.');
+      hold = true;
+      await dropWhileHeld(gmi, 'dropped', 'This is terrible.', () => releaseWrite !== undefined);
+      gmi.replaceHistory([createConversationMessage(MessageRole.USER, 'Hello there.')]);
+      await settle();
+      releaseWrite!();
+      await settle(); await settle();
+      expect(lines.filter((line) => line.event === 'gmi.sentiment_take_back_failed'),
+        'a take-back that fails writes one line').toHaveLength(1);
+      expect(JSON.stringify(lines)).not.toContain('Forget-me');
+    } finally {
+      releaseWrite?.();
+      resetLoggerFactory();
+      vi.useRealTimers();
+      await gmi.shutdown();
+    }
+  });
+});
