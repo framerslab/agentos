@@ -246,7 +246,7 @@ try {
 }
 ```
 
-When the model refuses the request with a refusal message (OpenAI's refusal), `generateObject()` makes no repair attempt: it throws `ObjectGenerationError` at once, with the message in `refusal` (the piece that came, when the output cap cut it off). [A refusal from the model](../getting-started/HIGH_LEVEL_API.md#a-refusal-from-the-model) describes the signal.
+When the model refuses the request with a refusal message (OpenAI's refusal), `generateObject()` makes no repair attempt: it throws `ObjectGenerationError` at once, with the message in `refusal` (the piece that came, when the output cap cut it off). [A refusal from the model](../getting-started/HIGH_LEVEL_API.md#a-refusal-from-the-model) describes the `refusal` field.
 
 `ObjectGenerationError` is also what `streamObject()`'s `object` rejects with. Provider errors (a missing key, an HTTP failure after the fallback chain) are thrown as they are.
 
