@@ -760,6 +760,73 @@ describe('retention', () => {
     await again.close();
   });
 
+  it('hands back an open session asked for by its id alone, as the user it runs as', async () => {
+    const { a } = await open({ retention: undefined });
+    const first = a.session('s1', { userId: 'alice' });
+    expect(a.session('s1')).toBe(first);
+    expect(a.session('s9', { userId: 'alice' }).id).toBe('s9');
+    expect(() => a.session('s2', { userId: 'bob' })).toThrow(NEEDED);
+  });
+
+  /** Puts a copy of the store's file back in its place, as a restore does; every agent on the folder is closed first. */
+  function restoreStore(from: string): void {
+    fs.copyFileSync(from, storeFile());
+    for (const suffix of ['-wal', '-shm']) fs.rmSync(`${storeFile()}${suffix}`, { force: true });
+  }
+
+  /** The store as it is now, put aside as a backup. */
+  function backUpStore(): string {
+    const backup = path.join(dir, `backup-${++n}.sqlite`);
+    fs.copyFileSync(storeFile(), backup);
+    return backup;
+  }
+
+  it('opens without retention a restored store that holds one subject once the tombstones are applied', async () => {
+    const { a } = await open();
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await turn(a, 's2', 'bob', 'My canary is WREN-2.');
+    await a.close();
+    const backup = backUpStore();
+    const { a: second } = await open();
+    expect((await second.forgetUser!('alice')).complete).toBe(true);
+    await second.close();
+    restoreStore(backup);
+
+    // The store put back holds alice's memory and bob's: the open deletes hers again before it counts who is left.
+    const { a: third } = await open({ retention: undefined });
+    expect(tracesOf(keyOf(alice))).toEqual([]);
+    expect(saidOf(keyOf(bob))).toHaveLength(2);
+    expect(third.session('s2', { userId: 'bob' }).id).toBe('s2');
+  });
+
+  it('counts no subject whose memory the open deleted again', async () => {
+    const { a } = await open({ retention: undefined });
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await a.close();
+    const backup = backUpStore();
+    const { a: second } = await open({ retention: undefined });
+    expect((await second.forgetUser!('alice')).complete).toBe(true);
+    await second.close();
+    restoreStore(backup);
+
+    const { a: third } = await open({ retention: undefined });
+    expect(tracesOf(keyOf(alice))).toEqual([]);
+    // The store holds nobody's memory: a first person's session needs no retention.
+    expect(third.session('s3', { userId: 'bob' }).id).toBe('s3');
+  });
+
+  it('counts one user once across the agent ids the store keeps memory under', async () => {
+    const { a } = await open({ retention: undefined });
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await a.close();
+    // The soul's agent id changes; the store keeps alice's memory under the old id's key.
+    fs.writeFileSync(path.join(dir, 'SOUL.md'), '---\nname: Aria\nagentId: aria-2\n---\nYou are Aria.');
+
+    const { a: renamed } = await open({ retention: undefined });
+    expect(renamed.session('s1', { userId: 'alice' }).id).toBe('s1');
+    expect(() => renamed.session('s2', { userId: 'bob' })).toThrow(NEEDED);
+  });
+
   it('refuses a period that is not a positive number', async () => {
     await expect(open({ retention: { traces: { days: 0 } } })).rejects.toThrow(TypeError);
     await expect(open({ retention: { traces: 'until-deletion', sessions: { days: Number.NaN } } })).rejects.toThrow(TypeError);
