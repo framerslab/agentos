@@ -343,8 +343,6 @@ describe('the image guard: its deadline', () => {
 
 describe('the image guard: the deadline every check receives', () => {
   const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-  /** The signal a check was handed, read without the field's type so the file compiles against a guard that hands none. */
-  const deadlineOf = (image: ImageUnderReview): AbortSignal | undefined => (image as ImageUnderReview & { deadlineSignal?: AbortSignal }).deadlineSignal;
   /** The vendor's endpoint: answers 100 ms after a request, or at once refuses one whose signal aborts. */
   function vendor() {
     let stopped = 0;
@@ -357,7 +355,7 @@ describe('the image guard: the deadline every check receives', () => {
   /** A model check that waits 100 ms (a key lookup) and then sends the image, unless its deadline stopped first. */
   const lateSender = (told: boolean[]) => check('model', 'classify', async (image) => {
     await sleep(100);
-    const deadline = deadlineOf(image);
+    const deadline = image.deadlineSignal;
     told.push(deadline?.aborted === true);
     if (deadline?.aborted) throw new Error('stopped before sending');
     await fetch('https://vendor.example/moderate', { method: 'POST', signal: deadline });
@@ -385,7 +383,7 @@ describe('the image guard: the deadline every check receives', () => {
 
     // a check that hands the signal to its request: the request already sent is stopped at the deadline
     const inFlight = check('model', 'classify', async (image) => {
-      await fetch('https://vendor.example/moderate', { method: 'POST', signal: deadlineOf(image) });
+      await fetch('https://vendor.example/moderate', { method: 'POST', signal: image.deadlineSignal });
       return { verdict: 'pass' };
     });
     const sent = await moderateContent({ images: [png(1)] }, { guards: [ImageGuardrail.create({ id: 'images', timeoutMs: 10, checks: [inFlight] })], context });
@@ -398,7 +396,7 @@ describe('the image guard: the deadline every check receives', () => {
   it('is live while the checks run and stopped once the guard has answered', async () => {
     const seen: { signal: AbortSignal | undefined; stoppedThen: boolean }[] = [];
     const recording: ImageCheck['check'] = async (image) => {
-      const signal = deadlineOf(image);
+      const signal = image.deadlineSignal;
       seen.push({ signal, stoppedThen: signal?.aborted === true });
       return { verdict: 'pass' };
     };
