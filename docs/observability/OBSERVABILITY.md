@@ -247,7 +247,7 @@ await generateText({
 
 ### A refused call
 
-When the model refused the request with a refusal message ([A refusal from the model](../getting-started/HIGH_LEVEL_API.md#a-refusal-from-the-model)), the event `generateText()` or `streamText()` fires carries `refused: true`. Its `finishReason` is the reason the call reported: `'stop'`, or `'length'` when the output cap cut the message off. The call's root span carries the attribute `agentos.api.refused`. An event with no `refused` field is a call the model did not refuse, or a `streamText()` call that ended on an error. A `streamText()` event names the reason the call's `finishReason` promise resolved to.
+When the model refused the request with a refusal message ([A refusal from the model](../getting-started/HIGH_LEVEL_API.md#a-refusal-from-the-model)), the event `generateText()` or `streamText()` fires carries `refused: true`. Its `finishReason` is the reason the call reported: `'stop'`, or `'length'` when the output cap cut the message off. The call's root span carries the attribute `agentos.api.refused`. An event with no `refused` field is a call the model did not refuse, or a `streamText()` call whose model stream ended on an error or an abort. A `streamText()` event names the reason the model's stream resolved to. The event describes the model's answer before any output guard judged it, as it does for a reply: with `guards` set, a refusal a guard then blocks still fires `refused: true` with the model's reason, while `generateText()` rejects and `streamText()` ends on an `error` part with `finishReason` `'error'`.
 
 ### An aborted call
 

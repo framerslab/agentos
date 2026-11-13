@@ -1539,7 +1539,10 @@ export class OpenAIProvider implements IProvider {
    *     exactly once, before the final chunk. A consumer that rebuilds the turn from deltas
    *     (StreamingReconstructor) and one that reads the final chunk
    *     (streamText, GMI) therefore see the same text and calls, including
-   *     when a proxy strips the delta events.
+   *     when a proxy strips the delta events. Whether the answer holds a
+   *     refusal, and its message, is read from the terminal output as the
+   *     same body read whole reads it; the refusal deltas decide only when the
+   *     terminal response carries no output.
    *   - `response.completed` and `response.incomplete` yield exactly one final
    *     chunk with the finish reason, tool calls and usage.
    *   - Before any text, refusal or tool call has gone out, `response.failed`, an
@@ -1713,19 +1716,21 @@ export class OpenAIProvider implements IProvider {
             yield correction;
           }
           // The refusal message too: what the refusal deltas left out goes out once, before the final chunk.
-          if (summary.refusal && summary.refusal !== emittedRefusal) {
-            if (summary.refusal.startsWith(emittedRefusal)) {
-              const missingRefusal = summary.refusal.slice(emittedRefusal.length);
-              emittedRefusal = summary.refusal;
-              yield chunk({ refusalDelta: missingRefusal });
-            } else {
-              // The refusal message is text of the answer: the terminal output and the deltas disagree on it.
-              log.warn('llm.output_mismatch', { provider: 'openai', reason: 'text' });
-            }
+          if (summary.refusal && summary.refusal !== emittedRefusal && summary.refusal.startsWith(emittedRefusal)) {
+            const missingRefusal = summary.refusal.slice(emittedRefusal.length);
+            emittedRefusal = summary.refusal;
+            yield chunk({ refusalDelta: missingRefusal });
           }
-          const refusal = summary.refusal || emittedRefusal;
+          // The terminal output decides whether the answer holds a refusal and what it says, as it does for the same
+          // body read whole; the deltas decide only when the terminal response carries no output at all.
+          const terminalOutput = summary.itemCount > 0;
+          if (terminalOutput && summary.refusal !== emittedRefusal) {
+            // The refusal message is text of the answer: the terminal output and the deltas disagree on it.
+            log.warn('llm.output_mismatch', { provider: 'openai', reason: 'text' });
+          }
+          const refusal = terminalOutput ? summary.refusal : emittedRefusal;
           // A refusal part with an empty message is a refusal too.
-          const refused = summary.refused || emittedRefusal.length > 0;
+          const refused = terminalOutput ? summary.refused : emittedRefusal.length > 0;
 
           const usage = response?.usage
             ? this.mapResponsesUsage(response.usage, response.model ?? modelId)
