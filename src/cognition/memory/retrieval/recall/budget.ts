@@ -58,10 +58,14 @@ function isNonBlank(value: unknown): boolean {
   return typeof value === 'string' && value.trim().length > 0;
 }
 
+/** A whole commit id: 40 hexadecimal characters (SHA-1), or 64 (SHA-256). */
+const COMMIT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
+
 /**
- * Checks `recall.rerank`: `'none'`, or an object whose `kind` is `'local'` (a non-blank `model` and `revision`) or
- * `'llm'` (a non-blank `model` and an `invoke` function), with `timeoutMs` and `maxCandidates`, when given, positive
- * integers. Any other `kind` names a provider memory rerank does not offer.
+ * Checks `recall.rerank`: `'none'`, or an object whose `kind` is `'local'` (a non-blank `model`, and a `revision` that
+ * is a whole commit id) or `'llm'` (a non-blank `model` and an `invoke` function), with `timeoutMs` and
+ * `maxCandidates`, when given, positive integers. Any other `kind` names a provider memory rerank does not offer. A
+ * branch, a tag or a shortened id is refused as a `revision`: it can name other weights later, so it pins nothing.
  *
  * @throws {RecallOptionError} `unsupported_provider` for another `kind`, else `invalid_value`, naming the field.
  */
@@ -81,11 +85,11 @@ function assertRerankSetting(rerank: unknown, where: string): void {
   if (!isNonBlank(setting.model)) {
     rejectRecallOption('rerank.model', 'invalid_value', `${where}: memory.recall.rerank.model must be a non-blank string (the model's id).`);
   }
-  if (setting.kind === 'local' && !isNonBlank(setting.revision)) {
+  if (setting.kind === 'local' && !(typeof setting.revision === 'string' && COMMIT_ID.test(setting.revision))) {
     rejectRecallOption(
       'rerank.revision',
       'invalid_value',
-      `${where}: memory.recall.rerank.revision must be a non-blank string: the commit of the model's repository to load.`,
+      `${where}: memory.recall.rerank.revision must be a commit id of the model's repository (40 hexadecimal characters). A branch, a tag or a shortened id can name other weights later.`,
     );
   }
   if (setting.kind === 'llm' && typeof setting.invoke !== 'function') {
@@ -102,8 +106,8 @@ function assertRerankSetting(rerank: unknown, where: string): void {
 /**
  * Checks a recall setting's values: the setting and its `budget` objects, `budget.totalTokens` an integer of at least
  * 0, `capture` one of its three modes, `retrieval` `'dense'` or `'hybrid'`, `rerank` `'none'` or a `local` or `llm`
- * setting with its fields (a non-blank `model`; `local`'s `revision`; `llm`'s `invoke`; `timeoutMs` and
- * `maxCandidates` positive integers), and a manager's `constants` an object of the hybrid recall's constants by name,
+ * setting with its fields (a non-blank `model`; `local`'s `revision`, a whole commit id; `llm`'s `invoke`; `timeoutMs`
+ * and `maxCandidates` positive integers), and a manager's `constants` an object of the hybrid recall's constants by name,
  * each a finite number of at least 0, `topK`, `recentTopK` and `overFetch` integers from 1 to 1,000, and
  * `nearDuplicate` above 0 and at most 1. A `null` or `undefined` setting, or field, is unset.
  *

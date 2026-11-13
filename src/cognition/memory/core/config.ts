@@ -518,8 +518,10 @@ export interface MemoryRecallConfig {
    * Reranks the recalled memories before they are shown. `'none'`: no
    * reranker. `{ kind: 'local' }`: a cross-encoder that runs in this
    * process, named by `model` (a Hugging Face model id) and a pinned
-   * `revision` (a commit of the model's repository); the query and the
-   * memories never leave the process. `{ kind: 'llm' }`: the host's own
+   * `revision`, a whole commit id of the model's repository (40 hexadecimal
+   * characters; a branch, a tag or a shortened id is refused, since it can
+   * name other weights later); the query and the memories never leave the
+   * process. The model's files load through Transformers.js's own cache. `{ kind: 'llm' }`: the host's own
    * model call (`invoke(system, user, model)`, called with `model`) scores
    * and ranks them, which sends the query and the first 200 characters of
    * each candidate memory to that model's provider. No remote reranking

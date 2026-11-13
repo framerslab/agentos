@@ -81,8 +81,9 @@ export interface MemoryRecallCandidate {
  * call (`{ kind: 'llm' }`), and `'none'` when no rerank scores were applied:
  * `reason` then says why (`none_configured` with no `recall.rerank`;
  * `loading` until the local model has loaded; `unavailable` after its load
- * failed or with Transformers.js missing; `timeout`, `error`, or `backoff`
- * after three failures in a row). A manager's memory recall records no other
+ * failed, with Transformers.js missing, or for a rerank whose reranker was
+ * stopped while it ran; `timeout`, `error`, or `backoff` after three
+ * failures in a row). A manager's memory recall records no other
  * provider. `'other'` is what {@link rerankerRecordOf} names a provider id
  * that is neither, for a host that records a rerank of its own.
  */
@@ -143,7 +144,10 @@ export interface MemoryRecallCapture {
    * fires.
    */
   memoryQuestionReserve: { fired: boolean; added: number };
-  /** Every candidate, in the order recall ranked them, then any memory the block shows that no leg returned. */
+  /**
+   * Every candidate, in the order recall ranked them (under `hybrid` the pool in fused order, a reranked cut in the
+   * order the rerank gave it), then any memory the block shows that no leg returned.
+   */
   candidates: MemoryRecallCandidate[];
   /** Milliseconds of each stage, rounded. */
   timings: { legsMs: number; fuseMs: number; dedupeMs: number; rerankMs: number; assembleMs: number; totalMs: number };
@@ -204,7 +208,8 @@ export interface RetrievalRecallReport {
   retrieval?: 'dense' | 'hybrid';
   /**
    * Under `hybrid`: the whole recall pool in fused order, the candidates the cut at `topK` left out and the ones the
-   * dedupe dropped (`duplicateOf`) included, each with its ranks and fused score.
+   * dedupe dropped (`duplicateOf`) included, each with its ranks and fused score. When a rerank answered, the cut's
+   * candidates stand in the order it gave them, in the places the cut holds in that list.
    */
   ranked?: RankedRecallCandidate[];
   /** Under `hybrid`: the full-text backend the exact-words leg read, or `none` when that leg did not run. */

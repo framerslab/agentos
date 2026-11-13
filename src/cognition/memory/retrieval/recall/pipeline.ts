@@ -53,7 +53,10 @@ export interface RecallRun {
   legs: MemoryRecallCapture['legs'];
   /** Which recall ran. */
   retrieval: 'dense' | 'hybrid';
-  /** Under `hybrid`: the whole pool in fused order, a candidate the dedupe dropped with `duplicateOf`. */
+  /**
+   * Under `hybrid`: the whole pool in fused order, a candidate the dedupe dropped with `duplicateOf`. A rerank that
+   * answered lists the cut's candidates in the order it gave them, in the places the cut holds in that list.
+   */
   ranked?: RankedRecallCandidate[];
   /** Under `hybrid`: the full-text backend the exact-words leg read, `none` when it did not run. */
   lexicalBackend?: MemoryRecallCapture['lexicalBackend'];
@@ -371,6 +374,28 @@ export class RecallPipeline {
       () => undefined,
     );
 
+    // The whole pool by fused score, a kept candidate with the score it holds; equal scores keep the pool's order.
+    const byFused: RankedRecallCandidate[] = pool
+      .map(({ id, ranks, fusedScore }) => ({
+        id,
+        ranks,
+        fusedScore: keptScore.get(id) ?? fusedScore,
+        ...(reranked.scores.has(id) ? { rerankScore: reranked.scores.get(id)! } : {}),
+        ...(duplicateOf.has(id) ? { duplicateOf: duplicateOf.get(id)! } : {}),
+        ...(reservedIds.has(id) ? { reserve: true } : {}),
+      }))
+      .sort((a, b) => b.fusedScore - a.fusedScore);
+    // A rerank that answered reordered the cut: its candidates hold the places the cut holds in the list, in the
+    // order the rerank gave them, so the record lists them as the block shows them. The rest keep their places.
+    let ranked = byFused;
+    if (reranked.scores.size > 0) {
+      const inCut = new Set(cut.map((entry) => entry.id));
+      const entryOf = new Map(byFused.map((candidate) => [candidate.id, candidate]));
+      const order = reranked.cut.map((entry) => entryOf.get(entry.id)).filter((candidate): candidate is RankedRecallCandidate => candidate !== undefined);
+      let next = 0;
+      ranked = byFused.map((candidate) => (inCut.has(candidate.id) && next < order.length ? order[next++] : candidate));
+    }
+
     return {
       scored: [...reranked.cut, ...reserved].map((entry) => entry.trace),
       reranker: reranked.record,
@@ -385,17 +410,7 @@ export class RecallPipeline {
         ...(supplied ? [{ leg: 'supplied' as const, ran: true, candidates: suppliedIds.length, ineligible: supplied.ineligible, ms: 0 }] : []),
       ],
       retrieval: 'hybrid',
-      // The whole pool by fused score, a kept candidate with the score it holds; equal scores keep the pool's order.
-      ranked: pool
-        .map(({ id, ranks, fusedScore }) => ({
-          id,
-          ranks,
-          fusedScore: keptScore.get(id) ?? fusedScore,
-          ...(reranked.scores.has(id) ? { rerankScore: reranked.scores.get(id)! } : {}),
-          ...(duplicateOf.has(id) ? { duplicateOf: duplicateOf.get(id)! } : {}),
-          ...(reservedIds.has(id) ? { reserve: true } : {}),
-        }))
-        .sort((a, b) => b.fusedScore - a.fusedScore),
+      ranked,
       lexicalBackend: words.ran ? lexicalBackendOf(store, lexical) : 'none',
       timings: { legsMs, fuseMs, dedupeMs },
       reserve: { fired: asked, ids: [...reservedIds] },
