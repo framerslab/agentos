@@ -52,7 +52,7 @@ const TagFixtureReportTag = z.strictObject({
  * - `id`: the file's name without `.json`, lower case words joined by hyphens, unique across the sets.
  * - `set`: the folder that holds the file.
  * - `kind`: the kind of item the text stands for.
- * - `language`: the language detector's ISO 639-1 code for the text (`en` for English).
+ * - `language`: the language detector's ISO 639-1 code for the text (`en` for English), or `und` where it has none.
  * - `title`, `headings`, `path`: what a host passes beside the text; `path` is null where the item has none.
  * - `text`: the text itself.
  * - `vocabulary`: the labels the person has used, with their counts; `typed` the labels they typed themselves.
@@ -65,7 +65,7 @@ export const TagFixture = z.strictObject({
   id: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
   set: z.enum(SET_NAMES),
   kind: z.enum(['document', 'session']),
-  language: z.string().regex(/^[a-z]{2}$/),
+  language: z.string().regex(/^(?:[a-z]{2}|und)$/),
   title: z.string(),
   headings: z.array(z.string()),
   path: z.string().min(1).nullable(),

@@ -87,6 +87,41 @@ describe('the tag suggestion fixture texts', () => {
     expect(loadTagFixtures('languages').filter((fixture) => fixture.expected.new.length > 0).map((f) => f.id)).toEqual([]);
   });
 
+  it('every expected tag is a key: the existing ones of its vocabulary, the new ones of no vocabulary label and no word it must not propose', () => {
+    const wrong = fixtures.flatMap((fixture) => {
+      const vocabulary = new Set(fixture.vocabulary.map((use) => tagKey(use.label)));
+      const refused = new Set(fixture.mustNot.map((word) => tagKey(word)));
+      const labels = new Set(fixture.vocabulary.map((use) => use.label));
+      return [
+        ...fixture.vocabulary.filter((use) => tagKey(use.label) === null).map((use) => `${fixture.id}: label ${use.label} has no key`),
+        ...[...fixture.expected.existing, ...fixture.expected.new].filter((key) => tagKey(key) !== key).map((key) => `${fixture.id}: ${key} is not a key`),
+        ...fixture.expected.existing.filter((key) => !vocabulary.has(key)).map((key) => `${fixture.id}: ${key} is not in its vocabulary`),
+        ...fixture.expected.new.filter((key) => vocabulary.has(key) || refused.has(key)).map((key) => `${fixture.id}: ${key} is not new`),
+        ...fixture.typed.filter((label) => !labels.has(label)).map((label) => `${fixture.id}: typed ${label} is not in its vocabulary`),
+      ];
+    });
+    expect(wrong).toEqual([]);
+    // Past the vocabulary's ceiling of 500 no new tag may be offered, and outside English none is.
+    const past = loadTagFixtures('plain').filter((fixture) => fixture.vocabulary.length > 500);
+    expect(past).toHaveLength(2);
+    expect(past.filter((fixture) => fixture.expected.new.length > 0).map((fixture) => fixture.id)).toEqual([]);
+    expect(fixtures.filter((f) => f.language !== 'en' && f.expected.new.length > 0).map((fixture) => fixture.id)).toEqual([]);
+  });
+
+  it('two sessions report a tag whose quote is not in the text, and every other quote of a report stands in its text', () => {
+    const sessions = loadTagFixtures('sessions');
+    expect(sessions.filter((fixture) => fixture.kind !== 'session' || fixture.report === undefined).map((f) => f.id)).toEqual([]);
+    const absent = sessions.filter((fixture) =>
+      (fixture.report ?? []).some((tag) => tag.quotes.some((quote) => !fold(fixture.text).includes(fold(quote)))),
+    );
+    expect(absent).toHaveLength(2);
+    const quotesAbsent = absent.flatMap((fixture) =>
+      (fixture.report ?? []).filter((tag) => tag.quotes.some((quote) => !fold(fixture.text).includes(fold(quote)))),
+    );
+    expect(quotesAbsent).toHaveLength(2);
+    expect(fixtures.filter((fixture) => fixture.set !== 'sessions' && fixture.report !== undefined).map((f) => f.id)).toEqual([]);
+  });
+
   it('makes a long text of the length asked from the plain set, with no two paragraphs the same', () => {
     const text = longFixture(50_000);
     expect(text).toHaveLength(50_000);
