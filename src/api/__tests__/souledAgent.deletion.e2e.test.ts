@@ -507,6 +507,20 @@ describe('forgetUser', () => {
     expect(forgetLearner).toHaveBeenCalledWith('alice');
   });
 
+  it('refuses an id no key can be built from before it deletes anything', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { a } = await open({ runtime: 'gmi', learning: true });
+    const forgetLearner = vi.spyOn(a.learning!, 'forgetUser');
+
+    await expect(a.forgetUser!('a\u0000b')).rejects.toThrow(TypeError);
+    await expect(a.forgetUser!('alice', { linkedSessions: ['s\uD800'] })).rejects.toThrow(TypeError);
+
+    // Neither the learning layer nor the store was reached, and no tombstone was written.
+    expect(forgetLearner).not.toHaveBeenCalled();
+    expect(lines('memory.forget_done')).toEqual([]);
+    expect(await a.memory!.isForgotten(alice)).toBe(false);
+  });
+
   it('names legacy memory it did not reach until the host deletes it', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const oldFile = path.join(dir, 'memory', 'concepts', 'old.md');
