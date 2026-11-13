@@ -10,6 +10,13 @@
  * playout, the receipt protocol of an AgentOS page, each chunk is announced to
  * the participant as an `audio` text message and counts as played only once
  * the participant answers with a playback receipt.
+ *
+ * A chunk of synthetic speech can carry a mark ({@link SpeechMark}, through
+ * the `mark` option): before the chunk's first frame is captured, the
+ * publisher sets the mark on the publishing participant's attributes
+ * ({@link LIVEKIT_SPEECH_MARK_ATTRIBUTES}), with the published track's SID,
+ * where anything that reads the room's state reads it. A chunk whose mark
+ * cannot be set is refused, and nothing of it plays.
  */
 
 import { inspectPcm16, type Pcm16View } from './audioFormat.js';
@@ -45,6 +52,8 @@ interface PublishedTrack {
 interface PublishingParticipant {
   publishTrack(track: LiveKitPublishingTrack, options: { source: number }): Promise<PublishedTrack>;
   unpublishTrack(sid: string, stopOnUnpublish?: boolean): Promise<void>;
+  /** As rtc-node's `LocalParticipant.setAttributes`: sets the keys given and leaves the participant's other attributes. */
+  setAttributes?(attributes: Record<string, string>): Promise<void>;
 }
 
 /**
@@ -88,6 +97,29 @@ export interface LiveKitPlayoutParticipant {
 export function isLiveKitSipParticipant(participant: LiveKitPlayoutParticipant | undefined): boolean {
   return participant?.kind === SIP_PARTICIPANT_KIND || typeof participant?.attributes?.['sip.callID'] === 'string';
 }
+
+/** A machine-readable mark for synthetic speech: who made it, with which model, when, and which clip it is. */
+export interface SpeechMark {
+  provider: string;
+  model: string;
+  /** When the clip was made, ISO 8601. */
+  madeAt: string;
+  clipId: string;
+}
+
+/**
+ * The participant attributes a marked chunk sets before its first frame is captured: `speech.ai_generated` is
+ * `'true'`, four carry the fields of the chunk's {@link SpeechMark}, and `speech.track_sid` is the SID of the track
+ * the speech plays on.
+ */
+export const LIVEKIT_SPEECH_MARK_ATTRIBUTES = {
+  aiGenerated: 'speech.ai_generated',
+  provider: 'speech.provider',
+  model: 'speech.model',
+  madeAt: 'speech.made_at',
+  clipId: 'speech.clip_id',
+  trackSid: 'speech.track_sid',
+} as const;
 
 /** Options of {@link LiveKitAudioPublisher}: the playout mode, the call identity, the track's rate and the bounds. */
 export interface LiveKitAudioPublisherOptions {
@@ -133,6 +165,18 @@ export interface LiveKitAudioPublisherOptions {
    * neither, the module is imported when the track is first published.
    */
   rtc?: unknown;
+  /**
+   * A chunk's mark, or undefined for a chunk that carries none. It is read once, as the chunk is handed to
+   * `sendAudio()`. Before a marked chunk's first frame is captured, and in participant playout before the chunk is
+   * announced, the publisher sets {@link LIVEKIT_SPEECH_MARK_ATTRIBUTES} on the publishing participant through its
+   * `setAttributes` (rtc-node's `LocalParticipant.setAttributes`), unless the clip id is the one it set last, so the
+   * chunks of one clip set them once. The send of a chunk whose mark cannot be set rejects with
+   * `publisher mark refused`, and nothing of that chunk is captured: a mark with an empty field or on a participant
+   * without `setAttributes` is refused before anything is published, and a `setAttributes` that rejects is refused
+   * with that rejection as the error's `cause`. A chunk without a mark plays as it does without this option and sets
+   * nothing, so the attributes stay as the last marked chunk set them.
+   */
+  mark?(chunk: EncodedAudioChunk): SpeechMark | undefined;
 }
 /** What a transport hands its publisher besides the host's options. */
 export interface LiveKitPublisherBinding {
@@ -265,6 +309,8 @@ export class LiveKitAudioPublisher {
   private watch?: { changed: Promise<void>; notify: () => void };
   /** Ends the wait for the first subscription, so that a close does not wait it out. */
   private stopWaiting?: () => void;
+  /** The clip id of the mark set last on the publishing participant; unset before the first and after a refusal. */
+  private marked?: string;
   /**
    * @param options - The host's options: the playout mode, the call identity, the track's rate and the bounds.
    * @param participant - The room's local participant, which publishes the track.
@@ -397,6 +443,37 @@ export class LiveKitAudioPublisher {
     if (pcm.durationMs > this.options.maxDurationMs || pcm.pcm.length + expected * 2 > this.options.maxBytes || chunk.audio.length > this.options.maxBytes + 4096) throw new Error('publisher decoded bound');
     return pcm;
   }
+  /**
+   * The mark a chunk carries, read as the chunk is handed over and before any native call, so a refused chunk
+   * publishes nothing. A mark that lacks a field is refused: LiveKit deletes an attribute set to the empty string, so
+   * the mark would be set in part. So is a mark on a participant that cannot set attributes.
+   *
+   * @returns A copy of the mark, which the host's later changes do not reach, or `undefined` for a chunk without one.
+   * @throws {Error} `publisher mark refused`.
+   */
+  private markOf(chunk: EncodedAudioChunk): SpeechMark | undefined {
+    const mark = this.options.mark?.(chunk);
+    if (!mark) return undefined;
+    const { provider, model, madeAt, clipId } = mark;
+    if (typeof this.participant.setAttributes !== 'function' || ![provider, model, madeAt, clipId].every((field) => typeof field === 'string' && field !== '')) throw new Error('publisher mark refused');
+    return { provider, model, madeAt, clipId };
+  }
+  /**
+   * Sets a clip's mark on the publishing participant, with the published track's SID, unless the mark set last is
+   * that clip's. The caller has published the track. A refusal leaves what the participant carries unknown, so the
+   * next marked chunk sets its mark whatever its clip.
+   *
+   * @throws {Error} `publisher mark refused` when `setAttributes` rejects or throws, with that failure as its `cause`.
+   */
+  private async setMark(mark: SpeechMark): Promise<void> {
+    if (this.marked === mark.clipId) return;
+    this.marked = undefined;
+    const keys = LIVEKIT_SPEECH_MARK_ATTRIBUTES;
+    try {
+      await this.participant.setAttributes!({ [keys.aiGenerated]: 'true', [keys.provider]: mark.provider, [keys.model]: mark.model, [keys.madeAt]: mark.madeAt, [keys.clipId]: mark.clipId, [keys.trackSid]: this.publication! });
+    } catch (cause) { throw Object.assign(new Error('publisher mark refused'), { cause }); }
+    this.marked = mark.clipId;
+  }
   /** Converts the samples to 16-bit integers once and, when the rates differ, resamples them once to the track's rate. */
   private convert(rtc: LiveKitPublishingRtc, pcm: Pcm16View): { frames: PublishedAudioFrame[]; publishedSamples: number } {
     const samples = new Int16Array(pcm.samples);
@@ -453,6 +530,11 @@ export class LiveKitAudioPublisher {
    * In participant playout the chunk must carry the publisher's scope, call and generation and a sequence, it is
    * announced to the participant first, and another chunk is refused until its playback wait has settled or a clear
    * has finished.
+   *
+   * With the `mark` option, a chunk's mark is read here, as the chunk is handed over, and set on the publishing
+   * participant before the chunk's first frame is captured, in participant playout before the chunk is announced; a
+   * chunk whose mark cannot be set is refused with `publisher mark refused` and nothing of it plays
+   * ({@link LiveKitAudioPublisherOptions.mark}).
    */
   async sendAudio(chunk: EncodedAudioChunk): Promise<void> {
     return this.fixMode() === 'native' ? this.sendNative(chunk) : this.sendForReceipt(chunk);
@@ -462,7 +544,7 @@ export class LiveKitAudioPublisher {
     const { scopeId, callId } = this.options; const call = chunk.generation ? this.options.generation?.() : undefined;
     // A scope, a call or a generation the chunk carries must be the publisher's, which a publisher without one lacks.
     if ((chunk.scopeId !== undefined && chunk.scopeId !== scopeId) || (chunk.callId !== undefined && chunk.callId !== callId) || (chunk.generation && (!call || !sameVoiceGeneration(chunk.generation, call))) || (chunk.sequence !== undefined && (!Number.isSafeInteger(chunk.sequence) || chunk.sequence < 1))) throw new Error('publisher scope or generation refused');
-    const pcm = this.decode(chunk);
+    const pcm = this.decode(chunk); const mark = this.markOf(chunk);
     const entry: NativeChunk = { playout: 'native', generation: chunk.generation ? { ...chunk.generation } : undefined, sequence: chunk.sequence ?? this.nextSequence++, playedSamples: pcm.samples, sampleRate: pcm.sampleRate, cancellation: this.cancellation, captured: Promise.resolve() };
     const previous = this.queued;
     this.waiting.add(entry);
@@ -471,11 +553,19 @@ export class LiveKitAudioPublisher {
         await previous;
         if (!this.current(entry.generation, entry.cancellation)) return;
         try { await this.prepare(); } catch (error) { if (!this.current(entry.generation, entry.cancellation)) return; throw error; }
-        const rtc = this.rtc!;
+        const rtc = this.rtc!; let unset = mark;
         for (const output of this.convert(rtc, pcm).frames) {
-          // A pause holds the track: no frame is captured until it is released.
-          while (this.hold) await this.hold.released;
-          if (!this.current(entry.generation, entry.cancellation)) return;
+          for (;;) {
+            // A pause holds the track: no frame is captured until it is released.
+            while (this.hold) await this.hold.released;
+            if (!this.current(entry.generation, entry.cancellation)) return;
+            if (!unset) break;
+            // The mark goes ahead of the chunk's first frame, once no pause holds the track. The chunk is whole until
+            // then, and a pause or a clear that comes while the mark is being set is read again before the frame. A
+            // mark refused after a clear or a close discarded the chunk refuses nothing.
+            try { await this.setMark(unset); } catch (error) { if (!this.current(entry.generation, entry.cancellation)) return; throw error; }
+            unset = undefined;
+          }
           const holds = this.holds; const stalls = this.stalls; entry.holds ??= holds;
           // The track takes the chunk from here: a pause from now on cuts into it.
           this.waiting.delete(entry);
@@ -495,7 +585,7 @@ export class LiveKitAudioPublisher {
   private async sendForReceipt(chunk: EncodedAudioChunk): Promise<void> {
     if (this.closed || this.sending || this.pending || this.clearWork) throw new Error('publisher outstanding or closed');
     if (chunk.scopeId !== this.options.scopeId || chunk.callId !== this.options.callId || !chunk.generation || !chunk.sequence || !this.current(chunk.generation, this.cancellation)) throw new Error('publisher scope or generation refused');
-    const pcm = this.decode(chunk);
+    const pcm = this.decode(chunk); const mark = this.markOf(chunk);
     const generation = { ...chunk.generation }; const captured = this.cancellation;
     const receipt: PlaybackReceipt = { generation, sequence: chunk.sequence, playedSamples: pcm.samples, sampleRate: pcm.sampleRate };
     const acks = this.acks; acks.begin(receipt);
@@ -503,6 +593,8 @@ export class LiveKitAudioPublisher {
     const work = (async () => {
       await this.prepare(); this.live(generation, captured); const rtc = this.rtc!;
       const { frames, publishedSamples } = this.convert(rtc, pcm);
+      // The mark goes ahead of the announcement, so a chunk whose mark is refused is neither announced nor captured.
+      if (mark) { await this.setMark(mark); this.live(generation, captured); }
       // The chunk is announced to the participant it was admitted for; once another is linked, the track alone plays it.
       if (acks === this.acks) await this.send({ type: 'audio', scopeId: this.options.scopeId, callId: this.options.callId, generation, sequence: receipt.sequence,
         publicationId: this.publication, encoding: 'pcm16le', channels: 1, samples: pcm.samples, sampleRate: pcm.sampleRate,

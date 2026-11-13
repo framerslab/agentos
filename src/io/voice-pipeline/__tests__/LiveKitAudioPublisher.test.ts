@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { LiveKitAudioPublisher, type LiveKitPublishingRtc, type PublishedAudioFrame } from '../LiveKitAudioPublisher.js';
 import type { LiveKitAudioPublisherOptions } from '../LiveKitAudioPublisher.js';
-// @ts-expect-error The mark is not built yet: the change that builds it takes this line away.
 import { LIVEKIT_SPEECH_MARK_ATTRIBUTES, type SpeechMark } from '../LiveKitAudioPublisher.js';
 import { LiveKitStreamTransport } from '../LiveKitStreamTransport.js';
 import type { AudioFrame, EncodedAudioChunk, VoiceGeneration } from '../types.js';
@@ -386,11 +385,14 @@ describe('the speech mark', () => {
    * (`published`), each `setAttributes` (`mark` and the clip's id), each announcement to the participant (`announced`)
    * and each frame handed to the track (`frame`). A chunk reaches the track as two frames: the resampler returns two.
    *
-   * @param options - Options over the bounds, the playout and the call identity among them.
-   * @param settable - Whether the participant has a `setAttributes`.
-   * @param markOf - The `mark` option; by default a chunk carries the mark `chunk()` was given for it.
+   * @param setup.options - Options over the bounds, the playout and the call identity among them.
+   * @param setup.settable - Whether the participant has a `setAttributes`.
+   * @param setup.markOf - The `mark` option; by default a chunk carries the mark `chunk()` was given for it.
+   * @param setup.shows - With it, the participant exposes its `attributes`, as rtc-node's local participant does:
+   *   `'late'` replaces them with what was set 30 ms after the call, as the room's change event does (`shown` in the
+   *   list), and `'never'` leaves them as they were, as when the server refused the set.
    */
-  function marking(options: Partial<LiveKitAudioPublisherOptions> = {}, settable = true, markOf?: (chunk: EncodedAudioChunk) => SpeechMark | undefined) {
+  function marking({ options = {}, settable = true, markOf, shows }: { options?: Partial<LiveKitAudioPublisherOptions>; settable?: boolean; markOf?: (chunk: EncodedAudioChunk) => SpeechMark | undefined; shows?: 'late' | 'never' } = {}) {
     const order: string[] = []; const messages: Record<string, unknown>[] = []; const marks = new WeakMap<EncodedAudioChunk, SpeechMark>();
     const base = fakePublishingRtc();
     const rtc: LiveKitPublishingRtc = { ...base, AudioSource: recordingSource(order),
@@ -403,10 +405,13 @@ describe('the speech mark', () => {
         flush(): PublishedAudioFrame[] { return []; }
         close(): void {}
       } };
-    const setAttributes = vi.fn(async (attributes: Record<string, string>): Promise<void> => { order.push(`mark ${attributes['speech.clip_id']}`); });
-    const participant = { publishTrack: vi.fn(async () => { order.push('published'); return { sid: 'TR_VOICE' }; }), unpublishTrack: vi.fn(async () => {}), ...(settable ? { setAttributes } : {}) };
+    const setAttributes = vi.fn(async (attributes: Record<string, string>): Promise<void> => {
+      order.push(`mark ${attributes['speech.clip_id']}`);
+      if (shows === 'late') setTimeout(() => { participant.attributes = { ...participant.attributes, ...attributes }; order.push('shown'); }, 30);
+    });
+    const participant: { publishTrack(): Promise<{ sid: string }>; unpublishTrack(): Promise<void>; setAttributes?: typeof setAttributes; attributes?: Record<string, string> } = {
+      publishTrack: vi.fn(async () => { order.push('published'); return { sid: 'TR_VOICE' }; }), unpublishTrack: vi.fn(async () => {}), ...(settable ? { setAttributes } : {}), ...(shows ? { attributes: {} } : {}) };
     const bounds: LiveKitAudioPublisherOptions = { sampleRate: 48000, maxBytes: 256000, maxDurationMs: 2000, receiptTimeoutMs: 1000, rtc,
-      // @ts-expect-error The mark is not built yet: the change that builds it takes this line away.
       mark: markOf ?? ((chunk: EncodedAudioChunk) => marks.get(chunk)) };
     const publisher = new LiveKitAudioPublisher({ ...bounds, ...options }, participant, async (message) => { order.push('announced'); messages.push(message); });
     /** A 20 ms chunk at 24,000 Hz, of the clip `mark` names when one is given, with the call identity `call` carries. */
@@ -424,7 +429,6 @@ describe('the speech mark', () => {
   it('names the six attributes of the mark, and both entries export them', async () => {
     expect(LIVEKIT_SPEECH_MARK_ATTRIBUTES).toEqual({ aiGenerated: 'speech.ai_generated', provider: 'speech.provider', model: 'speech.model', madeAt: 'speech.made_at', clipId: 'speech.clip_id', trackSid: 'speech.track_sid' });
     const hearing = await import('../../hearing/livekit.js'); const pipeline = await import('../index.js');
-    // @ts-expect-error The mark is not built yet: the change that builds it takes this line away.
     expect(hearing.LIVEKIT_SPEECH_MARK_ATTRIBUTES).toBe(LIVEKIT_SPEECH_MARK_ATTRIBUTES); expect(pipeline.LIVEKIT_SPEECH_MARK_ATTRIBUTES).toBe(LIVEKIT_SPEECH_MARK_ATTRIBUTES);
   });
   it("sets the mark on the publishing participant before a marked chunk's first frame, naming the published track", async () => {
@@ -452,7 +456,7 @@ describe('the speech mark', () => {
   });
   it('reads a chunk\'s mark as the chunk is handed over, so chunks queued one behind another keep their own', async () => {
     let current = clip('clip-a');
-    const f = marking({}, true, () => current);
+    const f = marking({ markOf: () => current });
     const first = f.publisher.sendAudio(f.chunk()); current = clip('clip-b'); const second = f.publisher.sendAudio(f.chunk());
     await Promise.all([first, second]);
     expect(f.order).toEqual(['published', 'mark clip-a', 'frame', 'frame', 'mark clip-b', 'frame', 'frame']);
@@ -473,7 +477,7 @@ describe('the speech mark', () => {
     await f.publisher.close();
   });
   it('refuses a marked chunk on a participant that cannot set attributes, before anything is published, and plays one without a mark', async () => {
-    const f = marking({}, false);
+    const f = marking({ settable: false });
     await expect(f.publisher.sendAudio(f.chunk(clip('clip-a')))).rejects.toThrow('publisher mark refused');
     expect(f.order).toEqual([]); expect(FakeAudioSource.created).toHaveLength(0);
     await f.publisher.sendAudio(f.chunk());
@@ -534,19 +538,58 @@ describe('the speech mark', () => {
     await f.publisher.close();
   });
   it('sets the mark before a chunk is announced to the participant, in participant playout', async () => {
-    const f = marking(page); const mark = clip('clip-a');
+    const f = marking({ options: page }); const mark = clip('clip-a');
     await f.publisher.sendAudio(f.chunk(mark, announced));
     expect(f.order).toEqual(['published', 'mark clip-a', 'announced', 'frame', 'frame']);
     expect(f.setAttributes).toHaveBeenCalledWith(attributesOf(mark)); expect(f.messages).toHaveLength(1);
     await f.publisher.close();
   });
   it('announces and captures nothing of a chunk whose mark the participant refuses, in participant playout', async () => {
-    const f = marking(page);
+    const f = marking({ options: page });
     f.setAttributes.mockRejectedValueOnce(new Error('participant disconnected'));
     await expect(f.publisher.sendAudio(f.chunk(clip('clip-a'), announced))).rejects.toThrow('publisher mark refused');
     expect(f.order).toEqual(['published']); expect(f.messages).toEqual([]); expect(f.source().capturedSamples).toBe(0);
     await f.publisher.close();
   });
+  it("waits for the participant's own attributes to show the mark, when the participant exposes them, before the first frame", async () => {
+    const f = marking({ shows: 'late' }); const mark = clip('clip-a');
+    await f.publisher.sendAudio(f.chunk(mark)); await f.publisher.sendAudio(f.chunk(mark));
+    expect(f.order).toEqual(['published', 'mark clip-a', 'shown', 'frame', 'frame', 'frame', 'frame']);
+    expect(f.participant.attributes).toEqual(attributesOf(mark)); expect(f.setAttributes).toHaveBeenCalledTimes(1);
+    await f.publisher.close();
+  });
+  it("refuses a marked chunk whose mark the participant's attributes never show, though the call resolved, and asks again for the next chunk", async () => {
+    const f = marking({ shows: 'never', options: { receiptTimeoutMs: 60 } }); const mark = clip('clip-a');
+    await expect(f.publisher.sendAudio(f.chunk(mark))).rejects.toThrow('publisher mark refused');
+    expect(f.order).toEqual(['published', 'mark clip-a']); expect(f.source().capturedSamples).toBe(0);
+    await expect(f.publisher.sendAudio(f.chunk(mark))).rejects.toThrow('publisher mark refused');
+    expect(f.setAttributes).toHaveBeenCalledTimes(2); expect(f.source().capturedSamples).toBe(0);
+    await f.publisher.close();
+  });
+  it("ends the wait for the participant's attributes at a clear, well before its deadline, and captures nothing of the chunk", async () => {
+    const f = marking({ shows: 'never', options: { receiptTimeoutMs: 30000 } }); await f.publisher.ready();
+    const sent = f.publisher.sendAudio(f.chunk(clip('clip-a'))); await settle();
+    expect(f.setAttributes).toHaveBeenCalledTimes(1);
+    const began = Date.now(); await f.publisher.clearPlayback();
+    await expect(sent).resolves.toBeUndefined(); expect(Date.now() - began).toBeLessThan(5000);
+    expect(f.order).toEqual(['published', 'mark clip-a']); expect(f.source().capturedSamples).toBe(0);
+    await f.publisher.close();
+  });
+  it('refuses a marked chunk whose setAttributes call does not answer within receiptTimeoutMs, and captures none of it', async () => {
+    const f = marking({ options: { receiptTimeoutMs: 60 } });
+    f.setAttributes.mockImplementationOnce(() => new Promise<void>(() => {}));
+    await expect(f.publisher.sendAudio(f.chunk(clip('clip-a')))).rejects.toThrow('publisher mark refused');
+    expect(f.order).toEqual(['published']); expect(f.source().capturedSamples).toBe(0);
+    await f.publisher.close();
+  }, 5000);
+  it("ends the wait for the participant's attributes at a close in participant playout: the send is cancelled and nothing is announced", async () => {
+    const f = marking({ shows: 'never', options: { ...page, receiptTimeoutMs: 30000 } }); await f.publisher.ready();
+    const sent = f.publisher.sendAudio(f.chunk(clip('clip-a'), announced)); await settle();
+    expect(f.setAttributes).toHaveBeenCalledTimes(1);
+    const cancelled = expect(sent).rejects.toThrow('publisher cancelled');
+    await f.publisher.close(); await cancelled;
+    expect(f.order).toEqual(['published', 'mark clip-a']); expect(f.messages).toEqual([]); expect(f.source().capturedSamples).toBe(0);
+  }, 5000);
   it("sets the mark on the room's local participant when a transport is given the option for its publisher", async () => {
     const room = new FakeRoom(); room.addParticipant('participant-a', new FakePublication(new FakeTrack('microphone')));
     const order: string[] = []; const mark = clip('clip-a');
@@ -554,7 +597,6 @@ describe('the speech mark', () => {
     Object.assign(room.localParticipant, { setAttributes });
     const transport = new LiveKitStreamTransport({ room, participantIdentity: 'participant-a', sampleRate: 16000, rtc: fakeRtc(),
       publisher: { sampleRate: 48000, maxBytes: 256000, maxDurationMs: 2000, receiptTimeoutMs: 1000, rtc: { ...fakePublishingRtc(), AudioSource: recordingSource(order) },
-        // @ts-expect-error The mark is not built yet: the change that builds it takes this line away.
         mark: () => mark } });
     await transport.sendAudio({ audio: Buffer.alloc(1920), format: 'pcm', container: 'raw', sampleRate: 48000, durationMs: 20, text: '' });
     expect(order).toEqual(['mark clip-a', 'frame']);
