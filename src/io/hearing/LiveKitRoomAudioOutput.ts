@@ -21,7 +21,11 @@
  *   with the code {@link ROOM_AUDIO_NO_SUBSCRIBER}, before any frame.
  * - {@link LiveKitRoomAudioOutput.clear}, an aborted signal and
  *   {@link LiveKitRoomAudioOutput.close} empty the track's queue and reject the
- *   play under way.
+ *   play under way. The next play hands the track nothing until that clear has
+ *   finished, so nothing of a clip stopped meanwhile reaches the track.
+ * - A capture the publisher gives up on retires the track: the output closes,
+ *   and the play under way and every later call reject with
+ *   `room audio output stalled`.
  *
  * Node only: it runs on the optional peer `@livekit/rtc-node`, loaded when the
  * track is first published, or passed in by the host.
@@ -191,7 +195,14 @@ export class LiveKitRoomAudioOutput {
   /** Settles `true` once a participant has subscribed to the published track; `false` when it cannot tell. Unset before the track is published. */
   private subscribed?: Promise<boolean>;
   private run?: Run;
+  /**
+   * The last clear asked of the publisher, until it settles. A play hands the track nothing before it has: the
+   * publisher shares a clear under way with a clear asked meanwhile, which would not cancel a chunk admitted behind it.
+   */
+  private clearing?: Promise<void>;
   private closed = false;
+  /** What a call on the closed output rejects with: closed by the host, or retired by a stalled capture. */
+  private closedMessage = 'room audio output closed';
   /** Rejects once the output is closed, so a wait for a subscriber ends then. */
   private readonly ended: Run = startRun();
 
@@ -233,7 +244,14 @@ export class LiveKitRoomAudioOutput {
       async () => {
         throw new Error('room audio output sends no message');
       },
-      { rtc: options.rtc }
+      {
+        rtc: options.rtc,
+        // A capture that never returned leaves the track unable to take audio, and its late return would clear the
+        // queue under a later clip: the output closes, as a transport closes its path.
+        stalled: () => {
+          void this.shut('room audio output stalled').catch(() => {});
+        },
+      }
     );
   }
 
@@ -249,18 +267,19 @@ export class LiveKitRoomAudioOutput {
    *
    * @throws {Error} With the code {@link ROOM_AUDIO_NO_SUBSCRIBER} when nobody subscribed within `receiptTimeoutMs`,
    *   or with a publication the output cannot ask (one without `waitForSubscription()`, or whose wait fails); the
-   *   track stays published. `room audio output closed` once closed. The publisher's error when the track cannot be
-   *   published, which every later call gives too.
+   *   track stays published. `room audio output closed` once closed, `room audio output stalled` once a capture
+   *   stalled. The publisher's error when the track cannot be published, which every later call gives too.
    */
   async open(): Promise<void> {
-    if (this.closed) throw failure('room audio output closed');
+    if (this.closed) throw failure(this.closedMessage);
     await this.listener(Date.now());
   }
 
   /**
    * Plays one whole clip: cut into chunks of at most `maxDurationMs` ({@link pcmChunks}), handed to the track in
    * order, each carrying the clip's mark when it has one (set once, before the clip's first frame), and resolved once
-   * the track has played the last one out. One play runs at a time.
+   * the track has played the last one out. One play runs at a time, and it hands the track nothing until a clear
+   * asked before it has finished.
    *
    * @param clip - PCM16 mono at its own rate, from 8000 to 192000 Hz; another rate than the track's is resampled
    *   chunk by chunk.
@@ -268,14 +287,15 @@ export class LiveKitRoomAudioOutput {
    * @returns The clip's length in whole milliseconds.
    * @throws {RangeError} When the clip is not whole PCM16 at a rate from 8000 to 192000 Hz, before anything is
    *   published.
-   * @throws {Error} `room audio busy` while another play runs; `room audio output closed` once closed; with the code
+   * @throws {Error} `room audio busy` while another play runs; `room audio output closed` once closed, and
+   *   `room audio output stalled` once a capture stalled, the play under way included; with the code
    *   {@link ROOM_AUDIO_NO_SUBSCRIBER} when nobody subscribed within `receiptTimeoutMs`, before any frame;
    *   `room audio cleared` after {@link clear}; `room audio aborted`, with the signal's reason as its `cause`; and the
-   *   publisher's own errors (`publisher capture stalled`, `publisher drain timeout`, `publisher mark refused`, a
-   *   bound), after which what the track holds of the clip is cleared.
+   *   publisher's own errors (`publisher drain timeout`, `publisher mark refused`, a bound), after which what the
+   *   track holds of the clip is cleared.
    */
   async play(clip: RoomAudioClip, signal?: AbortSignal): Promise<RoomAudioPlayed> {
-    if (this.closed) throw failure('room audio output closed');
+    if (this.closed) throw failure(this.closedMessage);
     if (this.run) throw failure('room audio busy');
     const { audio, sampleRate, mark } = clip;
     if (!Buffer.isBuffer(audio) || audio.length === 0 || audio.length % 2 !== 0 || !Number.isSafeInteger(sampleRate) || sampleRate < MIN_CLIP_RATE || sampleRate > MAX_CLIP_RATE) {
@@ -287,7 +307,7 @@ export class LiveKitRoomAudioOutput {
     const abort = (): void => {
       if (this.run !== run || run.error) return;
       run.stop(failure('room audio aborted', { cause: signal?.reason }));
-      void this.publisher.clearPlayback().catch(() => {});
+      void this.clearTrack().catch(() => {});
     };
     signal?.addEventListener('abort', abort, { once: true });
     // Ends the publisher's playout wait once the play has settled, whichever way.
@@ -296,6 +316,8 @@ export class LiveKitRoomAudioOutput {
     let handed = false;
     try {
       await this.within(run, this.listener(Date.now()));
+      // A clear asked before this play, of the clip before it, finishes first.
+      while (this.clearing) await this.within(run, this.clearing);
       for (const pcm of pcmChunks(audio, sampleRate, this.options.publisher.maxDurationMs)) {
         const chunk: EncodedAudioChunk = {
           audio: wavChunk(pcm, sampleRate),
@@ -314,7 +336,7 @@ export class LiveKitRoomAudioOutput {
     } catch (error) {
       if (run.error) throw run.error;
       // A play that failed part way leaves nothing of its clip on the track.
-      if (handed && !this.closed) void this.publisher.clearPlayback().catch(() => {});
+      if (handed && !this.closed) void this.clearTrack().catch(() => {});
       throw error;
     } finally {
       done.abort();
@@ -330,7 +352,7 @@ export class LiveKitRoomAudioOutput {
   clear(): Promise<void> {
     if (this.closed) return Promise.resolve();
     this.run?.stop(failure('room audio cleared'));
-    return this.publisher.clearPlayback();
+    return this.clearTrack();
   }
 
   /**
@@ -338,13 +360,36 @@ export class LiveKitRoomAudioOutput {
    * track and closes it and its native source (the publisher's `close()`). Later calls share that work.
    */
   close(): Promise<void> {
+    return this.shut('room audio output closed');
+  }
+
+  /**
+   * Closes the output once, with `message` for the play under way, every wait for a subscriber and every later call,
+   * then closes the publisher.
+   */
+  private shut(message: string): Promise<void> {
     if (!this.closed) {
       this.closed = true;
-      const closed = failure('room audio output closed');
+      this.closedMessage = message;
+      const closed = failure(message);
       this.run?.stop(closed);
       this.ended.stop(closed);
     }
     return this.publisher.close();
+  }
+
+  /** Asks the publisher to clear the track, and keeps the clear until it settles ({@link clearing}). */
+  private clearTrack(): Promise<void> {
+    const work = this.publisher.clearPlayback();
+    const settled = work.then(
+      () => {},
+      () => {}
+    );
+    this.clearing = settled;
+    void settled.then(() => {
+      if (this.clearing === settled) this.clearing = undefined;
+    });
+    return work;
   }
 
   /** Waits for `work` while the play runs; a clear, an abort or a close rejects the wait at once. */
