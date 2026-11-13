@@ -633,9 +633,10 @@ export function guardedStreamText(opts: GenerateTextOptions, inner: (opts: Gener
       const message = finish === undefined ? await source.refusal : undefined;
       if (message) {
         const judged = await run.judgeReply(message);
+        // a caller's abort while the guards judged the message ends the stream with the reason, whatever they
+        // decided, as generateText() rejects with it: the message is never delivered after the abort
+        opts.abortSignal?.throwIfAborted();
         if (judged.end.kind === 'stopped') {
-          // a caller's abort while the guards judged a message they refused ends the stream with the reason
-          opts.abortSignal?.throwIfAborted();
           finish = 'error';
           yield { type: 'error', error: run.stop('output', judged.end.decided, await source.usage) };
         } else {
