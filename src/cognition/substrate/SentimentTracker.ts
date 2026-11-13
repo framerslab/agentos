@@ -56,6 +56,22 @@ type StandingHistory = { history: SentimentHistoryState | undefined; writer?: ob
 const DROPPED_TURNS_KEPT = 64;
 
 /**
+ * The consecutive counter a sentiment score moves: frustration below the frustration threshold, satisfaction above
+ * the satisfaction threshold, confusion between them.
+ *
+ * @param score - The turn's sentiment score.
+ * @param config - The persona's sentiment settings.
+ */
+function counterMovedBy(
+  score: number,
+  config: IPersonaDefinition['sentimentTracking'],
+): 'frustration' | 'satisfaction' | 'confusion' {
+  if (score < (config?.frustrationThreshold ?? -0.3)) return 'frustration';
+  if (score > (config?.satisfactionThreshold ?? 0.3)) return 'satisfaction';
+  return 'confusion';
+}
+
+/**
  * Tracks user sentiment, detects emotional patterns, and emits GMI events.
  *
  * The tracker maintains two data structures:
@@ -272,14 +288,13 @@ export class SentimentTracker {
       }
 
       // Update consecutive counters based on configurable thresholds
-      const frustrationThreshold = stConfig?.frustrationThreshold ?? -0.3;
-      const satisfactionThreshold = stConfig?.satisfactionThreshold ?? 0.3;
+      const counter = counterMovedBy(sentimentResult.score, stConfig);
 
-      if (sentimentResult.score < frustrationThreshold) {
+      if (counter === 'frustration') {
         sentimentHistory.consecutiveFrustration++;
         sentimentHistory.consecutiveConfusion = 0;
         sentimentHistory.consecutiveSatisfaction = 0;
-      } else if (sentimentResult.score > satisfactionThreshold) {
+      } else if (counter === 'satisfaction') {
         sentimentHistory.consecutiveSatisfaction++;
         sentimentHistory.consecutiveFrustration = 0;
         sentimentHistory.consecutiveConfusion = 0;
@@ -302,10 +317,10 @@ export class SentimentTracker {
         await this.afterDroppedWrite(() => this.setUserContext(this.getUserContext()));
         return;
       }
-      // The history read may hold a dropped turn's write that its take-back has not replaced yet: its trend stays out.
-      // A turn analysed again keeps its new trend.
+      // The history read may hold a dropped turn's write that its take-back has not replaced yet: its trend stays out,
+      // and its counters with it. A turn analysed again keeps its new trend.
       this.droppedTurns.delete(turnId);
-      sentimentHistory.trends = this.withoutDroppedTrends(sentimentHistory.trends);
+      sentimentHistory = this.withoutDroppedTurns(sentimentHistory, stConfig);
       const writer = {};
       const before = this.standing;
       this.standing = { history: sentimentHistory, writer };
@@ -394,11 +409,11 @@ export class SentimentTracker {
     const base = latest && latest.writer !== writer ? latest.history : before ? before.history : read;
     const forgets = this.forgets;
     const scrub = forgets !== forgetsAtRead;
-    const restored = base && {
+    const restored = base && this.withoutDroppedTurns({
       ...base,
-      trends: this.withoutDroppedTrends(base.trends)
+      trends: base.trends
         .map((trend) => (!scrub || !trend.context || this.holdsTurn(trend.turnId) ? trend : { ...trend, context: '' })),
-    };
+    });
     this.standing = { history: restored };
     if (restored) await this.workingMemory.set('gmi_sentiment_history', restored);
     else await this.workingMemory.delete('gmi_sentiment_history');
@@ -430,22 +445,43 @@ export class SentimentTracker {
     if (!history?.trends?.some((trend) => this.droppedTurns.has(trend.turnId) || (trend.context && !keeps(trend.turnId)))) {
       return;
     }
-    const scrubbed = {
+    const scrubbed = this.withoutDroppedTurns({
       ...history,
-      trends: this.withoutDroppedTrends(history.trends)
-        .map((trend) => (keeps(trend.turnId) ? trend : { ...trend, context: '' })),
-    };
+      trends: history.trends.map((trend) => (keeps(trend.turnId) ? trend : { ...trend, context: '' })),
+    });
     this.standing = { history: scrubbed };
     await this.workingMemory.set('gmi_sentiment_history', scrubbed);
   }
 
   /**
-   * `trends` without those of the turns whose history writes were taken back.
+   * `history` without the trends of the turns whose history writes were taken back. When it leaves one out, the
+   * consecutive counters and `lastAnalyzedTurnId` are counted again from the trends that stay, so a taken-back turn
+   * moves no counter. That count reaches back no further than the trends the history window keeps.
    *
-   * @param trends - The trends a history write is about to hold.
+   * @param history - The history a write is about to hold.
+   * @param config - The sentiment settings whose thresholds count the trends.
    */
-  private withoutDroppedTrends(trends: SentimentHistoryState['trends']): SentimentHistoryState['trends'] {
-    return this.droppedTurns.size === 0 ? trends : trends.filter((trend) => !this.droppedTurns.has(trend.turnId));
+  private withoutDroppedTurns(
+    history: SentimentHistoryState,
+    config: IPersonaDefinition['sentimentTracking'] = this.getPersona().sentimentTracking,
+  ): SentimentHistoryState {
+    const trends = history.trends.filter((trend) => !this.droppedTurns.has(trend.turnId));
+    if (trends.length === history.trends.length) return history;
+    const { lastAnalyzedTurnId: _replaced, ...kept } = history;
+    const last = trends[trends.length - 1];
+    const counter = last && counterMovedBy(last.score, config);
+    let run = 0;
+    while (counter && run < trends.length && counterMovedBy(trends[trends.length - 1 - run].score, config) === counter) {
+      run += 1;
+    }
+    return {
+      ...kept,
+      trends,
+      consecutiveFrustration: counter === 'frustration' ? run : 0,
+      consecutiveConfusion: counter === 'confusion' ? run : 0,
+      consecutiveSatisfaction: counter === 'satisfaction' ? run : 0,
+      ...(last ? { lastAnalyzedTurnId: last.turnId } : {}),
+    };
   }
 
   /**
