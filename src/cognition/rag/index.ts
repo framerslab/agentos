@@ -104,6 +104,12 @@ export type {
   MetadataValue,
   MetadataFieldCondition,
   MetadataScalarValue,
+  LexicalGroupItem,
+  LexicalGroupKey,
+  LexicalGroupRow,
+  LexicalGroupSearchOptions,
+  LexicalGroupSearchResult,
+  LexicalMatchKind,
 } from '../../core/vector-store/IVectorStore.js';
 
 export type {
