@@ -306,6 +306,42 @@ describe('rerank in a turn', () => {
     await judged.close();
   });
 
+  it("under hybrid a supplied candidate's score, on the caller's own scale, does not shrink the recalled candidates' share of the blend", async () => {
+    // A supplied score of 0.5 is thirty times the best fused score. Read as the cut's best, it would leave each recalled
+    // candidate about a fiftieth of the 0.7 term, and the reranker alone would order them.
+    const supplied = [{ id: 'acct', text: 'The account is on the Team plan.', scope: { scope: 'user', scopeId: 'u1' }, score: 0.5 }];
+    let favourite = '';
+    const plain = await memoryWith({ retrieval: 'hybrid' }, new FlatEmbedder());
+    const judged = await memoryWith({ retrieval: 'hybrid', rerank: { kind: 'llm', invoke: judgeFirst(() => favourite), model: 'judge-model' } }, new FlatEmbedder());
+    for (const mem of [plain, judged]) for (let i = 0; i < 65; i++) await plant(mem, `n${i}`, `Garden note ${i}: the tomatoes on row ${i} were watered.`, at(i));
+
+    const a = await plain.manager.retrieve('What is the bike shed code?', NEUTRAL, { scopes: U1, supplied } as never);
+    const plainCut = a.retrieved.map((t: ScoredMemoryTrace) => t.id);
+    expect(plainCut[0]).toBe('acct');
+    expect(plainCut.length).toBe(20);
+    // The judge's favourite is the last recalled candidate of the cut.
+    favourite = plainCut.at(-1)!;
+    const run = await judged.manager.retrieve('What is the bike shed code?', NEUTRAL, { scopes: U1, supplied } as never);
+    const ranked = run.diagnostics.recall!.ranked!;
+    const rerankScores = run.diagnostics.recall!.rerankScores!;
+    const cut = run.retrieved.map((t: ScoredMemoryTrace) => t.id);
+    expect([...cut].sort()).toEqual([...plainCut].sort());
+    expect(Object.keys(rerankScores).sort()).toEqual([...cut].sort());
+
+    // Each candidate's share is its fused score over the best fused score of the cut's recalled candidates, at most 1.
+    const entry = new Map(ranked.map((c) => [c.id, c]));
+    const best = Math.max(...cut.filter((id) => entry.get(id)!.ranks.supplied === undefined).map((id) => entry.get(id)!.fusedScore));
+    expect(entry.get('acct')!.fusedScore).toBe(0.5);
+    expect(best).toBeLessThan(0.02);
+    const blend = (id: string) => 0.7 * Math.min(1, entry.get(id)!.fusedScore / best) + 0.3 * rerankScores[id];
+    expect(cut).toEqual([...cut].sort((x, y) => blend(y) - blend(x)));
+    // The favourite moved up, and not past the recalled candidate the fused order ranks first.
+    expect(cut.indexOf(favourite)).toBeLessThan(plainCut.indexOf(favourite));
+    expect(cut.indexOf(favourite)).toBeGreaterThan(cut.indexOf(plainCut[1]));
+    await plain.close();
+    await judged.close();
+  });
+
   it('with the capture off a rerank still orders the recall, and the retrieval carries no rerank record', async () => {
     let favourite = '';
     const recorded = await memoryWith({ rerank: { kind: 'llm', invoke: judgeFirst(() => favourite), model: 'judge-model' } }, new WordHashEmbedder());
