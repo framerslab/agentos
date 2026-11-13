@@ -144,3 +144,47 @@ describe('LlmJudgeReranker through RerankerService', () => {
     expect(ids(results)).toEqual(['doc-1', 'doc-0']);
   }, 2000);
 });
+
+describe('LlmJudgeReranker substitution metrics', () => {
+  const metricsOf = async (llmCallFn: (system: string, user: string) => Promise<string>, n: number) =>
+    (await new LlmJudgeReranker({ llmCallFn }).rerank(makeInput(n), { providerId: 'llm-judge', modelId: '' })).diagnostics?.providerMetrics;
+
+  it('a scoring call that rejects for one batch of ten reports scoringFailures 10 and listwiseFailed false', async () => {
+    let scoringCalls = 0;
+    const metrics = await metricsOf(async (system, user) => {
+      if (system.includes('relevance scorer')) {
+        scoringCalls += 1;
+        if (scoringCalls === 2) throw new Error('provider down');
+        return JSON.stringify((user.match(/^\[\d+\]/gm) ?? []).map(() => 5));
+      }
+      return '[]';
+    }, 20);
+    expect(metrics).toMatchObject({ scoringFailures: 10, listwiseFailed: false });
+  });
+
+  it('a scoring answer that is not a JSON array counts its batch as substituted', async () => {
+    const metrics = await metricsOf(async (system) => (system.includes('relevance scorer') ? 'not json' : '[]'), 4);
+    expect(metrics).toMatchObject({ scoringFailures: 4, listwiseFailed: false });
+  });
+
+  it('a score that is missing or not a number counts its document as substituted', async () => {
+    const metrics = await metricsOf(async (system) => (system.includes('relevance scorer') ? '[7, "high"]' : '[]'), 3);
+    expect(metrics).toMatchObject({ scoringFailures: 2, listwiseFailed: false });
+  });
+
+  it('a ranking call that rejects reports listwiseFailed true', async () => {
+    const metrics = await metricsOf(async (system, user) => {
+      if (system.includes('relevance scorer')) return JSON.stringify((user.match(/^\[\d+\]/gm) ?? []).map(() => 5));
+      throw new Error('provider down');
+    }, 3);
+    expect(metrics).toMatchObject({ scoringFailures: 0, listwiseFailed: true });
+  });
+
+  it('a clean run reports scoringFailures 0 and listwiseFailed false', async () => {
+    const metrics = await metricsOf(async (system, user) => {
+      if (system.includes('relevance scorer')) return JSON.stringify((user.match(/^\[\d+\]/gm) ?? []).map(() => 5));
+      return '["doc-2", "doc-0"]';
+    }, 3);
+    expect(metrics).toEqual({ scoringFailures: 0, listwiseFailed: false });
+  });
+});

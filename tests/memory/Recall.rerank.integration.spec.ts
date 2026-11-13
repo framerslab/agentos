@@ -184,16 +184,20 @@ describe('RecallReranker', () => {
   });
 });
 
-/** A judge whose scores and ranking put the trace named `first` first, the others in the order they were sent. */
-function judgeFirst(first: string, seen: string[] = []) {
+/**
+ * A judge whose scores and ranking put one trace first, the others in the order they were sent. `first` names it by its
+ * id (`t7`, `n40`: the number in its text), read at each call, so a case can pick it after a run with no rerank.
+ */
+function judgeFirst(first: string | (() => string), seen: string[] = []) {
+  const favourite = () => (typeof first === 'function' ? first() : first);
   return async (system: string, user: string): Promise<string> => {
     seen.push(user);
     if (system.includes('relevance scorer')) {
       const lines = user.split('\n').filter((line) => /^\[\d+\]/.test(line));
-      return JSON.stringify(lines.map((line) => (line.includes(`note ${first.slice(1)}:`) ? 10 : 1)));
+      return JSON.stringify(lines.map((line) => (line.includes(`note ${favourite().slice(1)}:`) ? 10 : 1)));
     }
     const ids = [...user.matchAll(/^\[([^\]]+)\]/gm)].map((m) => m[1]);
-    return JSON.stringify([...ids.filter((id) => id === first), ...ids.filter((id) => id !== first)]);
+    return JSON.stringify([...ids.filter((id) => id === favourite()), ...ids.filter((id) => id !== favourite())]);
   };
 }
 
@@ -223,56 +227,101 @@ describe('rerank in a turn', () => {
   });
 
   it('under dense a rerank that answers blends each recalled score with its rerank score at 0.7 and 0.3, and orders the recall by the blend', async () => {
+    // The judge's favourite is the trace the plain recall ranks last, named once that recall has run.
+    let favourite = '';
     const plain = await memoryWith({ retrieval: 'dense' }, new WordHashEmbedder());
-    const judged = await memoryWith({ retrieval: 'dense', rerank: { kind: 'llm', invoke: judgeFirst('t7'), model: 'judge-model' } }, new WordHashEmbedder());
+    const judged = await memoryWith({ retrieval: 'dense', rerank: { kind: 'llm', invoke: judgeFirst(() => favourite), model: 'judge-model' } }, new WordHashEmbedder());
     for (const mem of [plain, judged]) for (let i = 0; i < 8; i++) await plant(mem, `t${i}`, NOTE(i), at(i));
     const a = await plain.manager.retrieve('which switchback had the best view', NEUTRAL, { scopes: U1 });
+    expect(a.retrieved.length).toBeGreaterThan(2);
+    favourite = a.retrieved.at(-1)!.id;
     const b = await judged.manager.retrieve('which switchback had the best view', NEUTRAL, { scopes: U1 });
     expect(b.diagnostics.reranker).toMatchObject({ provider: 'llm', model: 'judge-model', candidates: a.retrieved.length });
     const rerankScores = b.diagnostics.recall!.rerankScores!;
     const before = new Map(a.retrieved.map((t) => [t.id, t.retrievalScore]));
     expect(Object.keys(rerankScores).sort()).toEqual([...before.keys()].sort());
+    expect(rerankScores[favourite]).toBe(1);
     for (const trace of b.retrieved) {
       expect(trace.retrievalScore).toBeCloseTo(0.7 * before.get(trace.id)! + 0.3 * rerankScores[trace.id], 9);
     }
     const scores = b.retrieved.map((t) => t.retrievalScore);
     expect(scores).toEqual([...scores].sort((x, y) => y - x));
-    expect(b.retrieved[0].id).toBe('t7');
+    // The favourite, last without the rerank, moved up.
+    const place = (list: ScoredMemoryTrace[]) => list.findIndex((t) => t.id === favourite);
+    expect(place(b.retrieved)).toBeLessThan(place(a.retrieved));
+    // The dense ranks are the dense leg's, as without the rerank.
+    expect(b.diagnostics.recall!.denseRanks).toEqual(a.diagnostics.recall!.denseRanks);
     const context = await judged.manager.assembleForPrompt('which switchback had the best view', 1600, NEUTRAL, { scopes: U1 });
     expect(context.capture!.reranker).toMatchObject({ provider: 'llm', model: 'judge-model' });
     expect(context.capture!.candidates.filter((c) => c.ranks.dense !== undefined).every((c) => typeof c.rerankScore === 'number')).toBe(true);
+    expect(context.capture!.timings.rerankMs).toBeGreaterThanOrEqual(0);
     await plain.close();
     await judged.close();
   });
 
-  it('under hybrid a rerank that answers orders the cut by 0.7 x fused / best fused + 0.3 x rerank score, keeps each fused score, and puts a reserved line after it unscored', async () => {
+  it('under hybrid a rerank that answers orders the cut by 0.7 x fused / best fused + 0.3 x rerank score, keeps each fused score and relevance, and puts a reserved line after it unscored', async () => {
     // A flat embedder: the dense leg cannot tell the notes apart, so the oldest, which holds the answer, is outside the
     // dense leg's sixty and only its words find it; on a memory question it is reserved past the cut.
-    const mem = await memoryWith({ retrieval: 'hybrid', rerank: { kind: 'llm', invoke: judgeFirst('n40'), model: 'judge-model' } }, new FlatEmbedder());
-    await plant(mem, 'gold', 'The bike shed code is XQ7Z, set in March.', at(0));
-    for (let i = 0; i < 65; i++) await plant(mem, `n${i}`, `Garden note ${i}: the tomatoes on row ${i} were watered.`, at(i + 1));
+    let favourite = '';
+    const plain = await memoryWith({ retrieval: 'hybrid' }, new FlatEmbedder());
+    const judged = await memoryWith({ retrieval: 'hybrid', rerank: { kind: 'llm', invoke: judgeFirst(() => favourite), model: 'judge-model' } }, new FlatEmbedder());
+    for (const mem of [plain, judged]) {
+      await plant(mem, 'gold', 'The bike shed code is XQ7Z, set in March.', at(0));
+      for (let i = 0; i < 65; i++) await plant(mem, `n${i}`, `Garden note ${i}: the tomatoes on row ${i} were watered.`, at(i + 1));
+    }
 
-    const run = await mem.manager.retrieve('What is the bike shed code?', NEUTRAL, { scopes: U1 });
+    const a = await plain.manager.retrieve('What is the bike shed code?', NEUTRAL, { scopes: U1 });
+    const plainCut = a.retrieved.map((t: ScoredMemoryTrace) => t.id);
+    expect(plainCut.length).toBe(20);
+    // The judge's favourite is the last candidate of the cut.
+    favourite = plainCut.at(-1)!;
+    const run = await judged.manager.retrieve('What is the bike shed code?', NEUTRAL, { scopes: U1 });
     const ranked = run.diagnostics.recall!.ranked!;
     const rerankScores = run.diagnostics.recall!.rerankScores!;
     const cut = run.retrieved.map((t: ScoredMemoryTrace) => t.id);
+    // The same candidates as without the rerank, in another order.
+    expect([...cut].sort()).toEqual([...plainCut].sort());
+    expect(cut).not.toEqual(plainCut);
+    expect(Object.keys(rerankScores).sort()).toEqual([...cut].sort());
+    expect(Object.keys(rerankScores).length).toBe(RERANK_DEFAULTS.maxCandidates);
     const fused = new Map(ranked.map((c) => [c.id, c.fusedScore]));
     const best = Math.max(...cut.map((id) => fused.get(id)!));
     const blend = (id: string) => 0.7 * (fused.get(id)! / best) + 0.3 * rerankScores[id];
-    expect(Object.keys(rerankScores).length).toBe(Math.min(cut.length, RERANK_DEFAULTS.maxCandidates));
-    const scoredIds = cut.filter((id) => rerankScores[id] !== undefined);
-    expect(scoredIds).toEqual([...scoredIds].sort((x, y) => blend(y) - blend(x)));
-    expect(cut[0]).toBe('n40');
-    // The fused scores stand: the pool's order by fused score is unchanged, and each ranked entry carries its rerank score.
-    const fusedOrder = ranked.map((c) => c.fusedScore);
-    expect(fusedOrder).toEqual([...fusedOrder].sort((x, y) => y - x));
-    for (const id of scoredIds) expect(ranked.find((c) => c.id === id)!.rerankScore).toBe(rerankScores[id]);
+    expect(cut).toEqual([...cut].sort((x, y) => blend(y) - blend(x)));
+    expect(cut.indexOf(favourite)).toBeLessThan(plainCut.indexOf(favourite));
+    // The fused scores stand: the pool's order and scores are those of the recall with no rerank, each scored
+    // candidate carries its rerank score, and each trace keeps the relevance its line shows.
+    expect(ranked.map((c) => [c.id, c.fusedScore])).toEqual(a.diagnostics.recall!.ranked!.map((c) => [c.id, c.fusedScore]));
+    for (const id of cut) expect(ranked.find((c) => c.id === id)!.rerankScore).toBe(rerankScores[id]);
+    const relevance = new Map(a.retrieved.map((t) => [t.id, t.retrievalScore]));
+    for (const trace of run.retrieved) expect(trace.retrievalScore).toBe(relevance.get(trace.id));
+    expect(run.diagnostics.reranker).toMatchObject({ provider: 'llm', model: 'judge-model', candidates: 20 });
 
-    const asked = await mem.manager.retrieve('Do you remember the bike shed code?', NEUTRAL, { scopes: U1 });
+    const asked = await judged.manager.retrieve('Do you remember the bike shed code?', NEUTRAL, { scopes: U1 });
     expect(asked.diagnostics.recall!.reserve).toEqual({ fired: true, ids: ['gold'] });
     expect(asked.retrieved.at(-1)!.id).toBe('gold');
     expect(asked.diagnostics.recall!.rerankScores!.gold).toBeUndefined();
-    await mem.close();
+    expect(asked.diagnostics.recall!.ranked!.find((c) => c.id === 'gold')!.rerankScore).toBeUndefined();
+    await plain.close();
+    await judged.close();
+  });
+
+  it('with the capture off a rerank still orders the recall, and the retrieval carries no rerank record', async () => {
+    let favourite = '';
+    const recorded = await memoryWith({ rerank: { kind: 'llm', invoke: judgeFirst(() => favourite), model: 'judge-model' } }, new WordHashEmbedder());
+    const off = await memoryWith({ capture: 'off', rerank: { kind: 'llm', invoke: judgeFirst(() => favourite), model: 'judge-model' } }, new WordHashEmbedder());
+    const plain = await memoryWith(undefined, new WordHashEmbedder());
+    for (const mem of [recorded, off, plain]) for (let i = 0; i < 8; i++) await plant(mem, `t${i}`, NOTE(i), at(i));
+    const p = await plain.manager.retrieve('which switchback had the best view', NEUTRAL, { scopes: U1 });
+    favourite = p.retrieved.at(-1)!.id;
+    const a = await recorded.manager.retrieve('which switchback had the best view', NEUTRAL, { scopes: U1 });
+    const b = await off.manager.retrieve('which switchback had the best view', NEUTRAL, { scopes: U1 });
+    expect(a.diagnostics.reranker).toBeDefined();
+    expect(b.diagnostics.reranker).toBeUndefined();
+    expect(b.diagnostics.recall).toBeUndefined();
+    expect(b.retrieved.map((t) => t.id)).toEqual(a.retrieved.map((t) => t.id));
+    expect(b.retrieved.map((t) => t.id)).not.toEqual(p.retrieved.map((t) => t.id));
+    for (const mem of [recorded, off, plain]) await mem.close();
   });
 
   it('a rerank applied to a built manager reaches the next turn, and one taken away stops', async () => {
