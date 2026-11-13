@@ -1180,6 +1180,35 @@ describe('legacyMemory', () => {
     await a.close();
   }
 
+  /** A store an earlier version wrote, whose one trace under the agent's plain scope was soft-deleted since. */
+  async function seedForgottenLegacy(): Promise<void> {
+    const { a } = await open();
+    const old = await a.memory!.remember('old shared words about a heron', { type: 'episodic', scope: 'persona', scopeId: 'aria-1' });
+    await a.memory!.forget(old.id);
+    await a.close();
+  }
+
+  it('attributes a soft-deleted legacy trace, which its owner\'s deletion then deletes', async () => {
+    await seedForgottenLegacy();
+    const { a } = await open({ legacyMemory: legacy });
+    // The row still holds its words: it is legacy memory to attribute, and to delete.
+    expect(owners()).toEqual([{ owner_key: keyOf(me) }]);
+
+    expect((await a.forgetUser!('me')).complete).toBe(true);
+    expect(rows(storeFile(), "SELECT id FROM memory_traces WHERE scope = 'persona'")).toEqual([]);
+  });
+
+  it('names a soft-deleted legacy trace nobody owns as not reached', async () => {
+    await seedForgottenLegacy();
+    const { a } = await open();
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+
+    const report = await a.forgetUser!('alice');
+
+    expect(report.stores).toContainEqual({ store: 'legacy memory under the agent scope', reached: false, reason: 'unattributed' });
+    expect(report.complete).toBe(false);
+  });
+
   it('counts an attributed owner without turns when opening a second subject', async () => {
     await seedLegacy();
     const { a } = await open({ legacyMemory: legacy, retention: undefined });
