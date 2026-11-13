@@ -199,8 +199,17 @@ export class SqlActionLimiter implements ActionLimiter {
       plan.push({ rule, key });
     }
     const taken: Array<{ meter: SqlSpendMeter; operationId: string }> = [];
+    // every unit is settled whatever became of the one before it, and the first failure is thrown after the last
     const settle = async (outcome: 'consumed' | 'released'): Promise<void> => {
-      for (const unit of taken) await unit.meter.settle({ operationId: unit.operationId, outcome });
+      let failure: { error: unknown } | undefined;
+      for (const unit of taken) {
+        try {
+          await unit.meter.settle({ operationId: unit.operationId, outcome });
+        } catch (error) {
+          failure ??= { error };
+        }
+      }
+      if (failure) throw failure.error;
     };
     let expiresAt = Number.POSITIVE_INFINITY;
     for (const { rule, key } of plan) {
