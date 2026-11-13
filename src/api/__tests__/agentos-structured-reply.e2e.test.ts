@@ -149,7 +149,8 @@ describe('a structured reply on processRequest', () => {
     expect(errorOf(failed)?.message).toContain('refused');
     expect(errorOf(failed)?.details).toMatchObject({ schemaName: 'week', attempts: 1, refused: true });
     expect(errorOf(failed)?.details).not.toHaveProperty('issues');
-    expect(finalOf(failed)).toBeUndefined();
+    // The final chunk that carries the error holds no structured value.
+    expect(finalOf(failed)?.structured).toBeUndefined();
     expect(deltasOf(failed)).toHaveLength(0);
 
     provider.calls.length = 0;
