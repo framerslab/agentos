@@ -56,7 +56,7 @@ export type EvidenceFailure =
   | 'ROOM_MISMATCH' | 'QUOTE_MISMATCH' | 'SOURCE_UNAVAILABLE'
   | 'UNKNOWN_POLICY_VERSION' | 'UNKNOWN_RULE' | 'VERDICT_NOT_FOUND';
 
-/** How much evidence a call needs: at least `minQuotes` quotes (default 1), each `minQuoteLength` code units or more (default 12) unless it quotes its message whole. */
+/** How much evidence a call needs: quotes from at least `minQuotes` distinct messages (default 1), each `minQuoteLength` code units or more (default 12) unless it quotes its message whole. */
 export interface EvidenceRule {
   minQuotes?: number;
   minQuoteLength?: number;
@@ -168,7 +168,8 @@ export async function verifyActionEvidence(evidence: ActionEvidence, source: Evi
     if (!known) return fail('VERDICT_NOT_FOUND');
   }
 
-  if (evidence.quotes.length < minQuotes) return fail('NO_QUOTES');
+  // quotes count by the messages they come from: one message quoted twice is one quote
+  if (new Set(evidence.quotes.map((item) => item.messageId)).size < minQuotes) return fail('NO_QUOTES');
   const quotes: EvidenceCheck['quotes'] = [];
   for (const [index, item] of evidence.quotes.entries()) {
     let stored: StoredMessage | null | undefined;
