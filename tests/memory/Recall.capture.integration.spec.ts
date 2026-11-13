@@ -239,9 +239,11 @@ describe('the recall capture of a memory assembly', () => {
   });
 
   it('names the reranker recall.rerank names: the LLM judge with its model, the local model with its revision, and a rerank that failed with the reason', async () => {
-    // The judge through the setting: a score for each memory it is sent, then an empty ranking, so the scores order them.
+    // The judge through the setting: a score for each memory it is sent, then a ranking of them in the order it was given.
     const judge = async (system: string, user: string): Promise<string> =>
-      system.includes('relevance scorer') ? JSON.stringify((user.match(/^\[\d+\]/gm) ?? []).map((_, i) => 10 - (i % 10))) : '[]';
+      system.includes('relevance scorer')
+        ? JSON.stringify((user.match(/^\[\d+\]/gm) ?? []).map((_, i) => 10 - (i % 10)))
+        : JSON.stringify([...user.matchAll(/^\[([^\]]+)\]/gm)].map((m) => m[1]));
     const llm = await managerWith({ recall: { rerank: { kind: 'llm', invoke: judge, model: 'judge-ranker' } } } as Partial<CognitiveMemoryConfig>);
     const c = (await llm.assembleForPrompt(QUERY, 1600, NEUTRAL, { scopes: SCOPES })).capture!;
     expect(c.legs[0].candidates).toBeGreaterThan(0);

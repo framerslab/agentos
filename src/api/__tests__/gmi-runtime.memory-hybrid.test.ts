@@ -500,8 +500,10 @@ describe("agent({ runtime: 'gmi' }) memory.recall.rerank", () => {
     const seen: string[] = [];
     const invoke = async (system: string, user: string): Promise<string> => {
       seen.push(user);
-      // A score for each memory sent, the first the highest; then an empty ranking, so the scores order them.
-      return system.includes('relevance scorer') ? JSON.stringify((user.match(/^\[\d+\]/gm) ?? []).map((_, i) => (i === 0 ? 9 : 1))) : '[]';
+      // A score for each memory sent, the first the highest; then a ranking of them in the order it was given.
+      return system.includes('relevance scorer')
+        ? JSON.stringify((user.match(/^\[\d+\]/gm) ?? []).map((_, i) => (i === 0 ? 9 : 1)))
+        : JSON.stringify([...user.matchAll(/^\[([^\]]+)\]/gm)].map((m) => m[1]));
     };
     const out = await turn({ rerank: { kind: 'llm', model: 'judge-model', invoke } });
     const record = out.memoryRecall as unknown as { reranker: Record<string, unknown>; candidates: Array<{ rerankScore?: number }> };

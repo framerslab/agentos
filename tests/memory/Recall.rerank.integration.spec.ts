@@ -175,7 +175,7 @@ describe('RecallReranker', () => {
     // The judge scores every candidate it is sent, in batches of ten.
     let scoringCalls = 0;
     const invoke = async (system: string, user: string) => {
-      if (!system.includes('relevance scorer')) return '[]';
+      if (!system.includes('relevance scorer')) return JSON.stringify([...user.matchAll(/^\[([^\]]+)\]/gm)].map((m) => m[1]));
       scoringCalls += 1;
       return JSON.stringify((user.match(/^\[\d+\]/gm) ?? []).map(() => 5));
     };
@@ -186,6 +186,18 @@ describe('RecallReranker', () => {
     expect(scoringCalls).toBe(13);
     expect(judged.record).toMatchObject({ provider: 'llm', candidates: 130 });
     expect(judged.scores.size).toBe(130);
+  });
+
+  it('a judge whose ranking names none of the candidates is an error: the scores alone order nothing', async () => {
+    for (const ranking of ['[]', '["not-sent"]']) {
+      const invoke = async (system: string, user: string) =>
+        system.includes('relevance scorer') ? JSON.stringify((user.match(/^\[\d+\]/gm) ?? []).map((_, i) => i)) : ranking;
+      const r = new RecallReranker({ kind: 'llm', invoke, model: 'judge-model' });
+      r.start();
+      await r.ready();
+      expect(await r.rerank('q', docs(3)), ranking).toEqual({ record: { provider: 'none', reason: 'error' }, scores: new Map() });
+      expect(events('memory.recall.rerank_failed_scoring').at(-1), ranking).toMatchObject({ provider: 'llm', failures: 1 });
+    }
   });
 
   it('an answer that leaves out a candidate it was sent is an error: no part of it orders the recall', async () => {

@@ -157,18 +157,18 @@ describe('LlmJudgeReranker substitution metrics', () => {
         if (scoringCalls === 2) throw new Error('provider down');
         return JSON.stringify((user.match(/^\[\d+\]/gm) ?? []).map(() => 5));
       }
-      return '[]';
+      return '["doc-0"]';
     }, 20);
     expect(metrics).toMatchObject({ scoringFailures: 10, listwiseFailed: false });
   });
 
   it('a scoring answer that is not a JSON array counts its batch as substituted', async () => {
-    const metrics = await metricsOf(async (system) => (system.includes('relevance scorer') ? 'not json' : '[]'), 4);
+    const metrics = await metricsOf(async (system) => (system.includes('relevance scorer') ? 'not json' : '["doc-0"]'), 4);
     expect(metrics).toMatchObject({ scoringFailures: 4, listwiseFailed: false });
   });
 
   it('a score that is missing or not a number counts its document as substituted', async () => {
-    const metrics = await metricsOf(async (system) => (system.includes('relevance scorer') ? '[7, "high"]' : '[]'), 3);
+    const metrics = await metricsOf(async (system) => (system.includes('relevance scorer') ? '[7, "high"]' : '["doc-0"]'), 3);
     expect(metrics).toMatchObject({ scoringFailures: 2, listwiseFailed: false });
   });
 
@@ -178,6 +178,16 @@ describe('LlmJudgeReranker substitution metrics', () => {
       throw new Error('provider down');
     }, 3);
     expect(metrics).toMatchObject({ scoringFailures: 0, listwiseFailed: true });
+  });
+
+  it('a ranking that names none of the candidates reports listwiseFailed true, and the scores order the answer', async () => {
+    const scoring = (user: string) => JSON.stringify((user.match(/^\[\d+\]/gm) ?? []).map((_, i) => 9 - i));
+    for (const ranking of ['[]', '["doc-9", 4]']) {
+      const reranker = new LlmJudgeReranker({ llmCallFn: async (system, user) => (system.includes('relevance scorer') ? scoring(user) : ranking) });
+      const out = await reranker.rerank(makeInput(3), { providerId: 'llm-judge', modelId: '' });
+      expect(out.diagnostics?.providerMetrics, ranking).toEqual({ scoringFailures: 0, listwiseFailed: true });
+      expect(out.results.map((result) => result.id), ranking).toEqual(['doc-0', 'doc-1', 'doc-2']);
+    }
   });
 
   it('a clean run reports scoringFailures 0 and listwiseFailed false', async () => {
