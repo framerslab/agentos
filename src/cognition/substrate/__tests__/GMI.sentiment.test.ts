@@ -1381,6 +1381,89 @@ describe('GMI sentiment writes that land after their turn dropped them', () => {
     }
   });
 
+  it('keeps a forgotten excerpt out of a take-back whose base is a history write the store rejected', async () => {
+    const utility = createMockUtilityAI(negative);
+    const wm = createMockWorkingMemory();
+    const write = wm.set.getMockImplementation()!;
+    let mode: 'pass' | 'reject' | 'hold' = 'reject';
+    let releaseWrite: (() => void) | undefined;
+    // The host store rejects the first sentiment history write, then holds the next one until the test releases it.
+    wm.set.mockImplementation((key: string, value: any) => {
+      if (key !== 'gmi_sentiment_history' || mode === 'pass') return write(key, value);
+      if (mode === 'reject') return Promise.reject(new Error('store failure'));
+      mode = 'pass';
+      return new Promise<void>((resolve) => { releaseWrite = () => { void write(key, value); resolve(); }; });
+    });
+    const gmi = await startGmi('rejected-base', utility, wm);
+    try {
+      await drainTurn(gmi, 'pin', 'My PIN is 1234.');
+      expect(wm._store.get('gmi_sentiment_history'), 'the store rejected the first history write').toBeUndefined();
+      gmi.clearHistory();
+      await settle();
+      mode = 'hold';
+      await dropWhileHeld(gmi, 'next', 'This is terrible.', () => releaseWrite !== undefined);
+      releaseWrite!();
+      await settle(); await settle();
+      expect(JSON.stringify(wm._store.get('gmi_sentiment_history') ?? null),
+        'a take-back writes no forgotten excerpt back').not.toContain('1234');
+    } finally {
+      releaseWrite?.();
+      vi.useRealTimers();
+      await gmi.shutdown();
+    }
+  });
+
+  it('does not drop an applied analysis whose second scrub outlasts the post-turn wait', async () => {
+    const lines: Array<Record<string, unknown>> = [];
+    const capture: Record<string, unknown> = { child: () => capture };
+    for (const level of ['debug', 'info', 'warn', 'error', 'fatal']) {
+      capture[level] = (line: Record<string, unknown>) => { lines.push(line); };
+    }
+    setLogger(capture as any);
+    const utility = createMockUtilityAI(negative);
+    const wm = createMockWorkingMemory();
+    const write = wm.set.getMockImplementation()!;
+    let holds = 0;
+    const releases: Array<() => void> = [];
+    // The host store holds the next `holds` sentiment history writes, each until the test releases it.
+    wm.set.mockImplementation((key: string, value: any) => {
+      if (key !== 'gmi_sentiment_history' || holds === 0) return write(key, value);
+      holds -= 1;
+      return new Promise<void>((resolve) => { releases.push(() => { void write(key, value); resolve(); }); });
+    });
+    const gmi = await startGmi('slow-second-scrub', utility, wm);
+    let turn: Promise<void> | undefined;
+    try {
+      await drainTurn(gmi, 'pin', 'My PIN is 1234.');
+      vi.useFakeTimers();
+      holds = 1;
+      turn = drainTurn(gmi, 'live', 'This is terrible.');
+      await vi.waitFor(() => expect(releases, 'the live analysis writes').toHaveLength(1), { timeout: 500, interval: 10 });
+      // A forget the analysis did not see: it keeps the live turn and drops the PIN turn.
+      gmi.replaceHistory([createConversationMessage(MessageRole.USER, 'This is terrible.')]);
+      await vi.advanceTimersByTimeAsync(0);
+      // The analysis' write lands and its result is applied; the scrub that runs again is held past both bounds.
+      holds = 1;
+      releases[0]();
+      await vi.waitFor(() => expect(releases, 'the scrub runs again').toHaveLength(2), { timeout: 500, interval: 10 });
+      await vi.advanceTimersByTimeAsync(3500);
+      await turn;
+      expect(lines.filter((line) => line.event === 'gmi.sentiment_late'),
+        'an analysis that applied its result is not reported late').toHaveLength(0);
+      releases[1]();
+      await vi.advanceTimersByTimeAsync(0);
+      const stored = wm._store.get('gmi_sentiment_history');
+      expect(stored?.trends.map((trend: any) => trend.turnId)).toContain('live');
+      expect(JSON.stringify(stored)).not.toContain('1234');
+    } finally {
+      for (const release of releases) release();
+      await turn?.catch(() => undefined);
+      resetLoggerFactory();
+      vi.useRealTimers();
+      await gmi.shutdown();
+    }
+  });
+
   it("ends the first tool round's sentiment wait when the caller aborts during it", async () => {
     let release: ((value: SentimentResult) => void) | undefined;
     const utility = createMockUtilityAI();
