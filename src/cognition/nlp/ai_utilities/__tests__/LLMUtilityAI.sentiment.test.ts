@@ -4,6 +4,9 @@
  * negative inputs.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { LLMUtilityAI, LLMUtilityAIConfig } from '../LLMUtilityAI';
 import { StatisticalUtilityAI } from '../StatisticalUtilityAI';
 import type { IUtilityAI } from '../IUtilityAI';
@@ -161,6 +164,28 @@ describe('LLMUtilityAI — analyzeSentiment', () => {
     expect(mockProvider.generateCompletion).not.toHaveBeenCalled();
     expect(actual).toEqual(expected);
     expect(actual.score).toBeGreaterThan(0.5);
+  });
+
+  it('reads a relative lexicon file of a lexicon_based call under the resourcePath of its latest initialize()', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'llm-lexicon-'));
+    const first = path.join(dir, 'first');
+    const second = path.join(dir, 'second');
+    fs.mkdirSync(first);
+    fs.mkdirSync(second);
+    fs.writeFileSync(path.join(first, 'words.json'), JSON.stringify({ blorft: 3 }), 'utf8');
+    fs.writeFileSync(path.join(second, 'words.json'), JSON.stringify({ blorft: -3 }), 'utf8');
+    const options = { method: 'lexicon_based', lexiconNameOrPath: 'words.json' };
+    // A read that fails answers its error, so the assertion below names what went wrong.
+    const score = (utility: IUtilityAI) => utility.analyzeSentiment('blorft', options).catch((error: unknown) => error as any);
+    try {
+      await llmUtility.initialize({ ...defaultConfig, resourcePath: first });
+      expect((await score(llmUtility))?.polarity, 'a relative lexicon file is read under resourcePath').toBe('positive');
+      await llmUtility.initialize({ ...defaultConfig, resourcePath: second });
+      expect((await score(llmUtility))?.polarity, 'a utility initialized again reads under its new resourcePath').toBe('negative');
+      expect(mockProvider.generateCompletion).not.toHaveBeenCalled();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('keeps the model path when the method is unset', async () => {
