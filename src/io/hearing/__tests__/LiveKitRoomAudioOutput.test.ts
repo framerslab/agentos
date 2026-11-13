@@ -59,6 +59,10 @@ async function until(done: () => boolean, rounds = 200): Promise<void> {
   for (let i = 0; i < rounds && !done(); i++) await settle(1);
 }
 
+/** How many waits the output holds in its lists, read from every set among its own fields, whatever their names. */
+const heldWaits = (output: LiveKitRoomAudioOutput): number =>
+  Object.values(output).reduce((sum: number, value: unknown) => sum + (value instanceof Set ? value.size : 0), 0);
+
 /** A subscription a test grants when it chooses, as rtc-node resolves `waitForSubscription()` at the first subscriber. */
 function heldSubscription(room: FakeRoom): () => void {
   let subscribe!: () => void;
@@ -280,6 +284,50 @@ describe('LiveKitRoomAudioOutput', () => {
     await settle();
     await second.close();
     await expect(reopening).rejects.toThrow('room audio output closed');
+  });
+
+  it('keeps no wait of a play stopped while the track is still being published, and asks the publisher once', async () => {
+    const room = new FakeRoom();
+    let publish!: () => void;
+    const held = new Promise<void>((resolve) => {
+      publish = resolve;
+    });
+    room.localParticipant.publishTrack.mockImplementationOnce(async () => {
+      await held;
+      return { sid: 'TR_AGENT', waitForSubscription: () => room.subscription };
+    });
+    const ready = vi.spyOn(LiveKitAudioPublisher.prototype, 'ready');
+    try {
+      const output = outputOn(room);
+      // Twenty plays asked and stopped while the publication hangs, by a clear and by an abort in turn.
+      for (let i = 0; i < 20; i++) {
+        const controller = new AbortController();
+        const playing = output.play({ audio: clip(1_000), sampleRate: RATE }, controller.signal);
+        playing.catch(() => {});
+        await settle(1);
+        if (i % 2 === 0) void output.clear();
+        else controller.abort();
+        await expect(playing).rejects.toThrow(i % 2 === 0 ? 'room audio cleared' : 'room audio aborted');
+      }
+      // No stopped play waits on: the output's lists of waits are empty, and the publisher's readiness was asked
+      // once, so no stopped play left a reaction on it.
+      expect(heldWaits(output)).toBe(0);
+      expect(ready).toHaveBeenCalledTimes(1);
+      expect(room.localParticipant.publishTrack).toHaveBeenCalledTimes(1);
+      expect(capturedSamples()).toBe(0);
+
+      publish();
+      await expect(output.open()).resolves.toBeUndefined();
+      const playing = output.play({ audio: clip(1_000), sampleRate: RATE });
+      await until(() => source().captured.length === 1);
+      source().playOut();
+      await expect(playing).resolves.toEqual({ playedMs: 1_000 });
+      expect(room.localParticipant.publishTrack).toHaveBeenCalledTimes(1);
+      expect(heldWaits(output)).toBe(0);
+      await output.close();
+    } finally {
+      ready.mockRestore();
+    }
   });
 
   it('plays one clip at a time: a second play while one runs rejects, and the first plays on', async () => {
