@@ -101,6 +101,20 @@ describe('LiveKitRoomAudioOutput', () => {
     await output.close();
   });
 
+  it("cuts a clip short enough that a chunk's bytes and the bytes it is resampled to fit maxBytes", async () => {
+    const room = new FakeRoom();
+    // 2,000 ms at 48,000 Hz is 192,000 bytes, and 96,000 more resampled to the track's 24,000 Hz: one chunk of it
+    // passes maxBytes 144,000. Two chunks of 1,000 ms, 96,000 and 48,000 bytes each, fit it exactly.
+    const output = outputOn(room, { maxBytes: 144_000 });
+    const playing = output.play({ audio: clip(2_000, 48_000), sampleRate: 48_000 });
+    playing.catch(() => {});
+    await until(() => FakeAudioSource.created.length > 0 && source().captured.length === 2);
+    expect(source().captured.map((frame) => frame.samplesPerChannel)).toEqual([24_000, 24_000]);
+    source().playOut();
+    await expect(playing).resolves.toEqual({ playedMs: 2_000 });
+    await output.close();
+  });
+
   it('empties the queue when cleared during a play, and rejects that play', async () => {
     const room = new FakeRoom();
     const output = outputOn(room);
