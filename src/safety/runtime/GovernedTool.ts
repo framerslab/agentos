@@ -9,6 +9,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { ITool, JSONSchemaObject, ToolExecutionContext, ToolExecutionResult } from '../../core/tools/ITool.js';
 import { listedErrorFields } from '../../core/logging/events.js';
+import { SchemaChecks, checkValue } from '../../core/utils/schemaChecks.js';
 import { isModerationId } from '../guardrails/ModerationContext.js';
 import {
   ACTION_EVIDENCE_SCHEMA, assertEvidenceRule, isActionEvidence, verifyActionEvidence,
@@ -93,7 +94,11 @@ export interface GovernedToolPolicy<TInput> {
    * record holds the library's own `toISOString()` of it, never the string returned.
    */
   expiresAt?(args: TInput): string | undefined;
-  /** What the model receives in a dry run in place of the tool's output. Default `{ dryRun: true }`. Never recorded. */
+  /**
+   * What the model receives in a dry run in place of the tool's output. Default `{ dryRun: true }`. Never recorded.
+   * When the tool has an `outputSchema`, the answer must meet it, or the call ends `refused_arguments` with
+   * `POLICY_ERROR` before anything is reserved.
+   */
   dryRunOutput?(args: TInput): unknown;
   /**
    * Default: the actor, action, account, room, unique sorted evidence ids and optional target message. The limiter and the record hold
@@ -136,6 +141,9 @@ const SENTENCES: Record<Refusal, string> = {
   limiter_unavailable: 'The action was refused: its limits could not be checked.',
   audit_unavailable: 'The action was refused: it could not be recorded.',
 };
+
+/** A dry run's answer is checked as `ToolExecutor` checks a tool's output, with the same options. */
+const OUTPUT_CHECKS = new SchemaChecks({ allErrors: true, coerceTypes: true, useDefaults: true, strict: false });
 
 const sha256 = (value: string): string => createHash('sha256').update(value, 'utf8').digest('hex');
 
@@ -265,7 +273,13 @@ export function governTool<TInput extends { evidence: ActionEvidence }, TOutput>
       }
       const key = policy.idempotencyKey ? policy.idempotencyKey(args) : defaultIdempotencyKey(actor, policy.action, target, evidence.quotes.map((quote) => quote.messageId));
       if (typeof key !== 'string' || key.length === 0) return undefined;
-      const dryOutput = mode === 'dryRun' ? (policy.dryRunOutput ? policy.dryRunOutput(args) : { dryRun: true }) : undefined;
+      let dryOutput = mode === 'dryRun' ? (policy.dryRunOutput ? policy.dryRunOutput(args) : { dryRun: true }) : undefined;
+      if (dryOutput !== undefined && tool.outputSchema) {
+        // an answer the tool's own output schema refuses would end as a failure after the dry run was counted
+        const checked = checkValue(OUTPUT_CHECKS.check(tool.outputSchema), dryOutput);
+        if (!checked.valid) return undefined;
+        dryOutput = checked.value;
+      }
       return {
         target: { accountId: target.accountId, ...(target.roomId !== undefined ? { roomId: target.roomId } : {}), ...(target.messageId !== undefined ? { messageId: target.messageId } : {}) },
         ...(expiresAt !== undefined ? { expiresAt } : {}),

@@ -563,7 +563,7 @@ The governed tool keeps every member of the tool, sets `hasSideEffects: true`, a
 
 | Step | What happens | How it can end |
 |---|---|---|
-| 1. Arguments | `evidence` is checked for shape in code, every id in it an id (letters, digits and `_ . : / -`, at most 128). Then the policy's own `target()`, `expiresAt()`, `idempotencyKey()` and, in a dry run, `dryRunOutput()` run, before anything is reserved | `refused_arguments` with `ARGUMENT_SHAPE`, or `POLICY_ERROR` when one of them throws or answers another shape |
+| 1. Arguments | `evidence` is checked for shape in code, every id in it an id (letters, digits and `_ . : / -`, at most 128). Then the policy's own `target()`, `expiresAt()`, `idempotencyKey()` and, in a dry run, `dryRunOutput()` run, before anything is reserved | `refused_arguments` with `ARGUMENT_SHAPE`, or `POLICY_ERROR` when one of them throws or answers another shape, or when a dry run's answer does not meet the tool's `outputSchema` |
 | 2. Evidence | The tool's own target must be the evidence's: its account, its room, and a message it names among the quoted ones. Then `verifyActionEvidence()` holds the evidence to the host's store and rule book | `voided_evidence` with `TARGET_MISMATCH` or the check's failure |
 | 3. Audit, first half | `audit.begin(record)`, with the values step 2 confirmed. Nothing is reserved yet, and nothing runs unrecorded | `audit_unavailable` when the sink throws |
 | 4. Limits | One unit under every rule, in the order given; a rule listed twice is reserved once | `limit_reached`, `duplicate`, `refused_arguments` with `LIMIT_SCOPE_MISSING`, or `limiter_unavailable` |
@@ -625,7 +625,7 @@ The end holds the outcome, its code, `endedAt`, and `reversalRef` when the tool 
 
 ### The dry run
 
-With `mode: 'dryRun'` the tool is not called. The units are committed under dry keys, every key and operation id starting with `dry:`, so dry and real counts never mix and a dry run meets the same ceilings. The model receives `dryRunOutput(args)` (default `{ dryRun: true }`) as a successful result with `details.dryRun`, and the call ends `would_execute`. A second dry run over the same messages meets the first run's keys and reads every action as a duplicate, so each run gets a limiter with a `tablePrefix` of its own.
+With `mode: 'dryRun'` the tool is not called. The units are committed under dry keys, every key and operation id starting with `dry:`, so dry and real counts never mix and a dry run meets the same ceilings. The model receives `dryRunOutput(args)` (default `{ dryRun: true }`) as a successful result with `details.dryRun`, and the call ends `would_execute`. The answer is not the tool's own, so the model may take another path than it would after a real call. When the tool has an `outputSchema`, the answer is checked against it as the tool executor checks an output, before anything is reserved: an answer the schema refuses, the default included, ends `refused_arguments` with `POLICY_ERROR`, so a tool whose output has required fields needs a `dryRunOutput` that fills them. A second dry run over the same messages meets the first run's keys and reads every action as a duplicate, so each run gets a limiter with a `tablePrefix` of its own.
 
 ### Outcomes
 
