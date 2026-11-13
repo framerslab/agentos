@@ -476,6 +476,8 @@ describe("agent({ runtime: 'gmi' }) memory.recall.rerank", () => {
     [{ rerank: { kind: 'local', model: ' ', revision: 'abc' } }, 'rerank.model', 'invalid_value'],
     [{ rerank: { kind: 'llm', model: 'm' } }, 'rerank.invoke', 'invalid_value'],
     [{ rerank: { kind: 'llm', invoke: emptyRanking, model: 'm', timeoutMs: 0 } }, 'rerank.timeoutMs', 'invalid_value'],
+    [{ rerank: { kind: 'llm', invoke: emptyRanking, model: 'm', timeoutMs: 2_147_483_648 } }, 'rerank.timeoutMs', 'invalid_value'],
+    [{ rerank: { kind: 'local', model: 'cross-encoder/ms-marco-MiniLM-L6-v2', revision: '233902D25C440F23AF6F7D6E94D2946BAC0BEE0A' } }, 'rerank.revision', 'invalid_value'],
     [{ rerank: { kind: 'llm', invoke: emptyRanking, model: 'm', maxCandidates: 2.5 } }, 'rerank.maxCandidates', 'invalid_value'],
     [{ rerank: 'cohere' }, 'rerank', 'invalid_value'],
   ];
