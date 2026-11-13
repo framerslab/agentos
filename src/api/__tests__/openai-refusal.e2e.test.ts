@@ -541,6 +541,37 @@ describe('an OpenAI refusal on a call with guards', () => {
     expect(await rewritten.refusal).toBe('A rewritten refusal.');
     expect(await rewritten.text).toBe('');
   });
+
+  /** A guard that passes the whole reply it is shown, and the caller aborts the call while it judges. */
+  const abortsWhileJudging = (controller: AbortController): IGuardrailService => ({
+    id: 'aborts-while-judging',
+    evaluateOutput: async ({ chunk }) => {
+      if (isFinal(chunk)) controller.abort(new Error('the caller stopped'));
+      return null;
+    },
+  });
+
+  it('ends on a caller abort that fired while the output guards judged its message', async () => {
+    route([
+      [/api\.openai\.com\/v1\/models/, modelList],
+      [/api\.openai\.com\/v1\/chat\/completions/, chatRefusal],
+    ]);
+    const stopping = new AbortController();
+    await expect(generateText({ ...call, abortSignal: stopping.signal, guards: { services: [abortsWhileJudging(stopping)], context } })).rejects.toThrow('the caller stopped');
+
+    route([
+      [/api\.openai\.com\/v1\/models/, modelList],
+      [/api\.openai\.com\/v1\/chat\/completions/, chatRefusalStream],
+    ]);
+    const controller = new AbortController();
+    const stopped = streamText({ ...call, abortSignal: controller.signal, guards: { services: [abortsWhileJudging(controller)], context } });
+    const parts: StreamPart[] = [];
+    for await (const part of stopped.fullStream) parts.push(part);
+    expect(parts.map((part) => part.type)).toEqual(['error']);
+    expect((parts[0] as { error: unknown }).error).toMatchObject({ message: 'the caller stopped' });
+    expect(await stopped.finishReason).toBe('error');
+    expect(await stopped.refusal).toBeUndefined();
+  });
 });
 
 describe('an OpenAI refusal on a call with tools', () => {
