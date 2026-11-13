@@ -25,13 +25,14 @@ const MEMORY_QUESTION: readonly RegExp[] = [
  * Whether a turn asks about something said before: its lower-cased text holds, at a word boundary, one of `remember`,
  * `recall`, `remind me`, `did i (say|tell|mention)`, `have i (told|mentioned|said)`, `what did i (say|tell)`,
  * `what was my`, `what('s| is) my … (name|favou?rite|birthday)`, `last time`, `earlier (i|you) (said|mentioned)` or
- * `you (said|told me)`. Deterministic, with no model call. English only: a host replaces it with the manager's
- * `recall.memoryQuestion`.
+ * `you (said|told me)`, a typographic apostrophe read as `'`. Deterministic, with no model call. English only: a host
+ * replaces it with the manager's `recall.memoryQuestion`.
  *
  * @param turnText - The turn's text.
  */
 export function isMemoryQuestion(turnText: string): boolean {
-  const text = typeof turnText === 'string' ? turnText.toLowerCase() : '';
+  // A phone keyboard types the typographic apostrophe: "What’s my sister’s name?" asks as "What's" does.
+  const text = typeof turnText === 'string' ? turnText.toLowerCase().replace(/[\u2018\u2019\u02bc]/g, "'") : '';
   return MEMORY_QUESTION.some((pattern) => pattern.test(text));
 }
 

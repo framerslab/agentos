@@ -177,9 +177,10 @@ export interface MemoryAssemblerInput {
   recallTraces?: ScoredMemoryTrace[];
   /**
    * Ids among `recallTraces` a memory question reserved room for (`retrieval: 'hybrid'`). Their whole lines are set
-   * aside in the recall section first, in this order, while they fit; the other lines fill what is left, in their
-   * order. A reserved line takes its place in `recallTraces`, so the caller puts them last to render them last. A
-   * reserved line that does not fit whole is left out like any other. Not read without `recallTraces`.
+   * aside in the recall section first, in their `recallTraces` order (not this list's), while they fit; the other lines
+   * fill what is left, in their order. A reserved line takes its place in `recallTraces`, so the caller puts them last
+   * to render them last. A reserved line that does not fit whole is left out like any other. Not read without
+   * `recallTraces`.
    */
   reservedIds?: string[];
   /** Prospective memory alerts (Batch 2). */

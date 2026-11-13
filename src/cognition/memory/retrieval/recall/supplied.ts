@@ -85,7 +85,8 @@ export function admitSupplied(options: CognitiveRetrievalOptions, now: number): 
         createdAt,
         updatedAt: createdAt,
         isActive: true,
-        retrievalScore: Math.max(0, Math.min(1, score ?? 0)),
+        // The line's relevance is the confidence of a fact the caller vouches for; its score only orders the pool.
+        retrievalScore: 1,
         scoreBreakdown: {
           strengthScore: 0,
           similarityScore: 0,

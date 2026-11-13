@@ -220,18 +220,20 @@ export class RecallPipeline {
     );
     // Supplied candidates join the pool before the dedupe and the cut, each at its own score or the pool's lowest. One
     // whose id names a memory the pool or the store holds is that memory, and is not added: it would otherwise share
-    // the id of a stored trace, and hide that trace's graph association. At most `topK × overFetch` are added, as many
-    // as a leg returns, the best-scored first (an unscored one after every scored one); the rest count as ineligible.
+    // the id of a stored trace, and hide that trace's graph association. One the pool holds is shown as that memory;
+    // one only the store holds is counted as ineligible. At most `topK × overFetch` are added, as many as a leg
+    // returns, the best-scored first (an unscored one after every scored one); the rest count as ineligible.
     const supplied = Array.isArray(options.supplied) && options.supplied.length > 0 ? admitSupplied(options, now) : null;
     const suppliedIds: string[] = [];
     if (supplied) {
       const held = new Set(pool.map((entry) => entry.id));
       const floor = pool.reduce((low, entry) => Math.min(low, entry.fusedScore), pool.length > 0 ? Number.POSITIVE_INFINITY : 0);
-      const fresh = supplied.kept
-        .filter(({ trace }) => !held.has(trace.id) && store.getTrace(trace.id) === undefined)
+      const notHeld = supplied.kept.filter(({ trace }) => !held.has(trace.id));
+      const fresh = notHeld
+        .filter(({ trace }) => store.getTrace(trace.id) === undefined)
         .sort((a, b) => (b.score ?? Number.NEGATIVE_INFINITY) - (a.score ?? Number.NEGATIVE_INFINITY) || 0);
       const admitted = fresh.slice(0, fetch);
-      supplied.ineligible += fresh.length - admitted.length;
+      supplied.ineligible += notHeld.length - admitted.length;
       for (const { trace, score, undated } of admitted) {
         suppliedIds.push(trace.id);
         pool.push({ id: trace.id, trace, ranks: { supplied: suppliedIds.length }, fusedScore: score ?? floor, ...(undated ? { undated: true } : {}) });
@@ -249,10 +251,15 @@ export class RecallPipeline {
     // A newer text that took an older one's place carries that one's fused score.
     const keptScore = new Map(kept.map((entry) => [entry.id, entry.fusedScore]));
 
-    // A memory question reserves room for the exact-words hits the cut left out. A predicate that throws is a no.
+    // A memory question reserves room for the exact-words hits the cut left out. A predicate that throws is a no, and
+    // so is one that returns a promise, whose rejection is handled here.
     let asked = false;
     try {
-      asked = (settings.memoryQuestion ?? isMemoryQuestion)(legQuery.query) === true;
+      const answer: unknown = (settings.memoryQuestion ?? isMemoryQuestion)(legQuery.query);
+      if (answer !== null && typeof answer === 'object' && typeof (answer as { then?: unknown }).then === 'function') {
+        Promise.resolve(answer).catch(() => undefined);
+      }
+      asked = answer === true;
     } catch {
       asked = false;
     }

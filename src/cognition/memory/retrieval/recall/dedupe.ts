@@ -143,8 +143,10 @@ export function dedupePool<E extends DedupeEntry>(
     }
     const challenger = slotOf(item);
     if (!mayTakeOver || !staysOver(challenger, holder)) {
-      // A newer candidate of an equal score takes the place of the older one it repeats.
+      // A newer candidate of an equal score takes the place of the older one it repeats; a drop looked at again can
+      // carry a better score than the kept text, which then takes it.
       holder.place = Math.min(holder.place, item.index);
+      if (item.entry.fusedScore > holder.best.fusedScore) holder.best = item.entry;
       dropped.push({ item, holder });
       return;
     }
@@ -167,6 +169,22 @@ export function dedupePool<E extends DedupeEntry>(
     }
   };
 
+  /**
+   * Sets each kept memory's score and place from the texts it stands for, its own and every one dropped against it, so
+   * a text that left it (a drop looked at again and kept, or dropped elsewhere) takes back its score and place.
+   */
+  const settle = (): void => {
+    for (const slot of kept) {
+      slot.best = slot.entry;
+      slot.place = slot.index;
+    }
+    for (const d of dropped) {
+      const slot = finalHolder(d.holder);
+      if (d.item.entry.fusedScore > slot.best.fusedScore) slot.best = d.item.entry;
+      slot.place = Math.min(slot.place, d.item.index);
+    }
+  };
+
   let queue = byPreference(items);
   for (let pass = 0; queue.length > 0; pass++) {
     const mayTakeOver = pass < TAKEOVER_PASSES;
@@ -177,8 +195,10 @@ export function dedupePool<E extends DedupeEntry>(
     // A drop whose holder's text changed since may no longer repeat it: look at it again.
     const stale = dropped.filter((d) => !nearDuplicate(d.item.tokens, finalHolder(d.holder).tokens, threshold));
     dropped = dropped.filter((d) => !stale.includes(d));
+    settle();
     queue = byPreference(stale.map((d) => d.item));
   }
+  settle();
   return {
     kept: kept
       .sort((a, b) => a.place - b.place)
