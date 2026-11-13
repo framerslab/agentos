@@ -260,6 +260,28 @@ describe('LiveKitRoomAudioOutput', () => {
     await output.close();
   });
 
+  it('rejects an open still waiting for a subscriber at close, while the track is published and after', async () => {
+    // While the track is published: the publisher's own wait for a first subscriber is under way.
+    const publishing = new FakeRoom();
+    heldSubscription(publishing);
+    const first = outputOn(publishing, { receiptTimeoutMs: 10_000 });
+    const opening = first.open();
+    opening.catch(() => {});
+    await settle();
+    await first.close();
+    await expect(opening).rejects.toThrow('room audio output closed');
+    // After it: the track is published and an earlier open gave up; a later open waits receiptTimeoutMs of its own.
+    const published = new FakeRoom();
+    heldSubscription(published);
+    const second = outputOn(published, { receiptTimeoutMs: 200 });
+    await expect(second.open()).rejects.toMatchObject({ code: ROOM_AUDIO_NO_SUBSCRIBER });
+    const reopening = second.open();
+    reopening.catch(() => {});
+    await settle();
+    await second.close();
+    await expect(reopening).rejects.toThrow('room audio output closed');
+  });
+
   it('plays one clip at a time: a second play while one runs rejects, and the first plays on', async () => {
     const room = new FakeRoom();
     const output = outputOn(room);

@@ -265,10 +265,12 @@ export class LiveKitRoomAudioOutput {
    * host opens it before it asks anything of its listener, so the listener holds the track when the first clip comes.
    * A later call, after one that rejected, waits for a subscriber again; the track is published once.
    *
-   * @throws {Error} With the code {@link ROOM_AUDIO_NO_SUBSCRIBER} when nobody subscribed within `receiptTimeoutMs`,
-   *   or with a publication the output cannot ask (one without `waitForSubscription()`, or whose wait fails); the
-   *   track stays published. `room audio output closed` once closed, `room audio output stalled` once a capture
-   *   stalled. The publisher's error when the track cannot be published, which every later call gives too.
+   * @throws {Error} With the code {@link ROOM_AUDIO_NO_SUBSCRIBER} when nobody subscribed within `receiptTimeoutMs`
+   *   (counted from the track's publication for the call that publishes it, which has no deadline of its own, and
+   *   from the call for a later one), or with a publication the output cannot ask (one without
+   *   `waitForSubscription()`, or whose wait fails); the track stays published. `room audio output closed` once
+   *   closed, `room audio output stalled` once a capture stalled. The publisher's error when the track cannot be
+   *   published, which every later call gives too.
    */
   async open(): Promise<void> {
     if (this.closed) throw failure(this.closedMessage);
