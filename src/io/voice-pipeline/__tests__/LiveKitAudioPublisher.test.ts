@@ -684,6 +684,41 @@ describe('the speech mark', () => {
     await expect(played).resolves.toMatchObject({ sequence: 1, playedSamples: 480, sampleRate: 24000 });
     await f.publisher.close();
   }, 5000);
+  it("keeps a playback wait begun while the mark is being set pending, though the page answers, until the chunk's frames are captured and the track has played them out, in participant playout", async () => {
+    const f = marking({ shows: 'held', options: page });
+    const sent = f.publisher.sendAudio(f.chunk(clip('clip-a'), announced));
+    await vi.waitFor(() => expect(f.order).toEqual(['published', 'mark clip-a']));
+    let outcome: unknown;
+    void f.publisher.waitForPlayback(generation, 1, new AbortController().signal).then((receipt) => { outcome = receipt; }, (error: Error) => { outcome = error.message; });
+    // The track's queue is full: the chunk's first frame waits for room once the chunk is announced.
+    let land!: () => void; f.source().gate = new Promise<void>((resolve) => { land = resolve; });
+    f.show(); await vi.waitFor(() => expect(f.messages).toHaveLength(1));
+    f.publisher.receiveReceipt({ type: 'playback', generation, sequence: 1, playedSamples: 480, sampleRate: 24000 }); await settle();
+    // None of the chunk is on the track yet, so none of it has played.
+    expect(outcome).toBeUndefined();
+    f.source().gate = undefined; land(); await sent; await settle();
+    // On the track now, and not played out yet.
+    expect(f.order.filter((step) => step === 'frame')).toHaveLength(2); expect(outcome).toBeUndefined();
+    f.source().playOut(); await settle();
+    expect(outcome).toMatchObject({ sequence: 1, playedSamples: 480, sampleRate: 24000 });
+    await f.publisher.close();
+  });
+  it('resolves a playback wait begun while @livekit/rtc-node is still loading, once the chunk has played, in participant playout', async () => {
+    let load!: () => void; const loading = new Promise<void>((resolve) => { load = resolve; });
+    vi.doMock('@livekit/rtc-node', async () => { await loading; return fakePublishingRtc(); });
+    try {
+      // No rtc module is given, so the publisher imports the peer as it prepares the track.
+      const f = marking({ options: { ...page, rtc: undefined } });
+      const sent = f.publisher.sendAudio(f.chunk(clip('clip-a'), announced)); await settle();
+      expect(FakeAudioSource.created).toHaveLength(0);
+      const played = f.publisher.waitForPlayback(generation, 1, new AbortController().signal); played.catch(() => {});
+      load(); await sent;
+      expect(f.order).toEqual(['published', 'mark clip-a', 'announced']);
+      f.source().playOut(); f.publisher.receiveReceipt({ type: 'playback', generation, sequence: 1, playedSamples: 480, sampleRate: 24000 });
+      await expect(played).resolves.toMatchObject({ sequence: 1, playedSamples: 480, sampleRate: 24000 });
+      await f.publisher.close();
+    } finally { vi.doUnmock('@livekit/rtc-node'); }
+  });
   it("sets the mark on the room's local participant when a transport is given the option for its publisher", async () => {
     const room = new FakeRoom(); room.addParticipant('participant-a', new FakePublication(new FakeTrack('microphone')));
     const order: string[] = []; const mark = clip('clip-a');
