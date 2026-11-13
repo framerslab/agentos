@@ -55,7 +55,7 @@ export type {
 export { MEMORY_RECALL_CAPTURE_VERSION, MEMORY_RERANK_MAX_DOCUMENTS, candidatesFrom, rerankerRecordOf } from './retrieval/recall/index.js';
 export { DEFAULT_RECALL_BUDGET_TOKENS, PROMPT_CONTEXT_SHARE, RecallOptionError, effectiveRecallBudget } from './retrieval/recall/index.js';
 export type { EffectiveRecallBudget, RecallOptionRejection } from './retrieval/recall/index.js';
-export { RECALL_CONSTANTS, isMemoryQuestion } from './retrieval/recall/index.js';
+export { RECALL_CONSTANTS, RERANK_DEFAULTS, isMemoryQuestion } from './retrieval/recall/index.js';
 export type { RecallConstants } from './retrieval/recall/index.js';
 
 // --- Configuration ---
