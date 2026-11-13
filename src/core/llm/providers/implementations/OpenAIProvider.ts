@@ -805,14 +805,13 @@ function summarizeResponsesOutput(
 
 /**
  * The finish reason and refusal fields of a choice whose answer may hold the
- * model's refusal message. A refusal message, which OpenAI sends beside an
- * ordinary `stop` (Chat Completions) or in a `completed` response (Responses),
- * makes the finish reason `refusal` and is kept in `refusal`, so a caller can
- * tell a declined request from an empty answer. A message the answer's end cut
- * off (`length`, `content_filter`, an `incomplete` response) keeps that reason,
- * as OpenAI's own handling reads an incomplete answer before its refusal, and
- * the piece that came is kept in `refusal`. Without one, the finish reason is
- * the one given and no `refusal` field is set.
+ * model's refusal message. The finish reason is always the one given: `stop`
+ * beside a whole refusal message (Chat Completions) or for a `completed`
+ * response (Responses), `length` or `content_filter` for a message the
+ * answer's end cut off, `tool_calls` when function calls came beside it. A
+ * refusal is carried in `refusal` alone, so a caller tells a declined request
+ * from an empty answer by that field: the whole message, or the piece that
+ * came when the answer was cut. Without one, no `refusal` field is set.
  *
  * `present` says whether the answer holds a refusal: by default a non-empty
  * message. A Responses `refusal` content part is one whatever its message, so
@@ -824,10 +823,7 @@ function withRefusal(
   present: boolean = typeof refusal === 'string' && refusal.length > 0,
 ): Pick<ModelCompletionChoice, 'finishReason' | 'refusal'> {
   if (!present) return { finishReason };
-  const message = typeof refusal === 'string' ? refusal : '';
-  return finishReason === null || finishReason === 'stop'
-    ? { finishReason: 'refusal', refusal: message }
-    : { finishReason, refusal: message };
+  return { finishReason, refusal: typeof refusal === 'string' ? refusal : '' };
 }
 
 /**
@@ -1528,8 +1524,9 @@ export class OpenAIProvider implements IProvider {
    *   - `response.output_text.delta` yields a text chunk.
    *   - `response.refusal.delta` yields a chunk carrying the piece of the
    *     model's refusal message in `refusalDelta`; the final chunk of a
-   *     refused answer has finish reason `refusal` and the whole message in
-   *     `refusal` (an `incomplete` one keeps its own reason).
+   *     refused answer holds the whole message in `refusal`, beside the
+   *     finish reason the response gave (`stop`, or `length` for an
+   *     `incomplete` one).
    *   - A `function_call` item yields a tool-call delta with its id and name
    *     (`response.output_item.added`), then its argument fragments
    *     (`response.function_call_arguments.delta`). Tool-call indexes are
@@ -1722,7 +1719,8 @@ export class OpenAIProvider implements IProvider {
               emittedRefusal = summary.refusal;
               yield chunk({ refusalDelta: missingRefusal });
             } else {
-              log.warn('llm.output_mismatch', { provider: 'openai', reason: 'refusal' });
+              // The refusal message is text of the answer: the terminal output and the deltas disagree on it.
+              log.warn('llm.output_mismatch', { provider: 'openai', reason: 'text' });
             }
           }
           const refusal = summary.refusal || emittedRefusal;
@@ -2533,7 +2531,7 @@ export class OpenAIProvider implements IProvider {
             ? { reasoningText: c.message.reasoning_content } : {}),
           tool_calls: c.message.tool_calls,
         },
-        // An explicit refusal comes with an ordinary stop and no content; it is kept as finish reason `refusal`.
+        // An explicit refusal comes with an ordinary stop and no content; its message is kept in `refusal`.
         ...withRefusal(c.finish_reason, c.message.refusal),
         logprobs: c.logprobs,
       })),
@@ -2547,9 +2545,9 @@ export class OpenAIProvider implements IProvider {
      * Maps an OpenAI API stream chunk to a ModelCompletionResponse chunk.
      * Handles accumulation of tool calls, and of the refusal message the
      * model streams as `delta.refusal` pieces: each piece goes out as
-     * `refusalDelta`, and the chunk that carries the finish reason ends the
-     * answer with finish reason `refusal` and the whole message in `refusal`
-     * (a message the output cap cut off keeps finish reason `length`).
+     * `refusalDelta`, and the chunk that carries the finish reason holds the
+     * whole message in `refusal`, beside that reason (`stop`, or `length`
+     * for a message the output cap cut off).
      * @private
      */
     private mapApiToStreamChunkResponse(
@@ -2659,7 +2657,7 @@ export class OpenAIProvider implements IProvider {
                     }
                 })).filter(tc => tc.id && tc.function.name) : undefined, // Only include if valid
             },
-            // The chunk that ends a refused answer reports the refusal and its whole message.
+            // The chunk that ends a refused answer holds the whole refusal message beside its finish reason.
             ...(isFinal
               ? withRefusal(choice.finish_reason || null, accumulatedRefusal.text)
               : { finishReason: choice.finish_reason || null }),

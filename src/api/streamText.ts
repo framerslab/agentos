@@ -184,7 +184,7 @@ export type StreamPart =
  * {@link GenerateTextResult.finishReason} so hosts can branch on one
  * vocabulary regardless of which API produced the text.
  */
-export type StreamFinishReason = 'stop' | 'length' | 'tool-calls' | 'error' | 'refusal';
+export type StreamFinishReason = 'stop' | 'length' | 'tool-calls' | 'error';
 
 /**
  * Normalize a provider-reported finish reason onto the canonical
@@ -194,11 +194,9 @@ export type StreamFinishReason = 'stop' | 'length' | 'tool-calls' | 'error' | 'r
  * `length` / `tool_calls` / `stop`; Anthropic's adapter maps its raw
  * `stop_reason` before it reaches this layer but raw `max_tokens` /
  * `tool_use` / `end_turn` are accepted here too so a provider that
- * skips that mapping still normalizes. `refusal` (the OpenAI provider's
- * reason for an answer that holds the model's refusal message) stays
- * `refusal`. Unknown strings and null/undefined degrade to `'stop'` — the
- * pre-existing semantics of the streaming surface, which fabricated
- * `'stop'` unconditionally.
+ * skips that mapping still normalizes. Unknown strings and null/undefined
+ * degrade to `'stop'` — the pre-existing semantics of the streaming
+ * surface, which fabricated `'stop'` unconditionally.
  */
 export function normalizeStreamFinishReason(
   raw: string | null | undefined,
@@ -216,8 +214,6 @@ export function normalizeStreamFinishReason(
       return 'tool-calls';
     case 'error':
       return 'error';
-    case 'refusal':
-      return 'refusal';
     default:
       return 'stop';
   }
@@ -319,8 +315,11 @@ export interface StreamTextResult {
    * - `'tool-calls'` — the run ended with outstanding tool calls and no
    *   final text (maxSteps exhaustion).
    * - `'error'` — the stream emitted an `error` part.
-   * - `'refusal'` — the model declined with an explicit refusal message,
-   *   which {@link refusal} resolves to; the text stream carried none of it.
+   *
+   * An answer the model refused keeps the reason it reports here (`'stop'`,
+   * or `'length'` when the output cap cut the refusal message off);
+   * {@link refusal} resolves to the message, and the text stream carried
+   * none of it.
    *
    * Historically the streaming surface discarded the provider's reason
    * and fabricated `'stop'`; the provider layer always had it (final
@@ -329,18 +328,20 @@ export interface StreamTextResult {
    * early abandonment too, so awaiting it after a partial consume does
    * not hang. On a stream the consumer abandoned it does not say why the
    * stream ended: it reports the latest step that finished. The
-   * prompt-shim tool-emulation path reports `'stop'` (its internal calls
-   * do not thread per-step reasons).
+   * prompt-shim tool-emulation path reports `'length'` when the output cap
+   * cut off the reply that ended it, and `'stop'` otherwise (its internal
+   * calls do not thread any other per-step reason).
    */
   finishReason: Promise<StreamFinishReason>;
   /**
    * The model's refusal message when the final step declined the request
-   * with one: resolves with {@link finishReason}, to the message when that is
-   * `'refusal'`, to the piece that came when the output cap cut the message
-   * off (`'length'`), and to `undefined` when the model sent none or the
-   * stream ended on an error. The message never goes out as a `text` part.
-   * Set by `streamText()`; other surfaces that return this shape may leave
-   * it unset.
+   * with one (OpenAI's refusal): resolves with {@link finishReason}, to the
+   * whole message (possibly the empty string) when that is `'stop'`, to the
+   * piece that came when the output cap cut the message off (`'length'`),
+   * and to `undefined` when the model did not refuse or the stream ended on
+   * an error. The message never goes out as a `text` part. Read this promise
+   * to tell a refusal from an empty answer. Set by `streamText()`; other
+   * surfaces that return this shape may leave it unset.
    */
   refusal?: Promise<string | undefined>;
   /**
@@ -484,8 +485,9 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
     };
   });
   // The refusal message of the step (or fallback leg) that ended the stream,
-  // set before the finish reason settles: a whole one (finish reason
-  // 'refusal') or the piece the output cap cut off ('length'). The refusal
+  // set before the finish reason settles: a whole one (finish reason 'stop')
+  // or the piece the output cap cut off ('length'). Set only when the model
+  // refused, so it is also the call's "was refused" flag. The refusal
   // promise follows the finish reason, so every terminal path settles both;
   // a stream that ended on an error has none.
   let finalRefusal: string | undefined;
@@ -1053,12 +1055,11 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         // signal's reason, once the round has run, instead of settling it.
         opts.abortSignal?.throwIfAborted();
         finalText = loopResult.text;
-        // A loop that ended on the model's refusal or on the output cap settles
-        // the stream on it: the finish reason follows lastStepFinishReason
-        // where the stream ends, and the refusal message goes with it.
-        if (loopResult.finishReason === 'refusal' || loopResult.finishReason === 'length') {
-          lastStepFinishReason = loopResult.finishReason;
-        }
+        // A loop whose last reply the output cap cut off, a refused one
+        // included, settles the stream on `length`: the finish reason follows
+        // lastStepFinishReason where the stream ends. The refusal message of
+        // a reply that held one goes with it.
+        if (loopResult.cut) lastStepFinishReason = 'length';
         if (loopResult.refusal !== undefined) finalRefusal = loopResult.refusal;
         const shimToolCalls: ToolCallRecord[] = loopResult.toolCalls.map((c) => ({
           name: c.name,
@@ -1458,13 +1459,15 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         if (stepRefused && streamedToolCalls && streamedToolCalls.length > 0) streamedToolCalls = [];
 
         if (!streamedToolCalls || streamedToolCalls.length === 0) {
-          // The OpenAI chat stream's last final chunk is its usage-only chunk,
-          // which names no reason, so the message decides it, not that chunk.
-          // A message the output cap or a content filter cut off is a cut
-          // answer: the step ends on the reason the provider gave with it, and
-          // the piece that came is kept.
+          // A refused step ends on the reason its answer always reported: a
+          // stop, or, for a message the output cap or a content filter cut
+          // off, the reason the provider gave with it, the piece that came
+          // kept. The chunk that carried the message decides it: the OpenAI
+          // chat stream's last final chunk is its usage-only chunk, which
+          // names no reason, and the reason of calls that came beside the
+          // message and were dropped no longer holds.
           if (stepRefused) {
-            lastStepFinishReason = stepRefusalReason === 'length' || stepRefusalReason === 'content_filter' ? stepRefusalReason : 'refusal';
+            lastStepFinishReason = stepRefusalReason === 'length' || stepRefusalReason === 'content_filter' ? stepRefusalReason : 'stop';
             finalRefusal = stepRefusal;
           }
           const stepFinish = normalizeStreamFinishReason(lastStepFinishReason);
@@ -2154,11 +2157,14 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         opts.cacheDiagnostics && sawFinalProviderChunk ? lastProviderMessageId : null,
       );
       rootSpan?.setAttribute('agentos.api.tool_calls', allToolCalls.length);
+      // Whether the model refused: the answer that ended the stream held a refusal message, and no error ended it.
+      const refused = metricStatus !== 'error' && finalRefusal !== undefined;
       if (metricStatus === 'error') {
         rootSpan?.setAttribute('agentos.api.finish_reason', 'error');
       } else if (settledFinishReason === 'tool-calls') {
         rootSpan?.setAttribute('agentos.api.finish_reason', 'tool-calls');
       }
+      if (refused) rootSpan?.setAttribute('agentos.api.refused', true);
       attachUsageAttributes(rootSpan, usage);
       if (recordedProviderId && recordedModelId) {
         attachGenAiAttributes(rootSpan, {
@@ -2231,11 +2237,12 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           usage,
           source: opts.source,
           ...(opts.__fallbackDepth ? { fallbackDepth: opts.__fallbackDepth } : {}),
-          // The reason the stream settled on, as the caller reads it (a refusal after a tool step included).
+          // The reason the stream settled on, as the caller reads it, and whether the model refused.
           finishReason:
             metricStatus === 'error'
               ? 'error'
               : settledFinishReason ?? normalizeStreamFinishReason(lastStepFinishReason),
+          ...(refused ? { refused: true as const } : {}),
           ...(endedByAbort ? { aborted: true } : {}),
           ...(usage.completionTokensEstimated ? { usageEstimated: true } : {}),
           surface: 'streamText',

@@ -79,6 +79,12 @@ export interface LlmUsageEvent {
    */
   finishReason?: string;
   /**
+   * True when the model refused the request with a refusal message (OpenAI's refusal), the result's `refusal` being
+   * set. `finishReason` is the reason that result reports: `'stop'`, or `'length'` when the output cap cut the message
+   * off. Absent on a call the model did not refuse, and on a `streamText` call that ended on an error.
+   */
+  refused?: true;
+  /**
    * True when the caller's `abortSignal` ended a `streamText` call (`finishReason` is then `'error'`). An aborted call fires an
    * event when it used anything: a stream aborted after the provider read the request reports the input it billed and
    * the output streamed before the abort. Absent on a call that was not aborted.

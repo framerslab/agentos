@@ -521,9 +521,8 @@ export async function guardedGenerateText(opts: GenerateTextOptions, inner: (opt
   const refusalEnd = refusal ? refusal.end.kind : undefined;
   if (refusal && (refusalEnd === 'replaced' || refusalEnd === 'sanitized')) {
     run.report.result = refusalEnd;
-    // a rewrite that leaves nothing of the message leaves the result without one
-    if (refusal.text.length > 0) delivered.refusal = refusal.text;
-    else delete delivered.refusal;
+    // a rewrite that leaves nothing of the message leaves an empty one: the field is what says the model refused
+    delivered.refusal = refusal.text;
   }
   return delivered;
 }
@@ -644,8 +643,8 @@ export function guardedStreamText(opts: GenerateTextOptions, inner: (opts: Gener
         } else {
           const kind = judged.end.kind;
           if (kind === 'replaced' || kind === 'sanitized') run.report.result = kind;
-          // a rewrite that leaves nothing of the message leaves the result without one
-          deliveredRefusal = judged.text.length > 0 ? judged.text : undefined;
+          // a rewrite that leaves nothing of the message leaves an empty one: the promise is what says the model refused
+          deliveredRefusal = judged.text;
         }
       }
     } catch (error) {

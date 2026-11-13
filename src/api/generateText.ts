@@ -1133,17 +1133,20 @@ export interface GenerateTextResult {
    * - `"length"`: `maxTokens` limit reached.
    * - `"tool-calls"`: loop exhausted `maxSteps` while still calling tools.
    * - `"error"`: provider returned an error.
-   * - `"refusal"`: the model declined with an explicit refusal message, which
-   *   is in {@link GenerateTextResult.refusal} (OpenAI's refusal).
+   *
+   * An answer the model refused keeps the reason it reports here (`"stop"`,
+   * or `"length"` when the output cap cut the refusal message off) and
+   * carries the message in {@link GenerateTextResult.refusal}.
    */
-  finishReason: 'stop' | 'length' | 'tool-calls' | 'error' | 'refusal';
+  finishReason: 'stop' | 'length' | 'tool-calls' | 'error';
   /**
-   * The model's refusal message when it declined the request with one;
-   * `finishReason` is then `'refusal'` and `text` holds no answer. When the
-   * output cap cut the message off, `finishReason` is `'length'` and this
-   * holds the piece that came. Undefined when the model sent no refusal
-   * message. Set by `generateText()`; other surfaces that return this shape
-   * may report the finish reason and leave it unset.
+   * The model's refusal message when it declined the request with one
+   * (OpenAI's refusal): present only when the model refused, and possibly the
+   * empty string. `text` holds no answer then. `finishReason` is `'stop'`
+   * beside a whole message, and `'length'` when the output cap cut the
+   * message off, with the piece that came here. Read this field to tell a
+   * refusal from an empty answer. Set by `generateText()`; other surfaces
+   * that return this shape may leave it unset.
    */
   refusal?: string;
   /**
@@ -3067,7 +3070,11 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         // Dual-emit the same root-span attribute pairs as the native
         // terminals below — the shim early-return is a first-class chat
         // terminal, not a bypass (spec batch-1 residual).
-        span?.setAttribute('agentos.api.finish_reason', loopResult.finishReason);
+        // A reply the output cap cut off, a refused one included, ends the call on `length`, as the native loop does.
+        const shimFinishReason = loopResult.cut ? 'length' : loopResult.finishReason;
+        const shimRefused = loopResult.refusal !== undefined;
+        span?.setAttribute('agentos.api.finish_reason', shimFinishReason);
+        if (shimRefused) span?.setAttribute('agentos.api.refused', true);
         span?.setAttribute('agentos.api.tool_calls', loopResult.toolCalls.length);
         attachUsageAttributes(span, shimUsage);
         attachGenAiAttributes(span, { providerName: resolved.providerId, operationName: 'chat', requestModel: resolved.modelId, responseModel: lastResponseModelId, usage: shimUsage, ...(opts.serviceTier !== undefined ? { requestServiceTier: opts.serviceTier } : {}), ...(lastServiceTier !== undefined ? { responseServiceTier: lastServiceTier } : {}) });
@@ -3078,7 +3085,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           usage: shimUsage,
           source: opts.source,
           ...(opts.__fallbackDepth ? { fallbackDepth: opts.__fallbackDepth } : {}),
-          finishReason: loopResult.finishReason,
+          finishReason: shimFinishReason,
+          ...(shimRefused ? { refused: true as const } : {}),
           surface: 'generateText',
           durationMs: Date.now() - rootStartedAt,
         }, usageAccount);
@@ -3098,7 +3106,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             args: c.args,
             ...(c.error ? { error: c.error } : {}),
           })) as ToolCallRecord[],
-          finishReason: loopResult.finishReason,
+          finishReason: shimFinishReason,
+          // The model's refusal message, a whole one or the piece the output cap cut off.
           ...(loopResult.refusal !== undefined ? { refusal: loopResult.refusal } : {}),
           plan: resolvedPlan,
         };
@@ -3375,15 +3384,24 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         opts.abortSignal?.throwIfAborted();
 
         // A reply that holds the model's refusal message ends the call on it.
-        // OpenAI may send function calls beside the refusal: they are not run,
-        // and the call ends on the refusal instead of the calls' reason.
-        const refusedWithCalls = typeof choice.refusal === 'string' && toolCallsInChoice.length > 0;
+        // OpenAI may send function calls beside the refusal: they are not run.
+        // The finish reason stays the provider's, except that the calls' own
+        // reason no longer holds once they are dropped: the call then stopped
+        // on the model's answer, unless the output cap or a content filter
+        // cut that answer off.
+        const refused = typeof choice.refusal === 'string';
+        const refusedWithCalls = refused && toolCallsInChoice.length > 0;
         if (refusedWithCalls) toolCallsInChoice = [];
-        const stepFinishReason = refusedWithCalls ? 'refusal' : (choice.finishReason ?? 'stop');
+        const reportedFinishReason = choice.finishReason ?? 'stop';
+        const stepFinishReason =
+          refusedWithCalls && reportedFinishReason !== 'length' && reportedFinishReason !== 'content_filter'
+            ? 'stop'
+            : reportedFinishReason;
 
         if (textContent && toolCallsInChoice.length === 0) {
           metricUsage = totalUsage;
           span?.setAttribute('agentos.api.finish_reason', stepFinishReason);
+          if (refused) span?.setAttribute('agentos.api.refused', true);
           span?.setAttribute('agentos.api.tool_calls', allToolCalls.length);
           attachUsageAttributes(span, totalUsage);
         attachGenAiAttributes(span, { providerName: resolved.providerId, operationName: 'chat', requestModel: resolved.modelId, responseModel: lastResponseModelId, usage: totalUsage, ...(opts.serviceTier !== undefined ? { requestServiceTier: opts.serviceTier } : {}), ...(lastServiceTier !== undefined ? { responseServiceTier: lastServiceTier } : {}) });
@@ -3399,6 +3417,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             source: opts.source,
             ...(opts.__fallbackDepth ? { fallbackDepth: opts.__fallbackDepth } : {}),
             finishReason: stepFinishReason,
+            ...(refused ? { refused: true as const } : {}),
             surface: 'generateText',
             durationMs: Date.now() - rootStartedAt,
             ...(lastServingProvider ? { servingProvider: lastServingProvider } : {}),
@@ -3433,7 +3452,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             usage: totalUsage,
             toolCalls: allToolCalls,
             finishReason: stepFinishReason as GenerateTextResult['finishReason'],
-            // The model's refusal message, beside finish reason 'refusal', or the piece the output cap cut off.
+            // The model's refusal message, a whole one or the piece the output cap cut off.
             ...(typeof choice.refusal === 'string' ? { refusal: choice.refusal } : {}),
             plan: resolvedPlan,
           };
@@ -3614,6 +3633,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
 
         metricUsage = totalUsage;
         span?.setAttribute('agentos.api.finish_reason', stepFinishReason);
+        if (refused) span?.setAttribute('agentos.api.refused', true);
         span?.setAttribute('agentos.api.tool_calls', allToolCalls.length);
         attachUsageAttributes(span, totalUsage);
         attachGenAiAttributes(span, { providerName: resolved.providerId, operationName: 'chat', requestModel: resolved.modelId, responseModel: lastResponseModelId, usage: totalUsage, ...(opts.serviceTier !== undefined ? { requestServiceTier: opts.serviceTier } : {}), ...(lastServiceTier !== undefined ? { responseServiceTier: lastServiceTier } : {}) });
@@ -3625,6 +3645,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           source: opts.source,
           ...(opts.__fallbackDepth ? { fallbackDepth: opts.__fallbackDepth } : {}),
           finishReason: stepFinishReason,
+          ...(refused ? { refused: true as const } : {}),
           surface: 'generateText',
           durationMs: Date.now() - rootStartedAt,
           ...(lastServingProvider ? { servingProvider: lastServingProvider } : {}),
@@ -3657,7 +3678,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           usage: totalUsage,
           toolCalls: allToolCalls,
           finishReason: stepFinishReason as GenerateTextResult['finishReason'],
-          // The model's refusal message: a whole one beside finish reason 'refusal', or the piece of one the output cap
+          // The model's refusal message: a whole one beside finish reason 'stop', or the piece of one the output cap
           // cut off beside finish reason 'length' (a cut answer, which keeps what the model sent).
           ...(typeof choice.refusal === 'string' ? { refusal: choice.refusal } : {}),
           plan: resolvedPlan,
