@@ -25,7 +25,7 @@ import type {
   ContentFeatures,
 } from './core/types.js';
 import { DEFAULT_TRUST_POLICY_BY_SOURCE } from './core/types.js';
-import type { CognitiveMemoryConfig, PADState, HexacoTraits } from './core/config.js';
+import type { CognitiveMemoryConfig, ManagerRecallConfig, PADState, HexacoTraits } from './core/config.js';
 import {
   DEFAULT_ENCODING_CONFIG,
   DEFAULT_DECAY_CONFIG,
@@ -41,11 +41,8 @@ import { computeCurrentStrength } from './core/decay/DecayModel.js';
 import { MemoryStore } from './retrieval/store/MemoryStore.js';
 import {
   MEMORY_RECALL_CAPTURE_VERSION,
-  MEMORY_RERANK_MAX_DOCUMENTS,
   candidatesFrom,
-  rerankerRecordOf,
   type MemoryRecallCapture,
-  type MemoryRecallReranker,
   type RankedRecallCandidate,
   type RecallCaptureMode,
   type RetrievalRecallReport,
@@ -276,12 +273,34 @@ export interface ICognitiveMemoryManager {
   getHydeRetriever?(): HydeRetriever | null;
 
   /**
-   * Get the attached neural reranker, or `null` when none is
-   * configured. Step 3 uses this so the bench-side `HybridRetriever`
-   * can plumb the manager's reranker into the per-case retriever
-   * without bracket-accessing a private field.
+   * The `rerankerService` the manager's configuration was given, or `null`.
+   * The manager never calls it: memory rerank is `recall.rerank`. A caller
+   * reads it to build a retriever of its own (a `HybridRetriever`, a
+   * `SessionRetriever`) over the same service.
    */
   getRerankerService?(): import('../rag/reranking/RerankerService.js').RerankerService | null;
+
+  /**
+   * Resolves when memory rerank's model has loaded or been found
+   * unavailable; at once with no `recall.rerank` or with `{ kind: 'llm' }`.
+   * For a deploy step that warms the local model before the process reports
+   * healthy. Never rejects.
+   */
+  recallReady?(): Promise<void>;
+
+  /**
+   * Replaces recall settings on a built manager, field by field over the
+   * ones it holds: for a host or a bench that is handed a manager it did
+   * not construct. The values are checked as at construction. A `rerank`
+   * builds that provider and starts its load, and the call resolves when
+   * the load has settled (loaded or unavailable); until then turns run
+   * unreranked, reason `loading`. This is the only way to change `rerank`
+   * on a built manager: its provider is built once.
+   *
+   * @throws {RecallOptionError} Naming the field, after one
+   *   `memory.recall.option_rejected` line; the settings stay as they were.
+   */
+  applyRecallConfig?(recall: ManagerRecallConfig): Promise<void>;
 
   /** Get infinite-context runtime stats when enabled. */
   getContextWindowStats(): ContextWindowStats | null;
@@ -374,10 +393,13 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
   // Cognitive Mechanisms (optional)
   private mechanismsEngine: import('./mechanisms/CognitiveMechanismsEngine.js').CognitiveMechanismsEngine | null = null;
 
-  // Optional neural reranker for post-retrieval quality improvement
+  // The reranker service of the configuration, held for `getRerankerService()` and never called for memory recall.
   private rerankerService: import('../rag/reranking/RerankerService.js').RerankerService | null = null;
 
-  /** The recall legs a retrieval runs ({@link RecallPipeline}), over this manager's store and graph as they are at each run. */
+  /**
+   * The recall legs a retrieval runs and the reranker `recall.rerank` names ({@link RecallPipeline}), over this
+   * manager's store and graph as they are at each run.
+   */
   private readonly recall = new RecallPipeline({
     store: () => this.store,
     graph: () => this.graph,
@@ -488,10 +510,14 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
       this.store.setBrain(config.brain);
     }
 
-    // Optional neural reranker for post-retrieval quality improvement
+    // A reranker service is kept for `getRerankerService()` and never called: memory recall reranks only with the
+    // provider `recall.rerank` names, so a remote provider registered in the service receives no memory.
     if (config.rerankerService) {
       this.rerankerService = config.rerankerService;
+      recallLog.warn('memory.recall.option_ignored', { option: 'remote_provider' });
     }
+    // Memory rerank's provider is built here and its model's load started, never inside a turn.
+    this.recall.configureRerank();
 
     // Cognitive working memory (wraps the existing IWorkingMemory)
     this.workingMemory = this.createWorkingMemory(config);
@@ -953,76 +979,24 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     const { scored, partial, storeTimings } = run;
     const denseMs = capturing ? hydeMs + (run.legs.find((leg) => leg.leg === 'dense')?.ms ?? 0) : 0;
 
-    // --- Optional neural reranking ---
-    // Blends the scores of the service's default provider (local
-    // cross-encoder, Cohere, LLM judge or one of the host's) with the
-    // existing cognitive composite. Weight: 0.7 cognitive + 0.3 neural reranker.
-    // This preserves decay, mood congruence, and graph activation signals
-    // while boosting semantically relevant results the bi-encoder missed.
-    // What the turn's recall capture says of the rerank: absent with no reranker.
-    let rerankerRecord: MemoryRecallReranker | undefined;
-    let rerankScores: Record<string, number> | undefined;
+    // The rerank ran inside the recall (`recall.rerank`): the pipeline blended the scores and ordered the candidates.
+    // What the turn's recall capture says of it is carried only when the manager records a capture.
+    const rerankerRecord = capturing && run.reranker.reason !== 'none_configured' ? run.reranker : undefined;
+    const rerankScores = capturing ? run.rerankScores : undefined;
     // Each trace's rank in the dense leg, before a rerank reorders them: the capture reports it beside the final order.
     // Under `hybrid` the pool holds them, beside the other legs' ranks.
     const denseRanks: Record<string, number> | undefined = !capturing
       ? undefined
       : run.ranked
         ? Object.fromEntries(run.ranked.flatMap((candidate) => (candidate.ranks.dense !== undefined ? [[candidate.id, candidate.ranks.dense]] : [])))
-        : Object.fromEntries(scored.map((trace, i) => [trace.id, i + 1]));
-    if (capturing && this.rerankerService && scored.length === 0) {
-      rerankerRecord = { provider: 'none', candidates: 0, ms: 0 };
-    }
-    if (this.rerankerService && scored.length > 0) {
-      const rerankStartedAt = capturing ? performance.now() : 0;
-      // The service sends at most this many, the dense leg's first; the capture counts what it sent.
-      const sent = Math.min(scored.length, MEMORY_RERANK_MAX_DOCUMENTS);
-      try {
-        const rerankerOutput = await this.rerankerService.rerank({
-          query,
-          documents: scored.map((t) => ({
-            id: t.id,
-            content: t.content,
-            originalScore: t.retrievalScore,
-          })),
-        }, { topN: effectiveTopK, maxDocuments: MEMORY_RERANK_MAX_DOCUMENTS });
-
-        const rerankedScores = new Map(
-          rerankerOutput.results.map((r) => [r.id, r.relevanceScore])
-        );
-        if (capturing) rerankScores = Object.fromEntries(rerankedScores);
-
-        for (const trace of scored) {
-          const neuralScore = rerankedScores.get(trace.id);
-          if (neuralScore !== undefined) {
-            trace.retrievalScore = 0.7 * trace.retrievalScore + 0.3 * neuralScore;
-          }
-        }
-
-        // Under `hybrid` the fused order stands: the blend sets each line's relevance, and re-sorting by it would sink a
-        // candidate only the exact words or the recency found, whose cognitive score has similarity 0.
-        if (run.retrieval !== 'hybrid') scored.sort((a, b) => b.retrievalScore - a.retrievalScore);
-        if (capturing) {
-          rerankerRecord = rerankerRecordOf(
-            rerankerOutput.diagnostics?.providerId,
-            rerankerOutput.diagnostics?.modelId,
-            rerankerOutput.diagnostics?.documentsProcessed ?? sent,
-            performance.now() - rerankStartedAt,
-          );
-        }
-      } catch {
-        // Reranking is non-critical — use cognitive scores as-is
-        rerankScores = undefined;
-        if (capturing) {
-          rerankerRecord = { provider: 'none', reason: 'error', candidates: sent, ms: Math.round(performance.now() - rerankStartedAt) };
-        }
-      }
-    }
+        : Object.fromEntries((run.denseOrder ?? scored.map((trace) => trace.id)).map((id, i) => [id, i + 1]));
     const recallReport: RetrievalRecallReport | undefined = denseRanks
       ? {
           denseRanks,
           denseMs,
           legs: run.legs,
           ...(rerankScores ? { rerankScores } : {}),
+          ...(run.rerankMs > 0 ? { rerankMs: run.rerankMs } : {}),
           retrieval: run.retrieval,
           ...(run.ranked ? { ranked: run.ranked } : {}),
           ...(run.lexicalBackend ? { lexicalBackend: run.lexicalBackend } : {}),
@@ -1354,7 +1328,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
           legsMs: Math.round(recalledAt - startedAt),
           fuseMs: recall?.timings?.fuseMs ?? 0,
           dedupeMs: recall?.timings?.dedupeMs ?? 0,
-          rerankMs: result.diagnostics.reranker?.ms ?? 0,
+          rerankMs: recall?.rerankMs ?? result.diagnostics.reranker?.ms ?? 0,
           assembleMs: Math.round(assembledAt - recalledAt),
           totalMs: Math.round(assembledAt - startedAt),
         },
@@ -2000,14 +1974,31 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
   }
 
   /**
-   * Return the attached neural reranker, or `null` when none is
-   * configured. Public read-only accessor for Step-3 bench wiring:
-   * the bench constructs a per-case `HybridRetriever` that needs the
-   * same reranker the manager uses, without bracket-accessing the
-   * private field.
+   * The `rerankerService` the configuration was given, or `null`. The
+   * manager never calls it (memory rerank is `recall.rerank`); a caller reads
+   * it to build a retriever of its own, such as a `HybridRetriever`, over the
+   * same service.
    */
   getRerankerService(): import('../rag/reranking/RerankerService.js').RerankerService | null {
     return this.rerankerService;
+  }
+
+  /** @inheritdoc */
+  recallReady(): Promise<void> {
+    return this.recall.ready();
+  }
+
+  /** @inheritdoc */
+  async applyRecallConfig(recall: ManagerRecallConfig): Promise<void> {
+    this.ensureInitialized();
+    // The settings given are checked alone first, so one that is not an object is refused before it is merged.
+    assertRecallConfig(recall, 'CognitiveMemoryManager');
+    const next: ManagerRecallConfig = { ...this.config.recall, ...recall };
+    assertRecallConfig(next, 'CognitiveMemoryManager');
+    this.config.recall = next;
+    // The provider is rebuilt only when the call names a rerank: another field leaves the loaded model as it is.
+    if (recall != null && 'rerank' in recall) this.recall.configureRerank();
+    await this.recall.ready();
   }
 
   // =========================================================================

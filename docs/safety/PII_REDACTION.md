@@ -1,6 +1,6 @@
 ---
 title: PII Redaction (and PHI scrubbing)
-description: Four-tier PII detection and redaction guardrail for AgentOS — regex, NER, optional LLM judge, and redaction engine — covering 18 entity types including SSN, payment information, dates of birth, names, locations, and clinical terminology. Designed to slot into HIPAA-PHI scrubbing pipelines without claiming HIPAA compliance itself.
+description: Four-tier PII detection and redaction guardrail for AgentOS — regex, NER, optional LLM judge, and redaction engine — covering 18 entity types by default, including SSN, payment information, dates of birth, names, locations, and clinical terminology, and two contact types, street addresses and social handles, when named. Designed to slot into HIPAA-PHI scrubbing pipelines without claiming HIPAA compliance itself.
 keywords:
   - pii redaction
   - phi scrubbing
@@ -22,7 +22,7 @@ keywords:
 
 `@framers/agentos-ext-pii-redaction` is the guardrail that scans every message flowing through an agent for personally identifiable information and redacts matches before the message reaches downstream tools, the LLM, or storage. It ships as an optional npm package outside the core runtime so the BERT-based NER model never enters the dependency graph for agents that do not need it.
 
-The package covers 18 entity categories including `SSN`, `CREDIT_CARD`, `EMAIL`, `PHONE`, `IBAN`, `PASSPORT`, `DRIVERS_LICENSE`, `GOV_ID`, `DATE_OF_BIRTH`, `API_KEY`, `AWS_KEY`, `CRYPTO_ADDRESS`, `PERSON`, `ORGANIZATION`, `LOCATION`, `MEDICAL_TERM`, and a catch-all `UNKNOWN_PII` bucket for spans the LLM judge or a custom denylist flag without a more specific label.
+The package covers 18 entity categories including `SSN`, `CREDIT_CARD`, `EMAIL`, `PHONE`, `IBAN`, `PASSPORT`, `DRIVERS_LICENSE`, `GOV_ID`, `DATE_OF_BIRTH`, `API_KEY`, `AWS_KEY`, `CRYPTO_ADDRESS`, `PERSON`, `ORGANIZATION`, `LOCATION`, `MEDICAL_TERM`, and a catch-all `UNKNOWN_PII` bucket for spans the LLM judge or a custom denylist flag without a more specific label. Two more types, `STREET_ADDRESS` and `SOCIAL_HANDLE`, are detected only when `entityTypes` names them; `CONTACT_PII_ENTITY_TYPES` holds both.
 
 Every class, entity type, redaction style, and config field below corresponds to a surface in the package's `src/` directory (published as `@framers/agentos-ext-pii-redaction`). It also covers, with deliberate care, what this guardrail does and does not contribute to a HIPAA-compliant healthcare deployment.
 
@@ -39,7 +39,7 @@ A four-tier detection pipeline, plus an optional fifth LLM-judge tier, feeding i
 | **Tier 3 — LLM judge (optional)** | A second LLM call (typically `gpt-4o-mini` or `claude-haiku`) that re-examines candidate spans flagged by earlier tiers and catches context-dependent PII — like a name embedded in a free-form complaint that NER missed, or a medical condition referenced by colloquial phrasing. Disabled by default. | One small LLM call per chunk when enabled. Cached via LRU (default 256 entries). |
 | **Redaction engine** | Applies one of four masking strategies to the final entity list and returns the redacted text. | In-process, microsecond-scale. |
 
-The guardrail registers with `config.canSanitize = true`, so it runs in Phase 1 of the two-phase guardrail dispatcher: sanitize results chain sequentially through the other Phase 1 sanitizers, then the redacted text feeds the Phase 2 classifiers in parallel. `config.evaluateStreamingChunks` is `false` unless the pack options set it.
+In redaction mode (the default) the guardrail registers with `config.canSanitize = true`, so it runs in Phase 1 of the two-phase guardrail dispatcher: sanitize results chain sequentially through the other Phase 1 sanitizers, then the redacted text feeds the Phase 2 classifiers in parallel. `config.evaluateStreamingChunks` is `false` unless the pack options set it.
 
 ## The shortest useful example
 
@@ -101,6 +101,48 @@ Defined in the package's `src/types.ts`:
 
 Narrow the `entityTypes` array in the pack options to skip irrelevant patterns. Performance improves measurably when you do — the regex engine compiles only the patterns for selected types.
 
+### Two contact types, when named
+
+`STREET_ADDRESS` and `SOCIAL_HANDLE` are off unless `entityTypes` names them. Neither is in `ALL_PII_ENTITY_TYPES`, which keeps its 18 types and stays the default of `entityTypes`, so a host that names no types gets the 18 as before and reports neither. `CONTACT_PII_ENTITY_TYPES` lists both:
+
+```typescript
+import {
+  CONTACT_PII_ENTITY_TYPES,
+  REGEX_TIER_TYPES,
+  createPiiRedactionGuardrail,
+} from '@framers/agentos-ext-pii-redaction';
+
+createPiiRedactionGuardrail({
+  entityTypes: [...REGEX_TIER_TYPES, ...CONTACT_PII_ENTITY_TYPES],
+});
+// "I live at 42 Maple Street, Apt 3. Add me on insta: sunny.side"
+// becomes "I live at [STREET_ADDRESS]. Add me on insta: [SOCIAL_HANDLE]"
+```
+
+Both are found in the regex tier by the pack's contact recognizer (`ContactRecognizer`), with pattern code of its own: no model, no network call and no optional library. The regex library's own address and handle patterns are not used for them.
+
+| Type | What it finds | Score |
+|---|---|---|
+| `STREET_ADDRESS` | A house number, one to four name words and a street word, with at least one support | 0.9 |
+| | A post-office box: `P.O. Box 123`, `PO Box 123`, `Post Office Box 123` | 0.9 |
+| | The same street shape with no support | 0.45 |
+| `SOCIAL_HANDLE` | A link to a profile or an invite | 0.95 |
+| | A service word and a name | 0.9 |
+| | A bare `@name` with no service word | 0.4 |
+
+**Street addresses.** The formats covered are English-language addresses of the United States, the United Kingdom, Canada and Australia. Addresses in other languages and in other countries' formats are not detected. The house number is one to six digits with an optional letter or second number (`221B`, `12-14`, `4/12`). Support is any of these:
+
+- a unit (`apt`, `apartment`, `unit`, `suite`, `ste`, `flat` or `#` with its number), after the street or before the house number;
+- a postal code within 60 characters after the street: a US ZIP after a state, an Australian postcode after a state or territory, a Canadian postal code, or a UK postcode;
+- a city and a region after a comma or on the next line (a US state, a Canadian province or territory, an Australian state or territory, or a UK nation, by name or by code; another region such as a UK county when the city and the region each follow a comma and each is capitalized);
+- an address cue in the 40 characters before it, such as "live at", "address", "located at" or "send it to".
+
+The entity covers the unit, the city, the region and the postal code found with the street; the cue stays in the text.
+
+**Social handles.** A link to a profile or an invite on Instagram, Telegram, Discord, X or Twitter, TikTok, Snapchat, WhatsApp (`wa.me`) or Reddit scores 0.95; a link to one of a service's own pages (`instagram.com/p/...`, `x.com/home`, `reddit.com/r/...`) names no account and is not one. A name next to a service word (instagram, insta, ig, snapchat, snap, discord, telegram, tg, kik, twitter, tiktok or reddit, as in "insta: name" or "add me on snap name") scores 0.9, and Reddit's `u/name` counts with no service word. A bare `@name` scores 0.4. The entity is the name alone, so a string in `allowlist`, such as a room's own account name, matches it.
+
+**The threshold.** Entities under `confidenceThreshold` (0.5 unless set) are dropped. Without `llmJudge`, a bare `@name` (0.4) and an address shape with no support (0.45) are reported only to a host that lowers the threshold. What raises a handle above it is a service word beside the name (0.9) or a link to the profile (0.95); what raises an address is a support (0.9). With `llmJudge` set, every entity scored between 0.3 and 0.7 goes to the judge's model, which with these types means every bare `@name` and every unsupported address shape. An entity the judge confirms takes the judge's confidence before the threshold applies, so a bare `@name` or an unsupported address the judge confirms at or above the threshold is reported at the default setting.
+
 ## Redaction styles
 
 `RedactionStyle`:
@@ -111,6 +153,35 @@ Narrow the `entityTypes` array in the pack options to skip irrelevant patterns. 
 | `'mask'` | `***` | The downstream consumer must not even learn the category. |
 | `'hash'` | `a3f2c1d8` (SHA-256 truncated to 8 hex chars) | The same input should produce the same redacted token across runs — useful for analytics that need stable identifiers without recovering the original. |
 | `'category-tag'` | `<PII type="EMAIL"/>` | Downstream consumer is another machine and needs structured tagging. |
+
+## Refusing instead of redacting
+
+`onDetect` is `'redact'` unless set. With `onDetect: 'refuse'` the guardrail rejects detected personal data so the sender can edit it: it answers `BLOCK` with `reasonCode: 'PII_PRESENT'`, and its metadata holds the detected types (`entityTypes`), their count (`entityCount`) and the tiers that ran (`tiersExecuted`). It never rewrites the text: in this mode it returns no `SANITIZE`, no redacted text and no matched text.
+
+- **`refuseTypes`** names the types that refuse. Left out, every detected type refuses; an empty list refuses none. Other detected types are left alone. `entityTypes` decides what the pipeline detects, so every entry of `refuseTypes` must be in `entityTypes` too (or in the default set when `entityTypes` is left out), and building a guardrail that breaks this throws: `createPiiRedactionGuardrail({ onDetect: 'refuse', refuseTypes: ['STREET_ADDRESS'] })` fails, because the default set holds no contact type.
+- **`sequential: true`** runs the guardrail in the dispatcher's first phase, before the guards that do not sanitize, so a refused input or final response reaches none of the second phase's guards: a `BLOCK` in the first phase ends the evaluation. Streamed `TEXT_DELTA` chunks skip a refusing guardrail (see **Output** below), so a second-phase guard with `evaluateStreamingChunks` set can receive a delta that holds personal data before the final response is refused. The first phase runs its guards (every guard with `canSanitize` or `sequential` set) one at a time in registration order, so a first-phase guard registered before this one still receives the message; register the PII guardrail first when nothing may see personal data it refuses. It sets both `config.sequential` and `config.canSanitize`; core 0.15.124 reads the latter to run the guardrail in its first phase, so the ordering holds on older cores too. It does not make refuse mode rewrite text. `sequential` is `false` unless set and changes nothing outside refuse mode. Without it, a refusing guardrail does not set `canSanitize`.
+- **Output.** For output, refuse mode ignores streaming deltas and `evaluateStreamingChunks`, and judges the complete `FINAL_RESPONSE` text. A host that must keep personal data out of what it delivers withholds delivery until that final evaluation.
+
+```typescript
+import { moderateContent, type IGuardrailService } from '@framers/agentos';
+import { CONTACT_PII_ENTITY_TYPES, createPiiRedactionGuardrail } from '@framers/agentos-ext-pii-redaction';
+
+const pack = createPiiRedactionGuardrail({
+  entityTypes: ['EMAIL', 'PHONE', ...CONTACT_PII_ENTITY_TYPES],
+  onDetect: 'refuse',
+  sequential: true,
+  guardrailScope: 'input',
+});
+const guard = pack.descriptors.find((item) => item.kind === 'guardrail')!.payload as IGuardrailService;
+const decision = await moderateContent(
+  { text: 'my address is 221 Baker Street, London NW1 6XE' },
+  { guards: [guard], context: { userId: 'member', sessionId: 'session' } },
+);
+// decision.outcome === 'refuse'; decision.deciding.reasonCode === 'PII_PRESENT'
+// No sanitized text is returned.
+```
+
+The example uses [`moderateContent()`](/features/guardrails), core's entry point for content between people, which core 0.17.1 exports. Refusal through the older guardrail dispatcher works with the pack's existing peer range (`@framers/agentos` 0.12.0 or later). `EMAIL` and `PHONE` come from the optional `openredaction` library, and detection throws when a type it serves is asked for and it is missing; the two contact types alone need no optional library.
 
 ## Allowlist and denylist
 
@@ -211,6 +282,7 @@ This guardrail is a building block. It does not, and cannot, make a deployment H
 | Package root | [`@framers/agentos-ext-pii-redaction`](https://www.npmjs.com/package/@framers/agentos-ext-pii-redaction) |
 | Entity type union, redaction styles, pack options | `src/types.ts` |
 | Regex recognizer (500+ patterns) | `src/recognizers/RegexRecognizer.ts` |
+| Contact recognizer (`STREET_ADDRESS`, `SOCIAL_HANDLE`) | `ContactRecognizer` in `src/recognizers/ContactRecognizer.ts` |
 | NER model recognizer | `src/recognizers/NerModelRecognizer.ts` |
 | NLP prefilter | `src/recognizers/NlpPrefilterRecognizer.ts` |
 | LLM judge recognizer (optional Tier 3) | `src/recognizers/LlmJudgeRecognizer.ts` |

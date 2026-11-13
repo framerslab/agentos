@@ -92,18 +92,58 @@ describe('LocalCrossEncoderReranker', () => {
     it('lists the supported models', () => {
       expect(reranker.getSupportedModels()).toEqual([...LOCAL_RERANKER_MODELS]);
     });
+
+    it('lists exactly the three models whose licences were read, by their canonical ids', () => {
+      expect([...LOCAL_RERANKER_MODELS]).toEqual([
+        'cross-encoder/ms-marco-MiniLM-L6-v2',
+        'cross-encoder/ms-marco-MiniLM-L12-v2',
+        'BAAI/bge-reranker-base',
+      ]);
+    });
+  });
+
+  describe('revision and local files', () => {
+    it('a provider built without defaultModelId loads the canonical cross-encoder/ms-marco-MiniLM-L6-v2', async () => {
+      await reranker.initialize();
+      expect(modelFromPretrained).toHaveBeenCalledWith('cross-encoder/ms-marco-MiniLM-L6-v2', expect.anything());
+      expect(tokenizerFromPretrained).toHaveBeenCalledWith('cross-encoder/ms-marco-MiniLM-L6-v2', expect.anything());
+    });
+
+    it('passes a pinned revision to the tokenizer and the model loads, and passes none without one', async () => {
+      const pinned = new LocalCrossEncoderReranker({ providerId: 'local', revision: 'abc' });
+      await pinned.initialize();
+      expect(modelFromPretrained.mock.calls[0][1]).toMatchObject({ revision: 'abc' });
+      expect((tokenizerFromPretrained.mock.calls[0] as unknown[])[1]).toMatchObject({ revision: 'abc' });
+
+      vi.clearAllMocks();
+      await reranker.initialize();
+      expect(modelFromPretrained.mock.calls[0][1]).not.toHaveProperty('revision');
+      expect((tokenizerFromPretrained.mock.calls[0] as unknown[])[1]).not.toHaveProperty('revision');
+    });
+
+    it('localFilesOnly loads from the cache alone (local_files_only), on both loads', async () => {
+      const offline = new LocalCrossEncoderReranker({ providerId: 'local', localFilesOnly: true, cacheDir: '/tmp/models' });
+      await offline.initialize();
+      expect(modelFromPretrained.mock.calls[0][1]).toMatchObject({ local_files_only: true, cache_dir: '/tmp/models' });
+      expect((tokenizerFromPretrained.mock.calls[0] as unknown[])[1]).toMatchObject({ local_files_only: true, cache_dir: '/tmp/models' });
+
+      vi.clearAllMocks();
+      await reranker.initialize();
+      expect(modelFromPretrained.mock.calls[0][1]).not.toHaveProperty('local_files_only');
+    });
   });
 
   describe('weights file', () => {
     it("loads the default model's quantized file, named, at fp32 so no dtype suffix is added", async () => {
       await reranker.initialize();
 
+      expect(LOCAL_RERANKER_DEFAULT_WEIGHTS['cross-encoder/ms-marco-MiniLM-L6-v2']).toBe('model_quint8_avx2');
       expect(LOCAL_RERANKER_DEFAULT_WEIGHTS['cross-encoder/ms-marco-MiniLM-L-6-v2']).toBe('model_quint8_avx2');
       expect(modelFromPretrained).toHaveBeenCalledWith(
-        'cross-encoder/ms-marco-MiniLM-L-6-v2',
+        'cross-encoder/ms-marco-MiniLM-L6-v2',
         expect.objectContaining({ model_file_name: 'model_quint8_avx2', dtype: 'fp32', quantized: false }),
       );
-      expect(tokenizerFromPretrained).toHaveBeenCalledWith('cross-encoder/ms-marco-MiniLM-L-6-v2', expect.anything());
+      expect(tokenizerFromPretrained).toHaveBeenCalledWith('cross-encoder/ms-marco-MiniLM-L6-v2', expect.anything());
     });
 
     it('loads onnx/model.onnx at fp32 for a model with no listed quantized file', async () => {
@@ -124,7 +164,7 @@ describe('LocalCrossEncoderReranker', () => {
       await custom.initialize();
 
       expect(modelFromPretrained).toHaveBeenCalledWith(
-        'cross-encoder/ms-marco-MiniLM-L-6-v2',
+        'cross-encoder/ms-marco-MiniLM-L6-v2',
         expect.objectContaining({ model_file_name: 'model_qint8_arm64', dtype: 'fp32', cache_dir: '/tmp/models' }),
       );
 
@@ -132,7 +172,7 @@ describe('LocalCrossEncoderReranker', () => {
       const q8 = new LocalCrossEncoderReranker({ providerId: 'local', dtype: 'q8' });
       await q8.initialize();
       expect(modelFromPretrained).toHaveBeenCalledWith(
-        'cross-encoder/ms-marco-MiniLM-L-6-v2',
+        'cross-encoder/ms-marco-MiniLM-L6-v2',
         expect.objectContaining({ model_file_name: 'model', dtype: 'q8', quantized: true }),
       );
     });
@@ -147,7 +187,7 @@ describe('LocalCrossEncoderReranker', () => {
         );
 
         expect(modelFromPretrained).toHaveBeenCalledWith(
-          'cross-encoder/ms-marco-MiniLM-L-6-v2',
+          'cross-encoder/ms-marco-MiniLM-L6-v2',
           expect.objectContaining({ model_file_name: 'model_quint8_avx2', dtype: 'fp32' }),
         );
         expect(result.diagnostics?.providerMetrics).toMatchObject({ modelFile: 'onnx/model_quint8_avx2.onnx' });
@@ -400,7 +440,7 @@ describe('LocalCrossEncoderReranker', () => {
   });
 
   describe('session options', () => {
-    const MODEL = 'cross-encoder/ms-marco-MiniLM-L-6-v2';
+    const MODEL = 'cross-encoder/ms-marco-MiniLM-L6-v2';
 
     it('passes intraOpNumThreads and interOpNumThreads to the ONNX session', async () => {
       const threaded = new LocalCrossEncoderReranker({ providerId: 'local', intraOpNumThreads: 1, interOpNumThreads: 1 });
@@ -667,10 +707,10 @@ describe('LocalCrossEncoderReranker', () => {
 
       expect(modelFromPretrained.mock.calls.map((call) => call[0])).toEqual([
         'BAAI/bge-reranker-base',
-        'cross-encoder/ms-marco-MiniLM-L-6-v2',
+        'cross-encoder/ms-marco-MiniLM-L6-v2',
       ]);
       const result = await reranker.rerank({ query: 'q', documents: [{ id: 'a', content: 'a' }] }, { providerId: 'local', modelId: '' });
-      expect(result.diagnostics?.modelId).toBe('cross-encoder/ms-marco-MiniLM-L-6-v2');
+      expect(result.diagnostics?.modelId).toBe('cross-encoder/ms-marco-MiniLM-L6-v2');
     });
   });
 
