@@ -34,6 +34,15 @@ export class PlaybackAcknowledgements {
     if (this.cleared && sameVoiceGeneration(this.cleared, receipt.generation)) throw new Error('cancelled generation');
     this.audio = { receipt: { ...receipt, generation: { ...receipt.generation } }, result: deferred(this.timeoutMs), acknowledged: false };
   }
+  /**
+   * Withdraws the receipt `begin()` reserved for audio that never left, so the next can be reserved at once; a wait on
+   * it rejects. Another receipt, or one already acknowledged, is left as it is.
+   */
+  withdraw(receipt: PlaybackReceipt): void {
+    const audio = this.audio;
+    if (!audio || audio.acknowledged || !sameVoiceGeneration(audio.receipt.generation, receipt.generation) || audio.receipt.sequence !== receipt.sequence) return;
+    clearTimeout(audio.result.timer); audio.result.reject(new Error('playback cancelled')); this.audio = undefined;
+  }
   /** Returns false for stale/duplicate receipts; malformed or inconsistent current receipts fail closed. */
   receive(input: unknown): boolean {
     const event = PlaybackAcknowledgementSchema.parse(input);
