@@ -12,6 +12,18 @@ import type {
   RerankerRequestConfig,
   RerankerProviderConfig,
 } from '../IRerankerService';
+import { importOptional } from '../../../../core/utils/importOptional.js';
+
+/** Transformers.js 3.x, the preferred package. */
+const TRANSFORMERS = '@huggingface/transformers';
+/** Transformers.js 2.x, the fallback. */
+const TRANSFORMERS_V2 = '@xenova/transformers';
+
+/** Transformers.js as the host passes it in `providerOptions.transformers`: the module, or what its function returns. */
+async function suppliedTransformers(config: LocalCrossEncoderConfig): Promise<any> {
+  const supplied = config.providerOptions?.transformers;
+  return typeof supplied === 'function' ? await supplied() : supplied;
+}
 
 /**
  * Transformers.js 3.x data types. The dtype picks the suffix Transformers.js
@@ -346,6 +358,13 @@ interface LoadedCrossEncoder {
  * `AutoTokenizer` and `AutoModelForSequenceClassification`. Scoring sends
  * nothing over the network: the query and documents stay in the process.
  *
+ * The provider imports Transformers.js by a specifier a bundler does not
+ * follow, which resolves in Node and on a page with an import map. A bundled
+ * browser page passes it in `providerOptions.transformers`, as the module or
+ * a function that imports it (`() => import('@huggingface/transformers')`),
+ * so the page's bundler takes the package in; the provider then uses only
+ * that, and reads 2.x from 3.x by the module's `env.version`.
+ *
  * Each batch of up to `batchSize` documents is tokenized as (query,
  * document) pairs, padded and truncated to `maxSequenceLength`, and scored in
  * one forward pass. With `pieceMaxChars`, a long document is split into
@@ -498,16 +517,24 @@ export class LocalCrossEncoderReranker implements IRerankerProvider {
     /** Transformers.js 2.x (`@xenova/transformers`), which reads `quantized` and not `dtype`. */
     let version2 = false;
     try {
-      // Dynamic import to avoid bundling issues and allow optional dependency.
-      // Prefer `@huggingface/transformers` (Transformers.js v3+) but support `@xenova/transformers` for back-compat.
-      transformers = await (async () => {
-        try {
-          return await import('@huggingface/transformers');
-        } catch {
-          version2 = true;
-          return await import('@xenova/transformers');
-        }
-      })();
+      // The module the host passes, as a bundled browser page does; its env.version tells 2.x from 3.x.
+      // Otherwise loaded at run time by a specifier a bundler does not follow, so a host bundles this module without
+      // them. Prefer `@huggingface/transformers` (Transformers.js v3+) but support `@xenova/transformers` for
+      // back-compat.
+      if (this.config.providerOptions?.transformers !== undefined) {
+        transformers = await suppliedTransformers(this.config);
+        if (!transformers) throw new Error('providerOptions.transformers gave no module');
+        version2 = String(transformers.env?.version ?? '').startsWith('2.');
+      } else {
+        transformers = await (async () => {
+          try {
+            return await importOptional(TRANSFORMERS);
+          } catch {
+            version2 = true;
+            return await importOptional(TRANSFORMERS_V2);
+          }
+        })();
+      }
     } catch {
       throw new Error(
         'LocalCrossEncoderReranker: Transformers.js is not installed. ' +
@@ -600,13 +627,20 @@ export class LocalCrossEncoderReranker implements IRerankerProvider {
    * Check if the local reranker is available.
    */
   public async isAvailable(): Promise<boolean> {
+    if (this.config.providerOptions?.transformers !== undefined) {
+      try {
+        return Boolean(await suppliedTransformers(this.config));
+      } catch {
+        return false;
+      }
+    }
     try {
       // Check if transformers.js is available
-      await import('@huggingface/transformers');
+      await importOptional(TRANSFORMERS);
       return true;
     } catch {
       try {
-        await import('@xenova/transformers');
+        await importOptional(TRANSFORMERS_V2);
         return true;
       } catch {
         return false;
