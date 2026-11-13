@@ -43,4 +43,19 @@ describe.each(ENGINES)('hybrid recall keeps to the turn scopes on %s', (_engine,
     await mem.close();
     await db.close();
   });
+
+  it("a supplied candidate of another organization is dropped before the pool: not in the block or the record, counted with no id", async () => {
+    const db = await open();
+    const mem = await memoryWith({ retrieval: 'hybrid' }, new FlatEmbedder(), db.brain);
+    await plant(mem, 'mine', 'The bike shed code is XQ7Z.');
+    const out = await mem.manager.assembleForPrompt('What does a seat cost?', 1600, NEUTRAL, {
+      scopes: TURN_SCOPES,
+      supplied: [{ id: 'secret', text: 'Org B pays 90 a seat.', scope: { scope: 'organization', scopeId: 'B' } }],
+    } as never);
+    expect(out.contextText).not.toContain('Org B');
+    expect(JSON.stringify(out.capture)).not.toContain('secret');
+    expect((out.capture as unknown as { suppliedRejected: unknown }).suppliedRejected).toEqual({ outOfScope: 1, ineligible: 0 });
+    await mem.close();
+    await db.close();
+  });
 });

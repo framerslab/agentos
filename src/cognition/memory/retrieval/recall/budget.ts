@@ -83,6 +83,10 @@ export function assertRecallConfig(recall: ManagerRecallConfig | null | undefine
   if (recall.retrieval != null && !RETRIEVAL_MODES.includes(recall.retrieval)) {
     rejectRecallOption('retrieval', 'invalid_value', `${where}: memory.recall.retrieval must be 'dense' or 'hybrid'.`);
   }
+  const memoryQuestion: unknown = recall.memoryQuestion;
+  if (memoryQuestion != null && typeof memoryQuestion !== 'function') {
+    rejectRecallOption('memoryQuestion', 'invalid_value', `${where}: recall.memoryQuestion must be a function of the turn's text.`);
+  }
   const constants: unknown = recall.constants;
   if (constants != null) {
     if (!isSettingsObject(constants)) {
