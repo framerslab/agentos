@@ -1325,4 +1325,97 @@ describe('GMI sentiment writes that land after their turn dropped them', () => {
       await gmi.shutdown();
     }
   });
+
+  it('logs a scrub that runs again after a forget and fails once its own turn is forgotten', async () => {
+    const lines: Array<Record<string, unknown>> = [];
+    const capture: Record<string, unknown> = { child: () => capture };
+    for (const level of ['debug', 'info', 'warn', 'error', 'fatal']) {
+      capture[level] = (line: Record<string, unknown>) => { lines.push(line); };
+    }
+    setLogger(capture as any);
+    const utility = createMockUtilityAI(negative);
+    const wm = createMockWorkingMemory();
+    const write = wm.set.getMockImplementation()!;
+    let holds = 0;
+    const held: Array<{ release: () => void; fail: () => void }> = [];
+    // The host store holds the next `holds` sentiment history writes, each until the test lands or fails it.
+    wm.set.mockImplementation((key: string, value: any) => {
+      if (key !== 'gmi_sentiment_history' || holds === 0) return write(key, value);
+      holds -= 1;
+      return new Promise<void>((resolve, reject) => {
+        held.push({
+          release: () => { void write(key, value); resolve(); },
+          fail: () => reject(new Error('Forget-me store failure')),
+        });
+      });
+    });
+    const gmi = await startGmi('rescrub-fails', utility, wm);
+    let turn: Promise<void> | undefined;
+    try {
+      await drainTurn(gmi, 'pin', 'My PIN is 1234.');
+      holds = 1;
+      turn = drainTurn(gmi, 'live', 'This is terrible.');
+      await vi.waitFor(() => expect(held, 'the live analysis writes').toHaveLength(1), { timeout: 500, interval: 10 });
+      // A forget the analysis did not see: it keeps the live turn and drops the PIN turn.
+      gmi.replaceHistory([createConversationMessage(MessageRole.USER, 'This is terrible.')]);
+      await vi.waitFor(() => expect(JSON.stringify(wm._store.get('gmi_sentiment_history'))).not.toContain('1234'),
+        { timeout: 500, interval: 10 });
+      await settle();
+      // The analysis' write lands with the excerpt it read, so the scrub runs again; the store holds that write.
+      holds = 1;
+      held[0].release();
+      await vi.waitFor(() => expect(held, 'the scrub runs again').toHaveLength(2), { timeout: 500, interval: 10 });
+      // The live turn is forgotten as well, and the store then fails the scrub write it held.
+      gmi.clearHistory();
+      await settle(); await settle();
+      held[1].fail();
+      await turn;
+      expect(lines.filter((line) => line.event === 'gmi.sentiment_take_back_failed'),
+        'a scrub run again that fails after its turn was forgotten writes one line').toHaveLength(1);
+      expect(JSON.stringify(lines)).not.toContain('Forget-me');
+    } finally {
+      for (const entry of held) entry.release();
+      await turn?.catch(() => undefined);
+      resetLoggerFactory();
+      await gmi.shutdown();
+    }
+  });
+
+  it("ends the first tool round's sentiment wait when the caller aborts during it", async () => {
+    let release: ((value: SentimentResult) => void) | undefined;
+    const utility = createMockUtilityAI();
+    utility.analyzeSentiment.mockImplementationOnce(() => new Promise<SentimentResult>((resolve) => { release = resolve; }));
+    const wm = createMockWorkingMemory();
+    let mainDone = false;
+    vi.mocked(mockProvider.generateCompletionStream).mockImplementationOnce((async function* () {
+      try {
+        yield { isFinal: true, choices: [{ index: 0, message: { role: 'assistant', content: null,
+          tool_calls: [{ id: 'abort-tool', type: 'function', function: { name: 'readSentiment', arguments: '{}' } }] },
+        finishReason: 'tool_calls' }] };
+      } finally {
+        mainDone = true;
+      }
+    }) as any);
+    const gmi = await startGmi('abort-in-wait', utility, wm);
+    const caller = new AbortController();
+    let ended = false;
+    vi.useFakeTimers();
+    const turn = drainTurn(gmi, 'aborted', 'This is terrible.', { metadata: { options: { abortSignal: caller.signal } } })
+      .catch(() => undefined)
+      .finally(() => { ended = true; });
+    try {
+      await vi.waitFor(() => expect(mainDone, 'the first model call asks for a tool').toBe(true), { timeout: 500, interval: 10 });
+      await vi.advanceTimersByTimeAsync(10);
+      expect(ended, 'the first tool round waits for the held analysis').toBe(false);
+      caller.abort();
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(ended, "an abort ends the first tool round's sentiment wait").toBe(true);
+    } finally {
+      release?.(negative);
+      await vi.advanceTimersByTimeAsync(10_000);
+      await turn;
+      vi.useRealTimers();
+      await gmi.shutdown();
+    }
+  });
 });
