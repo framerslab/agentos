@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { LiveKitAudioPublisher, type LiveKitPublishingRtc, type PublishedAudioFrame } from '../LiveKitAudioPublisher.js';
+import type { LiveKitAudioPublisherOptions } from '../LiveKitAudioPublisher.js';
+// @ts-expect-error The mark is not built yet: the change that builds it takes this line away.
+import { LIVEKIT_SPEECH_MARK_ATTRIBUTES, type SpeechMark } from '../LiveKitAudioPublisher.js';
 import { LiveKitStreamTransport } from '../LiveKitStreamTransport.js';
 import type { AudioFrame, EncodedAudioChunk, VoiceGeneration } from '../types.js';
 import { FakeAudioSource, FakeAudioStream, FakeRoom, FakePublication, FakeTrack, fakePublishingRtc, fakeRtc, rtcFrame, settle } from '../../hearing/__tests__/livekit-fakes.js';
@@ -366,6 +369,197 @@ describe('native playout', () => {
     await publisher.sendAudio(unscoped());
     expect(FakeAudioSource.created[0]!.capturedSamples).toBe(960);
     await publisher.close();
+  });
+});
+describe('the speech mark', () => {
+  const generation: VoiceGeneration = { workerGeneration: 1, inferenceGeneration: 1, transportEpoch: 1 };
+  /** The mark of one clip: who made it, with which model, when, and its id. */
+  const clip = (clipId: string): SpeechMark => ({ provider: 'voice-maker', model: 'voice-model-a', madeAt: '2026-11-12T10:00:00.000Z', clipId });
+  /** What the participant is asked to set for a mark, on the track with this SID. */
+  const attributesOf = (mark: SpeechMark, trackSid = 'TR_VOICE') => ({ 'speech.ai_generated': 'true', 'speech.provider': mark.provider, 'speech.model': mark.model, 'speech.made_at': mark.madeAt, 'speech.clip_id': mark.clipId, 'speech.track_sid': trackSid });
+  /** A source that writes `frame` into `order` as the publisher hands it each frame. */
+  const recordingSource = (order: string[]) => class extends FakeAudioSource {
+    override async captureFrame(frame: PublishedAudioFrame): Promise<void> { order.push('frame'); await super.captureFrame(frame); }
+  };
+  /**
+   * A publisher on a structural rtc that records in one list, in the order they came, the track's publication
+   * (`published`), each `setAttributes` (`mark` and the clip's id), each announcement to the participant (`announced`)
+   * and each frame handed to the track (`frame`). A chunk reaches the track as two frames: the resampler returns two.
+   *
+   * @param options - Options over the bounds, the playout and the call identity among them.
+   * @param settable - Whether the participant has a `setAttributes`.
+   * @param markOf - The `mark` option; by default a chunk carries the mark `chunk()` was given for it.
+   */
+  function marking(options: Partial<LiveKitAudioPublisherOptions> = {}, settable = true, markOf?: (chunk: EncodedAudioChunk) => SpeechMark | undefined) {
+    const order: string[] = []; const messages: Record<string, unknown>[] = []; const marks = new WeakMap<EncodedAudioChunk, SpeechMark>();
+    const base = fakePublishingRtc();
+    const rtc: LiveKitPublishingRtc = { ...base, AudioSource: recordingSource(order),
+      AudioResampler: class {
+        constructor(private readonly input: number, private readonly output: number, _channels: number) {}
+        push(frame: PublishedAudioFrame): PublishedAudioFrame[] {
+          const half = frame.samplesPerChannel * this.output / this.input / 2;
+          return [new base.AudioFrame(new Int16Array(half), this.output, 1, half), new base.AudioFrame(new Int16Array(half), this.output, 1, half)];
+        }
+        flush(): PublishedAudioFrame[] { return []; }
+        close(): void {}
+      } };
+    const setAttributes = vi.fn(async (attributes: Record<string, string>): Promise<void> => { order.push(`mark ${attributes['speech.clip_id']}`); });
+    const participant = { publishTrack: vi.fn(async () => { order.push('published'); return { sid: 'TR_VOICE' }; }), unpublishTrack: vi.fn(async () => {}), ...(settable ? { setAttributes } : {}) };
+    const bounds: LiveKitAudioPublisherOptions = { sampleRate: 48000, maxBytes: 256000, maxDurationMs: 2000, receiptTimeoutMs: 1000, rtc,
+      // @ts-expect-error The mark is not built yet: the change that builds it takes this line away.
+      mark: markOf ?? ((chunk: EncodedAudioChunk) => marks.get(chunk)) };
+    const publisher = new LiveKitAudioPublisher({ ...bounds, ...options }, participant, async (message) => { order.push('announced'); messages.push(message); });
+    /** A 20 ms chunk at 24,000 Hz, of the clip `mark` names when one is given, with the call identity `call` carries. */
+    const chunk = (mark?: SpeechMark, call: Partial<EncodedAudioChunk> = {}): EncodedAudioChunk => {
+      const made: EncodedAudioChunk = { audio: Buffer.alloc(960), format: 'pcm', container: 'raw', sampleRate: 24000, durationMs: 20, text: '', ...call };
+      if (mark) marks.set(made, mark);
+      return made;
+    };
+    return { publisher, participant, setAttributes, order, messages, chunk, source: () => FakeAudioSource.created[0]! };
+  }
+  /** The options and the chunk identity of participant playout, the receipt protocol of a page. */
+  const page = { playout: 'participant', scopeId: 'scope-a', callId: 'call-a', generation: () => generation } as const;
+  const announced: Partial<EncodedAudioChunk> = { scopeId: 'scope-a', callId: 'call-a', generation: { ...generation }, sequence: 1 };
+  beforeEach(() => { FakeAudioSource.created.length = 0; });
+  it('names the six attributes of the mark, and both entries export them', async () => {
+    expect(LIVEKIT_SPEECH_MARK_ATTRIBUTES).toEqual({ aiGenerated: 'speech.ai_generated', provider: 'speech.provider', model: 'speech.model', madeAt: 'speech.made_at', clipId: 'speech.clip_id', trackSid: 'speech.track_sid' });
+    const hearing = await import('../../hearing/livekit.js'); const pipeline = await import('../index.js');
+    // @ts-expect-error The mark is not built yet: the change that builds it takes this line away.
+    expect(hearing.LIVEKIT_SPEECH_MARK_ATTRIBUTES).toBe(LIVEKIT_SPEECH_MARK_ATTRIBUTES); expect(pipeline.LIVEKIT_SPEECH_MARK_ATTRIBUTES).toBe(LIVEKIT_SPEECH_MARK_ATTRIBUTES);
+  });
+  it("sets the mark on the publishing participant before a marked chunk's first frame, naming the published track", async () => {
+    const f = marking(); const mark = clip('clip-a');
+    await f.publisher.sendAudio(f.chunk(mark));
+    expect(f.order).toEqual(['published', 'mark clip-a', 'frame', 'frame']);
+    expect(f.setAttributes).toHaveBeenCalledTimes(1); expect(f.setAttributes).toHaveBeenCalledWith(attributesOf(mark));
+    expect(f.publisher.trackSid).toBe('TR_VOICE'); expect(f.source().capturedSamples).toBe(960);
+    await f.publisher.close();
+  });
+  it('sets the mark once for the chunks of one clip', async () => {
+    const f = marking(); const mark = clip('clip-a');
+    await f.publisher.sendAudio(f.chunk(mark)); await f.publisher.sendAudio(f.chunk(mark)); await f.publisher.sendAudio(f.chunk({ ...mark }));
+    expect(f.setAttributes).toHaveBeenCalledTimes(1);
+    expect(f.order).toEqual(['published', 'mark clip-a', 'frame', 'frame', 'frame', 'frame', 'frame', 'frame']);
+    await f.publisher.close();
+  });
+  it("sets the next clip's mark before that clip's first frame, and again when an earlier clip comes back", async () => {
+    const f = marking(); const first = clip('clip-a');
+    const second: SpeechMark = { provider: 'other-maker', model: 'voice-model-b', madeAt: '2026-11-12T10:00:05.000Z', clipId: 'clip-b' };
+    await f.publisher.sendAudio(f.chunk(first)); await f.publisher.sendAudio(f.chunk(second)); await f.publisher.sendAudio(f.chunk(first));
+    expect(f.order).toEqual(['published', 'mark clip-a', 'frame', 'frame', 'mark clip-b', 'frame', 'frame', 'mark clip-a', 'frame', 'frame']);
+    expect(f.setAttributes.mock.calls.map(([attributes]) => attributes)).toEqual([attributesOf(first), attributesOf(second), attributesOf(first)]);
+    await f.publisher.close();
+  });
+  it('reads a chunk\'s mark as the chunk is handed over, so chunks queued one behind another keep their own', async () => {
+    let current = clip('clip-a');
+    const f = marking({}, true, () => current);
+    const first = f.publisher.sendAudio(f.chunk()); current = clip('clip-b'); const second = f.publisher.sendAudio(f.chunk());
+    await Promise.all([first, second]);
+    expect(f.order).toEqual(['published', 'mark clip-a', 'frame', 'frame', 'mark clip-b', 'frame', 'frame']);
+    await f.publisher.close();
+  });
+  it('refuses a marked chunk when the participant refuses its mark, captures none of it, and asks again for the next chunk', async () => {
+    const f = marking(); const mark = clip('clip-a');
+    f.setAttributes.mockRejectedValueOnce(new Error('participant disconnected'));
+    await expect(f.publisher.sendAudio(f.chunk(mark))).rejects.toThrow('publisher mark refused');
+    expect(f.order).toEqual(['published']); expect(f.source().capturedSamples).toBe(0);
+    await f.publisher.sendAudio(f.chunk(mark));
+    expect(f.order).toEqual(['published', 'mark clip-a', 'frame', 'frame']); expect(f.setAttributes).toHaveBeenCalledTimes(2);
+    // A refusal leaves what the participant carries unknown, so the clip set before it is set again.
+    f.setAttributes.mockRejectedValueOnce(new Error('participant disconnected'));
+    await expect(f.publisher.sendAudio(f.chunk(clip('clip-b')))).rejects.toThrow('publisher mark refused');
+    await f.publisher.sendAudio(f.chunk(mark));
+    expect(f.order).toEqual(['published', 'mark clip-a', 'frame', 'frame', 'mark clip-a', 'frame', 'frame']); expect(f.setAttributes).toHaveBeenCalledTimes(4);
+    await f.publisher.close();
+  });
+  it('refuses a marked chunk on a participant that cannot set attributes, before anything is published, and plays one without a mark', async () => {
+    const f = marking({}, false);
+    await expect(f.publisher.sendAudio(f.chunk(clip('clip-a')))).rejects.toThrow('publisher mark refused');
+    expect(f.order).toEqual([]); expect(FakeAudioSource.created).toHaveLength(0);
+    await f.publisher.sendAudio(f.chunk());
+    expect(f.order).toEqual(['published', 'frame', 'frame']);
+    await f.publisher.close();
+  });
+  it('refuses a chunk whose mark lacks a field, before anything is published', async () => {
+    const f = marking();
+    for (const field of ['provider', 'model', 'madeAt', 'clipId'] as const) {
+      await expect(f.publisher.sendAudio(f.chunk({ ...clip('clip-a'), [field]: '' }))).rejects.toThrow('publisher mark refused');
+    }
+    expect(f.order).toEqual([]); expect(f.setAttributes).not.toHaveBeenCalled(); expect(FakeAudioSource.created).toHaveLength(0);
+    await f.publisher.close();
+  });
+  it('plays a chunk that carries no mark as before, and sets nothing for it', async () => {
+    const f = marking();
+    await f.publisher.sendAudio(f.chunk());
+    expect(f.order).toEqual(['published', 'frame', 'frame']); expect(f.setAttributes).not.toHaveBeenCalled();
+    await f.publisher.sendAudio(f.chunk(clip('clip-a'))); await f.publisher.sendAudio(f.chunk());
+    expect(f.order).toEqual(['published', 'frame', 'frame', 'mark clip-a', 'frame', 'frame', 'frame', 'frame']); expect(f.setAttributes).toHaveBeenCalledTimes(1);
+    await f.publisher.close();
+  });
+  it('sets nothing when the publisher is given no mark', async () => {
+    const setAttributes = vi.fn(async (_attributes: Record<string, string>): Promise<void> => {});
+    const participant = { publishTrack: vi.fn(async () => ({ sid: 'TR_VOICE' })), unpublishTrack: vi.fn(async () => {}), setAttributes };
+    const publisher = new LiveKitAudioPublisher({ sampleRate: 48000, maxBytes: 256000, maxDurationMs: 2000, receiptTimeoutMs: 1000, rtc: fakePublishingRtc() }, participant, async () => {});
+    await publisher.sendAudio({ audio: Buffer.alloc(960), format: 'pcm', container: 'raw', sampleRate: 24000, durationMs: 20, text: '' });
+    expect(setAttributes).not.toHaveBeenCalled(); expect(FakeAudioSource.created[0]!.capturedSamples).toBe(960);
+    await publisher.close();
+  });
+  it('keeps a chunk whole when a pause comes while its mark is being set, and captures it at the resume', async () => {
+    const f = marking(); await f.publisher.ready();
+    let release!: () => void;
+    f.setAttributes.mockImplementationOnce(async (attributes) => { f.order.push(`mark ${attributes['speech.clip_id']}`); await new Promise<void>((resolve) => { release = resolve; }); });
+    const sent = f.publisher.sendAudio(f.chunk(clip('clip-a'))); await settle();
+    expect(f.order).toEqual(['published', 'mark clip-a']);
+    expect([...f.publisher.pause()]).toEqual([1]);
+    release(); await settle();
+    expect(f.order).toEqual(['published', 'mark clip-a']);
+    f.publisher.resume(); await sent;
+    expect(f.order).toEqual(['published', 'mark clip-a', 'frame', 'frame']); expect(f.setAttributes).toHaveBeenCalledTimes(1);
+    await f.publisher.close();
+  });
+  it('captures nothing of a chunk a clear discards while its mark is being set, whether the participant then takes the mark or refuses it', async () => {
+    const f = marking(); await f.publisher.ready();
+    let release!: () => void;
+    f.setAttributes.mockImplementationOnce(async () => { await new Promise<void>((resolve) => { release = resolve; }); });
+    const taken = f.publisher.sendAudio(f.chunk(clip('clip-a'))); await settle();
+    expect(f.setAttributes).toHaveBeenCalledTimes(1);
+    let cleared = f.publisher.clearPlayback(); release();
+    await expect(taken).resolves.toBeUndefined(); await cleared;
+    f.setAttributes.mockImplementationOnce(async () => { await new Promise<void>((resolve) => { release = resolve; }); throw new Error('participant disconnected'); });
+    const refused = f.publisher.sendAudio(f.chunk(clip('clip-b'))); await settle();
+    expect(f.setAttributes).toHaveBeenCalledTimes(2);
+    cleared = f.publisher.clearPlayback(); release();
+    await expect(refused).resolves.toBeUndefined(); await cleared;
+    expect(f.order).toEqual(['published']); expect(f.source().capturedSamples).toBe(0);
+    await f.publisher.close();
+  });
+  it('sets the mark before a chunk is announced to the participant, in participant playout', async () => {
+    const f = marking(page); const mark = clip('clip-a');
+    await f.publisher.sendAudio(f.chunk(mark, announced));
+    expect(f.order).toEqual(['published', 'mark clip-a', 'announced', 'frame', 'frame']);
+    expect(f.setAttributes).toHaveBeenCalledWith(attributesOf(mark)); expect(f.messages).toHaveLength(1);
+    await f.publisher.close();
+  });
+  it('announces and captures nothing of a chunk whose mark the participant refuses, in participant playout', async () => {
+    const f = marking(page);
+    f.setAttributes.mockRejectedValueOnce(new Error('participant disconnected'));
+    await expect(f.publisher.sendAudio(f.chunk(clip('clip-a'), announced))).rejects.toThrow('publisher mark refused');
+    expect(f.order).toEqual(['published']); expect(f.messages).toEqual([]); expect(f.source().capturedSamples).toBe(0);
+    await f.publisher.close();
+  });
+  it("sets the mark on the room's local participant when a transport is given the option for its publisher", async () => {
+    const room = new FakeRoom(); room.addParticipant('participant-a', new FakePublication(new FakeTrack('microphone')));
+    const order: string[] = []; const mark = clip('clip-a');
+    const setAttributes = vi.fn(async (attributes: Record<string, string>): Promise<void> => { order.push(`mark ${attributes['speech.clip_id']}`); });
+    Object.assign(room.localParticipant, { setAttributes });
+    const transport = new LiveKitStreamTransport({ room, participantIdentity: 'participant-a', sampleRate: 16000, rtc: fakeRtc(),
+      publisher: { sampleRate: 48000, maxBytes: 256000, maxDurationMs: 2000, receiptTimeoutMs: 1000, rtc: { ...fakePublishingRtc(), AudioSource: recordingSource(order) },
+        // @ts-expect-error The mark is not built yet: the change that builds it takes this line away.
+        mark: () => mark } });
+    await transport.sendAudio({ audio: Buffer.alloc(1920), format: 'pcm', container: 'raw', sampleRate: 48000, durationMs: 20, text: '' });
+    expect(order).toEqual(['mark clip-a', 'frame']);
+    expect(setAttributes).toHaveBeenCalledTimes(1); expect(setAttributes).toHaveBeenCalledWith(attributesOf(mark, 'TR_AGENT'));
+    transport.close(); await transport.whenClosed();
   });
 });
 describe('loading @livekit/rtc-node', () => {
