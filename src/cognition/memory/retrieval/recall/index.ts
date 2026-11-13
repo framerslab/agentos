@@ -1,7 +1,8 @@
 /**
  * @fileoverview The recall capture record and its helpers, the memory block's budget and the recall settings' checks,
  * the recall legs, their eligibility gate and the in-process exact-words index, the hybrid recall's fusion and
- * near-duplicate dedupe, the recall pipeline, and the recall module's event handle.
+ * near-duplicate dedupe, the memory-question reserve, supplied candidates, the recall pipeline, and the recall
+ * module's event handle.
  * @module agentos/memory/retrieval/recall
  */
 
@@ -44,5 +45,9 @@ export { recencyLeg } from './legs/recency.js';
 export { RECALL_CONSTANTS, fuseLegs } from './fuse.js';
 export type { PoolEntry, RecallConstants } from './fuse.js';
 export { dedupePool, dedupeTokens, nearDuplicate } from './dedupe.js';
+export type { DedupeEntry } from './dedupe.js';
+export { isMemoryQuestion, reserveFor } from './memoryQuestion.js';
+export { admitSupplied } from './supplied.js';
+export type { AdmittedSupplied, SuppliedOutcome } from './supplied.js';
 export { RecallPipeline } from './pipeline.js';
 export type { RecallPipelineDeps, RecallRun } from './pipeline.js';

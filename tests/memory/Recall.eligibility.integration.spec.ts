@@ -47,6 +47,18 @@ describe.each(ENGINES)('recall eligibility on %s', (_engine, open) => {
     await db.close();
   });
 
+  it("under 'hybrid' a supplied candidate on a turn that sets types, minConfidence or usableFor is ineligible", async () => {
+    const { db, mem } = await fixture({ retrieval: 'hybrid' });
+    const supplied = [{ id: 'fact', text: 'The harbor pass is renewed online.', scope: { scope: 'user' as const, scopeId: 'u1' } }];
+    const result = await mem.manager.retrieve('Where is the harbor pass?', NEUTRAL, { ...OPTIONS, supplied } as never);
+    expect(result.retrieved.map((t) => t.id)).toEqual(['good']);
+    const recall = result.diagnostics.recall as unknown as { ranked: Array<{ id: string }>; suppliedRejected: unknown };
+    expect(recall.ranked.map((r) => r.id)).toEqual(['good']);
+    expect(recall.suppliedRejected).toEqual({ outOfScope: 0, ineligible: 1 });
+    await mem.close();
+    await db.close();
+  });
+
   it("under 'dense' the result is the one of no setting", async () => {
     const unset = await fixture(undefined);
     const dense = await fixture({ retrieval: 'dense' });

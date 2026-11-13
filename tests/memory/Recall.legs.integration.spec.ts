@@ -92,8 +92,8 @@ describe.each(ENGINES)('the durable legs on %s', (engine, open) => {
 
   it('a turn with no scopes reads nothing', async () => {
     await store.store(trace('a', 'Anything at all.'));
-    expect((await exactWordsLeg({ store, lexical: null }, ask('anything', { scopes: [] }))).traces).toEqual([]);
-    expect((await recencyLeg({ store }, ask('', { scopes: [] }))).traces).toEqual([]);
+    expect(await exactWordsLeg({ store, lexical: null }, ask('anything', { scopes: [] }))).toMatchObject({ ran: false, reason: 'no_scopes', traces: [] });
+    expect(await recencyLeg({ store }, ask('', { scopes: [] }))).toMatchObject({ ran: false, reason: 'no_scopes', traces: [] });
   });
 });
 
