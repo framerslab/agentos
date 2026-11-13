@@ -1,7 +1,8 @@
 /**
  * @fileoverview Memory recall reranks only with the provider `recall.rerank` names: a `rerankerService` passed on the
  * manager's config is never called for memory (one `memory.recall.option_ignored` line per manager built, and
- * `getRerankerService()` still returns it), and no environment variable turns memory rerank on.
+ * `getRerankerService()` returns it), a `recall.rerank` that names a remote provider is refused when the manager
+ * initialises, and no environment variable turns memory rerank on.
  */
 
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -74,6 +75,25 @@ it('a rerankerService passed on the manager config is not called for memory reca
   expect(called).not.toHaveBeenCalled();
   // One per manager built.
   expect(events('memory.recall.option_ignored').filter((e) => e.option === 'remote_provider')).toHaveLength(2);
+});
+
+it("a manager's recall.rerank that names a remote provider is refused when it initialises, with one line, and no manager is built", async () => {
+  const manager = new CognitiveMemoryManager();
+  const vectorStore = new InMemoryVectorStore();
+  await vectorStore.initialize({ id: 'policy-refused', type: 'in_memory', defaultEmbeddingDimension: 32, similarityMetric: 'cosine' } as never);
+  await expect(
+    manager.initialize({
+      vectorStore,
+      embeddingManager: new WordHashEmbedder() as never,
+      agentId: 'policy-agent',
+      traits: {},
+      moodProvider: () => NEUTRAL,
+      featureDetectionStrategy: 'keyword',
+      recall: { rerank: { kind: 'cohere', apiKey: 'test-key' } },
+    } as never),
+  ).rejects.toMatchObject({ name: 'RecallOptionError', option: 'rerank', reason: 'unsupported_provider' });
+  expect(events('memory.recall.option_rejected')).toEqual([expect.objectContaining({ option: 'rerank', reason: 'unsupported_provider' })]);
+  await expect(manager.retrieve('which pier', NEUTRAL, { scopes: U1 })).rejects.toThrow('not initialized');
 });
 
 it('no environment variable turns memory rerank on', async () => {

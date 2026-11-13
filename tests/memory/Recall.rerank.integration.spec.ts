@@ -336,6 +336,13 @@ describe('rerank in a turn', () => {
     const on = await mem.manager.assembleForPrompt('which switchback had the best view', 1600, NEUTRAL, { scopes: U1 });
     expect(on.capture!.reranker.provider).toBe('llm');
     expect(calls).toBeGreaterThan(0);
+    // A call that names another setting leaves the reranker as it is.
+    await mem.manager.applyRecallConfig!({ budget: { totalTokens: 1200 } });
+    expect(mem.manager.getConfig().recall).toMatchObject({ budget: { totalTokens: 1200 }, rerank: { kind: 'llm', model: 'judge-model' } });
+    const kept = calls;
+    const still = await mem.manager.assembleForPrompt('which switchback had the best view', 1600, NEUTRAL, { scopes: U1 });
+    expect(still.capture!.reranker.provider).toBe('llm');
+    expect(calls).toBeGreaterThan(kept);
     const after = calls;
     await mem.manager.applyRecallConfig!({ rerank: 'none' });
     const off = await mem.manager.assembleForPrompt('which switchback had the best view', 1600, NEUTRAL, { scopes: U1 });
@@ -344,6 +351,46 @@ describe('rerank in a turn', () => {
     await expect(mem.manager.applyRecallConfig!({ rerank: { kind: 'cohere' } } as never)).rejects.toThrow('memory.recall.rerank');
     expect(mem.manager.getConfig().recall?.rerank).toBe('none');
     await mem.close();
+  });
+
+  it("a persona's recall.rerank reaches the manager, and the agent's own memory.recall.rerank replaces it", async () => {
+    let personaCalls = 0;
+    const personaRerank = {
+      kind: 'llm' as const,
+      model: 'persona-judge',
+      invoke: async (system: string, user: string) => {
+        personaCalls += 1;
+        return judgeFirst('t0')(system, user);
+      },
+    };
+    const fromPersona = await memoryWith(undefined, new WordHashEmbedder(), undefined, { recall: { rerank: personaRerank } });
+    const replaced = await memoryWith({ rerank: 'none' }, new WordHashEmbedder(), undefined, { recall: { rerank: personaRerank } });
+    for (const mem of [fromPersona, replaced]) for (let i = 0; i < 4; i++) await plant(mem, `t${i}`, NOTE(i), at(i));
+    const a = await fromPersona.manager.assembleForPrompt('which switchback had the best view', 1600, NEUTRAL, { scopes: U1 });
+    expect(a.capture!.reranker).toMatchObject({ provider: 'llm', model: 'persona-judge' });
+    const seen = personaCalls;
+    expect(seen).toBeGreaterThan(0);
+    const b = await replaced.manager.assembleForPrompt('which switchback had the best view', 1600, NEUTRAL, { scopes: U1 });
+    expect(b.capture!.reranker).toEqual({ provider: 'none', reason: 'none_configured' });
+    expect(personaCalls).toBe(seen);
+    await fromPersona.close();
+    await replaced.close();
+  });
+
+  it("a session's view of the manager reranks as the manager does, and shutting the manager down stops the reranker", async () => {
+    const seen: string[] = [];
+    const mem = await memoryWith({ rerank: { kind: 'llm', invoke: judgeFirst('t0', seen), model: 'judge-model' } }, new WordHashEmbedder());
+    for (let i = 0; i < 4; i++) await plant(mem, `t${i}`, NOTE(i), at(i));
+    const session = mem.manager.forSession();
+    const context = await session.assembleForPrompt('which switchback had the best view', 1600, NEUTRAL, { scopes: U1 });
+    expect(context.capture!.reranker).toMatchObject({ provider: 'llm', model: 'judge-model' });
+    expect(seen.length).toBeGreaterThan(0);
+    await expect(session.recallReady!()).resolves.toBeUndefined();
+    const pipeline = (mem.manager as unknown as { recall: { reranker: unknown } }).recall;
+    expect(pipeline.reranker).not.toBeNull();
+    await mem.close();
+    expect(pipeline.reranker).toBeNull();
+    await expect(mem.manager.retrieve('which switchback had the best view', NEUTRAL, { scopes: U1 })).rejects.toThrow('not initialized');
   });
 
   it('supplying an invoker for rerank attaches no HyDE retriever', async () => {
