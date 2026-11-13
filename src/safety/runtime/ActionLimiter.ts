@@ -76,7 +76,8 @@ export interface SqlActionLimiterOptions {
   tablePrefix?: string;
   /**
    * How long a reservation lives without a renewal. Default 60000. A governed tool renews it three times a lease while
-   * its tool runs, so it runs out only when the process that holds it stopped. The constructor refuses one that is not
+   * its tool runs, so it runs out only when no renewal succeeds for a whole lease: the process that holds it stopped,
+   * or the store did not answer. A lease that runs out while the tool runs counts the action. The constructor refuses one that is not
    * shorter than every rule's `windowMs`.
    */
   leaseMs?: number;
