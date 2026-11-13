@@ -9,7 +9,8 @@
  *   `read_memory_page` answer nothing for them, and a compile writes no page for them. A host's own memory provider
  *   is guarded the same way by `guardMemoryProvider`.
  * - `forgetUser` deletes one user for good (traces, soft-deleted rows, document chunks, pages, the registry row, the
- *   bytes in the store's files) and leaves everyone else; it waits for the user's writes in flight, goes on past its
+ *   bytes in the store's files, and another user's page built from what they said there, which the next compile
+ *   builds again without it) and leaves everyone else; it waits for the user's writes in flight, goes on past its
  *   deadline and says so, and its report names every store it did not reach and never the user.
  * - Every open applies the tombstones again from a copy a restore does not replace: a store put back from before a
  *   deletion forgets again, a page a deletion could not delete goes at the next open, and a store whose copy or key
@@ -542,6 +543,99 @@ describe('forgetUser', () => {
     const again = await a.forgetUser!('alice');
     expect(again.complete).toBe(true);
     expect(again.stores.some((entry) => entry.store.startsWith('legacy memory'))).toBe(false);
+  });
+
+  /** What bob said on alice's conversation, filed by the host under her key and naming him. */
+  const fileBobOnAlice = (a: SouledAgent) =>
+    a.memory!.remember('Bob says his canary is WREN-2.', {
+      type: 'episodic',
+      scope: 'conversation',
+      scopeId: keyOf(alice),
+      metadata: { turnUserId: 'bob' },
+    });
+
+  it("deletes another user's page built from what the user said there, and the next compile builds it again without it", async () => {
+    const { a, s } = await open({}, [
+      reply.text('A canary, lovely.'),
+      reply.text('Alice keeps a canary named LARK-7; Bob keeps one named WREN-2.'),
+      reply.text('Alice keeps a canary named LARK-7.'),
+    ]);
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    const said = await fileBobOnAlice(a);
+    const ofAlice = saidOf(keyOf(alice))
+      .filter((trace) => trace.id !== said.id)
+      .map((trace) => trace.id);
+    await a.memory!.compileWiki();
+    expect(pagesOf(keyOf(alice))).toHaveLength(1);
+
+    const report = await a.forgetUser!('bob');
+
+    // Neither what bob said nor the page that says it again is left: not the page's row, not its chunks.
+    expect(rows(storeFile(), "SELECT id FROM memory_traces WHERE content LIKE '%WREN-2%'")).toEqual([]);
+    expect(rows(storeFile(), "SELECT page_id FROM memory_pages WHERE content LIKE '%WREN-2%'")).toEqual([]);
+    expect(pagesOf(keyOf(alice))).toEqual([]);
+    expect(saidOf(keyOf(alice)).map((trace) => trace.id)).toEqual(ofAlice);
+    expect(report.pages).toEqual({ deleted: 1, failed: [] });
+    expect(report.complete).toBe(true);
+    expect(JSON.stringify(report)).not.toContain('alice');
+
+    // The next compile builds her page again from her own traces alone.
+    const calls = s.seen.length;
+    await a.memory!.compileWiki();
+    expect(s.seen).toHaveLength(calls + 1);
+    const merge = JSON.stringify(s.seen.at(-1)!.messages);
+    expect(merge).toContain('LARK-7');
+    expect(merge).not.toContain('WREN-2');
+    expect(pagesOf(keyOf(alice))).toHaveLength(1);
+  });
+
+  it("keeps what the user said on another user's session while a page built from it is left, and the deletion made again takes both", async () => {
+    const { a } = await open({}, [reply.text('A canary, lovely.'), reply.text('Bob keeps a canary named WREN-2.')]);
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await fileBobOnAlice(a);
+    await a.memory!.compileWiki();
+    vi.spyOn(UserWikiStore.prototype, 'deletePage').mockRejectedValueOnce(new Error('disk I/O error'));
+
+    const first = await a.forgetUser!('bob');
+    expect(first.pages.failed).toEqual([{ id: 'concepts/notes', reason: expect.any(String) }]);
+    expect(first.complete).toBe(false);
+    // What he said stays while the page is left, so the deletion made again finds the page by it.
+    expect(rows(storeFile(), "SELECT id FROM memory_traces WHERE content = 'Bob says his canary is WREN-2.'")).toHaveLength(1);
+
+    const again = await a.forgetUser!('bob');
+    expect(again.pages).toEqual({ deleted: 1, failed: [] });
+    expect(again.complete).toBe(true);
+    expect(rows(storeFile(), "SELECT id FROM memory_traces WHERE content LIKE '%WREN-2%'")).toEqual([]);
+    expect(pagesOf(keyOf(alice))).toEqual([]);
+  });
+
+  it("deletes the page another user's compile writes from what the user said while the deletion runs", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { a, s } = await open({}, [
+      reply.text('A canary, lovely.'),
+      reply.hold([], gate, reply.text('Alice keeps a canary named LARK-7; Bob keeps one named WREN-2.')),
+    ]);
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await fileBobOnAlice(a);
+    const calls = s.seen.length;
+    const compiling = a.memory!.compileWiki();
+    // Her compile has read what he said and waits for the model.
+    await vi.waitFor(() => expect(s.seen).toHaveLength(calls + 1));
+
+    const forgetting = a.forgetUser!('bob');
+    // The deletion lists her pages and deletes what he said before her compile writes its page.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    release();
+    await compiling;
+    const report = await forgetting;
+
+    expect(rows(storeFile(), "SELECT page_id FROM memory_pages WHERE content LIKE '%WREN-2%'")).toEqual([]);
+    expect(rows(storeFile(), "SELECT id FROM memory_traces WHERE content LIKE '%WREN-2%'")).toEqual([]);
+    expect(report.pages).toEqual({ deleted: 1, failed: [] });
+    expect(report.complete).toBe(true);
   });
 });
 
