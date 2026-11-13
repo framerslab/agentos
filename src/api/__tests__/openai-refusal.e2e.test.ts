@@ -68,18 +68,29 @@ const chatRefusal = () =>
     usage: { prompt_tokens: 81, completion_tokens: 11, total_tokens: 92 },
   });
 
+/** One Chat Completions stream chunk as an SSE block. */
+const chatChunk = (choices: unknown[], extra: Record<string, unknown> = {}) =>
+  `data: ${JSON.stringify({ id: 'chatcmpl-refusal', object: 'chat.completion.chunk', created: 1721596428, model: CHAT_MODEL, choices, ...extra })}\n\n`;
+
 /** A refusal streamed as `delta.refusal` fragments, then the finish chunk and the usage-only chunk. */
-const chatRefusalStream = () => {
-  const chunk = (choices: unknown[], extra: Record<string, unknown> = {}) =>
-    `data: ${JSON.stringify({ id: 'chatcmpl-refusal', object: 'chat.completion.chunk', created: 1721596428, model: CHAT_MODEL, choices, ...extra })}\n\n`;
-  return sseResponse([
-    chunk([{ index: 0, delta: { role: 'assistant', content: null, refusal: '' }, finish_reason: null }]),
-    ...REFUSAL_PARTS.map((part) => chunk([{ index: 0, delta: { refusal: part }, finish_reason: null }])),
-    chunk([{ index: 0, delta: {}, finish_reason: 'stop' }]),
-    chunk([], { usage: { prompt_tokens: 81, completion_tokens: 11, total_tokens: 92 } }),
+const chatRefusalStream = () =>
+  sseResponse([
+    chatChunk([{ index: 0, delta: { role: 'assistant', content: null, refusal: '' }, finish_reason: null }]),
+    ...REFUSAL_PARTS.map((part) => chatChunk([{ index: 0, delta: { refusal: part }, finish_reason: null }])),
+    chatChunk([{ index: 0, delta: {}, finish_reason: 'stop' }]),
+    chatChunk([], { usage: { prompt_tokens: 81, completion_tokens: 11, total_tokens: 92 } }),
     'data: [DONE]\n\n',
   ]);
-};
+
+/** A streamed step that writes text and then calls the `lookup` tool. */
+const chatToolStepStream = () =>
+  sseResponse([
+    chatChunk([{ index: 0, delta: { role: 'assistant', content: 'Looking it up.' }, finish_reason: null }]),
+    chatChunk([{ index: 0, delta: { tool_calls: [{ index: 0, id: 'call_1', type: 'function', function: { name: 'lookup', arguments: '{"q":"x"}' } }] }, finish_reason: null }]),
+    chatChunk([{ index: 0, delta: {}, finish_reason: 'tool_calls' }]),
+    chatChunk([], { usage: { prompt_tokens: 40, completion_tokens: 9, total_tokens: 49 } }),
+    'data: [DONE]\n\n',
+  ]);
 
 /** The refused Responses answer the structured-outputs guide shows. */
 const responsesRefusalBody = () => ({
@@ -143,6 +154,16 @@ function route(handlers: Array<[RegExp, () => Response]>): void {
     if (!match) throw new Error(`unexpected request ${init?.method ?? 'GET'} ${target}`);
     return match[1]();
   });
+}
+
+/** Answers the requests one endpoint gets with the given answers, in order. */
+function inOrder(...answers: Array<() => Response>): () => Response {
+  const queue = [...answers];
+  return () => {
+    const next = queue.shift();
+    if (!next) throw new Error('more requests than answers');
+    return next();
+  };
 }
 
 const paths = [
@@ -335,6 +356,69 @@ describe('an OpenAI refusal on a call with guards', () => {
     let streamed = '';
     for await (const delta of result.textStream) streamed += delta;
     expect(streamed).toBe('');
+    expect(await result.finishReason).toBe('refusal');
+    expect(await result.refusal).toBe(REFUSAL);
+    expect(await result.text).toBe('');
+  });
+});
+
+describe('an OpenAI refusal on a call with tools', () => {
+  const lookup = {
+    description: 'Look a word up.',
+    parameters: { type: 'object' as const, properties: { q: { type: 'string' } }, required: ['q' as const] },
+    execute: vi.fn(async () => ({ hits: 1 })),
+  };
+  const call = {
+    provider: 'openai',
+    model: CHAT_MODEL,
+    apiKey: 'sk-refusal-e2e',
+    prompt: 'A request.',
+    fallbackProviders: [],
+    tools: { lookup },
+  };
+
+  it('comes back from generateText in prompt tool mode as a refusal', async () => {
+    route([
+      [/api\.openai\.com\/v1\/models/, modelList],
+      [/api\.openai\.com\/v1\/chat\/completions/, chatRefusal],
+    ]);
+
+    const result = await generateText({ ...call, toolMode: 'prompt' });
+
+    expect(result.finishReason).toBe('refusal');
+    expect(result.refusal).toBe(REFUSAL);
+    expect(result.text).toBe('');
+  });
+
+  it('comes back from streamText in prompt tool mode as a refusal', async () => {
+    // The prompt tool loop sends each round as a whole request, so the answer is the whole body.
+    route([
+      [/api\.openai\.com\/v1\/models/, modelList],
+      [/api\.openai\.com\/v1\/chat\/completions/, chatRefusal],
+    ]);
+
+    const result = streamText({ ...call, toolMode: 'prompt' });
+
+    let streamed = '';
+    for await (const delta of result.textStream) streamed += delta;
+    expect(streamed).toBe('');
+    expect(await result.finishReason).toBe('refusal');
+    expect(await result.refusal).toBe(REFUSAL);
+    expect(await result.text).toBe('');
+  });
+
+  it('after a tool step that wrote text, resolves the text of streamText empty', async () => {
+    route([
+      [/api\.openai\.com\/v1\/models/, modelList],
+      [/api\.openai\.com\/v1\/chat\/completions/, inOrder(chatToolStepStream, chatRefusalStream)],
+    ]);
+
+    const result = streamText({ ...call, maxSteps: 3 });
+
+    let streamed = '';
+    for await (const delta of result.textStream) streamed += delta;
+    // The tool step's own text went out as it came; the refused step added none.
+    expect(streamed).toBe('Looking it up.');
     expect(await result.finishReason).toBe('refusal');
     expect(await result.refusal).toBe(REFUSAL);
     expect(await result.text).toBe('');
