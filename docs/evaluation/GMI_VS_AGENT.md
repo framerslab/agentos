@@ -39,7 +39,7 @@ The other controls and diagnostics are A given the gold evidence (T1); R, the re
 
 Two more diagnostics hold memory fixed on one side:
 
-- A given the GMI's memory block: A, with the block C0 assembled for the same item and turn handed to it through `memoryProvider`, so the two differ in the runtime and not in what memory they read.
+- A given the GMI's memory block: A, with the block C0 assembled for the same item and turn handed to it through `memoryProvider`. The two read the same memory text, each in its runtime's own frame: `agent()` sends a provider's text as one record of a `<memory_recall>` data block in a user-role message, and the GMI sends the block as it assembled it. They differ in the runtime, that framing included, and not in what memory they read.
 - C0 reading the reference's memory section: C0 with its own recall off and the reference's section supplied through `longTermMemoryRetriever`, over C0's own store, so the two differ in the selection and not in the store.
 
 What each comparison measures:
@@ -50,7 +50,7 @@ What each comparison measures:
 - C − A is the sum of the two and is reported as a description; on T1 it is the memory wiring check, not a runtime effect.
 - A − Z is what `agent()` with the reference product's tools, some of them inert, and its chain-of-thought block adds over one plain call. The study does not separate `agent()`'s loop from those.
 - Z is the floor every arm is read against. C against Z is read from absolute scores only: it is never judged in pairs, it is not measured on the pairwise axes, and it is never computed as C − A plus A − Z.
-- C0 against A given the GMI's block is the runtime at identical memory.
+- C0 against A given the GMI's block is the runtime at identical memory text; how each runtime frames that text is part of what differs.
 - C0 against C0 reading the reference's section is the selection at an identical store, read only on turns where the section reached the model whole.
 - Z and R vote in no decision rule.
 
