@@ -22,12 +22,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const fetchMock = vi.fn();
 vi.stubGlobal('fetch', fetchMock);
 
+import { GuardrailStopError } from '../errors.js';
 import { generateText } from '../generateText.js';
-import { streamText } from '../streamText.js';
+import { streamText, type StreamPart } from '../streamText.js';
+import { AgentOSResponseChunkType, type AgentOSFinalResponseChunk } from '../types/AgentOSResponse.js';
 import { OpenAIProvider } from '../../core/llm/providers/implementations/OpenAIProvider.js';
 import type { ModelCompletionResponse } from '../../core/llm/providers/IProvider.js';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry.js';
-import type { GuardrailContext, IGuardrailService } from '../../safety/guardrails/IGuardrailService.js';
+import { GuardrailAction, type GuardrailContext, type IGuardrailService } from '../../safety/guardrails/IGuardrailService.js';
 
 const REFUSAL = "I'm sorry, I cannot assist with that request.";
 const REFUSAL_PARTS = ["I'm sorry, ", 'I cannot assist with that request.'];
@@ -359,6 +361,71 @@ describe('an OpenAI refusal on a call with guards', () => {
     expect(await result.finishReason).toBe('refusal');
     expect(await result.refusal).toBe(REFUSAL);
     expect(await result.text).toBe('');
+  });
+
+  const isFinal = (chunk: { type: string }): boolean => chunk.type === AgentOSResponseChunkType.FINAL_RESPONSE;
+  /** A guard that blocks every whole reply it is shown, and records its text. */
+  function blocks(): IGuardrailService & { seen: Array<string | null> } {
+    const seen: Array<string | null> = [];
+    return {
+      id: 'blocks',
+      seen,
+      evaluateOutput: async ({ chunk }) => {
+        if (!isFinal(chunk)) return null;
+        seen.push((chunk as AgentOSFinalResponseChunk).finalResponseText);
+        return { action: GuardrailAction.BLOCK, reasonCode: 'RULE_OUT' };
+      },
+    };
+  }
+  /** A guard that rewrites every whole reply it is shown. */
+  const rewrites: IGuardrailService = {
+    id: 'rewrites',
+    config: { canSanitize: true },
+    evaluateOutput: async ({ chunk }) => (isFinal(chunk) ? { action: GuardrailAction.SANITIZE, modifiedText: 'A rewritten refusal.' } : null),
+  };
+
+  it('is judged by the output guards before generateText returns its message', async () => {
+    route([
+      [/api\.openai\.com\/v1\/models/, modelList],
+      [/api\.openai\.com\/v1\/chat\/completions/, chatRefusal],
+    ]);
+
+    const guard = blocks();
+    const stopped = await generateText({ ...call, guards: { services: [guard], context } }).catch((e) => e);
+    expect(stopped).toBeInstanceOf(GuardrailStopError);
+    expect(stopped).toMatchObject({ code: 'GUARDRAIL_BLOCKED', stage: 'output' });
+    expect(guard.seen).toEqual([REFUSAL]);
+
+    const result = await generateText({ ...call, guards: { services: [rewrites], context } });
+    expect(result.finishReason).toBe('refusal');
+    expect(result.refusal).toBe('A rewritten refusal.');
+    expect(result.text).toBe('');
+    expect(result.guardReport?.result).toBe('sanitized');
+  });
+
+  it('is judged by the output guards before streamText resolves its message', async () => {
+    route([
+      [/api\.openai\.com\/v1\/models/, modelList],
+      [/api\.openai\.com\/v1\/chat\/completions/, chatRefusalStream],
+    ]);
+
+    const guard = blocks();
+    const blocked = streamText({ ...call, guards: { services: [guard], context } });
+    const parts: StreamPart[] = [];
+    for await (const part of blocked.fullStream) parts.push(part);
+    expect(parts.map((part) => part.type)).toEqual(['error']);
+    expect((parts[0] as { error: unknown }).error).toMatchObject({ name: 'GuardrailStopError', code: 'GUARDRAIL_BLOCKED', stage: 'output' });
+    expect(await blocked.finishReason).toBe('error');
+    expect(await blocked.refusal).toBeUndefined();
+    expect(guard.seen).toEqual([REFUSAL]);
+
+    const rewritten = streamText({ ...call, guards: { services: [rewrites], context } });
+    let streamed = '';
+    for await (const delta of rewritten.textStream) streamed += delta;
+    expect(streamed).toBe('');
+    expect(await rewritten.finishReason).toBe('refusal');
+    expect(await rewritten.refusal).toBe('A rewritten refusal.');
+    expect(await rewritten.text).toBe('');
   });
 });
 
