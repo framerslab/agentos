@@ -177,9 +177,11 @@ export interface LiveKitAudioPublisherOptions {
    * `attributes`, as rtc-node's local participant does once the room hears the server's update, must show the six
    * values before the first frame: rtc-node 1.1.0's `setAttributes` resolves when the server refuses the update (a
    * token without `canUpdateOwnMetadata`, for one), so the call alone does not prove the mark is set. A call given up
-   * on is still out, so the next call waits for it to answer and the older update cannot land after the newer one.
-   * That wait, the call and the read-back share one deadline, `receiptTimeoutMs`; a clear or a close ends the wait at
-   * once and nothing of the chunk plays. The send of a chunk whose mark cannot be set rejects with
+   * on is still out, so the next call waits for it to answer and the older update cannot land after the newer one,
+   * and one mark is set at a time, so a chunk of participant playout that comes while a native chunk's mark is being
+   * set waits for it. Those waits, the call and the read-back share one deadline, `receiptTimeoutMs`; a clear or a
+   * close ends the wait at once and nothing of the chunk plays. In participant playout the receipt's deadline starts
+   * again as the marked chunk is announced, so the time its mark took is not counted against the page. The send of a chunk whose mark cannot be set rejects with
    * `publisher mark refused`, and nothing of that chunk is captured: a mark with an empty field or on a participant
    * without `setAttributes` is refused before anything is published, a `setAttributes` that rejects is refused with
    * that rejection as the error's `cause`, and so is a mark not confirmed by the deadline. In participant playout the
@@ -324,6 +326,11 @@ export class LiveKitAudioPublisher {
   private marked?: string;
   /** Settles once the last `setAttributes` call has answered, while it is out: one given up on included. */
   private attributeCall?: Promise<void>;
+  /**
+   * Settles once the mark being set last is confirmed or refused, so that a chunk of participant playout that comes
+   * while a native chunk's mark is being set does not write over it before it shows.
+   */
+  private marking?: Promise<void>;
   /**
    * @param options - The host's options: the playout mode, the call identity, the track's rate and the bounds.
    * @param participant - The room's local participant, which publishes the track.
@@ -476,23 +483,33 @@ export class LiveKitAudioPublisher {
    * confirmed: the call has resolved and, on a participant that exposes its own `attributes`, they show the six values
    * (rtc-node 1.1.0's call resolves when the server refuses the update). The mark set last counts again for a chunk
    * of its clip while the participant still shows it, and is set again once it does not, as after an update that
-   * landed late. A call given up on before may still be out: the next call waits for it to answer, so the older
-   * update cannot land after the newer one. That wait, the call and the read-back share one deadline,
-   * `receiptTimeoutMs` from the start. The caller has published the track. A refusal leaves what the participant
-   * carries unknown, so the next marked chunk sets its mark whatever its clip.
+   * landed late. One mark is set at a time: a mark waits until the one being set before it is confirmed or refused,
+   * as when a chunk of participant playout comes while a native chunk's mark is being set. A call given up on before
+   * may still be out: the next call waits for it to answer, so the older update cannot land after the newer one. Those
+   * waits, the call and the read-back share one deadline, `receiptTimeoutMs` from the start. The caller has published
+   * the track. A refusal leaves what the participant carries unknown, so the next marked chunk sets its mark whatever
+   * its clip.
    *
    * @param current - Whether the chunk may still play; read again at each change a playout wait watches, so a clear or
    *   a close ends the wait at once.
    * @throws {Error} `publisher mark refused`: when `setAttributes` rejects or throws, with that failure as its `cause`;
    *   when the mark is not confirmed by the deadline; and when `current` turns false.
    */
-  private async setMark(mark: SpeechMark, current: () => boolean): Promise<void> {
+  private setMark(mark: SpeechMark, current: () => boolean): Promise<void> {
+    const before = this.marking; const deadline = Date.now() + this.options.receiptTimeoutMs;
+    const setting = this.markAfter(before, deadline, mark, current);
+    const settled = setting.then(() => {}, () => {}); this.marking = settled;
+    void settled.then(() => { if (this.marking === settled) this.marking = undefined; });
+    return setting;
+  }
+  /** {@link setMark} once the mark being set before it, `before`, is confirmed or refused, by `deadline`. */
+  private async markAfter(before: Promise<void> | undefined, deadline: number, mark: SpeechMark, current: () => boolean): Promise<void> {
+    const refused = (cause?: unknown): Error => Object.assign(new Error('publisher mark refused'), cause === undefined ? {} : { cause });
+    if (before && !(await this.within(deadline, current, before))) throw refused();
     const keys = LIVEKIT_SPEECH_MARK_ATTRIBUTES;
     const wanted: Record<string, string> = { [keys.aiGenerated]: 'true', [keys.provider]: mark.provider, [keys.model]: mark.model, [keys.madeAt]: mark.madeAt, [keys.clipId]: mark.clipId, [keys.trackSid]: this.publication! };
     if (this.marked === mark.clipId && this.shows(wanted)) return;
     this.marked = undefined;
-    const refused = (cause?: unknown): Error => Object.assign(new Error('publisher mark refused'), cause === undefined ? {} : { cause });
-    const deadline = Date.now() + this.options.receiptTimeoutMs;
     const earlier = this.attributeCall;
     if (earlier && !(await this.within(deadline, current, earlier))) throw refused();
     let call: Promise<void>;
@@ -666,6 +683,8 @@ export class LiveKitAudioPublisher {
           throw error;
         }
         this.live(generation, captured);
+        // The receipt's deadline starts again as the chunk is announced: the time its mark took is not the page's.
+        acks.rearm(receipt);
       }
       // The chunk is announced to the participant it was admitted for; once another is linked, the track alone plays it.
       if (acks === this.acks) await this.send({ type: 'audio', scopeId: this.options.scopeId, callId: this.options.callId, generation, sequence: receipt.sequence,

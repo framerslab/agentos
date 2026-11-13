@@ -43,6 +43,15 @@ export class PlaybackAcknowledgements {
     if (!audio || audio.acknowledged || !sameVoiceGeneration(audio.receipt.generation, receipt.generation) || audio.receipt.sequence !== receipt.sequence) return;
     clearTimeout(audio.result.timer); audio.result.reject(new Error('playback cancelled')); this.audio = undefined;
   }
+  /**
+   * Starts the deadline of the receipt `begin()` reserved again, from now, as its audio is announced after a wait of the
+   * publisher's own; another receipt, or one already acknowledged, is left as it is.
+   */
+  rearm(receipt: PlaybackReceipt): void {
+    const audio = this.audio;
+    if (!audio || audio.acknowledged || !sameVoiceGeneration(audio.receipt.generation, receipt.generation) || audio.receipt.sequence !== receipt.sequence) return;
+    clearTimeout(audio.result.timer); audio.result.timer = setTimeout(() => audio.result.reject(new Error('receipt timeout')), this.timeoutMs);
+  }
   /** Returns false for stale/duplicate receipts; malformed or inconsistent current receipts fail closed. */
   receive(input: unknown): boolean {
     const event = PlaybackAcknowledgementSchema.parse(input);
