@@ -1142,7 +1142,8 @@ export interface GenerateTextResult {
   /**
    * The model's refusal message when it declined the request with one
    * (OpenAI's refusal): present only when the model refused, and possibly the
-   * empty string. `text` holds no answer then. `finishReason` is `'stop'`
+   * empty string. `text` is empty then, unless the model wrote text beside
+   * the message in the same reply: `text` keeps that text. `finishReason` is `'stop'`
    * beside a whole message, and `'length'` when the output cap cut the
    * message off, with the piece that came here. Read this field to tell a
    * refusal from an empty answer. Set by `generateText()`; other surfaces
