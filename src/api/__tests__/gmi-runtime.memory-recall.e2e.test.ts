@@ -230,7 +230,7 @@ describe.each(ENGINES)("agent({ runtime: 'gmi' }) memory.recall over a durable s
       };
       const recall: MemoryRecallConfig = {
         budget: { totalTokens: 1200 },
-        retrieval: 'dense',
+        retrieval: 'hybrid',
         rerank: { kind: 'llm', model: 'judge-model', invoke },
         capture: 'metadata',
       };
