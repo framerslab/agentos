@@ -124,22 +124,24 @@ export function dedupePool<E extends DedupeEntry>(
     while (at.mergedInto) at = at.mergedInto;
     return at;
   };
+  /** A kept memory of `item` alone: its own text, score and place, and nothing of a slot it was folded from. */
+  const slotOf = (item: Item): Slot => ({ entry: item.entry, index: item.index, tokens: item.tokens, best: item.entry, place: item.index });
   /** Folds `loser` into `winner`: the better score, the higher place, and the loser's text dropped. */
   const fold = (winner: Slot, loser: Slot): void => {
     if (loser.best.fusedScore > winner.best.fusedScore) winner.best = loser.best;
     winner.place = Math.min(winner.place, loser.place);
     loser.mergedInto = winner;
-    dropped.push({ item: loser, holder: winner });
+    dropped.push({ item: { entry: loser.entry, index: loser.index, tokens: loser.tokens }, holder: winner });
     kept.splice(kept.indexOf(loser), 1);
   };
   /** Keeps `item`, drops it against the kept text it repeats, or lets it take that text's place. */
   const insert = (item: Item, mayTakeOver: boolean): void => {
     const holder = kept.find((k) => nearDuplicate(k.tokens, item.tokens, threshold));
     if (!holder) {
-      kept.push({ ...item, best: item.entry, place: item.index });
+      kept.push(slotOf(item));
       return;
     }
-    const challenger: Slot = { ...item, best: item.entry, place: item.index };
+    const challenger = slotOf(item);
     if (!mayTakeOver || !staysOver(challenger, holder)) {
       // A newer candidate of an equal score takes the place of the older one it repeats.
       holder.place = Math.min(holder.place, item.index);
@@ -167,9 +169,12 @@ export function dedupePool<E extends DedupeEntry>(
 
   let queue = byPreference(items);
   for (let pass = 0; queue.length > 0; pass++) {
-    for (const item of queue) insert(item, pass < TAKEOVER_PASSES);
-    // A drop whose holder's text changed since may no longer repeat it: look at it again. A pass that lets no text
-    // take a place changes no holder's text, so the loop ends after it at the latest.
+    const mayTakeOver = pass < TAKEOVER_PASSES;
+    for (const item of queue) insert(item, mayTakeOver);
+    // A pass that lets no text take a place changes no kept text, so every drop still repeats the text it names: it
+    // is the last pass.
+    if (!mayTakeOver) break;
+    // A drop whose holder's text changed since may no longer repeat it: look at it again.
     const stale = dropped.filter((d) => !nearDuplicate(d.item.tokens, finalHolder(d.holder).tokens, threshold));
     dropped = dropped.filter((d) => !stale.includes(d));
     queue = byPreference(stale.map((d) => d.item));
