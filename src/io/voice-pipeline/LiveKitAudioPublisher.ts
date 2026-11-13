@@ -15,8 +15,9 @@
  * the `mark` option): before the chunk's first frame is captured, the
  * publisher sets the mark on the publishing participant's attributes
  * ({@link LIVEKIT_SPEECH_MARK_ATTRIBUTES}), with the published track's SID,
- * where anything that reads the room's state reads it. A chunk whose mark
- * cannot be set is refused, and nothing of it plays.
+ * where anything that reads the room's state reads it, and waits until the
+ * participant's own attributes show it. A chunk whose mark cannot be set is
+ * refused, and nothing of it plays.
  */
 
 import { inspectPcm16, type Pcm16View } from './audioFormat.js';
@@ -54,6 +55,8 @@ interface PublishingParticipant {
   unpublishTrack(sid: string, stopOnUnpublish?: boolean): Promise<void>;
   /** As rtc-node's `LocalParticipant.setAttributes`: sets the keys given and leaves the participant's other attributes. */
   setAttributes?(attributes: Record<string, string>): Promise<void>;
+  /** As rtc-node's `Participant.attributes`: the participant's own attributes, as the room last heard them. */
+  readonly attributes?: Record<string, string>;
 }
 
 /**
@@ -170,11 +173,16 @@ export interface LiveKitAudioPublisherOptions {
    * `sendAudio()`. Before a marked chunk's first frame is captured, and in participant playout before the chunk is
    * announced, the publisher sets {@link LIVEKIT_SPEECH_MARK_ATTRIBUTES} on the publishing participant through its
    * `setAttributes` (rtc-node's `LocalParticipant.setAttributes`), unless the clip id is the one it set last, so the
-   * chunks of one clip set them once. The send of a chunk whose mark cannot be set rejects with
-   * `publisher mark refused`, and nothing of that chunk is captured: a mark with an empty field or on a participant
-   * without `setAttributes` is refused before anything is published, and a `setAttributes` that rejects is refused
-   * with that rejection as the error's `cause`. A chunk without a mark plays as it does without this option and sets
-   * nothing, so the attributes stay as the last marked chunk set them.
+   * chunks of one clip set them once. A participant that exposes its own `attributes`, as rtc-node's local participant
+   * does once the room hears the server's update, must show the six values before the first frame: rtc-node 1.1.0's
+   * `setAttributes` resolves when the server refuses the update (a token without `canUpdateOwnMetadata`, for one), so
+   * the call alone does not prove the mark is set. The call and that read-back share one deadline,
+   * `receiptTimeoutMs` from the call; a clear or a close ends the wait at once and nothing of the chunk plays. The
+   * send of a chunk whose mark cannot be set rejects with `publisher mark refused`, and nothing of that chunk is
+   * captured: a mark with an empty field or on a participant without `setAttributes` is refused before anything is
+   * published, a `setAttributes` that rejects is refused with that rejection as the error's `cause`, and so is a mark
+   * the call or the participant's attributes do not confirm by the deadline. A chunk without a mark plays as it does
+   * without this option and sets nothing, so the attributes stay as the last marked chunk set them.
    */
   mark?(chunk: EncodedAudioChunk): SpeechMark | undefined;
 }
@@ -460,19 +468,54 @@ export class LiveKitAudioPublisher {
   }
   /**
    * Sets a clip's mark on the publishing participant, with the published track's SID, unless the mark set last is
-   * that clip's. The caller has published the track. A refusal leaves what the participant carries unknown, so the
-   * next marked chunk sets its mark whatever its clip.
+   * that clip's, and waits until the mark is confirmed: the call has resolved and, on a participant that exposes its
+   * own `attributes`, they show the six values (rtc-node 1.1.0's call resolves when the server refuses the update).
+   * The call and the read-back share one deadline, `receiptTimeoutMs` from the call. The caller has published the
+   * track. A refusal leaves what the participant carries unknown, so the next marked chunk sets its mark whatever its
+   * clip.
    *
-   * @throws {Error} `publisher mark refused` when `setAttributes` rejects or throws, with that failure as its `cause`.
+   * @param current - Whether the chunk may still play; read again at each change a playout wait watches, so a clear or
+   *   a close ends the wait at once.
+   * @throws {Error} `publisher mark refused`: when `setAttributes` rejects or throws, with that failure as its `cause`;
+   *   when the mark is not confirmed by the deadline; and when `current` turns false.
    */
-  private async setMark(mark: SpeechMark): Promise<void> {
+  private async setMark(mark: SpeechMark, current: () => boolean): Promise<void> {
     if (this.marked === mark.clipId) return;
     this.marked = undefined;
     const keys = LIVEKIT_SPEECH_MARK_ATTRIBUTES;
+    const wanted: Record<string, string> = { [keys.aiGenerated]: 'true', [keys.provider]: mark.provider, [keys.model]: mark.model, [keys.madeAt]: mark.madeAt, [keys.clipId]: mark.clipId, [keys.trackSid]: this.publication! };
+    const refused = (cause?: unknown): Error => Object.assign(new Error('publisher mark refused'), cause === undefined ? {} : { cause });
+    const deadline = Date.now() + this.options.receiptTimeoutMs;
+    let call: Promise<'answered'>;
     try {
-      await this.participant.setAttributes!({ [keys.aiGenerated]: 'true', [keys.provider]: mark.provider, [keys.model]: mark.model, [keys.madeAt]: mark.madeAt, [keys.clipId]: mark.clipId, [keys.trackSid]: this.publication! });
-    } catch (cause) { throw Object.assign(new Error('publisher mark refused'), { cause }); }
+      call = Promise.resolve(this.participant.setAttributes!(wanted)).then(() => 'answered' as const, (cause: unknown) => { throw refused(cause); });
+    } catch (cause) { throw refused(cause); }
+    // A call given up on at the deadline, a clear or a close settles with nobody waiting for it.
+    call.catch(() => {});
+    let answered = false;
+    for (;;) {
+      if (!current()) throw refused();
+      if (answered && this.shows(wanted)) break;
+      const left = deadline - Date.now();
+      if (left <= 0) throw refused();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      // The room's change event updates the participant's attributes and tells the publisher nothing: once the call has
+      // answered they are read again every 20 ms.
+      const tick = new Promise<'tick'>((resolve) => { timer = setTimeout(() => resolve('tick'), answered ? Math.min(left, 20) : left); });
+      try {
+        if ((await Promise.race(answered ? [tick, this.nextChange()] : [call, tick, this.nextChange()])) === 'answered') answered = true;
+      } finally { clearTimeout(timer); }
+    }
     this.marked = mark.clipId;
+  }
+  /**
+   * Whether the publishing participant's own attributes show every one of `attributes`; a participant that does not
+   * expose its attributes is taken at its call's word.
+   */
+  private shows(attributes: Record<string, string>): boolean {
+    const own = this.participant.attributes;
+    if (typeof own !== 'object' || own === null) return true;
+    return Object.entries(attributes).every(([key, value]) => own[key] === value);
   }
   /** Converts the samples to 16-bit integers once and, when the rates differ, resamples them once to the track's rate. */
   private convert(rtc: LiveKitPublishingRtc, pcm: Pcm16View): { frames: PublishedAudioFrame[]; publishedSamples: number } {
@@ -563,7 +606,7 @@ export class LiveKitAudioPublisher {
             // The mark goes ahead of the chunk's first frame, once no pause holds the track. The chunk is whole until
             // then, and a pause or a clear that comes while the mark is being set is read again before the frame. A
             // mark refused after a clear or a close discarded the chunk refuses nothing.
-            try { await this.setMark(unset); } catch (error) { if (!this.current(entry.generation, entry.cancellation)) return; throw error; }
+            try { await this.setMark(unset, () => this.current(entry.generation, entry.cancellation)); } catch (error) { if (!this.current(entry.generation, entry.cancellation)) return; throw error; }
             unset = undefined;
           }
           const holds = this.holds; const stalls = this.stalls; entry.holds ??= holds;
@@ -593,8 +636,12 @@ export class LiveKitAudioPublisher {
     const work = (async () => {
       await this.prepare(); this.live(generation, captured); const rtc = this.rtc!;
       const { frames, publishedSamples } = this.convert(rtc, pcm);
-      // The mark goes ahead of the announcement, so a chunk whose mark is refused is neither announced nor captured.
-      if (mark) { await this.setMark(mark); this.live(generation, captured); }
+      // The mark goes ahead of the announcement, so a chunk whose mark is refused is neither announced nor captured. A
+      // clear or a close that ends the wait for it cancels the chunk, as it does at any other step.
+      if (mark) {
+        try { await this.setMark(mark, () => this.current(generation, captured)); } catch (error) { this.live(generation, captured); throw error; }
+        this.live(generation, captured);
+      }
       // The chunk is announced to the participant it was admitted for; once another is linked, the track alone plays it.
       if (acks === this.acks) await this.send({ type: 'audio', scopeId: this.options.scopeId, callId: this.options.callId, generation, sequence: receipt.sequence,
         publicationId: this.publication, encoding: 'pcm16le', channels: 1, samples: pcm.samples, sampleRate: pcm.sampleRate,
