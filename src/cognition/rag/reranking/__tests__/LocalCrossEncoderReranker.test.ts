@@ -15,7 +15,6 @@ import {
   LocalCrossEncoderReranker,
   LOCAL_RERANKER_MODELS,
   LOCAL_RERANKER_DEFAULT_WEIGHTS,
-  type LocalCrossEncoderConfig,
 } from '../providers/LocalCrossEncoderReranker';
 import { RerankerService } from '../RerankerService';
 import type { RerankerInput, RerankerRequestConfig } from '../IRerankerService';
@@ -111,7 +110,7 @@ describe('LocalCrossEncoderReranker', () => {
     });
 
     it('passes a pinned revision to the tokenizer and the model loads, and passes none without one', async () => {
-      const pinned = new LocalCrossEncoderReranker({ providerId: 'local', revision: 'abc' } as LocalCrossEncoderConfig);
+      const pinned = new LocalCrossEncoderReranker({ providerId: 'local', revision: 'abc' });
       await pinned.initialize();
       expect(modelFromPretrained.mock.calls[0][1]).toMatchObject({ revision: 'abc' });
       expect((tokenizerFromPretrained.mock.calls[0] as unknown[])[1]).toMatchObject({ revision: 'abc' });
@@ -123,7 +122,7 @@ describe('LocalCrossEncoderReranker', () => {
     });
 
     it('localFilesOnly loads from the cache alone (local_files_only), on both loads', async () => {
-      const offline = new LocalCrossEncoderReranker({ providerId: 'local', localFilesOnly: true, cacheDir: '/tmp/models' } as LocalCrossEncoderConfig);
+      const offline = new LocalCrossEncoderReranker({ providerId: 'local', localFilesOnly: true, cacheDir: '/tmp/models' });
       await offline.initialize();
       expect(modelFromPretrained.mock.calls[0][1]).toMatchObject({ local_files_only: true, cache_dir: '/tmp/models' });
       expect((tokenizerFromPretrained.mock.calls[0] as unknown[])[1]).toMatchObject({ local_files_only: true, cache_dir: '/tmp/models' });

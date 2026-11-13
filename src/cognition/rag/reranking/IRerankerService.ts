@@ -94,6 +94,11 @@ export interface RerankerRequestConfig {
    * `defaultTimeoutMs`, else none, and the provider applies its own: 30000 for Cohere and the LLM judge.
    */
   timeoutMs?: number;
+  /**
+   * The model's pinned revision (a commit of its repository), for a provider that loads weights. The local
+   * cross-encoder loads the revision its own configuration names and does not read this.
+   */
+  revision?: string;
   /** Provider-specific parameters */
   params?: Record<string, unknown>;
 }
@@ -110,6 +115,11 @@ export interface RerankerProviderConfig {
   baseUrl?: string;
   /** Default model to use if not specified per-request */
   defaultModelId?: string;
+  /**
+   * The model's pinned revision (a branch, a tag or a commit of its repository), for a provider that loads weights.
+   * The local cross-encoder passes it to every load; unset, it loads the repository's `main`.
+   */
+  revision?: string;
   /** Default timeout in milliseconds */
   defaultTimeoutMs?: number;
   /** Provider-specific configuration options */

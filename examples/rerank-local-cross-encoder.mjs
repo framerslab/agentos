@@ -10,7 +10,7 @@
 // This script demonstrates:
 //   - isAvailable(), which answers whether Transformers.js can be imported
 //   - LocalCrossEncoderReranker registered with a RerankerService, default model
-//     cross-encoder/ms-marco-MiniLM-L-6-v2, or RERANK_LOCAL_MODEL (one of LOCAL_RERANKER_MODELS)
+//     cross-encoder/ms-marco-MiniLM-L6-v2, or RERANK_LOCAL_MODEL (one of LOCAL_RERANKER_MODELS)
 //   - rerank() with the diagnostics the provider returns
 //
 // Usage (no API key; the first run needs the network once, for the model):
@@ -21,7 +21,7 @@ import { LOCAL_RERANKER_MODELS, LocalCrossEncoderReranker, RerankerService } fro
 
 const local = new LocalCrossEncoderReranker({
   providerId: 'local',
-  defaultModelId: process.env.RERANK_LOCAL_MODEL, // undefined: cross-encoder/ms-marco-MiniLM-L-6-v2
+  defaultModelId: process.env.RERANK_LOCAL_MODEL, // undefined: cross-encoder/ms-marco-MiniLM-L6-v2
   cacheDir: process.env.RERANK_LOCAL_CACHE_DIR,
 });
 

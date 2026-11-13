@@ -13,6 +13,11 @@
  * The answer holds every scored document: the ones the ranking names, in its order, then the rest by their phase 1
  * score, cut to the request's `topN` when it sets one.
  *
+ * A failed call never fails the rerank: a scoring call that fails or does not parse scores its batch 0, and a ranking
+ * call that fails leaves the order to the scores. The diagnostics count both (`providerMetrics.scoringFailures`,
+ * the documents whose score was put in for one the model did not give, and `providerMetrics.listwiseFailed`), so a
+ * caller that must not act on such an answer can tell.
+ *
  * Cognitive science: Combines absolute judgment (pointwise) with comparative
  * judgment (listwise) — mirrors how human expert reviewers evaluate documents.
  *
@@ -98,7 +103,10 @@ export class LlmJudgeReranker implements IRerankerProvider {
    * over), then the rest by score, the input order breaking a tie. When the ranking call fails, runs past the
    * timeout or does not answer a JSON array, the scores order them all. With `topN` the answer is cut to that many.
    * `relevanceScore` is `1 - i / n` for the answer's `i`-th document (from 0) of `n`. The diagnostics name this
-   * provider (`llm-judge`), `rankingModel` (else `''`) and the documents it scored.
+   * provider (`llm-judge`), `rankingModel` (else `''`) and the documents it scored, and in `providerMetrics` what was
+   * put in for an answer the model did not give: `scoringFailures`, the documents scored 0 because their batch's
+   * call failed, ran past the timeout or did not answer a JSON array, or because their own entry was missing or not
+   * a number; and `listwiseFailed`, true when the ranking call failed and the scores ordered the answer.
    */
   async rerank(input: RerankerInput, config: RerankerRequestConfig): Promise<RerankerOutput> {
     const startedAt = Date.now();
@@ -106,17 +114,19 @@ export class LlmJudgeReranker implements IRerankerProvider {
     const documents = input.documents.slice(0, this.maxPointwiseDocuments);
 
     // Phase 1: batch pointwise scoring, best score first (the sort is stable, so a tie keeps the input order).
-    const scored = await this.batchPointwiseScore(input.query, documents, timeoutMs);
+    const { scored, scoringFailures } = await this.batchPointwiseScore(input.query, documents, timeoutMs);
     scored.sort((a, b) => b.score - a.score);
     const candidates = scored.slice(0, this.pointwiseTopK);
 
     // Phase 2: listwise ranking of the best-scored candidates.
     let ranked: ScoredDocument[] = [];
+    let listwiseFailed = false;
     if (candidates.length > 0) {
       try {
         ranked = await this.listwiseRank(input.query, candidates, timeoutMs);
       } catch {
         ranked = [];
+        listwiseFailed = true;
       }
     }
 
@@ -138,6 +148,7 @@ export class LlmJudgeReranker implements IRerankerProvider {
         providerId: this.providerId,
         latencyMs: Date.now() - startedAt,
         documentsProcessed: documents.length,
+        providerMetrics: { scoringFailures, listwiseFailed },
       },
     };
   }
@@ -155,18 +166,22 @@ export class LlmJudgeReranker implements IRerankerProvider {
     }
   }
 
-  /** Phase 1: Score documents in batches. A batch whose call fails or does not parse scores 0. */
+  /**
+   * Phase 1: Score documents in batches. A batch whose call fails or does not parse scores 0, and so does a document
+   * whose entry in the answer is missing or not a number; `scoringFailures` counts the documents scored that way.
+   */
   private async batchPointwiseScore(
     query: string,
     documents: RerankerInput['documents'],
     timeoutMs: number,
-  ): Promise<ScoredDocument[]> {
+  ): Promise<{ scored: ScoredDocument[]; scoringFailures: number }> {
     const batches: RerankerInput['documents'][] = [];
     for (let i = 0; i < documents.length; i += this.batchSize) {
       batches.push(documents.slice(i, i + this.batchSize));
     }
 
     const results: ScoredDocument[] = [];
+    let scoringFailures = 0;
 
     for (const batch of batches) {
       const docList = batch
@@ -181,16 +196,19 @@ export class LlmJudgeReranker implements IRerankerProvider {
 
         for (let i = 0; i < batch.length; i++) {
           const score = scores[i];
-          results.push({ ...batch[i], score: typeof score === 'number' && Number.isFinite(score) ? score : 0 });
+          const given = typeof score === 'number' && Number.isFinite(score);
+          if (!given) scoringFailures += 1;
+          results.push({ ...batch[i], score: given ? score : 0 });
         }
       } catch {
+        scoringFailures += batch.length;
         for (const doc of batch) {
           results.push({ ...doc, score: 0 });
         }
       }
     }
 
-    return results;
+    return { scored: results, scoringFailures };
   }
 
   /**
