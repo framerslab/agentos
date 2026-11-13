@@ -1085,7 +1085,13 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         // judge the message there, and the span and the usage event say how
         // the call ended. The tool calls of a native step before the shim do
         // not make it a 'tool-calls' ending.
-        if (loopResult.refusal !== undefined) resolveFinishReason!(normalizeStreamFinishReason(lastStepFinishReason));
+        // The root span names that ending too; a block by the guards turns it
+        // into 'error' in the finally.
+        if (loopResult.refusal !== undefined) {
+          const refusalFinish = normalizeStreamFinishReason(lastStepFinishReason);
+          resolveFinishReason!(refusalFinish);
+          rootSpan?.setAttribute('agentos.api.finish_reason', refusalFinish);
+        }
         settleFallback(true);
       }
       if (tools.length > 0 && toolMode === 'prompt') {
