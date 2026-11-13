@@ -46,10 +46,10 @@ beforeEach(async () => {
   await engine.initialize(config);
 });
 
-/** Builds a prompt over `systemPrompts`; `marker` undefined leaves the marker out. */
+/** Builds a prompt over `systemPrompts`, asking for the cache marker; `marker` null leaves the request out. */
 const build = (systemPrompts: any[], provider = 'anthropic', marker: unknown = {}, model?: string) =>
   engine.constructPrompt(
-    { systemPrompts, userInput: 'Hello.', ...(marker === undefined ? {} : { systemCacheMarker: marker }) } as never,
+    { systemPrompts, userInput: 'Hello.', ...(marker === null ? {} : { systemCacheMarker: marker }) } as never,
     target(provider, model),
   );
 
@@ -105,7 +105,7 @@ describe('fixed system entries', () => {
   });
 
   it('keeps one string when the marker is absent or the leading entry is not fixed', async () => {
-    const absent = await build(entries, 'anthropic', undefined);
+    const absent = await build(entries, 'anthropic', null);
     expect(systemsOf(absent.prompt)).toHaveLength(1);
     expect((absent.prompt as any[])[0].content).toBe(joined);
     for (const first of [{ content: 'Unknown' }, { content: ' ', stability: 'persona' }, { content: 'Turn', stability: 'turn' }]) {
@@ -125,7 +125,7 @@ describe('fixed system entries', () => {
   it('does not share cached results across labels, marker or target', async () => {
     const a = await build(entries);
     const b = await build(entries.map((entry) => ({ ...entry, stability: 'turn' })));
-    const c = await build(entries, 'anthropic', undefined);
+    const c = await build(entries, 'anthropic', null);
     const d = await build(entries, 'openai');
     expect(new Set([a.cacheKey, b.cacheKey, c.cacheKey, d.cacheKey]).size).toBe(4);
     expect((b.prompt as any[])[0].content).toBeTypeOf('string');
