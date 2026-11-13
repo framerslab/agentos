@@ -209,6 +209,23 @@ const totals = await getRecordedAgentOSUsage({ enabled: true, sessionId: 'demo-s
 console.log(totals.totalTokens);
 ```
 
+### A refusal from the model
+
+```ts
+import { generateText } from '@framers/agentos';
+
+const result = await generateText({
+  provider: 'openai',
+  prompt: 'Draft a reply to this message.',
+});
+
+if (result.finishReason === 'refusal') {
+  console.log(result.refusal); // the model's refusal message
+}
+```
+
+When an OpenAI model refuses a request with a refusal message, `generateText()` returns `finishReason: 'refusal'`, the message in `refusal` and an empty `text`, so a caller can tell a refusal from an empty answer. The call does not throw, and nothing is sent to a fallback provider. `streamText()` sends no text part for it: `await result.finishReason` is `'refusal'` and `await result.refusal` is the message. A result with another finish reason has no `refusal`. [OpenAI](../features/LLM_PROVIDERS.md#openai) describes what the provider reads. Claude's refusal arrives another way: the provider throws an error with code `content_filter` ([Anthropic](../features/LLM_PROVIDERS.md#anthropic)).
+
 ### OpenAI response storage
 
 ```ts
