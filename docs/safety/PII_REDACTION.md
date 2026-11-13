@@ -119,7 +119,7 @@ createPiiRedactionGuardrail({
 // becomes "I live at [STREET_ADDRESS]. Add me on insta: [SOCIAL_HANDLE]"
 ```
 
-Both are found in the regex tier by the pack's contact recogniser (`ContactRecognizer`), with pattern code of its own: no model, no network call and no optional library. The regex library's own address and handle patterns are not used for them.
+Both are found in the regex tier by the pack's contact recognizer (`ContactRecognizer`), with pattern code of its own: no model, no network call and no optional library. The regex library's own address and handle patterns are not used for them.
 
 | Type | What it finds | Score |
 |---|---|---|
@@ -134,7 +134,7 @@ Both are found in the regex tier by the pack's contact recogniser (`ContactRecog
 
 - a unit (`apt`, `apartment`, `unit`, `suite`, `ste`, `flat` or `#` with its number), after the street or before the house number;
 - a postal code within 60 characters after the street: a US ZIP after a state, an Australian postcode after a state or territory, a Canadian postal code, or a UK postcode;
-- a city and a region after a comma or on the next line (a US state, a Canadian province or territory, an Australian state or territory, or a UK nation, by name or by code; another region such as a UK county when the city and the region each follow a comma and each is capitalised);
+- a city and a region after a comma or on the next line (a US state, a Canadian province or territory, an Australian state or territory, or a UK nation, by name or by code; another region such as a UK county when the city and the region each follow a comma and each is capitalized);
 - an address cue in the 40 characters before it, such as "live at", "address", "located at" or "send it to".
 
 The entity covers the unit, the city, the region and the postal code found with the street; the cue stays in the text.
