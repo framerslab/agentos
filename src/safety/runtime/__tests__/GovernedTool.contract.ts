@@ -18,7 +18,7 @@ import { verifyActionEvidence } from '../ActionEvidence.js';
 import { SqlActionLimiter, type ActionLimitRule } from '../ActionLimiter.js';
 import { governTool, governedActionOf, type ActionAuditSink, type ActionGovernance, type GovernedActionIds } from '../GovernedTool.js';
 import {
-  DAY, MESSAGES, MUTE_POLICY, OPENAI, RULES, RULE_BOOK, auditSink, capture, message, messageStore, muteOf, muteTool, posted, serve, text, toolCall,
+  CONTEXT, DAY, MESSAGES, MUTE_POLICY, OPENAI, RULES, RULE_BOOK, auditSink, capture, message, messageStore, muteOf, muteTool, posted, serve, text, toolCall,
   type Json, type Line, type MuteArgs, type MuteTool, type RecordingSink,
 } from './governedFixtures.js';
 
@@ -382,6 +382,21 @@ export function runGovernedToolSuite(name: string, open: () => Promise<StoreUnde
       expect(await of({ verdictRefs: ['v_missing'] })).toMatchObject({ outcome: 'voided_evidence', code: 'VERDICT_NOT_FOUND' });
       expect(mute.execute).not.toHaveBeenCalled();
       expect(everything()).not.toContain('MeetMeAt221BakerStreet');
+    });
+
+    it("the tool's own refusal before approval is recorded as the governed call's end", async () => {
+      const refusing: MuteTool = { ...mute, refusalBeforeApproval: () => ({ success: false, error: 'This room cannot be muted.' }) };
+      const governed = governTool(refusing, MUTE_POLICY, governanceOf(limiterOf()));
+      const refusal = governed.refusalBeforeApproval?.(muteOf(message('m1')), CONTEXT) as ToolExecutionResult;
+      expect(refusal).toMatchObject({ success: false, error: 'This room cannot be muted.', details: { governance: { outcome: 'refused_arguments', code: 'TOOL_REFUSED' } } });
+      await vi.waitFor(() => { expect(audit.finished).toHaveLength(1); });
+      expect(audit.begun).toEqual([expect.objectContaining({ id: governance(refusal).recordId, target: { messageIds: [] }, evidence: { quotes: [] } })]);
+      expect(audit.finished[0].end).toMatchObject({ outcome: 'refused_arguments', code: 'TOOL_REFUSED' });
+      expect(lines.filter((line) => line.event === 'action.ended')).toEqual([expect.objectContaining({ outcome: 'refused_arguments', code: 'TOOL_REFUSED' })]);
+      // a tool that names no refusal: nothing is answered and nothing recorded
+      expect(governTool(mute, MUTE_POLICY, governanceOf(limiterOf())).refusalBeforeApproval?.(muteOf(message('m1')), CONTEXT)).toBeUndefined();
+      expect(audit.begun).toHaveLength(1);
+      expect(mute.execute).not.toHaveBeenCalled();
     });
 
     it("(q) a provider's call id reaches no record, whichever step refuses the call", async () => {
