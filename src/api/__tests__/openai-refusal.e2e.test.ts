@@ -25,8 +25,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const fetchMock = vi.fn();
 vi.stubGlobal('fetch', fetchMock);
 
+import { z } from 'zod';
+import { agent } from '../agent.js';
 import { GuardrailStopError } from '../errors.js';
+import { generateObject, ObjectGenerationError } from '../generateObject.js';
 import { generateText } from '../generateText.js';
+import { setGlobalLlmObserver, type LlmUsageEvent } from '../observers.js';
 import { streamText, type StreamPart } from '../streamText.js';
 import { AgentOSResponseChunkType, type AgentOSFinalResponseChunk } from '../types/AgentOSResponse.js';
 import { OpenAIProvider } from '../../core/llm/providers/implementations/OpenAIProvider.js';
@@ -386,14 +390,14 @@ describe.each(cutPaths)('an OpenAI refusal the output cap cut off on $name', ({ 
     expect(finish?.choices[0]?.refusal).toBe(CUT_REFUSAL);
   });
 
-  it('comes back from generateText and streamText as finish reason length, with no refusal and no text', async () => {
+  it('comes back from generateText and streamText as finish reason length, with the piece of the message and no text', async () => {
     route([
       [/api\.openai\.com\/v1\/models/, modelList],
       [endpoint, answer],
     ]);
     const result = await generateText(call);
     expect(result.finishReason).toBe('length');
-    expect('refusal' in result).toBe(false);
+    expect(result.refusal).toBe(CUT_REFUSAL);
     expect(result.text).toBe('');
 
     route([
@@ -405,8 +409,31 @@ describe.each(cutPaths)('an OpenAI refusal the output cap cut off on $name', ({ 
     for await (const delta of streamed.textStream) text += delta;
     expect(text).toBe('');
     expect(await streamed.finishReason).toBe('length');
-    expect(await streamed.refusal).toBeUndefined();
+    expect(await streamed.refusal).toBe(CUT_REFUSAL);
     expect(await streamed.text).toBe('');
+  });
+
+  it('comes back the same in prompt tool mode, never as a stop', async () => {
+    // The prompt tool loop sends each round as a whole request, so the answer is the whole body.
+    route([
+      [/api\.openai\.com\/v1\/models/, modelList],
+      [endpoint, answer],
+    ]);
+    const lookup = { description: 'Look a word up.', parameters: { type: 'object' as const, properties: {} }, execute: vi.fn(async () => ({ hits: 1 })) };
+    const withTools = { ...call, tools: { lookup }, toolMode: 'prompt' as const };
+
+    const result = await generateText(withTools);
+    expect(result.finishReason).toBe('length');
+    expect(result.refusal).toBe(CUT_REFUSAL);
+    expect(result.text).toBe('');
+
+    const streamed = streamText(withTools);
+    let text = '';
+    for await (const delta of streamed.textStream) text += delta;
+    expect(text).toBe('');
+    expect(await streamed.finishReason).toBe('length');
+    expect(await streamed.refusal).toBe(CUT_REFUSAL);
+    expect(lookup.execute).not.toHaveBeenCalled();
   });
 });
 
@@ -634,5 +661,185 @@ describe('an OpenAI refusal on a call with tools', () => {
     expect(await result.finishReason).toBe('refusal');
     expect(await result.refusal).toBe(REFUSAL);
     expect(await result.text).toBe('');
+  });
+});
+
+describe('an OpenAI chat stream cut before its finish chunk', () => {
+  it('ends streamText on an error, never on a refusal', async () => {
+    // A refusal piece, then the body ends: no finish chunk, no usage chunk, no [DONE].
+    route([
+      [/api\.openai\.com\/v1\/models/, modelList],
+      [/api\.openai\.com\/v1\/chat\/completions/, () => sseResponse([chatChunk([{ index: 0, delta: { refusal: 'I cannot' }, finish_reason: null }])])],
+    ]);
+
+    const result = streamText({ provider: 'openai', model: CHAT_MODEL, apiKey: 'sk-refusal-e2e', prompt: 'A request.', fallbackProviders: [] });
+    const parts: StreamPart[] = [];
+    for await (const part of result.fullStream) parts.push(part);
+
+    expect(parts.map((part) => part.type)).toContain('error');
+    expect(await result.finishReason).toBe('error');
+    expect(await result.refusal).toBeUndefined();
+  });
+});
+
+describe('an OpenAI refusal beside a tool call', () => {
+  /** A Responses answer that refuses part of the request and calls `lookup` in the same output. */
+  const responsesRefusalWithCall = () =>
+    jsonResponse({
+      ...responsesRefusalBody(),
+      output: [
+        { type: 'message', id: 'msg_1', role: 'assistant', content: [{ type: 'refusal', refusal: REFUSAL }] },
+        { type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'lookup', arguments: '{"q":"x"}' },
+      ],
+    });
+  /** An ordinary Responses answer, which a second request would get. */
+  const responsesDone = () =>
+    jsonResponse({ ...responsesRefusalBody(), output: [{ type: 'message', id: 'msg_2', role: 'assistant', content: [{ type: 'output_text', text: 'Done.' }] }] });
+  /** The same on a Chat Completions stream: refusal pieces and a tool call, finished with `tool_calls`. */
+  const chatRefusalWithCallStream = () =>
+    sseResponse([
+      ...REFUSAL_PARTS.map((part) => chatChunk([{ index: 0, delta: { refusal: part }, finish_reason: null }])),
+      chatChunk([{ index: 0, delta: { tool_calls: [{ index: 0, id: 'call_1', type: 'function', function: { name: 'lookup', arguments: '{"q":"x"}' } }] }, finish_reason: null }]),
+      chatChunk([{ index: 0, delta: {}, finish_reason: 'tool_calls' }]),
+      chatChunk([], { usage: { prompt_tokens: 40, completion_tokens: 20, total_tokens: 60 } }),
+      'data: [DONE]\n\n',
+    ]);
+  const chatDoneStream = () =>
+    sseResponse([chatChunk([{ index: 0, delta: { role: 'assistant', content: 'Done.' }, finish_reason: null }]), chatChunk([{ index: 0, delta: {}, finish_reason: 'stop' }]), 'data: [DONE]\n\n']);
+  const tool = () => ({
+    description: 'Look a word up.',
+    parameters: { type: 'object' as const, properties: { q: { type: 'string' } }, required: ['q' as const] },
+    execute: vi.fn(async () => ({ hits: 1 })),
+  });
+  const requestsTo = (endpoint: RegExp) => fetchMock.mock.calls.filter(([url]) => endpoint.test(String(url))).length;
+
+  it('ends generateText on the refusal, and the call it came with is not run', async () => {
+    route([
+      [/api\.openai\.com\/v1\/models/, modelList],
+      [/api\.openai\.com\/v1\/responses/, inOrder(responsesRefusalWithCall, responsesDone)],
+    ]);
+    const lookup = tool();
+
+    const result = await generateText({ provider: 'openai', model: RESPONSES_MODEL, apiKey: 'sk-refusal-e2e', prompt: 'A request.', fallbackProviders: [], tools: { lookup }, maxSteps: 3 });
+
+    expect(result.finishReason).toBe('refusal');
+    expect(result.refusal).toBe(REFUSAL);
+    expect(result.text).toBe('');
+    expect(lookup.execute).not.toHaveBeenCalled();
+    expect(requestsTo(/api\.openai\.com\/v1\/responses/)).toBe(1);
+  });
+
+  it('ends streamText on the refusal, and the call it came with is not run', async () => {
+    route([
+      [/api\.openai\.com\/v1\/models/, modelList],
+      [/api\.openai\.com\/v1\/chat\/completions/, inOrder(chatRefusalWithCallStream, chatDoneStream)],
+    ]);
+    const lookup = tool();
+
+    const result = streamText({ provider: 'openai', model: CHAT_MODEL, apiKey: 'sk-refusal-e2e', prompt: 'A request.', fallbackProviders: [], tools: { lookup }, maxSteps: 3 });
+    const parts: StreamPart[] = [];
+    for await (const part of result.fullStream) parts.push(part);
+
+    expect(parts).toEqual([]);
+    expect(await result.finishReason).toBe('refusal');
+    expect(await result.refusal).toBe(REFUSAL);
+    expect(await result.text).toBe('');
+    expect(lookup.execute).not.toHaveBeenCalled();
+    expect(requestsTo(/api\.openai\.com\/v1\/chat\/completions/)).toBe(1);
+  });
+});
+
+describe('an OpenAI refusal on a structured call', () => {
+  const requestsTo = (endpoint: RegExp) => fetchMock.mock.calls.filter(([url]) => endpoint.test(String(url))).length;
+
+  it('ends generateObject on the refusal with its message, and asks for no repair', async () => {
+    route([
+      [/api\.openai\.com\/v1\/models/, modelList],
+      [/api\.openai\.com\/v1\/chat\/completions/, chatRefusal],
+    ]);
+
+    const failed = await generateObject({
+      provider: 'openai',
+      model: CHAT_MODEL,
+      apiKey: 'sk-refusal-e2e',
+      schema: z.object({ answer: z.string() }),
+      prompt: 'A request.',
+      fallbackProviders: [],
+    }).catch((e: unknown) => e);
+
+    expect(failed).toBeInstanceOf(ObjectGenerationError);
+    expect(failed).toMatchObject({ refusal: REFUSAL });
+    expect(requestsTo(/api\.openai\.com\/v1\/chat\/completions/)).toBe(1);
+  });
+
+  it('ends an agent session send with a response schema on the refusal, and asks for no repair', async () => {
+    route([
+      [/api\.openai\.com\/v1\/models/, modelList],
+      [/api\.openai\.com\/v1\/chat\/completions/, chatRefusal],
+    ]);
+
+    const session = agent({ provider: 'openai', model: CHAT_MODEL, apiKey: 'sk-refusal-e2e', fallbackProviders: [], memory: false, instructions: 'Answer in JSON.' }).session('refused');
+    const failed = await session.send('A request.', { responseSchema: z.object({ answer: z.string() }), maxValidationRetries: 1 }).catch((e: unknown) => e);
+
+    expect(failed).toBeInstanceOf(ObjectGenerationError);
+    expect(failed).toMatchObject({ refusal: REFUSAL });
+    expect(requestsTo(/api\.openai\.com\/v1\/chat\/completions/)).toBe(1);
+  });
+});
+
+describe('an OpenAI Responses refusal part with an empty message', () => {
+  const emptyRefusal = () => {
+    const body = responsesRefusalBody();
+    return jsonResponse({ ...body, output: [{ ...body.output[0], content: [{ type: 'refusal', refusal: '' }] }] });
+  };
+
+  it('is still a refusal at the provider and from generateText', async () => {
+    route([
+      [/api\.openai\.com\/v1\/models/, modelList],
+      [/api\.openai\.com\/v1\/responses/, emptyRefusal],
+    ]);
+    const provider = new OpenAIProvider();
+    await provider.initialize({ apiKey: 'sk-refusal-e2e', maxRetries: 1 });
+
+    const answer = await provider.generateCompletion(RESPONSES_MODEL, [{ role: 'user', content: 'A request.' }], {});
+    expect(answer.choices[0]?.finishReason).toBe('refusal');
+    expect(answer.choices[0]?.refusal).toBe('');
+
+    const result = await generateText({ provider: 'openai', model: RESPONSES_MODEL, apiKey: 'sk-refusal-e2e', prompt: 'A request.', fallbackProviders: [] });
+    expect(result.finishReason).toBe('refusal');
+    expect(result.refusal).toBe('');
+    expect(result.text).toBe('');
+  });
+});
+
+describe('the usage event of a streamText call refused after a tool step with no text', () => {
+  /** A streamed step that only calls the `lookup` tool. */
+  const chatToolCallOnlyStream = () =>
+    sseResponse([
+      chatChunk([{ index: 0, delta: { role: 'assistant', content: null, tool_calls: [{ index: 0, id: 'call_1', type: 'function', function: { name: 'lookup', arguments: '{"q":"x"}' } }] }, finish_reason: null }]),
+      chatChunk([{ index: 0, delta: {}, finish_reason: 'tool_calls' }]),
+      chatChunk([], { usage: { prompt_tokens: 40, completion_tokens: 9, total_tokens: 49 } }),
+      'data: [DONE]\n\n',
+    ]);
+
+  afterEach(() => setGlobalLlmObserver(null));
+
+  it('names the refusal, as the call does', async () => {
+    route([
+      [/api\.openai\.com\/v1\/models/, modelList],
+      [/api\.openai\.com\/v1\/chat\/completions/, inOrder(chatToolCallOnlyStream, chatRefusalStream)],
+    ]);
+    const events: LlmUsageEvent[] = [];
+    setGlobalLlmObserver((event) => {
+      events.push(event);
+    });
+    const lookup = { description: 'Look a word up.', parameters: { type: 'object' as const, properties: { q: { type: 'string' } }, required: ['q' as const] }, execute: vi.fn(async () => ({ hits: 1 })) };
+
+    const result = streamText({ provider: 'openai', model: CHAT_MODEL, apiKey: 'sk-refusal-e2e', prompt: 'A request.', fallbackProviders: [], tools: { lookup }, maxSteps: 3 });
+    for await (const _part of result.fullStream) void _part;
+
+    expect(await result.finishReason).toBe('refusal');
+    await vi.waitFor(() => expect(events.length).toBeGreaterThan(0));
+    expect(events.at(-1)?.finishReason).toBe('refusal');
   });
 });
