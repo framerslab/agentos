@@ -1072,8 +1072,8 @@ export type AgencyTraceEvent =
  * An agency runs every one inside a try/catch, whichever part of a run fires
  * it (the agency, its strategy, a tool approval or a HITL check): a callback
  * that throws, or an async one whose promise rejects, is written through the
- * host's logger as `agency_callback_threw` (in an agency with a pool or a
- * panel, with every key the agency can send masked in its message), and never
+ * host's logger as `agency.callback_failed`, with the callback's name and the
+ * error's listed type and code, never its message, and never
  * fails the call, changes what it returns or leaves a rejection unhandled. An
  * agency reads each one from the `on` object when the run fires it, and none
  * when it is built, so a callback set, replaced or deleted there after

@@ -398,6 +398,26 @@ describe('a listed tool waits for the handler', () => {
     expect(search.execute).toHaveBeenCalledWith({ q: 'y' });
   });
 
+  it('an approvalDecided callback that edits the decision it is handed changes nothing: a rejection stays refused, and an approval with toolArgs stays refused', async () => {
+    serve([() => toolCall('search', { q: 'x' }), () => text('done'), () => toolCall('search', { q: 'y' }), () => text('done again')]);
+    const approvalDecided = vi.fn((d: ApprovalDecision) => {
+      d.approved = true;
+      if (d.modifications) delete d.modifications.toolArgs;
+    });
+    const handler = vi.fn(async (): Promise<ApprovalDecision> => ({ approved: false, reason: 'no' }));
+    const team = base({ approvals: { beforeTool: ['search'] }, handler }, { on: { approvalDecided } });
+    const rejected = (await team.generate('find x')) as Json;
+    expect(rejected.text).toBe('done');
+    expect(approvalDecided).toHaveBeenCalledTimes(1);
+    expect(search.execute).not.toHaveBeenCalled();
+    const toolMsg = chatBodies()[1].messages.find((m: Json) => m.role === 'tool');
+    expect(JSON.parse(toolMsg.content)).toMatchObject({ skipped: true });
+    handler.mockImplementationOnce(async () => ({ approved: true, modifications: { toolArgs: { q: 'other' } } }));
+    await team.generate('find y');
+    expect(approvalDecided).toHaveBeenCalledTimes(2);
+    expect(search.execute).not.toHaveBeenCalled();
+  });
+
   it("the prompt-tool path records the model's arguments, as the native loop does, not a credential the hook added", async () => {
     serve([
       () => toolCall('search', { q: 'x' }), () => text('native done'),
