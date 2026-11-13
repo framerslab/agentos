@@ -184,7 +184,7 @@ export type StreamPart =
  * {@link GenerateTextResult.finishReason} so hosts can branch on one
  * vocabulary regardless of which API produced the text.
  */
-export type StreamFinishReason = 'stop' | 'length' | 'tool-calls' | 'error';
+export type StreamFinishReason = 'stop' | 'length' | 'tool-calls' | 'error' | 'refusal';
 
 /**
  * Normalize a provider-reported finish reason onto the canonical
