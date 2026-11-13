@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type * as Rtc from '@livekit/rtc-node';
-import { LIVEKIT_SPEECH_MARK_ATTRIBUTES, type SpeechMark } from '../../voice-pipeline/LiveKitAudioPublisher.js';
+import { LIVEKIT_SPEECH_MARK_ATTRIBUTES, LiveKitAudioPublisher, type SpeechMark } from '../../voice-pipeline/LiveKitAudioPublisher.js';
 import {
   LiveKitRoomAudioOutput,
   ROOM_AUDIO_NO_SUBSCRIBER,
@@ -361,6 +361,58 @@ describe('LiveKitRoomAudioOutput', () => {
     source().playOut();
     await expect(third).resolves.toEqual({ playedMs: 1_000 });
     await output.close();
+  });
+
+  it('hands the track no further chunk once a stop came, whichever turn of the microtask queue it came in', async () => {
+    /** Runs `then` after `hops` more turns of the microtask queue. */
+    const later = (hops: number, then: () => void): void => {
+      if (hops === 0) then();
+      else void Promise.resolve().then(() => later(hops - 1, then));
+    };
+    const original = LiveKitAudioPublisher.prototype.sendAudio;
+    let stopAfterFirstSend: (() => void) | undefined;
+    const send = vi.spyOn(LiveKitAudioPublisher.prototype, 'sendAudio').mockImplementation(function (this: LiveKitAudioPublisher, chunk) {
+      const sent = original.call(this, chunk);
+      const stop = stopAfterFirstSend;
+      stopAfterFirstSend = undefined;
+      if (stop) void sent.then(stop);
+      return sent;
+    });
+    try {
+      // The stop comes 0 to 8 turns after the first chunk's send settled: one of them falls between the play's check of
+      // that send and its call for the second chunk.
+      for (let hops = 0; hops <= 8; hops++) {
+        const room = new FakeRoom();
+        const output = outputOn(room);
+        await output.open();
+        const track = FakeAudioSource.created[FakeAudioSource.created.length - 1]!;
+        // What reaches the track, in order: each frame by the two-second block it came from, and each clear.
+        const events: string[] = [];
+        const capture = track.captureFrame.bind(track);
+        const clearQueue = track.clearQueue.bind(track);
+        track.captureFrame = async (frame) => {
+          await capture(frame);
+          events.push(`frame ${frame.data[0]}`);
+        };
+        track.clearQueue = () => {
+          events.push('clear');
+          clearQueue();
+        };
+        let cleared: Promise<void> | undefined;
+        stopAfterFirstSend = () => later(hops, () => {
+          cleared = output.clear();
+        });
+        const playing = output.play({ audio: clip(4_000), sampleRate: RATE });
+        await expect(playing).rejects.toThrow('room audio cleared');
+        await cleared;
+        await settle();
+        // The second chunk's frame, when it reached the track at all, was cleared after it: none follows the last clear.
+        expect({ hops, after: events.slice(events.lastIndexOf('clear') + 1) }).toEqual({ hops, after: [] });
+        await output.close();
+      }
+    } finally {
+      send.mockRestore();
+    }
   });
 
   it('closes once a capture stalls, so no later clip goes to the retired track', async () => {
