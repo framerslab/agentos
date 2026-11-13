@@ -360,6 +360,53 @@ describe('an ordinary OpenAI answer', () => {
     expect(result.finishReason).toBe('stop');
     expect('refusal' in result).toBe(false);
   });
+
+  /** An ordinary answer streamed on Chat Completions, its first delta naming `refusal: null` as OpenAI sends it. */
+  const chatAnswerStream = () =>
+    sseResponse([
+      chatChunk([{ index: 0, delta: { role: 'assistant', content: '', refusal: null }, finish_reason: null }]),
+      chatChunk([{ index: 0, delta: { content: 'Hello.' }, finish_reason: null }]),
+      chatChunk([{ index: 0, delta: {}, finish_reason: 'stop' }]),
+      chatChunk([], { usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 } }),
+      'data: [DONE]\n\n',
+    ]);
+  /** An ordinary answer streamed on the Responses API. */
+  const responsesAnswerStream = () => {
+    let sequence = 0;
+    const event = (type: string, fields: Record<string, unknown>) =>
+      `event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: sequence++, ...fields })}\n\n`;
+    const body = { ...responsesRefusalBody(), output: [{ id: 'msg_1', type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Hello.' }] }] };
+    return sseResponse([
+      event('response.created', { response: { ...body, status: 'in_progress', output: [], usage: null } }),
+      event('response.output_item.added', { output_index: 0, item: { id: 'msg_1', type: 'message', role: 'assistant', status: 'in_progress', content: [] } }),
+      event('response.output_text.delta', { item_id: 'msg_1', output_index: 0, content_index: 0, delta: 'Hello.' }),
+      event('response.completed', { response: body }),
+    ]);
+  };
+
+  it.each([
+    { name: 'Chat Completions', model: CHAT_MODEL, endpoint: /api\.openai\.com\/v1\/chat\/completions/, stream: chatAnswerStream },
+    { name: 'Responses', model: RESPONSES_MODEL, endpoint: /api\.openai\.com\/v1\/responses/, stream: responsesAnswerStream },
+  ])('streamed on $name, carries no refusal at the provider or from streamText', async ({ model, endpoint, stream }) => {
+    route([
+      [/api\.openai\.com\/v1\/models/, modelList],
+      [endpoint, stream],
+    ]);
+    const provider = new OpenAIProvider();
+    await provider.initialize({ apiKey: 'sk-refusal-e2e', maxRetries: 1 });
+    const chunks: ModelCompletionResponse[] = [];
+    for await (const chunk of provider.generateCompletionStream(model, [{ role: 'user', content: 'Say hello.' }], {})) chunks.push(chunk);
+    expect(chunks.some((chunk) => chunk.refusalDelta !== undefined || (chunk.choices[0] !== undefined && 'refusal' in chunk.choices[0]))).toBe(false);
+    expect(chunks.find((chunk) => chunk.choices[0]?.finishReason != null)?.choices[0]?.finishReason).toBe('stop');
+
+    const result = streamText({ provider: 'openai', model, apiKey: 'sk-refusal-e2e', prompt: 'Say hello.', fallbackProviders: [] });
+    let streamed = '';
+    for await (const delta of result.textStream) streamed += delta;
+    expect(streamed).toBe('Hello.');
+    expect(await result.finishReason).toBe('stop');
+    expect(await result.refusal).toBeUndefined();
+    expect(await result.text).toBe('Hello.');
+  });
 });
 
 // OpenAI's own handling reads an incomplete answer before it looks for a refusal: a message the cap cut off is a cut answer.
@@ -768,6 +815,41 @@ describe('an OpenAI refusal beside a tool call', () => {
     expect(lookup.execute).not.toHaveBeenCalled();
     expect(requestsTo(/api\.openai\.com\/v1\/chat\/completions/)).toBe(1);
   });
+
+  it('ends generateText and streamText in prompt tool mode on the refusal, and the call written beside it is not run', async () => {
+    // Prompt tool mode reads calls from the reply's text: this one holds a call block and the refusal message.
+    const refusalWithCallBlock = () =>
+      jsonResponse({
+        id: 'chatcmpl-refusal-call',
+        object: 'chat.completion',
+        created: 1721596428,
+        model: CHAT_MODEL,
+        choices: [{ index: 0, message: { role: 'assistant', content: '<tool_call>{"name":"lookup","arguments":{"q":"x"}}</tool_call>', refusal: REFUSAL }, logprobs: null, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 81, completion_tokens: 30, total_tokens: 111 },
+      });
+    route([
+      [/api\.openai\.com\/v1\/models/, modelList],
+      [/api\.openai\.com\/v1\/chat\/completions/, inOrder(refusalWithCallBlock, chatAnswer, refusalWithCallBlock, chatAnswer)],
+    ]);
+    const lookup = tool();
+    const call = { provider: 'openai', model: CHAT_MODEL, apiKey: 'sk-refusal-e2e', prompt: 'A request.', fallbackProviders: [], tools: { lookup }, toolMode: 'prompt' as const, maxSteps: 3 };
+
+    const result = await generateText(call);
+    expect(result.finishReason).toBe('stop');
+    expect(result.refusal).toBe(REFUSAL);
+    expect(result.text).toBe('');
+    expect(lookup.execute).not.toHaveBeenCalled();
+    expect(requestsTo(/api\.openai\.com\/v1\/chat\/completions/)).toBe(1);
+
+    const streamed = streamText(call);
+    let text = '';
+    for await (const delta of streamed.textStream) text += delta;
+    expect(text).toBe('');
+    expect(await streamed.finishReason).toBe('stop');
+    expect(await streamed.refusal).toBe(REFUSAL);
+    expect(lookup.execute).not.toHaveBeenCalled();
+    expect(requestsTo(/api\.openai\.com\/v1\/chat\/completions/)).toBe(2);
+  });
 });
 
 describe('an OpenAI refusal on a structured call', () => {
@@ -833,6 +915,56 @@ describe('an OpenAI Responses refusal part with an empty message', () => {
   });
 });
 
+describe('a Responses stream whose terminal output disagrees with its refusal pieces', () => {
+  /** Refusal pieces, then a `response.completed` whose output is the given message content. */
+  const streamEndingOn = (content: unknown[]) => () => {
+    let sequence = 0;
+    const event = (type: string, fields: Record<string, unknown>) =>
+      `event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: sequence++, ...fields })}\n\n`;
+    const body = { ...responsesRefusalBody(), output: [{ id: 'msg_1', type: 'message', role: 'assistant', content }] };
+    return sseResponse([
+      event('response.created', { response: { ...body, status: 'in_progress', output: [], usage: null } }),
+      event('response.output_item.added', { output_index: 0, item: { id: 'msg_1', type: 'message', role: 'assistant', status: 'in_progress', content: [] } }),
+      event('response.refusal.delta', { item_id: 'msg_1', output_index: 0, content_index: 0, delta: REFUSAL }),
+      event('response.completed', { response: body }),
+    ]);
+  };
+
+  it('reads the refusal from the terminal output, as the same body read whole does', async () => {
+    const provider = new OpenAIProvider();
+    await provider.initialize({ apiKey: 'sk-refusal-e2e', maxRetries: 1 });
+    const finalChoice = async () => {
+      const chunks: ModelCompletionResponse[] = [];
+      for await (const chunk of provider.generateCompletionStream(RESPONSES_MODEL, [{ role: 'user', content: 'A request.' }], {})) chunks.push(chunk);
+      return chunks.find((chunk) => chunk.choices[0]?.finishReason != null)?.choices[0];
+    };
+
+    // The terminal output holds an ordinary answer and no refusal: the answer is no refusal.
+    route([
+      [/api\.openai\.com\/v1\/models/, modelList],
+      [/api\.openai\.com\/v1\/responses/, streamEndingOn([{ type: 'output_text', text: 'Hello.' }])],
+    ]);
+    const answered = await finalChoice();
+    expect(answered?.finishReason).toBe('stop');
+    expect(answered && 'refusal' in answered).toBe(false);
+
+    const result = streamText({ provider: 'openai', model: RESPONSES_MODEL, apiKey: 'sk-refusal-e2e', prompt: 'A request.', fallbackProviders: [] });
+    for await (const _part of result.fullStream) void _part;
+    expect(await result.finishReason).toBe('stop');
+    expect(await result.refusal).toBeUndefined();
+    expect(await result.text).toBe('Hello.');
+
+    // The terminal output holds a refusal part with an empty message: the refusal is that empty message.
+    route([
+      [/api\.openai\.com\/v1\/models/, modelList],
+      [/api\.openai\.com\/v1\/responses/, streamEndingOn([{ type: 'refusal', refusal: '' }])],
+    ]);
+    const emptied = await finalChoice();
+    expect(emptied?.finishReason).toBe('stop');
+    expect(emptied?.refusal).toBe('');
+  });
+});
+
 describe('the usage event of a refused call', () => {
   /** A streamed step that only calls the `lookup` tool. */
   const chatToolCallOnlyStream = () =>
@@ -885,5 +1017,29 @@ describe('the usage event of a refused call', () => {
     expect(events[0]).toMatchObject({ surface: 'generateText', finishReason: 'stop', refused: true });
     expect(events[1]).toMatchObject({ surface: 'generateText', finishReason: 'stop' });
     expect(events[1] && 'refused' in events[1]).toBe(false);
+  });
+
+  it('describes the answer the model gave, before the output guards blocked it', async () => {
+    route([
+      [/api\.openai\.com\/v1\/models/, modelList],
+      [/api\.openai\.com\/v1\/chat\/completions/, inOrder(chatRefusal, chatRefusalStream)],
+    ]);
+    const events = heard();
+    const blocks: IGuardrailService = {
+      id: 'blocks',
+      evaluateOutput: async ({ chunk }) => (chunk.type === AgentOSResponseChunkType.FINAL_RESPONSE ? { action: GuardrailAction.BLOCK, reasonCode: 'RULE_OUT' } : null),
+    };
+    const call = { provider: 'openai', model: CHAT_MODEL, apiKey: 'sk-refusal-e2e', prompt: 'A request.', fallbackProviders: [], guards: { services: [blocks], context: { userId: 'user-1', sessionId: 'session-1' } } };
+
+    await expect(generateText(call)).rejects.toBeInstanceOf(GuardrailStopError);
+    const result = streamText(call);
+    for await (const _part of result.fullStream) void _part;
+    expect(await result.finishReason).toBe('error');
+    expect(await result.refusal).toBeUndefined();
+
+    // The model refused and its answer was billed; the guards' block is the call's outcome, not the model's.
+    await vi.waitFor(() => expect(events.length).toBe(2));
+    expect(events[0]).toMatchObject({ surface: 'generateText', finishReason: 'stop', refused: true });
+    expect(events[1]).toMatchObject({ surface: 'streamText', finishReason: 'stop', refused: true });
   });
 });
