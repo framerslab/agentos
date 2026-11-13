@@ -18,12 +18,21 @@ import os from 'node:os';
 import path from 'node:path';
 import pino from 'pino';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
-// Trace ids from a counter each ask starts again: a memory line's place among equal scores is read by id, so two
-// stores fed the same statements send the same block only when their ids match.
+// Trace ids from a counter each ask starts again: the block prints the ids of the memories in focus, so two stores fed
+// the same statements send the same block only when their ids match. Under a faked clock, each id minted also moves
+// the clock on one millisecond, so every memory has a filing time of its own, as the memories of real turns have. A
+// store loads its memories newest first, and memories filed in one millisecond load in an order the engine picks
+// (PostgreSQL's changes as rows are updated), which decides the place of equally scored memories in the block.
 const ids = vi.hoisted(() => ({ next: 0 }));
 vi.mock('../../cognition/memory/core/util/crossPlatformCrypto', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../cognition/memory/core/util/crossPlatformCrypto')>();
-  return { ...actual, uuid: () => `trace-${String(++ids.next).padStart(4, '0')}` };
+  return {
+    ...actual,
+    uuid: () => {
+      if (vi.isFakeTimers()) vi.setSystemTime(Date.now() + 1);
+      return `trace-${String(++ids.next).padStart(4, '0')}`;
+    },
+  };
 });
 import { createPostgresAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
 import { agent, type AgentOptions } from '../agent';
@@ -147,6 +156,8 @@ const GOLD = 'The bike shed code is XQ7Z, set in March.';
 const FACTS = [GOLD, 'My sister Ana lives in Porto and visits in June.', 'I water the tomatoes every second day.', 'The ferry to the island leaves from pier 3 at 9:15.'];
 const FILLER = Array.from({ length: 24 }, (_, i) => `Garden note ${i}: row ${i} was weeded and the hose was coiled by the east fence.`);
 const STATEMENTS = [...FACTS, ...FILLER];
+/** Where a case fakes the clock, the instant each ask starts at. */
+const FILING_STARTS_AT = Date.UTC(2026, 10, 10, 12, 0, 0);
 
 /**
  * Files the statements through the sends of one agent's session, closes the agent, and asks `question` in the same
@@ -155,6 +166,8 @@ const STATEMENTS = [...FACTS, ...FILLER];
  */
 async function askAfterRestart(db: OpenStore, recall: MemoryRecallConfig | undefined, question: string) {
   ids.next = 0;
+  // Under a faked clock every ask starts at the same instant, so two asks file and read at the same times.
+  if (vi.isFakeTimers()) vi.setSystemTime(FILING_STARTS_AT);
   const k = key();
   const emb = key();
   // One script for both agents: the provider's requests are counted on from the first agent's.
@@ -284,8 +297,10 @@ describe.each(ENGINES)("agent({ runtime: 'gmi' }) memory.recall over a durable s
   });
 
   it('the defaults as a set: no memory.recall sends, byte for byte, the block of dense, no rerank, 1,600 tokens and a metadata capture', async () => {
+    // A faked clock, so both blocks print the same ages: it stands still but for the millisecond each new memory
+    // moves it on (the uuid mock above).
     vi.useFakeTimers({ toFake: ['Date'], shouldAdvanceTime: false });
-    vi.setSystemTime(Date.UTC(2026, 10, 10, 12, 0, 0));
+    vi.setSystemTime(FILING_STARTS_AT);
     const a = await open();
     const b = await open();
     try {
