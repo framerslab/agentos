@@ -12,7 +12,7 @@ import type { ToolExecutionResult } from '../../../core/tools/ITool.js';
 import { SqlActionLimiter, type ActionLimitRule } from '../ActionLimiter.js';
 import { governTool, type ActionAuditSink, type ActionGovernance, type GovernedToolPolicy } from '../GovernedTool.js';
 import { runGovernedToolSuite } from './GovernedTool.contract.js';
-import { CONTEXT, HOUR, MUTE_POLICY, RULES, RULE_BOOK, auditSink, capture, message, messageStore, muteOf, muteTool, type MuteArgs, type RecordingSink } from './governedFixtures.js';
+import { CONTEXT, DAY, HOUR, MUTE_POLICY, RULES, RULE_BOOK, auditSink, capture, message, messageStore, muteOf, muteTool, type MuteArgs, type RecordingSink } from './governedFixtures.js';
 
 const openSqlite = (): Promise<StorageAdapter> => resolveStorageAdapter({ filePath: ':memory:', priority: ['better-sqlite3', 'sqljs'], quiet: true });
 let made = 0;
@@ -132,5 +132,41 @@ describe('a governed tool and the clock, SQLite', () => {
     // another message of the same author: a new action, the same target
     expect(governance(await governed.execute(muteOf(message('m5')), CONTEXT))).toMatchObject({ outcome: 'limit_reached', code: 'mute_target_day' });
     expect(mute.execute).toHaveBeenCalledTimes(1);
+  });
+
+  it('a release that fails while a refusal gives units back still gives back the units of the rules after it', async () => {
+    const rules: ActionLimitRule[] = [
+      { id: 'mute_room_hour', scope: 'room', windowMs: HOUR, max: 3 },
+      { id: 'mute_target_day', scope: 'target', windowMs: DAY, max: 3 },
+      { id: 'mute_all_hour', scope: 'platform', windowMs: HOUR, max: 0 },
+    ];
+    // the store drops the settle of the first rule's reservation, and answers every other statement
+    const dropsFirstSettle = (trx: StorageAdapter): StorageAdapter => new Proxy(trx, {
+      get(target, prop) {
+        const value = Reflect.get(target, prop, target);
+        if (prop !== 'get') return typeof value === 'function' ? value.bind(target) : value;
+        return async (statement: string, params?: unknown[]) => {
+          if (statement.includes('SELECT operation_id, account_id, period, units, state') && String(params?.[0]).endsWith(':mute_room_hour')) {
+            throw new Error('the store dropped this settle');
+          }
+          return (value as (...a: unknown[]) => unknown).call(target, statement, params);
+        };
+      },
+    }) as StorageAdapter;
+    const flaky = new Proxy(db, {
+      get(target, prop) {
+        if (prop === 'transaction') return (fn: (trx: StorageAdapter) => Promise<unknown>) => target.transaction((trx: StorageAdapter) => fn(dropsFirstSettle(trx)));
+        const value = Reflect.get(target, prop, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as StorageAdapter;
+    const limiter = new SqlActionLimiter({ db: flaky, rules, tablePrefix: 'gt_r', requireShared: false });
+    const mute = muteTool();
+    const result = await governTool(mute, { ...MUTE_POLICY, limits: rules }, governanceOf(limiter)).execute(muteOf(message('m1')), CONTEXT);
+    expect(governance(result).outcome).toBe('limiter_unavailable');
+    expect(mute.execute).not.toHaveBeenCalled();
+    // the platform rule refused; the room rule's release failed, and the target rule's was still made
+    expect(await db.all<{ state: string }>(`SELECT state FROM gt_r_w${HOUR}_reservations WHERE account_id = 'mute_room_hour|r:r1'`)).toEqual([{ state: 'reserved' }]);
+    expect(await db.all<{ state: string }>(`SELECT state FROM gt_r_w${DAY}_reservations`)).toEqual([{ state: 'released' }]);
   });
 });
