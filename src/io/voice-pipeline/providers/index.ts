@@ -100,7 +100,11 @@ export {
   OpenAIWhisperBatchSTT,
   type OpenAIWhisperBatchSTTConfig,
 } from './OpenAIWhisperBatchSTT.js';
-export { OpenAIRealtimeTTS, type OpenAIRealtimeTTSConfig } from './OpenAIRealtimeTTS.js';
+export {
+  OpenAIRealtimeTTS,
+  type OpenAIRealtimeTTSConfig,
+  type OpenAIRealtimeReplyTranscript,
+} from './OpenAIRealtimeTTS.js';
 export {
   StreamingSTTChain,
   type StreamingSTTChainOptions,

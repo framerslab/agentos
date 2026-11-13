@@ -1284,6 +1284,12 @@ export interface StreamingTTSConfig {
 
   /** Optional scoped synthesis request. A call-profile provider reports this identity on every chunk and usage event. */
   call?: AudioIdentity & { requestId: string };
+
+  /**
+   * The language the text is in, a BCP-47 tag. `OpenAIRealtimeTTS` reads it for a reply's transcript check
+   * (`outputTranscript`), so numbers written in that language's words compare with digits.
+   */
+  language?: string;
 }
 
 /**
@@ -1299,6 +1305,7 @@ export interface StreamingTTSConfig {
  * | `'warning'`        | `Error`                   | A failure the session goes on after, such as a provider socket lost mid-segment and the segment spoken again (`ElevenLabsStreamingTTS`), or a socket that failed to open for a reply, which ends unplayed, or one lost while the late audio of a segment that timed out was still to come, or a reply whose last segment timed out, whose flush completes before that audio could come (`DeepgramAuraStreamingTTS`). With nothing listening for it, the provider writes one warning line; `StreamingTTSChain`'s failover facade carries the warning of the provider session in use; `VoicePipelineOrchestrator` listens, and reports it as a recoverable `session_error` of the TTS part. |
  * | `'error'`          | `Error`                   | Unrecoverable synthesis error.       |
  * | `'close'`          | *(none)*                  | Session terminated.                  |
+ * | `'reply_transcript'` | `OpenAIRealtimeReplyTranscript` | `OpenAIRealtimeTTS` opened with `outputTranscript` alone, and a `StreamingTTSChain`'s facade over one: at each reply's end, the text asked for, the model's transcript of its audio and whether the two match. |
  *
  * See `IStreamingTTS.startSession()` for the factory method that creates these sessions.
  */

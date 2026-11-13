@@ -17,7 +17,10 @@
  * chain refuses a failover once any reply of the run has produced audio, with `partial synthesis cannot be replayed`.
  *
  * Realtime has no mode that speaks text as given: the model reads it because the instructions tell it to. OpenAI promises
- * no exact reading. Check the transcript before relying on a word that must be said.
+ * no exact reading. Every audio reply carries the model's own transcript of its audio
+ * (`response.output_audio_transcript.delta` and `.done`), and with `outputTranscript` the session emits it at the reply's
+ * end as `'reply_transcript'`, with whether it matches the text (`spokenMatch`), so a host can check a reply before it
+ * relies on a word that must be said.
  */
 
 import { EventEmitter } from 'node:events';
@@ -36,6 +39,7 @@ import {
   type ProviderCapabilities,
 } from '../HealthyProvider.js';
 import { VoicePipelineError } from '../VoicePipelineError.js';
+import { spokenMatch, type SpokenMatch } from '../spokenMatch.js';
 
 async function defaultOpenAIProbe(apiKey: string) {
   const start = Date.now();
@@ -63,13 +67,41 @@ export interface OpenAIRealtimeTTSConfig {
   connectTimeoutMs?: number;
   /** How long a reply may go without a frame of its response before it is cut and reported as an `'error'`. @default 30000 */
   responseTimeoutMs?: number;
+  /**
+   * Emit each reply's own transcript, and whether it matches the text asked for, as `'reply_transcript'` at the reply's
+   * `response.done`, before `'flush_complete'`. The server sends the transcript with every audio reply, so the option
+   * asks it for nothing more. @default false
+   */
+  outputTranscript?: boolean;
+}
+
+/**
+ * The payload of a session's `'reply_transcript'`, which a session opened with `outputTranscript` emits at each reply's
+ * `response.done`, after the reply's last audio and before `'flush_complete'`. A reply that ends without its
+ * `response.done` (a cut, a timeout, a lost socket) emits none.
+ */
+export interface OpenAIRealtimeReplyTranscript {
+  /** The text the reply was asked to read. */
+  text: string;
+  /** The model's transcript of the reply's audio, its parts joined by a space; the empty string when none came. */
+  transcript: string;
+  /**
+   * `spokenMatch(text, transcript, language)`, in the session's `StreamingTTSConfig.language`, or `'und'` (digits
+   * folded alone) when it has none. A reply with no transcript does not match.
+   */
+  verdict: SpokenMatch;
 }
 
 /** The fields of a Realtime server event the session reads. */
 interface RealtimeServerEvent {
   type?: string;
   response_id?: string;
+  /** A frame of audio, base64, or a piece of the audio's transcript. */
   delta?: string;
+  /** The whole transcript of one part of a reply's audio, on `response.output_audio_transcript.done`. */
+  transcript?: string;
+  item_id?: string;
+  content_index?: number;
   response?: {
     id?: string;
     status?: string;
@@ -89,6 +121,8 @@ interface SpeechRequest {
   /** Set by its `response.created`. Audio is matched to the reply by this id. */
   responseId?: string;
   timer?: ReturnType<typeof setTimeout>;
+  /** The transcript of each part of the reply's audio, by item and content index, kept with `outputTranscript`. */
+  transcript?: Map<string, string>;
 }
 
 /** The code of the `error` frame that answers a `response.cancel` of a response not in progress. Only that event gets it. */
@@ -122,6 +156,19 @@ class OpenAIRealtimeTTSSession extends EventEmitter implements StreamingTTSSessi
   private lastReplySpoken = true;
   /** Tags of responses cut before `response.created` named them: each is cancelled when it comes. */
   private readonly cutBeforeNamed = new Set<string>();
+  /**
+   * Counts each `cancel()` and `close()`. A listener may call either while a reply ends; the end then goes no further,
+   * since the cut has settled every flush, and no `'flush_complete'` follows it.
+   */
+  private cuts = 0;
+  /**
+   * True while a reply's `'reply_transcript'` is dispatched, before its status is read. A flush its listener makes with
+   * no text then leaves the queue empty, and the drain that ends it waits for the reply's own end, so the flushes end
+   * once and by that reply's status.
+   */
+  private endingReply = false;
+  /** Whether a drain came while `endingReply` held. */
+  private drainDeferred = false;
   private lastTag = 0;
 
   constructor(
@@ -236,6 +283,7 @@ class OpenAIRealtimeTTSSession extends EventEmitter implements StreamingTTSSessi
    * not emitted and its `response.done` completes nothing of the next reply.
    */
   cancel(): void {
+    this.cuts += 1;
     this.pendingText = '';
     this.lastReplySpoken = true;
     const cut = this.requests;
@@ -248,6 +296,7 @@ class OpenAIRealtimeTTSSession extends EventEmitter implements StreamingTTSSessi
   }
 
   close(): void {
+    this.cuts += 1;
     this.closed = true;
     this.pendingText = '';
     this.settleAll();
@@ -298,6 +347,10 @@ class OpenAIRealtimeTTSSession extends EventEmitter implements StreamingTTSSessi
       this.requests.shift();
     }
     if (this.requests.length) return;
+    if (this.endingReply) {
+      this.drainDeferred = true;
+      return;
+    }
     const spoken = this.lastReplySpoken;
     this.lastReplySpoken = true;
     // The flushes this drain ends are taken before the event: a flush a 'flush_complete' listener starts asks for a
@@ -328,8 +381,9 @@ class OpenAIRealtimeTTSSession extends EventEmitter implements StreamingTTSSessi
       this.requests.shift();
       this.stopResponse(request);
       this.lastReplySpoken = false;
+      const cuts = this.cuts;
       this.reportError(new Error(`OpenAI Realtime response sent nothing for ${timeoutMs} ms`));
-      this.startNext();
+      if (this.cuts === cuts) this.startNext();
     }, timeoutMs);
   }
 
@@ -384,6 +438,8 @@ class OpenAIRealtimeTTSSession extends EventEmitter implements StreamingTTSSessi
         text: current.text,
       };
       this.emit('audio', chunk);
+    } else if (msg.type === 'response.output_audio_transcript.delta' || msg.type === 'response.output_audio_transcript.done') {
+      if (isCurrent && this.config.outputTranscript) this.keepTranscript(current, msg);
     } else if (msg.type === 'response.done') {
       const tag = msg.response?.metadata?.tag;
       if (tag) this.cutBeforeNamed.delete(tag);
@@ -397,15 +453,65 @@ class OpenAIRealtimeTTSSession extends EventEmitter implements StreamingTTSSessi
         this.stopTimer(refused);
       }
       if (refused) this.lastReplySpoken = false;
+      const cuts = this.cuts;
       this.reportError(new Error(String(msg.error?.message ?? 'Unknown error')));
-      if (refused) this.startNext();
+      if (refused && this.cuts === cuts) this.startNext();
     }
   }
 
-  /** Ends the reply at its `response.done`: `completed` is spoken, `incomplete` warns and counts what was said, and any other status fails it. */
+  /** Keeps a piece of a reply's transcript: a delta adds to its part, and the part's `done` gives the part whole. */
+  private keepTranscript(request: SpeechRequest, msg: RealtimeServerEvent): void {
+    const parts = request.transcript ?? new Map<string, string>();
+    request.transcript = parts;
+    const part = `${msg.item_id ?? ''}:${msg.content_index ?? 0}`;
+    if (msg.type === 'response.output_audio_transcript.done' && typeof msg.transcript === 'string') parts.set(part, msg.transcript);
+    else if (typeof msg.delta === 'string') parts.set(part, (parts.get(part) ?? '') + msg.delta);
+  }
+
+  /**
+   * Emits a reply's transcript and its verdict, for a session opened with `outputTranscript`. A listener that throws is
+   * reported as a `'warning'`, and the reply ends as it would have.
+   */
+  private emitTranscript(request: SpeechRequest): void {
+    const transcript = [...(request.transcript?.values() ?? [])].join(' ');
+    const reply: OpenAIRealtimeReplyTranscript = {
+      text: request.text,
+      transcript,
+      verdict: spokenMatch(request.text, transcript, this.sessionConfig.language ?? 'und'),
+    };
+    try {
+      this.emit('reply_transcript', reply);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.reportWarning(new Error(`a 'reply_transcript' listener threw: ${message}`));
+    }
+  }
+
+  /**
+   * Ends the reply at its `response.done`: `completed` is spoken, `incomplete` warns and counts what was said, and any
+   * other status fails it. With `outputTranscript` the reply's transcript is emitted first. A listener that cuts the
+   * session (`cancel()` or `close()`) ends the reply there. A listener's flush with text starts its reply at once; the
+   * drain a flush with no text would start waits for this reply's status, so the flushes end once.
+   */
   private endReply(request: SpeechRequest, msg: RealtimeServerEvent): void {
+    const cuts = this.cuts;
     this.requests.shift();
     this.stopTimer(request);
+    if (this.config.outputTranscript) {
+      this.endingReply = true;
+      try {
+        this.emitTranscript(request);
+      } finally {
+        this.endingReply = false;
+      }
+    }
+    const deferred = this.drainDeferred;
+    this.drainDeferred = false;
+    if (this.cuts !== cuts) {
+      // A flush made after the cut ends as it would have outside the dispatch.
+      if (deferred && !this.closed) this.startNext();
+      return;
+    }
     const status = msg.response?.status;
     this.lastReplySpoken = status === 'completed' || status === 'incomplete';
     if (status === 'incomplete') {
@@ -413,7 +519,7 @@ class OpenAIRealtimeTTSSession extends EventEmitter implements StreamingTTSSessi
     } else if (!this.lastReplySpoken) {
       this.reportError(new Error(String(msg.response?.status_details?.error?.message ?? `OpenAI Realtime response ended with status ${status}`)));
     }
-    this.startNext();
+    if (this.cuts === cuts) this.startNext();
   }
 }
 
