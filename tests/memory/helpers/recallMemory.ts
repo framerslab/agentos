@@ -7,6 +7,7 @@ import { createAgentCognitiveMemory, type AgentCognitiveMemory } from '../../../
 import type { CognitiveMemoryPersonaConfig } from '../../../src/cognition/memory/core/config';
 import type { MemoryTrace } from '../../../src/cognition/memory/core/types';
 import type { Brain } from '../../../src/cognition/memory/retrieval/store/Brain';
+import { RecallReranker, type RecallRerankProvider } from '../../../src/cognition/memory/retrieval/recall/rerank';
 import { WordHashEmbedder, trace } from './recallFixtures';
 
 /**
@@ -39,4 +40,21 @@ export async function memoryWith(
 /** Files a trace of user `u1` (the fixtures' `trace`) through the memory's store. */
 export async function plant(mem: AgentCognitiveMemory, id: string, text: string, over: Partial<MemoryTrace> = {}): Promise<void> {
   await mem.manager.getStore().store(trace(id, text, over));
+}
+
+/**
+ * Gives a built manager's recall a reranker over `provider`, loaded and ready to score, in place of the one its
+ * settings name: a `local` reranker of model `stub-model` at revision `r1`, with `over` merged into its setting
+ * (`maxCandidates`, `timeoutMs`). For a case that needs exact rerank scores without loading a model.
+ */
+export async function rerankWith(
+  manager: unknown,
+  provider: RecallRerankProvider,
+  over: { maxCandidates?: number; timeoutMs?: number } = {},
+): Promise<RecallReranker> {
+  const reranker = new RecallReranker({ kind: 'local', model: 'stub-model', revision: 'r1', ...over }, { createProvider: () => provider });
+  reranker.start();
+  await reranker.ready();
+  (manager as { recall: { reranker: RecallReranker | null } }).recall.reranker = reranker;
+  return reranker;
 }

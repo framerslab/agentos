@@ -8,7 +8,7 @@ import type { ManagerRecallConfig, MemoryGraphConfig, PADState } from '../../cor
 import type { CognitiveRetrievalOptions, MemoryTrace, PartiallyRetrievedTrace, ScoredMemoryTrace } from '../../core/types.js';
 import type { IMemoryGraph } from '../graph/IMemoryGraph.js';
 import { isQueryEmbeddingFailure, type MemoryStore } from '../store/MemoryStore.js';
-import type { MemoryRecallCapture, RankedRecallCandidate } from './capture.js';
+import type { MemoryRecallCapture, MemoryRecallReranker, RankedRecallCandidate } from './capture.js';
 import { dedupePool } from './dedupe.js';
 import { fuseLegs, RECALL_CONSTANTS, type PoolEntry, type RecallConstants } from './fuse.js';
 import { ScopedLexicalIndex } from './lexical.js';
@@ -18,6 +18,7 @@ import type { LegQuery } from './legs/leg.js';
 import { recencyLeg } from './legs/recency.js';
 import { oncePerProcess, recallLog } from './log.js';
 import { isMemoryQuestion, reserveFor } from './memoryQuestion.js';
+import { RecallReranker, RERANK_DEFAULTS } from './rerank.js';
 import { admitSupplied } from './supplied.js';
 
 /** What a pipeline reads, each at every run: a manager's store, graph and settings can change after it is made. */
@@ -25,7 +26,7 @@ export interface RecallPipelineDeps {
   store: () => MemoryStore;
   graph: () => IMemoryGraph | null;
   graphConfig: () => Partial<MemoryGraphConfig> | undefined;
-  /** The manager's recall settings (`retrieval`, `constants`); unset is `retrieval: 'dense'`. */
+  /** The manager's recall settings (`retrieval`, `constants`, `rerank`); unset is `retrieval: 'dense'` with no rerank. */
   recall?: () => ManagerRecallConfig | undefined;
 }
 
@@ -33,9 +34,17 @@ export interface RecallPipelineDeps {
 export interface RecallRun {
   /**
    * The recalled traces, best first: under `hybrid`, the deduped pool cut at `topK`, then the candidates a memory
-   * question reserved room for (`reserve.ids`).
+   * question reserved room for (`reserve.ids`). A rerank that answered has reordered the candidates it scored.
    */
   scored: ScoredMemoryTrace[];
+  /** Under `dense`: the ids of the dense leg's traces in its own order, before any rerank. */
+  denseOrder?: string[];
+  /** The reranker that scored the candidates, or `none` with the reason (`none_configured` with no `recall.rerank`). */
+  reranker: MemoryRecallReranker;
+  /** Each candidate the reranker scored, with the score it gave before the blend; absent when no rerank answered. */
+  rerankScores?: Record<string, number>;
+  /** Milliseconds the rerank took, whether it answered or not; 0 with no reranker. */
+  rerankMs: number;
   /** The store's partially retrieved traces. */
   partial: PartiallyRetrievedTrace[];
   /** The store's own timings. */
@@ -88,12 +97,74 @@ function legEntry(leg: { leg: MemoryRecallCapture['legs'][number]['leg']; ran: b
  * memories ({@link dedupePool}) and cuts the pool at `topK`. A leg that fails under `'hybrid'` is absent for the turn
  * and the others go on. A leg that could not run writes one `memory.recall.leg_absent` line per process for its
  * reason.
+ *
+ * With a `recall.rerank` that names a provider ({@link RecallReranker}), the best candidates are scored against the
+ * turn's own text and reordered by the blend of the score each holds and its rerank score
+ * (`0.7 × score + 0.3 × rerank score`); the candidates the reranker was not sent keep their order after them. Under
+ * `'dense'` the score is the trace's retrieval score, which the blend replaces. Under `'hybrid'` it is the fused score
+ * over the cut's best fused score, so both terms run from 0 to 1 as under `'dense'`; the cut at `topK` is what is
+ * reranked, the fused scores and each trace's retrieval score stay, and a memory question's reserved candidates
+ * follow, unscored. A rerank that does not answer leaves the order as it was. The reranker is built by
+ * {@link RecallPipeline.configureRerank}, never by a run.
  */
 export class RecallPipeline {
   /** The in-process exact-words index of a store with no Brain, and the store it follows. */
   private lexical: { store: MemoryStore; index: ScopedLexicalIndex } | null = null;
+  /** The reranker `recall.rerank` named when {@link configureRerank} last ran; null for `'none'`. */
+  private reranker: RecallReranker | null = null;
 
   constructor(private readonly deps: RecallPipelineDeps) {}
+
+  /**
+   * Builds the reranker the settings' `rerank` names and starts its load, in place of the one built before, whose
+   * late answers are dropped. The manager calls it when it initialises and when `applyRecallConfig()` changes the
+   * setting; a turn never does, so a value written to the configuration is not read until then.
+   */
+  configureRerank(): void {
+    const previous = this.reranker;
+    const setting = this.deps.recall?.()?.rerank;
+    this.reranker = setting != null && typeof setting === 'object' ? new RecallReranker(setting) : null;
+    this.reranker?.start();
+    void previous?.dispose();
+  }
+
+  /** Resolves when the reranker's model has loaded or been found unavailable; at once with no reranker. */
+  ready(): Promise<void> {
+    return this.reranker?.ready() ?? Promise.resolve();
+  }
+
+  /**
+   * Reorders the head of `cut`, the candidates the reranker scored, by the blend of each one's score and its rerank
+   * score; the rest keep their order after it. With no reranker, or one that did not answer, `cut` is returned as it
+   * was, with the reason.
+   *
+   * @param query - The turn's own text.
+   * @param cut - The candidates, best first.
+   * @param scoreOf - The score a candidate holds, on a 0 to 1 scale.
+   * @param apply - Told each scored candidate's blended score.
+   */
+  private async rerankCut<E extends { id: string; trace: ScoredMemoryTrace }>(
+    query: string,
+    cut: E[],
+    scoreOf: (entry: E) => number,
+    apply: (entry: E, blended: number) => void,
+  ): Promise<{ cut: E[]; record: MemoryRecallReranker; scores: Map<string, number>; ms: number }> {
+    if (!this.reranker) return { cut, record: { provider: 'none', reason: 'none_configured' }, scores: new Map(), ms: 0 };
+    const started = performance.now();
+    const { record, scores } = await this.reranker.rerank(
+      query,
+      cut.map((entry) => ({ id: entry.id, content: entry.trace.content, score: scoreOf(entry) })),
+    );
+    // The reranker's own time when it answered; the time the attempt took when it did not.
+    const ms = record.ms ?? Math.round(performance.now() - started);
+    if (scores.size === 0) return { cut, record, scores, ms };
+    const head = cut.filter((entry) => scores.has(entry.id));
+    const blended = new Map(head.map((entry) => [entry.id, RERANK_DEFAULTS.blendScore * scoreOf(entry) + RERANK_DEFAULTS.blendRerank * scores.get(entry.id)!]));
+    for (const entry of head) apply(entry, blended.get(entry.id)!);
+    // Stable: equal blends keep the order the candidates came in.
+    head.sort((a, b) => blended.get(b.id)! - blended.get(a.id)!);
+    return { cut: [...head, ...cut.filter((entry) => !scores.has(entry.id))], record, scores, ms };
+  }
 
   /**
    * Runs the turn's recall.
@@ -120,22 +191,38 @@ export class RecallPipeline {
     // Dense recall has no pool: supplied candidates are not read, and are counted so the call is never silent.
     const supplied = Array.isArray(input.options.supplied) ? input.options.supplied.length : 0;
     logSuppliedRejected(0, supplied);
+    // The rerank blends each scored trace's retrieval score with its rerank score, and the blend orders them.
+    const denseOrder = dense.traces.map((trace) => trace.id);
+    const reranked = await this.rerankCut(
+      input.query ?? input.denseQuery,
+      dense.traces.map((trace) => ({ id: trace.id, trace })),
+      (entry) => entry.trace.retrievalScore,
+      (entry, blended) => {
+        entry.trace.retrievalScore = blended;
+      },
+    );
     return {
-      scored: dense.traces,
+      scored: reranked.cut.map((entry) => entry.trace),
+      denseOrder,
       partial: dense.partial,
       storeTimings: dense.storeTimings,
       legs: [legEntry(dense)],
       retrieval: 'dense',
+      reranker: reranked.record,
+      ...(reranked.scores.size > 0 ? { rerankScores: Object.fromEntries(reranked.scores) } : {}),
+      rerankMs: reranked.ms,
       reserve: { fired: false, ids: [] },
       suppliedIds: [],
       ...(supplied > 0 ? { suppliedRejected: { outOfScope: 0, ineligible: supplied } } : {}),
     };
   }
 
-  /** Stops the in-process exact-words index following its store. */
+  /** Stops the in-process exact-words index following its store, and the reranker. */
   dispose(): void {
     this.lexical?.index.dispose();
     this.lexical = null;
+    void this.reranker?.dispose();
+    this.reranker = null;
   }
 
   /** The in-process exact-words index of `store`, built at its first hybrid turn; null for a store with a Brain. */
@@ -268,8 +355,23 @@ export class RecallPipeline {
     const rejected = supplied && supplied.outOfScope + supplied.ineligible > 0 ? { outOfScope: supplied.outOfScope, ineligible: supplied.ineligible } : null;
     const shownSupplied = new Set(suppliedIds);
 
+    // The rerank orders the cut, the reserved candidates after it. A fused score is at most `1 / (rrfK + 1)`, so it is
+    // blended as its share of the cut's best: both terms then run from 0 to 1, as under dense. Each fused score and
+    // each trace's retrieval score stay as they were; only the order changes.
+    const cut = kept.slice(0, topK);
+    const bestFused = cut.reduce((best, entry) => Math.max(best, entry.fusedScore), 0);
+    const reranked = await this.rerankCut(
+      legQuery.query,
+      cut,
+      (entry) => (bestFused > 0 ? entry.fusedScore / bestFused : 0),
+      () => undefined,
+    );
+
     return {
-      scored: [...kept.slice(0, topK), ...reserved].map((entry) => entry.trace),
+      scored: [...reranked.cut, ...reserved].map((entry) => entry.trace),
+      reranker: reranked.record,
+      ...(reranked.scores.size > 0 ? { rerankScores: Object.fromEntries(reranked.scores) } : {}),
+      rerankMs: reranked.ms,
       partial: dense.partial,
       storeTimings: dense.storeTimings,
       legs: [
@@ -285,6 +387,7 @@ export class RecallPipeline {
           id,
           ranks,
           fusedScore: keptScore.get(id) ?? fusedScore,
+          ...(reranked.scores.has(id) ? { rerankScore: reranked.scores.get(id)! } : {}),
           ...(duplicateOf.has(id) ? { duplicateOf: duplicateOf.get(id)! } : {}),
           ...(reservedIds.has(id) ? { reserve: true } : {}),
         }))

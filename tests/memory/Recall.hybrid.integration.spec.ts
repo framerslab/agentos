@@ -14,7 +14,7 @@ import type { MemoryTrace } from '../../src/cognition/memory/core/types';
 import { memoryTraceLineLength } from '../../src/cognition/memory/core/prompt/MemoryFormatters';
 import { resetRecallLogOnce } from '../../src/cognition/memory/retrieval/recall/log';
 import { ENGINES, FlatEmbedder, U1, WordHashEmbedder } from './helpers/recallFixtures';
-import { memoryWith, plant } from './helpers/recallMemory';
+import { memoryWith, plant, rerankWith } from './helpers/recallMemory';
 
 const NEUTRAL: PADState = { valence: 0, arousal: 0, dominance: 0 };
 const QUESTION = 'What is the bike shed code?';
@@ -373,20 +373,33 @@ describe.each(ENGINES)('hybrid recall on %s', (engine, open) => {
     await db.close();
   });
 
-  it("a manager's reranker scores the pool and leaves its fused order, in the block and the record", async () => {
+  it('a rerank orders the cut by the blend of each fused score, as its share of the best, and its rerank score, and leaves every fused score as it was', async () => {
     const { db, mem } = await fixture({ retrieval: 'hybrid' });
-    // A reranker that ranks the answer last: blended and re-sorted, it would sink the exact-words hit.
-    (mem.manager as unknown as { rerankerService: unknown }).rerankerService = {
-      rerank: async ({ documents }: { documents: Array<{ id: string; originalScore?: number }> }) => ({
-        results: documents.map((d) => ({ id: d.id, content: '', relevanceScore: d.id === 'gold' ? 0 : 1, originalScore: d.originalScore })),
-        diagnostics: { providerId: 'stub', modelId: 'stub-model', documentsProcessed: documents.length },
+    // A reranker that scores the answer 0 and every other memory 1.
+    await rerankWith(mem.manager, {
+      providerId: 'local',
+      isAvailable: async () => true,
+      rerank: async ({ documents }) => ({
+        results: documents.map((d) => ({ id: d.id, content: d.content, relevanceScore: d.id === 'gold' ? 0 : 1 })),
+        diagnostics: { providerId: 'local', modelId: 'stub-model', latencyMs: 1, documentsProcessed: documents.length },
       }),
-    };
-    const h = await mem.manager.assembleForPrompt(QUESTION, 1600, NEUTRAL, { scopes: U1 });
-    const c = captureOf(h);
+    });
+    const h = await mem.manager.assembleForPrompt(QUESTION, 4000, NEUTRAL, { scopes: U1 });
+    const c = captureOf(h) as Capture & { reranker: Record<string, unknown>; candidates: Array<Capture['candidates'][number] & { rerankScore?: number }> };
+    expect(c.reranker).toMatchObject({ provider: 'local', model: 'stub-model', revision: 'r1', candidates: 20 });
+    // The record lists the pool in fused order, the answer first, with the reranker's score beside its fused score.
     expect(c.candidates[0]).toMatchObject({ id: 'gold', outcome: 'included', rerankScore: 0 });
-    expect(h.includedMemoryIds[0]).toBe('gold');
-    expect(h.contextText.indexOf('XQ7Z')).toBeLessThan(h.contextText.indexOf('Garden note'));
+    const ranked = c.candidates.filter((x) => Object.keys(x.ranks).length > 0).map((x) => x.fusedScore);
+    expect(ranked).toEqual([...ranked].sort((x, y) => y - x));
+    // The cut was scored, and the block shows it in the blend's order: the answer, scored 0, after the others.
+    const scored = c.candidates.filter((x) => typeof x.rerankScore === 'number');
+    expect(scored).toHaveLength(20);
+    const best = Math.max(...scored.map((x) => x.fusedScore));
+    const blend = (x: { fusedScore: number; rerankScore?: number }) => 0.7 * (x.fusedScore / best) + 0.3 * x.rerankScore!;
+    const expected = [...scored].sort((x, y) => blend(y) - blend(x)).map((x) => x.id);
+    expect(expected.at(-1)).toBe('gold');
+    expect(h.includedMemoryIds.filter((id) => expected.includes(id))).toEqual(expected);
+    expect(h.contextText.indexOf('Garden note')).toBeLessThan(h.contextText.indexOf('XQ7Z'));
     await mem.close();
     await db.close();
   });
