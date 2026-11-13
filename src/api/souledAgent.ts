@@ -474,7 +474,8 @@ export type SouledAgent = Agent & {
    * @returns One report for the user and the linked sessions: each store with `reached` and a count or a reason,
    *   the pages deleted and those that failed, `drained`, `pendingAtDeadline` and `complete`. It never holds the
    *   user's id or any text.
-   * @throws TypeError when `userId`, or an entry of `linkedSessions`, is not a non-empty string; nothing is deleted.
+   * @throws TypeError when `userId`, or an entry of `linkedSessions`, is not a non-empty string, or holds a NUL or a
+   *   lone surrogate, so no memory key can be built from it; nothing is deleted and no tombstone is written.
    */
   forgetUser?(userId: string, options?: { linkedSessions?: readonly string[] }): Promise<ForgetMemoryReport>;
   /**
@@ -1500,6 +1501,16 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       return Promise.reject(new TypeError('souledAgent: forgetUser needs each linked session as a non-empty id'));
     }
     const sessions = [...new Set(linked as string[])];
+    // An id no memory key can be built from (a NUL, a lone surrogate) is refused before the learning layer or the
+    // store is reached: a deletion that stopped at its key would have deleted the learner's rows alone.
+    try {
+      conversationScopeKey(agentId, { kind: 'user', id: userId });
+      for (const id of sessions) conversationScopeKey(agentId, { kind: 'session', id });
+    } catch {
+      return Promise.reject(
+        new TypeError('souledAgent: forgetUser needs a user id and linked session ids with no NUL and no lone surrogate'),
+      );
+    }
     const run = async (): Promise<ForgetMemoryReport> => {
       const ofUser = await forgetSubject({ kind: 'user', id: userId }, await forgetLearner(userId));
       // A subject the store holds nothing more of no longer counts toward the retention requirement.
