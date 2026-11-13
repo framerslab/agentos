@@ -354,7 +354,7 @@ With no Brain, the vector store is the store's only record. Each vector document
 
 ### Loading and moving one scope
 
-A store loads the 1,000 most recent traces of its Brain at its first recall, whatever their scope. `MemoryStore.hydrateScope(scope, scopeId, limit?)` loads one scope's most recent traces by the `scope_id` column, 1,000 by default, and skips the traces the store holds already, so a returning user's older memories are recallable however many traces other scopes hold. It returns how many traces it loaded, and refuses a `limit` that is not a positive integer with a `RangeError`. It reads by the column, so a row a release older than the column wrote since the Brain opened, which holds `''` there until the next open files it, is loaded by the whole-brain hydration while it is among the brain's 1,000 most recent.
+A store loads the 1,000 most recent traces of its Brain at its first recall, whatever their scope, newest first by `createdAt`. On the in-process vector index that `agent()` and `gmi()` build, two traces of a scope that a recall scores equally on every signal come back in the order the store loaded them. Traces stored in the same millisecond load in the order the engine returns them, which PostgreSQL leaves open for rows equal under a sort ([`ORDER BY`](https://www.postgresql.org/docs/16/sql-select.html#SQL-ORDERBY)), so two such traces with equal scores can change places in the block from one load of the store to the next. `MemoryStore.hydrateScope(scope, scopeId, limit?)` loads one scope's most recent traces by the `scope_id` column, 1,000 by default, and skips the traces the store holds already, so a returning user's older memories are recallable however many traces other scopes hold. It returns how many traces it loaded, and refuses a `limit` that is not a positive integer with a `RangeError`. It reads by the column, so a row a release older than the column wrote since the Brain opened, which holds `''` there until the next open files it, is loaded by the whole-brain hydration while it is among the brain's 1,000 most recent.
 
 `MemoryStore.refileScope(scope, fromScopeId, toScopeId)` moves one scope id's traces to another, as a host does once when it starts passing an organization id: a learner under a namespace reads `user:<namespace>/<userId>`, not the plain form filed before. Every Brain row filed under the old id moves (`scope_id` and the metadata's `scopeId`), soft-deleted rows included, so a later delete of the new id finds them all. Each live trace the store holds moves with its vector document, from the old collection into the new one, with the vector the store holds, the one its Brain row or the index holds, or a new embedding of its text. A trace the store does not hold leaves the old collection, and a store files it in the new one when it loads it (`hydrateScope`, or the whole-brain hydration). A live trace's knowledge-graph copy moves where the graph holds one; a trace with no copy gets none. With no Brain, the old collection is walked from its start as `deleteScope` walks it, and the documents another store filed into a durable index before a restart move too; a stale document there, of a trace the store holds under another scope, is deleted from it, as `deleteScope` deletes one. Each Brain row's metadata is written with a compare against what the move read, so a write another writer makes to the row meanwhile, such as a facade's recall or feedback, is read again and kept. A hydration of this store, or of another store on the same Brain in this process, that read a row before the move reads it again before it loads it, so the trace loads under the new id. It returns the number of traces it moved. An empty scope id on either side is refused with a `TypeError`, so a caller's missing id never moves the traces filed under no scope id or files a scope's traces under none. Each trace's row moves before its vector document, as a Brain's re-file moves its rows: a store on the same Brain or vector index that reads the new id meanwhile finds no document there yet, where a document whose row still named the old id would read as stale, and such a read deletes a stale document. It throws when a live trace's vector cannot be embedded or written into the new collection, or when a row changes under each of three reads; the traces moved before it stay moved, and a call made again moves the rest. A trace whose vector could not be written has its row under the new id already, and the store reads it under neither id until that call moves its vector. A trace the store holds under the old id whose row another store or process moved to another scope or a third id, or deleted for good, before this move or while it runs, stays as the store holds it, and the move does not count it: the words of a deleted trace go into no collection.
 
@@ -622,7 +622,7 @@ const { manager } = await createAgentCognitiveMemory({ persona, memory: { embedd
 
 ### Overflow Redistribution
 
-Budget a section leaves unused (it is empty, or its content is shorter than its share) flows to the sections that still have content, in `MEMORY_BUDGET_SPILL_ORDER`: Semantic Recall, Recent Episodic, Persistent Memory, Working Memory, Prospective Alerts, Graph Associations, Observation Notes. Each section in that order renders with its own share plus whatever the sections before it left unspent. A second pass in the same order gives what is still unspent (for example the share of a working memory too long for it) to the sections that still have content left out, so the block can fill the whole budget. The second pass only adds to the block. It adds a later line that now fits whole, at its place in the order, adds lines to a section that rendered none, and lengthens the persistent-memory text when the first pass cut it. Every line the first pass rendered stays, in its section and its order. A store that holds only episodic traces, assembled with the 1600 tokens the GMI's memory bridge asks for by default ([Recall Budget](#recall-budget)), fills the block with episodic traces rather than stopping at their 25%. Sections still appear in the block in the order shown under [Output Sections](#output-sections). When a host passes the mechanisms engine, the involuntary memory is chosen first, from the traces the turn did not retrieve, and a tenth of the budget after the preamble is set aside for it before the sections are granted theirs. A memory that does not fit that tenth whole is tried again on what the sections leave unspent, and is left out when it does not fit that whole either.
+Budget a section leaves unused (it is empty, or its content is shorter than its share) flows to the sections that still have content, in `MEMORY_BUDGET_SPILL_ORDER`: Semantic Recall, Recent Episodic, Persistent Memory, Working Memory, Prospective Alerts, Graph Associations, Observation Notes. Each section in that order renders with its own share plus whatever the sections before it left unspent. A second pass in the same order gives what is still unspent (for example the share of a working memory too long for it) to the sections that still have content left out, so the block can fill the whole budget. The second pass only adds to the block. It adds a later line that now fits whole, at its place in the order, adds lines to a section that rendered none, and lengthens the persistent-memory text when the first pass cut it. Every line the first pass rendered stays, in its section and its order. A store that holds only episodic traces, assembled at the configured budget the GMI's memory bridge asks for, 1,600 tokens by default ([Recall Budget](#recall-budget)), fills the block with episodic traces rather than stopping at their 25%. Sections still appear in the block in the order shown under [Output Sections](#output-sections). When a host passes the mechanisms engine, the involuntary memory is chosen first, from the traces the turn did not retrieve, and a tenth of the budget after the preamble is set aside for it before the sections are granted theirs. A memory that does not fit that tenth whole is tried again on what the sections leave unspent, and is left out when it does not fit that whole either.
 
 ### Overflow: whole memories only
 
@@ -792,19 +792,41 @@ What callers see differently in the memory block and its formatters:
 
 ## Recall
 
-`recall.retrieval` sets how a turn finds its memories. `'dense'`, the default, is the vector recall: the store's query by meaning and its six-signal ranking ([Retrieval Priority Scoring](#retrieval-priority-scoring)), shown in Relevant Memories and Recent Experiences. `'hybrid'` adds two legs and fuses all three into one pool:
+A memory's `recall` setting holds four fields. On `agent({ runtime: 'gmi' })` and `gmi()` it is `memory.recall`; on a persona, `cognitiveMemoryConfig.recall`; on a manager, the `recall` of its configuration, which a host of `AgentOS.create` sets on the manager its `gmiManagerConfig.cognitiveMemoryFactory` builds.
 
 ```typescript
 const assistant = agent({
   runtime: 'gmi',
   provider: 'openai',
-  memory: { embedding: { provider: 'openai' }, store: { path: './brain.sqlite' }, recall: { retrieval: 'hybrid' } },
+  memory: {
+    embedding: { provider: 'openai' },
+    store: { path: './brain.sqlite' },
+    recall: {
+      budget: { totalTokens: 2400 },
+      retrieval: 'hybrid',
+      rerank: { kind: 'local', model: 'cross-encoder/ms-marco-MiniLM-L6-v2', revision: '233902d25c440f23af6f7d6e94d2946bac0bee0a' },
+      capture: 'metadata',
+    },
+  },
   learning: { agentKey: 'assistant', mode: 'off' },
 });
 
-// The same setting on a manager:
-await manager.initialize({ ...config, recall: { retrieval: 'hybrid' } });
+// The same fields on a manager:
+await manager.initialize({ ...config, recall: { budget: { totalTokens: 2400 }, retrieval: 'hybrid', capture: 'metadata' } });
 ```
+
+| Field | Values | Default | What it changes |
+|---|---|---|---|
+| `budget.totalTokens` | An integer of at least 0 | 1,600 | The size of the whole memory block a GMI turn sends, its preamble included ([Recall Budget](#recall-budget)) |
+| `retrieval` | `'dense'`, `'hybrid'` | `'dense'` | How a turn finds its memories, and whether the block shows them in two sections or in one (the legs, the pool and the rules below) |
+| `rerank` | `'none'`, `{ kind: 'local', model, revision }`, `{ kind: 'llm', invoke, model }` | `'none'` | Whether a model reorders the recall's best candidates before the block is assembled (Rerank, below, and [Memory rerank](../text/RERANKING.md#memory-rerank)) |
+| `capture` | `'metadata'`, `'metadata+stream'`, `'off'` | `'metadata'` | What a turn records of its recall and where the record goes, never what the block holds ([Recall Capture](#recall-capture)) |
+
+A memory that sets none of the four recalls, renders and records as one that sets each to its default. A manager's `recall` also takes `constants` and `memoryQuestion` (both below), `traceIds` ([Recall Capture](#recall-capture)) and `embedder`, a label the capture copies. `agent()` and `gmi()` refuse a value of the wrong kind when the agent is built, and a manager when it initialises, naming the field ([Sessions served by GMIs](../getting-started/HIGH_LEVEL_API.md#sessions-served-by-gmis-runtime-gmi) lists the construction rules).
+
+**A host with no embedding model.** Cognitive memory embeds every trace it stores and every query it recalls for, whatever the recall setting. A manager is built on an `embeddingManager`, and an `agent()` or `gmi()` memory that finds no embedding model fails the session's first turn with an error naming `memory.embedding`. `'hybrid'` does not lift that: its exact-words and recency legs carry a turn alone only when the embedder gives that turn's query no vector (When something is missing, below). Set `memory.embedding`.
+
+`recall.retrieval` sets how a turn finds its memories. `'dense'`, the default, is the vector recall: the store's query by meaning and its six-signal ranking ([Retrieval Priority Scoring](#retrieval-priority-scoring)), shown in Relevant Memories and Recent Experiences. `'hybrid'` adds two legs and fuses all three into one pool:
 
 | Leg | What it reads | How many |
 |---|---|---|
@@ -856,16 +878,23 @@ const context = await manager.assembleForPrompt('Which plan am I on?', 1600, moo
 - **Shown, never stored.** A kept candidate joins the pool before the dedupe and the cut and is shown as a semantic memory line with its own age (`createdAt`, or now) and the relevance of a fact the caller vouches for, `1.00`; its `score` orders the pool and is not shown. Nothing supplied is written to the store, recorded as accessed, focused in working memory or used to seed the memory graph's walk.
 - **Hybrid only.** Under `'dense'` there is no pool: supplied candidates are not read, and are counted as `ineligible` with the same line. `agent()` and `gmi()` pass none: a host that builds its own manager passes them to `assembleForPrompt()`.
 
-**When a leg cannot run.** The turn goes on with the legs that can; the capture names each absent leg with its reason, and the process writes one `memory.recall.leg_absent` line per leg and reason.
+**When something is missing.** The turn goes on with what can run. The capture names each leg that did not run with its reason, and the process writes one `memory.recall.leg_absent` line per leg and reason. A reranker that does not answer leaves the recall in its own order, and the capture's `reranker` gives the reason.
 
-| Missing | What runs | The capture |
-|---|---|---|
-| No `memory.store` (no Brain) | Meaning, exact words in process, recency | `lexicalBackend: 'in_process'` |
-| An embedder that gives the query no vector, or throws | Exact words and recency | `dense`: `no_embedder` |
-| A Brain with no full-text index | Meaning and recency | `exact_words`: `no_index`, `lexicalBackend: 'none'` |
-| A leg whose query throws | The other legs | that leg: `query_error` |
-| A recall with no `scopes` | Meaning | `exact_words` and `recency`: `no_scopes`, `lexicalBackend: 'none'` |
-| Every leg | The other sections; no recall section | every leg absent, no candidates |
+| Missing | What runs | The capture | Log line |
+|---|---|---|---|
+| No `memory.store` (no Brain) | Meaning, exact words in process, recency | `lexicalBackend: 'in_process'` | none |
+| An embedder that gives the query no vector, or throws | Exact words and recency | `dense`: `no_embedder` | `memory.recall.leg_absent` |
+| A Brain with no full-text index | Meaning and recency | `exact_words`: `no_index`, `lexicalBackend: 'none'` | `memory.recall.leg_absent` |
+| A leg whose query throws | The other legs | that leg: `query_error` | `memory.recall.leg_absent` |
+| A recall with no `scopes` | Meaning | `exact_words` and `recency`: `no_scopes`, `lexicalBackend: 'none'` | `memory.recall.leg_absent`, one for each leg |
+| Every leg | The other sections; no recall section | every leg absent, no candidates | `memory.recall.leg_absent`, one for each leg and reason |
+| The local rerank model, while it loads | The recall, in its own order | `reranker`: `loading` | `memory.recall.rerank_skipped` |
+| The local rerank model, after a failed load or with Transformers.js not installed | The recall, in its own order; the load is not tried again | `reranker`: `unavailable` | `memory.recall.rerank_unavailable` (`load_failed` or `missing_dependency`), once per process for each |
+| A rerank's answer within `timeoutMs` | The recall, in its own order | `reranker`: `timeout` | `memory.recall.rerank_skipped` |
+| A usable answer from the reranker: it threw, left out a candidate it was sent, or put a score in for one it could not compute | The recall, in its own order | `reranker`: `error` | `memory.recall.rerank_skipped`; `memory.recall.rerank_failed_scoring` with the count for a substituted score |
+| A reranker after three failures or timeouts in a row | The recall, in its own order, for 60 seconds | `reranker`: `backoff` | `memory.recall.rerank_skipped`, once when the back-off begins |
+
+The leg rows are `'hybrid'`'s. Under `'dense'` the dense leg is the only one: a query the embedder gives no vector recalls no memory, with the same `no_embedder` reason and line, and an embedding call that throws fails the turn's memory assembly, which the GMI records in its reasoning trace ("Cognitive memory assembly failed.") before it sends the turn with no block. The rerank rows hold under both ([Memory rerank](../text/RERANKING.md#memory-rerank) has each reason in full). No line carries a memory's text, the turn's text or an id.
 
 The dense leg reads a scope whose vector query throws as a scope with no memories, under `'hybrid'` as under `'dense'`: the store's query cannot tell that failure from a scope that has no collection yet, so the leg runs with that scope's candidates missing and reports no reason.
 
@@ -881,7 +910,7 @@ await manager.initialize({
 await manager.recallReady(); // the model has loaded, or was found unavailable
 ```
 
-The reranker scores the recall's best 20 candidates (`maxCandidates`) against the turn's own text inside `timeoutMs` (1,500 ms for `local`, 10,000 for `llm`), and they are reordered by `0.7 × the score each holds + 0.3 × its rerank score`; the candidates past `maxCandidates` keep their order after them. Under `'dense'` the score is the trace's retrieval score, and the blend replaces it. Under `'hybrid'` it is the fused score as a share of the best fused score among the cut's recalled candidates, at most 1: the cut at `topK` is what is reranked, the fused scores and each line's relevance stay, and a memory question's reserved candidates follow the cut, unscored. A supplied candidate in the cut is scored with the rest; its `score` is on the caller's scale, so it is never read as the best, and one above every fused score counts as the best recalled candidate does. A memory deleted while the reranker runs leaves the recall and its record, as one deleted while the legs ran does. A rerank never fails a turn. Until the local model has loaded (`loading`), after a failed load or with Transformers.js missing (`unavailable`), past the timeout (`timeout`), on a provider's error, an answer that leaves a candidate out or a substituted score (`error`) and for 60 seconds after three failures in a row (`backoff`), the order stands and the capture's `reranker` gives the reason. The model loads when the manager initialises, never inside a turn. A built manager's rerank changes through `applyRecallConfig({ rerank })`, never by writing its configuration: the provider is built once.
+The reranker scores the recall's best 20 candidates (`maxCandidates`) against the turn's own text inside `timeoutMs` (1,500 ms for `local`, 10,000 for `llm`), and they are reordered by `0.7 × the score each holds + 0.3 × its rerank score`; the candidates past `maxCandidates` keep their order after them. Under `'dense'` the score is the trace's retrieval score, and the blend replaces it. Under `'hybrid'` it is the fused score as a share of the best fused score among the cut's recalled candidates, at most 1: the cut at `topK` is what is reranked, the fused scores and each line's relevance stay, and a memory question's reserved candidates follow the cut, unscored. A supplied candidate in the cut is scored with the rest; its `score` is on the caller's scale, so it is never read as the best, and one above every fused score counts as the best recalled candidate does. A memory deleted while the reranker runs leaves the recall and its record, as one deleted while the legs ran does. A rerank never fails a turn. Until the local model has loaded (`loading`), after a failed load or with Transformers.js missing (`unavailable`), past the timeout (`timeout`), on a provider's error, an answer that leaves a candidate out or a substituted score (`error`) and for 60 seconds after three failures in a row (`backoff`), the order stands and the capture's `reranker` gives the reason. The model loads when the manager initialises, never inside a turn. An `agent({ runtime: 'gmi' })` or `gmi()` agent builds its manager inside its first session's first turn and has no `recallReady()`, so its first turns can record `loading` ([Memory rerank](../text/RERANKING.md#memory-rerank)). A built manager's rerank changes through `applyRecallConfig({ rerank })`, never by writing its configuration: the provider is built once.
 
 ## Recall Budget
 
@@ -979,7 +1008,9 @@ The rest of the record:
 
 **Which stage a record shows.** `assembleForPrompt()` returns the assembly's record. A GMI turn's record (`GMIOutput.memoryRecall`, a session's `memoryRecall`, a runtime stream's `FINAL_RESPONSE.memoryRecall`) is the record of the hop that served the turn: the same candidates, with that hop's `budget` and its `delivery`, and, when the block was rendered again for the hop, that rendering's outcomes and `tokensUsed`. The stream's `MEMORY_SOURCES_AVAILABLE` chunk, and the `memorySources` update it becomes, carry the assembly's record, sent before the model call, so they hold neither `hop` nor `delivery`. A hop whose share held the block was sent the first rendering: its record has no `reassembled`, even when an earlier hop of the turn was sent a re-render.
 
-**What it holds.** Ids, ranks, scores, counts and timings, never a memory's text or the query's. Ids and scores can concern memories of other scopes the turn reads (an organization's, a persona's), so the host decides who sees a capture, under its logging allow-list. Whether ids and scores alone expose anything across those scopes is not established; evidence that they do turns the default to `'off'`.
+**What it holds.** Ids, ranks, scores, counts and timings, never a memory's text or the query's.
+
+**Who may read a capture.** Ids and scores can concern memories of other scopes the turn reads (an organization's, a persona's), so the host decides who sees a capture, under its logging allow-list: a capture handed to the user a turn served can name memories that user's own scope does not hold. Whether ids and scores alone expose anything across those scopes is not established; evidence that they do turns the default to `'off'`.
 
 **Where it goes.** The manager's `recall.capture` decides; on `agent()` and `gmi()` it is `memory.recall.capture`:
 

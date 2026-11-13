@@ -1012,10 +1012,17 @@ const tutor = agent({
   provider: 'openai',
   memory: {
     embedding: { provider: 'openai' },
-    recall: { budget: { totalTokens: 2400 }, retrieval: 'hybrid', capture: 'off' },
+    recall: {
+      budget: { totalTokens: 2400 },
+      retrieval: 'hybrid',
+      rerank: { kind: 'local', model: 'cross-encoder/ms-marco-MiniLM-L6-v2', revision: '233902d25c440f23af6f7d6e94d2946bac0bee0a' },
+      capture: 'metadata',
+    },
   },
 });
 ```
+
+Each field is optional, and a memory that sets none recalls, renders and records as one that sets each to its default:
 
 | Field | Default | What it does |
 |---|---|---|
@@ -1033,6 +1040,8 @@ The construction rules:
 - A `rerank` that is neither `'none'` nor an object throws, naming `rerank`; so does one whose `kind` is neither `'local'` nor `'llm'`, with the reason `unsupported_provider`. A blank `model` (`rerank.model`), a `local` whose `revision` is not a whole commit id of the model's repository (`rerank.revision`; a branch or a tag is refused), an `llm` whose `invoke` is not a function (`rerank.invoke`), and a `timeoutMs` or `maxCandidates` that is not a positive integer throw, naming the field.
 
 Each refusal writes one `memory.recall.option_rejected` line before the throw.
+
+A host of `AgentOS.create()` sets the same four fields as `recall` on the memory manager its `gmiManagerConfig.cognitiveMemoryFactory` builds, which checks them when it initialises ([Recall](../memory/COGNITIVE_MEMORY.md#recall)).
 
 `learning: true`, or a `LearningConfig`, turns on the agent's learning layer: every GMI of the agent sends the persona's personality section as a system prompt of its own on every turn, in the words `agent()` writes, a session opened with a `userId` is bound to a learner when the id is not one the layer reads as anonymous (`anonymous_user`, `guest` and the others, with `learning.anonymousUserIds`) and the agent has a `name` or `learning.agentKey`, and `agent.learning.manifest()` says which loops run. `agent.learning` also carries the operator's calls (`freeze`, `unfreeze`, `suspend`, `unsuspend`, `operatorSet`, `revert`, `exportLearnedState`, `importLearnedState` and `forgetUser`), with the agent's key and namespace filled in. Unset or `false` (the default), the agent builds no layer and the persona's base prompt carries the section; `agent()` without `runtime: 'gmi'` ignores the option. [Learning](../GMI.md#learning) has the rules.
 
