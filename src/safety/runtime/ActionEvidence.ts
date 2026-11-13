@@ -56,7 +56,7 @@ export type EvidenceFailure =
   | 'ROOM_MISMATCH' | 'QUOTE_MISMATCH' | 'SOURCE_UNAVAILABLE'
   | 'UNKNOWN_POLICY_VERSION' | 'UNKNOWN_RULE' | 'VERDICT_NOT_FOUND';
 
-/** How much evidence a call needs: quotes from at least `minQuotes` distinct messages (default 1), each `minQuoteLength` code units or more (default 12) unless it quotes its message whole. */
+/** How much evidence a call needs: quotes from at least `minQuotes` distinct messages (default 1, at most 20), each `minQuoteLength` code units or more (default 12) unless it quotes its message whole. */
 export interface EvidenceRule {
   minQuotes?: number;
   minQuoteLength?: number;
@@ -76,6 +76,10 @@ export interface EvidenceCheck {
 }
 
 const ID_FIELD = { type: 'string', minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9_.:/-]+$' } as const;
+/** The most quotes one call may carry: each one is a read of the host's store. */
+const MAX_QUOTES = 20;
+/** The longest quote, in code units. */
+const MAX_QUOTE_LENGTH = 4000;
 
 /** JSON Schema (draft-07) of {@link ActionEvidence}, merged into a governed tool's input schema. */
 export const ACTION_EVIDENCE_SCHEMA: JSONSchemaObject = Object.freeze({
@@ -90,9 +94,10 @@ export const ACTION_EVIDENCE_SCHEMA: JSONSchemaObject = Object.freeze({
     quotes: {
       type: 'array',
       description: 'The messages the action rests on, each quoted exactly as it was written.',
+      maxItems: MAX_QUOTES,
       items: {
         type: 'object', additionalProperties: false, required: ['messageId', 'quote'],
-        properties: { messageId: { ...ID_FIELD }, quote: { type: 'string', minLength: 1 } },
+        properties: { messageId: { ...ID_FIELD }, quote: { type: 'string', minLength: 1, maxLength: MAX_QUOTE_LENGTH } },
       },
     },
     verdictRefs: { type: 'array', description: 'The ids of the guard verdicts that led here.', items: { ...ID_FIELD } },
@@ -101,7 +106,7 @@ export const ACTION_EVIDENCE_SCHEMA: JSONSchemaObject = Object.freeze({
 
 /**
  * Whether a value has the shape of {@link ActionEvidence}, every id in it an id (letters, digits and `_ . : / -`, at
- * most 128).
+ * most 128), with at most 20 quotes of at most 4,000 code units each.
  *
  * @internal Read by the governed tool before anything else; not exported from the folder's index.
  */
@@ -110,17 +115,18 @@ export function isActionEvidence(value: unknown): value is ActionEvidence {
   const evidence = value as Record<string, unknown>;
   if (!isModerationId(evidence.targetId) || !isModerationId(evidence.ruleId) || !isModerationId(evidence.policyVersion)) return false;
   if (evidence.roomId !== undefined && !isModerationId(evidence.roomId)) return false;
-  if (!Array.isArray(evidence.quotes)) return false;
+  if (!Array.isArray(evidence.quotes) || evidence.quotes.length > MAX_QUOTES) return false;
   for (const entry of evidence.quotes) {
     if (typeof entry !== 'object' || entry === null) return false;
     const quote = entry as Record<string, unknown>;
-    if (!isModerationId(quote.messageId) || typeof quote.quote !== 'string') return false;
+    if (!isModerationId(quote.messageId) || typeof quote.quote !== 'string' || quote.quote.length > MAX_QUOTE_LENGTH) return false;
   }
   return evidence.verdictRefs === undefined || (Array.isArray(evidence.verdictRefs) && evidence.verdictRefs.every((ref) => isModerationId(ref)));
 }
 
 /**
- * Rejects evidence thresholds that could disable a comparison, including NaN.
+ * Rejects evidence thresholds that could disable a comparison, including NaN, and a `minQuotes` above the 20 quotes
+ * a call may carry, which no call could meet.
  * @internal Shared with the governed wrapper's policy check; not exported from the folder's index.
  */
 export function assertEvidenceRule(rule: EvidenceRule = {}): void {
@@ -128,6 +134,9 @@ export function assertEvidenceRule(rule: EvidenceRule = {}): void {
     if (value !== undefined && (!Number.isSafeInteger(value) || value < 1)) {
       throw new TypeError('Evidence thresholds must be positive safe integers.');
     }
+  }
+  if (rule.minQuotes !== undefined && rule.minQuotes > MAX_QUOTES) {
+    throw new TypeError(`minQuotes must be at most ${MAX_QUOTES}.`);
   }
 }
 
@@ -141,7 +150,7 @@ export function assertEvidenceRule(rule: EvidenceRule = {}): void {
  * @param ruleBook - The policy versions a call may cite, each with its rule ids.
  * @param rule - `minQuotes` (default 1) and `minQuoteLength` in code units (default 12).
  * @returns Whether the evidence holds, and why not when it does not.
- * @throws TypeError when an evidence threshold is not a positive safe integer.
+ * @throws TypeError when an evidence threshold is not a positive safe integer, or `minQuotes` is over 20.
  */
 export async function verifyActionEvidence(evidence: ActionEvidence, source: EvidenceSource, ruleBook: RuleBook, rule: EvidenceRule = {}): Promise<EvidenceCheck> {
   assertEvidenceRule(rule);
