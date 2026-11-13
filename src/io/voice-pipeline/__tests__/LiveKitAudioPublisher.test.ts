@@ -684,6 +684,33 @@ describe('the speech mark', () => {
     await expect(played).resolves.toMatchObject({ sequence: 1, playedSamples: 480, sampleRate: 24000 });
     await f.publisher.close();
   }, 5000);
+  it('rejects a playback wait begun before a marked chunk is announced with a drain timeout, within the deadline from its call, when the track is never published, in participant playout', async () => {
+    const f = marking({ shows: 'held', options: { ...page, receiptTimeoutMs: 200 } });
+    // The track's publication never settles, so the chunk's mark is never set and the chunk is never announced.
+    f.participant.publishTrack = () => new Promise<{ sid: string }>(() => {});
+    void f.publisher.sendAudio(f.chunk(clip('clip-a'), announced)).catch(() => {}); await settle();
+    let outcome: unknown;
+    void f.publisher.waitForPlayback(generation, 1, new AbortController().signal).then((receipt) => { outcome = receipt; }, (error: Error) => { outcome = error.message; });
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(f.order).toEqual([]); expect(outcome).toBe('publisher drain timeout');
+    // The close waits for the publication, which never settles.
+    void f.publisher.close().catch(() => {});
+  }, 5000);
+  it('starts the deadline of a playback wait begun while the track is published again as its mark begins to be set, and again at the announcement, in participant playout', async () => {
+    const f = marking({ shows: 'held', options: { ...page, receiptTimeoutMs: 400 } });
+    // The track is published 300 ms after the wait begins, and the mark shows 250 ms after it is set.
+    f.participant.publishTrack = async () => { await new Promise((resolve) => setTimeout(resolve, 300)); f.order.push('published'); return { sid: 'TR_VOICE' }; };
+    const sent = f.publisher.sendAudio(f.chunk(clip('clip-a'), announced)); await settle();
+    const played = f.publisher.waitForPlayback(generation, 1, new AbortController().signal); played.catch(() => {});
+    await vi.waitFor(() => expect(f.order).toEqual(['published', 'mark clip-a']));
+    setTimeout(() => f.show(), 250);
+    await sent; expect(f.messages).toHaveLength(1);
+    // The page answers 250 ms after the announcement, about 800 ms after the wait began: each span is within 400 ms.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    f.source().playOut(); f.publisher.receiveReceipt({ type: 'playback', generation, sequence: 1, playedSamples: 480, sampleRate: 24000 });
+    await expect(played).resolves.toMatchObject({ sequence: 1, playedSamples: 480, sampleRate: 24000 });
+    await f.publisher.close();
+  }, 5000);
   it("keeps a playback wait begun while the mark is being set pending, though the page answers, until the chunk's frames are captured and the track has played them out, in participant playout", async () => {
     const f = marking({ shows: 'held', options: page });
     const sent = f.publisher.sendAudio(f.chunk(clip('clip-a'), announced));
