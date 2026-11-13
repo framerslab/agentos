@@ -590,6 +590,38 @@ describe('the speech mark', () => {
     await f.publisher.close(); await cancelled;
     expect(f.order).toEqual(['published', 'mark clip-a']); expect(f.messages).toEqual([]); expect(f.source().capturedSamples).toBe(0);
   }, 5000);
+  it('takes the next chunk at once after a refused mark in participant playout, since nothing of the refused one was announced', async () => {
+    const f = marking({ options: page });
+    f.setAttributes.mockRejectedValueOnce(new Error('participant disconnected'));
+    await expect(f.publisher.sendAudio(f.chunk(clip('clip-a'), announced))).rejects.toThrow('publisher mark refused');
+    await f.publisher.sendAudio(f.chunk(clip('clip-a'), { ...announced, sequence: 2 }));
+    expect(f.order).toEqual(['published', 'mark clip-a', 'announced', 'frame', 'frame']);
+    expect(f.messages).toHaveLength(1); expect(f.messages[0]).toMatchObject({ type: 'audio', sequence: 2 });
+    await f.publisher.close();
+  });
+  it('calls setAttributes again only once a call given up on has answered, so its late answer cannot overwrite the newer mark', async () => {
+    const f = marking({ options: { receiptTimeoutMs: 200 } });
+    let answer!: () => void;
+    f.setAttributes.mockImplementationOnce(async (attributes) => {
+      f.order.push(`mark ${attributes['speech.clip_id']}`); await new Promise<void>((resolve) => { answer = resolve; }); f.order.push(`answered ${attributes['speech.clip_id']}`);
+    });
+    await expect(f.publisher.sendAudio(f.chunk(clip('clip-a')))).rejects.toThrow('publisher mark refused');
+    const second = f.publisher.sendAudio(f.chunk(clip('clip-b'))); await settle();
+    expect(f.order).toEqual(['published', 'mark clip-a']);
+    answer(); await second;
+    expect(f.order).toEqual(['published', 'mark clip-a', 'answered clip-a', 'mark clip-b', 'frame', 'frame']);
+    await f.publisher.close();
+  }, 5000);
+  it("sets a clip's mark again when the participant's attributes no longer show it, as after a late update or another writer", async () => {
+    const f = marking({ shows: 'late' }); const mark = clip('clip-a');
+    await f.publisher.sendAudio(f.chunk(mark));
+    f.participant.attributes = { ...f.participant.attributes, 'speech.clip_id': 'clip-z' };
+    await f.publisher.sendAudio(f.chunk(mark));
+    expect(f.setAttributes).toHaveBeenCalledTimes(2);
+    expect(f.order).toEqual(['published', 'mark clip-a', 'shown', 'frame', 'frame', 'mark clip-a', 'shown', 'frame', 'frame']);
+    expect(f.participant.attributes).toEqual(attributesOf(mark));
+    await f.publisher.close();
+  });
   it("sets the mark on the room's local participant when a transport is given the option for its publisher", async () => {
     const room = new FakeRoom(); room.addParticipant('participant-a', new FakePublication(new FakeTrack('microphone')));
     const order: string[] = []; const mark = clip('clip-a');
