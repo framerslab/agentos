@@ -261,6 +261,159 @@ export interface CreateCollectionOptions {
   providerSpecificParams?: Record<string, any>;
 }
 
+/** How a stored word matches a query word in a grouped lexical search: the same word, a word it begins, or a word one edit away. */
+export type LexicalMatchKind = 'same' | 'start' | 'edit';
+
+/** One item of a group: the caller's source id and the instant the caller orders it by, or null. */
+export interface LexicalGroupItem {
+  /** The value of the passages' `sourceId` metadata key: a text that is not empty and holds no NUL. */
+  sourceId: string;
+  /**
+   * An ISO 8601 instant with its zone (`2026-03-01T09:30:00.000Z`) that names a real day and time, to the
+   * microsecond at most, or null for an item with no date.
+   */
+  date: string | null;
+}
+
+/** An item's place in a page's complete order: what a later page starts after. */
+export interface LexicalGroupKey {
+  /** The item's date as the caller handed it, or null. Read only under the date order and by a listing with no word. */
+  date?: string | null;
+  /** The item's rank, the decimal text an earlier page answered: at most 131072 digits before the point, leading zeros aside, and 16383 after it, as a Postgres numeric holds. */
+  rank: string;
+  /** The item's source id. */
+  sourceId: string;
+}
+
+/**
+ * One group of a grouped lexical search ({@link IVectorStore.lexicalGroupSearch}): the items to read, the words, how
+ * an item ranks and which page of the answer is asked for.
+ */
+export interface LexicalGroupSearchOptions {
+  /**
+   * The query's words, in order, each once: a letter or a digit followed by letters, digits and combining marks, in
+   * lower case, as `lexicalTokens` reads them. A word the store's text search configuration reads as no word (a stop
+   * word) is left out of the search: the other words decide. With no word at all the search lists every item that holds
+   * a passage, in the date order.
+   */
+  words: string[];
+  /**
+   * For each word, in order, the stored words one edit away that an earlier page of this search matched. With it the
+   * store reads no stored word again and `oneEdit` is not read; a search hands back what the first page answered.
+   * At most 64 a word; each stored word is at most 2046 bytes of UTF-8 and all of them, each with one byte more, at
+   * most 1048575 bytes less the query's words, each counted twice with one byte more, as one tsquery holds them
+   * beside those words.
+   */
+  expansion?: string[][];
+  /**
+   * Without `expansion`: widens each word of `minLength` letters or more to the stored words of the group's passages
+   * that are one edit away (a letter added, dropped or changed, or two side by side swapped) and hold `minLength`
+   * letters or more, the most frequent first, at most `max` a word, and only as many as `expansion` holds. `max` is a
+   * whole number from 1 to 64. A word that more than `max` stored words are one edit from, or one whose stored word
+   * `expansion` has no room for, marks the answer incomplete. The words drawn follow the rule the answer's
+   * `expansion` states.
+   */
+  oneEdit?: { minLength: number; max: number };
+  /**
+   * The items to read, which the search never leaves: a passage counts only when its `sourceId` is one of them, a
+   * text and not a number of the same digits, and `filter` admits it. `partKinds` keeps the passages whose `partKind` metadata key is one of these; an empty list
+   * narrows nothing. An item is listed once.
+   */
+  group: { items: LexicalGroupItem[]; partKinds?: string[] };
+  /**
+   * Each field's weight, a finite number above 0, read by a passage's `field` metadata key; a passage with no `field`,
+   * or one `fields` does not name, takes the weight of `fallback`, which `fields` names. With `title: 'metadata'` an
+   * item's `title` metadata key is matched as well, as the field `title`.
+   */
+  profile: { fields: Record<string, number>; fallback: string; title?: 'passage' | 'metadata' };
+  /** `rank`: the highest rank first. `date`: the newest of the caller's dates first, an undated item after every dated one. */
+  order: 'rank' | 'date';
+  /** The most items a page answers: a whole number, 1 or more, that JavaScript holds exactly. */
+  pageSize: number;
+  /** The last item of the page before this one; without it, the first page. */
+  after?: LexicalGroupKey;
+  /**
+   * What else a passage must meet: the caller's scope. A plain value, `$eq`, `$ne`, `$in` and `$nin` compare a key that
+   * holds one value by its JSON type as well, so `{ tenantId: '7' }` never admits a passage whose `tenantId` is the
+   * number 7, as `LibraryIndex` checks the passages a store answers.
+   */
+  filter?: MetadataFilter;
+  /**
+   * Checked between the store's statements: once it has aborted the store starts no further statement of the search
+   * and answers `incomplete` with no item. A statement that has started runs to its end.
+   */
+  signal?: AbortSignal;
+}
+
+/** One item a grouped lexical search found. */
+export interface LexicalGroupRow {
+  /** The item's source id. */
+  sourceId: string;
+  /**
+   * The item's rank as exact decimal text: for each word, the best of its matches over the item's passages, the
+   * weight of the passage's field times the match's kind (the same word 1, a word it begins 0.75, a word one edit away
+   * 0.5), summed over the words. `0` in a listing with no word.
+   */
+  rank: string;
+  /**
+   * The field of the match shown: `document`'s field as the rank read it (its `field` metadata key, or the profile's
+   * `fallback` when it has none or the profile does not name it), or the title's field when no passage holds a word
+   * and the item matched by its title read from the metadata.
+   */
+  field: string;
+  /**
+   * For each word, in order, the kind of the item's best match of it, over its passages and its title read from the
+   * metadata, or null for a word the item does not hold.
+   */
+  kinds: Array<LexicalMatchKind | null>;
+  /**
+   * The passage to show, with its metadata and text: the one that holds the most words, then the one of the strongest
+   * field, then the earliest; the item's first passage when no passage holds a word (a listing, or a match in a title
+   * read from the metadata alone).
+   */
+  document: RetrievedVectorDocument;
+  /** For each word, in order, how `document` holds it, or null when it does not. */
+  held: Array<LexicalMatchKind | null>;
+}
+
+/** What a grouped lexical search answers for one group. */
+export interface LexicalGroupSearchResult {
+  /** How many distinct items match every word, whatever the page. */
+  total: number;
+  /**
+   * True when a word had more stored words one edit away than `oneEdit.max`, in which case the most frequent `max` are
+   * matched and the items are answered; when a stored word one edit away was left out as the tsquery had no room for
+   * it (past 2046 bytes, or past the room `expansion` states), in which case the words kept are matched and the items
+   * are answered; or when the signal stopped the search, in which case no item is.
+   */
+  incomplete: boolean;
+  /**
+   * For each word, in order, the stored words one edit away the search matched: found on a first page, the caller's
+   * own `expansion` echoed on a later page. `LibraryIndex` carries a first page's lists in its cursor and holds them
+   * to the same rule when a later page hands them back; a later page's cursor carries the lists the index handed that
+   * page, never the store's answer, so a store answers only lists that keep the rule:
+   * - a list for each word: on a first page, empty for a word under `oneEdit.minLength` letters, and empty for every
+   *   word without `oneEdit`; on a later page, the list handed in `expansion` for that word;
+   * - each stored word one edit from its word (a letter added, dropped or changed, or two side by side swapped) and
+   *   `oneEdit.minLength` letters or more, and never the word itself or a word that begins with it, which match as
+   *   such;
+   * - each stored word once in its list, and at most `oneEdit.max` (64 at most) a word;
+   * - each at most 2046 bytes of UTF-8, and all of them within the room `expansion` states beside the query's words.
+   * A word the store left out for room or past `max` marks the answer `incomplete`. A first page's list outside the rule,
+   * such as `[['budgets', 'budgte']]` for `budget`, makes the index refuse the cursor of its own next page.
+   */
+  expansion: string[][];
+  /** The page's items, in order. */
+  rows: LexicalGroupRow[];
+  /**
+   * On a first page of two words or more where no item matches every word: the items that match some of the words,
+   * in order, at most `pageSize`. They are outside `total`.
+   */
+  anyWord: LexicalGroupRow[];
+  /** Whether an item follows the page's last. */
+  more: boolean;
+}
+
 /**
  * @interface IVectorStore
  * @description Defines the contract for interacting with a specific vector database or storage backend.
@@ -391,6 +544,19 @@ export interface IVectorStore {
     queryText: string,
     options?: QueryOptions & { match?: 'all' | 'any'; prefix?: boolean },
   ): Promise<QueryResult>;
+
+  /**
+   * Optional: one search over the items of one of the caller's groups, on the store's lexical index, with no
+   * embedding. An item is a source: the passages whose `sourceId` metadata key is its id. It matches when every word
+   * matches in at least one of its passages, the same passage or different ones, and the answer counts the distinct
+   * items that match, ranks them by field and kind of match, pages them by a key, and gives each item's best passage.
+   * The store reads the metadata keys `sourceId`, `field`, `partKind`, `title` and `index`, and reads no passage that
+   * `filter` and the group's items do not admit: not for a match, a count, a rank or a stored word to widen to.
+   */
+  lexicalGroupSearch?(
+    collectionName: string,
+    options: LexicalGroupSearchOptions,
+  ): Promise<LexicalGroupSearchResult>;
 
   /**
    * Optional: change the metadata of every document a filter matches. A key whose value is `null` is removed; the
