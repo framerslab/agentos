@@ -150,10 +150,16 @@ export function assertEvidenceRule(rule: EvidenceRule = {}): void {
  * @param ruleBook - The policy versions a call may cite, each with its rule ids.
  * @param rule - `minQuotes` (default 1) and `minQuoteLength` in code units (default 12).
  * @returns Whether the evidence holds, and why not when it does not.
- * @throws TypeError when an evidence threshold is not a positive safe integer, or `minQuotes` is over 20.
+ * @throws TypeError when an evidence threshold is not a positive safe integer, or `minQuotes` is over 20, and when the
+ * evidence carries more than 20 quotes or a quote over 4,000 code units, before the store is read.
  */
 export async function verifyActionEvidence(evidence: ActionEvidence, source: EvidenceSource, ruleBook: RuleBook, rule: EvidenceRule = {}): Promise<EvidenceCheck> {
   assertEvidenceRule(rule);
+  // Each quote is a read of the host's store: a caller that skipped the shape check is held to the same caps.
+  const given: unknown = evidence?.quotes;
+  if (Array.isArray(given) && (given.length > MAX_QUOTES || given.some((item) => typeof item?.quote === 'string' && item.quote.length > MAX_QUOTE_LENGTH))) {
+    throw new TypeError(`Evidence may carry at most ${MAX_QUOTES} quotes of at most ${MAX_QUOTE_LENGTH} code units each.`);
+  }
   // A host can retain and change the input while its store is answering. Check one snapshot throughout.
   evidence = structuredClone(evidence);
   const minQuotes = rule.minQuotes ?? 1;
