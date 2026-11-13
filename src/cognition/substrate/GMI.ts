@@ -2354,7 +2354,19 @@ export class GMI implements IGMI {
               : gateway && stepSchemaInPayload !== false
                 ? 'provider_schema'
                 : 'prompt_only';
-          if (check.ok) {
+          if (stepRefused) {
+            // A refusal is the model's answer, not JSON to repair: the turn ends on it with no repair request, as
+            // generateObject() ends. Its message stays out of the error and the value, as out of any GMI turn's
+            // output: the turn's output guards have not judged it.
+            if (structuredReply.onExhausted === 'error') {
+              throw new GMIError(
+                `The model refused the request instead of writing the reply "${structuredReply.name}".`,
+                GMIErrorCode.STRUCTURED_OUTPUT_INVALID,
+                { schemaName: structuredReply.name, attempts: structuredAttempts, refused: true },
+              );
+            }
+            structuredResult = { value: null, meta: { schemaName: structuredReply.name, valid: false, attempts: structuredAttempts, enforcement, stage: 'model', issues: ['The model refused the request instead of writing the reply.'] } };
+          } else if (check.ok) {
             structuredResult = { value: check.value, meta: { schemaName: structuredReply.name, valid: true, attempts: structuredAttempts, enforcement, stage: 'model' } };
             if (lifted && !currentIterationTextResponse) {
               // the forced tool call carried the reply: its text is the value, so the final response holds it too
