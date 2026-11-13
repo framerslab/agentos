@@ -6,7 +6,7 @@
  */
 
 import { ModelCompletionOptions } from '../../../core/llm/providers/IProvider';
-import { PromptEngineConfig } from '../../../core/llm/IPromptEngine';
+import { PromptEngineConfig, type SystemPromptStability } from '../../../core/llm/IPromptEngine';
 // Assuming ITool is in a subdirectory 'interfaces' under 'tools'
 // The provided file structure is backend/agentos/core/tools/ITool.ts
 // So the path should be ../../core/tools/ITool.ts if IPersonaDefinition.ts is in cognitive_substrate/personas
@@ -407,9 +407,15 @@ export interface IPersonaDefinition {
    * Supports:
    *  - Raw string
    *  - Templated object { template, variables[] }
-   *  - Ordered array of prompt fragments with priority for deterministic merging.
+   *  - Ordered array of prompt fragments with priority for deterministic merging. A fragment's `stability` says how
+   *    long its text stays the same (`persona` when unset); the GMI sends the leading fixed fragments as a cached
+   *    first block on Anthropic-family models, so a fragment that changes every turn is labelled `turn`.
    */
-  baseSystemPrompt: string | { template: string; variables?: string[] } | Array<{ content: string; priority?: number }>;
+  baseSystemPrompt: string | { template: string; variables?: string[] } | Array<{
+    content: string;
+    priority?: number;
+    stability?: SystemPromptStability;
+  }>;
 
   /**
    * The lines the persona's body cannot override: rendered as the last block of every system prompt, under a fixed

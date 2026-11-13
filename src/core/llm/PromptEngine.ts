@@ -142,6 +142,62 @@ function retrievedContextAsText(retrievedContext: PromptComponents['retrievedCon
     : retrievedContext.map((r) => `Source: ${r.source}\nContent: ${r.content}`).join('\n\n');
 }
 
+/**
+ * The system messages of a chat prompt, and how the entries were divided. `components.systemPrompts` is read in the
+ * order given (already sorted by priority) and is never reordered.
+ *
+ * Without `systemCacheMarker`, or for a target outside the Anthropic family, the entries are one system message:
+ * their text joined with a blank line and trimmed. With the marker and such a target, the leading run of fixed
+ * entries (`persona` or `conversation`, none of them blank) is its own first message and the rest is a second one:
+ * on the `anthropic` provider the first is a text part carrying the cache marker; on OpenRouter with an `anthropic/`
+ * model both are plain strings, which that provider marks itself. The messages' text joined with a blank line is
+ * always the single trimmed string, so no byte of the system text changes. The token accounting does not read this.
+ *
+ * @param components - The prompt's components, after sorting and the token budget.
+ * @param model - The target the prompt is built for.
+ * @returns The system messages (none when the text is blank) and the split: `marked` is true when the fixed part
+ *   carries a cache marker.
+ */
+function systemMessagesOf(components: Readonly<PromptComponents>, model: Readonly<ModelTargetInfo>): {
+  messages: ChatMessage[];
+  split: { fixedEntries: number; restEntries: number; marked: boolean };
+} {
+  const entries = components.systemPrompts ?? [];
+  const combined = entries.map((entry) => entry.content).join('\n\n').trim();
+  let boundary = 0;
+  while (boundary < entries.length) {
+    const entry = entries[boundary];
+    const isFixed = entry.stability === 'persona' || entry.stability === 'conversation';
+    if (!isFixed || typeof entry.content !== 'string' || !entry.content.trim()) break;
+    boundary += 1;
+  }
+  const split = { fixedEntries: boundary, restEntries: entries.length - boundary, marked: false };
+  const single = (): { messages: ChatMessage[]; split: typeof split } => ({
+    messages: combined ? [{ role: 'system', content: combined }] : [],
+    split,
+  });
+  const direct = model.providerId === 'anthropic';
+  const routed = model.providerId === 'openrouter' && typeof model.modelId === 'string' && model.modelId.startsWith('anthropic/');
+  const marker = components.systemCacheMarker;
+  if (!marker || !boundary || (!direct && !routed)) return single();
+  // The two parts joined with a blank line must equal `combined`: the fixed part loses only the leading whitespace
+  // that trim removes, and the rest only the trailing whitespace.
+  const rest = entries.slice(boundary).map((entry) => entry.content).join('\n\n').trimEnd();
+  const hasRest = rest.trim().length > 0;
+  const fixed = entries.slice(0, boundary).map((entry) => entry.content).join('\n\n').trimStart();
+  const text = hasRest ? fixed : fixed.trimEnd();
+  // One string is all OpenRouter needs when nothing follows the fixed part: it marks a lone system message itself.
+  if (!hasRest && routed) return single();
+  const fixedPart: MessageContentPart = {
+    type: 'text',
+    text,
+    cache_control: marker.ttl === '1h' ? { type: 'ephemeral', ttl: '1h' } : { type: 'ephemeral' },
+  };
+  const messages: ChatMessage[] = [{ role: 'system', content: direct ? [fixedPart] : text }];
+  if (hasRest) messages.push({ role: 'system', content: rest });
+  return { messages, split: { ...split, marked: direct } };
+}
+
 export class PromptEngine implements IPromptEngine {
   /** PromptEngine reads `memoryContextText`: it counts the memory block and never reduces it. */
   public readonly acceptsMemoryContextText = true;
@@ -346,6 +402,9 @@ export class PromptEngine implements IPromptEngine {
         modelTargetInfo.modelId
       );
       result.metadata.totalSystemPromptsApplied = optimizedComponents.systemPrompts?.length || 0;
+      if (result.metadata.templateUsed === 'openai_chat') {
+        result.metadata.systemSplit = systemMessagesOf(optimizedComponents, modelTargetInfo).split;
+      }
       result.metadata.historyMessagesIncluded = optimizedComponents.conversationHistory?.length || 0;
       if(optimizedComponents.retrievedContext){
         result.metadata.ragContextTokensUsed = await this.estimateTokenCount(
@@ -706,7 +765,12 @@ export class PromptEngine implements IPromptEngine {
     if (!augmented.systemPrompts) augmented.systemPrompts = [];
     if (!augmented.customComponents) augmented.customComponents = {};
 
-    augmented.systemPrompts.push(...this.buildUserPreferencePrompts(executionContext));
+    // What the turn's context adds (the user's preferences, the selected contextual elements) can differ from one
+    // turn to the next, so these entries are never part of the fixed system text.
+    augmented.systemPrompts.push(...this.buildUserPreferencePrompts(executionContext).map((entry) => ({
+      ...entry,
+      stability: 'turn' as const,
+    })));
 
     for (const element of selectedElements) {
       switch (element.type) {
@@ -717,7 +781,12 @@ export class PromptEngine implements IPromptEngine {
         case ContextualElementType.ETHICAL_GUIDELINE:
         case ContextualElementType.OUTPUT_FORMAT_SPEC:
         case ContextualElementType.REASONING_PROTOCOL:
-          augmented.systemPrompts.push({ content: element.content as string, priority: element.priority || 100, source: `contextual:${element.id || element.type}` });
+          augmented.systemPrompts.push({
+            content: element.content as string,
+            priority: element.priority || 100,
+            source: `contextual:${element.id || element.type}`,
+            stability: 'turn',
+          });
           break;
         case ContextualElementType.FEW_SHOT_EXAMPLE:
           if (!augmented.customComponents.fewShotExamples) augmented.customComponents.fewShotExamples = [];
@@ -1248,12 +1317,8 @@ export class PromptEngine implements IPromptEngine {
   private createOpenAIChatTemplate(): PromptTemplateFunction {
     return async (components, modelInfo, _selectedElements, _config, _estimateTokenCountFn) => {
       const messages: ChatMessage[] = [];
-      if (components.systemPrompts && components.systemPrompts.length > 0) {
-        const combinedSystemContent = components.systemPrompts.map(p => p.content).join("\n\n").trim();
-        if (combinedSystemContent) {
-          messages.push({ role: 'system', content: combinedSystemContent });
-        }
-      }
+      // One system message, or the fixed entries and the rest as two when the caller asked for a cache marker.
+      messages.push(...systemMessagesOf(components, modelInfo).messages);
       if (components.conversationHistory) {
         components.conversationHistory.forEach(msg => {
           let role: ChatMessage['role'] = 'user';
