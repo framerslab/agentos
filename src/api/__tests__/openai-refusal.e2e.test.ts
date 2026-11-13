@@ -1259,4 +1259,59 @@ describe('the usage event of a refused call', () => {
     expect(events[0]).toMatchObject({ surface: 'streamText', finishReason: 'error', aborted: true });
     expect(events[0] && 'refused' in events[0]).toBe(false);
   });
+
+  it('and its root span say the same for a streamText call in prompt tool mode whose refusal the output guards blocked', async () => {
+    const exporter = new InMemorySpanExporter();
+    trace.disable();
+    trace.setGlobalTracerProvider(new BasicTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] }));
+    configureAgentOSObservability({ enabled: true, tracing: { enabled: true } });
+    try {
+      // The prompt tool loop sends each round as a whole request, so the answer is the whole body.
+      route([
+        [/api\.openai\.com\/v1\/models/, modelList],
+        [/api\.openai\.com\/v1\/chat\/completions/, chatRefusal],
+      ]);
+      const events = heard();
+      const lookup = { description: 'Look a word up.', parameters: { type: 'object' as const, properties: { q: { type: 'string' } }, required: ['q' as const] }, execute: vi.fn(async () => ({ hits: 1 })) };
+
+      const result = streamText({ ...guarded([blocks]), tools: { lookup }, toolMode: 'prompt' });
+      for await (const _part of result.fullStream) void _part;
+      expect(await result.finishReason).toBe('error');
+      expect(await result.refusal).toBeUndefined();
+
+      await vi.waitFor(() => expect(events.length).toBe(1));
+      expect(events[0]).toMatchObject({ surface: 'streamText', finishReason: 'error', refused: true });
+      const roots = exporter.getFinishedSpans().filter((span) => span.name === 'agentos.api.stream_text');
+      expect(roots).toHaveLength(1);
+      expect(roots[0]?.attributes).toMatchObject({ 'agentos.api.finish_reason': 'error', 'agentos.api.refused': true, 'agentos.api.guard_blocked': true });
+      expect(lookup.execute).not.toHaveBeenCalled();
+    } finally {
+      configureAgentOSObservability();
+      trace.disable();
+    }
+  });
+
+  it('from streamText that moved to prompt tool mode after a native tool step, ends on the refusal as a stop', async () => {
+    // A native tool step runs `lookup`; the next request is turned down for its tools, so the call goes on in
+    // prompt tool mode, whose whole answer is the refusal.
+    const noNativeTools = () =>
+      new Response(JSON.stringify({ error: { message: 'This model does not support tools.', type: 'invalid_request_error', code: null } }), { status: 400, headers: { 'content-type': 'application/json' } });
+    route([
+      [/api\.openai\.com\/v1\/models/, modelList],
+      [/api\.openai\.com\/v1\/chat\/completions/, inOrder(chatToolCallOnlyStream, noNativeTools, chatRefusal)],
+    ]);
+    const events = heard();
+    const lookup = { description: 'Look a word up.', parameters: { type: 'object' as const, properties: { q: { type: 'string' } }, required: ['q' as const] }, execute: vi.fn(async () => ({ hits: 1 })) };
+
+    const result = streamText({ provider: 'openai', model: CHAT_MODEL, apiKey: 'sk-refusal-e2e', prompt: 'A request.', fallbackProviders: [], tools: { lookup }, maxSteps: 3 });
+    for await (const _part of result.fullStream) void _part;
+
+    expect(lookup.execute).toHaveBeenCalledTimes(1);
+    // The call ended on the model's refusal, never as an unfinished tool loop.
+    expect(await result.finishReason).toBe('stop');
+    expect(await result.refusal).toBe(REFUSAL);
+    expect(await result.text).toBe('');
+    await vi.waitFor(() => expect(events.length).toBeGreaterThan(0));
+    expect(events.at(-1)).toMatchObject({ surface: 'streamText', finishReason: 'stop', refused: true });
+  });
 });
