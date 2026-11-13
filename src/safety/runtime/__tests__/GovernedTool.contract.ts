@@ -314,6 +314,31 @@ export function runGovernedToolSuite(name: string, open: () => Promise<StoreUnde
       expect(await under.db.all<{ account_id: string }>(`SELECT account_id FROM ${daily}_meter`)).toEqual([{ account_id: 'mute_target_day|t:axb' }]);
     });
 
+    it('(j) an account forgotten while an action on it runs: the same action is not reserved again until the first ends', async () => {
+      const rules = [RULES[1]];
+      const prefix = under.prefix();
+      const limiter = limiterOf(prefix, rules);
+      let again: ToolExecutionResult | undefined;
+      let nested = false;
+      let governed: ITool<MuteArgs> | undefined;
+      // while the action runs, the host deletes the account's rows and the same action is asked for again
+      mute = muteTool(async (args, context) => {
+        if (!nested) {
+          nested = true;
+          await limiter.forgetTarget('u_attacker');
+          again = await (governed as ITool<MuteArgs>).execute(structuredClone(args), context);
+        }
+        return { success: true, output: { muted: true } };
+      });
+      governed = governTool(mute, { ...MUTE_POLICY, limits: rules }, governanceOf(limiter));
+      expect(governance((await viaModel(governed, muteOf(message('m1')))).result).outcome).toBe('executed');
+      expect(governance(again as ToolExecutionResult).outcome).toBe('duplicate');
+      expect(mute.execute).toHaveBeenCalledTimes(1);
+      // once the action has ended, its rows go
+      await limiter.forgetTarget('u_attacker');
+      expect(await under.db.all(`SELECT account_id FROM ${prefix}_w${DAY}_reservations`)).toEqual([]);
+    });
+
     it('(k) evidence whose target is a sentence is refused, and the sentence is written nowhere', async () => {
       const governed = governTool(mute, MUTE_POLICY, governanceOf(limiterOf()));
       const { result } = await viaModel(governed, muteOf(message('m1'), { targetId: SENTENCE }));
