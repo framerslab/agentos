@@ -57,6 +57,31 @@ export interface RecallRerankerDeps {
   localFilesOnly?: boolean;
 }
 
+/**
+ * The LLM judge as memory rerank's provider: one `LlmJudgeReranker` per rerank over the host's `invoke`, scoring every
+ * candidate it is sent. The judge makes its model calls one after another; once the rerank's `signal` (the request's
+ * `params.signal`) has aborted, `invoke` is not called again, so a rerank the turn stopped waiting for starts no
+ * further model call. A call already made runs to its end: `invoke` takes no abort signal.
+ */
+function judgeProvider(setting: Extract<RerankSetting, { kind: 'llm' }>): RecallRerankProvider {
+  return {
+    providerId: 'llm-judge',
+    isAvailable: async () => typeof setting.invoke === 'function',
+    rerank: (input, config) => {
+      const signal: unknown = config.params?.signal;
+      const stopped = (): boolean => signal instanceof AbortSignal && signal.aborted;
+      return new LlmJudgeReranker({
+        llmCallFn: (system, user, model) =>
+          stopped() ? Promise.reject(new Error('Memory rerank: the turn stopped waiting for this rerank.')) : setting.invoke(system, user, model),
+        scoringModel: setting.model,
+        rankingModel: setting.model,
+        maxPointwiseDocuments: input.documents.length,
+        timeoutMs: config.timeoutMs ?? RERANK_DEFAULTS.llmTimeoutMs,
+      }).rerank(input, config);
+    },
+  };
+}
+
 /** Whether a load failed because Transformers.js is missing or too old to load a model. */
 function isMissingDependency(error: unknown): boolean {
   return error instanceof Error && /Transformers\.js is not installed|installed Transformers\.js has no/.test(error.message);
@@ -73,7 +98,8 @@ function isMissingDependency(error: unknown): boolean {
  *
  * `start()` begins the local model's load; turns before it settles run unreranked (`loading`). A load that fails, or
  * a missing Transformers.js, marks the reranker unavailable for good: no retry and no second download. A call is
- * bounded by `timeoutMs`; one that runs past it is dropped when it arrives. A provider that put a score in for one it
+ * bounded by `timeoutMs`; one that runs past it is dropped when it arrives, and the judge starts no further model call
+ * for it. A provider that put a score in for one it
  * could not compute (`providerMetrics.scoringFailures`, `listwiseFailed`) is read as failed. After
  * {@link RERANK_DEFAULTS}`.failuresToBackOff` failures or timeouts in a row the provider is not called for
  * `backoffMs`. `rerank()` never throws.
@@ -107,12 +133,7 @@ export class RecallReranker {
             ...(deps.cacheDir ? { cacheDir: deps.cacheDir } : {}),
             ...(deps.localFilesOnly ? { localFilesOnly: true } : {}),
           })
-        : new LlmJudgeReranker({
-            llmCallFn: setting.invoke,
-            scoringModel: setting.model,
-            rankingModel: setting.model,
-            timeoutMs: setting.timeoutMs ?? RERANK_DEFAULTS.llmTimeoutMs,
-          }));
+        : judgeProvider(setting));
     this.service = new RerankerService({
       config: { providers: [{ providerId: this.provider.providerId, defaultModelId: setting.model }], defaultProviderId: this.provider.providerId },
     });
@@ -211,20 +232,26 @@ export class RecallReranker {
     const batch = documents.slice(0, this.setting.maxCandidates ?? RERANK_DEFAULTS.maxCandidates);
     const timeoutMs = this.setting.timeoutMs ?? (this.kind === 'local' ? RERANK_DEFAULTS.localTimeoutMs : RERANK_DEFAULTS.llmTimeoutMs);
     const started = performance.now();
+    // Aborted at the deadline, so the judge starts no further model call for a rerank nobody waits for.
+    const abandoned = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
+      // The deadline is set before the provider is called: of two timers due together, a provider's own and this one,
+      // this one runs first.
+      const deadline = new Promise<'timeout'>((resolve) => {
+        timer = setTimeout(() => {
+          abandoned.abort();
+          resolve('timeout');
+        }, timeoutMs);
+      });
       const call = this.service.rerank(
         { query, documents: batch.map((d) => ({ id: d.id, content: d.content, originalScore: d.score })) },
-        { timeoutMs },
+        // Every candidate of the batch is scored: the service sends a provider at most 100 documents when told no limit.
+        { timeoutMs, maxDocuments: batch.length, params: { signal: abandoned.signal } },
       );
       // The loser of the race must not reject unhandled.
       call.catch(() => undefined);
-      const output = await Promise.race([
-        call,
-        new Promise<'timeout'>((resolve) => {
-          timer = setTimeout(() => resolve('timeout'), timeoutMs);
-        }),
-      ]);
+      const output = await Promise.race([call, deadline]);
       // The provider's work is abandoned; its late answer is dropped.
       if (output === 'timeout') return failed('timeout');
 

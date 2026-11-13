@@ -535,7 +535,8 @@ export interface MemoryRecallConfig {
    * is skipped for 60 seconds. Under `'dense'` the reranked candidates'
    * scores become `0.7 × retrieval score + 0.3 × rerank score` and order
    * them; under `'hybrid'` they are ordered by `0.7 × fused score / the
-   * cut's best fused score + 0.3 × rerank score` and keep their scores.
+   * best fused score of the cut's recalled candidates (at most 1) + 0.3 ×
+   * rerank score` and keep their scores.
    *
    * On a built manager, change it with `applyRecallConfig()`: the provider
    * is built once, so a value written to the configuration is not read.

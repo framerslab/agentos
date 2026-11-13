@@ -198,7 +198,7 @@ const { results } = await service.rerank(
 | `RerankerService.rerank()`, `rerankChunks()` | Logs the provider's error to the service's `logger` when it has one, then throws it; it also throws when no provider is named and none is the default, or the provider is not registered. The caller keeps its order only if it catches |
 | `LocalCrossEncoderReranker` | Throws when Transformers.js or the model cannot be loaded, and when a forward pass fails. After a failed load, the next call loads again only when no model is loaded; a model loaded before keeps serving |
 | `CohereReranker` | Throws without an `apiKey`, on a status that is not 2xx and when no response arrives within the timeout |
-| `LlmJudgeReranker` | Does not throw for a model's failure: a failed scoring batch scores 0, a failed ranking call leaves the order to the scores, and `diagnostics.providerMetrics` counts both (`scoringFailures`, `listwiseFailed`) |
+| `LlmJudgeReranker` | Does not throw for a model's failure: a failed scoring batch scores 0, a failed ranking call leaves the order to the scores |
 | `rerankChain()` | Skips the stage and keeps the order it was given |
 | `RetrievalAugmentor` | Returns the chunks without reranking and adds the error to `diagnostics.messages` |
 | `HybridRetriever`, `SessionRetriever` | Keep the scores they had before reranking and write no log line of their own; the service logs a provider's error to its `logger`. They call the service's default provider, so a service without `defaultProviderId` fails every call this way, logged nowhere |
@@ -269,7 +269,7 @@ agent({
 
 No other `kind` exists: a remote reranking service is not offered for memories, and `agent()`, `gmi()` and `CognitiveMemoryManager.initialize()` refuse one at construction (`memory.recall.rerank`, reason `unsupported_provider`). A blank `model`, a `local` without a `revision`, an `llm` without an `invoke`, and a `timeoutMs` or `maxCandidates` that is not a positive integer are refused the same way, naming the field. No environment variable turns memory rerank on, and a `rerankerService` on the manager's configuration is not read for it (one `memory.recall.option_ignored` line, `option: 'remote_provider'`, when the manager initialises). On `agent()` without `runtime: 'gmi'` the setting is refused: that agent's memory comes from its `memoryProvider`.
 
-**What a turn does.** The reranker scores the recall's best `maxCandidates` candidates against the turn's own text, never a HyDE hypothesis, and they are reordered by `0.7 × the score each holds + 0.3 × its rerank score`; candidates past `maxCandidates` keep their order after them. Under `retrieval: 'dense'` the score is the trace's retrieval score, and the blend replaces it. Under `'hybrid'` it is the candidate's fused score as a share of the cut's best fused score, so both terms run from 0 to 1; the fused scores and each line's relevance stay, and a memory question's reserved candidates follow the reranked cut, unscored. The turn's capture names the reranker (`reranker: { provider, model, revision, candidates, ms }`) and each scored candidate's `rerankScore` ([Recall Capture](../memory/COGNITIVE_MEMORY.md#recall-capture)).
+**What a turn does.** The reranker scores the recall's best `maxCandidates` candidates against the turn's own text, never a HyDE hypothesis, and they are reordered by `0.7 × the score each holds + 0.3 × its rerank score`; candidates past `maxCandidates` keep their order after them. Under `retrieval: 'dense'` the score is the trace's retrieval score, and the blend replaces it. Under `'hybrid'` it is the candidate's fused score as a share of the best fused score among the cut's recalled candidates, at most 1, so both terms run from 0 to 1; the fused scores and each line's relevance stay, and a memory question's reserved candidates follow the reranked cut, unscored. A supplied candidate in the cut is scored with the rest, and its score, which is on the caller's own scale, is never read as the best. The turn's capture names the reranker (`reranker: { provider, model, revision, candidates, ms }`) and each scored candidate's `rerankScore` ([Recall Capture](../memory/COGNITIVE_MEMORY.md#recall-capture)).
 
 **A rerank never fails a turn.** When it does not answer, the order stands and the capture says why:
 
@@ -278,7 +278,7 @@ No other `kind` exists: a remote reranking service is not offered for memories, 
 | `none_configured` | `rerank` is `'none'` or unset | none |
 | `loading` | The local model's load has not settled. It starts when the manager initialises, never inside a turn; `recallReady()` resolves when it has settled, for a deploy step that warms the model before the process reports healthy | `memory.recall.rerank_skipped` |
 | `unavailable` | The load failed, or Transformers.js is not installed. The load is not tried again and nothing else is downloaded | `memory.recall.rerank_unavailable` (`load_failed` or `missing_dependency`), once per process for each |
-| `timeout` | The rerank ran past `timeoutMs`. Its answer is dropped when it arrives: Transformers.js offers no cancellation, and the judge's `invoke` takes no abort signal | `memory.recall.rerank_skipped` |
+| `timeout` | The rerank ran past `timeoutMs`. Its answer is dropped when it arrives: Transformers.js offers no cancellation, and the judge's `invoke` takes no abort signal, so a call already made runs to its end. The judge starts no further model call for that rerank | `memory.recall.rerank_skipped` |
 | `error` | The provider threw, or put a score in for one it could not compute (the judge's `scoringFailures` or `listwiseFailed`) | `memory.recall.rerank_skipped`; `memory.recall.rerank_failed_scoring` with the count for a substituted score |
 | `backoff` | Three failures or timeouts in a row: the provider is not called for 60 seconds | one `memory.recall.rerank_skipped` when the back-off begins |
 
@@ -286,7 +286,7 @@ The lines carry the provider, the reason and a count, never a memory's text, the
 
 **On a built manager**, change the setting with `applyRecallConfig({ rerank })`: the provider is built once, so a value written to the manager's configuration is not read. It resolves when the new model's load has settled.
 
-**The judge's load.** With the defaults, 20 candidates are two scoring calls of ten and one ranking call of twenty, each holding the turn's text and the first 200 characters of every candidate it judges, on every turn that recalls. Size `maxCandidates` and the model to that, and prefer `local` where the latency of three model calls a turn is too much.
+**The judge's load.** With the defaults, 20 candidates are two scoring calls of ten and one ranking call of twenty, each holding the turn's text and the first 200 characters of every candidate it judges, on every turn that recalls. A larger `maxCandidates` adds a scoring call for every ten candidates; the ranking call orders the 20 best-scored. Size `maxCandidates` and the model to that, and prefer `local` where the latency of three model calls a turn is too much.
 
 ## Memories and remote rerankers
 

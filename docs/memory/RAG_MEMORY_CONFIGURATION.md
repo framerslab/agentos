@@ -666,7 +666,7 @@ For each of the best 20 traces (`maxCandidates`) the reranker scores, under `ret
 retrievalScore = 0.7 × cognitiveComposite + 0.3 × rerankerScore
 ```
 
-The weights are fixed. The cognitive composite combines six signals (strength, similarity, recency, emotional congruence, graph activation, importance). The scored traces are ordered by the blend, and the traces past `maxCandidates` keep their cognitive score and their order after them. Under `retrieval: 'hybrid'` the cut is ordered by `0.7 × fusedScore / the cut's best fusedScore + 0.3 × rerankerScore` and every score stays as it was. A reranker that is loading, unavailable, slow or failing leaves the order as it was, and the turn's capture says why.
+The weights are fixed. The cognitive composite combines six signals (strength, similarity, recency, emotional congruence, graph activation, importance). The scored traces are ordered by the blend, and the traces past `maxCandidates` keep their cognitive score and their order after them. Under `retrieval: 'hybrid'` the cut is ordered by `0.7 × fusedScore / the best fusedScore of the cut's recalled candidates (at most 1) + 0.3 × rerankerScore` and every score stays as it was. A reranker that is loading, unavailable, slow or failing leaves the order as it was, and the turn's capture says why.
 
 ## Multimodal RAG (Image + Audio)
 

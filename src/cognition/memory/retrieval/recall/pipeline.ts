@@ -102,10 +102,11 @@ function legEntry(leg: { leg: MemoryRecallCapture['legs'][number]['leg']; ran: b
  * turn's own text and reordered by the blend of the score each holds and its rerank score
  * (`0.7 × score + 0.3 × rerank score`); the candidates the reranker was not sent keep their order after them. Under
  * `'dense'` the score is the trace's retrieval score, which the blend replaces. Under `'hybrid'` it is the fused score
- * over the cut's best fused score, so both terms run from 0 to 1 as under `'dense'`; the cut at `topK` is what is
- * reranked, the fused scores and each trace's retrieval score stay, and a memory question's reserved candidates
- * follow, unscored. A rerank that does not answer leaves the order as it was. The reranker is built by
- * {@link RecallPipeline.configureRerank}, never by a run.
+ * over the best fused score of the cut's recalled candidates, at most 1 (a supplied candidate's score, on the caller's
+ * scale, is never read as the best), so both terms run from 0 to 1 as under `'dense'`; the cut at `topK` is what is
+ * reranked, a supplied candidate in it included, the fused scores and each trace's retrieval score stay, and a memory
+ * question's reserved candidates follow, unscored. A rerank that does not answer leaves the order as it was. The
+ * reranker is built by {@link RecallPipeline.configureRerank}, never by a run.
  */
 export class RecallPipeline {
   /** The in-process exact-words index of a store with no Brain, and the store it follows. */
@@ -356,14 +357,17 @@ export class RecallPipeline {
     const shownSupplied = new Set(suppliedIds);
 
     // The rerank orders the cut, the reserved candidates after it. A fused score is at most `1 / (rrfK + 1)`, so it is
-    // blended as its share of the cut's best: both terms then run from 0 to 1, as under dense. Each fused score and
-    // each trace's retrieval score stay as they were; only the order changes.
+    // blended as its share of the best fused score among the cut's recalled candidates: both terms then run from 0 to
+    // 1, as under dense. A supplied candidate's score is on the caller's own scale, so it is not read as the best (it
+    // would shrink every recalled share), and its own share is at most 1. Each fused score and each trace's retrieval
+    // score stay as they were; only the order changes.
     const cut = kept.slice(0, topK);
-    const bestFused = cut.reduce((best, entry) => Math.max(best, entry.fusedScore), 0);
+    const bestOf = (entries: typeof cut): number => entries.reduce((best, entry) => Math.max(best, entry.fusedScore), 0);
+    const bestFused = bestOf(cut.filter((entry) => entry.ranks.supplied === undefined)) || bestOf(cut);
     const reranked = await this.rerankCut(
       legQuery.query,
       cut,
-      (entry) => (bestFused > 0 ? entry.fusedScore / bestFused : 0),
+      (entry) => (bestFused > 0 ? Math.min(1, entry.fusedScore / bestFused) : 0),
       () => undefined,
     );
 
