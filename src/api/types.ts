@@ -141,10 +141,12 @@ export interface MemoryConfig {
    * `budget.totalTokens` sizes the memory block (default 1600, preamble included), `capture` sets what a turn
    * records about its recall (default `'metadata'`), and `retrieval` sets how a turn finds its memories (default
    * `'dense'`, by meaning; `'hybrid'` adds the turn's exact words and recency, fused into one Relevant Memories
-   * section). On the GMI path `memoryProviderOptions.tokenBudget` does not size the block. On the default runtime,
-   * and on the GMI path with memory off, only `budget.totalTokens` is read: it is the `tokenBudget` handed to
-   * `memoryProvider.getContext` when `memoryProviderOptions.tokenBudget` is unset; two different values, `capture`
-   * or `retrieval` are refused at construction.
+   * section), and `rerank` reranks the recalled memories (default `'none'`; `{ kind: 'local' }` scores with a
+   * cross-encoder in the process, `{ kind: 'llm' }` with the host's own model call, which receives the candidates;
+   * no remote reranking service is offered for memories). On the GMI path `memoryProviderOptions.tokenBudget` does
+   * not size the block. On the default runtime, and on the GMI path with memory off, only `budget.totalTokens` is
+   * read: it is the `tokenBudget` handed to `memoryProvider.getContext` when `memoryProviderOptions.tokenBudget` is
+   * unset; two different values, `capture`, `retrieval` or `rerank` are refused at construction.
    */
   recall?: MemoryRecallConfig;
 }

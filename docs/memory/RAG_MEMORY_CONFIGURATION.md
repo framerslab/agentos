@@ -612,7 +612,7 @@ If `RetrievalAugmentorServiceConfig.rerankerServiceConfig` is provided, the augm
 
 | Provider id | Class | What it does |
 |---|---|---|
-| `local` | `LocalCrossEncoderReranker` | A cross-encoder run in process through Transformers.js; scoring sends nothing over the network. Default model `cross-encoder/ms-marco-MiniLM-L-6-v2` (`LOCAL_RERANKER_MODELS` lists five model ids) |
+| `local` | `LocalCrossEncoderReranker` | A cross-encoder run in process through Transformers.js; scoring sends nothing over the network. Default model `cross-encoder/ms-marco-MiniLM-L6-v2` (`LOCAL_RERANKER_MODELS` lists three model ids, each with its licence in [Reranking](../text/RERANKING.md#local-a-cross-encoder-in-process)) |
 | `cohere` | `CohereReranker` | Cohere's rerank API with the `apiKey` in its config: one POST per request carrying the query and the full text of every passage. Default model `rerank-v3.5` (`COHERE_RERANKER_MODELS` lists seven model ids) |
 | `llm-judge` | `LlmJudgeReranker` | Your `llmCallFn(system, user, model?)`, on whatever model it calls; each call carries the query and the first 200 characters of each passage. Phase 1 scores up to `maxPointwiseDocuments` (100) documents 0-10 in batches of `batchSize` (10) with `scoringModel`; phase 2 ranks the best `pointwiseTopK` (20) with `rankingModel`, falling back to the phase-1 order when it fails or runs past `timeoutMs`. It answers every scored document, the ranked ones first and each once, unless the request's `topN` (a stage's `topK`) cuts it ([`llm-judge`](../text/RERANKING.md#llm-judge-an-llm-as-the-judge)) |
 
@@ -645,32 +645,28 @@ const results = await service.rerankChain('quantum computing', chunks, [
 
 ### Memory retrieval reranking
 
-When a [`RerankerService`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/reranking/RerankerService.ts) is passed to [`CognitiveMemoryManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/CognitiveMemoryManager.ts) in the `rerankerService` config field (see [Cognitive Memory](./COGNITIVE_MEMORY.md)), retrieval reranks the scored traces with the service's default provider after the cognitive scoring. Any provider works: `local`, `cohere`, `llm-judge` or your own ([Reranking](../text/RERANKING.md#choosing-a-provider)). The service's constructor only records the provider configs; register each provider:
+[`CognitiveMemoryManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/CognitiveMemoryManager.ts) reranks recalled memories with the provider its `recall.rerank` names (see [Cognitive Memory](./COGNITIVE_MEMORY.md#recall) and [Memory rerank](../text/RERANKING.md#memory-rerank)): `'none'` (the default), `{ kind: 'local' }`, a cross-encoder run in the process at a pinned revision, or `{ kind: 'llm' }`, your own model call as the judge. A `rerankerService` on the manager's configuration is not read for memory recall, and no remote reranking service is offered for memories.
 
 ```typescript
 import { CognitiveMemoryManager } from '@framers/agentos';
-import { RerankerService, LocalCrossEncoderReranker } from '@framers/agentos/cognition/rag/reranking';
-
-const rerankerService = new RerankerService({
-  // defaultProviderId picks the provider: the manager names none.
-  config: { providers: [{ providerId: 'local' }], defaultProviderId: 'local' },
-});
-rerankerService.registerProvider(new LocalCrossEncoderReranker({ providerId: 'local' }));
 
 const manager = new CognitiveMemoryManager();
 await manager.initialize({
   // ... the rest of the CognitiveMemoryConfig ...
-  rerankerService,
+  recall: {
+    rerank: { kind: 'local', model: 'cross-encoder/ms-marco-MiniLM-L6-v2', revision: '233902d25c440f23af6f7d6e94d2946bac0bee0a' },
+  },
 });
+await manager.recallReady(); // the model has loaded, or was found unavailable
 ```
 
-For each trace the reranker returns, the score becomes:
+For each of the best 20 traces (`maxCandidates`) the reranker scores, under `retrieval: 'dense'` the score becomes:
 
 ```
 retrievalScore = 0.7 × cognitiveComposite + 0.3 × rerankerScore
 ```
 
-The weights are fixed. The cognitive composite combines six signals (strength, similarity, recency, emotional congruence, graph activation, importance). Traces outside the reranker's top N keep their cognitive score. When the reranker throws (no provider registered, an API error), retrieval keeps the cognitive scores.
+The weights are fixed. The cognitive composite combines six signals (strength, similarity, recency, emotional congruence, graph activation, importance). The scored traces are ordered by the blend, and the traces past `maxCandidates` keep their cognitive score and their order after them. Under `retrieval: 'hybrid'` the cut is ordered by `0.7 × fusedScore / the best fusedScore of the cut's recalled candidates (at most 1) + 0.3 × rerankerScore` and every score stays as it was. A reranker that is loading, unavailable, slow or failing leaves the order as it was, and the turn's capture says why.
 
 ## Multimodal RAG (Image + Audio)
 
