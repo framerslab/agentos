@@ -84,8 +84,9 @@ function judgeProvider(setting: Extract<RerankSetting, { kind: 'llm' }>): Recall
 /**
  * The local cross-encoder as memory rerank's provider. Its module is imported the first time the reranker asks for it
  * (the load `start()` begins), not when this module loads, so a host that never names `{ kind: 'local' }` does not
- * load it; the provider in turn loads Transformers.js by a specifier a bundler does not follow. Each call is the
- * provider's own.
+ * load it at run time. A bundler still takes that module in, since the specifier is a literal; what keeps
+ * Transformers.js out of a host's bundle is the provider loading it by a specifier that is not a literal
+ * (`importOptional`). Each call is the provider's own.
  */
 function localProvider(setting: Extract<RerankSetting, { kind: 'local' }>, deps: RecallRerankerDeps): RecallRerankProvider {
   let loaded: Promise<RecallRerankProvider> | undefined;
