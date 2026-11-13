@@ -63,9 +63,10 @@ export interface ForgetUserMemoryOptions {
   writeTombstone?: boolean;
   /**
    * Entries the caller adds to the report: stores it reached itself, and stores it knows are not reached. They do not
-   * change `complete`.
+   * change `complete`. A function is called once the tombstone is written and the deletes are done, so what it
+   * deletes stays while the tombstone cannot be written.
    */
-  extraStores?: ForgetMemoryReport['stores'];
+  extraStores?: ForgetMemoryReport['stores'] | (() => ForgetMemoryReport['stores']);
   /** The caller's own stores failed: the report is incomplete. */
   alsoIncomplete?: boolean;
   /**
@@ -288,7 +289,8 @@ export async function forgetUserMemory(options: ForgetUserMemoryOptions): Promis
   const deleted = options.onChain && pendingAtDeadline === 0 ? await options.onChain(deletes) : await deletes();
   const failed = deleted.some((entry) => !entry.reached);
 
-  const stores: ForgetMemoryReport['stores'] = [...deleted, ...NEVER_REACHED.map((entry) => ({ ...entry })), ...(options.extraStores ?? [])];
+  const extra = typeof options.extraStores === 'function' ? options.extraStores() : (options.extraStores ?? []);
+  const stores: ForgetMemoryReport['stores'] = [...deleted, ...NEVER_REACHED.map((entry) => ({ ...entry })), ...extra];
   let legacy = false;
   if (options.legacyUnattributed) {
     try {

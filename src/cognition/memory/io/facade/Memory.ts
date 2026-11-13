@@ -257,6 +257,22 @@ const REPLACE_READ_PAGE_ROW = `UPDATE memory_pages
 /** How many times a page write reads the row again when another writer changed it between the read and the write. */
 const PAGE_WRITE_ATTEMPTS = 5;
 
+/**
+ * Each learning-store column that names a user, by table: the learner of a session, chain head, ledger row, trait row,
+ * freeze or document row, and the turn's user a ledger row records.
+ */
+const LEARNER_USER_COLUMNS: ReadonlyArray<readonly [string, string]> = [
+  ['agentos_learning_sessions', 'user_id'],
+  ['agentos_learning_heads', 'user_id'],
+  ['agentos_learning_ledger', 'user_id'],
+  ['agentos_learning_ledger', 'turn_user_id'],
+  ['agentos_learning_traits', 'user_id'],
+  ['agentos_learning_freezes', 'user_id'],
+  ['agentos_learning_outcomes', 'user_id'],
+  ['agentos_learning_lessons', 'user_id'],
+  ['agentos_learning_skills', 'user_id'],
+];
+
 /** Thrown inside a page write's transaction when the row is no longer the one read, so the transaction rolls back. */
 class PageRowChangedError extends Error {
   constructor() {
@@ -1487,7 +1503,9 @@ export class Memory {
    * Every subject this store holds anything of, each once: the users and sessions whose conversation key names a
    * registry row, a trace or a wiki page of this brain (a registry row may be gone after a deletion that did not
    * finish), the users a trace's metadata names as `turnUserId`, and, where the store's database holds the learning
-   * tables, the users of their session and chain-head rows, and the user memory from before per-user scope is
+   * tables, the users any learner row names (sessions, chain heads, the ledger and its turn users, traits, freezes,
+   * outcomes, lessons and skills), so a restore that put back one row of a learner alone leads back to them, and the
+   * user memory from before per-user scope is
    * attributed to ({@link legacyOwner}). The operator's key names no subject. The re-application of the tombstones asks
    * the ledger about each.
    */
@@ -1523,9 +1541,11 @@ export class Memory {
       [brainId],
     );
     for (const row of named) holdUser(row.user_id);
-    for (const table of ['agentos_learning_sessions', 'agentos_learning_heads']) {
+    for (const [table, column] of LEARNER_USER_COLUMNS) {
       try {
-        const rows = await this._brain.all<{ user_id: unknown }>(`SELECT DISTINCT user_id FROM ${table} WHERE user_id IS NOT NULL`);
+        const rows = await this._brain.all<{ user_id: unknown }>(
+          `SELECT DISTINCT ${column} AS user_id FROM ${table} WHERE ${column} IS NOT NULL`,
+        );
         for (const row of rows) holdUser(row.user_id);
       } catch (error) {
         // A store whose database holds no learning tables has no learner to name.

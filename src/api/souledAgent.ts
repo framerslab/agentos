@@ -1452,7 +1452,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     return {
       drain: () => drainSubject(key),
       onChain: (work) => onSubject(key, work),
-      extraStores: [...extra.stores, sessionHistoryOf(key)],
+      // The history goes once the tombstone is written: a deletion that cannot write it deletes nothing.
+      extraStores: () => [...extra.stores, sessionHistoryOf(key)],
       alsoIncomplete: extra.incomplete,
     };
   };
