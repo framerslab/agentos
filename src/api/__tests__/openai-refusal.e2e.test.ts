@@ -10,6 +10,9 @@
  * - Responses: a message content part `{ type: "refusal", refusal }` in a
  *   `completed` response, and the `response.refusal.delta` /
  *   `response.refusal.done` stream events.
+ * - A refusal the output cap cut off: `finish_reason: "length"`, and an
+ *   `incomplete` response whose reason is `max_output_tokens`. It stays a cut
+ *   answer, as the guide's own handling checks for one before a refusal.
  *
  * Sources: https://developers.openai.com/api/docs/guides/structured-outputs#refusals-with-structured-outputs,
  * https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events,
@@ -147,6 +150,61 @@ const chatAnswer = () =>
     choices: [{ index: 0, message: { role: 'assistant', content: 'Hello.', refusal: null }, logprobs: null, finish_reason: 'stop' }],
     usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 },
   });
+
+/** The piece of the refusal message that came before the output cap cut it off. */
+const CUT_REFUSAL = REFUSAL_PARTS[0];
+
+/** A Chat Completions refusal the output cap cut off: the piece that came, beside `finish_reason: "length"`. */
+const chatCutRefusal = () =>
+  jsonResponse({
+    id: 'chatcmpl-cut',
+    object: 'chat.completion',
+    created: 1721596428,
+    model: CHAT_MODEL,
+    choices: [{ index: 0, message: { role: 'assistant', content: null, refusal: CUT_REFUSAL }, logprobs: null, finish_reason: 'length' }],
+    usage: { prompt_tokens: 81, completion_tokens: 4, total_tokens: 85 },
+  });
+
+/** The same refusal streamed: its piece, then the finish chunk with `length` and the usage-only chunk. */
+const chatCutRefusalStream = () =>
+  sseResponse([
+    chatChunk([{ index: 0, delta: { role: 'assistant', content: null, refusal: '' }, finish_reason: null }]),
+    chatChunk([{ index: 0, delta: { refusal: CUT_REFUSAL }, finish_reason: null }]),
+    chatChunk([{ index: 0, delta: {}, finish_reason: 'length' }]),
+    chatChunk([], { usage: { prompt_tokens: 81, completion_tokens: 4, total_tokens: 85 } }),
+    'data: [DONE]\n\n',
+  ]);
+
+/** A Responses refusal the output cap cut off: an `incomplete` response, its reason `max_output_tokens`. */
+const responsesCutRefusalBody = () => {
+  const body = responsesRefusalBody();
+  return {
+    ...body,
+    status: 'incomplete',
+    completed_at: null,
+    incomplete_details: { reason: 'max_output_tokens' },
+    output: [{ ...body.output[0], status: 'incomplete', content: [{ type: 'refusal', refusal: CUT_REFUSAL }] }],
+    usage: { ...body.usage, output_tokens: 4, total_tokens: 85 },
+  };
+};
+
+/** The same refusal streamed: its piece as a `response.refusal.delta` event, closed by `response.incomplete`. */
+const responsesCutRefusalStream = () => {
+  let sequence = 0;
+  const event = (type: string, fields: Record<string, unknown>) =>
+    `event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: sequence++, ...fields })}\n\n`;
+  const body = responsesCutRefusalBody();
+  const at = { item_id: 'msg_1234567890', output_index: 0, content_index: 0 };
+  return sseResponse([
+    event('response.created', { response: { ...body, status: 'in_progress', incomplete_details: null, output: [], usage: null } }),
+    event('response.output_item.added', {
+      output_index: 0,
+      item: { id: 'msg_1234567890', type: 'message', role: 'assistant', status: 'in_progress', content: [] },
+    }),
+    event('response.refusal.delta', { ...at, delta: CUT_REFUSAL }),
+    event('response.incomplete', { response: body }),
+  ]);
+};
 
 /** Answers each request with the first handler whose pattern matches its URL. */
 function route(handlers: Array<[RegExp, () => Response]>): void {
@@ -293,6 +351,62 @@ describe('an ordinary OpenAI answer', () => {
     expect(result.text).toBe('Hello.');
     expect(result.finishReason).toBe('stop');
     expect('refusal' in result).toBe(false);
+  });
+});
+
+// OpenAI's own handling reads an incomplete answer before it looks for a refusal: a message the cap cut off is a cut answer.
+const cutPaths = [
+  { name: 'Chat Completions', model: CHAT_MODEL, endpoint: /api\.openai\.com\/v1\/chat\/completions/, answer: chatCutRefusal, stream: chatCutRefusalStream },
+  { name: 'Responses', model: RESPONSES_MODEL, endpoint: /api\.openai\.com\/v1\/responses/, answer: () => jsonResponse(responsesCutRefusalBody()), stream: responsesCutRefusalStream },
+];
+
+describe.each(cutPaths)('an OpenAI refusal the output cap cut off on $name', ({ model, endpoint, answer, stream }) => {
+  const call = { provider: 'openai', model, apiKey: 'sk-refusal-e2e', prompt: 'A request.', fallbackProviders: [] };
+
+  it('keeps finish reason length at the provider, with the piece of the message that came', async () => {
+    route([
+      [/api\.openai\.com\/v1\/models/, modelList],
+      [endpoint, answer],
+    ]);
+    const provider = new OpenAIProvider();
+    await provider.initialize({ apiKey: 'sk-refusal-e2e', maxRetries: 1 });
+
+    const result = await provider.generateCompletion(model, [{ role: 'user', content: 'A request.' }], {});
+    expect(result.choices[0]?.finishReason).toBe('length');
+    expect(result.choices[0]?.refusal).toBe(CUT_REFUSAL);
+
+    route([
+      [/api\.openai\.com\/v1\/models/, modelList],
+      [endpoint, stream],
+    ]);
+    const chunks: ModelCompletionResponse[] = [];
+    for await (const chunk of provider.generateCompletionStream(model, [{ role: 'user', content: 'A request.' }], {})) chunks.push(chunk);
+    const finish = chunks.find((chunk) => chunk.choices[0]?.finishReason != null);
+    expect(finish?.choices[0]?.finishReason).toBe('length');
+    expect(finish?.choices[0]?.refusal).toBe(CUT_REFUSAL);
+  });
+
+  it('comes back from generateText and streamText as finish reason length, with no refusal and no text', async () => {
+    route([
+      [/api\.openai\.com\/v1\/models/, modelList],
+      [endpoint, answer],
+    ]);
+    const result = await generateText(call);
+    expect(result.finishReason).toBe('length');
+    expect('refusal' in result).toBe(false);
+    expect(result.text).toBe('');
+
+    route([
+      [/api\.openai\.com\/v1\/models/, modelList],
+      [endpoint, stream],
+    ]);
+    const streamed = streamText(call);
+    let text = '';
+    for await (const delta of streamed.textStream) text += delta;
+    expect(text).toBe('');
+    expect(await streamed.finishReason).toBe('length');
+    expect(await streamed.refusal).toBeUndefined();
+    expect(await streamed.text).toBe('');
   });
 });
 
