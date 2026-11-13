@@ -439,6 +439,25 @@ describe('the image guard: the deadline every check receives', () => {
     expect(requests).not.toHaveBeenCalled();
   });
 
+  it('lets go of its own timer once the dispatcher has answered, though a check never settles', async () => {
+    capture();
+    const begun = arrivals();
+    const signals: (AbortSignal | undefined)[] = [];
+    const stuck = check('model', 'classify', (image) => {
+      signals.push(image.deadlineSignal);
+      begun.arrive();
+      return new Promise<never>(() => undefined);
+    });
+    // the guard's own deadline is the default 15 s; as a required guard it runs under 10 ms
+    const answered = ParallelGuardrailDispatcher.evaluateInput([required(ImageGuardrail.create({ id: 'images', checks: [stuck] }), 10)], oneImage(), context);
+    await begun.reached(1);
+    await vi.advanceTimersByTimeAsync(10);
+    expect((await answered).evaluation).toMatchObject(timedOut);
+    expect(signals[0]?.aborted).toBe(true);
+    // nothing of the evaluation is left on the clock to keep a process alive: the guard's 15 s timer went with the answer
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('is live while the checks run and stopped once the guard has answered', async () => {
     const seen: { signal: AbortSignal | undefined; stoppedThen: boolean }[] = [];
     const recording: ImageCheck['check'] = async (image) => {
