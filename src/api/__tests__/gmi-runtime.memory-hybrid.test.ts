@@ -116,6 +116,7 @@ async function turn(recall: Record<string, unknown> | undefined, extra: Record<s
     const before = embedder.embedCalls;
     const result = await session.send('What is the bike shed code?');
     return {
+      text: (result as unknown as { text: string }).text,
       block: memoryBlockOf(s, STATEMENTS.length),
       embedCalls: embedder.embedCalls - before,
       memoryRecall: (result as unknown as { memoryRecall?: Capture }).memoryRecall!,
@@ -463,5 +464,110 @@ describe("agent({ runtime: 'gmi' }) memory.recall.retrieval", () => {
     const absent = events('memory.recall.leg_absent');
     expect(absent).toEqual([expect.objectContaining({ leg: 'dense', reason: 'no_embedder' })]);
     expect(JSON.stringify(absent)).not.toContain(MARK);
+  });
+});
+
+describe("agent({ runtime: 'gmi' }) memory.recall.rerank", () => {
+  const emptyRanking = async (): Promise<string> => '[]';
+
+  const refused: Array<[Record<string, unknown>, string, string]> = [
+    [{ rerank: { kind: 'cohere', apiKey: 'k' } }, 'rerank', 'unsupported_provider'],
+    [{ rerank: { kind: 'local', model: 'cross-encoder/ms-marco-MiniLM-L6-v2' } }, 'rerank.revision', 'invalid_value'],
+    [{ rerank: { kind: 'local', model: ' ', revision: 'abc' } }, 'rerank.model', 'invalid_value'],
+    [{ rerank: { kind: 'llm', model: 'm' } }, 'rerank.invoke', 'invalid_value'],
+    [{ rerank: { kind: 'llm', invoke: emptyRanking, model: 'm', timeoutMs: 0 } }, 'rerank.timeoutMs', 'invalid_value'],
+    [{ rerank: { kind: 'llm', invoke: emptyRanking, model: 'm', maxCandidates: 2.5 } }, 'rerank.maxCandidates', 'invalid_value'],
+    [{ rerank: 'cohere' }, 'rerank', 'invalid_value'],
+  ];
+  it.each(refused)('rejects %j at construction, naming memory.recall.%s', (recall, field, reason) => {
+    expect(() =>
+      agent({
+        runtime: 'gmi', provider: 'openai', model: 'stub-model', apiKey: key(),
+        cognition: { memory: { embedding: { provider: 'openai' }, recall }, mechanisms: false },
+      } as unknown as AgentOptions),
+    ).toThrow(`memory.recall.${field}`);
+    expect(events('memory.recall.option_rejected')).toEqual([expect.objectContaining({ option: field, reason })]);
+  });
+
+  const anyValue: Array<[unknown]> = [[{ kind: 'llm', invoke: emptyRanking, model: 'm' }], ['none']];
+  it.each(anyValue)('rerank %j on the default runtime is refused: any value, the default included', (rerank) => {
+    expect(() => agent({ provider: 'openai', model: 'stub-model', apiKey: key(), memory: { recall: { rerank } } } as unknown as AgentOptions)).toThrow(
+      /memory\.recall\.rerank.*runtime: 'gmi'/s,
+    );
+    expect(events('memory.recall.option_rejected')).toEqual([expect.objectContaining({ option: 'rerank', reason: 'unsupported_runtime' })]);
+  });
+
+  it('an llm rerank set on agent() reaches the turn: the record names the provider and the model, and the judge saw the candidates', async () => {
+    const seen: string[] = [];
+    const invoke = async (system: string, user: string): Promise<string> => {
+      seen.push(user);
+      // A score for each memory sent, the first the highest; then a ranking of them in the order it was given.
+      return system.includes('relevance scorer')
+        ? JSON.stringify((user.match(/^\[\d+\]/gm) ?? []).map((_, i) => (i === 0 ? 9 : 1)))
+        : JSON.stringify([...user.matchAll(/^\[([^\]]+)\]/gm)].map((m) => m[1]));
+    };
+    const out = await turn({ rerank: { kind: 'llm', model: 'judge-model', invoke } });
+    const record = out.memoryRecall as unknown as { reranker: Record<string, unknown>; candidates: Array<{ rerankScore?: number }> };
+    expect(record.reranker).toMatchObject({ provider: 'llm', model: 'judge-model' });
+    expect(record.candidates.some((c) => typeof c.rerankScore === 'number')).toBe(true);
+    expect(seen.join('\n')).toContain('XQ7Z');
+    expect(out.block).toContain('XQ7Z');
+  });
+
+  it("rerank 'none' set outright on a GMI turn sends the block of no setting, byte for byte", async () => {
+    vi.useFakeTimers({ toFake: ['Date'], shouldAdvanceTime: false });
+    vi.setSystemTime(Date.UTC(2026, 10, 10, 12, 0, 0));
+    try {
+      const unset = await turn(undefined);
+      const none = await turn({ rerank: 'none' });
+      expect(unset.block).toContain('XQ7Z');
+      expect(none.block).toBe(unset.block);
+      expect((none.memoryRecall as unknown as { reranker: unknown }).reranker).toEqual({ provider: 'none', reason: 'none_configured' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // Fail-open on the real path: a judge that rejects, or one that never answers inside its timeout, leaves the block
+  // the model receives as it is with no rerank, and the turn still answers.
+  const failing: Array<['dense' | 'hybrid', 'error' | 'timeout']> = [
+    ['dense', 'error'],
+    ['hybrid', 'error'],
+    ['dense', 'timeout'],
+    ['hybrid', 'timeout'],
+  ];
+  it.each(failing)("under %s a judge that ends in %s on a GMI turn sends the block of no rerank, byte for byte, and the turn answers", async (retrieval, mode) => {
+    vi.useFakeTimers({ toFake: ['Date'], shouldAdvanceTime: false });
+    vi.setSystemTime(Date.UTC(2026, 10, 10, 12, 0, 0));
+    try {
+      const plain = await turn({ retrieval });
+      const QUESTION = 'Query: "What is the bike shed code?"';
+      const asked: string[] = [];
+      // The turns that file the statements recall too: there the judge answers, every memory scored alike and ranked
+      // as sent, so their order stands and no failure counts toward a back-off. Only the question's rerank fails.
+      const invoke = (system: string, user: string): Promise<string> => {
+        if (!user.includes(QUESTION)) {
+          return Promise.resolve(
+            system.includes('relevance scorer')
+              ? JSON.stringify((user.match(/^\[\d+\]/gm) ?? []).map(() => 5))
+              : JSON.stringify([...user.matchAll(/^\[([^\]]+)\]/gm)].map((m) => m[1])),
+          );
+        }
+        asked.push(user);
+        return mode === 'error' ? Promise.reject(new Error('provider down')) : new Promise<string>(() => undefined);
+      };
+      const judged = await turn({ retrieval, rerank: { kind: 'llm', model: 'judge-model', invoke, ...(mode === 'timeout' ? { timeoutMs: 50 } : {}) } });
+      // Precondition: the judge was asked about the question, with the turn's own text as its query.
+      expect(asked.length).toBeGreaterThan(0);
+      expect(plain.block).toContain('XQ7Z');
+      expect(judged.block).toBe(plain.block);
+      expect(judged.text).toBe('XQ7Z.');
+      const record = judged.memoryRecall as unknown as { reranker: unknown; candidates: Array<{ rerankScore?: number }> };
+      expect(record.reranker).toEqual({ provider: 'none', reason: mode });
+      expect(record.candidates.every((c) => c.rerankScore === undefined)).toBe(true);
+      expect(events('memory.recall.rerank_skipped')).toEqual([expect.objectContaining({ provider: 'llm', reason: mode })]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

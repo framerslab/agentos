@@ -28,7 +28,7 @@ export interface LocalCrossEncoderConfig extends RerankerProviderConfig {
   providerId: 'local';
   /**
    * Model ID from Hugging Face Hub.
-   * Default: 'cross-encoder/ms-marco-MiniLM-L-6-v2'
+   * Default: 'cross-encoder/ms-marco-MiniLM-L6-v2'
    */
   defaultModelId?: string;
   /**
@@ -62,6 +62,13 @@ export interface LocalCrossEncoderConfig extends RerankerProviderConfig {
    */
   cacheDir?: string;
   /**
+   * Load the model's files from the cache alone (`cacheDir`, else Transformers.js's own), never the network, passed
+   * to each load as `local_files_only`. A file the cache lacks fails the load. With a `revision`, Transformers.js
+   * reads the files from `<cache>/<model id>/<revision>/`; without one, from `<cache>/<model id>/`.
+   * Default: false (a file the cache lacks is downloaded)
+   */
+  localFilesOnly?: boolean;
+  /**
    * The ONNX weights file to load from the model repository's `onnx/`
    * folder, for example `'model'` (full precision) or `'model_qint8_arm64'`.
    * A path in that folder or a name with the extension names the same file:
@@ -71,7 +78,7 @@ export interface LocalCrossEncoderConfig extends RerankerProviderConfig {
    * for `fp32`).
    *
    * Default: the model's entry in {@link LOCAL_RERANKER_DEFAULT_WEIGHTS}
-   * (for `cross-encoder/ms-marco-MiniLM-L-6-v2`, `'model_quint8_avx2'`), else
+   * (for `cross-encoder/ms-marco-MiniLM-L6-v2`, `'model_quint8_avx2'`), else
    * `'model'` (`onnx/model.onnx`, full precision).
    */
   modelFileName?: string;
@@ -152,14 +159,14 @@ export interface LocalCrossEncoderConfig extends RerankerProviderConfig {
 }
 
 /**
- * Available local cross-encoder models (Hugging Face model IDs).
+ * The local cross-encoder models AgentOS lists (Hugging Face model ids), each under a licence read at its
+ * repository: apache-2.0, apache-2.0, mit. The provider loads any other id a host passes; checking that model's
+ * licence is then the host's.
  */
 export const LOCAL_RERANKER_MODELS = [
-  'cross-encoder/ms-marco-MiniLM-L-6-v2',      // Fast, good quality
-  'cross-encoder/ms-marco-MiniLM-L-12-v2',     // Better quality, slower
-  'BAAI/bge-reranker-base',                     // BGE reranker (smaller)
-  'BAAI/bge-reranker-large',                    // BGE reranker (larger, better)
-  'sentence-transformers/ce-ms-marco-TinyBERT-L-4', // Tiny, fastest
+  'cross-encoder/ms-marco-MiniLM-L6-v2', // apache-2.0. The default: fast, good quality
+  'cross-encoder/ms-marco-MiniLM-L12-v2', // apache-2.0. Better quality, slower
+  'BAAI/bge-reranker-base', // mit
 ] as const;
 
 export type LocalRerankerModel = (typeof LOCAL_RERANKER_MODELS)[number];
@@ -169,8 +176,8 @@ export type LocalRerankerModel = (typeof LOCAL_RERANKER_MODELS)[number];
  * `modelFileName` nor `dtype`. A model not listed here loads `onnx/model.onnx`
  * (full precision).
  *
- * `cross-encoder/ms-marco-MiniLM-L-6-v2` (and its new id,
- * `cross-encoder/ms-marco-MiniLM-L6-v2`) loads the repository's 8-bit
+ * `cross-encoder/ms-marco-MiniLM-L6-v2` (and its earlier id,
+ * `cross-encoder/ms-marco-MiniLM-L-6-v2`, which Hugging Face redirects to it) loads the repository's 8-bit
  * dynamically quantized `onnx/model_quint8_avx2.onnx` (22 MB, against 87 MB
  * for `onnx/model.onnx`). It ranks as the full-precision file does on a
  * query with one answering text in 20, and scores a batch in about half the
@@ -356,7 +363,8 @@ interface LoadedCrossEncoder {
  * `onnx/model_quint8_avx2.onnx` for the default model, `onnx/model.onnx` for
  * the others; see {@link LOCAL_RERANKER_DEFAULT_WEIGHTS}). Transformers.js
  * fetches them on the first load and reads them from its cache (`cacheDir`)
- * after that. The model loads once, for the model of the first `rerank()` or
+ * after that; `revision` pins the commit of the model's repository they come
+ * from, and `localFilesOnly` loads from the cache alone. The model loads once, for the model of the first `rerank()` or
  * `initialize()`; call `initialize(modelId)` to load another. The ONNX
  * session gets `intraOpNumThreads` and `interOpNumThreads` when they are set;
  * a host on a CPU limit sets `intraOpNumThreads` to its cores.
@@ -365,7 +373,7 @@ interface LoadedCrossEncoder {
  * ```typescript
  * const reranker = new LocalCrossEncoderReranker({
  *   providerId: 'local',
- *   defaultModelId: 'cross-encoder/ms-marco-MiniLM-L-6-v2',
+ *   defaultModelId: 'cross-encoder/ms-marco-MiniLM-L6-v2',
  *   batchSize: 32,
  * });
  *
@@ -373,7 +381,7 @@ interface LoadedCrossEncoder {
  *
  * const result = await reranker.rerank(
  *   { query: 'machine learning', documents: [...] },
- *   { providerId: 'local', modelId: 'cross-encoder/ms-marco-MiniLM-L-6-v2' }
+ *   { providerId: 'local', modelId: 'cross-encoder/ms-marco-MiniLM-L6-v2' }
  * );
  * ```
  */
@@ -391,7 +399,7 @@ export class LocalCrossEncoderReranker implements IRerankerProvider {
   constructor(config: LocalCrossEncoderConfig) {
     this.config = {
       ...config,
-      defaultModelId: config.defaultModelId ?? 'cross-encoder/ms-marco-MiniLM-L-6-v2',
+      defaultModelId: config.defaultModelId ?? 'cross-encoder/ms-marco-MiniLM-L6-v2',
       device: config.device ?? 'cpu',
       maxSequenceLength: config.maxSequenceLength ?? 512,
       // A batch size that is not a positive number (0, NaN) falls back to the default.
@@ -522,7 +530,12 @@ export class LocalCrossEncoderReranker implements IRerankerProvider {
     }
 
     const { modelFileName, dtype } = this.weightsFor(modelId);
-    const cacheOptions = this.config.cacheDir ? { cache_dir: this.config.cacheDir } : {};
+    // What both loads share: the cache folder, the pinned revision, and whether a file the cache lacks may be fetched.
+    const cacheOptions = {
+      ...(this.config.cacheDir ? { cache_dir: this.config.cacheDir } : {}),
+      ...(this.config.revision ? { revision: this.config.revision } : {}),
+      ...(this.config.localFilesOnly ? { local_files_only: true } : {}),
+    };
 
     // onnxruntime-node reads these session options; left out, onnxruntime sizes its thread pool for the machine.
     const sessionOptions: { intraOpNumThreads?: number; interOpNumThreads?: number } = {};

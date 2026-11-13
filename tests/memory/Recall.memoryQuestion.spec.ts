@@ -159,6 +159,19 @@ describe('the recall section with reserved lines', () => {
     expect(result.includedMemoryIds).toEqual(['f0', 'f1', 'f2', 'f3', 'f4', 'f5']);
   });
 
+  it('reserved lines are set aside in their recallTraces order, whatever order reservedIds lists them in', () => {
+    // Room for one line, two reserved: the one earlier in recallTraces is shown, though reservedIds names the other first.
+    const result = assembleMemoryContext({
+      totalTokenBudget: sectionBudget(1, CHARS),
+      allocation: ONLY_RECALL,
+      traits: {},
+      recallTraces: [line('a', CHARS), line('b', CHARS)],
+      reservedIds: ['b', 'a'],
+    } as never);
+    expect(result.includedMemoryIds).toEqual(['a']);
+    expect(result.lineOutcomes).toContainEqual(expect.objectContaining({ id: 'b', outcome: 'left_out', reason: 'section_full' }));
+  });
+
   it('a reserved line larger than the section is section_full and takes no room', () => {
     const result = assembleMemoryContext({
       totalTokenBudget: sectionBudget(2, CHARS),

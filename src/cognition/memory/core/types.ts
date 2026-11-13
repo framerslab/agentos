@@ -564,10 +564,11 @@ export interface CognitiveRetrievalResult {
      */
     retrievedTypedTraces?: ScoredMemoryTrace[];
     /**
-     * The rerank of this retrieval, when the manager holds a
-     * `rerankerService`: its provider and model with the candidates and the
-     * time it took, or `provider: 'none'` with the reason when no scores were
-     * applied. Absent when the manager holds no reranker.
+     * The rerank of this retrieval, when the manager's `recall.rerank` names
+     * a provider: `local` or `llm` with its model, the candidates it was sent
+     * and the time it took, or `provider: 'none'` with the reason when no
+     * scores were applied. Absent with no `recall.rerank`, and under
+     * `recall.capture: 'off'`.
      */
     reranker?: import('../retrieval/recall/capture.js').MemoryRecallReranker;
     /**

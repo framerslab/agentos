@@ -60,6 +60,10 @@ jobs:
 
     env:
       AGENTOS_TEST_POSTGRES_URL: postgresql://postgres:ci_test_password@localhost:5432/postgres
+      # The local memory reranker's real-model test (tests/memory/Recall.rerank.local.integration.spec.ts) must run
+      # in this job: with this set, it fails when the pinned revision's files are not where the step below lays them
+      # out, so a dropped step never passes as a skip. No other job sets it, and there the suite is skipped.
+      AGENTOS_TEST_RERANK_MODEL: required
 
     steps:
       - uses: actions/checkout@v5
@@ -401,6 +405,24 @@ jobs:
             exit 1
           fi
           echo "AGENTOS_TEST_CROSS_ENCODER_CACHE=$PWD/$dir" >> "$GITHUB_ENV"
+
+      # The local memory reranker loads its model at a pinned revision, and Transformers.js reads a pinned
+      # revision's files from <cache>/<model id>/<revision>/<file> (the bare <model id>/<file> path is for "main").
+      # The files fetched and checked above are that revision's, so they are copied into that layout, under the
+      # repository's current id, for tests/memory/Recall.rerank.local.integration.spec.ts, which loads them with
+      # downloads off.
+      - name: Lay the cross-encoder test model out as its pinned revision
+        run: |
+          set -euo pipefail
+          src=.cache/cross-encoder/cross-encoder/ms-marco-MiniLM-L-6-v2
+          dir=.cache/rerank
+          dst=$dir/cross-encoder/ms-marco-MiniLM-L6-v2/233902d25c440f23af6f7d6e94d2946bac0bee0a
+          rm -rf "$dir"
+          mkdir -p "$dst/onnx"
+          for f in config.json tokenizer.json tokenizer_config.json onnx/model_quint8_avx2.onnx; do
+            cp "$src/$f" "$dst/$f"
+          done
+          echo "AGENTOS_TEST_RERANK_CACHE=$PWD/$dir" >> "$GITHUB_ENV"
 
       # The whole suite with coverage on. A run under the thresholds in vitest.config.ts
       # fails here. The totals print at the end of the step; coverage/ holds
