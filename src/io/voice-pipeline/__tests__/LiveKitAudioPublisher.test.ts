@@ -656,6 +656,34 @@ describe('the speech mark', () => {
     await expect(played).resolves.toMatchObject({ sequence: 1, playedSamples: 480, sampleRate: 24000 });
     await f.publisher.close();
   }, 5000);
+  it("starts a marked chunk's receipt deadline at its announcement in participant playout, also when the track's publication and the mark together take longer than it", async () => {
+    const f = marking({ shows: 'held', options: { ...page, receiptTimeoutMs: 400 } });
+    // The track is published 200 ms after the chunk is admitted, and the mark shows 250 ms after it is set: 450 ms in all.
+    f.participant.publishTrack = async () => { await new Promise((resolve) => setTimeout(resolve, 200)); f.order.push('published'); return { sid: 'TR_VOICE' }; };
+    setTimeout(() => f.show(), 450);
+    await f.publisher.sendAudio(f.chunk(clip('clip-a'), announced));
+    expect(f.order).toEqual(['published', 'mark clip-a', 'shown', 'announced', 'frame', 'frame']);
+    // The page answers 250 ms after the announcement: within its 400 ms, 700 ms after the chunk was admitted.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    const played = f.publisher.waitForPlayback(generation, 1, new AbortController().signal);
+    f.source().playOut(); f.publisher.receiveReceipt({ type: 'playback', generation, sequence: 1, playedSamples: 480, sampleRate: 24000 });
+    await expect(played).resolves.toMatchObject({ sequence: 1, playedSamples: 480, sampleRate: 24000 });
+    await f.publisher.close();
+  }, 5000);
+  it('starts the deadline of a playback wait begun while the mark is being set at the announcement, in participant playout', async () => {
+    const f = marking({ shows: 'held', options: { ...page, receiptTimeoutMs: 400 } });
+    const sent = f.publisher.sendAudio(f.chunk(clip('clip-a'), announced));
+    await vi.waitFor(() => expect(f.order).toEqual(['published', 'mark clip-a']));
+    // The wait begins before the mark shows, 250 ms later, and so before the chunk is announced.
+    const played = f.publisher.waitForPlayback(generation, 1, new AbortController().signal); played.catch(() => {});
+    setTimeout(() => f.show(), 250);
+    await sent; expect(f.messages).toHaveLength(1);
+    // The page answers 250 ms after the announcement: within its 400 ms, about 500 ms after the wait began.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    f.source().playOut(); f.publisher.receiveReceipt({ type: 'playback', generation, sequence: 1, playedSamples: 480, sampleRate: 24000 });
+    await expect(played).resolves.toMatchObject({ sequence: 1, playedSamples: 480, sampleRate: 24000 });
+    await f.publisher.close();
+  }, 5000);
   it("sets the mark on the room's local participant when a transport is given the option for its publisher", async () => {
     const room = new FakeRoom(); room.addParticipant('participant-a', new FakePublication(new FakeTrack('microphone')));
     const order: string[] = []; const mark = clip('clip-a');
