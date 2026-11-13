@@ -1060,7 +1060,13 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         // lastStepFinishReason where the stream ends. The refusal message of
         // a reply that held one goes with it.
         if (loopResult.cut) lastStepFinishReason = 'length';
-        if (loopResult.refusal !== undefined) finalRefusal = loopResult.refusal;
+        // A refused reply ends the stream on the model's answer: a stop, or
+        // `length` when the cap cut it. A native tool step before the shim
+        // took over left its own reason here, which no longer holds.
+        if (loopResult.refusal !== undefined) {
+          finalRefusal = loopResult.refusal;
+          lastStepFinishReason = loopResult.cut ? 'length' : 'stop';
+        }
         const shimToolCalls: ToolCallRecord[] = loopResult.toolCalls.map((c) => ({
           name: c.name,
           args: c.args,
@@ -1074,6 +1080,12 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         resolveText!(finalText);
         resolveUsage!(usage); resolveResponseModel!(lastResponseModelId); resolveServiceTier!(lastServiceTier);
         resolveToolCalls!(shimToolCalls);
+        // A refusal settles the stream here, before the generator's finally,
+        // so the finally reads it as a finished stream: the output guards
+        // judge the message there, and the span and the usage event say how
+        // the call ended. The tool calls of a native step before the shim do
+        // not make it a 'tool-calls' ending.
+        if (loopResult.refusal !== undefined) resolveFinishReason!(normalizeStreamFinishReason(lastStepFinishReason));
         settleFallback(true);
       }
       if (tools.length > 0 && toolMode === 'prompt') {
