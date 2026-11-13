@@ -168,6 +168,7 @@ beforeEach(() => {
 
 afterEach(() => {
   globalLLMProviderHealth.reset();
+  vi.unstubAllEnvs();
 });
 
 describe.each(paths)('an OpenAI refusal on $name', ({ model, endpoint, answer, stream }) => {
@@ -268,5 +269,30 @@ describe('an ordinary OpenAI answer', () => {
     expect(result.text).toBe('Hello.');
     expect(result.finishReason).toBe('stop');
     expect('refusal' in result).toBe(false);
+  });
+});
+
+describe('an OpenAI refusal with a fallback provider set', () => {
+  it('is returned as the result and is never sent on to the fallback', async () => {
+    // A key for the fallback, so a walk would reach it: route() throws on any request outside OpenAI.
+    vi.stubEnv('ANTHROPIC_API_KEY', 'sk-ant-refusal-e2e');
+    route([
+      [/api\.openai\.com\/v1\/models/, modelList],
+      [/api\.openai\.com\/v1\/chat\/completions/, chatRefusal],
+    ]);
+
+    const result = await generateText({
+      provider: 'openai',
+      model: CHAT_MODEL,
+      apiKey: 'sk-refusal-e2e',
+      prompt: 'A request.',
+      fallbackProviders: [{ provider: 'anthropic', model: 'claude-opus-5-5' }],
+    });
+
+    expect(result.finishReason).toBe('refusal');
+    expect(result.refusal).toBe(REFUSAL);
+    expect(result.provider).toBe('openai');
+    const requested = fetchMock.mock.calls.map(([url]) => String(url));
+    expect(requested.filter((url) => !/api\.openai\.com/.test(url))).toEqual([]);
   });
 });

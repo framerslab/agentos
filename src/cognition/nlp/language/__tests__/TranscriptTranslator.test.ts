@@ -530,6 +530,13 @@ describe('TranscriptTranslator.translateLine', () => {
     expect(failures()).toEqual([expect.objectContaining({ provider: 'openai', reason: 'incomplete', status: 200 })]);
   });
 
+  it('throws TRANSLATION_INCOMPLETE for a line the model refused, never TRANSLATION_EMPTY_OUTPUT, with its billed usage', async () => {
+    // OpenAI's refusal: a refusal message beside an ordinary stop, and no content.
+    answer(jsonResponse({ ...chatCompletion(null, 30, 11), choices: [{ index: 0, message: { role: 'assistant', refusal: "I'm sorry, I cannot assist with that request." }, finish_reason: 'stop' }] }));
+    await expect(new TranscriptTranslator().translateLine(line('Hola.'), 'en', OPTIONS)).rejects.toMatchObject({ name: 'TranslationProviderError', code: 'TRANSLATION_INCOMPLETE', status: 200, usage: { promptTokens: 30, completionTokens: 11 } });
+    expect(failures()).toEqual([expect.objectContaining({ provider: 'openai', reason: 'incomplete', status: 200 })]);
+  });
+
   it('reads an answer that reported no usage as no report, so the call is recorded at its bound and never at nothing', async () => {
     const reportsNoUsage = (body: Record<string, unknown>): Record<string, unknown> => {
       delete body.usage;
