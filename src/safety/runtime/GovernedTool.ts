@@ -368,7 +368,8 @@ export function governTool<TInput extends { evidence: ActionEvidence }, TOutput>
     // settled by a reconcile pass, and a unit counts from when it was reserved: the action does not start, and the
     // units are given back where they still can be.
     if (reserved.expiresAt !== undefined && Date.now() >= reserved.expiresAt) {
-      await quietly(() => reserved.release());
+      // the tool never started, so the units go back without taking one of the action's attempts
+      await quietly(() => (reserved.cancel ? reserved.cancel() : reserved.release()));
       await finish(recordId, 'limiter_unavailable', 'LEASE_EXPIRED');
       return refusal('limiter_unavailable', 'LEASE_EXPIRED', recordId);
     }

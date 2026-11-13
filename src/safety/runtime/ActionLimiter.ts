@@ -26,7 +26,13 @@ export type ActionLimitAnswer =
   | {
       status: 'reserved';
       commit(): Promise<void>;
+      /** Gives the units back: the action ran and failed, and the release counts as one of its attempts. */
       release(): Promise<void>;
+      /**
+       * Gives the units back for an action whose tool never started, without counting an attempt. A limiter without it
+       * is released instead.
+       */
+      cancel?(): Promise<void>;
       /** When the earliest of the reservations runs out of its lease, epoch milliseconds. A limiter without leases leaves it out. */
       expiresAt?: number;
     }
@@ -122,7 +128,7 @@ export function actionLimiterDdl(windowsMs: readonly number[], tablePrefix?: str
 /**
  * {@link ActionLimiter} over a `@framers/sql-storage-adapter` store. Counts are rows in the host's database, so they
  * are shared between processes and survive a restart. They are not atomic across two rules: each rule reserves in its
- * own transaction, and a denial gives back the units taken before it.
+ * own transaction, and a denial gives back the units taken before it, without counting one of the action's attempts.
  *
  * Someone must run {@link reconcile} (or {@link startReconciler} in one process): a reservation whose lease ran out
  * counts against its window, and keeps its action a duplicate, until a pass settles it as used.
@@ -180,8 +186,8 @@ export class SqlActionLimiter implements ActionLimiter {
 
   /**
    * Reserves one unit under every rule, in the order given; a rule listed more than once is reserved once. A rule with
-   * no room left, an action that already ran or is running, one released three times, or a scope with no id in the
-   * target refuses the whole action, and the units taken before it are given back.
+   * no room left, an action that already ran or is running, one whose tool failed three times, or a scope with no id in
+   * the target refuses the whole action, and the units taken before it are given back without counting an attempt.
    *
    * @throws TypeError for a rule this limiter was not built with, or whose numbers differ.
    * @throws SpendMeterUnavailableError when the store does not answer; the units taken are given back where they can be.
@@ -200,13 +206,15 @@ export class SqlActionLimiter implements ActionLimiter {
       if (key === undefined) return { status: 'denied', reason: 'unresolvable', ruleId: rule.id };
       plan.push({ rule, key });
     }
-    const taken: Array<{ meter: SqlSpendMeter; operationId: string }> = [];
-    // every unit is settled whatever became of the one before it, and the first failure is thrown after the last
-    const settle = async (outcome: 'consumed' | 'released'): Promise<void> => {
+    const taken: TakenUnit[] = [];
+    // every unit is settled whatever became of the one before it, and the first failure is thrown after the last.
+    // `notStarted` also gives back the attempt each release counted: the action's tool never started.
+    const settle = async (outcome: 'consumed' | 'released', notStarted = false): Promise<void> => {
       let failure: { error: unknown } | undefined;
       for (const unit of taken) {
         try {
           await unit.meter.settle({ operationId: unit.operationId, outcome });
+          if (notStarted) await this.giveBackAttempt(unit);
         } catch (error) {
           failure ??= { error };
         }
@@ -215,25 +223,43 @@ export class SqlActionLimiter implements ActionLimiter {
     };
     let expiresAt = Number.POSITIVE_INFINITY;
     for (const { rule, key } of plan) {
-      const meter = (this.meters.get(rule.windowMs) as { meter: SqlSpendMeter }).meter;
+      const { meter, prefix } = this.meters.get(rule.windowMs) as { meter: SqlSpendMeter; prefix: string };
       const operationId = limiterOperationOf(request.operationId, rule, request.dryRun);
       let answer: Awaited<ReturnType<SqlSpendMeter['reserve']>>;
       try {
         answer = await meter.reserve({ accountId: key, operationId });
       } catch (error) {
         // the store did not answer: what was taken is given back when it can be, and left to its lease when it cannot
-        await settle('released').catch(() => undefined);
+        await settle('released', true).catch(() => undefined);
         throw error;
       }
       if (answer.status === 'denied') {
-        await settle('released');
+        await settle('released', true);
         const reason = answer.reason === 'allowance_exhausted' ? 'limit_reached' : answer.reason === 'already_consumed' ? 'duplicate' : answer.reason;
         return { status: 'denied', reason, ruleId: rule.id };
       }
-      taken.push({ meter, operationId });
+      taken.push({ meter, prefix, operationId, attempt: answer.attempt });
       expiresAt = Math.min(expiresAt, answer.expiresAt);
     }
-    return { status: 'reserved', expiresAt, commit: () => settle('consumed'), release: () => settle('released') };
+    return {
+      status: 'reserved',
+      expiresAt,
+      commit: () => settle('consumed'),
+      release: () => settle('released'),
+      cancel: () => settle('released', true),
+    };
+  }
+
+  /**
+   * Takes back the attempt a released reservation counted, for an action whose tool never started: a later rule
+   * refused it, the store failed, or its lease ran out first. Only an action whose tool ran and failed spends one of
+   * its three attempts. The row changes only while it is still that attempt and still released, so a retry another
+   * process reserved meanwhile keeps its own count.
+   */
+  private async giveBackAttempt(unit: TakenUnit): Promise<void> {
+    await this.db.transaction(async (trx) => {
+      await trx.run(`UPDATE ${unit.prefix}_reservations SET attempts = attempts - 1 WHERE operation_id = ? AND state = 'released' AND attempts = ?`, [unit.operationId, unit.attempt]);
+    });
   }
 
   /** Settles reservations whose lease ran out; each counts as used. */
@@ -288,6 +314,14 @@ export class SqlActionLimiter implements ActionLimiter {
       }
     }
   }
+}
+
+/** One unit a reservation took: its meter, the prefix of the meter's tables, its operation and its attempt. */
+interface TakenUnit {
+  meter: SqlSpendMeter;
+  prefix: string;
+  operationId: string;
+  attempt: number;
 }
 
 function sameRule(a: ActionLimitRule, b: ActionLimitRule): boolean {
