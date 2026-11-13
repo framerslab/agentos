@@ -813,10 +813,14 @@ describe('retention', () => {
 
   it('hands back an open session asked for by its id alone, as the user it runs as', async () => {
     const { a } = await open({ retention: undefined });
-    const first = a.session('s1', { userId: 'alice' });
-    expect(a.session('s1')).toBe(first);
+    a.session('s1', { userId: 'alice' });
+    // Asked for again by its id alone, the session runs as alice: it is no second subject.
+    expect(a.session('s1').id).toBe('s1');
     expect(a.session('s9', { userId: 'alice' }).id).toBe('s9');
     expect(() => a.session('s2', { userId: 'bob' })).toThrow(NEEDED);
+    // Once alice is deleted the store holds nobody, so the session was counted as hers alone, and a new user opens.
+    expect((await a.forgetUser!('alice')).complete).toBe(true);
+    expect(a.session('s3', { userId: 'carol' }).id).toBe('s3');
   });
 
   /** Puts a copy of the store's file back in its place, as a restore does; every agent on the folder is closed first. */

@@ -270,6 +270,8 @@ describe('forgetUser', () => {
     quiet();
     const store = new InMemoryLearningStore();
     const before = createLearningLayer({ store });
+    // The trait row is written at the learner's first session.
+    await before.forLearner(KEY, context());
     await before.operatorSet({ learner: KEY, traits: { extraversion: 0.6 }, by: 'ops' });
     // The learner's trait row and her tombstone, as a restore of the rows beside a later deletion leaves them.
     await store.insertForgotten(await tombstoneHash('A', '42'), new Date().toISOString());
