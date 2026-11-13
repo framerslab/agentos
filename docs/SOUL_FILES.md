@@ -70,7 +70,8 @@ Long-term memory is an **LLM wiki** in two layers:
 
 `.store/` holds what people said to the agent, so it is kept out of version control:
 the store's folder is made with a `.gitignore` holding `*`, and one already there is
-left as it is.
+left as it is. A file git tracked before the `.gitignore` existed stays tracked:
+remove it from the index with `git rm --cached`.
 
 Pages are markdown with YAML frontmatter and `[[wikilinks]]`. The agent reads
 the index from its prelude, then opens any page with the `read_memory_page` tool.

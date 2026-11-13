@@ -530,8 +530,8 @@ export type SouledAgent = Agent & {
  * it recalls the operator's pages alone, and one `memory.one_shot_unfiled` line an agent says so. With
  * {@link SouledAgentOptions.sharedMemory} every session that names no user, and every one-shot call, runs as one
  * user. Traces an earlier version filed under the agent's plain id stay in the store, are read by no turn, and are
- * counted in one `memory.legacy_traces` line at open. The store's folder, `memory/.store/`, gets a `.gitignore` that
- * keeps it out of version control.
+ * counted in one `memory.legacy_traces` line at open. The store's folder, `memory/.store/`, gets a `.gitignore` holding
+ * `*` when it has none; a file git tracked before stays tracked until the host removes it from the index.
  *
  * Each stored turn records who spoke it in the trace's metadata ({@link SPEAKER_METADATA_KEY}), outside its text and
  * its tags, so recall never matches a trace by its speaker; each recalled trace is sent as one record, with its
