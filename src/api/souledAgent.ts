@@ -710,33 +710,24 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
 
   /** The user every session that names none, and every one-shot call, runs as; undefined without `sharedMemory`. */
   const sharedUser = sharedMemory?.as;
-  if (sharedUser !== undefined) {
-    // One person's memory: a store that holds another user's, or a session's, is not opened as theirs.
-    const others = (await closingOnThrow(() => memory.listScopes())).filter((row) => {
-      if (row.kind === 'operator') return false;
-      const subject = parseConversationScopeKey(row.scopeId)?.subject;
-      return !(subject?.kind === 'user' && subject.id === sharedUser);
-    });
-    if (others.length > 0) {
-      await closeStore();
-      throw new Error(
-        "souledAgent: sharedMemory runs one person's memory, and this store already holds memory of another user or session",
-      );
-    }
-  }
 
   /**
-   * The key of every subject this store holds memory of, and of every session this process opened: read from the
-   * registry here, and kept current by the session wrapper. Without `retention`, a second one is refused.
+   * This agent's key of every subject this store holds memory of, and of every session this process opened: read
+   * from the registry once the open has applied the tombstones, and kept current by the session wrapper and the
+   * deletions. A subject the store holds under several agent ids counts once. Without `retention`, a second one is
+   * refused.
    */
   const subjects = new Set<string>();
-  for (const row of await closingOnThrow(() => memory.listScopes())) {
-    if (row.kind === 'user' || row.kind === 'session') subjects.add(row.scopeId);
-  }
-  if (retention === undefined && subjects.size > 1) {
-    await closeStore();
-    throw new Error(RETENTION_REQUIRED);
-  }
+  /** This agent's key of the user or session a stored key names; undefined for the operator's and for none. */
+  const ownKeyOf = (scopeId: string): string | undefined => {
+    const subject = parseConversationScopeKey(scopeId)?.subject;
+    if (!subject || subject.kind === 'operator') return undefined;
+    try {
+      return conversationScopeKey(agentId, subject);
+    } catch {
+      return undefined;
+    }
+  };
 
   // Traces an earlier version filed under the agent's plain id, in either form it was written in: no turn reads
   // them, and nothing here deletes, moves or rewrites them.
@@ -1325,7 +1316,19 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       return undefined;
     }
   };
+  /** The key an open session this handle gave out is kept under, by the session's id; undefined when none is open. */
+  const openSessionKeyOf = (sessionId: string | undefined): string | undefined => {
+    if (sessionId === undefined) return undefined;
+    for (const [key, held] of sessionsBySubject) {
+      for (const session of held) if (session.id === sessionId) return key;
+    }
+    return undefined;
+  };
   built.session = (id, sessionOptions) => {
+    // The runtime hands an open session asked for by its id alone back as the user it runs as: so is its subject.
+    const userId: unknown = sessionOptions?.userId;
+    const namesUser = typeof userId === 'string' && !isAnonymousUserId(userId, anonymousUserIds);
+    const reopened = namesUser ? undefined : openSessionKeyOf(id);
     if (sharedUser !== undefined) {
       // One person's memory: a session runs as that user, by name or by naming nobody.
       const asked: unknown = sessionOptions?.userId;
@@ -1336,12 +1339,12 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     if (retention === undefined) {
       // A second subject needs a retention choice. A session opened with no id is a new session, and so a new
       // subject, unless it names a user or runs as the one user of sharedMemory.
-      const asked = sessionKeyOf(id ?? '', sessionOptions?.userId);
+      const asked = reopened ?? sessionKeyOf(id ?? '', sessionOptions?.userId);
       const held = asked !== undefined && subjects.has(asked);
       if (!held && subjects.size > 0) throw new Error(RETENTION_REQUIRED);
     }
     const session = openSession(id, sessionOptions);
-    const subjectKey = sessionKeyOf(session.id, sessionOptions?.userId);
+    const subjectKey = reopened ?? sessionKeyOf(session.id, sessionOptions?.userId);
     if (subjectKey !== undefined) {
       subjects.add(subjectKey);
       const ofSubject = sessionsBySubject.get(subjectKey) ?? new Set<AgentSession>();
@@ -1520,18 +1523,30 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
    * Brings the ledger up to date from its copy and deletes again whatever the store holds of a forgotten subject. A
    * forgotten user's learner rows are deleted again by the learning layer first, when the agent runs one.
    */
-  const applyTombstones = (): Promise<ForgetMemoryReport[]> =>
-    reapplyTombstones({
+  const applyTombstones = async (): Promise<ForgetMemoryReport[]> => {
+    /** The subjects deleted again, in the order of their reports. */
+    const reapplied: SuppressionSubject[] = [];
+    const reports = await reapplyTombstones({
       memory,
       ledger: forgotten,
       wiki: { storeFor: pagesOf },
       agentId,
       legacyUnattributed,
-      forSubject: async (subject) => ({
-        ...deletionPartsOf(subject, subject.kind === 'user' ? await forgetLearner(subject.id) : { stores: [], incomplete: false }),
-        legacy: await legacyDeletionOf(),
-      }),
+      forSubject: async (subject) => {
+        reapplied.push(subject);
+        return {
+          ...deletionPartsOf(subject, subject.kind === 'user' ? await forgetLearner(subject.id) : { stores: [], incomplete: false }),
+          legacy: await legacyDeletionOf(),
+        };
+      },
     });
+    // A subject the store holds nothing more of no longer counts toward the retention requirement.
+    reports.forEach((report, at) => {
+      const subject = reapplied[at];
+      if (report.complete && subject) subjects.delete(conversationScopeKey(agentId, subject));
+    });
+    return reports;
+  };
   built.applyTombstones = () => awaitedOnClose(applyTombstones());
   /** Deletes what the agent's retention no longer keeps, each subject on its own chain. */
   const sweep = async (): Promise<{ traces: number; pages: number; scopes: number }> => {
@@ -1644,6 +1659,27 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   // ledger whose copy cannot be read fails the open, and no memory is served.
   try {
     await applyTombstones();
+    // The checks of who the store holds read it once the tombstones are applied: a forgotten subject a restore put
+    // back is deleted again first, and counts for neither.
+    if (sharedUser !== undefined) {
+      // One person's memory: a store that holds another user's, or a session's, is not opened as theirs.
+      const others = (await memory.listScopes()).filter((row) => {
+        if (row.kind === 'operator') return false;
+        const subject = parseConversationScopeKey(row.scopeId)?.subject;
+        return !(subject?.kind === 'user' && subject.id === sharedUser);
+      });
+      if (others.length > 0) {
+        throw new Error(
+          "souledAgent: sharedMemory runs one person's memory, and this store already holds memory of another user or session",
+        );
+      }
+    }
+    for (const row of await memory.listScopes()) {
+      if (row.kind !== 'user' && row.kind !== 'session') continue;
+      const key = ownKeyOf(row.scopeId);
+      if (key !== undefined) subjects.add(key);
+    }
+    if (retention === undefined && subjects.size > 1) throw new Error(RETENTION_REQUIRED);
     // On a single person's own machine the older memory is attributed to its one user, once the tombstones are
     // applied: a forgotten user, an attribution to another user, and a store that records anyone else refuse the open.
     if (legacyMemory !== undefined) {
