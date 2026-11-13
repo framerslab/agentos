@@ -409,4 +409,25 @@ describe('the image guard: the deadline every check receives', () => {
     expect(seen.map(({ stoppedThen }) => stoppedThen)).toEqual([false, false, false, false]);
     expect(seen.every(({ signal }) => signal?.aborted === true)).toBe(true);
   });
+
+  it('refuses as unavailable an image whose last check the deadline stopped, though an earlier check passed it', async () => {
+    const { requests, stopped } = vendor();
+    const first = passing('first', 'classify');
+    // a signal whose stopped request throws and is skipped, and a check that answers pass once its request is stopped
+    const skipped = check('signal', 'classify', async (image) => {
+      await fetch('https://vendor.example/moderate', { method: 'POST', signal: image.deadlineSignal });
+      return { verdict: 'pass' };
+    }, { onError: 'skip' });
+    const lenient = check('lenient', 'classify', async (image) => {
+      try { await fetch('https://vendor.example/moderate', { method: 'POST', signal: image.deadlineSignal }); } catch { /* stopped */ }
+      return { verdict: 'pass' };
+    });
+    for (const last of [skipped, lenient]) {
+      const decision = await moderateContent({ images: [png(1)] }, { guards: [ImageGuardrail.create({ id: 'images', timeoutMs: 10, checks: [first, last] })], context });
+      // the guard answers at its own deadline, which comes before the dispatcher's: never an allow
+      expect(decision).toMatchObject({ outcome: 'refuse', unavailable: true });
+    }
+    expect(requests).toHaveBeenCalledTimes(2);
+    expect(stopped()).toBe(2);
+  });
 });
