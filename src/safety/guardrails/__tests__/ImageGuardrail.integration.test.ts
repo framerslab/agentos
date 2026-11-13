@@ -5,7 +5,7 @@
  * closed or is skipped as it says, an image nobody judged refused as unavailable, and the deadline signal every check
  * receives, which stops a check still waiting and a request in flight once the dispatcher has answered.
  */
-import { afterEach, describe, expect, it, vi, type Mock } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import pino from 'pino';
 import { moderateContent } from '../contentModeration';
 import { holdResult } from '../guardrailDispatcher';
@@ -342,18 +342,39 @@ describe('the image guard: its deadline', () => {
 });
 
 describe('the image guard: the deadline every check receives', () => {
+  // The clock is the test's own: a deadline passes only when the test moves it, and only once the step it means to stop
+  // has started, so a slow runner cannot pass a deadline before a check begins.
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
   const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  const timedOut = { action: 'block', reasonCode: 'GUARDRAIL_ERROR', metadata: { cause: 'timeout' } };
+  const oneImage = () => ({ userId: 'user-1', sessionId: 'session-1', textInput: null, visionInputs: [png(1)] }) as unknown as AgentOSInput;
+  /** The guard as a required guard runs it, under a dispatcher deadline of `timeoutMs`. */
+  const required = (guard: ImageGuardrail, timeoutMs: number) => withRequiredPosture('images', guard, { id: 'images', stages: ['input'], timeoutMs });
+  /** Counts the times a step is reached; `reached(n)` settles once it has been reached n times, whatever the clock says. */
+  function arrivals() {
+    let count = 0;
+    const waiting: { n: number; resolve: () => void }[] = [];
+    return {
+      arrive(): void { count += 1; for (const wait of waiting) if (wait.n <= count) wait.resolve(); },
+      reached(n: number): Promise<void> { return n <= count ? Promise.resolve() : new Promise((resolve) => { waiting.push({ n, resolve }); }); },
+    };
+  }
   /** The vendor's endpoint: answers 100 ms after a request, or at once refuses one whose signal aborts. */
   function vendor() {
     let stopped = 0;
+    const sent = arrivals();
     const requests = vi.spyOn(globalThis, 'fetch').mockImplementation((_url, init) => new Promise<Response>((resolve, reject) => {
       const answer = setTimeout(() => resolve(new Response('{"flagged":false}')), 100);
       init?.signal?.addEventListener('abort', () => { stopped += 1; clearTimeout(answer); reject(new Error('the request was stopped')); }, { once: true });
+      sent.arrive();
     }));
-    return { requests, stopped: () => stopped };
+    return { requests, stopped: () => stopped, sent };
   }
   /** A model check that waits 100 ms (a key lookup) and then sends the image, unless its deadline stopped first. */
-  const lateSender = (told: boolean[]) => check('model', 'classify', async (image) => {
+  const lateSender = (told: boolean[], begun: ReturnType<typeof arrivals>, signals: (AbortSignal | undefined)[] = []) => check('model', 'classify', async (image) => {
+    signals.push(image.deadlineSignal);
+    begun.arrive();
     await sleep(100);
     const deadline = image.deadlineSignal;
     told.push(deadline?.aborted === true);
@@ -363,21 +384,24 @@ describe('the image guard: the deadline every check receives', () => {
   });
 
   it('stops at the deadline: a check still waiting when the dispatcher answered sends nothing, and a request in flight is stopped', async () => {
-    const { requests, stopped } = vendor();
+    const { requests, stopped, sent } = vendor();
+    const begun = arrivals();
     const told: boolean[] = [];
-    const timedOut = { action: 'block', reasonCode: 'GUARDRAIL_ERROR', metadata: { cause: 'timeout' } };
 
-    // the guard's own deadline
-    const own = await moderateContent({ images: [png(1)] }, { guards: [ImageGuardrail.create({ id: 'images', timeoutMs: 10, checks: [lateSender(told)] })], context });
-    expect(own).toMatchObject({ outcome: 'refuse', unavailable: true, deciding: timedOut });
+    // the guard's own deadline, which the dispatcher's equals: either answer is a refusal nobody could judge
+    const own = moderateContent({ images: [png(1)] }, { guards: [ImageGuardrail.create({ id: 'images', timeoutMs: 10, checks: [lateSender(told, begun)] })], context });
+    await begun.reached(1);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(await own).toMatchObject({ outcome: 'refuse', unavailable: true });
 
     // a required guard's shorter deadline, the dispatcher's: the guard's own is the default 15 s
-    const required = withRequiredPosture('images', ImageGuardrail.create({ id: 'images', checks: [lateSender(told)] }), { id: 'images', stages: ['input'], timeoutMs: 10 });
-    const input = { userId: 'user-1', sessionId: 'session-1', textInput: null, visionInputs: [png(1)] } as unknown as AgentOSInput;
-    expect((await ParallelGuardrailDispatcher.evaluateInput([required], input, context)).evaluation).toMatchObject(timedOut);
+    const answered = ParallelGuardrailDispatcher.evaluateInput([required(ImageGuardrail.create({ id: 'images', checks: [lateSender(told, begun)] }), 10)], oneImage(), context);
+    await begun.reached(2);
+    await vi.advanceTimersByTimeAsync(10);
+    expect((await answered).evaluation).toMatchObject(timedOut);
 
-    // both checks wake at 100 ms, after the dispatcher answered: told to stop, they send nothing
-    await sleep(150);
+    // both checks wake 100 ms after they started, after the dispatcher answered: told to stop, they send nothing
+    await vi.advanceTimersByTimeAsync(100);
     expect(told).toEqual([true, true]);
     expect(requests).not.toHaveBeenCalled();
 
@@ -386,12 +410,33 @@ describe('the image guard: the deadline every check receives', () => {
       await fetch('https://vendor.example/moderate', { method: 'POST', signal: image.deadlineSignal });
       return { verdict: 'pass' };
     });
-    const sent = await moderateContent({ images: [png(1)] }, { guards: [ImageGuardrail.create({ id: 'images', timeoutMs: 10, checks: [inFlight] })], context });
+    const decision = moderateContent({ images: [png(1)] }, { guards: [ImageGuardrail.create({ id: 'images', timeoutMs: 10, checks: [inFlight] })], context });
+    await sent.reached(1);
+    await vi.advanceTimersByTimeAsync(10);
     // the stopped request throws, so the guard may answer the image unavailable before the dispatcher's timeout does
-    expect(sent).toMatchObject({ outcome: 'refuse', unavailable: true });
-    await sleep(150);
+    expect(await decision).toMatchObject({ outcome: 'refuse', unavailable: true });
     expect(requests).toHaveBeenCalledTimes(1);
     expect(stopped()).toBe(1);
+  });
+
+  it('stops a check at the guard\'s own deadline when the dispatcher would wait longer', async () => {
+    const { requests } = vendor();
+    const begun = arrivals();
+    const told: boolean[] = [];
+    const signals: (AbortSignal | undefined)[] = [];
+    // the guard's own deadline is 10 ms; as a required guard the dispatcher waits 1 s for it
+    const answered = ParallelGuardrailDispatcher.evaluateInput([required(ImageGuardrail.create({ id: 'images', timeoutMs: 10, checks: [lateSender(told, begun, signals)] }), 1_000)], oneImage(), context);
+    await begun.reached(1);
+    await vi.advanceTimersByTimeAsync(9);
+    expect(signals[0]?.aborted).toBe(false);
+    // the guard's own deadline passes, long before the dispatcher's and before the check wakes to send
+    await vi.advanceTimersByTimeAsync(1);
+    expect(signals[0]?.aborted).toBe(true);
+    await vi.advanceTimersByTimeAsync(90);
+    // the guard answers itself, ahead of the dispatcher's deadline: the image is refused, and nothing was sent
+    expect((await answered).evaluation).toMatchObject({ action: 'block', reasonCode: 'IMAGE_CHECK_UNAVAILABLE', metadata: { failClosed: true, imageIndex: 0, checkId: 'model' } });
+    expect(told).toEqual([true]);
+    expect(requests).not.toHaveBeenCalled();
   });
 
   it('is live while the checks run and stopped once the guard has answered', async () => {
@@ -411,7 +456,7 @@ describe('the image guard: the deadline every check receives', () => {
   });
 
   it('refuses as unavailable an image whose last check the deadline stopped, though an earlier check passed it', async () => {
-    const { requests, stopped } = vendor();
+    const { requests, stopped, sent } = vendor();
     const first = passing('first', 'classify');
     // a signal whose stopped request throws and is skipped, and a check that answers pass once its request is stopped
     const skipped = check('signal', 'classify', async (image) => {
@@ -422,10 +467,13 @@ describe('the image guard: the deadline every check receives', () => {
       try { await fetch('https://vendor.example/moderate', { method: 'POST', signal: image.deadlineSignal }); } catch { /* stopped */ }
       return { verdict: 'pass' };
     });
-    for (const last of [skipped, lenient]) {
-      const decision = await moderateContent({ images: [png(1)] }, { guards: [ImageGuardrail.create({ id: 'images', timeoutMs: 10, checks: [first, last] })], context });
-      // the guard answers at its own deadline, which comes before the dispatcher's: never an allow
-      expect(decision).toMatchObject({ outcome: 'refuse', unavailable: true });
+    for (const [n, last] of [skipped, lenient].entries()) {
+      // the guard's own 10 ms deadline; the dispatcher waits 1 s, so what is read is the guard's own answer
+      const answered = ParallelGuardrailDispatcher.evaluateInput([required(ImageGuardrail.create({ id: 'images', timeoutMs: 10, checks: [first, last] }), 1_000)], oneImage(), context);
+      await sent.reached(n + 1);
+      await vi.advanceTimersByTimeAsync(10);
+      // past its deadline the guard's own answer is never an allow
+      expect((await answered).evaluation).toMatchObject({ action: 'block', reasonCode: 'IMAGE_CHECK_UNAVAILABLE', metadata: { failClosed: true, imageIndex: 0, checkId: last.id } });
     }
     expect(requests).toHaveBeenCalledTimes(2);
     expect(stopped()).toBe(2);
