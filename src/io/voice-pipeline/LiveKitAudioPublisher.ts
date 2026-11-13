@@ -799,22 +799,27 @@ export class LiveKitAudioPublisher {
    * a native chunk's wait asks; an aborted `signal` ends that wait at once. The receipt is then the publisher's own, with the chunk's samples and rate.
    */
   private async played(pending: ParticipantChunk, generation: VoiceGeneration, sequence: number, signal: AbortSignal): Promise<PlaybackReceipt> {
-    if (pending.acks === this.acks) {
-      try {
-        // The queue counts once the chunk is on it, also for a wait begun while the track was prepared or the mark set.
-        const [receipt] = await Promise.all([pending.acks.wait(generation, sequence, signal), (async () => { await pending.captured; await this.source!.waitForPlayout(); })()]);
-        return receipt;
-      } catch (error) {
-        // Only the close of an unlinked participant's store lets the wait go on without its receipt.
-        if (pending.acks === this.acks || signal.aborted) throw error;
-      }
-    }
     let abort: (() => void) | undefined;
     const aborted = new Promise<never>((_resolve, reject) => {
       abort = () => reject(new Error('publisher cancelled'));
       signal.addEventListener('abort', abort, { once: true }); if (signal.aborted) abort();
     });
+    aborted.catch(() => {});
     try {
+      if (pending.acks === this.acks) {
+        try {
+          // The queue counts once the chunk is on it, also for a wait begun while the track was prepared or the mark set.
+          const answered = pending.acks.wait(generation, sequence, signal);
+          const drained = (async () => { await pending.captured; await this.source!.waitForPlayout(); })();
+          // The receipt's wait stops listening for the abort once the page answers; from then on the abort is raced with
+          // the capture and the drain, so a wait aborted while the chunk's frames still wait for the track ends at once.
+          const [receipt] = await Promise.all([answered, Promise.race([drained, answered.then(() => aborted)])]);
+          return receipt;
+        } catch (error) {
+          // Only the close of an unlinked participant's store lets the wait go on without its receipt.
+          if (pending.acks === this.acks || signal.aborted) throw error;
+        }
+      }
       // The queue counts once the chunk is on it: a drain before its frames are captured proves nothing of it.
       await Promise.race([(async () => { await pending.captured; await this.source!.waitForPlayout(); })(), aborted]);
       return pending.receipt;
