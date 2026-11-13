@@ -28,8 +28,11 @@ export interface RunEmulatedToolLoopOptions {
    */
   currentTools?: () => ITool[];
   messages: EmulatedLoopMessage[];
-  /** Buffered model call. Returns the full assistant text + usage. */
-  callModel: (messages: EmulatedLoopMessage[]) => Promise<{ text: string; usage?: { totalTokens?: number } }>;
+  /**
+   * Buffered model call. Returns the full assistant text + usage, and the
+   * model's refusal message when the reply holds one.
+   */
+  callModel: (messages: EmulatedLoopMessage[]) => Promise<{ text: string; usage?: { totalTokens?: number }; refusal?: string }>;
   maxRoundtrips: number;
   /** Execution context passed to each tool.execute(). */
   toolContext?: ToolExecutionContext;
@@ -82,7 +85,10 @@ export interface RunEmulatedToolLoopOptions {
 export interface EmulatedToolLoopResult {
   text: string;
   toolCalls: EmulatedToolCallRecord[];
-  finishReason: 'stop' | 'tool-calls';
+  /** `refusal` when the reply that ended the loop held the model's refusal message, which is then in `refusal`. */
+  finishReason: 'stop' | 'tool-calls' | 'refusal';
+  /** The model's refusal message. Present only with `finishReason: 'refusal'`. */
+  refusal?: string;
   totalTokens: number;
 }
 
@@ -90,7 +96,9 @@ export interface EmulatedToolLoopResult {
  * Buffered prompt-based tool loop. Renders the tool system block, then on each
  * roundtrip calls the model (buffered), parses <tool_call> blocks, executes the
  * matched tools, appends <tool_response> blocks, and repeats until the model
- * replies with no tool calls or maxRoundtrips is hit.
+ * replies with no tool calls or maxRoundtrips is hit. A reply with no tool
+ * calls that holds the model's refusal message ends the loop with finish
+ * reason `refusal` and the message.
  */
 export async function runEmulatedToolLoop(
   opts: RunEmulatedToolLoopOptions
@@ -115,11 +123,12 @@ export async function runEmulatedToolLoop(
         messages[0] = { role: 'system', content: renderToolSystemBlock(current) };
       }
     }
-    const { text, usage } = await opts.callModel(messages);
+    const { text, usage, refusal: modelRefusal } = await opts.callModel(messages);
     totalTokens += usage?.totalTokens ?? 0;
     const { calls, cleanedText, parseErrors } = parseToolCalls(text);
 
     if (calls.length === 0 && parseErrors.length === 0) {
+      if (modelRefusal) return { text: cleanedText, toolCalls, finishReason: 'refusal', refusal: modelRefusal, totalTokens };
       return { text: cleanedText, toolCalls, finishReason: 'stop', totalTokens };
     }
 

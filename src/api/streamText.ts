@@ -1028,9 +1028,12 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             // its usage is counted above, and the stream stops here.
             opts.abortSignal?.throwIfAborted();
             const cc = r.choices?.[0]?.message?.content;
+            const refused = r.choices?.[0]?.refusal;
             return {
               text: typeof cc === 'string' ? cc : ((cc as any)?.text ?? ''),
               usage: { totalTokens: r.usage?.totalTokens ?? 0 },
+              // The model's refusal message: the loop ends on it as a refusal.
+              ...(typeof refused === 'string' && refused ? { refusal: refused } : {}),
             };
           },
         });
@@ -1038,6 +1041,12 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         // signal's reason, once the round has run, instead of settling it.
         opts.abortSignal?.throwIfAborted();
         finalText = loopResult.text;
+        // A loop that ended on the model's refusal settles the stream on it:
+        // the finish reason follows lastStepFinishReason where the stream ends.
+        if (loopResult.refusal !== undefined) {
+          lastStepFinishReason = 'refusal';
+          finalRefusal = loopResult.refusal;
+        }
         const shimToolCalls: ToolCallRecord[] = loopResult.toolCalls.map((c) => ({
           name: c.name,
           args: c.args,
@@ -1443,7 +1452,10 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               ...(lastServiceTier !== undefined ? { responseServiceTier: lastServiceTier } : {}),
             });
           }
-          resolveText!(finalText);
+          // A refused step with no text of its own resolves the text empty,
+          // as generateText() returns it: finalText may hold what an earlier
+          // tool step wrote, which is not the answer the model declined to give.
+          resolveText!(stepRefusal && !effectiveStepText ? '' : finalText);
           resolveUsage!(usage); resolveResponseModel!(lastResponseModelId); resolveServiceTier!(lastServiceTier);
           resolveToolCalls!(allToolCalls);
           resolveFinishReason!(stepFinish);

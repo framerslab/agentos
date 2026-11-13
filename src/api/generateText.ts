@@ -3046,9 +3046,12 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             // its usage is counted above, and the call stops here.
             opts.abortSignal?.throwIfAborted();
             const cc = r.choices?.[0]?.message?.content;
+            const refused = r.choices?.[0]?.refusal;
             return {
               text: typeof cc === 'string' ? cc : ((cc as any)?.text ?? ''),
               usage: { totalTokens: r.usage?.totalTokens ?? 0 },
+              // The model's refusal message: the loop ends on it as a refusal.
+              ...(typeof refused === 'string' && refused ? { refusal: refused } : {}),
             };
           },
         });
@@ -3092,6 +3095,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             ...(c.error ? { error: c.error } : {}),
           })) as ToolCallRecord[],
           finishReason: loopResult.finishReason,
+          ...(loopResult.refusal !== undefined ? { refusal: loopResult.refusal } : {}),
           plan: resolvedPlan,
         };
       };
