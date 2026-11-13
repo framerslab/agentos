@@ -202,4 +202,23 @@ describe('a governed tool and the clock, SQLite', () => {
     expect(governance(await governed.execute(muteOf(message('m5')), CONTEXT)).outcome).toBe('executed');
     expect(mute.execute).toHaveBeenCalledTimes(2);
   });
+
+  it('a tool that runs past the lease and then fails is not counted: the lease is renewed while it runs', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
+    vi.setSystemTime(START);
+    const limiter = new SqlActionLimiter({ db, rules: ROOM_HOUR, tablePrefix: 'gt_g', requireShared: false });
+    const policy: GovernedToolPolicy<MuteArgs> = { ...MUTE_POLICY, limits: ROOM_HOUR };
+    // a tool that takes 90 seconds, past the 60-second lease; a reconcile pass runs before it answers that it failed
+    const slow = muteTool(async () => {
+      await new Promise<void>((resolve) => { setTimeout(resolve, 90_000); });
+      await limiter.reconcile();
+      return { success: false, error: 'nothing changed' };
+    });
+    const result = await settled(governTool(slow, policy, governanceOf(limiter)).execute(muteOf(message('m1')), CONTEXT), 30_000);
+    expect(governance(result).outcome).toBe('failed');
+    expect(await db.all<{ state: string }>(`SELECT state FROM gt_g_w${HOUR}_reservations`)).toEqual([{ state: 'released' }]);
+    // the room's one action an hour is still there
+    const mute = muteTool();
+    expect(governance(await governTool(mute, policy, governanceOf(limiter)).execute(muteOf(message('m2')), CONTEXT)).outcome).toBe('executed');
+  });
 });
