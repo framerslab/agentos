@@ -916,12 +916,16 @@ describe("the ledger's state mark", () => {
     await pair.primary.exec(refusing(hash));
     await expect(ledger.markForgotten(ALICE)).rejects.toThrow(/refused/);
     await pair.primary.exec('DROP TRIGGER refuse_one');
+    // The copy holds the time the first try gave the tombstone.
+    const first = await valueOf(pair.copy, hash);
+    expect(first).toBeDefined();
     // The call is tried again at a later millisecond.
     await new Promise((resolve) => setTimeout(resolve, 5));
 
     expect(await ledger.markForgotten(ALICE)).toEqual({ form: 'unkeyed', written: true });
 
-    expect(await valueOf(pair.primary, hash)).toBe(await valueOf(pair.copy, hash));
+    expect(await valueOf(pair.primary, hash)).toBe(first);
+    expect(await valueOf(pair.copy, hash)).toBe(first);
     await closePair(pair);
     pair = await openPair(dir);
     await expect(ForgottenLedger.open(pair)).resolves.toBeInstanceOf(ForgottenLedger);

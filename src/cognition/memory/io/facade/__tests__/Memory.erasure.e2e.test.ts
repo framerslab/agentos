@@ -277,6 +277,23 @@ describe('deleting the document chunks a trace was filed from', () => {
   it('deletes the chunks, their pictures and an emptied document with the option', async () => {
     await deletesChunksPicturesAndAnEmptiedDocument(await facade());
   });
+
+  it('deletes on a later call the document whose delete failed after its chunks', async () => {
+    const { memory, brain } = await facade();
+    const trace = await memory.remember('The handbook opens with the leave policy.', { scope: 'user', scopeId: 'ana' });
+    await plantDocument(brain, { traceIds: [trace.id] });
+    // The document's own row cannot be deleted once its chunks are.
+    await brain.run("CREATE TRIGGER hold_documents BEFORE DELETE ON documents BEGIN SELECT RAISE(ABORT, 'the document is held'); END");
+    await expect(memory.deleteTraces([trace.id], { documentChunks: 'delete' })).rejects.toThrow('the document is held');
+    await brain.run('DROP TRIGGER hold_documents');
+
+    expect(await memory.deleteTraces([trace.id], { documentChunks: 'delete' })).toEqual({ deleted: 1 });
+
+    // The retry finds the document again by its chunks, and deletes it with them.
+    expect(await countOf(brain, 'documents')).toBe(0);
+    expect(await countOf(brain, 'document_chunks')).toBe(0);
+    expect(await countOf(brain, 'document_images')).toBe(0);
+  });
 });
 
 describe('deleting the traces that name a user', () => {
