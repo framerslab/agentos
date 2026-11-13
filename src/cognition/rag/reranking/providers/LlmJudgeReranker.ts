@@ -101,12 +101,13 @@ export class LlmJudgeReranker implements IRerankerProvider {
    * Scores the first `maxPointwiseDocuments` documents, ranks the `pointwiseTopK` best of them, and answers every
    * scored document: the ones the ranking names, in its order (an id it repeats once, an id it was not given passed
    * over), then the rest by score, the input order breaking a tie. When the ranking call fails, runs past the
-   * timeout or does not answer a JSON array, the scores order them all. With `topN` the answer is cut to that many.
+   * timeout, does not answer a JSON array or names none of the documents it was given, the scores order them all. With `topN` the answer is cut to that many.
    * `relevanceScore` is `1 - i / n` for the answer's `i`-th document (from 0) of `n`. The diagnostics name this
    * provider (`llm-judge`), `rankingModel` (else `''`) and the documents it scored, and in `providerMetrics` what was
    * put in for an answer the model did not give: `scoringFailures`, the documents scored 0 because their batch's
    * call failed, ran past the timeout or did not answer a JSON array, or because their own entry was missing or not
-   * a number; and `listwiseFailed`, true when the ranking call failed and the scores ordered the answer.
+   * a number; and `listwiseFailed`, true when the ranking call failed or named none of the documents it was given, so
+   * the scores ordered the answer.
    */
   async rerank(input: RerankerInput, config: RerankerRequestConfig): Promise<RerankerOutput> {
     const startedAt = Date.now();
@@ -126,8 +127,9 @@ export class LlmJudgeReranker implements IRerankerProvider {
         ranked = await this.listwiseRank(input.query, candidates, timeoutMs);
       } catch {
         ranked = [];
-        listwiseFailed = true;
       }
+      // A ranking that failed, or that named none of the candidates (`[]`, or ids it was not given), ordered nothing.
+      listwiseFailed = ranked.length === 0;
     }
 
     const placed = new Set(ranked);
