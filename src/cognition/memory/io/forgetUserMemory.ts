@@ -120,15 +120,82 @@ export async function deleteScopeWithDocuments(memory: Memory, scope: string, sc
 }
 
 /**
+ * Deletes for good what a user said under scopes that are not theirs (the traces whose metadata names them as
+ * `turnUserId`), with the document chunks those traces were filed from, and each page of another user's or session's
+ * conversation compiled from such a trace.
+ *
+ * Under each such conversation scope the pages go first, each whole, after the scope's registry row names the page's
+ * other sources for the next compile to build the page again from. While a page is left, the scope's traces of the
+ * user stay too, so the deletion made again finds the page by them. Once the traces are deleted, the call waits for a
+ * compile of the scope that is running, which may have read them first, and deletes the page that compile wrote.
+ * The user's own conversation keys (`ownKeys`) are left to the caller.
+ */
+async function deleteWhatTheUserSaidElsewhere(input: {
+  memory: Memory;
+  wiki: { storeFor(scopeId: string): SubjectPages };
+  userId: string;
+  ownKeys: readonly string[];
+  pages: ForgetMemoryReport['pages'];
+  tally: { deleted: number };
+}): Promise<void> {
+  const { memory, wiki, pages, tally } = input;
+  const named = await memory.tracesNamingUser(input.userId);
+  const namedIds = new Set(named.map((trace) => trace.id));
+  const byScope = new Map<string, string[]>();
+  const elsewhere: string[] = [];
+  for (const trace of named) {
+    const owner = trace.scope === CONVERSATION_SCOPE ? parseConversationScopeKey(trace.scopeId)?.subject : undefined;
+    if (owner && owner.kind !== 'operator' && !input.ownKeys.includes(trace.scopeId)) {
+      byScope.set(trace.scopeId, [...(byScope.get(trace.scopeId) ?? []), trace.id]);
+    } else {
+      elsewhere.push(trace.id);
+    }
+  }
+
+  /** Deletes the scope's pages compiled from what the user said; true when one of them is left. */
+  const deletePagesBuiltFrom = async (scopeId: string): Promise<boolean> => {
+    const store = wiki.storeFor(scopeId);
+    let left = false;
+    for (const page of await store.listPages()) {
+      if (!page.sources.some((id) => namedIds.has(id))) continue;
+      try {
+        await memory.addRebuildSources(
+          scopeId,
+          page.sources.filter((id) => !namedIds.has(id)),
+        );
+        await store.deletePage(page.id);
+        pages.deleted += 1;
+      } catch (error) {
+        left = true;
+        pages.failed.push({ id: page.id, reason: messageOf(error) });
+      }
+    }
+    return left;
+  };
+
+  tally.deleted += (await memory.deleteTraces(elsewhere, { documentChunks: 'delete' })).deleted;
+  for (const [scopeId, ids] of byScope) {
+    if (await deletePagesBuiltFrom(scopeId)) continue;
+    tally.deleted += (await memory.deleteTraces(ids, { documentChunks: 'delete' })).deleted;
+    // A compile of the scope that read them before they went writes its page when it ends: that page goes too. A
+    // compile that starts after the delete no longer finds them.
+    await memory.waitForScopeChanges(scopeId);
+    await deletePagesBuiltFrom(scopeId);
+  }
+}
+
+/**
  * Deletes one subject's memory from a store for good and keeps it deleted.
  *
  * In order: the subject's pending writes and compiles are waited for (`drain`); the tombstone is written to the
  * ledger's copy and then to the store, and from then on every new write of the subject is refused; the subject's
  * conversation traces are deleted under this agent's key and under every other agent's key of the subject, the
  * soft-deleted rows, the graph copies, the full-text entries and the document chunks with them; for a user, the
- * traces that name the user under other scopes; each compiled page with its chunks; the scope's registry row; for the
- * user older memory is attributed to (`legacy`), that memory and the attribution; then the
- * vector index is written again from what is left, and the write-ahead log is emptied. A store that throws is named as
+ * traces that name the user under other scopes, after each page of another user or session compiled from one of
+ * them, which the next compile builds again from that subject's own traces; each compiled page of the subject with
+ * its chunks; the scope's registry row; for the user older memory is attributed to (`legacy`), that memory and the
+ * attribution; then the vector index is written again from what is left, and the write-ahead log is emptied. A
+ * page left keeps the traces it was found by, so the deletion made again finds it. A store that throws is named as
  * not reached and the next one still runs. No model call is made, and `Memory.forget()` (a soft delete) is never used.
  *
  * @returns The report. One `memory.forget_done` line is logged with its counts.
@@ -179,17 +246,20 @@ export async function forgetUserMemory(options: ForgetUserMemoryOptions): Promis
     }
     traces += conversation;
 
-    // What the user said on someone else's session, filed under that session's scope.
+    // What the user said on someone else's session, filed under that session's scope, with each page of that scope
+    // compiled from it.
     let naming: ForgetMemoryReport['stores'][number] | undefined;
     if (subject.kind === 'user') {
       const store = 'traces that name the user under other scopes';
+      // Counted as they go, so the traces deleted before a failure still count for the vector index.
+      const tally = { deleted: 0 };
       try {
-        const { deleted } = await memory.deleteTracesNamingUser(subject.id);
-        traces += deleted;
-        naming = { store, reached: true, deleted };
+        await deleteWhatTheUserSaidElsewhere({ memory, wiki: options.wiki, userId: subject.id, ownKeys: keys, pages, tally });
+        naming = { store, reached: true, deleted: tally.deleted };
       } catch (error) {
         naming = { store, reached: false, reason: messageOf(error) };
       }
+      traces += tally.deleted;
     }
 
     // Pages, one by one, so each page that fails is named. A page is deleted whole, with its chunks.

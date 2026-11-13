@@ -1370,15 +1370,41 @@ export class Memory {
     if (typeof userId !== 'string' || userId === '') {
       throw new TypeError('Memory.deleteTracesNamingUser: userId must be a non-empty string');
     }
-    await this._initPromise;
-    const rows = await this._brain.all<{ id: string }>(
-      `SELECT id FROM memory_traces WHERE brain_id = ? AND CAST(${this._brain.features.dialect.jsonExtract('metadata', '$.turnUserId')} AS TEXT) = ?`,
-      [this._brain.brainId, userId],
-    );
     return this.deleteTraces(
-      rows.map((row) => row.id),
+      (await this.tracesNamingUser(userId)).map((trace) => trace.id),
       { documentChunks: 'delete' },
     );
+  }
+
+  /**
+   * Every trace whose metadata names the user as `turnUserId`, under any scope and under none, live or soft-deleted,
+   * each with the scope and the scope id it is filed under (`''` for none). A person's deletion reads them first, to
+   * find the pages of another person's conversation that were compiled from them.
+   *
+   * @throws TypeError when `userId` is not a non-empty string.
+   */
+  async tracesNamingUser(userId: string): Promise<Array<{ id: string; scope: string; scopeId: string }>> {
+    if (typeof userId !== 'string' || userId === '') {
+      throw new TypeError('Memory.tracesNamingUser: userId must be a non-empty string');
+    }
+    await this._initPromise;
+    const rows = await this._brain.all<{ id: string; scope: string; scope_id: string | null }>(
+      `SELECT id, scope, scope_id FROM memory_traces
+        WHERE brain_id = ? AND CAST(${this._brain.features.dialect.jsonExtract('metadata', '$.turnUserId')} AS TEXT) = ?`,
+      [this._brain.brainId, userId],
+    );
+    return rows.map((row) => ({ id: row.id, scope: row.scope, scopeId: row.scope_id ?? '' }));
+  }
+
+  /**
+   * Resolves once every compile, scope delete and page delete of one conversation scope that this store's facades in
+   * this process started before the call has settled. A person's deletion waits with it for a compile of another
+   * person's conversation that read what the person said before it was deleted, and then deletes the page that compile
+   * wrote. Writers in other processes are not waited for.
+   */
+  async waitForScopeChanges(scopeId: string): Promise<void> {
+    await this._initPromise;
+    await this._oneScopeChangeAtATime(scopeId, async () => undefined);
   }
 
   /**
