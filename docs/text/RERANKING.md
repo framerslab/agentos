@@ -225,6 +225,8 @@ const ranked = await service.rerankChunks(query, chunks).catch((error) => {
 
 ## Memory rerank
 
+A memory rerank reorders what a turn's recall found: the vector recall's list or, under `retrieval: 'hybrid'`, the cut of the one pool that meaning, exact words and recency are fused into ([Recall](../memory/COGNITIVE_MEMORY.md#recall); [Lexical and Hybrid Search](./LEXICAL_AND_HYBRID_SEARCH.md#other-lexical-search-in-the-package) sets the exact-words leg beside the package's other lexical search).
+
 Memory recall (`CognitiveMemoryManager`, and through it a `gmi()` or `agent({ runtime: 'gmi' })` agent's memory block) reranks with `recall.rerank`, on `memory.recall` of `agent()` and `gmi()` and on a manager's `recall`:
 
 ```typescript
