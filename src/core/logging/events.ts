@@ -137,7 +137,7 @@ export const AGENTOS_EVENTS = {
   // A host's memory hook threw, rejected or timed out; the turn went on without it.
   'memory.hook_failed': { hook: { enum: ['getContext', 'observe', 'memoryPolicy', 'screen'] }, type: 'word', code: 'word' },
   // Cognitive memory's recall (src/cognition/memory/retrieval/recall). No memory text, query text or id is ever a field.
-  'memory.recall.leg_absent': { leg: { enum: ['dense', 'exact_words', 'recency'] }, reason: { enum: ['no_store', 'no_embedder', 'no_index', 'no_scope_filter', 'query_error', 'disabled'] } },
+  'memory.recall.leg_absent': { leg: { enum: ['dense', 'exact_words', 'recency'] }, reason: { enum: ['no_store', 'no_embedder', 'no_index', 'no_scope_filter', 'no_scopes', 'query_error', 'disabled'] } },
   'memory.recall.rerank_skipped': { provider: { enum: ['local', 'llm'] }, reason: { enum: ['loading', 'timeout', 'error', 'backoff'] } },
   'memory.recall.rerank_unavailable': { provider: { enum: ['local'] }, reason: { enum: ['missing_dependency', 'load_failed'] } },
   'memory.recall.budget_clamped': { requested: 'int', effective: 'int', hop: 'int', reason: { enum: ['prompt_share', 'zero_remaining', 'invalid'] } },

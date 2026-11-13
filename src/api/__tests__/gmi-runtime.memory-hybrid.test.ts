@@ -29,7 +29,7 @@ import type { ChatMessage } from '../../core/llm/providers/IProvider';
 let n = 0;
 const key = () => `k-memory-hybrid-${++n}`;
 
-type Candidate = { id: string; ranks: { dense?: number; exact_words?: number; recency?: number }; outcome: string; reason?: string; duplicateOf?: string; section?: string };
+type Candidate = { id: string; ranks: { dense?: number; exact_words?: number; recency?: number }; outcome: string; reason?: string; duplicateOf?: string; reserve?: boolean; section?: string };
 type Capture = {
   retrieval: string;
   lexicalBackend: string;
@@ -305,6 +305,127 @@ describe("agent({ runtime: 'gmi' }) memory.recall.retrieval", () => {
     const included = recall.candidates.filter((c) => c.outcome === 'included' && c.section !== 'involuntary');
     expect(included.length).toBeGreaterThan(0);
     for (const c of included) expect(c.section, c.id).toBe('recall');
+  });
+
+  it("'hybrid' on a GMI turn: a correction that changes one word in a longer memory is sent in place of the text it corrects", async () => {
+    const sister = 'My sister Ana moved out of the old riverside flat last spring and now lives in';
+    const statements = [`${sister} Porto.`, 'I water the tomatoes every second day.', `${sister} Lisbon.`];
+    const question = 'Does my sister Ana still live in Porto?';
+    const dense = await ask(undefined, statements, question);
+    // Precondition: dense recall shows both texts, so the hybrid block showing one is the dedupe's doing.
+    expect(dense.block).toContain('lives in Porto');
+    expect(dense.block).toContain('lives in Lisbon');
+
+    const hybrid = await ask({ retrieval: 'hybrid' }, statements, question);
+    expect(hybrid.block).toContain('lives in Lisbon');
+    expect(hybrid.block).not.toContain('lives in Porto');
+    // The old text ranks first by exact words (the question names its city) and is the one dropped. (The session's
+    // three "Noted." replies are one memory too, so they are not the only candidates the dedupe drops.)
+    const old = hybrid.memoryRecall.candidates.find((c) => c.ranks.exact_words === 1)!;
+    expect(old).toMatchObject({ outcome: 'left_out', reason: 'dedupe' });
+    expect(hybrid.memoryRecall.candidates.find((c) => c.id === old.duplicateOf)).toMatchObject({ outcome: 'included', section: 'recall' });
+  });
+
+  it("'hybrid' on a GMI turn: a memory question sends the exact-words hit the cut left out; the same words without the question leave it out for the budget", async () => {
+    type Reserved = Omit<Capture, 'candidates'> & { memoryQuestionReserve: { fired: boolean; added: number }; candidates: Array<Candidate & { reserve?: boolean }> };
+    const GOLD = 'The bike shed code is XQ7Z.';
+    // Filed first, then 64 notes whose words are the questions' stop words and a number: by meaning the notes are
+    // nearer, so the dense leg's sixty are notes, and no note shares a word the exact-words leg reads. Only the code's
+    // exact word finds the oldest memory, and its fused score sorts it after every note the dense leg returned.
+    const statements = [GOLD, ...Array.from({ length: 64 }, (_, i) => `Note ${i + 10}: what it is you and I are on, and where it is.`)];
+    const k = key();
+    const emb = key();
+    const s = script('openai', k, { replies: [...statements.map(() => reply.text('Noted.')), reply.text('Noted.'), reply.text('Noted.')] });
+    script('openai', emb, { replies: [] });
+    vi.stubEnv('OPENAI_API_KEY', emb);
+    const a = agent({
+      runtime: 'gmi',
+      name: 'Shed',
+      provider: 'openai',
+      model: 'stub-model',
+      apiKey: k,
+      fallbackProviders: [],
+      cognition: { memory: { embedding: { provider: 'openai' }, recall: { retrieval: 'hybrid' } }, mechanisms: false },
+    } as unknown as AgentOptions);
+    try {
+      const session = a.session('s');
+      for (const statement of statements) await session.send(statement);
+      session.clear();
+      const plain = (await session.send('What is it you and I are on, and where is XQ7Z?')) as unknown as { memoryRecall: Reserved };
+      session.clear();
+      const asked = (await session.send('Do you remember what it is you and I are on, and where is XQ7Z?')) as unknown as { memoryRecall: Reserved };
+      const plainBlock = memoryBlockOf(s, statements.length);
+      const askedBlock = memoryBlockOf(s, statements.length + 1);
+
+      // Without a memory question: ranked first by exact words, never by meaning, and cut for the budget.
+      expect(plain.memoryRecall.memoryQuestionReserve).toEqual({ fired: false, added: 0 });
+      const left = plain.memoryRecall.candidates.find((c) => c.ranks.exact_words === 1)!;
+      expect(left).toMatchObject({ outcome: 'left_out', reason: 'budget' });
+      expect(left.ranks.dense).toBeUndefined();
+      expect(left.reserve).toBeUndefined();
+      expect(plainBlock).not.toContain(GOLD.slice(0, -1));
+
+      // With one: the same memory is reserved, shown in the recall section, and the model receives it.
+      expect(asked.memoryRecall.memoryQuestionReserve).toEqual({ fired: true, added: 1 });
+      expect(asked.memoryRecall.candidates.find((c) => c.id === left.id)).toMatchObject({ reserve: true, outcome: 'included', section: 'recall' });
+      expect(asked.memoryRecall.candidates.filter((c) => c.reserve)).toHaveLength(1);
+      expect(askedBlock).toContain(GOLD.slice(0, -1));
+      expect(askedBlock.match(/^## Relevant Memories/gm)).toHaveLength(1);
+      expect(events('memory.recall.reserve_fired')).toEqual([expect.objectContaining({ added: 1 })]);
+    } finally {
+      await a.close();
+    }
+  });
+
+  it("'hybrid' with capture 'off' on a GMI turn: a memory question still sends the reserved memory, as with a record", async () => {
+    const GOLD = 'The bike shed code is XQ7Z.';
+    // The fixture of the case above: only the code's exact word finds the oldest memory, and the cut leaves it out.
+    const statements = [GOLD, ...Array.from({ length: 64 }, (_, i) => `Note ${i + 10}: what it is you and I are on, and where it is.`)];
+    const run = async (capture: 'metadata' | 'off') => {
+      logged.length = 0;
+      const k = key();
+      const emb = key();
+      const s = script('openai', k, { replies: [...statements.map(() => reply.text('Noted.')), reply.text('Noted.'), reply.text('Noted.')] });
+      script('openai', emb, { replies: [] });
+      vi.stubEnv('OPENAI_API_KEY', emb);
+      const a = agent({
+        runtime: 'gmi',
+        name: 'Shed',
+        provider: 'openai',
+        model: 'stub-model',
+        apiKey: k,
+        fallbackProviders: [],
+        cognition: { memory: { embedding: { provider: 'openai' }, recall: { retrieval: 'hybrid', capture } }, mechanisms: false },
+      } as unknown as AgentOptions);
+      try {
+        const session = a.session('s');
+        for (const statement of statements) await session.send(statement);
+        session.clear();
+        await session.send('What is it you and I are on, and where is XQ7Z?');
+        session.clear();
+        const asked = (await session.send('Do you remember what it is you and I are on, and where is XQ7Z?')) as unknown as { memoryRecall?: unknown };
+        return {
+          plainBlock: memoryBlockOf(s, statements.length),
+          askedBlock: memoryBlockOf(s, statements.length + 1),
+          memoryRecall: asked.memoryRecall,
+          reserveFired: events('memory.recall.reserve_fired'),
+        };
+      } finally {
+        await a.close();
+      }
+    };
+    const recorded = await run('metadata');
+    const off = await run('off');
+    // Precondition: with a record the memory question reserved the memory and the plain question left it out.
+    expect(recorded.askedBlock).toContain(GOLD.slice(0, -1));
+    expect(recorded.plainBlock).not.toContain(GOLD.slice(0, -1));
+    // With no record the block still reserves the same room: the model receives the memory, and the line counts it.
+    expect(off.memoryRecall).toBeUndefined();
+    expect(off.plainBlock).not.toContain(GOLD.slice(0, -1));
+    expect(off.askedBlock).toContain(GOLD.slice(0, -1));
+    expect(off.askedBlock.match(/^## Relevant Memories/gm)).toHaveLength(1);
+    expect(off.reserveFired).toEqual([expect.objectContaining({ added: 1 })]);
+    expect(recorded.reserveFired).toEqual([expect.objectContaining({ added: 1 })]);
   });
 
   it("'hybrid' on a GMI turn whose question the embedding provider fails on: the dense leg is absent, exact words still put the memory in the block", async () => {

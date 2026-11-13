@@ -542,6 +542,14 @@ export interface ManagerRecallConfig extends MemoryRecallConfig {
    * only. For a bench that tunes them; a product leaves them.
    */
   constants?: Partial<RecallConstants>;
+  /**
+   * Whether a turn is a memory question, for the exact-words reserve of
+   * `retrieval: 'hybrid'`. Replaces the built-in English rule
+   * (`isMemoryQuestion`). A predicate that throws, or answers anything but
+   * `true`, is read as no. A function, so it is set on the manager and has no
+   * persona or JSON form.
+   */
+  memoryQuestion?: (turnText: string) => boolean;
 }
 
 /**
