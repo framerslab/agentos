@@ -16,7 +16,9 @@ import {
   LOCAL_RERANKER_MODELS,
   LOCAL_RERANKER_DEFAULT_WEIGHTS,
 } from '../providers/LocalCrossEncoderReranker';
+import { RerankerService } from '../RerankerService';
 import type { RerankerInput, RerankerRequestConfig } from '../IRerankerService';
+import type { RagRetrievedChunk } from '../../IRetrievalAugmentor';
 
 /** The logits the stub model returns for a document: a number per class. */
 let logitsFor: (doc: string) => number[] = () => [0];
@@ -90,18 +92,58 @@ describe('LocalCrossEncoderReranker', () => {
     it('lists the supported models', () => {
       expect(reranker.getSupportedModels()).toEqual([...LOCAL_RERANKER_MODELS]);
     });
+
+    it('lists exactly the three models whose licences were read, by their canonical ids', () => {
+      expect([...LOCAL_RERANKER_MODELS]).toEqual([
+        'cross-encoder/ms-marco-MiniLM-L6-v2',
+        'cross-encoder/ms-marco-MiniLM-L12-v2',
+        'BAAI/bge-reranker-base',
+      ]);
+    });
+  });
+
+  describe('revision and local files', () => {
+    it('a provider built without defaultModelId loads the canonical cross-encoder/ms-marco-MiniLM-L6-v2', async () => {
+      await reranker.initialize();
+      expect(modelFromPretrained).toHaveBeenCalledWith('cross-encoder/ms-marco-MiniLM-L6-v2', expect.anything());
+      expect(tokenizerFromPretrained).toHaveBeenCalledWith('cross-encoder/ms-marco-MiniLM-L6-v2', expect.anything());
+    });
+
+    it('passes a pinned revision to the tokenizer and the model loads, and passes none without one', async () => {
+      const pinned = new LocalCrossEncoderReranker({ providerId: 'local', revision: 'abc' });
+      await pinned.initialize();
+      expect(modelFromPretrained.mock.calls[0][1]).toMatchObject({ revision: 'abc' });
+      expect((tokenizerFromPretrained.mock.calls[0] as unknown[])[1]).toMatchObject({ revision: 'abc' });
+
+      vi.clearAllMocks();
+      await reranker.initialize();
+      expect(modelFromPretrained.mock.calls[0][1]).not.toHaveProperty('revision');
+      expect((tokenizerFromPretrained.mock.calls[0] as unknown[])[1]).not.toHaveProperty('revision');
+    });
+
+    it('localFilesOnly loads from the cache alone (local_files_only), on both loads', async () => {
+      const offline = new LocalCrossEncoderReranker({ providerId: 'local', localFilesOnly: true, cacheDir: '/tmp/models' });
+      await offline.initialize();
+      expect(modelFromPretrained.mock.calls[0][1]).toMatchObject({ local_files_only: true, cache_dir: '/tmp/models' });
+      expect((tokenizerFromPretrained.mock.calls[0] as unknown[])[1]).toMatchObject({ local_files_only: true, cache_dir: '/tmp/models' });
+
+      vi.clearAllMocks();
+      await reranker.initialize();
+      expect(modelFromPretrained.mock.calls[0][1]).not.toHaveProperty('local_files_only');
+    });
   });
 
   describe('weights file', () => {
     it("loads the default model's quantized file, named, at fp32 so no dtype suffix is added", async () => {
       await reranker.initialize();
 
+      expect(LOCAL_RERANKER_DEFAULT_WEIGHTS['cross-encoder/ms-marco-MiniLM-L6-v2']).toBe('model_quint8_avx2');
       expect(LOCAL_RERANKER_DEFAULT_WEIGHTS['cross-encoder/ms-marco-MiniLM-L-6-v2']).toBe('model_quint8_avx2');
       expect(modelFromPretrained).toHaveBeenCalledWith(
-        'cross-encoder/ms-marco-MiniLM-L-6-v2',
+        'cross-encoder/ms-marco-MiniLM-L6-v2',
         expect.objectContaining({ model_file_name: 'model_quint8_avx2', dtype: 'fp32', quantized: false }),
       );
-      expect(tokenizerFromPretrained).toHaveBeenCalledWith('cross-encoder/ms-marco-MiniLM-L-6-v2', expect.anything());
+      expect(tokenizerFromPretrained).toHaveBeenCalledWith('cross-encoder/ms-marco-MiniLM-L6-v2', expect.anything());
     });
 
     it('loads onnx/model.onnx at fp32 for a model with no listed quantized file', async () => {
@@ -122,7 +164,7 @@ describe('LocalCrossEncoderReranker', () => {
       await custom.initialize();
 
       expect(modelFromPretrained).toHaveBeenCalledWith(
-        'cross-encoder/ms-marco-MiniLM-L-6-v2',
+        'cross-encoder/ms-marco-MiniLM-L6-v2',
         expect.objectContaining({ model_file_name: 'model_qint8_arm64', dtype: 'fp32', cache_dir: '/tmp/models' }),
       );
 
@@ -130,9 +172,26 @@ describe('LocalCrossEncoderReranker', () => {
       const q8 = new LocalCrossEncoderReranker({ providerId: 'local', dtype: 'q8' });
       await q8.initialize();
       expect(modelFromPretrained).toHaveBeenCalledWith(
-        'cross-encoder/ms-marco-MiniLM-L-6-v2',
+        'cross-encoder/ms-marco-MiniLM-L6-v2',
         expect.objectContaining({ model_file_name: 'model', dtype: 'q8', quantized: true }),
       );
+    });
+
+    it('takes modelFileName as a path or with the .onnx extension and loads the same file', async () => {
+      for (const modelFileName of ['onnx/model_quint8_avx2.onnx', 'model_quint8_avx2.onnx', 'onnx/model_quint8_avx2']) {
+        vi.clearAllMocks();
+        const named = new LocalCrossEncoderReranker({ providerId: 'local', modelFileName });
+        const result = await named.rerank(
+          { query: 'q', documents: [{ id: 'a', content: 'aa' }] },
+          { providerId: 'local', modelId: '' },
+        );
+
+        expect(modelFromPretrained).toHaveBeenCalledWith(
+          'cross-encoder/ms-marco-MiniLM-L6-v2',
+          expect.objectContaining({ model_file_name: 'model_quint8_avx2', dtype: 'fp32' }),
+        );
+        expect(result.diagnostics?.providerMetrics).toMatchObject({ modelFile: 'onnx/model_quint8_avx2.onnx' });
+      }
     });
 
     it('loads the model once for repeated reranks', async () => {
@@ -377,6 +436,281 @@ describe('LocalCrossEncoderReranker', () => {
       const next = await r.rerank({ query: 'q', documents: docs.slice(0, 2) }, { providerId: 'local', modelId: 'A' });
       expect(next.diagnostics?.modelId).toBe('B');
       expect(next.results[0].relevanceScore).toBeCloseTo(sigmoid(-1), 6);
+    });
+  });
+
+  describe('session options', () => {
+    const MODEL = 'cross-encoder/ms-marco-MiniLM-L6-v2';
+
+    it('passes intraOpNumThreads and interOpNumThreads to the ONNX session', async () => {
+      const threaded = new LocalCrossEncoderReranker({ providerId: 'local', intraOpNumThreads: 1, interOpNumThreads: 1 });
+      await threaded.initialize();
+
+      expect(modelFromPretrained).toHaveBeenCalledWith(
+        MODEL,
+        expect.objectContaining({ session_options: { intraOpNumThreads: 1, interOpNumThreads: 1 } }),
+      );
+    });
+
+    it('passes only the thread counts given, as whole numbers', async () => {
+      const threaded = new LocalCrossEncoderReranker({ providerId: 'local', intraOpNumThreads: 2.9 });
+      await threaded.initialize();
+
+      expect(modelFromPretrained.mock.calls[0][1].session_options).toEqual({ intraOpNumThreads: 2 });
+    });
+
+    it('sets no session options without a positive thread count, so onnxruntime sizes its own pool', async () => {
+      for (const threads of [undefined, 0, -1, Number.NaN]) {
+        vi.clearAllMocks();
+        const plain = new LocalCrossEncoderReranker({
+          providerId: 'local',
+          intraOpNumThreads: threads,
+          interOpNumThreads: threads,
+        });
+        await plain.initialize();
+
+        expect(modelFromPretrained).toHaveBeenCalledTimes(1);
+        expect(modelFromPretrained.mock.calls[0][1]).not.toHaveProperty('session_options');
+      }
+    });
+  });
+
+  describe('best-piece scoring (pieceMaxChars)', () => {
+    const config: RerankerRequestConfig = { providerId: 'local', modelId: 'cross-encoder/ms-marco-MiniLM-L-6-v2' };
+    /** The texts the tokenizer was handed as `text_pair`, one array per forward pass. */
+    const pairsByPass = () => tokenizerCalls.map((c) => c.options.text_pair as string[]);
+
+    it('splits a document longer than pieceMaxChars at sentence ends, each piece at most that long', async () => {
+      const split = new LocalCrossEncoderReranker({ providerId: 'local', pieceMaxChars: 40 });
+      await split.rerank(
+        {
+          query: 'q',
+          documents: [{ id: 'a', content: 'Alpha beta gamma. Delta epsilon zeta eta. Theta iota kappa lambda mu nu xi.' }],
+        },
+        config,
+      );
+
+      expect(pairsByPass()).toEqual([['Alpha beta gamma.', 'Delta epsilon zeta eta.', 'Theta iota kappa lambda mu nu xi.']]);
+    });
+
+    it('packs short sentences together, splits a long sentence at spaces and cuts only a word longer than a piece', async () => {
+      const cases: Array<{ max: number; content: string; pieces: string[] }> = [
+        { max: 60, content: 'One. Two. Three is here.\nFour on a new line. Five and six and seven and eight and nine.', pieces: ['One. Two. Three is here. Four on a new line.', 'Five and six and seven and eight and nine.'] },
+        { max: 20, content: 'One two three four five six. Seven.', pieces: ['One two three four', 'five six. Seven.'] },
+        { max: 10, content: 'aaaa bbbb cccc ddddddddddddddd', pieces: ['aaaa bbbb', 'cccc', 'dddddddddd', 'ddddd'] },
+        // A cut never splits a character outside the Basic Multilingual Plane (two UTF-16 units).
+        { max: 3, content: '\u{1F600}\u{1F600}\u{1F600}', pieces: ['\u{1F600}', '\u{1F600}', '\u{1F600}'] },
+      ];
+      for (const c of cases) {
+        tokenizerCalls.length = 0;
+        const split = new LocalCrossEncoderReranker({ providerId: 'local', pieceMaxChars: c.max });
+        await split.rerank({ query: 'q', documents: [{ id: 'a', content: c.content }] }, config);
+
+        expect(pairsByPass()).toEqual([c.pieces]);
+        for (const piece of c.pieces) expect(piece.length).toBeLessThanOrEqual(c.max);
+      }
+    });
+
+    it('keeps a character outside the Basic Multilingual Plane whole, even at pieceMaxChars 1', async () => {
+      const split = new LocalCrossEncoderReranker({ providerId: 'local', pieceMaxChars: 1 });
+      await split.rerank({ query: 'q', documents: [{ id: 'a', content: 'a\u{1F600}b' }] }, config);
+
+      expect(pairsByPass()).toEqual([['a', '\u{1F600}', 'b']]);
+    });
+
+    it("scores every piece of every document in the same batches and gives a document its best piece's score", async () => {
+      const best = 'The answer sits right here.';
+      logitsFor = (piece) => [piece === best ? 5 : piece === 'short note' ? 1 : -3];
+      const split = new LocalCrossEncoderReranker({ providerId: 'local', pieceMaxChars: 30, batchSize: 4 });
+      const long = `First filler sentence here. ${best} Last filler bit.`;
+      const result = await split.rerank(
+        {
+          query: 'the query',
+          documents: [
+            { id: 'short', content: 'short note' },
+            { id: 'long', content: long },
+            { id: 'two', content: 'Another long note goes here. And it ends here.' },
+          ],
+        },
+        config,
+      );
+
+      expect(pairsByPass()).toEqual([
+        ['short note', 'First filler sentence here.', best, 'Last filler bit.'],
+        ['Another long note goes here.', 'And it ends here.'],
+      ]);
+      expect(tokenizerCalls.every((c) => c.texts.every((t) => t === 'the query'))).toBe(true);
+      expect(result.results.map((r) => r.id)).toEqual(['long', 'short', 'two']);
+      expect(result.results[0].content).toBe(long);
+      expect(result.results[0].relevanceScore).toBeCloseTo(sigmoid(5), 6);
+      expect(result.results[1].relevanceScore).toBeCloseTo(sigmoid(1), 6);
+      expect(result.results[2].relevanceScore).toBeCloseTo(sigmoid(-3), 6);
+      expect(result.diagnostics?.providerMetrics).toMatchObject({
+        batchSize: 4,
+        forwardPasses: 2,
+        pairsScored: 6,
+        pieceMaxChars: 30,
+      });
+    });
+
+    it('is off by default and for a pieceMaxChars that is not a positive number: each document is one pair', async () => {
+      const content = 'First filler sentence here. The answer sits right here. Last filler bit.';
+      for (const pieceMaxChars of [undefined, 0, -5, Number.NaN]) {
+        tokenizerCalls.length = 0;
+        const plain = new LocalCrossEncoderReranker({ providerId: 'local', pieceMaxChars });
+        const result = await plain.rerank({ query: 'q', documents: [{ id: 'a', content }] }, config);
+
+        expect(pairsByPass()).toEqual([[content]]);
+        expect(result.diagnostics?.providerMetrics).toMatchObject({ forwardPasses: 1, pairsScored: 1 });
+        expect(result.diagnostics?.providerMetrics).not.toHaveProperty('pieceMaxChars');
+      }
+    });
+  });
+
+  describe('a load that fails half way', () => {
+    const input: RerankerInput = { query: 'q', documents: [{ id: 'a', content: 'a' }] };
+    const config: RerankerRequestConfig = { providerId: 'local', modelId: '' };
+
+    it('disposes the model that loaded when the tokenizer fails, on every retry', async () => {
+      const tokenizerError = new Error('tokenizer.json could not be fetched');
+      tokenizerFromPretrained.mockRejectedValueOnce(tokenizerError).mockRejectedValueOnce(tokenizerError);
+      // The model finishes loading after the tokenizer has failed.
+      loadModel = async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        return defaultLoadModel();
+      };
+
+      await expect(reranker.rerank(input, config)).rejects.toBe(tokenizerError);
+      await expect(reranker.rerank(input, config)).rejects.toBe(tokenizerError);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(modelFromPretrained).toHaveBeenCalledTimes(2);
+      expect(modelStub.dispose).toHaveBeenCalledTimes(2);
+
+      // Once the tokenizer loads, the reranker scores and keeps its model.
+      const result = await reranker.rerank(input, config);
+      expect(result.results).toHaveLength(1);
+      expect(modelStub.dispose).toHaveBeenCalledTimes(2);
+    });
+
+    it('rejects as soon as the tokenizer fails, and disposes the model when its load ends later', async () => {
+      const tokenizerError = new Error('tokenizer.json could not be fetched');
+      tokenizerFromPretrained.mockRejectedValueOnce(tokenizerError);
+      // The model's download stalls until the test lets it finish.
+      let finishModelLoad!: () => void;
+      const modelLoaded = new Promise<void>((resolve) => (finishModelLoad = resolve));
+      loadModel = async () => {
+        await modelLoaded;
+        return defaultLoadModel();
+      };
+
+      const outcome = await Promise.race([
+        reranker.rerank(input, config).then(() => 'scored', (error: unknown) => error),
+        new Promise((resolve) => setTimeout(() => resolve('still waiting for the model'), 200)),
+      ]);
+      expect(outcome).toBe(tokenizerError);
+      expect(modelStub.dispose).not.toHaveBeenCalled();
+
+      finishModelLoad();
+      await vi.waitFor(() => expect(modelStub.dispose).toHaveBeenCalledTimes(1));
+    });
+
+    it('starts the next load only after a model that loads after its tokenizer failed has been disposed', async () => {
+      const tokenizerError = new Error('tokenizer.json could not be fetched');
+      tokenizerFromPretrained.mockRejectedValueOnce(tokenizerError);
+      let finishModelLoad!: () => void;
+      const modelLoaded = new Promise<void>((resolve) => (finishModelLoad = resolve));
+      loadModel = async () => {
+        await modelLoaded;
+        return defaultLoadModel();
+      };
+
+      await expect(reranker.rerank(input, config)).rejects.toBe(tokenizerError);
+      // The retry is asked for while the first model is still loading: it waits, so two loads never overlap.
+      const retry = reranker.rerank(input, config);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(modelFromPretrained).toHaveBeenCalledTimes(1);
+
+      finishModelLoad();
+      const result = await retry;
+      expect(result.results).toHaveLength(1);
+      expect(modelFromPretrained).toHaveBeenCalledTimes(2);
+      expect(modelStub.dispose).toHaveBeenCalledTimes(1);
+      expect(modelStub.dispose.mock.invocationCallOrder[0]).toBeLessThan(
+        modelFromPretrained.mock.invocationCallOrder[1],
+      );
+    });
+
+    it("keeps the tokenizer's error when disposing the model throws or rejects", async () => {
+      const tokenizerError = new Error('tokenizer.json could not be fetched');
+      const failures: Array<() => unknown> = [
+        () => {
+          throw new Error('release failed at once');
+        },
+        async () => {
+          throw new Error('release failed later');
+        },
+      ];
+      for (const [k, failure] of failures.entries()) {
+        tokenizerFromPretrained.mockRejectedValueOnce(tokenizerError);
+        modelStub.dispose.mockImplementationOnce(failure);
+
+        await expect(reranker.rerank(input, config)).rejects.toBe(tokenizerError);
+        await vi.waitFor(() => expect(modelStub.dispose).toHaveBeenCalledTimes(k + 1));
+      }
+    });
+
+    it("passes the model's error on when the model fails and the tokenizer loads", async () => {
+      const modelError = new Error('onnx/model_quint8_avx2.onnx could not be read');
+      modelFromPretrained.mockRejectedValueOnce(modelError);
+
+      await expect(reranker.rerank(input, config)).rejects.toBe(modelError);
+      expect(modelStub.dispose).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('a provider that fails to load, through RerankerService', () => {
+    const chunks: RagRetrievedChunk[] = [
+      { id: 'c0', content: 'first', originalDocumentId: 'd0', relevanceScore: 0.9 },
+      { id: 'c1', content: 'second', originalDocumentId: 'd1', relevanceScore: 0.5 },
+      { id: 'c2', content: 'third', originalDocumentId: 'd2', relevanceScore: 0.1 },
+    ];
+
+    it('rerankChunks passes the load error on; rerankChain keeps the order and the scores it was given', async () => {
+      const loadError = new Error('Unauthorized access to file: "tokenizer.json"');
+      tokenizerFromPretrained.mockRejectedValueOnce(loadError).mockRejectedValueOnce(loadError);
+      const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+      const service = new RerankerService({
+        config: { providers: [{ providerId: 'local' }], defaultProviderId: 'local' },
+        logger,
+      });
+      service.registerProvider(reranker);
+
+      await expect(service.rerankChunks('q', chunks)).rejects.toBe(loadError);
+      expect(logger.error).toHaveBeenCalledWith(
+        "RerankerService: Reranking failed with provider 'local'",
+        { error: loadError.message },
+      );
+
+      const kept = await service.rerankChain('q', chunks, [{ provider: 'local', topK: 2 }]);
+      expect(kept.map((c) => c.id)).toEqual(['c0', 'c1', 'c2']);
+      expect(kept.map((c) => c.relevanceScore)).toEqual([0.9, 0.5, 0.1]);
+      expect(kept.every((c) => c.metadata?._rerankerChainStages === '')).toBe(true);
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("Stage 'local' failed"));
+    });
+  });
+
+  describe('initialize() with no model id', () => {
+    it('loads the default model in place of another model loaded before', async () => {
+      await reranker.initialize('BAAI/bge-reranker-base');
+      await reranker.initialize();
+
+      expect(modelFromPretrained.mock.calls.map((call) => call[0])).toEqual([
+        'BAAI/bge-reranker-base',
+        'cross-encoder/ms-marco-MiniLM-L6-v2',
+      ]);
+      const result = await reranker.rerank({ query: 'q', documents: [{ id: 'a', content: 'a' }] }, { providerId: 'local', modelId: '' });
+      expect(result.diagnostics?.modelId).toBe('cross-encoder/ms-marco-MiniLM-L6-v2');
     });
   });
 

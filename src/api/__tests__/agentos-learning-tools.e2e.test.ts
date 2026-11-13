@@ -4,7 +4,8 @@
  * a model (the OpenAI provider class stubbed at its module boundary) that calls them, and the tool results the next
  * model call receives. With the learning flag on, a placeholder user's turn has no learner and the tools refuse
  * (`no_learner`); in mode `off` they refuse (`off`). With the flag off adapt_personality changes an editable trait as
- * before, and the trait it changes reaches no prompt; honesty and emotionality it refuses on every host
+ * before, and the trait it changes reaches no prompt, which carries the persona's own trait paragraph as defined;
+ * honesty and emotionality it refuses on every host
  * (`operator_only`), since only the persona definition sets them.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -39,6 +40,7 @@ vi.mock('../../core/llm/providers/implementations/OpenAIProvider', () => {
 
 import { AgentOS } from '../AgentOS';
 import type { IPersonaDefinition } from '../../cognition/substrate/personas/IPersonaDefinition';
+import { renderPersonalitySection } from '../../cognition/substrate/personas/personalityPrompt';
 
 const HEADING = '## Personality & Communication Style';
 const tutor = {
@@ -105,7 +107,9 @@ describe('the self-modification tools on the full runtime', () => {
     await send(booted, { userId: 'ana', sessionId: 's-1', textInput: 'Again.' });
     const [first, afterTool, nextTurn] = provider.seenMessages;
     expect(toolMessages(afterTool)[0]).toContain('"newValue"');
-    expect(systemTextOf(first)).not.toContain(HEADING);
+    // With no learning layer the GMI renders the persona's own trait paragraph once, from the definition.
+    expect(systemTextOf(first)).toContain(renderPersonalitySection(tutor.personalityTraits)!);
+    expect(systemTextOf(first).split(HEADING)).toHaveLength(2);
     expect(systemTextOf(afterTool)).toBe(systemTextOf(first));
     expect(systemTextOf(nextTurn)).toBe(systemTextOf(first));
   });

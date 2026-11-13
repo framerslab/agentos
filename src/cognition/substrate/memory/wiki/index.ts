@@ -10,4 +10,5 @@ export {
 } from './WikiPageId.js';
 export { ensureMemoryDir } from './migrateMemoryMd.js';
 export { WikiMemoryStore, type MemoryIndexPort, type WikiMemoryStoreOptions } from './WikiMemoryStore.js';
+export { UserWikiStore, type UserWikiStoreOptions, type UserWikiPagesPort } from './UserWikiStore.js';
 export { WikiCompiler, type WikiCompilerOptions, type WikiCompilerStorePort } from './WikiCompiler.js';

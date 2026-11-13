@@ -53,6 +53,7 @@ import { ContextWindowExceededError } from '../core/llm/providers/errors/Context
 import { checkContextFit } from './runtime/contextWindowFit.js';
 import { asSpendBudget, costOfUsageUSD, holdCall, withReservation, type HelperCall } from './runtime/spendBudget.js';
 import { isCallerStop, markHookStop } from './runtime/callerStop.js';
+import { guardedStreamText, type TextGuardrailReport } from './runtime/textGuardrails.js';
 import type { CacheDiagnostics } from '../core/llm/providers/IProvider.js';
 import { toProviderReplayMessage } from './sessionTranscript.js';
 import type { ModelRouteParams } from '../core/llm/routing/IModelRouter.js';
@@ -62,7 +63,7 @@ import { StreamingReconstructor } from '../core/llm/streaming/StreamingReconstru
 import { globalLLMProviderHealth } from '../core/safety/LLMProviderHealthRegistry.js';
 import { recordAgentOSTurnMetrics, startAgentOSSpan } from '../safety/evaluation/observability/otel.js';
 import { moduleLogger } from '../core/logging/loggerFactory.js';
-import { errorFields, providerName, safePath } from '../core/logging/events.js';
+import { listedErrorFields, providerName, safePath } from '../core/logging/events.js';
 import { isCallMask } from './runtime/pool/redact.js';
 import { createContentSafeConsole } from '../core/logging/contentSafeConsole.js';
 
@@ -279,6 +280,30 @@ export interface StreamTextResult {
    */
   fallback?: Promise<FallbackSignal | undefined>;
   /**
+   * With `guards`: resolves when the stream ends to what each stage's guards answered. After a stop it is the report
+   * the error part carries. Unset on a call without `guards`.
+   */
+  guardReport?: Promise<TextGuardrailReport | undefined>;
+  /**
+   * On a `gmi()` or `agent({ runtime: 'gmi' })` session's `stream()` with
+   * cognitive memory: the recall capture of the turn's memory assembly, as
+   * `GenerateTextResult.memoryRecall` carries it on `send()`. Resolves when the
+   * stream ends, also when the turn fails after its memory assembly (the
+   * record is that assembly's), to `undefined` when the turn assembled no
+   * memory block or `memory.recall.capture` is `'off'`. Unset on
+   * `streamText()` and on the default runtime.
+   */
+  memoryRecall?: Promise<import('../cognition/memory/retrieval/recall/capture.js').MemoryRecallCapture | undefined>;
+  /**
+   * On a `gmi()` or `agent({ runtime: 'gmi' })` session's `stream()`: the
+   * conversation history the turn's requests left out to fit the prompt
+   * engine's history budget, as `GenerateTextResult.historyOmitted` reports it
+   * on `send()`. Resolves when the stream ends, to `undefined` when every
+   * request carried the whole history or the turn ended before the GMI
+   * returned its output. Unset on `streamText()` and on the default runtime.
+   */
+  historyOmitted?: Promise<import('../core/llm/IPromptEngine.js').PromptHistoryOmission | undefined>;
+  /**
    * Resolves to the reason the FINAL model step stopped emitting, on the
    * same cadence as {@link usage} (when the stream completes):
    *
@@ -326,20 +351,24 @@ function buildHelperToolExecutionContext(
   runId: string,
   stepIndex: number,
   correlationId?: string,
+  callerUser?: GenerateTextOptions['_callerUser'],
 ): ToolExecutionContext {
   return {
     gmiId: `${source}:${runId}`,
     personaId: `${source}:persona`,
     userContext: {
-      userId: 'system',
+      // The session's user when an agent made the call; a direct call has none, and tools read `system` as no user.
+      userId: callerUser?.userId ?? 'system',
+      ...(callerUser ? { memorySubject: callerUser.subject } : {}),
       source,
     },
     correlationId: correlationId ?? `${source}:tool:${stepIndex + 1}:${randomUUID()}`,
     sessionData: {
-      sessionId: `${source}:${runId}`,
+      sessionId: callerUser?.sessionId ?? `${source}:${runId}`,
       source,
       stepIndex,
     },
+    ...(callerUser?.providerUserId !== undefined ? { callerTurn: { providerUserId: callerUser.providerUserId } } : {}),
   };
 }
 
@@ -374,6 +403,8 @@ function formatPlanForPrompt(plan: Plan): string {
  * ```
  */
 export function streamText(opts: GenerateTextOptions): StreamTextResult {
+  // A call with guards runs its input and output stages once, around every leg (runtime/textGuardrails).
+  if (opts.guards && !opts.__guardRun) return guardedStreamText(opts, streamText);
   // One budget instance for the whole stream: every options object built from
   // `opts` below (a fallback hop) carries it, so each hop is charged to the
   // same budget.
@@ -738,7 +769,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       // thinking fields (see toProviderReplayMessage).
       if (opts.messages)
         for (const m of opts.messages) messages.push(toProviderReplayMessage(m));
-      if (opts.prompt) messages.push({ role: 'user', content: opts.prompt });
+      if (opts.prompt || (opts.prompt === '' && opts.__emptyPrompt)) messages.push({ role: 'user', content: opts.prompt });
 
       rootSpan?.setAttribute('agentos.api.tool_count', tools.length);
 
@@ -829,6 +860,8 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             ...(opts.customModelParams !== undefined ? { customModelParams: opts.customModelParams } : {}),
             // The planning call's usage report counts into `usage` too.
             ...(opts.__onUsageReport ? { onUsageReport: opts.__onUsageReport } : {}),
+            // The planning request carries the caller's messages, so it takes the call's `store` too.
+            ...(typeof opts.store === 'boolean' ? { store: opts.store } : {}),
           },
           usage,
           budget ? { budget, providerId: resolved.providerId, what: 'stream_text.plan' } : undefined,
@@ -872,6 +905,15 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           onBeforeToolExecution: opts.onBeforeToolExecution,
           hookErrors: opts.hookErrors,
           approvalGate: opts.__approvalGate,
+          // The guards of the call judge each parsed call before the hook.
+          // A caller's abort while the guards were judging ends the round before any tool runs.
+          judgeToolCall: opts.__guardRun
+            ? async (call) => {
+                const refusal = await opts.__guardRun!.judgeToolCall(call);
+                opts.abortSignal?.throwIfAborted();
+                return refusal;
+              }
+            : undefined,
           // A seat's mask reaches the shim's tool errors too, and a successful
           // output passes the listed values alone.
           maskToolError: opts.__maskError ? maskToolText : undefined,
@@ -928,6 +970,8 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               : {}),
             ...(opts.promptCacheRetention !== undefined ? { promptCacheRetention: opts.promptCacheRetention } : {}),
             ...(opts.serviceTier !== undefined ? { serviceTier: opts.serviceTier } : {}),
+            // OpenAI's `store`; other providers ignore it.
+            ...(typeof opts.store === 'boolean' ? { store: opts.store } : {}),
               // Forward provider-specific top-level payload params (e.g.
               // OpenRouter provider-routing preferences) on the shim path too.
               ...(opts.customModelParams !== undefined
@@ -1096,6 +1140,8 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               : {}),
             ...(opts.promptCacheRetention !== undefined ? { promptCacheRetention: opts.promptCacheRetention } : {}),
             ...(opts.serviceTier !== undefined ? { serviceTier: opts.serviceTier } : {}),
+            // OpenAI's `store`; other providers ignore it.
+            ...(typeof opts.store === 'boolean' ? { store: opts.store } : {}),
             // Cache-diagnostics opt-in (Anthropic beta): thread the previous
             // request's message id — the caller's seed on step 1, the prior
             // step's id after — so the verdict names any prefix divergence.
@@ -1386,7 +1432,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             : {}),
         } as any);
 
-        for (const toolCall of streamedToolCalls) {
+        for (const [callIndex, toolCall] of streamedToolCalls.entries()) {
           const fnName = toolCall.function?.name ?? '';
           const rawArgs = toolCall.function?.arguments ?? '{}';
           const toolCallId = toolCall.id ?? '';
@@ -1415,6 +1461,22 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             } as any);
             allToolCalls.push(toolCallRecord);
             continue;
+          }
+          // --- guards: judged before any hook, on the arguments the model sent, and before a reader sees the call ---
+          if (opts.__guardRun) {
+            const refusal = await opts.__guardRun.judgeToolCall({ name: fnName, args: parsedArgs, step, index: callIndex, registered: toolMap.has(fnName) });
+            // a caller's abort while the guards were judging: no hook and no tool runs
+            opts.abortSignal?.throwIfAborted();
+            // a refused call is not shown as a call: its result says it was refused, as a call with bad arguments is shown by its result alone
+            if (refusal) {
+              toolCallRecord.error = refusal.error;
+              const resultPart: StreamPart = { type: 'tool-result', toolName: fnName, result: refusal.result };
+              parts.push(resultPart);
+              yield resultPart;
+              messages.push({ role: 'tool', tool_call_id: toolCallId, content: JSON.stringify(refusal.result) } as any);
+              allToolCalls.push(toolCallRecord);
+              continue;
+            }
           }
           const requestPart: StreamPart = { type: 'tool-call', toolName: fnName, args: parsedArgs };
           parts.push(requestPart);
@@ -1510,6 +1572,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
                 helperToolRunId,
                 step,
                 toolCallId || undefined,
+                opts._callerUser,
               ),
             );
             // One masked output serves the record, the tool-result part and
@@ -1764,7 +1827,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           // The run this leg reports as the one that answered, once it ended.
           let legAnswer: { provider: string; model: string } | undefined;
           try {
-            fallbackLogger.warn('llm.fallback_fired', { api: 'streamText', primaryProvider: providerName(recordedProviderId), fallbackProvider: providerName(legProvider), ...(legSentAs.model !== undefined ? { fallbackModel: safePath(legSentAs.model) } : {}), attempt, ...errorFields(lastFallbackError) });
+            fallbackLogger.warn('llm.fallback_fired', { api: 'streamText', primaryProvider: providerName(recordedProviderId), fallbackProvider: providerName(legProvider), ...(legSentAs.model !== undefined ? { fallbackModel: safePath(legSentAs.model) } : {}), attempt, ...listedErrorFields(lastFallbackError) });
             // A seat's callback is handed the error through the seat's mask, as it would leave the seat.
             opts.onFallback?.(opts.__maskError ? (opts.__maskError(lastFallbackError) as Error) : lastFallbackError, legProvider);
             const fallbackResult = streamText({
@@ -1944,7 +2007,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           const walkSignal = opts.abortSignal;
           const walkStoppedBy = walkSignal?.aborted ? abortReasonError(walkSignal) : undefined;
           if (!walkStoppedBy) {
-            fallbackLogger.error('llm.fallback_exhausted', { api: 'streamText', primaryProvider: providerName(recordedProviderId), attempts: attempt, ...errorFields(lastFallbackError) });
+            fallbackLogger.error('llm.fallback_exhausted', { api: 'streamText', primaryProvider: providerName(recordedProviderId), attempts: attempt, ...listedErrorFields(lastFallbackError) });
           }
           metricStatus = 'error';
           // No leg answered: the trail names this attempt's provider.

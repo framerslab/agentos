@@ -2529,16 +2529,32 @@ function frontMatterField(note: string, field: string): string | undefined {
  */
 function overtakenByRefile(brain: Brain, refile: () => Promise<unknown>): { brain: Brain; refiled: () => boolean } {
   let refiled = false;
+  /** `all` of `reader`, the re-file run before its first read of the traces. */
+  const overtakingAll =
+    (reader: { all: Brain['all'] }) =>
+    async (sql: string, params?: Parameters<Brain['all']>[1]) => {
+      if (!refiled && sql.includes('FROM memory_traces')) {
+        refiled = true;
+        await refile();
+      }
+      return reader.all(sql, params);
+    };
+  /** `source` with its `all` overtaken, every other member its own. */
+  const overtakenSource = <S extends object>(source: S & { all: Brain['all'] }): S =>
+    new Proxy(source, {
+      get(target, property) {
+        if (property === 'all') return overtakingAll(target);
+        const value: unknown = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
   const overtaken = new Proxy(brain, {
     get(target, property) {
-      if (property === 'all') {
-        return async (sql: string, params?: Parameters<Brain['all']>[1]) => {
-          if (!refiled && sql.includes('FROM memory_traces')) {
-            refiled = true;
-            await refile();
-          }
-          return target.all(sql, params);
-        };
+      if (property === 'all') return overtakingAll(target);
+      // An export that reads one consistent view reads it through this: the view's reads are overtaken too.
+      if (property === 'readConsistently') {
+        return <T>(read: (source: Parameters<Parameters<Brain['readConsistently']>[0]>[0]) => Promise<T>) =>
+          target.readConsistently((source) => read(overtakenSource(source)));
       }
       const value: unknown = Reflect.get(target, property, target);
       return typeof value === 'function' ? value.bind(target) : value;
@@ -3274,6 +3290,19 @@ function learningStoreCases(name: string, open: () => Promise<OpenedLearningStor
         ['s-1', 'visitor', 'coach'],
       ]);
       expect(await store.sessionRow('A', 'tutor', 's-1', '42', 'visitor')).toBeUndefined();
+    });
+
+    it('answers whether an agent key has learner rows in a namespace', async () => {
+      const { store } = await fresh();
+      await store.putSessionRow(sessionOf({ sessionId: 's1', namespace: 'n1', agentKey: 'aria', userId: 'ana' }));
+      // A learner's chain head counts; the agent's own chain head (no user) does not.
+      await store.insertHead({ chainKey: 'u|n1|coach|7', namespace: 'n1', agentKey: 'coach', userId: '7', lastId: 'c-1', lastHash: 'hash-c-1', seq: 1, forgotten: false });
+      await store.insertHead({ chainKey: 'a|n1|ops', namespace: 'n1', agentKey: 'ops', userId: null, lastId: 'a-1', lastHash: 'hash-a-1', seq: 1, forgotten: false });
+      expect(await store.agentHasLearners!('n1', 'aria')).toBe(true);
+      expect(await store.agentHasLearners!('n1', 'coach')).toBe(true);
+      expect(await store.agentHasLearners!('n1', 'aria-1')).toBe(false);
+      expect(await store.agentHasLearners!('n2', 'aria')).toBe(false);
+      expect(await store.agentHasLearners!('n1', 'ops')).toBe(false);
     });
 
     it("forgets a user in one namespace: marks the user's heads, deletes every row of theirs and counts them, and keeps the tombstone and every other user's and tenant's rows", async () => {
@@ -4959,7 +4988,9 @@ describe('the learning option and its fields, on gmi() and the full runtime', ()
     try {
       unsetSystem = await turn(unset);
       expect(unsetSystem).toContain('You teach networking.');
-      expect(unsetSystem).not.toContain(PERSONALITY_HEADING);
+      // With no learning layer the GMI renders the persona's own trait paragraph.
+      expect(unsetSystem).toContain(PERSONALITY_HEADING);
+      expect(unset.getLearningLayer()).toBeUndefined();
     } finally {
       await unset.shutdown();
     }
@@ -12158,7 +12189,16 @@ describe('the docs a host reads about it', () => {
   it("describe memory.store on gmi(), the learning store on its adapter, and agent.learning's host calls", () => {
     const gmiDoc = doc('docs/GMI.md');
     expect(gmiDoc).toContain('- **`memory.store`.** Durable memory: `{ path }`, a SQLite file agentos opens, or `{ adapter, brainId? }`');
-    expect(gmiDoc).toContain('It needs the learning option and `learning.agentKey`, which names the brain and the learners');
+    expect(gmiDoc).toContain(
+      "It needs the learning option and a key that names the brain: `learning.agentKey`, or, with a soul, the soul's id (`agentId`, else the slug of its `name`).",
+    );
+    // The persona id keys the memory's own traces and the persona scopes, so a soul that moves it moves what they recall.
+    expect(gmiDoc).toContain(
+      "The memory files its own traces and the `persona` scopes (the agent's, and each user's) under the persona's id: the soul's id, else a slug of the agent's `name`, else `learning.agentKey`.",
+    );
+    expect(gmiDoc).toContain(
+      "A brain whose persona id was the slug of the agent's `name` keeps those traces under the slug, and an agent whose soul gives another id does not recall them; each user's `user` scope it still recalls. To keep recalling them, set the soul's `agentId` to that slug.",
+    );
     expect(gmiDoc).toContain("A store that does not open fails the session's first send naming `memory.store`, before any model call, and the next send tries again.");
     expect(gmiDoc).toContain('One process serves a SQLite file; several processes share a Postgres database instead, each through an adapter of its own.');
     expect(gmiDoc).toContain('The manifest\'s `memory_store` loop names the store.');
@@ -12168,12 +12208,14 @@ describe('the docs a host reads about it', () => {
       "A `gmi()` agent with `memory.store` runs it on the adapter of that store's Brain, opened with the agent's memory or at the first call that needs it (in process when the adapter has no transactions).",
     );
     expect(gmiDoc).toContain(
-      "On a `gmi()` agent, `agent.learning` carries the same calls with the agent's key (`learning.agentKey`, else a named agent's persona id) and namespace (`learning.namespace`, else `''`) filled in",
+      "On a `gmi()` agent, `agent.learning` carries the same calls with the agent's key (`learning.agentKey`, else the key its learners are filed under: `learning.learnerKey`, the soul's id, or a named agent's persona id) and namespace (`learning.namespace`, else `''`) filled in",
     );
-    expect(gmiDoc).toContain('A call that names a learner on an agent with neither `learning.agentKey` nor a name rejects, naming `learning.agentKey`.');
+    expect(gmiDoc).toContain(
+      'A call that names a learner on an agent with no key (no `learning.agentKey`, `learning.learnerKey`, soul id or name) rejects, naming `learning.agentKey`.',
+    );
     expect(gmiDoc).toContain('a memory that does not open fails the call before the tombstone is written');
     const guide = doc('docs/getting-started/HIGH_LEVEL_API.md');
-    expect(guide).toContain('Of the `MemoryConfig` fields, this path reads `embedding`, `consolidation`, `persistAccessState` and `store`');
+    expect(guide).toContain('Of the `MemoryConfig` fields, this path reads `embedding`, `consolidation`, `persistAccessState`, `store` and `recall`');
     expect(guide).toContain("`memory.store` (`{ path }`, a SQLite file, or `{ adapter, brainId? }`, a host's storage adapter) keeps the agent's memory and its learning store there");
   });
 

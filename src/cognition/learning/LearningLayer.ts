@@ -1267,6 +1267,19 @@ export async function adoptLearningMemory(layer: ILearningLayer, memory: ICognit
 }
 
 /**
+ * Whether a layer's learning store holds a learner row for an agent key in a namespace. False for a layer built by
+ * another implementation of `ILearningLayer` and a store without the question.
+ *
+ * @throws {Error} When the store did not open: the store cannot answer, which is not the same as holding no learner.
+ */
+export async function learningAgentHasLearners(layer: ILearningLayer, namespace: string, agentKey: string): Promise<boolean> {
+  if (!(layer instanceof LearningLayer)) return false;
+  const ready = await layer.storage();
+  if (!ready) throw new Error('the learning store did not open, so it cannot say whether it holds learners for this agent key');
+  return (await ready.store.agentHasLearners?.(namespace, agentKey)) ?? false;
+}
+
+/**
  * Lets a layer go of a memory manager the host has shut down (`LearningLayer.releaseMemory`). A layer built by another
  * implementation of `ILearningLayer` is left as it is.
  */

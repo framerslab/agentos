@@ -14,7 +14,8 @@
  * finds in the block reached the prompt through recall, not through history.
  *
  * agent() builds the persona from its options, which set no
- * `cognitiveMemoryConfig`; a case that needs one sets `personaMemory.config`,
+ * `cognitiveMemoryConfig` but `recall` (from `memory.recall`, which these cases
+ * leave unset); a case that needs one sets `personaMemory.config`,
  * and the persona agent() builds carries it, so the case reads what
  * createAgentCognitiveMemory makes of a persona's memory settings on this path.
  */
@@ -177,6 +178,8 @@ function blockSections(block: string): Map<string, string[]> {
 /** The header each memory-line section of the block starts with, by the section `lineOutcomes` names. */
 const OUTCOME_HEADERS: Record<AssembledLineOutcome['section'], string | undefined> = {
   semanticRecall: '## Relevant Memories',
+  // A hybrid block's one recall section.
+  recall: '## Relevant Memories',
   recentEpisodic: '## Recent Experiences',
   graphAssociations: '## Related Context',
   involuntary: '## Something This Reminds Me Of',

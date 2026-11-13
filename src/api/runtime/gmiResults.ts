@@ -24,6 +24,7 @@ import { addModelUsage, type GenerateTextResult, type TokenUsage, type ToolCallR
 import { normalizeStreamFinishReason, type StreamPart, type StreamTextResult } from '../streamText.js';
 import type { SessionTranscriptMessage } from '../sessionTranscript.js';
 import type { MemoryRecallCapture } from '../../cognition/memory/retrieval/recall/capture.js';
+import type { PromptHistoryOmission } from '../../core/llm/IPromptEngine.js';
 
 /** The error a turn ended with, as the GMI reported it. */
 export interface GmiTurnError {
@@ -98,6 +99,8 @@ export class GmiTurnFolder {
   private lastStepCalledTools = false;
   /** The recall capture of the turn's memory assembly, from the GMI's output that ended the turn. */
   private memoryRecall: MemoryRecallCapture | undefined;
+  /** The history the turn's requests left out, from the GMI's output that ended the turn. */
+  private historyOmitted: PromptHistoryOmission | undefined;
 
   push(chunk: GMIOutputChunk): void {
     switch (chunk.type) {
@@ -145,9 +148,20 @@ export class GmiTurnFolder {
     }
   }
 
-  /** Records the GMI's output that ended the turn: its recall capture reaches the result. */
+  /** Records the GMI's output that ended the turn: its recall capture and its history report reach the result. */
   finish(output: GMIOutput | undefined): void {
     this.memoryRecall = output?.memoryRecall;
+    this.historyOmitted = output?.historyOmitted ? { ...output.historyOmitted } : undefined;
+  }
+
+  /** The recall capture of the GMI's output that ended the turn; undefined before the turn ended, or when it carried none. */
+  recall(): MemoryRecallCapture | undefined {
+    return this.memoryRecall;
+  }
+
+  /** The history the turn's requests left out, from the GMI's output that ended the turn; undefined when they left none out. */
+  omittedHistory(): PromptHistoryOmission | undefined {
+    return this.historyOmitted;
   }
 
   /** Marks the turn failed by a thrown error (the turn's generator itself threw). An ERROR chunk already seen wins. */
@@ -289,6 +303,7 @@ export class GmiTurnFolder {
       finishReason: this.finishReason(),
       ...(transcriptDelta ? { transcriptDelta } : {}),
       ...(this.memoryRecall ? { memoryRecall: this.memoryRecall } : {}),
+      ...(this.historyOmitted ? { historyOmitted: this.historyOmitted } : {}),
     };
   }
 }
@@ -342,7 +357,11 @@ export interface GmiStreamOptions {
  * `tool-result` and ERROR (or a thrown error) to a final `error` part, whose
  * error is `options.stoppedBy`'s when it gives one. `text`
  * is the latest step's text; after an error it is the text the failed step
- * delivered, as streamText resolves it.
+ * delivered, as streamText resolves it. `memoryRecall` is the recall capture of
+ * the GMI's output that ended the turn (`GmiTurnFolder.finish`), undefined when
+ * the turn stopped before it returned one; `historyOmitted` is that output's
+ * report of the history the turn's requests left out, undefined likewise or
+ * when they left none out.
  *
  * @param turn - The turn's chunks.
  * @param options - A caller-owned folder; see {@link GmiStreamOptions}.
@@ -381,6 +400,8 @@ export function streamFromGmiTurn(turn: AsyncIterable<GMIOutputChunk>, options: 
     serviceTier: deferred<string | undefined>(),
     cacheDiagnostics: deferred<Awaited<StreamTextResult['cacheDiagnostics']>>(),
     providerMessageId: deferred<string | null>(),
+    memoryRecall: deferred<MemoryRecallCapture | undefined>(),
+    historyOmitted: deferred<PromptHistoryOmission | undefined>(),
   };
   // Provider and model resolve once the turn's model call is routed, as streamText's do.
   folder.onRoute(({ providerId, modelId }) => {
@@ -437,6 +458,9 @@ export function streamFromGmiTurn(turn: AsyncIterable<GMIOutputChunk>, options: 
       p.serviceTier.resolve(last?.serviceTier);
       p.cacheDiagnostics.resolve((last?.cacheDiagnostics as Awaited<StreamTextResult['cacheDiagnostics']> | undefined) ?? null);
       p.providerMessageId.resolve(folder.providerMessageId());
+      // The GMI's output reaches the folder when its generator returns, before the turn's chunks end.
+      p.memoryRecall.resolve(folder.recall());
+      p.historyOmitted.resolve(folder.omittedHistory());
       done = true;
       wake();
     }
@@ -477,5 +501,7 @@ export function streamFromGmiTurn(turn: AsyncIterable<GMIOutputChunk>, options: 
     serviceTier: p.serviceTier.promise,
     cacheDiagnostics: p.cacheDiagnostics.promise,
     providerMessageId: p.providerMessageId.promise,
+    memoryRecall: p.memoryRecall.promise,
+    historyOmitted: p.historyOmitted.promise,
   };
 }

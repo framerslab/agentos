@@ -61,6 +61,8 @@ export enum GMIPrimeState {
  */
 export interface UserContext {
   userId: string;
+  /** The subject the turn's conversation memory is keyed by: the session's user, else the session. Set by `agent()` and `gmi()`. */
+  memorySubject?: { kind: 'user' | 'session'; id: string };
   skillLevel?: string;
   preferences?: Record<string, any>;
   pastInteractionSummary?: string;
@@ -581,11 +583,23 @@ export interface GMIOutput {
      */
     ragSources?: import('../rag/IRetrievalAugmentor.js').RagRetrievedChunk[];
     /**
-     * The recall capture of the turn's memory assembly, when the GMI assembled
-     * a memory block and the memory manager's `recall.capture` is not `'off'`.
-     * A tool continuation assembles none and carries none.
+     * The recall capture of the turn, when the GMI assembled a memory block and
+     * the memory manager's `recall.capture` is not `'off'`, on a turn that
+     * fails after the assembly as on one that completes: the record of the last
+     * model hop the turn's prompt was built for (on a completed turn, the hop
+     * that served it), with that hop's `budget` and `delivery`; the assembly's
+     * record when the turn failed before a prompt was built. The
+     * `MEMORY_SOURCES_AVAILABLE` chunk carries the assembly's record. A tool
+     * continuation assembles none and carries none.
      */
     memoryRecall?: import('../memory/retrieval/recall/capture.js').MemoryRecallCapture;
+    /**
+     * The conversation history the turn's requests left out to fit the prompt engine's history budget: of the
+     * requests that served the turn's steps, the one that left the most messages out (a fallback hop's prompt that
+     * served nothing does not count). Unset when every one of them carried the whole history. Set on a turn that
+     * fails after such a step too.
+     */
+    historyOmitted?: import('../../core/llm/IPromptEngine.js').PromptHistoryOmission;
     /** On a structured turn: the parsed value and its check (see `api/runtime/structuredReply`). */
     structuredOutput?: import('../../api/runtime/structuredReply.js').StructuredReplyOutput;
 }

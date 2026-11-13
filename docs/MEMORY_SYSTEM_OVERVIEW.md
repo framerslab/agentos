@@ -555,7 +555,7 @@ Starting from the prior 76.6% headline (Tier 3 minimize-cost preset, CharHashEmb
 - 5.3x faster average latency (21,042 ms → 4,001 ms) for the same reason.
 - 15.4x faster p95 latency (111,535 ms → 7,264 ms): OM-v11 routing imposed 60-120 seconds per OM-routed case as the per-session observer pipeline ran; canonical-only avoids that tail entirely.
 
-The configuration was stress-tested with 7 adjacent knobs at full Phase B: every adjacent setting (`--reader-top-k 30`, `--hyde`, `--rerank-candidate-multiplier 5`, `--retrieval-config-router minimize-cost-augmented`, `--policy-router-preset balanced`, `--policy-router-preset maximize-accuracy`, `text-embedding-3-large`) regresses. The 85.6% configuration is empirically Pareto-optimal in the tested parameter space.
+Seven adjacent knobs were probed at Phase A (N=54 stratified, 9 cases per category) on the earlier policy-router plus reader-router configuration, against that configuration's 85.2% Phase A baseline: every adjacent setting (`--reader-top-k 30`, `--hyde`, `--rerank-candidate-multiplier 5`, `--retrieval-config-router minimize-cost-augmented`, `--policy-router-preset balanced`, `--policy-router-preset maximize-accuracy`, `text-embedding-3-large`) regresses. On the 85.6% configuration itself, HyDE lowers the Phase A score from 85.2% to 79.6% (-5.6 points). The 85.6% configuration is empirically Pareto-optimal in the tested parameter space.
 
 ---
 

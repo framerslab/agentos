@@ -28,7 +28,8 @@
  * - `...transcription.delta` → `'transcript'` with `isFinal: false`, carrying
  *   the item's text so far and its `itemId`
  * - `...transcription.completed` → `'transcript'` with `isFinal: true`
- * - `speech_started` / `speech_stopped` → `'speech_start'` / `'speech_end'`
+ * - `speech_started` / `speech_stopped` → `'speech_start'` / `'speech_end'`,
+ *   each with `{ itemId }` (an `SttSpeechEdge`) naming the item the server gave
  * - a server `error` the session survives, or a failed item → `'warning'`
  *   (a {@link VoicePipelineError})
  * - a failure the session cannot recover from → `'error'`, then `'close'`
@@ -61,6 +62,7 @@ import type {
   StreamingSTTSession,
   StreamingSTTConfig,
   AudioFrame,
+  SttSpeechEdge,
   TranscriptEvent,
 } from '../types.js';
 import {
@@ -737,16 +739,26 @@ class TranscriptionConnection {
   }
 
   /**
+   * Whether the connection takes audio and a commit now: it receives audio and
+   * its socket is open. A socket that is closing sends nothing before its close
+   * is reported, so the session treats it as it treats a reconnect.
+   */
+  takesAudio(): boolean {
+    return this.state === 'open' && this.ws?.readyState === WebSocket.OPEN;
+  }
+
+  /**
    * Commits the input buffer when audio was appended since the last commit
-   * (OpenAI refuses to commit an empty buffer). `endMs` is the session audio
-   * offset the buffer reaches.
+   * (OpenAI refuses to commit an empty buffer), and says whether the commit
+   * went out. `endMs` is the session audio offset the buffer reaches. A socket
+   * that does not send records no commit, so nothing waits for its `committed`.
    */
   commit(endMs: number): boolean {
     if (this.samplesSinceCommit === 0) return false;
+    const eventId = `commit_${this.index}_${this.commitCount + 1}`;
+    if (!this.send({ type: 'input_audio_buffer.commit', event_id: eventId })) return false;
     this.commitCount += 1;
-    const eventId = `commit_${this.index}_${this.commitCount}`;
     this.commits.push({ eventId, startMs: this.uncommittedFromMs ?? endMs, endMs });
-    this.send({ type: 'input_audio_buffer.commit', event_id: eventId });
     this.samplesSinceCommit = 0;
     this.uncommittedFromMs = undefined;
     return true;
@@ -888,8 +900,12 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
   private droppedSuccessor: RolloverClocks | undefined;
   /** The last connection is draining and the session closes after it: a drop starts no reconnect. */
   private ending = false;
-  /** A client commit asked for while no connection was open; sent once one opens. */
-  private commitOnAdopt = false;
+  /**
+   * Client commits asked for by flushes that found no connection taking audio, oldest first; sent once one
+   * takes audio. A commit whose flush is still waiting has no `endMs` and covers all the audio held then; a
+   * flush that stopped waiting set `endMs` to where the audio stood, so its commit covers nothing pushed later.
+   */
+  private deferredCommits: Array<{ endMs?: number }> = [];
   /** Waiters of {@link waitAdopted}: a flush that found no connection taking audio. */
   private adoptWaiters = new Set<() => void>();
   /** Connections still connecting (a reconnect's, or a rollover's next one): `close()` abandons them. */
@@ -954,7 +970,9 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
    * Ends the current turn: commits the buffer when turn detection is off (or
    * when speech is in progress under server turn detection), then resolves
    * once every committed item's final has arrived, or after `finalTimeoutMs`.
-   * During a reconnect it first waits for the connection that takes over;
+   * During a reconnect, or while the socket is closing and its close has not
+   * been reported, it first waits for the connection that takes over, which
+   * commits the audio held meanwhile;
    * with client commits, the first flush after the rollover age starts the
    * rollover. The session stays open: at its end, flush before `close()` so
    * the last turn gets its final. Under server turn detection, speech is in
@@ -964,12 +982,17 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
    */
   async flush(): Promise<void> {
     if (this.closed) return;
-    const lead = this.lead();
+    const lead = this.receiver();
     if (!lead) {
-      // No connection takes audio now (a reconnect): commit once one opens, and wait for it.
-      if (this.settings.clientCommits) this.commitOnAdopt = true;
+      // No connection takes audio now (a reconnect, or a socket that is closing before its close is
+      // reported): commit once one takes over, and wait for it.
+      const deferred: { endMs?: number } | undefined = this.settings.clientCommits ? {} : undefined;
+      if (deferred) this.deferredCommits.push(deferred);
       await this.waitAdopted(this.settings.finalTimeoutMs);
       if (this.closed) return;
+      // Still deferred: no connection took over in time. Its commit stays for the one that does, and ends
+      // where the audio stands now, so audio pushed after this flush returns starts a turn of its own.
+      if (deferred && this.deferredCommits.includes(deferred)) deferred.endMs = this.sessionAudioMs;
     } else if (this.settings.clientCommits || lead.speaking) {
       lead.commit(this.sessionAudioMs);
       if (this.settings.clientCommits) this.maybeRollOver(lead, 'flush');
@@ -981,19 +1004,23 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
 
   /**
    * Resolves when a connection takes audio again (one is adopted, or a refused rollover keeps the old
-   * one) or the session closes, or after `timeoutMs`.
+   * one) or the session closes, or after `timeoutMs`. A connection adopted while its socket is already
+   * closing takes nothing, so the wait goes on for the one that replaces it.
    */
   private waitAdopted(timeoutMs: number): Promise<void> {
-    if (this.lead() || this.closed) return Promise.resolve();
+    if (this.receiver() || this.closed) return Promise.resolve();
     return new Promise<void>((resolve) => {
       const finish = (): void => {
         clearTimeout(timer);
-        this.adoptWaiters.delete(finish);
+        this.adoptWaiters.delete(wake);
         this.off('close', finish);
         resolve();
       };
+      const wake = (): void => {
+        if (this.receiver() || this.closed) finish();
+      };
       const timer = setTimeout(finish, timeoutMs);
-      this.adoptWaiters.add(finish);
+      this.adoptWaiters.add(wake);
       this.once('close', finish);
     });
   }
@@ -1020,6 +1047,7 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
     for (const finish of [...this.retryWaits]) finish();
     this.backlog = [];
     this.backlogMs = 0;
+    this.deferredCommits = [];
     this.emit('close');
   }
 
@@ -1054,9 +1082,11 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
   }
 
   /**
-   * Sends the held frames to a connection that takes audio, then the commit a flush asked for meanwhile.
-   * Frames its socket no longer takes (it began closing after the connection opened) stay held, and so
-   * does that commit, for the connection that replaces it.
+   * Sends the held frames to a connection that takes audio, with the commits flushes asked for meanwhile:
+   * a commit whose flush stopped waiting goes before the first frame pushed after that point, and the
+   * commit of a flush still waiting after every frame. Frames its socket no longer takes (it began closing
+   * after the connection opened) stay held, and so do the commits not yet sent, for the connection that
+   * replaces it, whether or not any frame was held.
    */
   private releaseBacklog(connection: TranscriptionConnection): void {
     const held = this.backlog;
@@ -1064,18 +1094,37 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
     this.backlogMs = 0;
     let refused = false;
     for (const frame of held) {
-      if (connection.sendAudio(frame)) continue;
+      if (!refused) {
+        this.sendDeferredCommits(connection, frame.startMs);
+        if (connection.sendAudio(frame)) continue;
+        refused = true;
+      }
       this.hold(frame);
-      refused = true;
     }
-    if (refused || !this.commitOnAdopt) return;
-    this.commitOnAdopt = false;
-    connection.commit(this.sessionAudioMs);
+    if (!refused) this.sendDeferredCommits(connection, Infinity);
+  }
+
+  /**
+   * Sends, in order, the deferred commits that end at or before `beforeMs` (every one, with `Infinity`)
+   * while the connection takes audio. A commit with nothing appended since the last one sends nothing.
+   */
+  private sendDeferredCommits(connection: TranscriptionConnection, beforeMs: number): void {
+    while (this.deferredCommits.length > 0 && connection.takesAudio()) {
+      const { endMs } = this.deferredCommits[0];
+      if ((endMs ?? Infinity) > beforeMs) return;
+      this.deferredCommits.shift();
+      connection.commit(endMs ?? this.sessionAudioMs);
+    }
   }
 
   /** The oldest connection still receiving audio: its speech events drive `speech_start` and `speech_end`. */
   private lead(): TranscriptionConnection | undefined {
     return this.connections.find((connection) => connection.state === 'open');
+  }
+
+  /** The oldest connection that takes audio and a commit now: a flush commits on it. */
+  private receiver(): TranscriptionConnection | undefined {
+    return this.connections.find((connection) => connection.takesAudio());
   }
 
   private hold(frame: EncodedFrame): void {
@@ -1368,7 +1417,7 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
     }
     if (connection.state !== 'open') return;
     connection.speaking = true;
-    if (this.lead() === connection) this.setSpeaking(true);
+    if (this.lead() === connection) this.setSpeaking(true, itemId);
   }
 
   private onSpeechStopped(connection: TranscriptionConnection, event: ServerEvent): void {
@@ -1384,7 +1433,7 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
     if (connection.state !== 'open') return;
     connection.speaking = false;
     if (this.lead() === connection) {
-      this.setSpeaking(false);
+      this.setSpeaking(false, itemId);
       this.maybeRollOver(connection, 'speech_stopped');
     }
     if (connection.drainWhenQuiet) void this.drain(connection, false);
@@ -1408,7 +1457,7 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
         if (item.endMs === undefined) item.endMs = ours.endMs;
         if (connection.speaking) {
           connection.speaking = false;
-          if (this.lead() === connection) this.setSpeaking(false);
+          if (this.lead() === connection) this.setSpeaking(false, item.itemId);
         }
       }
       if (!item.dropped && !item.finished) {
@@ -1533,10 +1582,22 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
     return event;
   }
 
-  private setSpeaking(speaking: boolean): void {
+  /**
+   * Reports a change of the lead connection's speech as `'speech_start'` or
+   * `'speech_end'`, with the item the server named for it ({@link SttSpeechEdge}),
+   * so an endpoint detector pairs a speech end with that item's final alone.
+   * A change no server event names an item for (a connection that stops
+   * leading) passes no argument.
+   *
+   * @param speaking - Whether the user now speaks.
+   * @param itemId - The input item the speech belongs to, when the server named one.
+   */
+  private setSpeaking(speaking: boolean, itemId?: string): void {
     if (this.speaking === speaking) return;
     this.speaking = speaking;
-    this.emit(speaking ? 'speech_start' : 'speech_end');
+    const edge: SttSpeechEdge | undefined = itemId ? { itemId } : undefined;
+    if (edge) this.emit(speaking ? 'speech_start' : 'speech_end', edge);
+    else this.emit(speaking ? 'speech_start' : 'speech_end');
   }
 
   // -------------------------------------------------------------------------

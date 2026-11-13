@@ -11,6 +11,9 @@ import type { AdaptableToolInput } from './runtime/toolAdapter.js';
 import type { FallbackProviderEntry, FallbackSignal } from './generateText.js';
 import type { CognitionConfig, CognitionProfile } from './runtime/gmiCognition.js';
 import type { StorageAdapter } from '@framers/sql-storage-adapter';
+import type { MemoryRecallConfig } from '../cognition/memory/core/config.js';
+
+export type { MemoryRecallConfig };
 
 // ---------------------------------------------------------------------------
 // Scalar union literals
@@ -114,13 +117,15 @@ export interface MemoryConfig {
   /**
    * Durable memory on the GMI path (`gmi()`, `agent({ runtime: 'gmi' })`): a SQLite file agentos opens, or a host's
    * storage adapter, which agentos never closes. The agent's memory files into a Brain there, under the brain id
-   * `brainId` or `learning.agentKey`, an archive over the same adapter keeps a gist's original, and the agent's
+   * `brainId`, else `learning.agentKey`, else the soul's id, an archive over the same adapter keeps a gist's original, and the agent's
    * learning store runs on the same adapter. A file is closed by `agent.close()` and opened again by the next session
    * or host call that needs it. One process serves a SQLite file; several processes share a Postgres database, each
    * through an adapter of its own, opened with `typeParsers: { int8: 'number' }`: the store refuses a PostgreSQL adapter
    * that reads BIGINT as text, since a trace's counts and times would load as strings.
-   * Needs the learning option on and `learning.agentKey`, which names the agent's brain and its learners; for durable
-   * memory without learning, set `learning: { agentKey, mode: 'off' }`. Without it, memory lives in the process.
+   * Needs the learning option on and a key that names the agent's brain: `learning.agentKey`, or, with a soul, the
+   * soul's id (its `agentId`, else the slug of its `name`). A `learning.agentKey` you set wins. For durable memory
+   * without learning, set `learning: { mode: 'off' }` with a soul that has an id, or `learning: { agentKey, mode: 'off' }`.
+   * Without it, memory lives in the process.
    */
   store?: { path: string } | { adapter: StorageAdapter; brainId?: string };
   /**
@@ -131,6 +136,19 @@ export interface MemoryConfig {
    * before-and-after measurement.
    */
   persistAccessState?: boolean;
+  /**
+   * Recall settings for cognitive memory on the GMI path (`gmi()`, `agent({ runtime: 'gmi' })`):
+   * `budget.totalTokens` sizes the memory block (default 1600, preamble included), `capture` sets what a turn
+   * records about its recall (default `'metadata'`), and `retrieval` sets how a turn finds its memories (default
+   * `'dense'`, by meaning; `'hybrid'` adds the turn's exact words and recency, fused into one Relevant Memories
+   * section), and `rerank` reranks the recalled memories (default `'none'`; `{ kind: 'local' }` scores with a
+   * cross-encoder in the process, `{ kind: 'llm' }` with the host's own model call, which receives the candidates;
+   * no remote reranking service is offered for memories). On the GMI path `memoryProviderOptions.tokenBudget` does
+   * not size the block. On the default runtime, and on the GMI path with memory off, only `budget.totalTokens` is
+   * read: it is the `tokenBudget` handed to `memoryProvider.getContext` when `memoryProviderOptions.tokenBudget` is
+   * unset; two different values, `capture`, `retrieval` or `rerank` are refused at construction.
+   */
+  recall?: MemoryRecallConfig;
 }
 
 /**
@@ -1056,8 +1074,8 @@ export type AgencyTraceEvent =
  * An agency runs every one inside a try/catch, whichever part of a run fires
  * it (the agency, its strategy, a tool approval or a HITL check): a callback
  * that throws, or an async one whose promise rejects, is written through the
- * host's logger as `agency_callback_threw` (in an agency with a pool or a
- * panel, with every key the agency can send masked in its message), and never
+ * host's logger as `agency.callback_failed`, with the callback's name and the
+ * error's listed type and code, never its message, and never
  * fails the call, changes what it returns or leaves a rejection unhandled. An
  * agency reads each one from the `on` object when the run fires it, and none
  * when it is built, so a callback set, replaced or deleted there after
@@ -1567,11 +1585,12 @@ export interface BaseAgentConfig {
    */
   customModelParams?: Record<string, unknown>;
   /**
-   * Memory configuration. `agent()` reads it only with `runtime: 'gmi'`, where `true`
-   * or a `MemoryConfig` turns on cognitive memory for the agent's sessions (its
-   * `embedding` and `consolidation` fields are read) and `false` keeps it off, also
-   * under `cognition: 'full'`. A session's message history is set by `history`, not
-   * by this field.
+   * Memory configuration. With `runtime: 'gmi'`, `true` or a `MemoryConfig` turns
+   * on cognitive memory for the agent's sessions (its `embedding`, `consolidation`,
+   * `persistAccessState`, `store` and `recall` fields are read) and `false` keeps it
+   * off, also under `cognition: 'full'`. Without it, `agent()` reads the `working`
+   * callback and `recall.budget.totalTokens` (see {@link MemoryConfig.recall}). A
+   * session's message history is set by `history`, not by this field.
    */
   memory?: boolean | MemoryConfig;
   /** Retrieval-Augmented Generation configuration. */

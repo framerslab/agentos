@@ -64,6 +64,12 @@ function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
 }
 
+/**
+ * The assembler's token estimate: about four characters a token, rounded up; 0 for an empty text. The GMI sizes the
+ * turn's other retrieved context with it when it clamps the memory block's budget to a model's share.
+ */
+export const estimateMemoryTokens = (text: string): number => estimateTokens(text ?? '');
+
 // ---------------------------------------------------------------------------
 // Personality → formatting style
 // ---------------------------------------------------------------------------
@@ -162,6 +168,21 @@ export interface MemoryAssemblerInput {
   workingMemoryText?: string;
   /** Scored semantic/episodic traces from retrieval. */
   retrievedTraces?: ScoredMemoryTrace[];
+  /**
+   * The recall pool of `retrieval: 'hybrid'`, in fused order. When set, the
+   * block shows it as one Relevant Memories section, in this order, on the
+   * `recall` share (unset: `semanticRecall + recentEpisodic`), with no Recent
+   * Experiences section, and `retrievedTraces` is not read.
+   */
+  recallTraces?: ScoredMemoryTrace[];
+  /**
+   * Ids among `recallTraces` a memory question reserved room for (`retrieval: 'hybrid'`). Their whole lines are set
+   * aside in the recall section first, in their `recallTraces` order (not this list's), while they fit; the other lines
+   * fill what is left, in their order. A reserved line takes its place in `recallTraces`, so the caller puts them last
+   * to render them last. A reserved line that does not fit whole is left out like any other. Not read without
+   * `recallTraces`.
+   */
+  reservedIds?: string[];
   /** Prospective memory alerts (Batch 2). */
   prospectiveAlerts?: string[];
   /**
@@ -192,7 +213,8 @@ export interface MemoryAssemblerInput {
 // Sections
 // ---------------------------------------------------------------------------
 
-type SectionKey = keyof MemoryBudgetAllocation;
+/** A section of the block; `recall` is a share of the hybrid block, which renders it in Semantic Recall's place. */
+type SectionKey = Exclude<keyof MemoryBudgetAllocation, 'recall'>;
 
 /** The order the sections appear in the block. */
 const BLOCK_ORDER: readonly SectionKey[] = [
@@ -210,7 +232,7 @@ const BLOCK_ORDER: readonly SectionKey[] = [
  * retrieved traces first (Semantic Recall, then Recent Episodic), then the
  * rest in the block's order.
  */
-export const MEMORY_BUDGET_SPILL_ORDER: readonly (keyof MemoryBudgetAllocation)[] = [
+export const MEMORY_BUDGET_SPILL_ORDER: readonly Exclude<keyof MemoryBudgetAllocation, 'recall'>[] = [
   'semanticRecall',
   'recentEpisodic',
   'persistentMemory',
@@ -229,6 +251,9 @@ const HEADERS: Record<SectionKey, string> = {
   graphAssociations: '## Related Context (connected memories — use for depth)',
   observationNotes: '## Observations',
 };
+
+/** The header of the one recall section a hybrid block shows in place of Relevant Memories and Recent Experiences. */
+const RECALL_HEADER = "## Relevant Memories (facts and past events, most relevant first — use as background, don't announce)";
 
 const PERSISTENT_TRUNCATED_MARKER = '\n<!-- truncated -->';
 const INVOLUNTARY_HEADER = '## Something This Reminds Me Of';
@@ -482,6 +507,13 @@ function renderInvoluntary(
  * in the block. `tokensUsed` counts the headers and separators too and never
  * exceeds `totalTokenBudget`. The returned `allocation` holds the shares the
  * sections were granted from, after the defaults, the zeroing and the scaling.
+ *
+ * With `recallTraces` (`retrieval: 'hybrid'`) the recalled traces are one
+ * section, Relevant Memories, in Semantic Recall's place and in the pool's
+ * order, granted the `recall` share (unset: the Semantic Recall and Recent
+ * Episodic shares together), and Recent Experiences is not shown. Its lines
+ * are reported under `recall`, and the returned `allocation` carries that
+ * share as `recall` with `semanticRecall` and `recentEpisodic` at 0.
  */
 export function assembleMemoryContext(input: MemoryAssemblerInput): AssembledMemoryContext {
   return assemble(input, true);
@@ -509,8 +541,19 @@ function assemble(input: MemoryAssemblerInput, secondPass: boolean): AssembledMe
     const share = input.allocation?.[key];
     if (share != null) alloc[key] = share;
   }
+  // A hybrid block: one section for every recalled trace, on the `recall` share, or the two shares it replaces.
+  const pooled = input.recallTraces ?? null;
+  if (pooled) {
+    const share = input.allocation?.recall;
+    // A share that counts as 0 (not a finite positive number) adds nothing to the one it is merged with.
+    const valid = (n: number): number => (Number.isFinite(n) && n > 0 ? n : 0);
+    alloc.semanticRecall = share != null ? share : valid(alloc.semanticRecall) + valid(alloc.recentEpisodic);
+    alloc.recentEpisodic = 0;
+  }
   /** A section the caller turned off by setting its share to exactly 0. */
   const off = (key: SectionKey): boolean => alloc[key] === 0;
+  /** Semantic Recall's header, or the one recall section's in a hybrid block. */
+  const semanticHeader = pooled ? RECALL_HEADER : HEADERS.semanticRecall;
 
   const budget = Number.isFinite(input.totalTokenBudget) ? Math.max(0, Math.floor(input.totalTokenBudget)) : 0;
   const style = selectFormattingStyle(input.traits);
@@ -530,8 +573,8 @@ function assemble(input: MemoryAssemblerInput, secondPass: boolean): AssembledMe
 
   // --- Candidates per section ---
   const episodicTraces: ScoredMemoryTrace[] = [];
-  const semanticTraces: ScoredMemoryTrace[] = [];
-  for (const trace of input.retrievedTraces ?? []) {
+  const semanticTraces: ScoredMemoryTrace[] = pooled ? [...pooled] : [];
+  for (const trace of pooled ? [] : (input.retrievedTraces ?? [])) {
     if (trace.type === 'episodic') {
       episodicTraces.push(trace);
     } else {
@@ -546,7 +589,7 @@ function assemble(input: MemoryAssemblerInput, secondPass: boolean): AssembledMe
   /** The most tokens the involuntary memory was offered: its tenth, or what the sections left unspent. */
   let involuntaryOffered = 0;
   if (input.mechanismsEngine && input.allTraces) {
-    const retrievedSet = new Set((input.retrievedTraces ?? []).map((trace) => trace.id));
+    const retrievedSet = new Set((pooled ?? input.retrievedTraces ?? []).map((trace) => trace.id));
     involuntaryTrace = input.mechanismsEngine.onPromptAssembly(input.allTraces, retrievedSet).involuntaryMemory;
     if (involuntaryTrace) {
       involuntaryOffered = Math.floor(afterPreamble * INVOLUNTARY_MAX_SHARE);
@@ -577,7 +620,7 @@ function assemble(input: MemoryAssemblerInput, secondPass: boolean): AssembledMe
   const demand: Record<SectionKey, number> = {
     persistentMemory: pmText ? Math.ceil(sectionChars(HEADERS.persistentMemory, [pmText]) / 4) : 0,
     workingMemory: Math.ceil(sectionChars(HEADERS.workingMemory, wmLines) / 4),
-    semanticRecall: Math.ceil(traceChars(HEADERS.semanticRecall, semanticTraces) / 4),
+    semanticRecall: Math.ceil(traceChars(semanticHeader, semanticTraces) / 4),
     recentEpisodic: Math.ceil(traceChars(HEADERS.recentEpisodic, episodicTraces) / 4),
     prospectiveAlerts: Math.ceil(sectionChars(HEADERS.prospectiveAlerts, prospectiveLines) / 4),
     graphAssociations: Math.ceil(sectionChars(HEADERS.graphAssociations, graphLines) / 4),
@@ -610,7 +653,7 @@ function assemble(input: MemoryAssemblerInput, secondPass: boolean): AssembledMe
   const sections: Record<SectionKey, Section> = {
     persistentMemory: createSection(HEADERS.persistentMemory, pmText ? [persistentLine(pmText)] : []),
     workingMemory: createSection(HEADERS.workingMemory, wmLines.map(wholeLine), true),
-    semanticRecall: createSection(HEADERS.semanticRecall, semanticTraces.map(traceLine)),
+    semanticRecall: createSection(semanticHeader, semanticTraces.map(traceLine)),
     recentEpisodic: createSection(HEADERS.recentEpisodic, episodicTraces.map(traceLine)),
     prospectiveAlerts: createSection(HEADERS.prospectiveAlerts, prospectiveLines.map(wholeLine)),
     graphAssociations: createSection(HEADERS.graphAssociations, graphItems.map(associationLine)),
@@ -637,12 +680,19 @@ function assemble(input: MemoryAssemblerInput, secondPass: boolean): AssembledMe
     }
     return undefined;
   };
+  /** The recall section's reserved lines (a hybrid block's memory question). */
+  const reserved = new Set(pooled ? (input.reservedIds ?? []) : []);
   /** Gives section `key` up to `extra` tokens beyond what it shows, and returns the tokens it took of them. */
   const grow = (key: SectionKey, extra: number): number => {
     if (off(key)) return 0;
     const section = sections[key];
     const before = shownTokens(section);
-    fillSection(section, before + extra, skipFor(key));
+    const skip = skipFor(key);
+    if (key === 'semanticRecall' && reserved.size > 0) {
+      // Room for the reserved lines first, then the rest of the section in order with what they left.
+      fillSection(section, before + extra, (candidate) => candidate.id === undefined || !reserved.has(candidate.id) || Boolean(skip?.(candidate)));
+    }
+    fillSection(section, before + extra, skip);
     return shownTokens(section) - before;
   };
 
@@ -709,10 +759,12 @@ function assemble(input: MemoryAssemblerInput, secondPass: boolean): AssembledMe
       reported.add(id);
       // A memory line is shown whole, so its tokens are the same shown or left out.
       const tokens = lineTokens(candidate.length);
+      // A hybrid block's one recall section renders in Semantic Recall's place.
+      const reportedAs = pooled && key === 'semanticRecall' ? 'recall' : key;
       lineOutcomes.push(
         shown
-          ? { id, section: key, outcome: 'included', tokens }
-          : { id, section: key, outcome: 'left_out', reason: section.offered === 0 ? 'budget' : 'section_full', tokens },
+          ? { id, section: reportedAs, outcome: 'included', tokens }
+          : { id, section: reportedAs, outcome: 'left_out', reason: section.offered === 0 ? 'budget' : 'section_full', tokens },
       );
     }
   }
@@ -734,7 +786,8 @@ function assemble(input: MemoryAssemblerInput, secondPass: boolean): AssembledMe
   return {
     contextText: blocks.join('\n\n'),
     tokensUsed: totalTokens,
-    allocation: effective,
+    // A hybrid block reports the share its one recall section was granted from as `recall`.
+    allocation: pooled ? { ...effective, recall: effective.semanticRecall, semanticRecall: 0, recentEpisodic: 0 } : effective,
     includedMemoryIds: includedIds,
     lineOutcomes,
   };

@@ -17,6 +17,7 @@ vi.mock('../generateText.js', async (orig) => {
 
 import { souledAgent } from '../souledAgent.js';
 import { SpendBudget } from '../runtime/spendBudget.js';
+import { conversationScopeKey } from '../../cognition/memory/retrieval/store/conversationScopeKey.js';
 
 let dir: string;
 beforeEach(() => {
@@ -44,7 +45,12 @@ describe("souledAgent()'s wiki compile", () => {
       onFallback,
       usageLedger: { enabled: true, path: path.join(dir, 'ledger.jsonl'), sessionId: 'night' },
     } as never);
-    await a.memory!.remember('Johnny likes green tea', { type: 'episodic', scope: 'persona', scopeId: 'aria-1' });
+    await a.memory!.remember('Johnny likes green tea', {
+      type: 'episodic',
+      scope: 'conversation',
+      scopeId: conversationScopeKey('aria-1', { kind: 'user', id: 'u1' }),
+    });
+    await a.memory!.compileWiki();
     await a.close();
 
     expect(generateTextSpy).toHaveBeenCalledTimes(1);

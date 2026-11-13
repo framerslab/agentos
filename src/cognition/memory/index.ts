@@ -53,6 +53,10 @@ export type {
   RetrievalRecallReport,
 } from './retrieval/recall/index.js';
 export { MEMORY_RECALL_CAPTURE_VERSION, MEMORY_RERANK_MAX_DOCUMENTS, candidatesFrom, rerankerRecordOf } from './retrieval/recall/index.js';
+export { DEFAULT_RECALL_BUDGET_TOKENS, PROMPT_CONTEXT_SHARE, RecallOptionError, effectiveRecallBudget } from './retrieval/recall/index.js';
+export type { EffectiveRecallBudget, RecallOptionRejection } from './retrieval/recall/index.js';
+export { RECALL_CONSTANTS, RERANK_DEFAULTS, isMemoryQuestion } from './retrieval/recall/index.js';
+export type { RecallConstants } from './retrieval/recall/index.js';
 
 // --- Configuration ---
 export type {
@@ -66,6 +70,7 @@ export type {
   ReflectorConfig,
   MemoryGraphConfig,
   ConsolidationConfig,
+  MemoryRecallConfig,
   ManagerRecallConfig,
 } from './core/config.js';
 export {
@@ -139,11 +144,19 @@ export { ReadWorkingMemoryTool } from './core/working/ReadWorkingMemoryTool.js';
 // ---------------------------------------------------------------------------
 
 // --- Store ---
-export { MemoryStore } from './retrieval/store/MemoryStore.js';
-export type { MemoryStoreConfig } from './retrieval/store/MemoryStore.js';
+export { MemoryStore, isQueryEmbeddingFailure } from './retrieval/store/MemoryStore.js';
+export type { MemoryStoreConfig, MemoryStoreTraceEvent } from './retrieval/store/MemoryStore.js';
 
 // --- SQLite Storage ---
 export { Brain } from './retrieval/store/Brain.js';
+export {
+  CONVERSATION_SCOPE,
+  conversationScopeKey,
+  parseConversationScopeKey,
+  type ConversationSubject,
+} from './retrieval/store/conversationScopeKey.js';
+export { ensureScopeRow, registerUnregisteredConversationScopes } from './retrieval/store/conversationScopes.js';
+export { encodePlainScopeId } from './retrieval/store/scopeIdForm.js';
 export { SqlKnowledgeGraph } from './retrieval/store/SqlKnowledgeGraph.js';
 export { HnswSidecar, type HnswSidecarConfig, type HnswQueryResult } from './retrieval/store/HnswSidecar.js';
 export { SqlMemoryGraph } from './retrieval/store/SqlMemoryGraph.js';
@@ -225,8 +238,9 @@ export type {
   HybridRetrieverOptions,
   HybridRetrieveOptions,
 } from './retrieval/hybrid/HybridRetriever.js';
-export { reciprocalRankFusion } from './retrieval/hybrid/reciprocalRankFusion.js';
+export { reciprocalRankFusion, fuseRankedLists } from './retrieval/hybrid/reciprocalRankFusion.js';
 export type {
+  FusedDoc,
   RankedDoc,
   RRFOptions,
   RRFResult,
@@ -321,7 +335,7 @@ export type { RecallResult, RememberResult, SearchOptions } from './AgentMemory.
 
 // --- Memory Facade (Phase 1: Ingestion + Self-Improving Graph) ---
 export { Memory } from './io/facade/index.js';
-export type { ScoredTrace } from './io/facade/index.js';
+export type { ScoredTrace, MemoryScopeRow, MemoryPageRow, MemoryPageChunk, AttachedWiki, CompileSkipReason } from './io/facade/index.js';
 // A trace as a ledger row's before-state holds it: `Memory.readTrace` reads one, `Memory.restoreTrace` writes one back.
 export { readTraceSnapshot } from './retrieval/store/tracePersistence.js';
 export type { TraceSnapshot } from './retrieval/store/tracePersistence.js';

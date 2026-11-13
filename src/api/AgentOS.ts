@@ -959,6 +959,16 @@ export class AgentOS implements IAgentOS {
    * config object themselves. Provenance is an extension pack
    * (`createProvenancePack()` in `extensionManifest`), not a config key.
    *
+   * A persona that names no provider or model runs on the default provider
+   * entry and its default model (`gmiManagerConfig.defaultGMIBaseConfigDefaults`).
+   * When `overrides.modelProviderManagerConfig` replaces the providers the
+   * environment configures, that default is taken from the providers given,
+   * unless the host writes a `defaultGMIBaseConfigDefaults` of its own, which
+   * is kept even when it names the pair the factory took from the environment.
+   * A `gmiManagerConfig` spread from a `createAgentOSConfig()` result carries
+   * the factory's pair, so it takes the default from the providers given too,
+   * unless the host has set another provider or model on that pair.
+   *
    * For fine-grained control, fall back to `new AgentOS()` +
    * `initialize(yourConfig)`.
    *
@@ -990,10 +1000,22 @@ export class AgentOS implements IAgentOS {
   ): Promise<AgentOS> {
     // Lazy-import to avoid a circular dependency between AgentOS.ts and
     // core/config/AgentOSConfig.ts (which transitively pulls AgentOS types).
-    const { createAgentOSConfig } = await import('../core/config/AgentOSConfig.js');
+    const { createAgentOSConfig, gmiModelDefaultsFor, isFactoryGmiModelDefaults } = await import('../core/config/AgentOSConfig.js');
     const { tools, externalTools, ...configOverrides } = overrides;
     const baseConfig = await createAgentOSConfig({ tools, externalTools } as Parameters<typeof createAgentOSConfig>[0]);
     const mergedConfig = { ...baseConfig, ...configOverrides } as AgentOSConfig;
+    // The factory's GMI default names the default provider of the environment's providers. With providers of the
+    // host's own, a GMI default left as the factory set it (the host's gmiManagerConfig absent, or spread from a
+    // factory-built config) would name a provider the runtime may not have, so it is taken from the providers given.
+    // A pair the host writes is kept, even one equal to the factory's, and so is one it sets on the factory's object.
+    const givenProviders = configOverrides.modelProviderManagerConfig?.providers;
+    const mergedDefaults = mergedConfig.gmiManagerConfig?.defaultGMIBaseConfigDefaults;
+    if (Array.isArray(givenProviders) && mergedDefaults && isFactoryGmiModelDefaults(mergedDefaults)) {
+      mergedConfig.gmiManagerConfig = {
+        ...mergedConfig.gmiManagerConfig,
+        defaultGMIBaseConfigDefaults: { ...mergedDefaults, ...gmiModelDefaultsFor(givenProviders) },
+      };
+    }
     const instance = new AgentOS(logger);
     await instance.initialize(mergedConfig);
     return instance;
@@ -1899,6 +1921,10 @@ export class AgentOS implements IAgentOS {
     const namespace = option === true ? undefined : (option as { namespace?: unknown }).namespace;
     if (namespace !== undefined && namespace !== null) {
       refuse("learning.namespace is read by gmi() only; the runtime takes each turn's resolved organizationId.");
+    }
+    const learnerKey = option === true ? undefined : (option as { learnerKey?: unknown }).learnerKey;
+    if (learnerKey !== undefined && learnerKey !== null) {
+      refuse("learning.learnerKey is read by gmi() only; the runtime keys learners by the registered persona's id.");
     }
     try {
       resolveLearningConfig(option === true ? {} : option, 'custom');

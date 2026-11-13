@@ -15,7 +15,7 @@
  * @module agentos/core/logging/kit/consoleCapture
  */
 
-import { errorFields } from '../events.js';
+import { listedErrorFields } from '../events.js';
 import { terminal } from '../../utils/terminal.js';
 
 /**
@@ -98,7 +98,7 @@ export function captureConsole(kit: ConsoleKit): () => void {
       writing = true;
       try {
         const error = firstError(values);
-        kit.warn('console_line', { method, ...(error ? errorFields(error) : {}) });
+        kit.warn('console_line', { method, ...(error ? listedErrorFields(error) : {}) });
         const frames = error ? framesOf(error) : '';
         if (frames) terminal(frames, 'stderr');
       } finally { writing = false; }

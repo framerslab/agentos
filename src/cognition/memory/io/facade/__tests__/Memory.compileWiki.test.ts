@@ -3,6 +3,15 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { Memory } from '../Memory.js';
+import { conversationScopeKey } from '../../../retrieval/store/conversationScopeKey.js';
+
+/** The scope the traces of these tests are filed under: one user of one agent. */
+const SCOPE = conversationScopeKey('a1', { kind: 'user', id: 'ana' });
+/** A page store that holds nothing and keeps nothing. */
+const noPages = () => ({ readPage: async () => null, writePage: async () => {} });
+/** When the scope was last compiled (Unix ms), from its registry row; null before its first compile. */
+const watermarkOf = async (mem: Memory): Promise<number | null> =>
+  (await mem.listScopes()).find((row) => row.scopeId === SCOPE)?.compiledAt ?? null;
 
 const opened: Memory[] = [];
 const dirs: string[] = [];
@@ -35,49 +44,43 @@ afterEach(async () => {
 });
 
 describe('Memory.compileWiki', () => {
-  it('runs the attached compiler over recent non-wiki traces then indexes', async () => {
+  it("runs the attached compiler over a scope's new traces, with that scope's page store", async () => {
     const mem = await makeMemory(true);
-    await mem.remember('Johnny prefers terse commits.', { type: 'episodic', scope: 'persona', scopeId: 'a1' });
+    await mem.remember('Johnny prefers terse commits.', { type: 'episodic', scope: 'conversation', scopeId: SCOPE });
 
     const compiled: any[] = [];
-    let indexed = 0;
+    const asked: string[] = [];
+    const store = noPages();
     mem.attachWiki({
-      store: {
-        index: async () => {
-          indexed++;
-          return { indexed: [], skipped: [], removed: [] };
-        },
-        readMetaWatermark: async () => null,
-        writeMetaWatermark: async () => {},
-      } as any,
+      storeFor: (scopeId: string) => {
+        asked.push(scopeId);
+        return store;
+      },
       compiler: {
         compile: async (input: any) => {
           compiled.push(input);
           return { pagesWritten: ['entities/johnny'], tracesConsumed: 1, conflicts: [] };
         },
-      } as any,
+      },
     });
 
     const res = await mem.compileWiki({ reason: 'explicit' });
     expect(res.pagesWritten).toEqual(['entities/johnny']);
-    expect(compiled[0].traces.some((t: any) => t.content.includes('terse commits'))).toBe(true);
-    expect(indexed).toBe(1);
+    expect(compiled).toHaveLength(1);
+    expect(compiled[0].traces.map((t: any) => t.content)).toEqual(['Johnny prefers terse commits.']);
+    expect(compiled[0].reason).toBe('explicit');
+    // The compiler writes through the store of the scope it compiles, and no other.
+    expect(compiled[0].store).toBe(store);
+    expect(asked).toEqual([SCOPE]);
   });
 
   it('advances the watermark to the newest processed trace and drains on re-compile', async () => {
     const mem = await makeMemory(true);
-    const t = await mem.remember('Johnny likes terse commits.', { type: 'episodic', scope: 'persona', scopeId: 'a1' });
+    const t = await mem.remember('Johnny likes terse commits.', { type: 'episodic', scope: 'conversation', scopeId: SCOPE });
 
-    let watermark: string | null = null;
     let compileCalls = 0;
     mem.attachWiki({
-      store: {
-        index: async () => ({ indexed: [], skipped: [], removed: [] }),
-        readMetaWatermark: async () => watermark,
-        writeMetaWatermark: async (iso: string) => {
-          watermark = iso;
-        },
-      } as any,
+      storeFor: () => noPages(),
       compiler: {
         compile: async (input: any) => {
           compileCalls++;
@@ -87,13 +90,13 @@ describe('Memory.compileWiki', () => {
             conflicts: [],
           };
         },
-      } as any,
+      },
     });
 
     const first = await mem.compileWiki({ reason: 'explicit' });
     expect(first.tracesConsumed).toBe(1);
-    // Watermark is the trace's own created_at, NOT wall-clock now.
-    expect(watermark).toBe(new Date(t.createdAt).toISOString());
+    // The scope's watermark is the trace's own created_at, NOT wall-clock now.
+    expect(await watermarkOf(mem)).toBe(t.createdAt);
 
     const callsAfterFirst = compileCalls;
     const second = await mem.compileWiki({ reason: 'explicit' });
@@ -105,36 +108,48 @@ describe('Memory.compileWiki', () => {
 
   it('keeps the watermark when a compile rejects, so the next compile takes up the same traces', async () => {
     const mem = await makeMemory(false);
-    await mem.remember('Johnny prefers terse commits.', { type: 'episodic', scope: 'persona', scopeId: 'a1' });
+    await mem.remember('Johnny prefers terse commits.', { type: 'episodic', scope: 'conversation', scopeId: SCOPE });
 
-    let watermark: string | null = null;
     let diskFull = true;
     const compiled: string[][] = [];
     mem.attachWiki({
-      store: {
-        index: async () => ({ indexed: [], skipped: [], removed: [] }),
-        readMetaWatermark: async () => watermark,
-        writeMetaWatermark: async (iso: string) => {
-          watermark = iso;
-        },
-      } as any,
+      storeFor: () => noPages(),
       compiler: {
         compile: async (input: any) => {
           compiled.push(input.traces.map((t: any) => t.content));
           if (diskFull) throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
           return { pagesWritten: ['entities/johnny'], tracesConsumed: input.traces.length, conflicts: [] };
         },
-      } as any,
+      },
     });
 
     await expect(mem.compileWiki({ reason: 'explicit' })).rejects.toMatchObject({ code: 'ENOSPC' });
-    expect(watermark).toBeNull();
+    expect(await watermarkOf(mem)).toBeNull();
 
     diskFull = false;
     const res = await mem.compileWiki({ reason: 'explicit' });
     expect(res.tracesConsumed).toBe(1);
     expect(compiled).toEqual([['Johnny prefers terse commits.'], ['Johnny prefers terse commits.']]);
-    expect(watermark).not.toBeNull();
+    expect(await watermarkOf(mem)).not.toBeNull();
+  });
+
+  it('leaves a trace of any other scope out of every compile', async () => {
+    const mem = await makeMemory(false);
+    await mem.remember('Johnny prefers terse commits.', { type: 'episodic', scope: 'persona', scopeId: 'a1' });
+
+    let compileCalls = 0;
+    mem.attachWiki({
+      storeFor: () => noPages(),
+      compiler: {
+        compile: async () => {
+          compileCalls++;
+          return { pagesWritten: [], tracesConsumed: 0, conflicts: [] };
+        },
+      },
+    });
+
+    expect(await mem.compileWiki({ reason: 'explicit' })).toEqual({ pagesWritten: [], tracesConsumed: 0, conflicts: [] });
+    expect(compileCalls).toBe(0);
   });
 
   it('no-ops when no wiki is attached', async () => {

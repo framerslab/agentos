@@ -455,7 +455,7 @@ Per call, a pooled agency rejects `model`, `provider`, `apiKey`, `baseUrl`,
 `AgencyConfigError`, since each would move every seat off its seating. Under
 `panel` a call accepts only `temperature`, `topP`, `frequencyPenalty`,
 `presencePenalty`, `maxTokens`, `thinking`, `effort`, `requestTimeout`,
-`cache`, `promptCacheKey`, `promptCacheRetention`, `serviceTier`,
+`cache`, `promptCacheKey`, `promptCacheRetention`, `serviceTier`, `store`,
 `cacheDiagnostics`, `sessionId`, `usageLedger`, `source`, `toolChoice`,
 `chainOfThought`, `planning`, `onAfterGeneration`, `onBeforeToolExecution`,
 `customModelParams` (without `model`, `models`, `system`, `messages`, `tools`,
@@ -532,8 +532,12 @@ the strategy, none of the text), `parallel_seat_failed` (warn),
 entry to sit on, with its `status`, written whether or not the run meets its
 quorum), `panel_quorum_shortfall` and `parallel_quorum_shortfall` (warn; a
 shortfall the call goes on from under `onShortfall: 'proceed'`),
-`agency_callback_threw` (warn; the callback's name, its message masked), and
-`fallback_fired` and `fallback_exhausted` from the `fallback` component.
+and `fallback_fired` and `fallback_exhausted` from the `fallback` component.
+A callback that throws is written through the typed event
+`agency.callback_failed` (warn; the callback's name and the error's listed
+type and code, never its message, and a type or a code the library does not
+list is written `unknown`; see
+[Logging](../observability/LOGGING.md#governed-action-events)).
 
 ### Upgrading to 0.14
 
@@ -557,8 +561,9 @@ shortfall the call goes on from under `onShortfall: 'proceed'`),
   are stripped from the parent's result.
 - A callback that throws, or an async one whose promise rejects, whichever
   part of the run fires it (the agency, its strategy, a tool approval or a HITL
-  check), is written through the host's logger as `agency_callback_threw` and
-  no longer rejects the call or leaves a rejection unhandled.
+  check), is written through the host's logger as `agency.callback_failed`
+  (its name and the error's listed type and code, never its message) and no
+  longer rejects the call or leaves a rejection unhandled.
 - A run that breaches `maxTotalTokens` or `maxCostUSD` is added to the usage
   totals before the limit error is thrown.
 - `quorum` is read by `panel` as well as `parallel`; `AgencyQuorumError` takes
@@ -1124,7 +1129,7 @@ roster, and a member can carry a `soul` file the same way.
 import { agent, agency, type AgentMemoryProvider } from '@framers/agentos';
 
 const myMemory: AgentMemoryProvider = {
-  getContext: async (text) => ({ contextText: await lookupNotes(text) }),   // injected as a system message before the call
+  getContext: async (text) => ({ contextText: await lookupNotes(text) }),   // sent as a data block before the turn's message
   observe: async (turn) => { await saveNotes(turn); },                       // runs after the reply
 };
 
@@ -1328,13 +1333,14 @@ per-member record is `result.agentCalls`, and on the sequential and graph
 strategies `stream()` emits `agent-start` and `agent-end` parts per member on
 `fullStream`. `handoff` and `toolCall` are declared on the callback type and
 never fired. A callback that throws, or an async one whose promise rejects,
-is written through the host's logger as `agency_callback_threw` and never
+is written through the host's logger as `agency.callback_failed`, with its
+name and the error's listed type and code and never its message, and never
 fails the run or changes its result, whichever part of the run fires it. The
 agency reads each callback from `on` when the run fires it, and nothing of `on`
 when it is built: one set, replaced or deleted on that object after `agency()`
 returns is the one that runs, from the next event on, and a getter there is
 read only when its event fires, so one that throws is written as
-`agency_callback_threw` and never fails `agency()`. `observability` (`logLevel`,
+`agency.callback_failed` and never fails `agency()`. `observability` (`logLevel`,
 `traceEvents`, `otel`) is accepted and not read by `agency()`.
 
 ### Provenance / audit trail

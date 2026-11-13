@@ -63,7 +63,7 @@ import {
 } from './openaiPricing.js';
 import { isOpenAIReasoningModel, openAiReasoningContextWindow } from './openaiModelFamilies.js';
 import { moduleLogger } from '../../../logging/loggerFactory.js';
-import { errorFields } from '../../../logging/events.js';
+import { listedErrorFields } from '../../../logging/events.js';
 import { AttemptBudgetExhaustedError, CountingAttemptBudget } from '../../../../safety/runtime/ModelAttemptBudget.js';
 
 /** This module's events, under its fixed diagnostic origin; no runtime name enters telemetry. */
@@ -1020,7 +1020,7 @@ export class OpenAIProvider implements IProvider {
       log.debug('llm.provider_ready', { provider: 'openai', count: this.availableModelsCache.size });
     } catch (error: unknown) {
       this.isInitialized = false;
-      log.error('llm.provider_start_failed', { provider: 'openai', ...errorFields(error) });
+      log.error('llm.provider_start_failed', { provider: 'openai', ...listedErrorFields(error) });
       if (error instanceof OpenAIProviderError) {
         throw error; // Re-throw if already an OpenAIProviderError
       }
@@ -1822,7 +1822,7 @@ export class OpenAIProvider implements IProvider {
       try {
         await this.refreshAvailableModels();
       } catch (error) {
-        log.warn('llm.models_failed', { provider: 'openai', ...errorFields(error) });
+        log.warn('llm.models_failed', { provider: 'openai', ...listedErrorFields(error) });
       }
     }
 
@@ -1843,7 +1843,7 @@ export class OpenAIProvider implements IProvider {
         try {
             await this.refreshAvailableModels();
         } catch (error) {
-            log.warn('llm.models_failed', { provider: 'openai', ...errorFields(error) });
+            log.warn('llm.models_failed', { provider: 'openai', ...listedErrorFields(error) });
         }
     }
     return this.availableModelsCache.get(modelId);
@@ -1969,6 +1969,10 @@ export class OpenAIProvider implements IProvider {
     }
     if (options.stopSequences !== undefined) payload.stop = options.stopSequences;
     if (options.userId !== undefined) payload.user = options.userId;
+    // Chat completions are stored by default for new accounts; the call's
+    // `store` goes out as given, and a call without it sends no key, as before.
+    // https://developers.openai.com/api/docs/guides/migrate-to-responses
+    if (typeof options.store === 'boolean') payload.store = options.store;
     if (options.tools !== undefined) payload.tools = options.tools;
     if (options.toolChoice !== undefined) payload.tool_choice = options.toolChoice;
     // Coerce to an OpenAI-valid response_format, or drop it. agentos builds a
@@ -2075,6 +2079,8 @@ export class OpenAIProvider implements IProvider {
    *     event.
    *   - A chat-style `reasoning_effort` in `customModelParams` moves to
    *     `reasoning.effort`, because Responses rejects the top-level key.
+   *   - `store` is the call's `store` option, and `false` when the call sets
+   *     none, since Responses stores a response by default.
    *
    * Live-probed 2026-07-08; block-content path live-probed 2026-09-12.
    *
@@ -2134,7 +2140,13 @@ export class OpenAIProvider implements IProvider {
       input.push({ role: m.role, content: text });
     }
 
-    const payload: Record<string, unknown> = { model: modelId, input, store: false };
+    // Responses are stored by default; a call that does not set `store` keeps
+    // sending `store: false`.
+    const payload: Record<string, unknown> = {
+      model: modelId,
+      input,
+      store: typeof options.store === 'boolean' ? options.store : false,
+    };
     // A Responses-only model can be called without tools, and a
     // `reasoning: {}` or `tools: undefined` key has no meaning on the wire.
     if (requestHasFunctionTools(options.tools)) payload.tools = this.toResponsesTools(options.tools);
@@ -3154,13 +3166,13 @@ export class OpenAIProvider implements IProvider {
         // A read that fails because the caller aborted is the abort, not a stream error.
         if (abortSignal?.aborted) return;
         const message = error instanceof Error ? error.message : 'Stream parsing error';
-        log.error('llm.stream_failed', { provider: 'openai', ...errorFields(error) });
+        log.error('llm.stream_failed', { provider: 'openai', ...listedErrorFields(error) });
         throw new OpenAIProviderError(message, 'STREAM_PARSING_ERROR', undefined, undefined, undefined, error);
     } finally {
       abortSignal?.removeEventListener('abort', cancelOnAbort);
       // Ensure stream is closed if `break` or `return` is called within the generator
       if (!reader.closed) {
-          await reader.cancel().catch(err => log.warn('llm.stream_cancel_failed', { provider: 'openai', ...errorFields(err) }));
+          await reader.cancel().catch(err => log.warn('llm.stream_cancel_failed', { provider: 'openai', ...listedErrorFields(err) }));
       }
       // console.log("OpenAIProvider: SSE Stream parsing finished.");
     }

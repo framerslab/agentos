@@ -1,0 +1,229 @@
+/**
+ * @fileoverview The memory block's budget and the value checks of the recall settings (`memory.recall` on `agent()`
+ * and `gmi()`, a persona's `cognitiveMemoryConfig.recall`, a manager's `recall`).
+ *
+ * @module agentos/cognition/memory/retrieval/recall/budget
+ */
+import type { ManagerRecallConfig } from '../../core/config.js';
+import { recallLog } from './log.js';
+
+/** The memory block's budget, in tokens, when no `recall.budget.totalTokens` is set: what the GMI's memory bridge asked for before the setting existed. */
+export const DEFAULT_RECALL_BUDGET_TOKENS = 1600;
+
+const CAPTURE_MODES: readonly unknown[] = ['off', 'metadata', 'metadata+stream'];
+const RETRIEVAL_MODES: readonly unknown[] = ['dense', 'hybrid'];
+/** The hybrid recall's constants that count candidates, so must be whole numbers from 1 to {@link MAX_RECALL_COUNT}. */
+const COUNT_CONSTANTS: readonly string[] = ['topK', 'recentTopK', 'overFetch'];
+/** The names of the hybrid recall's constants (`RECALL_CONSTANTS`). */
+const CONSTANT_NAMES: readonly string[] = ['rrfK', 'denseWeight', 'sparseWeight', 'recencyWeight', 'overFetch', 'topK', 'nearDuplicate', 'recentTopK'];
+/** The largest count constant: `topK × overFetch` rows stays a finite, bounded read. */
+const MAX_RECALL_COUNT = 1000;
+
+/** Why a recall setting was refused at construction. */
+export type RecallOptionRejection = 'conflict' | 'unsupported_provider' | 'unsupported_runtime' | 'invalid_value';
+
+/**
+ * A recall setting refused at construction. `option` is the field under `memory.recall` (`budget.totalTokens`,
+ * `budget`, `capture`, `retrieval`, `rerank` and its fields such as `rerank.revision`, a manager's `constants`), or
+ * `recall` for the setting itself.
+ */
+export class RecallOptionError extends Error {
+  constructor(
+    readonly option: string,
+    readonly reason: RecallOptionRejection,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'RecallOptionError';
+  }
+}
+
+/**
+ * Writes one `memory.recall.option_rejected` line, then throws.
+ *
+ * @throws {RecallOptionError} Always, with `option`, `reason` and `message`.
+ */
+export function rejectRecallOption(option: string, reason: RecallOptionRejection, message: string): never {
+  recallLog.error('memory.recall.option_rejected', { option, reason });
+  throw new RecallOptionError(option, reason, message);
+}
+
+/** Whether `value` is a plain settings object: an object that is not an array. */
+function isSettingsObject(value: unknown): boolean {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** Whether `value` is a string with something in it besides spaces. */
+function isNonBlank(value: unknown): boolean {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+/** A whole commit id: 40 hexadecimal characters (SHA-1), or 64 (SHA-256). */
+const COMMIT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
+
+/**
+ * Checks `recall.rerank`: `'none'`, or an object whose `kind` is `'local'` (a non-blank `model`, and a `revision` that
+ * is a whole commit id) or `'llm'` (a non-blank `model` and an `invoke` function), with `timeoutMs` and
+ * `maxCandidates`, when given, positive integers. Any other `kind` names a provider memory rerank does not offer. A
+ * branch, a tag or a shortened id is refused as a `revision`: it can name other weights later, so it pins nothing.
+ *
+ * @throws {RecallOptionError} `unsupported_provider` for another `kind`, else `invalid_value`, naming the field.
+ */
+function assertRerankSetting(rerank: unknown, where: string): void {
+  if (rerank == null || rerank === 'none') return;
+  if (!isSettingsObject(rerank)) {
+    rejectRecallOption('rerank', 'invalid_value', `${where}: memory.recall.rerank must be 'none', { kind: 'local', model, revision } or { kind: 'llm', invoke, model }.`);
+  }
+  const setting = rerank as Record<string, unknown>;
+  if (setting.kind !== 'local' && setting.kind !== 'llm') {
+    rejectRecallOption(
+      'rerank',
+      'unsupported_provider',
+      `${where}: memory.recall.rerank.kind must be 'local' or 'llm'; a remote reranker is not offered for memories. Use { kind: 'local', model, revision } or { kind: 'llm', invoke, model }.`,
+    );
+  }
+  if (!isNonBlank(setting.model)) {
+    rejectRecallOption('rerank.model', 'invalid_value', `${where}: memory.recall.rerank.model must be a non-blank string (the model's id).`);
+  }
+  if (setting.kind === 'local' && !(typeof setting.revision === 'string' && COMMIT_ID.test(setting.revision))) {
+    rejectRecallOption(
+      'rerank.revision',
+      'invalid_value',
+      `${where}: memory.recall.rerank.revision must be a commit id of the model's repository (40 hexadecimal characters). A branch, a tag or a shortened id can name other weights later.`,
+    );
+  }
+  if (setting.kind === 'llm' && typeof setting.invoke !== 'function') {
+    rejectRecallOption('rerank.invoke', 'invalid_value', `${where}: memory.recall.rerank.invoke must be a function (system, user, model) that returns the model's reply.`);
+  }
+  for (const field of ['timeoutMs', 'maxCandidates'] as const) {
+    const value = setting[field];
+    if (value != null && !(typeof value === 'number' && Number.isInteger(value) && value >= 1)) {
+      rejectRecallOption(`rerank.${field}`, 'invalid_value', `${where}: memory.recall.rerank.${field} must be a positive integer.`);
+    }
+  }
+}
+
+/**
+ * Checks a recall setting's values: the setting and its `budget` objects, `budget.totalTokens` an integer of at least
+ * 0, `capture` one of its three modes, `retrieval` `'dense'` or `'hybrid'`, `rerank` `'none'` or a `local` or `llm`
+ * setting with its fields (a non-blank `model`; `local`'s `revision`, a whole commit id; `llm`'s `invoke`; `timeoutMs`
+ * and `maxCandidates` positive integers), and a manager's `constants` an object of the hybrid recall's constants by name,
+ * each a finite number of at least 0, `topK`, `recentTopK` and `overFetch` integers from 1 to 1,000, and
+ * `nearDuplicate` above 0 and at most 1. A `null` or `undefined` setting, or field, is unset.
+ *
+ * @param recall - The setting.
+ * @param where - What opens the message (`gmi()`, `agent()`, `CognitiveMemoryManager`).
+ * @throws {RecallOptionError} Naming the field, after one `memory.recall.option_rejected` line: with the reason
+ *   `unsupported_provider` for a `rerank` whose `kind` is neither `'local'` nor `'llm'`, else `invalid_value`.
+ */
+export function assertRecallConfig(recall: ManagerRecallConfig | null | undefined, where: string): void {
+  if (recall == null) return;
+  // A JavaScript caller's `recall: 'off'` or `budget: 2400` would otherwise read as unset and build on the defaults.
+  if (!isSettingsObject(recall)) {
+    rejectRecallOption('recall', 'invalid_value', `${where}: memory.recall must be an object ({ budget?, capture?, retrieval?, rerank? }).`);
+  }
+  const budget: unknown = recall.budget;
+  if (budget != null && !isSettingsObject(budget)) {
+    rejectRecallOption('budget', 'invalid_value', `${where}: memory.recall.budget must be an object ({ totalTokens? }).`);
+  }
+  const total: unknown = recall.budget?.totalTokens;
+  if (total != null && !(typeof total === 'number' && Number.isInteger(total) && total >= 0)) {
+    rejectRecallOption('budget.totalTokens', 'invalid_value', `${where}: memory.recall.budget.totalTokens must be an integer of at least 0.`);
+  }
+  if (recall.capture != null && !CAPTURE_MODES.includes(recall.capture)) {
+    rejectRecallOption('capture', 'invalid_value', `${where}: memory.recall.capture must be 'off', 'metadata' or 'metadata+stream'.`);
+  }
+  if (recall.retrieval != null && !RETRIEVAL_MODES.includes(recall.retrieval)) {
+    rejectRecallOption('retrieval', 'invalid_value', `${where}: memory.recall.retrieval must be 'dense' or 'hybrid'.`);
+  }
+  assertRerankSetting(recall.rerank, where);
+  const memoryQuestion: unknown = recall.memoryQuestion;
+  if (memoryQuestion != null && typeof memoryQuestion !== 'function') {
+    rejectRecallOption('memoryQuestion', 'invalid_value', `${where}: recall.memoryQuestion must be a function of the turn's text.`);
+  }
+  const constants: unknown = recall.constants;
+  if (constants != null) {
+    if (!isSettingsObject(constants)) {
+      rejectRecallOption('constants', 'invalid_value', `${where}: recall.constants must be an object of numbers.`);
+    }
+    for (const [name, value] of Object.entries(constants as Record<string, unknown>)) {
+      // A misspelt name would otherwise run on the starting value with nothing said.
+      if (!CONSTANT_NAMES.includes(name)) {
+        rejectRecallOption('constants', 'invalid_value', `${where}: recall.constants.${name} is not a recall constant (${CONSTANT_NAMES.join(', ')}).`);
+      }
+      if (value == null) continue;
+      const finite = typeof value === 'number' && Number.isFinite(value) && value >= 0;
+      const fits = COUNT_CONSTANTS.includes(name)
+        ? finite && Number.isInteger(value) && value >= 1 && value <= MAX_RECALL_COUNT
+        : name === 'nearDuplicate'
+          ? finite && value > 0 && value <= 1
+          : finite;
+      if (!fits) {
+        const rule = COUNT_CONSTANTS.includes(name)
+          ? `an integer from 1 to ${MAX_RECALL_COUNT}`
+          : name === 'nearDuplicate'
+            ? 'a number above 0 and at most 1'
+            : 'a finite number of at least 0';
+        rejectRecallOption('constants', 'invalid_value', `${where}: recall.constants.${name} must be ${rule}.`);
+      }
+    }
+  }
+}
+
+/**
+ * The configured budget of the memory block, in tokens, its preamble included: `recall.budget.totalTokens`, else
+ * {@link DEFAULT_RECALL_BUDGET_TOKENS}.
+ */
+export function recallBudgetTokens(recall: ManagerRecallConfig | null | undefined): number {
+  return recall?.budget?.totalTokens ?? DEFAULT_RECALL_BUDGET_TOKENS;
+}
+
+/**
+ * The share of a model's context PromptEngine gives retrieved context (`applyTokenBudget`'s `rag` budget), which the
+ * memory block and the turn's other retrieved context (RAG, long-term-memory text) share. Fixed at 0.20.
+ */
+export const PROMPT_CONTEXT_SHARE = 0.2;
+
+/** The memory block's budget on one model: what was asked for, what the model's share leaves, and why they differ. */
+export interface EffectiveRecallBudget {
+  /** The configured budget (`recall.budget.totalTokens`). */
+  requested: number;
+  /** The budget the block is rendered in on this model: never above `requested`, never below 0. */
+  effective: number;
+  /** Set when `effective` is below `requested`: `zero_remaining` when nothing is left, `prompt_share` otherwise. */
+  clampReason?: 'prompt_share' | 'zero_remaining';
+  /** The model's retrieved-context share, in tokens. */
+  promptShareTokens?: number;
+  /** The turn's other retrieved context, in tokens, which the share holds first. */
+  otherContextTokens?: number;
+  /**
+   * An input was not a finite number of at least 0 (the context size: above 0), so the clamp was skipped and
+   * `effective` is `requested`.
+   */
+  invalid?: true;
+}
+
+/**
+ * The memory block's budget on one model: the smaller of the configured budget and what is left of the model's
+ * retrieved-context share ({@link PROMPT_CONTEXT_SHARE} of `contextTokens`, floored) after the turn's RAG and
+ * long-term-memory text. Never below 0.
+ *
+ * @param i.totalTokens - The configured budget.
+ * @param i.contextTokens - The model's context size as PromptEngine budgets it (`optimalContextTokens`, else `maxContextTokens`).
+ * @param i.otherContextTokens - The tokens of the turn's other retrieved context.
+ * @returns The budget, with `invalid` set when an input was not a finite number in range.
+ */
+export function effectiveRecallBudget(i: { totalTokens: number; contextTokens: number; otherContextTokens: number }): EffectiveRecallBudget {
+  const inRange = (n: number): boolean => typeof n === 'number' && Number.isFinite(n) && n >= 0;
+  if (!inRange(i.totalTokens) || !inRange(i.otherContextTokens) || !inRange(i.contextTokens) || i.contextTokens === 0) {
+    return { requested: i.totalTokens, effective: i.totalTokens, invalid: true };
+  }
+  const promptShareTokens = Math.floor(PROMPT_CONTEXT_SHARE * i.contextTokens);
+  const effective = Math.max(0, Math.min(i.totalTokens, promptShareTokens - i.otherContextTokens));
+  const budget: EffectiveRecallBudget = { requested: i.totalTokens, effective, promptShareTokens, otherContextTokens: i.otherContextTokens };
+  if (effective < i.totalTokens) budget.clampReason = effective === 0 ? 'zero_remaining' : 'prompt_share';
+  return budget;
+}
+
+/** The assembler's token estimate (about four characters a token), with which the GMI sizes the other context. */
+export { estimateMemoryTokens } from '../../core/prompt/MemoryPromptAssembler.js';

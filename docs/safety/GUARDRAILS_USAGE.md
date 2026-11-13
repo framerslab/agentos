@@ -19,7 +19,7 @@ User Input → [Input Guardrails] → Orchestration → [Output Guardrails] → 
 
 When multiple guardrails are active, AgentOS uses a **two-phase dispatcher**:
 
-1. **Phase 1 (sequential sanitizers)** - Guardrails with `config.canSanitize === true` run in registration order so each sanitizer sees the cumulative sanitized text
+1. **Phase 1 (sequential sanitizers)** - Guardrails with `config.canSanitize === true` run in registration order so each sanitizer sees the cumulative sanitized text; so do screens with `config.sequential === true`, whose BLOCK ends the evaluation before Phase 2 starts
 2. **Phase 2 (parallel classifiers)** - All remaining guardrails run concurrently via `Promise.allSettled`, with worst-action aggregation (`BLOCK > FLAG > ALLOW`)
 
 This keeps redaction deterministic while still allowing heavyweight classifiers and grounding checks to run in parallel.
@@ -81,6 +81,212 @@ await agent.initialize({
 | `FLAG` | Pass content, record metadata for audit |
 | `SANITIZE` | Replace content with modified version |
 | `BLOCK` | Reject/terminate the interaction |
+
+A `BLOCK` can also carry `hold: { reviewCode }`: the content is kept back for a person's review instead of refused. See [Holding Content for Review](#holding-content-for-review).
+
+## Holding Content for Review
+
+A guard that cannot decide alone keeps the content back for a person to look at. It answers a `BLOCK` with `hold`, or builds the same answer with `holdResult()`:
+
+```typescript
+import { GuardrailAction, holdResult, type IGuardrailService } from '@framers/agentos/safety/guardrails';
+
+const reviewer: IGuardrailService = {
+  id: 'needs-review',
+  config: { reasonCodes: ['NEEDS_REVIEW', 'REVIEW_LINKS'] },
+  async evaluateInput({ input }) {
+    if (!/https?:\/\//.test(input.textInput ?? '')) return null;
+    return holdResult('REVIEW_LINKS', { reasonCode: 'NEEDS_REVIEW' });
+    // the same as { action: GuardrailAction.BLOCK, reasonCode: 'NEEDS_REVIEW', hold: { reviewCode: 'REVIEW_LINKS' } }
+  },
+};
+```
+
+- **A hold is a BLOCK everywhere.** Every enforcement point (input, a streamed delta, the final reply, a tool call) treats it as the `BLOCK` it is, so nothing it keeps back is delivered and a held tool call never runs.
+- **A refusal outranks a hold.** When one guard holds and another refuses in the same phase, the refusal decides, whichever was registered first; the hold stays in `evaluations`. A sanitizer (`canSanitize: true`) runs before the others, one at a time, and any `BLOCK` it answers, a hold included, ends the evaluation before the later guards run. A hold outranks a `FLAG`, a `SANITIZE` and an `ALLOW`. Cross-agent guards stop at the first `BLOCK`, a hold included.
+- **Which it was.** `GuardrailInputOutcome.outcome` is always set: `'allow'`, `'flag'`, `'sanitize'`, `'hold'` or `'block'`. `guardrailOutcomeOf(evaluations)` gives the same answer for any list, and `isGuardrailHold(evaluation)` says whether one evaluation is a hold.
+- **What the caller receives.** Under `processRequest()` a held input ends the turn as a block does: one ERROR chunk, with the hold in `details.hold` (`{ reviewCode }`) beside `details.action`. A held reply ends the stream the same way, and `onVerdict` receives `hold` on its verdict; so does a hold on the text before an actionable tool call in hold mode, whose verdict also names the withheld calls in `toolCallIds`. A hold on output that carries a `replacementText` (`holdResult('REVIEW', { replacementText: 'Waiting for review' })`) is delivered as that fixed reply, a FINAL_RESPONSE chunk and not an ERROR, with the hold in its `metadata.guardrail.output`; a host that queues held replies reads both places. The serialised evaluation in chunk metadata carries `hold` too.
+- **The host does the rest.** It stores the content, tells the sender it is waiting for review and puts it in its review queue under `reviewCode`. The library keeps nothing.
+- **Where a host gets a held reply.** A held input is the host's own input. A held reply is not in what the caller receives: the ERROR chunk and a fixed reply carry the hold and no text, and under `processRequest()` the `onVerdict` callback is AgentOS's own, used to drop withheld tool calls and rewrite the stored reply. A host that queues held replies keeps the text where the hold is decided and queues it only once the caller receives that hold: the guard that holds gets the reply in its `evaluateOutput()` payload and stages it under the stream id and its own id; the host queues it when the stream ends in that guard's hold (`details.hold` with the guard's id in `details.metadata`, or a fixed reply whose `metadata.guardrail.output` names it) and discards it otherwise, since in phase 2 another guard's refusal outranks the hold. A guard on streamed deltas sees a delta, not the whole reply; a host that needs the whole reply decides holds on the final reply, with hold mode on. A host that drives a stream itself with `wrapOutputGuardrails()` passes its own `onVerdict`, whose `originalText` is the reply as the guards judged it on a final reply, and null on a verdict for a streamed delta.
+- **A release goes through the guards again.** A held message may not have been judged by every guard: a sanitizer's hold ends phase 1, so no phase 2 guard read it. A host that releases a held message after a person's review runs the guards on it again before delivering it.
+- **A hold on another action is ignored.** `hold` counts only with `BLOCK`. On a `FLAG` or a `SANITIZE` the dispatcher ignores it and writes `guardrail.hold_ignored` once for that guard; a `SANITIZE` of a tool call is applied as a `BLOCK` that is a refusal, not a hold.
+- **Codes.** A `reviewCode` is letters, digits and underscores, at most 64. `toModerationEvaluation()` reports an evaluation without its `reason` and `details`, and writes a code outside its shape as `INVALID_CODE`.
+
+A guard's failure is a typed event, not a console line: a throw or a timeout writes `guardrail.failed` with the guard's id, the stage, the posture (`open` or `closed`), the cause and the error's listed type and code, never its message (see [Logging](../observability/LOGGING.md)). Under `processRequest()` a guard with no `failClosed` is still skipped when it throws.
+
+## Content Between People: `moderateContent()`
+
+One call judges a message, a post or an upload that one person sends another, before the host delivers it:
+
+```typescript
+import { moderateContent, PhraseListGuardrail } from '@framers/agentos/safety/guardrails';
+
+const hardBan = await PhraseListGuardrail.create({ id: 'hard-ban', sequential: true, source: reviewedList });
+
+const decision = await moderateContent(
+  { text: message.text, images: message.images },
+  {
+    guards: [hardBan, vendorClassifier, reviewer],
+    context: {
+      userId: sender.id,
+      sessionId: room.id,
+      moderation: { surface: 'public_room', roomId: room.id, rating: 'standard', messageId: message.id },
+    },
+    stopVendorsOn: ['MINOR_SAFETY'],
+  },
+);
+
+if (decision.outcome === 'refuse' && decision.unavailable) tellSenderToRetry();
+else if (decision.outcome === 'refuse') refuse(decision.deciding?.reasonCode);
+else if (decision.outcome === 'hold') queueForReview(decision.hold?.reviewCode);
+else deliver(decision.sanitizedText ?? message.text);
+```
+
+- **Four outcomes.** `allow`, `flag`, `refuse` and `hold`. A `refuse` with `unavailable: true` means nothing but a guard that threw, ran late or answered no recognised action, or an image the [image guard](#images-imageguardrail) could not have checked, kept the content back: no rule refused it and no guard held it. A host tells the sender and does not count it as a policy refusal.
+- **Every guard runs closed** unless its config says `failClosed: false`, with a deadline of 8 seconds when neither its config nor the call's `timeoutMs` names one. A closed guard that throws, runs late or answers no recognised action (`undefined` included; `null` is an allow) becomes a `BLOCK` with `metadata.failClosed: true` and `metadata.cause` (`error`, `timeout` or `malformed`), and writes one `guardrail.failed` line with `posture: closed`. The library marks that `BLOCK` outside the answer: a guard that writes `failClosed`, `cause` or a library code into its own answer gives a rule's refusal, never an outage. A guard with `failClosed: false` is skipped and writes the same line with `posture: open`.
+- **What decides,** in this order: the first `BLOCK` a rule gave (not a hold, not a closed guard's failure); else the first hold; else the first closed guard's failure; else the first `FLAG`; else nothing. So among the guards that ran, one guard's outage never hides another guard's refusal or hold. A screen with `sequential: true` that fails ends the evaluation as its `BLOCK` would, so no phase 2 guard sees that text: a screen that is down cannot say the text is not one it refuses. `deciding` is that evaluation, `evaluations` holds every evaluation in registration order, and `hold` is set when the outcome (or `wouldBe`) is `hold`. `guardrailOutcomeOf()` keeps the plainer order of the older entry points, where any refusal comes first.
+- **No content in the decision but two fields.** It carries codes, ids and scores: each evaluation as `toModerationEvaluation()` reports it, without the guard's `reason` and `details`. Two fields can hold a person's text: `sanitizedText`, and an evaluation's `metadata`, which is the guard's own and passes through as the guard wrote it. A guard keeps the text out of its `metadata`, and a host keeps `sanitizedText` out of its logs.
+- **`sanitizedText`.** In `enforce`, the text as the guards with `canSanitize` left it, when one changed it, whatever the outcome; `''` when one removed it (`modifiedText: null`), so `sanitizedText ?? message.text` never brings the text back. A rewrite alone is an `allow` with `sanitizedText`.
+- **Dry run.** With `mode: 'dryRun'` every guard runs as it would in enforcement, and a screen's `BLOCK` still ends the evaluation. `outcome` is always `allow`, `wouldBe` is the outcome enforcement would have given, `enforced` is false, `unavailable` says what enforcement would have reported, and `sanitizedText` is never set. A `mode` other than `enforce` or `dryRun` throws a `TypeError` before any guard runs.
+- **Stopping vendor requests.** `stopVendorsOn` lists reason codes and review codes. Every guard of the call receives the same `context.vendorSignal`, and it is aborted the moment a guard answers one of those codes, while the other guards are still running. A guard that reads it starts no new vendor request. A request already sent is still answered.
+- **A guard that cannot judge input** is a configuration error: the call throws a `TypeError` naming a guard that has no `evaluateInput`, or declares `stages` without `input`. A guard with no `id` is reported as `guard_<its index>`.
+- **One line per decision.** A decision other than `allow` writes one `guardrail.verdict` line, and so does an `allow` whose text a guard rewrote (with `action: sanitize`); any other allow writes none (see [Logging](../observability/LOGGING.md#guardrail-events)).
+
+The closed default belongs to `moderateContent()`. Under `processRequest()`, `evaluateInputGuardrails()` and `wrapOutputGuardrails()` a guard with no `failClosed` is still skipped when it throws. `withModerationPosture(guard)` returns a guard wrapped the way `moderateContent()` wraps it, for a host that calls the dispatcher itself.
+
+## Screens That Run First
+
+A guard with `config.sequential: true` runs in phase 1, one at a time in registration order with the guards that can sanitize, though it does not rewrite. Its `BLOCK` ends the evaluation before any phase 2 guard is called, so text a local list refuses never reaches a phase 2 guard that calls a vendor, in enforcement and in a dry run. A phase 1 guard registered before the list still runs before it: register the list ahead of any sanitizer that calls a vendor. On a tool call the guards with `sequential` answer before the other guards that set `evaluateToolCalls`, and a `BLOCK` among them is the verdict before those are called. A `SANITIZE` from it is applied only when `canSanitize` is also true; otherwise it becomes a `FLAG` and writes `guardrail.sanitize_downgraded`. The phrase-list guard takes the option:
+
+```typescript
+const hardBan = await PhraseListGuardrail.create({
+  id: 'hard-ban',
+  sequential: true,
+  source: new StaticPhraseListSource({
+    version: '3', reviewedAt: '2026-11-10', reviewedBy: 'trust-and-safety',
+    entries: [{ phrase: 'a banned phrase', match: 'word', onMatch: 'block', ruleId: 'BAN_1' }],
+  }),
+});
+```
+
+A screen is local only when its list is. `sequential` orders guards; it does not stop one from calling out. A list with `judge` entries sends a matched text to its judge's model from inside the screen, so a host that wants no network call before its vendor guards keeps `block` entries alone in the screen and its `judge` entries in a second list without `sequential`.
+
+## Typed Context
+
+`context.moderation` tells a guard where the content appears and who wrote it:
+
+| Field | Shape | Meaning |
+|---|---|---|
+| `surface` | a word, required | `public_room`, `private_chat`, `group_chat`, `discussion_page`, `agent_turn`, `generated_media`, `upload`, `report_evidence`, or a word of the host's own |
+| `roomId` | an id | The place the content appears in: a room, a thread, a page |
+| `rating` | a word | The place's content rating, in the host's own words (`safe`, `standard`, ...) |
+| `messageId` | an id | The content's own id in the host's store |
+| `sender` | `{ id, kind? }` | Who wrote it, when that is not the call's `userId`; `id` is an id, `kind` is `account`, `guest` or `agent` |
+
+A word is letters, digits and `_ . : -`, at most 64 characters; an id is letters, digits and `_ . : / -`, at most 128. `moderateContent()` checks the field with `assertModerationContext()` before any guard runs and throws a `TypeError` that names the field and never its value. A host whose ids hold other characters (an email address, a provider's `auth|id`) passes a surrogate key of its own. Guards read `context.moderation?.rating` and its siblings; `context.metadata` stays as it is for everything else.
+
+### Text a person wrote, framed as data
+
+A guard or an agent that hands a person's text to a model frames it with `frameUntrustedEvidence()` and puts `UNTRUSTED_EVIDENCE_NOTICE` in the system prompt:
+
+```typescript
+import { UNTRUSTED_EVIDENCE_NOTICE, frameUntrustedEvidence } from '@framers/agentos/safety/guardrails';
+
+const { text } = frameUntrustedEvidence(message.text, { label: `message:${message.id}` });
+// [message:m1]
+// <<evidence:9f2c41d07ab3e855>>
+// ...the text...
+// <<end:9f2c41d07ab3e855>>
+```
+
+The two markers share a random boundary of 16 hexadecimal characters, new on every call. Any copy of it in the text is removed, null bytes are dropped, and chat-template tokens (`<|...|>`, `[INST]`, `[/INST]`, `<s>`, `</s>`) are broken with a space, in the text and in the label's line (a label `INST` is written `[ INST]`). The label, when given, must be an id. Framing lowers how often instructions planted in the text work; it does not make a model ignore them, so an agent that acts on such text is also held to limits and checked evidence.
+
+## Guards Under the Text Functions
+
+`generateText()` and `streamText()` take `guards`, and so do an agent's `generate()`, `stream()` and a session's `send()` and `stream()`:
+
+```typescript
+import { GuardrailStopError, generateText } from '@framers/agentos';
+
+const result = await generateText({
+  provider: 'openai',
+  prompt,
+  tools,
+  guards: { services: [hardBan, classifier], context: { userId: user.id, sessionId: thread.id, moderation: { surface: 'agent_turn' } } },
+});
+```
+
+- **Three stages.** The call's own user turn is judged once, before the first provider request. Each tool call the model makes is judged by the guards that set `evaluateToolCalls`, on the arguments the model sent, before `onBeforeToolExecution` and so before any approval. The whole reply is judged before the caller receives it. `stages` picks among `input`, `toolCalls` and `output`.
+- **Closed by default.** Each guard runs as `moderateContent()` runs it: closed unless its config says `failClosed: false`, with a deadline, and what decides a stage is what decides `moderateContent()`.
+- **A stop** rejects with `GuardrailStopError` (`GUARDRAIL_BLOCKED`, `GUARDRAIL_HELD` or `GUARDRAIL_UNAVAILABLE`); a stream yields it as one `error` part. The input and output stages run once per call, outside the fallback chain, so a stop is not retried on a fallback provider. A refused tool call is not a stop: the tool does not run, the model reads the refusal as the call's result and the loop goes on.
+- **A replacement reply.** A `BLOCK` that carries a non-empty `replacementText` on the input is the reply, and no request is made; on the output it takes the reply's place.
+- **The report.** `guardReport` carries codes and ids: no guard's reason, no prompt, no reply, and no call id from a provider.
+
+[Guards on a call](../getting-started/HIGH_LEVEL_API.md#guards-on-a-call) has the options, the error, the report and what a stream delivers after a stop.
+
+## The Dry Run
+
+`mode: 'dryRun'` on `moderateContent()` and on `guards` runs every guard as enforcement would, and changes nothing:
+
+- Every verdict is reported with `enforced: false`: `moderateContent()` answers `allow` with `wouldBe`, and `guards` passes each verdict to `onVerdict` and writes its `guardrail.verdict` line with `mode: dry_run`.
+- Under `guards` the input is sent as given, tools run and text passes. A stream's output guards judge the whole reply once it was delivered.
+- A screen's `BLOCK` still ends its evaluation, so a dry run calls the guards enforcement would call and no others.
+
+## Images: `ImageGuardrail`
+
+`ImageGuardrail` judges the images of an input (`visionInputs`, which `moderateContent()` fills from `content.images`). It holds the order of the checks and no vendor code: the host hands it its checks.
+
+```typescript
+import { ImageGuardrail, moderateContent, type ImageCheck } from '@framers/agentos/safety/guardrails';
+
+const hashCheck: ImageCheck = {
+  id: 'hash',
+  kind: 'match',
+  reasonCodes: ['KNOWN_MATERIAL'],
+  async check(image) {
+    return (await hashService.lookup(image.bytes)) ? { verdict: 'block', reasonCode: 'KNOWN_MATERIAL', quarantine: true } : { verdict: 'pass' };
+  },
+};
+const visionCheck: ImageCheck = {
+  id: 'vision',
+  kind: 'classify',
+  reasonCodes: ['IMAGE_EXPLICIT', 'IMAGE_REVIEW'],
+  async check(image) {
+    const score = await visionModel.score(image.bytes, image.mimeType);
+    if (score > 0.9) return { verdict: 'block', reasonCode: 'IMAGE_EXPLICIT' };
+    if (score > 0.6) return { verdict: 'hold', reviewCode: 'IMAGE_REVIEW' };
+    return { verdict: 'pass' };
+  },
+};
+
+const images = ImageGuardrail.create({
+  id: 'images',
+  checks: [hashCheck, visionCheck], // every match check first
+  requireMatch: true,               // a surface that takes people's uploads
+  sequential: true,                 // the image checks finish before any vendor guard reads the text
+  loadImage: (url) => fetchUnderEgressRules(url),
+});
+
+const decision = await moderateContent({ text: message.text, images: message.images }, { guards: [images, textClassifier], context });
+```
+
+- **Two kinds of check, in a fixed order.** A `match` check compares an image with known material (a hash service). A `classify` check sends it to a model. The guard runs every `match` check on every image (images in order, checks in list order) before it runs any `classify` check on any image. `create()` keeps its own copy of each check as it was validated, so editing a check object afterwards changes nothing. It throws a `TypeError` on an empty list, on a list with no `classify` check, on a `classify` check listed before a `match` check, on a `match` check with `onError: 'skip'`, on an `onError` other than `refuse` or `skip`, on a reason code that is not a word (letters, digits and `_ . : -`, at most 64), on two checks with one id or a check whose id is `load`, and, with `requireMatch: true`, on a list with no `match` check.
+- **A quarantine ends the evaluation.** A `block` with `quarantine: true` on any image ends the whole evaluation there. From a `match` check, no `classify` check has run on any image of the input, and none runs, so nothing of it reaches a model. From a `classify` check, no further check runs on that image or any other. The decision is a `refuse` whose `deciding.metadata` carries `quarantine: true`.
+- **What ends one image's chain.** Any other `block`, a `hold`, or a check that could not answer keeps that image from every `classify` check still to run; the other images go on. The other `match` checks still run on it, so a later one can still find known material and quarantine it: a list that holds or blocks, or is down, never hides a hash match. The first `block` on an image decides it. A `flag` and a `pass` let the next check run.
+- **`requireMatch`.** For a surface that takes people's uploads: the guard cannot be built until a `match` check exists. Without it a list of `classify` checks alone is allowed, for a host's own generated images.
+- **A check that fails.** A check that throws, or answers no verdict, writes one `image_guard.check_failed` line. With `onError: 'refuse'` (the default) the image is refused as unavailable and goes to no `classify` check, though the other `match` checks still run on it. A `classify` check with `onError: 'skip'` is a signal: its failure is written with `posture: skip` and the chain goes on. A `match` check is never skipped.
+- **An image nobody judged is refused.** An image counts as judged only when a `classify` check answered for it, or a check held or blocked it. A `match` check's `pass` says the image is not known material; it says nothing of what the image shows. An image no `classify` check answered for (each one that ran was skipped, or `context.vendorSignal` stopped them) is refused as unavailable, whatever the `match` checks answered.
+- **Unavailable.** An image refused as unavailable is a `BLOCK` with `reasonCode: 'IMAGE_CHECK_UNAVAILABLE'`, `metadata.failClosed: true` and the id of the check that could not answer (`classify` when none answered). `moderateContent()` reports it `unavailable: true` and ranks it below another guard's refusal or hold, as it ranks a closed guard's failure. The host tells the sender the image could not be checked.
+- **One capture, the same bytes for every check.** Before any check runs, the guard captures each image once: a `base64` input is decoded (a `data:` URL is allowed when it says `;base64`, and gives the mime type when `mimeType` is unset); an `image_url` input is handed to the host's `loadImage`, which fetches it under the host's own egress rules. The guard fetches nothing itself. The mime type is the input's `mimeType`, else the one `loadImage` returns. The guard judges the bytes it captured and leaves the input as it came: on the agent's own path (`processRequest()`) an `image_url` input still goes to the model as its URL, which the model's provider fetches again. Where a URL's server could answer differently the second time, hand the turn the bytes (a `base64` input, or a URL of storage you control whose content does not change). Each check receives its own copy of those bytes as an `ImageUnderReview` (`index`, `bytes`, `mimeType`) and never the URL, so a server that would answer the hash service and a model with different bytes gets no second request. An `image_url` input with no `loadImage`, a `loadImage` that throws or returns no bytes, a `base64` input that does not decode (a `data:` URL without `;base64` included), and an image with no mime type are refused as unavailable, with one `image_guard.check_failed` line whose `checkId` is `load`.
+- **Store what was judged.** A host that passes `loadImage` stores and serves the bytes it loaded, and never the URL again: the guard cannot see what a viewer later fetches from it.
+- **`maxImages`** (default 4). An input with more images is refused with `IMAGE_LIMIT` before any check runs. An input with no images is not judged by this guard.
+- **`maxBytes`** (default 20971520, 20 MiB). An image larger than this is refused with `IMAGE_LIMIT` (`metadata.imageIndex` names it) and no check runs on it; the input's other images are still checked, so a quarantine on one of them still decides. `base64` text is measured before it is decoded, and the bytes `loadImage` returns as they come back; a `loadImage` that can fetch large files limits its own download too.
+- **`sequential`.** With `sequential: true` the guard runs in phase 1 (see [Screens That Run First](#screens-that-run-first)), so the image checks finish before any phase 2 guard sees the input's text, and a quarantine keeps the text from the vendor guards too. Without it the text guards run beside the image checks.
+- **`timeoutMs`** (default 15000) is the deadline for the whole evaluation, every check of every image included. As a required guard the guard runs under its spec's `timeoutMs` instead, and the guard keeps whichever deadline comes first: its own, or the dispatcher's (`deadlineSignal`). The dispatcher answers at the deadline and does not wait for the guard; past it the guard starts no further capture or check, so no image goes to a vendor after the decision, and an image whose checks had not all run is refused as unavailable, named by the step that did not start (`load` or a check's id). A request a check had already sent is not stopped. Images and checks run one after another, so size the deadline for the slowest input you accept: with `maxImages` 4, a hash check of 0.5 s and a model check of 4 s need about 18 s, past the default.
+- **The verdict over all images.** A check's `block`, then a `hold`, then an image refused as unavailable, then a `flag`; the first image wins a tie. `metadata` is `{ guardrailId, imageIndex, checkId }`, with `quarantine` on a quarantine and the check's `scores` on a flag (only finite numbers under keys that are words; any other entry is dropped). A `block` or `flag` whose `reasonCode`, or a `hold` whose `reviewCode`, is not a word counts as a check that could not answer. `config.reasonCodes` lists `IMAGE_LIMIT`, `IMAGE_CHECK_UNAVAILABLE` and every code the checks list in their `reasonCodes`, so the `guardrail.verdict` line names the code.
+- **Generated images** are judged the same way: the host passes the image to `moderateContent()` with `context.moderation.surface: 'generated_media'`.
+
+No check is built in, and a host that registers no `ImageGuardrail` has no image guard. The library writes no image data, URL or description to a verdict or a log line: a verdict carries the guard's and the check's ids, the image's index and the check's codes and scores. The codes and score keys are the check's own words, so a check keeps anything about the image out of them. To write a check of your own, see [Writing an image check](./CREATING_GUARDRAILS.md#writing-an-image-check).
 
 ## Mid-Stream Decision Override ("Changing Mind")
 
@@ -364,8 +570,10 @@ class QualityGateGuardrail implements ICrossAgentGuardrailService {
 | `evaluateToolCalls` | `boolean` | `false` | Evaluate tool calls: a block refuses a call the runtime runs itself before it runs, and keeps an actionable call from the host and ends the stream; a sanitize is applied as a block. See [Tool Calls](#tool-calls) |
 | `maxStreamingEvaluations` | `number` | `undefined` | Rate limit streaming evaluations per guarded stream (the turn's stream and each continuation stream count on their own) |
 | `canSanitize` | `boolean` | `false` | Run this guardrail in Phase 1 so SANITIZE results chain deterministically |
-| `timeoutMs` | `number` | `undefined` | Per-guardrail timeout. On timeout/error the dispatcher fails open for that guardrail, unless `failClosed` is set or the guard is required |
-| `failClosed` | `boolean` | `false` | A throw or a timeout blocks instead of passing. Forced on for a required guard |
+| `sequential` | `boolean` | `false` | Run this guardrail in Phase 1, one at a time in registration order, though it does not sanitize: its BLOCK ends the evaluation before any Phase 2 guard is called. A SANITIZE it returns is a FLAG unless `canSanitize` is also set. See [Screens That Run First](#screens-that-run-first) |
+| `timeoutMs` | `number` | `undefined` | Per-guardrail timeout. On timeout/error the dispatcher fails open for that guardrail, unless `failClosed` is set or the guard is required. Under `moderateContent()` a guard that names none gets the call's deadline, 8 seconds by default |
+| `failClosed` | `boolean` | `false` | A throw or a timeout blocks instead of passing. Forced on for a required guard. Under `moderateContent()` a guard runs closed unless this is `false` |
+| `reasonCodes` | `readonly string[]` | `undefined` | Every reason code and review code the guard can answer, a closed list, declared for the log lines that name the code that decided: the `guardrail.verdict` line of `moderateContent()` takes a code from this list only, or a code the library made for a closed guard's failure, and writes `unknown` otherwise. `PhraseListGuardrail` lists the rule ids of the list it holds |
 
 ### Output Payload Extras
 
@@ -399,7 +607,7 @@ const agentos = await AgentOS.create({
 - **Replacement replies.** A `BLOCK` whose evaluation carries a non-empty `replacementText` reaches the caller as a `FINAL_RESPONSE` holding that text in `finalResponseText`, and in `finalResponseTextPlain` rendered as plain text as a turn renders its own reply, with `metadata.guardrail.output[0].action === 'block'` and the guard's `reasonCode`, in place of an error chunk. A block without one (or with an empty string) yields the error chunk.
 - **The stored reply.** With conversational persistence on, a reply a guard blocked with a replacement or sanitized is rewritten in the conversation's history (and one blocked without a replacement is emptied) before the final chunk leaves, so the history holds what the person saw: the stored message is matched by the text the guards judged, never by position, on a turn and on a tool continuation alike. The message's `metadata.modificationInfo` records the guard's reason code. A block on a streamed delta judges no whole reply and rewrites nothing; hold mode is where nothing streams before the final verdict. With `appendOnlyPersistence` on the conversation manager the stored row keeps the first text and the rewrite stays in memory; the runtime logs a warning when that happens, and a product that must not keep a replaced reply does not run an append-only store. A sanitized final chunk's `updatedConversationContext` reads the rewrite too.
 - **Declared stages.** A guard that has both methods but runs on one stage declares it in `IGuardrailService.stages` (the phrase-list guard does, from its `stages` option); a required guard is held to the stages it declares, and a stage it does not declare is reported as missing instead of passing on the method's existence.
-- **The text before a tool call.** In hold mode the text held before an actionable tool call is judged as a reply of its own, with the text in `finalResponseText` and as plain text in `finalResponseTextPlain`, as a final reply carries them: a block replaces it and the tool call does not go out; a sanitize rewrites what streams. That verdict is not reported through `onVerdict`, since nothing is stored at that point; the turn's final chunk, which carries the whole text, is judged and recorded on its own.
+- **The text before a tool call.** In hold mode the text held before an actionable tool call is judged as a reply of its own, with the text in `finalResponseText` and as plain text in `finalResponseTextPlain`, as a final reply carries them: a block replaces it and the tool call does not go out; a sanitize rewrites what streams. A block there, a hold included, is reported through `onVerdict` like a block on a final reply, with the withheld calls' ids in `toolCallIds`. An allow or a sanitize there is not reported, since nothing is stored at that point; the turn's final chunk, which carries the whole text, is judged and recorded on its own.
 - **Every verdict names its guard.** `metadata.guardrailId` is set on each evaluation when the guard has an `id`; a block's error chunk carries it in `details.metadata`.
 
 ### `PhraseListGuardrail`
@@ -444,9 +652,9 @@ phraseMatches(entries, 'Now in beta').map((e) => e.ruleId); // ['stage']
 
 ### Hard limits in the persona
 
-`IPersonaDefinition.hardLimits` (and `hardLimits:` in a SOUL file's front matter, when the file is loaded as a persona) renders as the last block of the system prompt of every GMI turn for that persona, under the heading "Hard limits", after everything the turn added and after every fragment of the persona's own prompt whatever priority it carries. The guards hold the same rules in code; the block tells the model.
+`IPersonaDefinition.hardLimits` (and `hardLimits:` in a SOUL file's front matter) renders as the last block of the system prompt on every path: every GMI turn for that persona, and every model call of `agent({ soul })` and `souledAgent()`, after `systemBlocks` too, under the heading "Hard limits", after everything the turn added and after every fragment of the persona's own prompt whatever priority it carries. The exception: the plan of a call with `planning` on is a system message after the limits. A memory provider's recall (the wiki's recall on a souled agent) is a data block in a user-role message, never a system message. The guards hold the same rules in code; the block tells the model.
 
-A GMI built by `agent({ runtime: 'gmi' })` or `gmi()` has no such block. Its persona comes from [`personaFromAgentOptions()`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/gmiPersona.ts), which sets no `hardLimits`, and the front matter of a `soul` file is not applied on that path ([GMIs from agent()](../GMI.md#gmis-from-agent)).
+A GMI built by `agent({ runtime: 'gmi' })` or `gmi()` has the block when its `soul` sets `hardLimits`: [`personaFromAgentOptions()`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/gmiPersona.ts) takes them from the soul's front matter ([GMIs from agent()](../GMI.md#gmis-from-agent)). An agent with no soul has none.
 
 ## Tool Calls
 
@@ -473,7 +681,7 @@ class ShellCommandGuard implements IGuardrailService {
 - **Sanitize.** A guard cannot rewrite a tool call. A `SANITIZE` is applied as a `BLOCK` that keeps the guard's reason and reason code.
 - **Flag and allow.** The chunk goes on with the evaluation in `metadata.guardrail.output`.
 - **Calls the runtime runs itself.** AgentOS asks the guard about each call with `executionMode: 'internal'` before the call runs, as a `TOOL_CALL_REQUEST` chunk holding that one call, with the sources the turn retrieved in `ragSources`, on `processRequest()`, `handleToolResult()` and `resumeExternalToolRequest()` alike. A continuation the orchestrator is given no gate for (`AgentOSOrchestrator.orchestrateToolResult()` takes none) is judged with the gate its turn ran with, which the runtime keeps with the turn's stream. A continuation retrieves nothing of its own, so its calls are judged with the sources the user turn it continues retrieved, which the runtime keeps with the turn's stream: a turn of another conversation on the session's GMI meanwhile, or a GMI built again for the session, does not change them. A turn resumed after a restart is judged without them: the pause stores the calls, never the documents the turn retrieved. A block (or a sanitize) refuses the call: the tool does not run, and the model reads a refused tool result (code `AUTH_PERMISSION_DENIED`, with the guard's reason), as it reads a permission refusal. When a model step asks for several such calls, every call of the step is judged before any of them runs, and the calls that pass alone are judged once more together, as the stream's chunk for the step holds them, so a guard that rules on calls together (notes read and a shell command run in one step) refuses each of them before any runs. On the stream `processRequest()` returns, the guard also judges the stream's chunk for the step, so it is asked about such calls twice; a block there ends the host's stream with the verdict while the turn finishes inside the runtime. A continuation's stream carries no chunk for the calls the GMI runs itself. A refused call never becomes an actionable request and no pending request is saved for it; the `FINAL_RESPONSE` lists it in `finalToolCalls` beside the calls that ran. To have a person approve a tool before it runs, gate the tool: with a `hitlManager` and `toolOrchestratorConfig.hitl.enabled`, the tool orchestrator asks for an approval before a tool with `hasSideEffects: true` runs ([Human-in-the-Loop](./HUMAN_IN_THE_LOOP.md)).
-- **Several guards.** The guards that evaluate tool calls run in parallel on each tool-call chunk; the first block in registration order is the verdict.
+- **Several guards.** The guards that evaluate tool calls and set `config.sequential` answer first, one at a time in registration order, and the first `BLOCK` among them is the verdict before any other guard is called. The rest run in parallel on each tool-call chunk; the first refusal in registration order is the verdict, else the first hold.
 - **What the guards do not see.** The guards judge the calls a turn's model requests. The steps of a composed tool (one `forge_tool` built from a chain of other tools) and the tool tasks of a workflow are not model requests: they run through the tool orchestrator's `processToolCall()` with no tool-call chunk, so a guard that sets `evaluateToolCalls` judges the composed tool's own call, with the arguments the model gave it, and never the steps that call runs, nor a workflow's tool tasks. Those calls meet the tool orchestrator's own checks: the disabled list, the permission check, argument validation and, with `hitl.enabled`, the approval a tool with `hasSideEffects: true` waits for.
 
 **Why it is opt-in.** A guard written for text may read any chunk it is given as text: one that takes every non-final chunk for a `TEXT_DELTA` reads `textDelta` as `undefined`, and a fail-closed guard that throws on it would block every tool call. A guard that sets `evaluateToolCalls` is written to read tool calls, and a guard without it never receives one. A guard that has a tool-call branch already, as the code-safety pack's guard does, runs it once its config sets the flag.
@@ -524,8 +732,8 @@ await agent.initialize({
 ```
 
 **Evaluation Order:**
-1. Phase 1 sanitizers run first in registration order
-2. If any sanitizer returns `BLOCK`, processing stops immediately
+1. Phase 1 sanitizers, and screens with `sequential: true`, run first in registration order
+2. If any of them returns `BLOCK`, processing stops immediately
 3. Sanitized text from Phase 1 becomes the input to all Phase 2 guardrails
 4. Phase 2 guardrails run concurrently, and the worst action wins
 5. `SANITIZE` returned from Phase 2 is downgraded to `FLAG` to preserve deterministic output
@@ -575,6 +783,7 @@ interface GuardrailEvaluationResult {
   details?: unknown;         // Debugging detail, not shown to users
   modifiedText?: string | null;  // For SANITIZE action
   replacementText?: string;  // With BLOCK on output, a non-empty string is the reply sent in place of the error chunk
+  hold?: { reviewCode: string }; // With BLOCK only: kept back for a person's review, not refused
 }
 ```
 

@@ -54,6 +54,17 @@ export interface DeepgramAuraBatchTTSConfig {
   voice?: string;
   /** Base URL for the Deepgram API. @default 'https://api.deepgram.com/v1' */
   baseUrl?: string;
+  /**
+   * Opt every request out of Deepgram's Model Improvement Program by sending
+   * `mip_opt_out=true`: Deepgram keeps an opted-out request's data only for
+   * the duration necessary to process the request. Off by default: Deepgram's
+   * API reference asks callers to refer to its docs for pricing impacts before
+   * setting it. A single request can opt out with
+   * `providerOptions.mip_opt_out: true`; a request's `false` does not undo
+   * this option.
+   * @default false
+   */
+  mipOptOut?: boolean;
   /** Chain priority. Lower values are tried first. @default 70 */
   priority?: number;
   /** Optional capability overrides. */
@@ -110,12 +121,14 @@ export class DeepgramAuraBatchTTS implements IBatchTTS, HealthyProvider {
   private readonly keyPool: ApiKeyPool;
   private readonly voice: string;
   private readonly baseUrl: string;
+  private readonly mipOptOut: boolean;
   private readonly healthProbe: NonNullable<DeepgramAuraBatchTTSConfig['healthProbe']>;
 
   constructor(config: DeepgramAuraBatchTTSConfig) {
     this.keyPool = new ApiKeyPool(config.apiKey);
     this.voice = config.voice ?? DEFAULT_VOICE;
     this.baseUrl = config.baseUrl ?? BASE_URL;
+    this.mipOptOut = config.mipOptOut === true;
     this.priority = config.priority ?? 70;
     this.healthProbe = config.healthProbe ?? defaultDeepgramProbe;
     this.capabilities = defaultCapabilities({
@@ -173,6 +186,7 @@ export class DeepgramAuraBatchTTS implements IBatchTTS, HealthyProvider {
     const format = config?.format ?? 'mp3';
     // Aura encodings: mp3, opus, linear16 (raw PCM). Map our format union.
     const encoding = format === 'mp3' ? 'mp3' : format === 'opus' ? 'opus' : 'linear16';
+    const mipOptOut = this.mipOptOut || config?.providerOptions?.mip_opt_out === true;
 
     const chunks = chunkForAura(text);
     // Chunks synthesize concurrently: Aura latency is per-request, so a
@@ -188,7 +202,7 @@ export class DeepgramAuraBatchTTS implements IBatchTTS, HealthyProvider {
       { length: Math.min(MAX_SYNTHESIZE_CONCURRENCY, chunks.length) },
       async () => {
         for (let i = cursor++; i < chunks.length; i = cursor++) {
-          buffers[i] = await this.synthesizeOne(chunks[i], voice, encoding);
+          buffers[i] = await this.synthesizeOne(chunks[i], voice, encoding, mipOptOut);
         }
       },
     );
@@ -202,8 +216,15 @@ export class DeepgramAuraBatchTTS implements IBatchTTS, HealthyProvider {
     return { audio, format, durationMs, provider: this.providerId };
   }
 
-  private async synthesizeOne(text: string, voice: string, encoding: string): Promise<Buffer> {
-    const url = `${this.baseUrl}/speak?model=${encodeURIComponent(voice)}&encoding=${encoding}`;
+  private async synthesizeOne(
+    text: string,
+    voice: string,
+    encoding: string,
+    mipOptOut: boolean,
+  ): Promise<Buffer> {
+    const params = new URLSearchParams({ model: voice, encoding });
+    if (mipOptOut) params.set('mip_opt_out', 'true');
+    const url = `${this.baseUrl}/speak?${params.toString()}`;
     const doFetch = (key: string) =>
       fetch(url, {
         method: 'POST',

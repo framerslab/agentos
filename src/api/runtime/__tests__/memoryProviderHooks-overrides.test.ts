@@ -9,9 +9,11 @@
  * block with no signal while the provider's own (still-running) success log
  * read as if recall had landed. The hook now accepts optional
  * { timeoutMs, tokenBudget } overrides (agent()-surface: `memoryProviderOptions`),
- * warns when the timeout wins the race, and warns on getContext failure.
+ * and writes a memory.hook_failed event when the timeout wins the race or
+ * getContext fails.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import pino from 'pino';
 
 const hoisted = vi.hoisted(() => {
   const generateCompletion = vi.fn();
@@ -37,6 +39,9 @@ import {
 } from '../memoryProviderHooks';
 import { agent } from '../../agent.js';
 import type { AgentMemoryProvider } from '../../agent';
+import { resetLoggerFactory, setLogger } from '../../../core/logging/loggerFactory.js';
+
+const CONTEXT = { sessionId: 's1', userId: 's1', subject: { kind: 'session', id: 's1' }, call: 'session' } as const;
 
 function createMockProvider(
   overrides: Partial<AgentMemoryProvider> = {},
@@ -50,39 +55,42 @@ function createMockProvider(
 
 describe('applyMemoryProvider hook options', () => {
   const baseOpts = { provider: 'openai', model: 'gpt-4.1-mini' };
-  let warnSpy: ReturnType<typeof vi.spyOn>;
+  const logged: Record<string, unknown>[] = [];
+  const failures = () => logged.filter((line) => line.event === 'memory.hook_failed');
 
   beforeEach(() => {
-    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    logged.length = 0;
+    setLogger(pino({ level: 'debug', base: undefined }, { write(line: string) { logged.push(JSON.parse(line)); } }));
   });
 
   afterEach(() => {
-    warnSpy.mockRestore();
+    resetLoggerFactory();
   });
 
   it('forwards the default token budget when no overrides are given', async () => {
     const provider = createMockProvider();
-    const result = applyMemoryProvider(baseOpts as any, provider, 'hello');
+    const result = applyMemoryProvider(baseOpts as any, provider, { userText: 'hello', context: CONTEXT });
     await result.onBeforeGeneration!({ messages: [{ role: 'user', content: 'hello' }] } as any);
     expect(provider.getContext).toHaveBeenCalledWith('hello', {
       tokenBudget: DEFAULT_MEMORY_TOKEN_BUDGET,
+      context: CONTEXT,
     });
   });
 
   it('forwards a custom tokenBudget override to getContext', async () => {
     const provider = createMockProvider();
-    const result = applyMemoryProvider(baseOpts as any, provider, 'hello', { tokenBudget: 4000 });
+    const result = applyMemoryProvider(baseOpts as any, provider, { userText: 'hello', context: CONTEXT }, { tokenBudget: 4000 });
     await result.onBeforeGeneration!({ messages: [{ role: 'user', content: 'hello' }] } as any);
-    expect(provider.getContext).toHaveBeenCalledWith('hello', { tokenBudget: 4000 });
+    expect(provider.getContext).toHaveBeenCalledWith('hello', { tokenBudget: 4000, context: CONTEXT });
   });
 
-  it('honors a custom timeoutMs and warns when the provider loses the race', async () => {
+  it('honors a custom timeoutMs and logs memory.hook_failed when the provider loses the race', async () => {
     vi.useFakeTimers();
     try {
       const slowProvider = createMockProvider({
         getContext: vi.fn().mockImplementation(() => new Promise(() => {})),
       });
-      const result = applyMemoryProvider(baseOpts as any, slowProvider, 'hello', { timeoutMs: 100 });
+      const result = applyMemoryProvider(baseOpts as any, slowProvider, { userText: 'hello', context: CONTEXT }, { timeoutMs: 100 });
       const next = result.onBeforeGeneration!({
         messages: [{ role: 'user', content: 'hello' }],
       } as any);
@@ -90,7 +98,7 @@ describe('applyMemoryProvider hook options', () => {
       const resolved = await next;
 
       expect((resolved as any).messages).toHaveLength(1);
-      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('exceeded 100ms'));
+      expect(failures()).toEqual([expect.objectContaining({ hook: 'getContext', type: 'TimeoutError', code: 'MEMORY_HOOK_TIMEOUT' })]);
     } finally {
       vi.useRealTimers();
     }
@@ -102,7 +110,7 @@ describe('applyMemoryProvider hook options', () => {
       const slowProvider = createMockProvider({
         getContext: vi.fn().mockImplementation(() => new Promise(() => {})),
       });
-      const result = applyMemoryProvider(baseOpts as any, slowProvider, 'hello');
+      const result = applyMemoryProvider(baseOpts as any, slowProvider, { userText: 'hello', context: CONTEXT });
       let settled = false;
       const next = result
         .onBeforeGeneration!({ messages: [{ role: 'user', content: 'hello' }] } as any)
@@ -114,38 +122,36 @@ describe('applyMemoryProvider hook options', () => {
       vi.advanceTimersByTime(100);
       await Promise.resolve();
       expect(settled).toBe(false);
-      expect(warnSpy).not.toHaveBeenCalled();
+      expect(failures()).toEqual([]);
 
       vi.advanceTimersByTime(MEMORY_TIMEOUT_MS + 10);
       const resolved = await next;
       expect(settled).toBe(true);
       expect((resolved as any).messages).toHaveLength(1);
-      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(`exceeded ${MEMORY_TIMEOUT_MS}ms`));
+      expect(failures()).toEqual([expect.objectContaining({ hook: 'getContext', type: 'TimeoutError', code: 'MEMORY_HOOK_TIMEOUT' })]);
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it('warns when getContext rejects and continues with the unmodified context', async () => {
+  it('logs memory.hook_failed when getContext rejects and continues with the unmodified context', async () => {
     const failingProvider = createMockProvider({
       getContext: vi.fn().mockRejectedValue(new Error('assembly boom')),
     });
-    const result = applyMemoryProvider(baseOpts as any, failingProvider, 'hello');
+    const result = applyMemoryProvider(baseOpts as any, failingProvider, { userText: 'hello', context: CONTEXT });
     const ctx = { messages: [{ role: 'user', content: 'hello' }] };
     const next = await result.onBeforeGeneration!(ctx as any);
 
     expect((next as any).messages).toHaveLength(1);
-    expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining('memoryProvider.getContext failed'),
-      expect.any(Error),
-    );
+    expect(failures()).toEqual([expect.objectContaining({ hook: 'getContext', type: 'Error' })]);
+    expect(JSON.stringify(logged)).not.toContain('assembly boom');
   });
 
-  it('does not warn when getContext resolves normally', async () => {
+  it('logs nothing when getContext resolves normally', async () => {
     const provider = createMockProvider();
-    const result = applyMemoryProvider(baseOpts as any, provider, 'hello');
+    const result = applyMemoryProvider(baseOpts as any, provider, { userText: 'hello', context: CONTEXT });
     await result.onBeforeGeneration!({ messages: [{ role: 'user', content: 'hello' }] } as any);
-    expect(warnSpy).not.toHaveBeenCalled();
+    expect(failures()).toEqual([]);
   });
 });
 
@@ -172,7 +178,10 @@ describe('agent() memoryProviderOptions wiring', () => {
     });
     const result = await a.generate('hello');
     expect(result.text).toBe('ok');
-    expect(provider.getContext).toHaveBeenCalledWith('hello', { tokenBudget: 4321 });
+    expect(provider.getContext).toHaveBeenCalledWith('hello', {
+      tokenBudget: 4321,
+      context: expect.objectContaining({ sessionId: expect.stringMatching(/^generate-/), call: 'one-shot' }),
+    });
   });
 
   it('keeps the module-default budget when the agent declares no overrides', async () => {
@@ -186,6 +195,7 @@ describe('agent() memoryProviderOptions wiring', () => {
     await a.generate('hello');
     expect(provider.getContext).toHaveBeenCalledWith('hello', {
       tokenBudget: DEFAULT_MEMORY_TOKEN_BUDGET,
+      context: expect.objectContaining({ sessionId: expect.stringMatching(/^generate-/), call: 'one-shot' }),
     });
   });
 });

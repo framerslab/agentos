@@ -35,7 +35,8 @@ export interface PersistedDecayState {
   nextReinforcementAt?: number;
 }
 
-const FTS_STOP_WORDS = new Set([
+/** The words `buildNaturalLanguageFtsQuery` drops from a query, unless nothing else is left. */
+export const FTS_STOP_WORDS: ReadonlySet<string> = new Set([
   'a',
   'an',
   'and',

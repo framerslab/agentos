@@ -660,5 +660,43 @@ describe('AgentCommunicationBus', () => {
       expect(senderHistory.filter((m) => m.messageId === sent.messageId)).toHaveLength(1);
       expect(handler).toHaveBeenCalledTimes(3);
     });
+
+    it('refuses a second retry while the first is re-sending, so a delivered message stays delivered', async () => {
+      const retrying = new AgentCommunicationBus({ routingConfig: { maxRetries: 3 } });
+      let releaseFirstRetry!: () => void;
+      const firstRetryGate = new Promise<void>((resolve) => {
+        releaseFirstRetry = resolve;
+      });
+      let calls = 0;
+      // The send fails, the first retry succeeds once its gate opens, and any
+      // later call throws: a second re-send would store `failed` over `delivered`.
+      const handler = vi.fn(async () => {
+        calls += 1;
+        if (calls === 1) throw new Error('handler unavailable');
+        if (calls === 2) {
+          await firstRetryGate;
+          return;
+        }
+        throw new Error('handler unavailable');
+      });
+      retrying.subscribe('agent-1', handler);
+
+      const sent = await retrying.sendToAgent('agent-1', question);
+      expect(sent.status).toBe('failed');
+
+      const first = retrying.retryDelivery(sent.messageId);
+      const second = retrying.retryDelivery(sent.messageId);
+      await expect(second).rejects.toThrow(`Cannot retry message ${sent.messageId}`);
+
+      releaseFirstRetry();
+      await expect(first).resolves.toMatchObject({ status: 'delivered', retryCount: 1 });
+
+      // The send and the one retry reached the handler; the refused retry sent nothing.
+      expect(handler).toHaveBeenCalledTimes(2);
+      expect(await retrying.getDeliveryStatus(sent.messageId)).toMatchObject({
+        status: 'delivered',
+        retryCount: 1,
+      });
+    });
   });
 });

@@ -1,0 +1,224 @@
+/**
+ * @file GovernedTool.sqlite.e2e.test.ts
+ * The governed-tool suite on SQLite in memory, and the cases that need a clock the test moves: a reservation left
+ * past its lease, a slow audit sink, a store slower than the lease, and a purge one hour back after a daily limit was
+ * used.
+ */
+import { createHash } from 'node:crypto';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { resolveStorageAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
+import { resetLoggerFactory } from '../../../core/logging/loggerFactory.js';
+import type { ToolExecutionResult } from '../../../core/tools/ITool.js';
+import { SqlActionLimiter, type ActionLimitRule } from '../ActionLimiter.js';
+import { governTool, type ActionAuditSink, type ActionGovernance, type GovernedToolPolicy } from '../GovernedTool.js';
+import { runGovernedToolSuite } from './GovernedTool.contract.js';
+import { CONTEXT, DAY, HOUR, MUTE_POLICY, RULES, RULE_BOOK, auditSink, capture, message, messageStore, muteOf, muteTool, type MuteArgs, type RecordingSink } from './governedFixtures.js';
+
+const openSqlite = (): Promise<StorageAdapter> => resolveStorageAdapter({ filePath: ':memory:', priority: ['better-sqlite3', 'sqljs'], quiet: true });
+let made = 0;
+
+runGovernedToolSuite('SQLite', async () => {
+  const db = await openSqlite();
+  return { db, prefix: () => `gt_${(made += 1)}`, close: async () => { await db.close(); } };
+});
+
+describe('a governed tool and the clock, SQLite', () => {
+  const START = Date.parse('2026-11-10T00:00:00.000Z');
+  const ROOM_HOUR: ActionLimitRule[] = [{ id: 'mute_room_hour', scope: 'room', windowMs: HOUR, max: 1 }];
+  let db: StorageAdapter;
+  let audit: RecordingSink;
+  const governance = (result: ToolExecutionResult): { outcome: string; code?: string } => result.details?.governance;
+  const governanceOf = (limiter: SqlActionLimiter, over: Partial<ActionGovernance> = {}): ActionGovernance => ({
+    actor: { id: 'moderator-1', kind: 'agent' }, mode: 'enforce', limiter, evidenceSource: messageStore(), ruleBook: RULE_BOOK, audit, ...over,
+  });
+  /** Moves the test's clock in steps of `stepMs` until the call has settled. */
+  async function settled(pending: Promise<ToolExecutionResult>, stepMs: number): Promise<ToolExecutionResult> {
+    let result: ToolExecutionResult | undefined;
+    void pending.then((r) => { result = r; });
+    for (let turn = 0; turn < 5 && result === undefined; turn += 1) await vi.advanceTimersByTimeAsync(stepMs);
+    return pending;
+  }
+
+  beforeEach(async () => { db = await openSqlite(); audit = auditSink(); capture(); });
+  afterEach(async () => { vi.useRealTimers(); resetLoggerFactory(); await db.close(); });
+
+  it('(i) a reservation left past its lease counts and blocks its key until a pass settles it, then leaves with its window', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(START);
+    const limiter = new SqlActionLimiter({ db, rules: ROOM_HOUR, tablePrefix: 'gt_i', requireShared: false });
+    const policy: GovernedToolPolicy<MuteArgs> = { ...MUTE_POLICY, limits: ROOM_HOUR, idempotencyKey: (args) => `mute:${args.userId}` };
+    const mute = muteTool();
+    const governed = governTool(mute, policy, governanceOf(limiter));
+    // a process reserved this action and died before it settled it
+    const key = createHash('sha256').update('mute:u_attacker', 'utf8').digest('hex');
+    expect((await limiter.reserve({ rules: ROOM_HOUR, target: { accountId: 'u_attacker', roomId: 'r1' }, operationId: key, dryRun: false })).status).toBe('reserved');
+
+    vi.setSystemTime(START + 61_000);
+    expect(governance(await governed.execute(muteOf(message('m1')), CONTEXT)).outcome).toBe('duplicate');
+    expect(governance(await governed.execute(muteOf(message('m2')), CONTEXT))).toMatchObject({ outcome: 'limit_reached', code: 'mute_room_hour' });
+
+    await limiter.reconcile();
+    expect(governance(await governed.execute(muteOf(message('m1')), CONTEXT)).outcome).toBe('duplicate');
+    expect(governance(await governed.execute(muteOf(message('m2')), CONTEXT)).outcome).toBe('limit_reached');
+    // none of the four refusals ran the tool
+    expect(mute.execute).not.toHaveBeenCalled();
+
+    vi.setSystemTime(START + HOUR + 1);
+    expect(governance(await governed.execute(muteOf(message('m2')), CONTEXT)).outcome).toBe('executed');
+    expect(mute.execute).toHaveBeenCalledTimes(1);
+  });
+
+  it('(o) a slow audit sink cannot stretch a window: a unit counts from just before its action', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    vi.setSystemTime(START);
+    const limiter = new SqlActionLimiter({ db, rules: ROOM_HOUR, tablePrefix: 'gt_o', requireShared: false });
+    const starts: number[] = [];
+    const mute = muteTool(async () => { starts.push(Date.now()); return { success: true, output: { muted: true } }; });
+    const policy: GovernedToolPolicy<MuteArgs> = { ...MUTE_POLICY, limits: ROOM_HOUR };
+    const slowSink: ActionAuditSink = {
+      begin: (record) => (record.target.accountId === 'u_attacker' ? new Promise<void>((resolve) => { setTimeout(resolve, 61 * 60_000); }) : Promise.resolve()),
+      finish: async () => undefined,
+    };
+    const slow = governTool(mute, policy, governanceOf(limiter, { audit: slowSink })).execute(muteOf(message('m1')), CONTEXT);
+    const fast = await governTool(mute, policy, governanceOf(limiter)).execute(muteOf(message('m2')), CONTEXT);
+    expect(governance(fast).outcome).toBe('executed');
+    expect(governance(await settled(slow, 61 * 60_000)).outcome).toBe('executed');
+    expect(starts).toHaveLength(2);
+    expect(starts[1] - starts[0]).toBeGreaterThanOrEqual(HOUR);
+  });
+
+  it('(o) a store slower than the lease ends the call before the tool starts, and gives the units back', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    vi.setSystemTime(START);
+    const delay = { on: false, seen: 0 };
+    const slowDb = new Proxy(db, {
+      get(target, prop) {
+        if (prop === 'transaction') {
+          return async (fn: never) => {
+            const out = await target.transaction(fn);
+            // the second reservation of the slow call commits, and its answer arrives 61 seconds later
+            if (delay.on && (delay.seen += 1) === 2) await new Promise<void>((resolve) => { setTimeout(resolve, 61_000); });
+            return out;
+          };
+        }
+        const value = Reflect.get(target, prop, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as StorageAdapter;
+    const limiter = new SqlActionLimiter({ db: slowDb, rules: RULES, tablePrefix: 'gt_s', requireShared: false });
+    // the tables exist before the slow call, so its first transaction is its first rule's reservation
+    const warm = await limiter.reserve({ rules: RULES, target: { accountId: 'u_warm', roomId: 'r9' }, operationId: 'warm', dryRun: false });
+    if (warm.status === 'reserved') await warm.release();
+    delay.on = true;
+
+    const mute = muteTool();
+    const result = await settled(governTool(mute, MUTE_POLICY, governanceOf(limiter)).execute(muteOf(message('m1')), CONTEXT), 61_000);
+    expect(governance(result)).toMatchObject({ outcome: 'limiter_unavailable', code: 'LEASE_EXPIRED' });
+    expect(mute.execute).not.toHaveBeenCalled();
+    // given back without taking one of the action's three attempts: its tool never started
+    expect(await db.all<{ state: string; attempts: number }>(`SELECT state, attempts FROM gt_s_w${HOUR}_reservations WHERE account_id = 'mute_room_hour|r:r1'`)).toEqual([{ state: 'released', attempts: 0 }]);
+  });
+
+  it('(p) a purge one hour back, two hours after a daily limit was used, keeps the unit the day still counts', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(START);
+    const limiter = new SqlActionLimiter({ db, rules: RULES, tablePrefix: 'gt_p', requireShared: false });
+    const mute = muteTool();
+    const governed = governTool(mute, MUTE_POLICY, governanceOf(limiter));
+    expect(governance(await governed.execute(muteOf(message('m1')), CONTEXT)).outcome).toBe('executed');
+
+    // the hourly unit has left its window; the daily one has not, and a purge one hour back must not delete it
+    vi.setSystemTime(START + 2 * HOUR);
+    await limiter.purge(Date.now() - HOUR);
+    // another message of the same author: a new action, the same target
+    expect(governance(await governed.execute(muteOf(message('m5')), CONTEXT))).toMatchObject({ outcome: 'limit_reached', code: 'mute_target_day' });
+    expect(mute.execute).toHaveBeenCalledTimes(1);
+  });
+
+  it('a release that fails while a refusal gives units back still gives back the units of the rules after it', async () => {
+    const rules: ActionLimitRule[] = [
+      { id: 'mute_room_hour', scope: 'room', windowMs: HOUR, max: 3 },
+      { id: 'mute_target_day', scope: 'target', windowMs: DAY, max: 3 },
+      { id: 'mute_all_hour', scope: 'platform', windowMs: HOUR, max: 0 },
+    ];
+    // the store drops the settle of the first rule's reservation, and answers every other statement
+    const dropsFirstSettle = (trx: StorageAdapter): StorageAdapter => new Proxy(trx, {
+      get(target, prop) {
+        const value = Reflect.get(target, prop, target);
+        if (prop !== 'get') return typeof value === 'function' ? value.bind(target) : value;
+        return async (statement: string, params?: unknown[]) => {
+          if (statement.includes('SELECT operation_id, account_id, period, units, state') && String(params?.[0]).endsWith(':mute_room_hour')) {
+            throw new Error('the store dropped this settle');
+          }
+          return (value as (...a: unknown[]) => unknown).call(target, statement, params);
+        };
+      },
+    }) as StorageAdapter;
+    const flaky = new Proxy(db, {
+      get(target, prop) {
+        if (prop === 'transaction') return (fn: (trx: StorageAdapter) => Promise<unknown>) => target.transaction((trx: StorageAdapter) => fn(dropsFirstSettle(trx)));
+        const value = Reflect.get(target, prop, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as StorageAdapter;
+    const limiter = new SqlActionLimiter({ db: flaky, rules, tablePrefix: 'gt_r', requireShared: false });
+    const mute = muteTool();
+    const result = await governTool(mute, { ...MUTE_POLICY, limits: rules }, governanceOf(limiter)).execute(muteOf(message('m1')), CONTEXT);
+    expect(governance(result).outcome).toBe('limiter_unavailable');
+    expect(mute.execute).not.toHaveBeenCalled();
+    // the platform rule refused; the room rule's release failed, and the target rule's was still made
+    expect(await db.all<{ state: string }>(`SELECT state FROM gt_r_w${HOUR}_reservations WHERE account_id = 'mute_room_hour|r:r1'`)).toEqual([{ state: 'reserved' }]);
+    expect(await db.all<{ state: string }>(`SELECT state FROM gt_r_w${DAY}_reservations`)).toEqual([{ state: 'released' }]);
+  });
+
+  it('a purge deletes every settled reservation past retention, more than one page of them', async () => {
+    const limiter = new SqlActionLimiter({ db, rules: ROOM_HOUR, tablePrefix: 'gt_d', requireShared: false });
+    // the first purge makes the tables
+    await limiter.purge(Date.now());
+    const long = Date.now() - 2 * HOUR;
+    await db.run(
+      `WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 1001)
+       INSERT INTO gt_d_w${HOUR}_reservations (operation_id, account_id, period, units, state, outcome, attempts, reserved_at, expires_at, settled_at)
+       SELECT 'op_' || i, 'mute_room_hour|r:r1', 'window', 1, 'released', 'released', 1, ?, ?, ? FROM n`,
+      [long, long, long],
+    );
+    await limiter.purge(Date.now());
+    expect(await db.get<{ rows_left: number }>(`SELECT COUNT(*) AS rows_left FROM gt_d_w${HOUR}_reservations`)).toEqual({ rows_left: 0 });
+  });
+
+  it('an action a later rule refuses keeps its three attempts, and runs once that rule has room again', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(START);
+    const limiter = new SqlActionLimiter({ db, rules: RULES, tablePrefix: 'gt_l', requireShared: false });
+    const mute = muteTool();
+    const governed = governTool(mute, MUTE_POLICY, governanceOf(limiter));
+    expect(governance(await governed.execute(muteOf(message('m1')), CONTEXT)).outcome).toBe('executed');
+    // the author's one mute a day is used: a mute for another of their messages is refused by the second rule, each
+    // time after the first rule reserved and gave back its unit
+    for (let ask = 0; ask < 4; ask += 1) {
+      expect(governance(await governed.execute(muteOf(message('m5')), CONTEXT))).toMatchObject({ outcome: 'limit_reached', code: 'mute_target_day' });
+    }
+    vi.setSystemTime(START + DAY + 1);
+    expect(governance(await governed.execute(muteOf(message('m5')), CONTEXT)).outcome).toBe('executed');
+    expect(mute.execute).toHaveBeenCalledTimes(2);
+  });
+
+  it('a tool that runs past the lease and then fails is not counted: the lease is renewed while it runs', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
+    vi.setSystemTime(START);
+    const limiter = new SqlActionLimiter({ db, rules: ROOM_HOUR, tablePrefix: 'gt_g', requireShared: false });
+    const policy: GovernedToolPolicy<MuteArgs> = { ...MUTE_POLICY, limits: ROOM_HOUR };
+    // a tool that takes 90 seconds, past the 60-second lease; a reconcile pass runs before it answers that it failed
+    const slow = muteTool(async () => {
+      await new Promise<void>((resolve) => { setTimeout(resolve, 90_000); });
+      await limiter.reconcile();
+      return { success: false, error: 'nothing changed' };
+    });
+    const result = await settled(governTool(slow, policy, governanceOf(limiter)).execute(muteOf(message('m1')), CONTEXT), 30_000);
+    expect(governance(result).outcome).toBe('failed');
+    expect(await db.all<{ state: string }>(`SELECT state FROM gt_g_w${HOUR}_reservations`)).toEqual([{ state: 'released' }]);
+    // the room's one action an hour is still there
+    const mute = muteTool();
+    expect(governance(await governTool(mute, policy, governanceOf(limiter)).execute(muteOf(message('m2')), CONTEXT)).outcome).toBe('executed');
+  });
+});

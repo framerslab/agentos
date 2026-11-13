@@ -9,6 +9,7 @@ import type { IVectorStore } from '../../../core/vector-store/IVectorStore.js';
 import type { IEmbeddingManager } from '../../../core/embeddings/IEmbeddingManager.js';
 import type { MemoryBudgetAllocation } from './types.js';
 import type { RecallCaptureMode } from '../retrieval/recall/capture.js';
+import type { RecallConstants } from '../retrieval/recall/fuse.js';
 import type { InfiniteContextConfig } from '../pipeline/context/types.js';
 
 // ---------------------------------------------------------------------------
@@ -231,7 +232,7 @@ export interface ConsolidationConfig {
  * read from JSON writes an unset key. A host that builds its manager from a persona
  * itself (`gmiManagerConfig.cognitiveMemoryFactory`) gets the persona so
  * normalized, and passes the fields the same way. `agent({ runtime: 'gmi' })` and `gmi()` build their persona from
- * their options, which set no `cognitiveMemoryConfig`.
+ * their options, which set only `cognitiveMemoryConfig.recall`, from `memory.recall`.
  */
 export interface CognitiveMemoryPersonaConfig {
   /**
@@ -256,10 +257,18 @@ export interface CognitiveMemoryPersonaConfig {
    * builds its manager from a persona itself
    * (`gmiManagerConfig.cognitiveMemoryFactory`) passes it the same way.
    * `agent({ runtime: 'gmi' })` and `gmi()` build their persona from their
-   * options, which set no `cognitiveMemoryConfig`, so their memory runs on the
-   * default shares.
+   * options, which set only `cognitiveMemoryConfig.recall`, so their memory
+   * runs on the default shares.
    */
   tokenBudget?: Partial<MemoryBudgetAllocation>;
+  /**
+   * Recall settings ({@link CognitiveMemoryConfig.recall}): the memory block's
+   * budget, the capture, the retrieval and the rerank. `createAgentCognitiveMemory`
+   * passes them to the manager it builds, under the agent's own `memory.recall`.
+   * A JSON persona can hold `rerank: 'none'` or a `local` setting; an `llm`
+   * setting holds a function, so a persona built in code sets it.
+   */
+  recall?: MemoryRecallConfig;
   /** Encoding config overrides ({@link CognitiveMemoryConfig.encoding}). */
   encoding?: Partial<EncodingConfig>;
   /** Decay config overrides ({@link CognitiveMemoryConfig.decay}). */
@@ -396,25 +405,23 @@ export interface CognitiveMemoryConfig {
   persistAccessState?: boolean;
 
   /**
-   * Optional reranker service for post-retrieval quality improvement.
+   * A reranker service the manager holds for its caller and never calls.
    *
-   * When provided, retrieved memory traces are reranked after the
-   * cognitive scoring pipeline (vector similarity + strength + recency +
-   * emotional congruence + graph activation + importance). The reranker
-   * score is blended with the existing composite score at a 0.7/0.3
-   * weighting to preserve cognitive signals while boosting semantically
-   * relevant results.
+   * Not read for memory recall: memory rerank is set in `recall.rerank`,
+   * which offers a local model (the query and the memories stay in the
+   * process) and the host's own model call. A service passed here is
+   * returned by `getRerankerService()` for the caller's own use (a
+   * `HybridRetriever` or `SessionRetriever` it builds) and is otherwise
+   * ignored, with one `memory.recall.option_ignored` line
+   * (`option: 'remote_provider'`) when the manager initialises. Through
+   * 0.17.1 the manager reranked every recall with the service's default
+   * provider.
    *
-   * The manager calls `rerankerService.rerank()` without a provider id, so
-   * the service's `defaultProviderId` picks the provider; without one the
-   * call throws and retrieval keeps the cognitive scores, with no log line.
-   * Any registered
-   * provider works: `local` (a cross-encoder run in process through
-   * Transformers.js), `cohere` (Cohere's rerank API) or `llm-judge` (a
-   * model you call through `llmCallFn`). A remote provider receives the
-   * query and the candidate texts. See docs/text/RERANKING.md.
+   * No remote reranking service is offered for memories. A host that sends
+   * a person's memories to one itself reads docs/text/RERANKING.md,
+   * "Memories and remote rerankers".
    *
-   * @default undefined (no reranking)
+   * @default undefined
    */
   rerankerService?: import('../../rag/reranking/RerankerService.js').RerankerService;
 
@@ -451,19 +458,37 @@ export interface CognitiveMemoryConfig {
   typedNetwork?: TypedNetworkRuntimeConfig;
 
   /**
-   * What the manager records of each memory assembly. Read at every
+   * The manager's recall settings: the memory block's budget on a GMI turn and
+   * what the manager records of each memory assembly. Read at every
    * `assembleForPrompt()`, so a change to a built manager's configuration
-   * applies from its next turn.
+   * applies from its next turn, except `rerank`, whose provider is built
+   * once: `applyRecallConfig()` changes it. `initialize()` checks the
+   * values. A host of
+   * `AgentOS.create` sets it on the manager its
+   * `gmiManagerConfig.cognitiveMemoryFactory` builds; `agent()` and `gmi()`
+   * set it from `memory.recall`.
    *
-   * @default undefined (capture `'metadata'`, no ids in the reasoning trace)
+   * @default undefined (a 1600-token block, capture `'metadata'`, no ids in the reasoning trace)
    */
   recall?: ManagerRecallConfig;
 }
 
 /**
- * The manager's recall settings: what it records of each memory assembly.
+ * The recall settings of `memory.recall` on `agent()` and `gmi()`, of a
+ * persona's `cognitiveMemoryConfig.recall`, and of a manager's `recall`.
  */
-export interface ManagerRecallConfig {
+export interface MemoryRecallConfig {
+  /**
+   * `totalTokens`: the budget of the whole memory block a GMI turn sends, its
+   * preamble included, in tokens of about 4 characters. An integer of at least
+   * 0; at 0 the turn sends no block and records every candidate left out for
+   * the budget. On `agent()` without `runtime: 'gmi'` it is the `tokenBudget`
+   * handed to `memoryProvider.getContext` when
+   * `memoryProviderOptions.tokenBudget` is unset.
+   *
+   * @default { totalTokens: 1600 }
+   */
+  budget?: { totalTokens?: number };
   /**
    * `'metadata'` returns a capture record (`MemoryRecallCapture`) with every assembled
    * context (`AssembledMemoryContext.capture`) and on a GMI turn's result;
@@ -478,6 +503,66 @@ export interface ManagerRecallConfig {
    */
   capture?: RecallCaptureMode;
   /**
+   * How a turn finds its memories. `'dense'`: by meaning (the vector query
+   * and its six-signal ranking), shown in Relevant Memories and Recent
+   * Experiences. `'hybrid'`: by meaning, by the turn's exact words (the
+   * store's full-text index through the storage adapter, or an in-process
+   * index where memory has no store) and by recency, fused into one deduped
+   * pool and shown as one Relevant Memories section. Both embed the query
+   * once, and neither calls any other vendor.
+   *
+   * @default 'dense'
+   */
+  retrieval?: 'dense' | 'hybrid';
+  /**
+   * Reranks the recalled memories before they are shown. `'none'`: no
+   * reranker. `{ kind: 'local' }`: a cross-encoder that runs in this
+   * process, named by `model` (a Hugging Face model id) and a pinned
+   * `revision`, a whole commit id of the model's repository (40 hexadecimal
+   * characters; a branch, a tag or a shortened id is refused, since it can
+   * name other weights later); the query and the memories never leave the
+   * process. The model's files load through Transformers.js's own cache. `{ kind: 'llm' }`: the host's own
+   * model call (`invoke(system, user, model)`, called with `model`) scores
+   * and ranks them, which sends the query and the first 200 characters of
+   * each candidate memory to that model's provider. No remote reranking
+   * service is offered for memories.
+   *
+   * A reranker that is loading, unavailable, slow or failing never fails a
+   * turn: the order stands and the capture's `reranker` says why. The local
+   * model loads when the manager initialises (`recallReady()` resolves when
+   * it has); a load that fails is not retried. `timeoutMs` bounds one
+   * rerank (default 1500 for `local`, 10000 for `llm`); `maxCandidates` is
+   * how many of the best candidates are scored (default 20). Both are
+   * positive integers. After three failures or timeouts in a row the rerank
+   * is skipped for 60 seconds. Under `'dense'` the reranked candidates'
+   * scores become `0.7 × retrieval score + 0.3 × rerank score` and order
+   * them; under `'hybrid'` they are ordered by `0.7 × fused score / the
+   * best fused score of the cut's recalled candidates (at most 1) + 0.3 ×
+   * rerank score` and keep their scores.
+   *
+   * On a built manager, change it with `applyRecallConfig()`: the provider
+   * is built once, so a value written to the configuration is not read.
+   *
+   * @default 'none'
+   */
+  rerank?:
+    | 'none'
+    | { kind: 'local'; model: string; revision: string; timeoutMs?: number; maxCandidates?: number }
+    | {
+        kind: 'llm';
+        invoke: (system: string, user: string, model?: string) => Promise<string>;
+        model: string;
+        timeoutMs?: number;
+        maxCandidates?: number;
+      };
+}
+
+/**
+ * A manager's recall settings: the public ones plus what a host or a bench
+ * sets below the `agent()` and `gmi()` options.
+ */
+export interface ManagerRecallConfig extends MemoryRecallConfig {
+  /**
    * Lists the ids of the memories the block shows (`includedMemoryIds`) in
    * the GMI's reasoning-trace entry "Cognitive memory context assembled.",
    * which otherwise carries counts only.
@@ -485,6 +570,29 @@ export interface ManagerRecallConfig {
    * @default false
    */
   traceIds?: boolean;
+  /**
+   * The embedding provider and model the memory was built with, copied to the
+   * capture record's `embedder`. A label only: the manager embeds through its
+   * `embeddingManager`. `agent()` and `gmi()` set it from the model their
+   * memory resolved.
+   */
+  embedder?: { provider: string; model: string };
+  /**
+   * The hybrid recall's fusion and pool constants, each over its starting
+   * value in `RECALL_CONSTANTS` (`rrfK` 60, `denseWeight` 0.7,
+   * `sparseWeight` 0.3, `recencyWeight` 0, `overFetch` 3, `topK` 20,
+   * `nearDuplicate` 0.8, `recentTopK` 10). Read under `retrieval: 'hybrid'`
+   * only. For a bench that tunes them; a product leaves them.
+   */
+  constants?: Partial<RecallConstants>;
+  /**
+   * Whether a turn is a memory question, for the exact-words reserve of
+   * `retrieval: 'hybrid'`. Replaces the built-in English rule
+   * (`isMemoryQuestion`). A predicate that throws, or answers anything but
+   * `true`, is read as no. A function, so it is set on the manager and has no
+   * persona or JSON form.
+   */
+  memoryQuestion?: (turnText: string) => boolean;
 }
 
 /**

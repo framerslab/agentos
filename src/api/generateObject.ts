@@ -324,6 +324,16 @@ export interface GenerateObjectOptions<T extends ZodType> {
   serviceTier?: GenerateTextOptions['serviceTier'];
 
   /**
+   * Sent to OpenAI as `store` on the request, on `/v1/chat/completions` and `/v1/responses` alike, forwarded to
+   * {@link GenerateTextOptions.store} on every attempt, a validation retry included. Left out, a chat completion
+   * sends no `store` key and a Responses request sends `store: false`, as before. Other providers ignore it, except
+   * those built on the OpenAI provider, which send it to their own endpoint. "Chat completions are stored by default
+   * for new accounts" (https://developers.openai.com/api/docs/guides/migrate-to-responses), so a call whose output
+   * OpenAI must not keep sets `store: false`.
+   */
+  store?: boolean;
+
+  /**
    * Provider-specific top-level request fields, forwarded to {@link GenerateTextOptions.customModelParams} and
    * spread onto every attempt's request body, a validation retry included, with the same rules as there: a fallback
    * leg gets them minus the fields only another vendor accepts (OpenRouter's routing controls, Gemini's request
@@ -710,6 +720,8 @@ export async function generateObject<T extends ZodType>(
       // The OpenAI service tier and the provider passthrough fields, sent as
       // generateText sends them.
       ...(opts.serviceTier !== undefined ? { serviceTier: opts.serviceTier } : {}),
+      // OpenAI's `store`, on every attempt.
+      ...(typeof opts.store === 'boolean' ? { store: opts.store } : {}),
       ...(opts.customModelParams !== undefined ? { customModelParams: opts.customModelParams } : {}),
       // Observer source label (see GenerateObjectOptions.source).
       ...(opts.source !== undefined ? { source: opts.source } : {}),

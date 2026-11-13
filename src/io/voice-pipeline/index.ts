@@ -262,6 +262,7 @@ export {
 } from './transcriptLedger.js';
 export { lineSpeaker, splitFinalBySpeaker } from './transcriptSpeakers.js';
 export { phraseHeard, type HeardLine, type PhraseHeardOptions, type PhraseHeardResult } from './phraseHeard.js';
+export { spokenMatch, spokenWords, type SpokenMatch } from './spokenMatch.js';
 export {
   VoiceMetricsReporter,
   type VoiceMetricEvent,

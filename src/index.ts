@@ -160,11 +160,14 @@ export { isPublicAddress } from './cognition/memory';
 // Memory Wiki — markdown-first long-term memory for soul-file agents
 export {
   WikiMemoryStore,
+  UserWikiStore,
   WikiCompiler,
   ensureMemoryDir,
   parsePage,
   serializePage,
   renderCatalog,
+  pageOriginOf,
+  operatorIndexText,
   extractWikiLinks,
   WIKI_PAGE_TYPES,
   isWikiPageType,
@@ -175,6 +178,7 @@ export {
 } from './cognition/substrate/memory/wiki/index.js';
 export type {
   WikiPage,
+  WikiPageOrigin,
   WikiPageType,
   WikiPageIdProblem,
   MetaIndex,
@@ -182,6 +186,9 @@ export type {
   CompileResult as WikiCompileResult,
   MemoryIndexPort,
   WikiMemoryStoreOptions,
+  UserWikiStoreOptions,
+  UserWikiPagesPort,
+  WikiPageStorePort,
   WikiCompilerOptions,
   WikiCompilerStorePort,
 } from './cognition/substrate/memory/wiki/index.js';
@@ -191,7 +198,12 @@ export type {
   AttachMemoryWikiResult,
   WikiAttachableMemory,
 } from './cognition/memory/io/attachMemoryWiki.js';
-export { ReadMemoryPageTool } from './cognition/memory/io/tools/ReadMemoryPageTool.js';
+export { ReadMemoryPageTool, memoryAskerOf } from './cognition/memory/io/tools/ReadMemoryPageTool.js';
+export type {
+  ReadMemoryPageAsker,
+  ReadMemoryPageListing,
+  ReadMemoryPagePort,
+} from './cognition/memory/io/tools/ReadMemoryPageTool.js';
 // Query Router (classification, retrieval dispatch, grounded answer generation)
 export {
   QueryClassifier,
@@ -258,6 +270,7 @@ export {
   buildFallbackChain,
   buildPolicyAwareFallbackChain,
 } from './api/generateText.js';
+export { GuardrailStopError } from './api/errors.js';
 export { CONTEXT_WINDOW_EXCEEDED_CODE } from './core/llm/providers/errors/errorCodes.js';
 export { ContextWindowExceededError } from './core/llm/providers/errors/ContextWindowExceededError.js';
 export { checkContextFit, type ContextFit, type ContextFitRequest } from './api/runtime/contextWindowFit.js';
@@ -274,6 +287,9 @@ export type {
   ToolCallHookInfo,
   TokenUsage,
   SystemContentBlock,
+  TextGuardrailOptions,
+  TextGuardrailReport,
+  TextGuardrailVerdict,
 } from './api/generateText.js';
 export type {
   AttemptOutcome,
@@ -296,7 +312,7 @@ export type {
 export { GatewayProviderManager } from './api/runtime/gatewayProviderManager.js';
 export { agent } from './api/agent.js';
 export { souledAgent } from './api/souledAgent.js';
-export type { SouledAgentOptions, SouledAgent } from './api/souledAgent.js';
+export type { SouledAgentOptions, SouledAgent, MemoryPolicy } from './api/souledAgent.js';
 export type {
   Agent,
   AgentLearning,
@@ -304,9 +320,11 @@ export type {
   AgentSessionOptions,
   AgentOptions,
   AgentMemoryProvider,
+  MemoryHookContext,
   SessionSendOptions,
   SessionSendStructuredResult,
 } from './api/agent.js';
+export type { MemoryRecallItem } from './api/runtime/memoryDataBlock.js';
 export { gmi, createGmi } from './api/gmi.js';
 export type { GmiOptions, GmiHandle } from './api/gmi.js';
 export { resolveCognition } from './api/runtime/gmiCognition.js';

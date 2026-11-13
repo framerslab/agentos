@@ -53,7 +53,10 @@ describe("agent({ runtime: 'gmi' }) keeps what agent() does", () => {
     });
     const session = agent(base(k, { memoryProvider: { observe } })).session('s');
     expect((await session.send('hi')).text).toBe('Done.');
-    expect(observe.mock.calls).toEqual([['user', 'hi'], ['assistant', 'Done.']]);
+    expect(observe.mock.calls).toEqual([
+      ['user', 'hi', expect.objectContaining({ sessionId: 's' })],
+      ['assistant', 'Done.', expect.objectContaining({ sessionId: 's' })],
+    ]);
     expect(session.messages().map((m) => m.content)).toEqual(['hi', 'Done.']);
   });
 

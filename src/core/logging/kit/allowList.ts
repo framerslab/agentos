@@ -16,7 +16,7 @@
  */
 
 import type { EventLogger, Level, Logger, LogMethod } from '../Logger.js';
-import { AGENTOS_CONTEXT, AGENTOS_EVENTS, errorFields, safeWord, valid, type AgentOSEvents, type ContextSchema, type EventMap, type FieldKind, type Fields } from '../events.js';
+import { AGENTOS_CONTEXT, AGENTOS_EVENTS, listedErrorFields, safeWord, valid, type AgentOSEvents, type ContextSchema, type EventMap, type FieldKind, type Fields } from '../events.js';
 import { checkContext, checkFields, isValidationError, LogValidationError, sinkCall, type RefusalReason } from '../forward.js';
 import { admit, burstOwner, closeOwner } from './burst.js';
 
@@ -140,7 +140,7 @@ export function createAllowListLogger<E extends EventMap, C extends ContextSchem
             try { checkFields(events, schema, event, { [key]: value }); safe[key] = value; } catch { /* Omit an invalid terminal field. */ }
           }
           raw('fatal', { ...bindings, ...safe, event });
-        } else raw('fatal', { event: 'process.uncaught', ...errorFields(undefined) });
+        } else raw('fatal', { event: 'process.uncaught', ...listedErrorFields(undefined) });
       },
       close() { if (!closed) { closeOwner(owner); closed = true; } },
       // The pino-shaped form. A host's line arrives as one object holding its event, its context and its fields;

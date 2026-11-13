@@ -1824,7 +1824,7 @@ describe('22-23. rotation, copies, retries, empty text', () => {
     expect(failed.find((l) => l.meta?.agent === 'extra')?.meta?.error).toContain('XAI_API_KEY');
     expect(JSON.stringify(lines)).not.toContain(K.oai);
   });
-  it("an agentStart callback that throws on a pooled agency's first call, before the call is seated, is written through the host's logger masked: the mask holds the configured keys from construction", async () => {
+  it("an agentStart callback that throws on a pooled agency's first call, before the call is seated, is written through the host's logger as agency.callback_failed with no message: no configured key reaches a line", async () => {
     const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       threeProviders();
@@ -1833,15 +1833,16 @@ describe('22-23. rotation, copies, retries, empty text', () => {
         const r = await panel({ on: { agentStart: () => { throw new Error(`callback saw ${K.ant}`); } } }).generate('review');
         expect(r.text).toBe('Merged findings');
       });
-      const threw = lines.filter((l) => l.meta?.event === 'agency_callback_threw' && l.meta?.callback === 'agentStart');
+      const threw = lines.filter((l) => l.message === 'agency.callback_failed' && l.meta?.callback === 'agentStart');
       expect(threw.length).toBeGreaterThanOrEqual(1);
-      for (const line of threw) expect(line.meta).toEqual({ event: 'agency_callback_threw', callback: 'agentStart', error: 'callback saw [redacted]' });
+      for (const line of threw) expect(line.meta).toEqual({ callback: 'agentStart', type: 'Error', code: 'unknown' });
       expect(JSON.stringify(lines)).not.toContain(K.ant);
+      expect(JSON.stringify(lines)).not.toContain('callback saw');
     } finally {
       consoleWarn.mockRestore();
     }
   });
-  it("a callback that throws is written through the host's logger as agency_callback_threw with its message masked, and to no console", async () => {
+  it("a callback that throws is written through the host's logger as agency.callback_failed with its name and its listed type and code, never its message, and to no console", async () => {
     const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       threeProviders();
@@ -1850,17 +1851,18 @@ describe('22-23. rotation, copies, retries, empty text', () => {
         expect(r.text).toBe('Merged findings');
       });
       // The seats' and the chair's agentEnd through the panel's callbacks, and the agency's own through its runner.
-      const threw = lines.filter((l) => l.meta?.event === 'agency_callback_threw');
+      const threw = lines.filter((l) => l.message === 'agency.callback_failed');
       expect(threw.length).toBeGreaterThanOrEqual(2);
-      for (const line of threw) expect(line).toEqual({ level: 'warn', message: expect.any(String), meta: { event: 'agency_callback_threw', callback: 'agentEnd', error: 'callback saw [redacted]' } });
+      for (const line of threw) expect(line).toEqual({ level: 'warn', message: 'agency.callback_failed', meta: { callback: 'agentEnd', type: 'Error', code: 'unknown' } });
       expect(JSON.stringify(lines)).not.toContain(K.ant);
+      expect(JSON.stringify(lines)).not.toContain('callback saw');
       expect(JSON.stringify(consoleWarn.mock.calls)).not.toContain(K.ant);
       expect(consoleWarn.mock.calls.filter(([first]) => /callback threw/.test(String(first)))).toEqual([]);
     } finally {
       consoleWarn.mockRestore();
     }
   });
-  it("an async callback that rejects is written through the host's logger as agency_callback_threw with its message masked, and leaves no rejection unhandled", async () => {
+  it("an async callback that rejects is written through the host's logger as agency.callback_failed, never its message, and leaves no rejection unhandled", async () => {
     const unhandled: unknown[] = [];
     const onUnhandled = (reason: unknown): void => { unhandled.push(reason); };
     process.on('unhandledRejection', onUnhandled);
@@ -1872,10 +1874,11 @@ describe('22-23. rotation, copies, retries, empty text', () => {
         // A callback's rejection settles after the call that fired it: let it land before the host's factory is reset.
         await new Promise((resolve) => setTimeout(resolve, 0));
       });
-      const threw = lines.filter((l) => l.meta?.event === 'agency_callback_threw');
+      const threw = lines.filter((l) => l.message === 'agency.callback_failed');
       expect(threw.length).toBeGreaterThanOrEqual(2);
-      for (const line of threw) expect(line).toEqual({ level: 'warn', message: expect.any(String), meta: { event: 'agency_callback_threw', callback: 'agentEnd', error: 'callback saw [redacted]' } });
+      for (const line of threw) expect(line).toEqual({ level: 'warn', message: 'agency.callback_failed', meta: { callback: 'agentEnd', type: 'Error', code: 'unknown' } });
       expect(JSON.stringify(lines)).not.toContain(K.ant);
+      expect(JSON.stringify(lines)).not.toContain('callback saw');
       expect(unhandled).toEqual([]);
     } finally {
       process.off('unhandledRejection', onUnhandled);
@@ -1900,11 +1903,12 @@ describe('22-23. rotation, copies, retries, empty text', () => {
       // The decision the strategy fired is in the trail, as the agency's own events are.
       expect(sequential.provenanceTrail!.events.filter((e) => e.kind === 'approvalDecided').map((e) => e.payload.approved)).toEqual([true]);
     });
-    expect(lines.filter((l) => l.meta?.event === 'agency_callback_threw').map((l) => [l.level, l.meta?.callback, l.meta?.error])).toEqual([
-      ['warn', 'error', 'error handler down'],
-      ['warn', 'approvalRequested', 'requested handler down'],
-      ['warn', 'approvalDecided', 'decided handler down'],
+    expect(lines.filter((l) => l.message === 'agency.callback_failed').map((l) => [l.level, l.meta?.callback, l.meta?.type, l.meta?.code])).toEqual([
+      ['warn', 'error', 'Error', 'unknown'],
+      ['warn', 'approvalRequested', 'Error', 'unknown'],
+      ['warn', 'approvalDecided', 'Error', 'unknown'],
     ]);
+    expect(JSON.stringify(lines)).not.toContain('handler down');
   });
   it("a callback the host sets, replaces or deletes on its on object after agency() returns is the one that runs at the next call, guarded: in an agency without a pool, and in a panel whose error callback and trail wrapped on at construction", async () => {
     const answering = { generate: async () => ({ text: 'B', usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } }), stream: () => { throw new Error('unused'); }, session: () => ({}), usage: async () => ({}), close: async () => {} } as unknown as Agent;
@@ -1921,7 +1925,8 @@ describe('22-23. rotation, copies, retries, empty text', () => {
       expect((await plain.generate('again')).text).toBe('B');
     });
     expect(seen).toEqual(['agentStart __agency__', 'agentEnd __agency__', 'agentEnd __agency__']);
-    expect(lines.filter((l) => l.meta?.event === 'agency_callback_threw').map((l) => [l.meta?.callback, l.meta?.error])).toEqual([['agentStart', 'added handler down']]);
+    expect(lines.filter((l) => l.message === 'agency.callback_failed').map((l) => [l.meta?.callback, l.meta?.type, l.meta?.code])).toEqual([['agentStart', 'Error', 'unknown']]);
+    expect(JSON.stringify(lines)).not.toContain('added handler down');
     // A panel's error callback and its trail wrap on at construction; an agentEnd added after still runs for every seat, the chair and the agency.
     threeProviders();
     const panelOn: AgencyCallbacks = { error: () => {} };
@@ -1931,7 +1936,7 @@ describe('22-23. rotation, copies, retries, empty text', () => {
     expect((await team.generate('review')).text).toBe('Merged findings');
     expect([...ended].sort()).toEqual(['__agency__', 'chair', 'correctness', 'failure', 'security']);
   });
-  it("a callback getter on the host's on object is read when its event fires, never by agency(): one that throws fails no construction and is written as agency_callback_threw at its event, and one whose event never fires is never read, in an agency without a pool and in a panel", async () => {
+  it("a callback getter on the host's on object is read when its event fires, never by agency(): one that throws fails no construction and is written as agency.callback_failed at its event, and one whose event never fires is never read, in an agency without a pool and in a panel", async () => {
     const answering = { generate: async () => ({ text: 'B', usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } }), stream: () => { throw new Error('unused'); }, session: () => ({}), usage: async () => ({}), close: async () => {} } as unknown as Agent;
     const read: string[] = [];
     /** An on object whose agentStart and emergentForge are enumerable getters that throw when read. */
@@ -1954,9 +1959,10 @@ describe('22-23. rotation, copies, retries, empty text', () => {
     // agentStart fired for each agency (and the panel's seats and chair) and was read at each event; emergentForge never fired.
     expect(read.length).toBeGreaterThanOrEqual(2);
     expect(new Set(read)).toEqual(new Set(['agentStart']));
-    const threw = lines.filter((l) => l.meta?.event === 'agency_callback_threw');
+    const threw = lines.filter((l) => l.message === 'agency.callback_failed');
     expect(threw.length).toBe(read.length);
-    for (const line of threw) expect(line.meta).toEqual({ event: 'agency_callback_threw', callback: 'agentStart', error: 'agentStart getter down' });
+    for (const line of threw) expect(line.meta).toEqual({ callback: 'agentStart', type: 'Error', code: 'unknown' });
+    expect(JSON.stringify(lines)).not.toContain('getter down');
   });
   it('a run no seat answered adds no assistant turn to its session: messages() keeps the user turn alone, in send() and in stream(), and the next prompt carries no empty answer', async () => {
     let decide: (r: ApprovalRequest) => Promise<ApprovalDecision> = hitl.autoReject('no');
