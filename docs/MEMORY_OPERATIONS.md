@@ -542,7 +542,7 @@ All operations are available via the `Memory` facade API.
 
 ### SQLite (One Brain, Every Table)
 
-The highest-fidelity export. Writes the brain's own rows of every portable table into a new SQLite file: traces with their embeddings, the knowledge graph, documents and chunks, conversations and messages, the consolidation log and the rest, with the registry of conversation scopes (`memory_scopes`) and each subject's wiki pages (`memory_pages`, see [Memory storage](memory/MEMORY_STORAGE.md)). It runs from a SQLite or a Postgres brain alike. A database can hold several brains, and the file holds this brain's rows only.
+The highest-fidelity export. Writes the brain's own rows of every portable table into a new SQLite file: traces with their embeddings, the knowledge graph, documents and chunks, conversations and messages, the consolidation log and the rest, with the registry of conversation scopes (`memory_scopes`), each subject's wiki pages (`memory_pages`) and the owner of each agent's older memory (`memory_legacy_owner`, see [Memory storage](memory/MEMORY_STORAGE.md)). It runs from a SQLite or a Postgres brain alike. A database can hold several brains, and the file holds this brain's rows only.
 
 ```ts
 await mem.export('./backup.sqlite', { format: 'sqlite' });

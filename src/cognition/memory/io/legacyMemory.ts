@@ -70,7 +70,8 @@ export interface AttributeLegacyMemoryOptions {
  * 1. The option must name one person and the reason `'one-persons-machine'`.
  * 2. The ledger must not hold the user as forgotten.
  * 3. An attribution to another user is never moved; one to the same user needs nothing more.
- * 4. A store with no legacy trace and no legacy compiled page has nothing to attribute.
+ * 4. A store with no legacy trace (a soft-deleted one counts: it holds its words) and no legacy compiled page has
+ *    nothing to attribute.
  * 5. The store must record nobody else: no registry row, trace or page of another user or of any session, no trace
  *    that names another user, no learner row of another user, and no other forgotten subject. The absence of all of
  *    these is not proof of one owner: the option rests on the host's own statement.
@@ -98,7 +99,8 @@ export async function attributeLegacyMemory(options: AttributeLegacyMemoryOption
   }
 
   let traces = 0;
-  for (const scopeId of legacyScopeIds(agentId)) traces += await memory.countScope(LEGACY_SCOPE, scopeId);
+  // A soft-deleted trace still holds its words: it is the owner's to recall no more, and to delete.
+  for (const scopeId of legacyScopeIds(agentId)) traces += await memory.countScope(LEGACY_SCOPE, scopeId, { includeDeleted: true });
   const pages = (await options.legacyPages()).filter((page) => page.parsed).length;
   if (traces === 0 && pages === 0) return { attributed: false };
 

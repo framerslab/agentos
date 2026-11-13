@@ -50,7 +50,7 @@ import { MigrationRunner, MIGRATIONS, LATEST_SCHEMA_VERSION } from './migrations
 import { ensureScopeIdColumn, fillScopeIds, postgresIndexExists } from './migrations/v2-to-v3.js';
 import { retryLostCreate } from './migrations/lost-create.js';
 import { registerUnregisteredConversationScopes, reopenCompiledScopes } from './conversationScopes.js';
-import { CONVERSATION_SCOPE_TABLES, PORTABLE_TABLES, PORTABLE_TABLE_PRIMARY_KEYS } from './portable-tables.js';
+import { CONVERSATION_SCOPE_TABLES, LEGACY_OWNER_TABLE, PORTABLE_TABLES, PORTABLE_TABLE_PRIMARY_KEYS } from './portable-tables.js';
 import { redactPostgresPassword } from './postgresPasswordRedaction.js';
 import { keyTraceCopies } from './SqlKnowledgeGraph.js';
 import {
@@ -1617,8 +1617,8 @@ export class Brain {
             // names the form its rows are in.
             const encoded = await readScopeIdFormRecord(source, this.#brainId);
             // The portable tables, then the registry of conversation scopes and each subject's wiki pages, so a
-            // subject's pages and its compile watermark travel with its traces.
-            for (const table of [...PORTABLE_TABLES, ...CONVERSATION_SCOPE_TABLES]) {
+            // subject's pages and its compile watermark travel with its traces, and the owner of older memory.
+            for (const table of [...PORTABLE_TABLES, ...CONVERSATION_SCOPE_TABLES, LEGACY_OWNER_TABLE]) {
               const rows = await source.all<Record<string, unknown>>(
                 `SELECT * FROM ${table} WHERE brain_id = ?`,
                 [this.#brainId],
@@ -1754,6 +1754,11 @@ export class Brain {
    * after it, and the copy is made again when a re-file of the source
    * committed in between.
    *
+   * The owner of each agent's memory from before per-user scope
+   * (`memory_legacy_owner`) comes in with the rows: a merge keeps the owner
+   * this brain records for an agent, which is never moved, and a replace
+   * keeps none the file lacks.
+   *
    * @param sourcePath - Source SQLite file path (typically produced by
    *   `Brain.exportToSqlite`).
    * @param opts.strategy - `'merge'` (default) upserts on PK collision;
@@ -1795,10 +1800,11 @@ export class Brain {
           `SELECT DISTINCT brain_id FROM brain_meta WHERE brain_id IS NOT NULL`,
         );
       }
-      // The registry of conversation scopes and the pages name their brain too, and the copy reads them whole: a file
-      // whose rows of the two tables name another brain than its meta is a file of two brains.
+      // The registry of conversation scopes, the pages and the owners of older memory name their brain too, and the
+      // copy reads them whole: a file whose rows of those tables name another brain than its meta is a file of two
+      // brains.
       const named = new Set(sourceBrainIds.map((row) => row.brain_id));
-      for (const table of CONVERSATION_SCOPE_TABLES) {
+      for (const table of [...CONVERSATION_SCOPE_TABLES, LEGACY_OWNER_TABLE]) {
         const columns = await peekAdapter.all<{ name: string }>(`PRAGMA table_info(${table})`);
         if (!columns.some((column) => column.name === 'brain_id')) continue;
         const rows = await peekAdapter.all<{ brain_id: string }>(
@@ -1895,10 +1901,10 @@ export class Brain {
     }
 
     if (strategy === 'replace') {
-      // Wipe existing rows for the receiving brainId in every portable table, the conversation scopes' two among
-      // them: a page row left behind would list chunks the wipe deleted.
+      // Wipe existing rows for the receiving brainId in every portable table, the conversation scopes' two and the
+      // owners of older memory among them: a page row left behind would list chunks the wipe deleted.
       // Order matters: child tables before parent tables to satisfy FKs.
-      for (const table of [...PORTABLE_TABLES, ...CONVERSATION_SCOPE_TABLES].reverse()) {
+      for (const table of [...PORTABLE_TABLES, ...CONVERSATION_SCOPE_TABLES, LEGACY_OWNER_TABLE].reverse()) {
         await trx.run(`DELETE FROM ${table} WHERE brain_id = ?`, [this.#brainId]);
       }
     }
@@ -1996,6 +2002,22 @@ export class Brain {
     await this._bulkCopy(this, 'memory_scopes', scopesToCopy, this.#brainId, { upsert: true, db: trx });
     tablesImported['memory_pages'] = pagesToCopy.length;
     await this._bulkCopy(this, 'memory_pages', pagesToCopy, this.#brainId, { upsert: true, db: trx });
+    // The owner of each agent's older memory: a merge keeps the owner this brain records, which is never moved; a
+    // replace emptied the table, so every source row is copied.
+    const sourceOwners = await source.all<Record<string, unknown>>(`SELECT * FROM ${LEGACY_OWNER_TABLE}`);
+    const heldOwners =
+      strategy === 'replace' || sourceOwners.length === 0
+        ? new Set<string>()
+        : new Set(
+            (
+              await trx.all<{ agent_id: string }>(`SELECT agent_id FROM ${LEGACY_OWNER_TABLE} WHERE brain_id = ?`, [
+                this.#brainId,
+              ])
+            ).map((row) => String(row.agent_id)),
+          );
+    const ownersToCopy = sourceOwners.filter((row) => !heldOwners.has(String(row.agent_id)));
+    tablesImported[LEGACY_OWNER_TABLE] = ownersToCopy.length;
+    await this._bulkCopy(this, LEGACY_OWNER_TABLE, ownersToCopy, this.#brainId, { upsert: true, db: trx });
     await reopenCompiledScopes(trx, this.#brainId, heldScopeIds, tracesAdded);
     // This brain holds the encoded form once the copy is in when the handshake encoded the source, gave this brain the
     // source's record, or took an encoded source into an encoded brain; a replace deleted the record with this brain's

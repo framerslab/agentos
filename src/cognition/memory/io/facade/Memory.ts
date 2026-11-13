@@ -1625,11 +1625,14 @@ export class Memory {
     return readTraceSnapshot(this._brain, this._brain.brainId, traceId);
   }
 
-  /** How many live traces one scope holds in this facade's Brain. */
-  async countScope(scope: string, scopeId: string): Promise<number> {
+  /**
+   * How many live traces one scope holds in this facade's Brain; with `includeDeleted`, the soft-deleted ones too,
+   * which still hold their words until a delete for good ({@link deleteScope}) removes them.
+   */
+  async countScope(scope: string, scopeId: string, options: { includeDeleted?: boolean } = {}): Promise<number> {
     await this._initPromise;
     const row = await this._brain.get<{ n: number | string }>(
-      'SELECT count(*) AS n FROM memory_traces WHERE brain_id = ? AND scope = ? AND scope_id = ? AND deleted = 0',
+      `SELECT count(*) AS n FROM memory_traces WHERE brain_id = ? AND scope = ? AND scope_id = ?${options.includeDeleted ? '' : ' AND deleted = 0'}`,
       [this._brain.brainId, scope, scopeId],
     );
     return Number(row?.n ?? 0);

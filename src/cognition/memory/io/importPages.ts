@@ -1,6 +1,6 @@
 /**
- * @fileoverview The registry of conversation scopes and the wiki pages, as an import brings them in: the rules the
- * SQLite and the JSON importer share.
+ * @fileoverview The registry of conversation scopes, the wiki pages and the owners of older memory, as an import
+ * brings them in: the rules the SQLite and the JSON importer share.
  *
  * - A scope the brain already registers keeps its own row and compile watermark; any other comes in with the
  *   source's.
@@ -9,6 +9,8 @@
  *   their own, never merged into a trace the brain holds, and the row lists the ids they were written under.
  * - A message the import stores under a scope the brain had compiled past its time moves that scope's watermark back
  *   to just before it.
+ * - The owner of an agent's older memory comes in where the brain records no owner for that agent; an owner the
+ *   brain records is never moved.
  *
  * @module memory/io/importPages
  */
@@ -179,6 +181,42 @@ export async function mergeImportedScopesAndPages(
       imported += 1;
     } catch (err) {
       errors.push(`Page merge error: ${String(err)}`);
+    }
+  }
+  return imported;
+}
+
+/**
+ * Brings in the owners of older memory a source names (`memory_legacy_owner`), a row an agent: the user that agent's
+ * memory from before per-user scope is attributed to. The brain takes a row for an agent it records no owner of; an
+ * owner it records is never moved. A row whose owner key the key builder did not write, or that names the operator,
+ * is left out.
+ *
+ * @param errors - Where a row that cannot be written is reported.
+ * @returns How many owners it wrote.
+ */
+export async function mergeImportedLegacyOwners(
+  trx: { run: Brain['run'] },
+  brainId: string,
+  rows: readonly unknown[],
+  errors: string[],
+): Promise<number> {
+  let imported = 0;
+  for (const row of rows) {
+    if (row === null || typeof row !== 'object') continue;
+    const owner = row as { agent_id?: unknown; owner_key?: unknown; attributed_at?: unknown };
+    if (typeof owner.agent_id !== 'string' || owner.agent_id === '' || typeof owner.owner_key !== 'string') continue;
+    const subject = parseConversationScopeKey(owner.owner_key)?.subject;
+    if (!subject || subject.kind === 'operator') continue;
+    try {
+      const written = await trx.run(
+        `INSERT INTO memory_legacy_owner (brain_id, agent_id, owner_key, attributed_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT (brain_id, agent_id) DO NOTHING`,
+        [brainId, owner.agent_id, owner.owner_key, timeOf(owner.attributed_at, Date.now())],
+      );
+      if (written.changes > 0) imported += 1;
+    } catch (err) {
+      errors.push(`Owner merge error: ${String(err)}`);
     }
   }
   return imported;

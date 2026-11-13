@@ -1393,7 +1393,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     const withheld = await operatorPages.withheldPages();
     if (withheld.some((page) => page.origin === 'uncertain')) return true;
     if ((await memory.legacyOwner(agentId)) !== undefined) return false;
-    for (const form of legacyForms) if ((await memory.countScope(LEGACY_SCOPE, form)) > 0) return true;
+    // A soft-deleted trace still holds its words until a delete for good.
+    for (const form of legacyForms) if ((await memory.countScope(LEGACY_SCOPE, form, { includeDeleted: true })) > 0) return true;
     return withheld.length > 0;
   };
   /** The older pages under memory/: those an earlier version compiled (`parsed`), and those that cannot be read. */

@@ -194,7 +194,7 @@ Give that notice in your product, at the first interaction. A hard limit in the 
 
 ### Memory from before per-user scope
 
-A store that an earlier release of `souledAgent()` wrote holds traces under the agent's one shared scope and compiled pages under `memory/`. The library leaves them in place. It keeps them out of every user's prompt, recall and page reads, and every deletion report names them as not reached, with `complete: false`, until you deal with them. The data is yours, so the choice is yours:
+A store that an earlier release of `souledAgent()` wrote holds traces under the agent's one shared scope and compiled pages under `memory/`. A trace soft-deleted there (`memory.forget(id)`) still holds its words and counts as one of them. The library leaves them in place. It keeps them out of every user's prompt, recall and page reads, and every deletion report names them as not reached, with `complete: false`, until you deal with them. The data is yours, so the choice is yours:
 
 - Delete them, before real users share the agent: `await agent.memory.deleteScope('persona', '<agentId>')` deletes the old traces and chunks; then remove the compiled page files (those whose front matter lists `sources`); the next open refreshes the catalog.
 - Or, on a single person's own machine, attribute them to that person: `legacyMemory: { attributeTo, reason: 'one-persons-machine' }`. The person then recalls, reads and exports that memory, and a deletion for them removes it. This is a statement you make. The library refuses it when the store records another user, any anonymous session, another forgotten subject or another learner, and it cannot check more than that.
