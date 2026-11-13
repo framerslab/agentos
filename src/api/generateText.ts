@@ -57,7 +57,7 @@ import {
   type SpendBudgetOptions,
 } from './runtime/spendBudget.js';
 import { isCallerStop, markHookStop } from './runtime/callerStop.js';
-import { guardedGenerateText, type TextGuardRun, type TextGuardrailOptions, type TextGuardrailReport, type TextGuardrailVerdict } from './runtime/textGuardrails.js';
+import { guardedGenerateText, refusalGuardEnd, type TextGuardRun, type TextGuardrailOptions, type TextGuardrailReport, type TextGuardrailVerdict } from './runtime/textGuardrails.js';
 
 /**
  * The `fallback` component's events, to the target current when each is
@@ -3073,8 +3073,14 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         // A reply the output cap cut off, a refused one included, ends the call on `length`, as the native loop does.
         const shimFinishReason = loopResult.cut ? 'length' : loopResult.finishReason;
         const shimRefused = loopResult.refusal !== undefined;
-        span?.setAttribute('agentos.api.finish_reason', shimFinishReason);
-        if (shimRefused) span?.setAttribute('agentos.api.refused', true);
+        // With guards set, a refusal message the output guards block ends the call on an error: the span and the
+        // usage event say so (the guards' wrapper reads the same verdict when it delivers the message).
+        const shimGuardEnd = shimRefused ? await refusalGuardEnd(opts.__guardRun, loopResult.refusal, opts.abortSignal) : undefined;
+        const shimRecordedReason = shimGuardEnd ? 'error' : shimFinishReason;
+        const shimRecordedRefused = shimRefused && shimGuardEnd !== 'aborted';
+        span?.setAttribute('agentos.api.finish_reason', shimRecordedReason);
+        if (shimRecordedRefused) span?.setAttribute('agentos.api.refused', true);
+        if (shimGuardEnd === 'blocked') span?.setAttribute('agentos.api.guard_blocked', true);
         span?.setAttribute('agentos.api.tool_calls', loopResult.toolCalls.length);
         attachUsageAttributes(span, shimUsage);
         attachGenAiAttributes(span, { providerName: resolved.providerId, operationName: 'chat', requestModel: resolved.modelId, responseModel: lastResponseModelId, usage: shimUsage, ...(opts.serviceTier !== undefined ? { requestServiceTier: opts.serviceTier } : {}), ...(lastServiceTier !== undefined ? { responseServiceTier: lastServiceTier } : {}) });
@@ -3085,8 +3091,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           usage: shimUsage,
           source: opts.source,
           ...(opts.__fallbackDepth ? { fallbackDepth: opts.__fallbackDepth } : {}),
-          finishReason: shimFinishReason,
-          ...(shimRefused ? { refused: true as const } : {}),
+          finishReason: shimRecordedReason,
+          ...(shimRecordedRefused ? { refused: true as const } : {}),
           surface: 'generateText',
           durationMs: Date.now() - rootStartedAt,
         }, usageAccount);
@@ -3397,11 +3403,19 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           refusedWithCalls && reportedFinishReason !== 'length' && reportedFinishReason !== 'content_filter'
             ? 'stop'
             : reportedFinishReason;
+        // With guards set, the output guards judge the refusal message before
+        // the caller reads it, and a block ends the call on an error: the span
+        // and the usage event say how the call ended (the guards' wrapper
+        // reads the same verdict when it delivers the message).
+        const refusalGuardOutcome = refused ? await refusalGuardEnd(opts.__guardRun, choice.refusal, opts.abortSignal) : undefined;
+        const recordedFinishReason = refusalGuardOutcome ? 'error' : stepFinishReason;
+        const recordedRefused = refused && refusalGuardOutcome !== 'aborted';
 
         if (textContent && toolCallsInChoice.length === 0) {
           metricUsage = totalUsage;
-          span?.setAttribute('agentos.api.finish_reason', stepFinishReason);
-          if (refused) span?.setAttribute('agentos.api.refused', true);
+          span?.setAttribute('agentos.api.finish_reason', recordedFinishReason);
+          if (recordedRefused) span?.setAttribute('agentos.api.refused', true);
+          if (refusalGuardOutcome === 'blocked') span?.setAttribute('agentos.api.guard_blocked', true);
           span?.setAttribute('agentos.api.tool_calls', allToolCalls.length);
           attachUsageAttributes(span, totalUsage);
         attachGenAiAttributes(span, { providerName: resolved.providerId, operationName: 'chat', requestModel: resolved.modelId, responseModel: lastResponseModelId, usage: totalUsage, ...(opts.serviceTier !== undefined ? { requestServiceTier: opts.serviceTier } : {}), ...(lastServiceTier !== undefined ? { responseServiceTier: lastServiceTier } : {}) });
@@ -3416,8 +3430,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             usage: totalUsage,
             source: opts.source,
             ...(opts.__fallbackDepth ? { fallbackDepth: opts.__fallbackDepth } : {}),
-            finishReason: stepFinishReason,
-            ...(refused ? { refused: true as const } : {}),
+            finishReason: recordedFinishReason,
+            ...(recordedRefused ? { refused: true as const } : {}),
             surface: 'generateText',
             durationMs: Date.now() - rootStartedAt,
             ...(lastServingProvider ? { servingProvider: lastServingProvider } : {}),
@@ -3632,8 +3646,9 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         }
 
         metricUsage = totalUsage;
-        span?.setAttribute('agentos.api.finish_reason', stepFinishReason);
-        if (refused) span?.setAttribute('agentos.api.refused', true);
+        span?.setAttribute('agentos.api.finish_reason', recordedFinishReason);
+        if (recordedRefused) span?.setAttribute('agentos.api.refused', true);
+        if (refusalGuardOutcome === 'blocked') span?.setAttribute('agentos.api.guard_blocked', true);
         span?.setAttribute('agentos.api.tool_calls', allToolCalls.length);
         attachUsageAttributes(span, totalUsage);
         attachGenAiAttributes(span, { providerName: resolved.providerId, operationName: 'chat', requestModel: resolved.modelId, responseModel: lastResponseModelId, usage: totalUsage, ...(opts.serviceTier !== undefined ? { requestServiceTier: opts.serviceTier } : {}), ...(lastServiceTier !== undefined ? { responseServiceTier: lastServiceTier } : {}) });
@@ -3644,8 +3659,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           usage: totalUsage,
           source: opts.source,
           ...(opts.__fallbackDepth ? { fallbackDepth: opts.__fallbackDepth } : {}),
-          finishReason: stepFinishReason,
-          ...(refused ? { refused: true as const } : {}),
+          finishReason: recordedFinishReason,
+          ...(recordedRefused ? { refused: true as const } : {}),
           surface: 'generateText',
           durationMs: Date.now() - rootStartedAt,
           ...(lastServingProvider ? { servingProvider: lastServingProvider } : {}),

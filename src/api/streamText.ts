@@ -53,7 +53,7 @@ import { ContextWindowExceededError } from '../core/llm/providers/errors/Context
 import { checkContextFit } from './runtime/contextWindowFit.js';
 import { asSpendBudget, costOfUsageUSD, holdCall, withReservation, type HelperCall } from './runtime/spendBudget.js';
 import { isCallerStop, markHookStop } from './runtime/callerStop.js';
-import { guardedStreamText, type TextGuardrailReport } from './runtime/textGuardrails.js';
+import { guardedStreamText, refusalGuardEnd, type TextGuardrailReport } from './runtime/textGuardrails.js';
 import type { CacheDiagnostics } from '../core/llm/providers/IProvider.js';
 import { toProviderReplayMessage } from './sessionTranscript.js';
 import type { ModelRouteParams } from '../core/llm/routing/IModelRouter.js';
@@ -2118,6 +2118,9 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         resolveFinishReason!('error');
       }
     } finally {
+      // Whether a terminal settled the stream before this block: an early
+      // abandonment settles it below.
+      const settledAtTerminal = settledFinishReason !== undefined;
       // Belt-and-suspenders for the routing Promises: if the stream
       // errored before routing completed (e.g. resolveProvider option
       // threw), settle the Promises with whatever recorded ids exist
@@ -2157,14 +2160,25 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         opts.cacheDiagnostics && sawFinalProviderChunk ? lastProviderMessageId : null,
       );
       rootSpan?.setAttribute('agentos.api.tool_calls', allToolCalls.length);
-      // Whether the model refused: the answer that ended the stream held a refusal message, and no error ended it.
-      const refused = metricStatus !== 'error' && finalRefusal !== undefined;
-      if (metricStatus === 'error') {
+      // With guards set, the output guards judge the model's refusal message
+      // before the caller reads it, and a block ends the call on an error. The
+      // verdict is the one the guards' wrapper delivers, judged once, so the
+      // span and the usage event say how the call ended.
+      const guardEnd =
+        settledAtTerminal && metricStatus !== 'error'
+          ? await refusalGuardEnd(opts.__guardRun, finalRefusal, opts.abortSignal)
+          : undefined;
+      const endedOnError = metricStatus === 'error' || guardEnd !== undefined;
+      // Whether the model refused: the answer that ended the stream held a refusal message, and nothing ended the call
+      // on an error but the guards' block of that message.
+      const refused = finalRefusal !== undefined && metricStatus !== 'error' && guardEnd !== 'aborted';
+      if (endedOnError) {
         rootSpan?.setAttribute('agentos.api.finish_reason', 'error');
       } else if (settledFinishReason === 'tool-calls') {
         rootSpan?.setAttribute('agentos.api.finish_reason', 'tool-calls');
       }
       if (refused) rootSpan?.setAttribute('agentos.api.refused', true);
+      if (guardEnd === 'blocked') rootSpan?.setAttribute('agentos.api.guard_blocked', true);
       attachUsageAttributes(rootSpan, usage);
       if (recordedProviderId && recordedModelId) {
         attachGenAiAttributes(rootSpan, {
@@ -2215,7 +2229,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       //   left real spend unmetered; zero-usage failures stay silent.
       const accruedBillableUsage = hasBillableUsage(usage);
       // The caller's signal ended the call: its event says so, and says when an output count in it is an estimate.
-      const endedByAbort = metricStatus === 'error' && opts.abortSignal?.aborted === true;
+      const endedByAbort = (metricStatus === 'error' || guardEnd === 'aborted') && opts.abortSignal?.aborted === true;
       if (fallbackLegRan && attemptUsage && hasBillableUsage(attemptUsage)) {
         fireLlmUsageObserver({
           provider: recordedProviderId ?? '',
@@ -2239,7 +2253,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           ...(opts.__fallbackDepth ? { fallbackDepth: opts.__fallbackDepth } : {}),
           // The reason the stream settled on, as the caller reads it, and whether the model refused.
           finishReason:
-            metricStatus === 'error'
+            endedOnError
               ? 'error'
               : settledFinishReason ?? normalizeStreamFinishReason(lastStepFinishReason),
           ...(refused ? { refused: true as const } : {}),

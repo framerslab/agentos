@@ -101,6 +101,32 @@ export interface ToolCallRefusal { error: string; result: { refused: true; error
 export interface TextGuardRun {
   /** Judges one call before any hook. `step` counts from 0 across the call, `index` is the call's place in its step. Null lets the call run. */
   judgeToolCall(call: { name: string; args: unknown; step: number; index: number; registered: boolean }): Promise<ToolCallRefusal | null>;
+  /**
+   * Whether the output guards block the model's refusal message, judged once for the call: the wrapper reads the
+   * same verdict when it delivers the message. False in a dry run, which blocks nothing.
+   */
+  judgeRefusal?(message: string): Promise<boolean>;
+}
+
+/**
+ * @internal How the output guards end a call whose model refused with `refusal`, for the call's root span and usage
+ * event, which are written before the wrapper delivers the message: `'blocked'` when they block it, `'aborted'` when
+ * the caller's signal fired while they judged it, else undefined (no guards, an empty message, a message they pass).
+ */
+export async function refusalGuardEnd(
+  run: TextGuardRun | undefined,
+  refusal: string | undefined,
+  signal: AbortSignal | undefined,
+): Promise<'blocked' | 'aborted' | undefined> {
+  if (!run?.judgeRefusal || !refusal) return undefined;
+  let blocked = false;
+  try {
+    blocked = await run.judgeRefusal(refusal);
+  } catch {
+    // a guard pipe that failed is the wrapper's to report, as it reports it for the message
+  }
+  if (signal?.aborted) return 'aborted';
+  return blocked ? 'blocked' : undefined;
 }
 
 interface Decided { evaluation: GuardrailEvaluationResult; outcome: 'refuse' | 'hold' | 'flag'; unavailable: boolean }
@@ -201,6 +227,8 @@ class GuardRun implements TextGuardRun {
   private readonly inputGuards: IGuardrailService[];
   private readonly outputGuards: IGuardrailService[];
   private readonly toolGuards: IGuardrailService[];
+  /** The verdict on the model's refusal message, judged once however often it is asked for. */
+  private refusalJudged?: { message: string; judged: Promise<{ end: OutputEnd; text: string }> };
 
   constructor(private readonly options: TextGuardrailOptions) {
     const mode = options.mode ?? 'enforce';
@@ -480,6 +508,17 @@ class GuardRun implements TextGuardRun {
     return { parts: parts(), end: () => end };
   }
 
+  /** The output guards over the model's refusal message, as over a whole reply; one judgement per message. */
+  judgeRefusalMessage(message: string): Promise<{ end: OutputEnd; text: string }> {
+    if (this.refusalJudged?.message !== message) this.refusalJudged = { message, judged: this.judgeReply(message) };
+    return this.refusalJudged.judged;
+  }
+
+  async judgeRefusal(message: string): Promise<boolean> {
+    if (this.mode === 'dryRun') return false;
+    return (await this.judgeRefusalMessage(message)).end.kind === 'stopped';
+  }
+
   /** The output guards over one whole reply: how it ended, and the text the guards deliver. */
   async judgeReply(text: string): Promise<{ end: OutputEnd; text: string }> {
     const one = (async function* (): AsyncGenerator<StreamPart, void, undefined> { yield { type: 'text', text }; })();
@@ -506,7 +545,7 @@ export async function guardedGenerateText(opts: GenerateTextOptions, inner: (opt
   // a caller's abort while the guards judged the reply ends the call, as it does while they judge a tool call
   opts.abortSignal?.throwIfAborted();
   // the model's refusal message is text the model wrote: the output guards judge it as they judge the reply
-  const refusal = result.refusal ? await run.judgeReply(result.refusal) : undefined;
+  const refusal = result.refusal ? await run.judgeRefusalMessage(result.refusal) : undefined;
   if (refusal) opts.abortSignal?.throwIfAborted();
   if (run.mode === 'dryRun') return { ...result, guardReport: run.report };
   if (judged.end.kind === 'stopped') throw run.stop('output', judged.end.decided, result.usage);
@@ -593,7 +632,7 @@ export function guardedStreamText(opts: GenerateTextOptions, inner: (opts: Gener
           await run.judgeReply(whole);
           // the refusal message is judged as the reply is, and delivered as it came
           deliveredRefusal = await source.refusal;
-          if (deliveredRefusal) await run.judgeReply(deliveredRefusal);
+          if (deliveredRefusal) await run.judgeRefusalMessage(deliveredRefusal);
         }
         // the call's own text (the last step's), as the same call without guards resolves it
         delivered = await source.text.catch(() => delivered);
@@ -633,7 +672,7 @@ export function guardedStreamText(opts: GenerateTextOptions, inner: (opts: Gener
       // an empty refusal message has nothing to judge, and goes out as it came
       if (message === '') deliveredRefusal = message;
       if (message) {
-        const judged = await run.judgeReply(message);
+        const judged = await run.judgeRefusalMessage(message);
         // a caller's abort while the guards judged the message ends the stream with the reason, whatever they
         // decided, as generateText() rejects with it: the message is never delivered after the abort
         opts.abortSignal?.throwIfAborted();

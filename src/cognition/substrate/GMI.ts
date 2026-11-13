@@ -1973,6 +1973,8 @@ export class GMI implements IGMI {
         let currentIterationThinkingBlocks: ThinkingBlock[] = [];
         let stepUsage: ModelUsage | undefined;
         let stepFinishReason: string | null = null;
+        // Whether the step's answer held the model's refusal (OpenAI's `refusal` field, an empty message included).
+        let stepRefused = false;
         let stepFinalChunk: ModelCompletionResponse | undefined;
         let stepStructuredOutput: unknown;
         // Whether the answering attempt's provider payload carried the response schema (the gateway says).
@@ -2179,7 +2181,11 @@ export class GMI implements IGMI {
               const structured = (chunk as { structuredOutput?: unknown }).structuredOutput;
               if (structured !== undefined) stepStructuredOutput = structured;
 
-              if (choice?.message?.tool_calls && choice.message.tool_calls.length > 0) {
+              // An answer that holds the model's refusal ends the turn on it: OpenAI may send tool calls beside the
+              // refusal, and they are neither requested nor run, as generateText() and streamText() drop them.
+              if (chunk.isFinal && typeof choice?.refusal === 'string') stepRefused = true;
+
+              if (!stepRefused && choice?.message?.tool_calls && choice.message.tool_calls.length > 0) {
                 currentIterationToolCallRequests = choice.message.tool_calls.map((tc: any) => ({ // tc is from IProvider.ChatMessage.tool_calls
                     id: tc.id || `toolcall-${uuidv4()}`, // Ensure ID
                     name: tc.function.name,
@@ -2214,7 +2220,8 @@ export class GMI implements IGMI {
               }
 
               if (chunk.isFinal && choice?.finishReason) {
-                stepFinishReason = choice.finishReason;
+                // The calls' own reason no longer holds once they are dropped: the turn stopped on the model's answer.
+                stepFinishReason = stepRefused && choice.finishReason === 'tool_calls' ? 'stop' : choice.finishReason;
                 this.addTraceEntry(ReasoningEntryType.LLM_CALL_COMPLETE, `LLM stream part finished. Reason: ${choice.finishReason}`, { usage: chunk.usage });
               }
               if (chunk.isFinal) stepFinalChunk = chunk;
@@ -2279,6 +2286,7 @@ export class GMI implements IGMI {
               currentIterationThinkingBlocks = [];
               stepUsage = undefined;
               stepFinishReason = null;
+              stepRefused = false;
               stepFinalChunk = undefined;
               stepStructuredOutput = undefined;
               stepSchemaRoute = undefined;

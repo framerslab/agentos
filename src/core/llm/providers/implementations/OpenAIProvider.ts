@@ -813,17 +813,41 @@ function summarizeResponsesOutput(
  * from an empty answer by that field: the whole message, or the piece that
  * came when the answer was cut. Without one, no `refusal` field is set.
  *
- * `present` says whether the answer holds a refusal: by default a non-empty
- * message. A Responses `refusal` content part is one whatever its message, so
- * that path passes it, and an empty message is then kept as `''`.
+ * `present` says whether the answer holds a refusal, an empty message
+ * included: a Responses `refusal` content part whatever its message, a Chat
+ * Completions refusal as {@link chatRefused} reads it. An empty message is
+ * then kept as `''`, so the field is there exactly when the model refused.
  */
 function withRefusal(
   finishReason: string | null,
   refusal: string | null | undefined,
-  present: boolean = typeof refusal === 'string' && refusal.length > 0,
+  present: boolean,
 ): Pick<ModelCompletionChoice, 'finishReason' | 'refusal'> {
   if (!present) return { finishReason };
   return { finishReason, refusal: typeof refusal === 'string' ? refusal : '' };
+}
+
+/**
+ * Whether a Chat Completions answer holds a refusal: a `refusal` string, the
+ * message possibly empty. An empty refusal field beside the answer's text or
+ * tool calls holds no refusal: the answer is that text or those calls.
+ *
+ * @param refusal - The message's `refusal` field, or `''` once a stream sent one.
+ * @param seen - Whether the answer carried a `refusal` string at all.
+ * @param answered - Whether the answer carried text or a tool call.
+ */
+function chatRefused(refusal: string, seen: boolean, answered: boolean): boolean {
+  return seen && (refusal.length > 0 || !answered);
+}
+
+/** The refusal a Chat Completions stream has sent so far, and whether it sent text or a tool call beside it. */
+interface ChatStreamRefusal {
+  /** The refusal pieces, joined. */
+  text: string;
+  /** Whether a delta carried a `refusal` string, an empty one included. */
+  seen: boolean;
+  /** Whether a delta carried text or a tool call. */
+  answered: boolean;
 }
 
 /**
@@ -1478,7 +1502,7 @@ export class OpenAIProvider implements IProvider {
     abortSignal: AbortSignal | undefined,
   ): AsyncGenerator<ModelCompletionResponse, void, undefined> {
     const accumulatedToolCalls: Map<number, { id?: string; type?: 'function'; function?: { name?: string; arguments?: string; } }> = new Map();
-    const accumulatedRefusal = { text: '' };
+    const accumulatedRefusal: ChatStreamRefusal = { text: '', seen: false, answered: false };
     // Whether a chunk reported the answer's finish reason.
     let finished = false;
 
@@ -1502,9 +1526,10 @@ export class OpenAIProvider implements IProvider {
       yield this.abortedStreamChunk(modelId, 'Stream aborted by caller');
       return;
     }
-    // A refusal message whose answer never finished was cut off: it is not a
-    // refusal the caller can rely on, so the stream ends on an error.
-    if (!finished && accumulatedRefusal.text.length > 0) {
+    // A refusal message whose answer never finished was cut off, an empty one
+    // included: it is not a refusal the caller can rely on, so the stream ends
+    // on an error.
+    if (!finished && chatRefused(accumulatedRefusal.text, accumulatedRefusal.seen, accumulatedRefusal.answered)) {
       yield {
         id: `openai-truncated-${Date.now()}`,
         object: 'chat.completion.chunk',
@@ -1570,6 +1595,8 @@ export class OpenAIProvider implements IProvider {
     let responseModel = modelId;
     let emittedText = '';
     let emittedRefusal = '';
+    // Whether a refusal delta came, an empty one included.
+    let refusalSeen = false;
     const calls: StreamedResponsesCall[] = [];
     const callByOutputIndex = new Map<number, StreamedResponsesCall>();
     const callByItemId = new Map<string, StreamedResponsesCall>();
@@ -1644,6 +1671,7 @@ export class OpenAIProvider implements IProvider {
           break;
 
         case 'response.refusal.delta':
+          if (typeof event.delta === 'string') refusalSeen = true;
           if (typeof event.delta === 'string' && event.delta) {
             emittedRefusal += event.delta;
             yield chunk({ refusalDelta: event.delta });
@@ -1730,7 +1758,7 @@ export class OpenAIProvider implements IProvider {
           }
           const refusal = terminalOutput ? summary.refusal : emittedRefusal;
           // A refusal part with an empty message is a refusal too.
-          const refused = terminalOutput ? summary.refused : emittedRefusal.length > 0;
+          const refused = terminalOutput ? summary.refused : refusalSeen;
 
           const usage = response?.usage
             ? this.mapResponsesUsage(response.usage, response.model ?? modelId)
@@ -2536,8 +2564,17 @@ export class OpenAIProvider implements IProvider {
             ? { reasoningText: c.message.reasoning_content } : {}),
           tool_calls: c.message.tool_calls,
         },
-        // An explicit refusal comes with an ordinary stop and no content; its message is kept in `refusal`.
-        ...withRefusal(c.finish_reason, c.message.refusal),
+        // An explicit refusal comes with an ordinary stop and no content; its message, an empty one included, is kept
+        // in `refusal`.
+        ...withRefusal(
+          c.finish_reason,
+          c.message.refusal,
+          chatRefused(
+            c.message.refusal ?? '',
+            typeof c.message.refusal === 'string',
+            (typeof c.message.content === 'string' && c.message.content.length > 0) || (c.message.tool_calls?.length ?? 0) > 0,
+          ),
+        ),
         logprobs: c.logprobs,
       })),
       usage: apiResponse.usage ? this.calculateUsage(apiResponse.usage, apiResponse.model) : undefined,
@@ -2558,7 +2595,7 @@ export class OpenAIProvider implements IProvider {
     private mapApiToStreamChunkResponse(
         apiChunk: OpenAIAPITypes.ChatCompletionStreamResponse,
         accumulatedToolCalls: Map<number, { id?: string; type?: 'function'; function?: { name?: string; arguments?: string; } }>,
-        accumulatedRefusal: { text: string } = { text: '' },
+        accumulatedRefusal: ChatStreamRefusal = { text: '', seen: false, answered: false },
     ): ModelCompletionResponse {
         const choice = apiChunk.choices?.[0];
         let responseTextDelta: string | undefined;
@@ -2602,12 +2639,19 @@ export class OpenAIProvider implements IProvider {
 
         if (choice?.delta?.content) {
             responseTextDelta = choice.delta.content;
+            accumulatedRefusal.answered = true;
         }
 
-        if (typeof choice?.delta?.refusal === 'string' && choice.delta.refusal) {
-            refusalDelta = choice.delta.refusal;
-            accumulatedRefusal.text += refusalDelta;
+        // A refusal string, an empty one included, says the answer is a refusal; its pieces go out as they come.
+        if (typeof choice?.delta?.refusal === 'string') {
+            accumulatedRefusal.seen = true;
+            if (choice.delta.refusal) {
+                refusalDelta = choice.delta.refusal;
+                accumulatedRefusal.text += refusalDelta;
+            }
         }
+
+        if (choice?.delta?.tool_calls?.length) accumulatedRefusal.answered = true;
 
         if (choice?.delta?.tool_calls) {
             toolCallsDeltas = [];
@@ -2664,7 +2708,11 @@ export class OpenAIProvider implements IProvider {
             },
             // The chunk that ends a refused answer holds the whole refusal message beside its finish reason.
             ...(isFinal
-              ? withRefusal(choice.finish_reason || null, accumulatedRefusal.text)
+              ? withRefusal(
+                  choice.finish_reason || null,
+                  accumulatedRefusal.text,
+                  chatRefused(accumulatedRefusal.text, accumulatedRefusal.seen, accumulatedRefusal.answered),
+                )
               : { finishReason: choice.finish_reason || null }),
             logprobs: choice.logprobs,
         };
