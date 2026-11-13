@@ -27,11 +27,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const fetchMock = vi.fn();
 vi.stubGlobal('fetch', fetchMock);
 
+import { trace } from '@opentelemetry/api';
+import { BasicTracerProvider, InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-base';
 import { z } from 'zod';
 import { agent } from '../agent.js';
 import { GuardrailStopError } from '../errors.js';
 import { generateObject, ObjectGenerationError } from '../generateObject.js';
-import { generateText } from '../generateText.js';
+import { generateText, type GenerateTextResult } from '../generateText.js';
 import { setGlobalLlmObserver, type LlmUsageEvent } from '../observers.js';
 import { streamText, type StreamPart } from '../streamText.js';
 import { AgentOSResponseChunkType, type AgentOSFinalResponseChunk } from '../types/AgentOSResponse.js';
@@ -39,6 +41,7 @@ import { OpenAIProvider } from '../../core/llm/providers/implementations/OpenAIP
 import type { ModelCompletionResponse } from '../../core/llm/providers/IProvider.js';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry.js';
 import { GuardrailAction, type GuardrailContext, type IGuardrailService } from '../../safety/guardrails/IGuardrailService.js';
+import { configureAgentOSObservability } from '../../safety/evaluation/observability/otel.js';
 
 const REFUSAL = "I'm sorry, I cannot assist with that request.";
 const REFUSAL_PARTS = ["I'm sorry, ", 'I cannot assist with that request.'];
@@ -851,6 +854,28 @@ describe('an OpenAI refusal beside a tool call', () => {
     expect(lookup.execute).not.toHaveBeenCalled();
     expect(requestsTo(/api\.openai\.com\/v1\/chat\/completions/)).toBe(2);
   });
+
+  it('ends a turn on the GMI runtime on the refusal, and the call it came with is not run', async () => {
+    vi.stubEnv('OPENAI_API_KEY', 'sk-refusal-e2e');
+    route([
+      [/api\.openai\.com\/v1\/models/, modelList],
+      [/api\.openai\.com\/v1\/chat\/completions/, inOrder(chatRefusalWithCallStream, chatDoneStream)],
+    ]);
+    const lookup = tool();
+    const seat = agent({ runtime: 'gmi', provider: 'openai', model: CHAT_MODEL, apiKey: 'sk-refusal-e2e', memory: false, fallbackProviders: [], tools: { lookup } });
+
+    try {
+      const result = (await seat.generate('A request.')) as GenerateTextResult;
+      // The GMI turn carries no refusal field (a documented limit); it ends on the model's answer, never on its calls.
+      expect(result.finishReason).toBe('stop');
+      expect(result.text).toBe('');
+      expect(result.toolCalls).toEqual([]);
+    } finally {
+      await seat.close();
+    }
+    expect(lookup.execute).not.toHaveBeenCalled();
+    expect(requestsTo(/api\.openai\.com\/v1\/chat\/completions/)).toBe(1);
+  });
 });
 
 describe('an OpenAI refusal on a structured call', () => {
@@ -913,6 +938,147 @@ describe('an OpenAI Responses refusal part with an empty message', () => {
     expect(result.finishReason).toBe('stop');
     expect(result.refusal).toBe('');
     expect(result.text).toBe('');
+  });
+});
+
+// The `refusal` field is the signal: present, an empty message included, exactly when the model refused, on every
+// endpoint, whole or streamed, and when the output cap cut the answer.
+describe('an OpenAI refusal with an empty message on every path', () => {
+  const call = (model: string) => ({ provider: 'openai', model, apiKey: 'sk-refusal-e2e', prompt: 'A request.', fallbackProviders: [] });
+  /** A Chat Completions answer whose message holds the given content beside an empty refusal. */
+  const chatEmptyRefusal = (finishReason: 'stop' | 'length', content: string | null = null) => () =>
+    jsonResponse({
+      id: 'chatcmpl-empty-refusal',
+      object: 'chat.completion',
+      created: 1721596428,
+      model: CHAT_MODEL,
+      choices: [{ index: 0, message: { role: 'assistant', content, refusal: '' }, logprobs: null, finish_reason: finishReason }],
+      usage: { prompt_tokens: 81, completion_tokens: 1, total_tokens: 82 },
+    });
+  /** The same streamed: the first delta opens an empty refusal; then the finish chunk, or the body ends there. */
+  const chatEmptyRefusalStream = (end: 'stop' | 'length' | 'cut') => () =>
+    sseResponse([
+      chatChunk([{ index: 0, delta: { role: 'assistant', content: null, refusal: '' }, finish_reason: null }]),
+      ...(end === 'cut'
+        ? []
+        : [
+            chatChunk([{ index: 0, delta: {}, finish_reason: end }]),
+            chatChunk([], { usage: { prompt_tokens: 81, completion_tokens: 1, total_tokens: 82 } }),
+            'data: [DONE]\n\n',
+          ]),
+    ]);
+  /** An `incomplete` response the output cap cut, its one message a refusal part with an empty message. */
+  const responsesCutEmptyRefusalBody = () => {
+    const body = responsesCutRefusalBody();
+    return { ...body, output: [{ ...body.output[0], content: [{ type: 'refusal', refusal: '' }] }] };
+  };
+  const responsesCutEmptyRefusalStream = () => {
+    let sequence = 0;
+    const event = (type: string, fields: Record<string, unknown>) =>
+      `event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: sequence++, ...fields })}\n\n`;
+    const body = responsesCutEmptyRefusalBody();
+    return sseResponse([
+      event('response.created', { response: { ...body, status: 'in_progress', incomplete_details: null, output: [], usage: null } }),
+      event('response.output_item.added', {
+        output_index: 0,
+        item: { id: 'msg_1234567890', type: 'message', role: 'assistant', status: 'in_progress', content: [] },
+      }),
+      event('response.incomplete', { response: body }),
+    ]);
+  };
+  const chatEndpoint = /api\.openai\.com\/v1\/chat\/completions/;
+  const responsesEndpoint = /api\.openai\.com\/v1\/responses/;
+
+  it('on Chat Completions, is a refusal at the provider, from generateText and from streamText', async () => {
+    route([
+      [/api\.openai\.com\/v1\/models/, modelList],
+      [chatEndpoint, chatEmptyRefusal('stop')],
+    ]);
+    const provider = new OpenAIProvider();
+    await provider.initialize({ apiKey: 'sk-refusal-e2e', maxRetries: 1 });
+    const answer = await provider.generateCompletion(CHAT_MODEL, [{ role: 'user', content: 'A request.' }], {});
+    expect(answer.choices[0]?.finishReason).toBe('stop');
+    expect(answer.choices[0]?.refusal).toBe('');
+
+    const result = await generateText(call(CHAT_MODEL));
+    expect(result.finishReason).toBe('stop');
+    expect(result.refusal).toBe('');
+    expect(result.text).toBe('');
+
+    route([
+      [/api\.openai\.com\/v1\/models/, modelList],
+      [chatEndpoint, chatEmptyRefusalStream('stop')],
+    ]);
+    const chunks: ModelCompletionResponse[] = [];
+    for await (const chunk of provider.generateCompletionStream(CHAT_MODEL, [{ role: 'user', content: 'A request.' }], {})) chunks.push(chunk);
+    const finish = chunks.find((chunk) => chunk.choices[0]?.finishReason != null);
+    expect(finish?.choices[0]?.finishReason).toBe('stop');
+    expect(finish?.choices[0]?.refusal).toBe('');
+
+    const streamed = streamText(call(CHAT_MODEL));
+    for await (const _part of streamed.fullStream) void _part;
+    expect(await streamed.finishReason).toBe('stop');
+    expect(await streamed.refusal).toBe('');
+    expect(await streamed.text).toBe('');
+  });
+
+  it('on a Chat Completions stream cut before its finish chunk, ends streamText on an error', async () => {
+    route([
+      [/api\.openai\.com\/v1\/models/, modelList],
+      [chatEndpoint, chatEmptyRefusalStream('cut')],
+    ]);
+
+    const result = streamText(call(CHAT_MODEL));
+    const parts: StreamPart[] = [];
+    for await (const part of result.fullStream) parts.push(part);
+
+    expect(parts.map((part) => part.type)).toContain('error');
+    expect(await result.finishReason).toBe('error');
+    expect(await result.refusal).toBeUndefined();
+  });
+
+  it.each([
+    { name: 'Chat Completions', model: CHAT_MODEL, endpoint: chatEndpoint, answer: chatEmptyRefusal('length'), stream: chatEmptyRefusalStream('length') },
+    { name: 'Responses', model: RESPONSES_MODEL, endpoint: responsesEndpoint, answer: () => jsonResponse(responsesCutEmptyRefusalBody()), stream: responsesCutEmptyRefusalStream },
+  ])('cut by the output cap on $name, comes back from generateText and streamText as length with the field', async ({ model, endpoint, answer, stream }) => {
+    route([
+      [/api\.openai\.com\/v1\/models/, modelList],
+      [endpoint, answer],
+    ]);
+    const result = await generateText(call(model));
+    expect(result).toMatchObject({ text: '', finishReason: 'length', refusal: '' });
+
+    route([
+      [/api\.openai\.com\/v1\/models/, modelList],
+      [endpoint, stream],
+    ]);
+    const streamed = streamText(call(model));
+    for await (const _part of streamed.fullStream) void _part;
+    expect(await streamed.finishReason).toBe('length');
+    expect(await streamed.refusal).toBe('');
+    expect(await streamed.text).toBe('');
+  });
+
+  it('beside text, is kept as a Responses refusal part, and an empty Chat Completions refusal field beside text is no refusal', async () => {
+    // A Responses refusal is its own typed part, so it is a refusal whatever comes beside it.
+    route([
+      [/api\.openai\.com\/v1\/models/, modelList],
+      [responsesEndpoint, () => {
+        const body = responsesRefusalBody();
+        return jsonResponse({ ...body, output: [{ ...body.output[0], content: [{ type: 'output_text', text: '{"c":{}}' }, { type: 'refusal', refusal: '' }] }] });
+      }],
+    ]);
+    const kept = await generateText(call(RESPONSES_MODEL));
+    expect(kept).toMatchObject({ text: '{"c":{}}', finishReason: 'stop', refusal: '' });
+
+    // A Chat Completions message has one refusal field: an empty one beside the answer's text holds no refusal.
+    route([
+      [/api\.openai\.com\/v1\/models/, modelList],
+      [chatEndpoint, chatEmptyRefusal('stop', 'Hello.')],
+    ]);
+    const answered = await generateText(call(CHAT_MODEL));
+    expect(answered.text).toBe('Hello.');
+    expect('refusal' in answered).toBe(false);
   });
 });
 
@@ -1021,27 +1187,76 @@ describe('the usage event of a refused call', () => {
     expect(events[1] && 'refused' in events[1]).toBe(false);
   });
 
-  it('describes the answer the model gave, before the output guards blocked it', async () => {
+  /** A guard that blocks every whole reply it is shown. */
+  const blocks: IGuardrailService = {
+    id: 'blocks',
+    evaluateOutput: async ({ chunk }) => (chunk.type === AgentOSResponseChunkType.FINAL_RESPONSE ? { action: GuardrailAction.BLOCK, reasonCode: 'RULE_OUT' } : null),
+  };
+  const guarded = (services: IGuardrailService[], abortSignal?: AbortSignal) => ({
+    provider: 'openai',
+    model: CHAT_MODEL,
+    apiKey: 'sk-refusal-e2e',
+    prompt: 'A request.',
+    fallbackProviders: [],
+    ...(abortSignal ? { abortSignal } : {}),
+    guards: { services, context: { userId: 'user-1', sessionId: 'session-1' } },
+  });
+
+  it('and its root span say the call was refused and blocked when the output guards blocked the refusal message', async () => {
+    // The root spans go to an in-memory exporter for this case.
+    const exporter = new InMemorySpanExporter();
+    trace.disable();
+    trace.setGlobalTracerProvider(new BasicTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] }));
+    configureAgentOSObservability({ enabled: true, tracing: { enabled: true } });
+    try {
+      route([
+        [/api\.openai\.com\/v1\/models/, modelList],
+        [/api\.openai\.com\/v1\/chat\/completions/, inOrder(chatRefusal, chatRefusalStream)],
+      ]);
+      const events = heard();
+
+      await expect(generateText(guarded([blocks]))).rejects.toBeInstanceOf(GuardrailStopError);
+      const result = streamText(guarded([blocks]));
+      for await (const _part of result.fullStream) void _part;
+      expect(await result.finishReason).toBe('error');
+      expect(await result.refusal).toBeUndefined();
+
+      // Each record says what the caller got: the call ended on an error, on a refusal the guards blocked.
+      await vi.waitFor(() => expect(events.length).toBe(2));
+      expect(events[0]).toMatchObject({ surface: 'generateText', finishReason: 'error', refused: true });
+      expect(events[1]).toMatchObject({ surface: 'streamText', finishReason: 'error', refused: true });
+      const roots = exporter.getFinishedSpans().filter((span) => span.name === 'agentos.api.generate_text' || span.name === 'agentos.api.stream_text');
+      expect(roots.map((span) => span.name)).toEqual(['agentos.api.generate_text', 'agentos.api.stream_text']);
+      for (const span of roots) {
+        expect(span.attributes).toMatchObject({ 'agentos.api.finish_reason': 'error', 'agentos.api.refused': true, 'agentos.api.guard_blocked': true });
+      }
+    } finally {
+      configureAgentOSObservability();
+      trace.disable();
+    }
+  });
+
+  it('of a streamText call the caller aborted while the output guards judged the refusal message says it ended on the abort', async () => {
     route([
       [/api\.openai\.com\/v1\/models/, modelList],
-      [/api\.openai\.com\/v1\/chat\/completions/, inOrder(chatRefusal, chatRefusalStream)],
+      [/api\.openai\.com\/v1\/chat\/completions/, chatRefusalStream],
     ]);
     const events = heard();
-    const blocks: IGuardrailService = {
-      id: 'blocks',
-      evaluateOutput: async ({ chunk }) => (chunk.type === AgentOSResponseChunkType.FINAL_RESPONSE ? { action: GuardrailAction.BLOCK, reasonCode: 'RULE_OUT' } : null),
+    const controller = new AbortController();
+    const abortsWhileJudging: IGuardrailService = {
+      id: 'aborts-while-judging',
+      evaluateOutput: async ({ chunk }) => {
+        if (chunk.type === AgentOSResponseChunkType.FINAL_RESPONSE) controller.abort(new Error('the caller stopped'));
+        return null;
+      },
     };
-    const call = { provider: 'openai', model: CHAT_MODEL, apiKey: 'sk-refusal-e2e', prompt: 'A request.', fallbackProviders: [], guards: { services: [blocks], context: { userId: 'user-1', sessionId: 'session-1' } } };
 
-    await expect(generateText(call)).rejects.toBeInstanceOf(GuardrailStopError);
-    const result = streamText(call);
+    const result = streamText(guarded([abortsWhileJudging], controller.signal));
     for await (const _part of result.fullStream) void _part;
     expect(await result.finishReason).toBe('error');
-    expect(await result.refusal).toBeUndefined();
 
-    // The model refused and its answer was billed; the guards' block is the call's outcome, not the model's.
-    await vi.waitFor(() => expect(events.length).toBe(2));
-    expect(events[0]).toMatchObject({ surface: 'generateText', finishReason: 'stop', refused: true });
-    expect(events[1]).toMatchObject({ surface: 'streamText', finishReason: 'stop', refused: true });
+    await vi.waitFor(() => expect(events.length).toBe(1));
+    expect(events[0]).toMatchObject({ surface: 'streamText', finishReason: 'error', aborted: true });
+    expect(events[0] && 'refused' in events[0]).toBe(false);
   });
 });
