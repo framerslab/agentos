@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { LiveKitAudioPublisher, type LiveKitPublishingRtc, type PublishedAudioFrame } from '../LiveKitAudioPublisher.js';
 import type { LiveKitAudioPublisherOptions } from '../LiveKitAudioPublisher.js';
-import { LIVEKIT_SPEECH_MARK_ATTRIBUTES, type SpeechMark } from '../LiveKitAudioPublisher.js';
+import { LIVEKIT_PLAYOUT_ATTRIBUTE, LIVEKIT_SPEECH_MARK_ATTRIBUTES, type LiveKitPlayoutParticipant, type LiveKitPublisherBinding, type SpeechMark } from '../LiveKitAudioPublisher.js';
 import { LiveKitStreamTransport } from '../LiveKitStreamTransport.js';
 import type { AudioFrame, EncodedAudioChunk, VoiceGeneration } from '../types.js';
 import { FakeAudioSource, FakeAudioStream, FakeRoom, FakePublication, FakeTrack, fakePublishingRtc, fakeRtc, rtcFrame, settle } from '../../hearing/__tests__/livekit-fakes.js';
@@ -390,9 +390,11 @@ describe('the speech mark', () => {
    * @param setup.markOf - The `mark` option; by default a chunk carries the mark `chunk()` was given for it.
    * @param setup.shows - With it, the participant exposes its `attributes`, as rtc-node's local participant does:
    *   `'late'` replaces them with what was set 30 ms after the call, as the room's change event does (`shown` in the
-   *   list), and `'never'` leaves them as they were, as when the server refused the set.
+   *   list), `'held'` does so when the test calls `show()`, one call at a time in order, and `'never'` leaves them as
+   *   they were, as when the server refused the set.
+   * @param setup.binding - What a transport hands the publisher: the participant it speaks to, among them.
    */
-  function marking({ options = {}, settable = true, markOf, shows }: { options?: Partial<LiveKitAudioPublisherOptions>; settable?: boolean; markOf?: (chunk: EncodedAudioChunk) => SpeechMark | undefined; shows?: 'late' | 'never' } = {}) {
+  function marking({ options = {}, settable = true, markOf, shows, binding }: { options?: Partial<LiveKitAudioPublisherOptions>; settable?: boolean; markOf?: (chunk: EncodedAudioChunk) => SpeechMark | undefined; shows?: 'late' | 'held' | 'never'; binding?: LiveKitPublisherBinding } = {}) {
     const order: string[] = []; const messages: Record<string, unknown>[] = []; const marks = new WeakMap<EncodedAudioChunk, SpeechMark>();
     const base = fakePublishingRtc();
     const rtc: LiveKitPublishingRtc = { ...base, AudioSource: recordingSource(order),
@@ -405,22 +407,26 @@ describe('the speech mark', () => {
         flush(): PublishedAudioFrame[] { return []; }
         close(): void {}
       } };
+    const held: Record<string, string>[] = [];
+    /** Lets the room hear the oldest set it holds: the participant's attributes take it. */
+    const show = (): void => { participant.attributes = { ...participant.attributes, ...held.shift() }; order.push('shown'); };
     const setAttributes = vi.fn(async (attributes: Record<string, string>): Promise<void> => {
       order.push(`mark ${attributes['speech.clip_id']}`);
-      if (shows === 'late') setTimeout(() => { participant.attributes = { ...participant.attributes, ...attributes }; order.push('shown'); }, 30);
+      if (shows === 'late') { held.push(attributes); setTimeout(show, 30); }
+      if (shows === 'held') held.push(attributes);
     });
     const participant: { publishTrack(): Promise<{ sid: string }>; unpublishTrack(): Promise<void>; setAttributes?: typeof setAttributes; attributes?: Record<string, string> } = {
       publishTrack: vi.fn(async () => { order.push('published'); return { sid: 'TR_VOICE' }; }), unpublishTrack: vi.fn(async () => {}), ...(settable ? { setAttributes } : {}), ...(shows ? { attributes: {} } : {}) };
     const bounds: LiveKitAudioPublisherOptions = { sampleRate: 48000, maxBytes: 256000, maxDurationMs: 2000, receiptTimeoutMs: 1000, rtc,
       mark: markOf ?? ((chunk: EncodedAudioChunk) => marks.get(chunk)) };
-    const publisher = new LiveKitAudioPublisher({ ...bounds, ...options }, participant, async (message) => { order.push('announced'); messages.push(message); });
+    const publisher = new LiveKitAudioPublisher({ ...bounds, ...options }, participant, async (message) => { order.push('announced'); messages.push(message); }, binding);
     /** A 20 ms chunk at 24,000 Hz, of the clip `mark` names when one is given, with the call identity `call` carries. */
     const chunk = (mark?: SpeechMark, call: Partial<EncodedAudioChunk> = {}): EncodedAudioChunk => {
       const made: EncodedAudioChunk = { audio: Buffer.alloc(960), format: 'pcm', container: 'raw', sampleRate: 24000, durationMs: 20, text: '', ...call };
       if (mark) marks.set(made, mark);
       return made;
     };
-    return { publisher, participant, setAttributes, order, messages, chunk, source: () => FakeAudioSource.created[0]! };
+    return { publisher, participant, setAttributes, show, order, messages, chunk, source: () => FakeAudioSource.created[0]! };
   }
   /** The options and the chunk identity of participant playout, the receipt protocol of a page. */
   const page = { playout: 'participant', scopeId: 'scope-a', callId: 'call-a', generation: () => generation } as const;
@@ -622,6 +628,34 @@ describe('the speech mark', () => {
     expect(f.participant.attributes).toEqual(attributesOf(mark));
     await f.publisher.close();
   });
+  it('sets a mark only once the mark being set before it is confirmed, also when a chunk of participant playout comes while a native one is being marked', async () => {
+    let linked: LiveKitPlayoutParticipant | undefined;
+    const f = marking({ shows: 'held', options: { scopeId: 'scope-a', callId: 'call-a', generation: () => generation }, binding: { participant: () => linked } });
+    const first = f.publisher.sendAudio(f.chunk(clip('clip-a'))); await settle();
+    expect(f.order).toEqual(['published', 'mark clip-a']);
+    // The page joins and asks for participant playout while the native chunk's mark waits to show.
+    linked = { attributes: { [LIVEKIT_PLAYOUT_ATTRIBUTE]: 'participant' } };
+    const second = f.publisher.sendAudio(f.chunk(clip('clip-b'), announced)); await settle();
+    expect(f.publisher.playout).toBe('participant'); expect(f.setAttributes).toHaveBeenCalledTimes(1);
+    f.show(); await first;
+    await vi.waitFor(() => expect(f.setAttributes).toHaveBeenCalledTimes(2));
+    f.show(); await second;
+    expect(f.order.indexOf('mark clip-b')).toBeGreaterThan(f.order.indexOf('shown'));
+    expect(f.order.filter((step) => step === 'frame')).toHaveLength(4); expect(f.messages).toHaveLength(1);
+    expect(f.participant.attributes).toEqual(attributesOf(clip('clip-b')));
+    await f.publisher.close();
+  }, 5000);
+  it('starts the receipt deadline in participant playout when the chunk is announced, so the time its mark took does not count against it', async () => {
+    const f = marking({ shows: 'held', options: { ...page, receiptTimeoutMs: 400 } });
+    setTimeout(() => f.show(), 250);
+    await f.publisher.sendAudio(f.chunk(clip('clip-a'), announced));
+    // The page plays the chunk and answers 250 ms after it was announced: past the reservation's 400 ms, within the announcement's.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    const played = f.publisher.waitForPlayback(generation, 1, new AbortController().signal);
+    f.source().playOut(); f.publisher.receiveReceipt({ type: 'playback', generation, sequence: 1, playedSamples: 480, sampleRate: 24000 });
+    await expect(played).resolves.toMatchObject({ sequence: 1, playedSamples: 480, sampleRate: 24000 });
+    await f.publisher.close();
+  }, 5000);
   it("sets the mark on the room's local participant when a transport is given the option for its publisher", async () => {
     const room = new FakeRoom(); room.addParticipant('participant-a', new FakePublication(new FakeTrack('microphone')));
     const order: string[] = []; const mark = clip('clip-a');
