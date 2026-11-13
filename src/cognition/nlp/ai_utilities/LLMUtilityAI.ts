@@ -124,6 +124,8 @@ export class LLMUtilityAI implements IUtilityAI, IPromptEngineUtilityAI {
     }
     this.config = config;
     this.llmProviderManager = config.llmProviderManager;
+    // The lexicon is built again from this configuration at the next lexicon call.
+    this.sentimentLexicon = undefined;
     this.isInitialized = true;
     console.log(`LLMUtilityAI (ID: ${this.utilityId}) initialized.`);
   }
@@ -482,11 +484,15 @@ Respond with ONLY a JSON object with one key, "keywords", whose value is an arra
   public async analyzeSentiment(text: string, options?: SentimentAnalysisOptions): Promise<SentimentResult> {
     this.ensureInitialized();
     // An explicit lexicon method scores with a statistical lexicon and makes no model call. The promise is stored
-    // before any await, so concurrent first calls share one instance; each call forwards its own options.
+    // before any await, so concurrent first calls share one instance; each call forwards its own options. A relative
+    // lexicon file is read under this utility's resourcePath.
     if (options?.method === 'lexicon_based') {
       this.sentimentLexicon ??= (async () => {
         const utility = new StatisticalUtilityAI(`${this.utilityId}-sentiment`);
-        await utility.initialize({ defaultLanguage: this.config.defaultLanguage || 'en' });
+        await utility.initialize({
+          defaultLanguage: this.config.defaultLanguage || 'en',
+          ...(this.config.resourcePath ? { resourcePath: this.config.resourcePath } : {}),
+        });
         return utility;
       })();
       return (await this.sentimentLexicon).analyzeSentiment(text, options);
