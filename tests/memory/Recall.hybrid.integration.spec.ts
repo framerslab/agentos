@@ -387,19 +387,21 @@ describe.each(ENGINES)('hybrid recall on %s', (engine, open) => {
     const h = await mem.manager.assembleForPrompt(QUESTION, 4000, NEUTRAL, { scopes: U1 });
     const c = captureOf(h) as Capture & { reranker: Record<string, unknown>; candidates: Array<Capture['candidates'][number] & { rerankScore?: number }> };
     expect(c.reranker).toMatchObject({ provider: 'local', model: 'stub-model', revision: 'r1', candidates: 20 });
-    // The record lists the pool in fused order, the answer first, with the reranker's score beside its fused score.
-    expect(c.candidates[0]).toMatchObject({ id: 'gold', outcome: 'included', rerankScore: 0 });
-    const ranked = c.candidates.filter((x) => Object.keys(x.ranks).length > 0).map((x) => x.fusedScore);
-    expect(ranked).toEqual([...ranked].sort((x, y) => y - x));
-    // The cut was scored, and the block shows it in the blend's order: the answer, scored 0, after the others.
+    // The cut was scored: the answer holds the best fused score, with the reranker's 0 beside it.
     const scored = c.candidates.filter((x) => typeof x.rerankScore === 'number');
     expect(scored).toHaveLength(20);
     const best = Math.max(...scored.map((x) => x.fusedScore));
+    expect(scored.find((x) => x.id === 'gold')).toMatchObject({ outcome: 'included', rerankScore: 0, fusedScore: best });
+    // The block shows the cut in the blend's order: the answer, scored 0, after the others.
     const blend = (x: { fusedScore: number; rerankScore?: number }) => 0.7 * (x.fusedScore / best) + 0.3 * x.rerankScore!;
     const expected = [...scored].sort((x, y) => blend(y) - blend(x)).map((x) => x.id);
     expect(expected.at(-1)).toBe('gold');
     expect(h.includedMemoryIds.filter((id) => expected.includes(id))).toEqual(expected);
     expect(h.contextText.indexOf('Garden note')).toBeLessThan(h.contextText.indexOf('XQ7Z'));
+    // The record lists the cut in that order too, ahead of the candidates the cut left out, which keep their fused order.
+    expect(c.candidates.slice(0, 20).map((x) => x.id)).toEqual(expected);
+    const rest = c.candidates.slice(20).filter((x) => Object.keys(x.ranks).length > 0).map((x) => x.fusedScore);
+    expect(rest).toEqual([...rest].sort((x, y) => y - x));
     await mem.close();
     await db.close();
   });

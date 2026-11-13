@@ -7,6 +7,9 @@ import { describe, expect, it } from 'vitest';
 import { resolveRecallOptions } from '../../src/api/runtime/recallOptions.js';
 import { RecallOptionError, recallBudgetTokens, DEFAULT_RECALL_BUDGET_TOKENS } from '../../src/cognition/memory/retrieval/recall/budget.js';
 
+/** A commit id, as `rerank.revision` takes one. */
+const COMMIT = '233902d25c440f23af6f7d6e94d2946bac0bee0a';
+
 /** The error `run` throws, or undefined when it throws none. */
 function thrown(run: () => unknown): unknown {
   try {
@@ -60,7 +63,7 @@ describe('resolveRecallOptions', () => {
 
   it('without cognitive memory, rerank is refused with the reason unsupported_runtime, whatever its value', () => {
     const invoke = async (): Promise<string> => '[]';
-    for (const rerank of ['none', { kind: 'local', model: 'm', revision: 'r' }, { kind: 'llm', invoke, model: 'm' }] as const) {
+    for (const rerank of ['none', { kind: 'local', model: 'm', revision: COMMIT }, { kind: 'llm', invoke, model: 'm' }] as const) {
       const error = thrown(() => resolveRecallOptions({ recall: { rerank }, cognitiveMemory: false, providerTokenBudget: undefined, providerContext: true, where: 'agent()' }));
       expect(error, JSON.stringify(rerank)).toMatchObject({ option: 'rerank', reason: 'unsupported_runtime' });
       expect((error as Error).message, JSON.stringify(rerank)).toMatch(/^agent\(\): memory\.recall\.rerank .*runtime: 'gmi'/);
@@ -69,7 +72,7 @@ describe('resolveRecallOptions', () => {
 
   it('passes a rerank that names a local model or a model call to the manager on the GMI path, as given', () => {
     const invoke = async (): Promise<string> => '[]';
-    for (const rerank of ['none', { kind: 'local', model: 'm', revision: 'r', timeoutMs: 800, maxCandidates: 10 }, { kind: 'llm', invoke, model: 'm' }] as const) {
+    for (const rerank of ['none', { kind: 'local', model: 'm', revision: COMMIT, timeoutMs: 800, maxCandidates: 10 }, { kind: 'llm', invoke, model: 'm' }] as const) {
       const resolved = resolveRecallOptions({ recall: { rerank }, cognitiveMemory: true, providerTokenBudget: undefined, providerContext: false, where: 'gmi()' });
       expect(resolved.managerRecall?.rerank).toBe(rerank);
     }
@@ -88,14 +91,20 @@ describe('resolveRecallOptions', () => {
       [{ kind: 'local', model: 7, revision: 'r' }, 'rerank.model', 'invalid_value'],
       [{ kind: 'local', model: 'm' }, 'rerank.revision', 'invalid_value'],
       [{ kind: 'local', model: 'm', revision: '   ' }, 'rerank.revision', 'invalid_value'],
+      // A branch, a tag or a short id can name other weights later: only a whole commit id pins them.
+      [{ kind: 'local', model: 'm', revision: 'main' }, 'rerank.revision', 'invalid_value'],
+      [{ kind: 'local', model: 'm', revision: 'v1.0' }, 'rerank.revision', 'invalid_value'],
+      [{ kind: 'local', model: 'm', revision: COMMIT.slice(0, 7) }, 'rerank.revision', 'invalid_value'],
+      [{ kind: 'local', model: 'm', revision: `${COMMIT}0` }, 'rerank.revision', 'invalid_value'],
+      [{ kind: 'local', model: 'm', revision: 42 }, 'rerank.revision', 'invalid_value'],
       [{ kind: 'llm', model: 'm' }, 'rerank.invoke', 'invalid_value'],
       [{ kind: 'llm', invoke: 'call', model: 'm' }, 'rerank.invoke', 'invalid_value'],
       [{ kind: 'llm', invoke, model: '' }, 'rerank.model', 'invalid_value'],
       [{ kind: 'llm', invoke, model: 'm', timeoutMs: 0 }, 'rerank.timeoutMs', 'invalid_value'],
       [{ kind: 'llm', invoke, model: 'm', timeoutMs: 1.5 }, 'rerank.timeoutMs', 'invalid_value'],
-      [{ kind: 'local', model: 'm', revision: 'r', timeoutMs: Number.POSITIVE_INFINITY }, 'rerank.timeoutMs', 'invalid_value'],
-      [{ kind: 'local', model: 'm', revision: 'r', maxCandidates: 0 }, 'rerank.maxCandidates', 'invalid_value'],
-      [{ kind: 'local', model: 'm', revision: 'r', maxCandidates: '20' }, 'rerank.maxCandidates', 'invalid_value'],
+      [{ kind: 'local', model: 'm', revision: COMMIT, timeoutMs: Number.POSITIVE_INFINITY }, 'rerank.timeoutMs', 'invalid_value'],
+      [{ kind: 'local', model: 'm', revision: COMMIT, maxCandidates: 0 }, 'rerank.maxCandidates', 'invalid_value'],
+      [{ kind: 'local', model: 'm', revision: COMMIT, maxCandidates: '20' }, 'rerank.maxCandidates', 'invalid_value'],
     ];
     for (const cognitiveMemory of [true, false]) {
       for (const [rerank, option, reason] of cases) {
@@ -108,7 +117,7 @@ describe('resolveRecallOptions', () => {
   });
 
   it('a null or undefined rerank is unset, and its optional fields may be null', () => {
-    for (const rerank of [null, undefined, { kind: 'local', model: 'm', revision: 'r', timeoutMs: null, maxCandidates: null }]) {
+    for (const rerank of [null, undefined, { kind: 'local', model: 'm', revision: COMMIT, timeoutMs: null, maxCandidates: null }, { kind: 'local', model: 'm', revision: COMMIT.toUpperCase() }]) {
       expect(thrown(() => resolveRecallOptions({ recall: { rerank } as never, cognitiveMemory: true, providerTokenBudget: undefined, providerContext: false, where: 'gmi()' }))).toBeUndefined();
     }
     expect(thrown(() => resolveRecallOptions({ recall: { rerank: null } as never, cognitiveMemory: false, providerTokenBudget: undefined, providerContext: false, where: 'agent()' }))).toBeUndefined();

@@ -188,6 +188,43 @@ describe('RecallReranker', () => {
     expect(judged.scores.size).toBe(130);
   });
 
+  it('an answer that leaves out a candidate it was sent is an error: no part of it orders the recall', async () => {
+    const r = new RecallReranker(LOCAL, {
+      createProvider: () =>
+        provider(async (input) => {
+          const out = await reversed(input);
+          out.results.pop();
+          return out;
+        }) as never,
+    });
+    r.start();
+    await r.ready();
+    expect(await r.rerank('q', docs(3))).toEqual({ record: { provider: 'none', reason: 'error' }, scores: new Map() });
+    expect(events('memory.recall.rerank_skipped').map((e) => e.reason)).toEqual(['error']);
+  });
+
+  it('a rerank whose reranker was stopped while it ran is dropped: the order stands, and it counts as no failure', async () => {
+    let answer: (() => void) | undefined;
+    const r = new RecallReranker(LOCAL, {
+      createProvider: () =>
+        provider(
+          (input) =>
+            new Promise((resolve) => {
+              answer = () => resolve(reversed(input));
+            }),
+        ) as never,
+    });
+    r.start();
+    await r.ready();
+    const pending = r.rerank('q', docs(3));
+    await flush();
+    expect(answer, 'the provider was called').toBeDefined();
+    await r.dispose();
+    answer!();
+    expect(await pending).toEqual({ record: { provider: 'none', reason: 'unavailable' }, scores: new Map() });
+    expect(events('memory.recall.rerank_skipped')).toEqual([]);
+  });
+
   it('a judge the turn stopped waiting for starts no further model call', async () => {
     // The first scoring call never answers. The rerank's deadline and the judge's own wait for that call end together.
     let calls = 0;
@@ -337,10 +374,17 @@ describe('rerank in a turn', () => {
     const blend = (id: string) => 0.7 * (fused.get(id)! / best) + 0.3 * rerankScores[id];
     expect(cut).toEqual([...cut].sort((x, y) => blend(y) - blend(x)));
     expect(cut.indexOf(favourite)).toBeLessThan(plainCut.indexOf(favourite));
-    // The fused scores stand: the pool's order and scores are those of the recall with no rerank, each scored
+    // The fused scores stand: every candidate of the pool has the fused score of the recall with no rerank, each scored
     // candidate carries its rerank score, and each trace keeps the relevance its line shows.
-    expect(ranked.map((c) => [c.id, c.fusedScore])).toEqual(a.diagnostics.recall!.ranked!.map((c) => [c.id, c.fusedScore]));
+    const byId = (list: Array<{ id: string; fusedScore: number }>) => [...list].map((c) => [c.id, c.fusedScore]).sort((x, y) => String(x[0]).localeCompare(String(y[0])));
+    expect(byId(ranked)).toEqual(byId(a.diagnostics.recall!.ranked!));
     for (const id of cut) expect(ranked.find((c) => c.id === id)!.rerankScore).toBe(rerankScores[id]);
+    // The record lists the cut in the order the rerank gave it, in the places the cut holds in the pool; the rest of
+    // the pool keeps its fused order.
+    const plainRanked = a.diagnostics.recall!.ranked!.map((c) => c.id);
+    expect(ranked.filter((c) => cut.includes(c.id)).map((c) => c.id)).toEqual(cut);
+    expect(ranked.map((c) => c.id).filter((id) => !cut.includes(id))).toEqual(plainRanked.filter((id) => !cut.includes(id)));
+    expect(ranked.map((c) => cut.includes(c.id))).toEqual(plainRanked.map((id) => plainCut.includes(id)));
     const relevance = new Map(a.retrieved.map((t) => [t.id, t.retrievalScore]));
     for (const trace of run.retrieved) expect(trace.retrievalScore).toBe(relevance.get(trace.id));
     expect(run.diagnostics.reranker).toMatchObject({ provider: 'llm', model: 'judge-model', candidates: 20 });
