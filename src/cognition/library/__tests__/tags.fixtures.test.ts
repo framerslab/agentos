@@ -50,7 +50,7 @@ describe('the tag suggestion fixture texts', () => {
       const expected = [...fixture.expected.existing, ...fixture.expected.new];
       return fixture.asks.flatMap((ask) => [
         ...(fold(fixture.text).includes(fold(ask)) ? [] : [`${fixture.id}: ${ask} is not in the text`]),
-        ...(expected.includes(tagKey(ask)) || expected.includes(ask) ? [`${fixture.id}: ${ask} is expected`] : []),
+        ...(expected.includes(tagKey(ask) ?? ask) || expected.includes(ask) ? [`${fixture.id}: ${ask} is expected`] : []),
       ]);
     });
     expect(wrong).toEqual([]);
