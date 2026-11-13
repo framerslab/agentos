@@ -278,6 +278,18 @@ export function runGovernedToolSuite(name: string, open: () => Promise<StoreUnde
       expect(check.quotes).toEqual([expect.objectContaining({ messageId: 'm1', quoteLength: message('m1').text.length })]);
     });
 
+    it('the standalone evidence check throws for more than 20 quotes, or a quote over 4,000 characters, before it reads the store', async () => {
+      const store = messageStore();
+      const getMessage = vi.fn(store.getMessage);
+      const source = { ...store, getMessage };
+      const whole = { messageId: 'm1', quote: message('m1').text };
+      const many = muteOf(message('m1'), { quotes: Array.from({ length: 21 }, () => ({ ...whole })) }).evidence;
+      await expect(verifyActionEvidence(many, source, RULE_BOOK)).rejects.toThrow(TypeError);
+      const long = muteOf(message('m1'), { quotes: [{ messageId: 'm1', quote: 'x'.repeat(4001) }] }).evidence;
+      await expect(verifyActionEvidence(long, source, RULE_BOOK)).rejects.toThrow(TypeError);
+      expect(getMessage).not.toHaveBeenCalled();
+    });
+
     it.each([
       { minQuotes: Number.NaN },
       { minQuotes: 21 },
