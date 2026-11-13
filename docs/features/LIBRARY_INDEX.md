@@ -114,6 +114,144 @@ A choice is ranked as one search. A `dense` or `hybrid` choice embeds the text o
 
 An empty `anyOf` finds nothing, as does one whose every entry finds nothing by its own narrowing (an empty `sourceIds` or `folderIds`, or a `folderId` outside its `folderIds`), without a call to the embedder or the store. On a store without `lexicalSearch`, which is every store in `@framers/agentos/cognition/rag` but `PostgresVectorStore`, a `hybrid` search with `anyOf` runs the dense leg alone, even on a store that has `hybridSearch`, and a `lexical` one throws. A choice of three entries asks the store at most six times.
 
+## Grouped search
+
+`searchGroups` is one search over item lists the caller hands, in named groups. A product that decides by its own rule which sources a person may open hands those sources group by group (sessions, documents, mail threads), and each group answers the count of its items that match, a ranked page of them, a cursor for the next page and whether anything was left out. It runs on the store's lexical index, embeds nothing, and reads no passage outside the scope and the items handed: not for a match, a count, a rank or a word to widen to.
+
+```typescript
+import type { LibraryGroupSearch } from '@framers/agentos/cognition/library';
+
+// A list's fingerprint is the caller's: any text that changes whenever the list, a date or an item's passages change.
+const sessionsFingerprint = 'sessions@41';
+const documentsFingerprint = 'documents@7';
+
+const search: LibraryGroupSearch = {
+  text: 'budget revew',
+  scope: { tenantId: 'org1', aclGroups: ['acct:ann', 'org:org1'] },
+  groups: [
+    {
+      id: 'sessions',
+      fingerprint: sessionsFingerprint,
+      items: [
+        { sourceId: 'session:s1', date: '2026-03-01T09:30:00.000Z' },
+        { sourceId: 'session:s2', date: null },
+      ],
+      partKinds: ['summary', 'decisions'],
+    },
+    { id: 'documents', fingerprint: documentsFingerprint, items: [{ sourceId: 'document:d7', date: '2026-02-11T08:00:00.000Z' }] },
+  ],
+  profile: { fields: { title: 100, summary: 10, decisions: 10, turn: 1, text: 1 }, fallback: 'text' },
+  typo: 'one-edit',
+  pageSize: 20,
+};
+
+const { groups } = await index.searchGroups(search);
+for (const group of groups) {
+  console.log(group.id, group.total, group.hits.map((hit) => [hit.sourceId, hit.field, hit.matchKind, hit.passage.score]));
+}
+
+const [sessions] = groups;
+if (sessions.cursor) {
+  const later = await index.searchGroups({ ...search, cursor: sessions.cursor });
+  if (later.groups[0].state === 'restart') {
+    // The sessions' list changed between the two pages: search again from the first page.
+  }
+}
+```
+
+### What a search takes
+
+| Option | Meaning |
+|---|---|
+| `text` | The query. Its words are read by `lexicalTokens`, each once, the first 32. With no word the search is a [listing](#a-listing-with-no-word). |
+| `scope` | `{ tenantId, aclGroups }`, as in `search`: a scope with no tenant or no group is refused before the store is asked. |
+| `groups` | One group or more: `{ id, items, fingerprint, partKinds? }`. `items` is the list the search may read, `{ sourceId, date }` each, a source listed once; `sourceId` holds no NUL, which a Postgres text cannot hold; `date` is an ISO 8601 instant with its zone, or `null`. The date names a day that exists from the year 1, an hour to 23, a minute and a second to 59 and a zone at most 14:59 from UTC, with at most six digits of a second, as Postgres keeps a timestamp to the microsecond ([PostgreSQL: date/time types](https://www.postgresql.org/docs/current/datatype-datetime.html)) and two instants finer than that would stand level. Any other date, `2026-02-30T00:00:00Z` or `2026-03-01T09:30:00.0000001Z`, is refused before the store is asked. `fingerprint` is any text that is not empty, the caller's name for the list as it stands. `partKinds` keeps the passages whose `partKind` metadata key is one of `transcript`, `summary`, `decisions`, `action_items` and `next_steps`; an empty list narrows nothing. |
+| `profile` | How an item ranks: `{ fields, fallback, title? }` ([the rank](#the-rank)). |
+| `order` | `'rank'` (the default) or `'date'` ([the order](#the-order-and-the-callers-dates)). |
+| `typo` | `'one-edit'` or `'none'` (the default) ([one edit](#one-edit)). |
+| `expansionMax` | The most stored words one edit away that a word is widened to: a whole number from 1 to 64, and 64 unless given. A search asking for more throws before the store is asked anything. |
+| `pageSize` | The most hits a group answers on a page: a whole number, 1 or more. |
+| `cursor` | A later page of one group ([pages](#pages-and-the-cursor)). |
+| `signal` | Stops the search between the store's statements ([what is left out](#what-is-left-out)). |
+
+Each group is searched on its own, one after another in the order handed: its count, its page and the stored words it is widened to are its own items' alone. A group whose `items` is empty answers a count of 0 and no hit, and the store is not asked: an empty list is empty, never unrestricted. The answer is `{ groups }`, one result a group in the order handed: `{ id, state, total, incomplete, cursor, hits, anyWord }`.
+
+The store's statements keep the passages of the scope's tenant whose `aclGroups` hold at least one of the scope's groups, whose `status` is `active` and whose `sourceId` is one of the group's items, narrowed by `partKinds`. They compare these values as the index does, by type: a passage written past the index with the number 7 as its tenant, a group or its source id is not a passage of the text `"7"`, and is never matched, counted, ranked, widened to or listed. The index then checks each passage the store answers against the same scope, items and part kinds, and a search whose store answers a passage outside them throws: a count that holds what the scope does not is no answer.
+
+### A match is an item's
+
+An item is a source: the passages indexed under its `sourceId`. Each word is tested on every passage on its own, and an item matches when every word matches in at least one of its passages, the same passage or different ones. A session whose title passage is "Press" and one of whose turns holds "list" matches `press list`; two items never add up to one match. A word matches a stored word that is the same, that it begins, or, under `typo: 'one-edit'`, that is one edit away.
+
+`total` counts the distinct items that match every word, whatever the page and the page size. `hits` holds a page of them, each as:
+
+| Field | Value |
+|---|---|
+| `passage` | The item's passage that holds the most of the words, then the one of the strongest field, then the earliest, as `search` answers a passage; its `score` is the item's rank. |
+| `sourceId`, `date` | The item, and the date the caller handed for it. |
+| `field` | The passage's field as the rank read it, or the title's when only a title read from the metadata matched. |
+| `matchKind` | `same`, `start` or `edit`: how the first word the passage holds matched, or the first the item holds when the passage holds none. |
+| `marks`, `at` | Where the passage's text holds the words, `{ start, end }` in UTF-16 units, in order, and where the first begins, or -1 with none. |
+| `partKind` | The passage's `partKind`, or `null`. |
+| `anyWord` | `false` in `hits`. |
+
+When a search of two words or more finds no item that holds them all, the first page's `anyWord` holds the items that hold some of them, in the same order, at most `pageSize`, each with `anyWord: true`. They are outside `total` and have no cursor. A word the store's text search configuration reads as no word, such as a stop word of `english`, is left out of the rule: the other words decide, and a search whose every word is one finds nothing.
+
+The marks are placed by the word rule on the passage's text: every word of it that is a query word the passage holds, begins with one, or is one of the stored words that query word was widened to. Postgres cuts a text into words by its own parser and, under a configuration that stems, matches by stems, so a passage can match by a word that the word rule cuts otherwise (`e-mail`) or by a stem alone, and such a match carries no mark.
+
+### The rank
+
+The rank is explicit and reads no `ts_rank`. For each word, the best of its matches over the item's passages: the weight of the passage's field times 1 for the same word, 0.75 for a word it begins and 0.5 for a word one edit away. The item's rank is the sum over the words, in exact decimal arithmetic, and `passage.score` reads it as a number. A stronger field outranks a weaker one, and the kind of match orders within a field.
+
+`profile.fields` gives each field's weight, a finite number above 0, read by a passage's `field` metadata key, which the caller writes when it indexes the source (`passages: [{ text: title, metadata: { field: 'title' } }, { text: summary, metadata: { field: 'summary', partKind: 'summary' } }]`). A passage with no `field`, or one `fields` does not name, takes the weight of `fallback`, which `fields` must name. With `title: 'metadata'` an item's title is read as well from its passages' `title` metadata key, the source's title that `indexSource` writes on every passage, and ranks as the field `title` (at the weight of `fallback` when `fields` names no `title`): a source indexed with a title and no title passage, such as a mail thread whose subject is its title, then ranks its title above its text, and a word of the title is widened as any other. An item that matched by that title alone is shown by its first passage, with nothing marked and `field: 'title'`.
+
+### The order and the caller's dates
+
+Under `order: 'rank'` a group's items stand by rank, the highest first. Under `order: 'date'` they stand by the dates the caller handed, the newest first, items of one instant by rank, and an item with no date after every dated one, in rank order. Items still level stand in the byte order of their source ids, so the order is complete and a page never depends on the store's row order. Two dates that name one instant in two zones are level. No date is read from a passage: the dates, and any bound on them, are the caller's, which hands the items inside the bound.
+
+### One edit
+
+With `typo: 'one-edit'` each word of four letters or more is widened to the stored words, of four letters or more, that are one edit away: a letter added, dropped or changed, or two side by side swapped, by `withinOneEdit`. The stored words are read from the passages the search admits and no other, so a word that only another tenant's, another group's or an unshared passage holds is never matched and never takes a place of the limit. On `PostgresVectorStore` they come from `ts_stat` over those passages' `tsv` column ([PostgreSQL: gathering document statistics](https://www.postgresql.org/docs/current/textsearch-features.html#TEXTSEARCH-STATISTICS)): every stored word within one letter of the query word's length, the word held by the most passages first, read 1,000 at a time and held to one edit in process, with no limit before that check, so frequent words of the right length never crowd out the one that is one edit away. The first `expansionMax` that pass are kept for each word, 64 at most, and only while the statement's one tsquery holds them beside the search's own words: each kept word at most 2046 bytes of UTF-8, and the kept words with the search's words, each query word counted twice (as itself and as a prefix) and every word with one byte more, at most 1,048,575 bytes, as Postgres refuses a joined tsquery past that ("tsquery is too large", [commit 84b6a7a061](https://github.com/postgres/postgres/commit/84b6a7a061)). A word with more, or with a stored word left out for room, marks its group `incomplete`, and the hits then match the ones kept. The cap of 64 holds the tsquery's length as well as its bytes: the store joins every word's stored words into it one `|` after another, and Postgres reads, joins and matches a tsquery by recursion over its tree (`findoprnd_recurse`, `QT2QTN` and `TS_execute_recurse` in [its `utils/adt`](https://github.com/postgres/postgres/tree/REL_16_STABLE/src/backend/utils/adt)), each step held to `max_stack_depth` (2 MB by default, [PostgreSQL: resource consumption](https://www.postgresql.org/docs/current/runtime-config-resource.html)). At 32 words and 64 stored words a word, a tsquery holds at most 2,112 words, which CI runs on Postgres at the most bytes the room admits. `expansionMax` bounds the stored words kept, not the stored words read: a first page with the rule reads every stored word of those lengths that the group's admitted passages hold, so its cost grows with the group's passages and their vocabulary ([the figures](#measured-in-ci)).
+
+### Pages and the cursor
+
+A group with more items than the page answers a `cursor`, and the same search with that cursor answers the next page of that group alone. A cursor is opaque. It is bound to the words, the order, the profile, the part kinds, the typo rule, the expansion limit and the group, and it carries the stored words the first page found, so a later page matches the same words and reads none again. The page size is not part of it: a later page may ask for more or fewer.
+
+A cursor also keeps the fingerprint of the list its page was made under, and the scope it was read under. A later page whose group carries another fingerprint, or that is asked under another tenant or other access groups, answers `{ state: 'restart', total: 0, hits: [], cursor: null }` and reads nothing: what the search may read changed between the pages, and the caller searches again from the first one. The same groups handed in another order are the same scope. The index compares fingerprints and never computes one, so the fingerprint must change whenever the list, an item's date or what the index holds for an item changes; under one fingerprint and one scope, every item is listed once across the pages and none is skipped.
+
+`searchGroups` throws a `LibraryCursorError` for a cursor it refuses: a text the index did not make, a cursor of a group the search does not hand, one made under other words, another order, profile, `partKinds`, typo rule or expansion limit, one that carries a stored word no word of the search reaches as the store draws one (each carried word is held again to being one edit from its query word, neither that word nor a word it begins, which match as such and are never carried, and each once), so a cursor never adds a word to a search, one that carries more stored words for a word than the expansion limit (64 at most), one that carries more than one tsquery holds beside the search's own words (a stored word of more than 2046 bytes of UTF-8, or stored words that with the search's words come to more than a mebibyte, by `MAXSTRLEN` and `MAXSTRPOS` in [Postgres's `ts_type.h`](https://github.com/postgres/postgres/blob/REL_16_STABLE/src/include/tsearch/ts_type.h); a word of 2047 bytes is refused too, as Postgres releases before [commit 1fc1b82b2f](https://github.com/postgres/postgres/commit/1fc1b82b2f) will not read one in a tsquery), and one whose key names no place in the order: a rank with more digits than a numeric holds (131072 before the point, leading zeros aside, and 16383 after it, by [PostgreSQL: numeric types](https://www.postgresql.org/docs/16/datatype-numeric.html)), a date that is not an instant as an item's must be, or a source id holding NUL. Each is refused before any statement runs, so an edited cursor never surfaces as a database error. Any value but a cursor's text is refused the same way: the `null` a group answers after its last page is not read as a first page, which would start a pager over.
+
+A cursor is not signed, and the index holds no secret to sign one with. A caller that edits its own cursor can move where its next page starts or drop stored words the first page found, and so lose items from its own later pages; it reads nothing a first page of the same search under the same scope and items would not read. A product that must hold a person to the pages it served keeps the cursor on its side or signs it there.
+
+### A listing with no word
+
+With no word in `text`, a group lists every item that holds a passage, a passage of one of `partKinds` where it names any: counted in `total`, paged by the cursor, in the date order under either `order`, since no match ranks them. Each hit is the item's first such passage, with nothing marked, `matchKind: 'none'` and a `score` of 0.
+
+### What is left out
+
+`incomplete` is true for a group when a word had more stored words one edit away than `expansionMax`, or than the store's query has room for, on the page that read them and on every page after it, or when `signal` stopped the search. The index checks the signal before each group and the store checks it between its statements; once it has aborted, the store is asked nothing more, the group being read and every group after it answer `incomplete: true` with no hit, and a statement that had started runs to its end with its answer dropped. A group with no item is complete either way. A grouped search does not reject on its signal.
+
+### What a store needs
+
+`searchGroups` calls the store's optional `lexicalGroupSearch`, one call a group, and throws `LibraryIndex: the store has no lexicalGroupSearch.` without it. A store of your own serves a grouped search by implementing that member; its options and its answer are `LexicalGroupSearchOptions` and `LexicalGroupSearchResult`, exported from `@framers/agentos/cognition/rag`. The stored words a store answers in `expansion` on a first page are what the cursor carries, and the index holds them to the rule the store must keep when a later page hands them back; a later page's store echoes the `expansion` it was handed, and that page's cursor carries the lists the index handed, never the store's answer, so a store answering other lists there drops no item from the pages after it. The rule: one list a word, on a first page empty for a word under `oneEdit.minLength` letters and for every word without `oneEdit`; each stored word one edit from its word, of `oneEdit.minLength` letters or more, never the word itself or a word that begins with it; each once, at most `oneEdit.max` (64 at most) a word; each at most 2046 bytes of UTF-8 and all of them within the room beside the query's words. A store that leaves a word out for room or past `max` answers `incomplete`. A store answering `[['budgets', 'budgte']]` for `budget` on a first page has its own next page's cursor refused, as `budgets` begins with the word. `PostgresVectorStore` has it; the store reads the metadata keys `sourceId`, `field`, `partKind`, `title` and `index`. For each group it runs the read of the stored words (first page, `typo: 'one-edit'`) in a transaction, then one statement that answers the count, the page, the any-word items and each item's passage together, so they describe one state of the table. Every value reaches Postgres as a parameter; the query `ts_stat` takes as text is built by Postgres's own `format()` with `%I` and `%L` ([PostgreSQL: format](https://www.postgresql.org/docs/current/functions-string.html#FUNCTIONS-STRING-FORMAT)). The statements select by `metadata_json->>'sourceId'`, which the store's GIN index on `metadata_json` does not serve: on a large collection, an index of your own on that expression keeps them from reading every row.
+
+The types (`LibraryGroupSearch`, `LibraryGroup`, `LibraryGroupItem`, `LibraryPartKind`, `LibraryRankProfile`, `LibraryGroupAnswer`, `LibraryGroupResult`, `LibraryGroupHit`) are exported from `@framers/agentos/cognition/library` and, as types alone, from its [browser entry](#on-a-device); `LibraryCursorError` is exported from `@framers/agentos/cognition/library`.
+
+### Measured in CI
+
+The suite `LibraryIndex.groups.postgres.test.ts` measures the search on a seeded table: 10,000 passages of twelve words each, from a vocabulary of 2,000 words, in 9,880 items across fifty groups, beside the few hundred passages of its other cases. It runs on GitHub's hosted runner against the `pgvector/pgvector:pg16` service of the "Test & Lint" job and prints its figures. In [run 42750762488](https://github.com/framerslab/agentos/actions/runs/42750762488):
+
+| Search | Time | Statements | Stored words read |
+|---|---|---|---|
+| A group of 1,000 items, one word with `typo: 'one-edit'`, the first page of ten | 29.5 ms | 8 | 2,000, in 16.5 ms |
+| The same search, the second page | 10.3 ms | 1 | none |
+| A group of 1,000 items, no word, the first page of twenty | 9.6 ms | 1 | none |
+| A group of 5,000 items, one word with `typo: 'one-edit'`, the first page of ten | 78.7 ms | 8 | 2,001, in 48.4 ms |
+| The same search, the second page | 25.2 ms | 1 | none |
+| A group of 5,000 items, no word, the first page of twenty | 57.4 ms | 1 | none |
+| The fifty groups in one search, one word with `typo: 'one-edit'`, five a page | 624.5 ms | 305 | 49,531, in 294.3 ms |
+
+The eight statements of a first page with the typo rule are the transaction's `BEGIN` and `COMMIT`, the `DECLARE` of the cursor over the stored words, three `FETCH` from it and its `CLOSE`, and the search's one statement. These are one run's figures on a small table, the client and the database on one machine. They show how the work grows with a group's size and with the number of groups, and say nothing of a production table's speed. The first page of a search with the typo rule pays for the read of the stored words, a statement over the group's passages inside a transaction; a later page, and a search without the rule, runs one statement.
+
 ## Stores
 
 The index asks the store's own filter for the scope and the narrowing, checks what the store answers, and replaces and removes sources with `delete` by `DeleteOptions.filter`. A store serves it fully when it honours these `MetadataFilter` rules:
@@ -131,8 +269,8 @@ The index asks the store's own filter for the scope and the narrowing, checks wh
 | `Neo4jVectorStore` | `$in` compares an array field as one value, and `delete` with a filter alone deletes nothing and answers 0. | A dense search finds nothing, and a hybrid search answers only what its lexical leg finds within the scope; a hybrid search with `anyOf`, which runs the dense leg alone there, finds nothing. `removeSource` and `removeTenant` leave the passages, and indexing a source again leaves those past its new count. |
 | `PineconeVectorStore`, `QdrantVectorStore` | Their filters drop `$all`, and a delete by filter answers -1 (Pinecone) or 0 (Qdrant) in place of a count. | A search with `tags` can answer fewer than `topK` passages, since the index drops those without every tag. `removeSource` and `removeTenant` answer the store's value. |
 
-- `PostgresVectorStore` has every member the index calls, the optional ones included: `lexicalSearch`, `hybridSearch` with `match` and `prefix`, `updateMetadata` and `delete` by filter. Its options, its text search configuration and its filter rules are in [Postgres + pgvector Backend](../memory/POSTGRES_BACKEND.md). `removeSource`, `removeTenant` and `setSourceScope` filter on `metadata_json->>'sourceId'` or `metadata_json->>'tenantId'`, which the store's GIN index on `metadata_json` does not serve: without an index of your own on that expression, each reads every row of the collection.
-- `InMemoryVectorStore` honours `delete` by filter and runs `dense` and `hybrid` searches, the latter as its dense search. It has no `lexicalSearch` and no `updateMetadata`, so a `lexical` search or `setSourceScope` throws on it.
+- `PostgresVectorStore` has every member the index calls, the optional ones included: `lexicalSearch`, `hybridSearch` with `match` and `prefix`, `lexicalGroupSearch`, `updateMetadata` and `delete` by filter. Its options, its text search configuration and its filter rules are in [Postgres + pgvector Backend](../memory/POSTGRES_BACKEND.md). `removeSource`, `removeTenant` and `setSourceScope` filter on `metadata_json->>'sourceId'` or `metadata_json->>'tenantId'`, which the store's GIN index on `metadata_json` does not serve: without an index of your own on that expression, each reads every row of the collection.
+- `InMemoryVectorStore` honours `delete` by filter and runs `dense` and `hybrid` searches, the latter as its dense search. It has no `lexicalSearch`, no `lexicalGroupSearch` and no `updateMetadata`, so a `lexical` search, `searchGroups` or `setSourceScope` throws on it.
 
 ## A transcript's passages
 
