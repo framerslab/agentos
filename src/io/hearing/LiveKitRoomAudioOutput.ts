@@ -160,6 +160,13 @@ function failure(message: string, fields: { code?: string; cause?: unknown } = {
   return Object.assign(new Error(message), fields);
 }
 
+/** The publisher's readiness, asked once: whether it has ended, and whether it failed and with what. */
+interface Readiness {
+  ended: boolean;
+  failed: boolean;
+  error?: unknown;
+}
+
 /** The play under way: the error that stopped it, once one did, and the promise that rejects with it. */
 interface Run {
   error?: Error;
@@ -197,9 +204,16 @@ export class LiveKitRoomAudioOutput {
   /** `true` once a participant has subscribed to the published track, `false` when the output cannot tell; unset before. */
   private subscriber?: boolean;
   /**
-   * Each wait for a subscriber, and each wait that a close ends, until the wait ends. A wait leaves its list as it
-   * ends, so an output that plays clip after clip keeps none of the waits it finished.
+   * The publisher's readiness (the track's publication and the publisher's own wait for a first subscriber), asked
+   * once. A wait on it is told through {@link readinessWaits}, so no wait adds a reaction to the publisher's promise.
    */
+  private readiness?: Readiness;
+  /**
+   * Each wait for the publisher's readiness, for a subscriber, and each wait that a close ends, until the wait ends. A
+   * wait leaves its list as it ends, and a play's waits end when the play is stopped, so an output keeps none of the
+   * waits of the clips it played or stopped, a publication that never settles included.
+   */
+  private readonly readinessWaits = new Set<() => void>();
   private readonly subscriberWaits = new Set<(subscribed: boolean) => void>();
   private readonly closeWaits = new Set<(error: Error) => void>();
   private run?: Run;
@@ -291,7 +305,8 @@ export class LiveKitRoomAudioOutput {
    * Plays one whole clip: cut into chunks of at most `maxDurationMs` ({@link pcmChunks}), handed to the track in
    * order, each carrying the clip's mark when it has one (set once, before the clip's first frame), and resolved once
    * the track has played the last one out. One play runs at a time, and it hands the track nothing until a clear
-   * asked before it has finished.
+   * asked before it has finished. A clear or an abort ends the play's wait for the track's publication or for a
+   * subscriber at once, and the output keeps nothing of that wait.
    *
    * @param clip - PCM16 mono at its own rate, from 8000 to 192000 Hz; another rate than the track's is resampled
    *   chunk by chunk.
@@ -327,7 +342,7 @@ export class LiveKitRoomAudioOutput {
     // Whether a chunk of the clip was handed to the track, so a failure has something of it to clear.
     let handed = false;
     try {
-      await this.within(run, this.listener(Date.now()));
+      await this.within(run, this.listener(Date.now(), run));
       // A clear asked before this play, of the clip before it, finishes first.
       while (this.clearing) await this.within(run, this.clearing);
       for (const pcm of pcmChunks(audio, sampleRate, this.options.publisher.maxDurationMs)) {
@@ -421,12 +436,12 @@ export class LiveKitRoomAudioOutput {
   /**
    * Publishes the track, once, through the publisher's `ready()`, which waits up to `receiptTimeoutMs` for its first
    * subscriber and goes on without one, then reads whether a participant subscribed by `started` plus
-   * `receiptTimeoutMs`.
+   * `receiptTimeoutMs`. Each wait ends when the output closes, and, for a play's, when `run` stops.
    *
    * @throws {Error} With the code {@link ROOM_AUDIO_NO_SUBSCRIBER} when nobody did.
    */
-  private async listener(started: number): Promise<void> {
-    await this.untilClosed(this.publisher.ready());
+  private async listener(started: number, run?: Run): Promise<void> {
+    await this.readied(run);
     if (this.subscriber === true) return;
     let settle!: (subscribed: boolean) => void;
     const subscribed = new Promise<boolean>((resolve) => {
@@ -442,7 +457,7 @@ export class LiveKitRoomAudioOutput {
       timer = setTimeout(() => settle(false), left);
     }
     try {
-      if (!(await this.untilClosed(subscribed))) {
+      if (!(await this.untilStopped(subscribed, run))) {
         throw failure('nobody subscribed to the room audio track in time', { code: ROOM_AUDIO_NO_SUBSCRIBER });
       }
     } finally {
@@ -451,8 +466,51 @@ export class LiveKitRoomAudioOutput {
     }
   }
 
-  /** Waits for `work`, or rejects once the output closes; the wait leaves the close's list as it ends. */
-  private async untilClosed<T>(work: Promise<T>): Promise<T> {
+  /**
+   * Waits for the publisher's readiness, asked of it once ({@link readiness}), until the output closes or `run` stops.
+   *
+   * @throws The publisher's error when the track could not be published, to this call and every later one.
+   */
+  private async readied(run?: Run): Promise<void> {
+    let readiness = this.readiness;
+    if (!readiness) {
+      // A readiness that throws as it is asked is not kept, so the next call asks again.
+      const ready = this.publisher.ready();
+      const asked: Readiness = { ended: false, failed: false };
+      readiness = this.readiness = asked;
+      void ready
+        .then(
+          () => {},
+          (error: unknown) => {
+            asked.failed = true;
+            asked.error = error;
+          }
+        )
+        .then(() => {
+          asked.ended = true;
+          for (const tell of this.readinessWaits) tell();
+        });
+    }
+    if (!readiness.ended) {
+      let tell!: () => void;
+      const told = new Promise<void>((resolve) => {
+        tell = resolve;
+      });
+      this.readinessWaits.add(tell);
+      try {
+        await this.untilStopped(told, run);
+      } finally {
+        this.readinessWaits.delete(tell);
+      }
+    }
+    if (readiness.failed) throw readiness.error;
+  }
+
+  /**
+   * Waits for `work`, or rejects once the output closes or `run` stops; the wait leaves the close's list as it ends.
+   * `work` is the wait's own promise, so nothing that outlives the wait keeps a reaction of it.
+   */
+  private async untilStopped<T>(work: Promise<T>, run?: Run): Promise<T> {
     if (this.closed) throw failure(this.closedMessage);
     let stop!: (error: Error) => void;
     const closed = new Promise<never>((_resolve, reject) => {
@@ -460,7 +518,7 @@ export class LiveKitRoomAudioOutput {
     });
     this.closeWaits.add(stop);
     try {
-      return await Promise.race([work, closed]);
+      return await Promise.race(run ? [work, closed, run.stopped] : [work, closed]);
     } finally {
       this.closeWaits.delete(stop);
     }
