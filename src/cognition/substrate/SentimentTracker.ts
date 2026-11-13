@@ -207,7 +207,8 @@ export class SentimentTracker {
    * history write lands then, the analysis takes it back, and every later history write leaves that turn's trend
    * out. A forget that ended while the history was read or written has its scrub run again once the write lands.
    * A failure is logged as one `gmi.sentiment_failed` event with the error's type and code and a trace warning;
-   * it never fails the turn. A take-back that fails is logged as one `gmi.sentiment_take_back_failed` event.
+   * it never fails the turn. A take-back that fails is logged as one `gmi.sentiment_take_back_failed` event, and so
+   * is a scrub run again after a forget that fails once a newer forget dropped the turn.
    *
    * @param turnId - Current turn identifier.
    * @param userInput - The user's input text to analyze.
@@ -235,6 +236,8 @@ export class SentimentTracker {
         content: Array.isArray(message.content) ? message.content.map((part) => ({ ...part })) : message.content,
       })),
     };
+    // Set while the scrub runs again after a forget: a failure there is logged even once the turn is forgotten.
+    let scrubbingAgain = false;
 
     try {
       const sentimentResult = await this.utilityAI.analyzeSentiment(userInput, {
@@ -354,9 +357,15 @@ export class SentimentTracker {
       await this.detectAndEmitEvents(turnId, userInput, sentimentResult, sentimentHistory, snapshot);
       // A forget that ended while the history was read or written may have scrubbed the store before this write
       // landed with the excerpts it cleared.
+      scrubbingAgain = true;
       await this.clearExcerptsAfterForgets(forgetsAtRead);
     } catch (error: unknown) {
-      if (!live()) return;
+      if (!live()) {
+        // A newer forget dropped the turn while its scrub ran again: that forget's own scrub clears the store, and
+        // the failure is one line with the error's type and code.
+        if (scrubbingAgain) sentimentLog.warn('gmi.sentiment_take_back_failed', errorFields(error));
+        return;
+      }
       const fields = errorFields(error);
       sentimentLog.warn('gmi.sentiment_failed', fields);
       this.addTraceEntry('WARNING', 'Sentiment analysis failed', fields);

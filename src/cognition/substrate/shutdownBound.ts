@@ -21,19 +21,31 @@ export function shutdownTimeoutOrDefault(value: number | undefined): number {
 }
 
 /**
- * Waits for `work` at most `ms` milliseconds.
+ * Waits for `work` at most `ms` milliseconds, and no longer than until
+ * `signal` aborts.
  *
+ * @param work - What to wait for.
+ * @param ms - The bound, in milliseconds.
+ * @param signal - Ends the wait when it aborts, or at once when it has
+ *   aborted already.
  * @returns `true` once `work` settles within the bound, `false` when it has
- *   not by then. A rejection of `work` within the bound rejects.
+ *   not by then or `signal` aborted first. A rejection of `work` within the
+ *   bound rejects.
  */
-export async function settlesWithin(work: Promise<unknown>, ms: number): Promise<boolean> {
+export async function settlesWithin(work: Promise<unknown>, ms: number, signal?: AbortSignal): Promise<boolean> {
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let stopped: (() => void) | undefined;
   const expired = new Promise<false>((resolve) => {
     timer = setTimeout(() => resolve(false), ms);
+    if (!signal) return;
+    stopped = () => resolve(false);
+    if (signal.aborted) stopped();
+    else signal.addEventListener('abort', stopped, { once: true });
   });
   try {
     return await Promise.race([work.then(() => true as const), expired]);
   } finally {
     clearTimeout(timer);
+    if (stopped) signal?.removeEventListener('abort', stopped);
   }
 }

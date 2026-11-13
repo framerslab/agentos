@@ -1564,12 +1564,14 @@ export class GMI implements IGMI {
     const settleSentiment = async (postTurn: boolean): Promise<void> => {
       if (!sentimentWork || sentimentSettled || sentimentAbandoned) return;
       const remaining = Math.max(0, SENTIMENT_SETTLE_BUDGET_MS - (Date.now() - sentimentStartedAt));
-      if (remaining > 0 && !stop.signal.aborted) await settlesWithin(sentimentWork, remaining);
+      // An abort or a shutdown during either wait ends it at once.
+      if (remaining > 0 && !stop.signal.aborted) await settlesWithin(sentimentWork, remaining, stop.signal);
       if (postTurn && !sentimentSettled && sentimentCommitted && !stop.signal.aborted) {
         // The reply came in time and its writes have begun: finish them (store writes and event detection, no model
         // call), at most the shutdown bound, so the check consumes the turn's own events and nothing is half written.
         // A history write that outlasts the bound lands after the drop below, and the tracker takes it back.
-        if (await settlesWithin(sentimentWork, shutdownTimeoutOrDefault(this.config?.shutdownTimeoutMs))) return;
+        const bound = shutdownTimeoutOrDefault(this.config?.shutdownTimeoutMs);
+        if (await settlesWithin(sentimentWork, bound, stop.signal)) return;
       }
       if (postTurn && !sentimentSettled) {
         sentimentAbandoned = true;

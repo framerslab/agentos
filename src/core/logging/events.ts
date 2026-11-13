@@ -65,8 +65,8 @@ export const AGENTOS_EVENTS = {
   // A GMI turn's sentiment analysis had not answered by the turn's post-turn metaprompt check, or its store writes
   // outlasted the shutdown bound there, and was dropped; `waitedMs` counts from the analysis start.
   'gmi.sentiment_late': { waitedMs: 'int' },
-  // A dropped GMI sentiment analysis' store write landed, and putting the store back failed: the error's listed type
-  // and code, never its message.
+  // A dropped GMI sentiment analysis' store write landed, or one landed after a forget it did not see, and putting
+  // the store back failed: the error's listed type and code, never its message.
   'gmi.sentiment_take_back_failed': { type: 'word', code: 'word' },
   'http.request': { method: { enum: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS', 'CONNECT', 'TRACE', 'OTHER'] }, route: 'path', status: 'int', ms: 'int', outcome: { enum: ['ok', 'aborted', 'error'] } },
   'http.handler_failed': { type: 'word', code: 'word' },
