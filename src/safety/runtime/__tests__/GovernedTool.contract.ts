@@ -208,6 +208,22 @@ export function runGovernedToolSuite(name: string, open: () => Promise<StoreUnde
       expect(governance((await viaModel(governed, two)).result).outcome).toBe('executed');
     });
 
+    it('evidence of more than 20 quotes, or a quote over 4,000 characters, is refused before the store is read', async () => {
+      const source = messageStore();
+      const getMessage = vi.fn(source.getMessage);
+      const governed = governTool(mute, MUTE_POLICY, governanceOf(limiterOf(), { evidenceSource: { ...source, getMessage } }));
+      const quotes = (count: number) => Array.from({ length: count }, () => ({ messageId: 'm1', quote: message('m1').text }));
+      const many = muteOf(message('m1'), { quotes: quotes(1000) });
+      expect(governance((await viaModel(governed, many)).result)).toMatchObject({ outcome: 'refused_arguments', code: 'ARGUMENT_SHAPE' });
+      const long = muteOf(message('m1'), { quotes: [{ messageId: 'm1', quote: 'x'.repeat(4001) }] });
+      expect(governance((await viaModel(governed, long)).result)).toMatchObject({ outcome: 'refused_arguments', code: 'ARGUMENT_SHAPE' });
+      expect(getMessage).not.toHaveBeenCalled();
+      expect(mute.execute).not.toHaveBeenCalled();
+      // twenty quotes are still read, one by one
+      expect(governance((await viaModel(governed, muteOf(message('m1'), { quotes: quotes(20) }))).result).outcome).toBe('executed');
+      expect(getMessage).toHaveBeenCalledTimes(20);
+    });
+
     it('a rule listed twice in the limits counts once', async () => {
       const room = { ...RULES[0], max: 1 };
       const rules = [room, { ...room }];
@@ -264,6 +280,7 @@ export function runGovernedToolSuite(name: string, open: () => Promise<StoreUnde
 
     it.each([
       { minQuotes: Number.NaN },
+      { minQuotes: 21 },
       { minQuoteLength: Number.NaN },
     ])('invalid evidence thresholds fail closed: %j', async (evidenceRule) => {
       const limiter = limiterOf();
