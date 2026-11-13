@@ -1205,7 +1205,8 @@ export class Memory {
    *
    * With `documentChunks: 'delete'` the document chunks the traces were filed from are deleted with their text, the
    * pictures of those chunks, and each document left with no chunk: a person's deletion and the retention sweep pass
-   * it.
+   * it. On an adapter with transactions those deletes share one, so a failure among them deletes none and a later call
+   * finds them again.
    *
    * A delete only marks a trace's vector in the vector index, which keeps the numbers in its files until it is
    * written again: {@link rebuildVectorIndex} writes it from the traces that are left.
@@ -1301,39 +1302,44 @@ export class Memory {
    * Deletes the document chunks the given traces were filed from, with their text: first the pictures of those
    * chunks, as the foreign key of `document_images` on `document_chunks` requires, then the chunks, 400 ids a
    * statement. A document left with no chunk is deleted with the pictures filed under it; a document that still has
-   * a chunk stays.
+   * a chunk stays. On an adapter with transactions every delete shares one: a step that fails rolls back the ones
+   * before it, so a later call finds the chunks by their traces again, and the document by its chunks.
    */
   private async _deleteDocumentChunksOf(traceIds: readonly string[]): Promise<void> {
     const brainId = this._brain.brainId;
-    const documentIds = new Set<string>();
-    const chunkIds: string[] = [];
-    for (let offset = 0; offset < traceIds.length; offset += 400) {
-      const slice = traceIds.slice(offset, offset + 400);
-      const chunks = await this._brain.all<{ id: string; document_id: string }>(
-        `SELECT id, document_id FROM document_chunks WHERE brain_id = ? AND trace_id IN (${slice.map(() => '?').join(', ')})`,
-        [brainId, ...slice],
-      );
-      for (const chunk of chunks) {
-        chunkIds.push(chunk.id);
-        documentIds.add(chunk.document_id);
+    const deletes = async (trx: Pick<StorageAdapter, 'all' | 'get' | 'run'>): Promise<void> => {
+      const documentIds = new Set<string>();
+      const chunkIds: string[] = [];
+      for (let offset = 0; offset < traceIds.length; offset += 400) {
+        const slice = traceIds.slice(offset, offset + 400);
+        const chunks = await trx.all<{ id: string; document_id: string }>(
+          `SELECT id, document_id FROM document_chunks WHERE brain_id = ? AND trace_id IN (${slice.map(() => '?').join(', ')})`,
+          [brainId, ...slice],
+        );
+        for (const chunk of chunks) {
+          chunkIds.push(chunk.id);
+          documentIds.add(chunk.document_id);
+        }
       }
-    }
-    for (let offset = 0; offset < chunkIds.length; offset += 400) {
-      const slice = chunkIds.slice(offset, offset + 400);
-      const placeholders = slice.map(() => '?').join(', ');
-      const params = [brainId, ...slice];
-      await this._brain.run(`DELETE FROM document_images WHERE brain_id = ? AND chunk_id IN (${placeholders})`, params);
-      await this._brain.run(`DELETE FROM document_chunks WHERE brain_id = ? AND id IN (${placeholders})`, params);
-    }
-    for (const documentId of documentIds) {
-      const left = await this._brain.get<{ n: number | string }>(
-        'SELECT count(*) AS n FROM document_chunks WHERE brain_id = ? AND document_id = ?',
-        [brainId, documentId],
-      );
-      if (Number(left?.n ?? 0) > 0) continue;
-      await this._brain.run('DELETE FROM document_images WHERE brain_id = ? AND document_id = ?', [brainId, documentId]);
-      await this._brain.run('DELETE FROM documents WHERE brain_id = ? AND id = ?', [brainId, documentId]);
-    }
+      for (let offset = 0; offset < chunkIds.length; offset += 400) {
+        const slice = chunkIds.slice(offset, offset + 400);
+        const placeholders = slice.map(() => '?').join(', ');
+        const params = [brainId, ...slice];
+        await trx.run(`DELETE FROM document_images WHERE brain_id = ? AND chunk_id IN (${placeholders})`, params);
+        await trx.run(`DELETE FROM document_chunks WHERE brain_id = ? AND id IN (${placeholders})`, params);
+      }
+      for (const documentId of documentIds) {
+        const left = await trx.get<{ n: number | string }>(
+          'SELECT count(*) AS n FROM document_chunks WHERE brain_id = ? AND document_id = ?',
+          [brainId, documentId],
+        );
+        if (Number(left?.n ?? 0) > 0) continue;
+        await trx.run('DELETE FROM document_images WHERE brain_id = ? AND document_id = ?', [brainId, documentId]);
+        await trx.run('DELETE FROM documents WHERE brain_id = ? AND id = ?', [brainId, documentId]);
+      }
+    };
+    if (this._brain.adapter.capabilities?.has?.('transactions') === true) await this._brain.transaction(deletes);
+    else await deletes(this._brain);
   }
 
   /**
