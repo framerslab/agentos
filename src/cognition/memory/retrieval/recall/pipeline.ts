@@ -312,7 +312,7 @@ export class RecallPipeline {
         return scored ? [scored] : [];
       });
     // A trace deleted while the legs ran (this process's soft delete, or a tombstone) leaves the pool.
-    const live = (trace: MemoryTrace): boolean => !store.isDeleted(trace.id) && store.getTrace(trace.id)?.isActive !== false;
+    const live = (trace: MemoryTrace): boolean => isLive(store, trace.id);
     const pool: Array<PoolEntry<ScoredMemoryTrace> & { undated?: boolean }> = fuseLegs(
       { dense: dense.traces.filter(live), exactWords: asScored(words.traces).filter(live), recency: asScored(recent.traces).filter(live) },
       c,
@@ -382,8 +382,13 @@ export class RecallPipeline {
       () => undefined,
     );
 
+    // A memory deleted while the reranker ran is in neither the result nor the record, as one deleted while the legs ran
+    // is in neither. Each list is read against the store once more here, so the result and the record agree.
+    const shownCut = reranked.cut.filter((entry) => live(entry.trace));
+    const shownReserved = reserved.filter((entry) => live(entry.trace));
     // The whole pool by fused score, a kept candidate with the score it holds; equal scores keep the pool's order.
     const byFused: RankedRecallCandidate[] = pool
+      .filter(({ id }) => isLive(store, id))
       .map(({ id, ranks, fusedScore }) => ({
         id,
         ranks,
@@ -397,19 +402,15 @@ export class RecallPipeline {
     // order the rerank gave them, so the record lists them as the block shows them. The rest keep their places.
     let ranked = byFused;
     if (reranked.scores.size > 0) {
-      const inCut = new Set(cut.map((entry) => entry.id));
+      const inCut = new Set(shownCut.map((entry) => entry.id));
       const entryOf = new Map(byFused.map((candidate) => [candidate.id, candidate]));
-      const order = reranked.cut.map((entry) => entryOf.get(entry.id)).filter((candidate): candidate is RankedRecallCandidate => candidate !== undefined);
+      const order = shownCut.map((entry) => entryOf.get(entry.id)).filter((candidate): candidate is RankedRecallCandidate => candidate !== undefined);
       let next = 0;
       ranked = byFused.map((candidate) => (inCut.has(candidate.id) && next < order.length ? order[next++] : candidate));
     }
-    // A memory deleted while the reranker ran is in neither the result nor the record, as one deleted while the legs
-    // ran is in neither.
-    const shownReserved = reserved.filter((entry) => live(entry.trace));
-    ranked = ranked.filter((candidate) => isLive(store, candidate.id));
 
     return {
-      scored: [...reranked.cut, ...shownReserved].map((entry) => entry.trace),
+      scored: [...shownCut, ...shownReserved].map((entry) => entry.trace),
       reranker: reranked.record,
       ...(reranked.scores.size > 0 ? { rerankScores: Object.fromEntries(reranked.scores) } : {}),
       rerankMs: reranked.ms,
