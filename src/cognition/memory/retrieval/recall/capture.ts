@@ -57,7 +57,10 @@ export interface MemoryRecallCandidate {
    * again for the hop failed (`budget.renderFailed`).
    */
   reason?: 'budget' | 'dedupe' | 'section_full' | 'render_failed';
-  /** The candidate it duplicates, with `reason: 'dedupe'`. */
+  /**
+   * The candidate it duplicates: with `reason: 'dedupe'`, or, for one the block
+   * shows only through its graph association, with `outcome: 'included'`.
+   */
   duplicateOf?: string;
   /** Whether a memory-question reserve added it. */
   reserve?: boolean;
@@ -181,6 +184,17 @@ export interface RetrievalRecallReport {
   legs?: MemoryRecallCapture['legs'];
   /** Each trace the reranker scored, with the score it gave before the blend. Absent when no rerank answered. */
   rerankScores?: Record<string, number>;
+  /** `hybrid` when the retrieval fused the dense, exact-words and recency legs; `dense` (or absent) otherwise. */
+  retrieval?: 'dense' | 'hybrid';
+  /**
+   * Under `hybrid`: the whole recall pool in fused order, the candidates the cut at `topK` left out and the ones the
+   * dedupe dropped (`duplicateOf`) included, each with its ranks and fused score.
+   */
+  ranked?: RankedRecallCandidate[];
+  /** Under `hybrid`: the full-text backend the exact-words leg read, or `none` when that leg did not run. */
+  lexicalBackend?: MemoryRecallCapture['lexicalBackend'];
+  /** Under `hybrid`: milliseconds of the legs (run together), the fusion and the dedupe. */
+  timings?: { legsMs: number; fuseMs: number; dedupeMs: number };
 }
 
 /** A ranked candidate before assembly. */
@@ -189,13 +203,19 @@ export interface RankedRecallCandidate {
   ranks: MemoryRecallCandidate['ranks'];
   fusedScore: number;
   rerankScore?: number;
+  /** Set when the hybrid recall's dedupe dropped it: the candidate that holds the same memory. */
+  duplicateOf?: string;
 }
 
 /**
  * The candidates' outcomes from the assembler's line report.
  *
- * Each ranked candidate takes its line's outcome, reason, tokens and section;
- * one the assembler gave no line is left out for `budget`, with 0 tokens. A
+ * A ranked candidate the dedupe dropped (`duplicateOf`) is left out for
+ * `dedupe`, with 0 tokens, unless the block shows it through another line (an
+ * association in Related Context): then it takes that line's outcome, tokens
+ * and section, and keeps its `duplicateOf`. Each other ranked candidate takes
+ * its line's outcome, reason, tokens and section; one the assembler gave no
+ * line is left out for `budget`, with 0 tokens. A
  * line for a memory no leg returned (an association's trace, the involuntary
  * memory) is added after the ranked candidates, with empty `ranks` and a
  * `fusedScore` of 0, so the included candidates are every memory the block
@@ -211,6 +231,8 @@ export function candidatesFrom(
   const byId = new Map(lines.map((line) => [line.id, line]));
   const candidates: MemoryRecallCandidate[] = ranked.map((candidate) => {
     const line = byId.get(candidate.id);
+    const shown = line?.outcome === 'included';
+    if (candidate.duplicateOf !== undefined && !shown) return { ...candidate, outcome: 'left_out' as const, reason: 'dedupe' as const, tokens: 0 };
     return line
       ? { ...candidate, outcome: line.outcome, ...(line.reason ? { reason: line.reason } : {}), tokens: line.tokens, section: line.section }
       : { ...candidate, outcome: 'left_out' as const, reason: 'budget' as const, tokens: 0 };

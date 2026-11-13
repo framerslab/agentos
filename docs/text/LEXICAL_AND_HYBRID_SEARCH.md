@@ -162,6 +162,19 @@ reciprocalRankFusion(
 // b: 0.7/62 + 0.3/61 ≈ 0.0162, then a: 0.7/61 ≈ 0.0115, then c: 0.3/62 ≈ 0.0048
 ```
 
+`fuseRankedLists(lists, { k })`, exported from `@framers/agentos/cognition/memory`, fuses any number of weighted lists of `{ id, rank }`: an id's score is the sum of `weight / (k + rank)` over the lists that hold it, an id a list holds twice counting once at its first rank, and each answer is `{ id, score, ranks }` with its rank in each list (`undefined` where a list did not hold it), best first, equal scores by id. Two lists at the weights 0.7 and 0.3 give `reciprocalRankFusion`'s scores and order. A list of weight 0 adds its ids and moves no score: cognitive memory's hybrid recall fuses its recency leg that way.
+
+```typescript
+import { fuseRankedLists } from '@framers/agentos/cognition/memory';
+
+fuseRankedLists([
+  { ranked: [{ id: 'a', rank: 1 }, { id: 'b', rank: 2 }], weight: 0.7 },
+  { ranked: [{ id: 'b', rank: 1 }], weight: 0.3 },
+  { ranked: [{ id: 'z', rank: 1 }], weight: 0 },
+]);
+// b: 0.7/62 + 0.3/61 ≈ 0.0162 (ranks [2, 1, undefined]), then a: 0.7/61 ≈ 0.0115, then z: 0
+```
+
 `fuseRanked(lists, { idOf, k, weights, perList, groupOf, perGroup, limit })`, exported from `@framers/agentos/cognition/rag`, fuses any number of ranked lists of any items. Each list is in its own order, best first. `idOf` tells the items apart: an item that stands in several lists is one fused item, kept as its first list holds it, and an item twice in one list counts once, at its better rank. An item's score is the sum, over the lists it stands in, of the list's weight (`weights[place]`, 1 for a list with none) over `k` (60) plus its rank there. The order is by score, then by the first list the item stands in, then by its rank there, then by its id, so the same input gives the same answer on every call. Two lists fused with their weights give `reciprocalRankFusion`'s scores and order, but for a tie, which that function breaks by the id alone, and an item twice in one list, which it scores at each of its ranks. Then the caps, walking that order: an item is passed over when its first list already gave `perList` items (one number for every list, or one a list by place) or its group, read by `groupOf`, already gave `perGroup`, and the walk stops at `limit`. Each answer is `{ item, id, score, list, ranks }`: the item, its id, its score, the place of its first list and its rank in each list it stands in. A `k` or a weight that is not a finite number, zero or more, or a cap (`perList`, `perGroup`, `limit`) that is not a whole number, zero or more, or positive infinity, throws a `RangeError`; `perGroup` without `groupOf` throws a `TypeError`.
 
 ```typescript
@@ -191,6 +204,7 @@ fuseRanked([notes, call], { idOf: (item) => item.id, weights: [1, 0.8], groupOf:
 - `PostgresVectorStore.lexicalSearch()` and `hybridSearch()` rank with PostgreSQL full-text search (`ts_rank`, not BM25) ([Postgres + pgvector Backend](../memory/POSTGRES_BACKEND.md#lexical-search-and-the-words-of-a-hybrid-search)).
 - `SqlVectorStore.hybridSearch()` scores BM25 over the collection's rows itself and fuses it with the dense ranking, by RRF unless asked for a weighted sum ([RAG Memory Configuration](../memory/RAG_MEMORY_CONFIGURATION.md#retrieval-strategies-implemented)).
 - The SQLite brain keeps an FTS5 index over its memory traces, which `recall()` and the `memory_search` tool query ([SQLite Brain Storage](../memory/MEMORY_STORAGE.md)).
+- Cognitive memory's `recall.retrieval: 'hybrid'` adds an exact-words leg to a turn's recall: on a store with a brain it reads `memory_traces_fts` (Postgres's tsvector column) through the storage adapter's full-text query, with the turn's scopes, types and time written into the query; on a memory with no store it reads an in-process index of its traces' words, one per scope, that follows the store through `addTraceListener`. Its hits are read through `loadTracesForRecall`, fused with the dense and recency legs by `fuseRankedLists` and deduped ([Recall](../memory/COGNITIVE_MEMORY.md#recall)). `HybridRetriever` is a separate class the caller builds, and the manager's recall does not use it.
 - The `QueryRouter` falls back to keyword matching over its corpus when it has no embeddings ([Query Router](../QUERY_ROUTER.md)).
 
 ## Reading memory traces by id and following a store

@@ -91,7 +91,8 @@ export interface StreamingTTSChainOptions {
    * audio ends the facade instead, until `flush_complete` ends that request,
    * after which a failure sends nothing again and switches. The session is
    * then the chain's facade:
-   * it forwards `'audio'`, `'flush_complete'` and `'warning'` from the
+   * it forwards `'audio'`, `'flush_complete'`, `'warning'` and
+   * `'reply_transcript'` (`OpenAIRealtimeTTS` with `outputTranscript`) from the
    * provider session in use (under a `ProviderPolicy` a warning arrives as
    * `Error('provider warning')`, without the provider's text, and one nobody
    * listens for is not printed) and `'usage'` from every provider session it
@@ -445,6 +446,11 @@ export class StreamingTTSChain implements IStreamingTTS {
         facade.emit('audio', chunk);
       });
       session.on('usage', (event: unknown) => facade.emit('usage', event));
+      // A reply's own transcript and its verdict, which the host asked the provider for: forwarded as its audio is.
+      session.on('reply_transcript', (reply: unknown) => {
+        if (closed || cancelled || current !== session || failedNow(session)) return;
+        facade.emit('reply_transcript', reply);
+      });
       session.on('flush_complete', () => {
         if (!closed && !cancelled && current === session && !failedNow(session)) {
           flushed = true;

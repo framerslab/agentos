@@ -138,11 +138,13 @@ export interface MemoryConfig {
   persistAccessState?: boolean;
   /**
    * Recall settings for cognitive memory on the GMI path (`gmi()`, `agent({ runtime: 'gmi' })`):
-   * `budget.totalTokens` sizes the memory block (default 1600, preamble included) and `capture` sets what a turn
-   * records about its recall (default `'metadata'`). On the GMI path `memoryProviderOptions.tokenBudget` does not
-   * size the block. On the default runtime, and on the GMI path with memory off, only `budget.totalTokens` is read:
-   * it is the `tokenBudget` handed to `memoryProvider.getContext` when `memoryProviderOptions.tokenBudget` is unset;
-   * two different values, or `capture`, are refused at construction.
+   * `budget.totalTokens` sizes the memory block (default 1600, preamble included), `capture` sets what a turn
+   * records about its recall (default `'metadata'`), and `retrieval` sets how a turn finds its memories (default
+   * `'dense'`, by meaning; `'hybrid'` adds the turn's exact words and recency, fused into one Relevant Memories
+   * section). On the GMI path `memoryProviderOptions.tokenBudget` does not size the block. On the default runtime,
+   * and on the GMI path with memory off, only `budget.totalTokens` is read: it is the `tokenBudget` handed to
+   * `memoryProvider.getContext` when `memoryProviderOptions.tokenBudget` is unset; two different values, `capture`
+   * or `retrieval` are refused at construction.
    */
   recall?: MemoryRecallConfig;
 }

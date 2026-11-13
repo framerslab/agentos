@@ -157,6 +157,43 @@ wunderland chat \
 - **Cancelling.** `cancel()` drops the pending text and every reply and settles each flush without `flush_complete`. A response in progress is cancelled by its `response_id`, since a `response.cancel` without one reaches only the default conversation and an out-of-band response goes on. With no response in progress nothing is sent. Frames of a cut response are dropped by their id. The server's `response_cancel_not_active`, which a cancel gets when it crosses a finishing response, is not an `'error'`; every other error frame is.
 - **Failover.** A `StreamingTTSChain` keeps the text since the last `flush_complete`, and `flush_complete` waits for the last queued reply. Under the legacy policy a backup speaks that text again, so a reply of the run already spoken is heard twice. Under a `ProviderPolicy` a failover once any reply of the run has produced audio is refused: the session fails with `partial synthesis cannot be replayed`, no backup opens, and a reply queued behind the spoken one is lost, though it has produced no audio of its own. A failure before any audio goes to the backup, and a failure after `flush_complete` has nothing to replay.
 - **Word for word.** Realtime has no mode that speaks text as given, and OpenAI promises no exact reading. The model reads the text because the instructions tell it to. On 1 November 2026, five sentences on `gpt-realtime-2.1-mini`, among them a question and an instruction to ignore the instructions, each came back with a transcript equal to the text, ignoring case and punctuation. That is five samples and the model's own transcript, not a guarantee: a reply where each word must be said needs its own check.
+- **Each reply's transcript.** With `outputTranscript: true` the session hands the host each reply's transcript and whether it matches the text, the check a reply where each word must be said needs (below).
+
+#### Whether a reply said its text
+
+```typescript
+import { OpenAIRealtimeTTS, type OpenAIRealtimeReplyTranscript } from '@framers/agentos/io/voice-pipeline/providers';
+
+const tts = new OpenAIRealtimeTTS({ apiKey: process.env.OPENAI_API_KEY!, outputTranscript: true });
+const session = await tts.startSession({ voice: 'alloy', language: 'es' });
+session.on('reply_transcript', ({ text, transcript, verdict }: OpenAIRealtimeReplyTranscript) => {
+  if (!verdict.match) console.warn('the voice did not say', text, 'but', transcript);
+});
+session.pushTokens('Nos vemos a las 3.');
+await session.flush();
+```
+
+Every audio reply of the Realtime API carries the model's own transcript of its audio, as `response.output_audio_transcript.delta` and `response.output_audio_transcript.done`, each with the reply's `response_id` ([server events](https://developers.openai.com/api/reference/resources/realtime/server-events)). With `outputTranscript: true` the session keeps each reply's transcript by its response id and emits `'reply_transcript'` at the reply's `response.done`, after its last audio and before `flush_complete`, with:
+
+- `text`: the text the reply was asked to read;
+- `transcript`: the transcript, its parts joined by a space, or the empty string when none came;
+- `verdict`: `spokenMatch(text, transcript, language)`, in the session's `StreamingTTSConfig.language`, or `'und'` when it has none, which folds digits alone.
+
+A reply that ends without its `response.done` (a `cancel()`, a timeout, a lost socket) emits none, and a cut reply's late transcript is dropped. A listener may `cancel()` or `close()` the session from the event: the reply ends there, its flush settles and no `flush_complete` follows, as for a cut from an `'error'` listener. A listener may also `flush()`: a flush with text starts its reply at once, and the flushes end when that reply ends; a flush with no text ends with the reply that emitted the event, by its status, so `flush_complete` comes once for a spoken reply and not at all for a failed one. A listener that throws is reported as a `'warning'`, and the reply ends as it would have. A `StreamingTTSChain`'s facade forwards the event from the provider session in use. The option sends the server nothing more, and without it the session emits no `'reply_transcript'`.
+
+`spokenWords` and `spokenMatch` come from `@framers/agentos/io/voice-pipeline`:
+
+```typescript
+import { spokenMatch, spokenWords } from '@framers/agentos/io/voice-pipeline';
+
+spokenMatch('We meet at 3', 'We meet at three', 'en'); // { match: true, ratio: 1 }
+spokenMatch('red green blue white', 'red blue green white', 'en'); // { match: false, ratio: 0.75 }
+spokenWords('我们三点见面。', 'zh-Hans'); // the words, as the platform's segmenter cuts them
+```
+
+`spokenWords(text, language)` reads the text in NFKC, so width and compatibility forms fold, drops default-ignorable characters such as the soft hyphen, lowers case in the language's own rule, and keeps the word-like segments of `Intl.Segmenter` in that language: punctuation and symbols drop, inside a word too ("don't" is "dont"), and a script written without spaces is cut into words. A runtime without `Intl.Segmenter` cuts the same words from a text written with spaces. A number written with a separator, a sign, a currency or a percent ("3:15", "1/2", "1,000", "-5", "$5", "5%") is one word as written. A tag the platform refuses reads as `'und'`. `spokenMatch(asked, said, language)` folds the numbers of both texts, then answers `match: true` only when the two word sequences are equal; `ratio` is the longest run of words the two hold in common, in order, over the longer sequence's length. A text with no words on either side answers `{ match: false, ratio: 0 }`. `match` is exact at any length; two texts that differ past their shared start and end, with more than a million pairs of words left between them, get the share of that start and end alone as their `ratio`, which keeps the work bounded. Both functions are pure.
+
+The number rule: a run of digits, and a run of the language's cardinal words that reads as one integer from 0 to 999,999, each become that integer in ASCII digits, so "3", "three", "tres" and "drei" are one word. The tables cover en, es, fr, de, pt, it, ko, zh and hi, built from CLDR's spell-out rules ([rbnf](https://github.com/unicode-org/cldr/tree/main/common/rbnf)); another language folds digit runs alone. Digits of any script count, and a digit run with a leading zero ("0100", "007") is a code, compared as written, so a voice that drops its zero does not match. A grouped digit string counts in the grouping of the tag's region, which the platform's CLDR data names: "1,000" in English and in `es-MX`, "1.000" in German and in `es`, "1 000" in French and in `pt-PT` (French writes a narrow no-break space, which NFKC makes a space), "१,०००" in Hindi; a runtime with no data for the language keeps the table's grouping. Where a region writes the other point as its decimal mark, the number compares as written ("1,000" in `es-ES`). A German or Italian compound is read when it splits wholly into number words ("dreihundertfünfundsechzig"), and Chinese and Sino-Korean numbers are read by place value (三百六十五, 삼백육십오). Two numbers said side by side stay two ("three four" is not seven). These are compared as written, so a line that writes one in digits while the transcript writes it in words does not match: a decimal, an ordinal, a date, a time of day, a fraction, a signed number, a percent, an amount of money, a number with an article ("a hundred"), a year said in pairs ("twenty twenty-six"), and a Chinese number whose last digit stands for a place it does not name ("一百一"). Both texts go through the same rule, so a limit refuses a match and never makes one. A word that is also a numeral (Korean 이, "this", is also 2) folds on both sides; the two are said alike, so a transcript that writes the other form still matches.
 
 ## Endpointing
 

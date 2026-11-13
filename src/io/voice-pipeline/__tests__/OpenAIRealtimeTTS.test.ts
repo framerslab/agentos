@@ -19,7 +19,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import type { IncomingMessage } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { OpenAIRealtimeTTS } from '../providers/OpenAIRealtimeTTS.js';
+import { OpenAIRealtimeTTS, type OpenAIRealtimeReplyTranscript } from '../providers/OpenAIRealtimeTTS.js';
 import { StreamingTTSChain } from '../providers/StreamingTTSChain.js';
 import { VoicePipelineOrchestrator } from '../VoicePipelineOrchestrator.js';
 import { createVoiceProvidersFromEnv } from '../env-constructor.js';
@@ -157,6 +157,19 @@ class LocalRealtimeServer {
     const delta = Buffer.from([0x00, 0x01, 0x02, 0x03]).toString('base64');
     this.send({ type: 'response.output_audio.delta', response_id: responseId, delta });
     this.send({ type: 'response.audio.delta', response_id: responseId, delta });
+  }
+
+  /**
+   * Sends the model's transcript of a response's audio as the current interface does: the text in deltas, then the
+   * part's `response.output_audio_transcript.done` with the whole transcript.
+   */
+  transcript(responseId: string, text: string): void {
+    const part = { response_id: responseId, item_id: `item_${responseId}`, output_index: 0, content_index: 0 };
+    const half = Math.ceil(text.length / 2);
+    for (const delta of [text.slice(0, half), text.slice(half)]) {
+      if (delta) this.send({ type: 'response.output_audio_transcript.delta', ...part, delta });
+    }
+    this.send({ type: 'response.output_audio_transcript.done', ...part, transcript: text });
   }
 
   /** Ends a response. */
@@ -700,6 +713,57 @@ describe('OpenAIRealtimeTTS against a local Realtime server', () => {
       expect(log.errors.map((error) => error.message)).toEqual(['Refused']);
     });
 
+    describe("an 'error' listener that cancels", () => {
+      it('on a failed response leaves no flush_complete', async () => {
+        const session = await start();
+        const log = record(session);
+        session.on('error', () => session.cancel());
+        session.pushTokens('A reply.');
+        const flush = session.flush();
+        await until(() => server.running.size === 1, 'the response');
+        await delay(SOCKET_TURN_MS);
+
+        server.finish(server.responseId(0), 'failed', { type: 'failed', error: { code: 'server_error', message: 'The model failed' } });
+        await flush;
+        await delay(SOCKET_TURN_MS);
+
+        expect(log.errors.map((error) => error.message)).toEqual(['The model failed']);
+        expect(log.flushes).toBe(0);
+      });
+
+      it('on a request the server refuses leaves no flush_complete', async () => {
+        const session = await start();
+        const log = record(session);
+        session.on('error', () => session.cancel());
+        session.pushTokens('A reply.');
+        const flush = session.flush();
+        await until(() => server.sent('response.create').length === 1, 'the request');
+
+        server.send({
+          type: 'error',
+          error: { type: 'invalid_request_error', code: 'invalid_value', message: 'Refused', event_id: server.sent('response.create')[0]!.event_id },
+        });
+        await flush;
+        await delay(SOCKET_TURN_MS);
+
+        expect(log.errors.map((error) => error.message)).toEqual(['Refused']);
+        expect(log.flushes).toBe(0);
+      });
+
+      it('on a response that goes silent leaves no flush_complete', async () => {
+        tts = new OpenAIRealtimeTTS({ apiKey: 'test-key', baseUrl: server.url, responseTimeoutMs: 60 });
+        const session = await start();
+        const log = record(session);
+        session.on('error', () => session.cancel());
+        session.pushTokens('A reply.');
+        await session.flush();
+        await delay(SOCKET_TURN_MS);
+
+        expect(log.errors).toHaveLength(1);
+        expect(log.flushes).toBe(0);
+      });
+    });
+
     it('reports a response that goes silent, and settles its flush', async () => {
       tts = new OpenAIRealtimeTTS({ apiKey: 'test-key', baseUrl: server.url, responseTimeoutMs: 60 });
       const session = await start();
@@ -772,6 +836,213 @@ describe('OpenAIRealtimeTTS against a local Realtime server', () => {
     });
   });
 
+  describe("each reply's transcript", () => {
+    /** The session's events in the order they came, with each `'reply_transcript'` payload. */
+    const order = (session: StreamingTTSSession) => {
+      const log = { events: [] as string[], transcripts: [] as OpenAIRealtimeReplyTranscript[] };
+      session.on('audio', () => log.events.push('audio'));
+      session.on('flush_complete', () => log.events.push('flush_complete'));
+      session.on('reply_transcript', (reply: OpenAIRealtimeReplyTranscript) => {
+        log.events.push('reply_transcript');
+        log.transcripts.push(reply);
+      });
+      return log;
+    };
+
+    const startWithTranscript = async (): Promise<StreamingTTSSession> => {
+      tts = new OpenAIRealtimeTTS({ apiKey: 'test-key', baseUrl: server.url, outputTranscript: true });
+      const session = await tts.startSession({ voice: 'shimmer', language: 'en' });
+      open.push(session);
+      return session;
+    };
+
+    it('emits one transcript that matches the text, after the last audio and before flush_complete', async () => {
+      const session = await startWithTranscript();
+      const log = order(session);
+      session.pushTokens('We meet at three.');
+      const flush = session.flush();
+      await until(() => server.running.size === 1, 'the response');
+      await delay(SOCKET_TURN_MS);
+
+      server.audio(server.responseId(0));
+      server.transcript(server.responseId(0), 'We meet at 3.');
+      server.audio(server.responseId(0));
+      server.finish(server.responseId(0));
+      await flush;
+
+      expect(log.transcripts).toEqual([
+        { text: 'We meet at three.', transcript: 'We meet at 3.', verdict: { match: true, ratio: 1 } },
+      ]);
+      expect(log.events).toEqual(['audio', 'audio', 'reply_transcript', 'flush_complete']);
+    });
+
+    it('answers no match for a transcript with a dropped word', async () => {
+      const session = await startWithTranscript();
+      const log = order(session);
+      session.pushTokens('We meet at three today.');
+      const flush = session.flush();
+      await until(() => server.running.size === 1, 'the response');
+      await delay(SOCKET_TURN_MS);
+
+      server.audio(server.responseId(0));
+      server.transcript(server.responseId(0), 'We meet at three.');
+      server.finish(server.responseId(0));
+      await flush;
+
+      expect(log.transcripts).toHaveLength(1);
+      expect(log.transcripts[0]!.transcript).toBe('We meet at three.');
+      expect(log.transcripts[0]!.verdict.match).toBe(false);
+      expect(log.transcripts[0]!.verdict.ratio).toBeCloseTo(0.8, 5);
+    });
+
+    it('answers an empty transcript and no match for a reply that sent no transcript', async () => {
+      const session = await startWithTranscript();
+      const log = order(session);
+      session.pushTokens('Hello there.');
+      const flush = session.flush();
+      await until(() => server.running.size === 1, 'the response');
+      await delay(SOCKET_TURN_MS);
+
+      server.audio(server.responseId(0));
+      server.finish(server.responseId(0));
+      await flush;
+
+      expect(log.transcripts).toEqual([{ text: 'Hello there.', transcript: '', verdict: { match: false, ratio: 0 } }]);
+    });
+
+    it("keeps each reply's transcript to its own reply, and drops a cut reply's late transcript", async () => {
+      const session = await startWithTranscript();
+      const log = order(session);
+      session.pushTokens('First reply.');
+      void session.flush();
+      await until(() => server.running.size === 1, 'the first response');
+      await delay(SOCKET_TURN_MS);
+
+      // The first reply is cut; its transcript arrives after the cut, while the next reply runs.
+      session.cancel();
+      session.pushTokens('Second reply.');
+      const second = session.flush();
+      await until(() => server.sent('response.create').length === 2, 'the second response');
+      await delay(SOCKET_TURN_MS);
+      server.transcript(server.responseId(0), 'First reply.');
+      server.transcript(server.responseId(1), 'Second reply.');
+      server.finish(server.responseId(1));
+      await second;
+
+      expect(log.transcripts).toEqual([
+        { text: 'Second reply.', transcript: 'Second reply.', verdict: { match: true, ratio: 1 } },
+      ]);
+    });
+
+    it("a 'reply_transcript' listener that throws is reported as a warning, and the reply ends as it would have", async () => {
+      const session = await startWithTranscript();
+      const log = record(session);
+      session.on('reply_transcript', () => {
+        throw new Error('host bug');
+      });
+      session.pushTokens('A reply.');
+      const flush = watch(session.flush());
+      await until(() => server.running.size === 1, 'the response');
+      await delay(SOCKET_TURN_MS);
+
+      server.finish(server.responseId(0));
+      await until(() => flush.settled, 'the flush to settle');
+
+      expect(log.flushes).toBe(1);
+      expect(log.warnings.map((warning) => warning.message)).toEqual([expect.stringContaining('host bug')]);
+      expect(log.errors).toEqual([]);
+    });
+
+    for (const cut of ['cancel', 'close'] as const) {
+      it(`a 'reply_transcript' listener that calls ${cut}() ends the reply there, with no flush_complete`, async () => {
+        const session = await startWithTranscript();
+        const log = record(session);
+        session.on('reply_transcript', () => session[cut]());
+        session.pushTokens('A reply.');
+        const flush = watch(session.flush());
+        await until(() => server.running.size === 1, 'the response');
+        await delay(SOCKET_TURN_MS);
+
+        server.finish(server.responseId(0));
+        await until(() => flush.settled, 'the flush to settle');
+        await delay(SOCKET_TURN_MS);
+
+        expect(log.flushes).toBe(0);
+        expect(log.errors).toEqual([]);
+      });
+    }
+
+    for (const status of ['completed', 'failed'] as const) {
+      it(`a 'reply_transcript' listener that flushes no text gets one end for a ${status} reply, read from its status`, async () => {
+        const session = await startWithTranscript();
+        const events: string[] = [];
+        session.on('flush_complete', () => events.push('flush_complete'));
+        session.on('error', (error: Error) => events.push(`error: ${error.message}`));
+        let nested: { settled: boolean } | undefined;
+        session.on('reply_transcript', () => {
+          nested = watch(session.flush());
+        });
+        session.pushTokens('A reply.');
+        const flush = watch(session.flush());
+        await until(() => server.running.size === 1, 'the response');
+        await delay(SOCKET_TURN_MS);
+
+        if (status === 'completed') server.finish(server.responseId(0));
+        else server.finish(server.responseId(0), 'failed', { type: 'failed', error: { code: 'server_error', message: 'The model failed' } });
+        await until(() => flush.settled && nested?.settled === true, 'both flushes to settle');
+        await delay(SOCKET_TURN_MS);
+
+        expect(events).toEqual(status === 'completed' ? ['flush_complete'] : ['error: The model failed']);
+        expect(server.sent('response.create')).toHaveLength(1);
+      });
+    }
+
+    it("a 'reply_transcript' listener that flushes text starts that reply, and the two end once", async () => {
+      const session = await startWithTranscript();
+      const log = record(session);
+      let spoke = false;
+      session.on('reply_transcript', () => {
+        if (spoke) return;
+        spoke = true;
+        session.pushTokens('Second reply.');
+        void session.flush();
+      });
+      session.pushTokens('First reply.');
+      const flush = watch(session.flush());
+      await until(() => server.running.size === 1, 'the first response');
+      await delay(SOCKET_TURN_MS);
+
+      server.finish(server.responseId(0));
+      await until(() => server.sent('response.create').length === 2, 'the second response');
+      await delay(SOCKET_TURN_MS);
+      expect(log.flushes).toBe(0);
+      server.finish(server.responseId(1));
+      await until(() => flush.settled, 'the flush to settle');
+      await delay(SOCKET_TURN_MS);
+
+      expect(log.flushes).toBe(1);
+      expect(log.errors).toEqual([]);
+    });
+
+    it('emits no transcript with the option unset', async () => {
+      const session = await tts.startSession({ voice: 'shimmer', language: 'en' });
+      open.push(session);
+      const log = order(session);
+      session.pushTokens('We meet at three.');
+      const flush = session.flush();
+      await until(() => server.running.size === 1, 'the response');
+      await delay(SOCKET_TURN_MS);
+
+      server.audio(server.responseId(0));
+      server.transcript(server.responseId(0), 'We meet at three.');
+      server.finish(server.responseId(0));
+      await flush;
+
+      expect(log.transcripts).toEqual([]);
+      expect(log.events).toEqual(['audio', 'flush_complete']);
+    });
+  });
+
   describe('through StreamingTTSChain', () => {
     const backup = (): IStreamingTTS & HealthyProvider => ({
       providerId: 'backup',
@@ -787,6 +1058,28 @@ describe('OpenAIRealtimeTTS against a local Realtime server', () => {
         });
         return session as unknown as StreamingTTSSession;
       }),
+    });
+
+    it("forwards each reply's transcript from the session in use", async () => {
+      tts = new OpenAIRealtimeTTS({ apiKey: 'test-key', baseUrl: server.url, outputTranscript: true });
+      const chain = new StreamingTTSChain([tts, backup()], { enableMidSynthesisFailover: true });
+      const session = await chain.startSession({ voice: 'shimmer', language: 'en' });
+      open.push(session);
+      const transcripts: OpenAIRealtimeReplyTranscript[] = [];
+      session.on('reply_transcript', (reply: OpenAIRealtimeReplyTranscript) => transcripts.push(reply));
+      session.pushTokens('We meet at three.');
+      const flush = session.flush();
+      await until(() => server.running.size === 1, 'the response');
+      await delay(SOCKET_TURN_MS);
+
+      server.audio(server.responseId(0));
+      server.transcript(server.responseId(0), 'We meet at 3.');
+      server.finish(server.responseId(0));
+      await flush;
+
+      expect(transcripts).toEqual([
+        { text: 'We meet at three.', transcript: 'We meet at 3.', verdict: { match: true, ratio: 1 } },
+      ]);
     });
 
     it('a barge-in followed at once by the next text starts no failover', async () => {
