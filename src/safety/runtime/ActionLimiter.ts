@@ -55,6 +55,11 @@ export interface ActionLimiter {
   }): Promise<ActionLimitAnswer>;
 }
 
+/**
+ * How a {@link SqlActionLimiter} is built: the store its counts live in, every rule the host uses, the start of its
+ * tables' names, the length of a reservation's lease, and whether it refuses a store processes cannot share and makes
+ * its own tables.
+ */
 export interface SqlActionLimiterOptions {
   db: StorageAdapter;
   /**

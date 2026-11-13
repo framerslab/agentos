@@ -185,6 +185,15 @@ export function runGovernedToolSuite(name: string, open: () => Promise<StoreUnde
       expect(mute.execute).toHaveBeenCalledTimes(1);
     });
 
+    it('a partial quote that holds reaches no record', async () => {
+      const part = 'everyone here knows it';
+      const governed = governTool(mute, MUTE_POLICY, governanceOf(limiterOf()));
+      const { result } = await viaModel(governed, muteOf(message('m1'), { quotes: [{ messageId: 'm1', quote: part }] }));
+      expect(governance(result).outcome).toBe('executed');
+      expect(audit.begun[0].evidence.quotes).toEqual([expect.objectContaining({ messageId: 'm1', quoteLength: part.length })]);
+      expect(everything()).not.toContain(part);
+    });
+
     it('two quotes of one message count as one toward minQuotes', async () => {
       const governed = governTool(mute, { ...MUTE_POLICY, evidence: { minQuotes: 2 } }, governanceOf(limiterOf()));
       const twice = muteOf(message('m1'));
