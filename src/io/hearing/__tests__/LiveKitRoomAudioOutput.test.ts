@@ -435,6 +435,18 @@ describe('LiveKitRoomAudioOutput', () => {
     expect(source().captured).toHaveLength(0);
   });
 
+  it('tells a host that awaits close() when the track could not be unpublished after a stalled capture', async () => {
+    const room = new FakeRoom();
+    room.localParticipant.unpublishTrack.mockRejectedValueOnce(new Error('unpublish refused'));
+    const output = outputOn(room, { maxDurationMs: 100, receiptTimeoutMs: 30 });
+    await output.open();
+    source().gate = new Promise<void>(() => {});
+    await expect(output.play({ audio: clip(100), sampleRate: RATE })).rejects.toThrow('room audio output stalled');
+    // The output closed itself on the stall; the host's own close() shares that cleanup and reports its failure.
+    await expect(output.close()).rejects.toThrow('publisher cleanup incomplete');
+    expect(room.localParticipant.unpublishTrack).toHaveBeenCalledTimes(1);
+  });
+
   it('takes a real rtc-node Room as it is', () => {
     expect(conformance).toEqual([true]);
   });

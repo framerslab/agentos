@@ -361,7 +361,10 @@ export class LiveKitRoomAudioOutput {
 
   /**
    * Rejects the play under way and every wait for a subscriber with `room audio output closed`, then unpublishes the
-   * track and closes it and its native source (the publisher's `close()`). Later calls share that work.
+   * track and closes it and its native source (the publisher's `close()`). Later calls share that work, the close the
+   * output made itself on a stalled capture included.
+   *
+   * @throws {Error} `publisher cleanup incomplete` when the track could not be unpublished or closed.
    */
   close(): Promise<void> {
     return this.shut('room audio output closed');
