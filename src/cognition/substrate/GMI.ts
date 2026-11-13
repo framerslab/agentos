@@ -497,9 +497,9 @@ export class GMI implements IGMI {
       },
       (type, message, details) => this.addTraceEntry(type as ReasoningEntryType, message, details),
       () => this.gmiId,
-      (turnId) => this.turnInputs.has(turnId)
-        && this.state !== GMIPrimeState.SHUTTING_DOWN
-        && this.state !== GMIPrimeState.SHUTDOWN,
+      // The history holds the turn. A turn's own analysis also stops once shutdown or a newer turn takes the
+      // lifecycle state (see processTurnStream).
+      (turnId) => this.turnInputs.has(turnId),
     );
 
     // Initialize metaprompt executor
@@ -1657,8 +1657,10 @@ export class GMI implements IGMI {
             ? lastMsg.content
             : JSON.stringify(lastMsg.content);
           sentimentStartedAt = Date.now();
+          // The result applies while the turn owns the lifecycle state: a newer turn, or shutdown, takes it, and the
+          // reasoning trace then records another turn's entries.
           sentimentWork = this.sentimentTracker.analyzeTurnSentiment(
-            turnId, userInputText, () => !sentimentAbandoned && !stop.signal.aborted,
+            turnId, userInputText, () => !sentimentAbandoned && !stop.signal.aborted && ownsState(),
             () => { sentimentCommitted = true; },
           ).finally(() => { sentimentSettled = true; });
         }
@@ -2579,6 +2581,9 @@ export class GMI implements IGMI {
         { turnId },
         `Error in GMI turn '${turnId}'.`,
       );
+      // A failed turn takes no sentiment result: the host may start its next turn while this stream waits at the
+      // error chunk below, before the finally runs.
+      if (!sentimentSettled) sentimentAbandoned = true;
       if (ownsState()) this.state = GMIPrimeState.ERRORED;
       lastErrorForOutput = { code: gmiError.code, message: gmiError.message, details: gmiError.details };
       this.addTraceEntry(ReasoningEntryType.ERROR, `GMI processing error: ${gmiError.message}`, gmiError.toPlainObject());

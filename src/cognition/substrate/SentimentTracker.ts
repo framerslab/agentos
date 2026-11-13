@@ -44,6 +44,12 @@ type SentimentSnapshot = {
 };
 
 /**
+ * A sentiment history the tracker wrote and stands by, from the moment the write starts: an applied analysis', a
+ * scrub's or a take-back's (`undefined` when the take-back deleted the key), with the analysis that wrote it.
+ */
+type StandingHistory = { history: SentimentHistoryState | undefined; writer?: object };
+
+/**
  * Tracks user sentiment, detects emotional patterns, and emits GMI events.
  *
  * The tracker maintains two data structures:
@@ -62,6 +68,18 @@ export class SentimentTracker {
   private _eventHistory: GMIEvent[] = [];
 
   /**
+   * The sentiment history the store should hold by this tracker's writes: what a write that lands after its turn
+   * dropped the result is taken back to.
+   */
+  private standing?: StandingHistory;
+
+  /**
+   * The forgets that have ended ({@link SentimentTracker.forgetTurnsExcept}). A history write that read the store
+   * before one ended can land after its scrub, so the scrub runs again once that write lands.
+   */
+  private forgets = 0;
+
+  /**
    * Creates a new SentimentTracker.
    *
    * @param utilityAI - AI utility service for sentiment analysis.
@@ -74,7 +92,8 @@ export class SentimentTracker {
    * @param addTraceEntry - Callback to add entries to the GMI's reasoning trace.
    * @param _getGmiId - Kept in its position for existing callers; not read.
    * @param holdsTurn - Whether the GMI holds a turn: false once a replaced or cleared history dropped the
-   *   turn's input, or the GMI is shutting down. An analysis of a turn it does not hold writes nothing more.
+   *   turn's input. An analysis of a turn it does not hold writes nothing more, and a scrub that runs again after
+   *   a late write clears the excerpts of the turns it does not hold.
    */
   constructor(
     private readonly utilityAI: IUtilityAI,
@@ -123,7 +142,8 @@ export class SentimentTracker {
   /**
    * Drops the input excerpts kept for turns the conversation history no longer
    * holds: the `evidencePreview` of their events and the `context` of their
-   * sentiment trends. Scores, counters and the events themselves stay.
+   * sentiment trends. Scores, counters and the events themselves stay. A sentiment history write that read the
+   * store before this scrub ended is scrubbed again once it lands.
    *
    * @param keptTurnIds - The turns whose input is still in the history.
    */
@@ -134,10 +154,11 @@ export class SentimentTracker {
       return { ...event, metadata };
     });
 
-    const history = await this.workingMemory.get<SentimentHistoryState>('gmi_sentiment_history');
-    if (!history?.trends?.some((trend) => trend.context && !keptTurnIds.has(trend.turnId))) return;
-    history.trends = history.trends.map((trend) => (keptTurnIds.has(trend.turnId) ? trend : { ...trend, context: '' }));
-    await this.workingMemory.set('gmi_sentiment_history', history);
+    try {
+      await this.clearStoredExcerpts((turnId) => keptTurnIds.has(turnId));
+    } finally {
+      this.forgets += 1;
+    }
   }
 
   /**
@@ -153,10 +174,12 @@ export class SentimentTracker {
    * Event detection reads the persona's settings, the reasoning trace and the history as they were when the
    * analysis started. After each wait the analysis checks that its result may be applied (`mayApply`, and the
    * GMI holding the turn) and stops writing when it may not. `currentSentiment` is set on the user context the
-   * moment the writes begin, before the store has saved it. A store write cannot be cancelled: when the history
-   * write lands once the result may not be applied, the analysis takes it back.
+   * moment the writes begin, before the store has saved it. A store write cannot be cancelled: when the user
+   * context write lands once the result may not be applied, the GMI's current context is saved over it; when the
+   * history write lands then, the analysis takes it back. A forget that ended while the history was read or
+   * written has its scrub run again once the write lands.
    * A failure is logged as one `gmi.sentiment_failed` event with the error's type and code and a trace warning;
-   * it never fails the turn.
+   * it never fails the turn. A take-back that fails is logged as one `gmi.sentiment_take_back_failed` event.
    *
    * @param turnId - Current turn identifier.
    * @param userInput - The user's input text to analyze.
@@ -194,6 +217,8 @@ export class SentimentTracker {
       });
       if (!live()) return;
 
+      // The forgets ended before the read: one that ends later is run again once this analysis' write lands.
+      const forgetsAtRead = this.forgets;
       // Get or initialize sentiment history
       let sentimentHistory = await this.workingMemory.get<SentimentHistoryState>(
         'gmi_sentiment_history',
@@ -259,11 +284,21 @@ export class SentimentTracker {
       // a forgotten turn, an abort or a shutdown stops it at the checks below.
       onCommit();
       await this.setUserContext({ ...this.getUserContext(), currentSentiment: sentimentResult.polarity });
-      if (!live()) return;
+      if (!live()) {
+        // The turn dropped the result while the store was writing, and a later turn may have saved a newer context
+        // before this write landed: the GMI's current context is saved over it.
+        await this.afterDroppedWrite(() => this.setUserContext(this.getUserContext()));
+        return;
+      }
+      const writer = {};
+      const before = this.standing;
+      this.standing = { history: sentimentHistory, writer };
       await this.workingMemory.set('gmi_sentiment_history', sentimentHistory);
       if (!live()) {
-        // The turn dropped the result, ended, stopped or was forgotten while the store was writing.
-        await this.takeBackHistoryWrite(turnId, replaced);
+        // The turn dropped the result, ended, failed, stopped or was forgotten while the store was writing.
+        await this.afterDroppedWrite(
+          () => this.takeBackHistoryWrite(turnId, writer, before, replaced, forgetsAtRead),
+        );
         return;
       }
 
@@ -286,6 +321,9 @@ export class SentimentTracker {
 
       // Detect and emit events based on sentiment patterns
       await this.detectAndEmitEvents(turnId, userInput, sentimentResult, sentimentHistory, snapshot);
+      // A forget that ended while the history was read or written may have scrubbed the store before this write
+      // landed with the excerpts it cleared.
+      await this.clearExcerptsAfterForgets(forgetsAtRead);
     } catch (error: unknown) {
       if (!live()) return;
       const fields = errorFields(error);
@@ -295,32 +333,86 @@ export class SentimentTracker {
   }
 
   /**
-   * Takes back the history write of an analysis whose result may not be applied, for a write the store
-   * finished after the turn dropped the result (its post-turn check stopped waiting, or it ended, stopped or was
-   * forgotten). While that write is the stored history's latest, the history it replaced is put back, or the key
-   * is deleted when there was none; after a later analysis wrote, only this turn's trend is removed. Either way the
-   * excerpts of turns the GMI does not hold are cleared, as `forgetTurnsExcept` does: the write may carry
-   * excerpts a forgotten-turn scrub cleared while it was in flight.
+   * Runs the clean-up of a write that landed once its result could not be applied. Its turn may have ended, so a
+   * failure writes one `gmi.sentiment_take_back_failed` event with the error's type and code, and nothing else.
+   *
+   * @param cleanUp - The writes that put the store back.
+   */
+  private async afterDroppedWrite(cleanUp: () => Promise<void>): Promise<void> {
+    try {
+      await cleanUp();
+    } catch (error: unknown) {
+      sentimentLog.warn('gmi.sentiment_take_back_failed', errorFields(error));
+    }
+  }
+
+  /**
+   * Takes back the history write of an analysis whose result may not be applied, once the store has finished it:
+   * the turn dropped the result (its post-turn check stopped waiting, or it ended, failed, stopped or was
+   * forgotten) while the write was in flight, and the write may have landed over a newer one. The stored history
+   * becomes the one the tracker stands by: a later write's, else the one it stood by before this write, else the one
+   * the analysis read; with none, the key is deleted. This turn's trend is left out of it. When a forget ended
+   * since the analysis read the history, the excerpts of the turns the GMI does not hold are cleared, before the
+   * write and again after it while forgets end meanwhile.
    *
    * @param turnId - The turn whose analysis wrote.
-   * @param replaced - The history the write replaced, as the analysis read it.
+   * @param writer - The analysis' mark on {@link SentimentTracker.standing}.
+   * @param before - What the tracker stood by when the write started.
+   * @param read - The history the analysis read before it wrote.
+   * @param forgetsAtRead - The forgets ended before the analysis read the history.
    */
-  private async takeBackHistoryWrite(turnId: string, replaced: SentimentHistoryState | undefined): Promise<void> {
-    const stored = await this.workingMemory.get<SentimentHistoryState>('gmi_sentiment_history');
-    if (!stored) return;
-    const restored = stored.lastAnalyzedTurnId === turnId
-      ? replaced
-      : { ...stored, trends: stored.trends.filter((trend) => trend.turnId !== turnId) };
-    if (!restored) {
-      await this.workingMemory.delete('gmi_sentiment_history');
-      return;
+  private async takeBackHistoryWrite(
+    turnId: string,
+    writer: object,
+    before: StandingHistory | undefined,
+    read: SentimentHistoryState | undefined,
+    forgetsAtRead: number,
+  ): Promise<void> {
+    const latest = this.standing;
+    const base = latest && latest.writer !== writer ? latest.history : before ? before.history : read;
+    const forgets = this.forgets;
+    const scrub = forgets !== forgetsAtRead;
+    const restored = base && {
+      ...base,
+      trends: base.trends
+        .filter((trend) => trend.turnId !== turnId)
+        .map((trend) => (!scrub || !trend.context || this.holdsTurn(trend.turnId) ? trend : { ...trend, context: '' })),
+    };
+    this.standing = { history: restored };
+    if (restored) await this.workingMemory.set('gmi_sentiment_history', restored);
+    else await this.workingMemory.delete('gmi_sentiment_history');
+    await this.clearExcerptsAfterForgets(forgets);
+  }
+
+  /**
+   * Runs the forgotten-turn scrub again, with the turns the GMI holds now, while forgets end after `seen`: a write
+   * that read the store before a forget ended can land after its scrub with the excerpts it cleared.
+   *
+   * @param seen - The forgets ended when the write's history was read.
+   */
+  private async clearExcerptsAfterForgets(seen: number): Promise<void> {
+    let ended = seen;
+    while (this.forgets !== ended) {
+      ended = this.forgets;
+      await this.clearStoredExcerpts((turnId) => this.holdsTurn(turnId));
     }
-    await this.workingMemory.set('gmi_sentiment_history', {
-      ...restored,
-      trends: restored.trends.map((trend) => (
-        (this.holdsTurn(trend.turnId) || !trend.context) ? trend : { ...trend, context: '' }
-      )),
-    });
+  }
+
+  /**
+   * Clears the `context` of each stored sentiment trend whose turn `keeps` does not keep; writes only when one has
+   * an excerpt to clear.
+   *
+   * @param keeps - Whether a turn keeps its excerpt.
+   */
+  private async clearStoredExcerpts(keeps: (turnId: string) => boolean): Promise<void> {
+    const history = await this.workingMemory.get<SentimentHistoryState>('gmi_sentiment_history');
+    if (!history?.trends?.some((trend) => trend.context && !keeps(trend.turnId))) return;
+    const scrubbed = {
+      ...history,
+      trends: history.trends.map((trend) => (keeps(trend.turnId) ? trend : { ...trend, context: '' })),
+    };
+    this.standing = { history: scrubbed };
+    await this.workingMemory.set('gmi_sentiment_history', scrubbed);
   }
 
   /**
