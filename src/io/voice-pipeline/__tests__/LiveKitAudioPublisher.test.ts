@@ -730,6 +730,24 @@ describe('the speech mark', () => {
     expect(outcome).toMatchObject({ sequence: 1, playedSamples: 480, sampleRate: 24000 });
     await f.publisher.close();
   });
+  it("rejects a playback wait aborted after the page answered, while the chunk's frames still wait for the track, at once and not at its deadline, in participant playout", async () => {
+    const f = marking({ shows: 'held', options: page });
+    const sent = f.publisher.sendAudio(f.chunk(clip('clip-a'), announced)); sent.catch(() => {});
+    await vi.waitFor(() => expect(f.order).toEqual(['published', 'mark clip-a']));
+    const controller = new AbortController(); let outcome: unknown;
+    void f.publisher.waitForPlayback(generation, 1, controller.signal).then((receipt) => { outcome = receipt; }, (error: Error) => { outcome = error.message; });
+    // The track's queue is full: the chunk's first frame waits for room once the chunk is announced.
+    let land!: () => void; f.source().gate = new Promise<void>((resolve) => { land = resolve; });
+    f.show(); await vi.waitFor(() => expect(f.messages).toHaveLength(1));
+    // The page answers first, so only the capture and the track's drain are left to wait for.
+    f.publisher.receiveReceipt({ type: 'playback', generation, sequence: 1, playedSamples: 480, sampleRate: 24000 }); await settle();
+    expect(outcome).toBeUndefined();
+    // A barge-in aborts the wait well within the 1,000 ms deadline: it ends now, with no frame captured and nothing played out.
+    controller.abort(); await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(outcome).toBe('publisher cancelled'); expect(f.source().captured).toHaveLength(0);
+    f.source().gate = undefined; land(); await sent.catch(() => {});
+    await f.publisher.close();
+  });
   it('resolves a playback wait begun while @livekit/rtc-node is still loading, once the chunk has played, in participant playout', async () => {
     let load!: () => void; const loading = new Promise<void>((resolve) => { load = resolve; });
     vi.doMock('@livekit/rtc-node', async () => { await loading; return fakePublishingRtc(); });
