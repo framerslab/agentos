@@ -1327,6 +1327,17 @@ describe.skipIf(!POSTGRES_URL)('the forgotten-user ledger with the store on Post
     await writesOneUnkeyedRowAndFindsIt(primary, copy);
   });
 
+  it("refuses a copy that is a second pool on the store's own database and schema, and pairs nothing", async () => {
+    const schema = newSchema();
+    const primary = await openPostgres(schema);
+    const copy = await openPostgres(schema);
+
+    await expect(ForgottenLedger.open({ primary, copy })).rejects.toMatchObject({ name: 'ForgottenLedgerError', code: 'COPY_UNAVAILABLE' });
+    // Neither the pair's markers nor the row the open read the copy by are left in the one table both name.
+    expect(await everyRowOf(primary)).toEqual([]);
+    expect(refusals()).toHaveLength(1);
+  });
+
   it('two first opens of one store and copy end with one identity', async () => {
     const pairs = await twoProcesses();
     await openTogether(pairs);
