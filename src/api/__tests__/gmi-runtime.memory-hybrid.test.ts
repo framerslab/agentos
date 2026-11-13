@@ -377,6 +377,57 @@ describe("agent({ runtime: 'gmi' }) memory.recall.retrieval", () => {
     }
   });
 
+  it("'hybrid' with capture 'off' on a GMI turn: a memory question still sends the reserved memory, as with a record", async () => {
+    const GOLD = 'The bike shed code is XQ7Z.';
+    // The fixture of the case above: only the code's exact word finds the oldest memory, and the cut leaves it out.
+    const statements = [GOLD, ...Array.from({ length: 64 }, (_, i) => `Note ${i + 10}: what it is you and I are on, and where it is.`)];
+    const run = async (capture: 'metadata' | 'off') => {
+      logged.length = 0;
+      const k = key();
+      const emb = key();
+      const s = script('openai', k, { replies: [...statements.map(() => reply.text('Noted.')), reply.text('Noted.'), reply.text('Noted.')] });
+      script('openai', emb, { replies: [] });
+      vi.stubEnv('OPENAI_API_KEY', emb);
+      const a = agent({
+        runtime: 'gmi',
+        name: 'Shed',
+        provider: 'openai',
+        model: 'stub-model',
+        apiKey: k,
+        fallbackProviders: [],
+        cognition: { memory: { embedding: { provider: 'openai' }, recall: { retrieval: 'hybrid', capture } }, mechanisms: false },
+      } as unknown as AgentOptions);
+      try {
+        const session = a.session('s');
+        for (const statement of statements) await session.send(statement);
+        session.clear();
+        await session.send('What is it you and I are on, and where is XQ7Z?');
+        session.clear();
+        const asked = (await session.send('Do you remember what it is you and I are on, and where is XQ7Z?')) as unknown as { memoryRecall?: unknown };
+        return {
+          plainBlock: memoryBlockOf(s, statements.length),
+          askedBlock: memoryBlockOf(s, statements.length + 1),
+          memoryRecall: asked.memoryRecall,
+          reserveFired: events('memory.recall.reserve_fired'),
+        };
+      } finally {
+        await a.close();
+      }
+    };
+    const recorded = await run('metadata');
+    const off = await run('off');
+    // Precondition: with a record the memory question reserved the memory and the plain question left it out.
+    expect(recorded.askedBlock).toContain(GOLD.slice(0, -1));
+    expect(recorded.plainBlock).not.toContain(GOLD.slice(0, -1));
+    // With no record the block still reserves the same room: the model receives the memory, and the line counts it.
+    expect(off.memoryRecall).toBeUndefined();
+    expect(off.plainBlock).not.toContain(GOLD.slice(0, -1));
+    expect(off.askedBlock).toContain(GOLD.slice(0, -1));
+    expect(off.askedBlock.match(/^## Relevant Memories/gm)).toHaveLength(1);
+    expect(off.reserveFired).toEqual([expect.objectContaining({ added: 1 })]);
+    expect(recorded.reserveFired).toEqual([expect.objectContaining({ added: 1 })]);
+  });
+
   it("'hybrid' on a GMI turn whose question the embedding provider fails on: the dense leg is absent, exact words still put the memory in the block", async () => {
     const MARK = 'tarpaulin';
     const statements = ['The bike shed code is XQ7Z.', 'I water the tomatoes every second day.', 'My sister Ana lives in Porto.'];
