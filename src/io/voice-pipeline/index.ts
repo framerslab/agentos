@@ -263,6 +263,8 @@ export {
 export { lineSpeaker, splitFinalBySpeaker } from './transcriptSpeakers.js';
 export { phraseHeard, type HeardLine, type PhraseHeardOptions, type PhraseHeardResult } from './phraseHeard.js';
 export { spokenMatch, spokenWords, type SpokenMatch } from './spokenMatch.js';
+// The mark a published track of synthetic speech carries on its participant's attributes, for whatever reads it there.
+export { LIVEKIT_SPEECH_MARK_ATTRIBUTES, type SpeechMark } from './LiveKitAudioPublisher.js';
 export {
   VoiceMetricsReporter,
   type VoiceMetricEvent,
