@@ -71,7 +71,7 @@ new LocalCrossEncoderReranker({
 });
 ```
 
-- Needs Transformers.js: `@huggingface/transformers` 3.x, an optional dependency of the package, else `@xenova/transformers` 2.x. `isAvailable()` answers whether one of them imports; `rerank()` throws when neither does. Both are imported at run time by a specifier a bundler does not follow, and memory recall imports the provider itself only when a `{ kind: 'local' }` rerank loads, so a host that bundles the package builds without either one.
+- Needs Transformers.js: `@huggingface/transformers` 3.x, an optional dependency of the package, else `@xenova/transformers` 2.x. `isAvailable()` answers whether one of them imports; `rerank()` throws when neither does. Both are imported at run time by a specifier a bundler does not follow, and memory recall imports the provider itself only when a `{ kind: 'local' }` rerank loads, so a host that bundles the package builds without either one. That import resolves in Node and on a page with an import map. A bundled browser page passes Transformers.js in `providerOptions.transformers`, as the module or a function that imports it, so its own bundler takes the package in: `new LocalCrossEncoderReranker({ providerId: 'local', providerOptions: { transformers: () => import('@huggingface/transformers') } })`. With it set, the provider uses only that module, and `isAvailable()` answers whether it loads.
 - `LOCAL_RERANKER_MODELS` lists three Hugging Face model ids, each with the licence its repository states (read on 13 November 2026):
 
   | Model | Licence |
