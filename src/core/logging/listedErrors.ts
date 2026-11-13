@@ -48,7 +48,7 @@ export const LISTED_ERROR_TYPES: ReadonlySet<string> = closedList([
   'ImageUpscaleNotSupportedError', 'ImageVariationNotSupportedError', 'IngestRouterBudgetExceededError',
   'IngestRouterDispatcherMissingError', 'IngestRouterUnknownKindError', 'InvalidAgentWorkspaceIdError',
   'InvalidSegmentationPromptError', 'InvalidToolNameError', 'InvalidWikiPageIdError', 'LLMProviderCircuitOpenError',
-  'LanguageDetectionUnsupportedError', 'LlmOutputValidationError', 'LogValidationError',
+  'LanguageDetectionUnsupportedError', 'LibraryCursorError', 'LlmOutputValidationError', 'LogValidationError',
   'MemoryRouterAugmentedTableMissingError', 'MemoryRouterBudgetExceededError', 'MemoryRouterDispatcherMissingError',
   'MemoryRouterUnknownCategoryError', 'MissingStageError', 'ModelRouterError', 'NoCapacityError',
   'NoVoiceProvidersAvailableError', 'NotFoundError', 'ObjectGenerationError', 'OllamaProviderError',
