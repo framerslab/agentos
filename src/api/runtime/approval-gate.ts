@@ -242,12 +242,17 @@ export function createApprovalGate(o: CreateApprovalGateOptions): ApprovalGateFn
     const late = stopped();
     if (late) return late;
     try {
+      // approvalDecided is handed the decision itself, so the gate reads what
+      // it acts on first: a callback that edits the object changes nothing.
+      const approved = decision.approved;
+      const reason = decision.reason;
+      const toolArgs = decision.modifications?.toolArgs;
       safeCall('approvalDecided', o.on?.approvalDecided, decision);
-      if (!decision.approved) return refusal(decision.reason ?? 'rejected by the approval handler');
+      if (!approved) return refusal(reason ?? 'rejected by the approval handler');
       // Arguments are rewritten in onBeforeToolExecution, never by a decision:
       // an approval that names other arguments is refused, so the call never
       // runs with the ones the approver meant to replace.
-      if (decision.modifications?.toolArgs != null) return refusal(TOOL_ARGS_NOT_APPLIED);
+      if (toolArgs != null) return refusal(TOOL_ARGS_NOT_APPLIED);
       if (o.hitl.guardrailOverride !== false) {
         const { runPostApprovalGuardrails } = await import('../agency.js');
         // The import yields, and the guardrails fire their events as soon as
