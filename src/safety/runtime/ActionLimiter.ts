@@ -177,9 +177,9 @@ export class SqlActionLimiter implements ActionLimiter {
   }
 
   /**
-   * Reserves one unit under every rule, in the order given. A rule with no room left, an action that already ran or
-   * is running, one released three times, or a scope with no id in the target refuses the whole action, and the units
-   * taken before it are given back.
+   * Reserves one unit under every rule, in the order given; a rule listed more than once is reserved once. A rule with
+   * no room left, an action that already ran or is running, one released three times, or a scope with no id in the
+   * target refuses the whole action, and the units taken before it are given back.
    *
    * @throws TypeError for a rule this limiter was not built with, or whose numbers differ.
    * @throws SpendMeterUnavailableError when the store does not answer; the units taken are given back where they can be.
@@ -187,9 +187,13 @@ export class SqlActionLimiter implements ActionLimiter {
   async reserve(request: Parameters<ActionLimiter['reserve']>[0]): Promise<ActionLimitAnswer> {
     // every rule is known and has its key before any unit is taken
     const plan: Array<{ rule: ActionLimitRule; key: string }> = [];
+    const planned = new Set<string>();
     for (const asked of request.rules) {
       const rule = this.rules.get(asked.id);
       if (!rule || !sameRule(rule, asked)) throw new TypeError(`Limit rule ${RULE_ID.test(String(asked.id)) ? asked.id : 'of another shape'} is not one this limiter was built with.`);
+      // copies of one rule share its key and its operation, so the rule is reserved once
+      if (planned.has(rule.id)) continue;
+      planned.add(rule.id);
       const key = limiterKeyOf(rule, request.target, request.dryRun);
       if (key === undefined) return { status: 'denied', reason: 'unresolvable', ruleId: rule.id };
       plan.push({ rule, key });
