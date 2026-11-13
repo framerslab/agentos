@@ -1291,6 +1291,37 @@ describe('the usage event of a refused call', () => {
     }
   });
 
+  it('and its root span name a stop for a streamText call in prompt tool mode whose refusal the guards let through', async () => {
+    const exporter = new InMemorySpanExporter();
+    trace.disable();
+    trace.setGlobalTracerProvider(new BasicTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] }));
+    configureAgentOSObservability({ enabled: true, tracing: { enabled: true } });
+    try {
+      route([
+        [/api\.openai\.com\/v1\/models/, modelList],
+        [/api\.openai\.com\/v1\/chat\/completions/, chatRefusal],
+      ]);
+      const events = heard();
+      const lookup = { description: 'Look a word up.', parameters: { type: 'object' as const, properties: { q: { type: 'string' } }, required: ['q' as const] }, execute: vi.fn(async () => ({ hits: 1 })) };
+
+      const letsThrough: IGuardrailService = { id: 'lets-through', evaluateOutput: async () => null };
+      const result = streamText({ ...guarded([letsThrough]), tools: { lookup }, toolMode: 'prompt' });
+      for await (const _part of result.fullStream) void _part;
+      expect(await result.finishReason).toBe('stop');
+      expect(await result.refusal).toBe(REFUSAL);
+
+      await vi.waitFor(() => expect(events.length).toBe(1));
+      expect(events[0]).toMatchObject({ surface: 'streamText', finishReason: 'stop', refused: true });
+      const roots = exporter.getFinishedSpans().filter((span) => span.name === 'agentos.api.stream_text');
+      expect(roots).toHaveLength(1);
+      expect(roots[0]?.attributes).toMatchObject({ 'agentos.api.finish_reason': 'stop', 'agentos.api.refused': true });
+      expect(roots[0]?.attributes['agentos.api.guard_blocked']).toBeUndefined();
+    } finally {
+      configureAgentOSObservability();
+      trace.disable();
+    }
+  });
+
   it('from streamText that moved to prompt tool mode after a native tool step, ends on the refusal as a stop', async () => {
     // A native tool step runs `lookup`; the next request is turned down for its tools, so the call goes on in
     // prompt tool mode, whose whole answer is the refusal.
