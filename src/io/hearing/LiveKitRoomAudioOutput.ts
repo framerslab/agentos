@@ -328,6 +328,9 @@ export class LiveKitRoomAudioOutput {
           text: '',
         };
         if (mark) this.marks.set(chunk, mark);
+        // A stop can land in the turn between the last wait's check and this send: it is read here, synchronously
+        // before the send, so the track takes no chunk after a clear, an abort or a close.
+        if (run.error) throw run.error;
         handed = true;
         await this.within(run, this.publisher.sendAudio(chunk));
       }
