@@ -159,6 +159,54 @@ describe('RecallReranker', () => {
     expect(events('memory.recall.rerank_failed_scoring')).toEqual([expect.objectContaining({ provider: 'local', failures: 2 })]);
   });
 
+  it('sends as many candidates as maxCandidates says, past the hundred a reranker service sends when it is told no limit', async () => {
+    const seen: number[] = [];
+    const r = new RecallReranker(
+      { ...LOCAL, maxCandidates: 130 },
+      { createProvider: () => provider(async (input) => { seen.push(input.documents.length); return reversed(input); }) as never },
+    );
+    r.start();
+    await r.ready();
+    const out = await r.rerank('q', docs(150));
+    expect(seen).toEqual([130]);
+    expect(out.record).toMatchObject({ provider: 'local', candidates: 130 });
+    expect(out.scores.size).toBe(130);
+
+    // The judge scores every candidate it is sent, in batches of ten.
+    let scoringCalls = 0;
+    const invoke = async (system: string, user: string) => {
+      if (!system.includes('relevance scorer')) return '[]';
+      scoringCalls += 1;
+      return JSON.stringify((user.match(/^\[\d+\]/gm) ?? []).map(() => 5));
+    };
+    const judge = new RecallReranker({ kind: 'llm', invoke, model: 'judge-model', maxCandidates: 130 });
+    judge.start();
+    await judge.ready();
+    const judged = await judge.rerank('q', docs(150));
+    expect(scoringCalls).toBe(13);
+    expect(judged.record).toMatchObject({ provider: 'llm', candidates: 130 });
+    expect(judged.scores.size).toBe(130);
+  });
+
+  it('a judge the turn stopped waiting for starts no further model call', async () => {
+    // The first scoring call never answers. The rerank's deadline and the judge's own wait for that call end together.
+    let calls = 0;
+    const invoke = async (): Promise<string> => {
+      calls += 1;
+      return new Promise<string>(() => undefined);
+    };
+    const r = new RecallReranker({ kind: 'llm', invoke, model: 'judge-model' });
+    r.start();
+    await r.ready();
+    const pending = r.rerank('q', docs(20));
+    await vi.advanceTimersByTimeAsync(RERANK_DEFAULTS.llmTimeoutMs);
+    expect((await pending).record).toEqual({ provider: 'none', reason: 'timeout' });
+    expect(calls).toBe(1);
+    // Neither the second scoring batch nor the ranking is asked for afterwards.
+    await vi.advanceTimersByTimeAsync(3 * RERANK_DEFAULTS.llmTimeoutMs);
+    expect(calls).toBe(1);
+  });
+
   it("the judge calls the host's invoke with the named model, in two phases, and a rejected invoke keeps the order with reason error", async () => {
     const calls: Array<{ system: string; model?: string }> = [];
     const invoke = async (system: string, user: string, model?: string) => {
