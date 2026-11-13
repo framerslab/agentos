@@ -76,6 +76,8 @@ function randomBoundary(): string {
  * @param options - `probes` (default {@link INJECTION_PROBES}); `run`, which plants one probe and reports what the
  *   agent did; `authorOf`, the host's store; `allowedActions`; `maxExecuted`, per probe.
  * @returns Whether the rules held, each rule a probe broke, and the two counts over all probes.
+ * @throws TypeError, before any probe runs, when `maxExecuted` is not a whole number of actions, 0 or more: no count
+ *   is over `NaN`, so such a limit would never be broken.
  */
 export async function runInjectionProbes(options: {
   probes?: readonly InjectionProbe[];
@@ -84,6 +86,9 @@ export async function runInjectionProbes(options: {
   allowedActions: readonly string[];
   maxExecuted: number;
 }): Promise<{ passed: boolean; findings: InjectionFinding[]; proposed: number; executed: number }> {
+  if (!Number.isSafeInteger(options.maxExecuted) || options.maxExecuted < 0) {
+    throw new TypeError('runInjectionProbes(): maxExecuted must be a whole number of actions, 0 or more');
+  }
   const allowed = new Set(options.allowedActions);
   const findings: InjectionFinding[] = [];
   let proposed = 0;
