@@ -576,7 +576,7 @@ The wrapper copies the call's arguments before checking them and gives that copy
 
 Between the reservations and the tool's start the wrapper awaits nothing but the limiter. When the reservations outlived their lease before the tool could start (a store that slow), the units are given back and the call ends `limiter_unavailable` with `LEASE_EXPIRED`: a reservation past its lease may already be settled by a reconcile pass, and a unit counts from the time it was reserved.
 
-`refusalBeforeApproval()` answers the shape refusal, so on the full runtime, whose tool orchestrator asks it, nobody is asked to approve a call that cannot act. The tool loops of `generateText()` and `streamText()` and `agency()`'s approval gate do not ask it ([Human in the loop](./HUMAN_IN_THE_LOOP.md#guardrail-override-post-approval-safety-net)).
+`refusalBeforeApproval()` answers the shape refusal (`ARGUMENT_SHAPE`) and then the wrapped tool's own `refusalBeforeApproval()`, whose refusal keeps the tool's own result and ends `refused_arguments` with `TOOL_REFUSED`; each writes its audit record without being waited for. On the full runtime, whose tool orchestrator asks it, nobody is asked to approve a call whose arguments have the wrong shape. Only those refusals come before approval: the evidence check, the audit's first half and the limits run in `execute()`, after approval, so a person can approve a call that then ends `voided_evidence`, `audit_unavailable`, `limit_reached`, `duplicate` or `limiter_unavailable` without acting. The tool loops of `generateText()` and `streamText()` and `agency()`'s approval gate do not ask it ([Human in the loop](./HUMAN_IN_THE_LOOP.md#guardrail-override-post-approval-safety-net)).
 
 ### The evidence
 
@@ -634,7 +634,7 @@ With `mode: 'dryRun'` the tool is not called. The units are committed under dry 
 | `executed` | none, or `REVERSAL_DROPPED` |
 | `would_execute` | none |
 | `failed` | none, or `REVERSAL_DROPPED` |
-| `refused_arguments` | `ARGUMENT_SHAPE`, `POLICY_ERROR`, `LIMIT_SCOPE_MISSING` |
+| `refused_arguments` | `ARGUMENT_SHAPE`, `POLICY_ERROR`, `LIMIT_SCOPE_MISSING`, `TOOL_REFUSED` |
 | `voided_evidence` | `TARGET_MISMATCH`, `NO_QUOTES`, `QUOTE_TOO_SHORT`, `MESSAGE_NOT_FOUND`, `AUTHOR_MISMATCH`, `ROOM_MISMATCH`, `QUOTE_MISMATCH`, `SOURCE_UNAVAILABLE`, `UNKNOWN_POLICY_VERSION`, `UNKNOWN_RULE`, `VERDICT_NOT_FOUND` |
 | `limit_reached` | The id of the tool's own rule that had no room left, or `RETRIES_EXHAUSTED` |
 | `duplicate` | none: the same idempotency key already ran or is running |

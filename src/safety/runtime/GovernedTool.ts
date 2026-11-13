@@ -36,6 +36,8 @@ export type ActionEndCode =
   | EvidenceFailure
   | 'ARGUMENT_SHAPE' | 'POLICY_ERROR' | 'TARGET_MISMATCH' | 'LIMIT_SCOPE_MISSING' | 'RETRIES_EXHAUSTED'
   | 'LEASE_EXPIRED' | 'REVERSAL_DROPPED'
+  /** The wrapped tool's own `refusalBeforeApproval()` refused the call. */
+  | 'TOOL_REFUSED'
   /** The id of one of the governed tool's own limit rules (`policy.limits`), for `limit_reached`. */
   | ActionLimitRule['id'];
 
@@ -411,15 +413,27 @@ export function governTool<TInput extends { evidence: ActionEvidence }, TOutput>
     return { ...result, details: { ...details, governance: governanceOf('executed', code, recordId) } };
   }
 
-  /** The shape refusal, answered before anyone is asked to approve a call that cannot act. */
+  /**
+   * The shape refusal, answered before anyone is asked to approve a call that cannot act, and then the wrapped tool's
+   * own refusal. Each is recorded as a governed call that ended `refused_arguments`; the records are written without
+   * being waited for, and refuseEarly catches what the sink throws.
+   */
   function refusalBeforeApproval(args: Record<string, any>, context: ToolExecutionContext): ToolExecutionResult<TOutput> | undefined {
     if (!isActionEvidence(args?.evidence)) {
       const recordId = `act_${randomUUID()}`;
-      // the record is written without being waited for; refuseEarly catches what the sink throws
       void refuseEarly(recordId, instant(), 'refused_arguments', 'ARGUMENT_SHAPE').catch(() => undefined);
       return refusal('refused_arguments', 'ARGUMENT_SHAPE', recordId);
     }
-    return tool.refusalBeforeApproval?.(args, context);
+    const own = tool.refusalBeforeApproval?.(args, context);
+    // only a failure is a refusal; the orchestrator gates any other answer as it would no answer
+    if (!own || own.success !== false) return own;
+    const recordId = `act_${randomUUID()}`;
+    void refuseEarly(recordId, instant(), 'refused_arguments', 'TOOL_REFUSED').catch(() => undefined);
+    // as for a failed result: a key or a reversal the tool returns is not passed on
+    const details: Record<string, any> = isPlainRecord(own.details) ? { ...own.details } : {};
+    delete details.reversalRef;
+    delete details.reversal;
+    return { ...own, details: { ...details, governance: governanceOf('refused_arguments', 'TOOL_REFUSED', recordId) } };
   }
 
   // A plain object whose members are all its own, so a host can spread it. The members of the tool are named one by
