@@ -350,7 +350,8 @@ export class LiveKitRoomAudioOutput {
 
   /**
    * Empties the track's queue, as the publisher's `clearPlayback()` does, and rejects the play under way with
-   * `room audio cleared`. Resolves once the queue is empty, a frame whose capture was under way cleared as it landed.
+   * `room audio cleared`; no further chunk of that play reaches the track. Resolves once the queue is empty, a frame
+   * whose capture was under way cleared as it landed.
    */
   clear(): Promise<void> {
     if (this.closed) return Promise.resolve();
