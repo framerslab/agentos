@@ -184,6 +184,15 @@ export function runGovernedToolSuite(name: string, open: () => Promise<StoreUnde
       expect(governance((await viaModel(governed, two)).result).outcome).toBe('executed');
     });
 
+    it('a rule listed twice in the limits counts once', async () => {
+      const room = { ...RULES[0], max: 1 };
+      const rules = [room, { ...room }];
+      const governed = governTool(mute, { ...MUTE_POLICY, limits: rules }, governanceOf(limiterOf(under.prefix(), rules)));
+      expect(governance((await viaModel(governed, muteOf(message('m1')))).result).outcome).toBe('executed');
+      expect(governance((await viaModel(governed, muteOf(message('m2')))).result)).toMatchObject({ outcome: 'limit_reached', code: 'mute_room_hour' });
+      expect(mute.execute).toHaveBeenCalledTimes(1);
+    });
+
     it.each(['evidence', 'audit', 'limiter'] as const)('isolates arguments changed while awaiting %s', async (stage) => {
       let callerArgs: MuteArgs | undefined;
       const mutate = () => {
