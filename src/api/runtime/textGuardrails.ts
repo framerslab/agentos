@@ -631,6 +631,8 @@ export function guardedStreamText(opts: GenerateTextOptions, inner: (opts: Gener
       // The model's refusal message is text the model wrote: the output guards judge it before the caller can read it.
       // The stream was read to its end, so the call's refusal promise has settled.
       const message = finish === undefined ? await source.refusal : undefined;
+      // an empty refusal message has nothing to judge, and goes out as it came
+      if (message === '') deliveredRefusal = message;
       if (message) {
         const judged = await run.judgeReply(message);
         // a caller's abort while the guards judged the message ends the stream with the reason, whatever they

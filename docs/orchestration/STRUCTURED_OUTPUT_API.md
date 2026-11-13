@@ -241,9 +241,12 @@ try {
     console.log(error.message);          // names the number of attempts
     console.log(error.rawText);          // the last reply
     console.log(error.validationErrors); // the ZodError of the last attempt, when it parsed but did not validate
+    console.log(error.refusal);          // the model's refusal message, when it refused the request
   }
 }
 ```
+
+When the model refuses the request with a refusal message (OpenAI's refusal), `generateObject()` makes no repair attempt: it throws `ObjectGenerationError` at once, with the message in `refusal` (the piece that came, when the output cap cut it off). [A refusal from the model](../getting-started/HIGH_LEVEL_API.md#a-refusal-from-the-model) describes the signal.
 
 `ObjectGenerationError` is also what `streamObject()`'s `object` rejects with. Provider errors (a missing key, an HTTP failure after the fallback chain) are thrown as they are.
 

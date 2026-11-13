@@ -760,6 +760,8 @@ interface ResponsesOutputSummary {
   text: string;
   /** Concatenated `refusal` parts of every message item: the model's refusal message, or '' when it sent none. */
   refusal: string;
+  /** Whether any message item holds a `refusal` part, one with an empty message included. */
+  refused: boolean;
   /** Function calls in output order. */
   toolCalls: Array<{ id: string; type: 'function'; function: { name: string; arguments: string } }>;
   /** Number of output items of any type, reasoning included. */
@@ -779,12 +781,16 @@ function summarizeResponsesOutput(
   const items = output ?? [];
   let text = '';
   let refusal = '';
+  let refused = false;
   const toolCalls: ResponsesOutputSummary['toolCalls'] = [];
   for (const item of items) {
     if (item.type === 'message') {
       for (const part of item.content ?? []) {
         if (part.type === 'output_text' && typeof part.text === 'string') text += part.text;
-        else if (part.type === 'refusal' && typeof part.refusal === 'string') refusal += part.refusal;
+        else if (part.type === 'refusal' && typeof part.refusal === 'string') {
+          refusal += part.refusal;
+          refused = true;
+        }
       }
     } else if (item.type === 'function_call') {
       toolCalls.push({
@@ -794,7 +800,7 @@ function summarizeResponsesOutput(
       });
     }
   }
-  return { text, refusal, toolCalls, itemCount: items.length };
+  return { text, refusal, refused, toolCalls, itemCount: items.length };
 }
 
 /**
@@ -807,13 +813,21 @@ function summarizeResponsesOutput(
  * as OpenAI's own handling reads an incomplete answer before its refusal, and
  * the piece that came is kept in `refusal`. Without one, the finish reason is
  * the one given and no `refusal` field is set.
+ *
+ * `present` says whether the answer holds a refusal: by default a non-empty
+ * message. A Responses `refusal` content part is one whatever its message, so
+ * that path passes it, and an empty message is then kept as `''`.
  */
 function withRefusal(
   finishReason: string | null,
   refusal: string | null | undefined,
+  present: boolean = typeof refusal === 'string' && refusal.length > 0,
 ): Pick<ModelCompletionChoice, 'finishReason' | 'refusal'> {
-  if (typeof refusal !== 'string' || refusal.length === 0) return { finishReason };
-  return finishReason === null || finishReason === 'stop' ? { finishReason: 'refusal', refusal } : { finishReason, refusal };
+  if (!present) return { finishReason };
+  const message = typeof refusal === 'string' ? refusal : '';
+  return finishReason === null || finishReason === 'stop'
+    ? { finishReason: 'refusal', refusal: message }
+    : { finishReason, refusal: message };
 }
 
 /**
@@ -1469,11 +1483,13 @@ export class OpenAIProvider implements IProvider {
   ): AsyncGenerator<ModelCompletionResponse, void, undefined> {
     const accumulatedToolCalls: Map<number, { id?: string; type?: 'function'; function?: { name?: string; arguments?: string; } }> = new Map();
     const accumulatedRefusal = { text: '' };
+    // Whether a chunk reported the answer's finish reason.
+    let finished = false;
 
     for await (const data of this.parseSseStream(stream, abortSignal)) {
       if (abortSignal?.aborted) break;
       // OpenAI ends the stream with [DONE]; the finish and usage chunks come before it.
-      if (data === '[DONE]') return;
+      if (data === '[DONE]') break;
       let mapped: ModelCompletionResponse;
       try {
         const apiChunk = JSON.parse(data) as OpenAIAPITypes.ChatCompletionStreamResponse;
@@ -1482,11 +1498,26 @@ export class OpenAIProvider implements IProvider {
         log.warn('llm.stream_invalid', { provider: 'openai', bytes: new TextEncoder().encode(data).byteLength, reason: 'json' });
         continue;
       }
+      if (mapped.choices[0]?.finishReason) finished = true;
       yield mapped;
     }
 
     if (abortSignal?.aborted) {
       yield this.abortedStreamChunk(modelId, 'Stream aborted by caller');
+      return;
+    }
+    // A refusal message whose answer never finished was cut off: it is not a
+    // refusal the caller can rely on, so the stream ends on an error.
+    if (!finished && accumulatedRefusal.text.length > 0) {
+      yield {
+        id: `openai-truncated-${Date.now()}`,
+        object: 'chat.completion.chunk',
+        created: Math.floor(Date.now() / 1000),
+        modelId,
+        choices: [],
+        error: { message: 'OpenAI chat stream ended before the refused answer finished', type: 'stream_truncated' },
+        isFinal: true,
+      };
     }
   }
 
@@ -1695,12 +1726,14 @@ export class OpenAIProvider implements IProvider {
             }
           }
           const refusal = summary.refusal || emittedRefusal;
+          // A refusal part with an empty message is a refusal too.
+          const refused = summary.refused || emittedRefusal.length > 0;
 
           const usage = response?.usage
             ? this.mapResponsesUsage(response.usage, response.model ?? modelId)
             : undefined;
           const status = response?.status ?? (event.type === 'response.incomplete' ? 'incomplete' : 'completed');
-          if (summary.itemCount === 0 && emittedText.length === 0 && refusal.length === 0 && calls.length === 0) {
+          if (summary.itemCount === 0 && emittedText.length === 0 && !refused && calls.length === 0) {
             // Nothing streamed and nothing in the output: the malformed body
             // the non-streamed mapping throws INVALID_RESPONSE for.
             yield chunk({
@@ -1727,7 +1760,7 @@ export class OpenAIProvider implements IProvider {
             response?.incomplete_details?.reason,
             toolCalls.length > 0,
           );
-          if (emittedText.length === 0 && toolCalls.length === 0 && refusal.length === 0) {
+          if (emittedText.length === 0 && toolCalls.length === 0 && !refused) {
             this.warnReasoningOnlyOutput(response ?? { id: responseId, status });
           }
           yield chunk({
@@ -1739,7 +1772,7 @@ export class OpenAIProvider implements IProvider {
                 content: null,
                 tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
               },
-              ...withRefusal(finishReason, refusal),
+              ...withRefusal(finishReason, refusal, refused),
               logprobs: null,
             }],
             usage,
@@ -2380,7 +2413,7 @@ export class OpenAIProvider implements IProvider {
     if (apiResponse.status === 'failed') {
       throw responsesFailedError(apiResponse, usage);
     }
-    const { text: assistantText, refusal, toolCalls, itemCount } = summarizeResponsesOutput(apiResponse.output);
+    const { text: assistantText, refusal, refused, toolCalls, itemCount } = summarizeResponsesOutput(apiResponse.output);
     const finishReason = responsesFinishReason(
       apiResponse.status,
       apiResponse.incomplete_details?.reason,
@@ -2413,7 +2446,7 @@ export class OpenAIProvider implements IProvider {
       );
     }
 
-    if (assistantText.length === 0 && toolCalls.length === 0 && refusal.length === 0) {
+    if (assistantText.length === 0 && toolCalls.length === 0 && !refused) {
       this.warnReasoningOnlyOutput(apiResponse);
     }
 
@@ -2430,7 +2463,7 @@ export class OpenAIProvider implements IProvider {
           content: assistantText.length > 0 ? assistantText : null,
           tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
         },
-        ...withRefusal(finishReason, refusal),
+        ...withRefusal(finishReason, refusal, refused),
         logprobs: null,
       }],
       usage,

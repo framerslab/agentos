@@ -224,7 +224,11 @@ if (result.finishReason === 'refusal') {
 }
 ```
 
-When an OpenAI model refuses a request with a refusal message, `generateText()` returns `finishReason: 'refusal'`, the message in `refusal` and an empty `text`, so a caller can tell a refusal from an empty answer. The call does not throw, and nothing is sent to a fallback provider. `streamText()` sends no text part for it. Its `finishReason` and `refusal` promises settle as the stream is read, as `text` does: once `textStream` or `fullStream` has been read to its end, `await result.finishReason` is `'refusal'`, `await result.refusal` is the message and `await result.text` is the empty string, also when an earlier tool step streamed text of its own. A call with tools returns a refusal the same way, in prompt tool mode (`toolMode: 'prompt'`) too. A refusal the output cap cut off is a cut answer: `finishReason` is `'length'`, with no `refusal` and an empty `text`. A result with another finish reason has no `refusal`. [OpenAI](../features/LLM_PROVIDERS.md#openai) describes what the provider reads. Claude's refusal arrives another way: the provider throws an error with code `content_filter` ([Anthropic](../features/LLM_PROVIDERS.md#anthropic)).
+When an OpenAI model refuses a request with a refusal message, `generateText()` returns `finishReason: 'refusal'`, the message in `refusal` and an empty `text`, so a caller can tell a refusal from an empty answer. An explicit refusal with an empty message is a refusal too, its `refusal` the empty string. The call does not throw, and nothing is sent to a fallback provider. `streamText()` sends no text part for it. Its `finishReason` and `refusal` promises settle as the stream is read, as `text` does: once `textStream` or `fullStream` has been read to its end, `await result.finishReason` is `'refusal'`, `await result.refusal` is the message and `await result.text` is the empty string, also when an earlier tool step streamed text of its own. A stream that ends after a piece of a refusal message and before the answer's finish ends on an `error` part, with `finishReason` `'error'` and no `refusal`.
+
+A call with tools returns a refusal the same way, in prompt tool mode (`toolMode: 'prompt'`) too. When the model sends tool calls beside its refusal message, the call ends on the refusal and those tool calls are not run. A refusal the output cap cut off is a cut answer: `finishReason` is `'length'`, `refusal` holds the piece of the message that came and `text` is empty, in prompt tool mode as well. A result with no refusal message has no `refusal`. `generateObject()` and an agent's `responseSchema` end on a refusal without asking for a repair: they throw [`ObjectGenerationError`](../orchestration/STRUCTURED_OUTPUT_API.md#errors) with the message in its `refusal`. A GMI session (`runtime: 'gmi'`) reports finish reason `'refusal'` without the message, and a runtime agency seat reports a refusal as `'stop'`. [OpenAI](../features/LLM_PROVIDERS.md#openai) describes what the provider reads. Claude's refusal arrives another way: the provider throws an error with code `content_filter` ([Anthropic](../features/LLM_PROVIDERS.md#anthropic)).
+
+`'refusal'` is a value of `GenerateTextResult['finishReason']` and of `StreamFinishReason`. Code that lists every finish reason, such as a `switch` whose `default` assigns the reason to `never`, or a union type of its own that a result's `finishReason` is assigned to, needs a case for `'refusal'`.
 
 ### OpenAI response storage
 
@@ -952,7 +956,9 @@ On the default runtime, `agent({ responseSchema })` validates `generate()`'s
 final text with the supplied Zod schema and returns the value in `result.parsed`.
 It can extract JSON from a code fence. `controls.maxValidationRetries` defaults
 to 1, so an invalid reply gets one more attempt. Set it to 0 to throw
-`ObjectGenerationError` on the first invalid reply.
+`ObjectGenerationError` on the first invalid reply. A [refusal](#a-refusal-from-the-model)
+is not retried: the send throws `ObjectGenerationError` with the model's
+refusal message in its `refusal`.
 `output` is the `agency()` option: `agent()` accepts it, does not apply it
 and names it in its construction warning, so pass an agent's schema as
 `responseSchema`.
