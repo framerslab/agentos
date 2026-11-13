@@ -716,10 +716,11 @@ export class LiveKitAudioPublisher {
    * In native playout the wait is for the last chunk admitted: once its frames are captured, the track's native queue
    * must play out (`AudioSource.waitForPlayout()`), and the receipt is the publisher's own, with the chunk's samples
    * and rate. A queue that a clear emptied does not count as played, nor does a chunk the track had begun to take when
-   * a pause came, whether the pause came before this wait or during it. In participant playout both the native drain
-   * and the participant's receipt are required; the native drain alone does not count, until the transport links
-   * another participant: the receipt is then no longer asked for, and the chunk counts as played as a native chunk
-   * does, once its frames are captured and the native queue has played out ({@link participantChanged}).
+   * a pause came, whether the pause came before this wait or during it. In participant playout both the native drain,
+   * once the chunk's frames are captured, and the participant's receipt are required; the native drain alone does not
+   * count, until the transport links another participant: the receipt is then no longer asked for, and the chunk counts
+   * as played as a native chunk does, once its frames are captured and the native queue has played out
+   * ({@link participantChanged}).
    *
    * The wait goes through the playout the chunk was admitted under: a chunk sent natively before the participant was
    * in the room waits for the track, also once a later chunk has fixed participant playout.
@@ -773,7 +774,6 @@ export class LiveKitAudioPublisher {
    */
   private async waitForReceipt(pending: ParticipantChunk, generation: VoiceGeneration, sequence: number, signal: AbortSignal): Promise<PlaybackReceipt> {
     const captured = this.cancellation;
-    if (!this.source) throw new Error('missing publisher receipt');
     let timer: ReturnType<typeof setTimeout> | undefined; let ended = false;
     // The deadline of a wait begun before a marked chunk is announced starts at the announcement, as the receipt's does.
     const deadline = new Promise<never>((_resolve, reject) => {
@@ -786,15 +786,16 @@ export class LiveKitAudioPublisher {
     } finally { ended = true; if (timer) clearTimeout(timer); if (this.pending === pending) this.pending = undefined; }
   }
   /**
-   * What proves a chunk participant playout admitted played: the participant's receipt with the native drain, or, once
-   * the transport has linked another participant, whose fresh store closed the one the receipt was asked through, the
-   * chunk's frames captured and then the native queue played out, as a native chunk's wait asks; an aborted `signal`
-   * ends that wait at once. The receipt is then the publisher's own, with the chunk's samples and rate.
+   * What proves a chunk participant playout admitted played: the participant's receipt with the native drain that comes
+   * once the chunk's frames are captured, or, once the transport has linked another participant, whose fresh store
+   * closed the one the receipt was asked through, the chunk's frames captured and then the native queue played out, as
+   * a native chunk's wait asks; an aborted `signal` ends that wait at once. The receipt is then the publisher's own, with the chunk's samples and rate.
    */
   private async played(pending: ParticipantChunk, generation: VoiceGeneration, sequence: number, signal: AbortSignal): Promise<PlaybackReceipt> {
     if (pending.acks === this.acks) {
       try {
-        const [receipt] = await Promise.all([pending.acks.wait(generation, sequence, signal), this.source!.waitForPlayout()]);
+        // The queue counts once the chunk is on it, also for a wait begun while the track was prepared or the mark set.
+        const [receipt] = await Promise.all([pending.acks.wait(generation, sequence, signal), (async () => { await pending.captured; await this.source!.waitForPlayout(); })()]);
         return receipt;
       } catch (error) {
         // Only the close of an unlinked participant's store lets the wait go on without its receipt.
