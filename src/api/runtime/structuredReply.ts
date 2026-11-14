@@ -55,10 +55,13 @@ export interface StructuredReplyOutput {
   meta: StructuredOutputMeta;
 }
 
+/** The issue a refused structured reply carries: the GMI writes it, and {@link isRefusedStructuredReply} reads it. */
+export const STRUCTURED_REPLY_REFUSED_ISSUE = 'The model refused the request instead of writing the reply.';
+
 /** Whether the output carries the runtime's refusal result rather than a schema validation failure. */
 export function isRefusedStructuredReply(output: StructuredReplyOutput): boolean {
   return output.value === null && !output.meta.valid
-    && output.meta.issues?.includes('The model refused the request instead of writing the reply.') === true;
+    && output.meta.issues?.includes(STRUCTURED_REPLY_REFUSED_ISSUE) === true;
 }
 
 /** Where a `schemaRef` is looked up. A `Map<string, ZodType | JsonSchemaObject>` is one. */

@@ -57,7 +57,7 @@ import { ChatMessage, IProvider, MessageContentPart, ModelCompletionOptions, Mod
 import { resolveCacheCapabilities } from '../../core/llm/providers/model-cache-capabilities';
 import type { ZodType } from 'zod';
 import type { CompletionAttempt, CompletionOutcome, CompletionResolution, CompletionRoute } from '../../api/runtime/completionGateway.js';
-import { checkStructuredReply, resolveStructuredReply, structuredRepairMessage, StructuredReplyConfigError, type StructuredReplyOutput } from '../../api/runtime/structuredReply.js';
+import { checkStructuredReply, resolveStructuredReply, STRUCTURED_REPLY_REFUSED_ISSUE, structuredRepairMessage, StructuredReplyConfigError, type StructuredReplyOutput } from '../../api/runtime/structuredReply.js';
 import type { AgencyLaunchFrame } from '../../api/runtime/agencyLaunch/types';
 
 import { AIModelProviderManager } from '../../core/llm/providers/AIModelProviderManager';
@@ -2598,7 +2598,7 @@ export class GMI implements IGMI {
                 { schemaName: structuredReply.name, attempts: structuredAttempts, refused: true },
               );
             }
-            structuredResult = { value: null, meta: { schemaName: structuredReply.name, valid: false, attempts: structuredAttempts, enforcement, stage: 'model', issues: ['The model refused the request instead of writing the reply.'] } };
+            structuredResult = { value: null, meta: { schemaName: structuredReply.name, valid: false, attempts: structuredAttempts, enforcement, stage: 'model', issues: [STRUCTURED_REPLY_REFUSED_ISSUE] } };
           } else {
             // The schema's check runs on a step the model answered, never on a refusal: a check that throws (a refinement
             // that throws, an async one under safeParse) would end the turn on its own error in place of the refusal.
