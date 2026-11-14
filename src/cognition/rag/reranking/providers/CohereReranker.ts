@@ -115,6 +115,14 @@ export class CohereReranker implements IRerankerProvider {
 
   /**
    * Rerank documents using Cohere's Rerank API.
+   *
+   * The request's `timeoutMs` (else the provider's `defaultTimeoutMs`) bounds the whole call, the response's body
+   * included, and the request's `signal` ends it at its abort. Either one aborts the request, which closes its
+   * connection, and the timer is cleared once the call settles.
+   *
+   * @throws `CohereReranker: Request timed out after <ms>ms` when the response and its body are not read within
+   * the timeout; the signal's reason when the signal aborts, before the request is sent or while it runs;
+   * `Cohere API error (<status>): <body>` for a status that is not 2xx.
    */
   public async rerank(
     input: RerankerInput,
@@ -122,6 +130,12 @@ export class CohereReranker implements IRerankerProvider {
   ): Promise<RerankerOutput> {
     if (!this.apiKey) {
       throw new Error('CohereReranker: apiKey is required for reranking');
+    }
+
+    const callerSignal = config.signal;
+    if (callerSignal?.aborted) {
+      // Nothing is sent for a call its caller has already stopped.
+      throw callerSignal.reason;
     }
 
     const modelId = config.modelId || this.defaultModelId;
@@ -138,30 +152,43 @@ export class CohereReranker implements IRerankerProvider {
       ...(config.params as Record<string, unknown>),
     };
 
-    // Create abort controller for timeout
+    // One controller ends the request and its body read: the timer aborts it with the timeout's error, the
+    // caller's signal with its own reason. Both stay armed until the body is read.
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    const timeoutId = setTimeout(
+      () => controller.abort(new Error(`CohereReranker: Request timed out after ${timeoutMs}ms`)),
+      timeoutMs,
+    );
+    const onCallerAbort = (): void => controller.abort(callerSignal?.reason);
+    callerSignal?.addEventListener('abort', onCallerAbort, { once: true });
 
     try {
-      const response = await fetch(`${this.baseUrl}/v1/rerank`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${this.apiKey}`,
-          'Content-Type': 'application/json',
-          'X-Client-Name': 'agentos',
-        },
-        body: JSON.stringify(requestBody),
-        signal: controller.signal,
-      });
+      // A signal fires its abort event once: one that aborted while the body was built, before the listener
+      // above, ends the call here, and nothing is sent.
+      if (callerSignal?.aborted) {
+        throw callerSignal.reason;
+      }
 
-      clearTimeout(timeoutId);
+      const response = await untilAborted(
+        fetch(`${this.baseUrl}/v1/rerank`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${this.apiKey}`,
+            'Content-Type': 'application/json',
+            'X-Client-Name': 'agentos',
+          },
+          body: JSON.stringify(requestBody),
+          signal: controller.signal,
+        }),
+        controller.signal,
+      );
 
       if (!response.ok) {
-        const errorText = await response.text();
+        const errorText = await untilAborted(response.text(), controller.signal);
         throw new Error(`Cohere API error (${response.status}): ${errorText}`);
       }
 
-      const data = await response.json() as CohereRerankResponse;
+      const data = await untilAborted(response.json() as Promise<CohereRerankResponse>, controller.signal);
       const latencyMs = Date.now() - startTime;
 
       // Map results back to documents (Cohere returns indices)
@@ -191,13 +218,41 @@ export class CohereReranker implements IRerankerProvider {
         },
       };
     } catch (error) {
-      clearTimeout(timeoutId);
-
-      if (error instanceof Error && error.name === 'AbortError') {
-        throw new Error(`CohereReranker: Request timed out after ${timeoutMs}ms`);
+      // Once the controller has aborted, the call ends with its reason (the timeout's error or the caller's),
+      // whatever the request or the body read rejected with.
+      if (controller.signal.aborted) {
+        throw controller.signal.reason;
       }
-
       throw error;
+    } finally {
+      clearTimeout(timeoutId);
+      callerSignal?.removeEventListener('abort', onCallerAbort);
     }
   }
+}
+
+/**
+ * Settles as `work` does, or rejects with the signal's reason once the signal aborts, whichever comes first.
+ * `fetch` and its body reads end on the same signal; this also holds the deadline for a `fetch` that does not
+ * honour it. A rejection of `work` after the abort is handled here, so it never surfaces as unhandled.
+ */
+function untilAborted<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(signal.reason);
+    if (signal.aborted) {
+      onAbort();
+    } else {
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+    Promise.resolve(work).then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
 }

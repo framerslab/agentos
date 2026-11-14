@@ -683,7 +683,7 @@
     "docs:clean": "rimraf docs/api ../../docs-generated/library ../../docs-generated/api",
     "docs:library": "npm run docs:clean && pnpm --dir ../../ exec typedoc --options packages/agentos/typedoc.json && pnpm --dir ../../ exec typedoc --options packages/agentos/typedoc.modules.json && node scripts/generate-doc-search-index.mjs && pnpm --dir ../../ exec node apps/agentos.sh/scripts/copy-docs.js",
     "docs:site-api": "pnpm --dir ../../ --filter @framers/agentos-live-docs run build",
-    "docs:verify": "node scripts/build-publication-inventory.mjs && pnpm --dir ../../ --filter @framers/agentos-live-docs run verify:publication && npx vitest run src/api/runtime/__tests__/docs-alignment.test.ts",
+    "docs:verify": "node scripts/build-publication-inventory.mjs && pnpm --dir ../../ --filter @framers/agentos-live-docs run verify:publication && npx vitest run src/api/runtime/__tests__/docs-alignment.test.ts src/api/runtime/__tests__/docs-alignment.memory-recall.test.ts",
     "docs": "npm run docs:library",
     "docs:full": "npm run docs:library && npm run docs:site-api",
     "docs:watch": "npm run docs:clean && pnpm --dir ../../ exec typedoc --options packages/agentos/typedoc.json && pnpm --dir ../../ exec typedoc --options packages/agentos/typedoc.modules.json && node scripts/generate-doc-search-index.mjs && pnpm --dir ../../ exec node apps/agentos.sh/scripts/copy-docs.js && concurrently \"pnpm --dir ../../ exec typedoc --options packages/agentos/typedoc.json --watch\" \"pnpm --dir ../../ exec typedoc --options packages/agentos/typedoc.modules.json --watch\" \"node scripts/generate-doc-search-index.mjs --watch\" \"pnpm --dir ../../ exec node apps/agentos.sh/scripts/copy-docs.js --watch\""
