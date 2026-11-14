@@ -5,10 +5,11 @@
  * provider classes are stubbed (helpers/stubProviders.ts), and the OpenAI stub embeds with a deterministic word hash,
  * so texts that share words recall each other.
  *
- * A GMI files each reply as a semantic trace with sourceType 'agent_inference', as earlier versions did. The block
- * shows such a trace as the assistant's own words, a line that starts "You said: " among the past exchanges, and never
- * under the facts heading. Each case clears the session's history before the turn it reads, so the reply reaches the
- * request through recall alone.
+ * A GMI files each reply as a semantic trace with sourceType 'agent_inference' and the bridge's tags, its role
+ * 'assistant' first, as earlier versions did. The block shows such a trace as the assistant's own words, a line that
+ * starts "You said: " among the past exchanges, and never under the facts heading. A trace a host files itself with
+ * that sourceType, and without the tag, is shown as it was. Each case clears the session's history before the turn it
+ * reads, so the reply reaches the request through recall alone.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CognitiveMemoryManager } from '../../cognition/memory/CognitiveMemoryManager';
@@ -169,14 +170,16 @@ describe("agent({ runtime: 'gmi' }): the assistant's own earlier reply in the me
       await session.send('Hello.');
       const manager = built.manager;
       expect(manager, 'the manager agent() built').toBeDefined();
-      // The reply the turn filed: a semantic trace with sourceType 'agent_inference', as every earlier version filed it.
+      // The reply the turn filed: a semantic trace with sourceType 'agent_inference', under the bridge's tags (its role
+      // first), as every earlier version filed it.
       const filed = manager!.getStore().listTraces({ activeOnly: true }).filter((trace) => trace.content === 'Hi.');
       expect(filed, 'the filed reply').toHaveLength(1);
       expect(filed[0]).toMatchObject({ type: 'semantic', provenance: { sourceType: 'agent_inference' } });
-      const { scope, scopeId } = filed[0];
+      expect(filed[0].tags, 'the filed reply').toContain('assistant');
+      const { scope, scopeId, tags } = filed[0];
       const pad = { valence: 0, arousal: 0, dominance: 0 };
       // A reply filed by an earlier version, in the same scope: what its syncForTurn passed.
-      await manager!.encode(REPLY, pad, 'neutral', { type: 'semantic', scope, scopeId, sourceType: 'agent_inference' });
+      await manager!.encode(REPLY, pad, 'neutral', { type: 'semantic', scope, scopeId, sourceType: 'agent_inference', tags: [...tags] });
       // A host's own fact: a semantic trace with no sourceType of its own, so 'user_statement'.
       await manager!.encode(FACT, pad, 'neutral', { type: 'semantic', scope, scopeId });
       session.clear();
@@ -192,6 +195,39 @@ describe("agent({ runtime: 'gmi' }): the assistant's own earlier reply in the me
       expect(facts, where).toHaveLength(1);
       expect(facts[0].startsWith(`- [semantic] ${FACT} (`), where).toBe(true);
       expect(linesWith(sectionLines(block, EPISODIC_HEADER), FACT), where).toEqual([]);
+    } finally {
+      await a.close();
+    }
+  });
+
+  it("an inference a host filed itself with sourceType 'agent_inference' is shown as it was, never as words the assistant said", async () => {
+    const INFERENCE = 'By my reading, the user seems to like green tea.';
+    const k = key(); const emb = key();
+    const s = script('openai', k, { replies: [reply.text('Hi.'), reply.text('Green tea.')] });
+    script('openai', emb, { replies: [] });
+    vi.stubEnv('OPENAI_API_KEY', emb);
+    const a = withMemory(k);
+    try {
+      const session = a.session('s');
+      await session.send('Hello.');
+      const manager = built.manager;
+      expect(manager, 'the manager agent() built').toBeDefined();
+      const filed = manager!.getStore().listTraces({ activeOnly: true }).filter((trace) => trace.content === 'Hi.');
+      expect(filed, 'the filed reply').toHaveLength(1);
+      const { scope, scopeId } = filed[0];
+      const pad = { valence: 0, arousal: 0, dominance: 0 };
+      // Filed through the manager's public encode, as a host files a conclusion it drew: no reply of the assistant's.
+      await manager!.encode(INFERENCE, pad, 'neutral', { type: 'semantic', scope, scopeId, sourceType: 'agent_inference' });
+      session.clear();
+      await session.send('What tea do I like?');
+
+      const block = memoryBlockOf(s, 1);
+      const where = `the block:\n${block}`;
+      // Under the facts heading, the line it had before, with no prefix; nowhere as the assistant's own words.
+      const facts = linesWith(sectionLines(block, FACTS_HEADER), INFERENCE);
+      expect(facts, where).toHaveLength(1);
+      expect(facts[0].startsWith(`- [semantic] ${INFERENCE} (`), where).toBe(true);
+      expect(linesWith(block.split('\n'), INFERENCE).filter((line) => line.includes('You said:')), where).toEqual([]);
     } finally {
       await a.close();
     }
