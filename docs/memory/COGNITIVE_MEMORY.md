@@ -719,7 +719,7 @@ Token estimation uses ~4 chars per token heuristic.
 
 ### Upgrading from 0.17.3 or earlier
 
-- A store loads traces stored in the same millisecond by id, compared character code by character code, in the whole-brain hydration of its first recall and in `hydrateScope`. Through 0.17.3 SQLite loaded them in the order they were stored, and PostgreSQL in an order its plan and the rows' updates left open, so two loads of the same traces could differ. On SQLite, two equally scored traces of one millisecond can now come back in the other order than before; traces stored in different milliseconds load as before.
+- A store loads traces stored in the same millisecond by id, compared character code by character code, in the whole-brain hydration of its first recall and in `hydrateScope`. Through 0.17.3 they loaded in an order each engine's query plan left open: on SQLite it followed how the rows were read (in the order they were stored in one store, the newest first in another), and on PostgreSQL it also changed as rows were updated, so two loads of the same traces could differ. A host sees it in the memory block a GMI sends (`agent({ runtime: 'gmi' })`, `gmi()`) and in a turn's `memoryRecall.candidates`: equally scored traces of one millisecond are listed by id, and the same traces give the same block on SQLite and on PostgreSQL, and from one load to the next. On either engine, two such traces can come back in the other order than before. Traces stored in different milliseconds load as before.
 
 ### Upgrading from 0.17.2 or earlier
 
