@@ -217,6 +217,15 @@ export interface CostAggregator {
     promptTokens: number;
     completionTokens: number;
     totalCostUSD?: number;
+    /**
+     * Prompt-cache counts summed over the turn's billed model steps, each only when a provider reported it (a
+     * reported zero is kept; a count no step reported is absent): prompt tokens read from the cache, written to it,
+     * of those writes the ones with the longer lifetime, and all input tokens with the cached ones included.
+     */
+    cacheReadTokens?: number;
+    cacheCreationTokens?: number;
+    cacheCreationExtendedTokens?: number;
+    inclusiveInputTokens?: number;
     breakdown?: Array<{
         providerId: string;
         modelId: string;

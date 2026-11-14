@@ -315,3 +315,22 @@ export function stubProviderClass(providerId: string) {
     async shutdown(): Promise<void> {}
   };
 }
+
+/**
+ * Every system message's text, in message order and, within a message, in text-part order, joined with a blank
+ * line. A request's system text can arrive as one string, as several system messages, or as text parts (the fixed
+ * part of a GMI prompt carries a cache marker on Anthropic-family models); this reads all of them as one text.
+ */
+export function systemTextOf(messages: readonly Pick<ChatMessage, 'role' | 'content'>[]): string {
+  return messages
+    .filter((message) => message.role === 'system')
+    .map((message) => {
+      if (typeof message.content === 'string') return message.content;
+      if (!Array.isArray(message.content)) return '';
+      return message.content
+        .filter((part) => part.type === 'text')
+        .map((part) => ('text' in part && typeof part.text === 'string' ? part.text : ''))
+        .join('\n\n');
+    })
+    .join('\n\n');
+}

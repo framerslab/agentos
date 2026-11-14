@@ -2,7 +2,8 @@ import { CostAggregator } from '../../cognition/substrate/IGMI';
 import type { IPersonaDefinition } from '../../cognition/substrate/personas/IPersonaDefinition';
 
 /**
- * Normalises undefined cost fields so downstream consumers always receive a fully shaped usage object.
+ * Normalises undefined cost fields so downstream consumers always receive a fully shaped usage object. The
+ * prompt-cache counts are kept when the usage has them and stay absent when it does not.
  */
 export const normalizeUsage = (usage?: CostAggregator): CostAggregator | undefined => {
   if (!usage) {
@@ -15,6 +16,10 @@ export const normalizeUsage = (usage?: CostAggregator): CostAggregator | undefin
     completionTokens: usage.completionTokens ?? 0,
     totalCostUSD: usage.totalCostUSD,
     breakdown: usage.breakdown,
+    ...(usage.cacheReadTokens !== undefined ? { cacheReadTokens: usage.cacheReadTokens } : {}),
+    ...(usage.cacheCreationTokens !== undefined ? { cacheCreationTokens: usage.cacheCreationTokens } : {}),
+    ...(usage.cacheCreationExtendedTokens !== undefined ? { cacheCreationExtendedTokens: usage.cacheCreationExtendedTokens } : {}),
+    ...(usage.inclusiveInputTokens !== undefined ? { inclusiveInputTokens: usage.inclusiveInputTokens } : {}),
   };
 };
 

@@ -24,6 +24,33 @@ result.usage.cacheReadTokens;     // tokens served from cache, summed over the c
 result.usage.cacheCreationTokens; // tokens written to cache this call
 ```
 
+## GMI turns
+
+A GMI labels each system entry `persona`, `conversation` or `turn`. An entry without a label is a `turn` entry. The GMI keeps priority order and splits off only the leading run of nonblank fixed entries (`persona` or `conversation`); a fixed entry after a turn entry stays where it is. Persona prompts and the GMI's own personality section are fixed; a learner's personality section holds for the conversation. Rolling summaries, prompt profiles, skill and discovery context, a structured reply's instruction, user preferences and contextual instructions are turn entries. The hard limits are fixed and close the system text.
+
+| Target | Fixed prefix followed by turn entries | All entries fixed |
+|---|---|---|
+| Direct Anthropic, a Claude model with prompt caching | A fixed text part with a cache marker, then a plain system string | One marked text part |
+| OpenRouter `anthropic/` | Two system strings; the provider marks the first and the message tail | One string; the provider marks it |
+| Other providers | One joined system string | One joined system string |
+
+The text and its order do not change in the prompt engine's messages: the system messages joined with a blank line are the single string sent without the split. On the direct Anthropic wire the fixed part and the rest go out as separate `system` blocks, with no separator text between them. The memory block goes in the newest user message, outside the cached system block, with the same token count and delivery record. History summaries and gateway schema instructions are later system messages.
+
+No split or GMI marker is requested with `cache: false`, a `customModelParams` override of `system`, `messages`, `tools` or `cache_control`, `AGENTOS_ANTHROPIC_AUTO_CACHE=0` or `false`, or a model with no prompt-cache support. A nonempty `customModelParams.model` is the model that capability check reads. A fallback hop rebuilds the prompt for its own provider and model, with the `cache` setting its `fallbackProviders` entry names when it names one: an entry with `cache: false` gets the single string on that hop, and an entry with `cache: { ttl: '1h' }` gets the one-hour marker there.
+
+`cache: { ttl: '1h' }` gives the fixed marker a one-hour lifetime. `cache: { tail: false }` keeps only that marker; consider it when cognitive memory changes the newest user message every turn. Otherwise the provider's tail rule applies. A changed tool list, or a different discovered subset of tools, changes the cached prefix before the system text and can cause a miss.
+
+`beforeModelCall` hooks must accept more than one system message and text parts. The GMI sends a hook's replacement messages as returned. If a hook keeps the GMI's marked part and the result holds more than four markers, the GMI removes only its own marker and records one warning. It does the same when its marker has the default five-minute lifetime and the hook puts a one-hour marker after it, or when its marker has the one-hour lifetime (`cache: { ttl: '1h' }`) and the hook puts a shorter-lived marker before it. Anthropic refuses both: the provider reads markers in the order tools, system messages, then the other messages, and a one-hour marker must come before every five-minute one. A marker of another value that the hook sets on that part, such as a one-hour marker, is the hook's: the GMI leaves it, and the messages go out as returned. A hook that copies the parts (with `structuredClone`, or a map that spreads each part) returns a copy of the GMI's part. Only where the request would otherwise be refused, the GMI also takes as its own the first system part whose text is the fixed text and whose marker equals its own, whether the hook copied the part or set an equal marker on it, and removes that marker with the same warning. Otherwise such a marker goes out as returned. It adds no marker after the hook. `cache: false` keeps the single-string shape for hooks too.
+
+On `agent({ runtime: 'gmi' })`, empty `systemBlocks` are dropped. Blocks through the last `cacheBreakpoint: true` form one fixed entry, their text joined with a blank line, so a blank block among them stays in the fixed prefix; each later block is a turn entry. With no breakpoint, or none followed by a block, the joined text is one fixed entry. `onBeforeGeneration.system` is the joined base text, the recall instruction included when present. On this runtime a block's `cacheTtl` is not read: `cache: { ttl: '1h' }` sets the lifetime of the fixed marker.
+
+Turn usage includes `cacheReadTokens`, `cacheCreationTokens`, `cacheCreationExtendedTokens` and `inclusiveInputTokens` when a provider reports them, summed over the turn's billed steps. The full runtime keeps them on `FINAL_RESPONSE.usage`; a field no step reported stays absent. The prompt engine's result reports the split in `metadata.systemSplit`: `fixedEntries`, `restEntries` and `marked`.
+
+Limits:
+
+- When `systemBlocks` has blocks after its last `cacheBreakpoint`, the fixed blocks are one system entry and each later block is its own, and the prompt's token estimate rounds each entry up. The estimate can be up to one token higher for each block after the breakpoint than for the joined text, so at a budget edge one more history message can be left out.
+- Request-shape tests do not prove a cache hit. Model token floors, prefix changes and provider routing decide reuse. Whether OpenRouter keeps the split blocks upstream, and reuse there without a session ID, need live measurement. Nothing here measures OpenAI cache read-back or a cost saving.
+
 ## What zero config does, per provider
 
 | Provider | Cache mechanism | Default behavior |

@@ -957,7 +957,13 @@ export function gmi(opts: GmiOptions): GmiHandle {
               messages: messages as unknown as Message[],
               // With learning on, the base prompt holds no personality section: the system text in `messages` holds
               // the turn's section after it.
-              system: typeof persona.baseSystemPrompt === 'string' ? persona.baseSystemPrompt : undefined,
+              // One string either way: `systemBlocks` with turn blocks after a breakpoint make a list of entries, whose
+              // text joined with a blank line is the base prompt, the recall line included.
+              system: typeof persona.baseSystemPrompt === 'string'
+                ? persona.baseSystemPrompt
+                : Array.isArray(persona.baseSystemPrompt)
+                  ? persona.baseSystemPrompt.map((entry) => entry.content).join('\n\n')
+                  : undefined,
               tools: offered,
               model: ctx.modelId,
               provider: ctx.providerId,

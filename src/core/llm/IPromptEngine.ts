@@ -111,14 +111,35 @@ export interface PromptExecutionContext {
 }
 
 /**
+ * How long a system entry's text stays the same: for the life of the persona (`persona`), for the conversation
+ * (`conversation`), or for one turn (`turn`). An entry with no label is read as `turn`. The chat template can send
+ * the leading run of `persona` and `conversation` entries as its own first system message, so a provider's prompt
+ * cache can keep it (see `PromptComponents.systemCacheMarker`).
+ */
+export type SystemPromptStability = 'persona' | 'conversation' | 'turn';
+
+/**
  * Core components that form the foundation of any prompt construction.
  * These are gathered from various sources (GMI state, user input, RAG) and then
  * augmented with dynamically selected contextual elements.
  * @interface PromptComponents
  */
 export interface PromptComponents {
-  /** System-level prompts with optional priority ordering. Higher priority usually means placed earlier or given more weight. */
-  systemPrompts?: Array<{ content: string; priority?: number; source?: string }>;
+  /**
+   * System-level prompts, sent in ascending `priority` order (entries of equal priority keep the order given).
+   * `stability` says how long an entry's text stays the same; an entry without one is a `turn` entry.
+   */
+  systemPrompts?: Array<{ content: string; priority?: number; source?: string; stability?: SystemPromptStability }>;
+  /**
+   * Asks the chat template to send the leading run of fixed system entries (`persona` or `conversation`, none of
+   * them blank) apart from the rest, for a target in the Anthropic family: on the `anthropic` provider as a text
+   * part that carries a cache marker (`ttl: '1h'` gives it a one-hour lifetime), followed by the rest as a plain
+   * system string; on OpenRouter with an `anthropic/` model as two system strings, which that provider marks.
+   * The text and its order are unchanged: the system messages joined with a blank line are the single string sent
+   * without this field. Unset, or on any other target, the system text is that single string. The GMI sets it per
+   * model hop.
+   */
+  systemCacheMarker?: { ttl?: '5m' | '1h' };
   /** Conversation history messages, typically an array of `Message` objects. */
   conversationHistory?: Message[]; // Using Message type (aliased ConversationMessage)
   /**
@@ -311,6 +332,12 @@ export interface PromptEngineResult {
      * other retrieved context (`retrievedContext`) before and after the budget step.
      */
     contextTokens?: { memory: number; otherBefore: number; otherAfter: number };
+    /**
+     * How the chat template divided the system entries: how many lead the prompt as fixed entries (`fixedEntries`),
+     * how many follow (`restEntries`), and whether the fixed part went out as a text part with a cache marker
+     * (`marked`). Set for the `openai_chat` template only.
+     */
+    systemSplit?: { fixedEntries: number; restEntries: number; marked: boolean };
     [key: string]: unknown; // For other arbitrary metadata
   };
   /** An optional cache key if the result was retrieved from or stored in a cache. */
