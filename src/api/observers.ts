@@ -79,6 +79,17 @@ export interface LlmUsageEvent {
    */
   finishReason?: string;
   /**
+   * True when the model refused the request with a refusal message (OpenAI's refusal), the result's `refusal` being
+   * set. `finishReason` is the reason that result reports: `'stop'`, or `'length'` when the output cap cut the message
+   * off. Absent on a call the model did not refuse, and on a `streamText` call whose model stream ended on an error
+   * or an abort. With `guards` set, the output guards judge the refusal message before the event fires: when they
+   * block it, the call rejects (in `streamText`, ends on an `error` part) and the event says `refused: true` beside
+   * `finishReason: 'error'`, the one event with both, and the root span has `agentos.api.guard_blocked`. A caller
+   * abort while they judge it reports `finishReason: 'error'` with no `refused` (and, in `streamText`, `aborted`).
+   * A reply that is not a refusal is reported as the model gave it, whatever the guards then decide.
+   */
+  refused?: true;
+  /**
    * True when the caller's `abortSignal` ended a `streamText` call (`finishReason` is then `'error'`). An aborted call fires an
    * event when it used anything: a stream aborted after the provider read the request reports the input it billed and
    * the output streamed before the abort. Absent on a call that was not aborted.
