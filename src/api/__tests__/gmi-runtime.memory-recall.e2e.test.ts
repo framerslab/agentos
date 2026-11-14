@@ -21,8 +21,8 @@ vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => (
 // Trace ids from a counter each ask starts again: the block prints the ids of the memories in focus, so two stores fed
 // the same statements send the same block only when their ids match. Under a faked clock, each id minted also moves
 // the clock on one millisecond, so every memory has a filing time of its own, as the memories of real turns have. A
-// store loads its memories newest first, and memories filed in one millisecond load in an order the engine picks
-// (PostgreSQL's changes as rows are updated), which decides the place of equally scored memories in the block.
+// store loads its memories newest first, and memories filed in one millisecond by id, on either engine
+// (gmi-runtime.memory-tiebreak.e2e.test.ts), which decides the place of equally scored memories in the block.
 const ids = vi.hoisted(() => ({ next: 0 }));
 vi.mock('../../cognition/memory/core/util/crossPlatformCrypto', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../cognition/memory/core/util/crossPlatformCrypto')>();
