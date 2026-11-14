@@ -30,8 +30,10 @@
  * another id because its id names another trace, or does not write, is
  * skipped, with the edges that name it.
  *
- * The registry of conversation scopes (`scopes`) and the wiki pages (`pages`)
- * come in by the rules the SQLite import uses (`importPages.ts`): a scope the
+ * The registry of conversation scopes (`scopes`), the wiki pages (`pages`) and
+ * the owners of older memory (`legacyOwners`) come in by the rules the SQLite
+ * import uses (`importPages.ts`): an owner comes in for an agent the brain
+ * records no owner of, and an owner it records is never moved; a scope the
  * brain already registers keeps its own row and compile watermark; a page the
  * brain already holds, by scope and page id, is kept, and the file's chunks of
  * it stay out; any other page comes in with its chunks, written as traces of
@@ -77,6 +79,7 @@ import { parseTraceMetadata } from '../retrieval/store/tracePersistence.js';
 import {
   conversationPagesOf,
   type ImportedScopeRow,
+  mergeImportedLegacyOwners,
   mergeImportedScopesAndPages,
   registeredConversationScopes,
   splitImportedPages,
@@ -114,6 +117,8 @@ interface BrainExportPayload {
   scopes?: unknown[];
   /** Each subject's wiki pages (`memory_pages` rows). */
   pages?: unknown[];
+  /** The owner of each agent's older memory (`memory_legacy_owner` rows). */
+  legacyOwners?: unknown[];
 }
 
 /** Serialised memory trace from the export file. */
@@ -404,6 +409,13 @@ export class JsonImporter {
           written: context.writtenTraceIds,
           stored: context.storedTraces,
         },
+        result.errors,
+      );
+      // The owner of each agent's older memory, where this brain records none: an owner it records is never moved.
+      await mergeImportedLegacyOwners(
+        trx,
+        brainId,
+        Array.isArray(payload.legacyOwners) ? payload.legacyOwners : [],
         result.errors,
       );
       const memoryNodes = await this._importNodes(trx, payload.nodes ?? [], result, context);

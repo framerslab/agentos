@@ -244,8 +244,8 @@ describe('forgetUser', () => {
     expect(report.plainFormLeft).toBe(1);
     const lines = warn.mock.calls.map((call) => String(call[0])).filter((line) => line.includes('refileScope'));
     expect(lines).toHaveLength(1);
-    // A line about a forgotten user names the tombstone, never the user: the caller holds the id it deleted.
-    expect(lines[0]).toContain(`tombstone ${(await tombstoneHash('A', '42')).slice(0, 16)}`);
+    // A line about a forgotten user names neither the user nor a hash of the id: the caller holds the id it deleted.
+    expect(lines[0]).not.toContain((await tombstoneHash('A', '42')).slice(0, 16));
     expect(lines[0]).toContain("the user's plain id in its user scope");
     expect(lines[0]).not.toContain('user:42');
   });
@@ -263,6 +263,22 @@ describe('forgetUser', () => {
     await deleting.forgetUser('42', { namespace: 'A' });
 
     expect((await session.prepareTurn(turn())).systemPrompts[0]?.content).toBe(renderPersonalitySection(PERSONA));
+    expect(session.currentTraits()).toMatchObject({ extraversion: 0.8 });
+  });
+
+  it("answers the persona's traits, never a forgotten learner's kept ones, from a session opened on a store that holds both", async () => {
+    quiet();
+    const store = new InMemoryLearningStore();
+    const before = createLearningLayer({ store });
+    // The trait row is written at the learner's first session.
+    await before.forLearner(KEY, context());
+    await before.operatorSet({ learner: KEY, traits: { extraversion: 0.6 }, by: 'ops' });
+    // The learner's trait row and her tombstone, as a restore of the rows beside a later deletion leaves them.
+    await store.insertForgotten(await tombstoneHash('A', '42'), new Date().toISOString());
+
+    const session = await createLearningLayer({ store }).forLearner(KEY, context());
+
+    // Before any turn: the open checks the tombstone as a turn does.
     expect(session.currentTraits()).toMatchObject({ extraversion: 0.8 });
   });
 
