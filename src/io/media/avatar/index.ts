@@ -3,9 +3,12 @@
  * Barrel export for the avatar generation pipeline.
  */
 
-export { AvatarPipeline, type ImageGeneratorFn } from './AvatarPipeline.js';
+export { AvatarPipeline, type ImageGeneratorFn, type ImageGeneratorOptions } from './AvatarPipeline.js';
 
 export type {
+  AvatarAcceptanceCheck,
+  AvatarAcceptanceCheckArgs,
+  AvatarAcceptanceVerdict,
   AvatarGenerationStage,
   AvatarGenerationRequest,
   AvatarGenerationJob,
@@ -14,8 +17,10 @@ export type {
 } from './types.js';
 
 export {
+  AVATAR_ANGLES,
   AVATAR_EMOTIONS,
   type AvatarEmotion,
+  buildAnglePrompt,
   buildPortraitPrompt,
   buildExpressionPrompt,
   buildEmotePrompt,

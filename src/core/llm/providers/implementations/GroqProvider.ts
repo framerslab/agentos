@@ -24,6 +24,7 @@ import {
   ProviderEmbeddingResponse,
 } from '../IProvider';
 import { OpenAIProvider, type OpenAIProviderConfig } from './OpenAIProvider';
+import { withoutOpenAiStore } from './openaiGatewayOptions';
 import { keyPoolStrategyFromEnv } from '../../../providers/ApiKeyPool.js';
 import { createContentSafeConsole } from '../../../logging/contentSafeConsole.js';
 
@@ -174,7 +175,7 @@ export class GroqProvider implements IProvider {
     messages: ChatMessage[],
     options: ModelCompletionOptions,
   ): Promise<ModelCompletionResponse> {
-    return this.delegate.generateCompletion(modelId, messages, options);
+    return this.delegate.generateCompletion(modelId, messages, withoutOpenAiStore(options));
   }
 
   /** @inheritdoc */
@@ -183,7 +184,7 @@ export class GroqProvider implements IProvider {
     messages: ChatMessage[],
     options: ModelCompletionOptions,
   ): AsyncGenerator<ModelCompletionResponse, void, undefined> {
-    yield* this.delegate.generateCompletionStream(modelId, messages, options);
+    yield* this.delegate.generateCompletionStream(modelId, messages, withoutOpenAiStore(options));
   }
 
   /**

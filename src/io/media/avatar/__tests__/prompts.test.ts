@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
+  AVATAR_ANGLES,
   AVATAR_EMOTIONS,
+  buildAnglePrompt,
   buildPortraitPrompt,
   buildExpressionPrompt,
   buildEmotePrompt,
@@ -144,5 +146,29 @@ describe('AVATAR_EMOTIONS', () => {
     expect(AVATAR_EMOTIONS).toEqual([
       'neutral', 'happy', 'sad', 'angry', 'surprised', 'flirty', 'fearful',
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AVATAR_ANGLES and buildAnglePrompt
+// ---------------------------------------------------------------------------
+
+describe('AVATAR_ANGLES', () => {
+  it('names the three-quarter and profile views', () => {
+    expect(AVATAR_ANGLES).toEqual(['three-quarter view', 'profile view']);
+  });
+});
+
+describe('buildAnglePrompt', () => {
+  it('appends the angle words to the base portrait prompt', () => {
+    const prompt = buildAnglePrompt(fullIdentity, 'profile view');
+    expect(prompt.startsWith(buildPortraitPrompt(fullIdentity))).toBe(true);
+    expect(prompt.endsWith(', profile view')).toBe(true);
+  });
+
+  it('takes a caller angle as written', () => {
+    expect(buildAnglePrompt(minimalIdentity, 'from behind, full figure')).toBe(
+      `${buildPortraitPrompt(minimalIdentity)}, from behind, full figure`,
+    );
   });
 });
