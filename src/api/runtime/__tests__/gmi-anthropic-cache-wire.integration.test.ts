@@ -26,6 +26,7 @@ import { promptEngineConfig } from '../../../cognition/substrate/__tests__/helpe
 import { MEMORY_RECALL_SYSTEM_LINE } from '../memoryDataBlock';
 import { AgentOS } from '../../AgentOS';
 import { DEFAULT_PROMPT_PROFILE_CONFIG } from '../../structured/prompting/PromptProfileRouter';
+import { createCurrentDateTimeTool } from '../../../core/tools/builtins/currentDateTime';
 
 type Json = Record<string, any>;
 let bodies: Json[];
@@ -269,6 +270,8 @@ describe('full-runtime Anthropic wire', () => {
     const os = await AgentOS.create({
       modelProviderManagerConfig: { providers: [{ providerId: 'anthropic', enabled: true, isDefault: true, config: { apiKey: `wire-runtime-${++serial}` } }] },
       turnPlanning: { enabled: false },
+      // the runtime registers no tool of its own, so the host names one: the requests then carry a tool list to compare
+      tools: [createCurrentDateTimeTool()],
       orchestratorConfig: {
         enableConversationalPersistence: false,
         promptProfileConfig: { ...DEFAULT_PROMPT_PROFILE_CONFIG, routing: { ...DEFAULT_PROMPT_PROFILE_CONFIG.routing, reviewEveryNTurns: 1 } },
@@ -294,6 +297,7 @@ describe('full-runtime Anthropic wire', () => {
       }
       expect(second.system[0]).toEqual(third.system[0]);
       expect(JSON.stringify(second.tools)).toBe(JSON.stringify(third.tools));
+      expect(second.tools.map((tool: Json) => tool.name)).toContain('getCurrentDateTime');
       expect(systemTextOf([{ role: 'system', content: second.system }])).toContain('Meta-Preset: Concise');
       expect(systemTextOf([{ role: 'system', content: third.system }])).toContain('Meta-Preset: Deep Dive');
     } finally {
