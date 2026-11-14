@@ -60,6 +60,16 @@ describe('memory recall docs', () => {
     expect(lineOf(memory, '| `lexicalBackend` | ')).toContain('`in_process` (a store with no Brain)');
   });
 
+  it("say hybrid's exact-words and recency legs carry a turn alone whenever the dense leg returns nothing, a dense search with a vector included", () => {
+    // pipeline.ts runs the three legs side by side: the dense leg also returns nothing with a usable query vector when
+    // the turn's scopes hold no vector match or a scope's vector query throws (read as a scope with no memories), and
+    // the other two legs then carry the turn alone.
+    const line = lineOf('docs/memory/COGNITIVE_MEMORY.md', '**A host with no embedding model.**');
+    expect(line).not.toContain('only when');
+    expect(line).toContain('whenever the dense leg returns nothing');
+    expect(line).toContain('the vector search finds no memory in the turn\'s scopes');
+  });
+
   it('state the numbers the source holds: the default budget, the hybrid recall constants and the rerank bounds', () => {
     // A constant a measured run moves (RECALL_CONSTANTS, RERANK_DEFAULTS) must move in these tables with it.
     const cell = (row: string, n: number) => row.split('|')[n].trim();
