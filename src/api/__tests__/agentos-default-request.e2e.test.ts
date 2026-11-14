@@ -5,7 +5,8 @@
  * completion request the stub receives and the orchestrator's effective persistence setting, and checks the one
  * `runtime.defaults` event initialization writes. No prompt profile and no date tool reach a request unless the host
  * passes one; `AgentOS.create()` keeps the factory's ENABLE_PERSISTENCE value when the host's orchestrator config
- * leaves that field out. A persona that names the date tool gets it only when the host registers it: the bundled
+ * leaves that field out, and with persistence left to its default on either path, the reply an output guard sanitized
+ * is the one the stored conversation keeps. A persona that names the date tool gets it only when the host registers it: the bundled
  * architect persona, whose definition lists the tool, is served either way, and strict persona validation refuses a
  * persona whose `toolIds` name a date tool the host did not register.
  */
@@ -47,6 +48,9 @@ vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async (import
 import * as root from '../../index';
 import { AgentOS } from '../AgentOS';
 import { createAgentOSConfig } from '../../core/config/AgentOSConfig';
+import { MessageRole } from '../../core/conversation/ConversationMessage';
+import { GuardrailAction, type IGuardrailService } from '../../safety/guardrails/IGuardrailService';
+import { AgentOSResponseChunkType } from '../types/AgentOSResponse';
 
 /** Every system message's text in one request, in order: string content, or the text of its text parts. */
 function systemTextOf(messages: Array<{ role: string; content: unknown }>): string {
@@ -143,6 +147,26 @@ describe('full-runtime explicit defaults', () => {
     const result = await execute.mock.results[0].value;
     expect(result).toMatchObject({ success: true, output: { timezoneUsed: 'UTC', isoTimestamp: expect.any(String) } });
     expect(defaults()[0].fields.dateTool).toBe('on');
+  });
+  it.each(['create', 'initialize'] as const)('rewrites the stored reply an output guard sanitized when %s leaves persistence to its default', async (path) => {
+    vi.stubEnv('ENABLE_PERSISTENCE', undefined);
+    const rewrites: IGuardrailService = {
+      config: { canSanitize: true },
+      evaluateOutput: async ({ chunk }) => (chunk.type === AgentOSResponseChunkType.FINAL_RESPONSE
+        ? { action: GuardrailAction.SANITIZE, modifiedText: 'Rewritten.', reasonCode: 'REWRITTEN' } : null),
+    };
+    const host = { modelProviderManagerConfig: providers, personas, turnPlanning: { enabled: false }, orchestratorConfig: {}, guardrailService: rewrites };
+    if (path === 'create') {
+      os = await AgentOS.create(host as any);
+    } else {
+      os = new AgentOS();
+      await os.initialize({ ...(await createAgentOSConfig()), ...host } as any);
+    }
+    await send();
+    expect(persistence()).toBe(true);
+    const stored = (await os!.getConversationManager().getConversation('s'))?.getAllMessages()
+      .filter((message) => message.role === MessageRole.ASSISTANT && message.metadata?.source === 'agentos_output');
+    expect(stored?.map((message) => message.content)).toEqual(['Rewritten.']);
   });
   it('does not log resolved defaults twice when initialize is called again', async () => {
     await create(); await os!.initialize((os as any).config);
