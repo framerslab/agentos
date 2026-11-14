@@ -43,7 +43,7 @@ import {
   type FreezeTarget,
 } from './hostCalls.js';
 import { canonicalJson } from './ledger/canonical.js';
-import { chainKeyOf, Ledger, tombstoneHash } from './ledger/Ledger.js';
+import { chainKeyOf, Ledger } from './ledger/Ledger.js';
 import { LearnerSession, type LearnerSessionHost, type SessionBinding } from './LearnerSession.js';
 import { buildManifest } from './manifest.js';
 import { InMemoryLearningStore } from './store/InMemoryLearningStore.js';
@@ -391,8 +391,8 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
     try {
       await ready.store.deleteUserRows(namespace, userId);
     } catch (error) {
-      const hash = (await tombstoneHash(namespace, userId)).slice(0, 16);
-      console.warn(`[agentos] learning: the rows of a forgotten user (tombstone ${hash}) were not deleted again (${messageOf(error)}); a second forgetUser call deletes them.`);
+      // No hash of the user's id: an unkeyed hash in a log lets anyone with a list of ids find who was forgotten.
+      console.warn(`[agentos] learning: the rows of a forgotten user were not deleted again (${messageOf(error)}); a second forgetUser call deletes them.`);
     }
   }
 
@@ -1042,10 +1042,10 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
       const plain = await this.countPlainForm(userId, rows);
       plainFormLeft = plain.left;
       if (plain.left > 0) {
-        // A line about a forgotten user names the tombstone, never the user: the caller holds the id it deleted.
-        const hash = (await tombstoneHash(namespace, userId)).slice(0, 16);
+        // A line about a forgotten user names neither the user nor a hash of the id: the caller holds the id it
+        // deleted, and an unkeyed hash in a log lets anyone with a list of ids find who was forgotten.
         console.warn(
-          `[agentos] learning: forgetUser (tombstone ${hash}) left ${plain.left} trace(s) filed before the namespace, under the user's plain id in its ${plain.scopes.join(' and ')}; re-file them in the namespaced form with MemoryStore.refileScope, then call forgetUser again.`,
+          `[agentos] learning: forgetUser left ${plain.left} trace(s) filed before the namespace, under the user's plain id in its ${plain.scopes.join(' and ')}; re-file them in the namespaced form with MemoryStore.refileScope, then call forgetUser again.`,
         );
       }
     }
