@@ -117,6 +117,13 @@ describe('renameTag and mergeTags', () => {
     expect(mergeTags(['C++', 'cpp'], 'C++', 'CPP')).toEqual(['cpp']);
   });
 
+  it('renameTag and mergeTags keep every other tag once too, at its first place and spelling', () => {
+    expect(renameTag(['q3-planning', 'Q3 Planning', 'budget'], 'budget', 'finance')).toEqual(['q3-planning', 'finance']);
+    expect(mergeTags(['Q3 Planning', 'budget', 'q3-planning', 'Finance'], 'budget', 'finance')).toEqual(['Q3 Planning', 'Finance']);
+    expect(renameTag(['C++', 'c', 'C++'], 'c', 'clang')).toEqual(['C++', 'clang']);
+    expect(renameTag(['q3-planning', 'Q3 Planning'], 'budget', 'finance')).toEqual(['q3-planning', 'Q3 Planning']);
+  });
+
   it('given lists are not changed', () => {
     const tags = Object.freeze(['Budget', 'q3', 'Finance']);
     expect(renameTag(tags, 'budget', 'Money')).toEqual(['Money', 'q3', 'Finance']);
