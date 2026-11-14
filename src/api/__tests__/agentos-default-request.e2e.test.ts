@@ -142,6 +142,18 @@ describe('full-runtime explicit defaults', () => {
     expect(persistence()).toBe(host ?? true);
     expect(defaults()[0].fields).toMatchObject({ persistence: (host ?? true) ? 'on' : 'off', persistenceFrom: host === undefined ? 'default' : 'host' });
   });
+  it.each([
+    ['create', false, 'environment'],
+    ['initialize', true, 'default'],
+  ] as const)('%s reads a null host persistence as left out, in the value and in its logged source', async (path, expected, from) => {
+    vi.stubEnv('ENABLE_PERSISTENCE', 'false');
+    if (path === 'create') await create({ enableConversationalPersistence: null });
+    else await initialize({ enableConversationalPersistence: null });
+    await send();
+    expect(wire.calls.length).toBeGreaterThan(0);
+    expect(persistence()).toBe(expected);
+    expect(defaults()[0].fields).toMatchObject({ persistence: expected ? 'on' : 'off', persistenceFrom: from });
+  });
   it('offers no tool or tool choice when the host and discovery supply none', async () => {
     await create(); await send();
     for (const call of wire.calls) {
