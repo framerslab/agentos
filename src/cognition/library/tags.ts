@@ -338,9 +338,16 @@ function standsFor(given: string): (label: string) => boolean {
   };
 }
 
+/** What a label is the same tag as in a list: its key when it is an alias of one, and itself as written otherwise. */
+function sameTagAs(label: string): string {
+  const { state, key } = classifyLegacyTag(label);
+  return state === 'alias' && key !== null ? `key:${key}` : `as:${label}`;
+}
+
 /**
- * A list with every label of `from` and of `target` gone and `written` at the first place any of them stood; the list
- * itself, copied, when it holds no label of `from`.
+ * A list with every label of `from` and of `target` gone and `written` at the first place any of them stood, and every
+ * other tag once, at its first place and spelling (a list stored before the grammar can hold `q3-planning` and
+ * `Q3 Planning`); the list itself, copied, when it holds no label of `from`.
  */
 function replaceAtFirst(tags: readonly string[], from: string, target: string, written: (tags: readonly string[]) => string): string[] {
   const isFrom = standsFor(from);
@@ -348,10 +355,16 @@ function replaceAtFirst(tags: readonly string[], from: string, target: string, w
   const isTarget = standsFor(target);
   const spelling = written(tags);
   const result: string[] = [];
+  const kept = new Set<string>();
   let placed = false;
   for (const label of tags) {
-    if (!isFrom(label) && !isTarget(label)) result.push(label);
-    else if (!placed) {
+    if (!isFrom(label) && !isTarget(label)) {
+      const same = sameTagAs(label);
+      if (!kept.has(same)) {
+        kept.add(same);
+        result.push(label);
+      }
+    } else if (!placed) {
       result.push(spelling);
       placed = true;
     }
@@ -361,7 +374,8 @@ function replaceAtFirst(tags: readonly string[], from: string, target: string, w
 
 /**
  * A list with every label of `from`'s key written as `to`, each tag once, in the list's order: where the list holds
- * `to`'s key too, the two become one `to` at the first place either stood. A label with no key (`C++`) is compared as
+ * `to`'s key too, the two become one `to` at the first place either stood, and any other key the list holds twice
+ * keeps its first label. A label with no key (`C++`) is compared as
  * written, so renaming `c` leaves `C++` where it stands. A list that holds no label of `from` comes back unchanged.
  * `to` is written as given; the host passes a label it accepts. Pure: the list given is not changed.
  */
@@ -371,7 +385,8 @@ export function renameTag(tags: readonly string[], from: string, to: string): st
 
 /**
  * A list with every label of `from`'s key gone and `into` at the first place either stood, in the spelling the list
- * holds for it (its first label of `into`'s key), else as given; each tag once, in the list's order. A label with no key
+ * holds for it (its first label of `into`'s key), else as given; each tag once, in the list's order, any other key the
+ * list holds twice at its first label. A label with no key
  * (`C++`) is compared as written. A list that holds no label of `from` comes back unchanged. Pure: the list given is not
  * changed.
  */
