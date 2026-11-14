@@ -600,9 +600,10 @@ export interface GenerateTextOptions {
    * Sent to OpenAI as `store` on the request, on `/v1/chat/completions` and
    * `/v1/responses` alike. Left out, a chat completion sends no `store` key
    * and a Responses request sends `store: false`, as before. Other providers
-   * ignore it, except those built on the OpenAI provider (Groq, xAI,
-   * Together, Mistral, LiteLLM, MiniMax), which send it to their own
-   * endpoint.
+   * ignore it, those built on the OpenAI provider (Groq, xAI, Together,
+   * Mistral, LiteLLM, MiniMax) included, which leave it out of the request to
+   * their own endpoint; `customModelParams: { store }` reaches such an
+   * endpoint when it takes the field.
    *
    * OpenAI keeps output unless a request says otherwise: "Responses are
    * stored by default. Chat completions are stored by default for new
