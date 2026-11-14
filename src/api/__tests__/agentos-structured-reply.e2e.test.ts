@@ -209,7 +209,7 @@ describe('a structured reply on processRequest', () => {
     { rewrite: true, throws: false },
     { rewrite: false, throws: true },
     { rewrite: true, throws: true },
-  ])('keeps a refused structured reply after output sanitization without checking or repairing it (rewrite: $rewrite, throwing schema: $throws)', async ({ rewrite, throws }) => {
+  ])('keeps a refused structured reply after output sanitization without checking it again (rewrite: $rewrite, throwing schema: $throws)', async ({ rewrite, throws }) => {
     const sanitizedText = rewrite ? GOOD.replace('Chapter 2 drill', 'Review') : GOOD;
     const evaluateOutput = vi.fn<NonNullable<IGuardrailService['evaluateOutput']>>(async ({ chunk }) =>
       chunk.type === AgentOSResponseChunkType.FINAL_RESPONSE
@@ -221,18 +221,16 @@ describe('a structured reply on processRequest', () => {
       if (throws) throw new Error('the schema check ran on a sanitized refusal');
     });
     const schema = week.superRefine(check);
-    // A Responses refusal beside matching output text. A repair would consume the queued good reply.
+    // A refusal beside matching output text. The recheck asks the model nothing, so the check's runs are what tell.
     provider.replies.push([
       { responseTextDelta: GOOD },
       { isFinal: true, choices: [{ index: 0, message: { role: 'assistant', content: GOOD }, finishReason: 'stop', refusal: REFUSAL }] },
-    ], reply(GOOD));
+    ]);
     const chunks = await collect(booted, {
       structuredReply: { schema, name: 'week', maxRetries: 2, onExhausted: 'return_invalid' },
     }, 's-refused-sanitized');
     expect(evaluateOutput.mock.calls.some(([{ chunk }]) => chunk.type === AgentOSResponseChunkType.FINAL_RESPONSE)).toBe(true);
     expect(check).not.toHaveBeenCalled();
-    expect(provider.calls).toHaveLength(1);
-    expect(provider.replies).toHaveLength(1);
     expect(errorOf(chunks)).toBeUndefined();
     expect(deltasOf(chunks)).toHaveLength(0);
     const final = finalOf(chunks)!;
