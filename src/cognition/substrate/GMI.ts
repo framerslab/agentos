@@ -305,6 +305,13 @@ function addUsage(total: CostAggregator, usage: ModelUsage): void {
   total.completionTokens += usage.completionTokens || 0;
   total.totalTokens = total.promptTokens + total.completionTokens;
   if (usage.costUSD) total.totalCostUSD = (total.totalCostUSD || 0) + usage.costUSD;
+  // The cache counts only where the provider reported them, so an unreported count stays absent.
+  if (usage.cacheReadInputTokens !== undefined) total.cacheReadTokens = (total.cacheReadTokens ?? 0) + usage.cacheReadInputTokens;
+  if (usage.cacheCreationInputTokens !== undefined) total.cacheCreationTokens = (total.cacheCreationTokens ?? 0) + usage.cacheCreationInputTokens;
+  if (usage.cacheCreationExtendedInputTokens !== undefined) {
+    total.cacheCreationExtendedTokens = (total.cacheCreationExtendedTokens ?? 0) + usage.cacheCreationExtendedInputTokens;
+  }
+  if (usage.inclusiveInputTokens !== undefined) total.inclusiveInputTokens = (total.inclusiveInputTokens ?? 0) + usage.inclusiveInputTokens;
 }
 
 /**

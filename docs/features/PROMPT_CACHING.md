@@ -44,7 +44,7 @@ No split or GMI marker is requested with `cache: false`, a `customModelParams` o
 
 On `agent({ runtime: 'gmi' })`, empty `systemBlocks` are dropped. Blocks through the last `cacheBreakpoint: true` form the fixed prefix; later blocks are turn entries. With no breakpoint, or none followed by a block, the joined text is one fixed entry. `onBeforeGeneration.system` is the joined base text, the recall instruction included when present.
 
-The prompt engine's result reports the split in `metadata.systemSplit`: `fixedEntries`, `restEntries` and `marked`.
+Turn usage includes `cacheReadTokens`, `cacheCreationTokens`, `cacheCreationExtendedTokens` and `inclusiveInputTokens` when a provider reports them, summed over the turn's billed steps. The full runtime keeps them on `FINAL_RESPONSE.usage`; a field no step reported stays absent. The prompt engine's result reports the split in `metadata.systemSplit`: `fixedEntries`, `restEntries` and `marked`.
 
 Limits:
 
