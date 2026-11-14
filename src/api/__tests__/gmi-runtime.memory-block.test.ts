@@ -276,16 +276,19 @@ describe("agent({ runtime: 'gmi' }) memory block in the model request", () => {
 
       // The assembly behind that request reports what became of each memory line. The three statements are the
       // episodic traces: the long one left out because its whole line does not fit the room Recent Experiences was
-      // offered (it is more tokens than the whole block), the two short ones included.
+      // offered (it is more tokens than the whole block), the two short ones included. Recent Experiences also shows
+      // the assistant's own replies, as its words; they are not statements.
       expect(assemblies.length, 'assemblies on the last turn').toBeGreaterThan(0);
-      const { block: assembled, lineOutcomes } = assemblies[assemblies.length - 1];
+      const { block: assembled, lineOutcomes, contents } = assemblies[assemblies.length - 1];
       expect(block.startsWith(assembled.trimEnd()), "the request's block is the assembled one").toBe(true);
       const leftOut = lineOutcomes.filter((line) => line.outcome === 'left_out');
       expect(leftOut, JSON.stringify(lineOutcomes)).toHaveLength(1);
       expect(leftOut[0]).toMatchObject({ section: 'recentEpisodic', reason: 'section_full' });
       expect(leftOut[0].tokens).toBeGreaterThan(1600);
       const includedEpisodic = lineOutcomes.filter((line) => line.outcome === 'included' && line.section === 'recentEpisodic');
-      expect(includedEpisodic, JSON.stringify(lineOutcomes)).toHaveLength(SHORT_STATEMENTS.length);
+      const replies = ['Noted.', 'Okay.', 'Sure.'];
+      const includedStatements = includedEpisodic.filter((line) => !replies.includes(contents.get(line.id) ?? ''));
+      expect(includedStatements, JSON.stringify(lineOutcomes)).toHaveLength(SHORT_STATEMENTS.length);
       for (const line of includedEpisodic) expect(line).not.toHaveProperty('reason');
     } finally {
       await a.close();

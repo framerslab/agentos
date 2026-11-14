@@ -613,8 +613,8 @@ const { manager } = await createAgentCognitiveMemory({ persona, memory: { embedd
 |---------|---------|---------|
 | Persistent Memory | 5% | The persistent markdown working memory, truncated to fit |
 | Working Memory | 15% | Active context from slot buffer |
-| Semantic Recall | 40% | Retrieved traces other than episodic |
-| Recent Episodic | 25% | Retrieved episodic traces |
+| Semantic Recall | 40% | Retrieved traces other than episodic, except the agent's own replies |
+| Recent Episodic | 25% | Retrieved episodic traces, and the agent's own earlier replies ([Trace Lines](#trace-lines)) |
 | Prospective Alerts | 5% | Triggered reminders (Batch 2) |
 | Graph Associations | 5% | Spreading activation context (Batch 2) |
 | Observation Notes | 5% | Recent observer notes (Batch 2) |
@@ -665,6 +665,12 @@ Every line carries the trace's age and the UTC date it was stored (`createdAt`):
 - [episodic] user: which locker did we pick? ... (26 days ago, 2026-10-13 | moderate confidence | relevance: 0.62)
 ```
 
+A GMI files each reply as a semantic trace with sourceType `agent_inference` under the bridge's tags, its role `assistant` first, then the persona id and the user id. The block shows such a trace as a past exchange in the agent's words, never as a fact: an `[episodic]` line whose content starts `You said: `, in Recent Experiences, or in the one recall section under `retrieval: 'hybrid'`. A graph association and the involuntary memory that lead to such a trace read the same way. The block reads the sourceType and the `assistant` tag each time it is built and the stored trace is not changed, so a reply an earlier version filed, under the same tags, is shown the same way, with no migration. Every other trace is shown as it is: a semantic fact a host filed, one consolidation wrote, and a trace a host filed itself with sourceType `agent_inference` and without the `assistant` tag, a conclusion it drew, among them. A reply recalled a day later reads:
+
+```
+- [episodic] You said: Green tea, from what you told me. (1d ago, 2026-11-13 | moderate confidence | relevance: 0.71 | tags: assistant, tutor, user-42)
+```
+
 ### Personality -> Formatting Style
 
 The assembler selects a formatting style by comparing conscientiousness, openness and emotionality (ties go in that order):
@@ -713,6 +719,8 @@ Under `retrieval: 'hybrid'` the two recall sections are one, in Relevant Memorie
 ...
 ```
 
+The agent's own earlier replies are shown in Recent Experiences, or in the hybrid block's one recall section, each line's content starting `You said: `, and never under the dense block's facts heading ([Trace Lines](#trace-lines)).
+
 The preamble appears when the budget has room for it and 100 more tokens. `assembleForPrompt()` never fills the last two sections: it passes no observer notes (their 5% flows to the sections with content), and it passes neither the mechanisms engine nor the trace pool that the involuntary-recall section needs. Both sections appear only when a host calls `assembleMemoryContext()` (from `@framers/agentos/cognition/memory`) itself, with `observationNotes`, or with `mechanismsEngine` and `allTraces`. How each trace line reads depends on the formatting style.
 
 Token estimation uses ~4 chars per token heuristic.
@@ -741,6 +749,7 @@ Every other provider gets one string: the note, a blank line, then the words. A 
 
 ### Upgrading from 0.17.3 or earlier
 
+- The agent's own earlier replies, the traces with sourceType `agent_inference` and the tag `assistant` that a GMI files after each turn as semantic traces, are shown as past exchanges in its words and not under the facts heading. Under `retrieval: 'dense'` such a trace is shown in Recent Experiences, and under `'hybrid'` in the one recall section, as an `[episodic]` line whose content starts `You said: `; a graph association to one reads the same way ([Trace Lines](#trace-lines)). The stored traces are not changed: the block reads the sourceType and the tag each time it is built, so the replies a store holds from earlier versions, which carry the same tag, are shown the new way with no migration. In a dense block such a reply draws on Recent Episodic's share, and `lineOutcomes` and the recall capture report it under `recentEpisodic` where 0.17.3 reported `semanticRecall`, so which recalled memories fit the block may shift. A reply the graph walk reaches from another memory is a Related Context line: it draws on Graph Associations' share and is reported under `graphAssociations`, as every association is, so with `recentEpisodic` at 0 a reply can still appear there. A trace a host files with sourceType `agent_inference` and without the `assistant` tag is shown exactly as before: in a dense block a semantic one stays under the facts heading and is reported under `semanticRecall`, and an episodic one stays in Recent Experiences.
 - A store loads traces stored in the same millisecond by id, compared character code by character code, in the whole-brain hydration of its first recall and in `hydrateScope`. Through 0.17.3 they loaded in an order each engine's query plan left open: on SQLite it followed how the rows were read (in the order they were stored in one store, the newest first in another), and on PostgreSQL it also changed as rows were updated, so two loads of the same traces could differ. A host sees it in the memory block a GMI sends (`agent({ runtime: 'gmi' })`, `gmi()`) and in a turn's `memoryRecall.candidates`: equally scored traces of one millisecond are listed by id, and the same traces give the same block on SQLite and on PostgreSQL, and from one load to the next. On either engine, two such traces can come back in the other order than before. Traces stored in different milliseconds load as before.
 
 ### Upgrading from 0.17.2 or earlier
@@ -1304,8 +1313,11 @@ await cognitiveMemory.encode(assistantResponse, mood, gmiMood, {
   scope: 'user',
   scopeId: sessionId,
   sourceType: 'agent_inference',
+  tags: ['assistant', personaId, userId],
 });
 ```
+
+A later turn's block shows the reply as the agent's own earlier words, a past exchange whose content starts `You said: `, and never as a fact; it reads that from the `agent_inference` sourceType and the `assistant` tag ([Trace Lines](#trace-lines)).
 
 With a learning layer the GMI reads and files under the scope ids its learner session gives the turn: the user's message and the reply both go under the turn's own user scope id (the learner's, or the session's form on a turn with no learner), each encode runs inside the user's write chain with the tombstone read before it and once it has committed, and the recall lists only the turn's own scopes ([Where a turn's memory is filed and read](../GMI.md#where-a-turns-memory-is-filed-and-read)).
 

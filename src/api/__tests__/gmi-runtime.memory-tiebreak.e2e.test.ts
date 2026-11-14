@@ -277,8 +277,8 @@ function expectTiesById(out: Awaited<ReturnType<typeof askAfterRestart>>): strin
   expect(ties.some((group) => byCollation(group).join() !== byCharCode(group).join())).toBe(true);
 
   // The lanterns: one group of six, each shown in the block, in the record's order, which is neither the order they
-  // were filed in nor its reverse.
-  const lanterns = ties.find((group) => group.length === LANTERNS.length && group.every((id) => capture.candidates.find((c) => c.id === id)?.section === 'semanticRecall'));
+  // were filed in nor its reverse. They are the agent's replies, so the block shows them in Recent Experiences.
+  const lanterns = ties.find((group) => group.length === LANTERNS.length && group.every((id) => capture.candidates.find((c) => c.id === id)?.section === 'recentEpisodic'));
   expect(lanterns, `a group of the ${LANTERNS.length} lanterns among ${JSON.stringify(capture.candidates.map((c) => [c.id, c.fusedScore, c.section]))}`).toBeDefined();
   const textOfId = new Map(byFiling(lanterns!).map((id, i) => [id, LANTERNS[i]]));
   for (const lantern of LANTERNS) expect(block).toContain(lantern);
