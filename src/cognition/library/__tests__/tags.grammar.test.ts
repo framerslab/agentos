@@ -1,9 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { canonicalTag, classifyLegacyTag, compareCodePoints, isTag, normalizeTag, resolveTag, tagKey, tagKeysOf, tagVocabulary, type TagDocument } from '../tags.js';
+import { canonicalTag, classifyLegacyTag, compareCodePoints, isTag, normalizeTag, resolveTag, tagKey, tagKeysOf, tagVocabulary, type TagDocument, type TagUse } from '../tags.js';
 
 const doc = (id: string, kind: TagDocument['kind'], tags: string[], changedAt: number | null): TagDocument => ({ id, kind, title: id, text: '', keywords: [], tags, changedAt });
-// The two members a use gains with the grammar's widening; the row is typed as a TagUse once they are declared.
-const use = (tag: string, uses: number, lastUsed: number | null) => ({ tag, label: tag, uses, notes: uses, sessions: 0, documents: 0, lastUsed });
+const use = (tag: string, uses: number, lastUsed: number | null): TagUse => ({ tag, label: tag, uses, notes: uses, sessions: 0, documents: 0, lastUsed });
 
 describe('the tag grammar (U1)', () => {
   it('makes typing a tag with one spelling per key, and refuses rather than cuts', () => {

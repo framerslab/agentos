@@ -3,17 +3,9 @@
  * rename and merge by key, and the grammar's names in both of the library's entries.
  */
 import { describe, expect, it } from 'vitest';
-import * as grammar from '../tags.js';
-import { resolveTag, tagVocabulary, type TagDocument } from '../tags.js';
+import { mergeTags, renameTag, resolveTag, tagVocabulary, type TagDocument } from '../tags.js';
 
-// The two functions and the document kind this file reads arrive with the grammar's widening. Until then they are
-// read through the module, so the type check passes and each case below fails on what it asserts.
-const { renameTag, mergeTags } = grammar as unknown as {
-  renameTag: (tags: readonly string[], from: string, to: string) => string[];
-  mergeTags: (tags: readonly string[], from: string, into: string) => string[];
-};
-const doc = (id: string, kind: 'note' | 'session' | 'document', tags: string[], changedAt: number | null): TagDocument =>
-  ({ id, kind, title: id, text: '', keywords: [], tags, changedAt }) as unknown as TagDocument;
+const doc = (id: string, kind: TagDocument['kind'], tags: string[], changedAt: number | null): TagDocument => ({ id, kind, title: id, text: '', keywords: [], tags, changedAt });
 
 /** The grammar's values, which both entries export. */
 const GRAMMAR = [

@@ -7,9 +7,20 @@ The module will live in `src/cognition/library/`, beside the tag grammar (`tags.
 ## What is built
 
 - The fixture texts under [`tests/fixtures/tags/`](../../tests/fixtures/tags/README.md), written for this repository and holding no person's content.
-- The scoring harness, [`src/cognition/library/__tests__/tags.scoring.test.ts`](../../src/cognition/library/__tests__/tags.scoring.test.ts), and the CI job "Tag suggestions (fixtures and scores)" that runs it on every pull request and on the release's run. Every part of the report reads `missing`, since no part of the module exists.
+- The scoring harness, [`src/cognition/library/__tests__/tags.scoring.test.ts`](../../src/cognition/library/__tests__/tags.scoring.test.ts), and the CI job "Tag suggestions (fixtures and scores)" that runs it on every pull request and on the release's run. Every part of the report reads `missing`, since none of the parts it scores exists.
+- The tag grammar, [`src/cognition/library/tags.ts`](../../src/cognition/library/tags.ts), exported from both entries, `@framers/agentos/cognition/library` and `@framers/agentos/cognition/library/browser`. It is described under [The grammar](#the-grammar).
 
 The steps and checks below are the design each later change builds.
+
+## The grammar
+
+A tag is 1 to 40 code points in NFC and lower case: runs of letters and decimal digits, with single hyphens between runs in what a person types. `normalizeTag` makes typing a tag (`Q3 Planning!` gives `q3-planning`), and refuses rather than cuts. `tagKey` and `canonicalTag` drop the hyphens, so `q3-planning` and `q3planning` are one tag, whose key is `q3planning`. `classifyLegacyTag` reads a label stored before the grammar: an alias of its key when case, Unicode normalization and separators alone stand between them, unresolved otherwise (`C++`, `C#`, an emoji), and an unresolved label is never counted under its candidate key.
+
+- **The vocabulary.** `tagVocabulary(documents)` reads `TagDocument`s of three kinds, `note`, `session` and `document`, and gives one `TagUse` a key: `uses`, the documents that hold it, each counted once, with `notes`, `sessions` and `documents` by kind, and `lastUsed`, the latest `changedAt` among them. Its `label` is the person's own spelling of the key: of the labels the documents hold for it, the one on the most documents, then the one on the latest changed document, then the first by code point. `Q3 Planning` on three documents and `q3-planning` on one give the label `Q3 Planning` for the key `q3planning`. The documents are read and never changed, and no stored label is rewritten.
+- **A candidate's resolution.** `resolveTag(candidate, vocabulary)` makes a candidate an existing tag by its key, by its stem (one spaced word) or one edit away (both keys 5 code points or more, the same digits, a script written with spaces), and answers that tag's key as `tag` and the vocabulary's `label` for it. A new tag's `tag` is its key and its `label` is `normalizeTag`'s form: `Road Map 2027!` gives the key `roadmap2027` and the label `road-map-2027`.
+- **Rename and merge.** `renameTag(tags, from, to)` writes every label of `from`'s key as `to`. `mergeTags(tags, from, into)` takes every label of `from`'s key away and puts `into` at the first place either stood, in the spelling the list holds for it, else as given. Both work by key, keep the list's order, keep each tag once, leave a label with no key (`C++`) where it stands, and return a new list. A list that holds no label of `from` comes back unchanged.
+
+`TagUse` holds `label` and `documents`, and each `TagResolution` holds `label`. A vocabulary row an application builds for itself needs both members; one read from `tagVocabulary` has them.
 
 ## The steps
 
