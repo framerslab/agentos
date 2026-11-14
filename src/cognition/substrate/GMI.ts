@@ -53,7 +53,8 @@ import { IWorkingMemory } from './memory/IWorkingMemory';
 import { IPromptEngine, PromptExecutionContext, PromptComponents, PromptEngineResult, ModelTargetInfo, type PromptHistoryOmission } from '../../core/llm/IPromptEngine';
 import { IRetrievalAugmentor, RagRetrievalOptions, RagDocumentInput, RagIngestionOptions, RagMemoryCategory } from '../rag/IRetrievalAugmentor';
 
-import { ChatMessage, IProvider, ModelCompletionOptions, ModelCompletionResponse, ModelUsage, ThinkingBlock } from '../../core/llm/providers/IProvider';
+import { ChatMessage, IProvider, MessageContentPart, ModelCompletionOptions, ModelCompletionResponse, ModelUsage, ThinkingBlock } from '../../core/llm/providers/IProvider';
+import { resolveCacheCapabilities } from '../../core/llm/providers/model-cache-capabilities';
 import type { ZodType } from 'zod';
 import type { CompletionAttempt, CompletionOutcome, CompletionResolution, CompletionRoute } from '../../api/runtime/completionGateway.js';
 import { checkStructuredReply, resolveStructuredReply, structuredRepairMessage, StructuredReplyConfigError, type StructuredReplyOutput } from '../../api/runtime/structuredReply.js';
@@ -127,6 +128,94 @@ function withSystemMessage(messages: ChatMessage[], text: string): ChatMessage[]
   let at = 0;
   while (at < messages.length && messages[at].role === 'system') at += 1;
   return [...messages.slice(0, at), { role: 'system', content: text }, ...messages.slice(at)];
+}
+
+/**
+ * The cache marker a model hop asks the prompt engine to put on the fixed system entries, or undefined for none.
+ * Only an Anthropic-family target gets one (the `anthropic` provider, or OpenRouter with an `anthropic/` model), and
+ * only when the call leaves prompt caching on: not with `cache: false`, not when `customModelParams` overrides
+ * `system`, `messages`, `tools` or `cache_control` (the host then owns those regions), not with
+ * `AGENTOS_ANTHROPIC_AUTO_CACHE` set to `0` or `false`, and not for a model without prompt caching. A nonempty
+ * `customModelParams.model` is the model checked, as the provider sends it.
+ *
+ * @param target - The hop's model and provider.
+ * @param options - The completion options the hop is sent with: the turn's, under a fallback entry's own overrides.
+ * @returns `{ ttl: '1h' }` with `cache: { ttl: '1h' }`, `{}` for the default lifetime, or undefined.
+ */
+function systemCacheMarkerFor(
+  target: Readonly<ModelTargetInfo>,
+  options: ModelCompletionOptions,
+): PromptComponents['systemCacheMarker'] {
+  const family = target.providerId === 'anthropic'
+    || (target.providerId === 'openrouter' && typeof target.modelId === 'string' && target.modelId.startsWith('anthropic/'));
+  // Every other provider returns here, before anything reads the environment: a GMI hop in a runtime with no
+  // `process` global must not throw.
+  if (!family) return undefined;
+  const custom = options.customModelParams;
+  const override = custom !== undefined && custom !== null && ['system', 'messages', 'tools', 'cache_control'].some((key) =>
+    Object.prototype.hasOwnProperty.call(custom, key),
+  );
+  const autoCache = typeof process !== 'undefined' ? process.env?.AGENTOS_ANTHROPIC_AUTO_CACHE : undefined;
+  const disabled = autoCache === '0' || autoCache === 'false';
+  const customModel = custom?.model;
+  const modelId = typeof customModel === 'string' && customModel.length > 0 ? customModel : target.modelId;
+  if (options.cache === false || override || disabled || !resolveCacheCapabilities(modelId).supportsPromptCaching) return undefined;
+  return typeof options.cache === 'object' && options.cache.ttl === '1h' ? { ttl: '1h' } : {};
+}
+
+/** How many `cache_control` markers `value` holds, at any depth. */
+function countCacheMarkers(value: unknown): number {
+  if (!value || typeof value !== 'object') return 0;
+  return Object.entries(value).reduce(
+    (count, [key, nested]) => count + (key === 'cache_control' ? 1 : countCacheMarkers(nested)),
+    0,
+  );
+}
+
+/** The cache marker on a content part, or undefined when the part carries none. */
+function cacheMarkerOf(part: MessageContentPart | undefined): unknown {
+  return part && 'cache_control' in part ? part.cache_control : undefined;
+}
+
+/** Whether `value` holds, at any depth, a `cache_control` marker whose lifetime `test` accepts. */
+function holdsMarkerWith(value: unknown, test: (ttl: unknown) => boolean): boolean {
+  if (!value || typeof value !== 'object') return false;
+  return Object.entries(value).some(([key, nested]) =>
+    key === 'cache_control'
+      ? typeof nested === 'object' && nested !== null && test((nested as { ttl?: unknown }).ttl)
+      : holdsMarkerWith(nested, test),
+  );
+}
+
+/**
+ * Whether the GMI's own marker, on the part `isOwn` picks, breaks Anthropic's lifetime order with a marker of the
+ * hook's. Anthropic reads the markers in this order: the system messages' parts in message order (the provider sends
+ * every system message as the request's `system`), then the other messages' parts; and it refuses a request with a
+ * one-hour marker after a shorter one. So a five-minute own marker breaks it when a one-hour marker comes after it,
+ * and a one-hour own marker when a shorter marker comes before it.
+ */
+function breaksLifetimeOrder(
+  messages: readonly ChatMessage[],
+  isOwn: (part: MessageContentPart) => boolean,
+  ownLastsAnHour: boolean,
+): boolean {
+  const ordered = [...messages.filter((message) => message.role === 'system'), ...messages.filter((message) => message.role !== 'system')];
+  let afterOwn = false;
+  let shorterBefore = false;
+  for (const message of ordered) {
+    if (!Array.isArray(message.content)) continue;
+    for (const part of message.content) {
+      if (isOwn(part)) {
+        if (ownLastsAnHour && shorterBefore) return true;
+        afterOwn = true;
+      } else if (afterOwn) {
+        if (!ownLastsAnHour && holdsMarkerWith(part, (ttl) => ttl === '1h')) return true;
+      } else if (holdsMarkerWith(part, (ttl) => ttl !== '1h')) {
+        shorterBefore = true;
+      }
+    }
+  }
+  return false;
 }
 
 /** `value` when it is an abort signal: an object that takes abort listeners. */
@@ -262,6 +351,13 @@ function addUsage(total: CostAggregator, usage: ModelUsage): void {
   total.completionTokens += usage.completionTokens || 0;
   total.totalTokens = total.promptTokens + total.completionTokens;
   if (usage.costUSD) total.totalCostUSD = (total.totalCostUSD || 0) + usage.costUSD;
+  // The cache counts only where the provider reported them, so an unreported count stays absent.
+  if (usage.cacheReadInputTokens !== undefined) total.cacheReadTokens = (total.cacheReadTokens ?? 0) + usage.cacheReadInputTokens;
+  if (usage.cacheCreationInputTokens !== undefined) total.cacheCreationTokens = (total.cacheCreationTokens ?? 0) + usage.cacheCreationInputTokens;
+  if (usage.cacheCreationExtendedInputTokens !== undefined) {
+    total.cacheCreationExtendedTokens = (total.cacheCreationExtendedTokens ?? 0) + usage.cacheCreationExtendedInputTokens;
+  }
+  if (usage.inclusiveInputTokens !== undefined) total.inclusiveInputTokens = (total.inclusiveInputTokens ?? 0) + usage.inclusiveInputTokens;
 }
 
 /**
@@ -1805,18 +1901,30 @@ export class GMI implements IGMI {
         }
 
         const promptExecContext = this.buildPromptExecutionContext();
-        const baseSystemPrompts = Array.isArray(this.activePersona.baseSystemPrompt)
-            ? this.activePersona.baseSystemPrompt
-            : typeof this.activePersona.baseSystemPrompt === 'object' && 'template' in this.activePersona.baseSystemPrompt
-                ? [{ content: this.activePersona.baseSystemPrompt.template, priority: 1}]
-                : typeof this.activePersona.baseSystemPrompt === 'string'
-                    ? [{ content: this.activePersona.baseSystemPrompt, priority: 1}]
+        // Each entry says how long its text stays the same, so that the leading fixed entries can go out as a cached
+        // first block (see systemCacheMarkerFor): the persona's base prompt is fixed unless a list entry says
+        // otherwise, the GMI's own personality section is fixed and a learner's holds for the conversation. What a turn
+        // adds below (summary, prompt profile, discovery and skill context, a structured reply's instruction) is a turn
+        // entry; the hard limits are fixed.
+        const base = this.activePersona.baseSystemPrompt;
+        const baseSystemPrompts: NonNullable<PromptComponents['systemPrompts']> = Array.isArray(base)
+            ? base.map((entry) => ({ ...entry, stability: entry.stability ?? ('persona' as const) }))
+            : typeof base === 'object' && 'template' in base
+                ? [{ content: base.template, priority: 1, stability: 'persona' as const }]
+                : typeof base === 'string'
+                    ? [{ content: base, priority: 1, stability: 'persona' as const }]
                     : [];
 
         // The personality section sorts after a string or template base prompt (priority 2 after priority 1); the
         // entries of a list keep their own priorities. With no learner session and no persona traits passed there is
         // none, and the prompt is the one sent before.
-        const systemPrompts = [...baseSystemPrompts, ...turnLearning.systemPrompts];
+        const systemPrompts: NonNullable<PromptComponents['systemPrompts']> = [
+          ...baseSystemPrompts,
+          ...turnLearning.systemPrompts.map((entry) => ({
+            ...entry,
+            stability: entry.source === 'gmi:personality' ? ('persona' as const) : ('conversation' as const),
+          })),
+        ];
         const rollingSummaryText = typeof turnInput.metadata?.rollingSummary?.text === 'string'
           ? turnInput.metadata.rollingSummary.text.trim()
           : '';
@@ -1824,6 +1932,7 @@ export class GMI implements IGMI {
           systemPrompts.push({
             content: `Rolling Memory Summary (compressed)\n${rollingSummaryText}`,
             priority: 50,
+            stability: 'turn',
           });
         }
         const promptProfileInstructions = typeof turnInput.metadata?.promptProfile?.systemInstructions === 'string'
@@ -1833,6 +1942,7 @@ export class GMI implements IGMI {
           systemPrompts.push({
             content: promptProfileInstructions,
             priority: 60,
+            stability: 'turn',
           });
         }
         const discoveryPromptContext =
@@ -1843,6 +1953,7 @@ export class GMI implements IGMI {
           systemPrompts.push({
             content: `Capability Discovery Context\n${discoveryPromptContext}`,
             priority: 55,
+            stability: 'turn',
           });
         }
         const skillPromptContext =
@@ -1853,15 +1964,16 @@ export class GMI implements IGMI {
           systemPrompts.push({
             content: skillPromptContext,
             priority: 57,
+            stability: 'turn',
           });
         }
         if (structuredReply) {
-          systemPrompts.push({ content: structuredReply.instruction, priority: 900 });
+          systemPrompts.push({ content: structuredReply.instruction, priority: 900, stability: 'turn' });
         }
         // the persona's hard limits close the system prompt, after everything the turn added above
         const hardLimits = hardLimitsBlock(this.activePersona.hardLimits);
         if (hardLimits) {
-          systemPrompts.push({ content: hardLimits, priority: HARD_LIMITS_PRIORITY });
+          systemPrompts.push({ content: hardLimits, priority: HARD_LIMITS_PRIORITY, stability: 'persona' });
         }
 
         const promptConversation = this.buildPromptConversation({
@@ -2079,8 +2191,15 @@ export class GMI implements IGMI {
           // An engine that reads `memoryContextText` takes the block on its own; any other (a host's own IPromptEngine)
           // takes it joined in front of the other retrieved context, as before the field existed, so it is still sent.
           const hopMemoryText = hopMemoryContext?.contextText;
+          // Asked per hop: a fallback hop to another provider or model rebuilds the prompt for its own target, and
+          // with the options the gateway sends that hop (a fallback entry's own `cache` replaces the turn's there).
+          const systemCacheMarker = systemCacheMarkerFor(
+            modelTargetInfo,
+            resolution ? { ...llmOptions, ...resolution.optionOverrides } : llmOptions,
+          );
           const hopComponents: PromptComponents = {
             ...promptComponents,
+            ...(systemCacheMarker ? { systemCacheMarker } : {}),
             ...(hopMemoryText
               ? this.promptEngine.acceptsMemoryContextText === true
                 ? { memoryContextText: hopMemoryText }
@@ -2158,6 +2277,21 @@ export class GMI implements IGMI {
             }
           }
 
+          // The text part of the fixed first system block that carries this GMI's cache marker, when the prompt has
+          // one, with the marker as the GMI set it. The hook gets a copy of the message list, not of the messages, so
+          // a hook that keeps the block keeps this very part, and the GMI can tell its own marker from the host's
+          // after the hook: the marker is the GMI's while the part carries the same marker object, unchanged. A
+          // marker the hook sets on the part, or changes in place, is the host's, except that in a request Anthropic
+          // would refuse, a marker equal to the GMI's on a part with the fixed text counts as the GMI's (below).
+          const firstSystemContent = promptForHook.find((message) => message.role === 'system')?.content;
+          const markedSystemPart = promptEngineResult.metadata?.systemSplit?.marked === true && Array.isArray(firstSystemContent)
+            ? firstSystemContent.find((part) => 'cache_control' in part && part.cache_control !== undefined)
+            : undefined;
+          const ownMarker = cacheMarkerOf(markedSystemPart);
+          const ownMarkerText = JSON.stringify(ownMarker);
+          const carriesOwnMarker = (part: MessageContentPart): boolean =>
+            part === markedSystemPart && cacheMarkerOf(part) === ownMarker && JSON.stringify(cacheMarkerOf(part)) === ownMarkerText;
+
           // The host's hook sees each attempt's prompt, a fallback hop's rebuilt one
           // included, and may replace it for that attempt; the history is untouched.
           let sendMessages: ChatMessage[] = promptForHook;
@@ -2185,6 +2319,50 @@ export class GMI implements IGMI {
             } catch (hookError) {
               this.addTraceEntry(ReasoningEntryType.WARNING, `beforeModelCall hook failed: ${hookError instanceof Error ? hookError.message : String(hookError)}`);
             }
+          }
+          // Anthropic takes at most four cache markers a request, and no one-hour marker after a shorter one. When the
+          // hook's messages keep the GMI's own marker (the hook kept the fixed block and its marker) and carry more
+          // than four, or put the GMI's marker out of lifetime order with one of the hook's (a one-hour marker after
+          // the GMI's five-minute one, or a shorter marker before the GMI's one-hour one), the GMI removes its own and
+          // leaves the host's markers as they are. It adds no marker to messages the hook built itself.
+          const keepsOwnByIdentity = markedSystemPart !== undefined
+            && sendMessages.some((message) => Array.isArray(message.content) && message.content.some(carriesOwnMarker));
+          // A hook that copies the parts (structuredClone, or a map that spreads each part) returns another object for
+          // the GMI's part, with the same text and an equal marker. Only where the request would otherwise be refused,
+          // the GMI also takes as its own the first system part whose text is the fixed text and whose marker equals
+          // its own by value.
+          const fixedText = markedSystemPart && 'text' in markedSystemPart ? markedSystemPart.text : undefined;
+          const copiedOwnPart = keepsOwnByIdentity || fixedText === undefined
+            ? undefined
+            : sendMessages
+              .filter((message) => message.role === 'system' && Array.isArray(message.content))
+              .flatMap((message) => message.content as MessageContentPart[])
+              .find((part) => part.type === 'text' && 'text' in part && part.text === fixedText
+                && cacheMarkerOf(part) !== undefined && JSON.stringify(cacheMarkerOf(part)) === ownMarkerText);
+          const isOwnMarker = keepsOwnByIdentity ? carriesOwnMarker : (part: MessageContentPart): boolean => part === copiedOwnPart;
+          const keepsOwnMarker = keepsOwnByIdentity || copiedOwnPart !== undefined;
+          const ownLastsAnHour = (ownMarker as { ttl?: unknown } | undefined)?.ttl === '1h';
+          const overMarkerCap = keepsOwnMarker && countCacheMarkers(sendMessages) > 4;
+          const outOfLifetimeOrder = keepsOwnMarker && !overMarkerCap
+            && breaksLifetimeOrder(sendMessages, isOwnMarker, ownLastsAnHour);
+          if (overMarkerCap || outOfLifetimeOrder) {
+            sendMessages = sendMessages.map((message) => !Array.isArray(message.content) ? message : ({
+              ...message,
+              content: message.content.map((part) => {
+                if (!isOwnMarker(part)) return part;
+                const unmarked: Record<string, unknown> = { ...part };
+                delete unmarked.cache_control;
+                return unmarked as typeof part;
+              }),
+            }));
+            this.addTraceEntry(
+              ReasoningEntryType.WARNING,
+              overMarkerCap
+                ? 'Dropped the GMI system cache marker because the hook supplied more than four markers.'
+                : ownLastsAnHour
+                  ? 'Dropped the GMI system cache marker because the hook put a shorter-lived marker before it.'
+                  : 'Dropped the GMI system cache marker because the hook put a one-hour marker after it.',
+            );
           }
 
           let attempt: AsyncIterable<ModelCompletionResponse>;
