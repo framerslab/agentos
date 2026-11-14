@@ -403,6 +403,27 @@ describe('forgetUser', () => {
     expect(tracesOf(keyOf(alice))).toEqual([]);
   });
 
+  it('reports a full-text index it could not rebuild, and rebuilds it at the next applyTombstones()', async () => {
+    const { a } = await open();
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    // The index's own rows, read without the traces: a word stays in them until the index is rebuilt.
+    const indexed = () =>
+      rows<{ rowid: number }>(storeFile(), "SELECT rowid FROM memory_traces_fts WHERE memory_traces_fts MATCH 'lark'").length;
+    expect(indexed()).toBeGreaterThan(0);
+    const rebuild = vi.spyOn(brainOf(a), 'fullTextRebuild').mockImplementation(() => {
+      throw new Error('disk full');
+    });
+    const report = await a.forgetUser!('alice');
+    expect(report.stores).toContainEqual({ store: 'full-text index', reached: false, reason: 'disk full' });
+    expect(report.complete).toBe(false);
+    expect(tracesOf(keyOf(alice))).toEqual([]);
+    expect(indexed()).toBeGreaterThan(0);
+
+    rebuild.mockRestore();
+    await a.applyTombstones!();
+    expect(indexed()).toBe(0);
+  });
+
   it('rewrites at the next applyTombstones() the vector index a deletion could not', async () => {
     const { a } = await open();
     await turn(a, 's1', 'alice', 'My canary is LARK-7.');

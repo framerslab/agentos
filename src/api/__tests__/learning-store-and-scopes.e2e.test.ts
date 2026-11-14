@@ -6751,11 +6751,14 @@ describe("an operator's calls on a learner: freezes and suspensions, operatorSet
       "a session's forged tools",
       "an organization scope a host's policy shares",
     ]);
-    // The traces filed under the plain id stay, named in one WARNING by the user's tombstone and their scope.
+    // The traces filed under the plain id stay, named in one WARNING by their scope. The line holds no hash of the
+    // user's id: an unkeyed hash in a log lets anyone with a list of ids find who was forgotten.
     const tombstone = (await tombstoneHash('A', '42')).slice(0, 16);
-    expect(warn.mock.calls.map((call) => String(call[0])).filter((line) => line.includes('refileScope'))).toEqual([
-      `[agentos] learning: forgetUser (tombstone ${tombstone}) left 2 trace(s) filed before the namespace, under the user's plain id in its user scope; re-file them in the namespaced form with MemoryStore.refileScope, then call forgetUser again.`,
+    const lines = warn.mock.calls.map((call) => String(call[0]));
+    expect(lines.filter((line) => line.includes('refileScope'))).toEqual([
+      `[agentos] learning: forgetUser left 2 trace(s) filed before the namespace, under the user's plain id in its user scope; re-file them in the namespaced form with MemoryStore.refileScope, then call forgetUser again.`,
     ]);
+    expect(lines.filter((line) => line.includes(tombstone))).toEqual([]);
     expect(liveContents(toolsFile)).toEqual(['B42 likes coffee.', 'Filed with the tools before the namespace.']);
     expect(await memory.getStore().getByScope('user', ofA.userScopeId)).toEqual([]);
     expect((await memory.getStore().getByScope('user', ofB.userScopeId)).map((trace) => trace.content)).toEqual(['B42 keeps goats.']);
