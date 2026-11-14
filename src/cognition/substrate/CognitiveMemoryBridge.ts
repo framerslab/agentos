@@ -561,7 +561,10 @@ export class CognitiveMemoryBridge {
    * - User input (TEXT or MULTIMODAL_CONTENT) is encoded as an episodic
    *   memory with sourceType 'user_statement'.
    * - The assistant's response text is encoded as a semantic memory with
-   *   sourceType 'agent_inference'.
+   *   sourceType 'agent_inference'. A later turn's memory block shows it as the
+   *   assistant's own earlier words, a past exchange whose line starts
+   *   "You said: ", never as a fact; that is read from the sourceType, so a
+   *   reply an earlier version filed is shown the same way.
    *
    * @param turnInput - The turn's input payload.
    * @param responseText - The assistant's generated response text.

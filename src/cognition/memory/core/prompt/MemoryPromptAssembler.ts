@@ -36,6 +36,12 @@
  * next association, and a trace section does not take a trace Related Context
  * already shows through its association.
  *
+ * A trace with sourceType `agent_inference` holds the agent's own earlier
+ * reply. The block shows it as a past exchange in the agent's words, never as
+ * a fact: as an episodic trace whose line starts `You said: `, in Recent
+ * Experiences (in a hybrid block, the one recall section), and the same way as
+ * the involuntary memory.
+ *
  * @module agentos/memory/prompt/MemoryPromptAssembler
  */
 
@@ -49,6 +55,7 @@ import type {
 import type { HexacoTraits } from '../config.js';
 import { DEFAULT_BUDGET_ALLOCATION } from '../config.js';
 import {
+  asShownInMemoryBlock,
   formatMemoryTrace,
   memoryTraceLineLength,
   sliceWholeCodePoints,
@@ -166,7 +173,11 @@ export interface MemoryAssemblerInput {
   // --- Data sources ---
   /** Working memory formatted string. */
   workingMemoryText?: string;
-  /** Scored semantic/episodic traces from retrieval. */
+  /**
+   * Scored semantic/episodic traces from retrieval. Episodic traces are shown in Recent Experiences, the others in
+   * Relevant Memories; a trace with sourceType `agent_inference` (the agent's own reply) is shown as an episodic one
+   * whose line starts `You said: `.
+   */
   retrievedTraces?: ScoredMemoryTrace[];
   /**
    * The recall pool of `retrieval: 'hybrid'`, in fused order. When set, the
@@ -514,6 +525,12 @@ function renderInvoluntary(
  * Episodic shares together), and Recent Experiences is not shown. Its lines
  * are reported under `recall`, and the returned `allocation` carries that
  * share as `recall` with `semanticRecall` and `recentEpisodic` at 0.
+ *
+ * A retrieved trace with sourceType `agent_inference`, the agent's own earlier
+ * reply, is shown as an episodic trace whose content starts `You said: `: in
+ * Recent Experiences, or in a hybrid block's one recall section, and reported
+ * under the section that shows it. The involuntary memory is shown the same
+ * way. Every other trace is shown as it is.
  */
 export function assembleMemoryContext(input: MemoryAssemblerInput): AssembledMemoryContext {
   return assemble(input, true);
@@ -572,9 +589,10 @@ function assemble(input: MemoryAssemblerInput, secondPass: boolean): AssembledMe
   const afterPreamble = budget - totalTokens;
 
   // --- Candidates per section ---
+  // The agent's own earlier reply is shown as a past exchange in its words, never as a fact (asShownInMemoryBlock).
   const episodicTraces: ScoredMemoryTrace[] = [];
-  const semanticTraces: ScoredMemoryTrace[] = pooled ? [...pooled] : [];
-  for (const trace of pooled ? [] : (input.retrievedTraces ?? [])) {
+  const semanticTraces: ScoredMemoryTrace[] = pooled ? pooled.map(asShownInMemoryBlock) : [];
+  for (const trace of pooled ? [] : (input.retrievedTraces ?? []).map(asShownInMemoryBlock)) {
     if (trace.type === 'episodic') {
       episodicTraces.push(trace);
     } else {
@@ -590,7 +608,8 @@ function assemble(input: MemoryAssemblerInput, secondPass: boolean): AssembledMe
   let involuntaryOffered = 0;
   if (input.mechanismsEngine && input.allTraces) {
     const retrievedSet = new Set((pooled ?? input.retrievedTraces ?? []).map((trace) => trace.id));
-    involuntaryTrace = input.mechanismsEngine.onPromptAssembly(input.allTraces, retrievedSet).involuntaryMemory;
+    const picked = input.mechanismsEngine.onPromptAssembly(input.allTraces, retrievedSet).involuntaryMemory;
+    involuntaryTrace = picked ? asShownInMemoryBlock(picked) : null;
     if (involuntaryTrace) {
       involuntaryOffered = Math.floor(afterPreamble * INVOLUNTARY_MAX_SHARE);
       involuntary = renderInvoluntary(involuntaryTrace, style, now, involuntaryOffered);

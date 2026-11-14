@@ -50,6 +50,20 @@ export const MEMORY_CUT_MARKER = ' …[cut]';
 /** The least content, in characters, worth keeping when a trace is cut. */
 export const MIN_CUT_CONTENT_CHARS = 40;
 
+/** Starts the content of a line that shows the agent's own earlier reply in the memory block. */
+export const OWN_WORDS_PREFIX = 'You said: ';
+
+/**
+ * `trace` as the memory block shows it. A trace with sourceType `agent_inference` holds the agent's own words: a GMI
+ * files each reply that way, as a semantic trace, and earlier versions filed it the same way. The block shows it as a
+ * past exchange, never as a fact: an episodic trace whose content starts with {@link OWN_WORDS_PREFIX}. Every other
+ * trace is returned as it is. The trace in the store is not changed.
+ */
+export function asShownInMemoryBlock<T extends MemoryTrace>(trace: T): T {
+  if (trace.provenance?.sourceType !== 'agent_inference') return trace;
+  return { ...trace, type: 'episodic', content: `${OWN_WORDS_PREFIX}${trace.content}` };
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
