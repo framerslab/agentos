@@ -1,0 +1,61 @@
+{
+  "id": "sessions-incident-call",
+  "set": "sessions",
+  "kind": "session",
+  "language": "en",
+  "title": "Incident call: slow page loads",
+  "headings": [],
+  "path": null,
+  "text": "Kai: I am leading this incident. Page loads are slow for about a third of users since ten o'clock.\nMira: The database looks fine. Query times are normal.\nJon: The content delivery network shows a drop in cache hits starting at ten.\nKai: What changed at ten?\nMira: We released a change to the image sizes. Every image now has a new address.\nJon: That would empty the cache. Every request goes back to our servers until the cache fills again.\nKai: Do we roll back or wait for the cache to warm up?\nJon: Warming up takes about two hours at this traffic. Rolling back takes ten minutes.\nKai: Then we roll back. Mira, please start it.\nMira: Rolling back now.\nJon: Cache hits are climbing again.\nKai: Good. Page loads are back to normal for most users. Let's keep watching for fifteen minutes.\nMira: Next time we change image addresses, we should warm the cache before switching.\nKai: Agreed. I will write that into the release checklist and open a ticket for a warm-up script.\nJon: I will post a summary in the status channel.\n",
+  "vocabulary": [
+    {
+      "label": "incidents",
+      "uses": 9,
+      "lastUsed": 1762300800000
+    },
+    {
+      "label": "performance",
+      "uses": 8,
+      "lastUsed": 1762214400000
+    },
+    {
+      "label": "caching",
+      "uses": 7,
+      "lastUsed": 1762128000000
+    },
+    {
+      "label": "releases",
+      "uses": 6,
+      "lastUsed": 1762041600000
+    }
+  ],
+  "typed": [
+    "incidents"
+  ],
+  "expected": {
+    "existing": [
+      "incidents",
+      "performance",
+      "caching"
+    ],
+    "new": [
+      "rollback"
+    ]
+  },
+  "mustNot": [],
+  "asks": [],
+  "report": [
+    {
+      "label": "incident",
+      "quotes": [
+        "I am leading this incident."
+      ]
+    },
+    {
+      "label": "cache",
+      "quotes": [
+        "The content delivery network shows a drop in cache hits starting at ten."
+      ]
+    }
+  ]
+}

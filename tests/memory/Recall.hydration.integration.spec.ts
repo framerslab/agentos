@@ -476,6 +476,30 @@ describe.each(ENGINES)('loadTracesForRecall on %s', (_engine, open) => {
     await db.close();
   });
 
+  it('a row with a vector that names its scope id in the scope_id column alone is hydrated under that scope id, by the whole store and by its scope', async () => {
+    const db = await open();
+    const writer = await storeOver(db.brain, new FlatEmbedder());
+    await writer.store(trace('column-vec', 'The locker code is 4471.'));
+    // The metadata names no scope id: the column alone does.
+    await db.brain.run('UPDATE memory_traces SET metadata = ? WHERE brain_id = ? AND id = ?', ['{}', db.brain.brainId, 'column-vec']);
+
+    const fresh = await storeOver(await db.reopen(), new FlatEmbedder());
+    const { scored } = await fresh.query('locker', NEUTRAL, { scopes: U1 });
+    expect(scored.map((t) => t.id)).toEqual(['column-vec']);
+    expect(fresh.getTrace('column-vec')).toMatchObject({ scope: 'user', scopeId: 'u1' });
+    const { traces, unread } = await fresh.loadTracesForRecall(['column-vec']);
+    expect(unread).toBe(0);
+    expect(traces.get('column-vec')).toMatchObject({ scope: 'user', scopeId: 'u1' });
+
+    const scoped = await storeOver(await db.reopen(), new FlatEmbedder());
+    expect(await scoped.hydrateScope('user', 'u1')).toBe(1);
+    expect(scoped.getTrace('column-vec')).toMatchObject({ scope: 'user', scopeId: 'u1' });
+    writer.dispose();
+    fresh.dispose();
+    scoped.dispose();
+    await db.close();
+  });
+
   it("a trace's trust policy is kept in its row, so a store that loads the row reads it", async () => {
     const db = await open();
     const writer = await storeOver(db.brain, new FlatEmbedder());

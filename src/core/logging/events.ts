@@ -59,6 +59,15 @@ export const AGENTOS_EVENTS = {
   'console_line': { method: { enum: ['debug', 'info', 'log', 'warn', 'error', 'trace', 'dir', 'table', 'assert', 'count', 'countReset', 'time', 'timeEnd', 'timeLog', 'group', 'groupCollapsed', 'groupEnd', 'clear', 'dirxml', 'profile', 'profileEnd', 'timeStamp'] }, type: 'word', code: 'word' },
   'process.uncaught': { type: 'word', code: 'word' },
   'process.shutdown': { signal: { enum: ['SIGTERM', 'SIGINT'] } },
+  // A GMI turn's sentiment analysis failed (a provider error, or a reply that did not parse after its repair): the
+  // error's listed type and code, never its message. The turn goes on without the analysis.
+  'gmi.sentiment_failed': { type: 'word', code: 'word' },
+  // A GMI turn's sentiment analysis had not answered by the turn's post-turn metaprompt check, or its store writes
+  // outlasted the shutdown bound there, and was dropped; `waitedMs` counts from the analysis start.
+  'gmi.sentiment_late': { waitedMs: 'int' },
+  // A dropped GMI sentiment analysis' store write landed, or one landed after a forget it did not see, and putting
+  // the store back failed: the error's listed type and code, never its message.
+  'gmi.sentiment_take_back_failed': { type: 'word', code: 'word' },
   'http.request': { method: { enum: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS', 'CONNECT', 'TRACE', 'OTHER'] }, route: 'path', status: 'int', ms: 'int', outcome: { enum: ['ok', 'aborted', 'error'] } },
   'http.handler_failed': { type: 'word', code: 'word' },
   'llm.provider_ready': { provider, count: 'int' },
@@ -119,6 +128,13 @@ export const AGENTOS_EVENTS = {
   'guardrail.verdict': { guardrailId: 'word', stage: { enum: ['input', 'output', 'tool_call'] }, action: { enum: ['flag', 'sanitize', 'hold', 'block'] }, code: 'word', surface: 'word', mode: { enum: ['enforce', 'dry_run'] }, unavailable: { enum: ['yes', 'no'] } },
   // An image check threw, or an image could not be captured (checkId: load). Never the image, its URL or an error's message.
   'image_guard.check_failed': { guardrailId: 'word', checkId: 'word', posture: { enum: ['refuse', 'skip'] }, type: 'word', code: 'word' },
+  // A governed tool call ended. The code is one the wrapper built: an evidence failure, a fixed code, or the id of one
+  // of the tool's own limit rules. Absent when the end has none.
+  'action.ended': { action: 'word', outcome: { enum: ['executed', 'failed', 'would_execute', 'refused_arguments', 'voided_evidence', 'limit_reached', 'duplicate', 'limiter_unavailable', 'audit_unavailable'] }, code: 'word', mode: { enum: ['enforce', 'dry_run'] } },
+  // A half of a governed call's audit record could not be written: the host's sink threw. Never its message.
+  'action.audit_failed': { action: 'word', half: { enum: ['begin', 'finish'] }, type: 'word', code: 'word' },
+  // A callback of agency() threw or rejected: its name, and the error's listed type and code. Never its message.
+  'agency.callback_failed': { callback: { enum: ['agentStart', 'agentEnd', 'handoff', 'toolCall', 'error', 'emergentForge', 'guardrailResult', 'limitReached', 'approvalRequested', 'approvalDecided', 'guardrailHitlOverride'] }, type: 'word', code: 'word' },
   // A soul given `optional: true` failed to load; the agent runs without it.
   'soul.load_failed': { optional: { enum: ['yes'] }, type: 'word', code: 'word' },
   // gmi() left out a front matter field that path cannot apply.
@@ -130,7 +146,7 @@ export const AGENTOS_EVENTS = {
   // A host's memory hook threw, rejected or timed out; the turn went on without it.
   'memory.hook_failed': { hook: { enum: ['getContext', 'observe', 'memoryPolicy', 'screen'] }, type: 'word', code: 'word' },
   // Cognitive memory's recall (src/cognition/memory/retrieval/recall). No memory text, query text or id is ever a field.
-  'memory.recall.leg_absent': { leg: { enum: ['dense', 'exact_words', 'recency'] }, reason: { enum: ['no_store', 'no_embedder', 'no_index', 'no_scope_filter', 'query_error', 'disabled'] } },
+  'memory.recall.leg_absent': { leg: { enum: ['dense', 'exact_words', 'recency'] }, reason: { enum: ['no_store', 'no_embedder', 'no_index', 'no_scope_filter', 'no_scopes', 'query_error', 'disabled'] } },
   'memory.recall.rerank_skipped': { provider: { enum: ['local', 'llm'] }, reason: { enum: ['loading', 'timeout', 'error', 'backoff'] } },
   'memory.recall.rerank_unavailable': { provider: { enum: ['local'] }, reason: { enum: ['missing_dependency', 'load_failed'] } },
   'memory.recall.budget_clamped': { requested: 'int', effective: 'int', hop: 'int', reason: { enum: ['prompt_share', 'zero_remaining', 'invalid'] } },

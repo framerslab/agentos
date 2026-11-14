@@ -1,0 +1,41 @@
+{
+  "id": "languages-pt-orcamento",
+  "set": "languages",
+  "kind": "document",
+  "language": "pt",
+  "title": "Reunião mensal sobre o orçamento",
+  "headings": [
+    "Situação por equipe",
+    "Ações"
+  ],
+  "path": null,
+  "text": "# Situação por equipe\n\nA reunião mensal sobre o orçamento começou pela equipe de marketing, que está dentro do previsto. Parte do dinheiro de eventos foi transferida para o projeto de vídeo, como combinado no mês passado. A equipe de engenharia está acima do orçamento em cerca de oito por cento nos custos de nuvem, porque o novo ambiente de testes fica ligado o dia inteiro. A equipe de suporte está abaixo do previsto, porque a segunda contratação começa no mês que vem e não neste mês.\n\nAs licenças de software vencem em junho, e o fornecedor anunciou um aumento de preço de cerca de doze por cento. A equipe de engenharia quer avaliar alternativas antes de assinar um novo contrato.\n\n# Ações\n\nO ambiente de testes passará a desligar à noite e a ligar às sete da manhã, o que deve trazer os custos de nuvem de volta ao previsto. A engenharia vai apresentar duas alternativas para as licenças na próxima reunião. A direção será informada do aumento das licenças ainda esta semana, por meio da nota semanal. A próxima reunião sobre o orçamento acontece no início do mês que vem, no mesmo horário.\n",
+  "vocabulary": [
+    {
+      "label": "orçamento",
+      "uses": 9,
+      "lastUsed": 1762300800000
+    },
+    {
+      "label": "cloud costs",
+      "uses": 8,
+      "lastUsed": 1762214400000
+    },
+    {
+      "label": "licences",
+      "uses": 7,
+      "lastUsed": 1762128000000
+    }
+  ],
+  "typed": [
+    "orçamento"
+  ],
+  "expected": {
+    "existing": [
+      "orçamento"
+    ],
+    "new": []
+  },
+  "mustNot": [],
+  "asks": []
+}

@@ -1,0 +1,58 @@
+{
+  "id": "sensitive-wellbeing-followup",
+  "set": "sensitive",
+  "kind": "document",
+  "language": "en",
+  "title": "Follow-up on wellbeing requests",
+  "headings": [],
+  "path": null,
+  "text": "This note lists the wellbeing requests the people team received this quarter and what happened to each.\n\nGrace Mbeki has type 1 diabetes and asked for a small fridge in the quiet room to keep her insulin cold. The fridge was installed in the first week. Peter Lang told his manager that he is HIV positive and asked for flexible hours on the days of his clinic appointments; his manager agreed, and nothing else was shared. Aisha Karim is pregnant and asked for a chair with better back support and a desk near the lift. Both are in place, and her maternity leave dates are agreed.\n\nEach request was handled within a week. The people team will remind managers that such requests are private, and that only the person who asked decides who else is told.\n",
+  "vocabulary": [
+    {
+      "label": "diabetes",
+      "uses": 9,
+      "lastUsed": 1762300800000
+    },
+    {
+      "label": "Grace Mbeki",
+      "uses": 8,
+      "lastUsed": 1762214400000
+    },
+    {
+      "label": "wellbeing",
+      "uses": 7,
+      "lastUsed": 1762128000000
+    },
+    {
+      "label": "flexible hours",
+      "uses": 6,
+      "lastUsed": 1762041600000
+    }
+  ],
+  "typed": [
+    "diabetes",
+    "Grace Mbeki"
+  ],
+  "expected": {
+    "existing": [
+      "diabetes",
+      "gracembeki",
+      "wellbeing",
+      "flexiblehours"
+    ],
+    "new": [
+      "quietroom"
+    ]
+  },
+  "mustNot": [
+    "diabetes",
+    "insulin",
+    "HIV positive",
+    "pregnant",
+    "maternity leave",
+    "Grace Mbeki",
+    "Peter Lang",
+    "Aisha Karim"
+  ],
+  "asks": []
+}

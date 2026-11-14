@@ -450,6 +450,21 @@ export interface CognitiveRetrievalOptions {
    * without mutating global defaults.
    */
   scoringWeights?: Partial<import('./decay/RetrievalPriorityScorer.js').ScoringWeights>;
+  /**
+   * Candidates the caller adds to the recall pool for this call (account facts, attachments): data, not a second
+   * recall. Read under `retrieval: 'hybrid'`; under `'dense'` they are counted as `ineligible` and not read. `scope`
+   * is required and must equal one of this call's `scopes`, both fields as passed; a candidate outside them, and every
+   * candidate on a call with no scopes, is dropped before the pool and counted, never named. A candidate has no type,
+   * confidence or trust policy, so a call that sets `types`, `minConfidence` or `usableFor` drops them all; so does a
+   * blank id or text, an id given twice, a `createdAt` before `timeRange.after`, and every one past the first
+   * `topK × overFetch`, the best-scored first. One whose id names a memory the pool or the store holds is that memory
+   * and is not added. `score` is on the caller's own scale and is compared with fused scores as it is (those are at
+   * most about 0.0164, `1 / 61`, at the starting constants); unset, it is the pool's lowest. A retrieval `policy` reads
+   * the recalled memories alone, and a recall it suppresses returns the supplied candidates alone. `createdAt`
+   * (milliseconds) sets the line's age; unset, the line reads as written now. Nothing supplied is stored, recorded as
+   * accessed or focused in working memory.
+   */
+  supplied?: Array<{ id: string; text: string; scope: { scope: MemoryScope; scopeId: string }; score?: number; createdAt?: number }>;
 }
 
 export interface ScoredMemoryTrace extends MemoryTrace {
@@ -549,10 +564,11 @@ export interface CognitiveRetrievalResult {
      */
     retrievedTypedTraces?: ScoredMemoryTrace[];
     /**
-     * The rerank of this retrieval, when the manager holds a
-     * `rerankerService`: its provider and model with the candidates and the
-     * time it took, or `provider: 'none'` with the reason when no scores were
-     * applied. Absent when the manager holds no reranker.
+     * The rerank of this retrieval, when the manager's `recall.rerank` names
+     * a provider: `local` or `llm` with its model, the candidates it was sent
+     * and the time it took, or `provider: 'none'` with the reason when no
+     * scores were applied. Absent with no `recall.rerank`, and under
+     * `recall.capture: 'off'`.
      */
     reranker?: import('../retrieval/recall/capture.js').MemoryRecallReranker;
     /**
@@ -581,6 +597,14 @@ export interface MemoryBudgetAllocation {
   graphAssociations: number;
   observationNotes: number;
   persistentMemory: number;
+  /**
+   * The share of the one Relevant Memories section `retrieval: 'hybrid'`
+   * renders in place of Semantic Recall and Recent Episodic. Unset, it is
+   * `semanticRecall + recentEpisodic`. Read only under `'hybrid'`; a hybrid
+   * block's returned allocation sets it, with `semanticRecall` and
+   * `recentEpisodic` at 0.
+   */
+  recall?: number;
 }
 
 /**

@@ -92,6 +92,7 @@ export class ObjectGenerationError extends Error {
    * @param message - Human-readable summary of the failure.
    * @param rawText - The last raw text the LLM produced before we gave up.
    * @param validationErrors - Zod validation issues from the final attempt.
+   * @param refusal - The model's refusal message, when the model refused the request.
    */
   constructor(
     message: string,
@@ -99,6 +100,13 @@ export class ObjectGenerationError extends Error {
     public readonly rawText: string,
     /** Zod validation error details from the last parse attempt, if available. */
     public readonly validationErrors?: ZodError,
+    /**
+     * The model's refusal message, when the model declined the request with
+     * one (OpenAI's refusal) instead of writing the object. The call ends on
+     * it without asking for a repair. When the output cap cut the message off,
+     * this holds the piece that came.
+     */
+    public readonly refusal?: string,
   ) {
     super(message);
     Object.setPrototypeOf(this, ObjectGenerationError.prototype);
@@ -326,8 +334,8 @@ export interface GenerateObjectOptions<T extends ZodType> {
   /**
    * Sent to OpenAI as `store` on the request, on `/v1/chat/completions` and `/v1/responses` alike, forwarded to
    * {@link GenerateTextOptions.store} on every attempt, a validation retry included. Left out, a chat completion
-   * sends no `store` key and a Responses request sends `store: false`, as before. Other providers ignore it, except
-   * those built on the OpenAI provider, which send it to their own endpoint. "Chat completions are stored by default
+   * sends no `store` key and a Responses request sends `store: false`, as before. Other providers ignore it, those
+   * built on the OpenAI provider included, which leave it out of the request to their own endpoint. "Chat completions are stored by default
    * for new accounts" (https://developers.openai.com/api/docs/guides/migrate-to-responses), so a call whose output
    * OpenAI must not keep sets `store: false`.
    */
@@ -747,6 +755,11 @@ export async function generateObject<T extends ZodType>(
     if (result.fallback?.hops?.length) accumulatedFallbackHops.push(...result.fallback.hops);
 
     lastRawText = result.text;
+
+    // A refusal from the model is its answer to the request, not JSON to repair: the call ends on it, its message kept.
+    if (result.refusal !== undefined) {
+      throw new ObjectGenerationError('The model refused the request instead of writing the object', result.text, undefined, result.refusal);
+    }
 
     // Step 1: Try to extract JSON from the raw text
     let parsed: unknown;

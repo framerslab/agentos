@@ -1,0 +1,53 @@
+{
+  "id": "plain-office-move",
+  "set": "plain",
+  "kind": "document",
+  "language": "en",
+  "title": "Office move plan",
+  "headings": [
+    "Why we are moving",
+    "The new office",
+    "Moving week",
+    "Questions"
+  ],
+  "path": null,
+  "text": "# Why we are moving\n\nThe lease on the current office ends in June, and the building does not fit the way we work any more. Most teams come in two or three days a week, the meeting rooms are always full while half the desks are empty, and the kitchen is too small for the Friday lunch. The new office has fewer desks and more rooms of different sizes.\n\n# The new office\n\nThe new office is on two floors of a building near the station, a short walk from the old one. The lower floor has the reception, the kitchen, a large room for all-hands meetings and twelve small rooms for calls. The upper floor has open desks, which nobody owns, and lockers for personal things. Bicycles go in a locked room in the basement, and there are showers on both floors. The building has step-free access from the street and a lift to every floor.\n\n# Moving week\n\nThe move happens in the last week of May. On Monday and Tuesday everyone packs their things into the labelled crates that facilities will hand out. On Wednesday the movers take the crates, the screens and the shared equipment. Thursday is a remote day for everyone while the network and the meeting room screens are set up. On Friday the new office opens with breakfast for the whole company, and facilities walk each team through the floors.\n\n# Questions\n\nFacilities collect questions about the move in a shared document and answer them every Monday until the move. The most common so far: parking stays the same, since both buildings use the same car park; the old office's plants come with us; and anyone who needs a particular chair or desk for their health can ask facilities in private, and it will be arranged before the move.\n",
+  "vocabulary": [
+    {
+      "label": "office",
+      "uses": 9,
+      "lastUsed": 1762300800000
+    },
+    {
+      "label": "facilities",
+      "uses": 8,
+      "lastUsed": 1762214400000
+    },
+    {
+      "label": "moving",
+      "uses": 7,
+      "lastUsed": 1762128000000
+    },
+    {
+      "label": "lease",
+      "uses": 6,
+      "lastUsed": 1762041600000
+    }
+  ],
+  "typed": [
+    "facilities"
+  ],
+  "expected": {
+    "existing": [
+      "office",
+      "facilities",
+      "moving",
+      "lease"
+    ],
+    "new": [
+      "newoffice"
+    ]
+  },
+  "mustNot": [],
+  "asks": []
+}

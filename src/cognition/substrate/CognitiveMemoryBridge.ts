@@ -418,7 +418,8 @@ export class CognitiveMemoryBridge {
           candidates,
           included,
           leftOut: candidates - included,
-          retrieval: capture?.retrieval ?? 'dense',
+          // With the capture off there is no record: the manager's setting names the recall that ran.
+          retrieval: capture?.retrieval ?? this.recallConfig()?.retrieval ?? 'dense',
           reranker: capture?.reranker.provider ?? 'none',
           legsAbsent: capture ? capture.legs.filter((leg) => !leg.ran).map((leg) => ({ leg: leg.leg, ...(leg.reason ? { reason: leg.reason } : {}) })) : [],
           ...(this.recallConfig()?.traceIds === true ? { includedMemoryIds: context.includedMemoryIds } : {}),

@@ -60,6 +60,10 @@ jobs:
 
     env:
       AGENTOS_TEST_POSTGRES_URL: postgresql://postgres:ci_test_password@localhost:5432/postgres
+      # The local memory reranker's real-model test (tests/memory/Recall.rerank.local.integration.spec.ts) must run
+      # in this job: with this set, it fails when the pinned revision's files are not where the step below lays them
+      # out, so a dropped step never passes as a skip. No other job sets it, and there the suite is skipped.
+      AGENTOS_TEST_RERANK_MODEL: required
 
     steps:
       - uses: actions/checkout@v5
@@ -402,6 +406,24 @@ jobs:
           fi
           echo "AGENTOS_TEST_CROSS_ENCODER_CACHE=$PWD/$dir" >> "$GITHUB_ENV"
 
+      # The local memory reranker loads its model at a pinned revision, and Transformers.js reads a pinned
+      # revision's files from <cache>/<model id>/<revision>/<file> (the bare <model id>/<file> path is for "main").
+      # The files fetched and checked above are that revision's, so they are copied into that layout, under the
+      # repository's current id, for tests/memory/Recall.rerank.local.integration.spec.ts, which loads them with
+      # downloads off.
+      - name: Lay the cross-encoder test model out as its pinned revision
+        run: |
+          set -euo pipefail
+          src=.cache/cross-encoder/cross-encoder/ms-marco-MiniLM-L-6-v2
+          dir=.cache/rerank
+          dst=$dir/cross-encoder/ms-marco-MiniLM-L6-v2/233902d25c440f23af6f7d6e94d2946bac0bee0a
+          rm -rf "$dir"
+          mkdir -p "$dst/onnx"
+          for f in config.json tokenizer.json tokenizer_config.json onnx/model_quint8_avx2.onnx; do
+            cp "$src/$f" "$dst/$f"
+          done
+          echo "AGENTOS_TEST_RERANK_CACHE=$PWD/$dir" >> "$GITHUB_ENV"
+
       # The whole suite with coverage on. A run under the thresholds in vitest.config.ts
       # fails here. The totals print at the end of the step; coverage/ holds
       # coverage-summary.json (the totals and each file's figures) and lcov.info.
@@ -596,6 +618,55 @@ jobs:
           src/cognition/emergent/__tests__/decay-for-agent.test.ts
           src/cognition/emergent/__tests__/adapt-personality.test.ts
           src/cognition/rag/__tests__/neo4j-graphrag-export.test.ts
+
+  # Scores the tag suggestion module on the fixture texts under tests/fixtures/tags and reports each figure; a part the
+  # module does not hold reads "missing". The hard checks (quotes found, nothing refused proposed, no asked tag in an
+  # answer, the browser entry's import graph, the model input's bytes) fail this job; the scores carry no threshold.
+  tags:
+    name: Tag suggestions (fixtures and scores)
+    if: github.event_name != 'push' || github.ref != 'refs/heads/master'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Install PNPM
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Score the fixtures
+        env:
+          TAGS_REPORT_DIR: ${{ runner.temp }}/tags-report
+        run: >-
+          pnpm exec vitest run
+          src/cognition/library/__tests__/tags.fixtures.test.ts
+          src/cognition/library/__tests__/tags.scoring.test.ts
+
+      - name: Write the scores to the run's summary
+        if: always()
+        run: node scripts/tags/summary.mjs "$RUNNER_TEMP/tags-report/report.json" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tags-report-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/tags-report
+          if-no-files-found: error
+          retention-days: 30
 
   # Exercises the release configuration without tagging or publishing: the
   # commit analyser and the release-notes generator read the commits since

@@ -1,0 +1,47 @@
+{
+  "id": "sensitive-genetic-test",
+  "set": "sensitive",
+  "kind": "document",
+  "language": "en",
+  "title": "Benefits question about health screening",
+  "headings": [],
+  "path": null,
+  "text": "Olivia Brennan asked whether the health benefit covers a genetic test. Her mother carries the BRCA mutation, and her doctor suggested a BRCA test to see whether she does too. She asked the people team because the insurer's website was not clear.\n\nThe people team checked with the insurer. Genetic testing is covered when a doctor refers the person because of family history, as in this case, and the referral must be sent before the test. Results go only to Olivia and her doctor; the insurer does not share them with the company, and the company would not ask for them.\n\nMateo Ruiz, who manages the benefits contract, will add a short page to the benefits guide that explains which screening tests are covered and how a referral works, without naming anyone. Olivia has the insurer's answer in writing.\n",
+  "vocabulary": [
+    {
+      "label": "benefits",
+      "uses": 9,
+      "lastUsed": 1762300800000
+    },
+    {
+      "label": "insurance",
+      "uses": 8,
+      "lastUsed": 1762214400000
+    },
+    {
+      "label": "people team",
+      "uses": 7,
+      "lastUsed": 1762128000000
+    }
+  ],
+  "typed": [
+    "benefits"
+  ],
+  "expected": {
+    "existing": [
+      "benefits",
+      "insurance"
+    ],
+    "new": [
+      "referral"
+    ]
+  },
+  "mustNot": [
+    "genetic test",
+    "BRCA",
+    "genetic testing",
+    "Olivia Brennan",
+    "Mateo Ruiz"
+  ],
+  "asks": []
+}

@@ -1,0 +1,62 @@
+{
+  "id": "sessions-demo-feedback",
+  "set": "sessions",
+  "kind": "session",
+  "language": "en",
+  "title": "Product demo feedback session",
+  "headings": [],
+  "path": null,
+  "text": "Rosa: Thanks for watching the demo. What stood out to you?\nGuest: The search is fast. I typed half a word and the document came up.\nRosa: Great. Was anything confusing?\nGuest: The sharing menu. I could not tell whether a link lets people edit or only read.\nRosa: That is helpful. Would a label on the link, like view only, make it clearer?\nGuest: Yes, and maybe a different icon for each.\nRosa: What about the reports page?\nGuest: I liked the charts, but I would want to export them to a slide.\nRosa: We hear that often. Exports to slides are on the list for next quarter.\nGuest: One more thing. On my laptop the sidebar covered part of the page.\nRosa: Which screen size were you using?\nGuest: A small laptop, nothing unusual.\nRosa: I will pass that to the design team with a screenshot. Thank you, this was useful.\n",
+  "vocabulary": [
+    {
+      "label": "demos",
+      "uses": 9,
+      "lastUsed": 1762300800000
+    },
+    {
+      "label": "feedback",
+      "uses": 8,
+      "lastUsed": 1762214400000
+    },
+    {
+      "label": "sharing",
+      "uses": 7,
+      "lastUsed": 1762128000000
+    },
+    {
+      "label": "search",
+      "uses": 6,
+      "lastUsed": 1762041600000
+    }
+  ],
+  "typed": [
+    "feedback"
+  ],
+  "expected": {
+    "existing": [
+      "demos",
+      "feedback",
+      "sharing",
+      "search"
+    ],
+    "new": [
+      "sidebar"
+    ]
+  },
+  "mustNot": [],
+  "asks": [],
+  "report": [
+    {
+      "label": "sharing",
+      "quotes": [
+        "I could not tell whether a link lets people edit or only read."
+      ]
+    },
+    {
+      "label": "pricing",
+      "quotes": [
+        "The price per seat felt high for a small team."
+      ]
+    }
+  ]
+}

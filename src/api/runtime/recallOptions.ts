@@ -48,9 +48,11 @@ export interface RecallOptionsInput {
  *   `memoryProvider.getContext` reads it (with one, `generate()` and `stream()` still hand it to the provider).
  * - Without it (the default runtime, or a GMI agent whose memory is off), `budget.totalTokens` is the provider's
  *   `tokenBudget` when `memoryProviderOptions.tokenBudget` is unset, two different values are refused (`conflict`), and
- *   `capture` is refused (`unsupported_runtime`): no cognitive assembler runs. With no `memoryProvider.getContext` to
- *   read it, a set `budget.totalTokens` is reported in `ignored` (`recall_budget`).
- * - Either way, a value of the wrong kind, or a setting or a budget that is not an object, is refused (`invalid_value`).
+ *   `capture`, `retrieval` and `rerank` (any value, `'none'` included) are refused (`unsupported_runtime`): no cognitive
+ *   assembler or recall runs. With no `memoryProvider.getContext` to read it, a set `budget.totalTokens` is reported in
+ *   `ignored` (`recall_budget`).
+ * - Either way, a value of the wrong kind, or a setting or a budget that is not an object, is refused (`invalid_value`),
+ *   and a `rerank` that names a provider other than `local` or `llm` is refused (`unsupported_provider`).
  *
  * @throws {RecallOptionError} Naming the field, after one `memory.recall.option_rejected` line.
  */
@@ -69,6 +71,21 @@ export function resolveRecallOptions(o: RecallOptionsInput): ResolvedRecallOptio
       'capture',
       'unsupported_runtime',
       `${o.where}: memory.recall.capture needs cognitive memory, which runs on runtime: 'gmi' (or gmi()) with memory on; this agent's memory comes from memoryProvider.`,
+    );
+  }
+  if (recall?.retrieval != null) {
+    rejectRecallOption(
+      'retrieval',
+      'unsupported_runtime',
+      `${o.where}: memory.recall.retrieval needs cognitive memory, which runs on runtime: 'gmi' (or gmi()) with memory on; this agent's memory comes from memoryProvider.`,
+    );
+  }
+  // Any value, the default included: the field has no meaning without the cognitive recall it orders.
+  if (recall?.rerank != null) {
+    rejectRecallOption(
+      'rerank',
+      'unsupported_runtime',
+      `${o.where}: memory.recall.rerank needs cognitive memory, which runs on runtime: 'gmi' (or gmi()) with memory on; this agent's memory comes from memoryProvider.`,
     );
   }
   const total = recall?.budget?.totalTokens ?? undefined;
