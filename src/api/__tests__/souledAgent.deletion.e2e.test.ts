@@ -1042,6 +1042,32 @@ describe('retention', () => {
     expect(JSON.stringify(rows(storeFile(), 'SELECT content FROM memory_traces'))).not.toContain('LARK-7');
   });
 
+  it("sweeps every person's expired memory when one person's page could not be deleted", async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const start = Date.now();
+    const { a } = await open({ retention: { traces: { days: 1 } } });
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await turn(a, 's2', 'bob', 'My canary is WREN-2.');
+    await a.memory!.compileWiki();
+    expect(pagesOf(keyOf(alice))).toHaveLength(1);
+    expect(pagesOf(keyOf(bob))).toHaveLength(1);
+
+    at(start + 2 * DAY);
+    // The page of the person swept first cannot be deleted once: the sweep still sweeps the other person.
+    vi.spyOn(a.memory!, 'deletePageRows').mockRejectedValueOnce(new Error('the page is held'));
+    await expect(a.sweepRetention!()).rejects.toThrow('the page is held');
+    const held = [alice, bob].filter((who) => tracesOf(keyOf(who)).length > 0);
+    expect(held).toHaveLength(1);
+    const swept = held[0] === alice ? bob : alice;
+    expect(tracesOf(keyOf(swept))).toEqual([]);
+    expect(pagesOf(keyOf(swept))).toEqual([]);
+    expect(pagesOf(keyOf(held[0]))).toHaveLength(1);
+
+    // The next sweep finishes the person it could not sweep.
+    expect(await a.sweepRetention!()).toEqual({ traces: 2, pages: 1, scopes: 1 });
+    expect(JSON.stringify(rows(storeFile(), 'SELECT content FROM memory_traces'))).not.toMatch(/LARK-7|WREN-2/);
+  });
+
   it('rewrites the vector index at the next sweep when the rewrite after its deletes failed', async () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     const start = Date.now();

@@ -550,6 +550,29 @@ describe('the forgotten-user ledger', () => {
     await expect(ledger.markForgotten({ kind: 'operator', id: 'x' } as unknown as SuppressionSubject)).rejects.toThrow(TypeError);
     expect(await tombstonesOf(primary)).toEqual([]);
   });
+
+  it('refuses a tombstone write as unavailable while another connection holds the write lock, with one line', async () => {
+    const dir = folder();
+    const pair = await openPair(dir);
+    const ledger = await ForgottenLedger.open(pair);
+    // Another connection to the copy's file holds its write lock past this connection's busy timeout.
+    await pair.copy.get('PRAGMA busy_timeout = 50');
+    const holder = await sqliteAt(path.join(dir, 'forgotten.sqlite'));
+    await holder.run('BEGIN IMMEDIATE');
+    logged.length = 0;
+
+    const refused = await ledger.markForgotten(ALICE).catch((error: unknown) => error);
+    await holder.run('ROLLBACK');
+
+    expect(refused).toBeInstanceOf(ForgottenLedgerError);
+    expect(refused).toMatchObject({ name: 'ForgottenLedgerError', code: 'LEDGER_UNAVAILABLE' });
+    expect(refusals()).toEqual([expect.objectContaining({ type: 'ForgottenLedgerError', code: 'LEDGER_UNAVAILABLE' })]);
+    expect(await tombstonesOf(pair.primary)).toEqual([]);
+    expect(await tombstonesOf(pair.copy)).toEqual([]);
+    // Once the lock is let go, the same call writes the tombstone to both sides.
+    expect(await ledger.markForgotten(ALICE)).toMatchObject({ written: true });
+    expect(await tombstonesOf(pair.copy)).toHaveLength(1);
+  });
 });
 
 describe("the ledger's identity", () => {
