@@ -78,7 +78,7 @@ A request that names no `selectedPersonaId` uses the configuration's `defaultPer
 | Conversation context | The factory keeps 100 messages and enables automatic summarisation | `conversationManagerConfig.defaultConversationContextConfig` |
 | GMI history window | 20 messages without a persona override | `persona.conversationContextConfig.maxMessages` |
 
-`AgentOS.create` merges overrides one level deep. Its one persistence-field exception keeps the factory value when a host supplies an orchestrator object without that field. `new AgentOS().initialize(config)` does not consult the factory for this field; omission means true. Initialization emits one `runtime.defaults` event with the resolved profile, persistence, persistence source and date-tool state. It contains enums, not host text.
+`AgentOS.create` merges overrides one level deep. Its one persistence-field exception keeps the factory value when a host supplies an orchestrator object without that field. The factory reads `ENABLE_PERSISTENCE` as on when the variable is unset, empty or exactly `true`, and as off for any other value, `1` and `TRUE` included. `new AgentOS().initialize(config)` does not consult the factory for this field; omission means true. Initialization emits one `runtime.defaults` event with the resolved profile, persistence, persistence source and date-tool state. It contains enums, not host text.
 
 With no profile config, the turn's `METADATA_UPDATE` chunk carries `updates.promptProfile: null`, as it does under `promptProfileConfig: null`. A client that reads `updates.promptProfile.presetId` checks for null first.
 
