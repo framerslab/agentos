@@ -13,6 +13,8 @@ const script = fileURLToPath(new URL('./check-lockfile-integrity.mjs', import.me
 
 const LIBSIGNAL_TARBALL = 'https://codeload.github.com/whiskeysockets/libsignal-node/tar.gz/bcea72df9ec34d9d9140ab30619cf479c7c144c7';
 const LIBSIGNAL = `libsignal@${LIBSIGNAL_TARBALL}`;
+// The same commit as a git source, the key pull request 745's first refresh wrote with no integrity.
+const LIBSIGNAL_GIT = 'libsignal@git+https://github.com/whiskeysockets/libsignal-node.git#bcea72df9ec34d9d9140ab30619cf479c7c144c7';
 const LIBSIGNAL_INTEGRITY = 'sha512-KmRMuAYSfd4upRD0xOgKbURxRXNE8X8NtgmkUOJFXOn9ESSCXguIZ7PJu8OBJIr7KGww41Vf/Pbgko+PgWQ55g==';
 const ADAPTER_0_7_14 = 'sha512-MXERr9rLdppu6cXWo1T6hBxJVzFKS03tKzWtHeugB7d/UNdegIOomflolCH9/5ogr69M61YTm4cdyNKj08em8A==';
 const ADAPTER_0_8_1 = 'sha512-Zcw3ChiT19XH+JWJI+9SBm0YbqhKoeLOT1KbNp1BVB6NQ9qexDhRj1FIka2nlkIZ9rlMKVqlQVbXD2MoY2nT6Q==';
@@ -22,9 +24,9 @@ const LIE = 'sha512-UaiMJzeWRlEujzAuw5LokY1L5ecNQYZKfmyZ9L7wDHb/p5etKaxXhohBcrw0
  * A lockfile as pnpm 10 writes it, cut down to the entries pull request 559 changed: the storage adapter it bumped and
  * libsignal, a git dependency of @whiskeysockets/baileys. Its snapshots section repeats libsignal's key with no
  * resolution, as pnpm's does.
- * @param {{ adapter: string, adapterIntegrity: string, libsignalResolution: string }} at
+ * @param {{ adapter: string, adapterIntegrity: string, libsignalResolution: string, libsignal?: string }} at
  */
-const lockfile = ({ adapter, adapterIntegrity, libsignalResolution }) => `lockfileVersion: '9.0'
+const lockfile = ({ adapter, adapterIntegrity, libsignalResolution, libsignal = LIBSIGNAL }) => `lockfileVersion: '9.0'
 
 settings:
   autoInstallPeers: true
@@ -48,7 +50,7 @@ packages:
       better-sqlite3:
         optional: true
 
-  ${LIBSIGNAL}:
+  ${libsignal}:
     resolution: ${libsignalResolution}
     version: 6.0.0
 
@@ -61,7 +63,7 @@ snapshots:
     dependencies:
       sql.js: 1.14.2
 
-  ${LIBSIGNAL}:
+  ${libsignal}:
     dependencies:
       curve25519-js: 0.0.4
     optional: true
@@ -80,6 +82,14 @@ const MASTER_BEFORE_559 = lockfile({ adapter: '0.7.14', adapterIntegrity: ADAPTE
 const PULL_REQUEST_559 = lockfile({ adapter: '0.8.1', adapterIntegrity: ADAPTER_0_8_1, libsignalResolution: WITHOUT_LIBSIGNAL_INTEGRITY });
 // The same bump refreshed on an empty pnpm store, which downloads libsignal and pins its integrity again.
 const REFRESHED_ON_AN_EMPTY_STORE = lockfile({ adapter: '0.8.1', adapterIntegrity: ADAPTER_0_8_1, libsignalResolution: WITH_LIBSIGNAL_INTEGRITY });
+// The same bump with libsignal written as a git source of the same commit: its key changed, and the entry under the
+// new key pins no integrity, as pull request 745's first refresh wrote it.
+const REFRESHED_AS_A_GIT_SOURCE = lockfile({
+  adapter: '0.8.1',
+  adapterIntegrity: ADAPTER_0_8_1,
+  libsignal: LIBSIGNAL_GIT,
+  libsignalResolution: '{commit: bcea72df9ec34d9d9140ab30619cf479c7c144c7, repo: https://github.com/whiskeysockets/libsignal-node.git, type: git}',
+});
 
 describe('packageIntegrities', () => {
   test('reads each entry of the packages section by its key, and nothing from importers or snapshots', () => {
@@ -168,6 +178,17 @@ describe('compareIntegrities', () => {
     assert.deepEqual(gained, [{ key: LIBSIGNAL, after: LIBSIGNAL_INTEGRITY }]);
   });
 
+  test("names libsignal's entry when the refresh replaced it with a git source that pins no integrity", () => {
+    const { lost, changed, replaced } = compareIntegrities(packageIntegrities(MASTER_BEFORE_559), packageIntegrities(REFRESHED_AS_A_GIT_SOURCE));
+    assert.deepEqual([lost, changed], [[], []]);
+    assert.deepEqual(replaced, [{ key: LIBSIGNAL, before: LIBSIGNAL_INTEGRITY, by: LIBSIGNAL_GIT }]);
+  });
+
+  test('passes a bump that replaces a scoped entry with a new version that pins its own integrity', () => {
+    const { replaced } = compareIntegrities(packageIntegrities(MASTER_BEFORE_559), packageIntegrities(REFRESHED_ON_AN_EMPTY_STORE));
+    assert.deepEqual(replaced, []);
+  });
+
   test('names an entry whose integrity changed under the same key', () => {
     const before = new Map([[LIBSIGNAL, LIBSIGNAL_INTEGRITY]]);
     const after = new Map([[LIBSIGNAL, 'sha512-ZGlmZmVyZW50']]);
@@ -190,6 +211,7 @@ describe('check-lockfile-integrity.mjs', () => {
   const master = file('master.yaml', MASTER_BEFORE_559);
   const merged = file('pull-request-559.yaml', PULL_REQUEST_559);
   const refreshed = file('refreshed.yaml', REFRESHED_ON_AN_EMPTY_STORE);
+  const gitSource = file('git-source.yaml', REFRESHED_AS_A_GIT_SOURCE);
   /**
    * @param {string[]} args
    * @param {Record<string, string>} [env]
@@ -200,6 +222,15 @@ describe('check-lockfile-integrity.mjs', () => {
     const result = run([master, merged]);
     assert.equal(result.status, 1, result.stdout + result.stderr);
     assert.ok(result.stdout.includes(`${LIBSIGNAL}: the refresh dropped integrity ${LIBSIGNAL_INTEGRITY}.`), result.stdout);
+  });
+
+  test('fails a refresh that rewrote libsignal as a git source with no integrity, and names both keys', () => {
+    const result = run([master, gitSource]);
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.ok(
+      result.stdout.includes(`${LIBSIGNAL}: the refresh replaced it with ${LIBSIGNAL_GIT}, which pins no integrity, and dropped integrity ${LIBSIGNAL_INTEGRITY}.`),
+      result.stdout
+    );
   });
 
   test('writes an error annotation on the refreshed lockfile in GitHub Actions', () => {

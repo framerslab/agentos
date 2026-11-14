@@ -52,6 +52,7 @@ export {
   type GuardrailConfig,
   type GuardrailContext,
   type GuardrailEvaluationResult,
+  type GuardrailHold,
   type GuardrailInputPayload,
   type GuardrailOutputPayload,
   type IGuardrailService,
@@ -62,23 +63,45 @@ export {
   createGuardrailBlockedStream,
   createToolCallGate,
   evaluateInputGuardrails,
+  guardrailOutcomeOf,
+  holdResult,
+  isGuardrailHold,
+  toModerationEvaluation,
   type GuardrailInputOutcome,
+  type GuardrailMetadataEntry,
+  type GuardrailOutcome,
   type GuardrailOutputOptions,
   type GuardrailOutputVerdict,
   type GuardrailToolCallGate,
+  type ModerationEvaluation,
   wrapOutputGuardrails,
 } from './guardrailDispatcher';
 
-// Guards a deployment requires: the boot and request checks and the fail-closed posture
+// Guards a deployment requires: the boot and request checks and the fail-closed posture; the moderation posture
 export {
   assertRequiredGuardrails,
   checkRequiredGuardrails,
+  withModerationPosture,
   withRequiredPosture,
   type ActiveGuardrail,
   type GuardrailStage,
+  type ModerationPostureOptions,
   type RequiredGuardrailReport,
   type RequiredGuardrailSpec,
 } from './requiredGuardrails';
+
+// Content between people: one entry point, a closed posture, a typed context
+export {
+  moderateContent,
+  type ContentUnderReview,
+  type ModerateContentOptions,
+  type ModerationDecision,
+  type ModerationOutcome,
+} from './contentModeration';
+export { assertModerationContext, type ModerationContext, type ModerationSurface } from './ModerationContext';
+
+// Text a person wrote, framed so a model reads it as data
+export { UNTRUSTED_EVIDENCE_NOTICE, frameUntrustedEvidence, type FramedEvidence } from './untrustedEvidence';
 
 // Two-phase parallel guardrail dispatcher
 export { ParallelGuardrailDispatcher, type GuardrailToolCallVerdict } from './ParallelGuardrailDispatcher';
@@ -98,6 +121,15 @@ export {
   type PhraseListSnapshot,
   type PhraseListSource,
 } from './builtin/PhraseListGuardrail';
+
+// A guard over an input's images: match checks first, one capture, a closed default
+export {
+  ImageGuardrail,
+  type ImageCheck,
+  type ImageCheckResult,
+  type ImageGuardrailOptions,
+  type ImageUnderReview,
+} from './builtin/ImageGuardrail';
 
 // Cross-agent guardrail interface and types
 export {

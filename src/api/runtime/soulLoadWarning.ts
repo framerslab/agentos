@@ -9,7 +9,7 @@
  * @module api/runtime/soulLoadWarning
  */
 import { soulLog } from '../../cognition/substrate/personas/soulLog.js';
-import { errorFields } from '../../core/logging/events.js';
+import { listedErrorFields } from '../../core/logging/events.js';
 
 /** The failures logged in the running scope, as `source + NUL + message`; null outside a scope. */
 let warnedInScope: Set<string> | null = null;
@@ -46,7 +46,7 @@ export function warnSoulLoadFailed(source: string, error: unknown): void {
     if (warnedInScope.has(key)) return;
     warnedInScope.add(key);
   }
-  soulLog.warn('soul.load_failed', { optional: 'yes', ...errorFields(error) });
+  soulLog.warn('soul.load_failed', { optional: 'yes', ...listedErrorFields(error) });
 }
 
 /**

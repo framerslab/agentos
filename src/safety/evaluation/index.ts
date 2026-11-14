@@ -8,3 +8,4 @@ export * from './IEvaluator';
 export * from './Evaluator';
 export * from './LLMJudge';
 export * from './wordErrorRate';
+export * from './injectionProbes';

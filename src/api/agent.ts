@@ -4,9 +4,10 @@
  *
  * Wraps {@link generateText} and {@link streamText} with per-session conversation
  * history, optional HEXACO-inspired personality shaping, and a named-agent system
- * prompt builder.  Guardrail identifiers are accepted and stored in config but
- * are not actively enforced in this lightweight layer — use the full AgentOS
- * runtime (`AgentOSOrchestrator`) or `agency()` for guardrail enforcement.
+ * prompt builder. Guardrail identifiers are accepted and stored in config and
+ * are not enforced here or by `agency()`. To enforce guards on a call, pass
+ * `guards` to `generate()`, `stream()` or a session's `send()` and `stream()`;
+ * the full AgentOS runtime enforces its own.
  *
  * With `runtime: 'gmi'` the agent is built by {@link gmi} instead: every session
  * is served by a Generalized Mind Instance (docs/GMI.md, "GMIs from agent()").
@@ -33,6 +34,8 @@ import { credentialsGoWith, modelNamesAnotherProvider } from './runtime/credenti
 import { lowerZodToJsonSchema } from '../orchestration/compiler/SchemaLowering.js';
 import { ObjectGenerationError } from './generateObject.js';
 import { streamText, type StreamTextResult } from './streamText.js';
+import { inputDecisionOf, type TextGuardrailReport } from './runtime/textGuardrails.js';
+import { GuardrailAction } from '../safety/guardrails/IGuardrailService.js';
 import type { SeatInternals } from './runtime/pool/seating.js';
 import { isCallMask } from './runtime/pool/redact.js';
 import { maskStreamMembers } from './runtime/pool/maskedOutput.js';
@@ -65,7 +68,7 @@ import {
   type AgentExportConfig,
   type ExportAgentConfigOptions,
 } from './agentExportCore.js';
-import { applyMemoryProvider, type MemoryProviderHookOptions, type MemoryTurn } from './runtime/memoryProviderHooks.js';
+import { applyMemoryProvider, sentTurnText, type MemoryProviderHookOptions, type MemoryTurn } from './runtime/memoryProviderHooks.js';
 import { memoryHookContextOf, namedSessionUser } from './runtime/memorySubject.js';
 import { resolveRecallOptions } from './runtime/recallOptions.js';
 import { recallLog } from '../cognition/memory/retrieval/recall/log.js';
@@ -514,6 +517,8 @@ export interface SessionSendOptions<S extends ZodType | undefined = undefined> {
   cacheDiagnostics?: GenerateTextOptions['cacheDiagnostics'];
   cache?: GenerateTextOptions['cache'];
   maxTokens?: number;
+  /** Guards enforced on this send, as on generateText(). */
+  guards?: GenerateTextOptions['guards'];
   /**
    * Ends this send when it aborts: the provider request in flight is cancelled, no further step, retry or fallback
    * hop starts, and the send rejects with the signal's reason. The session stays open. With the default runtime
@@ -585,10 +590,12 @@ export interface AgentSession {
    * @param input - User message as text string or MessageContent array.
    * @param opts - `abortSignal` ends this stream when it aborts, as {@link SessionSendOptions.abortSignal} ends a
    *   send: the provider's stream stops and the stream ends with an `error` part. The session stays open. `budget`
-   *   takes the agent's place for this stream, as {@link SessionSendOptions.budget} takes it for a send.
+   *   takes the agent's place for this stream, as {@link SessionSendOptions.budget} takes it for a send. `guards`
+   *   are enforced on this stream, as on streamText(); a turn whose input a guard rewrote or replaced is not added to
+   *   the history.
    * @returns A {@link StreamTextResult} with async iterables and awaitable aggregates.
    */
-  stream(input: MessageContent, opts?: { abortSignal?: AbortSignal; budget?: SpendBudget | SpendBudgetOptions }): StreamTextResult;
+  stream(input: MessageContent, opts?: { abortSignal?: AbortSignal; budget?: SpendBudget | SpendBudgetOptions; guards?: GenerateTextOptions['guards'] }): StreamTextResult;
   /**
    * Returns a snapshot of the current conversation transcript for this
    * session in provider-replayable shape (assistant tool_calls, tool
@@ -889,10 +896,60 @@ function pickSendGenerationOverrides(
   if (sendOpts.cacheDiagnostics !== undefined) out.cacheDiagnostics = sendOpts.cacheDiagnostics;
   if (sendOpts.cache !== undefined) out.cache = sendOpts.cache;
   if (sendOpts.maxTokens !== undefined) out.maxTokens = sendOpts.maxTokens;
+  if (sendOpts.guards !== undefined) out.guards = sendOpts.guards;
   if (sendOpts.abortSignal !== undefined) out.abortSignal = sendOpts.abortSignal;
   // Settings become one budget here, so a send's validation retries are charged to the same one.
   if (sendOpts.budget !== undefined) out.budget = asSpendBudget(sendOpts.budget);
   return out;
+}
+
+/**
+ * Whether an enforced guard rewrote or replaced the call's input: the turn as the caller gave it is then not what was
+ * sent, and neither the session's history nor its memory provider keeps it.
+ */
+function guardTookInput(report: TextGuardrailReport | undefined): boolean {
+  if (report?.mode !== 'enforce') return false;
+  // what the input stage did, when the report says: a sanitizer that returned the text unchanged took nothing
+  const decided = inputDecisionOf(report);
+  if (decided !== undefined) return decided !== 'passed';
+  return report.input.some((e) => e.action === GuardrailAction.SANITIZE || e.action === GuardrailAction.BLOCK);
+}
+
+/** Whether an enforced guard replaced the call's input: no request was made and the reply is the guard's fixed text. */
+function guardReplacedInput(report: TextGuardrailReport | undefined): boolean {
+  if (report?.mode !== 'enforce') return false;
+  const decided = inputDecisionOf(report);
+  if (decided !== undefined) return decided === 'replaced' || decided === 'stopped';
+  return report.input.some((e) => e.action === GuardrailAction.BLOCK);
+}
+
+/**
+ * With `guards`, the options with a hook that keeps the turn's text as the call's first request sent it, and a reader
+ * of it: a guard may have rewritten the turn, and a check after the call reads that text, never the original. A call
+ * that made no request (a guard replaced its turn) leaves it unset.
+ */
+function keepSentTurn(options: Partial<GenerateTextOptions>): { options: Partial<GenerateTextOptions>; sent: () => string | undefined } {
+  if (options.guards === undefined) return { options, sent: () => undefined };
+  let sent: string | undefined;
+  const next = options.onBeforeGeneration;
+  return {
+    options: {
+      ...options,
+      onBeforeGeneration: async (ctx: GenerationHookContext) => {
+        if (sent === undefined) sent = sentTurnText(ctx);
+        return next ? next(ctx) : undefined;
+      },
+    },
+    sent: () => sent,
+  };
+}
+
+/**
+ * What citation verification retrieves with: the turn as the caller gave it, or as it was sent when a guard rewrote
+ * it. Undefined when a guard replaced it: no request was made and the reply is the guard's fixed text.
+ */
+function verificationQuery(userText: string, tookInput: boolean, sent: (() => string | undefined) | undefined): string | undefined {
+  return tookInput ? sent?.() : userText;
 }
 
 /**
@@ -932,8 +989,8 @@ function observeStreamWhenDone(
   turn: MemoryTurn,
 ): StreamTextResult {
   if (!provider?.observe) return result;
-  const text = Promise.all([result.text, result.finishReason]).then(([replyText, finishReason]) => {
-    if (finishReason !== 'error') observeValidatedExchange(provider, turn, replyText);
+  const text = Promise.all([result.text, result.finishReason, result.guardReport]).then(([replyText, finishReason, report]) => {
+    if (finishReason !== 'error' && !guardTookInput(report)) observeValidatedExchange(provider, turn, replyText);
     return replyText;
   });
   void text.catch(() => undefined);
@@ -948,19 +1005,24 @@ async function generateWithValidation(
   extract: boolean,
   onResult: (result: GenerateTextResult) => void,
   memory: { provider?: AgentMemoryProvider; turn: MemoryTurn; options?: MemoryProviderHookOptions },
-): Promise<{ result: GenerateTextResult; object: unknown; retried: boolean }> {
+): Promise<{ result: GenerateTextResult; object: unknown; retried: boolean; tookInput: boolean }> {
   if (schema && (!Number.isInteger(maxRetries) || maxRetries < 0)) {
     throw new RangeError('maxValidationRetries must be a non-negative integer');
   }
   // One recall for the call, which every attempt sends; only the result the caller receives is observed.
   let request = applyMemoryProvider(options, memory.provider, memory.turn, memory.options) as GenerateTextOptions;
+  // Whether an enforced guard rewrote or replaced the user's turn on any attempt: a retry's own input stage judges
+  // only its correction turn, so what the first attempt's guards did to the turn holds for the whole call.
+  let tookInput = false;
   for (let attempt = 0; ; attempt++) {
     const result = await generateText(request);
     onResult(result);
+    tookInput = tookInput || guardTookInput(result.guardReport);
     if (!schema) {
-      // The call's one observation: the user's text, and the reply the caller receives.
-      observeValidatedExchange(memory.provider, memory.turn, result.text);
-      return { result, object: undefined, retried: false };
+      // The call's one observation: the user's text, and the reply the caller receives. A turn whose input a guard
+      // rewrote or replaced is not observed.
+      if (!tookInput) observeValidatedExchange(memory.provider, memory.turn, result.text);
+      return { result, object: undefined, retried: false, tookInput };
     }
 
     let failure: ObjectGenerationError;
@@ -969,8 +1031,8 @@ async function generateWithValidation(
       // A strict json_schema payload makes every optional property nullable: a `null` there means absent.
       const safe = schema.safeParse(dropNullsForOptionalFields(parsed, schema));
       if (safe.success) {
-        observeValidatedExchange(memory.provider, memory.turn, result.text);
-        return { result, object: safe.data, retried: attempt > 0 };
+        if (!tookInput) observeValidatedExchange(memory.provider, memory.turn, result.text);
+        return { result, object: safe.data, retried: attempt > 0, tookInput };
       }
       failure = new ObjectGenerationError('Response failed Zod validation', result.text, safe.error);
     } catch (err) {
@@ -979,7 +1041,9 @@ async function generateWithValidation(
         result.text,
       );
     }
-    if (attempt >= maxRetries) throw failure;
+    // A turn a guard replaced made no request and its reply is the guard's fixed text: a retry would ask the model
+    // with the user's turn left out, so the call fails as its last attempt would.
+    if (attempt >= maxRetries || guardReplacedInput(result.guardReport)) throw failure;
     const feedback = failure.validationErrors?.message ?? failure.message;
     const priorMessages = request.messages ?? [];
     const repairMessages: Message[] = result.transcriptDelta
@@ -1248,8 +1312,10 @@ export function agent(opts: AgentOptions): Agent {
         if (opts.responseSchema) {
           genOpts._schemaInstruction = buildSchemaInstructionText(lowerZodToJsonSchema(opts.responseSchema), 'response');
         }
-        const { result, object } = await generateWithValidation(
-          genOpts as GenerateTextOptions,
+        // Verification after the call retrieves with the turn as it was sent.
+        const sentTurn = opts.verifyCitations ? keepSentTurn(genOpts) : undefined;
+        const { result, object, tookInput } = await generateWithValidation(
+          (sentTurn?.options ?? genOpts) as GenerateTextOptions,
           opts.responseSchema,
           opts.controls?.maxValidationRetries ?? 1,
           true,
@@ -1257,10 +1323,11 @@ export function agent(opts: AgentOptions): Agent {
           { provider: opts.memoryProvider, turn, options: memoryProviderOptions },
         );
         if (opts.responseSchema) result.parsed = object;
-        if (opts.verifyCitations) {
+        const query = opts.verifyCitations ? verificationQuery(userText, tookInput, sentTurn?.sent) : undefined;
+        if (opts.verifyCitations && query !== undefined) {
           result.grounding = await runCitationVerification(
             result.text,
-            userText,
+            query,
             opts.verifyCitations,
           );
         }
@@ -1472,39 +1539,44 @@ export function agent(opts: AgentOptions): Agent {
             _callerUser: callerUserOf(turn.context),
           };
 
-          const { result, object, retried } = await generateWithValidation(
-            generationOptions,
+          let firstAttempt: GenerateTextResult | undefined;
+          // Verification after the call retrieves with the turn as it was sent.
+          const sentTurn = opts.verifyCitations ? keepSentTurn(generationOptions) : undefined;
+          const { result, object, retried, tookInput } = await generateWithValidation(
+            (sentTurn?.options ?? generationOptions) as GenerateTextOptions,
             sendOpts?.responseSchema,
             sendOpts?.maxValidationRetries ?? 0,
             false,
             (attempt) => {
+              firstAttempt ??= attempt;
               accumulateUsage(sessionUsageTally, attempt.usage);
               accumulateUsage(agentUsageTally, attempt.usage);
             },
             { provider: opts.memoryProvider, turn, options: memoryProviderOptions },
           );
           if (retried) {
+            // the user turn as the first attempt sent it: a guard may have rewritten it, or replaced the turn outright
+            const sent = firstAttempt?.transcriptDelta?.find((m) => (m as { role?: string }).role === 'user');
             result.transcriptDelta = [
-              userMessage as unknown as SessionTranscriptMessage,
+              ...(firstAttempt?.transcriptDelta && !sent ? [] : [(sent ?? userMessage) as unknown as SessionTranscriptMessage]),
               { role: 'assistant', content: result.text },
             ];
           }
-          if (opts.verifyCitations) {
-            result.grounding = await runCitationVerification(result.text, textForMemory, opts.verifyCitations);
+          const query = opts.verifyCitations ? verificationQuery(textForMemory, tookInput, sentTurn?.sent) : undefined;
+          if (opts.verifyCitations && query !== undefined) {
+            result.grounding = await runCitationVerification(result.text, query, opts.verifyCitations);
           }
 
           if (historyBuffer) {
             // Lossless delta when the call carried one; minimal user/assistant
             // pair otherwise (legacy generateText wrappers and test doubles
             // predating transcriptDelta keep the pre-0.10 history shape).
-            historyBuffer.appendSendDelta(
-              result.transcriptDelta ?? [
-                userMessage as unknown as SessionTranscriptMessage,
-                { role: 'assistant', content: result.text },
-              ],
-              sendOpts?.blockLabel,
-              epochAtStart,
-            );
+            const delta = result.transcriptDelta ?? [
+              userMessage as unknown as SessionTranscriptMessage,
+              { role: 'assistant', content: result.text },
+            ];
+            // An input a guard replaced made no request and leaves an empty delta: nothing of the turn is kept.
+            if (delta.length > 0) historyBuffer.appendSendDelta(delta, sendOpts?.blockLabel, epochAtStart);
           }
 
           // Backwards-compat: when no schema, return plain GenerateTextResult.
@@ -1516,29 +1588,33 @@ export function agent(opts: AgentOptions): Agent {
             : result;
         },
 
-        stream(input: MessageContent, streamOpts?: { abortSignal?: AbortSignal; budget?: SpendBudget | SpendBudgetOptions }): StreamTextResult {
+        stream(input: MessageContent, streamOpts?: { abortSignal?: AbortSignal; budget?: SpendBudget | SpendBudgetOptions; guards?: GenerateTextOptions['guards'] }): StreamTextResult {
           const textForMemory = typeof input === 'string' ? input : extractTextFromContent(input);
           const userMessage: Message = { role: 'user', content: input };
 
           const turn = turnOf(textForMemory);
+          const streamBase: Partial<GenerateTextOptions> = {
+            ...baseOpts,
+            messages: historyBuffer
+              ? [...(historyBuffer.messages() as unknown as Message[]), userMessage]
+              : [userMessage],
+            usageLedger: mergeUsageLedgerOptions(baseOpts.usageLedger, {
+              sessionId,
+              source: 'agent.session.stream',
+            }),
+            // The caller's signal ends the stream; a stream that ends in an
+            // error is added to no history (below).
+            ...(streamOpts?.abortSignal ? { abortSignal: streamOpts.abortSignal } : {}),
+            // A stream's own budget takes the agent's place; without one the agent's applies.
+            ...(streamOpts?.budget !== undefined ? { budget: streamOpts.budget } : {}),
+            ...(streamOpts?.guards ? { guards: streamOpts.guards } : {}),
+            // The turn's tools run for the session's user.
+            _callerUser: callerUserOf(turn.context),
+          };
+          // Verification after the stream retrieves with the turn as it was sent.
+          const sentTurn = opts.verifyCitations ? keepSentTurn(streamBase) : undefined;
           const wrappedOpts = applyMemoryProvider(
-            {
-              ...baseOpts,
-              messages: historyBuffer
-                ? [...(historyBuffer.messages() as unknown as Message[]), userMessage]
-                : [userMessage],
-              usageLedger: mergeUsageLedgerOptions(baseOpts.usageLedger, {
-                sessionId,
-                source: 'agent.session.stream',
-              }),
-              // The caller's signal ends the stream; a stream that ends in an
-              // error is added to no history (below).
-              ...(streamOpts?.abortSignal ? { abortSignal: streamOpts.abortSignal } : {}),
-              // A stream's own budget takes the agent's place; without one the agent's applies.
-              ...(streamOpts?.budget !== undefined ? { budget: streamOpts.budget } : {}),
-              // The turn's tools run for the session's user.
-              _callerUser: callerUserOf(turn.context),
-            },
+            sentTurn?.options ?? streamBase,
             opts.memoryProvider,
             turn,
             memoryProviderOptions,
@@ -1547,8 +1623,11 @@ export function agent(opts: AgentOptions): Agent {
           const result = observeStreamWhenDone(streamText(wrappedOpts as GenerateTextOptions), opts.memoryProvider, turn);
           if (opts.verifyCitations) {
             const verification = opts.verifyCitations;
-            result.grounding = result.text.then(
-              (text) => runCitationVerification(text, textForMemory, verification),
+            result.grounding = Promise.all([result.text, result.guardReport]).then(
+              ([text, report]) => {
+                const query = verificationQuery(textForMemory, guardTookInput(report), sentTurn?.sent);
+                return query === undefined ? undefined : runCitationVerification(text, query, verification);
+              },
               () => undefined,
             );
           }
@@ -1566,13 +1645,16 @@ export function agent(opts: AgentOptions): Agent {
             // append the minimal user/assistant text pair, epoch-guarded so a
             // reseed during the stream discards the stale append.
             const epochAtStreamStart = historyBuffer.epoch();
-            const recorded = Promise.all([result.text, result.finishReason]).then(([replyText, finishReason]) => {
+            const recorded = Promise.all([result.text, result.finishReason, result.guardReport]).then(([replyText, finishReason, report]) => {
               // A stream that ended in an error (a refusal, a dropped
               // connection) is left out, as send() leaves out a call that
               // throws. An empty reply is not recorded as a turn: Anthropic
               // rejects a request whose history has an empty assistant
               // message.
               if (finishReason === 'error') return;
+              // The pair below is built from the input as it was given. A turn whose input a guard rewrote or
+              // replaced is left out, as a turn that ended in an error is: the history never holds what a guard took out.
+              if (guardTookInput(report)) return;
               historyBuffer.appendSendDelta(
                 [
                   { role: 'user', content: input } as SessionTranscriptMessage,

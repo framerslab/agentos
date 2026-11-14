@@ -49,7 +49,8 @@ import {
 import { MigrationRunner, MIGRATIONS, LATEST_SCHEMA_VERSION } from './migrations/index.js';
 import { ensureScopeIdColumn, fillScopeIds, postgresIndexExists } from './migrations/v2-to-v3.js';
 import { retryLostCreate } from './migrations/lost-create.js';
-import { PORTABLE_TABLES, PORTABLE_TABLE_PRIMARY_KEYS } from './portable-tables.js';
+import { registerUnregisteredConversationScopes, reopenCompiledScopes } from './conversationScopes.js';
+import { CONVERSATION_SCOPE_TABLES, PORTABLE_TABLES, PORTABLE_TABLE_PRIMARY_KEYS } from './portable-tables.js';
 import { redactPostgresPassword } from './postgresPasswordRedaction.js';
 import { keyTraceCopies } from './SqlKnowledgeGraph.js';
 import {
@@ -87,6 +88,26 @@ class ScopeIdFormChangedWhileCopied extends Error {
  * trace's `user` or `persona` scope id encoded, in its column and its metadata, and each knowledge-graph memory node's
  * stored scope id with it. A row whose id the encoded form keeps is written as it is.
  */
+/** One registry row's scope and scope id as one key, for telling which scopes a brain already registers. */
+function scopeKeyOf(row: Record<string, unknown>): string {
+  return JSON.stringify([String(row.scope), String(row.scope_id)]);
+}
+
+/** One page row's scope, scope id and page id as one key, for telling which pages a brain already holds. */
+function pageKeyOf(row: Record<string, unknown>): string {
+  return JSON.stringify([String(row.scope), String(row.scope_id), String(row.page_id)]);
+}
+
+/** The ids of the chunk traces a page row lists; none when its list cannot be read. */
+function chunkIdsOfPageRow(row: Record<string, unknown>): string[] {
+  try {
+    const ids: unknown = JSON.parse(String(row.chunk_ids));
+    return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
 function encodedSourceRows(table: string, rows: Record<string, unknown>[]): Record<string, unknown>[] {
   if (table === 'knowledge_nodes') {
     return rows.map((row) =>
@@ -554,6 +575,53 @@ CREATE INDEX IF NOT EXISTS idx_memory_traces_brain_type
   ON memory_traces (brain_id, type, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_memory_traces_brain_scope
   ON memory_traces (brain_id, scope);
+`;
+
+/**
+ * The registry of conversation scopes: one row a scope, written with the scope's first trace.
+ *
+ * Column notes:
+ * - `scope` is `'conversation'`; `scope_id` is the key `conversationScopeKey` built.
+ * - `kind` is `'user'`, `'session'` or `'operator'`, and `agent_id` the agent's id, both read from the key.
+ * - `created_at` and `compiled_at` are Unix milliseconds; `compiled_at` is NULL until the scope's first wiki compile.
+ * - `rebuild_sources` is a JSON array of trace ids, or NULL.
+ */
+const DDL_MEMORY_SCOPES = `
+CREATE TABLE IF NOT EXISTS memory_scopes (
+  brain_id        TEXT   NOT NULL,
+  scope           TEXT   NOT NULL,
+  scope_id        TEXT   NOT NULL,
+  kind            TEXT   NOT NULL,
+  agent_id        TEXT   NOT NULL,
+  created_at      BIGINT NOT NULL,
+  compiled_at     BIGINT,
+  rebuild_sources TEXT,
+  PRIMARY KEY (brain_id, scope, scope_id)
+);
+`;
+
+/**
+ * One subject's wiki pages: a row a page, in the store's own adapter.
+ *
+ * Column notes:
+ * - `scope` is `'conversation'`; `scope_id` is the subject's key (`conversationScopeKey`), kept as given.
+ * - `content` is the page as a page file holds it: front matter (`summary`, `updated`, `sources`), then the body.
+ * - `content_hash` is the SHA-256 of the body, in hex.
+ * - `chunk_ids` is a JSON array of the ids of the page's chunks in `memory_traces`.
+ * - `updated_at` is Unix milliseconds.
+ */
+const DDL_MEMORY_PAGES = `
+CREATE TABLE IF NOT EXISTS memory_pages (
+  brain_id     TEXT   NOT NULL,
+  scope        TEXT   NOT NULL,
+  scope_id     TEXT   NOT NULL,
+  page_id      TEXT   NOT NULL,
+  content      TEXT   NOT NULL,
+  content_hash TEXT   NOT NULL,
+  chunk_ids    TEXT   NOT NULL,
+  updated_at   BIGINT NOT NULL,
+  PRIMARY KEY (brain_id, scope, scope_id, page_id)
+);
 `;
 
 // FTS index DDL is now generated dynamically by features.fts.createIndex()
@@ -1083,8 +1151,9 @@ export class Brain {
    * 4. Run the pending schema migrations (idempotent; no-op for fresh DBs and the latest schema).
    * 5. Apply full DDL via _initSchema().
    * 6. File the brain's traces that hold `scope_id` `''` while their metadata names a scope id (`fillScopeIds`).
-   * 7. Seed brain_meta defaults.
-   * 8. Repair the full-text index (SQLite).
+   * 7. Register each conversation scope that holds traces and has no row in `memory_scopes`.
+   * 8. Seed brain_meta defaults.
+   * 9. Repair the full-text index (SQLite).
    */
   private static async _initialize(
     adapter: StorageAdapter,
@@ -1105,6 +1174,9 @@ export class Brain {
     // A release older than `scope_id` writes the column's default, '', to a brain at version 3 too, whose migration
     // never runs again.
     await fillScopeIds(adapter, brainId);
+    // A conversation trace another writer filed with no registry row (an import, an older file copied in) gets its
+    // scope's row here, so no scope holds traces the registry does not name.
+    await registerUnregisteredConversationScopes(adapter, brainId);
     await brain._seedMeta();
     await brain._repairFullTextIndex();
 
@@ -1203,6 +1275,8 @@ export class Brain {
     const ddlStatements = [
       DDL_BRAIN_META,
       DDL_MEMORY_TRACES,
+      DDL_MEMORY_SCOPES,
+      DDL_MEMORY_PAGES,
       DDL_KNOWLEDGE_NODES,
       DDL_KNOWLEDGE_EDGES,
       DDL_DOCUMENTS,
@@ -1510,7 +1584,9 @@ export class Brain {
             // not read yet; the pass is then made again, and the file's record
             // names the form its rows are in.
             const encoded = await readScopeIdFormRecord(source, this.#brainId);
-            for (const table of PORTABLE_TABLES) {
+            // The portable tables, then the registry of conversation scopes and each subject's wiki pages, so a
+            // subject's pages and its compile watermark travel with its traces.
+            for (const table of [...PORTABLE_TABLES, ...CONVERSATION_SCOPE_TABLES]) {
               const rows = await source.all<Record<string, unknown>>(
                 `SELECT * FROM ${table} WHERE brain_id = ?`,
                 [this.#brainId],
@@ -1568,6 +1644,11 @@ export class Brain {
    *
    * @param read - Reads the view; its result is returned.
    */
+  async readConsistently<T>(read: (source: StorageAdapter) => Promise<T>): Promise<T> {
+    return this._readSnapshot(read);
+  }
+
+  /** {@link readConsistently}, which an export of this brain reads through. */
   private async _readSnapshot<T>(read: (source: StorageAdapter) => Promise<T>): Promise<T> {
     if (this._features.dialect.name === 'postgres') {
       return this._adapter.transaction(async (trx) => {
@@ -1682,6 +1763,18 @@ export class Brain {
           `SELECT DISTINCT brain_id FROM brain_meta WHERE brain_id IS NOT NULL`,
         );
       }
+      // The registry of conversation scopes and the pages name their brain too, and the copy reads them whole: a file
+      // whose rows of the two tables name another brain than its meta is a file of two brains.
+      const named = new Set(sourceBrainIds.map((row) => row.brain_id));
+      for (const table of CONVERSATION_SCOPE_TABLES) {
+        const columns = await peekAdapter.all<{ name: string }>(`PRAGMA table_info(${table})`);
+        if (!columns.some((column) => column.name === 'brain_id')) continue;
+        const rows = await peekAdapter.all<{ brain_id: string }>(
+          `SELECT DISTINCT brain_id FROM ${table} WHERE brain_id IS NOT NULL`,
+        );
+        for (const row of rows) named.add(row.brain_id);
+      }
+      sourceBrainIds = [...named].sort().map((brain_id) => ({ brain_id }));
     } finally {
       await peekAdapter.close();
     }
@@ -1770,12 +1863,59 @@ export class Brain {
     }
 
     if (strategy === 'replace') {
-      // Wipe existing rows for the receiving brainId in every portable table.
+      // Wipe existing rows for the receiving brainId in every portable table, the conversation scopes' two among
+      // them: a page row left behind would list chunks the wipe deleted.
       // Order matters: child tables before parent tables to satisfy FKs.
-      for (const table of [...PORTABLE_TABLES].reverse()) {
+      for (const table of [...PORTABLE_TABLES, ...CONVERSATION_SCOPE_TABLES].reverse()) {
         await trx.run(`DELETE FROM ${table} WHERE brain_id = ?`, [this.#brainId]);
       }
     }
+
+    // The source's wiki pages. A merge keeps a page this brain already holds: the source's page of the same scope and
+    // id is not copied, and neither are its chunks, which no row here would list.
+    const sourcePages = await source.all<Record<string, unknown>>('SELECT * FROM memory_pages');
+    const heldPages =
+      strategy === 'replace' || sourcePages.length === 0
+        ? new Set<string>()
+        : new Set(
+            (
+              await trx.all<Record<string, unknown>>(
+                'SELECT scope, scope_id, page_id FROM memory_pages WHERE brain_id = ?',
+                [this.#brainId],
+              )
+            ).map(pageKeyOf),
+          );
+    const pagesToCopy = sourcePages.filter((row) => !heldPages.has(pageKeyOf(row)));
+    const chunksLeftOut = new Set<string>();
+    for (const row of sourcePages) {
+      if (heldPages.has(pageKeyOf(row))) for (const id of chunkIdsOfPageRow(row)) chunksLeftOut.add(id);
+    }
+
+    // A merge: the conversation scopes this brain registers and the conversation traces it holds before the copy. A
+    // trace the copy adds under one of those scopes, older than the scope's compile, is read by its next compile.
+    const heldScopeIds =
+      strategy === 'replace'
+        ? new Set<string>()
+        : new Set(
+            (
+              await trx.all<{ scope_id: string }>('SELECT scope_id FROM memory_scopes WHERE brain_id = ? AND scope = ?', [
+                this.#brainId,
+                'conversation',
+              ])
+            ).map((row) => String(row.scope_id)),
+          );
+    const heldTraceIds =
+      heldScopeIds.size === 0
+        ? new Set<string>()
+        : new Set(
+            (
+              await trx.all<{ id: string }>('SELECT id FROM memory_traces WHERE brain_id = ? AND scope = ?', [
+                this.#brainId,
+                'conversation',
+              ])
+            ).map((row) => String(row.id)),
+          );
+    let tracesAdded: Array<Record<string, unknown>> = [];
 
     const tablesImported: Record<string, number> = {};
     for (const table of PORTABLE_TABLES) {
@@ -1794,10 +1934,37 @@ export class Brain {
       // by `_seedMeta` during the receiving Brain's initialization (which
       // would otherwise collide with the source's schema_version/created_at).
       // The record is the handshake's to write, below.
-      const kept = table === 'brain_meta' ? rows.filter((row) => row.key !== SCOPE_ID_FORM_KEY) : rows;
+      const kept =
+        table === 'brain_meta'
+          ? rows.filter((row) => row.key !== SCOPE_ID_FORM_KEY)
+          : table === 'memory_traces' && chunksLeftOut.size > 0
+            ? rows.filter((row) => !chunksLeftOut.has(String(row.id)))
+            : rows;
       const copied = decision.action === 'encode' ? encodedSourceRows(table, kept) : kept;
       await this._bulkCopy(this, table, copied, this.#brainId, { upsert: true, db: trx });
+      if (table === 'memory_traces' && heldScopeIds.size > 0) {
+        tracesAdded = copied.filter((row) => !heldTraceIds.has(String(row.id)));
+      }
     }
+    // The registry of conversation scopes: a scope this brain already registers keeps its own row and watermark; a
+    // replace emptied the table, so every source row is copied. Then the pages.
+    const sourceScopes = await source.all<Record<string, unknown>>('SELECT * FROM memory_scopes');
+    const heldScopes =
+      strategy === 'replace' || sourceScopes.length === 0
+        ? new Set<string>()
+        : new Set(
+            (
+              await trx.all<Record<string, unknown>>('SELECT scope, scope_id FROM memory_scopes WHERE brain_id = ?', [
+                this.#brainId,
+              ])
+            ).map(scopeKeyOf),
+          );
+    const scopesToCopy = sourceScopes.filter((row) => !heldScopes.has(scopeKeyOf(row)));
+    tablesImported['memory_scopes'] = scopesToCopy.length;
+    await this._bulkCopy(this, 'memory_scopes', scopesToCopy, this.#brainId, { upsert: true, db: trx });
+    tablesImported['memory_pages'] = pagesToCopy.length;
+    await this._bulkCopy(this, 'memory_pages', pagesToCopy, this.#brainId, { upsert: true, db: trx });
+    await reopenCompiledScopes(trx, this.#brainId, heldScopeIds, tracesAdded);
     // This brain holds the encoded form once the copy is in when the handshake encoded the source, gave this brain the
     // source's record, or took an encoded source into an encoded brain; a replace deleted the record with this brain's
     // other brain_meta rows.

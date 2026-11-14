@@ -138,11 +138,15 @@ export interface MemoryConfig {
   persistAccessState?: boolean;
   /**
    * Recall settings for cognitive memory on the GMI path (`gmi()`, `agent({ runtime: 'gmi' })`):
-   * `budget.totalTokens` sizes the memory block (default 1600, preamble included) and `capture` sets what a turn
-   * records about its recall (default `'metadata'`). On the GMI path `memoryProviderOptions.tokenBudget` does not
-   * size the block. On the default runtime, and on the GMI path with memory off, only `budget.totalTokens` is read:
-   * it is the `tokenBudget` handed to `memoryProvider.getContext` when `memoryProviderOptions.tokenBudget` is unset;
-   * two different values, or `capture`, are refused at construction.
+   * `budget.totalTokens` sizes the memory block (default 1600, preamble included), `capture` sets what a turn
+   * records about its recall (default `'metadata'`), and `retrieval` sets how a turn finds its memories (default
+   * `'dense'`, by meaning; `'hybrid'` adds the turn's exact words and recency, fused into one Relevant Memories
+   * section), and `rerank` reranks the recalled memories (default `'none'`; `{ kind: 'local' }` scores with a
+   * cross-encoder in the process, `{ kind: 'llm' }` with the host's own model call, which receives the candidates;
+   * no remote reranking service is offered for memories). On the GMI path `memoryProviderOptions.tokenBudget` does
+   * not size the block. On the default runtime, and on the GMI path with memory off, only `budget.totalTokens` is
+   * read: it is the `tokenBudget` handed to `memoryProvider.getContext` when `memoryProviderOptions.tokenBudget` is
+   * unset; two different values, `capture`, `retrieval` or `rerank` are refused at construction.
    */
   recall?: MemoryRecallConfig;
 }
@@ -1070,8 +1074,8 @@ export type AgencyTraceEvent =
  * An agency runs every one inside a try/catch, whichever part of a run fires
  * it (the agency, its strategy, a tool approval or a HITL check): a callback
  * that throws, or an async one whose promise rejects, is written through the
- * host's logger as `agency_callback_threw` (in an agency with a pool or a
- * panel, with every key the agency can send masked in its message), and never
+ * host's logger as `agency.callback_failed`, with the callback's name and the
+ * error's listed type and code, never its message, and never
  * fails the call, changes what it returns or leaves a rejection unhandled. An
  * agency reads each one from the `on` object when the run fires it, and none
  * when it is built, so a callback set, replaced or deleted there after

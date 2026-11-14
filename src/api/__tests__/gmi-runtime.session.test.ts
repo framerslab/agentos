@@ -51,6 +51,20 @@ afterEach(() => {
 });
 
 describe("agent({ runtime: 'gmi' }) sessions", () => {
+  it('a send or a stream that carries guards is refused before any turn: the GMI path does not enforce them', async () => {
+    const k = key(); script('openai', k, { replies: [reply.text('Unguarded.')] });
+    const a = agent({ ...base(k), instructions: 'Be brief.' });
+    const s = a.session('guarded');
+    const guards = { services: [], context: { userId: 'u1', sessionId: 'guarded' } };
+    await expect(s.send('hi', { guards })).rejects.toThrow("the per-call option 'guards' is not supported on the GMI path");
+    expect(() => s.stream('hi', { guards })).toThrow("the per-call option 'guards' is not supported on the GMI path");
+    expect(() => a.stream('hi', { guards })).toThrow("the per-call option 'guards' is not supported on the GMI path");
+    expect(s.messages()).toEqual([]);
+    // the session still serves a turn without them
+    await expect(s.send('hi')).resolves.toMatchObject({ text: 'Unguarded.' });
+    await a.close();
+  });
+
   it('send returns the reply with stop, usage from the trailing chunk and the provider', async () => {
     const k = key(); script('openai', k, { replies: [reply.text('Hello there.')] });
     const a = agent({ ...base(k), name: 'Greeter', instructions: 'Be brief.' });

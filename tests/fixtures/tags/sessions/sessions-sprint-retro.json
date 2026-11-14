@@ -1,0 +1,61 @@
+{
+  "id": "sessions-sprint-retro",
+  "set": "sessions",
+  "kind": "session",
+  "language": "en",
+  "title": "Sprint retrospective",
+  "headings": [],
+  "path": null,
+  "text": "Dev: Let's start with what went well this sprint.\nInes: The new deploy pipeline. We shipped four times and none of them needed a rollback.\nOmar: Pairing on the import bug helped too. We found it in a day instead of a week.\nDev: Good. What did not go well?\nInes: Code review was slow. Some pull requests waited three days for a first look.\nOmar: And the sprint was overloaded from the start. We took on more than we finished.\nDev: Why do you think review was slow?\nInes: Everyone was heads down on their own tickets, and nobody owned the review queue.\nOmar: Maybe one person each day could be the first reviewer for anything new.\nDev: A review rotation. I like that. Ines, can you set it up for next sprint?\nInes: Yes, I will put a rotation in the team calendar.\nDev: For the overload, I think we should bring fewer tickets into planning and keep a buffer for bugs.\nOmar: Twenty percent buffer would have covered this sprint's bugs.\nDev: Let's try that. So two actions: the review rotation and a buffer of twenty percent in planning.\nInes: Should we write down the pipeline win too, so we keep doing it?\nDev: Yes, I will add it to the notes. Thanks, everyone.\n",
+  "vocabulary": [
+    {
+      "label": "retrospectives",
+      "uses": 9,
+      "lastUsed": 1762300800000
+    },
+    {
+      "label": "code review",
+      "uses": 8,
+      "lastUsed": 1762214400000
+    },
+    {
+      "label": "sprints",
+      "uses": 7,
+      "lastUsed": 1762128000000
+    },
+    {
+      "label": "deploys",
+      "uses": 6,
+      "lastUsed": 1762041600000
+    }
+  ],
+  "typed": [
+    "retrospectives"
+  ],
+  "expected": {
+    "existing": [
+      "retrospectives",
+      "codereview",
+      "sprints"
+    ],
+    "new": [
+      "rotation"
+    ]
+  },
+  "mustNot": [],
+  "asks": [],
+  "report": [
+    {
+      "label": "code review",
+      "quotes": [
+        "Code review was slow."
+      ]
+    },
+    {
+      "label": "review rotation",
+      "quotes": [
+        "A review rotation. I like that."
+      ]
+    }
+  ]
+}

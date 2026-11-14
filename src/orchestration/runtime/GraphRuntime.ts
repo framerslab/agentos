@@ -1072,6 +1072,23 @@ export class GraphRuntime {
 
         // Re-execute the node (pure / read effects, or nodes without a stored result).
         state = stateManager.recordNodeVisit(state, nodeId);
+
+        // As in stream(): the checkpoint before a node set to 'before' or 'both'.
+        if (node.checkpoint === 'before' || node.checkpoint === 'both') {
+          const checkpointId = await this.saveCheckpoint(
+            activeGraph,
+            runId,
+            nodeId,
+            state,
+            nodeResults,
+            completedNodes,
+            skippedNodes,
+            [],
+          );
+          state = this.attachCheckpointMetadata(state, checkpointId);
+          yield { type: 'checkpoint_saved', checkpointId, nodeId };
+        }
+
         yield { type: 'node_start', nodeId, state: { input: state.input, scratch: state.scratch } };
         const nodeStart = Date.now();
 
@@ -1252,6 +1269,25 @@ export class GraphRuntime {
             const edgeType = outEdges.find(e => e.target === target)?.type ?? 'static';
             yield { type: 'edge_transition', sourceId: nodeId, targetId: target, edgeType };
           }
+        }
+
+        // As in stream(): the checkpoint after a node set to 'after' or 'both',
+        // or after every node under 'every_node'. Without it a resumed run that
+        // stops before the next node finishes resumes again from the older
+        // checkpoint and runs this node again, whatever its effect class.
+        if (savesAfter(node, activeGraph)) {
+          const checkpointId = await this.saveCheckpoint(
+            activeGraph,
+            runId,
+            nodeId,
+            state,
+            nodeResults,
+            completedNodes,
+            skippedNodes,
+            this.resolvePendingEdgeIds(outEdges, targets),
+          );
+          state = this.attachCheckpointMetadata(state, checkpointId);
+          yield { type: 'checkpoint_saved', checkpointId, nodeId };
         }
       }
     }
@@ -1472,6 +1508,14 @@ function shouldRetry(policy: RetryPolicy, errorMessage?: string): boolean {
 
 function evaluateConditionExpression(expr: string, state: GraphState): unknown {
   return safeEvaluateExpression(expr, state);
+}
+
+/**
+ * Whether the run saves a checkpoint after `node` completes: the node is set to
+ * `'after'` or `'both'`, or the graph saves after every node.
+ */
+function savesAfter(node: GraphNode, graph: CompiledExecutionGraph): boolean {
+  return node.checkpoint === 'after' || node.checkpoint === 'both' || graph.checkpointPolicy === 'every_node';
 }
 
 function getResultEvents(result: NodeExecutionResult): GraphEvent[] {

@@ -24,6 +24,7 @@ import {
   type GuardrailOutputPayload,
   type IGuardrailService,
 } from '../../src/safety/guardrails/IGuardrailService.js';
+import { ImageGuardrail, type ImageCheck, type ImageUnderReview } from '../../src/safety/guardrails/builtin/ImageGuardrail';
 
 class FakeStreamingManager {
   private readonly prepared = new Map<StreamId, AgentOSResponse[]>();
@@ -316,6 +317,25 @@ describe('AgentOS.processRequest guardrail integration', () => {
     expect(errorChunk.details).toMatchObject({
       action: GuardrailAction.BLOCK,
     });
+  });
+
+  it('a held input ends the turn as a block does and carries the hold, with no text delivered', async () => {
+    const streamId = 'stream-hold';
+    const streamingManager = new FakeStreamingManager();
+    const orchestrator = new StubOrchestrator(streamingManager, streamId, [buildFinalChunk(streamId, 'persona-default', 'never sent')]);
+    const guardrailService = new TestGuardrailService({
+      inputEvaluation: { action: GuardrailAction.BLOCK, reasonCode: 'NEEDS_REVIEW', hold: { reviewCode: 'REVIEW' } },
+    });
+
+    const agent = createAgentUnderTest(guardrailService, streamingManager, orchestrator);
+    const responses = await collectResponses(agent, baseInput);
+
+    expect(orchestrator.callCount).toBe(0);
+    expect(responses).toHaveLength(1);
+    const errorChunk = responses[0] as AgentOSErrorChunk;
+    expect(errorChunk.type).toBe(AgentOSResponseChunkType.ERROR);
+    expect(errorChunk.details).toMatchObject({ action: GuardrailAction.BLOCK, hold: { reviewCode: 'REVIEW' } });
+    expect(JSON.stringify(responses)).not.toContain('never sent');
   });
 
   it('converts final output into an error chunk when guardrails block the response', async () => {
@@ -678,5 +698,171 @@ describe('AgentOS.processRequest output guards and tool calls', () => {
     expect(text.seen.map((c) => c.type)).toEqual([AgentOSResponseChunkType.TEXT_DELTA]);
     expect(tools.seen.map((c) => c.type)).toEqual([AgentOSResponseChunkType.TOOL_CALL_REQUEST]);
     expect(out.map((r) => r.type)).toEqual([AgentOSResponseChunkType.TEXT_DELTA, AgentOSResponseChunkType.TOOL_CALL_REQUEST]);
+  });
+});
+
+describe('AgentOS.processRequest with holds from guards a host registered', () => {
+  const HOLD: GuardrailEvaluationResult = { action: GuardrailAction.BLOCK, reasonCode: 'NEEDS_REVIEW', hold: { reviewCode: 'REVIEW' } };
+  const REFUSE: GuardrailEvaluationResult = { action: GuardrailAction.BLOCK, reasonCode: 'RULE_1' };
+
+  /** A guard that answers `verdict` on input, on a final reply and on a tool call, as `stages` lists. */
+  function guard(id: string, verdict: GuardrailEvaluationResult, stages: Array<'input' | 'output' | 'tool_call'>): IGuardrailService {
+    return {
+      id,
+      config: stages.includes('tool_call') ? { evaluateToolCalls: true } : {},
+      evaluateInput: async () => (stages.includes('input') ? verdict : null),
+      evaluateOutput: async ({ chunk }: GuardrailOutputPayload) => {
+        if (chunk.type === AgentOSResponseChunkType.TOOL_CALL_REQUEST) return stages.includes('tool_call') ? verdict : null;
+        return chunk.type === AgentOSResponseChunkType.FINAL_RESPONSE && stages.includes('output') ? verdict : null;
+      },
+    };
+  }
+
+  /** The agent with `guards` registered in this order, as extensions a host loaded, and a turn that sends `chunks`. */
+  function agentWith(streamId: StreamId, guards: IGuardrailService[], chunks: AgentOSResponse[]): { agent: AgentOS; orchestrator: StubOrchestrator } {
+    const streamingManager = new FakeStreamingManager();
+    const orchestrator = new StubOrchestrator(streamingManager, streamId, chunks);
+    const agent = createAgentUnderTest(undefined, streamingManager, orchestrator);
+    const descriptors = guards.map((payload) => ({ id: payload.id, payload }));
+    (agent as unknown as { extensionManager: unknown }).extensionManager = { getRegistry: () => ({ listActive: () => descriptors }) };
+    return { agent, orchestrator };
+  }
+
+  const toolCall = (streamId: StreamId): AgentOSResponse => ({
+    type: AgentOSResponseChunkType.TOOL_CALL_REQUEST, streamId, gmiInstanceId: 'gmi-1', personaId: 'persona-default', isFinal: false,
+    timestamp: new Date().toISOString(), toolCalls: [{ id: 'call-1', name: 'mute', arguments: { userId: 'u2' } }],
+    executionMode: 'external', requiresExternalToolResult: true,
+  } as AgentOSResponse);
+
+  it('on input, a refusal from a guard registered after a hold outranks it, and the turn never runs', async () => {
+    const { agent, orchestrator } = agentWith('stream-hold-then-refuse', [guard('holder-in', HOLD, ['input']), guard('refuser-in', REFUSE, ['input'])], [buildFinalChunk('stream-hold-then-refuse', 'persona-default', 'never sent')]);
+    const responses = await collectResponses(agent, baseInput);
+    expect(orchestrator.callCount).toBe(0);
+    expect(responses).toHaveLength(1);
+    const error = responses[0] as AgentOSErrorChunk;
+    expect(error.type).toBe(AgentOSResponseChunkType.ERROR);
+    expect(error.code).toBe('RULE_1');
+    expect((error.details as { hold?: unknown }).hold).toBeUndefined();
+    expect(JSON.stringify(responses)).not.toContain('never sent');
+  });
+
+  it('on a final reply, a hold ends the turn with the hold in the error chunk and the reply never delivered', async () => {
+    const streamId = 'stream-output-hold';
+    const { agent } = agentWith(streamId, [guard('holder-out', HOLD, ['output']), guard('passer-out', { action: GuardrailAction.ALLOW }, ['output'])], [buildDeltaChunk(streamId, 'persona-default', 'the '), buildFinalChunk(streamId, 'persona-default', 'the held reply')]);
+    const responses = await collectResponses(agent, baseInput);
+    const last = responses.at(-1) as AgentOSErrorChunk;
+    expect(last.type).toBe(AgentOSResponseChunkType.ERROR);
+    expect(last.code).toBe('NEEDS_REVIEW');
+    expect(last.details).toMatchObject({ action: GuardrailAction.BLOCK, hold: { reviewCode: 'REVIEW' } });
+    expect(responses.some((r) => r.type === AgentOSResponseChunkType.FINAL_RESPONSE)).toBe(false);
+    expect(JSON.stringify(responses)).not.toContain('the held reply');
+  });
+
+  it('on a final reply, a refusal registered after a hold outranks it', async () => {
+    const streamId = 'stream-output-hold-refuse';
+    const { agent } = agentWith(streamId, [guard('holder-out-2', HOLD, ['output']), guard('refuser-out', REFUSE, ['output'])], [buildFinalChunk(streamId, 'persona-default', 'the held reply')]);
+    const responses = await collectResponses(agent, baseInput);
+    expect(responses).toHaveLength(1);
+    const error = responses[0] as AgentOSErrorChunk;
+    expect(error.code).toBe('RULE_1');
+    expect((error.details as { hold?: unknown }).hold).toBeUndefined();
+  });
+
+  it('a hold with a fixed reply delivers that reply, and its record carries the hold', async () => {
+    const streamId = 'stream-output-hold-replacement';
+    const { agent } = agentWith(streamId, [guard('holder-out-3', { ...HOLD, replacementText: 'Your message is waiting for review.' }, ['output'])], [buildFinalChunk(streamId, 'persona-default', 'the held reply')]);
+    const responses = await collectResponses(agent, baseInput);
+    expect(responses).toHaveLength(1);
+    const final = responses[0] as AgentOSFinalResponseChunk;
+    expect(final.type).toBe(AgentOSResponseChunkType.FINAL_RESPONSE);
+    expect(final.finalResponseText).toBe('Your message is waiting for review.');
+    expect(final.metadata?.guardrail?.output?.[0]).toMatchObject({ action: GuardrailAction.BLOCK, hold: { reviewCode: 'REVIEW' } });
+    expect(JSON.stringify(responses)).not.toContain('the held reply');
+  });
+
+  it('a held tool call never reaches the host, and a refusal registered after the hold outranks it', async () => {
+    const execute = vi.fn();
+    for (const [name, guards, code, hold] of [
+      ['held', [guard('holder-tool', HOLD, ['tool_call'])], 'NEEDS_REVIEW', { reviewCode: 'REVIEW' }],
+      ['refused', [guard('holder-tool-2', HOLD, ['tool_call']), guard('refuser-tool', REFUSE, ['tool_call'])], 'RULE_1', undefined],
+    ] as const) {
+      const streamId = `stream-tool-${name}`;
+      const { agent } = agentWith(streamId, [...guards], [toolCall(streamId)]);
+      const responses: AgentOSResponse[] = [];
+      for await (const chunk of agent.processRequest(baseInput)) {
+        responses.push(chunk);
+        if (isActionableToolCallRequestChunk(chunk)) for (const call of chunk.toolCalls) execute(call);
+      }
+      expect(responses.map((r) => r.type), name).toEqual([AgentOSResponseChunkType.ERROR]);
+      const error = responses[0] as AgentOSErrorChunk;
+      expect(error.code, name).toBe(code);
+      expect((error.details as { hold?: unknown }).hold, name).toEqual(hold);
+    }
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('a hold on an action other than BLOCK is ignored: the turn runs and the reply is delivered', async () => {
+    const streamId = 'stream-flag-hold';
+    const flagged: GuardrailEvaluationResult = { action: GuardrailAction.FLAG, reasonCode: 'NOTE', hold: { reviewCode: 'REVIEW' } };
+    const { agent, orchestrator } = agentWith(streamId, [guard('flagger-in-out', flagged, ['input', 'output'])], [buildFinalChunk(streamId, 'persona-default', 'a delivered reply')]);
+    const responses = await collectResponses(agent, baseInput);
+    expect(orchestrator.callCount).toBe(1);
+    expect(responses.map((r) => r.type)).toEqual([AgentOSResponseChunkType.FINAL_RESPONSE]);
+    expect((responses[0] as AgentOSFinalResponseChunk).finalResponseText).toBe('a delivered reply');
+  });
+});
+
+describe('AgentOS.processRequest with the image guard a host registered', () => {
+  /** A three-byte image whose bytes are all `byte`. */
+  const image = (byte: number) => ({ type: 'base64' as const, data: Buffer.from([byte, byte, byte]).toString('base64'), mimeType: 'image/png' });
+
+  /** The agent with `guard` registered as an extension a host loaded, and a turn that would reply `a reply`. */
+  function agentWithImageGuard(streamId: StreamId, guard: IGuardrailService): { agent: AgentOS; orchestrator: StubOrchestrator } {
+    const streamingManager = new FakeStreamingManager();
+    const orchestrator = new StubOrchestrator(streamingManager, streamId, [buildFinalChunk(streamId, 'persona-default', 'a reply')]);
+    const agent = createAgentUnderTest(undefined, streamingManager, orchestrator);
+    (agent as unknown as { extensionManager: unknown }).extensionManager = { getRegistry: () => ({ listActive: () => [{ id: guard.id, payload: guard }] }) };
+    return { agent, orchestrator };
+  }
+
+  it('a quarantine on the second upload ends the turn before any model check or the agent sees the input', async () => {
+    const hash = vi.fn<ImageCheck['check']>(async (img) => (img.index === 1 ? { verdict: 'block', reasonCode: 'KNOWN_MATERIAL', quarantine: true } : { verdict: 'pass' }));
+    const model = vi.fn<ImageCheck['check']>(async () => ({ verdict: 'pass' }));
+    const guard = ImageGuardrail.create({ id: 'images', checks: [{ id: 'hash', kind: 'match', check: hash, reasonCodes: ['KNOWN_MATERIAL'] }, { id: 'model', kind: 'classify', check: model }], requireMatch: true, sequential: true });
+    const { agent, orchestrator } = agentWithImageGuard('stream-image-quarantine', guard);
+    const responses = await collectResponses(agent, { ...baseInput, visionInputs: [image(1), image(2)] });
+    expect(orchestrator.callCount).toBe(0);
+    expect(responses).toHaveLength(1);
+    const error = responses[0] as AgentOSErrorChunk;
+    expect(error.type).toBe(AgentOSResponseChunkType.ERROR);
+    expect(error.code).toBe('KNOWN_MATERIAL');
+    expect(hash).toHaveBeenCalledTimes(2);
+    expect(model).not.toHaveBeenCalled();
+    expect(JSON.stringify(responses)).not.toContain('a reply');
+  });
+
+  it('an image_url upload with no loadImage ends the turn as unavailable, and the URL reaches no check and no chunk', async () => {
+    const model = vi.fn<ImageCheck['check']>(async () => ({ verdict: 'pass' }));
+    const guard = ImageGuardrail.create({ id: 'images', checks: [{ id: 'model', kind: 'classify', check: model }] });
+    const { agent, orchestrator } = agentWithImageGuard('stream-image-url', guard);
+    const responses = await collectResponses(agent, { ...baseInput, visionInputs: [{ type: 'image_url', data: 'https://images.example/upload.jpg' }] });
+    expect(orchestrator.callCount).toBe(0);
+    expect(responses).toHaveLength(1);
+    expect((responses[0] as AgentOSErrorChunk).code).toBe('IMAGE_CHECK_UNAVAILABLE');
+    expect(model).not.toHaveBeenCalled();
+    expect(JSON.stringify(responses)).not.toContain('images.example');
+  });
+
+  it('an upload every check passes reaches the agent unchanged, and the model check judged the captured bytes', async () => {
+    const seen: ImageUnderReview[] = [];
+    const model = vi.fn<ImageCheck['check']>(async (img) => { seen.push(img); return { verdict: 'pass' }; });
+    const guard = ImageGuardrail.create({ id: 'images', checks: [{ id: 'hash', kind: 'match', check: async () => ({ verdict: 'pass' }) }, { id: 'model', kind: 'classify', check: model }], requireMatch: true });
+    const { agent, orchestrator } = agentWithImageGuard('stream-image-allowed', guard);
+    const upload = image(5);
+    const responses = await collectResponses(agent, { ...baseInput, visionInputs: [upload] });
+    expect(orchestrator.callCount).toBe(1);
+    expect(orchestrator.lastInput?.visionInputs).toEqual([upload]);
+    expect(responses.map((r) => r.type)).toEqual([AgentOSResponseChunkType.FINAL_RESPONSE]);
+    expect(seen.map((img) => [img.index, img.mimeType, [...img.bytes]])).toEqual([[0, 'image/png', [5, 5, 5]]]);
   });
 });

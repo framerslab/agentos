@@ -23,6 +23,7 @@ import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory'
 import { reply, script, type ProviderScript } from './helpers/stubProviders';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 import { Brain } from '../../cognition/memory/retrieval/store/Brain';
+import { conversationScopeKey } from '../../cognition/memory/retrieval/store/conversationScopeKey';
 import { CognitiveMemoryManager } from '../../cognition/memory/CognitiveMemoryManager';
 import { InMemoryLearningStore } from '../../cognition/learning/store/InMemoryLearningStore';
 import { stableIdOfName } from '../../cognition/substrate/personas/stableId';
@@ -301,6 +302,9 @@ describe("a soul's identity on the GMI path", () => {
 });
 
 describe("the soul's id as the agent's key", () => {
+  /** The key the turns of the session `s` are filed under for an agent of that id. */
+  const sessionKeyOf = (agentId: string) => conversationScopeKey(agentId, { kind: 'session', id: 's' });
+
   it.each([['the default runtime', {}], ["runtime: 'gmi'", { runtime: 'gmi' }]] as const)(
     'souledAgent() on %s files its turns under the soul agentId, whatever the agent is named',
     async (_name, extra) => {
@@ -310,8 +314,8 @@ describe("the soul's id as the agent's key", () => {
       const a = await souledAgent({ ...stubbed(k, { ...extra, name: 'Support' }), soul: dir } as never);
       try {
         await a.session('s').send('I moved to Lisbon.');
-        await vi.waitFor(async () => expect((await a.memory!.recall('Lisbon', { scope: 'persona', scopeId: 'aria-1' })).length).toBe(2));
-        expect(await a.memory!.recall('Lisbon', { scope: 'persona', scopeId: 'Support' })).toEqual([]);
+        await vi.waitFor(async () => expect((await a.memory!.recall('Lisbon', { scope: 'conversation', scopeId: sessionKeyOf('aria-1') })).length).toBe(2));
+        expect(await a.memory!.recall('Lisbon', { scope: 'conversation', scopeId: sessionKeyOf('Support') })).toEqual([]);
       } finally {
         await a.close();
       }
@@ -325,7 +329,7 @@ describe("the soul's id as the agent's key", () => {
     const a = await souledAgent({ ...stubbed(k), soul: dir } as never);
     try {
       await a.session('s').send('I moved to Lisbon.');
-      await vi.waitFor(async () => expect((await a.memory!.recall('Lisbon', { scope: 'persona', scopeId: 'aria-stone' })).length).toBe(2));
+      await vi.waitFor(async () => expect((await a.memory!.recall('Lisbon', { scope: 'conversation', scopeId: sessionKeyOf('aria-stone') })).length).toBe(2));
     } finally {
       await a.close();
     }
@@ -340,7 +344,7 @@ describe("the soul's id as the agent's key", () => {
       const a = await souledAgent({ ...stubbed(k, extra), soul: dir } as never);
       try {
         await a.session('s').send('I moved to Lisbon.');
-        await vi.waitFor(async () => expect((await a.memory!.recall('Lisbon', { scope: 'persona', scopeId: stableIdOfName('アリア') })).length).toBe(2));
+        await vi.waitFor(async () => expect((await a.memory!.recall('Lisbon', { scope: 'conversation', scopeId: sessionKeyOf(stableIdOfName('アリア')) })).length).toBe(2));
       } finally {
         await a.close();
       }

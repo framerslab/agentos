@@ -6,7 +6,7 @@
  * @module agentos/cognition/nlp/language/log
  */
 import { moduleLogger } from '../../../core/logging/loggerFactory.js';
-import { errorFields } from '../../../core/logging/events.js';
+import { listedErrorFields } from '../../../core/logging/events.js';
 
 /** Writes the `language.*` events to the logger current when each is written. */
 export const languageLog = moduleLogger('language', 'language_service');
@@ -36,6 +36,6 @@ export function logTranslationFailed(
     provider,
     reason,
     status: status ?? 0,
-    ...(error === undefined ? {} : errorFields(error)),
+    ...(error === undefined ? {} : listedErrorFields(error)),
   });
 }

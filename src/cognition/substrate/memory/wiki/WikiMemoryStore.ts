@@ -3,10 +3,14 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileOutsideLinks } from '../../../../core/utils/linkFreeWrite.js';
-import { parsePage, serializePage, renderCatalog } from './WikiPageCodec.js';
+import { CONVERSATION_SCOPE, conversationScopeKey } from '../../../memory/retrieval/store/conversationScopeKey.js';
+import { originOfPage, pageOriginOf, parsePage, serializePage, renderCatalog } from './WikiPageCodec.js';
 import { isWikiPageId, resolveWikiPagePath } from './WikiPageId.js';
-import { migratedBlockOf } from './migrateMemoryMd.js';
-import type { WikiPage, MetaIndex, IndexResult } from './types.js';
+import { migratedBlockOf, withMigratedText } from './migrateMemoryMd.js';
+import type { WikiPage, WikiPageOrigin, WikiPageStorePort, MetaIndex, IndexResult } from './types.js';
+
+/** The `keyVersion` of a `.meta/index.json` whose pages' chunks are filed under the operator's conversation key. */
+const META_KEY_VERSION = 'c1';
 
 /** One entry of a folder's listing: its name, and whether it is a folder. `fs.Dirent` has this shape. */
 export interface WikiFolderEntry {
@@ -55,6 +59,42 @@ export async function listWikiPageIds(
 }
 
 /**
+ * Synchronous companion to {@link listWikiPageIds}, with the same rule: the ids of the `.md` files under
+ * `memoryDir` whose path makes a valid page id, dot-named files and folders skipped.
+ *
+ * @param memoryDir - The wiki's folder.
+ * @param readDir - Lists one folder, given its path. A folder it cannot list is skipped.
+ * @param paths - The path functions that build a folder's path: the platform's by default.
+ * @returns The ids, sorted.
+ */
+export function listWikiPageIdsSync(
+  memoryDir: string,
+  readDir: (dir: string) => readonly WikiFolderEntry[],
+  paths: Pick<path.PlatformPath, 'join'> = path,
+): string[] {
+  const out: string[] = [];
+  const walk = (names: readonly string[]): void => {
+    let entries: readonly WikiFolderEntry[];
+    try {
+      entries = readDir(paths.join(memoryDir, ...names));
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      if (e.name.startsWith('.')) continue;
+      if (e.isDirectory()) {
+        walk([...names, e.name]);
+      } else if (e.name.endsWith('.md')) {
+        const id = [...names, e.name.slice(0, -3)].join('/');
+        if (isWikiPageId(id)) out.push(id);
+      }
+    }
+  };
+  walk([]);
+  return out.sort();
+}
+
+/**
  * The page entries of `.meta/index.json` in an object with no prototype, so a page id that names a member every
  * object has (`constructor`, `toString`, `__proto__`) finds only its own entry. An entry with no list of trace ids
  * is dropped, and its page is indexed again.
@@ -68,15 +108,6 @@ function pageEntries(pages: unknown): MetaIndex['pages'] {
     }
   }
   return entries;
-}
-
-/** The heading `renderCatalog` opens index.md with. */
-const CATALOG_HEADING = '# Memory Index\n';
-
-/** index.md with the migrated `MEMORY.md` block under its heading and the catalog's sections after it. */
-function withMigratedText(catalog: string, migrated: string): string {
-  const sections = (catalog.startsWith(CATALOG_HEADING) ? catalog.slice(CATALOG_HEADING.length) : catalog).replace(/^\n+/, '');
-  return `${CATALOG_HEADING}\n${migrated}\n${sections ? `\n${sections}` : ''}`;
 }
 
 /**
@@ -117,7 +148,10 @@ async function replaceFile(file: string, text: string): Promise<void> {
 /** The slice of the Memory facade the store depends on (injected for testability). */
 export interface MemoryIndexPort {
   remember(content: string, options?: Record<string, unknown>): Promise<{ id: string }>;
+  /** Kept on the port for hosts that pass one; the store deletes a page's old chunks with {@link deleteTraces}. */
   forget(traceId: string): Promise<void>;
+  /** Deletes traces for good: the chunks of a page that was edited, removed or deleted. */
+  deleteTraces(ids: readonly string[]): Promise<unknown>;
   chunk(text: string): Array<{ text: string }>;
 }
 
@@ -127,7 +161,13 @@ export interface WikiMemoryStoreOptions {
   agentId: string;
 }
 
-export class WikiMemoryStore {
+/**
+ * The operator's wiki pages: the hand-written markdown files under `memory/`, shared by everyone the agent talks
+ * with. Their chunks are filed for recall under the operator's own conversation key of the agent. A page file a
+ * compile wrote (front matter that lists `sources`), and one whose front matter cannot be read, is left on disk as
+ * it is and is not listed in `index.md` and not indexed: see {@link WikiMemoryStore.withheldPages}.
+ */
+export class WikiMemoryStore implements WikiPageStorePort {
   private readonly memoryDir: string;
   private readonly port: MemoryIndexPort;
   private readonly agentId: string;
@@ -196,14 +236,14 @@ export class WikiMemoryStore {
   }
 
   /**
-   * Write index.md from the full page set, after the migrated block the index holds. The index is read never through
-   * a symbolic link, as the soul loader reads it, and replaced whole (see `replaceFile`), so a refresh running at the
-   * same time in another store over the same folder never reads it half written.
+   * Write index.md from the operator's pages, after the migrated block the index holds. The index is read never
+   * through a symbolic link, as the soul loader reads it, and replaced whole (see `replaceFile`), so a refresh running
+   * at the same time in another store over the same folder never reads it half written.
    *
    * @throws Any error reading the index meets other than a missing file, so an index that cannot be read is never
    *   replaced by a catalog without its migrated text.
    */
-  private async refreshCatalog(): Promise<void> {
+  async refreshCatalog(): Promise<void> {
     const pages = await this.load();
     const indexPath = path.join(this.memoryDir, 'index.md');
     const read = await readFileOutsideLinks(this.memoryDir, 'index.md');
@@ -217,6 +257,65 @@ export class WikiMemoryStore {
   /** The page ids under memory/ (see `listWikiPageIds`). */
   private async listPageIds(): Promise<string[]> {
     return listWikiPageIds(this.memoryDir, (dir) => fs.readdir(dir, { withFileTypes: true }));
+  }
+
+  /**
+   * Where page `id` came from, as its file's front matter tells it (see `pageOriginOf`); null when the id has no
+   * file that can be read.
+   *
+   * @throws InvalidWikiPageIdError when the id is refused (see `isWikiPageId`); nothing is read.
+   */
+  async pageOrigin(id: string): Promise<WikiPageOrigin | null> {
+    const file = this.pagePath(id);
+    let raw: string;
+    try {
+      raw = await fs.readFile(file, 'utf8');
+    } catch {
+      return null;
+    }
+    return pageOriginOf(raw);
+  }
+
+  /**
+   * The pages under memory/ that are not the operator's: each page file a compile wrote, and each whose origin
+   * cannot be told. They stay on disk as they are, and are in no index, no prompt and no recall.
+   */
+  async withheldPages(): Promise<Array<{ id: string; origin: 'compiled' | 'uncertain' }>> {
+    const withheld: Array<{ id: string; origin: 'compiled' | 'uncertain' }> = [];
+    for (const id of await this.listPageIds()) {
+      const origin = await this.pageOrigin(id);
+      if (origin === 'compiled' || origin === 'uncertain') withheld.push({ id, origin });
+    }
+    return withheld;
+  }
+
+  /**
+   * Delete page `id`: its file, then its chunks, for good, with its entry of `.meta/index.json`, then its line of
+   * index.md. A page whose file an earlier delete removed before its chunks could be deleted is finished here: its
+   * chunks and its entry go.
+   *
+   * @returns True when the page had a file or chunks left of it; false, with nothing changed, when it had neither.
+   * @throws InvalidWikiPageIdError when the id is refused (see `isWikiPageId`); nothing is deleted.
+   */
+  async deletePage(id: string): Promise<boolean> {
+    const file = this.pagePath(id);
+    let hadFile = true;
+    try {
+      await fs.rm(file);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      hadFile = false;
+    }
+    const meta = await this.readMeta();
+    const entry = meta.keyVersion === META_KEY_VERSION ? meta.pages[id] : undefined;
+    if (!hadFile && !entry) return false;
+    if (entry) {
+      await this._port.deleteTraces(entry.traceIds);
+      delete meta.pages[id];
+      await this.writeMeta(meta);
+    }
+    await this.refreshCatalog();
+    return true;
   }
 
   /**
@@ -241,11 +340,26 @@ export class WikiMemoryStore {
     await fs.writeFile(path.join(metaDir, 'index.json'), JSON.stringify(meta, null, 2));
   }
 
-  /** Incremental: re-embed only pages whose body hash changed since the last index. */
+  /**
+   * Index the operator's pages for recall, incrementally: only a page whose body hash changed since the last index
+   * is embedded again. Each chunk is filed under the operator's conversation key of the agent, with the tags `wiki`
+   * and `page:<id>`. The old chunks of a page that was edited, and the chunks of a page that is gone or is no longer
+   * the operator's, are deleted for good. A page a compile wrote, and one whose origin cannot be told, is not indexed.
+   *
+   * An index written before the operator key existed (no `keyVersion`) names chunks filed under the agent's plain
+   * scope: its entries are not used, every operator page is indexed afresh, and those earlier chunks are left where
+   * they are. An index whose entries were filed under another operator key (the folder's agent id changed, or another
+   * agent opened the folder) is not used either: every operator page is indexed afresh under this agent's key, and
+   * the chunks its entries name, which no turn of this agent reads, are deleted.
+   */
   async index(opts?: { force?: boolean }): Promise<IndexResult> {
-    const pages = await this.load();
-    const meta = await this.readMeta();
+    const pages = (await this.load()).filter((page) => originOfPage(page) === 'operator');
+    const { meta, stale } = await this.currentMeta();
     const result: IndexResult = { indexed: [], skipped: [], removed: [] };
+    if (stale.length > 0) {
+      await this._port.deleteTraces(stale);
+      result.removed.push(...stale);
+    }
 
     for (const page of pages) {
       const hash = createHash('sha256').update(page.body).digest('hex');
@@ -254,19 +368,17 @@ export class WikiMemoryStore {
         result.skipped.push(page.id);
         continue;
       }
-      // Remove prior traces for this page before re-embedding.
+      // Delete the page's prior chunks before re-embedding.
       if (prior) {
-        for (const id of prior.traceIds) {
-          await this._port.forget(id);
-          result.removed.push(id);
-        }
+        await this._port.deleteTraces(prior.traceIds);
+        result.removed.push(...prior.traceIds);
       }
       const traceIds: string[] = [];
       for (const chunk of this._port.chunk(page.body)) {
         const trace = await this._port.remember(chunk.text, {
           type: page.type === 'log' ? 'episodic' : 'semantic',
-          scope: 'persona',
-          scopeId: this._agentId,
+          scope: CONVERSATION_SCOPE,
+          scopeId: this.operatorKey,
           tags: ['wiki', `page:${page.id}`],
           entities: page.links,
         });
@@ -276,14 +388,12 @@ export class WikiMemoryStore {
       result.indexed.push(page.id);
     }
 
-    // Drop meta entries for deleted pages.
+    // Drop the entries of pages that are gone, or are no longer the operator's, with their chunks.
     const liveIds = new Set(pages.map((p) => p.id));
     for (const id of Object.keys(meta.pages)) {
       if (!liveIds.has(id)) {
-        for (const t of meta.pages[id].traceIds) {
-          await this._port.forget(t);
-          result.removed.push(t);
-        }
+        await this._port.deleteTraces(meta.pages[id].traceIds);
+        result.removed.push(...meta.pages[id].traceIds);
         delete meta.pages[id];
       }
     }
@@ -292,14 +402,38 @@ export class WikiMemoryStore {
     return result;
   }
 
-  /** Full rebuild: clear the meta map and re-embed everything. */
+  /** Full rebuild: delete every indexed page's chunks, clear the meta map and re-embed everything. */
   async rebuildIndex(): Promise<IndexResult> {
-    const meta = await this.readMeta();
-    for (const entry of Object.values(meta.pages)) {
-      for (const t of entry.traceIds) await this._port.forget(t);
-    }
-    await this.writeMeta({ lastCompiledAt: meta.lastCompiledAt, pages: {} });
+    const { meta, stale } = await this.currentMeta();
+    const traceIds = [...stale, ...Object.values(meta.pages).flatMap((entry) => entry.traceIds)];
+    if (traceIds.length > 0) await this._port.deleteTraces(traceIds);
+    await this.writeMeta({ ...meta, pages: {} });
     return this.index({ force: true });
+  }
+
+  /**
+   * `.meta/index.json` as an index of chunks filed under this agent's operator key: the file as it is when it carries
+   * that key's version and names that key, and otherwise the file with no page entry, marked with the version and the
+   * key for its next write.
+   *
+   * @returns The index, and the chunks of the entries it left out that were filed under another operator key, for the
+   *   caller to delete; an index of the agent's plain scope leaves its chunks where they are.
+   */
+  private async currentMeta(): Promise<{ meta: MetaIndex; stale: string[] }> {
+    const meta = await this.readMeta();
+    const operatorKey = this.operatorKey;
+    if (meta.keyVersion === META_KEY_VERSION && meta.operatorKey === operatorKey) return { meta, stale: [] };
+    const stale =
+      meta.keyVersion === META_KEY_VERSION ? Object.values(meta.pages).flatMap((entry) => entry.traceIds) : [];
+    return {
+      meta: { ...meta, keyVersion: META_KEY_VERSION, operatorKey, pages: Object.create(null) as MetaIndex['pages'] },
+      stale,
+    };
+  }
+
+  /** The conversation key the operator's pages are filed under for this store's agent. */
+  private get operatorKey(): string {
+    return conversationScopeKey(this.agentId, { kind: 'operator' });
   }
 
   /** Read the last-compile watermark (ISO8601) from `.meta/index.json`. */

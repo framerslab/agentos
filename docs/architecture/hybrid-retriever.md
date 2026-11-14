@@ -30,7 +30,7 @@ The BM25 index starts empty and is not filled from the store: traces the caller 
 
 `HybridRetriever` is the memory-domain sibling: it delegates dense search to `MemoryStore.query`, owns its BM25 index, and returns [`ScoredMemoryTrace`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/types.ts) results in a [`CognitiveRetrievalResult`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/types.ts). It is not built on `HybridSearcher`.
 
-`HybridRetriever` and [`SessionRetriever`](./session-retriever.md) are retrievers the caller builds next to a `CognitiveMemoryManager`; the manager's own `retrieve()` uses neither. The manager does run HyDE itself: with an LLM invoker in its config it builds a HyDE retriever and uses it on `retrieve({ hyde: true })`.
+`HybridRetriever` and [`SessionRetriever`](./session-retriever.md) are retrievers the caller builds next to a `CognitiveMemoryManager`; the manager's own `retrieve()` uses neither. The manager's own hybrid recall, `recall.retrieval: 'hybrid'`, is a separate path ([Recall](../memory/COGNITIVE_MEMORY.md#recall)): its exact-words leg reads the store's full-text index (`memory_traces_fts`, through the storage adapter's full-text query, with the turn's scopes in the query) or, on a memory with no store, an in-process index the manager keeps filled from the store, and it keeps an exact-words-only hit in the pool. `HybridRetriever` is opt-in and unchanged by it. The manager does run HyDE itself: with an LLM invoker in its config it builds a HyDE retriever and uses it on `retrieve({ hyde: true })`.
 
 ## Steps of `retrieve()`
 

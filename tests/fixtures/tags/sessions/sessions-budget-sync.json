@@ -1,0 +1,61 @@
+{
+  "id": "sessions-budget-sync",
+  "set": "sessions",
+  "kind": "session",
+  "language": "en",
+  "title": "Monthly budget sync",
+  "headings": [],
+  "path": null,
+  "text": "Raj: This is the monthly budget sync. Let's go team by team.\nElla: Marketing is on track. We moved some of the events money into the video project, as agreed.\nRaj: Thanks. Engineering?\nTom: We are over on cloud costs by about eight percent. The new staging environment runs all day.\nRaj: Can it shut down at night?\nTom: Yes. We can schedule it to stop in the evening and start at seven. That should bring us back in line.\nRaj: Please do that this week. Support?\nElla: Support is under, because the second hire starts next month instead of this month.\nRaj: Good. Then the only real issue is cloud costs, and we have a plan.\nTom: One more thing. The software licences renew in June, and the vendor is raising prices.\nRaj: How much?\nTom: About twelve percent. I would like to look at alternatives before we commit.\nRaj: Agreed. Bring two options to the next sync.\nElla: Should we flag the licence increase to the leadership team now?\nRaj: Yes, I will mention it in my weekly note. Thanks, both of you.\n",
+  "vocabulary": [
+    {
+      "label": "budget",
+      "uses": 9,
+      "lastUsed": 1762300800000
+    },
+    {
+      "label": "cloud costs",
+      "uses": 8,
+      "lastUsed": 1762214400000
+    },
+    {
+      "label": "licences",
+      "uses": 7,
+      "lastUsed": 1762128000000
+    },
+    {
+      "label": "finance",
+      "uses": 6,
+      "lastUsed": 1762041600000
+    }
+  ],
+  "typed": [
+    "budget"
+  ],
+  "expected": {
+    "existing": [
+      "budget",
+      "cloudcosts",
+      "licences"
+    ],
+    "new": [
+      "staging"
+    ]
+  },
+  "mustNot": [],
+  "asks": [],
+  "report": [
+    {
+      "label": "cloud costs",
+      "quotes": [
+        "We are over on cloud costs by about eight percent."
+      ]
+    },
+    {
+      "label": "licences",
+      "quotes": [
+        "The software licences renew in June, and the vendor is raising prices."
+      ]
+    }
+  ]
+}
