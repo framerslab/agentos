@@ -2281,7 +2281,8 @@ export class GMI implements IGMI {
           // one, with the marker as the GMI set it. The hook gets a copy of the message list, not of the messages, so
           // a hook that keeps the block keeps this very part, and the GMI can tell its own marker from the host's
           // after the hook: the marker is the GMI's while the part carries the same marker object, unchanged. A
-          // marker the hook sets on the part, or changes in place, is the host's.
+          // marker the hook sets on the part, or changes in place, is the host's, except that in a request Anthropic
+          // would refuse, a marker equal to the GMI's on a part with the fixed text counts as the GMI's (below).
           const firstSystemContent = promptForHook.find((message) => message.role === 'system')?.content;
           const markedSystemPart = promptEngineResult.metadata?.systemSplit?.marked === true && Array.isArray(firstSystemContent)
             ? firstSystemContent.find((part) => 'cache_control' in part && part.cache_control !== undefined)
