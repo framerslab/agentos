@@ -2560,6 +2560,9 @@ export class GMI implements IGMI {
           ...(stepFinalChunk?.id ? { providerMessageId: stepFinalChunk.id } : {}),
           ...(stepFinalChunk?.cacheDiagnostics !== undefined ? { cacheDiagnostics: stepFinalChunk.cacheDiagnostics } : {}),
           ...(stepStructuredOutput !== undefined ? { structuredOutput: stepStructuredOutput } : {}),
+          // A refused step's text and lifted value are no answer: a host that parses them (a session's structured
+          // send) reads this flag first. The refusal message stays out, as out of the turn's output.
+          ...(stepRefused ? { refused: true as const } : {}),
           ...(currentIterationThinkingBlocks.length > 0 ? { thinkingBlocks: [...currentIterationThinkingBlocks] } : {}),
         };
         yield this.createOutputChunk(turnInput.interactionId, GMIOutputChunkType.STEP_FINISHED, stepPayload, {
