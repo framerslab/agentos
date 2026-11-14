@@ -745,7 +745,7 @@ The person's message follows exactly as they wrote it, with no label in front of
 }
 ```
 
-Every other provider gets one string: the note, a blank line, then the words. A message with images keeps its image parts. PromptEngine counts the block, not the line, in `metadata.contextTokens.memory`, and the recall record's `delivery` reports that count. A host that reads the person's words out of a captured request finds them in the last text part of the newest user message, or at the end of its string on a one-string provider.
+Every other provider gets one string: the note, a blank line, then the words. A message with images keeps its image parts; on a one-string provider the note joins the text part that holds the words, a blank line before them, wherever that part stands among the images. PromptEngine counts the block, not the line, in `metadata.contextTokens.memory`, and the recall record's `delivery` reports that count. A host that reads the person's words out of a captured request finds them in the last text part of the newest user message, or at the end of its string on a one-string provider.
 
 ### Upgrading from 0.17.3 or earlier
 
