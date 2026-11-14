@@ -1,9 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { AvatarPipeline, type ImageGeneratorFn } from '../AvatarPipeline';
 import type { IFaceEmbeddingService, FaceEmbedding, FaceComparisonResult } from '../../images/face/IFaceEmbeddingService';
-import type { AvatarGenerationRequest } from '../types';
+import type { AvatarAcceptanceCheck, AvatarGenerationRequest } from '../types';
 import type { AvatarIdentityDescriptor } from '../../../../api/types';
-import { AVATAR_EMOTIONS } from '../prompts';
+import { AVATAR_ANGLES, AVATAR_EMOTIONS } from '../prompts';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -503,6 +503,498 @@ describe('AvatarPipeline', () => {
 
       expect(result.jobs.every((j) => j.status === 'completed')).toBe(true);
       expect(result.identityPackage.anchors.neutralPortrait).toBeTruthy();
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Caller-owned acceptance check, emotion list, angles and generator routing
+// ---------------------------------------------------------------------------
+
+describe('AvatarPipeline caller-owned options', () => {
+  let faceService: IFaceEmbeddingService;
+  let generateImage: ReturnType<typeof vi.fn> & ImageGeneratorFn;
+  let pipeline: AvatarPipeline;
+
+  beforeEach(() => {
+    faceService = createMockFaceService();
+    generateImage = createMockImageGenerator() as ReturnType<typeof vi.fn> & ImageGeneratorFn;
+    pipeline = new AvatarPipeline(faceService, generateImage);
+  });
+
+  const promptsOf = (): string[] =>
+    (generateImage as ReturnType<typeof vi.fn>).mock.calls.map(([prompt]) => String(prompt));
+
+  // -------------------------------------------------------------------------
+  // acceptanceCheck
+  // -------------------------------------------------------------------------
+
+  describe('acceptanceCheck', () => {
+    it('replaces the embedding drift check: no embedding is extracted or compared', async () => {
+      const acceptanceCheck = vi.fn<AvatarAcceptanceCheck>().mockResolvedValue({ accepted: true });
+
+      const result = await pipeline.generate(
+        makeRequest({
+          stages: ['neutral_portrait', 'face_embedding', 'expression_sheet'],
+          acceptanceCheck,
+        }),
+      );
+
+      expect(faceService.extractEmbedding).not.toHaveBeenCalled();
+      expect(faceService.compareFaces).not.toHaveBeenCalled();
+      expect(result.identityPackage.faceEmbedding).toBeUndefined();
+      expect(result.driftReport).toBeUndefined();
+
+      const embeddingJob = result.jobs.find((j) => j.stage === 'face_embedding');
+      expect(embeddingJob?.status).toBe('skipped');
+
+      const portrait = result.identityPackage.anchors.neutralPortrait;
+      const nonNeutral = AVATAR_EMOTIONS.filter((e) => e !== 'neutral');
+      expect(acceptanceCheck).toHaveBeenCalledTimes(nonNeutral.length);
+      for (const emotion of nonNeutral) {
+        const label = `expression:${emotion}`;
+        const job = result.jobs.find((j) => j.label === label);
+        expect(job?.status).toBe('completed');
+        expect(job?.acceptance).toEqual({ accepted: true });
+        expect(acceptanceCheck).toHaveBeenCalledWith(
+          expect.objectContaining({
+            referenceUrl: portrait,
+            candidateUrl: job?.imageUrl,
+            stage: 'expression_sheet',
+            label,
+            attempt: 1,
+          }),
+        );
+      }
+    });
+
+    it('regenerates a refused render up to maxRegenerationAttempts, then fails that job alone', async () => {
+      const acceptanceCheck = vi.fn<AvatarAcceptanceCheck>().mockImplementation(async ({ label }) =>
+        label === 'expression:sad'
+          ? { accepted: false, reason: 'the eyes changed colour' }
+          : { accepted: true },
+      );
+
+      const result = await pipeline.generate(
+        makeRequest({
+          stages: ['neutral_portrait', 'expression_sheet'],
+          driftGuard: { maxRegenerationAttempts: 2 },
+          acceptanceCheck,
+        }),
+      );
+
+      const sad = result.jobs.find((j) => j.label === 'expression:sad');
+      expect(sad?.status).toBe('failed');
+      expect(sad?.attempts).toBe(2);
+      expect(sad?.error).toBe('the eyes changed colour');
+      expect(sad?.acceptance).toEqual({ accepted: false, reason: 'the eyes changed colour' });
+      expect(sad?.imageUrl).toBeUndefined();
+
+      const sheet = result.identityPackage.anchors.expressionSheet!;
+      expect(sheet.sad).toBeUndefined();
+      for (const emotion of AVATAR_EMOTIONS.filter((e) => e !== 'sad')) {
+        expect(sheet[emotion]).toBeDefined();
+      }
+      // 1 portrait + 6 expressions + 1 regeneration of the refused one
+      expect(generateImage).toHaveBeenCalledTimes(8);
+    });
+
+    it('keeps the render that passes after a refusal', async () => {
+      let happyAttempts = 0;
+      const acceptanceCheck = vi.fn<AvatarAcceptanceCheck>().mockImplementation(async ({ label }) => {
+        if (label !== 'expression:happy') return { accepted: true };
+        happyAttempts++;
+        return happyAttempts === 1 ? { accepted: false, reason: 'lettering in the frame' } : { accepted: true };
+      });
+
+      const result = await pipeline.generate(
+        makeRequest({
+          stages: ['neutral_portrait', 'expression_sheet'],
+          driftGuard: { maxRegenerationAttempts: 3 },
+          acceptanceCheck,
+        }),
+      );
+
+      const happy = result.jobs.find((j) => j.label === 'expression:happy');
+      expect(happy?.status).toBe('completed');
+      expect(happy?.attempts).toBe(2);
+      expect(happy?.acceptance).toEqual({ accepted: true });
+      const secondCandidate = acceptanceCheck.mock.calls
+        .map(([args]) => args)
+        .find((args) => args.label === 'expression:happy' && args.attempt === 2);
+      expect(result.identityPackage.anchors.expressionSheet!.happy).toBe(secondCandidate?.candidateUrl);
+    });
+
+    it('tells the generator which attempt each redraw of a refused render is', async () => {
+      const acceptanceCheck = vi.fn<AvatarAcceptanceCheck>().mockImplementation(async ({ label }) =>
+        label === 'expression:sad' ? { accepted: false, reason: 'the same refused face' } : { accepted: true },
+      );
+
+      await pipeline.generate(
+        makeRequest({
+          stages: ['neutral_portrait', 'expression_sheet'],
+          emotions: ['neutral', 'sad'],
+          driftGuard: { maxRegenerationAttempts: 3 },
+          acceptanceCheck,
+        }),
+      );
+
+      const sadCalls = (generateImage as ReturnType<typeof vi.fn>).mock.calls
+        .map(([, options]) => options)
+        .filter((options) => options.label === 'expression:sad');
+      // With a fixed seed, the attempt is the only argument that tells a redraw from the draw it replaces.
+      expect(sadCalls).toEqual(
+        [1, 2, 3].map((attempt) =>
+          expect.objectContaining({ seed: 42, stage: 'expression_sheet', label: 'expression:sad', attempt }),
+        ),
+      );
+    });
+
+    it('draws and checks each image once when maxRegenerationAttempts is 0', async () => {
+      const acceptanceCheck = vi.fn<AvatarAcceptanceCheck>().mockResolvedValue({ accepted: true });
+
+      const result = await pipeline.generate(
+        makeRequest({
+          stages: ['neutral_portrait', 'expression_sheet', 'full_body', 'additional_angles'],
+          emotions: ['neutral', 'happy'],
+          angles: ['profile view'],
+          driftGuard: { maxRegenerationAttempts: 0 },
+          acceptanceCheck,
+        }),
+      );
+
+      for (const label of ['expression:happy', 'full_body', 'angle:profile view']) {
+        const job = result.jobs.find((j) => j.label === label);
+        expect(job?.status).toBe('completed');
+        expect(job?.attempts).toBe(1);
+        expect(job?.acceptance).toEqual({ accepted: true });
+      }
+      expect(acceptanceCheck).toHaveBeenCalledTimes(3);
+      // 1 portrait + 1 expression + 1 full body + 1 angle
+      expect(generateImage).toHaveBeenCalledTimes(4);
+    });
+
+    it('draws and checks each image once when maxRegenerationAttempts is NaN', async () => {
+      const acceptanceCheck = vi.fn<AvatarAcceptanceCheck>().mockResolvedValue({ accepted: true });
+
+      const result = await pipeline.generate(
+        makeRequest({
+          stages: ['neutral_portrait', 'expression_sheet', 'full_body', 'additional_angles'],
+          emotions: ['neutral', 'happy'],
+          angles: ['profile view'],
+          // What Number(process.env.X) gives for an unset variable.
+          driftGuard: { maxRegenerationAttempts: Number(undefined) },
+          acceptanceCheck,
+        }),
+      );
+
+      for (const label of ['expression:happy', 'full_body', 'angle:profile view']) {
+        const job = result.jobs.find((j) => j.label === label);
+        expect(job?.status).toBe('completed');
+        expect(job?.attempts).toBe(1);
+        expect(job?.acceptance).toEqual({ accepted: true });
+      }
+      expect(acceptanceCheck).toHaveBeenCalledTimes(3);
+      // 1 portrait + 1 expression + 1 full body + 1 angle
+      expect(generateImage).toHaveBeenCalledTimes(4);
+    });
+
+    it('records the attempt limit it drew under in the identity package, 0 and NaN as 1', async () => {
+      for (const asked of [0, -2, Number(undefined)]) {
+        const result = await pipeline.generate(
+          makeRequest({ stages: ['neutral_portrait'], driftGuard: { maxRegenerationAttempts: asked } }),
+        );
+        expect(result.identityPackage.driftGuard.maxRegenerationAttempts).toBe(1);
+        expect(JSON.parse(JSON.stringify(result.identityPackage)).driftGuard.maxRegenerationAttempts).toBe(1);
+      }
+    });
+
+    it('fails the job when the check throws and draws no more for it', async () => {
+      const acceptanceCheck = vi.fn<AvatarAcceptanceCheck>().mockImplementation(async ({ label }) => {
+        if (label === 'expression:angry') throw new Error('judge unavailable');
+        return { accepted: true };
+      });
+
+      const result = await pipeline.generate(
+        makeRequest({
+          stages: ['neutral_portrait', 'expression_sheet'],
+          driftGuard: { maxRegenerationAttempts: 3 },
+          acceptanceCheck,
+        }),
+      );
+
+      const angry = result.jobs.find((j) => j.label === 'expression:angry');
+      expect(angry?.status).toBe('failed');
+      expect(angry?.error).toBe('judge unavailable');
+      expect(result.identityPackage.anchors.expressionSheet!.angry).toBeUndefined();
+      // 1 portrait + 6 expressions, no regeneration after the throw
+      expect(generateImage).toHaveBeenCalledTimes(7);
+    });
+
+    it('keeps the draws made and the last verdict when the check throws after a refusal', async () => {
+      const acceptanceCheck = vi.fn<AvatarAcceptanceCheck>().mockImplementation(async ({ attempt }) => {
+        if (attempt === 1) return { accepted: false, reason: 'eyes differ' };
+        throw new Error('judge unavailable');
+      });
+      const completed: Array<{ label: string; attempts: number; acceptance: unknown }> = [];
+
+      const result = await pipeline.generate(
+        makeRequest({
+          stages: ['neutral_portrait', 'expression_sheet'],
+          emotions: ['happy'],
+          driftGuard: { maxRegenerationAttempts: 3 },
+          acceptanceCheck,
+          onJobComplete: (job) => {
+            completed.push({ label: job.label, attempts: job.attempts, acceptance: job.acceptance });
+          },
+        }),
+      );
+
+      const happy = result.jobs.find((j) => j.label === 'expression:happy');
+      expect(happy?.status).toBe('failed');
+      expect(happy?.error).toBe('judge unavailable');
+      expect(happy?.attempts).toBe(2);
+      expect(happy?.acceptance).toEqual({ accepted: false, reason: 'eyes differ' });
+      expect(completed.find((j) => j.label === 'expression:happy')).toEqual({
+        label: 'expression:happy',
+        attempts: 2,
+        acceptance: { accepted: false, reason: 'eyes differ' },
+      });
+      // 1 portrait + 2 draws of the expression, none after the throw
+      expect(generateImage).toHaveBeenCalledTimes(3);
+    });
+
+    it('a refusal of one angle stops that angle alone', async () => {
+      const acceptanceCheck = vi.fn<AvatarAcceptanceCheck>().mockImplementation(async ({ label }) =>
+        label === 'angle:side view' ? { accepted: false, reason: 'a second figure in the frame' } : { accepted: true },
+      );
+
+      const result = await pipeline.generate(
+        makeRequest({
+          stages: ['neutral_portrait', 'additional_angles'],
+          angles: ['front view', 'side view', 'back view'],
+          driftGuard: { maxRegenerationAttempts: 1 },
+          acceptanceCheck,
+        }),
+      );
+
+      const byLabel = (label: string) => result.jobs.find((j) => j.label === label);
+      expect(byLabel('angle:side view')?.status).toBe('failed');
+      expect(byLabel('angle:side view')?.error).toBe('a second figure in the frame');
+      expect(byLabel('angle:front view')?.status).toBe('completed');
+      expect(byLabel('angle:back view')?.status).toBe('completed');
+      expect(result.identityPackage.anchors.additionalAngles).toEqual([
+        byLabel('angle:front view')?.imageUrl,
+        byLabel('angle:back view')?.imageUrl,
+      ]);
+      expect(acceptanceCheck).toHaveBeenCalledWith(
+        expect.objectContaining({
+          referenceUrl: result.identityPackage.anchors.neutralPortrait,
+          stage: 'additional_angles',
+          label: 'angle:side view',
+        }),
+      );
+      // 1 portrait + 3 angles, one attempt each
+      expect(generateImage).toHaveBeenCalledTimes(4);
+    });
+
+    it('checks the full-body render against the anchor when given', async () => {
+      const acceptanceCheck = vi.fn<AvatarAcceptanceCheck>().mockResolvedValue({ accepted: true });
+
+      const result = await pipeline.generate(
+        makeRequest({ stages: ['neutral_portrait', 'full_body'], acceptanceCheck }),
+      );
+
+      expect(acceptanceCheck).toHaveBeenCalledTimes(1);
+      expect(acceptanceCheck).toHaveBeenCalledWith(
+        expect.objectContaining({
+          referenceUrl: result.identityPackage.anchors.neutralPortrait,
+          candidateUrl: result.identityPackage.anchors.fullBody,
+          stage: 'full_body',
+          label: 'full_body',
+        }),
+      );
+      expect(result.jobs.find((j) => j.stage === 'full_body')?.acceptance).toEqual({ accepted: true });
+    });
+
+    it('never checks the anchor portrait or the animated emotes', async () => {
+      const acceptanceCheck = vi.fn<AvatarAcceptanceCheck>().mockResolvedValue({ accepted: true });
+
+      await pipeline.generate(
+        makeRequest({ stages: ['neutral_portrait', 'animated_emotes'], acceptanceCheck }),
+      );
+
+      expect(acceptanceCheck).not.toHaveBeenCalled();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // additional_angles
+  // -------------------------------------------------------------------------
+
+  describe('additional_angles stage', () => {
+    it('draws the default angles against the anchor when asked', async () => {
+      const result = await pipeline.generate(
+        makeRequest({ stages: ['neutral_portrait', 'additional_angles'] }),
+      );
+
+      const portrait = result.identityPackage.anchors.neutralPortrait;
+      const angleJobs = result.jobs.filter((j) => j.stage === 'additional_angles');
+      expect(angleJobs.map((j) => j.label).sort()).toEqual(
+        AVATAR_ANGLES.map((a) => `angle:${a}`).sort(),
+      );
+      expect(angleJobs.every((j) => j.status === 'completed')).toBe(true);
+
+      // 1 portrait + one image per default angle
+      expect(generateImage).toHaveBeenCalledTimes(1 + AVATAR_ANGLES.length);
+      const angleCalls = (generateImage as ReturnType<typeof vi.fn>).mock.calls.slice(1);
+      for (const [prompt, options] of angleCalls) {
+        expect(options.referenceImageUrl).toBe(portrait);
+        expect(options.consistencyMode).toBe('balanced');
+        expect(options.stage).toBe('additional_angles');
+        expect(AVATAR_ANGLES.some((a) => String(prompt).includes(a))).toBe(true);
+      }
+
+      expect(result.identityPackage.anchors.additionalAngles).toEqual(
+        AVATAR_ANGLES.map((a) => angleJobs.find((j) => j.label === `angle:${a}`)?.imageUrl),
+      );
+    });
+
+    it('is absent when not asked, including the default stage set', async () => {
+      const result = await pipeline.generate(makeRequest());
+
+      expect(result.jobs.some((j) => j.stage === 'additional_angles')).toBe(false);
+      expect(result.identityPackage.anchors.additionalAngles).toBeUndefined();
+      expect(promptsOf().some((p) => AVATAR_ANGLES.some((a) => p.includes(a)))).toBe(false);
+    });
+
+    it('draws a caller angle list in place of the defaults and keeps its order under concurrency', async () => {
+      const angles = ['front view', 'left side view', 'back view', 'right side view', 'from above'];
+      generateImage.mockImplementation(async (prompt: string) => {
+        const index = angles.findIndex((a) => prompt.endsWith(a));
+        // later angles answer first, so completion order is the reverse of the list
+        await new Promise((resolve) => setTimeout(resolve, index >= 0 ? (angles.length - index) * 5 : 0));
+        return `https://images.test/${index >= 0 ? `angle-${index}` : 'portrait'}.png`;
+      });
+
+      const result = await pipeline.generate(
+        makeRequest({ stages: ['neutral_portrait', 'additional_angles'], angles }),
+      );
+
+      expect(result.identityPackage.anchors.additionalAngles).toEqual(
+        angles.map((_, index) => `https://images.test/angle-${index}.png`),
+      );
+      expect(promptsOf().some((p) => AVATAR_ANGLES.some((a) => p.includes(a)))).toBe(false);
+    });
+
+    it('drift-checks each angle against the anchor embedding when no acceptance check is given', async () => {
+      const result = await pipeline.generate(
+        makeRequest({ stages: ['neutral_portrait', 'face_embedding', 'additional_angles'] }),
+      );
+
+      for (const angle of AVATAR_ANGLES) {
+        expect(result.driftReport?.scores[`angle:${angle}`]).toBeDefined();
+      }
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // emotions
+  // -------------------------------------------------------------------------
+
+  describe('emotions', () => {
+    it('an emotion list of two draws two', async () => {
+      const result = await pipeline.generate(
+        makeRequest({ stages: ['neutral_portrait', 'expression_sheet'], emotions: ['happy', 'sad'] }),
+      );
+
+      // 1 portrait + 2 expressions
+      expect(generateImage).toHaveBeenCalledTimes(3);
+      expect(Object.keys(result.identityPackage.anchors.expressionSheet!).sort()).toEqual(['happy', 'sad']);
+      expect(promptsOf().some((p) => p.includes('flirty'))).toBe(false);
+    });
+
+    it('applies the list to the animated emotes as well', async () => {
+      const result = await pipeline.generate(
+        makeRequest({ stages: ['animated_emotes'], emotions: ['calm', 'proud'] }),
+      );
+
+      expect(generateImage).toHaveBeenCalledTimes(2);
+      expect(Object.keys(result.identityPackage.anchors.animatedEmotes!).sort()).toEqual(['calm', 'proud']);
+    });
+
+    it('never draws an emotion the list leaves out', async () => {
+      await pipeline.generate(
+        makeRequest({
+          stages: ['neutral_portrait', 'expression_sheet', 'animated_emotes'],
+          emotions: ['neutral', 'happy', 'surprised'],
+        }),
+      );
+
+      expect(promptsOf().some((p) => p.includes('flirty'))).toBe(false);
+      expect(promptsOf().some((p) => p.includes('angry'))).toBe(false);
+    });
+
+    it('reuses the portrait for neutral and draws a repeated emotion once', async () => {
+      const result = await pipeline.generate(
+        makeRequest({
+          stages: ['neutral_portrait', 'expression_sheet'],
+          emotions: ['neutral', 'happy', 'happy'],
+        }),
+      );
+
+      // 1 portrait + 1 expression
+      expect(generateImage).toHaveBeenCalledTimes(2);
+      const sheet = result.identityPackage.anchors.expressionSheet!;
+      expect(sheet.neutral).toBe(result.identityPackage.anchors.neutralPortrait);
+      expect(result.jobs.filter((j) => j.label === 'expression:happy')).toHaveLength(1);
+    });
+
+    it('returns an emotion named __proto__ as its own key in both maps', async () => {
+      const result = await pipeline.generate(
+        makeRequest({ stages: ['neutral_portrait', 'expression_sheet', 'animated_emotes'], emotions: ['__proto__', 'happy'] }),
+      );
+
+      const { expressionSheet, animatedEmotes } = result.identityPackage.anchors;
+      expect(Object.keys(expressionSheet!).sort()).toEqual(['__proto__', 'happy']);
+      expect(Object.keys(animatedEmotes!).sort()).toEqual(['__proto__', 'happy']);
+      expect(typeof Object.getOwnPropertyDescriptor(expressionSheet, '__proto__')?.value).toBe('string');
+      expect(JSON.parse(JSON.stringify(result.identityPackage.anchors)).expressionSheet).toHaveProperty(['__proto__']);
+    });
+
+    it('keeps the default set without a list', async () => {
+      await pipeline.generate(makeRequest({ stages: ['animated_emotes'] }));
+      expect(generateImage).toHaveBeenCalledTimes(AVATAR_EMOTIONS.length);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // generator routing
+  // -------------------------------------------------------------------------
+
+  describe('generator options name the stage and label', () => {
+    it('tells the caller-given generator which stage and label each call draws', async () => {
+      await pipeline.generate(
+        makeRequest({
+          stages: ['neutral_portrait', 'expression_sheet', 'animated_emotes', 'full_body', 'additional_angles'],
+          emotions: ['neutral', 'happy'],
+          angles: ['profile view'],
+        }),
+      );
+
+      const routed = (generateImage as ReturnType<typeof vi.fn>).mock.calls
+        .map(([, options]) => `${options.stage}|${options.label}`)
+        .sort();
+      expect(routed).toEqual(
+        [
+          'neutral_portrait|neutral_portrait',
+          'expression_sheet|expression:happy',
+          'animated_emotes|emote:neutral',
+          'animated_emotes|emote:happy',
+          'full_body|full_body',
+          'additional_angles|angle:profile view',
+        ].sort(),
+      );
     });
   });
 });
