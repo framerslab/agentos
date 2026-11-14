@@ -480,6 +480,11 @@
       "default": "./dist/core/storage/browser/index.js",
       "types": "./dist/core/storage/browser/index.d.ts"
     },
+    "./core/storage/browser/runs": {
+      "import": "./dist/core/storage/browser/runs.js",
+      "default": "./dist/core/storage/browser/runs.js",
+      "types": "./dist/core/storage/browser/runs.d.ts"
+    },
     "./memory": {
       "import": "./dist/cognition/memory/index.js",
       "default": "./dist/cognition/memory/index.js",
