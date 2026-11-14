@@ -47,7 +47,7 @@ vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async (import
 }));
 import * as root from '../../index';
 import { AgentOS } from '../AgentOS';
-import { createAgentOSConfig } from '../../core/config/AgentOSConfig';
+import { createAgentOSConfig, gmiModelDefaultsFor } from '../../core/config/AgentOSConfig';
 import { MessageRole } from '../../core/conversation/ConversationMessage';
 import { GuardrailAction, type IGuardrailService } from '../../safety/guardrails/IGuardrailService';
 import { AgentOSResponseChunkType } from '../types/AgentOSResponse';
@@ -71,6 +71,21 @@ const exportsOf = root as unknown as Record<string, any>;
 async function create(orchestratorConfig: Record<string, unknown> = {}, tools?: unknown[]) {
   os = await AgentOS.create({ modelProviderManagerConfig: providers, personas,
     turnPlanning: { enabled: false }, orchestratorConfig, ...(tools ? { tools } : {}),
+  } as any);
+  return os;
+}
+/**
+ * Boots through `new AgentOS().initialize()` on a factory-built config with the host's providers. `initialize()` takes
+ * the config as given, so the GMIs' default provider and model are named for those providers here, as
+ * `AgentOS.create()` does itself: left as the factory read them from the environment, a turn asks for a provider the
+ * runtime was not given and ends in an error before any request.
+ */
+async function initialize(orchestratorConfig: Record<string, unknown>, extra: Record<string, unknown> = {}) {
+  const factory = await createAgentOSConfig();
+  os = new AgentOS();
+  await os.initialize({ ...factory, modelProviderManagerConfig: providers, personas, turnPlanning: { enabled: false }, orchestratorConfig,
+    gmiManagerConfig: { ...factory.gmiManagerConfig, defaultGMIBaseConfigDefaults: gmiModelDefaultsFor(providers.providers) },
+    ...extra,
   } as any);
   return os;
 }
@@ -121,12 +136,9 @@ describe('full-runtime explicit defaults', () => {
   });
   it.each([undefined, false, true] as const)('initialize resolves host persistence %s independently of environment false', async (host) => {
     vi.stubEnv('ENABLE_PERSISTENCE', 'false');
-    const config = await createAgentOSConfig();
-    os = new AgentOS();
-    await os.initialize({ ...config, modelProviderManagerConfig: providers, personas,
-      turnPlanning: { enabled: false }, orchestratorConfig: host === undefined ? {} : { enableConversationalPersistence: host },
-    } as any);
+    await initialize(host === undefined ? {} : { enableConversationalPersistence: host });
     await send();
+    expect(wire.calls.length).toBeGreaterThan(0);
     expect(persistence()).toBe(host ?? true);
     expect(defaults()[0].fields).toMatchObject({ persistence: (host ?? true) ? 'on' : 'off', persistenceFrom: host === undefined ? 'default' : 'host' });
   });
@@ -155,14 +167,14 @@ describe('full-runtime explicit defaults', () => {
       evaluateOutput: async ({ chunk }) => (chunk.type === AgentOSResponseChunkType.FINAL_RESPONSE
         ? { action: GuardrailAction.SANITIZE, modifiedText: 'Rewritten.', reasonCode: 'REWRITTEN' } : null),
     };
-    const host = { modelProviderManagerConfig: providers, personas, turnPlanning: { enabled: false }, orchestratorConfig: {}, guardrailService: rewrites };
     if (path === 'create') {
-      os = await AgentOS.create(host as any);
+      os = await AgentOS.create({ modelProviderManagerConfig: providers, personas, turnPlanning: { enabled: false }, orchestratorConfig: {}, guardrailService: rewrites } as any);
     } else {
-      os = new AgentOS();
-      await os.initialize({ ...(await createAgentOSConfig()), ...host } as any);
+      await initialize({}, { guardrailService: rewrites });
     }
     await send();
+    // the turn reached the model and ended with a reply, so there is a stored reply for the guard's rewrite to land on
+    expect(wire.calls.length).toBeGreaterThan(0);
     expect(persistence()).toBe(true);
     const stored = (await os!.getConversationManager().getConversation('s'))?.getAllMessages()
       .filter((message) => message.role === MessageRole.ASSISTANT && message.metadata?.source === 'agentos_output');
