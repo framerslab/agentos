@@ -131,6 +131,7 @@ import {
 } from '../safety/guardrails/requiredGuardrails';
 import { SpendMeterUnavailableError, type ISpendMeter, type SpendDenyReason } from '../safety/runtime/SpendMeter';
 import {
+  isRefusedStructuredReply,
   recheckStructuredReply,
   resolveStructuredReply,
   resolveStructuredReplySpec,
@@ -2368,11 +2369,12 @@ export class AgentOS implements IAgentOS {
         let chunk: AgentOSResponse = guarded;
         if (meteredOperationId && isOutputGuardrailBlock(chunk)) replacedByGuardrail = true;
         // A structured turn's final chunk, after the output guardrails: a sanitizer that rewrote the text may have
-        // broken the shape the model matched, so the text is checked again as it stands.
+        // broken the shape the model matched, so the text is checked again as it stands. A refused reply is not: the
+        // model wrote no reply, so it stays refused whatever text the sanitizer left.
         if (structuredSpec && chunk.type === AgentOSResponseChunkType.FINAL_RESPONSE) {
           const finalChunk = chunk as AgentOSFinalResponseChunk;
           const sanitized = Array.isArray(finalChunk.metadata?.guardrail?.output) && finalChunk.metadata.guardrail.output.some((e: { action?: unknown }) => String(e?.action).toLowerCase() === 'sanitize');
-          if (finalChunk.structured && sanitized) {
+          if (finalChunk.structured && sanitized && !isRefusedStructuredReply(finalChunk.structured)) {
             const rechecked = recheckStructuredReply(finalChunk.finalResponseText, finalChunk.structured, structuredSpec);
             if (!rechecked.meta.valid && structuredSpec.onExhausted === 'error') {
               yield {

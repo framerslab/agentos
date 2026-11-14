@@ -500,6 +500,11 @@ export interface StepFinishedChunkPayload {
    * here: it stays the step's text, with the step's own finish reason.
    */
   structuredOutput?: unknown;
+  /**
+   * Set when the step's answer held the model's refusal (a provider refusal field, such as OpenAI's `refusal`). Its
+   * `text` and `structuredOutput` are then no answer. The refusal message is not carried.
+   */
+  refused?: true;
   /** The step's extended-thinking blocks (Anthropic), so a session store can replay the step. */
   thinkingBlocks?: ThinkingBlock[];
 }

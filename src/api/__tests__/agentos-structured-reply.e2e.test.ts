@@ -40,6 +40,7 @@ import { AgentOSResponseChunkType, type AgentOSFinalResponseChunk } from '../typ
 import type { IPersonaDefinition } from '../../cognition/substrate/personas/IPersonaDefinition';
 import { GMIErrorCode } from '../../core/utils/errors.js';
 import { GuardrailAction, type IGuardrailService } from '../../safety/guardrails/IGuardrailService';
+import { STRUCTURED_REPLY_REFUSED_ISSUE } from '../runtime/structuredReply';
 
 const persona = { id: 'planner', name: 'Planner', description: 'Drafts a week.', version: '1.0.0', baseSystemPrompt: 'You draft the week from the path.' } as unknown as IPersonaDefinition;
 const week = z.object({ items: z.array(z.object({ date: z.string(), title: z.string(), heavy: z.boolean() })) });
@@ -161,7 +162,7 @@ describe('a structured reply on processRequest', () => {
     expect(errorOf(kept)).toBeUndefined();
     const final = finalOf(kept)!;
     expect(final.structured).toMatchObject({ value: null, meta: { schemaName: 'week', valid: false, attempts: 1, stage: 'model' } });
-    expect(final.structured?.meta.issues).toEqual(['The model refused the request instead of writing the reply.']);
+    expect(final.structured?.meta.issues).toEqual([STRUCTURED_REPLY_REFUSED_ISSUE]);
     expect(final.finalResponseText ?? '').toBe('');
   });
 
@@ -200,7 +201,48 @@ describe('a structured reply on processRequest', () => {
     expect(errorOf(kept)).toBeUndefined();
     const final = finalOf(kept)!;
     expect(final.structured).toMatchObject({ value: null, meta: { schemaName: 'week', valid: false, attempts: 1, stage: 'model' } });
-    expect(final.structured?.meta.issues).toEqual(['The model refused the request instead of writing the reply.']);
+    expect(final.structured?.meta.issues).toEqual([STRUCTURED_REPLY_REFUSED_ISSUE]);
+  });
+
+  it.each([
+    { rewrite: false, throws: false },
+    { rewrite: true, throws: false },
+    { rewrite: false, throws: true },
+    { rewrite: true, throws: true },
+  ])('keeps a refused structured reply after output sanitization without checking it again (rewrite: $rewrite, throwing schema: $throws)', async ({ rewrite, throws }) => {
+    const sanitizedText = rewrite ? GOOD.replace('Chapter 2 drill', 'Review') : GOOD;
+    const evaluateOutput = vi.fn<NonNullable<IGuardrailService['evaluateOutput']>>(async ({ chunk }) =>
+      chunk.type === AgentOSResponseChunkType.FINAL_RESPONSE
+        ? { action: GuardrailAction.SANITIZE, modifiedText: sanitizedText, reasonCode: 'REDACTED' }
+        : null,
+    );
+    booted = await boot({ guardrailService: { config: { canSanitize: true }, evaluateOutput } });
+    const check = vi.fn(() => {
+      if (throws) throw new Error('the schema check ran on a sanitized refusal');
+    });
+    const schema = week.superRefine(check);
+    // A refusal beside matching output text. The recheck asks the model nothing, so the check's runs are what tell.
+    provider.replies.push([
+      { responseTextDelta: GOOD },
+      { isFinal: true, choices: [{ index: 0, message: { role: 'assistant', content: GOOD }, finishReason: 'stop', refusal: REFUSAL }] },
+    ]);
+    const chunks = await collect(booted, {
+      structuredReply: { schema, name: 'week', maxRetries: 2, onExhausted: 'return_invalid' },
+    }, 's-refused-sanitized');
+    expect(evaluateOutput.mock.calls.some(([{ chunk }]) => chunk.type === AgentOSResponseChunkType.FINAL_RESPONSE)).toBe(true);
+    expect(check).not.toHaveBeenCalled();
+    expect(errorOf(chunks)).toBeUndefined();
+    expect(deltasOf(chunks)).toHaveLength(0);
+    const final = finalOf(chunks)!;
+    expect(final.isFinal).toBe(true);
+    expect(final.finalResponseText).toBe(sanitizedText);
+    expect(final.structured).toEqual({
+      value: null,
+      meta: {
+        schemaName: 'week', valid: false, attempts: 1, enforcement: 'prompt_only', stage: 'model',
+        issues: [STRUCTURED_REPLY_REFUSED_ISSUE],
+      },
+    });
   });
 
   it('streams the deltas when asked', async () => {
