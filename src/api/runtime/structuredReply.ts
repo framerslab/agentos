@@ -55,6 +55,12 @@ export interface StructuredReplyOutput {
   meta: StructuredOutputMeta;
 }
 
+/** Whether the output carries the runtime's refusal result rather than a schema validation failure. */
+export function isRefusedStructuredReply(output: StructuredReplyOutput): boolean {
+  return output.value === null && !output.meta.valid
+    && output.meta.issues?.includes('The model refused the request instead of writing the reply.') === true;
+}
+
 /** Where a `schemaRef` is looked up. A `Map<string, ZodType | JsonSchemaObject>` is one. */
 export interface IStructuredSchemaRegistry {
   get(ref: string): ZodType | JsonSchemaObject | undefined;
