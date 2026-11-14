@@ -7,7 +7,7 @@ import { EventEmitter, getEventListeners, once } from 'node:events';
 import * as http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { RerankerService } from '../RerankerService';
 import { CohereReranker } from '../providers/CohereReranker';
@@ -94,6 +94,7 @@ beforeAll(async () => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const res of stalled) res.destroy();
   stalled.clear();
   received.length = 0;
@@ -113,6 +114,24 @@ function cohereAt(mode: Mode): CohereReranker {
 /** The next request the server receives. */
 function nextRequest(): Promise<Received> {
   return once(arrivals, 'request').then(([request]) => request as Received);
+}
+
+/**
+ * Wraps the real `fetch` so the returned promise settles once the client holds a response, its headers read.
+ * An abort after it lands in the body read, however slow the runner.
+ */
+function headersReceived(): Promise<void> {
+  const realFetch = globalThis.fetch;
+  let markHeaders: () => void = () => undefined;
+  const headersIn = new Promise<void>((resolve) => {
+    markHeaders = resolve;
+  });
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (...args: Parameters<typeof fetch>) => {
+    const response = await realFetch(...args);
+    markHeaders();
+    return response;
+  });
+  return headersIn;
 }
 
 /** Settles as `promise` does, or rejects with "still pending after <ms> ms" once `ms` have passed. */
@@ -180,12 +199,12 @@ describe("CohereReranker: the request's signal", () => {
     const reason = new Error('the caller stopped');
     // Built apart from the call, as a host passes its own config through.
     const config = { providerId: 'cohere', modelId: 'rerank-v3.5', timeoutMs: 30_000, signal: controller.signal };
+    const headersIn = headersReceived();
     const arrived = nextRequest();
     const call = cohereAt('stall-body').rerank(input, config);
 
     const request = await within(arrived, 3000);
-    await within(request.sent, 3000);
-    await delay(50); // the headers reach the client, so the abort lands in the body read
+    await within(headersIn, 3000); // the client holds the response, so the abort lands in the body read
     controller.abort(reason);
 
     await expect(within(call, 3000)).rejects.toBe(reason);
@@ -246,15 +265,42 @@ describe("CohereReranker: the request's signal", () => {
     const controller = new AbortController();
     const reason = new Error('the caller stopped');
     const config = { providerId: 'cohere', signal: controller.signal };
+    const headersIn = headersReceived();
     const arrived = nextRequest();
     const call = service.rerank(input, config);
 
     const request = await within(arrived, 3000);
-    await within(request.sent, 3000);
-    await delay(50);
+    await within(headersIn, 3000);
     controller.abort(reason);
 
     await expect(within(call, 3000)).rejects.toBe(reason);
     await within(request.closed, 2000);
+  });
+
+  it("logs a stop by the caller's signal at debug through RerankerService.rerank, and a timeout at error", async () => {
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+    const service = new RerankerService({ config: { providers: [{ providerId: 'cohere' }] }, logger });
+    service.registerProvider(cohereAt('stall-body'));
+    const controller = new AbortController();
+    const reason = new Error('superseded');
+    const headersIn = headersReceived();
+    const arrived = nextRequest();
+    const call = service.rerank(input, { providerId: 'cohere', signal: controller.signal });
+
+    await within(arrived, 3000);
+    await within(headersIn, 3000);
+    logger.debug.mockClear();
+    controller.abort(reason);
+
+    await expect(within(call, 3000)).rejects.toBe(reason);
+    expect(logger.error).not.toHaveBeenCalled();
+    expect(logger.debug).toHaveBeenCalledTimes(1);
+    expect(logger.debug.mock.calls[0]?.[0]).toBe("RerankerService: Reranking with provider 'cohere' stopped by the caller's signal");
+
+    // A timeout that fires while a signal is armed is the provider's failure, and keeps its error line.
+    const timedOut = service.rerank(input, { providerId: 'cohere', timeoutMs: 300, signal: new AbortController().signal });
+    await expect(within(timedOut, 3000)).rejects.toThrow('CohereReranker: Request timed out after 300ms');
+    expect(logger.error).toHaveBeenCalledTimes(1);
+    expect(logger.error.mock.calls[0]?.[0]).toBe("RerankerService: Reranking failed with provider 'cohere'");
   });
 });
