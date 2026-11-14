@@ -1,7 +1,7 @@
 /**
  * @file MemoryStore.hydration-order.test.ts
  * The order a store loads a Brain's traces in, where several were filed in the same millisecond: newest first by
- * `created_at`, then by trace id, on SQLite and, where AGENTOS_TEST_POSTGRES_URL is set, on PostgreSQL, which leaves
+ * `created_at`, then by trace id in character-code order, on SQLite and, where AGENTOS_TEST_POSTGRES_URL is set, on PostgreSQL, which leaves
  * the order of rows equal under a sort to the plan and to where updates moved them in the table. Two Brains hold the
  * same traces, filed in the same order, with a different set of rows updated since; a fresh store on each loads them
  * in one order, by the whole-brain hydration a first read runs and by `hydrateScope`, and a recall returns its equally
@@ -45,10 +45,14 @@ class NoopKG {
 
 /** The millisecond the tied traces were filed in. */
 const FILED_AT = Date.UTC(2026, 10, 10, 12, 0, 0);
-/** Filed in this order, which is neither the ids' order nor its reverse. */
-const TIED = ['mt-c', 'mt-a', 'mt-e', 'mt-b', 'mt-f', 'mt-d'];
-/** Newest first, and the traces of one millisecond by id. */
-const EXPECTED = ['mt-new', 'mt-a', 'mt-b', 'mt-c', 'mt-d', 'mt-e', 'mt-f', 'mt-old'];
+/**
+ * Filed in this order, which is neither the ids' order nor its reverse. Two ids hold a capital letter, which sorts
+ * before every small one by its character code and among them by a language's collation (PostgreSQL's database
+ * default), so an id compared by the collation fails here.
+ */
+const TIED = ['mt-c', 'mt-A', 'mt-e', 'mt-b', 'mt-F', 'mt-d'];
+/** Newest first, and the traces of one millisecond by id, character code by character code. */
+const EXPECTED = ['mt-new', 'mt-A', 'mt-F', 'mt-b', 'mt-c', 'mt-d', 'mt-e', 'mt-old'];
 
 function trace(id: string, createdAt: number): MemoryTrace {
   return {
@@ -140,7 +144,7 @@ describe.each(ENGINES)('MemoryStore loads traces of one millisecond in id order 
   it('the whole-brain hydration, a scope hydration and a recall give one order on two Brains of the same traces', async () => {
     const brains = [await open(), await open()];
     await file(brains[0], ['mt-c', 'mt-e']);
-    await file(brains[1], ['mt-a', 'mt-f', 'mt-c']);
+    await file(brains[1], ['mt-A', 'mt-F', 'mt-c']);
 
     for (const brain of brains) {
       // The first read of a fresh store loads the brain's most recent traces.
