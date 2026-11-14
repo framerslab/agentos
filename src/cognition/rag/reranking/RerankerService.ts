@@ -157,6 +157,8 @@ export class RerankerService {
       maxDocuments: config?.maxDocuments ?? 100,
       // Unset when neither the call nor the provider's settings name one, so the provider's own default applies.
       timeoutMs: config?.timeoutMs ?? providerConfig?.defaultTimeoutMs,
+      // The caller's abort reaches the provider; one that reads it (Cohere's) ends its request there.
+      signal: config?.signal,
       params: config?.params,
     };
 
@@ -189,9 +191,14 @@ export class RerankerService {
 
       return result;
     } catch (error) {
-      this.logger?.error(`RerankerService: Reranking failed with provider '${providerId}'`, {
-        error: error instanceof Error ? error.message : String(error),
-      });
+      // A stop by the caller's own signal is not a provider failure; a timeout that fired first has another reason.
+      if (fullConfig.signal?.aborted && error === fullConfig.signal.reason) {
+        this.logger?.debug?.(`RerankerService: Reranking with provider '${providerId}' stopped by the caller's signal`);
+      } else {
+        this.logger?.error(`RerankerService: Reranking failed with provider '${providerId}'`, {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
       throw error;
     }
   }
