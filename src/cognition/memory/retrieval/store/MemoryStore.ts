@@ -343,6 +343,18 @@ function sameSeenRow(a: SeenRow, b: SeenRow): boolean {
   );
 }
 
+/**
+ * The order a hydration reads a Brain's traces in: newest first, and traces filed in the same millisecond by id in
+ * character-code order, so every load of the same rows, on either engine, files them into the index in one order. On
+ * PostgreSQL the id compares under the `C` collation: the database's default collates by language, which puts `a`
+ * before `B`, where SQLite's binary comparison and a JavaScript sort put `B` first.
+ */
+function hydrationOrder(brain: import('./Brain.js').Brain): string {
+  return brain.features.dialect.name === 'postgres'
+    ? 'ORDER BY created_at DESC, id COLLATE "C" ASC'
+    : 'ORDER BY created_at DESC, id ASC';
+}
+
 /** The live row of one trace, read again where a write may have run since the first read. */
 const LIVE_TRACE_ROW_SQL = `SELECT id, type, scope, content, embedding, strength, created_at,
         last_accessed, retrieval_count, tags, emotions, metadata, deleted, scope_id
@@ -1826,7 +1838,7 @@ export class MemoryStore {
                 last_accessed, retrieval_count, tags, emotions, metadata, scope_id
            FROM memory_traces
           WHERE brain_id = ? AND deleted = 0
-          ORDER BY created_at DESC
+          ${hydrationOrder(brain)}
           LIMIT ?`,
         [brain.brainId, MemoryStore.HYDRATION_LIMIT],
       );
@@ -2814,7 +2826,7 @@ export class MemoryStore {
               last_accessed, retrieval_count, tags, emotions, metadata, scope_id
          FROM memory_traces
         WHERE brain_id = ? AND scope = ? AND scope_id = ? AND deleted = 0
-        ORDER BY created_at DESC
+        ${hydrationOrder(brain)}
         LIMIT ?`,
       [brain.brainId, scope, scopeId, limit],
     );
