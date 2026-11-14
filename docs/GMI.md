@@ -96,6 +96,8 @@ const runtime = await AgentOS.create({
 });
 ```
 
+A persona that names the date tool gets it only when the host registers it. The bundled `atlas-systems-architect` persona (`getBuiltInPersona('atlas-systems-architect')`) lists `getCurrentDateTime` in its definition: the runtime serves it either way, and it offers the date tool only when the host registers it. A persona whose `toolIds` name `getCurrentDateTime` while the host registers no date tool fails persona validation with `unknown_tool_id`: the runtime logs the error when it loads its personas and serves the persona, and under strict persona validation (`gmiManagerConfig.personaValidationStrict` enabled, outside shadow mode) it refuses that persona's turns, as it does for any blocking validation error.
+
 ## GMIs from agent()
 
 ```typescript
