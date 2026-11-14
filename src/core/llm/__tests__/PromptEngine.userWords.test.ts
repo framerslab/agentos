@@ -163,6 +163,22 @@ describe('PromptEngine: retrieved text beside the person\'s words', () => {
     expect(joined[joined.length - 1].content).toEqual([{ type: 'text', text: `${FRAME}\n${MEMORY}\n\n${WORDS}` }, turn[1]]);
   });
 
+  it.each(TAKES_ONE_STRING)('%s: a structured message with an image before the words: the note joins the words a blank line apart', async (providerId) => {
+    // These adapters join a message's text parts themselves (Ollama with a newline, the CLI bridges with nothing
+    // between), so a note sent as a part of its own would run its last line into the words.
+    const turn = [
+      { type: 'image_url', image_url: { url: 'data:image/png;base64,iVBORw0KGgo=' } },
+      { type: 'text', text: WORDS },
+    ];
+    const components: PromptComponents = {
+      systemPrompts: base.systemPrompts,
+      conversationHistory: [createConversationMessage(MessageRole.USER, turn)],
+      memoryContextText: MEMORY,
+    };
+    const prompt = await build(components, model(providerId));
+    expect(prompt[prompt.length - 1].content).toEqual([turn[0], { type: 'text', text: `${FRAME}\n${MEMORY}\n\n${WORDS}` }]);
+  });
+
   it('sends the note alone, with no instruction about a query, when no user message is the newest', async () => {
     const history = [
       createConversationMessage(MessageRole.USER, WORDS),
