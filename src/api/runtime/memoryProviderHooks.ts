@@ -54,6 +54,23 @@ export interface MemoryTurn {
   context: MemoryHookContext;
 }
 
+/** The text of the turn a request sends: its `prompt`, else its last user message. */
+export function sentTurnText(ctx: GenerationHookContext): string | undefined {
+  if (typeof ctx.prompt === 'string') return ctx.prompt;
+  for (let i = ctx.messages.length - 1; i >= 0; i -= 1) {
+    const message = ctx.messages[i];
+    if (message.role !== 'user') continue;
+    const content: unknown = message.content;
+    if (typeof content === 'string') return content;
+    if (!Array.isArray(content)) return undefined;
+    return content
+      .filter((p): p is { type: 'text'; text: string } => (p as { type?: unknown }).type === 'text' && typeof (p as { text?: unknown }).text === 'string')
+      .map((p) => p.text)
+      .join('\n');
+  }
+  return undefined;
+}
+
 /** What a provider's `getContext` resolves to. */
 type Recalled = Awaited<ReturnType<NonNullable<AgentMemoryProvider['getContext']>>>;
 
@@ -135,6 +152,8 @@ export function applyMemoryProvider(
 ): Partial<GenerateTextOptions> {
   if (!provider?.getContext) return baseOpts;
   const userOnBefore = baseOpts.onBeforeGeneration;
+  // A call with guards sends its turn as the input stage left it, so recall reads that text: never what a guard took out.
+  const guarded = baseOpts.guards !== undefined;
   // One recall for the call: its tool steps, its validation attempts and its fallback legs send the same block.
   let recalled: Promise<Recalled> | undefined;
   /** The rendered block, once there is one. */
@@ -145,7 +164,7 @@ export function applyMemoryProvider(
   const wrappedOnBefore: NonNullable<GenerateTextOptions['onBeforeGeneration']> = async (
     ctx: GenerationHookContext,
   ): Promise<GenerationHookContext | void> => {
-    recalled ??= recallForTurn(provider, turn, hookOptions);
+    recalled ??= recallForTurn(provider, guarded ? { ...turn, userText: sentTurnText(ctx) ?? turn.userText } : turn, hookOptions);
     const items = memoryItemsOf(await recalled);
     let nextCtx: GenerationHookContext = ctx;
     if (items.length > 0) {

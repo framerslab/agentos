@@ -99,6 +99,8 @@ Rejects every request. Use for dry-run mode where you want to confirm which acti
 handler: hitl.autoReject('dry-run mode — no side effects permitted');
 ```
 
+A [governed tool](./SAFETY_PRIMITIVES.md#governed-tools)'s dry run (`mode: 'dryRun'`) runs nothing and answers the model with the policy's `dryRunOutput(args)` (default `{ dryRun: true }`) as a successful result, where `autoReject` tells the model the call was skipped. The answer is the configured one, not the tool's own, so the model can take another path in the dry run than it would after a real call.
+
 ### `hitl.webhook(url)`
 
 POSTs the [`ApprovalRequest`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts) as JSON to your endpoint and reads back an [`ApprovalDecision`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts). Non-2xx is treated as rejection with the status code as the reason. Use this when you have an in-house approval service.
@@ -204,6 +206,12 @@ hitl: {
 
 Set `guardrailOverride: false` to disable the safety net and give the handler full autonomy. Default `true` is the right setting for production.
 
+### Approvals of a governed tool
+
+A [governed tool](./SAFETY_PRIMITIVES.md#governed-tools) listed in `approvals.beforeTool` is asked for first by the approval gate and governed when it runs. Its arguments hold the messages its evidence quotes, and the two built-in checks read them: an approved action is vetoed when a message it quotes holds a sixteen-digit number, a number shaped like a US social security number, or a command such as `shutdown`, `reboot` or `kill -9`, which are the messages a report about a person quotes. `postApprovalGuardrails` has no per-tool form: setting it to `[]` turns the checks off for the whole agency, for every other `beforeTool` approval, every `beforeAgent` approval and the final output as well. The governed tool's evidence check holds each quote to the host's store; it does not replace these content checks. Keep the default list unless the agency accepts losing them everywhere. The agency hears of any veto through `on.guardrailHitlOverride`.
+
+The approver is asked before the evidence is checked: the gate runs before the tool's `execute()`, so the host's handler calls `verifyActionEvidence()` itself before it shows a person the quotes, and the governed tool checks again when it runs. The tool loops of `generateText()` and `streamText()` and the gate do not ask the tool's `refusalBeforeApproval()`, so a person can be asked about a call the governed tool then refuses. The handler and `on.approvalRequested` receive the arguments, quotes included; a callback that throws them back is written as `agency.callback_failed` with its name and the error's listed type and code, never its message.
+
 ## Graph `human` nodes
 
 A human node suspends a graph run until the host resumes it. `workflow()` lowers `step('id', { human: { prompt } })` to `humanNode({ prompt, timeout })`: the step takes a prompt and the step's `timeout`, and nothing else, so it always suspends. The resolution modes below are options of [`humanNode()`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/nodes.ts), which an [`AgentGraph`](../architecture/AGENT_GRAPH.md) takes as a node.
@@ -226,7 +234,7 @@ Resolution modes, checked in this order:
 | Mode | Behaviour |
 |---|---|
 | `autoAccept: true` | Resolve at once as approved. Use in tests. |
-| `autoReject: true` or `'reason string'` | Resolve at once as rejected. Use for dry-run pipelines. |
+| `autoReject: true` or `'reason string'` | Resolve at once as rejected. Use for dry-run pipelines. For a dry run of the actions a tool takes, a governed tool's own `mode: 'dryRun'` runs nothing and answers the model with its configured `dryRunOutput`, not the tool's own response. |
 | `judge: { model?, provider?, criteria?, confidenceThreshold? }` | Ask a model for `{ approved, confidence, reasoning }`. At or above `confidenceThreshold` (default `0.7`) its decision stands; below it, or when the call fails, the node suspends as with no mode. |
 | (none of the above) | Suspend: the runtime saves a checkpoint and emits an `interrupt` event. |
 

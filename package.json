@@ -754,8 +754,8 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@framers/agentos": "link:.",
-    "@framers/agentos-ext-account-sources": "^0.11.0",
-    "@framers/agentos-extensions-registry": "^0.18.16",
+    "@framers/agentos-ext-account-sources": "^0.11.3",
+    "@framers/agentos-extensions-registry": "^0.18.18",
     "@jitl/quickjs-wasmfile-release-sync": "0.32.0",
     "@opentelemetry/context-async-hooks": "^2.0.1",
     "@opentelemetry/sdk-metrics": "^2.0.1",
@@ -797,7 +797,7 @@
     "vitest": "^5.0.3"
   },
   "dependencies": {
-    "@framers/sql-storage-adapter": "^0.9.4",
+    "@framers/sql-storage-adapter": "^0.9.5",
     "@opentelemetry/api": "^1.9.0",
     "@opentelemetry/api-logs": "^0.201.1",
     "ajv": "^8.17.1",

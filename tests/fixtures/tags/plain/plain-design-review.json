@@ -1,0 +1,185 @@
+{
+  "id": "plain-design-review",
+  "set": "plain",
+  "kind": "document",
+  "language": "en",
+  "title": "Design review: the new settings page",
+  "headings": [
+    "What was reviewed",
+    "What worked",
+    "What needs work",
+    "Decisions"
+  ],
+  "path": null,
+  "text": "# What was reviewed\n\nThe review covered the new settings page in three sizes: phone, tablet and desktop. The page replaces the old one, which had grown to forty options in one long column. The new page groups the options under six headings, puts a search box at the top, and keeps the most used options in a short list called Common. The design team showed the clickable prototype, and two engineers and a support lead joined the review.\n\n# What worked\n\nEveryone agreed the grouping is easier to scan. The search box found every option we tried, including ones people call by another name, because each option carries a few extra words. The Common list matched what the usage numbers say people change most. On the phone the headings fold, so the page opens short, and the person sees the six groups before any option.\n\n# What needs work\n\nThe contrast of the secondary text is too low in the dark theme and fails the accessibility check. Two options sit in the wrong group: the export format belongs under Data, not under Display. The save behaviour is not clear. Some options save at once and others wait for a button, and the prototype does not say which is which. The support lead asked for a link from each option to its help page, since many tickets are about what an option does.\n\n# Decisions\n\nOptions save at once, everywhere, with a short message that says what changed and offers to undo it. The contrast is fixed before the next review. The two options move. Help links are added for the twelve options that bring the most tickets. The next design review is in two weeks, with the changes and a first version built in the app.\n",
+  "vocabulary": [
+    {
+      "label": "Design Review",
+      "uses": 9,
+      "lastUsed": 1762300800000
+    },
+    {
+      "label": "design_review",
+      "uses": 8,
+      "lastUsed": 1762214400000
+    },
+    {
+      "label": "design-review",
+      "uses": 7,
+      "lastUsed": 1762128000000
+    },
+    {
+      "label": "Settings",
+      "uses": 6,
+      "lastUsed": 1762041600000
+    },
+    {
+      "label": "settings page",
+      "uses": 5,
+      "lastUsed": 1761955200000
+    },
+    {
+      "label": "Accessibility",
+      "uses": 4,
+      "lastUsed": 1761868800000
+    },
+    {
+      "label": "a11y",
+      "uses": 3,
+      "lastUsed": 1761782400000
+    },
+    {
+      "label": "Dark Theme",
+      "uses": 2,
+      "lastUsed": 1761696000000
+    },
+    {
+      "label": "dark-mode",
+      "uses": 1,
+      "lastUsed": 1761609600000
+    },
+    {
+      "label": "Prototype",
+      "uses": 9,
+      "lastUsed": 1761523200000
+    },
+    {
+      "label": "prototypes",
+      "uses": 8,
+      "lastUsed": 1761436800000
+    },
+    {
+      "label": "Usability",
+      "uses": 7,
+      "lastUsed": 1761350400000
+    },
+    {
+      "label": "Support Tickets",
+      "uses": 6,
+      "lastUsed": 1761264000000
+    },
+    {
+      "label": "Help Center",
+      "uses": 5,
+      "lastUsed": 1761177600000
+    },
+    {
+      "label": "help-centre",
+      "uses": 4,
+      "lastUsed": 1761091200000
+    },
+    {
+      "label": "Mobile",
+      "uses": 3,
+      "lastUsed": 1761004800000
+    },
+    {
+      "label": "Tablet",
+      "uses": 2,
+      "lastUsed": 1760918400000
+    },
+    {
+      "label": "Search",
+      "uses": 1,
+      "lastUsed": 1760832000000
+    },
+    {
+      "label": "UX",
+      "uses": 9,
+      "lastUsed": 1760745600000
+    },
+    {
+      "label": "User Research",
+      "uses": 8,
+      "lastUsed": 1760659200000
+    },
+    {
+      "label": "Design System",
+      "uses": 7,
+      "lastUsed": 1760572800000
+    },
+    {
+      "label": "Components",
+      "uses": 6,
+      "lastUsed": 1760486400000
+    },
+    {
+      "label": "Icons",
+      "uses": 5,
+      "lastUsed": 1760400000000
+    },
+    {
+      "label": "Copy",
+      "uses": 4,
+      "lastUsed": 1760313600000
+    },
+    {
+      "label": "Onboarding",
+      "uses": 3,
+      "lastUsed": 1760227200000
+    },
+    {
+      "label": "Navigation",
+      "uses": 2,
+      "lastUsed": 1760140800000
+    },
+    {
+      "label": "Forms",
+      "uses": 1,
+      "lastUsed": 1760054400000
+    },
+    {
+      "label": "Release Notes",
+      "uses": 9,
+      "lastUsed": 1759968000000
+    },
+    {
+      "label": "Feedback",
+      "uses": 8,
+      "lastUsed": 1759881600000
+    },
+    {
+      "label": "Q1",
+      "uses": 7,
+      "lastUsed": 1759795200000
+    }
+  ],
+  "typed": [
+    "Design Review",
+    "Settings",
+    "Accessibility"
+  ],
+  "expected": {
+    "existing": [
+      "designreview",
+      "settings",
+      "accessibility",
+      "prototype"
+    ],
+    "new": [
+      "contrast"
+    ]
+  },
+  "mustNot": [],
+  "asks": []
+}

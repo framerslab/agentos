@@ -33,6 +33,9 @@ const PANEL_DECISION: Record<keyof GenerateTextOptions, 'allow' | 'deny'> = {
   _hardLimitsText: 'deny',
   // Added later, and allowed: store says whether OpenAI keeps each seat's output; it moves no seat off its seating.
   store: 'allow',
+  // Added later, and denied: guards would judge the one prompt once per seat and the chair, and each seat's reply
+  // apart from the panel's answer; __guardRun and __emptyPrompt are set by the guards wrapper alone.
+  guards: 'deny', __guardRun: 'deny', __emptyPrompt: 'deny',
 };
 
 describe('the pooled guard (deny list, presence not value)', () => {

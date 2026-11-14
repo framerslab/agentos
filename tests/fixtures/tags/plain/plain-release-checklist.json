@@ -1,0 +1,57 @@
+{
+  "id": "plain-release-checklist",
+  "set": "plain",
+  "kind": "document",
+  "language": "en",
+  "title": "Release checklist",
+  "headings": [
+    "Before the release",
+    "During the release",
+    "After the release"
+  ],
+  "path": "release/checklist.md",
+  "text": "# Before the release\n\nFreeze the release branch on Tuesday at noon. After the freeze only fixes for blocking bugs go in, each one approved by the release owner. Run the full test suite on the branch and attach the result to the release ticket. Read the list of merged changes and write the release notes in plain words, one line for each change a customer can see. Check that every database migration in the release has been run on the staging copy and that it can be rolled back. Confirm with support that they have read the notes and know what is changing.\n\n# During the release\n\nAnnounce the start in the release channel. Deploy to the first group of servers and watch the error rate and the response times for fifteen minutes. If both stay within the normal range, continue to the rest of the servers in two more steps, watching each step in the same way. If the error rate rises, stop, roll back the last step, and write down what you saw before trying again. Keep the release channel updated at each step, so anyone joining late can see where things stand.\n\n# After the release\n\nPublish the release notes on the website and in the app. Watch the dashboards for one more hour and keep the release owner on call until the end of the day. Close the release ticket with the time each step finished, any problem found and how it was handled. On Friday, the release owner leads a short review of what went well and what to change in this checklist, and edits this file in the same week so the next release uses the improved version.\n",
+  "vocabulary": [
+    {
+      "label": "releases",
+      "uses": 9,
+      "lastUsed": 1762300800000
+    },
+    {
+      "label": "release notes",
+      "uses": 8,
+      "lastUsed": 1762214400000
+    },
+    {
+      "label": "checklists",
+      "uses": 7,
+      "lastUsed": 1762128000000
+    },
+    {
+      "label": "deploys",
+      "uses": 6,
+      "lastUsed": 1762041600000
+    },
+    {
+      "label": "migrations",
+      "uses": 5,
+      "lastUsed": 1761955200000
+    }
+  ],
+  "typed": [
+    "release notes"
+  ],
+  "expected": {
+    "existing": [
+      "releases",
+      "releasenotes",
+      "checklists",
+      "migrations"
+    ],
+    "new": [
+      "rollback"
+    ]
+  },
+  "mustNot": [],
+  "asks": []
+}

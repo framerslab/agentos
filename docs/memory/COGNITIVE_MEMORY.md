@@ -618,6 +618,7 @@ const { manager } = await createAgentCognitiveMemory({ persona, memory: { embedd
 | Prospective Alerts | 5% | Triggered reminders (Batch 2) |
 | Graph Associations | 5% | Spreading activation context (Batch 2) |
 | Observation Notes | 5% | Recent observer notes (Batch 2) |
+| Recall (`recall`) | unset: Semantic Recall's and Recent Episodic's together (65% at the defaults) | The one section of `retrieval: 'hybrid'`, in their place ([Recall](#recall)); not read under `'dense'` |
 
 ### Overflow Redistribution
 
@@ -645,7 +646,7 @@ context.lineOutcomes;
 | Field | Value |
 |-------|-------|
 | `id` | The id of the trace the line shows, or leads to |
-| `section` | `semanticRecall`, `recentEpisodic`, `graphAssociations` or `involuntary`: the section that shows the trace, or, for a trace left out, the first section in the block's order that had a line for it |
+| `section` | `semanticRecall`, `recentEpisodic`, `recall` (the one Relevant Memories section of `retrieval: 'hybrid'`), `graphAssociations` or `involuntary`: the section that shows the trace, or, for a trace left out, the first section in the block's order that had a line for it |
 | `outcome` | `included` or `left_out` |
 | `reason` | Set only for a line left out. `section_full`: the whole line did not fit what its section was offered. `budget`: its section was offered no tokens at all (its share is 0, or the budget had none for it) |
 | `tokens` | Tokens of the line with its newline, about 4 characters a token: as rendered when included, as it would render whole when left out |
@@ -705,17 +706,42 @@ The assembler selects a formatting style by comparing conscientiousness, opennes
 [spontaneous memory] ...
 ```
 
+Under `retrieval: 'hybrid'` the two recall sections are one, in Relevant Memories' place, and Recent Experiences is not shown:
+
+```
+## Relevant Memories (facts and past events, most relevant first — use as background, don't announce)
+...
+```
+
 The preamble appears when the budget has room for it and 100 more tokens. `assembleForPrompt()` never fills the last two sections: it passes no observer notes (their 5% flows to the sections with content), and it passes neither the mechanisms engine nor the trace pool that the involuntary-recall section needs. Both sections appear only when a host calls `assembleMemoryContext()` (from `@framers/agentos/cognition/memory`) itself, with `observationNotes`, or with `mechanismsEngine` and `allTraces`. How each trace line reads depends on the formatting style.
 
 Token estimation uses ~4 chars per token heuristic.
 
+### Upgrading from 0.17.2 or earlier
+
+- `recall.rerank` refuses at construction two values 0.17.2 accepted, with a `RecallOptionError` (reason `invalid_value`) and one `memory.recall.option_rejected` line naming the field. A `local` one's `revision` in upper or mixed case (`rerank.revision`): give the commit id in lower case, as Hugging Face Hub shows it; 0.17.2 matched the id case-insensitively and loaded the files from the id as written, which finds the lower-case folder on a case-insensitive file system and misses it on a case-sensitive one. A `timeoutMs` above 2,147,483,647 (`rerank.timeoutMs`): a timer set past it runs after 1 ms, so on 0.17.2 such a rerank timed out on every turn and the turns answered unreranked. `agent()`, `gmi()`, a persona's `cognitiveMemoryConfig.recall`, `CognitiveMemoryManager.initialize()` and `applyRecallConfig()` all refuse them.
+
+### Upgrading from 0.17.1 or earlier
+
+- `CognitiveMemoryConfig.rerankerService` is no longer read for memory recall: set `recall.rerank` (`'none'`, the default; `{ kind: 'local', model, revision }`; `{ kind: 'llm', invoke, model }`; see [Recall](#recall)). Through 0.17.1 a manager given a `rerankerService` reranked every recall with the service's default provider, a remote one included. It now calls no provider but the one `recall.rerank` names, writes one `memory.recall.option_ignored` line (`option: 'remote_provider'`) when it initialises with a service, and returns the service from `getRerankerService()` as before. The capture's `reranker.provider` is `none`, `local` or `llm`; the manager no longer records `other`. A reranked recall scores the best 20 candidates (`maxCandidates`; through 0.17.1, the first 100), and under `retrieval: 'hybrid'` the rerank now orders the cut and leaves each line's relevance as it was.
+- `LOCAL_RERANKER_MODELS` no longer lists `BAAI/bge-reranker-large` and `sentence-transformers/ce-ms-marco-TinyBERT-L-4`, and names the MiniLM models by their repositories' current ids, `cross-encoder/ms-marco-MiniLM-L6-v2` and `cross-encoder/ms-marco-MiniLM-L12-v2`; `LocalRerankerModel` narrows with it, so code that types one of the removed or earlier ids as a `LocalRerankerModel` no longer compiles. `LocalCrossEncoderReranker` loads any id it is given, the removed and earlier ones included.
+- `LocalCrossEncoderReranker`'s default model id is `cross-encoder/ms-marco-MiniLM-L6-v2` (it was `cross-encoder/ms-marco-MiniLM-L-6-v2`, the same repository's earlier id). A host that fetched the model's files ahead into a cache folder named for the earlier id, and builds the provider without a `defaultModelId`, names the earlier id or moves the folder.
+- `memory.recall` gains `rerank` (a `local` one's `revision` a whole commit id in lower case; `timeoutMs` at most 2,147,483,647); `LocalCrossEncoderConfig` gains `revision` and `localFilesOnly`; `LlmJudgeReranker`'s `diagnostics.providerMetrics` gains `scoringFailures` and `listwiseFailed`; `CognitiveMemoryManager` gains `recallReady()` and `applyRecallConfig()`. `MEMORY_RERANK_MAX_DOCUMENTS` is deprecated and read by nothing.
+- `memory.recall` (and a manager's `recall`) gains `retrieval`, `'dense'` by default: a memory that sets none, or sets `'dense'`, recalls and renders as before, byte for byte. `'hybrid'` fuses the dense, exact-words and recency legs into one deduped pool and shows it as one Relevant Memories section ([Recall](#recall)). A value other than the two, or `retrieval` on the default runtime, is refused at construction (`RecallOptionError`, `option: 'retrieval'`). The capture's `LegAbsentReason` gains `no_scopes`, which a hybrid recall with no `scopes` reports for its exact-words and recency legs: a `switch` or `Record` over the reasons needs it.
+- Under `'hybrid'`, a memory question reserves room for exact-words hits past the cut, so `retrieve()` can return up to `topK` plus one in ten of it; a manager's `recall.memoryQuestion` replaces the English rule. `CognitiveRetrievalOptions` gains `supplied`, `MemoryAssemblerInput` gains `reservedIds`, and `diagnostics.recall` gains `reserve` and `suppliedRejected`. A call that passes nothing new recalls and renders as before.
+- `MemoryBudgetAllocation` gains the optional `recall` share; an allocation of the seven fields still type-checks. A hybrid block's `allocation` sets it, with `semanticRecall` and `recentEpisodic` at 0, and its lines report `section: 'recall'`, so `AssembledLineOutcome['section']` and the capture's `section` include `'recall'`: a `Record` keyed by every section needs a `recall` entry.
+- `retrieve()`'s `diagnostics.recall` gains `retrieval`, and under `'hybrid'` the pool (`ranked`), the `lexicalBackend` and the fusion's `timings`. `MemoryStore` gains `scoreForRecall(traces, mood, options)`, and `@framers/agentos/cognition/memory` exports `fuseRankedLists` (reciprocal rank fusion over any number of lists; `reciprocalRankFusion` is unchanged) and `RECALL_CONSTANTS`.
+- A Brain row whose metadata names no `scopeId` loads under its `scope_id` column in a store's hydration and in a scope's hydration (`hydrateScope`), as the by-id load (`loadTracesForRecall`) reads it. Through 0.17.1 the two hydrations loaded it under `''`, so after a restart a recall of its scope did not return it, and a by-id load of it then answered nothing. Rows this store and the `Memory` facade write name both, and load as before.
+
+### Upgrading from 0.17.0 or earlier
+
+- A trace's trust policy is written into its Brain row's metadata (`policy`) and read back when a store loads the row. Through 0.17.0 a trace loaded from the Brain (a fresh store's hydration) had no policy, so a `retrieve()` with `usableFor` let it through whatever policy it was stored with; a user statement, stored with `usableForAuthorization: false`, passed an `authorization` check after a restart. A row an earlier release wrote holds no policy and loads as before.
+- A recall whose query the embedding manager gives no vector reports the dense leg as `{ ran: false, reason: 'no_embedder' }` in the recall capture's `legs`, and the process writes one `memory.recall.leg_absent` line (`leg: 'dense'`, `reason: 'no_embedder'`). Through 0.17.0 the leg read `ran: true` with no candidates. The recall returns no traces, as before. `MemoryStore.query` sets `emptyQueryVector: true` on its result then, and an error the embedding call throws is rethrown unchanged, known by `isQueryEmbeddingFailure(error)`.
+- The capture's dense leg counts in `ineligible` the traces the `usableFor` trust-policy check dropped; through 0.17.0 it read 0. `retrieve()`'s `diagnostics.recall` carries the `legs` the capture reports.
+- `MemoryStore` gains `loadTracesForRecall(ids)` and `addTraceListener(listener)`; see [Lexical and Hybrid Search](../text/LEXICAL_AND_HYBRID_SEARCH.md#reading-memory-traces-by-id-and-following-a-store). The ranking `retrieve()` returns and the block are unchanged.
+
 ### Upgrading from 0.16.0 or earlier
 
-- A trace's trust policy is written into its Brain row's metadata (`policy`) and read back when a store loads the row. Through 0.16.0 a trace loaded from the Brain (a fresh store's hydration) had no policy, so a `retrieve()` with `usableFor` let it through whatever policy it was stored with; a user statement, stored with `usableForAuthorization: false`, passed an `authorization` check after a restart. A row an earlier release wrote holds no policy and loads as before.
-- A recall whose query the embedding manager gives no vector reports the dense leg as `{ ran: false, reason: 'no_embedder' }` in the recall capture's `legs`, and the process writes one `memory.recall.leg_absent` line (`leg: 'dense'`, `reason: 'no_embedder'`). Through 0.16.0 the leg read `ran: true` with no candidates. The recall returns no traces, as before. `MemoryStore.query` sets `emptyQueryVector: true` on its result then, and an error the embedding call throws is rethrown unchanged, known by `isQueryEmbeddingFailure(error)`.
-- The capture's dense leg counts in `ineligible` the traces the `usableFor` trust-policy check dropped; through 0.16.0 it read 0. `retrieve()`'s `diagnostics.recall` carries the `legs` the capture reports.
-- A Brain row whose metadata names no `scopeId` loads under its `scope_id` column; through 0.16.0 it loaded under `''`, so a recall of its scope did not return it. Rows this store and the `Memory` facade write name both, and load as before.
-- `MemoryStore` gains `loadTracesForRecall(ids)` and `addTraceListener(listener)`; see [Lexical and Hybrid Search](../text/LEXICAL_AND_HYBRID_SEARCH.md#reading-memory-traces-by-id-and-following-a-store). The ranking `retrieve()` returns and the block are unchanged.
 - A GMI turn sizes the memory block for the model each hop is sent to. When what the model's retrieved-context share (20% of its context) leaves after the turn's RAG and long-term-memory text is smaller than the block, the block is rendered again at that remainder from the turn's one recall: no second retrieval and no embedding call, and memories drop whole. Through 0.16.0 every model was sent the block assembled at the full budget, joined to the other context, and PromptEngine cut or summarised the joined text when the share was smaller. A model whose share holds the block gets the same block as before. See [Budget and the prompt share](#budget-and-the-prompt-share).
 - PromptEngine takes the memory block as `PromptComponents.memoryContextText`, counts it into the prompt and never reduces it: when the prompt must be reduced, only `retrievedContext` is summarised or truncated, to what the share leaves beside the block. Through 0.16.0 the GMI joined the block into `retrievedContext`, so a reduction could cut or summarise it. A prompt nothing was reduced in is the same byte for byte: the block goes first, joined to the other context with `\n\n---\n\n`, as the GMI joined it.
 - For a host that calls PromptEngine itself: the `anthropic_messages` and `generic_completion` templates send `retrievedContext`, and with it the memory block, in front of the query (`Context:`), as `openai_chat` does; through 0.16.0 they left it out. A prompt over its budget whose other context already fits beside the block leaves that context as it is and reports no cut.
@@ -767,6 +793,99 @@ What callers see differently in the memory block and its formatters:
 - A `tokenBudget` share of exactly 0 turns its section off. With the budget other sections leave unused flowing to the sections with content, a 0 share would otherwise still render its section. The default allocation has no zero share, so a host that sets none sees no change.
 - Each line carries the UTC date the trace was stored after its age, and an age from a week on reads `N days ago`. Through 0.15.120 a line carried no date and an age from a week on read `Nw ago`. Ages of a day or more count UTC calendar days between the stored date and the turn's date, so the age and the date agree: a trace stored at 23:00 UTC on 2026-10-12 reads `27 days ago, 2026-10-12` at 00:30 UTC on 2026-11-08, one more than the whole 24-hour periods between them.
 - The returned `allocation` holds the shares the assembly used, not the configured ones.
+
+## Recall
+
+`recall.retrieval` sets how a turn finds its memories. `'dense'`, the default, is the vector recall: the store's query by meaning and its six-signal ranking ([Retrieval Priority Scoring](#retrieval-priority-scoring)), shown in Relevant Memories and Recent Experiences. `'hybrid'` adds two legs and fuses all three into one pool:
+
+```typescript
+const assistant = agent({
+  runtime: 'gmi',
+  provider: 'openai',
+  memory: { embedding: { provider: 'openai' }, store: { path: './brain.sqlite' }, recall: { retrieval: 'hybrid' } },
+  learning: { agentKey: 'assistant', mode: 'off' },
+});
+
+// The same setting on a manager:
+await manager.initialize({ ...config, recall: { retrieval: 'hybrid' } });
+```
+
+| Leg | What it reads | How many |
+|---|---|---|
+| `dense` | The vector index, as `'dense'` reads it: the query embedded once, the six-signal ranking, the memory graph's activation | `topK × overFetch` (60) |
+| `exact_words` | The store's full-text index (`memory_traces_fts`, or Postgres's tsvector column) through the storage adapter's full-text query; a memory with no store, an in-process index of the words of the traces it holds, a query word matching the words that begin with it | `topK × overFetch` (60) |
+| `recency` | The newest traces | `recentTopK` (10) |
+
+The turn's scopes, types and `timeRange.after` are inside each leg's query, so another user's or organization's rows are never read, and a trace under `minConfidence` or one whose trust policy refuses the asked `usableFor` passes no leg (`legs[].ineligible` counts them, with no id). A `retrieve()` with no `scopes` gets the dense leg over the store's known scopes and nothing from the other two, which never read without a scope: the capture reports them `{ ran: false, reason: 'no_scopes' }` and `lexicalBackend: 'none'`.
+
+**The pool.** Every candidate of every leg stays in the pool, an exact-words-only one included, ordered by reciprocal rank fusion: `0.7 / (60 + dense rank) + 0.3 / (60 + exact-words rank) + 0 / (60 + recency rank)`, a leg that did not return a trace adding nothing. Equal scores keep a fixed order: by exact-words rank, then by recency rank (newest first), then by id, so recency-only candidates follow every other candidate. A trace only the exact-words or recency leg found carries the store's cognitive score with similarity 0 (`MemoryStore.scoreForRecall`), which its line shows as its relevance. A trace deleted while the legs ran leaves the pool. A rerank (`recall.rerank`, below) orders the cut pool and leaves every fused score and each line's relevance as they were. A recall the retrieval policy suppresses (`diagnostics.suppressed`) returns no memory and its capture records no recalled candidate, as under `'dense'`; it returns the call's supplied candidates alone (Supplied candidates, below). The pool is cut at `topK` (20) and shown as one section, `## Relevant Memories (facts and past events, most relevant first — use as background, don't announce)`, in fused order, on the `recall` share (unset: the Semantic Recall and Recent Episodic shares together; see [Default Budget Allocation](#default-budget-allocation)).
+
+| Constant | Start | |
+|---|---|---|
+| `rrfK` | 60 | The rank smoothing |
+| `denseWeight` | 0.7 | |
+| `sparseWeight` | 0.3 | The exact-words leg's weight |
+| `recencyWeight` | 0 | The recency leg adds candidates and moves no fused score |
+| `overFetch` | 3 | The dense and exact-words legs return `topK × overFetch` |
+| `topK` | 20 | The pool's cut (a turn's `topK` sets it) |
+| `nearDuplicate` | 0.80 | The token-set Jaccard index at which two memories are one |
+| `recentTopK` | 10 | The recency leg's size |
+
+They are `RECALL_CONSTANTS`; a manager's `recall.constants` lays values over them by name, for a bench that tunes them, and they move only through measured runs. A name that is not one of the eight, a count (`topK`, `overFetch`, `recentTopK`) that is not an integer from 1 to 1,000, a `nearDuplicate` outside (0, 1], or any other value that is not a finite number of at least 0 is refused at construction.
+
+**When exact words changes the block.** At these constants an exact-words-only candidate does not reach the block of a large store: at exact-words rank 1 it scores 0.3 / 61 = 0.0049, below a dense-only candidate at rank 60 (0.7 / 120 = 0.0058), so with sixty dense candidates it sorts after them and the cut at 20 leaves it out (the capture records it `left_out`, reason `budget`). Exact words changes the block where a candidate is in both lists, since its two terms add, and where the dense leg returned fewer than sixty.
+
+**Dedupe.** Two candidates whose words (runs of letters, digits and `_`, lower-cased, stop words dropped) are equal or have a Jaccard index of at least `nearDuplicate` are one memory: a trace a consolidation pass rewrote, or two writers filed from one exchange, differ in a few words, while two memories of one subject that differ in a fifth of their words stay apart. A changed value keeps two texts apart in two ways. A one-character word counts, a stop word among them (`a`, `i`), though the exact-words leg drops it, so "My locker number is 7" and "My locker number is 9" are two memories, and so are "We meet in room A" and "We meet in room I". Two texts that each hold a word with a digit the other lacks (a different number, code, date or amount) are two memories whatever else they share, so a correction of such a value is never dropped as a duplicate, however long the text. A correction that changes one word with no digit is one memory with the text it corrects when the two share eight or more other words (8 of 10 is 0.80), and the newer text stays: of two near-duplicates whose words differ, the one with the newer `createdAt` is kept, since such a pair is most often one memory after a correction or a rewrite and the later text is its current state. It takes the better of the two fused scores and the higher-ranked one's place, and keeps its own `ranks` (the legs that found its text), so "My sister Ana moved out of the old riverside flat last spring and now lives in Lisbon" is shown where the older text ending "Porto" ranked, and the Porto text is not shown. Two candidates with the same words, or a pair of which one has no `createdAt` (a supplied candidate given none), keep the higher fused score; on equal scores the newer, in the older one's place, and with no time to compare, the one earlier in the pool. A candidate dropped against a text that a newer one then replaced is looked at again: it stays dropped only when it repeats a kept text, so `duplicateOf` always names a text it repeats. Each kept text then carries the best fused score and the highest place of the texts it stands for (its own and those dropped against it), so a text kept again takes its score and place back. A memory corrected twice, each correction one word apart from the text before and the first and last two words apart, shows its first text beside its last: the middle text is dropped against the last, and the first repeats no kept text, so it is kept. Under `'dense'` all three show. The capture records the other `left_out` with reason `dedupe` and `duplicateOf`, the id it repeats, and a re-render for a model hop keeps that record. A graph association whose memory the cut pool holds, in the same words or nearly, is not shown in Related Context. The check reads the pool after its cut at `topK`, so when the memory a dropped candidate repeats is past the cut, the graph can still lead to the dropped one: Related Context then shows it, and the capture records it `included` under `graphAssociations`, with its `duplicateOf`.
+
+**Memory questions.** A turn that asks about something said before gets room for what only its exact words found. The rule, `isMemoryQuestion(turnText)` (exported from `@framers/agentos/cognition/memory`), lower-cases the turn's text and matches, each at a word boundary, one of: `remember`, `recall`, `remind me`, `did i (say|tell|mention)`, `have i (told|mentioned|said)`, `what did i (say|tell)`, `what was my`, `what('s| is) my … (name|favou?rite|birthday)`, `last time`, `earlier (i|you) (said|mentioned)`, `you (said|told me)`. A typographic apostrophe (`’`, as a phone keyboard types it) reads as `'`. It is deterministic, calls no model, and reads English only. A host replaces it on the manager with a function of the turn's text (a JSON persona cannot hold one); one that throws, returns a promise (its rejection is handled), or answers anything but `true`, is read as no:
+
+```typescript
+await manager.initialize({ ...config, recall: { retrieval: 'hybrid', memoryQuestion: (text) => /\b(remember|lembra)\b/i.test(text) } });
+```
+
+When it fires, the candidates found by exact words and not by meaning that the cut at `topK` left out are reserved, in exact-words rank order, at most one in ten of `topK` and at least one (2 at `topK` 20). They follow the cut in `retrieve()`'s `retrieved`. A reserve is room, never a promise: before the recall section fills, it sets aside each reserved line's whole tokens while they fit, in reserve order; the other lines then fill what is left in fused order, and the reserved lines render after them. A reserved line that does not fit whole is left out (`section_full`, or `budget` when the section had no room at all), and a line that lost its room to a reserve is `section_full`. The capture records `memoryQuestionReserve: { fired, added }` every turn (`fired` when the rule said yes, whatever it found; `added`, the reserved lines the block shows), marks each reserved candidate `reserve: true`, and the process writes `memory.recall.reserve_fired` with `added` at debug level. With the capture `'off'` the block reserves the same room. At the starting constants an exact-words-only candidate never reaches the cut of a store with sixty dense candidates ([When exact words changes the block](#recall)), so on a large store the reserve is how a memory question shows such a memory.
+
+**Supplied candidates.** A caller adds facts it holds outside the memory (an account's plan, an attachment's text) to one call's pool with `supplied`, on `assembleForPrompt()` or `retrieve()`:
+
+```typescript
+const context = await manager.assembleForPrompt('Which plan am I on?', 1600, mood, {
+  scopes: [{ scope: 'user', scopeId: 'u1' }, { scope: 'organization', scopeId: 'acme' }],
+  supplied: [{ id: 'acct-plan', text: 'The account is on the Team plan, renewed 2026-10-01.', scope: { scope: 'organization', scopeId: 'acme' }, score: 0.5, createdAt: Date.UTC(2026, 9, 1) }],
+});
+```
+
+- **Scope.** `scope` is required and must equal one of the call's `scopes`, `scope` and `scopeId` as passed on both sides (`'acme'` and `'Acme'` are two). A candidate outside them, and every candidate on a call with no `scopes`, is dropped before the pool, so it is never shown and its id is never recorded: the capture counts it in `suppliedRejected.outOfScope` and the process writes `memory.recall.supplied_rejected` with the counts alone. A caller's data for another user or organization cannot reach a turn that does not read that scope.
+- **What drops one.** A supplied candidate has no type, confidence or trust policy, so a call that sets `types`, `minConfidence` or `usableFor` drops every one; so does a blank `id` or `text`, an `id` given twice, and a `createdAt` before `timeRange.after`. A call adds at most `topK × overFetch` (60), as many as a leg returns, the best-scored first and the unscored after them. These count as `suppliedRejected.ineligible`. One whose `id` names a memory the pool or the store holds is that memory and is not added, so a caller's text never takes a stored memory's id and hides its Related Context line: one the pool holds is shown as that memory and not counted, and one only the store holds counts as `ineligible`.
+- **Score.** `score` is on the caller's own scale and is compared with the fused scores as it is; a retrieval policy's `minScore` reads the recalled memories alone, so a supplied score neither lifts weak hits past it nor is suppressed with them. Those are at most 0.0164 at the starting constants (`1 / 61` with both weights), so a score above about 0.02 puts the candidate ahead of every recalled memory; without one it takes the lowest fused score of the pool. The capture records it with `ranks: { supplied: n }` and that score.
+- **Shown, never stored.** A kept candidate joins the pool before the dedupe and the cut and is shown as a semantic memory line with its own age (`createdAt`, or now) and the relevance of a fact the caller vouches for, `1.00`; its `score` orders the pool and is not shown. Nothing supplied is written to the store, recorded as accessed, focused in working memory or used to seed the memory graph's walk.
+- **Hybrid only.** Under `'dense'` there is no pool: supplied candidates are not read, and are counted as `ineligible` with the same line. `agent()` and `gmi()` pass none: a host that builds its own manager passes them to `assembleForPrompt()`.
+
+**When a leg cannot run.** The turn goes on with the legs that can; the capture names each absent leg with its reason, and the process writes one `memory.recall.leg_absent` line per leg and reason.
+
+| Missing | What runs | The capture |
+|---|---|---|
+| No `memory.store` (no Brain) | Meaning, exact words in process, recency | `lexicalBackend: 'in_process'` |
+| An embedder that gives the query no vector, or throws | Exact words and recency | `dense`: `no_embedder` |
+| A Brain with no full-text index | Meaning and recency | `exact_words`: `no_index`, `lexicalBackend: 'none'` |
+| A leg whose query throws | The other legs | that leg: `query_error` |
+| A recall with no `scopes` | Meaning | `exact_words` and `recency`: `no_scopes`, `lexicalBackend: 'none'` |
+| Every leg | The other sections; no recall section | every leg absent, no candidates |
+
+The dense leg reads a scope whose vector query throws as a scope with no memories, under `'hybrid'` as under `'dense'`: the store's query cannot tell that failure from a scope that has no collection yet, so the leg runs with that scope's candidates missing and reports no reason.
+
+**No new call.** Hybrid embeds the query once, as dense does, and calls no vendor: the exact-words and recency legs read the store and the process.
+
+**Rerank.** `recall.rerank` reranks the recalled memories, under `'dense'` and `'hybrid'` alike. `'none'`, the default, runs no reranker. `{ kind: 'local', model, revision }` scores with a cross-encoder in the process, at a pinned commit of the model's repository (`revision` is a whole commit id in lower case; a branch, a tag or an upper-case id is refused): the memories never leave the process. `{ kind: 'llm', invoke, model }` has the host's own model call judge them, which sends the turn's text and the first 200 characters of each candidate to that model's provider. No remote reranking service is offered for memories, no environment variable turns a rerank on, and a `rerankerService` on the manager's configuration is not read for memory recall ([Memory rerank](../text/RERANKING.md#memory-rerank) holds the settings, the bounds and the notes on memories and remote services).
+
+```typescript
+await manager.initialize({
+  ...config,
+  recall: { rerank: { kind: 'local', model: 'cross-encoder/ms-marco-MiniLM-L6-v2', revision: '233902d25c440f23af6f7d6e94d2946bac0bee0a' } },
+});
+await manager.recallReady(); // the model has loaded, or was found unavailable
+```
+
+The reranker scores the recall's best 20 candidates (`maxCandidates`) against the turn's own text inside `timeoutMs` (1,500 ms for `local`, 10,000 for `llm`), and they are reordered by `0.7 × the score each holds + 0.3 × its rerank score`; the candidates past `maxCandidates` keep their order after them. Under `'dense'` the score is the trace's retrieval score, and the blend replaces it. Under `'hybrid'` it is the fused score as a share of the best fused score among the cut's recalled candidates, at most 1: the cut at `topK` is what is reranked, the fused scores and each line's relevance stay, and a memory question's reserved candidates follow the cut, unscored. A supplied candidate in the cut is scored with the rest; its `score` is on the caller's scale, so it is never read as the best, and one above every fused score counts as the best recalled candidate does. A memory deleted while the reranker runs leaves the recall and its record, as one deleted while the legs ran does. A rerank never fails a turn. Until the local model has loaded (`loading`), after a failed load or with Transformers.js missing (`unavailable`), past the timeout (`timeout`), on a provider's error, an answer that leaves a candidate out or a substituted score (`error`) and for 60 seconds after three failures in a row (`backoff`), the order stands and the capture's `reranker` gives the reason. The model loads when the manager initialises, never inside a turn. A built manager's rerank changes through `applyRecallConfig({ rerank })`, never by writing its configuration: the provider is built once.
 
 ## Recall Budget
 
@@ -828,18 +947,20 @@ context.capture;
 // }
 ```
 
-Each candidate is a memory the recall returned, in the order it ranked them:
+Each candidate is a memory the recall returned, in the order it ranked them. Under `dense` that is the recalled list, after a rerank when one answered; under `hybrid` it is the whole pool in fused order, the candidates past the cut at `topK` and the ones the dedupe dropped included, and when a rerank answered the cut's candidates stand in the order it gave them, in the places the cut holds in that list:
 
 | Field | Value |
 |-------|-------|
 | `id` | The trace's id |
-| `ranks` | Its 1-based rank in each leg that returned it: `{ dense: n }`, the rank the vector recall's cognitive scores gave it, before any rerank |
-| `fusedScore` | The score the candidates were ordered by: the trace's retrieval score, after the `rerankerService` blend when the manager has one |
+| `ranks` | Its 1-based rank in each leg that returned it. Under `dense`, `{ dense: n }`, the rank the vector recall's cognitive scores gave it, before any rerank; under `hybrid`, a rank for each of `dense`, `exact_words` and `recency` that returned it, or `supplied` for a caller's candidate. |
+| `fusedScore` | The score the candidates were ordered by. Under `dense`, the trace's retrieval score, after the blend with its rerank score when a rerank scored it; under `hybrid`, its reciprocal-rank-fusion score ([Recall](#recall)), at most 0.7 / 61 + 0.3 / 61 = 0.0164 at the starting constants, and not a retrieval score: a kept candidate that took the place of a near-duplicate with a better score carries that score, and a supplied candidate its own `score` (or the pool's lowest) |
 | `rerankScore` | The score the reranker gave it before the blend; set only for a candidate a rerank scored |
 | `outcome` | `included` when the block shows it, `left_out` otherwise |
-| `reason` | Set only for a candidate left out: `section_full` when its line did not fit whole in what its section was offered, `budget` when its section was offered no tokens (or no section had a line for it), `render_failed` on a GMI hop sent no block because rendering it again for the hop failed |
+| `reason` | Set only for a candidate left out: `section_full` when its line did not fit whole in what its section was offered, `budget` when its section was offered no tokens (or no section had a line for it; under `hybrid`, a candidate past the cut at `topK`), `dedupe` under `hybrid` when another candidate holds the same memory, `render_failed` on a GMI hop sent no block because rendering it again for the hop failed |
+| `reserve` | `true` on a candidate a memory question reserved room for, past the cut ([Recall](#recall), Memory questions) |
+| `duplicateOf` | Under `hybrid`, for a candidate the dedupe dropped: the id of the candidate that holds the same memory. Set with `reason: 'dedupe'`, or with `outcome: 'included'` on one the block shows only through its graph association ([Recall](#recall)) |
 | `tokens` | Tokens of its line, about 4 characters a token: as rendered when included, as it would render whole when left out |
-| `section` | The section of the block its line belongs to, as in [`lineOutcomes`](#overflow-whole-memories-only) |
+| `section` | The section of the block its line belongs to, as in [`lineOutcomes`](#overflow-whole-memories-only): `recall` for the one Relevant Memories section under `hybrid` |
 
 The included candidates are every memory the block shows. A memory the block shows that the recall did not return (a trace reached only through its graph association) comes after the ranked ones, with empty `ranks` and a `fusedScore` of 0.
 
@@ -847,17 +968,18 @@ The rest of the record:
 
 | Field | Value |
 |-------|-------|
-| `retrieval` | `dense`: the vector recall `assembleForPrompt()` runs |
+| `retrieval` | `dense` (the default) or `hybrid`, as the manager's `recall.retrieval` sets ([Recall](#recall)) |
 | `budget` | `requested` and `effective`: the token budget the block was asked for and assembled in. A GMI turn's record adds the serving hop's sizing ([Budget and the prompt share](#budget-and-the-prompt-share)): `hop` (0 for the route's primary), `promptShareTokens` and `otherContextTokens` (the model's share and the other context it holds first), `clampReason` (`prompt_share`, or `zero_remaining` when nothing was left) when `effective` is below `requested`, `reassembled: true` when the block was rendered again at `effective`, and `renderFailed: true` when rendering it again failed and the hop was sent no block |
 | `delivery` | A GMI turn's record only: what reached the model. `memoryBlockTokens` (PromptEngine's count of the block, which it never reduces); `otherContext`, when the turn had RAG or long-term-memory text, with `ragTokens` and `longTermMemoryTokens` (the assembler's estimate), `deliveredTokens` (PromptEngine's count of what it sent) and `cutBy` (`prompt_engine_truncate` or `prompt_engine_summarize`) when PromptEngine reduced it; `issueCodes`, PromptEngine's `RAG_SUMMARIZATION_FAILED` or `TOKEN_BUDGET_EXCEEDED_POST_OPT`; `promptReplacedByHook: true` when the host's `beforeModelCall` replaced the hop's prompt, so the counts are of the prompt PromptEngine built |
 | `tokensUsed`, `allocation` | As on the assembled context |
-| `legs` | Each recall leg: whether it ran, why not (`reason`), how many candidates it returned, how many the eligibility checks dropped (`ineligible`, a count with no id) and how long it took. The vector recall is one leg, `dense`; its time covers the query's embedding, the vector search, the scoring and the memory graph's activation, not the rerank, and its `ineligible` counts the traces the `usableFor` trust-policy check dropped. When the embedding manager gives the query no vector, the dense leg is `{ ran: false, reason: 'no_embedder' }` with no candidates, and the process writes one `memory.recall.leg_absent` line for it |
-| `lexicalBackend` | The full-text backend an exact-words leg read: `none`, as the vector recall reads none |
-| `reranker` | The reranker that scored the candidates: `{ provider: 'none', reason: 'none_configured' }` without a `rerankerService`; with one, `local` (the cross-encoder), `llm` (the LLM judge) or `other` (any other provider, Cohere's API among them, which received the query and the candidates' texts), with the `model` it reported, the `candidates` it was sent (the provider's own count, else at most 100: the manager sends the dense leg's first 100) and its `ms`; `{ provider: 'none', reason: 'error' }` when the rerank failed and the cognitive scores stood |
-| `memoryQuestionReserve` | `{ fired: false, added: 0 }` |
-| `timings` | Milliseconds of each stage, rounded: `legsMs` (recall, the persistent-memory read and the prospective check, which run together), `rerankMs`, `assembleMs` (the graph walk and the assembler), `totalMs` |
+| `legs` | Each recall leg: whether it ran, why not (`reason`), how many candidates it returned, how many the eligibility checks dropped (`ineligible`, a count with no id) and how long it took. The vector recall is one leg, `dense`; its time covers the query's embedding, the vector search, the scoring and the memory graph's activation, not the rerank, and its `ineligible` counts the traces the `usableFor` trust-policy check dropped. When the embedding manager gives the query no vector, the dense leg is `{ ran: false, reason: 'no_embedder' }` with no candidates, and the process writes one `memory.recall.leg_absent` line for it. Under `hybrid` the exact-words and recency legs follow, and a call that passed `supplied` adds a `supplied` entry: the candidates it added to the pool, and in `ineligible` the ones it refused as ineligible |
+| `lexicalBackend` | The full-text backend the exact-words leg read: `fts5` or `fts4` (SQLite), `postgres_tsvector`, `in_process` (a memory with no store), or `none` when the leg did not run and under `dense`, which reads none |
+| `reranker` | The reranker that scored the candidates: `{ provider: 'none', reason: 'none_configured' }` with no `recall.rerank`; with one, `local` (the cross-encoder, with its `model` and `revision`) or `llm` (the LLM judge over the host's model call, with its `model`), the `candidates` it was sent (the recall's best, at most `maxCandidates`, 20) and its `ms`; or `{ provider: 'none', reason }` when it did not answer and the order stood: `loading`, `unavailable`, `timeout`, `error` or `backoff` ([Recall](#recall), Rerank) |
+| `memoryQuestionReserve` | `{ fired, added }`: whether the turn was a memory question, and how many reserved candidates the block shows ([Recall](#recall), Memory questions). Always `{ fired: false, added: 0 }` under `dense` |
+| `suppliedRejected` | Set when the call refused a supplied candidate: `{ outOfScope, ineligible }`, counts with no id ([Recall](#recall), Supplied candidates) |
+| `timings` | Milliseconds of each stage, rounded: `legsMs` (recall, the persistent-memory read and the prospective check, which run together), `fuseMs` and `dedupeMs` (under `hybrid`; 0 under `dense`), `rerankMs` (the rerank, whether it answered or not), `assembleMs` (the graph walk and the assembler), `totalMs` |
 
-`embedder` is the manager's `recall.embedder`, a label of the embedding provider and model the memory was built with: `agent()` and `gmi()` set it to the ones their memory resolved, and it is unset on a manager that names none. The type also holds `suppliedRejected`, which this recall leaves unset.
+`embedder` is the manager's `recall.embedder`, a label of the embedding provider and model the memory was built with: `agent()` and `gmi()` set it to the ones their memory resolved, and it is unset on a manager that names none.
 
 **Which stage a record shows.** `assembleForPrompt()` returns the assembly's record. A GMI turn's record (`GMIOutput.memoryRecall`, a session's `memoryRecall`, a runtime stream's `FINAL_RESPONSE.memoryRecall`) is the record of the hop that served the turn: the same candidates, with that hop's `budget` and its `delivery`, and, when the block was rendered again for the hop, that rendering's outcomes and `tokensUsed`. The stream's `MEMORY_SOURCES_AVAILABLE` chunk, and the `memorySources` update it becomes, carry the assembly's record, sent before the model call, so they hold neither `hop` nor `delivery`. A hop whose share held the block was sent the first rendering: its record has no `reassembled`, even when an earlier hop of the turn was sent a re-render.
 
@@ -880,7 +1002,7 @@ const assistant = agent({ runtime: 'gmi', provider: 'openai', memory: { embeddin
 
 The setting is read at each `assembleForPrompt()` and `retrieve()`, so a change to a built manager's configuration applies from its next turn. The block is the same byte for byte whatever it says. Under `'off'` the manager builds no part of the record: a `retrieve()` result carries neither `diagnostics.recall` (the dense ranks, the reranker's scores, the dense leg's time, the `legs` the capture reports) nor `diagnostics.reranker`, and the assembly takes no timings. A configured reranker still orders the traces.
 
-**The reasoning trace.** With a memory block assembled, the GMI's reasoning trace gets the entry "Cognitive memory context assembled." with `tokensUsed`, `candidates`, `included`, `leftOut`, `retrieval`, `reranker` (the provider) and `legsAbsent` (each leg that did not run, with its reason). `recall: { traceIds: true }` adds `includedMemoryIds`. With the capture `'off'` the counts come from the block's `lineOutcomes`, so `leftOut` still counts the memories the block left out. The entry never holds text.
+**The reasoning trace.** With a memory block assembled, the GMI's reasoning trace gets the entry "Cognitive memory context assembled." with `tokensUsed`, `candidates`, `included`, `leftOut`, `retrieval`, `reranker` (the provider) and `legsAbsent` (each leg that did not run, with its reason). `recall: { traceIds: true }` adds `includedMemoryIds`. With the capture `'off'` the counts come from the block's `lineOutcomes`, so `leftOut` still counts the memories the block left out, and `retrieval` from the manager's `recall.retrieval`. The entry never holds text.
 
 ---
 
@@ -958,8 +1080,15 @@ interface CognitiveMemoryConfig {
 interface ManagerRecallConfig {
   budget?: { totalTokens?: number };           // Default: 1600, the whole block (see Recall Budget)
   capture?: 'metadata' | 'metadata+stream' | 'off'; // Default: 'metadata' (see Recall Capture)
+  retrieval?: 'dense' | 'hybrid';              // Default: 'dense' (see Recall)
+  rerank?:                                     // Default: 'none' (see Recall, Rerank)
+    | 'none'
+    | { kind: 'local'; model: string; revision: string; timeoutMs?: number; maxCandidates?: number }
+    | { kind: 'llm'; invoke: (system: string, user: string, model?: string) => Promise<string>; model: string; timeoutMs?: number; maxCandidates?: number };
   traceIds?: boolean;                          // Default: false
   embedder?: { provider: string; model: string }; // A label for the capture record
+  constants?: Partial<RecallConstants>;        // The hybrid recall's constants (see Recall)
+  memoryQuestion?: (turnText: string) => boolean; // Replaces the memory-question rule (see Recall)
 }
 ```
 

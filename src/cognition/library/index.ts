@@ -10,9 +10,18 @@
 export { countWords, foldText, lexicalTokens, snippetAround, type FoldedText, type Snippet } from './tokens.js';
 export { chunkTurns, type ChunkTurnsOptions, type LibraryTurn, type TurnChunk } from './chunkTurns.js';
 export {
+  LibraryCursorError,
   LibraryIndex,
+  type LibraryGroup,
+  type LibraryGroupAnswer,
+  type LibraryGroupHit,
+  type LibraryGroupItem,
+  type LibraryGroupResult,
+  type LibraryGroupSearch,
   type LibraryIndexOptions,
+  type LibraryPartKind,
   type LibraryPassage,
+  type LibraryRankProfile,
   type LibraryScope,
   type LibrarySearch,
   type LibrarySource,

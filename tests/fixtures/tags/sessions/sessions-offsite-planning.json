@@ -1,0 +1,68 @@
+{
+  "id": "sessions-offsite-planning",
+  "set": "sessions",
+  "kind": "session",
+  "language": "en",
+  "title": "Offsite planning call",
+  "headings": [],
+  "path": null,
+  "text": "Ana: Thanks for joining. The main thing today is the team offsite.\nBen: Right. I think we should plan the offsite for March, before the busy season starts.\nAna: March works for me. Do we know how many people are coming?\nChloe: Fourteen from our team, and maybe two from design if they can get away.\nBen: Then we need a place with one big room and a couple of small ones for breakout sessions.\nAna: Last year the venue was too far from the station. Can we look for something we can reach by train?\nChloe: I have three options near the coast, all within an hour by train. I will send the list after this call.\nBen: What about the agenda? Last time we spent the whole first day on presentations.\nAna: Let's keep presentations to the first morning and spend the rest on planning the next half year.\nChloe: And one afternoon for something outdoors. People asked for that in the survey.\nBen: Budget is the open question. Finance said the travel budget is tight this quarter.\nAna: I will ask finance this week whether the offsite can come from the training budget instead.\nChloe: Then the next step is the venue list from me, the budget answer from Ana, and a draft agenda from Ben.\nBen: Agreed. Let's meet again next Thursday to decide on the venue.\n",
+  "vocabulary": [
+    {
+      "label": "offsite",
+      "uses": 9,
+      "lastUsed": 1762300800000
+    },
+    {
+      "label": "planning",
+      "uses": 8,
+      "lastUsed": 1762214400000
+    },
+    {
+      "label": "budget",
+      "uses": 7,
+      "lastUsed": 1762128000000
+    },
+    {
+      "label": "travel",
+      "uses": 6,
+      "lastUsed": 1762041600000
+    }
+  ],
+  "typed": [
+    "offsite"
+  ],
+  "expected": {
+    "existing": [
+      "offsite",
+      "budget",
+      "planning"
+    ],
+    "new": [
+      "venue",
+      "agenda"
+    ]
+  },
+  "mustNot": [],
+  "asks": [],
+  "report": [
+    {
+      "label": "offsite",
+      "quotes": [
+        "we should plan the offsite for March"
+      ]
+    },
+    {
+      "label": "venue",
+      "quotes": [
+        "Can we look for something we can reach by train?"
+      ]
+    },
+    {
+      "label": "training budget",
+      "quotes": [
+        "whether the offsite can come from the training budget instead"
+      ]
+    }
+  ]
+}

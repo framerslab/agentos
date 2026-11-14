@@ -14,7 +14,7 @@ export const CONTENT_SAFE_COMPONENTS = Object.freeze([
   'anthropic_provider', 'gemini_provider', 'groq_provider', 'litellm_provider', 'mistral_provider',
   'ollama_provider', 'openai_provider', 'openrouter_provider', 'requesty_provider', 'together_provider',
   'xai_provider', 'cache_leak_detector', 'listen_session', 'reconnecting_stt', 'streaming_stt_chain', 'livekit_transport',
-  'gmi_launch_tool', 'agentos_server', 'language_service', 'cognitive_memory', 'guardrails',
+  'gmi_launch_tool', 'agentos_server', 'language_service', 'cognitive_memory', 'guardrails', 'action_governance', 'agency',
 ] as const);
 /** Closed source module vocabulary available to host budget declarations. */
 export type ContentSafeLogComponent = (typeof CONTENT_SAFE_COMPONENTS)[number];

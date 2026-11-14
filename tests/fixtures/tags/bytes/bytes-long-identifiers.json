@@ -1,0 +1,769 @@
+{
+  "id": "bytes-long-identifiers",
+  "set": "bytes",
+  "kind": "document",
+  "language": "es",
+  "title": "Identificadores",
+  "headings": [],
+  "path": null,
+  "text": "cálculo_convenio_revisión_código_teléfono_diseño_jubilación_empleado\nvigente_contratación_migración_región_último_cálculo_convenio_revisión\nnúmero_atención_pequeño_información_mensual_vigente_contratación_migración_región\nregión_último_cálculo_convenio_revisión_código_teléfono_diseño_jubilación_empleado_año_categoría\ninformación_mensual_vigente_contratación_migración_región_último_cálculo_convenio_revisión_código_teléfono\nsegún_señal_número_atención_pequeño_información_mensual_vigente\ncontratación_migración_región_último_cálculo_convenio_revisión_código\natención_pequeño_información_mensual_vigente_contratación_migración_región_último_cálculo\nbúsqueda_nómina_según_señal_número_atención_pequeño_información_mensual_vigente_contratación_migración\nmensual_vigente_contratación_migración_región_último_cálculo_convenio_revisión_código_teléfono_diseño_jubilación\nseñal_número_atención_pequeño_información_mensual_vigente_contratación\nversión_dirección_búsqueda_nómina_según_señal_número_atención_pequeño_información\npequeño_información_mensual_vigente_contratación_migración_región_último_cálculo_convenio\nnómina_según_señal_número_atención_pequeño_información_mensual_vigente_contratación_migración_región_último\ncolectivo_presupuesto_versión_dirección_búsqueda_nómina_según_señal_número_atención_pequeño_información_mensual_vigente\nnúmero_atención_pequeño_información_mensual_vigente_contratación\ndirección_búsqueda_nómina_según_señal_número_atención_pequeño_información_mensual\npróximo_retención_colectivo_presupuesto_versión_dirección_búsqueda_nómina_según_señal_número\nsegún_señal_número_atención_pequeño_información_mensual_vigente_contratación_migración_región_último_cálculo\npresupuesto_versión_dirección_búsqueda_nómina_según_señal_número\nconfiguración_compañía_próximo_retención_colectivo_presupuesto_versión\nbúsqueda_nómina_según_señal_número_atención_pequeño_información_mensual_vigente\nretención_colectivo_presupuesto_versión_dirección_búsqueda_nómina_según_señal_número_atención_pequeño\naño_categoría_configuración_compañía_próximo_retención_colectivo_presupuesto_versión_dirección_búsqueda_nómina\nversión_dirección_búsqueda_nómina_según_señal_número_atención\ncompañía_próximo_retención_colectivo_presupuesto_versión_dirección_búsqueda\njubilación_empleado_año_categoría_configuración_compañía_próximo_retención_colectivo\ncolectivo_presupuesto_versión_dirección_búsqueda_nómina_según_señal_número_atención_pequeño_información\ncategoría_configuración_compañía_próximo_retención_colectivo_presupuesto_versión_dirección_búsqueda_nómina_según_señal\nteléfono_diseño_jubilación_empleado_año_categoría_configuración\npróximo_retención_colectivo_presupuesto_versión_dirección_búsqueda_nómina_según\nempleado_año_categoría_configuración_compañía_próximo_retención_colectivo_presupuesto_versión\nrevisión_código_teléfono_diseño_jubilación_empleado_año_categoría_configuración_compañía_próximo_retención\nconfiguración_compañía_próximo_retención_colectivo_presupuesto\ndiseño_jubilación_empleado_año_categoría_configuración_compañía_próximo\ncálculo_convenio_revisión_código_teléfono_diseño_jubilación_empleado_año_categoría\naño_categoría_configuración_compañía_próximo_retención_colectivo_presupuesto_versión_dirección\ncódigo_teléfono_diseño_jubilación_empleado_año_categoría_configuración_compañía_próximo_retención_colectivo\nregión_último_cálculo_convenio_revisión_código_teléfono_diseño\njubilación_empleado_año_categoría_configuración_compañía_próximo_retención\n",
+  "vocabulary": [
+    {
+      "label": "cálculoretenciónmensualempleadosegúnconv",
+      "uses": 9,
+      "lastUsed": 1762300800000
+    },
+    {
+      "label": "retenciónmensualempleadosegúnconveniocol",
+      "uses": 8,
+      "lastUsed": 1762214400000
+    },
+    {
+      "label": "mensualempleadosegúnconveniocolectivovig",
+      "uses": 7,
+      "lastUsed": 1762128000000
+    },
+    {
+      "label": "empleadosegúnconveniocolectivovigenteaño",
+      "uses": 6,
+      "lastUsed": 1762041600000
+    },
+    {
+      "label": "segúnconveniocolectivovigenteañoseñalrev",
+      "uses": 5,
+      "lastUsed": 1761955200000
+    },
+    {
+      "label": "conveniocolectivovigenteañoseñalrevisión",
+      "uses": 4,
+      "lastUsed": 1761868800000
+    },
+    {
+      "label": "colectivovigenteañoseñalrevisiónpresupue",
+      "uses": 3,
+      "lastUsed": 1761782400000
+    },
+    {
+      "label": "vigenteañoseñalrevisiónpresupuestocontra",
+      "uses": 2,
+      "lastUsed": 1761696000000
+    },
+    {
+      "label": "añoseñalrevisiónpresupuestocontrataciónc",
+      "uses": 1,
+      "lastUsed": 1761609600000
+    },
+    {
+      "label": "señalrevisiónpresupuestocontratacióncate",
+      "uses": 9,
+      "lastUsed": 1761523200000
+    },
+    {
+      "label": "revisiónpresupuestocontratacióncategoría",
+      "uses": 8,
+      "lastUsed": 1761436800000
+    },
+    {
+      "label": "presupuestocontratacióncategoríanúmerocó",
+      "uses": 7,
+      "lastUsed": 1761350400000
+    },
+    {
+      "label": "contratacióncategoríanúmerocódigoversión",
+      "uses": 6,
+      "lastUsed": 1761264000000
+    },
+    {
+      "label": "categoríanúmerocódigoversiónmigracióncon",
+      "uses": 5,
+      "lastUsed": 1761177600000
+    },
+    {
+      "label": "númerocódigoversiónmigraciónconfiguració",
+      "uses": 4,
+      "lastUsed": 1761091200000
+    },
+    {
+      "label": "códigoversiónmigraciónconfiguraciónatenc",
+      "uses": 3,
+      "lastUsed": 1761004800000
+    },
+    {
+      "label": "versiónmigraciónconfiguraciónatencióntel",
+      "uses": 2,
+      "lastUsed": 1760918400000
+    },
+    {
+      "label": "migraciónconfiguraciónatenciónteléfonodi",
+      "uses": 1,
+      "lastUsed": 1760832000000
+    },
+    {
+      "label": "configuraciónatenciónteléfonodirecciónre",
+      "uses": 9,
+      "lastUsed": 1760745600000
+    },
+    {
+      "label": "atenciónteléfonodirecciónregióncompañíap",
+      "uses": 8,
+      "lastUsed": 1760659200000
+    },
+    {
+      "label": "teléfonodirecciónregióncompañíapequeñodi",
+      "uses": 7,
+      "lastUsed": 1760572800000
+    },
+    {
+      "label": "direcciónregióncompañíapequeñodiseñobúsq",
+      "uses": 6,
+      "lastUsed": 1760486400000
+    },
+    {
+      "label": "regióncompañíapequeñodiseñobúsquedaúltim",
+      "uses": 5,
+      "lastUsed": 1760400000000
+    },
+    {
+      "label": "compañíapequeñodiseñobúsquedaúltimopróxi",
+      "uses": 4,
+      "lastUsed": 1760313600000
+    },
+    {
+      "label": "pequeñodiseñobúsquedaúltimopróximoinform",
+      "uses": 3,
+      "lastUsed": 1760227200000
+    },
+    {
+      "label": "diseñobúsquedaúltimopróximoinformaciónju",
+      "uses": 2,
+      "lastUsed": 1760140800000
+    },
+    {
+      "label": "búsquedaúltimopróximoinformaciónjubilaci",
+      "uses": 1,
+      "lastUsed": 1760054400000
+    },
+    {
+      "label": "últimopróximoinformaciónjubilaciónnómina",
+      "uses": 9,
+      "lastUsed": 1759968000000
+    },
+    {
+      "label": "próximoinformaciónjubilaciónnóminacálcul",
+      "uses": 8,
+      "lastUsed": 1759881600000
+    },
+    {
+      "label": "informaciónjubilaciónnóminacálculoretenc",
+      "uses": 7,
+      "lastUsed": 1759795200000
+    },
+    {
+      "label": "jubilaciónnóminacálculoretenciónmensuale",
+      "uses": 6,
+      "lastUsed": 1759708800000
+    },
+    {
+      "label": "nóminacálculoretenciónmensualempleadoseg",
+      "uses": 5,
+      "lastUsed": 1759622400000
+    },
+    {
+      "label": "cálculomensualsegúncolectivoañorevisiónc",
+      "uses": 4,
+      "lastUsed": 1759536000000
+    },
+    {
+      "label": "retenciónempleadoconveniovigenteseñalpre",
+      "uses": 3,
+      "lastUsed": 1759449600000
+    },
+    {
+      "label": "mensualsegúncolectivoañorevisióncontrata",
+      "uses": 2,
+      "lastUsed": 1759363200000
+    },
+    {
+      "label": "empleadoconveniovigenteseñalpresupuestoc",
+      "uses": 1,
+      "lastUsed": 1759276800000
+    },
+    {
+      "label": "segúncolectivoañorevisióncontrataciónnúm",
+      "uses": 9,
+      "lastUsed": 1759190400000
+    },
+    {
+      "label": "conveniovigenteseñalpresupuestocategoría",
+      "uses": 8,
+      "lastUsed": 1759104000000
+    },
+    {
+      "label": "colectivoañorevisióncontrataciónnúmerove",
+      "uses": 7,
+      "lastUsed": 1759017600000
+    },
+    {
+      "label": "vigenteseñalpresupuestocategoríacódigomi",
+      "uses": 6,
+      "lastUsed": 1758931200000
+    },
+    {
+      "label": "añorevisióncontrataciónnúmeroversiónconf",
+      "uses": 5,
+      "lastUsed": 1758844800000
+    },
+    {
+      "label": "señalpresupuestocategoríacódigomigración",
+      "uses": 4,
+      "lastUsed": 1758758400000
+    },
+    {
+      "label": "revisióncontrataciónnúmeroversiónconfigu",
+      "uses": 3,
+      "lastUsed": 1758672000000
+    },
+    {
+      "label": "presupuestocategoríacódigomigraciónatenc",
+      "uses": 2,
+      "lastUsed": 1758585600000
+    },
+    {
+      "label": "contrataciónnúmeroversiónconfiguraciónte",
+      "uses": 1,
+      "lastUsed": 1758499200000
+    },
+    {
+      "label": "categoríacódigomigraciónatencióndirecció",
+      "uses": 9,
+      "lastUsed": 1758412800000
+    },
+    {
+      "label": "númeroversiónconfiguraciónteléfonoregión",
+      "uses": 8,
+      "lastUsed": 1758326400000
+    },
+    {
+      "label": "códigomigraciónatencióndireccióncompañía",
+      "uses": 7,
+      "lastUsed": 1758240000000
+    },
+    {
+      "label": "versiónconfiguraciónteléfonoregiónpequeñ",
+      "uses": 6,
+      "lastUsed": 1758153600000
+    },
+    {
+      "label": "migraciónatencióndireccióncompañíadiseño",
+      "uses": 5,
+      "lastUsed": 1758067200000
+    },
+    {
+      "label": "configuraciónteléfonoregiónpequeñobúsque",
+      "uses": 4,
+      "lastUsed": 1757980800000
+    },
+    {
+      "label": "atencióndireccióncompañíadiseñoúltimoinf",
+      "uses": 3,
+      "lastUsed": 1757894400000
+    },
+    {
+      "label": "teléfonoregiónpequeñobúsquedapróximojubi",
+      "uses": 2,
+      "lastUsed": 1757808000000
+    },
+    {
+      "label": "direccióncompañíadiseñoúltimoinformación",
+      "uses": 1,
+      "lastUsed": 1757721600000
+    },
+    {
+      "label": "regiónpequeñobúsquedapróximojubilacióncá",
+      "uses": 9,
+      "lastUsed": 1757635200000
+    },
+    {
+      "label": "compañíadiseñoúltimoinformaciónnóminaret",
+      "uses": 8,
+      "lastUsed": 1757548800000
+    },
+    {
+      "label": "pequeñobúsquedapróximojubilacióncálculom",
+      "uses": 7,
+      "lastUsed": 1757462400000
+    },
+    {
+      "label": "diseñoúltimoinformaciónnóminaretenciónem",
+      "uses": 6,
+      "lastUsed": 1757376000000
+    },
+    {
+      "label": "búsquedapróximojubilacióncálculomensuals",
+      "uses": 5,
+      "lastUsed": 1757289600000
+    },
+    {
+      "label": "últimoinformaciónnóminaretenciónempleado",
+      "uses": 4,
+      "lastUsed": 1757203200000
+    },
+    {
+      "label": "próximojubilacióncálculomensualsegúncole",
+      "uses": 3,
+      "lastUsed": 1757116800000
+    },
+    {
+      "label": "informaciónnóminaretenciónempleadoconven",
+      "uses": 2,
+      "lastUsed": 1757030400000
+    },
+    {
+      "label": "jubilacióncálculomensualsegúncolectivoañ",
+      "uses": 1,
+      "lastUsed": 1756944000000
+    },
+    {
+      "label": "nóminaretenciónempleadoconveniovigentese",
+      "uses": 9,
+      "lastUsed": 1756857600000
+    },
+    {
+      "label": "cálculoempleadocolectivoseñalcontratació",
+      "uses": 8,
+      "lastUsed": 1756771200000
+    },
+    {
+      "label": "retenciónsegúnvigenterevisióncategoríave",
+      "uses": 7,
+      "lastUsed": 1756684800000
+    },
+    {
+      "label": "mensualconvenioañopresupuestonúmeromigra",
+      "uses": 6,
+      "lastUsed": 1756598400000
+    },
+    {
+      "label": "empleadocolectivoseñalcontratacióncódigo",
+      "uses": 5,
+      "lastUsed": 1756512000000
+    },
+    {
+      "label": "segúnvigenterevisióncategoríaversiónaten",
+      "uses": 4,
+      "lastUsed": 1756425600000
+    },
+    {
+      "label": "convenioañopresupuestonúmeromigracióntel",
+      "uses": 3,
+      "lastUsed": 1756339200000
+    },
+    {
+      "label": "colectivoseñalcontratacióncódigoconfigur",
+      "uses": 2,
+      "lastUsed": 1756252800000
+    },
+    {
+      "label": "vigenterevisióncategoríaversiónatenciónr",
+      "uses": 1,
+      "lastUsed": 1756166400000
+    },
+    {
+      "label": "añopresupuestonúmeromigraciónteléfonocom",
+      "uses": 9,
+      "lastUsed": 1756080000000
+    },
+    {
+      "label": "señalcontratacióncódigoconfiguracióndire",
+      "uses": 8,
+      "lastUsed": 1755993600000
+    },
+    {
+      "label": "revisióncategoríaversiónatenciónregióndi",
+      "uses": 7,
+      "lastUsed": 1755907200000
+    },
+    {
+      "label": "presupuestonúmeromigraciónteléfonocompañ",
+      "uses": 6,
+      "lastUsed": 1755820800000
+    },
+    {
+      "label": "contratacióncódigoconfiguracióndirección",
+      "uses": 5,
+      "lastUsed": 1755734400000
+    },
+    {
+      "label": "categoríaversiónatenciónregióndiseñopróx",
+      "uses": 4,
+      "lastUsed": 1755648000000
+    },
+    {
+      "label": "númeromigraciónteléfonocompañíabúsquedai",
+      "uses": 3,
+      "lastUsed": 1755561600000
+    },
+    {
+      "label": "códigoconfiguracióndirecciónpequeñoúltim",
+      "uses": 2,
+      "lastUsed": 1755475200000
+    },
+    {
+      "label": "versiónatenciónregióndiseñopróximonómina",
+      "uses": 1,
+      "lastUsed": 1755388800000
+    },
+    {
+      "label": "migraciónteléfonocompañíabúsquedainforma",
+      "uses": 9,
+      "lastUsed": 1755302400000
+    },
+    {
+      "label": "configuracióndirecciónpequeñoúltimojubil",
+      "uses": 8,
+      "lastUsed": 1755216000000
+    },
+    {
+      "label": "atenciónregióndiseñopróximonóminamensual",
+      "uses": 7,
+      "lastUsed": 1755129600000
+    },
+    {
+      "label": "teléfonocompañíabúsquedainformacióncálcu",
+      "uses": 6,
+      "lastUsed": 1755043200000
+    },
+    {
+      "label": "direcciónpequeñoúltimojubilaciónretenció",
+      "uses": 5,
+      "lastUsed": 1754956800000
+    },
+    {
+      "label": "regióndiseñopróximonóminamensualconvenio",
+      "uses": 4,
+      "lastUsed": 1754870400000
+    },
+    {
+      "label": "compañíabúsquedainformacióncálculoemplea",
+      "uses": 3,
+      "lastUsed": 1754784000000
+    },
+    {
+      "label": "pequeñoúltimojubilaciónretenciónsegúnvig",
+      "uses": 2,
+      "lastUsed": 1754697600000
+    },
+    {
+      "label": "diseñopróximonóminamensualconvenioañopre",
+      "uses": 1,
+      "lastUsed": 1754611200000
+    },
+    {
+      "label": "búsquedainformacióncálculoempleadocolect",
+      "uses": 9,
+      "lastUsed": 1754524800000
+    },
+    {
+      "label": "últimojubilaciónretenciónsegúnvigenterev",
+      "uses": 8,
+      "lastUsed": 1754438400000
+    },
+    {
+      "label": "próximonóminamensualconvenioañopresupues",
+      "uses": 7,
+      "lastUsed": 1754352000000
+    },
+    {
+      "label": "informacióncálculoempleadocolectivoseñal",
+      "uses": 6,
+      "lastUsed": 1754265600000
+    },
+    {
+      "label": "jubilaciónretenciónsegúnvigenterevisiónc",
+      "uses": 5,
+      "lastUsed": 1754179200000
+    },
+    {
+      "label": "nóminamensualconvenioañopresupuestonúmer",
+      "uses": 4,
+      "lastUsed": 1754092800000
+    },
+    {
+      "label": "cálculosegúnañocontrataciónversiónteléfo",
+      "uses": 3,
+      "lastUsed": 1754006400000
+    },
+    {
+      "label": "retenciónconvenioseñalcategoríamigración",
+      "uses": 2,
+      "lastUsed": 1753920000000
+    },
+    {
+      "label": "mensualcolectivorevisiónnúmeroconfigurac",
+      "uses": 1,
+      "lastUsed": 1753833600000
+    },
+    {
+      "label": "empleadovigentepresupuestocódigoatención",
+      "uses": 9,
+      "lastUsed": 1753747200000
+    },
+    {
+      "label": "segúnañocontrataciónversiónteléfonopeque",
+      "uses": 8,
+      "lastUsed": 1753660800000
+    },
+    {
+      "label": "convenioseñalcategoríamigracióndirección",
+      "uses": 7,
+      "lastUsed": 1753574400000
+    },
+    {
+      "label": "colectivorevisiónnúmeroconfiguraciónregi",
+      "uses": 6,
+      "lastUsed": 1753488000000
+    },
+    {
+      "label": "vigentepresupuestocódigoatencióncompañía",
+      "uses": 5,
+      "lastUsed": 1753401600000
+    },
+    {
+      "label": "añocontrataciónversiónteléfonopequeñopró",
+      "uses": 4,
+      "lastUsed": 1753315200000
+    },
+    {
+      "label": "señalcategoríamigracióndireccióndiseñoin",
+      "uses": 3,
+      "lastUsed": 1753228800000
+    },
+    {
+      "label": "revisiónnúmeroconfiguraciónregiónbúsqued",
+      "uses": 2,
+      "lastUsed": 1753142400000
+    },
+    {
+      "label": "presupuestocódigoatencióncompañíaúltimon",
+      "uses": 1,
+      "lastUsed": 1753056000000
+    },
+    {
+      "label": "contrataciónversiónteléfonopequeñopróxim",
+      "uses": 9,
+      "lastUsed": 1752969600000
+    },
+    {
+      "label": "categoríamigracióndireccióndiseñoinforma",
+      "uses": 8,
+      "lastUsed": 1752883200000
+    },
+    {
+      "label": "númeroconfiguraciónregiónbúsquedajubilac",
+      "uses": 7,
+      "lastUsed": 1752796800000
+    },
+    {
+      "label": "códigoatencióncompañíaúltimonóminaemplea",
+      "uses": 6,
+      "lastUsed": 1752710400000
+    },
+    {
+      "label": "versiónteléfonopequeñopróximocálculosegú",
+      "uses": 5,
+      "lastUsed": 1752624000000
+    },
+    {
+      "label": "migracióndireccióndiseñoinformaciónreten",
+      "uses": 4,
+      "lastUsed": 1752537600000
+    },
+    {
+      "label": "configuraciónregiónbúsquedajubilaciónmen",
+      "uses": 3,
+      "lastUsed": 1752451200000
+    },
+    {
+      "label": "atencióncompañíaúltimonóminaempleadovige",
+      "uses": 2,
+      "lastUsed": 1752364800000
+    },
+    {
+      "label": "teléfonopequeñopróximocálculosegúnañocon",
+      "uses": 1,
+      "lastUsed": 1752278400000
+    },
+    {
+      "label": "direccióndiseñoinformaciónretenciónconve",
+      "uses": 9,
+      "lastUsed": 1752192000000
+    },
+    {
+      "label": "regiónbúsquedajubilaciónmensualcolectivo",
+      "uses": 8,
+      "lastUsed": 1752105600000
+    },
+    {
+      "label": "compañíaúltimonóminaempleadovigentepresu",
+      "uses": 7,
+      "lastUsed": 1752019200000
+    },
+    {
+      "label": "pequeñopróximocálculosegúnañocontratació",
+      "uses": 6,
+      "lastUsed": 1751932800000
+    },
+    {
+      "label": "diseñoinformaciónretenciónconvenioseñalc",
+      "uses": 5,
+      "lastUsed": 1751846400000
+    },
+    {
+      "label": "búsquedajubilaciónmensualcolectivorevisi",
+      "uses": 4,
+      "lastUsed": 1751760000000
+    },
+    {
+      "label": "últimonóminaempleadovigentepresupuestocó",
+      "uses": 3,
+      "lastUsed": 1751673600000
+    },
+    {
+      "label": "próximocálculosegúnañocontrataciónversió",
+      "uses": 2,
+      "lastUsed": 1751587200000
+    },
+    {
+      "label": "informaciónretenciónconvenioseñalcategor",
+      "uses": 1,
+      "lastUsed": 1751500800000
+    },
+    {
+      "label": "jubilaciónmensualcolectivorevisiónnúmero",
+      "uses": 9,
+      "lastUsed": 1751414400000
+    },
+    {
+      "label": "nóminaempleadovigentepresupuestocódigoat",
+      "uses": 8,
+      "lastUsed": 1751328000000
+    },
+    {
+      "label": "cálculoconveniorevisióncódigoteléfonodis",
+      "uses": 7,
+      "lastUsed": 1751241600000
+    },
+    {
+      "label": "retencióncolectivopresupuestoversióndire",
+      "uses": 6,
+      "lastUsed": 1751155200000
+    },
+    {
+      "label": "mensualvigentecontrataciónmigraciónregió",
+      "uses": 5,
+      "lastUsed": 1751068800000
+    },
+    {
+      "label": "empleadoañocategoríaconfiguracióncompañí",
+      "uses": 4,
+      "lastUsed": 1750982400000
+    },
+    {
+      "label": "segúnseñalnúmeroatenciónpequeñoinformaci",
+      "uses": 3,
+      "lastUsed": 1750896000000
+    },
+    {
+      "label": "conveniorevisióncódigoteléfonodiseñojubi",
+      "uses": 2,
+      "lastUsed": 1750809600000
+    },
+    {
+      "label": "colectivopresupuestoversióndirecciónbúsq",
+      "uses": 1,
+      "lastUsed": 1750723200000
+    },
+    {
+      "label": "vigentecontrataciónmigraciónregiónúltimo",
+      "uses": 9,
+      "lastUsed": 1750636800000
+    },
+    {
+      "label": "añocategoríaconfiguracióncompañíapróximo",
+      "uses": 8,
+      "lastUsed": 1750550400000
+    },
+    {
+      "label": "señalnúmeroatenciónpequeñoinformaciónmen",
+      "uses": 7,
+      "lastUsed": 1750464000000
+    },
+    {
+      "label": "revisióncódigoteléfonodiseñojubilaciónem",
+      "uses": 6,
+      "lastUsed": 1750377600000
+    },
+    {
+      "label": "presupuestoversióndirecciónbúsquedanómin",
+      "uses": 5,
+      "lastUsed": 1750291200000
+    },
+    {
+      "label": "contrataciónmigraciónregiónúltimocálculo",
+      "uses": 4,
+      "lastUsed": 1750204800000
+    },
+    {
+      "label": "categoríaconfiguracióncompañíapróximoret",
+      "uses": 3,
+      "lastUsed": 1750118400000
+    },
+    {
+      "label": "númeroatenciónpequeñoinformaciónmensualv",
+      "uses": 2,
+      "lastUsed": 1750032000000
+    },
+    {
+      "label": "códigoteléfonodiseñojubilaciónempleadoañ",
+      "uses": 1,
+      "lastUsed": 1749945600000
+    },
+    {
+      "label": "versióndirecciónbúsquedanóminasegúnseñal",
+      "uses": 9,
+      "lastUsed": 1749859200000
+    },
+    {
+      "label": "migraciónregiónúltimocálculoconveniorevi",
+      "uses": 8,
+      "lastUsed": 1749772800000
+    },
+    {
+      "label": "configuracióncompañíapróximoretencióncol",
+      "uses": 7,
+      "lastUsed": 1749686400000
+    },
+    {
+      "label": "atenciónpequeñoinformaciónmensualvigente",
+      "uses": 6,
+      "lastUsed": 1749600000000
+    },
+    {
+      "label": "teléfonodiseñojubilaciónempleadoañocateg",
+      "uses": 5,
+      "lastUsed": 1749513600000
+    },
+    {
+      "label": "direcciónbúsquedanóminasegúnseñalnúmeroa",
+      "uses": 4,
+      "lastUsed": 1749427200000
+    }
+  ],
+  "typed": [],
+  "expected": {
+    "existing": [],
+    "new": []
+  },
+  "mustNot": [],
+  "asks": []
+}

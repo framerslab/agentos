@@ -1,0 +1,158 @@
+{
+  "cldr": "https://github.com/unicode-org/cldr/tree/c7792db1b1f556563a94068402db2b4084a366eb/common/rbnf (read 12 November 2026); each form is the named rule set's output for the number, its soft hyphens (U+00AD) kept as CLDR writes them",
+  "languages": {
+    "en": {
+      "tag": "en",
+      "ruleset": "spellout-numbering",
+      "forms": {
+        "0": "zero",
+        "7": "seven",
+        "15": "fifteen",
+        "21": "twenty-one",
+        "50": "fifty",
+        "99": "ninety-nine",
+        "100": "one hundred",
+        "101": "one hundred one",
+        "365": "three hundred sixty-five",
+        "1000": "one thousand",
+        "2026": "two thousand twenty-six"
+      }
+    },
+    "es": {
+      "tag": "es",
+      "ruleset": "spellout-numbering",
+      "forms": {
+        "0": "cero",
+        "7": "siete",
+        "15": "quince",
+        "21": "veintiuno",
+        "50": "cincuenta",
+        "99": "noventa y nueve",
+        "100": "cien",
+        "101": "ciento uno",
+        "365": "trescientos sesenta y cinco",
+        "1000": "mil",
+        "2026": "dos mil veintiséis"
+      }
+    },
+    "fr": {
+      "tag": "fr",
+      "ruleset": "spellout-numbering",
+      "forms": {
+        "0": "zéro",
+        "7": "sept",
+        "15": "quinze",
+        "21": "vingt-et-un",
+        "50": "cinquante",
+        "99": "quatre-vingt-dix-neuf",
+        "100": "cent",
+        "101": "cent un",
+        "365": "trois cent soixante-cinq",
+        "1000": "mille",
+        "2026": "deux mille vingt-six"
+      }
+    },
+    "de": {
+      "tag": "de",
+      "ruleset": "spellout-numbering",
+      "forms": {
+        "0": "null",
+        "7": "sieben",
+        "15": "fünfzehn",
+        "21": "ein­und­zwanzig",
+        "50": "fünfzig",
+        "99": "neun­und­neunzig",
+        "100": "ein­hundert",
+        "101": "ein­hundert­eins",
+        "365": "drei­hundert­fünf­und­sechzig",
+        "1000": "ein­tausend",
+        "2026": "zwei­tausend­sechs­und­zwanzig"
+      }
+    },
+    "pt": {
+      "tag": "pt",
+      "ruleset": "spellout-numbering",
+      "forms": {
+        "0": "zero",
+        "7": "sete",
+        "15": "quinze",
+        "21": "vinte e um",
+        "50": "cinquenta",
+        "99": "noventa e nove",
+        "100": "cem",
+        "101": "cento e um",
+        "365": "trezentos e sessenta e cinco",
+        "1000": "mil",
+        "2026": "dois mil e vinte e seis"
+      }
+    },
+    "it": {
+      "tag": "it",
+      "ruleset": "spellout-numbering",
+      "forms": {
+        "0": "zero",
+        "7": "sette",
+        "15": "quindici",
+        "21": "vent­uno",
+        "50": "cinquanta",
+        "99": "novanta­nove",
+        "100": "cento",
+        "101": "cento­uno",
+        "365": "tre­cento­sessanta­cinque",
+        "1000": "mille",
+        "2026": "due­mila­venti­sei"
+      }
+    },
+    "ko": {
+      "tag": "ko",
+      "ruleset": "spellout-numbering",
+      "forms": {
+        "0": "공",
+        "7": "칠",
+        "15": "십오",
+        "21": "이십일",
+        "50": "오십",
+        "99": "구십구",
+        "100": "백",
+        "101": "백일",
+        "365": "삼백육십오",
+        "1000": "천",
+        "2026": "이천이십육"
+      }
+    },
+    "zh": {
+      "tag": "zh-Hans",
+      "ruleset": "spellout-cardinal",
+      "forms": {
+        "0": "零",
+        "7": "七",
+        "15": "十五",
+        "21": "二十一",
+        "50": "五十",
+        "99": "九十九",
+        "100": "一百",
+        "101": "一百零一",
+        "365": "三百六十五",
+        "1000": "一千",
+        "2026": "二千零二十六"
+      }
+    },
+    "hi": {
+      "tag": "hi",
+      "ruleset": "spellout-numbering",
+      "forms": {
+        "0": "शून्य",
+        "7": "सात",
+        "15": "पन्द्रह",
+        "21": "इक्कीस",
+        "50": "पचास",
+        "99": "निन्यानबे",
+        "100": "एक सौ",
+        "101": "एक सौ एक",
+        "365": "तीन सौ पैंसठ",
+        "1000": "एक हज़ार",
+        "2026": "दो हज़ार छब्बीस"
+      }
+    }
+  }
+}

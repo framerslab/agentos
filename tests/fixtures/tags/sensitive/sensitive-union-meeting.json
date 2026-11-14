@@ -1,0 +1,49 @@
+{
+  "id": "sensitive-union-meeting",
+  "set": "sensitive",
+  "kind": "document",
+  "language": "en",
+  "title": "Notes from the staff council",
+  "headings": [],
+  "path": null,
+  "text": "The staff council met on Tuesday to discuss the new shift schedule for the warehouse. Fergus Doyle, the shop steward for the trade union at the warehouse, said most union members oppose the change to twelve-hour shifts and asked for a vote before it starts. He said the union will consider a strike ballot if the schedule is imposed without that vote.\n\nAmara Nwosu, who manages the warehouse, explained that the longer shifts would give each person four days off a week and fewer handovers. She agreed to hold a vote of all warehouse staff, union members or not, and to share the results with the council.\n\nThe council agreed three actions. The schedule will not change before the vote. The vote will run for two weeks in the staff room and online. Amara and Fergus will present the results together at the next meeting.\n",
+  "vocabulary": [
+    {
+      "label": "staff council",
+      "uses": 9,
+      "lastUsed": 1762300800000
+    },
+    {
+      "label": "shift schedule",
+      "uses": 8,
+      "lastUsed": 1762214400000
+    },
+    {
+      "label": "warehouse",
+      "uses": 7,
+      "lastUsed": 1762128000000
+    }
+  ],
+  "typed": [
+    "staff council"
+  ],
+  "expected": {
+    "existing": [
+      "staffcouncil",
+      "shiftschedule",
+      "warehouse"
+    ],
+    "new": [
+      "vote"
+    ]
+  },
+  "mustNot": [
+    "trade union",
+    "union",
+    "shop steward",
+    "strike ballot",
+    "Fergus Doyle",
+    "Amara Nwosu"
+  ],
+  "asks": []
+}

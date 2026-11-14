@@ -218,7 +218,79 @@ await generateText({ provider: 'openai', prompt: 'Summarize this call.', store: 
 await generateObject({ provider: 'openai', schema, prompt: transcript, store: false });
 ```
 
-`store` is sent to OpenAI as `store` on the request body, on `/v1/chat/completions` and `/v1/responses` alike. OpenAI's [migration guide](https://developers.openai.com/api/docs/guides/migrate-to-responses) says "Responses are stored by default. Chat completions are stored by default for new accounts. To disable storage when using either API, set `store: false`." `streamText()` takes it too. Every request the call makes carries the option, which covers each step of the tool loop, the planning request, each attempt of `generateObject()` and a fallback leg to OpenAI. Left out, a chat completion sends no `store` key and a Responses request sends `store: false`. The providers built on the OpenAI provider (Groq, xAI, Together, Mistral, LiteLLM, MiniMax) send it to their own endpoint too; the other providers ignore it. `ModelCompletionOptions.store` sets it on a direct `generateCompletion()` call.
+`store` is sent to OpenAI as `store` on the request body, on `/v1/chat/completions` and `/v1/responses` alike. OpenAI's [migration guide](https://developers.openai.com/api/docs/guides/migrate-to-responses) says "Responses are stored by default. Chat completions are stored by default for new accounts. To disable storage when using either API, set `store: false`." `streamText()` takes it too. Every request the call makes carries the option, which covers each step of the tool loop, the planning request, each attempt of `generateObject()` and a fallback leg to OpenAI. Left out, a chat completion sends no `store` key and a Responses request sends `store: false`. The other providers ignore it, those built on the OpenAI provider (Groq, xAI, Together, Mistral, LiteLLM, MiniMax) included: they leave it out of the request to their own endpoint, since such an endpoint can refuse a field outside its schema (Mistral's chat completion request sets `additionalProperties: false` in its [OpenAPI document](https://docs.mistral.ai/openapi.yaml) and answers "Extra inputs are not permitted"). `customModelParams: { store: false }` reaches such an endpoint, for a gateway known to take the field. `ModelCompletionOptions.store` sets it on a direct `generateCompletion()` call.
+
+### Guards on a call
+
+```ts
+import { GuardrailStopError, generateText } from '@framers/agentos';
+
+const guards = {
+  services: [hardBan, classifier],
+  context: { userId: user.id, sessionId: thread.id, moderation: { surface: 'agent_turn' } },
+};
+
+try {
+  const { text, guardReport } = await generateText({ provider: 'openai', prompt, tools, guards });
+  show(text);
+} catch (error) {
+  if (!(error instanceof GuardrailStopError)) throw error;
+  if (error.code === 'GUARDRAIL_UNAVAILABLE') askToRetry();
+  else if (error.code === 'GUARDRAIL_HELD') queueForReview(error.hold?.reviewCode);
+  else refuse(error.reasonCode);
+}
+```
+
+`guards` enforces a host's guards on the call itself:
+
+| Field | Meaning |
+|---|---|
+| `services` | The guards, in registration order. Each runs as `moderateContent()` runs it: closed unless its config says `failClosed: false`, with a deadline |
+| `context` | The `GuardrailContext` every guard receives. `context.moderation` is checked as `moderateContent()` checks it |
+| `mode` | `enforce` (default) applies every verdict. `dryRun` runs every guard, reports each verdict with `enforced: false` and changes nothing |
+| `stages` | Any of `input`, `toolCalls` and `output`. Default: every stage some guard implements |
+| `output` | `streamText()` only: `hold` (default) or `stream` (see [Guards on a stream](#guards-on-a-stream)) |
+| `timeoutMs` | The deadline of a guard whose config sets none. Default 8000 |
+| `onVerdict` | Called with each stage decision other than an allow, enforced or not. A callback that throws writes `guardrail.verdict_callback_failed`, and the verdict stands |
+
+A `mode` other than `enforce` or `dryRun`, a `services` that is not an array or a `context.moderation` that fails its check is a `TypeError` before any guard runs: `generateText()` rejects with it and `streamText()` yields it as an `error` part.
+
+The guards run in three stages:
+
+- **Input, once, before the first provider request.** The call's own user turn is judged: `prompt`, else the last message when its role is `user`. A call whose messages end on another role has no input stage. The guards with `evaluateInput` read the turn's text and its images (a `data:` URL as its bytes, any other URL as a URL). A `BLOCK` stops the call before any request is made. A `BLOCK` whose evaluation carries a non-empty `replacementText` is the reply instead: no request is made, `text` is that text, `usage` is zero and `transcriptDelta` is empty. A rewrite sends the rewritten text in the turn's place; in multi-part content one text part takes the place of the text parts and the images stay. A text a guard removed (`modifiedText: null`) is sent as an empty turn, never as the original.
+- **Tool calls, each one, in every tool loop.** The guards with `evaluateOutput` and `config.evaluateToolCalls: true` judge each call the model makes, in the native tool loop and the prompt-tool loop of every leg, on the arguments the model sent, before `onBeforeToolExecution` and before any approval gate. A refused call does not run and no hook sees it: the model reads `This tool call was refused by a guardrail.` as its result, with the guard's `reasonCode` when it gave one, and the loop goes on. In `streamText()` a call's `tool-call` part goes out after the guards passed it; a refused call shows as its `tool-result` part alone. A caller's `abortSignal` that fires while the guards are judging ends the call before any hook or tool runs. A hold refuses the call too. A refused tool call is not a stop.
+- **Output, the whole reply, before the caller receives it.** A `BLOCK` stops the call. A `BLOCK` that carries a `replacementText` puts that text in the reply's place, and a rewrite replaces the reply, a rewrite of the reply's streamed pieces by a guard with `evaluateStreamingChunks` included. An empty reply is not judged. A caller's `abortSignal` that fires while the guards judge the prompt or the reply rejects `generateText()` with the signal's reason; `streamText()` ends with an `error` part that carries it, before any held text goes out.
+
+What decides a stage is what decides `moderateContent()`: a rule's `BLOCK`, else a hold, else a closed guard's failure, else a `FLAG`. A screen with `sequential: true` answers first, as it does there.
+
+A stop rejects with `GuardrailStopError`:
+
+| Field | Meaning |
+|---|---|
+| `code` | `GUARDRAIL_BLOCKED` (a rule), `GUARDRAIL_HELD` (held for a person's review; `hold` is set) or `GUARDRAIL_UNAVAILABLE` (nothing but a closed guard that threw, ran late or answered no recognised action decided it) |
+| `stage` | `input`: no request was made. `output`: the reply was withheld |
+| `reasonCode`, `guardrailId`, `hold` | The deciding evaluation's |
+| `report` | The call's report, below |
+| `usage` | What the call had spent, on the output stage |
+
+Its message is one fixed sentence: it holds no guard's reason, no prompt and no reply. The input and output stages run once per call, outside the fallback chain, so a stop is not retried on a fallback provider and does not count against a provider's health.
+
+`result.guardReport`, and `error.report` after a stop:
+
+| Field | Meaning |
+|---|---|
+| `mode` | `enforce` or `dryRun` |
+| `input`, `output` | Each stage's evaluations, as `toModerationEvaluation()` reports them. After a block, `output` holds what every guard that ran answered, the guards before the one that blocked included |
+| `toolCalls` | `{ toolCallId, toolName, evaluations }` for each judged call. `toolCallId` is the call's own number, `tc_<step>_<index>` (the step from 1, the index from 0 in the order the model listed the step's calls), never the provider's or the model's id. `toolName` is the registered tool's name, or `unregistered` when the model named no tool of the call's list |
+| `result` | `passed`, `sanitized` (a guard rewrote the input or the reply), `replaced` (a fixed reply took its place) or `stopped` |
+
+The report carries codes, ids and scores: no guard's `reason`, no prompt, no reply and no call id from a provider. An evaluation's `metadata` is the guard's own and passes through as the guard wrote it, as in `moderateContent()`.
+
+After a reply was rewritten or replaced, `text` is what the caller receives and the last assistant entry of `transcriptDelta` holds that text, so a next turn built from the delta never sends what a guard took out. When the reply ended the call, that entry is the delta's last, `{ role: 'assistant', content: <that text> }`. When `maxSteps` ended the call on a tool step, the reply is that step's text: its assistant entry keeps its tool calls and holds the delivered text, and the step's tool results follow it. After the input was rewritten, the delta's user turn is the rewritten one, as it was sent.
+
+`onVerdict` receives one verdict per stage decision: `stage` (`input`, `toolCall` or `output`), `action`, `enforced`, `unavailable`, `guardrailId`, `reasonCode`, `hold`, and on a tool call `toolCallId` and `toolName`. On the output stage `originalText` and `finalText` hold the reply as the guards judged it and as the caller receives it, so a host keeps them out of its logs. Each verdict also writes one `guardrail.verdict` line ([Logging](../observability/LOGGING.md#guardrail-events)).
+
+With `mode: 'dryRun'` every guard runs as it does in enforcement and every verdict reaches `onVerdict` with `enforced: false`; the input is sent as given, tools run and the reply is returned as the model wrote it.
 
 ## `streamText()`
 
@@ -236,6 +308,15 @@ for await (const delta of result.textStream) {
 
 console.log(await result.text);
 ```
+
+### Guards on a stream
+
+`streamText()` takes the same `guards` as [`generateText()`](#guards-on-a-call), and `result.guardReport` resolves to the report when the stream ends.
+
+- **`output: 'hold'`** (the default). No text part is delivered before the output guards have judged the whole reply; tool calls and the other parts pass as they come. A stop yields no text part and one `error` part carrying the `GuardrailStopError`; `await result.text` is the empty string and `finishReason` is `error`.
+- **`output: 'stream'`.** Text flows as it arrives, and only a guard with `evaluateStreamingChunks` can stop it mid-stream. The final guards still judge the whole reply: a `BLOCK` arrives as an `error` part after the text, one that carries a `replacementText` included, since the text is already out and nothing can take its place. A rewrite is reported with `enforced: false` and not applied.
+
+`text` resolves with what was delivered and nothing else when a guard stopped, replaced or rewrote the reply; when they passed it, `text` resolves as it does for the same call without guards (the last step's text). An input stop ends the stream the same way, before any request. The `error` part is in `fullStream`: a caller that reads `textStream` alone sees the text stop and no error, so it also reads `finishReason` or `guardReport`. In a dry run the reply streams as it arrives, the output guards judge it whole once it was delivered, and `text` resolves as it does for the same call without guards (the last step's text).
 
 ## Cancellation
 
@@ -785,6 +866,41 @@ A tool an agent calls receives the session's user in `context.userContext.userId
 and `stream()`) and the subject its memory is keyed by in
 `context.userContext.memorySubject`; a direct `generateText()` call passes `system`.
 
+### Guards on an agent's calls
+
+`generate()`, `stream()` and a session's `send()` and `stream()` take `guards` per
+call, as [`generateText()`](#guards-on-a-call) and [`streamText()`](#guards-on-a-stream) do:
+
+```ts
+const reply = await session.send(message, { guards });
+const live = session.stream(message, { guards });
+```
+
+- A schema retry is a call of its own: the retry's input stage judges its
+  correction turn, and the turns it repeats hold the text that was delivered.
+  A send whose input a guard replaced is not retried: no request is made and
+  the replacement is validated as the reply. It resolves when the replacement
+  fits the schema, and rejects with `ObjectGenerationError`, whose `rawText` is
+  the replacement, when it does not.
+- A session's history holds what was delivered. A reply a guard rewrote or
+  replaced is stored as delivered, a send whose input a guard rewrote stores
+  the rewritten turn, and a send whose input a guard replaced adds nothing. A
+  stream turn whose input a guard rewrote or replaced is not added to the
+  history. A sanitizer that returned the turn's text unchanged rewrote
+  nothing: the turn is kept and observed as any other.
+- A memory provider's `getContext()` recalls for the turn as it was sent, a
+  rewritten turn's text included, and its `observe()` is not called for a turn
+  whose input an enforced guard rewrote or replaced, a turn whose schema retry
+  then passed included.
+- `verifyCitations` retrieves with the turn as it was sent, a rewritten turn's
+  text included, and does not run for a turn a guard replaced.
+- The `guardrails` ids in an `agent()` or `agency()` config are stored and not
+  applied: a call is guarded by its `guards`. A panel agency's call cannot
+  carry `guards`.
+- An agent with `runtime: 'gmi'` does not enforce `guards`: its `generate()`,
+  `stream()` and a session's `send()` and `stream()` throw when a call
+  carries them, before any turn starts.
+
 ### Citation verification
 
 Set `verifyCitations: { embedFn, retrieve }` to check generated claims against
@@ -888,7 +1004,7 @@ await tutor.close();
 
 With `runtime: 'gmi'` (or [`gmi()`](https://github.com/framerslab/agentos/blob/master/src/api/gmi.ts), the same function under its own name), every session is a Generalized Mind Instance built from the options, and `memory` turns on cognitive memory: one manager for the sessions, scoped per user, embedding with `memory.embedding` (unset, a model picked from the global default provider or the environment's keys). `cognition: 'full'` adds sentiment tracking and the metaprompt presets. Of the `MemoryConfig` fields, this path reads `embedding`, `consolidation`, `persistAccessState`, `store` and `recall`; it does not read `types`, `working` or `shared`. `memory.store` (`{ path }`, a SQLite file, or `{ adapter, brainId? }`, a host's storage adapter) keeps the agent's memory and its learning store there, so an agent built again on it recalls what its users said; it needs `learning.agentKey`. The default runtime reads only the `memory.working` callback described above and `memory.recall.budget.totalTokens` (below). [GMIs from agent()](../GMI.md#gmis-from-agent) lists what each option does on this path.
 
-`memory.recall` sets the memory block's budget and what each turn records of its recall:
+`memory.recall` sets the memory block's budget, how each turn finds its memories and what it records of its recall:
 
 ```ts
 const tutor = agent({
@@ -896,7 +1012,7 @@ const tutor = agent({
   provider: 'openai',
   memory: {
     embedding: { provider: 'openai' },
-    recall: { budget: { totalTokens: 2400 }, capture: 'off' },
+    recall: { budget: { totalTokens: 2400 }, retrieval: 'hybrid', capture: 'off' },
   },
 });
 ```
@@ -904,14 +1020,17 @@ const tutor = agent({
 | Field | Default | What it does |
 |---|---|---|
 | `budget.totalTokens` | 1600 | The budget of the whole memory block a turn sends, its preamble included, in tokens of about four characters. An integer of at least 0; at 0 the turn sends no block. A model whose share of the prompt for retrieved context (20% of its context, less the turn's RAG and long-term-memory text) is smaller is sent the block rendered again at that remainder, from the same recall ([Budget and the prompt share](../memory/COGNITIVE_MEMORY.md#budget-and-the-prompt-share)). |
+| `retrieval` | `'dense'` | How a turn finds its memories. `'dense'`: by meaning, shown in Relevant Memories and Recent Experiences. `'hybrid'`: by meaning, by the turn's exact words (the store's full-text index with `memory.store`, an in-process index without it) and by recency, fused into one deduped pool and shown as one Relevant Memories section. Both embed the query once and call no other vendor ([Recall](../memory/COGNITIVE_MEMORY.md#recall)). |
+| `rerank` | `'none'` | Reranks the recalled memories before they are shown. `'none'`: no reranker. `{ kind: 'local', model, revision }`: a cross-encoder run in this process, at a pinned commit of the model's repository, so the memories never leave the process. `{ kind: 'llm', invoke, model }`: your own model call judges them, which sends the turn's text and the first 200 characters of each candidate to that model's provider. Both take `timeoutMs` (1,500 for `local`, 10,000 for `llm`) and `maxCandidates` (20). A reranker that is loading, unavailable, slow or failing never fails a turn: the order stands and the turn's record says why. No remote reranking service is offered for memories ([Memory rerank](../text/RERANKING.md#memory-rerank)). |
 | `capture` | `'metadata'` | What a turn records of its recall: `'metadata'` puts the record on a session's `send()` result (`memoryRecall`) and on its `stream()` result (a `memoryRecall` promise, which also settles with the record when the turn fails after its memory assembly), `'off'` records nothing. `'metadata+stream'` records the same on these sessions, whose `stream()` parts carry no memory part; the record goes on a runtime stream only for a host of `AgentOS.create()` whose memory manager sets that value. The record holds ids, ranks, scores, counts and timings, never a memory's text ([Recall Capture](../memory/COGNITIVE_MEMORY.md#recall-capture)). |
 
 The construction rules:
 
-- With `runtime: 'gmi'` and memory on, both fields go to the agent's memory manager, and `memoryProviderOptions.tokenBudget` does not size the block. When it is set and no `memoryProvider.getContext` reads it, the agent writes one `memory.recall.option_ignored` line at construction (`generate()` and `stream()` run without cognitive memory and still pass it to a provider's `getContext`).
+- With `runtime: 'gmi'` and memory on, the fields go to the agent's memory manager, and `memoryProviderOptions.tokenBudget` does not size the block. When it is set and no `memoryProvider.getContext` reads it, the agent writes one `memory.recall.option_ignored` line at construction (`generate()` and `stream()` run without cognitive memory and still pass it to a provider's `getContext`).
 - A `cognition.memory` of the agent's own replaces `memory` for cognitive memory, its `recall` included: set `recall` inside `cognition.memory`. A `memory.recall` set beside it is applied nowhere, and the agent writes one `memory.recall.option_ignored` line at construction (`option: 'memory_recall'`).
-- Without `runtime: 'gmi'`, or with memory off, `budget.totalTokens` is the `tokenBudget` handed to `memoryProvider.getContext` when `memoryProviderOptions.tokenBudget` is unset; the two set to different values throw at construction naming both, and `capture` throws: no cognitive memory runs to record anything. With no `memoryProvider.getContext` to read it, a set `budget.totalTokens` is applied nowhere, and the agent writes one `memory.recall.option_ignored` line at construction (`option: 'recall_budget'`).
-- A `budget.totalTokens` that is not an integer of at least 0, a `capture` outside its three values, or a `recall` or `budget` that is not an object (`recall: 'off'`, `budget: 2400`), throws a `RecallOptionError` at construction naming the field.
+- Without `runtime: 'gmi'`, or with memory off, `budget.totalTokens` is the `tokenBudget` handed to `memoryProvider.getContext` when `memoryProviderOptions.tokenBudget` is unset; the two set to different values throw at construction naming both, and `capture`, `retrieval` and `rerank` (any value, `'none'` included) throw: no cognitive memory runs to record, recall or rerank anything. With no `memoryProvider.getContext` to read it, a set `budget.totalTokens` is applied nowhere, and the agent writes one `memory.recall.option_ignored` line at construction (`option: 'recall_budget'`).
+- A `budget.totalTokens` that is not an integer of at least 0, a `capture` outside its three values, a `retrieval` other than `'dense'` and `'hybrid'`, or a `recall` or `budget` that is not an object (`recall: 'off'`, `budget: 2400`), throws a `RecallOptionError` at construction naming the field.
+- A `rerank` that is neither `'none'` nor an object throws, naming `rerank`; so does one whose `kind` is neither `'local'` nor `'llm'`, with the reason `unsupported_provider`. A blank `model` (`rerank.model`), a `local` whose `revision` is not a whole commit id of the model's repository in lower case (`rerank.revision`; a branch, a tag or an upper-case id is refused), an `llm` whose `invoke` is not a function (`rerank.invoke`), a `timeoutMs` or `maxCandidates` that is not a positive integer, and a `timeoutMs` above 2,147,483,647 throw, naming the field.
 
 Each refusal writes one `memory.recall.option_rejected` line before the throw.
 

@@ -201,6 +201,37 @@ const { text } = frameUntrustedEvidence(message.text, { label: `message:${messag
 
 The two markers share a random boundary of 16 hexadecimal characters, new on every call. Any copy of it in the text is removed, null bytes are dropped, and chat-template tokens (`<|...|>`, `[INST]`, `[/INST]`, `<s>`, `</s>`) are broken with a space, in the text and in the label's line (a label `INST` is written `[ INST]`). The label, when given, must be an id. Framing lowers how often instructions planted in the text work; it does not make a model ignore them, so an agent that acts on such text is also held to limits and checked evidence.
 
+## Guards Under the Text Functions
+
+`generateText()` and `streamText()` take `guards`, and so do an agent's `generate()`, `stream()` and a session's `send()` and `stream()`:
+
+```typescript
+import { GuardrailStopError, generateText } from '@framers/agentos';
+
+const result = await generateText({
+  provider: 'openai',
+  prompt,
+  tools,
+  guards: { services: [hardBan, classifier], context: { userId: user.id, sessionId: thread.id, moderation: { surface: 'agent_turn' } } },
+});
+```
+
+- **Three stages.** The call's own user turn is judged once, before the first provider request. Each tool call the model makes is judged by the guards that set `evaluateToolCalls`, on the arguments the model sent, before `onBeforeToolExecution` and so before any approval. The whole reply is judged before the caller receives it. `stages` picks among `input`, `toolCalls` and `output`.
+- **Closed by default.** Each guard runs as `moderateContent()` runs it: closed unless its config says `failClosed: false`, with a deadline, and what decides a stage is what decides `moderateContent()`.
+- **A stop** rejects with `GuardrailStopError` (`GUARDRAIL_BLOCKED`, `GUARDRAIL_HELD` or `GUARDRAIL_UNAVAILABLE`); a stream yields it as one `error` part. The input and output stages run once per call, outside the fallback chain, so a stop is not retried on a fallback provider. A refused tool call is not a stop: the tool does not run, the model reads the refusal as the call's result and the loop goes on.
+- **A replacement reply.** A `BLOCK` that carries a non-empty `replacementText` on the input is the reply, and no request is made; on the output it takes the reply's place.
+- **The report.** `guardReport` carries codes and ids: no guard's reason, no prompt, no reply, and no call id from a provider.
+
+[Guards on a call](../getting-started/HIGH_LEVEL_API.md#guards-on-a-call) has the options, the error, the report and what a stream delivers after a stop.
+
+## The Dry Run
+
+`mode: 'dryRun'` on `moderateContent()` and on `guards` runs every guard as enforcement would, and changes nothing:
+
+- Every verdict is reported with `enforced: false`: `moderateContent()` answers `allow` with `wouldBe`, and `guards` passes each verdict to `onVerdict` and writes its `guardrail.verdict` line with `mode: dry_run`.
+- Under `guards` the input is sent as given, tools run and text passes. A stream's output guards judge the whole reply once it was delivered.
+- A screen's `BLOCK` still ends its evaluation, so a dry run calls the guards enforcement would call and no others.
+
 ## Images: `ImageGuardrail`
 
 `ImageGuardrail` judges the images of an input (`visionInputs`, which `moderateContent()` fills from `content.images`). It holds the order of the checks and no vendor code: the host hands it its checks.
@@ -251,7 +282,7 @@ const decision = await moderateContent({ text: message.text, images: message.ima
 - **`maxImages`** (default 4). An input with more images is refused with `IMAGE_LIMIT` before any check runs. An input with no images is not judged by this guard.
 - **`maxBytes`** (default 20971520, 20 MiB). An image larger than this is refused with `IMAGE_LIMIT` (`metadata.imageIndex` names it) and no check runs on it; the input's other images are still checked, so a quarantine on one of them still decides. `base64` text is measured before it is decoded, and the bytes `loadImage` returns as they come back; a `loadImage` that can fetch large files limits its own download too.
 - **`sequential`.** With `sequential: true` the guard runs in phase 1 (see [Screens That Run First](#screens-that-run-first)), so the image checks finish before any phase 2 guard sees the input's text, and a quarantine keeps the text from the vendor guards too. Without it the text guards run beside the image checks.
-- **`timeoutMs`** (default 15000) is the deadline for the whole evaluation, every check of every image included. As a required guard the guard runs under its spec's `timeoutMs` instead, and the guard keeps whichever deadline comes first: its own, or the dispatcher's (`deadlineSignal`). The dispatcher answers at the deadline and does not wait for the guard; past it the guard starts no further capture or check, so no image goes to a vendor after the decision, and an image whose checks had not all run is refused as unavailable, named by the step that did not start (`load` or a check's id). A request a check had already sent is not stopped. Images and checks run one after another, so size the deadline for the slowest input you accept: with `maxImages` 4, a hash check of 0.5 s and a model check of 4 s need about 18 s, past the default.
+- **`timeoutMs`** (default 15000) is the deadline for the whole evaluation, every check of every image included. As a required guard the guard runs under its spec's `timeoutMs` instead, and the guard keeps whichever deadline comes first: its own, or the dispatcher's (`deadlineSignal`). The dispatcher answers at the deadline and does not wait for the guard; past it the guard starts no further capture or check, so no image goes to a vendor after the decision, and an image whose checks had not all run is refused as unavailable, named by the step that did not start (`load` or a check's id). An image whose last check was still running when the deadline passed is refused as unavailable too, named by that check, unless a check blocked or held it: an earlier `pass` or `flag`, or a skipped signal, does not make it an allow. Every check receives that deadline as `image.deadlineSignal`, aborted once it passes or the guard has answered: a check sends nothing once it is aborted, and hands it to a request in flight so the request stops (see [Writing an image check](./CREATING_GUARDRAILS.md#writing-an-image-check)). Images and checks run one after another, so size the deadline for the slowest input you accept: with `maxImages` 4, a hash check of 0.5 s and a model check of 4 s need about 18 s, past the default.
 - **The verdict over all images.** A check's `block`, then a `hold`, then an image refused as unavailable, then a `flag`; the first image wins a tie. `metadata` is `{ guardrailId, imageIndex, checkId }`, with `quarantine` on a quarantine and the check's `scores` on a flag (only finite numbers under keys that are words; any other entry is dropped). A `block` or `flag` whose `reasonCode`, or a `hold` whose `reviewCode`, is not a word counts as a check that could not answer. `config.reasonCodes` lists `IMAGE_LIMIT`, `IMAGE_CHECK_UNAVAILABLE` and every code the checks list in their `reasonCodes`, so the `guardrail.verdict` line names the code.
 - **Generated images** are judged the same way: the host passes the image to `moderateContent()` with `context.moderation.surface: 'generated_media'`.
 

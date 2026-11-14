@@ -1583,6 +1583,42 @@ export class MemoryStore {
   }
 
   /**
+   * Scores traces the vector query did not return, for a recall pool that holds them beside the ones it did: the
+   * six-signal composite the query ranks by, with similarity and graph activation 0, under this store's decay
+   * settings. A trace's line shows this score as its relevance, so a candidate found by its words or its age alone
+   * shows its strength, recency, mood congruence and importance, never a rank-fusion score. Returned in the order
+   * given; nothing is recorded, written or embedded.
+   *
+   * @param traces - The traces, as the store loaded them.
+   * @param currentMood - The current mood, for the mood-congruence signal.
+   * @param options - The turn's `neutralMood` and `scoringWeights`, and its clock (`now`, default `Date.now()`).
+   */
+  scoreForRecall(
+    traces: readonly MemoryTrace[],
+    currentMood: PADState,
+    options: Pick<CognitiveRetrievalOptions, 'neutralMood' | 'scoringWeights'> & { now?: number } = {},
+  ): ScoredMemoryTrace[] {
+    if (traces.length === 0) return [];
+    const context: ScoringContext = {
+      currentMood,
+      now: options.now ?? Date.now(),
+      neutralMood: options.neutralMood,
+      decayConfig: this.decay,
+      weights: options.scoringWeights ? { ...DEFAULT_SCORING_WEIGHTS, ...options.scoringWeights } : undefined,
+    };
+    const byId = new Map(
+      scoreAndRankTraces(
+        traces.map((trace) => ({ trace, vectorSimilarity: 0, graphActivation: 0 })),
+        context,
+      ).map((scored) => [scored.id, scored]),
+    );
+    return traces.flatMap((trace) => {
+      const scored = byId.get(trace.id);
+      return scored ? [scored] : [];
+    });
+  }
+
+  /**
    * The traces with these ids, for a recall leg that found them outside the vector index (the Brain's full-text index,
    * its newest rows). Without a Brain they come from the cache. With one, every id is checked against its row first,
    * as a vector query checks its hits: a trace whose row is gone or deleted, by this process or another, is left out
@@ -1784,9 +1820,10 @@ export class MemoryStore {
       // keep the SQL read + vector upserts bounded for very long-lived scopes.
       // A process-level facade cache (so hydration runs once, not per request)
       // is the follow-up optimisation; the cap keeps the un-cached path safe.
+      // `scope_id` too: a row whose metadata names no scope id loads under the column's (`rowToTrace`).
       const rows = await brain.all<MemoryTraceRow>(
         `SELECT id, type, scope, content, embedding, strength, created_at,
-                last_accessed, retrieval_count, tags, emotions, metadata
+                last_accessed, retrieval_count, tags, emotions, metadata, scope_id
            FROM memory_traces
           WHERE brain_id = ? AND deleted = 0
           ORDER BY created_at DESC
@@ -1837,7 +1874,7 @@ export class MemoryStore {
           if (current.deletes !== epochs.deletes || current.refiles !== epochs.refiles) {
             const fresh = await brain.get<MemoryTraceRow>(
               `SELECT id, type, scope, content, embedding, strength, created_at,
-                      last_accessed, retrieval_count, tags, emotions, metadata
+                      last_accessed, retrieval_count, tags, emotions, metadata, scope_id
                  FROM memory_traces
                 WHERE brain_id = ? AND id = ? AND deleted = 0`,
               [brain.brainId, traceId],
@@ -2774,7 +2811,7 @@ export class MemoryStore {
     const epochs = hydrationEpochs(namespace);
     const rows = await brain.all<MemoryTraceRow>(
       `SELECT id, type, scope, content, embedding, strength, created_at,
-              last_accessed, retrieval_count, tags, emotions, metadata
+              last_accessed, retrieval_count, tags, emotions, metadata, scope_id
          FROM memory_traces
         WHERE brain_id = ? AND scope = ? AND scope_id = ? AND deleted = 0
         ORDER BY created_at DESC
@@ -3367,7 +3404,7 @@ export class MemoryStore {
       try {
         const row = await brain.get<MemoryTraceRow>(
           `SELECT id, type, scope, content, embedding, strength, created_at,
-                  last_accessed, retrieval_count, tags, emotions, metadata, deleted
+                  last_accessed, retrieval_count, tags, emotions, metadata, deleted, scope_id
              FROM memory_traces
             WHERE brain_id = ? AND id = ?`,
           [brain.brainId, traceId],
