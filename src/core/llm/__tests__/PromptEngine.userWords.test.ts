@@ -212,6 +212,45 @@ describe('PromptEngine: retrieved text beside the person\'s words', () => {
     expect(JSON.stringify(result.prompt)).not.toContain('User Query:');
   });
 
+  it('the anthropic_messages template puts the note in front of a structured user message that ends the history', async () => {
+    // With no userInput the newest user message is the last history message; the note goes before its parts, in
+    // that message, and not after it as a user message of its own.
+    const turn = [
+      { type: 'text', text: WORDS },
+      { type: 'image_url', image_url: { url: 'data:image/png;base64,iVBORw0KGgo=' } },
+    ];
+    const result = await engine.constructPrompt(
+      {
+        systemPrompts: base.systemPrompts,
+        conversationHistory: [createConversationMessage(MessageRole.USER, turn)],
+        memoryContextText: MEMORY,
+      },
+      model('anthropic', { promptFormatType: 'anthropic_messages' }),
+      executionContext,
+    );
+    const { messages } = result.prompt as unknown as { messages: ChatMessage[] };
+    expect(messages).toEqual([{ role: 'user', content: [{ type: 'text', text: `${FRAME}\n${MEMORY}` }, ...turn] }]);
+  });
+
+  it('the anthropic_messages template sends the note alone after tool results', async () => {
+    // A tool_result block opens its user message, so the note stays a user message of its own after it.
+    const history = [
+      createConversationMessage(MessageRole.USER, WORDS),
+      createConversationMessage(MessageRole.ASSISTANT, null, { tool_calls: [{ id: 'call_a', name: 'lookup', arguments: { q: 'bar' } }] }),
+      createConversationMessage(MessageRole.TOOL, 'Opens at five.', { tool_call_id: 'call_a', name: 'lookup' }),
+    ];
+    const result = await engine.constructPrompt(
+      { systemPrompts: base.systemPrompts, conversationHistory: history, retrievedContext: OTHER },
+      model('anthropic', { promptFormatType: 'anthropic_messages' }),
+      executionContext,
+    );
+    const { messages } = result.prompt as unknown as { messages: ChatMessage[] };
+    expect(messages[messages.length - 2].content).toEqual([
+      { type: 'tool_result', tool_use_id: 'call_a', content: 'Opens at five.' },
+    ]);
+    expect(messages[messages.length - 1]).toEqual({ role: 'user', content: [{ type: 'text', text: `${FRAME}\n${OTHER}` }] });
+  });
+
   it('the generic_completion template opens the retrieved text with the frame line', async () => {
     const result = await engine.constructPrompt(
       { ...base, memoryContextText: MEMORY },
