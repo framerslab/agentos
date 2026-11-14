@@ -236,7 +236,8 @@ describe('full-runtime sentiment overlap', () => {
     const second = turn('Next question.'); await mainStarted(2); await second;
     const before = await snapshot(); held.resolve(negative); await vi.advanceTimersByTimeAsync(0);
     expect(await snapshot()).toBe(before);
-    expect(await snapshot()).not.toContain('1234');
+    // The forgotten text, not its digits alone: the trace holds random turn ids, and a hex id can contain '1234'.
+    expect(await snapshot()).not.toContain('PIN is 1234');
   });
 
   it('drops a forgotten result even before the turn reaches its post-turn reader', async () => {
@@ -247,7 +248,8 @@ describe('full-runtime sentiment overlap', () => {
     await vi.waitFor(() => expect(current.sentimentTracker.events).toEqual([]));
     main.resolve(); await done;
     expect(await current.workingMemory.get('gmi_sentiment_history')).toBeUndefined();
-    expect(await snapshot()).not.toContain('1234');
+    // The forgotten text, not its digits alone: the trace holds random turn ids, and a hex id can contain '1234'.
+    expect(await snapshot()).not.toContain('PIN is 1234');
   });
 
   it.each(['failure', 'abort', 'shutdown'] as const)('abandons analysis on %s', async (ending) => {
