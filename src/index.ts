@@ -204,6 +204,23 @@ export type {
   ReadMemoryPageListing,
   ReadMemoryPagePort,
 } from './cognition/memory/io/tools/ReadMemoryPageTool.js';
+// The forgotten-user ledger: who a store was told to forget, kept as hashes, with a copy outside the store
+export { ForgottenLedger, ForgottenLedgerError, openForgottenCopy, guardMemoryProvider } from './cognition/memory/suppression/index.js';
+export type { ForgottenLedgerOptions, SuppressionSubject, TombstoneKey } from './cognition/memory/suppression/index.js';
+// One person's memory deleted for good, with a report of every store reached and not reached
+export { forgetUserMemory, reapplyTombstones } from './cognition/memory/io/forgetUserMemory.js';
+export { sweepRetention } from './cognition/memory/io/retentionSweep.js';
+export type { RetentionPeriod, RetentionSweepOptions } from './cognition/memory/io/retentionSweep.js';
+// One person's memory exported as JSON, and corrected with a trace later compiles keep
+export { exportSubjectMemory, correctSubjectMemory } from './cognition/memory/io/userMemoryExport.js';
+export type { UserMemoryExport } from './cognition/memory/io/userMemoryExport.js';
+export type {
+  ForgetMemoryReport,
+  ForgetUserMemoryOptions,
+  LegacyDeletion,
+  ReapplyTombstonesOptions,
+  SubjectPages,
+} from './cognition/memory/io/forgetUserMemory.js';
 // Query Router (classification, retrieval dispatch, grounded answer generation)
 export {
   QueryClassifier,
@@ -312,7 +329,7 @@ export type {
 export { GatewayProviderManager } from './api/runtime/gatewayProviderManager.js';
 export { agent } from './api/agent.js';
 export { souledAgent } from './api/souledAgent.js';
-export type { SouledAgentOptions, SouledAgent, MemoryPolicy } from './api/souledAgent.js';
+export type { SouledAgentOptions, SouledAgent, MemoryPolicy, MemoryRetention } from './api/souledAgent.js';
 export type {
   Agent,
   AgentLearning,

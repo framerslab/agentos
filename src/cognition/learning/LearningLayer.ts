@@ -18,6 +18,8 @@
 import type { StorageAdapter } from '@framers/sql-storage-adapter';
 import type { ICognitiveMemoryManager } from '../memory/CognitiveMemoryManager.js';
 import type { TraceSnapshot } from '../memory/retrieval/store/tracePersistence.js';
+import type { ForgottenLedger } from '../memory/suppression/ForgottenLedger.js';
+import { learnerTombstones, type LearnerTombstones } from '../memory/suppression/learnerTombstones.js';
 import { processIsFrozen, resolveLearningConfig, resolveTurnMode } from './config.js';
 import {
   admitImport,
@@ -41,7 +43,7 @@ import {
   type FreezeTarget,
 } from './hostCalls.js';
 import { canonicalJson } from './ledger/canonical.js';
-import { chainKeyOf, Ledger, tombstoneHash } from './ledger/Ledger.js';
+import { chainKeyOf, Ledger } from './ledger/Ledger.js';
 import { LearnerSession, type LearnerSessionHost, type SessionBinding } from './LearnerSession.js';
 import { buildManifest } from './manifest.js';
 import { InMemoryLearningStore } from './store/InMemoryLearningStore.js';
@@ -153,6 +155,12 @@ export interface LearningLayerOptions extends LearningConfig {
   openStore?: () => Promise<LearningStore>;
   /** Memory-tools facades beside `memoryTools` (the full runtime's second one): each is re-filed once and kept by its brain id. */
   memoryFacades?: LearningMemoryTools[];
+  /**
+   * The forgotten-user ledger the agent's memory store uses (a souled agent's). With it, a user that ledger holds is
+   * refused by the layer as one the layer forgot itself, and `forgetUser` writes that ledger before the layer's own
+   * tombstone. It is asked and written only for a namespace it reads (`ForgottenLedger.namespaces`).
+   */
+  forgotten?: ForgottenLedger;
 }
 
 /** Where the store comes from, and what the manifest says of it. */
@@ -172,6 +180,7 @@ interface LayerHost {
   storageAdapter?: StorageAdapter;
   openStore?: () => Promise<LearningStore>;
   memoryFacades?: LearningMemoryTools[];
+  forgotten?: ForgottenLedger;
 }
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
@@ -224,6 +233,8 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
   readonly chains = new WriteChains();
   readonly inFlight = new Set<string>();
   readonly defaultNamespace: string;
+  /** Every tombstone read outside a store transaction, and the one tombstone write, go through this route. */
+  readonly tombstones: LearnerTombstones;
   private readonly anonymous: ReadonlySet<string>;
   private readonly clock: () => number;
   private readonly source: StoreSource;
@@ -255,6 +266,7 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
   ) {
     this.anonymous = new Set([...DEFAULT_ANONYMOUS_USER_IDS, ...(config.anonymousUserIds ?? [])]);
     this.defaultNamespace = config.namespace ?? '';
+    this.tombstones = learnerTombstones(host.forgotten);
     this.clock = config.clock ?? Date.now;
     this.source = storeSourceOf(config.store ?? undefined, host);
     const facades = [config.memoryTools, ...(host.memoryFacades ?? [])].filter(
@@ -312,6 +324,7 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
             : { agentKey: learner.agentKey, learner: { namespace: learner.namespace, agentKey: learner.agentKey, userId: learner.userId } },
         ),
       onForgottenAfterCommit: (namespace, userId) => this.purgeUserRows(namespace, userId),
+      isForgotten: (namespace, userId) => this.tombstones.has(store, { namespace, userId }),
     });
     this.storeError = undefined;
     this.storeDetail = this.source.detail(store);
@@ -378,8 +391,8 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
     try {
       await ready.store.deleteUserRows(namespace, userId);
     } catch (error) {
-      const hash = (await tombstoneHash(namespace, userId)).slice(0, 16);
-      console.warn(`[agentos] learning: the rows of a forgotten user (tombstone ${hash}) were not deleted again (${messageOf(error)}); a second forgetUser call deletes them.`);
+      // No hash of the user's id: an unkeyed hash in a log lets anyone with a list of ids find who was forgotten.
+      console.warn(`[agentos] learning: the rows of a forgotten user were not deleted again (${messageOf(error)}); a second forgetUser call deletes them.`);
     }
   }
 
@@ -555,7 +568,7 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
   }
 
   private async refuseForgotten(store: LearningStore, user: { namespace: string; userId: string }, call: string): Promise<void> {
-    if (await store.isForgotten(await tombstoneHash(user.namespace, user.userId))) {
+    if (await this.tombstones.has(store, user)) {
       throw new Error(`${call}: the user is forgotten in this namespace; nothing is written for them again.`);
     }
   }
@@ -779,7 +792,7 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
       const id = proposed.candidate.id;
       const restored = (before?.traces ?? []).filter((trace) => !trace.deleted).map((trace) => trace.id);
       const forgottenNow = async (): Promise<boolean> =>
-        owner !== null && (await ready.store.isForgotten(await tombstoneHash(namespace, owner)));
+        owner !== null && (await this.tombstones.has(ready.store, { namespace, userId: owner }));
       // The user was forgotten while the revert ran: what it restored is deleted again, with the user's rows.
       const takeBackForgotten = async (): Promise<never> => {
         await facade.deleteTraces?.(restored);
@@ -822,7 +835,7 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
     const exportedAt = new Date(this.clock()).toISOString();
     // A forgotten user's document is empty: the rows a forgetUser keeps while a store it must reach fails are kept for
     // its second call, never handed out.
-    if (await ready.store.isForgotten(await tombstoneHash(learner.namespace, learner.userId))) {
+    if (await this.tombstones.has(ready.store, { namespace: learner.namespace, userId: learner.userId })) {
       return { version: 1, learner, personaId: null, traitState: null, lessons: [], skills: [], ledger: [], outcomes: [], exportedAt };
     }
     const read = await ready.store.transaction(async (tx) => ({
@@ -921,7 +934,7 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
   private async forgetInChain(ready: { store: LearningStore; ledger: Ledger }, namespace: string, userId: string): Promise<ForgetReport> {
     const { store } = ready;
     // Committed before any delete starts, so a write in another process that commits during the deletion finds it.
-    await store.insertForgotten(await tombstoneHash(namespace, userId), new Date(this.clock()).toISOString());
+    await this.tombstones.mark(store, { namespace, userId }, new Date(this.clock()).toISOString());
     await store.markHeadsForgotten(namespace, userId);
     const rows = await store.sessionRowsOf(namespace, userId);
     const named = await this.tracesNamedForVisitor(store, namespace, userId, rows);
@@ -1029,10 +1042,10 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
       const plain = await this.countPlainForm(userId, rows);
       plainFormLeft = plain.left;
       if (plain.left > 0) {
-        // A line about a forgotten user names the tombstone, never the user: the caller holds the id it deleted.
-        const hash = (await tombstoneHash(namespace, userId)).slice(0, 16);
+        // A line about a forgotten user names neither the user nor a hash of the id: the caller holds the id it
+        // deleted, and an unkeyed hash in a log lets anyone with a list of ids find who was forgotten.
         console.warn(
-          `[agentos] learning: forgetUser (tombstone ${hash}) left ${plain.left} trace(s) filed before the namespace, under the user's plain id in its ${plain.scopes.join(' and ')}; re-file them in the namespaced form with MemoryStore.refileScope, then call forgetUser again.`,
+          `[agentos] learning: forgetUser left ${plain.left} trace(s) filed before the namespace, under the user's plain id in its ${plain.scopes.join(' and ')}; re-file them in the namespaced form with MemoryStore.refileScope, then call forgetUser again.`,
         );
       }
     }
@@ -1300,7 +1313,7 @@ export function releaseLearningMemory(layer: ILearningLayer, memory: ICognitiveM
  * @throws {Error} Naming the field, when the config is not valid ({@link resolveLearningConfig}).
  */
 export function createLearningLayer(options: LearningLayerOptions = {}): LearningLayerHandle {
-  const { profile: givenProfile, surface: givenSurface, hostLoops, memory, storageAdapter, openStore, memoryFacades, ...config } = options;
+  const { profile: givenProfile, surface: givenSurface, hostLoops, memory, storageAdapter, openStore, memoryFacades, forgotten, ...config } = options;
   const profile = givenProfile ?? 'custom';
   return new LearningLayer(config, resolveLearningConfig(config, profile), {
     surface: givenSurface ?? 'custom',
@@ -1310,5 +1323,6 @@ export function createLearningLayer(options: LearningLayerOptions = {}): Learnin
     storageAdapter: storageAdapter ?? undefined,
     openStore: openStore ?? undefined,
     memoryFacades: memoryFacades ?? undefined,
+    forgotten: forgotten ?? undefined,
   });
 }

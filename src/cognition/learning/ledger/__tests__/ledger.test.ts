@@ -251,7 +251,7 @@ describe.each([
     expect(line).not.toContain('ana-7731');
   });
 
-  it('answers forgotten when the deletion it runs again fails, naming the tombstone and never the user', async () => {
+  it('answers forgotten when the deletion it runs again fails, naming neither the user nor a hash of the id', async () => {
     const store = await open();
     const learner = { ...LEARNER, userId: 'ana-7731' };
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
@@ -270,7 +270,7 @@ describe.each([
     expect(warn).toHaveBeenCalledTimes(1);
     const line = String(warn.mock.calls[0]![0]);
     expect(line).toMatch(/^\[agentos\] learning: /);
-    expect(line).toContain(tomb.slice(0, 16));
+    expect(line).not.toContain(tomb.slice(0, 16));
     expect(line).toContain('the database is not reachable');
     expect(line).not.toContain('ana-7731');
   });

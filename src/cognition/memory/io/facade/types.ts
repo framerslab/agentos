@@ -10,6 +10,7 @@
 
 import type { MemoryRetrievalPolicy } from '../../../rag/unified/policy.js';
 import type { PathNameProblem } from '../../../../core/utils/pathName.js';
+import type { ForgottenLedger, ForgottenLedgerOptions } from '../../suppression/ForgottenLedger.js';
 
 // ---------------------------------------------------------------------------
 // Embedding configuration
@@ -282,6 +283,28 @@ export interface MemoryConfig {
 
   /** Document ingestion settings applied to all `ingest()` calls by default. */
   ingestion?: IngestionConfig;
+
+  /**
+   * The forgotten-user ledger this store's deletions and guards use: one already open, or the options to open one
+   * over this store's own adapter. `Memory.markForgotten` and `Memory.isForgotten` write and read it. A store opened
+   * without one has neither call.
+   *
+   * With options, the ledger's table lives in the store's own database, and `copy` names the adapter of the second
+   * copy kept outside it (`openForgottenCopy` opens one). The open is refused, and the store closed again, when the
+   * ledger does not open: its copy is missing, or its tombstones are keyed and the key is not given. The open also
+   * compares the ledger identity the store holds with its copy's, and refuses a copy that belongs to another store.
+   *
+   * Tombstones are database-wide, including historical learner rows: brain ids do not isolate them. Give each
+   * agent its own database or PostgreSQL schema and a separate copy outside restores.
+   *
+   * @example
+   * ```typescript
+   * const { adapter: copy } = await openForgottenCopy('./data/forgotten.sqlite');
+   * const mem = await Memory.createSqlite('./data/agent-memory.sqlite', { forgotten: { copy } });
+   * await mem.markForgotten({ kind: 'user', id: userId });
+   * ```
+   */
+  forgotten?: ForgottenLedger | Omit<ForgottenLedgerOptions, 'primary'>;
 }
 
 // ---------------------------------------------------------------------------

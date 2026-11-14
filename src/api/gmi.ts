@@ -109,6 +109,7 @@ import type {
   LoopState,
 } from '../cognition/learning/types.js';
 import type { ICognitiveMemoryManager } from '../cognition/memory/CognitiveMemoryManager.js';
+import { sharedForgottenLedgerOf } from '../cognition/memory/suppression/learnerTombstones.js';
 import { normalizeHexacoTraits } from '../cognition/substrate/personas/hexaco.js';
 
 /** The options of {@link gmi}: the options of `agent()`. */
@@ -613,12 +614,15 @@ export function gmi(opts: GmiOptions): GmiHandle {
   let inProcessStore: InMemoryLearningStore | undefined;
   // One learning layer for the agent, only when its `learning` option is on. With it off nothing below builds or
   // passes anything of the layer, and the agent runs as it did before the layer existed.
+  // A souled agent hands the ledger of its memory store to the layer by the options object it was built from.
+  const forgotten = sharedForgottenLedgerOf(opts);
   const layer: LearningLayerHandle | undefined = cognition.learning
     ? createLearningLayer({
         ...(learningConfig ?? {}),
         profile: cognition.profile,
         surface: 'gmi',
         hostLoops: hostLoopsOf(cognition),
+        ...(forgotten ? { forgotten } : {}),
         // With memory.store, the learning store runs on the adapter of its Brain, opened on first use; a store passed
         // as learning.store wins.
         ...(memoryStore

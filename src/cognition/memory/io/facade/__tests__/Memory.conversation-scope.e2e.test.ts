@@ -56,7 +56,7 @@ afterEach(async () => {
     const brain = brainOf(memory);
     if (brain.features.dialect.name === 'postgres') {
       // The Postgres database outlives the test: remove this brain's rows, children before parents.
-      for (const table of ['memory_pages', 'memory_scopes', ...[...PORTABLE_TABLES].reverse()]) {
+      for (const table of ['memory_legacy_owner', 'memory_pages', 'memory_scopes', ...[...PORTABLE_TABLES].reverse()]) {
         await brain.run(`DELETE FROM ${table} WHERE brain_id = ?`, [brain.brainId]).catch(() => undefined);
       }
     }
@@ -1392,6 +1392,20 @@ describe.each(STORES)('scopes kept apart on every path, on %s', (store) => {
     expect((await memory.listScopes()).map((row) => [row.scopeId, row.compiledAt])).toEqual([[A, null]]);
   });
 
+  it('a JSON export carries the owner of older memory, and its import brings the owner back', async () => {
+    const source = await open(store);
+    await source.memory.remember('old shared words about a heron', { scope: 'persona', scopeId: 'aria-1' });
+    await source.memory.setLegacyOwner('aria-1', A);
+    const json = await source.memory.exportToString();
+    const { memory } = await open(store);
+
+    const result = await memory.importFromString(json, 'json');
+
+    expect(result.errors).toEqual([]);
+    // Without the owner, the older memory is withheld again, and a deletion of its owner would not reach it.
+    expect(await memory.legacyOwner('aria-1')).toBe(A);
+  });
+
   it("a JSON-imported message with the text of one of the brain's page chunks is stored as a trace of its own", async () => {
     const source = await open(store);
     await source.memory.remember('Alice likes tea.', { scope: 'conversation', scopeId: A });
@@ -1670,6 +1684,46 @@ describe.each(STORES)('scopes kept apart on every path, on %s', (store) => {
 
       expect(prompts).toHaveLength(2);
       expect(prompts[1]).toContain('Alice keeps a kestrel.');
+    });
+
+    /** A SQLite export of a brain whose older memory is attributed to alice. */
+    const exportedOwner = async (): Promise<string> => {
+      const { memory: source, dir } = await openWith({ selfImprove: false });
+      await source.remember('old shared words about a heron', { scope: 'persona', scopeId: 'aria-1' });
+      await source.setLegacyOwner('aria-1', A);
+      const file = path.join(dir, 'export.sqlite');
+      await source.export(file, { format: 'sqlite' });
+      return file;
+    };
+
+    it.each<[string, (memory: Memory, brain: Brain, file: string) => Promise<unknown>]>([
+      ['an import', (memory, _brain, file) => memory.importFrom(file, { format: 'sqlite' })],
+      ['a merge of the brain file', (_memory, brain, file) => brain.importFromSqlite(file, { strategy: 'merge' })],
+      ['a replace from the brain file', (_memory, brain, file) => brain.importFromSqlite(file, { strategy: 'replace' })],
+    ])('a SQLite export carries the owner of older memory, and %s brings the owner back', async (_case, bringIn) => {
+      const file = await exportedOwner();
+      const { memory, brain } = await openWith({ selfImprove: false });
+
+      await bringIn(memory, brain, file);
+
+      expect(await memory.legacyOwner('aria-1')).toBe(A);
+    });
+
+    it('a merge keeps the owner this brain records, and a replace keeps none the file lacks', async () => {
+      const file = await exportedOwner();
+      const kept = await openWith({ selfImprove: false });
+      await kept.memory.setLegacyOwner('aria-1', B);
+      await kept.memory.importFrom(file, { format: 'sqlite' });
+      // An attribution is never moved.
+      expect(await kept.memory.legacyOwner('aria-1')).toBe(B);
+
+      const { memory: bare, dir } = await openWith({ selfImprove: false });
+      const ownerless = path.join(dir, 'ownerless.sqlite');
+      await bare.export(ownerless, { format: 'sqlite' });
+      const replaced = await openWith({ selfImprove: false });
+      await replaced.memory.setLegacyOwner('aria-1', B);
+      await replaced.brain.importFromSqlite(ownerless, { strategy: 'replace' });
+      expect(await replaced.memory.legacyOwner('aria-1')).toBeUndefined();
     });
   }
 });
