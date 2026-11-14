@@ -118,7 +118,9 @@ export interface ITaskOutcomeTelemetryStore {
 export interface AgentOSOrchestratorConfig {
   maxToolCallIterations?: number;
   defaultAgentTurnTimeoutMs?: number;
+  /** initialize() defaults to true. AgentOS.create() keeps its factory's ENABLE_PERSISTENCE value unless the host sets this field. */
   enableConversationalPersistence?: boolean;
+  /** Unset or null means no profile. Pass DEFAULT_PROMPT_PROFILE_CONFIG to opt into the built-in profile set. */
   promptProfileConfig?: PromptProfileConfig | null;
   rollingSummaryCompactionConfig?: RollingSummaryCompactionConfig | null;
   rollingSummaryCompactionProfilesConfig?: RollingSummaryCompactionProfilesConfig | null;

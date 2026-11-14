@@ -59,6 +59,15 @@ export const AGENTOS_EVENTS = {
   'console_line': { method: { enum: ['debug', 'info', 'log', 'warn', 'error', 'trace', 'dir', 'table', 'assert', 'count', 'countReset', 'time', 'timeEnd', 'timeLog', 'group', 'groupCollapsed', 'groupEnd', 'clear', 'dirxml', 'profile', 'profileEnd', 'timeStamp'] }, type: 'word', code: 'word' },
   'process.uncaught': { type: 'word', code: 'word' },
   'process.shutdown': { signal: { enum: ['SIGTERM', 'SIGINT'] } },
+  // The full runtime finished initializing: whether a prompt profile is configured, whether conversational persistence
+  // is on and where that setting came from (the host's orchestrator config, the factory's ENABLE_PERSISTENCE, or the
+  // default), and whether the date tool is registered. Written once a runtime.
+  'runtime.defaults': {
+    promptProfile: { enum: ['none', 'host'] },
+    persistence: { enum: ['on', 'off'] },
+    persistenceFrom: { enum: ['host', 'environment', 'default'] },
+    dateTool: { enum: ['on', 'off'] },
+  },
   // A GMI turn's sentiment analysis failed (a provider error, or a reply that did not parse after its repair): the
   // error's listed type and code, never its message. The turn goes on without the analysis.
   'gmi.sentiment_failed': { type: 'word', code: 'word' },

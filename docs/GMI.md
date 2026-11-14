@@ -66,6 +66,36 @@ A request that names no `selectedPersonaId` uses the configuration's `defaultPer
 
 `AgentOS.shutdown()` shuts the manager down after the orchestrator. From then on `getOrCreateGMIForSession()` and the manager's other calls fail with `NOT_INITIALIZED`, and a call already in flight shuts down the GMI it built instead of registering it. Every active GMI is shut down at the same time, each within `gmiManagerConfig.shutdownTimeoutMs` (8000 ms by default); a GMI that has not finished by then is logged at warn and finishes on its own while the runtime shuts down its other components. A GMI's own `shutdown()` stops the turn it is running, as `session.close()` does: the turn's model call is aborted, the turn ends with the abort error, and the GMI's state stays `SHUTDOWN` after the turn ends. The GMI waits for the stopped turn within the same bound before it closes its memories. Calls to `shutdown()` that overlap (a second signal to the host, or a manager that shuts down while a session is deactivated) share one shutdown, so a GMI's memories are closed once.
 
+## What the full runtime adds to a request
+
+| Addition | Default | Setting |
+|---|---|---|
+| Prompt profile | None | `orchestratorConfig.promptProfileConfig`; pass `DEFAULT_PROMPT_PROFILE_CONFIG` from the package root to restore the built-in profile set |
+| Conversational persistence | `AgentOS.create` keeps the factory's `ENABLE_PERSISTENCE` value, true when unset; direct `initialize` defaults to true | `orchestratorConfig.enableConversationalPersistence`; an explicit host boolean wins |
+| Date tool | None | Add `createCurrentDateTimeTool()` from the package root to `tools` to offer `getCurrentDateTime` |
+| Capability discovery | The factory turns on turn planning with capability discovery, which can register its two meta-tools, `discover_capabilities` and `load_capability_extension` | `turnPlanning: { enabled: false }` turns off the planner and discovery; discovery settings can also be supplied under `turnPlanning.discovery` |
+| History summarisation | The prompt engine can summarise history with the runtime's utility AI when its history share is exceeded | `promptEngineConfig.historyManagement` |
+| Conversation context | The factory keeps 100 messages and enables automatic summarisation | `conversationManagerConfig.defaultConversationContextConfig` |
+| GMI history window | 20 messages without a persona override | `persona.conversationContextConfig.maxMessages` |
+
+`AgentOS.create` merges overrides one level deep. Its one persistence-field exception keeps the factory value when a host supplies an orchestrator object without that field. `new AgentOS().initialize(config)` does not consult the factory for this field; omission means true. Initialization emits one `runtime.defaults` event with the resolved profile, persistence, persistence source and date-tool state. It contains enums, not host text.
+
+With no profile config, the turn's `METADATA_UPDATE` chunk carries `updates.promptProfile: null`, as it does under `promptProfileConfig: null`. A client that reads `updates.promptProfile.presetId` checks for null first.
+
+To keep the previous profile and date tool explicitly:
+
+```ts
+import { AgentOS, DEFAULT_PROMPT_PROFILE_CONFIG, createCurrentDateTimeTool } from '@framers/agentos';
+
+const runtime = await AgentOS.create({
+  tools: [createCurrentDateTimeTool()],
+  orchestratorConfig: {
+    promptProfileConfig: DEFAULT_PROMPT_PROFILE_CONFIG,
+    enableConversationalPersistence: true,
+  },
+});
+```
+
 ## GMIs from agent()
 
 ```typescript

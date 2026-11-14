@@ -48,9 +48,6 @@ import { normalizeUsage, snapshotPersonaDetails } from '../../orchestration/turn
 import type { WorkflowProgressUpdate } from '../../orchestration/workflows/WorkflowTypes';
 // AIModelProviderManager — referenced via AgentOSOrchestratorDependencies
 import {
-  DEFAULT_PROMPT_PROFILE_CONFIG,
-} from '../structured/prompting/PromptProfileRouter';
-import {
   DEFAULT_ROLLING_SUMMARY_COMPACTION_CONFIG,
 } from '../../core/conversation/RollingSummaryCompactor';
 // IRollingSummaryMemorySink, RollingSummaryMemoryUpdate — now used by TurnExecutionPipeline
@@ -343,10 +340,8 @@ export class AgentOSOrchestrator {
       maxToolCallIterations: config.maxToolCallIterations ?? 5,
       defaultAgentTurnTimeoutMs: config.defaultAgentTurnTimeoutMs ?? 120000,
       enableConversationalPersistence: config.enableConversationalPersistence ?? true,
-      promptProfileConfig:
-        config.promptProfileConfig === null
-          ? null
-          : (config.promptProfileConfig ?? DEFAULT_PROMPT_PROFILE_CONFIG),
+      // No profile unless the host names one: DEFAULT_PROMPT_PROFILE_CONFIG is the built-in set, passed explicitly.
+      promptProfileConfig: config.promptProfileConfig ?? null,
       rollingSummaryCompactionConfig:
         config.rollingSummaryCompactionConfig === null
           ? null

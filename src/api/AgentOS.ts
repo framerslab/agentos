@@ -113,7 +113,7 @@ import {
 import { GMIError, GMIErrorCode } from '../core/utils/errors.js';
 import { uuidv4 } from '../core/utils/uuid.js';
 import { ILogger } from '../core/logging/ILogger';
-import { createLogger } from '../core/logging/loggerFactory';
+import { createLogger, moduleLogger } from '../core/logging/loggerFactory';
 import {
   configureAgentOSObservability,
   type AgentOSObservabilityConfig,
@@ -478,6 +478,9 @@ export interface AgentOSSpendMeterConfig {
   /** The units a request reserves. Default 1. */
   unitsOf?(input: AgentOSInput): number;
 }
+
+/** Writes the one `runtime.defaults` event a runtime's initialization ends with. */
+const runtimeDefaultsLog = moduleLogger('AgentOS', 'library');
 
 /** The error code a refused reservation answers with. */
 const SPEND_DENIAL_CODE: Record<SpendDenyReason, GMIErrorCode> = {
@@ -940,6 +943,8 @@ export class AgentOS implements IAgentOS {
 
   private subscriptionService?: ISubscriptionService;
   private prisma!: PrismaClient;
+  /** Where `AgentOS.create()` took the persistence setting from; unset on a direct `initialize()`. */
+  private persistenceFrom?: 'host' | 'environment' | 'default';
 
   /**
    * Constructs an `AgentOS` instance. The instance is not operational until
@@ -953,10 +958,11 @@ export class AgentOS implements IAgentOS {
    *
    * The factory uses {@link createAgentOSConfig} under the hood, which reads
    * from the standard environment (`DATABASE_URL`, provider API keys, etc.)
-   * and wires up sane defaults for every sub-system. Any fields passed in
-   * `overrides` are deep-merged onto the generated config so callers can
-   * tweak observability, memoryTools, etc. without rebuilding the whole
-   * config object themselves. Provenance is an extension pack
+   * and wires up sane defaults for every sub-system. Overrides replace
+   * generated fields one level deep. When the host's `orchestratorConfig`
+   * omits `enableConversationalPersistence`, that field keeps the generated
+   * value from `ENABLE_PERSISTENCE` (`true` when unset). An explicit host
+   * value wins. Other nested objects are not deep-merged. Provenance is an extension pack
    * (`createProvenancePack()` in `extensionManifest`), not a config key.
    *
    * A persona that names no provider or model runs on the default provider
@@ -972,8 +978,11 @@ export class AgentOS implements IAgentOS {
    * For fine-grained control, fall back to `new AgentOS()` +
    * `initialize(yourConfig)`.
    *
-   * @param overrides - Optional partial `AgentOSConfig` whose fields are
-   *   shallow-merged onto the auto-generated config. Pass `tools` /
+   * @param overrides - Optional partial `AgentOSConfig`. Overrides replace
+   *   generated fields one level deep. When the host's `orchestratorConfig`
+   *   omits `enableConversationalPersistence`, that field keeps the generated
+   *   value from `ENABLE_PERSISTENCE` (`true` when unset). An explicit host
+   *   value wins. Other nested objects are not deep-merged. Pass `tools` /
    *   `externalTools` here to register them at construction time. Pass
    *   `observability`, `memoryTools`, etc. to opt into subsystems without
    *   touching the rest of the defaults.
@@ -1004,6 +1013,13 @@ export class AgentOS implements IAgentOS {
     const { tools, externalTools, ...configOverrides } = overrides;
     const baseConfig = await createAgentOSConfig({ tools, externalTools } as Parameters<typeof createAgentOSConfig>[0]);
     const mergedConfig = { ...baseConfig, ...configOverrides } as AgentOSConfig;
+    // The one field merged a level deeper: a host orchestrator config without a persistence setting keeps the
+    // factory's, which reads ENABLE_PERSISTENCE.
+    mergedConfig.orchestratorConfig = {
+      ...mergedConfig.orchestratorConfig,
+      enableConversationalPersistence: configOverrides.orchestratorConfig?.enableConversationalPersistence
+        ?? baseConfig.orchestratorConfig.enableConversationalPersistence,
+    };
     // The factory's GMI default names the default provider of the environment's providers. With providers of the
     // host's own, a GMI default left as the factory set it (the host's gmiManagerConfig absent, or spread from a
     // factory-built config) would name a provider the runtime may not have, so it is taken from the providers given.
@@ -1017,6 +1033,9 @@ export class AgentOS implements IAgentOS {
       };
     }
     const instance = new AgentOS(logger);
+    instance.persistenceFrom = configOverrides.orchestratorConfig?.enableConversationalPersistence !== undefined
+      ? 'host'
+      : process.env.ENABLE_PERSISTENCE ? 'environment' : 'default';
     await instance.initialize(mergedConfig);
     return instance;
   }
@@ -1464,6 +1483,13 @@ export class AgentOS implements IAgentOS {
     }
 
     this.initialized = true;
+    runtimeDefaultsLog.info('runtime.defaults', {
+      promptProfile: this.config.orchestratorConfig.promptProfileConfig == null ? 'none' : 'host',
+      persistence: (this.config.orchestratorConfig.enableConversationalPersistence ?? true) ? 'on' : 'off',
+      persistenceFrom: this.persistenceFrom
+        ?? (this.config.orchestratorConfig.enableConversationalPersistence !== undefined ? 'host' : 'default'),
+      dateTool: this.toolExecutor.getTool('getCurrentDateTime') ? 'on' : 'off',
+    });
     this.logger.info('AgentOS initialization complete');
   }
 
