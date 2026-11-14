@@ -96,8 +96,10 @@ export interface SimilarityOptions {
 // --- Sentiment Analysis Types ---
 export interface SentimentAnalysisOptions {
   /**
-   * Read by HybridUtilityAI alone, which sends `'llm'` to its LLM-backed class and `'lexicon_based'` to its
-   * statistical class. LLMUtilityAI asks a provider and StatisticalUtilityAI scores with a lexicon, whatever it names.
+   * Unset, the utility class chooses its normal method: LLMUtilityAI asks the model;
+   * StatisticalUtilityAI and HybridUtilityAI use a lexicon. Explicit `lexicon_based`
+   * uses a statistical lexicon on every class, with no sentiment model call.
+   * Other methods keep the utility class's existing routing.
    */
   method?: 'lexicon_based' | 'llm' | 'trained_classifier' | string;
   modelId?: string; // LLMUtilityAI's, else its sentimentModelId, else its defaultModelId
