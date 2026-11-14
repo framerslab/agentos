@@ -106,12 +106,35 @@ export function agentStableIdOf(opts: Partial<AgentOptions>, soul: LoadedSoul | 
  *
  * @param soul - The soul loaded from `opts.soul`, or `null` for none.
  */
-function basePrompt(opts: AgentOptions, leaveOutPersonality: boolean, soul: LoadedSoul | null): string {
-  const prompt = opts.systemBlocks
-    ? opts.systemBlocks.map((block) => block.text).filter(Boolean).join('\n\n')
-    : (buildSystemPrompt(opts, soul, leaveOutPersonality ? { personality: false } : undefined) ?? '');
-  // The static line that explains the recall block is the base prompt's last line, so it renders before the limits.
-  return opts.memoryProvider?.getContext ? [prompt, MEMORY_RECALL_SYSTEM_LINE].filter(Boolean).join('\n\n') : prompt;
+function basePrompt(
+  opts: AgentOptions,
+  leaveOutPersonality: boolean,
+  soul: LoadedSoul | null,
+): IPersonaDefinition['baseSystemPrompt'] {
+  const recalls = Boolean(opts.memoryProvider?.getContext);
+  if (!opts.systemBlocks) {
+    const prompt = buildSystemPrompt(opts, soul, leaveOutPersonality ? { personality: false } : undefined) ?? '';
+    // The static line that explains the recall block is the base prompt's last line, so it renders before the limits.
+    return recalls ? [prompt, MEMORY_RECALL_SYSTEM_LINE].filter(Boolean).join('\n\n') : prompt;
+  }
+  const blocks = opts.systemBlocks.filter((block) => Boolean(block.text));
+  let breakpoint = -1;
+  blocks.forEach((block, index) => {
+    if (block.cacheBreakpoint) breakpoint = index;
+  });
+  // Blocks through the last breakpoint are fixed and the ones after it change per turn. With no block after a
+  // breakpoint (or no breakpoint) every block is fixed, and the joined text is the base prompt as one string.
+  if (breakpoint < 0 || breakpoint === blocks.length - 1) {
+    const prompt = blocks.map((block) => block.text).join('\n\n');
+    return recalls ? [prompt, MEMORY_RECALL_SYSTEM_LINE].filter(Boolean).join('\n\n') : prompt;
+  }
+  const entries: Array<{ content: string; priority: number; stability: 'persona' | 'turn' }> = blocks.map((block, index) => ({
+    content: block.text,
+    priority: 1,
+    stability: index <= breakpoint ? 'persona' : 'turn',
+  }));
+  if (recalls) entries.push({ content: MEMORY_RECALL_SYSTEM_LINE, priority: 1, stability: 'persona' });
+  return entries;
 }
 
 /**

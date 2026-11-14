@@ -54,6 +54,7 @@ import { IPromptEngine, PromptExecutionContext, PromptComponents, PromptEngineRe
 import { IRetrievalAugmentor, RagRetrievalOptions, RagDocumentInput, RagIngestionOptions, RagMemoryCategory } from '../rag/IRetrievalAugmentor';
 
 import { ChatMessage, IProvider, ModelCompletionOptions, ModelCompletionResponse, ModelUsage, ThinkingBlock } from '../../core/llm/providers/IProvider';
+import { resolveCacheCapabilities } from '../../core/llm/providers/model-cache-capabilities';
 import type { ZodType } from 'zod';
 import type { CompletionAttempt, CompletionOutcome, CompletionResolution, CompletionRoute } from '../../api/runtime/completionGateway.js';
 import { checkStructuredReply, resolveStructuredReply, structuredRepairMessage, StructuredReplyConfigError, type StructuredReplyOutput } from '../../api/runtime/structuredReply.js';
@@ -127,6 +128,48 @@ function withSystemMessage(messages: ChatMessage[], text: string): ChatMessage[]
   let at = 0;
   while (at < messages.length && messages[at].role === 'system') at += 1;
   return [...messages.slice(0, at), { role: 'system', content: text }, ...messages.slice(at)];
+}
+
+/**
+ * The cache marker a model hop asks the prompt engine to put on the fixed system entries, or undefined for none.
+ * Only an Anthropic-family target gets one (the `anthropic` provider, or OpenRouter with an `anthropic/` model), and
+ * only when the call leaves prompt caching on: not with `cache: false`, not when `customModelParams` overrides
+ * `system`, `messages`, `tools` or `cache_control` (the host then owns those regions), not with
+ * `AGENTOS_ANTHROPIC_AUTO_CACHE` set to `0` or `false`, and not for a model without prompt caching. A nonempty
+ * `customModelParams.model` is the model checked, as the provider sends it.
+ *
+ * @param target - The hop's model and provider.
+ * @param options - The call's completion options.
+ * @returns `{ ttl: '1h' }` with `cache: { ttl: '1h' }`, `{}` for the default lifetime, or undefined.
+ */
+function systemCacheMarkerFor(
+  target: Readonly<ModelTargetInfo>,
+  options: ModelCompletionOptions,
+): PromptComponents['systemCacheMarker'] {
+  const family = target.providerId === 'anthropic'
+    || (target.providerId === 'openrouter' && typeof target.modelId === 'string' && target.modelId.startsWith('anthropic/'));
+  // Every other provider returns here, before anything reads the environment: a GMI hop in a runtime with no
+  // `process` global must not throw.
+  if (!family) return undefined;
+  const custom = options.customModelParams;
+  const override = custom !== undefined && custom !== null && ['system', 'messages', 'tools', 'cache_control'].some((key) =>
+    Object.prototype.hasOwnProperty.call(custom, key),
+  );
+  const autoCache = typeof process !== 'undefined' ? process.env?.AGENTOS_ANTHROPIC_AUTO_CACHE : undefined;
+  const disabled = autoCache === '0' || autoCache === 'false';
+  const customModel = custom?.model;
+  const modelId = typeof customModel === 'string' && customModel.length > 0 ? customModel : target.modelId;
+  if (options.cache === false || override || disabled || !resolveCacheCapabilities(modelId).supportsPromptCaching) return undefined;
+  return typeof options.cache === 'object' && options.cache.ttl === '1h' ? { ttl: '1h' } : {};
+}
+
+/** How many `cache_control` markers `value` holds, at any depth. */
+function countCacheMarkers(value: unknown): number {
+  if (!value || typeof value !== 'object') return 0;
+  return Object.entries(value).reduce(
+    (count, [key, nested]) => count + (key === 'cache_control' ? 1 : countCacheMarkers(nested)),
+    0,
+  );
 }
 
 /** `value` when it is an abort signal: an object that takes abort listeners. */
@@ -1805,18 +1848,30 @@ export class GMI implements IGMI {
         }
 
         const promptExecContext = this.buildPromptExecutionContext();
-        const baseSystemPrompts = Array.isArray(this.activePersona.baseSystemPrompt)
-            ? this.activePersona.baseSystemPrompt
-            : typeof this.activePersona.baseSystemPrompt === 'object' && 'template' in this.activePersona.baseSystemPrompt
-                ? [{ content: this.activePersona.baseSystemPrompt.template, priority: 1}]
-                : typeof this.activePersona.baseSystemPrompt === 'string'
-                    ? [{ content: this.activePersona.baseSystemPrompt, priority: 1}]
+        // Each entry says how long its text stays the same, so that the leading fixed entries can go out as a cached
+        // first block (see systemCacheMarkerFor): the persona's base prompt is fixed unless a list entry says
+        // otherwise, the GMI's own personality section is fixed and a learner's holds for the conversation. What a turn
+        // adds below (summary, prompt profile, discovery and skill context, a structured reply's instruction) is a turn
+        // entry; the hard limits are fixed.
+        const base = this.activePersona.baseSystemPrompt;
+        const baseSystemPrompts: NonNullable<PromptComponents['systemPrompts']> = Array.isArray(base)
+            ? base.map((entry) => ({ ...entry, stability: entry.stability ?? ('persona' as const) }))
+            : typeof base === 'object' && 'template' in base
+                ? [{ content: base.template, priority: 1, stability: 'persona' as const }]
+                : typeof base === 'string'
+                    ? [{ content: base, priority: 1, stability: 'persona' as const }]
                     : [];
 
         // The personality section sorts after a string or template base prompt (priority 2 after priority 1); the
         // entries of a list keep their own priorities. With no learner session and no persona traits passed there is
         // none, and the prompt is the one sent before.
-        const systemPrompts = [...baseSystemPrompts, ...turnLearning.systemPrompts];
+        const systemPrompts: NonNullable<PromptComponents['systemPrompts']> = [
+          ...baseSystemPrompts,
+          ...turnLearning.systemPrompts.map((entry) => ({
+            ...entry,
+            stability: entry.source === 'gmi:personality' ? ('persona' as const) : ('conversation' as const),
+          })),
+        ];
         const rollingSummaryText = typeof turnInput.metadata?.rollingSummary?.text === 'string'
           ? turnInput.metadata.rollingSummary.text.trim()
           : '';
@@ -1824,6 +1879,7 @@ export class GMI implements IGMI {
           systemPrompts.push({
             content: `Rolling Memory Summary (compressed)\n${rollingSummaryText}`,
             priority: 50,
+            stability: 'turn',
           });
         }
         const promptProfileInstructions = typeof turnInput.metadata?.promptProfile?.systemInstructions === 'string'
@@ -1833,6 +1889,7 @@ export class GMI implements IGMI {
           systemPrompts.push({
             content: promptProfileInstructions,
             priority: 60,
+            stability: 'turn',
           });
         }
         const discoveryPromptContext =
@@ -1843,6 +1900,7 @@ export class GMI implements IGMI {
           systemPrompts.push({
             content: `Capability Discovery Context\n${discoveryPromptContext}`,
             priority: 55,
+            stability: 'turn',
           });
         }
         const skillPromptContext =
@@ -1853,15 +1911,16 @@ export class GMI implements IGMI {
           systemPrompts.push({
             content: skillPromptContext,
             priority: 57,
+            stability: 'turn',
           });
         }
         if (structuredReply) {
-          systemPrompts.push({ content: structuredReply.instruction, priority: 900 });
+          systemPrompts.push({ content: structuredReply.instruction, priority: 900, stability: 'turn' });
         }
         // the persona's hard limits close the system prompt, after everything the turn added above
         const hardLimits = hardLimitsBlock(this.activePersona.hardLimits);
         if (hardLimits) {
-          systemPrompts.push({ content: hardLimits, priority: HARD_LIMITS_PRIORITY });
+          systemPrompts.push({ content: hardLimits, priority: HARD_LIMITS_PRIORITY, stability: 'persona' });
         }
 
         const promptConversation = this.buildPromptConversation({
@@ -2077,8 +2136,11 @@ export class GMI implements IGMI {
           // An engine that reads `memoryContextText` takes the block on its own; any other (a host's own IPromptEngine)
           // takes it joined in front of the other retrieved context, as before the field existed, so it is still sent.
           const hopMemoryText = hopMemoryContext?.contextText;
+          // Asked per hop: a fallback hop to another provider or model rebuilds the prompt for its own target.
+          const systemCacheMarker = systemCacheMarkerFor(modelTargetInfo, llmOptions);
           const hopComponents: PromptComponents = {
             ...promptComponents,
+            ...(systemCacheMarker ? { systemCacheMarker } : {}),
             ...(hopMemoryText
               ? this.promptEngine.acceptsMemoryContextText === true
                 ? { memoryContextText: hopMemoryText }
@@ -2156,6 +2218,14 @@ export class GMI implements IGMI {
             }
           }
 
+          // The text part of the fixed first system block that carries this GMI's cache marker, when the prompt has
+          // one. The hook gets a copy of the message list, not of the messages, so a hook that keeps the block keeps
+          // this very part, and the GMI can tell its own marker from the host's after the hook.
+          const firstSystemContent = promptForHook.find((message) => message.role === 'system')?.content;
+          const markedSystemPart = promptEngineResult.metadata?.systemSplit?.marked === true && Array.isArray(firstSystemContent)
+            ? firstSystemContent.find((part) => 'cache_control' in part && part.cache_control !== undefined)
+            : undefined;
+
           // The host's hook sees each attempt's prompt, a fallback hop's rebuilt one
           // included, and may replace it for that attempt; the history is untouched.
           let sendMessages: ChatMessage[] = promptForHook;
@@ -2183,6 +2253,28 @@ export class GMI implements IGMI {
             } catch (hookError) {
               this.addTraceEntry(ReasoningEntryType.WARNING, `beforeModelCall hook failed: ${hookError instanceof Error ? hookError.message : String(hookError)}`);
             }
+          }
+          // Anthropic takes at most four cache markers a request. When the hook's messages carry more and one of them
+          // is the GMI's own (the hook kept the fixed block), the GMI removes that one and leaves the host's markers as
+          // they are. It adds no marker to messages the hook built itself.
+          if (
+            markedSystemPart
+            && countCacheMarkers(sendMessages) > 4
+            && sendMessages.some((message) => Array.isArray(message.content) && message.content.includes(markedSystemPart))
+          ) {
+            sendMessages = sendMessages.map((message) => !Array.isArray(message.content) ? message : ({
+              ...message,
+              content: message.content.map((part) => {
+                if (part !== markedSystemPart) return part;
+                const unmarked: Record<string, unknown> = { ...part };
+                delete unmarked.cache_control;
+                return unmarked as typeof part;
+              }),
+            }));
+            this.addTraceEntry(
+              ReasoningEntryType.WARNING,
+              'Dropped the GMI system cache marker because the hook supplied more than four markers.',
+            );
           }
 
           let attempt: AsyncIterable<ModelCompletionResponse>;
