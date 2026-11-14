@@ -71,7 +71,7 @@ A request that names no `selectedPersonaId` uses the configuration's `defaultPer
 | Addition | Default | Setting |
 |---|---|---|
 | Prompt profile | None | `orchestratorConfig.promptProfileConfig`; pass `DEFAULT_PROMPT_PROFILE_CONFIG` from the package root to restore the built-in profile set |
-| Conversational persistence | `AgentOS.create` keeps the factory's `ENABLE_PERSISTENCE` value, true when unset; direct `initialize` defaults to true | `orchestratorConfig.enableConversationalPersistence`; an explicit host boolean wins |
+| Conversational persistence | `AgentOS.create` keeps the factory's `ENABLE_PERSISTENCE` value: on when the variable is unset, empty or exactly `true`, off for any other value; direct `initialize` defaults to true | `orchestratorConfig.enableConversationalPersistence`; an explicit host boolean wins |
 | Date tool | None | Add `createCurrentDateTimeTool()` from the package root to `tools` to offer `getCurrentDateTime` |
 | Capability discovery | The factory turns on turn planning with capability discovery, which can register its two meta-tools, `discover_capabilities` and `load_capability_extension` | `turnPlanning: { enabled: false }` turns off the planner and discovery; discovery settings can also be supplied under `turnPlanning.discovery` |
 | History summarisation | The prompt engine can summarise history with the runtime's utility AI when its history share is exceeded | `promptEngineConfig.historyManagement` |
