@@ -20,12 +20,14 @@
  *   "conversations": [...],
  *   "messages": [...],
  *   "scopes": [...],
- *   "pages": [...]
+ *   "pages": [...],
+ *   "legacyOwners": [...]
  * }
  * ```
  *
- * `scopes` holds the brain's registry of conversation scopes (`memory_scopes`, each with its compile watermark) and
- * `pages` each subject's wiki pages (`memory_pages`, each listing the ids of its chunks among `traces`).
+ * `scopes` holds the brain's registry of conversation scopes (`memory_scopes`, each with its compile watermark),
+ * `pages` each subject's wiki pages (`memory_pages`, each listing the ids of its chunks among `traces`), and
+ * `legacyOwners` the user each agent's memory from before per-user scope is attributed to (`memory_legacy_owner`).
  *
  * A Brain a learning layer serves writes its record of the encoded scope-id
  * form into `meta` (`scope_id_form`), which an import reads as the export's
@@ -140,10 +142,10 @@ interface MessageRow {
   metadata: string;
 }
 
-/** A registry or page row with its times as numbers: a BIGINT column can come back as text (Postgres). */
+/** A registry, page or owner row with its times as numbers: a BIGINT column can come back as text (Postgres). */
 function numericTimes(row: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = { ...row };
-  for (const column of ['created_at', 'compiled_at', 'updated_at']) {
+  for (const column of ['created_at', 'compiled_at', 'updated_at', 'attributed_at']) {
     const value = out[column];
     if (typeof value === 'string' && value !== '') out[column] = Number(value);
   }
@@ -283,6 +285,14 @@ export class JsonExporter {
       [brainId],
     );
 
+    // ---- memory_legacy_owner ----
+    // The owner of each agent's older memory: without it an import withholds that memory again, and a deletion of the
+    // owner would not reach it.
+    const legacyOwners = await source.all<Record<string, unknown>>(
+      'SELECT agent_id, owner_key, attributed_at FROM memory_legacy_owner WHERE brain_id = ?',
+      [brainId],
+    );
+
     return {
       meta,
       traces,
@@ -295,6 +305,7 @@ export class JsonExporter {
       messages,
       scopes: scopes.map(numericTimes),
       pages: pages.map(numericTimes),
+      legacyOwners: legacyOwners.map(numericTimes),
     };
   }
 
