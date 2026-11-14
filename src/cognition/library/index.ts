@@ -1,14 +1,38 @@
 /**
  * @fileoverview The library module: an index of sources over any vector store, a transcript's chunker, the word
- * rule of the lexical legs with a search hit's snippet, a lexical index and a fuzzy index a device can hold, readers
- * of transcript files from other notetakers, the plan of an archive's entries, readers of an HTML page and a CSV file
- * into Markdown, the delivery policy of results derived from private sources, and their durable store with deletion
- * fences on PostgreSQL.
+ * rule of the lexical legs with a search hit's snippet, the tag grammar with its vocabulary, a lexical index and a
+ * fuzzy index a device can hold, readers of transcript files from other notetakers, the plan of an archive's entries,
+ * readers of an HTML page and a CSV file into Markdown, the delivery policy of results derived from private sources,
+ * and their durable store with deletion fences on PostgreSQL.
  * @module agentos/cognition/library
  */
 
 export { countWords, foldText, lexicalTokens, snippetAround, type FoldedText, type Snippet } from './tokens.js';
 export { chunkTurns, type ChunkTurnsOptions, type LibraryTurn, type TurnChunk } from './chunkTurns.js';
+// The tag grammar: one spelling for each key, a label stored before it read without loss, the vocabulary with each
+// key's own spelling, a candidate resolved against it, and rename and merge by key. Pure, and reaches the word rule
+// and the fuzzy index alone.
+export {
+  TAG_MAX_CHARS,
+  TAGS_MAX,
+  TAG_SUGGESTIONS_MAX,
+  isTag,
+  normalizeTag,
+  tagKey,
+  canonicalTag,
+  classifyLegacyTag,
+  compareCodePoints,
+  tagKeysOf,
+  tagVocabulary,
+  preferredTagOrder,
+  resolveTag,
+  renameTag,
+  mergeTags,
+  type LegacyTagClass,
+  type TagDocument,
+  type TagUse,
+  type TagResolution,
+} from './tags.js';
 export {
   LibraryCursorError,
   LibraryIndex,

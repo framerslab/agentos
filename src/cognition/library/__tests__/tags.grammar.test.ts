@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { canonicalTag, classifyLegacyTag, compareCodePoints, isTag, normalizeTag, resolveTag, tagKey, tagKeysOf, tagVocabulary, type TagDocument, type TagUse } from '../tags.js';
 
 const doc = (id: string, kind: TagDocument['kind'], tags: string[], changedAt: number | null): TagDocument => ({ id, kind, title: id, text: '', keywords: [], tags, changedAt });
-const use = (tag: string, uses: number, lastUsed: number | null): TagUse => ({ tag, uses, notes: uses, sessions: 0, lastUsed });
+const use = (tag: string, uses: number, lastUsed: number | null): TagUse => ({ tag, label: tag, uses, notes: uses, sessions: 0, documents: 0, lastUsed });
 
 describe('the tag grammar (U1)', () => {
   it('makes typing a tag with one spelling per key, and refuses rather than cuts', () => {
@@ -28,7 +28,7 @@ describe('the tag grammar (U1)', () => {
   it('keeps every key a tag, in NFC where joining the runs composes a Hangul syllable', () => {
     expect(canonicalTag('\uAC00 \u11A8')).toBe('\uAC01');
     expect(canonicalTag('\u1100-\u1161')).toBe('\uAC00');
-    expect(resolveTag('\uAC00 \u11A8', [use('\uAC01', 1, 1)])).toEqual({ kind: 'existing', tag: '\uAC01', via: 'key', from: '\uAC00 \u11A8' });
+    expect(resolveTag('\uAC00 \u11A8', [use('\uAC01', 1, 1)])).toEqual({ kind: 'existing', tag: '\uAC01', label: '\uAC01', via: 'key', from: '\uAC00 \u11A8' });
     for (const typed of ['Q3 Planning!', '\uFF22udget', 'Cafe\u0301', '\u0915\u093F\u0924\u093E\u092C', '\uAC00 \u11A8', '\u1100-\u1161']) expect(isTag(canonicalTag(typed) ?? ''), typed).toBe(true);
   });
 
@@ -103,15 +103,15 @@ describe('tagVocabulary', () => {
         doc('d', 'note', [], null),
       ]),
     ).toEqual([
-      { tag: 'budget', uses: 2, notes: 2, sessions: 0, lastUsed: 30 },
-      { tag: 'q3planning', uses: 2, notes: 1, sessions: 1, lastUsed: 20 },
-      { tag: 'roadmap', uses: 1, notes: 0, sessions: 1, lastUsed: 20 },
+      { tag: 'budget', label: 'budget', uses: 2, notes: 2, sessions: 0, documents: 0, lastUsed: 30 },
+      { tag: 'q3planning', label: 'q3planning', uses: 2, notes: 1, sessions: 1, documents: 0, lastUsed: 20 },
+      { tag: 'roadmap', label: 'roadmap', uses: 1, notes: 0, sessions: 1, documents: 0, lastUsed: 20 },
     ]);
   });
 
   it('counts an alias under its key and leaves out a label the legacy classification keeps unresolved', () => {
     expect(tagKeysOf({ tags: ['Budget', 'q3-planning', 'C++', 'budget', 'q3 Planning'] })).toEqual(['budget', 'q3planning']);
-    expect(tagVocabulary([doc('a', 'note', ['C++', 'C#'], 10), doc('b', 'note', ['c'], 20)])).toEqual([{ tag: 'c', uses: 1, notes: 1, sessions: 0, lastUsed: 20 }]);
+    expect(tagVocabulary([doc('a', 'note', ['C++', 'C#'], 10), doc('b', 'note', ['c'], 20)])).toEqual([{ tag: 'c', label: 'c', uses: 1, notes: 1, sessions: 0, documents: 0, lastUsed: 20 }]);
   });
 });
 
@@ -119,8 +119,8 @@ describe('resolveTag (A2)', () => {
   const vocabulary = [use('roadmap', 5, 100), use('q3', 3, 50), use('budget', 9, 10), use('2025budget', 1, 1), use('会議', 4, 1), use('plan', 1, 1)];
 
   it('resolves by key whatever the spelling, hyphenated or spaced', () => {
-    expect(resolveTag('Q3', vocabulary)).toEqual({ kind: 'existing', tag: 'q3', via: 'key', from: 'Q3' });
-    expect(resolveTag('road-map', vocabulary)).toEqual({ kind: 'existing', tag: 'roadmap', via: 'key', from: 'road-map' });
+    expect(resolveTag('Q3', vocabulary)).toEqual({ kind: 'existing', tag: 'q3', label: 'q3', via: 'key', from: 'Q3' });
+    expect(resolveTag('road-map', vocabulary)).toEqual({ kind: 'existing', tag: 'roadmap', label: 'roadmap', via: 'key', from: 'road-map' });
     expect(resolveTag('Road map', vocabulary)).toMatchObject({ kind: 'existing', tag: 'roadmap', via: 'key' });
   });
 
@@ -131,10 +131,10 @@ describe('resolveTag (A2)', () => {
 
   it('resolves one edit away only for keys of five code points or more, with the same digits, in a spaced script', () => {
     expect(resolveTag('budgte', vocabulary)).toMatchObject({ kind: 'existing', tag: 'budget', via: 'edit' });
-    expect(resolveTag('q4', vocabulary)).toEqual({ kind: 'new', tag: 'q4', from: 'q4' });
-    expect(resolveTag('2026budget', vocabulary)).toEqual({ kind: 'new', tag: '2026budget', from: '2026budget' });
-    expect(resolveTag('play', vocabulary)).toEqual({ kind: 'new', tag: 'play', from: 'play' });
-    expect(resolveTag('会义', vocabulary)).toEqual({ kind: 'new', tag: '会义', from: '会义' });
+    expect(resolveTag('q4', vocabulary)).toEqual({ kind: 'new', tag: 'q4', label: 'q4', from: 'q4' });
+    expect(resolveTag('2026budget', vocabulary)).toEqual({ kind: 'new', tag: '2026budget', label: '2026budget', from: '2026budget' });
+    expect(resolveTag('play', vocabulary)).toEqual({ kind: 'new', tag: 'play', label: 'play', from: 'play' });
+    expect(resolveTag('会义', vocabulary)).toEqual({ kind: 'new', tag: '会义', label: '会义', from: '会义' });
     expect(resolveTag('!!!', vocabulary)).toBeNull();
   });
 
