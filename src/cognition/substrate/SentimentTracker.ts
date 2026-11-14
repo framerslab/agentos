@@ -205,7 +205,8 @@ export class SentimentTracker {
    * moment the writes begin, before the store has saved it. A store write cannot be cancelled: when the user
    * context write lands once the result may not be applied, the GMI's current context is saved over it; when the
    * history write lands then, the analysis takes it back, and every later history write leaves that turn's trend
-   * out. A forget that ended while the history was read or written has its scrub run again once the write lands.
+   * out. A forget that ended while the history was read or written has its scrub run again once the write lands,
+   * and every history write clears the excerpts of the turns the GMI does not hold.
    * A failure is logged as one `gmi.sentiment_failed` event with the error's type and code and a trace warning;
    * it never fails the turn. A take-back that fails is logged as one `gmi.sentiment_take_back_failed` event, and so
    * is a scrub run again after a forget that fails once a newer forget dropped the turn.
@@ -324,9 +325,10 @@ export class SentimentTracker {
         return;
       }
       // The history read may hold a dropped turn's write that its take-back has not replaced yet: its trend stays out,
-      // and its counters with it. A turn analysed again keeps its new trend.
+      // and its counters with it. A turn analysed again keeps its new trend. It may also hold the excerpt of a turn a
+      // forget dropped before a scrub cleared it from the store: that excerpt stays out too.
       this.droppedTurns.delete(turnId);
-      sentimentHistory = this.withoutDroppedTurns(sentimentHistory, stConfig);
+      sentimentHistory = this.withoutDroppedTurns(this.withHeldExcerpts(sentimentHistory), stConfig);
       const writer = {};
       const before = this.standing;
       this.standing = { history: sentimentHistory, writer };
@@ -425,11 +427,7 @@ export class SentimentTracker {
     const latest = this.standing;
     const base = latest && latest.writer !== writer ? latest.history : before ? before.history : read;
     const forgets = this.forgets;
-    const restored = base && this.withoutDroppedTurns({
-      ...base,
-      trends: base.trends
-        .map((trend) => (!trend.context || this.holdsTurn(trend.turnId) ? trend : { ...trend, context: '' })),
-    });
+    const restored = base && this.withoutDroppedTurns(this.withHeldExcerpts(base));
     this.standing = { history: restored };
     if (restored) await this.workingMemory.set('gmi_sentiment_history', restored);
     else await this.workingMemory.delete('gmi_sentiment_history');
@@ -467,6 +465,19 @@ export class SentimentTracker {
     });
     this.standing = { history: scrubbed };
     await this.workingMemory.set('gmi_sentiment_history', scrubbed);
+  }
+
+  /**
+   * `history` with the `context` of each trend whose turn the GMI does not hold cleared.
+   *
+   * @param history - The history a write is about to hold.
+   */
+  private withHeldExcerpts(history: SentimentHistoryState): SentimentHistoryState {
+    if (!history.trends.some((trend) => trend.context && !this.holdsTurn(trend.turnId))) return history;
+    return {
+      ...history,
+      trends: history.trends.map((trend) => (!trend.context || this.holdsTurn(trend.turnId) ? trend : { ...trend, context: '' })),
+    };
   }
 
   /**

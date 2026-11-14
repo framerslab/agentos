@@ -1475,7 +1475,7 @@ describe('GMI sentiment writes that land after their turn dropped them', () => {
     let releaseContext: (() => void) | undefined;
     let skipHistory = 0;
     let holdHistory = 0;
-    const releases: Array<() => void> = [];
+    const releases: Array<{ turn: unknown; release: () => void }> = [];
     // The host store applies writes in call order. It can hold the first negative user-context write, and, after
     // letting `skipHistory` sentiment history writes through, the next `holdHistory` ones.
     wm.set.mockImplementation((key: string, value: any) => {
@@ -1485,7 +1485,9 @@ describe('GMI sentiment writes that land after their turn dropped them', () => {
       if (key === 'gmi_sentiment_history' && holdHistory > 0) {
         if (skipHistory > 0) { skipHistory -= 1; return write(key, value); }
         holdHistory -= 1;
-        return new Promise<void>((resolve) => { releases.push(() => { void write(key, value); resolve(); }); });
+        return new Promise<void>((resolve) => {
+          releases.push({ turn: value?.lastAnalyzedTurnId, release: () => { void write(key, value); resolve(); } });
+        });
       }
       return write(key, value);
     });
@@ -1504,25 +1506,27 @@ describe('GMI sentiment writes that land after their turn dropped them', () => {
       await vi.waitFor(() => expect(JSON.stringify(wm._store.get('gmi_sentiment_history'))).not.toContain('1234'),
         { timeout: 500, interval: 10 });
       await settle();
-      // A's history write lands with the excerpt it read; the scrub that runs again, and the next write, are held.
+      // A's history write lands with what it read. The history writes after it are held: a scrub run again for the
+      // excerpt it brought back, then turn B's write.
       skipHistory = 1;
       holdHistory = 2;
       releaseContext!();
-      await vi.waitFor(() => expect(releases, "turn A's second scrub is held").toHaveLength(1), { timeout: 500, interval: 10 });
       await turnA;
-      // Turn B reads the store before that scrub lands; its write is called after it, so it lands after it.
+      // Turn B reads the store before any held write lands; its write is called after them, so it lands after them.
       turnB = drainTurn(gmi, 'b', 'Next question.');
-      await vi.waitFor(() => expect(releases, "turn B's history write is held").toHaveLength(2), { timeout: 500, interval: 10 });
-      releases[0]();
-      await settle();
-      releases[1]();
+      await vi.waitFor(() => expect(releases.map((held) => held.turn), "turn B's history write is held").toContain('b'),
+        { timeout: 500, interval: 10 });
+      for (const held of releases) {
+        held.release();
+        await settle();
+      }
       await turnB;
       await settle(); await settle();
       expect(JSON.stringify(wm._store.get('gmi_sentiment_history')),
         'a later write keeps a forgotten excerpt cleared').not.toContain('1234');
     } finally {
       releaseContext?.();
-      for (const release of releases) release();
+      for (const held of releases) held.release();
       await turnB?.catch(() => undefined);
       await gmi.shutdown();
     }
