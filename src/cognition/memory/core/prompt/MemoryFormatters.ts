@@ -50,6 +50,28 @@ export const MEMORY_CUT_MARKER = ' …[cut]';
 /** The least content, in characters, worth keeping when a trace is cut. */
 export const MIN_CUT_CONTENT_CHARS = 40;
 
+/** Starts the content of a line that shows the agent's own earlier reply in the memory block. */
+export const OWN_WORDS_PREFIX = 'You said: ';
+
+/**
+ * The tag a GMI's memory bridge files each reply under: its role, the first of the tags it stamps (the persona id and
+ * the user id follow).
+ */
+export const OWN_REPLY_TAG = 'assistant';
+
+/**
+ * `trace` as the memory block shows it. A GMI files each reply as a semantic trace with sourceType `agent_inference`
+ * and the tag {@link OWN_REPLY_TAG}, and earlier versions filed it the same way. The block shows such a trace as a past
+ * exchange, never as a fact: an episodic trace whose content starts with {@link OWN_WORDS_PREFIX}. Every other trace is
+ * returned as it is, an `agent_inference` trace without the tag (a conclusion a host filed itself) among them. The
+ * trace in the store is not changed.
+ */
+export function asShownInMemoryBlock<T extends MemoryTrace>(trace: T): T {
+  if (trace.provenance?.sourceType !== 'agent_inference') return trace;
+  if (!Array.isArray(trace.tags) || !trace.tags.includes(OWN_REPLY_TAG)) return trace;
+  return { ...trace, type: 'episodic', content: `${OWN_WORDS_PREFIX}${trace.content}` };
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

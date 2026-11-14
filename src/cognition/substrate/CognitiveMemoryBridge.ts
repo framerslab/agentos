@@ -222,7 +222,9 @@ export class CognitiveMemoryBridge {
    * Builds a de-duplicated set of tags for a memory trace.
    *
    * Tags include the message role, active persona ID, current user ID, and
-   * the task domain. Falsy or whitespace-only values are filtered out.
+   * the task domain. Falsy or whitespace-only values are filtered out. The
+   * memory block reads the role tag 'assistant' on a trace with sourceType
+   * 'agent_inference' as the agent's own earlier reply.
    *
    * @param role - The conversational role producing the content.
    * @returns A unique array of non-empty tag strings.
@@ -561,7 +563,12 @@ export class CognitiveMemoryBridge {
    * - User input (TEXT or MULTIMODAL_CONTENT) is encoded as an episodic
    *   memory with sourceType 'user_statement'.
    * - The assistant's response text is encoded as a semantic memory with
-   *   sourceType 'agent_inference'.
+   *   sourceType 'agent_inference', under the tags
+   *   {@link CognitiveMemoryBridge.buildTags} gives the role 'assistant'. A
+   *   later turn's memory block shows it as the assistant's own earlier words,
+   *   a past exchange whose content starts "You said: ", never as a fact; that is
+   *   read from the sourceType and the 'assistant' tag, so a reply an earlier
+   *   version filed is shown the same way.
    *
    * @param turnInput - The turn's input payload.
    * @param responseText - The assistant's generated response text.
