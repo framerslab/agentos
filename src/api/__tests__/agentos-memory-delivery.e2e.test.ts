@@ -146,12 +146,25 @@ function textOf(message: ChatMessage): string {
 /** The text of the model's last request. */
 const lastRequest = (model: ProviderScript) => model.seen.at(-1)!.messages.map(textOf).join('\n');
 
-/** The memory block in a request's text: from the preamble heading to where the other retrieved context resumes. */
-function blockIn(request: string): string {
-  const start = request.indexOf(PREAMBLE_HEADING);
-  if (start === -1) return '';
-  const ends = ['\n\n---\n\n'].map((marker) => request.indexOf(marker, start)).filter((at) => at !== -1);
-  return request.slice(start, ends.length > 0 ? Math.min(...ends) : undefined);
+/** The texts of a message: its one string, or the text of each of its text parts. */
+function textPartsOf(message: ChatMessage): string[] {
+  const content = message.content as unknown;
+  if (typeof content === 'string') return [content];
+  if (!Array.isArray(content)) return [];
+  return content.flatMap((part) => (part && typeof part === 'object' && typeof (part as { text?: unknown }).text === 'string' ? [(part as { text: string }).text] : []));
+}
+
+/**
+ * The memory block in the model's last request: from the preamble heading to where the other retrieved context
+ * resumes, or to the end of the text part that carries the block when no other context follows it. The person's
+ * words travel in a text part of their own, after that one, and are never part of the block.
+ */
+function blockIn(model: ProviderScript): string {
+  const holder = model.seen.at(-1)!.messages.flatMap(textPartsOf).find((text) => text.includes(PREAMBLE_HEADING));
+  if (!holder) return '';
+  const start = holder.indexOf(PREAMBLE_HEADING);
+  const end = holder.indexOf('\n\n---\n\n', start);
+  return holder.slice(start, end === -1 ? undefined : end);
 }
 
 /** Tokens of a text by the assembler's estimate (about four characters a token). */
@@ -185,7 +198,7 @@ describe('the memory block beside a host long-term-memory retriever, through pro
     expect(request).toContain(longTerm);
     expect(request.indexOf(PREAMBLE_HEADING)).toBeLessThan(request.indexOf('Profile line 0:'));
     expect(request).not.toContain('…[cut]');
-    const block = blockIn(request);
+    const block = blockIn(model);
     expect(block).toContain(PREAMBLE_HEADING);
     expect(tokensOf(block)).toBeLessThanOrEqual(record.budget.effective);
     const included = record.candidates.filter((c) => c.outcome === 'included');
@@ -226,7 +239,7 @@ describe('the memory block beside a host long-term-memory retriever, through pro
     expect(request).toContain(question);
     expect(request).not.toContain('Profile line 19');
     expect(request).not.toContain('…[cut]');
-    const block = blockIn(request);
+    const block = blockIn(model);
     expect(tokensOf(block)).toBeLessThanOrEqual(record.budget.effective);
     const included = record.candidates.filter((c) => c.outcome === 'included');
     expect(included.length).toBeGreaterThan(0);
