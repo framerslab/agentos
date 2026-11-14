@@ -4531,8 +4531,8 @@ describe('the ledger', () => {
       await failing.propose(selfChange('agreeableness', { learner: user }), { verdict: 'kept', change: async (tx) => tx.insertForgotten(tomb, LATER) }),
     ).toEqual({ status: 'forgotten' });
     const deleteWarning = warned.mock.calls.map((call) => call.join(' ')).join('\n');
-    expect(deleteWarning).toContain(`tombstone ${tomb.slice(0, 16)}`);
-    expect(deleteWarning).toContain('the deletion failed');
+    expect(deleteWarning).toContain('[agentos] learning: the rows an append wrote after its user was forgotten were not deleted (the deletion failed)');
+    expect(deleteWarning).not.toContain(tomb.slice(0, 16));
     expect(deleteWarning).not.toContain(tomb);
     expect(deleteWarning).not.toContain('ana@example.org');
     // Its rows stand until a second forgetUser call deletes them.
@@ -5671,7 +5671,8 @@ describe("a learner's trait row and its ledger, on gmi(), the full runtime and a
       };
       expect(await zedSession.recordSelfChange!(stuck)).toEqual({ status: 'rejected', reason: 'forgotten' });
       const lines = warn.mock.calls.map((call) => String(call[0]));
-      expect(lines.some((line) => line.includes(`(tombstone ${hash.slice(0, 16)}) was not taken back (the trace is locked)`))).toBe(true);
+      expect(lines.some((line) => line.includes('after its user was forgotten was not taken back (the trace is locked)'))).toBe(true);
+      expect(lines.some((line) => line.includes(hash.slice(0, 16)))).toBe(false);
       expect(lines.some((line) => line.includes('zed-private'))).toBe(false);
       expect(await store.traitRow('A', 'tutor', 'zed-private')).toBeUndefined();
       expect(await store.chainRows(chainKeyOf(zed))).toEqual([]);

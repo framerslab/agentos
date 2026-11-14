@@ -244,8 +244,8 @@ describe('forgetUser', () => {
     expect(report.plainFormLeft).toBe(1);
     const lines = warn.mock.calls.map((call) => String(call[0])).filter((line) => line.includes('refileScope'));
     expect(lines).toHaveLength(1);
-    // A line about a forgotten user names the tombstone, never the user: the caller holds the id it deleted.
-    expect(lines[0]).toContain(`tombstone ${(await tombstoneHash('A', '42')).slice(0, 16)}`);
+    // A line about a forgotten user names neither the user nor a hash of the id: the caller holds the id it deleted.
+    expect(lines[0]).not.toContain((await tombstoneHash('A', '42')).slice(0, 16));
     expect(lines[0]).toContain("the user's plain id in its user scope");
     expect(lines[0]).not.toContain('user:42');
   });
