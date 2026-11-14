@@ -21,15 +21,14 @@ vi.mock('../../../cognition/memory/core/prompt/MemoryPromptAssembler', async (or
 import { agent, type AgentOptions } from '../../agent';
 import { script, systemTextOf } from '../../__tests__/helpers/stubProviders';
 import { globalLLMProviderHealth } from '../../../core/safety/LLMProviderHealthRegistry';
-import * as promptEngineModule from '../../../core/llm/PromptEngine';
-import { PromptEngine } from '../../../core/llm/PromptEngine';
+import { APPLICATION_NOTE_FRAME, PromptEngine } from '../../../core/llm/PromptEngine';
 import { promptEngineConfig } from '../../../cognition/substrate/__tests__/helpers/scriptedGmi';
 import { MEMORY_RECALL_SYSTEM_LINE } from '../memoryDataBlock';
 import { AgentOS } from '../../AgentOS';
 import { DEFAULT_PROMPT_PROFILE_CONFIG } from '../../structured/prompting/PromptProfileRouter';
 
 /** The frame line the prompt engine opens retrieved text with. */
-const FRAME = (promptEngineModule as unknown as { APPLICATION_NOTE_FRAME?: string }).APPLICATION_NOTE_FRAME;
+const FRAME = APPLICATION_NOTE_FRAME;
 type Json = Record<string, any>;
 let bodies: Json[];
 let agents: ReturnType<typeof agent>[];

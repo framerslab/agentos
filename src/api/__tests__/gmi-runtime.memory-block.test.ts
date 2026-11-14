@@ -117,19 +117,26 @@ function textOf(message: ChatMessage): string {
   return '';
 }
 
+/** The texts of a message: its one string, or the text of each of its text parts. */
+function textPartsOf(message: ChatMessage): string[] {
+  const content = message.content as unknown;
+  if (typeof content === 'string') return [content];
+  if (!Array.isArray(content)) return [];
+  return content.flatMap((part) => (part && typeof part === 'object' && typeof (part as { text?: unknown }).text === 'string' ? [(part as { text: string }).text] : []));
+}
+
 /**
  * The memory block of the provider request `call`: the text from the preamble
- * heading to where the prompt engine resumes with the user's query.
+ * heading to the end of the text part that carries it.
  */
 function memoryBlockOf(s: ProviderScript, call: number): string {
   const request = s.seen[call];
   expect(request, `model call ${call}`).toBeDefined();
   const holders = request.messages.map(textOf).filter((text) => text.includes(PREAMBLE_HEADING));
   expect(holders, 'messages that carry the memory block').toHaveLength(1);
-  const text = holders[0];
-  const start = text.indexOf(PREAMBLE_HEADING);
-  const end = text.indexOf('\n\nUser Query:', start);
-  return text.slice(start, end === -1 ? undefined : end);
+  // The block travels in a text part of its own, before the person's words: it runs to the end of that part.
+  const text = request.messages.flatMap(textPartsOf).find((part) => part.includes(PREAMBLE_HEADING)) ?? holders[0];
+  return text.slice(text.indexOf(PREAMBLE_HEADING));
 }
 
 /** Every message of the provider request `call`, as one text: what the model receives on that turn. */

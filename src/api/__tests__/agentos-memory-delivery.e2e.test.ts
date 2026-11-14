@@ -146,11 +146,11 @@ function textOf(message: ChatMessage): string {
 /** The text of the model's last request. */
 const lastRequest = (model: ProviderScript) => model.seen.at(-1)!.messages.map(textOf).join('\n');
 
-/** The memory block in a request's text: from the preamble heading to where the other retrieved context or the query resumes. */
+/** The memory block in a request's text: from the preamble heading to where the other retrieved context resumes. */
 function blockIn(request: string): string {
   const start = request.indexOf(PREAMBLE_HEADING);
   if (start === -1) return '';
-  const ends = ['\n\n---\n\n', '\n\nUser Query:'].map((marker) => request.indexOf(marker, start)).filter((at) => at !== -1);
+  const ends = ['\n\n---\n\n'].map((marker) => request.indexOf(marker, start)).filter((at) => at !== -1);
   return request.slice(start, ends.length > 0 ? Math.min(...ends) : undefined);
 }
 

@@ -7,15 +7,14 @@
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import * as promptEngineModule from '../PromptEngine';
-import { PromptEngine } from '../PromptEngine';
+import { APPLICATION_NOTE_FRAME, PromptEngine } from '../PromptEngine';
 import type { ModelTargetInfo, PromptComponents, PromptExecutionContext } from '../IPromptEngine';
 import type { ChatMessage } from '../providers/IProvider';
 import { MessageRole, createConversationMessage } from '../../conversation/ConversationMessage';
 import { promptEngineConfig } from '../../../cognition/substrate/__tests__/helpers/scriptedGmi';
 
 /** The frame line the engine opens retrieved text with. */
-const FRAME = (promptEngineModule as unknown as { APPLICATION_NOTE_FRAME?: string }).APPLICATION_NOTE_FRAME;
+const FRAME = APPLICATION_NOTE_FRAME;
 
 const WORDS = "Hey Tess! Slow afternoon at work so I'm bothering you.";
 const MEMORY =

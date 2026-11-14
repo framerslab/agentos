@@ -27,13 +27,12 @@ vi.mock('../../cognition/memory/core/prompt/MemoryPromptAssembler', async (impor
 import { agent, type AgentOptions } from '../agent';
 import { reply, script, systemTextOf, type ProviderScript } from './helpers/stubProviders';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
-import * as promptEngineModule from '../../core/llm/PromptEngine';
-import { PromptEngine } from '../../core/llm/PromptEngine';
+import { APPLICATION_NOTE_FRAME, PromptEngine } from '../../core/llm/PromptEngine';
 import { promptEngineConfig } from '../../cognition/substrate/__tests__/helpers/scriptedGmi';
 import type { ChatMessage } from '../../core/llm/providers/IProvider';
 
 /** The frame line the prompt engine opens retrieved text with. */
-const FRAME = (promptEngineModule as unknown as { APPLICATION_NOTE_FRAME?: string }).APPLICATION_NOTE_FRAME;
+const FRAME = APPLICATION_NOTE_FRAME;
 
 /** Shares most of its words with the greeting, so the word-hash embedding recalls it. */
 const EARLIER = "Work at the hotel front desk is slow in the afternoon, so I end up bothering Tess when I'm bored.";

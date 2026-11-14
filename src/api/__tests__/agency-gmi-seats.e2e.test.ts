@@ -20,17 +20,24 @@ import type { CallerTurnContext, ToolCallHook } from '../runtime/agencyLaunch/ty
 import { seatMetadataOf } from '../runtime/strategies/shared';
 import { reply, script } from './helpers/stubProviders';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
+import { APPLICATION_NOTE_FRAME } from '../../core/llm/PromptEngine';
 
 let n = 0;
 const key = () => `k-seats-${++n}`;
 /** The system prompt a model call sent: the text of its system messages. */
 const systemText = (call: { messages: Array<{ role: string; content: unknown }> }): string =>
   call.messages.filter((m) => m.role === 'system').map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content))).join('\n');
-/** The text of a model call's last user message. */
+/** The text of a model call's last user message: its one string, or its text parts a line apart. */
 const lastUserText = (call: { messages: Array<{ role: string; content: unknown }> }): string => {
   const users = call.messages.filter((m) => m.role === 'user');
   const last = users[users.length - 1];
-  return last ? (typeof last.content === 'string' ? last.content : JSON.stringify(last.content)) : '';
+  if (!last) return '';
+  if (typeof last.content === 'string') return last.content;
+  if (!Array.isArray(last.content)) return JSON.stringify(last.content);
+  return last.content
+    .map((part) => (part && typeof part === 'object' ? (part as { text?: unknown }).text : undefined))
+    .filter((text): text is string => typeof text === 'string')
+    .join('\n');
 };
 
 beforeEach(() => globalLLMProviderHealth.reset());
@@ -194,7 +201,7 @@ describe('agency() seats served by GMIs', () => {
     // message, apart from the history its session keeps.
     await seat.generate('Which vault word did I give you?');
     const seatRecall = lastUserText(s.seen[3]);
-    expect(seatRecall.startsWith('Context:')).toBe(true);
+    expect(seatRecall.startsWith(`${APPLICATION_NOTE_FRAME}\n`)).toBe(true);
     expect(seatRecall).toContain('CANARY-TWO-4410');
 
     // A memory tool never runs in a seat.
