@@ -101,7 +101,7 @@ function assertRerankSetting(rerank: unknown, where: string): void {
     rejectRecallOption(
       'rerank.revision',
       'invalid_value',
-      `${where}: memory.recall.rerank.revision must be a commit id of the model's repository (40 hexadecimal characters, in lower case). A branch, a tag or a shortened id can name other weights later.`,
+      `${where}: memory.recall.rerank.revision must be a commit id of the model's repository (40 hexadecimal characters, or 64 for a SHA-256 repository, in lower case). A branch, a tag or a shortened id can name other weights later.`,
     );
   }
   if (setting.kind === 'llm' && typeof setting.invoke !== 'function') {

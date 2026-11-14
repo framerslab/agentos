@@ -519,10 +519,10 @@ export interface MemoryRecallConfig {
    * reranker. `{ kind: 'local' }`: a cross-encoder that runs in this
    * process, named by `model` (a Hugging Face model id) and a pinned
    * `revision`, a whole commit id of the model's repository in lower case
-   * (40 hexadecimal characters; a branch, a tag, a shortened id or an
-   * upper-case id is refused: the first three can name other weights later,
-   * and Transformers.js finds a pinned revision's cached files under the id
-   * as written); the query and the memories never leave the
+   * (40 hexadecimal characters, or 64 for a SHA-256 repository; a branch,
+   * a tag, a shortened id or an upper-case id is refused: the first three
+   * can name other weights later, and Transformers.js finds a pinned
+   * revision's cached files under the id as written); the query and the memories never leave the
    * process. The model's files load through Transformers.js's own cache. `{ kind: 'llm' }`: the host's own
    * model call (`invoke(system, user, model)`, called with `model`) scores
    * and ranks them, which sends the query and the first 200 characters of
