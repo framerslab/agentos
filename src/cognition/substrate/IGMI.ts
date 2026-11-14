@@ -500,6 +500,8 @@ export interface StepFinishedChunkPayload {
    * here: it stays the step's text, with the step's own finish reason.
    */
   structuredOutput?: unknown;
+  /** The model's refusal message, including an empty refusal, when the step declined the request. */
+  refusal?: string;
   /** The step's extended-thinking blocks (Anthropic), so a session store can replay the step. */
   thinkingBlocks?: ThinkingBlock[];
 }

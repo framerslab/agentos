@@ -559,6 +559,11 @@ export async function* runGmiTurn(
  * @param maxTokens - The turn's `maxTokens`, named in the cut-off's message when the turn set one.
  */
 function parseStructured(folder: GmiTurnFolder, schema: ZodType, maxTokens?: number): unknown {
+  const refusal = folder.steps.at(-1)?.refusal;
+  // A refusal ends the turn before parsing or schema validation, even beside an otherwise valid answer.
+  if (refusal !== undefined) {
+    throw new ObjectGenerationError('The model refused the request instead of writing the reply', folder.text(), undefined, refusal);
+  }
   // The last step's own stop reason, not the folder's: the folder reports 'stop' for any step whose answer a
   // gateway lifted, and the turn's gateway is the host's to choose.
   const cutOff = normalizeStreamFinishReason(folder.steps.at(-1)?.finishReason ?? null) === 'length';
