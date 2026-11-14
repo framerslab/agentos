@@ -2342,7 +2342,6 @@ export class GMI implements IGMI {
         if (structuredReply && currentIterationToolCallRequests.length === 0) {
           structuredAttempts += 1;
           const lifted = stepStructuredOutput !== undefined;
-          const check = lifted ? structuredReply.checkValue(stepStructuredOutput) : checkStructuredReply(currentIterationTextResponse, structuredReply);
           // 'forced_tool' when the gateway lifted a forced schema tool call; a JSON text answer the gateway lifted
           // from an Anthropic hop on the JSON output format is 'provider_schema', as any payload that carried the
           // schema; a hop that sent it in the prompt alone reports 'prompt_only'. The route is the one the hop's
@@ -2366,30 +2365,35 @@ export class GMI implements IGMI {
               );
             }
             structuredResult = { value: null, meta: { schemaName: structuredReply.name, valid: false, attempts: structuredAttempts, enforcement, stage: 'model', issues: ['The model refused the request instead of writing the reply.'] } };
-          } else if (check.ok) {
-            structuredResult = { value: check.value, meta: { schemaName: structuredReply.name, valid: true, attempts: structuredAttempts, enforcement, stage: 'model' } };
-            if (lifted && !currentIterationTextResponse) {
-              // the forced tool call carried the reply: its text is the value, so the final response holds it too
-              currentIterationTextResponse = JSON.stringify(check.value);
-              aggregatedResponseText += currentIterationTextResponse;
-            }
           } else {
-            const canRetry = structuredAttempts <= structuredReply.maxRetries && safetyBreak < maxToolLoopIterations;
-            if (canRetry) {
-              this.addTraceEntry(ReasoningEntryType.WARNING, `The reply did not match the schema "${structuredReply.name}" (attempt ${structuredAttempts}); asking again.`, { issues: check.issues });
-              turnMessages.push({ role: 'assistant', content: currentIterationTextResponse || null });
-              turnMessages.push({ role: 'user', content: structuredRepairMessage(check.issues, structuredReply, currentIterationTextResponse) });
-              aggregatedResponseText = '';
-              continue main_processing_loop;
+            // The schema's check runs on a step the model answered, never on a refusal: a check that throws (a refinement
+            // that throws, an async one under safeParse) would end the turn on its own error in place of the refusal.
+            const check = lifted ? structuredReply.checkValue(stepStructuredOutput) : checkStructuredReply(currentIterationTextResponse, structuredReply);
+            if (check.ok) {
+              structuredResult = { value: check.value, meta: { schemaName: structuredReply.name, valid: true, attempts: structuredAttempts, enforcement, stage: 'model' } };
+              if (lifted && !currentIterationTextResponse) {
+                // the forced tool call carried the reply: its text is the value, so the final response holds it too
+                currentIterationTextResponse = JSON.stringify(check.value);
+                aggregatedResponseText += currentIterationTextResponse;
+              }
+            } else {
+              const canRetry = structuredAttempts <= structuredReply.maxRetries && safetyBreak < maxToolLoopIterations;
+              if (canRetry) {
+                this.addTraceEntry(ReasoningEntryType.WARNING, `The reply did not match the schema "${structuredReply.name}" (attempt ${structuredAttempts}); asking again.`, { issues: check.issues });
+                turnMessages.push({ role: 'assistant', content: currentIterationTextResponse || null });
+                turnMessages.push({ role: 'user', content: structuredRepairMessage(check.issues, structuredReply, currentIterationTextResponse) });
+                aggregatedResponseText = '';
+                continue main_processing_loop;
+              }
+              if (structuredReply.onExhausted === 'error') {
+                throw new GMIError(
+                  `The reply did not match the schema "${structuredReply.name}" after ${structuredAttempts} attempt(s).`,
+                  GMIErrorCode.STRUCTURED_OUTPUT_INVALID,
+                  { schemaName: structuredReply.name, attempts: structuredAttempts, issues: check.issues },
+                );
+              }
+              structuredResult = { value: check.value ?? null, meta: { schemaName: structuredReply.name, valid: false, attempts: structuredAttempts, enforcement, stage: 'model', issues: check.issues } };
             }
-            if (structuredReply.onExhausted === 'error') {
-              throw new GMIError(
-                `The reply did not match the schema "${structuredReply.name}" after ${structuredAttempts} attempt(s).`,
-                GMIErrorCode.STRUCTURED_OUTPUT_INVALID,
-                { schemaName: structuredReply.name, attempts: structuredAttempts, issues: check.issues },
-              );
-            }
-            structuredResult = { value: check.value ?? null, meta: { schemaName: structuredReply.name, valid: false, attempts: structuredAttempts, enforcement, stage: 'model', issues: check.issues } };
           }
         }
 
