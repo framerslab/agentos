@@ -175,8 +175,9 @@ function applicationNoteOf(retrieved: string): string {
  *
  * A provider that takes text parts gets the note as a text part of its own, before the words and any image parts.
  * Any other provider gets one text: the note, a blank line, then the words. When its message already holds parts
- * (a turn with an image), the note joins the first text part the same way, because its adapter joins text parts
- * itself, with a newline or with nothing between.
+ * (a turn with an image), the note joins the message's first text part the same way, wherever that part stands (an
+ * image may come before it), because its adapter joins text parts itself, with a newline or with nothing between.
+ * A message with no text part gets the note as a part of its own, in front.
  *
  * @param content - The message's content as built so far: the person's words, or parts.
  * @param note - The note ({@link applicationNoteOf}).
@@ -186,9 +187,12 @@ function applicationNoteOf(retrieved: string): string {
 function withApplicationNote(content: ChatMessage['content'], note: string, takesParts: boolean): MessageContent {
   const notePart: MessageContentPart = { type: 'text', text: note };
   if (Array.isArray(content)) {
-    const first = content[0];
-    if (!takesParts && first?.type === 'text' && typeof first.text === 'string') {
-      return [{ ...first, text: `${note}\n\n${first.text}` }, ...content.slice(1)];
+    if (!takesParts) {
+      const at = content.findIndex((part) => part?.type === 'text' && typeof part.text === 'string');
+      const words = at === -1 ? undefined : content[at];
+      if (words?.type === 'text' && typeof words.text === 'string') {
+        return [...content.slice(0, at), { ...words, text: `${note}\n\n${words.text}` }, ...content.slice(at + 1)];
+      }
     }
     return [notePart, ...content];
   }
