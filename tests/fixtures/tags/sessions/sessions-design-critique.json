@@ -1,0 +1,61 @@
+{
+  "id": "sessions-design-critique",
+  "set": "sessions",
+  "kind": "session",
+  "language": "en",
+  "title": "Design critique: onboarding screens",
+  "headings": [],
+  "path": null,
+  "text": "Lena: I will share the three onboarding screens. The goal is to get a new person to their first document in under a minute.\nSam: The first screen asks for too much. Name, team, role and goals before anything happens.\nLena: We need the role to pick the right template.\nSam: Could we ask for the role later, after they have seen the app?\nPriya: I agree with Sam. Ask only for the name, and guess the template from what they open first.\nLena: That makes the template choice weaker at the start.\nPriya: But people drop off on that first screen. The funnel shows a third of them leave there.\nLena: Fair. What about the second screen?\nSam: The illustration is lovely, but the button is below the fold on a small phone.\nLena: I can move the button up and shrink the picture.\nPriya: The third screen is good. The empty state tells people exactly what to do.\nLena: So the changes are: one question on the first screen, the button higher on the second, and keep the third.\nSam: And test it with five new people before the next critique.\nLena: Yes, I will book the sessions for next week.\n",
+  "vocabulary": [
+    {
+      "label": "onboarding",
+      "uses": 9,
+      "lastUsed": 1762300800000
+    },
+    {
+      "label": "design critique",
+      "uses": 8,
+      "lastUsed": 1762214400000
+    },
+    {
+      "label": "templates",
+      "uses": 7,
+      "lastUsed": 1762128000000
+    },
+    {
+      "label": "usability tests",
+      "uses": 6,
+      "lastUsed": 1762041600000
+    }
+  ],
+  "typed": [
+    "design critique"
+  ],
+  "expected": {
+    "existing": [
+      "onboarding",
+      "designcritique",
+      "templates"
+    ],
+    "new": [
+      "funnel"
+    ]
+  },
+  "mustNot": [],
+  "asks": [],
+  "report": [
+    {
+      "label": "onboarding",
+      "quotes": [
+        "I will share the three onboarding screens."
+      ]
+    },
+    {
+      "label": "drop-off",
+      "quotes": [
+        "The funnel shows a third of them leave there."
+      ]
+    }
+  ]
+}

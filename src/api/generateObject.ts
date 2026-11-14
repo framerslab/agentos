@@ -326,8 +326,8 @@ export interface GenerateObjectOptions<T extends ZodType> {
   /**
    * Sent to OpenAI as `store` on the request, on `/v1/chat/completions` and `/v1/responses` alike, forwarded to
    * {@link GenerateTextOptions.store} on every attempt, a validation retry included. Left out, a chat completion
-   * sends no `store` key and a Responses request sends `store: false`, as before. Other providers ignore it, except
-   * those built on the OpenAI provider, which send it to their own endpoint. "Chat completions are stored by default
+   * sends no `store` key and a Responses request sends `store: false`, as before. Other providers ignore it, those
+   * built on the OpenAI provider included, which leave it out of the request to their own endpoint. "Chat completions are stored by default
    * for new accounts" (https://developers.openai.com/api/docs/guides/migrate-to-responses), so a call whose output
    * OpenAI must not keep sets `store: false`.
    */

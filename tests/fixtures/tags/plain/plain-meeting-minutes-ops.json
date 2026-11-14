@@ -1,0 +1,62 @@
+{
+  "id": "plain-meeting-minutes-ops",
+  "set": "plain",
+  "kind": "document",
+  "language": "en",
+  "title": "Operations meeting minutes, 4 March",
+  "headings": [
+    "Attendance",
+    "Warehouse capacity",
+    "Shipping delays",
+    "Actions"
+  ],
+  "path": null,
+  "text": "# Attendance\n\nThe operations lead chaired. The warehouse manager, the shipping coordinator, two people from customer service and the finance partner attended. The procurement lead sent apologies and a written update.\n\n# Warehouse capacity\n\nThe warehouse is at 88 percent of its shelf space after the spring stock arrived early. The warehouse manager proposed renting overflow space in the unit next door for three months instead of slowing the next delivery. Finance asked for the cost of both options in writing. The meeting agreed that overflow space is the better choice if its monthly cost stays under the figure finance named, because a slower delivery would leave the summer range short.\n\n# Shipping delays\n\nShipping delays to the northern region continue. The carrier changed its route plan in February, and parcels now wait an extra day at the regional hub. Customer service reported a rise in calls asking where an order is. The shipping coordinator has asked the carrier for the old route back and is getting a quote from a second carrier for that region. Customer service will add a line to the order email that tells customers in the north to expect one more day.\n\n# Actions\n\nThe warehouse manager will send the cost of the overflow space to finance by Friday. The shipping coordinator will share the second carrier's quote at the next meeting. Customer service will change the order email this week and report whether calls fall. The operations lead will write to the procurement lead about moving the autumn delivery date. The next operations meeting is on the eighteenth, at the same time, and the minutes of this one go to every team lead today.\n",
+  "vocabulary": [
+    {
+      "label": "operations",
+      "uses": 9,
+      "lastUsed": 1762300800000
+    },
+    {
+      "label": "meeting minutes",
+      "uses": 8,
+      "lastUsed": 1762214400000
+    },
+    {
+      "label": "warehouse",
+      "uses": 7,
+      "lastUsed": 1762128000000
+    },
+    {
+      "label": "shipping",
+      "uses": 6,
+      "lastUsed": 1762041600000
+    },
+    {
+      "label": "customer service",
+      "uses": 5,
+      "lastUsed": 1761955200000
+    },
+    {
+      "label": "carriers",
+      "uses": 4,
+      "lastUsed": 1761868800000
+    }
+  ],
+  "typed": [
+    "meeting minutes"
+  ],
+  "expected": {
+    "existing": [
+      "operations",
+      "meetingminutes",
+      "warehouse",
+      "shipping",
+      "carriers"
+    ],
+    "new": []
+  },
+  "mustNot": [],
+  "asks": []
+}

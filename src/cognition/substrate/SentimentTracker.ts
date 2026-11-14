@@ -215,12 +215,15 @@ export class SentimentTracker {
    * @param mayApply - Whether the turn takes this analysis' result: false once the turn dropped it, ended or
    *   stopped.
    * @param onCommit - Called once the result is in and its writes begin.
+   * @param onApplied - Called once the result is applied: the history is written and the events are raised. What
+   *   runs after it is the scrub run again after a forget.
    */
   public async analyzeTurnSentiment(
     turnId: string,
     userInput: string,
     mayApply: () => boolean = () => true,
     onCommit: () => void = () => {},
+    onApplied: () => void = () => {},
   ): Promise<void> {
     if (!userInput || typeof userInput !== 'string') return;
     const live = () => mayApply() && this.holdsTurn(turnId);
@@ -327,11 +330,17 @@ export class SentimentTracker {
       const writer = {};
       const before = this.standing;
       this.standing = { history: sentimentHistory, writer };
-      await this.workingMemory.set('gmi_sentiment_history', sentimentHistory);
+      try {
+        await this.workingMemory.set('gmi_sentiment_history', sentimentHistory);
+      } catch (error: unknown) {
+        // The store never held this history, so it is no base to put the store back to.
+        if (this.standing?.writer === writer) this.standing = before;
+        throw error;
+      }
       if (!live()) {
         // The turn dropped the result, ended, failed, stopped or was forgotten while the store was writing.
         await this.afterDroppedWrite(
-          () => this.takeBackHistoryWrite(turnId, writer, before, replaced, forgetsAtRead),
+          () => this.takeBackHistoryWrite(turnId, writer, before, replaced),
         );
         return;
       }
@@ -355,6 +364,7 @@ export class SentimentTracker {
 
       // Detect and emit events based on sentiment patterns
       await this.detectAndEmitEvents(turnId, userInput, sentimentResult, sentimentHistory, snapshot);
+      onApplied();
       // A forget that ended while the history was read or written may have scrubbed the store before this write
       // landed with the excerpts it cleared.
       scrubbingAgain = true;
@@ -392,22 +402,20 @@ export class SentimentTracker {
    * forgotten) while the write was in flight, and the write may have landed over a newer one. The stored history
    * becomes the one the tracker stands by: a later write's, else the one it stood by before this write, else the one
    * the analysis read; with none, the key is deleted. This turn's trend, and those of the other turns taken back, are
-   * left out of it and of every later history write. When a forget ended since the analysis read the history, the
-   * excerpts of the turns the GMI does not hold are cleared, before the write and again after it while forgets end
-   * meanwhile.
+   * left out of it and of every later history write. The excerpts of the turns the GMI does not hold are cleared,
+   * before the write and again after it while forgets end meanwhile: the history put back may be one a forget never
+   * scrubbed.
    *
    * @param turnId - The turn whose analysis wrote.
    * @param writer - The analysis' mark on {@link SentimentTracker.standing}.
    * @param before - What the tracker stood by when the write started.
    * @param read - The history the analysis read before it wrote.
-   * @param forgetsAtRead - The forgets ended before the analysis read the history.
    */
   private async takeBackHistoryWrite(
     turnId: string,
     writer: object,
     before: StandingHistory | undefined,
     read: SentimentHistoryState | undefined,
-    forgetsAtRead: number,
   ): Promise<void> {
     this.droppedTurns.add(turnId);
     if (this.droppedTurns.size > DROPPED_TURNS_KEPT) {
@@ -417,11 +425,10 @@ export class SentimentTracker {
     const latest = this.standing;
     const base = latest && latest.writer !== writer ? latest.history : before ? before.history : read;
     const forgets = this.forgets;
-    const scrub = forgets !== forgetsAtRead;
     const restored = base && this.withoutDroppedTurns({
       ...base,
       trends: base.trends
-        .map((trend) => (!scrub || !trend.context || this.holdsTurn(trend.turnId) ? trend : { ...trend, context: '' })),
+        .map((trend) => (!trend.context || this.holdsTurn(trend.turnId) ? trend : { ...trend, context: '' })),
     });
     this.standing = { history: restored };
     if (restored) await this.workingMemory.set('gmi_sentiment_history', restored);

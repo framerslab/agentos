@@ -1,0 +1,67 @@
+{
+  "id": "sessions-renewal-call",
+  "set": "sessions",
+  "kind": "session",
+  "language": "en",
+  "title": "Customer renewal call",
+  "headings": [],
+  "path": null,
+  "text": "Maya: Thanks for making time. Your contract renews at the end of next month, so I wanted to check in.\nClient: Sure. Overall the team is happy, but we have a few concerns before we sign again.\nMaya: Please go ahead.\nClient: The main one is the price. Our seat count went up, and the cost grew more than we expected.\nMaya: Understood. We can look at a yearly plan, which comes with a lower rate for each seat.\nClient: That would help. The second concern is the export. Our finance team needs a monthly export in a format their tools read.\nMaya: The new export ships next month and includes the spreadsheet format your team uses.\nClient: Good. And the last thing is support response times. Two tickets waited over a day last quarter.\nMaya: I am sorry about that. I will check those two tickets and send you what happened.\nClient: Thanks. If the price and the export work out, I think we renew.\nMaya: I will send a quote for the yearly plan by Friday, with the export date in writing.\nClient: Perfect. Send it to me and I will share it with our finance lead.\n",
+  "vocabulary": [
+    {
+      "label": "renewals",
+      "uses": 9,
+      "lastUsed": 1762300800000
+    },
+    {
+      "label": "pricing",
+      "uses": 8,
+      "lastUsed": 1762214400000
+    },
+    {
+      "label": "customers",
+      "uses": 7,
+      "lastUsed": 1762128000000
+    },
+    {
+      "label": "exports",
+      "uses": 6,
+      "lastUsed": 1762041600000
+    }
+  ],
+  "typed": [
+    "renewals"
+  ],
+  "expected": {
+    "existing": [
+      "renewals",
+      "pricing",
+      "exports"
+    ],
+    "new": [
+      "yearlyplan"
+    ]
+  },
+  "mustNot": [],
+  "asks": [],
+  "report": [
+    {
+      "label": "renewal",
+      "quotes": [
+        "Your contract renews at the end of next month"
+      ]
+    },
+    {
+      "label": "export",
+      "quotes": [
+        "The new export ships next month"
+      ]
+    },
+    {
+      "label": "discount",
+      "quotes": [
+        "We can offer a discount of a fifth if you sign today."
+      ]
+    }
+  ]
+}

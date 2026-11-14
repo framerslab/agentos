@@ -1369,7 +1369,9 @@ describe('GMI sentiment writes that land after their turn dropped them', () => {
       gmi.clearHistory();
       await settle(); await settle();
       held[1].fail();
+      // The turn ends once the result is applied; the scrub that runs again finishes after it.
       await turn;
+      await settle(); await settle();
       expect(lines.filter((line) => line.event === 'gmi.sentiment_take_back_failed'),
         'a scrub run again that fails after its turn was forgotten writes one line').toHaveLength(1);
       expect(JSON.stringify(lines)).not.toContain('Forget-me');
@@ -1460,6 +1462,68 @@ describe('GMI sentiment writes that land after their turn dropped them', () => {
       await turn?.catch(() => undefined);
       resetLoggerFactory();
       vi.useRealTimers();
+      await gmi.shutdown();
+    }
+  });
+
+  it('keeps a forgotten excerpt out of a later write that read the store before the second scrub landed', async () => {
+    const utility = createMockUtilityAI(negative);
+    utility.analyzeSentiment.mockResolvedValueOnce({ score: 0, polarity: 'neutral', intensity: 0 } as SentimentResult);
+    const wm = createMockWorkingMemory();
+    const write = wm.set.getMockImplementation()!;
+    let holdContext = false;
+    let releaseContext: (() => void) | undefined;
+    let skipHistory = 0;
+    let holdHistory = 0;
+    const releases: Array<() => void> = [];
+    // The host store applies writes in call order. It can hold the first negative user-context write, and, after
+    // letting `skipHistory` sentiment history writes through, the next `holdHistory` ones.
+    wm.set.mockImplementation((key: string, value: any) => {
+      if (key === 'currentUserContext' && holdContext && !releaseContext && value?.currentSentiment === 'negative') {
+        return new Promise<void>((resolve) => { releaseContext = () => { void write(key, value); resolve(); }; });
+      }
+      if (key === 'gmi_sentiment_history' && holdHistory > 0) {
+        if (skipHistory > 0) { skipHistory -= 1; return write(key, value); }
+        holdHistory -= 1;
+        return new Promise<void>((resolve) => { releases.push(() => { void write(key, value); resolve(); }); });
+      }
+      return write(key, value);
+    });
+    const gmi = await startGmi('later-write-after-forget', utility, wm);
+    let turnB: Promise<void> | undefined;
+    try {
+      await drainTurn(gmi, 'pin', 'My PIN is 1234.');
+      expect(JSON.stringify(wm._store.get('gmi_sentiment_history'))).toContain('1234');
+      holdContext = true;
+      const turnA = drainTurn(gmi, 'a', 'This is terrible.');
+      // Turn A's analysis has read the history and waits for its user-context write.
+      await vi.waitFor(() => expect(releaseContext, "turn A's context write is held").toBeTypeOf('function'),
+        { timeout: 500, interval: 10 });
+      // A forget the analysis did not see: it keeps turn A and drops the PIN turn.
+      gmi.replaceHistory([createConversationMessage(MessageRole.USER, 'This is terrible.')]);
+      await vi.waitFor(() => expect(JSON.stringify(wm._store.get('gmi_sentiment_history'))).not.toContain('1234'),
+        { timeout: 500, interval: 10 });
+      await settle();
+      // A's history write lands with the excerpt it read; the scrub that runs again, and the next write, are held.
+      skipHistory = 1;
+      holdHistory = 2;
+      releaseContext!();
+      await vi.waitFor(() => expect(releases, "turn A's second scrub is held").toHaveLength(1), { timeout: 500, interval: 10 });
+      await turnA;
+      // Turn B reads the store before that scrub lands; its write is called after it, so it lands after it.
+      turnB = drainTurn(gmi, 'b', 'Next question.');
+      await vi.waitFor(() => expect(releases, "turn B's history write is held").toHaveLength(2), { timeout: 500, interval: 10 });
+      releases[0]();
+      await settle();
+      releases[1]();
+      await turnB;
+      await settle(); await settle();
+      expect(JSON.stringify(wm._store.get('gmi_sentiment_history')),
+        'a later write keeps a forgotten excerpt cleared').not.toContain('1234');
+    } finally {
+      releaseContext?.();
+      for (const release of releases) release();
+      await turnB?.catch(() => undefined);
       await gmi.shutdown();
     }
   });
