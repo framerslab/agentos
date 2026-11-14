@@ -15,8 +15,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
 vi.mock('../../core/llm/providers/implementations/AnthropicProvider', async () => ({ AnthropicProvider: (await import('./helpers/stubProviders')).stubProviderClass('anthropic') }));
 
-/** The response bodies the next OpenRouter chat requests stream, in order. */
-const openRouter = vi.hoisted(() => ({ bodies: [] as Array<() => NodeJS.ReadableStream> }));
+/** The response bodies the next OpenRouter chat requests stream, in order, and a copy of each chat request's payload. */
+const openRouter = vi.hoisted(() => ({ bodies: [] as Array<() => NodeJS.ReadableStream>, sent: [] as Array<Record<string, any>> }));
 // The real OpenRouter provider over a scripted HTTP client (its initialize() would fetch the model list).
 vi.mock('../../core/llm/providers/implementations/OpenRouterProvider', async (importOriginal) => {
   const real = await importOriginal<typeof import('../../core/llm/providers/implementations/OpenRouterProvider')>();
@@ -27,8 +27,9 @@ vi.mock('../../core/llm/providers/implementations/OpenRouterProvider', async (im
         config: { apiKey: config.apiKey, baseURL: 'https://openrouter.test/api/v1', requestTimeout: 1_000, streamRequestTimeout: 5_000 },
         keyPool: new ApiKeyPool(config.apiKey),
         client: {
-          request: async ({ url }: { url: string }) => {
+          request: async ({ url, data }: { url: string; data?: unknown }) => {
             if (url === '/models') return { data: { data: [] } };
+            openRouter.sent.push(JSON.parse(JSON.stringify(data ?? {})));
             const body = openRouter.bodies.shift();
             if (!body) throw new Error('openrouter: unexpected request');
             return { data: body() };
@@ -93,6 +94,7 @@ function ledgerRows(): Array<Record<string, unknown>> {
 beforeEach(() => {
   globalLLMProviderHealth.reset();
   openRouter.bodies.length = 0;
+  openRouter.sent.length = 0;
   ledgerDir = mkdtempSync(join(tmpdir(), 'agentos-gmi-usage-'));
   ledgerPath = join(ledgerDir, 'ledger.jsonl');
   events = [];
@@ -392,6 +394,53 @@ describe("agent({ runtime: 'gmi' }) usage", () => {
       expect(primary.seen[0].messages.filter((message) => message.role === 'system')).toHaveLength(2);
       expect(fallback.seen[0].messages.filter((message) => message.role === 'system')).toEqual([{ role: 'system', content: 'Policy\n\nClock' }]);
       expect(systemTextOf(primary.seen[0].messages)).toBe(systemTextOf(fallback.seen[0].messages));
+    } finally { await a.close(); }
+  });
+
+  // A fallback entry's own `cache` replaces the turn's on its hop (the gateway sends the hop with it), so the hop's
+  // prompt is built for that setting, not for the turn's.
+  it("sends one system string to an OpenRouter Claude fallback hop whose entry sets cache false", async () => {
+    const k = key();
+    script('openai', k, { replies: [Object.assign(new Error('overloaded'), { httpStatus: 529 })] });
+    vi.stubEnv('OPENROUTER_API_KEY', key());
+    openRouter.bodies.push(() =>
+      sseBody([
+        orLine({ choices: [{ index: 0, delta: { role: 'assistant', content: 'Recovered.' }, finish_reason: null }] }),
+        orLine({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }),
+        orLine({ choices: [], usage: { prompt_tokens: 12, completion_tokens: 4, total_tokens: 16 } }),
+        'data: [DONE]',
+      ]),
+    );
+    const a = agent(base(k, { cognition: { mechanisms: false }, chainOfThought: false,
+      systemBlocks: [{ text: 'Policy', cacheBreakpoint: true }, { text: 'Clock' }],
+      fallbackProviders: [{ provider: 'openrouter', model: 'anthropic/claude-sonnet-4-6', cache: false }],
+    }));
+    try {
+      expect(await a.session('s').send('Hi.')).toMatchObject({ text: 'Recovered.', provider: 'openrouter' });
+      expect(openRouter.sent.map((payload) => payload.model)).toEqual(['anthropic/claude-sonnet-4-6']);
+      const system = openRouter.sent[0].messages.filter((message: { role: string }) => message.role === 'system');
+      expect(system.map((message: { content: unknown }) => message.content), 'a hop sent with caching off gets one system string').toEqual(['Policy\n\nClock']);
+      expect(JSON.stringify(openRouter.sent[0])).not.toContain('cache_control');
+    } finally { await a.close(); }
+  });
+
+  it("marks the fixed block for one hour on an Anthropic fallback hop whose entry sets that lifetime over the agent's cache false", async () => {
+    const k = key(); const fallbackKey = key();
+    script('openai', k, { replies: [Object.assign(new Error('overloaded'), { httpStatus: 529 })] });
+    const fallback = script('anthropic', fallbackKey, { replies: [reply.text('Recovered.')] });
+    vi.stubEnv('ANTHROPIC_API_KEY', fallbackKey);
+    const a = agent(base(k, { cache: false,
+      systemBlocks: [{ text: 'Policy', cacheBreakpoint: true }, { text: 'Clock' }],
+      fallbackProviders: [{ provider: 'anthropic', model: 'claude-sonnet-4-6', cache: { ttl: '1h' } }],
+    }));
+    try {
+      expect(await a.session('s').send('Hi.')).toMatchObject({ text: 'Recovered.', provider: 'anthropic' });
+      // The precondition: the gateway sends the hop with its entry's setting.
+      expect(fallback.seen[0].options.cache).toEqual({ ttl: '1h' });
+      expect(fallback.seen[0].messages.filter((message) => message.role === 'system'), 'a hop sent with caching on gets the marked fixed block').toEqual([
+        { role: 'system', content: [{ type: 'text', text: 'Policy', cache_control: { type: 'ephemeral', ttl: '1h' } }] },
+        { role: 'system', content: 'Clock' },
+      ]);
     } finally { await a.close(); }
   });
 });

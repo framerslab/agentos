@@ -62,6 +62,28 @@ describe('GMI cache eligibility', () => {
       entry.type === 'WARNING' && entry.message === 'Dropped the GMI system cache marker because the hook supplied more than four markers.',
     )).toHaveLength(1);
   });
+  // A hook that writes a marker of its own on the fixed part has taken that marker over: the GMI's is gone, so nothing
+  // is the GMI's to remove, and the hook's five go out as returned.
+  it.each([
+    { how: 'sets a new marker', write: (part: any) => { part.cache_control = { type: 'ephemeral', ttl: '1h' }; } },
+    { how: 'changes the marker in place', write: (part: any) => { part.cache_control.ttl = '1h'; } },
+  ])('leaves the fixed part marked when the hook $how on it and adds four more', async ({ write }) => {
+    const result = await request({}, { config: { beforeModelCall: ({ messages }: any) => {
+      write(messages.find((message: any) => message.role === 'system').content[0]);
+      return [
+        ...messages,
+        ...Array.from({ length: 4 }, (_, i) => ({ role: 'system', content: [
+          { type: 'text', text: `Host ${i}`, cache_control: { type: 'ephemeral' } },
+        ] })),
+      ];
+    } } });
+    expect((systems(result.received[0])[0].content as any[])[0], "the hook's one-hour marker stays on the fixed part")
+      .toEqual({ type: 'text', text: 'Policy', cache_control: { type: 'ephemeral', ttl: '1h' } });
+    expect(markers(result.received[0])).toBe(5);
+    expect((result.gmi as any).reasoningTrace.entries.filter((entry: any) =>
+      entry.type === 'WARNING' && entry.message === 'Dropped the GMI system cache marker because the hook supplied more than four markers.',
+    )).toHaveLength(0);
+  });
   it('includes hard limits in the marked block when all entries are fixed', async () => {
     const result = await request({}, { persona: { defaultModelId: 'claude-sonnet-4-6', baseSystemPrompt: 'Policy', hardLimits: ['Final constraint.'] } });
     const system = systems(result.received[0]);
