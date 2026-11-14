@@ -29,6 +29,9 @@ export {
   type Message,
   type ToolCallRecord,
   type TokenUsage,
+  type TextGuardrailOptions,
+  type TextGuardrailReport,
+  type TextGuardrailVerdict,
 } from './generateText.js';
 export { normalizeHostLLMPolicy } from './runtime/hostPolicy.js';
 export { ContextWindowExceededError } from '../core/llm/providers/errors/ContextWindowExceededError.js';
@@ -118,7 +121,7 @@ export {
   type AgentCognitiveMemoryOptions,
 } from './runtime/agentCognitiveMemory.js';
 export { souledAgent } from './souledAgent.js';
-export type { SouledAgentOptions, SouledAgent } from './souledAgent.js';
+export type { SouledAgentOptions, SouledAgent, MemoryPolicy } from './souledAgent.js';
 export { exportAgent } from './exportAgent.js';
 
 // --- Model routing ---

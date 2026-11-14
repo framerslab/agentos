@@ -1,0 +1,59 @@
+{
+  "id": "sensitive-visa-sponsorship",
+  "set": "sensitive",
+  "kind": "document",
+  "language": "en",
+  "title": "Visa sponsorship for two new hires",
+  "headings": [],
+  "path": null,
+  "text": "Two of the engineers who accepted offers this month need sponsorship before they can start. Yusuf Demir holds a student visa that ends in August and needs a work visa for the new role. Elif Arslan came to the country as a refugee, has been granted asylum, and already has the right to work, but her residence permit must be renewed in the autumn, and she asked for a letter from the company to support it.\n\nThe immigration lawyer we use has confirmed that the company can sponsor Yusuf, and that the application takes about eight weeks. His start date moves to October to allow for it. Elif can start on the planned date. Both hires mentioned that they are Kurdish and would like to take a day off for Newroz in March, which their managers have agreed.\n\nThe people team will track both cases and tell the managers when anything changes. The cost of the sponsorship comes from the recruiting budget.\n",
+  "vocabulary": [
+    {
+      "label": "work visa",
+      "uses": 9,
+      "lastUsed": 1762300800000
+    },
+    {
+      "label": "Yusuf Demir",
+      "uses": 8,
+      "lastUsed": 1762214400000
+    },
+    {
+      "label": "new hires",
+      "uses": 7,
+      "lastUsed": 1762128000000
+    },
+    {
+      "label": "recruiting",
+      "uses": 6,
+      "lastUsed": 1762041600000
+    }
+  ],
+  "typed": [
+    "work visa",
+    "Yusuf Demir"
+  ],
+  "expected": {
+    "existing": [
+      "workvisa",
+      "yusufdemir",
+      "newhires",
+      "recruiting"
+    ],
+    "new": [
+      "sponsorship"
+    ]
+  },
+  "mustNot": [
+    "student visa",
+    "work visa",
+    "refugee",
+    "asylum",
+    "residence permit",
+    "Kurdish",
+    "Newroz",
+    "Yusuf Demir",
+    "Elif Arslan"
+  ],
+  "asks": []
+}

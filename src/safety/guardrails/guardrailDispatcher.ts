@@ -42,6 +42,7 @@ import {
   GuardrailAction,
   type GuardrailContext,
   type GuardrailEvaluationResult,
+  type GuardrailHold,
   type GuardrailOutputPayload,
   type IGuardrailService,
 } from './IGuardrailService';
@@ -94,6 +95,9 @@ export interface GuardrailInputOutcome {
 
   /** All evaluation results from all guardrails in execution order. */
   evaluations?: GuardrailEvaluationResult[];
+
+  /** Always set by the dispatcher: what the evaluations amount to. */
+  outcome?: GuardrailOutcome;
 }
 
 /**
@@ -121,6 +125,15 @@ export interface GuardrailOutputOptions {
 
   /** Called once with the final verdict on the reply: blocked, sanitized, flagged or allowed. A throw is logged and ignored. */
   onVerdict?: (verdict: GuardrailOutputVerdict) => void | Promise<void>;
+
+  /**
+   * Picks which evaluation ends the reply, or answers undefined when none does. Called with every evaluation the
+   * guards have answered on the chunk so far, in registration order: once the parallel phase has settled (a picker
+   * that answers undefined lets the chunk pass), and when a phase 1 guard answers a BLOCK, which is then the last entry
+   * and ends the reply whatever the picker answers. Default: the first BLOCK without a hold, else the first hold. A
+   * reply the picker lets pass reaches `onVerdict` as flagged or allowed, never as blocked.
+   */
+  pickBlock?: (evaluations: readonly GuardrailEvaluationResult[]) => GuardrailEvaluationResult | undefined;
 }
 
 /** The verdict on a reply, as {@link GuardrailOutputOptions.onVerdict} receives it. */
@@ -130,6 +143,8 @@ export interface GuardrailOutputVerdict {
   /** The id of the guard that blocked, when it has one. */
   guardrailId?: string;
   reasonCode?: string;
+  /** Set when the block that decided is a hold: the content waits for a person's review. */
+  hold?: GuardrailHold;
   /** The text the caller receives: the replacement after a block with one, the reply after a pass, else null. */
   finalText: string | null;
   /** The reply's text as the guards judged it, before any rewrite; null for a verdict on a streamed delta, which judged no whole reply. */
@@ -154,7 +169,53 @@ export interface GuardrailMetadataEntry {
   action: GuardrailAction;
   reason?: string;
   reasonCode?: string;
+  /** Set on a BLOCK that keeps the content back for a person's review. */
+  hold?: GuardrailHold;
   metadata?: Record<string, unknown>;
+}
+
+/** What a list of evaluations amounts to. A hold is a BLOCK that asks for a person's review. */
+export type GuardrailOutcome = 'allow' | 'flag' | 'sanitize' | 'hold' | 'block';
+
+/** Whether an evaluation is a hold: a BLOCK that carries `hold`. A `hold` on any other action is ignored. */
+export function isGuardrailHold(e: GuardrailEvaluationResult | null | undefined): boolean {
+  return !!e && e.action === GuardrailAction.BLOCK && e.hold !== undefined && e.hold !== null;
+}
+
+/** block when any BLOCK has no hold; else hold when a BLOCK has one; else flag when any FLAG; else sanitize when any SANITIZE; else allow. */
+export function guardrailOutcomeOf(evaluations: readonly GuardrailEvaluationResult[]): GuardrailOutcome {
+  let hold = false; let flag = false; let sanitize = false;
+  for (const e of evaluations) {
+    if (e.action === GuardrailAction.BLOCK) { if (!isGuardrailHold(e)) return 'block'; hold = true; }
+    else if (e.action === GuardrailAction.FLAG) flag = true;
+    else if (e.action === GuardrailAction.SANITIZE) sanitize = true;
+  }
+  return hold ? 'hold' : flag ? 'flag' : sanitize ? 'sanitize' : 'allow';
+}
+
+/** A BLOCK that asks for review under `reviewCode`, with any other fields a guard wants on it. */
+export function holdResult(reviewCode: string, rest: Omit<GuardrailEvaluationResult, 'action' | 'hold'> = {}): GuardrailEvaluationResult {
+  return { ...rest, action: GuardrailAction.BLOCK, hold: { reviewCode } };
+}
+
+/** One evaluation as the moderation entry points report it: no `reason`, no `details`. */
+export type ModerationEvaluation = Omit<GuardrailMetadataEntry, 'reason'>;
+
+const REASON_CODE = /^[A-Za-z0-9_.:-]{1,64}$/;
+const REVIEW_CODE = /^[A-Za-z0-9_]{1,64}$/;
+
+/** Drops `reason` and `details`, and writes a `reasonCode` that is not a word, or a `hold.reviewCode` outside its shape, as `INVALID_CODE`. */
+export function toModerationEvaluation(evaluation: GuardrailEvaluationResult): ModerationEvaluation {
+  const reported: ModerationEvaluation = { action: evaluation.action };
+  if (evaluation.reasonCode !== undefined) {
+    reported.reasonCode = typeof evaluation.reasonCode === 'string' && REASON_CODE.test(evaluation.reasonCode) ? evaluation.reasonCode : 'INVALID_CODE';
+  }
+  if (isGuardrailHold(evaluation)) {
+    const code = evaluation.hold!.reviewCode;
+    reported.hold = { reviewCode: typeof code === 'string' && REVIEW_CODE.test(code) ? code : 'INVALID_CODE' };
+  }
+  if (evaluation.metadata !== undefined) reported.metadata = evaluation.metadata;
+  return reported;
 }
 
 /**
@@ -239,6 +300,7 @@ export async function* createGuardrailBlockedStream(
       action: evaluation.action,
       metadata: evaluation.metadata,
       context,
+      ...(isGuardrailHold(evaluation) ? { hold: evaluation.hold } : {}),
     },
   };
   yield errorChunk;
@@ -347,6 +409,7 @@ export function serializeEvaluation(evaluation: GuardrailEvaluationResult): Guar
     reason: evaluation.reason,
     reasonCode: evaluation.reasonCode,
     metadata: evaluation.metadata,
+    ...(isGuardrailHold(evaluation) ? { hold: evaluation.hold } : {}),
   };
 }
 

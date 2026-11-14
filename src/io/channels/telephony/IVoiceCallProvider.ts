@@ -9,6 +9,7 @@
  */
 
 import type {
+  CallDirection,
   CallId,
   CallMode,
   NormalizedCallEvent,
@@ -72,6 +73,34 @@ export interface PlayTtsInput {
   text: string;
   /** TTS voice name/ID. */
   voice?: string;
+}
+
+/** A call the carrier reports answered, as {@link IVoiceCallProvider.onCallAnswered} receives it. */
+export interface CallAnsweredInput {
+  /** Internal call ID assigned by CallManager. */
+  callId: CallId;
+  /** Provider-assigned call ID of the answered call. */
+  providerCallId: string;
+  /** Whether the manager placed the call or admitted it. */
+  direction: CallDirection;
+  /** Call interaction mode. */
+  mode: CallMode;
+  /** The message a notify call speaks, when one was given. */
+  message?: string;
+  /** TTS voice for the message (the manager's `tts.voice`). */
+  voice?: string;
+}
+
+/** An inbound call to answer, as {@link IVoiceCallProvider.answerCall} receives it. */
+export interface AnswerCallInput {
+  /** Internal call ID assigned by CallManager. */
+  callId: CallId;
+  /** Provider-assigned call ID of the inbound call. */
+  providerCallId: string;
+  /** Media stream WebSocket URL, when the manager's `streaming.enabled` is set. */
+  mediaStreamUrl?: string;
+  /** Host-issued stream credential, as for {@link InitiateCallInput.mediaStreamToken}. */
+  mediaStreamToken?: string;
 }
 
 /** Parameters for starting STT listening on a call. */
@@ -155,6 +184,26 @@ export interface IVoiceCallProvider {
    * Hang up an active call.
    */
   hangupCall(input: HangupCallInput): Promise<void>;
+
+  /**
+   * Set up a call the carrier reports answered, for a carrier controlled by
+   * commands rather than by the answer XML the host serves (Telnyx Call
+   * Control). `CallManager` calls it once per call, when an event first moves
+   * the call to `answered`; in `processWebhookDurable` that is after the event
+   * commits. It does not wait for the returned promise: a rejection is
+   * written to the console. Twilio and Plivo leave it unimplemented, since the
+   * host's answer XML sets their calls up.
+   */
+  onCallAnswered?(input: CallAnsweredInput): Promise<void>;
+
+  /**
+   * Answer an inbound call the host has admitted, for a carrier that answers
+   * by command rather than by the answer XML the host serves (Telnyx Call
+   * Control). `CallManager.answerInboundCall` calls it and waits for it; a
+   * rejection reaches the host. Twilio and Plivo leave it unimplemented, since
+   * the host's answer XML answers their calls.
+   */
+  answerCall?(input: AnswerCallInput): Promise<void>;
 
   /**
    * Play TTS audio into an active call (non-streaming).

@@ -33,6 +33,7 @@ describe('streamGmiTurn and the caller signal', () => {
       opts: {} as AgentOptions,
       userId: 'u1',
       useMemoryProviderContext: false,
+      memoryHook: { sessionId: 's1', userId: 'u1', subject: { kind: 'user', id: 'u1' }, providerUserId: 'u1', call: 'session' },
       history: null,
       // The turn hands over its usage once its failure is recorded, before the stream reports it: the caller stops then.
       onUsage: () => stop.abort(new Error('stopped late')),
@@ -71,6 +72,7 @@ describe('sendGmiTurn and the caller signal', () => {
     opts: {} as AgentOptions,
     userId: 'u1',
     useMemoryProviderContext: false,
+    memoryHook: { sessionId: 's1', userId: 'u1', subject: { kind: 'user', id: 'u1' }, providerUserId: 'u1', call: 'session' },
     history: null,
     onUsage,
     lock: new TurnLock(),

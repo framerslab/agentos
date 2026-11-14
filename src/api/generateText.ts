@@ -30,7 +30,7 @@ import { resolveDynamicToolCalls } from './runtime/dynamicToolCalling.js';
 import type { ITool, ToolExecutionContext } from '../core/tools/ITool.js';
 import { recordAgentOSTurnMetrics, withAgentOSSpan } from '../safety/evaluation/observability/otel.js';
 import { moduleLogger } from '../core/logging/loggerFactory.js';
-import { errorFields, providerName, safePath } from '../core/logging/events.js';
+import { listedErrorFields, providerName, safePath } from '../core/logging/events.js';
 import { isCallMask } from './runtime/pool/redact.js';
 import { createContentSafeConsole } from '../core/logging/contentSafeConsole.js';
 import type { AgentCallRecord, AgencyTraceEvent } from './types.js';
@@ -57,6 +57,7 @@ import {
   type SpendBudgetOptions,
 } from './runtime/spendBudget.js';
 import { isCallerStop, markHookStop } from './runtime/callerStop.js';
+import { guardedGenerateText, type TextGuardRun, type TextGuardrailOptions, type TextGuardrailReport, type TextGuardrailVerdict } from './runtime/textGuardrails.js';
 
 /**
  * The `fallback` component's events, to the target current when each is
@@ -95,7 +96,7 @@ function safeBuildLegResponseFormat(
   try {
     return builder(providerId, modelId);
   } catch (err) {
-    logger.warn('llm.response_format_failed', { provider: providerName(providerId), ...errorFields(err) });
+    logger.warn('llm.response_format_failed', { provider: providerName(providerId), ...listedErrorFields(err) });
     return undefined;
   }
 }
@@ -135,6 +136,7 @@ const console = createContentSafeConsole('generate_text');
 // Re-export multimodal types for downstream consumers
 export type { MessageContent, MessageContentPart };
 export type { HostLLMPolicy } from './runtime/hostPolicy.js';
+export type { TextGuardrailOptions, TextGuardrailReport, TextGuardrailVerdict };
 
 async function recordAgentOSUsageLazy(
   input: Parameters<typeof import('./runtime/usageLedger.js')['recordAgentOSUsage']>[0]
@@ -916,6 +918,27 @@ export interface GenerateTextOptions {
    */
   onBeforeToolExecution?: (info: ToolCallHookInfo) => Promise<ToolCallHookInfo | null>;
   /**
+   * Guards enforced on this call: the call's own user turn before the first provider request, every tool call before
+   * any hook, and the whole reply before it is returned. A guard runs closed unless its config says
+   * `failClosed: false`. A stop rejects with `GuardrailStopError`; `mode: 'dryRun'` evaluates and reports and changes
+   * nothing. Named `guards` because an agent's `guardrails` field is a list of ids that nothing enforces.
+   */
+  guards?: TextGuardrailOptions;
+  /**
+   * Internal: the run of a call that carries `guards`, set by the wrapper and carried by every fallback leg so each
+   * tool loop can ask it about a call. Not part of the public API.
+   *
+   * @internal
+   */
+  __guardRun?: TextGuardRun;
+  /**
+   * Internal: set by the guards when a sanitizer removed the whole text of `prompt`. The empty prompt is then sent as
+   * an empty user turn, where an empty prompt a caller passes adds none. Not part of the public API.
+   *
+   * @internal
+   */
+  __emptyPrompt?: boolean;
+  /**
    * Internal — DO NOT set from application code. The tool-approval gate,
    * set by `agency()` when `hitl.approvals.beforeTool` is listed, or
    * forwarded from a parent agency. Every tool loop calls it after
@@ -1030,6 +1053,15 @@ export interface GenerateTextOptions {
    * `messages` instead). Not part of the public API.
    */
   _continuation?: { helperToolRunId: string; stepOffset: number; prompt?: string };
+  /**
+   * INTERNAL: the caller this call's tools run for, set by agent() from the
+   * session's user, or from a one-shot call's own id. Each tool is told its
+   * user and the subject its memory is keyed by in `userContext`, its session
+   * in `sessionData.sessionId`, and the user id the caller named in
+   * `callerTurn.providerUserId`. A direct call has none, and its tools are
+   * told `system`. Not part of the public API.
+   */
+  _callerUser?: { userId: string; sessionId: string; providerUserId?: string; subject: { kind: 'user' | 'session'; id: string } };
 }
 
 /**
@@ -1135,13 +1167,24 @@ export interface GenerateTextResult {
   grounding?: import('../cognition/rag/citation/types.js').VerifiedResponse;
   /**
    * On a `gmi()` or `agent({ runtime: 'gmi' })` session's turn with cognitive
-   * memory: the recall capture of the turn's memory assembly (every candidate
-   * with its ranks, scores and outcome, the legs, the reranker, the budget and
-   * the timings; never a memory's text or the query's). `undefined` when the
-   * turn assembled no memory block or the manager's `recall.capture` is
-   * `'off'`.
+   * memory: the recall capture of the model hop that served the turn (every
+   * candidate with its ranks, scores and outcome, the legs, the reranker, the
+   * hop's budget and delivery, and the timings; never a memory's text or the
+   * query's). `undefined` when the turn assembled no memory block or the
+   * manager's `recall.capture` is `'off'`.
    */
   memoryRecall?: import('../cognition/memory/retrieval/recall/capture.js').MemoryRecallCapture;
+  /**
+   * On a `gmi()` or `agent({ runtime: 'gmi' })` session's turn: the
+   * conversation history the turn's requests left out to fit the prompt
+   * engine's history budget (35 percent of the serving model's context
+   * window). `messages` counts the oldest messages left out of the request
+   * that left out the most, `tokens` is their size at the prompt engine's
+   * estimate; the session's `messages()` still lists them. `undefined` when
+   * every request of the turn carried the whole history, and on the default
+   * runtime, which sends the whole history.
+   */
+  historyOmitted?: import('../core/llm/IPromptEngine.js').PromptHistoryOmission;
   /**
    * Per-hop provider fallback trail. `fired` is true when any non-primary
    * provider produced — or was tried for — the result, so callers can flag a
@@ -1149,6 +1192,8 @@ export interface GenerateTextResult {
    * `undefined` only on legacy code paths that predate the field.
    */
   fallback?: FallbackSignal;
+  /** With `guards`: what each stage's guards answered, as codes and ids, and whether the reply passed, was rewritten or was replaced. */
+  guardReport?: TextGuardrailReport;
 }
 
 /** @see {@link GenerateTextResult.fallback} */
@@ -2374,20 +2419,24 @@ function buildHelperToolExecutionContext(
   runId: string,
   stepIndex: number,
   correlationId?: string,
+  callerUser?: GenerateTextOptions['_callerUser'],
 ): ToolExecutionContext {
   return {
     gmiId: `${source}:${runId}`,
     personaId: `${source}:persona`,
     userContext: {
-      userId: 'system',
+      // The session's user when an agent made the call; a direct call has none, and tools read `system` as no user.
+      userId: callerUser?.userId ?? 'system',
+      ...(callerUser ? { memorySubject: callerUser.subject } : {}),
       source,
     },
     correlationId: correlationId ?? `${source}:tool:${stepIndex + 1}:${randomUUID()}`,
     sessionData: {
-      sessionId: `${source}:${runId}`,
+      sessionId: callerUser?.sessionId ?? `${source}:${runId}`,
       source,
       stepIndex,
     },
+    ...(callerUser?.providerUserId !== undefined ? { callerTurn: { providerUserId: callerUser.providerUserId } } : {}),
   };
 }
 
@@ -2418,6 +2467,8 @@ function buildHelperToolExecutionContext(
 export async function generateText(opts: GenerateTextOptions): Promise<GenerateTextResult> {
   // A call whose signal has already aborted is refused before anything is set up or sent.
   opts.abortSignal?.throwIfAborted();
+  // A call with guards runs its input and output stages once, around every leg (runtime/textGuardrails).
+  if (opts.guards && !opts.__guardRun) return guardedGenerateText(opts, generateText);
   // One budget instance for the whole call: every options object built from
   // `opts` below (a fallback hop, a continuation leg) carries it, so each hop
   // is charged to the same budget.
@@ -2735,7 +2786,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       // The plan's system message, when planning adds one; a continuation
       // leaves it out (the fallback plans again if planning is on).
       let planMessage: Record<string, unknown> | undefined;
-      if (opts.prompt) messages.push({ role: 'user', content: opts.prompt });
+      if (opts.prompt || (opts.prompt === '' && opts.__emptyPrompt)) messages.push({ role: 'user', content: opts.prompt });
 
       span?.setAttribute('agentos.api.tool_count', tools.length);
 
@@ -2885,6 +2936,16 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           onBeforeToolExecution: opts.onBeforeToolExecution,
           hookErrors: opts.hookErrors,
           approvalGate: opts.__approvalGate,
+          // The guards of the call judge each parsed call before the hook.
+          // The step is the call's own (a continuation's shim starts after the rounds before it), and a caller's
+          // abort while the guards were judging ends the round before any tool runs.
+          judgeToolCall: opts.__guardRun
+            ? async (call) => {
+                const refusal = await opts.__guardRun!.judgeToolCall({ ...call, step: stepOffset + call.step });
+                opts.abortSignal?.throwIfAborted();
+                return refusal;
+              }
+            : undefined,
           // A seat's mask reaches the shim's tool errors too, and a successful
           // output passes the listed values alone.
           maskToolError: opts.__maskError ? maskToolText : undefined,
@@ -3374,7 +3435,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
               : {}),
           } as any);
 
-          for (const tc of toolCallsInChoice) {
+          for (const [callIndex, tc] of toolCallsInChoice.entries()) {
             const fnName = (tc as any).function?.name ?? (tc as any).name ?? '';
             const fnArgs = (tc as any).function?.arguments ?? '{}';
             const tcId = (tc as any).id ?? '';
@@ -3398,6 +3459,19 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
               } as any);
               allToolCalls.push(record);
               continue;
+            }
+
+            // --- guards: judged before any hook, on the arguments the model sent ---
+            if (opts.__guardRun) {
+              const refusal = await opts.__guardRun.judgeToolCall({ name: fnName, args: parsedArgs, step: runStep, index: callIndex, registered: tool !== undefined });
+              // a caller's abort while the guards were judging: no hook and no tool runs
+              opts.abortSignal?.throwIfAborted();
+              if (refusal) {
+                record.error = refusal.error;
+                messages.push({ role: 'tool', tool_call_id: tcId, content: JSON.stringify(refusal.result) } as any);
+                allToolCalls.push(record);
+                continue;
+              }
             }
 
             // --- onBeforeToolExecution hook ---
@@ -3459,6 +3533,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
                     helperToolRunId,
                     runStep,
                     tcId || undefined,
+                    opts._callerUser,
                   ),
                 );
                 // One masked output serves the record and the tool turn: the
@@ -3788,7 +3863,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             : undefined;
           // The line, the callback and the leg's hop name the provider and
           // model the leg is sent as, not the provider the entry says.
-          fallbackLogger.warn('llm.fallback_fired', { api: 'generateText', primaryProvider: providerName(metricProviderId), fallbackProvider: providerName(legSentAs.provider), ...(legSentAs.model !== undefined ? { fallbackModel: safePath(legSentAs.model) } : {}), attempt, ...errorFields(lastErr) });
+          fallbackLogger.warn('llm.fallback_fired', { api: 'generateText', primaryProvider: providerName(metricProviderId), fallbackProvider: providerName(legSentAs.provider), ...(legSentAs.model !== undefined ? { fallbackModel: safePath(legSentAs.model) } : {}), attempt, ...listedErrorFields(lastErr) });
           // A seat's callback is handed the error through the seat's mask, as it would leave the seat.
           opts.onFallback?.(opts.__maskError ? (opts.__maskError(lastErr) as Error) : lastErr, legSentAs.provider);
           // Build a new options object targeting the fallback provider.
@@ -3919,7 +3994,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       }
       // All fallbacks exhausted: fall through to throw
       const lastErr = lastError instanceof Error ? lastError: new Error(String(lastError));
-      fallbackLogger.error('llm.fallback_exhausted', { api: 'generateText', primaryProvider: providerName(metricProviderId), attempts: attempt, ...errorFields(lastErr) });
+      fallbackLogger.error('llm.fallback_exhausted', { api: 'generateText', primaryProvider: providerName(metricProviderId), attempts: attempt, ...listedErrorFields(lastErr) });
       metricStatus = 'error';
       throw markChainWalked(
         toolProgress.shimRanTool || toolProgress.completedToolRounds ? markToolsRan(lastError) : lastError,

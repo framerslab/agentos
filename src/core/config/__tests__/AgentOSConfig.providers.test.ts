@@ -2,6 +2,7 @@ import axios, { type AxiosAdapter, type InternalAxiosRequestConfig } from 'axios
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createAgentOSConfig } from '../AgentOSConfig.js';
 import { AIModelProviderManager } from '../../llm/providers/AIModelProviderManager.js';
+import { resolveModelOption } from '../../../api/model.js';
 
 describe('createAgentOSConfig provider defaults', () => {
   let originalAdapter: typeof axios.defaults.adapter;
@@ -50,6 +51,38 @@ describe('createAgentOSConfig provider defaults', () => {
     if (!provider) throw new Error(`Missing provider: ${providerId}`);
     expect(provider.defaultModelId).toBe(modelId);
   });
+
+  it.each(['openai', 'openrouter', 'requesty', 'minimax', 'ollama'])(
+    'gives %s the default model a model-less API call to it resolves to',
+    async (providerId) => {
+      vi.stubEnv('REQUESTY_API_KEY', 'test-requesty-key');
+      vi.stubEnv('MINIMAX_API_KEY', 'test-minimax-key');
+      const config = await createAgentOSConfig();
+      const entry = config.modelProviderManagerConfig.providers.find((p) => p.providerId === providerId);
+      if (!entry) throw new Error(`Missing provider entry: ${providerId}`);
+      expect((entry.config as { defaultModelId?: string }).defaultModelId).toBe(resolveModelOption({ provider: providerId }, 'text').modelId);
+    },
+  );
+
+  it.each([
+    ['OpenAI', { OPENAI_API_KEY: 'test-openai-key' }, 'openai', 'gpt-4o'],
+    ['OpenRouter', { OPENAI_API_KEY: '' }, 'openrouter', 'openai/gpt-4o-mini'],
+    ['Requesty', { OPENAI_API_KEY: '', OPENROUTER_API_KEY: '', REQUESTY_API_KEY: 'test-requesty-key' }, 'requesty', 'openai/gpt-4o'],
+    ['Ollama', { OPENAI_API_KEY: '', OPENROUTER_API_KEY: '', MINIMAX_API_KEY: '' }, 'ollama', 'llama3.2'],
+  ] as const)(
+    "makes the default entry's provider and default model the GMI default when %s is the default provider",
+    async (_name, env, providerId, modelId) => {
+      vi.stubEnv('MINIMAX_API_KEY', '');
+      for (const [key, value] of Object.entries(env)) vi.stubEnv(key, value);
+      const config = await createAgentOSConfig();
+      const defaultEntry = config.modelProviderManagerConfig.providers.find((p) => p.isDefault);
+      expect(defaultEntry?.providerId).toBe(providerId);
+      expect(config.gmiManagerConfig.defaultGMIBaseConfigDefaults).toEqual({
+        defaultLlmProviderId: providerId,
+        defaultLlmModelId: modelId,
+      });
+    },
+  );
 
   it('makes MiniMax the manager default and the GMI default when its key is the only cloud key', async () => {
     vi.stubEnv('OPENAI_API_KEY', '');

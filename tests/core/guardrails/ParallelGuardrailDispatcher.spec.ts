@@ -359,6 +359,25 @@ describe('ParallelGuardrailDispatcher', () => {
       expect(outcome.sanitizedInput).toBe(baseInput);
     });
 
+    it('timeout: a closed guard that answers from its deadline signal still times out, and the signal aborts at the deadline', async () => {
+      const signals: (AbortSignal | undefined)[] = [];
+      const answersOnAbort: IGuardrailService = {
+        id: 'answers-on-abort',
+        config: { failClosed: true, timeoutMs: 10 },
+        evaluateInput: ({ deadlineSignal }: GuardrailInputPayload) =>
+          new Promise((resolve) => {
+            signals.push(deadlineSignal);
+            deadlineSignal?.addEventListener('abort', () => resolve(null), { once: true });
+          }),
+      };
+
+      const outcome = await ParallelGuardrailDispatcher.evaluateInput([answersOnAbort], baseInput, baseContext);
+
+      expect(outcome.evaluation).toMatchObject({ action: GuardrailAction.BLOCK, reasonCode: 'GUARDRAIL_ERROR', metadata: { cause: 'timeout' } });
+      expect(signals).toHaveLength(1);
+      expect(signals[0]?.aborted).toBe(true);
+    });
+
     it('error: throwing guardrail is skipped (fail-open)', async () => {
       const brokenGuardrail = createMockGuardrail({
         id: 'broken',

@@ -2529,16 +2529,32 @@ function frontMatterField(note: string, field: string): string | undefined {
  */
 function overtakenByRefile(brain: Brain, refile: () => Promise<unknown>): { brain: Brain; refiled: () => boolean } {
   let refiled = false;
+  /** `all` of `reader`, the re-file run before its first read of the traces. */
+  const overtakingAll =
+    (reader: { all: Brain['all'] }) =>
+    async (sql: string, params?: Parameters<Brain['all']>[1]) => {
+      if (!refiled && sql.includes('FROM memory_traces')) {
+        refiled = true;
+        await refile();
+      }
+      return reader.all(sql, params);
+    };
+  /** `source` with its `all` overtaken, every other member its own. */
+  const overtakenSource = <S extends object>(source: S & { all: Brain['all'] }): S =>
+    new Proxy(source, {
+      get(target, property) {
+        if (property === 'all') return overtakingAll(target);
+        const value: unknown = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
   const overtaken = new Proxy(brain, {
     get(target, property) {
-      if (property === 'all') {
-        return async (sql: string, params?: Parameters<Brain['all']>[1]) => {
-          if (!refiled && sql.includes('FROM memory_traces')) {
-            refiled = true;
-            await refile();
-          }
-          return target.all(sql, params);
-        };
+      if (property === 'all') return overtakingAll(target);
+      // An export that reads one consistent view reads it through this: the view's reads are overtaken too.
+      if (property === 'readConsistently') {
+        return <T>(read: (source: Parameters<Parameters<Brain['readConsistently']>[0]>[0]) => Promise<T>) =>
+          target.readConsistently((source) => read(overtakenSource(source)));
       }
       const value: unknown = Reflect.get(target, property, target);
       return typeof value === 'function' ? value.bind(target) : value;
@@ -12178,7 +12194,7 @@ describe('the docs a host reads about it', () => {
     );
     // The persona id keys the memory's own traces and the persona scopes, so a soul that moves it moves what they recall.
     expect(gmiDoc).toContain(
-      "The memory files its own traces and the `persona` scopes (the agent's, and each user's) under the persona's id, which with a soul is the soul's id.",
+      "The memory files its own traces and the `persona` scopes (the agent's, and each user's) under the persona's id: the soul's id, else a slug of the agent's `name`, else `learning.agentKey`.",
     );
     expect(gmiDoc).toContain(
       "A brain whose persona id was the slug of the agent's `name` keeps those traces under the slug, and an agent whose soul gives another id does not recall them; each user's `user` scope it still recalls. To keep recalling them, set the soul's `agentId` to that slug.",

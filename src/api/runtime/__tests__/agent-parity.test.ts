@@ -40,6 +40,10 @@ const systemAt = (index: number) => messagesAt(index)
   .filter((message) => message.role === 'system')
   .map((message) => typeof message.content === 'string' ? message.content : JSON.stringify(message.content))
   .join('\n');
+/** The recall data blocks of one request: the user-role messages that hold one. */
+const recallBlocksAt = (index: number) => messagesAt(index)
+  .filter((message) => message.role === 'user' && typeof message.content === 'string' && message.content.startsWith('<memory_recall>'))
+  .map((message) => message.content);
 
 beforeEach(() => {
   hoisted.generateCompletion.mockReset().mockResolvedValue(completion(answer));
@@ -216,11 +220,12 @@ describe('schema validation retries', () => {
     expect(repairOptions.tools).toBeUndefined();
     expect(repairOptions.toolChoice).toBeUndefined();
     expect(observe.mock.calls).toEqual([
-      ['user', 'Write records.'], ['assistant', '{"count":2}'],
+      ['user', 'Write records.', expect.objectContaining({ sessionId: expect.any(String) })],
+      ['assistant', '{"count":2}', expect.objectContaining({ sessionId: expect.any(String) })],
     ]);
   });
 
-  it.each(['generate', 'send'] as const)('observes only the accepted %s exchange while recall and caller hooks run on every attempt', async (method) => {
+  it.each(['generate', 'send'] as const)('observes only the accepted %s exchange; recall runs once and its text and the caller hooks reach every attempt', async (method) => {
     hoisted.generateCompletion
       .mockResolvedValueOnce(completion('{"count":"invalid"}'))
       .mockResolvedValueOnce(completion('{"count":1}'));
@@ -243,14 +248,16 @@ describe('schema validation retries', () => {
       : await subject.session().send('Count records.', { responseSchema: schema, maxValidationRetries: 1 });
     expect(result.text).toBe('{"count":2}');
     expect(observe.mock.calls).toEqual([
-      ['user', 'Count records.'], ['assistant', '{"count":2}'],
+      ['user', 'Count records.', expect.objectContaining({ sessionId: expect.any(String) })],
+      ['assistant', '{"count":2}', expect.objectContaining({ sessionId: expect.any(String) })],
     ]);
-    expect(getContext).toHaveBeenCalledTimes(2);
+    expect(getContext).toHaveBeenCalledTimes(1);
+    expect(getContext).toHaveBeenCalledWith('Count records.', expect.any(Object));
     expect(onBeforeGeneration).toHaveBeenCalledTimes(2);
     expect(onAfterGeneration).toHaveBeenCalledTimes(2);
     for (const index of [0, 1]) {
-      expect(getContext).toHaveBeenNthCalledWith(index + 1, 'Count records.', expect.any(Object));
-      expect(systemAt(index)).toContain('Remember the count.');
+      expect(systemAt(index)).not.toContain('Remember the count.');
+      expect(recallBlocksAt(index)).toEqual([expect.stringContaining('Remember^the^count.')]);
     }
   });
 
@@ -273,7 +280,7 @@ describe('schema validation retries', () => {
       : session.send('Count records.', { responseSchema: schema, maxValidationRetries: 1 });
     await expect(result).rejects.toBeInstanceOf(ObjectGenerationError);
     expect(observe).not.toHaveBeenCalled();
-    expect(getContext).toHaveBeenCalledTimes(2);
+    expect(getContext).toHaveBeenCalledTimes(1);
     expect(onBeforeGeneration).toHaveBeenCalledTimes(2);
     expect(onAfterGeneration).toHaveBeenCalledTimes(2);
     expect(session.messages()).toEqual([]);

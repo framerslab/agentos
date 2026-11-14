@@ -23,8 +23,11 @@ export const MEMORY_RECALL_CAPTURE_VERSION = 'memory-recall-capture/1' as const;
 /** A recall leg: one way of finding candidates for a turn. */
 export type RecallLeg = 'dense' | 'exact_words' | 'recency' | 'supplied';
 
-/** Why a recall leg did not run. */
-export type LegAbsentReason = 'no_store' | 'no_embedder' | 'no_index' | 'no_scope_filter' | 'query_error' | 'disabled';
+/**
+ * Why a recall leg did not run. `no_scopes`: the turn passed no `scopes`, so the exact-words and recency legs, which
+ * read only inside a turn's scopes, had nothing they may read.
+ */
+export type LegAbsentReason = 'no_store' | 'no_embedder' | 'no_index' | 'no_scope_filter' | 'no_scopes' | 'query_error' | 'disabled';
 
 /** Why no rerank scores were applied to a turn's candidates. */
 export type RerankSkipReason = 'loading' | 'unavailable' | 'timeout' | 'error' | 'backoff' | 'none_configured';
@@ -52,10 +55,15 @@ export interface MemoryRecallCandidate {
    * Set for a candidate left out, and only then: `budget` when its section was
    * offered no room (or the candidate never reached a section), `section_full`
    * when it did not fit whole in the room its section was offered, `dedupe`
-   * when another candidate holds the same memory (`duplicateOf`).
+   * when another candidate holds the same memory (`duplicateOf`), and
+   * `render_failed` on a GMI hop that was sent no block because rendering it
+   * again for the hop failed (`budget.renderFailed`).
    */
-  reason?: 'budget' | 'dedupe' | 'section_full';
-  /** The candidate it duplicates, with `reason: 'dedupe'`. */
+  reason?: 'budget' | 'dedupe' | 'section_full' | 'render_failed';
+  /**
+   * The candidate it duplicates: with `reason: 'dedupe'`, or, for one the block
+   * shows only through its graph association, with `outcome: 'included'`.
+   */
   duplicateOf?: string;
   /** Whether a memory-question reserve added it. */
   reserve?: boolean;
@@ -68,20 +76,26 @@ export interface MemoryRecallCandidate {
 /**
  * The reranker that scored a turn's candidates, or why none did.
  *
- * `provider` is `'local'` for the in-process cross-encoder, `'llm'` for the LLM
- * judge, `'other'` for any other provider of a `rerankerService` passed on the
- * manager (Cohere's API among them: the query and the candidates' texts went to
- * that provider), and `'none'` when no rerank scores were applied.
+ * `provider` is `'local'` for the in-process cross-encoder (`recall.rerank`
+ * `{ kind: 'local' }`), `'llm'` for the LLM judge over the host's own model
+ * call (`{ kind: 'llm' }`), and `'none'` when no rerank scores were applied:
+ * `reason` then says why (`none_configured` with no `recall.rerank`;
+ * `loading` until the local model has loaded; `unavailable` after its load
+ * failed, with Transformers.js missing, or for a rerank whose reranker was
+ * stopped while it ran; `timeout`, `error`, or `backoff` after three
+ * failures in a row). A manager's memory recall records no other
+ * provider. `'other'` is what {@link rerankerRecordOf} names a provider id
+ * that is neither, for a host that records a rerank of its own.
  */
 export interface MemoryRecallReranker {
   provider: 'none' | 'local' | 'llm' | 'other';
-  /** The model the provider reported. */
+  /** The model `recall.rerank` names. */
   model?: string;
-  /** The model's revision, when one is pinned. */
+  /** The local model's pinned revision. */
   revision?: string;
   /** With `provider: 'none'`: why no rerank scores were applied. */
   reason?: RerankSkipReason;
-  /** How many candidates the reranker was sent (as the provider reports it, else at most `MEMORY_RERANK_MAX_DOCUMENTS`). */
+  /** How many candidates the reranker was sent: the recall's best, at most `recall.rerank.maxCandidates` (20). */
   candidates?: number;
   /** How long the rerank took, in milliseconds. */
   ms?: number;
@@ -94,13 +108,22 @@ export interface MemoryRecallCapture {
   retrieval: 'dense' | 'hybrid';
   /** The budget the block was assembled in: the one asked for, and the one used. */
   budget: {
+    /** The configured budget of the block (`recall.budget.totalTokens`, or the caller's). */
     requested: number;
+    /** The budget the block was rendered in. */
     effective: number;
+    /** Set when a model's share of the prompt held less than `requested`: `zero_remaining` when nothing was left. */
     clampReason?: 'prompt_share' | 'zero_remaining';
+    /** The serving model's retrieved-context share, in tokens (a GMI turn's record). */
     promptShareTokens?: number;
+    /** The turn's RAG and long-term-memory text, in tokens, which the share holds first (a GMI turn's record). */
     otherContextTokens?: number;
+    /** The model hop the record is for, 0 for the route's primary (a GMI turn's record). */
     hop?: number;
+    /** True when the block was rendered again at `effective` from the turn's recall, with no second retrieval. */
     reassembled?: boolean;
+    /** True when rendering the block again for the hop failed, so the hop was sent no block (a GMI turn's record). */
+    renderFailed?: boolean;
   };
   /** Estimated tokens of the block, headers included. */
   tokensUsed: number;
@@ -115,23 +138,41 @@ export interface MemoryRecallCapture {
   /** The embedder of the dense leg, when known. */
   embedder?: { provider: string; model: string };
   reranker: MemoryRecallReranker;
-  /** Whether the memory-question reserve added candidates, and how many. */
+  /**
+   * Whether the turn was a memory question (`fired`: the rule, or the manager's `recall.memoryQuestion`, said yes,
+   * whatever it found to reserve), and how many reserved candidates the block shows (`added`). Under `dense` it never
+   * fires.
+   */
   memoryQuestionReserve: { fired: boolean; added: number };
-  /** Every candidate, in the order recall ranked them, then any memory the block shows that no leg returned. */
+  /**
+   * Every candidate, in the order recall ranked them (under `hybrid` the pool in fused order, a reranked cut in the
+   * order the rerank gave it), then any memory the block shows that no leg returned.
+   */
   candidates: MemoryRecallCandidate[];
   /** Milliseconds of each stage, rounded. */
   timings: { legsMs: number; fuseMs: number; dedupeMs: number; rerankMs: number; assembleMs: number; totalMs: number };
-  /** What reached the model, once the prompt was built. */
+  /**
+   * What reached the model, once the prompt was built (a GMI turn's record): PromptEngine's count of the memory block,
+   * which it never reduces; the other retrieved context the turn had (`ragTokens`, `longTermMemoryTokens`, by the
+   * assembler's estimate) and what of it was sent (`deliveredTokens`, by PromptEngine's), with `cutBy` when PromptEngine
+   * reduced it; and the codes of PromptEngine's issues about the context (`RAG_SUMMARIZATION_FAILED`,
+   * `TOKEN_BUDGET_EXCEEDED_POST_OPT`). `promptReplacedByHook` is true when the host's `beforeModelCall` replaced the
+   * prompt for the hop: the counts are then of the prompt PromptEngine built, and what the model received is the
+   * hook's.
+   */
   delivery?: {
     memoryBlockTokens: number;
     otherContext?: { ragTokens: number; longTermMemoryTokens: number; deliveredTokens: number; cutBy?: 'prompt_engine_truncate' | 'prompt_engine_summarize' };
     issueCodes?: string[];
+    promptReplacedByHook?: boolean;
   };
 }
 
 /**
- * The most candidates a manager's memory recall sends its `rerankerService` (`maxDocuments` on the call): the
- * ones the dense leg ranks first. The rest keep their cognitive scores.
+ * Through 0.17.1, the most candidates a manager's memory recall sent the `rerankerService` on its configuration.
+ *
+ * @deprecated Read by nothing: memory recall no longer calls that service, and sends the reranker `recall.rerank`
+ *   names at most `recall.rerank.maxCandidates` candidates (20 by default, `RERANK_DEFAULTS.maxCandidates`).
  */
 export const MEMORY_RERANK_MAX_DOCUMENTS = 100;
 
@@ -153,8 +194,35 @@ export interface RetrievalRecallReport {
    * the graph's activation, not the co-activation the graph records after.
    */
   denseMs: number;
+  /**
+   * Each recall leg of the retrieval, as the capture reports it: whether it ran, why not (`no_embedder` when the
+   * embedding manager gave the query no vector), how many candidates it returned, how many the eligibility checks
+   * dropped (for the dense leg, the trust-policy filter), and its time. `CognitiveMemoryManager` always sets it.
+   */
+  legs?: MemoryRecallCapture['legs'];
   /** Each trace the reranker scored, with the score it gave before the blend. Absent when no rerank answered. */
   rerankScores?: Record<string, number>;
+  /** Milliseconds the rerank took, whether it answered, failed or timed out; 0 or absent with no reranker. */
+  rerankMs?: number;
+  /** `hybrid` when the retrieval fused the dense, exact-words and recency legs; `dense` (or absent) otherwise. */
+  retrieval?: 'dense' | 'hybrid';
+  /**
+   * Under `hybrid`: the whole recall pool in fused order, the candidates the cut at `topK` left out and the ones the
+   * dedupe dropped (`duplicateOf`) included, each with its ranks and fused score. When a rerank answered, the cut's
+   * candidates stand in the order it gave them, in the places the cut holds in that list.
+   */
+  ranked?: RankedRecallCandidate[];
+  /** Under `hybrid`: the full-text backend the exact-words leg read, or `none` when that leg did not run. */
+  lexicalBackend?: MemoryRecallCapture['lexicalBackend'];
+  /** Under `hybrid`: milliseconds of the legs (run together), the fusion and the dedupe. */
+  timings?: { legsMs: number; fuseMs: number; dedupeMs: number };
+  /**
+   * Under `hybrid`: whether the turn was a memory question (`fired`), and the ids of the exact-words candidates past
+   * the cut it reserved room for, in reserve order (they follow the cut in `retrieved`).
+   */
+  reserve?: { fired: boolean; ids: string[] };
+  /** Counts of the call's supplied candidates that were refused, set only when one was; never their ids. */
+  suppliedRejected?: { outOfScope: number; ineligible: number };
 }
 
 /** A ranked candidate before assembly. */
@@ -163,13 +231,21 @@ export interface RankedRecallCandidate {
   ranks: MemoryRecallCandidate['ranks'];
   fusedScore: number;
   rerankScore?: number;
+  /** Set when the hybrid recall's dedupe dropped it: the candidate that holds the same memory. */
+  duplicateOf?: string;
+  /** Set when a memory-question reserve added it past the cut. */
+  reserve?: boolean;
 }
 
 /**
  * The candidates' outcomes from the assembler's line report.
  *
- * Each ranked candidate takes its line's outcome, reason, tokens and section;
- * one the assembler gave no line is left out for `budget`, with 0 tokens. A
+ * A ranked candidate the dedupe dropped (`duplicateOf`) is left out for
+ * `dedupe`, with 0 tokens, unless the block shows it through another line (an
+ * association in Related Context): then it takes that line's outcome, tokens
+ * and section, and keeps its `duplicateOf`. Each other ranked candidate takes
+ * its line's outcome, reason, tokens and section; one the assembler gave no
+ * line is left out for `budget`, with 0 tokens. A
  * line for a memory no leg returned (an association's trace, the involuntary
  * memory) is added after the ranked candidates, with empty `ranks` and a
  * `fusedScore` of 0, so the included candidates are every memory the block
@@ -185,6 +261,8 @@ export function candidatesFrom(
   const byId = new Map(lines.map((line) => [line.id, line]));
   const candidates: MemoryRecallCandidate[] = ranked.map((candidate) => {
     const line = byId.get(candidate.id);
+    const shown = line?.outcome === 'included';
+    if (candidate.duplicateOf !== undefined && !shown) return { ...candidate, outcome: 'left_out' as const, reason: 'dedupe' as const, tokens: 0 };
     return line
       ? { ...candidate, outcome: line.outcome, ...(line.reason ? { reason: line.reason } : {}), tokens: line.tokens, section: line.section }
       : { ...candidate, outcome: 'left_out' as const, reason: 'budget' as const, tokens: 0 };
@@ -208,7 +286,9 @@ export function candidatesFrom(
 /**
  * The reranker record of a rerank that answered, from the provider id and the
  * model the provider reported: `local` for the cross-encoder, `llm` for the
- * LLM judge, `other` for any other provider.
+ * LLM judge, `other` for any other provider. For a host that records a rerank
+ * it ran itself; the manager's memory recall builds its own record from
+ * `recall.rerank`.
  */
 export function rerankerRecordOf(
   providerId: string | undefined,

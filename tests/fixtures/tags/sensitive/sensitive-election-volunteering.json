@@ -1,0 +1,46 @@
+{
+  "id": "sensitive-election-volunteering",
+  "set": "sensitive",
+  "kind": "document",
+  "language": "en",
+  "title": "Volunteering days and the local election",
+  "headings": [],
+  "path": null,
+  "text": "Two people asked to use their volunteering days during the local election in May. Helen Brandt will spend two days knocking on doors for the Green Party in her ward, and Josef Novak is a candidate for the Liberal Democrats on the town council and wants three days to campaign.\n\nThe volunteering policy allows up to three days a year for unpaid work with a charity, a school or a community group. It does not say whether political campaigning counts. The people team's view is that the policy should be neutral: either all campaigning for any party counts, or none does.\n\nThe leadership team will decide before the end of the month. Until then, both requests are on hold, and Helen and Josef can take the days as annual leave if they prefer. Whatever the decision, the policy will be updated to say clearly how it applies to elections.\n",
+  "vocabulary": [
+    {
+      "label": "volunteering",
+      "uses": 9,
+      "lastUsed": 1762300800000
+    },
+    {
+      "label": "policies",
+      "uses": 8,
+      "lastUsed": 1762214400000
+    },
+    {
+      "label": "annual leave",
+      "uses": 7,
+      "lastUsed": 1762128000000
+    }
+  ],
+  "typed": [
+    "volunteering"
+  ],
+  "expected": {
+    "existing": [
+      "volunteering",
+      "policies",
+      "annualleave"
+    ],
+    "new": []
+  },
+  "mustNot": [
+    "Green Party",
+    "Liberal Democrats",
+    "campaigning",
+    "Helen Brandt",
+    "Josef Novak"
+  ],
+  "asks": []
+}

@@ -33,6 +33,17 @@ import {
   TERMINAL_CALL_STATES,
 } from './types.js';
 
+/** The event kinds that end a call. */
+const ENDING_EVENT_KINDS: ReadonlySet<NormalizedCallEvent['kind']> = new Set<NormalizedCallEvent['kind']>([
+  'call-completed',
+  'call-failed',
+  'call-busy',
+  'call-no-answer',
+  'call-voicemail',
+  'call-hangup-user',
+  'call-error',
+]);
+
 // ============================================================================
 // Event Emitter Types
 // ============================================================================
@@ -164,6 +175,7 @@ export class CallManager {
       state: 'initiated',
       direction: 'outbound',
       mode,
+      ...(params.message !== undefined ? { message: params.message } : {}),
       fromNumber,
       toNumber: params.toNumber,
       seedId: params.seedId,
@@ -178,9 +190,7 @@ export class CallManager {
     const baseUrl = this.config.webhookBaseUrl || 'http://localhost:3000';
     const webhookUrl = `${baseUrl}/voice/webhook/${provider.name}`;
     const statusCallbackUrl = `${baseUrl}/voice/status/${provider.name}`;
-    const mediaStreamUrl = this.config.streaming?.enabled
-      ? `${baseUrl.replace('http', 'ws')}${this.config.streaming.wsPath || '/voice/media-stream'}`
-      : undefined;
+    const mediaStreamUrl = this.mediaStreamUrl();
 
     const input: InitiateCallInput = {
       callId,
@@ -223,27 +233,44 @@ export class CallManager {
   /**
    * Hang up a call. Transitions to 'hangup-bot' terminal state.
    *
+   * The call ends before the carrier is asked to hang up, so a callback processed while that request is pending, such
+   * as the completion the hangup causes, finds the call ended: with `eventHandling: 'carrier'` it changes nothing and
+   * emits nothing. `call:ended` is emitted after the request returns.
+   *
    * A call persisted with {@link persistCall} or read by {@link processWebhookDurable} ends in its store: the
    * end, with any bot speech not yet committed, commits there before the carrier is asked to hang up, so the
    * completion callback the hangup causes, like any callback after the commit, finds the call ended and changes
    * nothing, whichever manager processes it. `call:ended` is emitted after the carrier request returns. The carrier
    * is asked even when that commit fails, and the promise then rejects with the commit's error. A call the store
-   * already holds as ended keeps its stored outcome and emits nothing.
+   * already holds as ended, while the manager's record still reads it as live (another manager ended it), keeps its
+   * stored outcome and emits nothing; the carrier is still asked. A carrier request that fails is written to the
+   * console and is not retried: the call has ended here, and in its store.
    */
   async hangupCall(callId: CallId): Promise<void> {
+    await this.hangUp(callId, true);
+  }
+
+  /**
+   * Hangs a call up as {@link hangupCall} describes. `askWhenStoredEnded` says whether the carrier is asked when the
+   * call's store already holds it as ended: {@link hangupCall} asks; a notify call's own hangup asks only when its
+   * commit ends the call, so two deliveries of one `notify-message-spoken` event handled at once ask the carrier once.
+   */
+  private async hangUp(callId: CallId, askWhenStoredEnded: boolean): Promise<void> {
     const call = this.activeCalls.get(callId);
     if (!call) return;
     if (TERMINAL_CALL_STATES.has(call.state)) return;
 
     const store = this.durableStores.get(callId);
     if (store) {
-      await this.hangupDurable(call, store);
+      await this.hangupDurable(call, store, askWhenStoredEnded);
       return;
     }
 
-    await this.requestCarrierHangup(this.getProvider(call.provider), call.providerCallId);
+    const provider = this.getProvider(call.provider);
+    const providerCallId = call.providerCallId;
     this.transitionState(call, 'hangup-bot');
     call.endedAt = Date.now();
+    await this.requestCarrierHangup(provider, providerCallId);
     this.finalizeCall(call);
     this.emit({ type: 'call:ended', callId, call });
   }
@@ -310,14 +337,23 @@ export class CallManager {
    * nothing, a call emits one terminal notification, and the record stays in
    * the manager. This repairs transitions in process and adds no restart
    * durability; see {@link processWebhookDurable}. Otherwise the original
-   * handling below applies.
+   * handling below applies, except that an event ending a call that has
+   * already ended (the carrier's report of a hangup the manager asked for,
+   * say) changes nothing and emits no second `call:ended`.
+   *
+   * In either handling, the first `notify-message-spoken` event for a notify
+   * call hangs it up as {@link hangupCall} does, without waiting for it.
    */
   processNormalizedEvent(event: NormalizedCallEvent): void {
     if (this.config.eventHandling === 'carrier') {
       const call = [...this.activeCalls.values()].find((candidate) => (!event.provider || candidate.provider === event.provider) && (candidate.providerCallId === event.providerCallId || (event.providerRequestId !== undefined && candidate.providerRequestId === event.providerRequestId)));
       if (!call) return;
       this.bindCarrierIdentity(call, event);
-      for (const notification of this.applyCarrierEvent(call, event)) this.emit(notification);
+      const spoken = this.isNotifyMessageSpoken(call, event);
+      const notifications = this.applyCarrierEvent(call, event);
+      for (const notification of notifications) this.emit(notification);
+      if (notifications.some((notification) => notification.type === 'call:answered')) this.setUpAnsweredCall(call);
+      if (spoken) this.hangUpSpokenNotifyCall(call.callId);
       return;
     }
     // Idempotency check
@@ -334,6 +370,13 @@ export class CallManager {
       return;
     }
 
+    // A call ends once: an ending event for a call that has ended, such as the carrier's report of a hangup the
+    // manager asked for, changes nothing and emits nothing.
+    if (TERMINAL_CALL_STATES.has(call.state) && ENDING_EVENT_KINDS.has(event.kind)) {
+      this.processedEventIds.delete(event.eventId);
+      return;
+    }
+
     call.processedEventIds.push(event.eventId);
 
     switch (event.kind) {
@@ -342,8 +385,10 @@ export class CallManager {
         this.emit({ type: 'call:ringing', callId: call.callId, call });
         break;
 
-      case 'call-answered':
+      case 'call-answered': {
+        const before = call.state;
         this.transitionState(call, 'answered');
+        const answeredNow = before !== 'answered' && call.state === 'answered';
         this.emit({ type: 'call:answered', callId: call.callId, call });
         // Auto-transition to active then listening for conversation mode
         if (call.mode === 'conversation') {
@@ -352,7 +397,9 @@ export class CallManager {
           this.transitionState(call, 'listening');
           this.emit({ type: 'call:listening', callId: call.callId, call });
         }
+        if (answeredNow) this.setUpAnsweredCall(call);
         break;
+      }
 
       case 'call-completed':
         this.transitionState(call, 'completed');
@@ -450,6 +497,11 @@ export class CallManager {
           data: { digit: event.digit, durationMs: event.durationMs },
         });
         break;
+
+      case 'notify-message-spoken':
+        // The carrier has spoken a notify call's message to the end: the call has done its work.
+        if (call.mode === 'notify') this.hangUpSpokenNotifyCall(call.callId);
+        break;
     }
   }
 
@@ -510,30 +562,47 @@ export class CallManager {
    * commit and are best-effort; financial/external effects must consume durable records, not handlers.
    * A call's bot speech not yet committed commits first, and the manager's record of each call becomes the
    * committed one with the speech recorded since on top; the manager's store transactions run one at a time.
+   * A `notify-message-spoken` event counts as applied and is not recorded as processed: after the commit, outside
+   * the store queue, its notify call hangs up as {@link hangupCall} does, and the returned promise waits for that
+   * hangup and rejects with its error, or when the manager was disposed before it. A webhook acknowledged on that
+   * promise has had its hangup committed and asked of the carrier; one redelivered because the hangup did not commit
+   * (the worker stopped, or the commit failed) finds the call still open and hangs it up. Two deliveries of the event
+   * handled at once both find the call open: the hangup whose commit ends the call asks the carrier, and the other,
+   * finding the call ended in the store, asks nothing.
    */
   async processWebhookDurable(providerName: VoiceProviderName, context: WebhookContext, store: ITelephonyCallStore): Promise<{ accepted: boolean; applied: number }> {
     const provider = this.providers.get(providerName);
     if (!provider || provider.webhookIdentity !== 'stable-v1') throw new Error('stable carrier provider required');
     if (!provider.verifyWebhook(context).valid) return { accepted: false, applied: 0 };
     const events = provider.parseWebhookEvent(context).events;
-    return this.durable(async () => {
+    const result = await this.durable(async () => {
       const committed = await store.withProvider(providerName, async (tx) => {
-        const notifications: CallManagerEvent[] = []; const calls = new Map<string, CallRecord>(); const speech = new Map<string, TranscriptEntry[]>(); let applied = 0;
+        const notifications: CallManagerEvent[] = []; const calls = new Map<string, CallRecord>(); const speech = new Map<string, TranscriptEntry[]>(); const spoken: CallId[] = []; let applied = 0;
         for (const event of events) {
           if (event.provider !== providerName || !event.eventId.startsWith(`${providerName}:v1:`)) throw new Error('unstable carrier event');
           const call = await tx.find(event.providerCallId) ?? (event.providerRequestId ? await tx.find(`request:${event.providerRequestId}`) : undefined);
           if (!call) throw new Error('unknown carrier call');
           if (!speech.has(call.callId)) speech.set(call.callId, this.applyUnsavedSpeech(call));
           this.bindCarrierIdentity(call, event);
-          const changed = this.applyCarrierEvent(call, event); if (changed.length) applied += 1;
+          // The hangup below ends the call; until it commits, a redelivery of the event is not a duplicate.
+          const ends = this.isNotifyMessageSpoken(call, event); if (ends) spoken.push(call.callId);
+          const changed = ends ? [] : this.applyCarrierEvent(call, event); if (changed.length || ends) applied += 1;
           await tx.put(call); calls.set(call.callId, call); notifications.push(...changed);
         }
-        return { applied, notifications, calls: [...calls.values()], speech };
+        return { applied, notifications, calls: [...calls.values()], speech, spoken };
       });
       for (const call of committed.calls) this.refreshDurable(call, store, committed.speech.get(call.callId) ?? []);
       for (const event of committed.notifications) this.emit(event);
-      return { accepted: true, applied: committed.applied };
+      for (const event of committed.notifications) if (event.type === 'call:answered') this.setUpAnsweredCall(event.call);
+      return { applied: committed.applied, spoken: committed.spoken };
     });
+    // Outside the store queue: each hangup commits the call's end in a transaction of its own, then asks the carrier.
+    for (const callId of result.spoken) {
+      // A disposed manager no longer holds the call and cannot hang it up: refuse the webhook so it is redelivered.
+      if (this.disposed) throw new Error('call manager disposed before the notify hangup');
+      await this.hangUp(callId, false);
+    }
+    return { accepted: true, applied: result.applied };
   }
   /** Runs `work` once this manager's earlier store transactions, and the refreshes after them, have finished. */
   private durable<T>(work: () => Promise<T>): Promise<T> {
@@ -586,9 +655,10 @@ export class CallManager {
    * store queue and also when the commit failed, and `call:ended` follows the request. Rejects with the commit's error.
    * The provider is resolved before the commit, so a {@link dispose} while it commits does not cancel the request.
    * After a failed commit the request names the carrier call of the manager's current record, which a callback
-   * committed while the hangup waited may have bound to its call leg.
+   * committed while the hangup waited may have bound to its call leg. When the store already holds the call as ended,
+   * the carrier is asked only with `askWhenStoredEnded`.
    */
-  private async hangupDurable(call: CallRecord, store: ITelephonyCallStore): Promise<void> {
+  private async hangupDurable(call: CallRecord, store: ITelephonyCallStore, askWhenStoredEnded: boolean): Promise<void> {
     const provider = this.getProvider(call.provider);
     const committed = await this.durable(async () => {
       const result = await store.withProvider(call.provider, async (tx) => {
@@ -604,9 +674,51 @@ export class CallManager {
       await this.requestCarrierHangup(provider, this.activeCalls.get(call.callId)?.providerCallId ?? call.providerCallId);
       throw error;
     });
-    await this.requestCarrierHangup(provider, committed.stored.providerCallId);
+    if (committed.ended || askWhenStoredEnded) await this.requestCarrierHangup(provider, committed.stored.providerCallId);
     if (committed.ended) this.emit({ type: 'call:ended', callId: call.callId, call: structuredClone(committed.stored) });
   }
+  /**
+   * Hands a call that has just reached `answered` to its provider's {@link IVoiceCallProvider.onCallAnswered}, with
+   * the call's mode, its notify message and the configured TTS voice. It does not wait for the provider: webhook
+   * processing goes on, and a provider that throws or rejects is written to the console, as a failed hangup is.
+   */
+  private setUpAnsweredCall(call: CallRecord): void {
+    const provider = this.getProvider(call.provider);
+    if (!provider?.onCallAnswered || !call.providerCallId) return;
+    const report = (err: unknown): void => console.error('[CallManager] Setting up the answered call failed:', err);
+    try {
+      provider.onCallAnswered({
+        callId: call.callId,
+        providerCallId: call.providerCallId,
+        direction: call.direction,
+        mode: call.mode,
+        ...(call.message !== undefined ? { message: call.message } : {}),
+        ...(this.config.tts?.voice !== undefined ? { voice: this.config.tts.voice } : {}),
+      }).catch(report);
+    } catch (err) {
+      report(err);
+    }
+  }
+
+  /**
+   * Whether a carrier event, not yet applied to the call, reports that the carrier has spoken the call's notify
+   * message to the end ({@link NormalizedCallEvent} `notify-message-spoken`). Read before the event is applied: a
+   * repeated event, or one for an ended call, is not new.
+   */
+  private isNotifyMessageSpoken(call: CallRecord, event: NormalizedCallEvent): boolean {
+    return event.kind === 'notify-message-spoken' && call.mode === 'notify' && !call.processedEventIds.includes(event.eventId) && !TERMINAL_CALL_STATES.has(call.state);
+  }
+
+  /**
+   * Hangs up a notify call whose message the carrier has spoken to the end, as {@link hangupCall} does: the call ends
+   * `hangup-bot`, committed to its store first when it has one, and `call:ended` follows the carrier request; a call
+   * its store already holds as ended asks the carrier nothing. It does not wait for the hangup: a failed one is
+   * written to the console.
+   */
+  private hangUpSpokenNotifyCall(callId: CallId): void {
+    this.hangUp(callId, false).catch((err: unknown) => console.error('[CallManager] Hanging up the notify call failed:', err));
+  }
+
   /** Asks the call's carrier to hang up. A failed request is written to the console; the call ends here regardless. */
   private async requestCarrierHangup(provider: IVoiceCallProvider | undefined, providerCallId: string | undefined): Promise<void> {
     if (!provider || !providerCallId) return;
@@ -686,6 +798,26 @@ export class CallManager {
     return call;
   }
 
+  /**
+   * Answer an inbound call the host has admitted with {@link handleInboundCall} and, for
+   * {@link processWebhookDurable}, persisted with {@link persistCall}, on a carrier that answers by command
+   * ({@link IVoiceCallProvider.answerCall}). A carrier-profile Telnyx provider sends `answer`, carrying the media stream
+   * URL when `streaming.enabled` is set, so the stream starts with the answer; the `call.answered` webhook that follows
+   * moves the call to `listening`. On a carrier the host's answer XML answers (Twilio, Plivo), and with a legacy-profile
+   * Telnyx provider, it sends nothing. A call that is no longer ringing (answered, or ended) is not answered again.
+   *
+   * @param callId - The id of the call {@link handleInboundCall} returned.
+   * @throws When the manager holds no inbound call with this id, or when the carrier refuses the answer.
+   */
+  async answerInboundCall(callId: CallId): Promise<void> {
+    const call = this.activeCalls.get(callId);
+    if (!call || call.direction !== 'inbound') throw new Error(`[CallManager] no inbound call ${callId}`);
+    if (call.state !== 'ringing' || !call.providerCallId) return;
+    const provider = this.getProvider(call.provider);
+    if (!provider?.answerCall) return;
+    await provider.answerCall({ callId, providerCallId: call.providerCallId, mediaStreamUrl: this.mediaStreamUrl(), mediaStreamToken: callId });
+  }
+
   // ── State Machine ──
 
   /**
@@ -747,6 +879,16 @@ export class CallManager {
     setTimeout(() => {
       this.activeCalls.delete(call.callId);
     }, 30_000);
+  }
+
+  /**
+   * The media stream URL a call is given when `streaming.enabled` is set: `webhookBaseUrl` (`http://localhost:3000`
+   * when unset) with `http` replaced by `ws`, plus `streaming.wsPath` (`/voice/media-stream` when unset).
+   */
+  private mediaStreamUrl(): string | undefined {
+    if (!this.config.streaming?.enabled) return undefined;
+    const baseUrl = this.config.webhookBaseUrl || 'http://localhost:3000';
+    return `${baseUrl.replace('http', 'ws')}${this.config.streaming.wsPath || '/voice/media-stream'}`;
   }
 
   /** Get the default "from" number from config. */

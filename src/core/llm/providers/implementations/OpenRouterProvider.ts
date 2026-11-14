@@ -38,7 +38,7 @@ import { stripGeminiOnlyParams } from '../openrouter-only-params';
 import { baseUrlCredentials, redactUrlSecrets } from '../url-secrets.js';
 import { buildSchemaInstructionText, SCHEMA_INSTRUCTION_LEAD } from '../../../../api/runtime/structuredReply.js';
 import { moduleLogger } from '../../../logging/loggerFactory.js';
-import { errorFields } from '../../../logging/events.js';
+import { listedErrorFields } from '../../../logging/events.js';
 import { cheapestPricedChatModel } from './billing-probe-model.js';
 import { resolveAttemptCount, waitForRetry, type AttemptTally } from './retry-backoff.js';
 import { operationIdHeaderNamed, operationIdHeaders, resolveOperationIdHeader } from './operation-id.js';
@@ -473,7 +473,7 @@ export class OpenRouterProvider implements IProvider {
           { providerId: this.providerId },
           `OpenRouterProvider failed to initialize: ${error instanceof Error ? error.message : String(error)}`
         );
-      log.error('llm.provider_start_failed', { provider: 'openrouter', ...errorFields(initError) });
+      log.error('llm.provider_start_failed', { provider: 'openrouter', ...listedErrorFields(initError) });
       throw initError;
     }
   }
@@ -1377,7 +1377,7 @@ export class OpenRouterProvider implements IProvider {
       try {
         await this.refreshAvailableModels();
       } catch (refreshError) {
-        log.warn('llm.models_failed', { provider: 'openrouter', ...errorFields(refreshError) });
+        log.warn('llm.models_failed', { provider: 'openrouter', ...listedErrorFields(refreshError) });
       }
     }
     const models = Array.from(this.availableModelsCache.values());
@@ -1409,7 +1409,7 @@ export class OpenRouterProvider implements IProvider {
         await this.refreshAvailableModels(signal);
       } catch (error) {
         if (signal?.aborted) throw aborted();
-        log.warn('llm.models_failed', { provider: 'openrouter', ...errorFields(error) });
+        log.warn('llm.models_failed', { provider: 'openrouter', ...listedErrorFields(error) });
       }
     }
     return this.availableModelsCache.get(modelId);
@@ -2193,7 +2193,7 @@ export class OpenRouterProvider implements IProvider {
       // A stream error can be an AxiosError holding the request config, so
       // only its description is logged and kept.
       const description = this.describeError(error);
-      log.error('llm.stream_failed', { provider: 'openrouter', ...errorFields(error) });
+      log.error('llm.stream_failed', { provider: 'openrouter', ...listedErrorFields(error) });
       if (error instanceof OpenRouterProviderError) throw error;
       throw new OpenRouterProviderError(message, 'STREAM_PARSING_ERROR', undefined, undefined, description);
     } finally {

@@ -12,6 +12,18 @@ import type {
   RerankerRequestConfig,
   RerankerProviderConfig,
 } from '../IRerankerService';
+import { importOptional } from '../../../../core/utils/importOptional.js';
+
+/** Transformers.js 3.x, the preferred package. */
+const TRANSFORMERS = '@huggingface/transformers';
+/** Transformers.js 2.x, the fallback. */
+const TRANSFORMERS_V2 = '@xenova/transformers';
+
+/** Transformers.js as the host passes it in `providerOptions.transformers`: the module, or what its function returns. */
+async function suppliedTransformers(config: LocalCrossEncoderConfig): Promise<any> {
+  const supplied = config.providerOptions?.transformers;
+  return typeof supplied === 'function' ? await supplied() : supplied;
+}
 
 /**
  * Transformers.js 3.x data types. The dtype picks the suffix Transformers.js
@@ -28,7 +40,7 @@ export interface LocalCrossEncoderConfig extends RerankerProviderConfig {
   providerId: 'local';
   /**
    * Model ID from Hugging Face Hub.
-   * Default: 'cross-encoder/ms-marco-MiniLM-L-6-v2'
+   * Default: 'cross-encoder/ms-marco-MiniLM-L6-v2'
    */
   defaultModelId?: string;
   /**
@@ -62,6 +74,13 @@ export interface LocalCrossEncoderConfig extends RerankerProviderConfig {
    */
   cacheDir?: string;
   /**
+   * Load the model's files from the cache alone (`cacheDir`, else Transformers.js's own), never the network, passed
+   * to each load as `local_files_only`. A file the cache lacks fails the load. With a `revision`, Transformers.js
+   * reads the files from `<cache>/<model id>/<revision>/`; without one, from `<cache>/<model id>/`.
+   * Default: false (a file the cache lacks is downloaded)
+   */
+  localFilesOnly?: boolean;
+  /**
    * The ONNX weights file to load from the model repository's `onnx/`
    * folder, for example `'model'` (full precision) or `'model_qint8_arm64'`.
    * A path in that folder or a name with the extension names the same file:
@@ -71,7 +90,7 @@ export interface LocalCrossEncoderConfig extends RerankerProviderConfig {
    * for `fp32`).
    *
    * Default: the model's entry in {@link LOCAL_RERANKER_DEFAULT_WEIGHTS}
-   * (for `cross-encoder/ms-marco-MiniLM-L-6-v2`, `'model_quint8_avx2'`), else
+   * (for `cross-encoder/ms-marco-MiniLM-L6-v2`, `'model_quint8_avx2'`), else
    * `'model'` (`onnx/model.onnx`, full precision).
    */
   modelFileName?: string;
@@ -152,14 +171,14 @@ export interface LocalCrossEncoderConfig extends RerankerProviderConfig {
 }
 
 /**
- * Available local cross-encoder models (Hugging Face model IDs).
+ * The local cross-encoder models AgentOS lists (Hugging Face model ids), each under a licence read at its
+ * repository: apache-2.0, apache-2.0, mit. The provider loads any other id a host passes; checking that model's
+ * licence is then the host's.
  */
 export const LOCAL_RERANKER_MODELS = [
-  'cross-encoder/ms-marco-MiniLM-L-6-v2',      // Fast, good quality
-  'cross-encoder/ms-marco-MiniLM-L-12-v2',     // Better quality, slower
-  'BAAI/bge-reranker-base',                     // BGE reranker (smaller)
-  'BAAI/bge-reranker-large',                    // BGE reranker (larger, better)
-  'sentence-transformers/ce-ms-marco-TinyBERT-L-4', // Tiny, fastest
+  'cross-encoder/ms-marco-MiniLM-L6-v2', // apache-2.0. The default: fast, good quality
+  'cross-encoder/ms-marco-MiniLM-L12-v2', // apache-2.0. Better quality, slower
+  'BAAI/bge-reranker-base', // mit
 ] as const;
 
 export type LocalRerankerModel = (typeof LOCAL_RERANKER_MODELS)[number];
@@ -169,8 +188,8 @@ export type LocalRerankerModel = (typeof LOCAL_RERANKER_MODELS)[number];
  * `modelFileName` nor `dtype`. A model not listed here loads `onnx/model.onnx`
  * (full precision).
  *
- * `cross-encoder/ms-marco-MiniLM-L-6-v2` (and its new id,
- * `cross-encoder/ms-marco-MiniLM-L6-v2`) loads the repository's 8-bit
+ * `cross-encoder/ms-marco-MiniLM-L6-v2` (and its earlier id,
+ * `cross-encoder/ms-marco-MiniLM-L-6-v2`, which Hugging Face redirects to it) loads the repository's 8-bit
  * dynamically quantized `onnx/model_quint8_avx2.onnx` (22 MB, against 87 MB
  * for `onnx/model.onnx`). It ranks as the full-precision file does on a
  * query with one answering text in 20, and scores a batch in about half the
@@ -339,6 +358,13 @@ interface LoadedCrossEncoder {
  * `AutoTokenizer` and `AutoModelForSequenceClassification`. Scoring sends
  * nothing over the network: the query and documents stay in the process.
  *
+ * The provider imports Transformers.js by a specifier a bundler does not
+ * follow, which resolves in Node and on a page with an import map. A bundled
+ * browser page passes it in `providerOptions.transformers`, as the module or
+ * a function that imports it (`() => import('@huggingface/transformers')`),
+ * so the page's bundler takes the package in; the provider then uses only
+ * that, and reads 2.x from 3.x by the module's `env.version`.
+ *
  * Each batch of up to `batchSize` documents is tokenized as (query,
  * document) pairs, padded and truncated to `maxSequenceLength`, and scored in
  * one forward pass. With `pieceMaxChars`, a long document is split into
@@ -356,7 +382,8 @@ interface LoadedCrossEncoder {
  * `onnx/model_quint8_avx2.onnx` for the default model, `onnx/model.onnx` for
  * the others; see {@link LOCAL_RERANKER_DEFAULT_WEIGHTS}). Transformers.js
  * fetches them on the first load and reads them from its cache (`cacheDir`)
- * after that. The model loads once, for the model of the first `rerank()` or
+ * after that; `revision` pins the commit of the model's repository they come
+ * from, and `localFilesOnly` loads from the cache alone. The model loads once, for the model of the first `rerank()` or
  * `initialize()`; call `initialize(modelId)` to load another. The ONNX
  * session gets `intraOpNumThreads` and `interOpNumThreads` when they are set;
  * a host on a CPU limit sets `intraOpNumThreads` to its cores.
@@ -365,7 +392,7 @@ interface LoadedCrossEncoder {
  * ```typescript
  * const reranker = new LocalCrossEncoderReranker({
  *   providerId: 'local',
- *   defaultModelId: 'cross-encoder/ms-marco-MiniLM-L-6-v2',
+ *   defaultModelId: 'cross-encoder/ms-marco-MiniLM-L6-v2',
  *   batchSize: 32,
  * });
  *
@@ -373,7 +400,7 @@ interface LoadedCrossEncoder {
  *
  * const result = await reranker.rerank(
  *   { query: 'machine learning', documents: [...] },
- *   { providerId: 'local', modelId: 'cross-encoder/ms-marco-MiniLM-L-6-v2' }
+ *   { providerId: 'local', modelId: 'cross-encoder/ms-marco-MiniLM-L6-v2' }
  * );
  * ```
  */
@@ -391,7 +418,7 @@ export class LocalCrossEncoderReranker implements IRerankerProvider {
   constructor(config: LocalCrossEncoderConfig) {
     this.config = {
       ...config,
-      defaultModelId: config.defaultModelId ?? 'cross-encoder/ms-marco-MiniLM-L-6-v2',
+      defaultModelId: config.defaultModelId ?? 'cross-encoder/ms-marco-MiniLM-L6-v2',
       device: config.device ?? 'cpu',
       maxSequenceLength: config.maxSequenceLength ?? 512,
       // A batch size that is not a positive number (0, NaN) falls back to the default.
@@ -490,16 +517,24 @@ export class LocalCrossEncoderReranker implements IRerankerProvider {
     /** Transformers.js 2.x (`@xenova/transformers`), which reads `quantized` and not `dtype`. */
     let version2 = false;
     try {
-      // Dynamic import to avoid bundling issues and allow optional dependency.
-      // Prefer `@huggingface/transformers` (Transformers.js v3+) but support `@xenova/transformers` for back-compat.
-      transformers = await (async () => {
-        try {
-          return await import('@huggingface/transformers');
-        } catch {
-          version2 = true;
-          return await import('@xenova/transformers');
-        }
-      })();
+      // The module the host passes, as a bundled browser page does; its env.version tells 2.x from 3.x.
+      // Otherwise loaded at run time by a specifier a bundler does not follow, so a host bundles this module without
+      // them. Prefer `@huggingface/transformers` (Transformers.js v3+) but support `@xenova/transformers` for
+      // back-compat.
+      if (this.config.providerOptions?.transformers !== undefined) {
+        transformers = await suppliedTransformers(this.config);
+        if (!transformers) throw new Error('providerOptions.transformers gave no module');
+        version2 = String(transformers.env?.version ?? '').startsWith('2.');
+      } else {
+        transformers = await (async () => {
+          try {
+            return await importOptional(TRANSFORMERS);
+          } catch {
+            version2 = true;
+            return await importOptional(TRANSFORMERS_V2);
+          }
+        })();
+      }
     } catch {
       throw new Error(
         'LocalCrossEncoderReranker: Transformers.js is not installed. ' +
@@ -522,7 +557,12 @@ export class LocalCrossEncoderReranker implements IRerankerProvider {
     }
 
     const { modelFileName, dtype } = this.weightsFor(modelId);
-    const cacheOptions = this.config.cacheDir ? { cache_dir: this.config.cacheDir } : {};
+    // What both loads share: the cache folder, the pinned revision, and whether a file the cache lacks may be fetched.
+    const cacheOptions = {
+      ...(this.config.cacheDir ? { cache_dir: this.config.cacheDir } : {}),
+      ...(this.config.revision ? { revision: this.config.revision } : {}),
+      ...(this.config.localFilesOnly ? { local_files_only: true } : {}),
+    };
 
     // onnxruntime-node reads these session options; left out, onnxruntime sizes its thread pool for the machine.
     const sessionOptions: { intraOpNumThreads?: number; interOpNumThreads?: number } = {};
@@ -587,13 +627,20 @@ export class LocalCrossEncoderReranker implements IRerankerProvider {
    * Check if the local reranker is available.
    */
   public async isAvailable(): Promise<boolean> {
+    if (this.config.providerOptions?.transformers !== undefined) {
+      try {
+        return Boolean(await suppliedTransformers(this.config));
+      } catch {
+        return false;
+      }
+    }
     try {
       // Check if transformers.js is available
-      await import('@huggingface/transformers');
+      await importOptional(TRANSFORMERS);
       return true;
     } catch {
       try {
-        await import('@xenova/transformers');
+        await importOptional(TRANSFORMERS_V2);
         return true;
       } catch {
         return false;

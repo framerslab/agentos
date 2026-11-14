@@ -1,0 +1,62 @@
+{
+  "id": "sessions-hiring-debrief",
+  "set": "sessions",
+  "kind": "session",
+  "language": "en",
+  "title": "Interview debrief for the support specialist role",
+  "headings": [],
+  "path": null,
+  "text": "Nora: We saw three candidates for the support specialist role this week. Let's go through the scores first.\nFelix: I scored the first candidate highest on the written exercise. Clear answers, kind tone.\nGwen: Same for me. Their reply to the angry customer was the best of the three.\nNora: The second candidate?\nFelix: Strong on the product but slow on the exercise. They ran out of time.\nGwen: I liked how they asked questions before answering, though.\nNora: And the third?\nFelix: Friendly, but the answers had several mistakes about billing.\nGwen: I agree. Billing questions are a large share of our tickets, so that matters.\nNora: So the first candidate leads. Any concerns about them?\nFelix: Only that they have not used our ticketing tool. That is easy to learn.\nGwen: No concerns from me.\nNora: Then I will ask for references and prepare an offer. If they decline, we talk to the second candidate again.\nFelix: Should we ask the second one for another exercise with more time?\nNora: Only if the offer is declined. Thanks for the careful notes, both of you.\n",
+  "vocabulary": [
+    {
+      "label": "hiring",
+      "uses": 9,
+      "lastUsed": 1762300800000
+    },
+    {
+      "label": "interviews",
+      "uses": 8,
+      "lastUsed": 1762214400000
+    },
+    {
+      "label": "support",
+      "uses": 7,
+      "lastUsed": 1762128000000
+    },
+    {
+      "label": "candidates",
+      "uses": 6,
+      "lastUsed": 1762041600000
+    }
+  ],
+  "typed": [
+    "hiring"
+  ],
+  "expected": {
+    "existing": [
+      "hiring",
+      "interviews",
+      "support",
+      "candidates"
+    ],
+    "new": [
+      "offer"
+    ]
+  },
+  "mustNot": [],
+  "asks": [],
+  "report": [
+    {
+      "label": "hiring",
+      "quotes": [
+        "We saw three candidates for the support specialist role this week."
+      ]
+    },
+    {
+      "label": "references",
+      "quotes": [
+        "Then I will ask for references and prepare an offer."
+      ]
+    }
+  ]
+}

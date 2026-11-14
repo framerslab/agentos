@@ -10,6 +10,7 @@ let memoryDir: string;
 const noopPort = {
   remember: async () => ({ id: 'x' }),
   forget: async () => {},
+  deleteTraces: async () => ({ deleted: 0 }),
   chunk: (t: string) => [{ text: t }],
 };
 
@@ -101,8 +102,8 @@ describe('WikiMemoryStore filesystem', () => {
       expect(file.startsWith('---\nid: concepts/notes\n')).toBe(true);
       expect(file.endsWith(`\n---\n${page.body}`)).toBe(true);
 
-      // Read back, the fields are the page's own and the body is whole.
-      expect(await store.readPage('concepts/notes')).toEqual(page);
+      // Read back, the fields are the page's own and the body is whole; a page that lists sources reads as compiled.
+      expect(await store.readPage('concepts/notes')).toEqual({ ...page, origin: 'compiled' });
       expect(Reflect.get(globalThis, mark)).toBeUndefined();
 
       // A page file that opens with the block itself: the block gives no fields, so the id decides the type.
@@ -115,6 +116,7 @@ describe('WikiMemoryStore filesystem', () => {
         sources: [],
         body: 'Notes on [[Frame]].\n',
         links: ['Frame'],
+        origin: 'operator',
       });
       expect(Reflect.get(globalThis, mark)).toBeUndefined();
     } finally {

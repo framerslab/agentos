@@ -7,6 +7,9 @@ import { describe, expect, it } from 'vitest';
 import { resolveRecallOptions } from '../../src/api/runtime/recallOptions.js';
 import { RecallOptionError, recallBudgetTokens, DEFAULT_RECALL_BUDGET_TOKENS } from '../../src/cognition/memory/retrieval/recall/budget.js';
 
+/** A commit id, as `rerank.revision` takes one. */
+const COMMIT = '233902d25c440f23af6f7d6e94d2946bac0bee0a';
+
 /** The error `run` throws, or undefined when it throws none. */
 function thrown(run: () => unknown): unknown {
   try {
@@ -56,6 +59,75 @@ describe('resolveRecallOptions', () => {
       expect(error, capture).toMatchObject({ option: 'capture', reason: 'unsupported_runtime' });
       expect((error as Error).message, capture).toMatch(/^gmi\(\): memory\.recall\.capture .*runtime: 'gmi'/);
     }
+  });
+
+  it('without cognitive memory, rerank is refused with the reason unsupported_runtime, whatever its value', () => {
+    const invoke = async (): Promise<string> => '[]';
+    for (const rerank of ['none', { kind: 'local', model: 'm', revision: COMMIT }, { kind: 'llm', invoke, model: 'm' }] as const) {
+      const error = thrown(() => resolveRecallOptions({ recall: { rerank }, cognitiveMemory: false, providerTokenBudget: undefined, providerContext: true, where: 'agent()' }));
+      expect(error, JSON.stringify(rerank)).toMatchObject({ option: 'rerank', reason: 'unsupported_runtime' });
+      expect((error as Error).message, JSON.stringify(rerank)).toMatch(/^agent\(\): memory\.recall\.rerank .*runtime: 'gmi'/);
+    }
+  });
+
+  it('passes a rerank that names a local model or a model call to the manager on the GMI path, as given', () => {
+    const invoke = async (): Promise<string> => '[]';
+    for (const rerank of ['none', { kind: 'local', model: 'm', revision: COMMIT, timeoutMs: 800, maxCandidates: 10 }, { kind: 'llm', invoke, model: 'm' }] as const) {
+      const resolved = resolveRecallOptions({ recall: { rerank }, cognitiveMemory: true, providerTokenBudget: undefined, providerContext: false, where: 'gmi()' });
+      expect(resolved.managerRecall?.rerank).toBe(rerank);
+    }
+  });
+
+  it('refuses a rerank that names another provider with the reason unsupported_provider, and a field of the wrong kind with invalid_value, on either path', () => {
+    const invoke = async (): Promise<string> => '[]';
+    const cases: Array<[unknown, string, string]> = [
+      [{ kind: 'cohere', apiKey: 'k' }, 'rerank', 'unsupported_provider'],
+      [{ kind: 'voyage' }, 'rerank', 'unsupported_provider'],
+      [{ model: 'm', revision: 'r' }, 'rerank', 'unsupported_provider'],
+      ['local', 'rerank', 'invalid_value'],
+      [true, 'rerank', 'invalid_value'],
+      [['none'], 'rerank', 'invalid_value'],
+      [{ kind: 'local', revision: 'r' }, 'rerank.model', 'invalid_value'],
+      [{ kind: 'local', model: 7, revision: 'r' }, 'rerank.model', 'invalid_value'],
+      [{ kind: 'local', model: 'm' }, 'rerank.revision', 'invalid_value'],
+      [{ kind: 'local', model: 'm', revision: '   ' }, 'rerank.revision', 'invalid_value'],
+      // A branch, a tag or a short id can name other weights later: only a whole commit id pins them.
+      [{ kind: 'local', model: 'm', revision: 'main' }, 'rerank.revision', 'invalid_value'],
+      [{ kind: 'local', model: 'm', revision: 'v1.0' }, 'rerank.revision', 'invalid_value'],
+      [{ kind: 'local', model: 'm', revision: COMMIT.slice(0, 7) }, 'rerank.revision', 'invalid_value'],
+      [{ kind: 'local', model: 'm', revision: `${COMMIT}0` }, 'rerank.revision', 'invalid_value'],
+      [{ kind: 'local', model: 'm', revision: 42 }, 'rerank.revision', 'invalid_value'],
+      // Transformers.js keys a pinned revision's cache folder by the string as given: an upper-case id misses the
+      // lower-case folder on a case-sensitive file system, and the record would name the commit in another case.
+      [{ kind: 'local', model: 'm', revision: COMMIT.toUpperCase() }, 'rerank.revision', 'invalid_value'],
+      [{ kind: 'local', model: 'm', revision: `${COMMIT.slice(0, 20).toUpperCase()}${COMMIT.slice(20)}` }, 'rerank.revision', 'invalid_value'],
+      [{ kind: 'llm', model: 'm' }, 'rerank.invoke', 'invalid_value'],
+      [{ kind: 'llm', invoke: 'call', model: 'm' }, 'rerank.invoke', 'invalid_value'],
+      [{ kind: 'llm', invoke, model: '' }, 'rerank.model', 'invalid_value'],
+      [{ kind: 'llm', invoke, model: 'm', timeoutMs: 0 }, 'rerank.timeoutMs', 'invalid_value'],
+      [{ kind: 'llm', invoke, model: 'm', timeoutMs: 1.5 }, 'rerank.timeoutMs', 'invalid_value'],
+      [{ kind: 'local', model: 'm', revision: COMMIT, timeoutMs: Number.POSITIVE_INFINITY }, 'rerank.timeoutMs', 'invalid_value'],
+      // Node runs a timer set past 2^31 - 1 ms after 1 ms, so every rerank would time out at once.
+      [{ kind: 'llm', invoke, model: 'm', timeoutMs: 2_147_483_648 }, 'rerank.timeoutMs', 'invalid_value'],
+      [{ kind: 'local', model: 'm', revision: COMMIT, timeoutMs: 1e12 }, 'rerank.timeoutMs', 'invalid_value'],
+      [{ kind: 'local', model: 'm', revision: COMMIT, maxCandidates: 0 }, 'rerank.maxCandidates', 'invalid_value'],
+      [{ kind: 'local', model: 'm', revision: COMMIT, maxCandidates: '20' }, 'rerank.maxCandidates', 'invalid_value'],
+    ];
+    for (const cognitiveMemory of [true, false]) {
+      for (const [rerank, option, reason] of cases) {
+        const error = thrown(() => resolveRecallOptions({ recall: { rerank } as never, cognitiveMemory, providerTokenBudget: undefined, providerContext: false, where: 'gmi()' }));
+        expect(error, JSON.stringify(rerank)).toBeInstanceOf(RecallOptionError);
+        expect(error, JSON.stringify(rerank)).toMatchObject({ option, reason });
+        expect((error as Error).message, JSON.stringify(rerank)).toContain(`gmi(): memory.recall.${option}`);
+      }
+    }
+  });
+
+  it('a null or undefined rerank is unset, its optional fields may be null, and timeoutMs may be as large as a timer takes', () => {
+    for (const rerank of [null, undefined, { kind: 'local', model: 'm', revision: COMMIT, timeoutMs: null, maxCandidates: null }, { kind: 'local', model: 'm', revision: COMMIT, timeoutMs: 2_147_483_647, maxCandidates: 1 }]) {
+      expect(thrown(() => resolveRecallOptions({ recall: { rerank } as never, cognitiveMemory: true, providerTokenBudget: undefined, providerContext: false, where: 'gmi()' }))).toBeUndefined();
+    }
+    expect(thrown(() => resolveRecallOptions({ recall: { rerank: null } as never, cognitiveMemory: false, providerTokenBudget: undefined, providerContext: false, where: 'agent()' }))).toBeUndefined();
   });
 
   it('refuses a value of the wrong kind with the reason invalid_value, on either path', () => {

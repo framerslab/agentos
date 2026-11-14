@@ -78,24 +78,43 @@ interface GuardrailConfig {
 
   // When true, this guardrail runs in Phase 1 (sequential).
   // It sees and can modify text produced by prior sanitizers.
-  // When false, it runs in Phase 2 (parallel).
+  // When false, it runs in Phase 2 (parallel), unless sequential is true.
   // Phase 2 guardrails that return SANITIZE are downgraded to FLAG.
   canSanitize?: boolean; // default: false
 
+  // When true, this guardrail runs in Phase 1 too, one at a time in
+  // registration order, though it does not sanitize. Its BLOCK ends the
+  // evaluation before any Phase 2 guardrail is called, so content it refuses
+  // never reaches a guardrail that calls a vendor. A SANITIZE it returns is
+  // applied only when canSanitize is also true; otherwise it is a FLAG.
+  sequential?: boolean; // default: false
+
   // Maximum time (ms) to wait for this guardrail's evaluation.
-  // On timeout the evaluation is abandoned and a warning is logged; the
-  // guardrail is skipped (fail-open) unless failClosed is true.
+  // On timeout the evaluation is abandoned and a guardrail.failed event is
+  // written; the guardrail is skipped (fail-open) unless failClosed is true.
   //
   // SAFETY WARNING: Do NOT set timeoutMs on a safety-critical guardrail
   // (e.g., CSAM detection, compliance-mandatory filters) without failClosed,
   // because fail-open on timeout means content passes unchecked.
+  //
+  // Under moderateContent() a guardrail runs closed unless failClosed is
+  // false, with a deadline of 8 seconds when it names none.
   timeoutMs?: number; // default: undefined (wait indefinitely)
 
   // When true, an evaluation that throws or times out yields a BLOCK
   // (reasonCode 'GUARDRAIL_ERROR') instead of skipping this guardrail.
   failClosed?: boolean; // default: false
+
+  // Every reason code and review code this guardrail can answer: a closed
+  // list. The guardrail.verdict line writes a code only when the deciding
+  // guard lists it here (or the library made it for a closed guard's
+  // failure); a guard that lists none has its verdict lines written with
+  // unknown.
+  reasonCodes?: readonly string[]; // default: undefined
 }
 ```
+
+A guard that answers codes declares them all in `reasonCodes`, for the log lines that name the code that decided: such a line writes a code supplied from outside the list (a model's answer, a vendor's label) as `unknown`. `moderateContent()` writes one such line, `guardrail.verdict`, for each decision that is not a plain allow. `PhraseListGuardrail` lists the rule ids of the list it holds, and lists them again on each `reload()`.
 
 ### evaluateInput(payload)
 
@@ -108,6 +127,9 @@ interface GuardrailInputPayload {
 
   // The user's input. The most commonly inspected field is input.textInput.
   input: AgentOSInput;
+
+  // Aborted when the dispatcher stops waiting for this evaluation (its deadline passed). Absent with no deadline.
+  deadlineSignal?: AbortSignal;
 }
 
 interface GuardrailContext {
@@ -117,8 +139,66 @@ interface GuardrailContext {
   conversationId?: string; // Conversation thread
   mode?: string; // Operating mode (e.g., 'debug', 'production')
   metadata?: Record<string, unknown>; // Arbitrary context for your policy logic
+  moderation?: ModerationContext; // Where the content appears and who wrote it
+  vendorSignal?: AbortSignal; // Set by moderateContent(): stop starting vendor requests once aborted
 }
 ```
+
+`context.moderation` holds `surface`, `roomId`, `rating`, `messageId` and `sender` (`{ id, kind? }`) as words and ids, checked by `moderateContent()` before any guard runs; read `context.moderation?.rating` and its siblings instead of keys in `metadata`. A guard that calls a vendor reads `context.vendorSignal` before each request and starts none once it is aborted: `moderateContent()` aborts it the moment any guard answers a code the host listed in `stopVendorsOn`. A request already sent finishes and is answered as usual, so the guard does not hand the signal to the request itself: a client that honours it would cancel that request and the guard would throw.
+
+`deadlineSignal` is the dispatcher's deadline for this evaluation: `config.timeoutMs`, or the shorter or longer one a required guard's spec gives it. At the deadline the dispatcher answers without the guard (a closed guard's timeout is a block) and aborts the signal, but the evaluation keeps running, so a guard that makes several requests reads it before each one and starts none once it is aborted.
+
+```typescript
+async evaluateInput({ input, context }: GuardrailInputPayload) {
+  const scores: number[] = [];
+  for (const chunk of chunksOf(input.textInput ?? '')) {
+    if (context.vendorSignal?.aborted) break; // another guard already answered a code that stops vendor requests
+    scores.push(await vendor.classify(chunk));
+  }
+  return Math.max(0, ...scores) > 0.9 ? { action: GuardrailAction.BLOCK, reasonCode: 'VENDOR_HIGH' } : null;
+}
+```
+
+`input.visionInputs` carries the input's images, in order: each is `{ type: 'base64' | 'image_url', data, mimeType?, description? }`, where `data` is the base64 text (a `data:` URL included) or the image's URL. `moderateContent()` fills it from `content.images`. A guard of your own that reads images decodes `base64` data itself and decides how an `image_url` is fetched; a guard that only reads text ignores the field. For checks over images, prefer the built-in `ImageGuardrail` (see [Images](./GUARDRAILS_USAGE.md#images-imageguardrail)): it captures each image once, under the host's `loadImage` for a URL, runs every `match` check before any `classify` check, and refuses an image nobody judged. You then write the checks alone.
+
+### Writing an image check
+
+An `ImageCheck` is one step of `ImageGuardrail`'s chain:
+
+```typescript
+import type { ImageCheck } from '@framers/agentos/safety/guardrails';
+
+const visionCheck: ImageCheck = {
+  id: 'vision',      // a word of its own, never 'load'
+  kind: 'classify',  // 'match' for a hash service, 'classify' for a model
+  onError: 'skip',   // 'refuse' (default) refuses the image as unavailable; 'skip' makes the check a signal
+  reasonCodes: ['IMAGE_SUGGESTIVE', 'IMAGE_REVIEW'],
+  async check(image, context) {
+    // image: { index, bytes, mimeType, deadlineSignal }; the bytes are this check's own copy
+    const parts: number[] = [];
+    for (const region of regionsOf(image.bytes)) {
+      if (image.deadlineSignal?.aborted) throw new Error('past the guard deadline'); // nobody waits for the answer
+      if (context.vendorSignal?.aborted) break; // another guard answered a code that stops vendor requests
+      // the deadline goes to the request itself, so a request in flight stops when it passes
+      parts.push(await visionModel.score(region, image.mimeType, { signal: image.deadlineSignal }));
+    }
+    // nothing scored, or a score that is not a number, is no judgment: throw, and the guard refuses the image or,
+    // with 'skip', asks the next check
+    if (parts.length === 0 || !parts.every(Number.isFinite)) throw new Error('no usable score for the image');
+    const score = Math.max(...parts);
+    if (score > 0.8) return { verdict: 'hold', reviewCode: 'IMAGE_REVIEW' };
+    if (score > 0.5) return { verdict: 'flag', reasonCode: 'IMAGE_SUGGESTIVE', scores: { suggestive: score } };
+    return { verdict: 'pass' };
+  },
+};
+```
+
+- **What a check receives.** An `ImageUnderReview`: the image's `index` in `visionInputs`, its `bytes`, its `mimeType` and the guard's `deadlineSignal`. The bytes are a copy the guard made of the image it captured once, so a check that changes them changes nothing the next check reads. A check never receives the URL: send the bytes to a vendor (as a data URL when its API takes one), never a link it would fetch again.
+- **The four verdicts.** `{ verdict: 'pass' }`; `{ verdict: 'flag', reasonCode, scores? }`, which lets the next check run; `{ verdict: 'hold', reviewCode }`, which keeps the content back for a person's review and ends this image's chain of `classify` checks; `{ verdict: 'block', reasonCode, quarantine? }`, which refuses the image and ends its chain of `classify` checks. The other `match` checks still run on an image a `match` check held, blocked or could not judge, so a later hash match is never hidden. A `match` check that finds known material answers `block` with `quarantine: true`, which ends the whole evaluation before any `classify` check sees any image of the input; from a `classify` check, a quarantine ends it before any further check runs. Any other answer (a `block` or `flag` whose `reasonCode`, or a `hold` whose `reviewCode`, is not a word included), and a throw, is a check that could not answer: one `image_guard.check_failed` line, then the image is refused as unavailable, or, for a `classify` check with `onError: 'skip'`, the chain goes on.
+- **`reasonCodes`.** List every reason code and review code the check can answer, each a word (letters, digits and `_ . : -`, at most 64); `create()` throws on any other. The guard's own `config.reasonCodes` is its two fixed codes (`IMAGE_LIMIT`, `IMAGE_CHECK_UNAVAILABLE`) and every check's list, and the `guardrail.verdict` line writes a code outside it as `unknown`.
+- **`context.vendorSignal`.** The guard reads it before each `classify` check and starts none once it is aborted. A check that makes more than one request reads it before each one, as above, and does not hand it to a request already sent.
+- **`image.deadlineSignal`.** Aborted once the guard's deadline has passed (its `timeoutMs`, or the dispatcher's when a required guard's spec gives a shorter one) or the guard has answered: the caller has its decision and nobody waits for the check's answer. The guard sets it on every call, one signal for the whole evaluation. Send nothing once it is aborted, whatever the check was waiting on (a key lookup, a queue), and hand it to a request in flight (`fetch(url, { signal: image.deadlineSignal })`) so the request stops. Unlike `context.vendorSignal`, it goes to the request itself: a request it stops throws, which the guard counts as a check that could not answer. Whatever a check answers once the deadline has passed, `onError: 'skip'` included, the image is refused as unavailable unless a check blocked or held it. A check that ignores it is run all the same, and a request it sent runs until the check's own timer ends it.
+- **Write nothing of the image.** Keep the bytes, the URL and any description out of a reason code, a review code, `scores` and your own log lines. The guard keeps a flag's `scores` only as finite numbers under keys that are words, and drops any other entry.
 
 ### evaluateOutput(payload)
 
@@ -178,8 +258,26 @@ interface GuardrailEvaluationResult {
   // in place of the error chunk; an empty string or none yields the error
   // chunk. Input BLOCKs do not read it.
   replacementText?: string;
+
+  // With BLOCK only: the content is kept back for a person's review instead
+  // of refused. On any other action it is ignored.
+  hold?: { reviewCode: string };
 }
 ```
+
+### Answering a hold
+
+A guard that wants a person to look before content goes on answers a `BLOCK` with `hold`:
+
+```typescript
+import { holdResult } from '@framers/agentos/safety/guardrails';
+
+// in evaluateInput or evaluateOutput
+return holdResult('REVIEW_LINKS', { reasonCode: 'NEEDS_REVIEW' });
+// { action: GuardrailAction.BLOCK, reasonCode: 'NEEDS_REVIEW', hold: { reviewCode: 'REVIEW_LINKS' } }
+```
+
+The dispatcher treats it as the `BLOCK` it is at every enforcement point, so nothing it keeps back is delivered. A refusal (a `BLOCK` without `hold`) from any other guard of the same phase outranks it; it outranks every other action. Cross-agent guards are the exception: they stop at the first `BLOCK`, a hold included. The host stores the content and queues it under `reviewCode` (letters, digits and underscores, at most 64), and reads which it was from `GuardrailInputOutcome.outcome` or `guardrailOutcomeOf()`. A `hold` on `FLAG` or `SANITIZE` is ignored, and the dispatcher writes `guardrail.hold_ignored` once for that guard. List the review codes in `config.reasonCodes` beside the reason codes.
 
 ---
 
@@ -190,12 +288,12 @@ interface GuardrailEvaluationResult {
 | **ALLOW**    | `'allow'`    | Pass content unchanged. Use when all checks pass.                                                                                                                                         |
 | **FLAG**     | `'flag'`     | Pass content through but record metadata for audit/analytics. Content reaches the user; the evaluation is logged for review.                                                              |
 | **SANITIZE** | `'sanitize'` | Replace content with the value in `modifiedText`. Use for PII redaction, profanity masking, or content rewriting. Requires `canSanitize: true` in config to work in Phase 1.              |
-| **BLOCK**    | `'block'`    | Reject/terminate the interaction. For input evaluation, the request is never processed. For output evaluation, the stream ends at once: with a `FINAL_RESPONSE` holding the evaluation's `replacementText` when that is a non-empty string, otherwise with an error chunk. |
+| **BLOCK**    | `'block'`    | Reject/terminate the interaction. For input evaluation, the request is never processed. For output evaluation, the stream ends at once: with a `FINAL_RESPONSE` holding the evaluation's `replacementText` when that is a non-empty string, otherwise with an error chunk. A BLOCK that carries `hold` keeps the content back for review; it is enforced the same way. |
 
 ### SANITIZE rules
 
 - If `canSanitize: true` is set in your config, your guardrail runs in **Phase 1 (sequential)** and your `modifiedText` is applied before downstream guardrails see the content.
-- If your guardrail is in **Phase 2** (no `canSanitize` or `canSanitize: false`) and it returns SANITIZE, the action is **automatically downgraded to FLAG** with a warning logged. This prevents non-deterministic concurrent modifications.
+- If your guardrail does not set `canSanitize: true` (it runs in **Phase 2**, or in Phase 1 through `sequential: true` alone) and it returns SANITIZE, the action is **automatically downgraded to FLAG** and a `guardrail.sanitize_downgraded` event is written. This prevents non-deterministic concurrent modifications.
 - On a `FINAL_RESPONSE`, `modifiedText` replaces the reply in every field that carries it: `finalResponseText`; `finalResponseTextPlain`, rendered as plain text as a turn renders its own reply; the reply in `updatedConversationContext`; and `audioOutput`, which keeps its voice settings, speaks the new text as plain text in `textToSpeak` and drops the `url` of the audio made from the replaced reply. A `null` `modifiedText` removes the reply, and the audio output with it. A structured value parsed from the replaced reply is withdrawn, as [Structured replies](../features/STRUCTURED_REPLY.md) (item 5) states. A `modifiedText` equal to the reply changes nothing: the parsed value and the audio output stay.
 
 ---
@@ -331,7 +429,7 @@ When multiple guardrails are registered, the [`ParallelGuardrailDispatcher`](htt
                           |
               +-----------+-----------+
               |                       |
-        canSanitize: true       canSanitize: false/omitted
+  canSanitize or sequential      neither set
               |                       |
          Phase 1                 Phase 2
       (Sequential)             (Parallel)
@@ -358,17 +456,19 @@ Guardrails with `canSanitize: true` run **one at a time in registration order**.
 
 A **BLOCK** in Phase 1 short-circuits immediately -- Phase 2 never runs.
 
+A guardrail with `sequential: true` joins Phase 1 without sanitizing: a screen that must judge the content before any Phase 2 guardrail that calls a vendor sees it, such as a local list of banned phrases. Phase 1 runs in registration order, so register the screen ahead of any sanitizer that calls a vendor. Its BLOCK ends the evaluation like a sanitizer's, in enforcement and in a dry run. On a tool call, the guardrails that set `evaluateToolCalls` and `sequential` answer before the others, and a BLOCK among them ends that evaluation. A SANITIZE it returns is downgraded to FLAG (with a `guardrail.sanitize_downgraded` line) unless it also sets `canSanitize`. `sequential` orders guardrails; it does not stop one from calling out, so a screen that calls a model is not a local screen.
+
 ### Phase 2: Parallel classifiers
 
-All remaining guardrails (those without `canSanitize` or with `canSanitize: false`) run **concurrently via `Promise.allSettled`** on the fully-sanitized text from Phase 1.
+All remaining guardrails (those that set neither `canSanitize: true` nor `sequential: true`) run **concurrently via `Promise.allSettled`** on the fully-sanitized text from Phase 1.
 
-If a Phase 2 guardrail returns **SANITIZE**, the action is **downgraded to FLAG** with a warning logged, because concurrent sanitization would produce non-deterministic results.
+If a Phase 2 guardrail returns **SANITIZE**, the action is **downgraded to FLAG** and a `guardrail.sanitize_downgraded` event is written, because concurrent sanitization would produce non-deterministic results.
 
 ### Worst-wins aggregation
 
 After both phases complete, the dispatcher picks the single worst action:
 
-- **BLOCK** (severity 3) takes priority over everything.
+- **BLOCK** (severity 3) takes priority over everything. Among the blocks of phase 2 and of the tool-call guards, a refusal (no `hold`) decides over a hold, whatever the registration order; the dispatcher reads every guard of the phase before it picks. A `BLOCK` from a phase 1 sanitizer ends the evaluation, a hold included, and cross-agent guards stop at the first `BLOCK`.
 - **FLAG** (severity 2) takes priority over ALLOW.
 - **ALLOW** (severity 0) is the default when no guardrail triggers.
 
@@ -1283,7 +1383,7 @@ describe('Integration: ParallelGuardrailDispatcher + MyGuardrail', () => {
 
 3. **Use specific reasonCodes for analytics.** Codes like `'PII_SSN_REDACTED'`, `'TOXICITY_HIGH'`, or `'COST_CEILING_EXCEEDED'` are far more useful than generic codes. These are machine-readable and can drive dashboards.
 
-4. **Fail-open on errors, unless the guardrail is safety-critical.** The dispatcher skips a guardrail that throws, with a logged warning, unless its config sets `failClosed: true`, which turns the throw into a BLOCK. A safety-critical guardrail sets `failClosed` and lets its errors propagate; any other guardrail wraps its evaluation logic in try/catch and returns `null` on unexpected errors:
+4. **Fail-open on errors, unless the guardrail is safety-critical.** The dispatcher skips a guardrail that throws, with a logged warning, unless its config sets `failClosed: true`, which turns the throw into a BLOCK. Under `moderateContent()` a guardrail runs closed unless its config says `failClosed: false`, with a deadline of 8 seconds when it names none. A safety-critical guardrail sets `failClosed` and lets its errors propagate; any other guardrail wraps its evaluation logic in try/catch and returns `null` on unexpected errors:
 
    ```typescript
    async evaluateInput(payload) {
@@ -1296,7 +1396,7 @@ describe('Integration: ParallelGuardrailDispatcher + MyGuardrail', () => {
    }
    ```
 
-5. **Do NOT set timeoutMs on safety-critical guardrails without `failClosed: true`.** Fail-open on timeout means content passes unchecked. Without `failClosed`, use timeoutMs only on guardrails where a missed evaluation is acceptable (e.g., quality flags, analytics).
+5. **Do NOT set timeoutMs on safety-critical guardrails without `failClosed: true`.** Fail-open on timeout means content passes unchecked. Without `failClosed`, use timeoutMs only on guardrails where a missed evaluation is acceptable (e.g., quality flags, analytics). Under `moderateContent()` a guardrail that times out refuses the content as unavailable unless its config says `failClosed: false`.
 
 6. **Keep guardrails focused.** One concern per guardrail. A PII guardrail should not also check for toxicity. This makes them independently testable, configurable, and composable.
 
