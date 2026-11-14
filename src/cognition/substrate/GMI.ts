@@ -177,29 +177,42 @@ function cacheMarkerOf(part: MessageContentPart | undefined): unknown {
   return part && 'cache_control' in part ? part.cache_control : undefined;
 }
 
-/** Whether `value` holds a `cache_control` marker with the one-hour lifetime, at any depth. */
-function holdsOneHourMarker(value: unknown): boolean {
+/** Whether `value` holds, at any depth, a `cache_control` marker whose lifetime `test` accepts. */
+function holdsMarkerWith(value: unknown, test: (ttl: unknown) => boolean): boolean {
   if (!value || typeof value !== 'object') return false;
   return Object.entries(value).some(([key, nested]) =>
     key === 'cache_control'
-      ? typeof nested === 'object' && nested !== null && (nested as { ttl?: unknown }).ttl === '1h'
-      : holdsOneHourMarker(nested),
+      ? typeof nested === 'object' && nested !== null && test((nested as { ttl?: unknown }).ttl)
+      : holdsMarkerWith(nested, test),
   );
 }
 
 /**
- * Whether a one-hour cache marker comes after the part `isMarked` picks, in the order Anthropic reads the request's
- * markers: the system messages' parts in message order (the provider sends every system message as the request's
- * `system`), then the other messages' parts. Anthropic refuses a request with a one-hour marker after a five-minute one.
+ * Whether the GMI's own marker, on the part `isOwn` picks, breaks Anthropic's lifetime order with a marker of the
+ * hook's. Anthropic reads the markers in this order: the system messages' parts in message order (the provider sends
+ * every system message as the request's `system`), then the other messages' parts; and it refuses a request with a
+ * one-hour marker after a shorter one. So a five-minute own marker breaks it when a one-hour marker comes after it,
+ * and a one-hour own marker when a shorter marker comes before it.
  */
-function oneHourMarkerFollows(messages: readonly ChatMessage[], isMarked: (part: MessageContentPart) => boolean): boolean {
+function breaksLifetimeOrder(
+  messages: readonly ChatMessage[],
+  isOwn: (part: MessageContentPart) => boolean,
+  ownLastsAnHour: boolean,
+): boolean {
   const ordered = [...messages.filter((message) => message.role === 'system'), ...messages.filter((message) => message.role !== 'system')];
-  let after = false;
+  let afterOwn = false;
+  let shorterBefore = false;
   for (const message of ordered) {
     if (!Array.isArray(message.content)) continue;
     for (const part of message.content) {
-      if (isMarked(part)) after = true;
-      else if (after && holdsOneHourMarker(part)) return true;
+      if (isOwn(part)) {
+        if (ownLastsAnHour && shorterBefore) return true;
+        afterOwn = true;
+      } else if (afterOwn) {
+        if (!ownLastsAnHour && holdsMarkerWith(part, (ttl) => ttl === '1h')) return true;
+      } else if (holdsMarkerWith(part, (ttl) => ttl !== '1h')) {
+        shorterBefore = true;
+      }
     }
   }
   return false;
@@ -2306,21 +2319,36 @@ export class GMI implements IGMI {
               this.addTraceEntry(ReasoningEntryType.WARNING, `beforeModelCall hook failed: ${hookError instanceof Error ? hookError.message : String(hookError)}`);
             }
           }
-          // Anthropic takes at most four cache markers a request, and no one-hour marker after a five-minute one. When
-          // the hook's messages keep the GMI's own marker (the hook kept the fixed block and its marker) and carry more
-          // than four, or a one-hour marker after the GMI's five-minute one, the GMI removes its own and leaves the
-          // host's markers as they are. It adds no marker to messages the hook built itself.
-          const keepsOwnMarker = markedSystemPart !== undefined
+          // Anthropic takes at most four cache markers a request, and no one-hour marker after a shorter one. When the
+          // hook's messages keep the GMI's own marker (the hook kept the fixed block and its marker) and carry more
+          // than four, or put the GMI's marker out of lifetime order with one of the hook's (a one-hour marker after
+          // the GMI's five-minute one, or a shorter marker before the GMI's one-hour one), the GMI removes its own and
+          // leaves the host's markers as they are. It adds no marker to messages the hook built itself.
+          const keepsOwnByIdentity = markedSystemPart !== undefined
             && sendMessages.some((message) => Array.isArray(message.content) && message.content.some(carriesOwnMarker));
+          // A hook that copies the parts (structuredClone, or a map that spreads each part) returns another object for
+          // the GMI's part, with the same text and an equal marker. Only where the request would otherwise be refused,
+          // the GMI also takes as its own the first system part whose text is the fixed text and whose marker equals
+          // its own by value.
+          const fixedText = markedSystemPart && 'text' in markedSystemPart ? markedSystemPart.text : undefined;
+          const copiedOwnPart = keepsOwnByIdentity || fixedText === undefined
+            ? undefined
+            : sendMessages
+              .filter((message) => message.role === 'system' && Array.isArray(message.content))
+              .flatMap((message) => message.content as MessageContentPart[])
+              .find((part) => part.type === 'text' && 'text' in part && part.text === fixedText
+                && cacheMarkerOf(part) !== undefined && JSON.stringify(cacheMarkerOf(part)) === ownMarkerText);
+          const isOwnMarker = keepsOwnByIdentity ? carriesOwnMarker : (part: MessageContentPart): boolean => part === copiedOwnPart;
+          const keepsOwnMarker = keepsOwnByIdentity || copiedOwnPart !== undefined;
+          const ownLastsAnHour = (ownMarker as { ttl?: unknown } | undefined)?.ttl === '1h';
           const overMarkerCap = keepsOwnMarker && countCacheMarkers(sendMessages) > 4;
-          const outlivedByHook = keepsOwnMarker && !overMarkerCap
-            && (ownMarker as { ttl?: unknown } | undefined)?.ttl !== '1h'
-            && oneHourMarkerFollows(sendMessages, carriesOwnMarker);
-          if (overMarkerCap || outlivedByHook) {
+          const outOfLifetimeOrder = keepsOwnMarker && !overMarkerCap
+            && breaksLifetimeOrder(sendMessages, isOwnMarker, ownLastsAnHour);
+          if (overMarkerCap || outOfLifetimeOrder) {
             sendMessages = sendMessages.map((message) => !Array.isArray(message.content) ? message : ({
               ...message,
               content: message.content.map((part) => {
-                if (!carriesOwnMarker(part)) return part;
+                if (!isOwnMarker(part)) return part;
                 const unmarked: Record<string, unknown> = { ...part };
                 delete unmarked.cache_control;
                 return unmarked as typeof part;
@@ -2330,7 +2358,9 @@ export class GMI implements IGMI {
               ReasoningEntryType.WARNING,
               overMarkerCap
                 ? 'Dropped the GMI system cache marker because the hook supplied more than four markers.'
-                : 'Dropped the GMI system cache marker because the hook put a one-hour marker after it.',
+                : ownLastsAnHour
+                  ? 'Dropped the GMI system cache marker because the hook put a shorter-lived marker before it.'
+                  : 'Dropped the GMI system cache marker because the hook put a one-hour marker after it.',
             );
           }
 

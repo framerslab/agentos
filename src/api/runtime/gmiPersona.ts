@@ -128,11 +128,12 @@ function basePrompt(
     const prompt = blocks.map((block) => block.text).join('\n\n');
     return recalls ? [prompt, MEMORY_RECALL_SYSTEM_LINE].filter(Boolean).join('\n\n') : prompt;
   }
-  const entries: Array<{ content: string; priority: number; stability: 'persona' | 'turn' }> = blocks.map((block, index) => ({
-    content: block.text,
-    priority: 1,
-    stability: index <= breakpoint ? 'persona' : 'turn',
-  }));
+  // The blocks through the breakpoint are one fixed entry, so a blank block among them (kept, as in the joined text)
+  // cannot end the fixed run early; their joined text is the same either way. Each later block is a turn entry.
+  const entries: Array<{ content: string; priority: number; stability: 'persona' | 'turn' }> = [
+    { content: blocks.slice(0, breakpoint + 1).map((block) => block.text).join('\n\n'), priority: 1, stability: 'persona' },
+    ...blocks.slice(breakpoint + 1).map((block) => ({ content: block.text, priority: 1, stability: 'turn' as const })),
+  ];
   if (recalls) entries.push({ content: MEMORY_RECALL_SYSTEM_LINE, priority: 1, stability: 'persona' });
   return entries;
 }
