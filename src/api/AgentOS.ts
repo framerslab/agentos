@@ -1261,10 +1261,12 @@ export class AgentOS implements IAgentOS {
 
       // Initialize Tool Orchestrator
       const toolRegistry = this.extensionManager.getRegistry<ITool>(EXTENSION_KIND_TOOL);
+      // The runtime registers no built-in tool: the date tool joins only through the host's `tools`.
       this.toolExecutor = new ToolExecutor(
         this.authService,
         this.subscriptionService,
-        toolRegistry
+        toolRegistry,
+        { builtInTools: false },
       );
       this.toolOrchestrator = new ToolOrchestrator();
       // Build emergent options from config when emergent: true.

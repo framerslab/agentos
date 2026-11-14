@@ -18,6 +18,7 @@ export type {
   ToolExecutionContext,
   JSONSchemaObject,
 } from './core/tools/ITool';
+export { createCurrentDateTimeTool } from './core/tools/builtins/currentDateTime.js';
 export * from './core/llm/IPromptEngine';
 export * from './core/config/ToolOrchestratorConfig';
 export * from './core/tools/permissions/IToolPermissionManager';
