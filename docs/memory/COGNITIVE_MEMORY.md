@@ -719,7 +719,7 @@ Under `retrieval: 'hybrid'` the two recall sections are one, in Relevant Memorie
 ...
 ```
 
-The agent's own earlier replies are shown in Recent Experiences, or in the hybrid block's one recall section, each line starting `You said: `, and never under the dense block's facts heading ([Trace Lines](#trace-lines)).
+The agent's own earlier replies are shown in Recent Experiences, or in the hybrid block's one recall section, each line's content starting `You said: `, and never under the dense block's facts heading ([Trace Lines](#trace-lines)).
 
 The preamble appears when the budget has room for it and 100 more tokens. `assembleForPrompt()` never fills the last two sections: it passes no observer notes (their 5% flows to the sections with content), and it passes neither the mechanisms engine nor the trace pool that the involuntary-recall section needs. Both sections appear only when a host calls `assembleMemoryContext()` (from `@framers/agentos/cognition/memory`) itself, with `observationNotes`, or with `mechanismsEngine` and `allTraces`. How each trace line reads depends on the formatting style.
 
@@ -1295,7 +1295,7 @@ await cognitiveMemory.encode(assistantResponse, mood, gmiMood, {
 });
 ```
 
-A later turn's block shows the reply as the agent's own earlier words, a past exchange whose line starts `You said: `, and never as a fact; it reads that from the `agent_inference` sourceType and the `assistant` tag ([Trace Lines](#trace-lines)).
+A later turn's block shows the reply as the agent's own earlier words, a past exchange whose content starts `You said: `, and never as a fact; it reads that from the `agent_inference` sourceType and the `assistant` tag ([Trace Lines](#trace-lines)).
 
 With a learning layer the GMI reads and files under the scope ids its learner session gives the turn: the user's message and the reply both go under the turn's own user scope id (the learner's, or the session's form on a turn with no learner), each encode runs inside the user's write chain with the tombstone read before it and once it has committed, and the recall lists only the turn's own scopes ([Where a turn's memory is filed and read](../GMI.md#where-a-turns-memory-is-filed-and-read)).
 

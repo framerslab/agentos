@@ -39,7 +39,7 @@
  * A trace with sourceType `agent_inference` and the tag `assistant` holds the
  * agent's own earlier reply: a GMI files each reply so. The block shows it as
  * a past exchange in the agent's words, never as a fact: as an episodic trace
- * whose line starts `You said: `, in Recent Experiences (in a hybrid block,
+ * whose content starts `You said: `, in Recent Experiences (in a hybrid block,
  * the one recall section), and the same way as the involuntary memory.
  *
  * @module agentos/memory/prompt/MemoryPromptAssembler
@@ -176,7 +176,7 @@ export interface MemoryAssemblerInput {
   /**
    * Scored semantic/episodic traces from retrieval. Episodic traces are shown in Recent Experiences, the others in
    * Relevant Memories; a trace with sourceType `agent_inference` and the tag `assistant` (the agent's own reply) is
-   * shown as an episodic one whose line starts `You said: `.
+   * shown as an episodic one whose content starts `You said: `.
    */
   retrievedTraces?: ScoredMemoryTrace[];
   /**

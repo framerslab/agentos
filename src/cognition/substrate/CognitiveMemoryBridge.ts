@@ -566,7 +566,7 @@ export class CognitiveMemoryBridge {
    *   sourceType 'agent_inference', under the tags
    *   {@link CognitiveMemoryBridge.buildTags} gives the role 'assistant'. A
    *   later turn's memory block shows it as the assistant's own earlier words,
-   *   a past exchange whose line starts "You said: ", never as a fact; that is
+   *   a past exchange whose content starts "You said: ", never as a fact; that is
    *   read from the sourceType and the 'assistant' tag, so a reply an earlier
    *   version filed is shown the same way.
    *

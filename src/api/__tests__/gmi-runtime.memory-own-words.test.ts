@@ -6,9 +6,9 @@
  * so texts that share words recall each other.
  *
  * A GMI files each reply as a semantic trace with sourceType 'agent_inference' and the bridge's tags, its role
- * 'assistant' first, as earlier versions did. The block shows such a trace as the assistant's own words, a line that
- * starts "You said: " among the past exchanges, and never under the facts heading. A trace a host files itself with
- * that sourceType, and without the tag, is shown as it was. Each case clears the session's history before the turn it
+ * 'assistant' first, as earlier versions did. The block shows such a trace as the assistant's own words, a line whose
+ * content starts "You said: " among the past exchanges, and never under the facts heading. A trace a host files
+ * itself with that sourceType, and without the tag, is shown as it was. Each case clears the session's history before the turn it
  * reads, so the reply reaches the request through recall alone.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';

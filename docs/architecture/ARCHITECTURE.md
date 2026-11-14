@@ -659,7 +659,7 @@ Located in `cognition/memory/mechanisms/`; seven of the eight are scaled by a HE
 ### GMI Integration
 
 1. **Before prompt construction**: `CognitiveMemoryBridge.assembleContext()` calls the manager's `assembleForPrompt()`, which retrieves and formats memory within a token budget
-2. **After the turn**: `CognitiveMemoryBridge.syncForTurn()` encodes the user's input as an episodic trace (`user_statement`) and the reply as a semantic trace (`agent_inference`, tagged `assistant`), each with personality-modulated strength; a later turn's block shows the reply as the assistant's own earlier words, a line that starts `You said: `, never as a fact ([Trace Lines](../memory/COGNITIVE_MEMORY.md#trace-lines))
+2. **After the turn**: `CognitiveMemoryBridge.syncForTurn()` encodes the user's input as an episodic trace (`user_statement`) and the reply as a semantic trace (`agent_inference`, tagged `assistant`), each with personality-modulated strength; a later turn's block shows the reply as the assistant's own earlier words, a line whose content starts `You said: `, never as a fact ([Trace Lines](../memory/COGNITIVE_MEMORY.md#trace-lines))
 3. **Before each encode**: the bridge passes the text to the manager's `observe()`, which feeds the [`MemoryObserver`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/pipeline/observation/MemoryObserver.ts) buffer when an observer is configured
 
 For full details, see [Cognitive Memory](../memory/COGNITIVE_MEMORY.md) (theory + mechanism implementation reference) and the [Memory System Overview](../MEMORY_SYSTEM_OVERVIEW.md) (composition, archive, vendor comparison).
