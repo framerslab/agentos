@@ -91,10 +91,11 @@ const runtime = await AgentOS.create({
   tools: [createCurrentDateTimeTool()],
   orchestratorConfig: {
     promptProfileConfig: DEFAULT_PROMPT_PROFILE_CONFIG,
-    enableConversationalPersistence: true,
   },
 });
 ```
+
+The snippet leaves `enableConversationalPersistence` out, so `AgentOS.create` keeps the `ENABLE_PERSISTENCE` value, as it did for a host that passed no `orchestratorConfig`. A host whose own `orchestratorConfig` left the field out had persistence on whatever `ENABLE_PERSISTENCE` said; it adds `enableConversationalPersistence: true` to keep that. An `orchestratorConfig` passed to `AgentOS.create` replaces the factory's other orchestrator settings, so `maxToolCallIterations` falls to 5 unless the object sets it: a host that relied on `MAX_TOOL_CALL_ITERATIONS` sets `maxToolCallIterations` in the object as well.
 
 A persona that names the date tool gets it only when the host registers it. The bundled `atlas-systems-architect` persona (`getBuiltInPersona('atlas-systems-architect')`) lists `getCurrentDateTime` in its definition: the runtime serves it either way, and it offers the date tool only when the host registers it. A persona whose `toolIds` name `getCurrentDateTime` while the host registers no date tool fails persona validation with `unknown_tool_id`: the runtime logs the error when it loads its personas and serves the persona, and under strict persona validation (`gmiManagerConfig.personaValidationStrict` enabled, outside shadow mode) it refuses that persona's turns, as it does for any blocking validation error.
 
