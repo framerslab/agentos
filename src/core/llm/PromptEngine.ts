@@ -1491,10 +1491,6 @@ export class PromptEngine implements IPromptEngine {
       }
 
       const currentUserInputParts: MessageContentPart[] = []; // Use MessageContentPart
-      // The retrieved text (the memory block first, when one was given) goes in front of the person's words as a
-      // note from the application, a text part of its own, as in the OpenAI chat template.
-      const ragContent = retrievedContextAsText(components.retrievedContext);
-      if (ragContent) currentUserInputParts.push({ type: 'text', text: applicationNoteOf(ragContent) });
       if(components.userInput) currentUserInputParts.push({type: 'text', text: components.userInput});
       if(components.visionInputs && modelInfo.visionSupport?.supported){
         components.visionInputs.forEach(vis => {
@@ -1507,6 +1503,23 @@ export class PromptEngine implements IPromptEngine {
             }
           } as any); // Use 'as any' if 'image' type with 'source' is not yet in MessageContentPart
         });
+      }
+      // The retrieved text (the memory block first, when one was given) goes in the newest user message as a note
+      // from the application, a text part of its own in front of the person's words, as in the OpenAI chat template.
+      // With no new input that message is the last one of the history, unless it carries tool results, whose blocks
+      // open their message: then the note is a user message of its own.
+      const ragContent = retrievedContextAsText(components.retrievedContext);
+      const newest = messages[messages.length - 1];
+      if (
+        ragContent &&
+        currentUserInputParts.length === 0 &&
+        newest?.role === 'user' &&
+        Array.isArray(newest.content) &&
+        !newest.content.some((part) => part?.type === 'tool_result')
+      ) {
+        newest.content = withApplicationNote(newest.content, applicationNoteOf(ragContent), true);
+      } else if (ragContent) {
+        currentUserInputParts.unshift({ type: 'text', text: applicationNoteOf(ragContent) });
       }
       if (currentUserInputParts.length > 0) {
         messages.push({role: 'user', content: currentUserInputParts});
