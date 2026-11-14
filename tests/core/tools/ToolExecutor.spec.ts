@@ -2,6 +2,8 @@ import { describe, it, expect, vi } from 'vitest';
 import { ToolExecutor } from '../../../src/core/tools/ToolExecutor';
 import { ITool, ToolExecutionContext, ToolExecutionResult } from '../../../src/core/tools/ITool';
 import { ToolCallRequest, UserContext } from '../../../src/cognition/substrate/IGMI.js';
+import * as publicApi from '../../../src/index';
+import * as toolsApi from '../../../src/core/tools/index';
 
 const userContext: UserContext = { userId: 'u-1' };
 
@@ -29,6 +31,35 @@ const makeRequest = (name: string, args: Record<string, any> = { text: 'hi' }): 
 });
 
 describe('ToolExecutor', () => {
+  it('keeps the date tool by default but omits it when builtInTools is false', async () => {
+    const normal = new ToolExecutor();
+    const explicit = new ToolExecutor(undefined, undefined, undefined, { builtInTools: false } as any);
+    try {
+      expect(normal.getTool('getCurrentDateTime')).toBeDefined();
+      expect(explicit.getTool('getCurrentDateTime')).toBeUndefined();
+    } finally { await normal.shutdownAllTools(); await explicit.shutdownAllTools(); }
+  });
+
+  it('exports one date factory on both public paths and executes its original schema', async () => {
+    const factory = (publicApi as unknown as Record<string, any>).createCurrentDateTimeTool;
+    expect(factory, 'createCurrentDateTimeTool root export').toBeTypeOf('function');
+    expect((toolsApi as unknown as Record<string, any>).createCurrentDateTimeTool).toBe(factory);
+    const tool = factory();
+    expect(tool.id).toBe('system-current-time-tool-v1.1');
+    expect(tool.name).toBe('getCurrentDateTime');
+    const executor = new ToolExecutor(undefined, undefined, undefined, { builtInTools: false } as any);
+    try {
+      await executor.registerTool(tool);
+      const result = await executor.executeTool({
+        toolCallRequest: makeRequest('getCurrentDateTime', { timezone: 'UTC' }),
+        gmiId: 'gmi-1', personaId: 'persona-1', personaCapabilities: [], userContext,
+      });
+      expect(result.success).toBe(true);
+      expect(result.output).toMatchObject({ timezoneUsed: 'UTC', isoTimestamp: expect.any(String), currentTime: expect.any(String) });
+      expect(Number.isFinite(Date.parse((result.output as any).isoTimestamp))).toBe(true);
+    } finally { await executor.shutdownAllTools(); }
+  });
+
   it('registers and executes a tool successfully', async () => {
     const executor = new ToolExecutor();
     const tool = makeTool();

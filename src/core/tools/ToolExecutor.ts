@@ -14,7 +14,8 @@
 import { uuidv4 } from '../utils/uuid.js';
 import { SchemaChecks, checkValue, type SchemaCheck } from '../utils/schemaChecks.js';
 
-import { ITool, JSONSchemaObject, ToolExecutionResult, ToolExecutionContext } from './ITool';
+import { ITool, ToolExecutionResult, ToolExecutionContext } from './ITool';
+import { createCurrentDateTimeTool } from './builtins/currentDateTime.js';
 import { ToolCallRequest, UserContext } from '../../cognition/substrate/IGMI';
 import type { IAuthService, ISubscriptionService } from '../types/auth';
 import { GMIError, GMIErrorCode, createGMIErrorFromError } from '../utils/errors.js';
@@ -118,14 +119,15 @@ export class ToolExecutor {
   * @param {ISubscriptionService} [subscriptionService] - Optional. An instance of a subscription service.
   * Similarly used for potential future feature-based tool access control at the executor level.
   * @param {ExtensionRegistry<ITool>} [toolRegistry] - Optional. The registry the tools live in; a new one when omitted.
-  * @param {{ logToolCalls?: boolean }} [options] - Optional. `logToolCalls` puts each tool's arguments, an output preview
-  * and failure details in the console lines of `executeTool`; off by default (see `setLogToolCalls`).
+  * @param {{ logToolCalls?: boolean; builtInTools?: boolean }} [options] - Optional. `logToolCalls` controls content-bearing
+  * tool logs: each tool's arguments, an output preview and failure details in the console lines of `executeTool`; off by
+  * default (see `setLogToolCalls`). `builtInTools` defaults to true; false starts without the built-in date tool.
   */
   constructor(
     authService?: IAuthService,
     subscriptionService?: ISubscriptionService,
     toolRegistry?: ExtensionRegistry<ITool>,
-    options?: { logToolCalls?: boolean },
+    options?: { logToolCalls?: boolean; builtInTools?: boolean },
   ) {
     this.logToolCalls = options?.logToolCalls === true;
     this.toolRegistry = toolRegistry ?? new ExtensionRegistry<ITool>(EXTENSION_KIND_TOOL);
@@ -133,7 +135,7 @@ export class ToolExecutor {
     this.authService = authService;
     this.subscriptionService = subscriptionService;
 
-    this.registerDefaultTools();
+    if (options?.builtInTools !== false) this.registerDefaultTools();
     console.log(
       `ToolExecutor initialized. Registered tools: ${this.toolRegistry.listActive().length}.`,
     );
@@ -483,54 +485,7 @@ export class ToolExecutor {
   }
 
   private registerDefaultTools(): void {
-    const currentTimeTool: ITool<{ timezone?: string }, { currentTime: string; timezoneUsed: string; isoTimestamp: string }> = {
-      id: "system-current-time-tool-v1.1",
-      name: "getCurrentDateTime",
-      displayName: "Current Date & Time Service",
-      description: "Gets the current date and time, optionally for a specific IANA timezone (e.g., 'America/New_York', 'Europe/London'). Defaults to the server's local timezone if no timezone is provided or if the provided one is invalid.",
-      inputSchema: {
-        type: "object",
-        properties: { timezone: { type: "string", description: "Optional: IANA timezone string (e.g., 'America/Los_Angeles', 'Europe/London'). Examples: 'UTC', 'America/New_York', 'Asia/Tokyo'.", format: "time-zone" } },
-        additionalProperties: false,
-      } as JSONSchemaObject,
-      outputSchema: {
-        type: "object",
-        properties: {
-          currentTime: { type: "string", description: "The current date and time formatted as a locale string (e.g., '5/24/2025, 11:43:58 AM')." },
-          timezoneUsed: { type: "string", description: "The IANA timezone that was used for the calculation." },
-          isoTimestamp: { type: "string", format: "date-time", description: "The current date and time in ISO 8601 format (UTC)."}
-        },
-        required: ["currentTime", "timezoneUsed", "isoTimestamp"]
-      } as JSONSchemaObject,
-      category: "System Utilities", version: "1.1.0", hasSideEffects: false,
-      execute: async (args: { timezone?: string }, context: ToolExecutionContext): Promise<ToolExecutionResult<{ currentTime: string; timezoneUsed: string; isoTimestamp: string }>> => {
-        try {
-          let effectiveTimezone = args.timezone;
-          const serverDefaultTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
-          if (effectiveTimezone) {
-            try { new Date().toLocaleString("en-US", { timeZone: effectiveTimezone }); } 
-            catch (tzError: any) {
-              console.warn(`ToolExecutor[getCurrentDateTime]: Invalid timezone '${args.timezone}' provided by GMI ${context.gmiId}. Falling back to ${serverDefaultTimezone}. Error: ${tzError.message}`);
-              effectiveTimezone = serverDefaultTimezone;
-            }
-          } else { effectiveTimezone = serverDefaultTimezone; }
-          
-          const currentDate = new Date();
-          return {
-            success: true,
-            output: {
-              currentTime: currentDate.toLocaleString("en-US", { timeZone: effectiveTimezone, hour12: true, year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric' }),
-              timezoneUsed: effectiveTimezone,
-              isoTimestamp: currentDate.toISOString(),
-            },
-            contentType: "application/json"
-          };
-        } catch (e: any) {
-          return { success: false, error: `Error getting current time: ${e.message}`, details: { stack: e.stack } };
-        }
-      }
-    };
-    this.registerTool(currentTimeTool).catch((e: any) => {
+    this.registerTool(createCurrentDateTimeTool()).catch((e: any) => {
       console.error('Error registering default current time tool:', e);
     });
   }
