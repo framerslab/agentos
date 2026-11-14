@@ -1369,7 +1369,9 @@ describe('GMI sentiment writes that land after their turn dropped them', () => {
       gmi.clearHistory();
       await settle(); await settle();
       held[1].fail();
+      // The turn ends once the result is applied; the scrub that runs again finishes after it.
       await turn;
+      await settle(); await settle();
       expect(lines.filter((line) => line.event === 'gmi.sentiment_take_back_failed'),
         'a scrub run again that fails after its turn was forgotten writes one line').toHaveLength(1);
       expect(JSON.stringify(lines)).not.toContain('Forget-me');
