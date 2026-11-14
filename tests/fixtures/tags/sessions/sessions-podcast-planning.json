@@ -1,0 +1,62 @@
+{
+  "id": "sessions-podcast-planning",
+  "set": "sessions",
+  "kind": "session",
+  "language": "en",
+  "title": "Podcast planning",
+  "headings": [],
+  "path": null,
+  "text": "Iris: Let's plan the next three episodes of the podcast.\nTheo: The first one should be about how small teams plan their week. Listeners keep asking for it.\nIris: Good. Who could we invite as a guest?\nTheo: Someone who runs a team of five or six. I know a couple of founders who would talk about it.\nIris: Second episode?\nTheo: A listener questions episode. We have twenty questions in the inbox.\nIris: That one is easy to record. We could do it next week.\nTheo: The third could be about writing good meeting notes.\nIris: Nice. We should keep each episode under forty minutes. The last two ran long.\nTheo: Agreed. I will cut the intro music shorter too.\nIris: For the recording schedule, Tuesday mornings work best for me.\nTheo: Tuesdays are fine. I will book the studio for the next three weeks.\nIris: And I will write to the guests today.\n",
+  "vocabulary": [
+    {
+      "label": "podcast",
+      "uses": 9,
+      "lastUsed": 1762300800000
+    },
+    {
+      "label": "episodes",
+      "uses": 8,
+      "lastUsed": 1762214400000
+    },
+    {
+      "label": "guests",
+      "uses": 7,
+      "lastUsed": 1762128000000
+    },
+    {
+      "label": "recording",
+      "uses": 6,
+      "lastUsed": 1762041600000
+    }
+  ],
+  "typed": [
+    "podcast"
+  ],
+  "expected": {
+    "existing": [
+      "podcast",
+      "episodes",
+      "guests",
+      "recording"
+    ],
+    "new": [
+      "listeners"
+    ]
+  },
+  "mustNot": [],
+  "asks": [],
+  "report": [
+    {
+      "label": "podcast",
+      "quotes": [
+        "Let's plan the next three episodes of the podcast."
+      ]
+    },
+    {
+      "label": "meeting notes",
+      "quotes": [
+        "The third could be about writing good meeting notes."
+      ]
+    }
+  ]
+}

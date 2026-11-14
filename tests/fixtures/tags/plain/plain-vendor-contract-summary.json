@@ -1,0 +1,53 @@
+{
+  "id": "plain-vendor-contract-summary",
+  "set": "plain",
+  "kind": "document",
+  "language": "en",
+  "title": "Vendor contract summary: cleaning and facilities",
+  "headings": [
+    "Scope",
+    "Price and terms",
+    "Service levels",
+    "Renewal"
+  ],
+  "path": null,
+  "text": "# Scope\n\nThis summary covers the facilities contract for the two offices. The vendor cleans the offices every weekday evening, restocks the kitchens and the washrooms, and handles small repairs such as doors, lights and furniture. Larger repairs, the heating and the lifts stay with the building's own management company and are not part of this contract.\n\n# Price and terms\n\nThe contract runs for two years with a fixed monthly fee for each office. The fee covers the regular cleaning and up to six hours of repair work a month. Repair work beyond those hours is billed by the hour at the rate in the second schedule, and the vendor must ask before starting any job that would take more than three extra hours. Supplies for the kitchens are billed at cost with a small handling charge. Invoices arrive at the start of each month and are due in thirty days.\n\n# Service levels\n\nThe vendor answers a repair request within one working day and finishes a small repair within three. A missed evening of cleaning is made up the next morning before nine. If the vendor misses the response time more than three times in a quarter, the next month's fee drops by a tenth. The office manager keeps a log of requests and response times and shares it with the vendor at the quarterly review.\n\n# Renewal\n\nThe contract renews for one more year unless either side gives notice ninety days before the end date. Facilities will review the log, the invoices and the feedback from staff two months before that deadline and recommend whether to renew, renegotiate or put the work out to tender. Legal has reviewed the termination clause and the insurance terms and has no open concerns.\n",
+  "vocabulary": [
+    {
+      "label": "vendors",
+      "uses": 9,
+      "lastUsed": 1762300800000
+    },
+    {
+      "label": "contracts",
+      "uses": 8,
+      "lastUsed": 1762214400000
+    },
+    {
+      "label": "facilities",
+      "uses": 7,
+      "lastUsed": 1762128000000
+    },
+    {
+      "label": "office",
+      "uses": 6,
+      "lastUsed": 1762041600000
+    }
+  ],
+  "typed": [
+    "facilities"
+  ],
+  "expected": {
+    "existing": [
+      "contracts",
+      "facilities",
+      "vendors"
+    ],
+    "new": [
+      "cleaning",
+      "renewal"
+    ]
+  },
+  "mustNot": [],
+  "asks": []
+}

@@ -1,0 +1,47 @@
+{
+  "id": "sensitive-reference-check",
+  "set": "sensitive",
+  "kind": "document",
+  "language": "en",
+  "title": "Reference and background check results",
+  "headings": [],
+  "path": null,
+  "text": "The background check for the finance assistant role came back this week. Gareth Mills disclosed a conviction for theft from eleven years ago, which the check confirmed. He served a sentence of community service and completed his probation without any further offence. The role handles payments, so the hiring manager, Sandra Kowalski, asked the people team how to weigh it.\n\nThe policy says a past conviction is not by itself a reason to withdraw an offer. The decision must consider how long ago it happened, what it was, and whether it relates to the role. Sandra spoke with Gareth, who explained the circumstances openly. His two references, both from finance roles in the last six years, were strong.\n\nThe decision is to confirm the offer, with the same payment approval limits that apply to every new finance assistant. The details of the check stay in the people team's records and are not shared with the wider team.\n",
+  "vocabulary": [
+    {
+      "label": "background checks",
+      "uses": 9,
+      "lastUsed": 1762300800000
+    },
+    {
+      "label": "references",
+      "uses": 8,
+      "lastUsed": 1762214400000
+    },
+    {
+      "label": "offers",
+      "uses": 7,
+      "lastUsed": 1762128000000
+    }
+  ],
+  "typed": [
+    "references"
+  ],
+  "expected": {
+    "existing": [
+      "backgroundchecks",
+      "references",
+      "offers"
+    ],
+    "new": []
+  },
+  "mustNot": [
+    "conviction",
+    "theft",
+    "probation",
+    "community service",
+    "Gareth Mills",
+    "Sandra Kowalski"
+  ],
+  "asks": []
+}
