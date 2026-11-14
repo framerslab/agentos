@@ -1485,7 +1485,7 @@ export class AgentOS implements IAgentOS {
     this.initialized = true;
     runtimeDefaultsLog.info('runtime.defaults', {
       promptProfile: this.config.orchestratorConfig.promptProfileConfig == null ? 'none' : 'host',
-      persistence: (this.config.orchestratorConfig.enableConversationalPersistence ?? true) ? 'on' : 'off',
+      persistence: this.conversationalPersistenceOn() ? 'on' : 'off',
       persistenceFrom: this.persistenceFrom
         ?? (this.config.orchestratorConfig.enableConversationalPersistence !== undefined ? 'host' : 'default'),
       dateTool: this.toolExecutor.getTool('getCurrentDateTime') ? 'on' : 'off',
@@ -1701,6 +1701,14 @@ export class AgentOS implements IAgentOS {
   }
 
   /**
+   * Whether conversational persistence is on, read as the orchestrator reads it: on unless the orchestrator config
+   * sets `enableConversationalPersistence: false`, so an omitted field means on.
+   */
+  private conversationalPersistenceOn(): boolean {
+    return this.config.orchestratorConfig?.enableConversationalPersistence ?? true;
+  }
+
+  /**
    * With conversational persistence on, the orchestrator stores the model's reply before the output guards run. When
    * a guard replaced or rewrote it, the stored message is made to hold what the person saw, so the history never
    * carries a reply the guards refused. A reply blocked with no replacement is emptied, with the reason recorded.
@@ -1709,7 +1717,7 @@ export class AgentOS implements IAgentOS {
     const rewritten = verdict.action === GuardrailAction.SANITIZE || verdict.action === GuardrailAction.BLOCK;
     // a verdict on a streamed delta judged no whole reply, and the orchestrator stores the reply only once the turn
     // ends: that case is left to hold mode, where nothing streams before the final verdict
-    if (!rewritten || verdict.originalText === null || !this.config.orchestratorConfig?.enableConversationalPersistence || !this.conversationManager) return;
+    if (!rewritten || verdict.originalText === null || !this.conversationalPersistenceOn() || !this.conversationManager) return;
     try {
       const context = await this.conversationManager.getConversation(conversationKey);
       if (!context) return;
