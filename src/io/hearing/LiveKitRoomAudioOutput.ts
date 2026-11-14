@@ -132,11 +132,21 @@ export function pcmChunks(audio: Buffer, sampleRate: number, maxMs: number): Buf
   return cut(audio, samples);
 }
 
-/** A PCM16 mono clip cut into chunks of at most `samples` samples. */
-function cut(audio: Buffer, samples: number): Buffer[] {
+/**
+ * A PCM16 mono clip cut into chunks of at most `samples` samples. With `least`, a last chunk shorter than `least`
+ * samples shares the samples of the chunk before it evenly with that chunk, so neither is shorter than `least` when
+ * `samples` holds twice `least`.
+ */
+function cut(audio: Buffer, samples: number, least = 1): Buffer[] {
   const bytes = samples * 2;
   const chunks: Buffer[] = [];
-  for (let at = 0; at < audio.length; at += bytes) chunks.push(audio.subarray(at, Math.min(audio.length, at + bytes)));
+  for (let at = 0; at < audio.length; ) {
+    let end = Math.min(audio.length, at + bytes);
+    const rest = (audio.length - end) / 2;
+    if (rest > 0 && rest < least) end = at + Math.ceil((audio.length - at) / 4) * 2;
+    chunks.push(audio.subarray(at, end));
+    at = end;
+  }
   return chunks;
 }
 
@@ -326,9 +336,11 @@ export class LiveKitRoomAudioOutput {
    * Plays one whole clip: cut into chunks of at most `maxDurationMs`, shorter when a chunk's PCM16 bytes and the
    * bytes it is resampled to at the track's rate would pass `maxBytes` (both as the publisher counts them), handed to
    * the track in order, each carrying the clip's mark when it has one (set once, before the clip's first frame), and
-   * resolved once the track has played the last one out. One play runs at a time, and it hands the track nothing
-   * until a clear asked before it has finished. A clear or an abort ends the play's wait for the track's publication
-   * or for a subscriber at once, and the output keeps nothing of that wait.
+   * resolved once the track has played the last one out. A last chunk too short for the resampler to give one sample
+   * at the track's rate shares the samples of the chunk before it. One play runs at a time; a play stopped by a clear,
+   * an abort or a close lets the next one in at once, and that one hands the track nothing until a clear asked before
+   * it has finished. A clear or an abort ends the play's wait for the track's publication or for a subscriber at
+   * once, and the output keeps nothing of that wait.
    *
    * @param clip - PCM16 mono at its own rate, from 8000 to 192000 Hz; another rate than the track's is resampled
    *   chunk by chunk.
@@ -336,8 +348,8 @@ export class LiveKitRoomAudioOutput {
    * @returns The clip's length in whole milliseconds.
    * @throws {RangeError} When the clip is not whole PCM16 at a rate from 8000 to 192000 Hz, before anything is
    *   published.
-   * @throws {Error} `room audio busy` while another play runs; `room audio output closed` once closed, and
-   *   `room audio output stalled` once a capture stalled, the play under way included; with the code
+   * @throws {Error} `room audio busy` while another play runs and nothing has stopped it; `room audio output closed`
+   *   once closed, and `room audio output stalled` once a capture stalled, the play under way included; with the code
    *   {@link ROOM_AUDIO_NO_SUBSCRIBER} when nobody subscribed within `receiptTimeoutMs`, before any frame;
    *   `room audio cleared` after {@link clear}; `room audio aborted`, with the signal's reason as its `cause`; and the
    *   publisher's own errors (`publisher drain timeout`, `publisher mark refused`, a bound), after which what the
@@ -345,7 +357,8 @@ export class LiveKitRoomAudioOutput {
    */
   async play(clip: RoomAudioClip, signal?: AbortSignal): Promise<RoomAudioPlayed> {
     if (this.closed) throw failure(this.closedMessage);
-    if (this.run) throw failure('room audio busy');
+    // A play stopped by a clear, an abort or a close hands the track nothing more, so the next is admitted at once.
+    if (this.run && !this.run.error) throw failure('room audio busy');
     const { audio, sampleRate, mark } = clip;
     if (!Buffer.isBuffer(audio) || audio.length === 0 || audio.length % 2 !== 0 || !Number.isSafeInteger(sampleRate) || sampleRate < MIN_CLIP_RATE || sampleRate > MAX_CLIP_RATE) {
       throw new RangeError('LiveKitRoomAudioOutput: a clip is whole PCM16 mono at a rate from 8000 to 192000 Hz');
@@ -353,6 +366,9 @@ export class LiveKitRoomAudioOutput {
     if (signal?.aborted) throw failure('room audio aborted', { cause: signal.reason });
     const { sampleRate: trackRate, maxDurationMs, maxBytes } = this.options.publisher;
     const samples = chunkSamples(sampleRate, trackRate, maxDurationMs, maxBytes);
+    // The fewest samples a chunk holds that rtc-node's resampler turns into at least one sample at the track's rate:
+    // a last chunk with fewer would be refused by the publisher, after the clip's first chunks played.
+    const least = Math.ceil(sampleRate / trackRate);
     const run = startRun();
     this.run = run;
     const abort = (): void => {
@@ -369,7 +385,7 @@ export class LiveKitRoomAudioOutput {
       await this.within(run, this.listener(Date.now(), run));
       // A clear asked before this play, of the clip before it, finishes first.
       while (this.clearing) await this.within(run, this.clearing);
-      for (const pcm of cut(audio, samples)) {
+      for (const pcm of cut(audio, samples, samples >= 2 * least ? least : 1)) {
         const chunk: EncodedAudioChunk = {
           audio: wavChunk(pcm, sampleRate),
           format: 'pcm',
