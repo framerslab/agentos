@@ -4531,8 +4531,8 @@ describe('the ledger', () => {
       await failing.propose(selfChange('agreeableness', { learner: user }), { verdict: 'kept', change: async (tx) => tx.insertForgotten(tomb, LATER) }),
     ).toEqual({ status: 'forgotten' });
     const deleteWarning = warned.mock.calls.map((call) => call.join(' ')).join('\n');
-    expect(deleteWarning).toContain(`tombstone ${tomb.slice(0, 16)}`);
-    expect(deleteWarning).toContain('the deletion failed');
+    expect(deleteWarning).toContain('[agentos] learning: the rows an append wrote after its user was forgotten were not deleted (the deletion failed)');
+    expect(deleteWarning).not.toContain(tomb.slice(0, 16));
     expect(deleteWarning).not.toContain(tomb);
     expect(deleteWarning).not.toContain('ana@example.org');
     // Its rows stand until a second forgetUser call deletes them.
@@ -5671,7 +5671,8 @@ describe("a learner's trait row and its ledger, on gmi(), the full runtime and a
       };
       expect(await zedSession.recordSelfChange!(stuck)).toEqual({ status: 'rejected', reason: 'forgotten' });
       const lines = warn.mock.calls.map((call) => String(call[0]));
-      expect(lines.some((line) => line.includes(`(tombstone ${hash.slice(0, 16)}) was not taken back (the trace is locked)`))).toBe(true);
+      expect(lines.some((line) => line.includes('after its user was forgotten was not taken back (the trace is locked)'))).toBe(true);
+      expect(lines.some((line) => line.includes(hash.slice(0, 16)))).toBe(false);
       expect(lines.some((line) => line.includes('zed-private'))).toBe(false);
       expect(await store.traitRow('A', 'tutor', 'zed-private')).toBeUndefined();
       expect(await store.chainRows(chainKeyOf(zed))).toEqual([]);
@@ -6751,11 +6752,14 @@ describe("an operator's calls on a learner: freezes and suspensions, operatorSet
       "a session's forged tools",
       "an organization scope a host's policy shares",
     ]);
-    // The traces filed under the plain id stay, named in one WARNING by the user's tombstone and their scope.
+    // The traces filed under the plain id stay, named in one WARNING by their scope. The line holds no hash of the
+    // user's id: an unkeyed hash in a log lets anyone with a list of ids find who was forgotten.
     const tombstone = (await tombstoneHash('A', '42')).slice(0, 16);
-    expect(warn.mock.calls.map((call) => String(call[0])).filter((line) => line.includes('refileScope'))).toEqual([
-      `[agentos] learning: forgetUser (tombstone ${tombstone}) left 2 trace(s) filed before the namespace, under the user's plain id in its user scope; re-file them in the namespaced form with MemoryStore.refileScope, then call forgetUser again.`,
+    const lines = warn.mock.calls.map((call) => String(call[0]));
+    expect(lines.filter((line) => line.includes('refileScope'))).toEqual([
+      `[agentos] learning: forgetUser left 2 trace(s) filed before the namespace, under the user's plain id in its user scope; re-file them in the namespaced form with MemoryStore.refileScope, then call forgetUser again.`,
     ]);
+    expect(lines.filter((line) => line.includes(tombstone))).toEqual([]);
     expect(liveContents(toolsFile)).toEqual(['B42 likes coffee.', 'Filed with the tools before the namespace.']);
     expect(await memory.getStore().getByScope('user', ofA.userScopeId)).toEqual([]);
     expect((await memory.getStore().getByScope('user', ofB.userScopeId)).map((trace) => trace.content)).toEqual(['B42 keeps goats.']);

@@ -542,7 +542,7 @@ All operations are available via the `Memory` facade API.
 
 ### SQLite (One Brain, Every Table)
 
-The highest-fidelity export. Writes the brain's own rows of every portable table into a new SQLite file: traces with their embeddings, the knowledge graph, documents and chunks, conversations and messages, the consolidation log and the rest, with the registry of conversation scopes (`memory_scopes`) and each subject's wiki pages (`memory_pages`, see [Memory storage](memory/MEMORY_STORAGE.md)). It runs from a SQLite or a Postgres brain alike. A database can hold several brains, and the file holds this brain's rows only.
+The highest-fidelity export. Writes the brain's own rows of every portable table into a new SQLite file: traces with their embeddings, the knowledge graph, documents and chunks, conversations and messages, the consolidation log and the rest, with the registry of conversation scopes (`memory_scopes`), each subject's wiki pages (`memory_pages`) and the owner of each agent's older memory (`memory_legacy_owner`, see [Memory storage](memory/MEMORY_STORAGE.md)). It runs from a SQLite or a Postgres brain alike. A database can hold several brains, and the file holds this brain's rows only.
 
 ```ts
 await mem.export('./backup.sqlite', { format: 'sqlite' });
@@ -761,6 +761,20 @@ content,type,tags
 A row's scope id is its `metadata` cell's `scopeId`, else its `scope_id` cell, which is then written into the metadata too. The `metadata` cell is read before the duplicate check: a cell that is not valid JSON, or whose JSON is not an object (an array or `null`, say), makes the row an error, listed in `errors` and not imported, even when a trace of the same scope already holds the row's text.
 
 
+### One person's memory
+
+`await agent.exportUserMemory(userId)` on a `souledAgent()` returns that person's conversation traces (id, time, speaker, text, tags) and compiled pages (id, summary, updated, sources, body) as one JSON object. It reads the person's own scope alone: operator pages, other people's memory and a `gmi()` session's history are not in it. A person the store has forgotten gets an empty export.
+
+`await agent.correctUserMemory(userId, { traceIds, text })` deletes each page built from a named trace and has the next compile rebuild it from the traces that are left, files `text` as a trace tagged `correction`, deletes the named traces for good, and writes the vector index again and empties the store's write-ahead log, so neither file keeps the deleted words. The named traces go last: a correction that fails partway is finished by the same call made again. An index rewrite or a checkpoint that fails does not fail the call; one `memory.erasure_unfinished` line says so, and the next deletion, sweep or `applyTombstones()` runs it. It rejects, and changes nothing, when any id is not one of that person's live traces; the rejection gives a count and no id, and one `memory.write_refused` line (`reason: 'foreign_trace'`) says so.
+
+```ts
+const doc = await agent.exportUserMemory('user-42');
+const wrong = doc.traces.find((trace) => trace.text.includes('LARK-7'))!;
+await agent.correctUserMemory('user-42', { traceIds: [wrong.id], text: 'My canary is WREN-9.' });
+```
+
+Outside a souled agent, `exportSubjectMemory()` and `correctSubjectMemory()` (in `userMemoryExport.ts`) take the store, its page stores and the subject.
+
 ### SHA-256 Deduplication
 
 All import paths deduplicate traces by their text and its SHA-256:
@@ -870,3 +884,4 @@ All under [`src/cognition/memory/io/`](https://github.com/framerslab/agentos/tre
 | `SqliteImporter.ts` | Merge of one brain's SQLite file, with dedup + tag union |
 | `ChatGptImporter.ts` | ChatGPT `conversations.json` parser |
 | `CsvImporter.ts` | CSV import with required `content` column |
+| `userMemoryExport.ts` | One person's memory as JSON, and a correction of it |

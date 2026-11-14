@@ -82,9 +82,12 @@ import {
   type TraceSnapshot,
 } from '../../retrieval/store/tracePersistence.js';
 import { fillScopeIds } from '../../retrieval/store/migrations/v2-to-v3.js';
+import { ForgottenLedger, type SuppressionSubject } from '../../suppression/ForgottenLedger.js';
 import { CONVERSATION_SCOPE, parseConversationScopeKey } from '../../retrieval/store/conversationScopeKey.js';
+import { isMissingTableError } from '../../retrieval/store/missingTable.js';
 import { ensureScopeRow, registerUnregisteredConversationScopes } from '../../retrieval/store/conversationScopes.js';
 import { memoryLog } from '../../log.js';
+import { errorFields } from '../../../../core/logging/events.js';
 import { assertWikiPageId } from '../../../substrate/memory/wiki/WikiPageId.js';
 import { refileBrainScopeIds, snapshotInEncodedForm, takeScopeIdFormLock } from '../../retrieval/store/scopeIdForm.js';
 import { SqlKnowledgeGraph } from '../../retrieval/store/SqlKnowledgeGraph.js';
@@ -114,7 +117,7 @@ import {
 // ---------------------------------------------------------------------------
 
 /** Why a scope's wiki compile did not run in a call, as its `memory.compile_skipped` line says it. */
-export type CompileSkipReason = 'budget' | 'policy_raw' | 'screen_failed';
+export type CompileSkipReason = 'budget' | 'policy_raw' | 'screen_failed' | 'forgotten';
 
 /** What {@link Memory.attachWiki} takes: a page store per conversation scope, a compiler, and two optional hooks. */
 export interface AttachedWiki {
@@ -135,7 +138,12 @@ export interface AttachedWiki {
   beforeScopeCompile?(
     scopeId: string,
     traces: MemoryTrace[],
-  ): Promise<{ traces: MemoryTrace[] } | { skip: 'policy_raw' | 'screen_failed' }>;
+  ): Promise<{ traces: MemoryTrace[] } | { skip: 'policy_raw' | 'screen_failed' | 'forgotten' }>;
+  /**
+   * Runs one scope's compile: a host that orders each subject's writes, compiles and deletion one after another
+   * passes it, and runs `work` in the subject's turn. Unset: the compile runs at once.
+   */
+  runScope?<T>(scopeId: string, work: () => Promise<T>): Promise<T>;
   /**
    * The reason to log for an error a scope's compile threw: `'budget'` for a spend budget's refusal. Undefined:
    * the error is the call's, thrown once every scope has run.
@@ -249,6 +257,22 @@ const REPLACE_READ_PAGE_ROW = `UPDATE memory_pages
 /** How many times a page write reads the row again when another writer changed it between the read and the write. */
 const PAGE_WRITE_ATTEMPTS = 5;
 
+/**
+ * Each learning-store column that names a user, by table: the learner of a session, chain head, ledger row, trait row,
+ * freeze or document row, and the turn's user a ledger row records.
+ */
+const LEARNER_USER_COLUMNS: ReadonlyArray<readonly [string, string]> = [
+  ['agentos_learning_sessions', 'user_id'],
+  ['agentos_learning_heads', 'user_id'],
+  ['agentos_learning_ledger', 'user_id'],
+  ['agentos_learning_ledger', 'turn_user_id'],
+  ['agentos_learning_traits', 'user_id'],
+  ['agentos_learning_freezes', 'user_id'],
+  ['agentos_learning_outcomes', 'user_id'],
+  ['agentos_learning_lessons', 'user_id'],
+  ['agentos_learning_skills', 'user_id'],
+];
+
 /** Thrown inside a page write's transaction when the row is no longer the one read, so the transaction rolls back. */
 class PageRowChangedError extends Error {
   constructor() {
@@ -327,6 +351,17 @@ function pageChangedUnderEveryAttempt(): Error {
   return new Error(
     `Memory: the page row changed under each of ${PAGE_WRITE_ATTEMPTS} attempts to write it; nothing of this write is kept`,
   );
+}
+
+/** The trace ids a registry row's `rebuild_sources` holds: a JSON array of strings; anything else holds none. */
+function rebuildSourceIds(listed: string | null): string[] {
+  if (listed === null) return [];
+  try {
+    const parsed: unknown = JSON.parse(listed);
+    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string' && id !== '') : [];
+  } catch {
+    return [];
+  }
 }
 
 /** True for a trace's tags (a JSON array in text) that mark it a chunk of a wiki page. */
@@ -427,8 +462,25 @@ export class Memory {
   /** HNSW sidecar index for O(log n) vector search alongside SQLite. */
   private _hnswSidecar: import('../../retrieval/store/HnswSidecar.js').HnswSidecar | null = null;
 
+  /**
+   * The vector index's work, one step after another ({@link _onVectorIndex}): an add, a remove, a rebuild and a
+   * rewrite never interleave, so a rewrite that read the traces writes them with nothing added or removed between.
+   */
+  private _vectorIndexWork: Promise<unknown> = Promise.resolve();
+
+  /**
+   * What deletes for good left to do in the store's files ({@link finishErasure}): the vector index is owed a rewrite
+   * from a delete until a rewrite succeeds, and from an open whose check of the index failed; the write-ahead log is
+   * owed a checkpoint while deletes were made after the last checkpoint that emptied it; on SQLite the full-text index
+   * is owed a rebuild while deletes were made after the last rebuild that succeeded.
+   */
+  private readonly _erasureOwed = { vectorIndex: false, deletes: 0, checkpointed: 0, fullTextRebuilt: 0 };
+
   /** Optional embedding function for vector search (set via config.embed). */
   private readonly _embed: ((text: string) => Promise<number[]>) | null;
+
+  /** The forgotten-user ledger the store was opened with, if any (config.forgotten). */
+  private readonly _forgotten: ForgottenLedger | undefined;
 
   // -------------------------------------------------------------------
   // Constructor (private — use Memory.create() instead)
@@ -441,9 +493,11 @@ export class Memory {
   private constructor(
     brain: Brain,
     config: Required<Pick<MemoryConfig, 'store' | 'graph' | 'selfImprove' | 'decay'>> & MemoryConfig,
+    forgotten?: ForgottenLedger,
   ) {
     this._brain = brain;
     this._config = config;
+    this._forgotten = forgotten;
 
     // Store the optional embedding function for vector search.
     this._embed = config.embed ?? null;
@@ -474,19 +528,34 @@ export class Memory {
     // available. Falls back to FTS5-only recall if hnswlib-node is not
     // installed or no embeddings exist.
     this._initPromise = this._initPromise.then(async () => {
+      let sidecar: import('../../retrieval/store/HnswSidecar.js').HnswSidecar | undefined;
       try {
         const { HnswSidecar } = await import('../../retrieval/store/HnswSidecar.js');
         const dims = this._config.embeddings?.dimensions ?? 1536;
-        this._hnswSidecar = new HnswSidecar({
+        sidecar = new HnswSidecar({
           sqlitePath: this._config.path!,
           dimensions: dims,
           brainId: this._brain.brainId,
         });
-        await this._hnswSidecar.init();
+        await sidecar.init();
       } catch {
         // hnswlib-node not installed or init failed — HNSW stays null.
         // Recall will use FTS5 only (still works, just O(n) for vectors).
         this._hnswSidecar = null;
+        return;
+      }
+      this._hnswSidecar = sidecar ?? null;
+      if (!sidecar?.isActive) return;
+      try {
+        // The database is authoritative: an index loaded from its files is brought up to date with it before recall
+        // uses it, including a small store whose index was built explicitly.
+        await this._checkLoadedVectorIndex(sidecar);
+      } catch (error) {
+        // The files may still name a trace that is gone: their rewrite is owed, and the next deletion, sweep or
+        // re-application of the tombstones runs it. Recall keeps the index as it loaded: a vector of a trace that is
+        // gone finds no row.
+        this._erasureOwed.vectorIndex = true;
+        memoryLog.warn('memory.erasure_unfinished', errorFields(error));
       }
     });
   }
@@ -620,7 +689,10 @@ export class Memory {
 
   /**
    * Internal common initialization path for all three factories.
-   * Wires the Memory facade around an already-opened Brain.
+   * Wires the Memory facade around an already-opened Brain, and opens the
+   * forgotten-user ledger over the Brain's adapter when the config asks for one.
+   *
+   * @throws {ForgottenLedgerError} When the ledger does not open; the Brain is closed first.
    */
   private static async _initialize(
     brain: Brain,
@@ -645,7 +717,21 @@ export class Memory {
       );
     }
 
-    return new Memory(brain, merged);
+    // The ledger's table lives beside the traces, on the store's own adapter, which exists only now.
+    let forgotten: ForgottenLedger | undefined;
+    if (config.forgotten instanceof ForgottenLedger) {
+      forgotten = config.forgotten;
+    } else if (config.forgotten) {
+      try {
+        forgotten = await ForgottenLedger.open({ ...config.forgotten, primary: brain.adapter });
+      } catch (error) {
+        // A store whose ledger does not open is not served, and the refused open leaves no handle behind.
+        await brain.close();
+        throw error;
+      }
+    }
+
+    return new Memory(brain, merged, forgotten);
   }
 
   /**
@@ -1067,7 +1153,9 @@ export class Memory {
    * rolling-summary sink filed. Account deletion calls it. A whole `'conversation'` scope loses its row of
    * `memory_scopes` with its traces; a delete of one user's traces in it (`turnUserId`) keeps the row, and so does a
    * scope that still holds a wiki page (`memory_pages`): this call deletes no page row, and the registry goes on
-   * naming the scope until its pages are deleted and the call is made again.
+   * naming the scope until its pages are deleted and the call is made again. A document chunk one of the scope's
+   * traces was filed from lets go of it and keeps its text: to delete those chunks too, delete the scope's traces
+   * first with {@link deleteTraces} and `documentChunks: 'delete'` ({@link tracesStoredBefore} lists them).
    *
    * It reads the rows by their `scope_id` column, after filing the brain's rows that hold `''` there while their
    * metadata names a scope id: a release older than the column writes those, to a Brain this facade holds open too.
@@ -1132,28 +1220,450 @@ export class Memory {
    * on the Brain wrote them, a relation a host made to the node ({@link addRelation}) included. Each trace's
    * knowledge-graph copy goes before its row. Unknown ids are skipped.
    *
+   * With `documentChunks: 'delete'` the document chunks the traces were filed from are deleted with their text, the
+   * pictures of those chunks, and each document left with no chunk: a person's deletion and the retention sweep pass
+   * it. On an adapter with transactions those deletes share one, so a failure among them deletes none and a later call
+   * finds them again.
+   *
+   * A delete only marks a trace's vector in the vector index, which keeps the numbers in its files until it is
+   * written again: {@link rebuildVectorIndex} writes it from the traces that are left.
+   *
    * @returns How many trace rows it deleted, so a call made again counts none.
    * @throws When the knowledge graph cannot delete the copies: no row is deleted, so a later call deletes them.
    */
-  async deleteTraces(traceIds: readonly string[]): Promise<{ deleted: number }> {
+  async deleteTraces(
+    traceIds: readonly string[],
+    options: { documentChunks?: 'delete' } = {},
+  ): Promise<{ deleted: number }> {
     await this._initPromise;
     const ids = [...new Set(traceIds)];
     if (ids.length === 0) return { deleted: 0 };
     // A trace's knowledge-graph copy holds its full text, and once the row is gone nothing finds the copy again: the
     // copies go first, and a failure fails the call with every row kept, so a later call deletes them.
     await this._knowledgeGraph.deleteMemories({ traceIds: ids });
+    // The chunks go while their rows still name the traces: once a trace is gone its chunk names nothing.
+    if (options.documentChunks === 'delete') await this._deleteDocumentChunksOf(ids);
     const deleted = await deleteTraceRows(this._brain, this._brain.brainId, ids);
+    if (deleted > 0) this._erasureOwed.deletes += 1;
     for (const id of ids) {
       try {
         await this._memoryGraph.removeNode(id);
       } catch {
         // A node whose delete fails stays, holding no words of the trace; its trace is gone.
       }
-      this._hnswSidecar?.remove(id);
     }
-    // Postgres keeps the index in each row's own column, which went with the row.
-    if (this._brain.features.dialect.name !== 'postgres') await this._rebuildFtsIndex();
+    // After a rewrite already running, so the index it writes does not keep the vectors as live.
+    const sidecar = this._hnswSidecar;
+    if (sidecar) {
+      await this._onVectorIndex(async () => {
+        for (const id of ids) sidecar.remove(id);
+        // After a rewrite already running: that rewrite may have written these vectors, so the next one is owed.
+        if (deleted > 0) this._erasureOwed.vectorIndex = true;
+      });
+    }
+    // Postgres keeps the index in each row's own column, which went with the row. On SQLite the index keeps the words
+    // of a deleted row until it is rebuilt: a rebuild that fails stays owed, for finishFullTextIndex().
+    if (this._brain.features.dialect.name !== 'postgres') await this._rebuildFullText().catch(() => undefined);
     return { deleted };
+  }
+
+  /**
+   * Rebuilds the full-text index from the rows that are left, and records the deletes it covers. A database that holds
+   * no full-text index has nothing to rebuild.
+   *
+   * @throws What the rebuild throws; the deletes before it stay owed.
+   */
+  private async _rebuildFullText(): Promise<void> {
+    // The deletes made before the rebuild starts are the ones it leaves no word of.
+    const before = this._erasureOwed.deletes;
+    try {
+      const rebuild = this._brain.fullTextRebuild();
+      await this._brain.run(rebuild.sql, rebuild.params);
+    } catch (error) {
+      if (!isFtsUnavailableError(error)) throw error;
+    }
+    this._erasureOwed.fullTextRebuilt = Math.max(this._erasureOwed.fullTextRebuilt, before);
+  }
+
+  /**
+   * Rebuilds the full-text index when a delete for good could not: until a rebuild succeeds, the index keeps the words
+   * of the rows deleted. Nothing owed, nothing runs; PostgreSQL keeps the index in each row, which goes with the row.
+   * A person's deletion calls it once its deletes are done, and {@link finishErasure} calls it too.
+   *
+   * @returns `'rebuilt'`, or `'not owed'`.
+   * @throws What the rebuild throws; it stays owed.
+   */
+  async finishFullTextIndex(): Promise<{ fullText: 'rebuilt' | 'not owed' }> {
+    await this._initPromise;
+    if (this._brain.features.dialect.name === 'postgres' || this._erasureOwed.deletes <= this._erasureOwed.fullTextRebuilt) {
+      return { fullText: 'not owed' };
+    }
+    await this._rebuildFullText();
+    return { fullText: 'rebuilt' };
+  }
+
+  /**
+   * The ids of one scope's traces stored before a time, live or soft-deleted, a wiki page's chunks left out: a chunk
+   * follows its page, never its own age. A person's deletion lists every trace of theirs with it (a bound past any
+   * time a trace was stored), and a retention sweep the traces that expired. Like {@link deleteScope}, it first files
+   * the brain's rows that hold `''` as their scope id while their metadata names one.
+   *
+   * @param beforeMs - Exclusive upper bound on the time a trace was stored (Unix ms).
+   * @throws TypeError when `scopeId` is empty.
+   */
+  async tracesStoredBefore(scope: string, scopeId: string, beforeMs: number): Promise<string[]> {
+    if (typeof scopeId !== 'string' || scopeId === '') {
+      throw new TypeError('Memory.tracesStoredBefore: scopeId must be a non-empty string');
+    }
+    await this._initPromise;
+    await fillScopeIds(this._brain.adapter, this._brain.brainId);
+    const rows = await this._brain.all<{ id: string; tags: string }>(
+      'SELECT id, tags FROM memory_traces WHERE brain_id = ? AND scope = ? AND scope_id = ? AND created_at < ?',
+      [this._brain.brainId, scope, scopeId, beforeMs],
+    );
+    return rows.filter((row) => !isPageChunkTags(row.tags)).map((row) => row.id);
+  }
+
+  /**
+   * Which of the given ids are live traces of one scope, a wiki page's chunks left out: a chunk is not a statement a
+   * person made. A correction checks with it that every trace it names is the person's own before it changes anything.
+   * The scope id is matched by equality, 400 ids a statement.
+   *
+   * @returns The ids found, each once, in no set order.
+   * @throws TypeError when `scopeId` is empty.
+   */
+  async liveTraceIdsOf(scope: string, scopeId: string, traceIds: readonly string[]): Promise<string[]> {
+    if (typeof scopeId !== 'string' || scopeId === '') {
+      throw new TypeError('Memory.liveTraceIdsOf: scopeId must be a non-empty string');
+    }
+    await this._initPromise;
+    const ids = [...new Set(traceIds)];
+    const found: string[] = [];
+    for (let offset = 0; offset < ids.length; offset += 400) {
+      const slice = ids.slice(offset, offset + 400);
+      const rows = await this._brain.all<{ id: string; tags: string }>(
+        `SELECT id, tags FROM memory_traces
+          WHERE brain_id = ? AND scope = ? AND scope_id = ? AND deleted = 0 AND id IN (${slice.map(() => '?').join(', ')})`,
+        [this._brain.brainId, scope, scopeId, ...slice],
+      );
+      for (const row of rows) if (!isPageChunkTags(row.tags)) found.push(row.id);
+    }
+    return found;
+  }
+
+  /**
+   * Deletes the document chunks the given traces were filed from, with their text: first the pictures of those
+   * chunks, as the foreign key of `document_images` on `document_chunks` requires, then the chunks, 400 ids a
+   * statement. A document left with no chunk is deleted with the pictures filed under it; a document that still has
+   * a chunk stays. On an adapter with transactions every delete shares one: a step that fails rolls back the ones
+   * before it, so a later call finds the chunks by their traces again, and the document by its chunks.
+   */
+  private async _deleteDocumentChunksOf(traceIds: readonly string[]): Promise<void> {
+    const brainId = this._brain.brainId;
+    const deletes = async (trx: Pick<StorageAdapter, 'all' | 'get' | 'run'>): Promise<void> => {
+      const documentIds = new Set<string>();
+      const chunkIds: string[] = [];
+      for (let offset = 0; offset < traceIds.length; offset += 400) {
+        const slice = traceIds.slice(offset, offset + 400);
+        const chunks = await trx.all<{ id: string; document_id: string }>(
+          `SELECT id, document_id FROM document_chunks WHERE brain_id = ? AND trace_id IN (${slice.map(() => '?').join(', ')})`,
+          [brainId, ...slice],
+        );
+        for (const chunk of chunks) {
+          chunkIds.push(chunk.id);
+          documentIds.add(chunk.document_id);
+        }
+      }
+      for (let offset = 0; offset < chunkIds.length; offset += 400) {
+        const slice = chunkIds.slice(offset, offset + 400);
+        const placeholders = slice.map(() => '?').join(', ');
+        const params = [brainId, ...slice];
+        await trx.run(`DELETE FROM document_images WHERE brain_id = ? AND chunk_id IN (${placeholders})`, params);
+        await trx.run(`DELETE FROM document_chunks WHERE brain_id = ? AND id IN (${placeholders})`, params);
+      }
+      for (const documentId of documentIds) {
+        const left = await trx.get<{ n: number | string }>(
+          'SELECT count(*) AS n FROM document_chunks WHERE brain_id = ? AND document_id = ?',
+          [brainId, documentId],
+        );
+        if (Number(left?.n ?? 0) > 0) continue;
+        await trx.run('DELETE FROM document_images WHERE brain_id = ? AND document_id = ?', [brainId, documentId]);
+        await trx.run('DELETE FROM documents WHERE brain_id = ? AND id = ?', [brainId, documentId]);
+      }
+    };
+    if (this._brain.adapter.capabilities?.has?.('transactions') === true) await this._brain.transaction(deletes);
+    else await deletes(this._brain);
+  }
+
+  /**
+   * Deletes for good every trace whose metadata names the user as `turnUserId`, under any scope and under none, live
+   * or soft-deleted, with the document chunks those traces were filed from ({@link deleteTraces} with
+   * `documentChunks: 'delete'`). A person's deletion calls it for what they said on someone else's session.
+   *
+   * @returns How many trace rows it deleted.
+   * @throws TypeError when `userId` is not a non-empty string.
+   */
+  async deleteTracesNamingUser(userId: string): Promise<{ deleted: number }> {
+    if (typeof userId !== 'string' || userId === '') {
+      throw new TypeError('Memory.deleteTracesNamingUser: userId must be a non-empty string');
+    }
+    return this.deleteTraces(
+      (await this.tracesNamingUser(userId)).map((trace) => trace.id),
+      { documentChunks: 'delete' },
+    );
+  }
+
+  /**
+   * Every trace whose metadata names the user as `turnUserId`, under any scope and under none, live or soft-deleted,
+   * each with the scope and the scope id it is filed under (`''` for none). A person's deletion reads them first, to
+   * find the pages of another person's conversation that were compiled from them.
+   *
+   * @throws TypeError when `userId` is not a non-empty string.
+   */
+  async tracesNamingUser(userId: string): Promise<Array<{ id: string; scope: string; scopeId: string }>> {
+    if (typeof userId !== 'string' || userId === '') {
+      throw new TypeError('Memory.tracesNamingUser: userId must be a non-empty string');
+    }
+    await this._initPromise;
+    const rows = await this._brain.all<{ id: string; scope: string; scope_id: string | null }>(
+      `SELECT id, scope, scope_id FROM memory_traces
+        WHERE brain_id = ? AND CAST(${this._brain.features.dialect.jsonExtract('metadata', '$.turnUserId')} AS TEXT) = ?`,
+      [this._brain.brainId, userId],
+    );
+    return rows.map((row) => ({ id: row.id, scope: row.scope, scopeId: row.scope_id ?? '' }));
+  }
+
+  /**
+   * Resolves once every compile, scope delete and page delete of one conversation scope that this store's facades in
+   * this process started before the call has settled. A person's deletion waits with it for a compile of another
+   * person's conversation that read what the person said before it was deleted, and then deletes the page that compile
+   * wrote. Writers in other processes are not waited for.
+   */
+  async waitForScopeChanges(scopeId: string): Promise<void> {
+    await this._initPromise;
+    await this._oneScopeChangeAtATime(scopeId, async () => undefined);
+  }
+
+  /**
+   * Writes the vector index again from the live traces that are left, or removes its files when none is left. A
+   * delete only marks a vector in the index, so the numbers of a deleted trace stay in the index files until this
+   * runs: call it after deleting for good.
+   *
+   * It runs after the vector index's other work and reads the traces inside its own step: a trace deleted while an
+   * earlier rewrite runs is not written back by this one, and a trace remembered while it runs is indexed after it.
+   *
+   * @returns How many vectors the index holds afterwards: 0 for a store with no file path, and where `hnswlib-node`
+   *   is not installed (no index file is written there).
+   * @throws When an index file cannot be removed, or when the rebuilt index did not save.
+   */
+  async rebuildVectorIndex(): Promise<{ vectors: number }> {
+    await this._initPromise;
+    const sidecar = this._hnswSidecar;
+    if (!sidecar) return { vectors: 0 };
+    return this._onVectorIndex(async () => {
+      const written = await sidecar.rewrite(await this._ownEmbeddedTraces());
+      this._erasureOwed.vectorIndex = false;
+      return written;
+    });
+  }
+
+  /**
+   * Moves the store's write-ahead log into its file and empties the log. A row deleted for good is overwritten in the
+   * page the delete wrote, and the log still holds the pages written before it until a checkpoint: a person's deletion
+   * calls this once its deletes are done, so neither file holds the deleted text.
+   *
+   * @returns `'emptied'` when the log holds nothing more; `'busy'` when a reader or a writer of another connection held
+   *   it, and the deleted bytes stay in it until a later checkpoint; `'none'` for a database that keeps no such log
+   *   (PostgreSQL).
+   */
+  async checkpointLog(): Promise<{ log: 'emptied' | 'busy' | 'none' }> {
+    await this._initPromise;
+    // The deletes made before the checkpoint starts are the ones it can empty from the log.
+    const before = this._erasureOwed.deletes;
+    const checkpoint = this._brain.features.dialect.pragma('wal_checkpoint', 'TRUNCATE');
+    if (!checkpoint) {
+      this._erasureOwed.checkpointed = Math.max(this._erasureOwed.checkpointed, before);
+      return { log: 'none' };
+    }
+    const row = await this._brain.get<{ busy?: number | string | null }>(checkpoint);
+    const log = Number(row?.busy ?? 0) === 0 ? 'emptied' : 'busy';
+    if (log === 'emptied') this._erasureOwed.checkpointed = Math.max(this._erasureOwed.checkpointed, before);
+    return { log };
+  }
+
+  /**
+   * Finishes what deletes for good left in the store's files: on SQLite the full-text index is rebuilt
+   * ({@link finishFullTextIndex}) when a delete's own rebuild failed; the vector index is written again
+   * ({@link rebuildVectorIndex}) when a delete, or an open whose check of the index failed, left it naming a trace that
+   * is gone; the write-ahead log is emptied ({@link checkpointLog}) when deletes were made after the last checkpoint
+   * that emptied it, or the full-text index was rebuilt here. Nothing owed, nothing runs. A retention sweep, a
+   * correction and a re-application of the tombstones call it, so a rebuild, a rewrite or a checkpoint that failed in
+   * an earlier call runs again.
+   *
+   * @returns Whether the full-text index was rebuilt and the vector index written again, and what the checkpoint
+   *   answered; `'not owed'` for a step that had nothing to do.
+   * @throws What the first failed step throws, once every step was tried. A step that fails, and a checkpoint another
+   *   connection held (`'busy'`), stay owed.
+   */
+  async finishErasure(): Promise<{
+    fullText: 'rebuilt' | 'not owed';
+    vectorIndex: 'rewritten' | 'not owed';
+    log: 'emptied' | 'busy' | 'none' | 'not owed';
+  }> {
+    await this._initPromise;
+    let failure: unknown;
+    let fullText: 'rebuilt' | 'not owed' = 'not owed';
+    try {
+      fullText = (await this.finishFullTextIndex()).fullText;
+    } catch (error) {
+      failure = error;
+    }
+    let vectorIndex: 'rewritten' | 'not owed' = 'not owed';
+    if (this._erasureOwed.vectorIndex) {
+      try {
+        await this.rebuildVectorIndex();
+        vectorIndex = 'rewritten';
+      } catch (error) {
+        failure ??= error;
+      }
+    }
+    let log: 'emptied' | 'busy' | 'none' | 'not owed' = 'not owed';
+    // A late rebuild of the full-text index leaves the pages of the old index in the store's file until a checkpoint.
+    if (this._erasureOwed.deletes > this._erasureOwed.checkpointed || fullText === 'rebuilt') {
+      try {
+        log = (await this.checkpointLog()).log;
+      } catch (error) {
+        failure ??= error;
+      }
+    }
+    if (failure !== undefined) throw failure;
+    return { fullText, vectorIndex, log };
+  }
+
+  /**
+   * Runs one step of the vector index's work once every step asked for before it has settled. A step that throws
+   * rejects its own caller and does not stop the steps after it.
+   */
+  private _onVectorIndex<T>(work: () => Promise<T>): Promise<T> {
+    const step = this._vectorIndexWork.then(work);
+    this._vectorIndexWork = step.catch(() => undefined);
+    return step;
+  }
+
+  /**
+   * Records a subject as forgotten in this store's ledger: its copy first, then the store.
+   *
+   * @throws When the store was opened without a ledger (`forgotten` in its config), or when either write fails.
+   */
+  async markForgotten(subject: SuppressionSubject): Promise<{ form: 'keyed' | 'unkeyed'; written: boolean }> {
+    if (!this._forgotten) throw new Error('Memory.markForgotten: this store was opened without a forgotten-user ledger');
+    return this._forgotten.markForgotten(subject);
+  }
+
+  /**
+   * Whether this store's ledger holds a tombstone of the subject, in any form.
+   *
+   * @throws When the store was opened without a ledger (`forgotten` in its config).
+   */
+  async isForgotten(subject: SuppressionSubject): Promise<boolean> {
+    if (!this._forgotten) throw new Error('Memory.isForgotten: this store was opened without a forgotten-user ledger');
+    return this._forgotten.isForgotten(subject);
+  }
+
+  /** The ledger the store was opened with; undefined for a store opened without one. */
+  get forgotten(): ForgottenLedger | undefined {
+    return this._forgotten;
+  }
+
+  /**
+   * Every subject this store holds anything of, each once: the users and sessions whose conversation key names a
+   * registry row, a trace or a wiki page of this brain (a registry row may be gone after a deletion that did not
+   * finish), the users a trace's metadata names as `turnUserId`, and, where the store's database holds the learning
+   * tables, the users any learner row names (sessions, chain heads, the ledger and its turn users, traits, freezes,
+   * outcomes, lessons and skills), so a restore that put back one row of a learner alone leads back to them, and the
+   * user memory from before per-user scope is
+   * attributed to ({@link legacyOwner}). The operator's key names no subject. The re-application of the tombstones asks
+   * the ledger about each.
+   */
+  async listHeldSubjects(): Promise<SuppressionSubject[]> {
+    await this._initPromise;
+    const brainId = this._brain.brainId;
+    const held = new Map<string, SuppressionSubject>();
+    const hold = (subject: SuppressionSubject): void => {
+      held.set(`${subject.kind}\u0000${subject.id}`, subject);
+    };
+    for (const table of ['memory_scopes', 'memory_traces', 'memory_pages']) {
+      const rows = await this._brain.all<{ scope_id: string | null }>(
+        `SELECT DISTINCT scope_id FROM ${table} WHERE brain_id = ? AND scope = ?`,
+        [brainId, CONVERSATION_SCOPE],
+      );
+      for (const row of rows) {
+        const subject = typeof row.scope_id === 'string' ? parseConversationScopeKey(row.scope_id)?.subject : undefined;
+        if (subject && subject.kind !== 'operator') hold({ kind: subject.kind, id: subject.id });
+      }
+    }
+    // The owner of older memory: a forgotten owner's attributed memory is deleted again after a restore.
+    const owners = await this._brain.all<{ owner_key: string }>('SELECT owner_key FROM memory_legacy_owner WHERE brain_id = ?', [brainId]);
+    for (const row of owners) {
+      const subject = parseConversationScopeKey(row.owner_key)?.subject;
+      if (subject && subject.kind !== 'operator') hold({ kind: subject.kind, id: subject.id });
+    }
+    const holdUser = (userId: unknown): void => {
+      if (typeof userId === 'number') hold({ kind: 'user', id: String(userId) });
+      else if (typeof userId === 'string' && userId !== '') hold({ kind: 'user', id: userId });
+    };
+    const named = await this._brain.all<{ user_id: unknown }>(
+      `SELECT DISTINCT ${this._brain.features.dialect.jsonExtract('metadata', '$.turnUserId')} AS user_id FROM memory_traces WHERE brain_id = ?`,
+      [brainId],
+    );
+    for (const row of named) holdUser(row.user_id);
+    for (const [table, column] of LEARNER_USER_COLUMNS) {
+      try {
+        const rows = await this._brain.all<{ user_id: unknown }>(
+          `SELECT DISTINCT ${column} AS user_id FROM ${table} WHERE ${column} IS NOT NULL`,
+        );
+        for (const row of rows) holdUser(row.user_id);
+      } catch (error) {
+        // A store whose database holds no learning tables has no learner to name.
+        if (!isMissingTableError(error)) throw error;
+      }
+    }
+    return [...held.values()];
+  }
+
+  /**
+   * The conversation key of the user the agent's memory from before per-user scope is attributed to; undefined when
+   * it is attributed to nobody. An attribution stands for the store's life, whatever later opens pass.
+   */
+  async legacyOwner(agentId: string): Promise<string | undefined> {
+    await this._initPromise;
+    const row = await this._brain.get<{ owner_key: string }>(
+      'SELECT owner_key FROM memory_legacy_owner WHERE brain_id = ? AND agent_id = ?',
+      [this._brain.brainId, agentId],
+    );
+    return typeof row?.owner_key === 'string' ? row.owner_key : undefined;
+  }
+
+  /**
+   * Attributes the agent's memory from before per-user scope to one user, by their conversation key. An attribution
+   * already made is never moved: the call then writes nothing.
+   */
+  async setLegacyOwner(agentId: string, ownerKey: string): Promise<void> {
+    if (typeof ownerKey !== 'string' || ownerKey === '') {
+      throw new TypeError('Memory.setLegacyOwner: ownerKey must be a non-empty string');
+    }
+    await this._initPromise;
+    await this._brain.run(
+      `INSERT INTO memory_legacy_owner (brain_id, agent_id, owner_key, attributed_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT (brain_id, agent_id) DO NOTHING`,
+      [this._brain.brainId, agentId, ownerKey, Date.now()],
+    );
+  }
+
+  /** Removes the attribution of the agent's older memory: the owner's deletion does, once that memory is gone. */
+  async clearLegacyOwner(agentId: string): Promise<void> {
+    await this._initPromise;
+    await this._brain.run('DELETE FROM memory_legacy_owner WHERE brain_id = ? AND agent_id = ?', [this._brain.brainId, agentId]);
   }
 
   /**
@@ -1217,11 +1727,14 @@ export class Memory {
     return readTraceSnapshot(this._brain, this._brain.brainId, traceId);
   }
 
-  /** How many live traces one scope holds in this facade's Brain. */
-  async countScope(scope: string, scopeId: string): Promise<number> {
+  /**
+   * How many live traces one scope holds in this facade's Brain; with `includeDeleted`, the soft-deleted ones too,
+   * which still hold their words until a delete for good ({@link deleteScope}) removes them.
+   */
+  async countScope(scope: string, scopeId: string, options: { includeDeleted?: boolean } = {}): Promise<number> {
     await this._initPromise;
     const row = await this._brain.get<{ n: number | string }>(
-      'SELECT count(*) AS n FROM memory_traces WHERE brain_id = ? AND scope = ? AND scope_id = ? AND deleted = 0',
+      `SELECT count(*) AS n FROM memory_traces WHERE brain_id = ? AND scope = ? AND scope_id = ?${options.includeDeleted ? '' : ' AND deleted = 0'}`,
       [this._brain.brainId, scope, scopeId],
     );
     return Number(row?.n ?? 0);
@@ -1582,6 +2095,8 @@ export class Memory {
         );
         if (result.changes > 0) {
           pages += 1;
+          // The page's text is in the log until a checkpoint.
+          this._erasureOwed.deletes += 1;
           break;
         }
         if (attempt >= PAGE_WRITE_ATTEMPTS) {
@@ -1665,6 +2180,41 @@ export class Memory {
     return rows.map((row) => this._buildTrace(row));
   }
 
+  /**
+   * Names traces of a conversation scope for its next compile to read by id, beside the traces after its watermark:
+   * the traces a deleted page was built from that are still there, so the page is rebuilt from them. The ids are
+   * added to the scope's registry row (`rebuild_sources`), each once; a scope with no registry row takes none.
+   */
+  async addRebuildSources(scopeId: string, traceIds: readonly string[]): Promise<void> {
+    await this._initPromise;
+    const ids = traceIds.filter((id) => typeof id === 'string' && id !== '');
+    if (ids.length === 0) return;
+    const where = 'brain_id = ? AND scope = ? AND scope_id = ?';
+    const key = [this._brain.brainId, CONVERSATION_SCOPE, scopeId];
+    const row = await this._brain.get<{ rebuild_sources: string | null }>(`SELECT rebuild_sources FROM memory_scopes WHERE ${where}`, key);
+    if (!row) return;
+    const listed = [...new Set([...rebuildSourceIds(row.rebuild_sources ?? null), ...ids])];
+    await this._brain.run(`UPDATE memory_scopes SET rebuild_sources = ? WHERE ${where}`, [JSON.stringify(listed), ...key]);
+  }
+
+  /** The live traces of one scope a registry row lists in `rebuild_sources`, a page's chunks left out. */
+  private async _rebuildSourceTraces(scopeId: string, listed: string): Promise<MemoryTrace[]> {
+    const ids = rebuildSourceIds(listed);
+    const traces: MemoryTrace[] = [];
+    for (let offset = 0; offset < ids.length; offset += 400) {
+      const slice = ids.slice(offset, offset + 400);
+      const rows = await this._brain.all<TraceRow>(
+        `SELECT id, type, scope, content, embedding, strength, created_at,
+                last_accessed, retrieval_count, tags, emotions, metadata, deleted
+           FROM memory_traces
+          WHERE brain_id = ? AND deleted = 0 AND scope = ? AND scope_id = ? AND id IN (${slice.map(() => '?').join(', ')})`,
+        [this._brain.brainId, CONVERSATION_SCOPE, scopeId, ...slice],
+      );
+      for (const row of rows) if (!isPageChunkTags(row.tags)) traces.push(this._buildTrace(row));
+    }
+    return traces;
+  }
+
   /** The wiki attached by the agent at boot: a page store per conversation scope, and the compiler. */
   private _wiki?: AttachedWiki;
 
@@ -1712,7 +2262,9 @@ export class Memory {
     let failure: unknown;
     for (const target of await this._scopesToCompile(opts?.scopes)) {
       try {
-        const skip = await this._oneScopeChangeAtATime(target.scopeId, () => this._compileScope(wiki, target, reason, aggregate));
+        const compileScope = () =>
+          this._oneScopeChangeAtATime(target.scopeId, () => this._compileScope(wiki, target, reason, aggregate));
+        const skip = await (wiki.runScope ? wiki.runScope(target.scopeId, compileScope) : compileScope());
         if (skip) skipped.add(skip);
       } catch (error) {
         const why = wiki.compileSkipReasonOf?.(error);
@@ -1731,7 +2283,8 @@ export class Memory {
 
   /**
    * The user and session scopes a compile runs over, each with its watermark: the scopes named, or, with none
-   * named, every one that holds a live trace newer than its watermark. A scope is matched by equality on its id.
+   * named, every one that holds a live trace newer than its watermark or names traces a page is to be rebuilt from
+   * (`rebuild_sources`). A scope is matched by equality on its id.
    */
   private async _scopesToCompile(scopes: readonly string[] | undefined): Promise<Array<{ scopeId: string; compiledAt: number }>> {
     const brainId = this._brain.brainId;
@@ -1743,10 +2296,10 @@ export class Memory {
         `SELECT s.scope_id AS scope_id, s.compiled_at AS compiled_at
            FROM memory_scopes s
           WHERE s.brain_id = ? AND s.scope = ? AND s.kind IN ('user', 'session')
-            AND EXISTS (
+            AND (s.rebuild_sources IS NOT NULL OR EXISTS (
               SELECT 1 FROM memory_traces t
                WHERE t.brain_id = s.brain_id AND t.scope = s.scope AND t.scope_id = s.scope_id
-                 AND t.deleted = 0 AND t.created_at > COALESCE(s.compiled_at, 0))
+                 AND t.deleted = 0 AND t.created_at > COALESCE(s.compiled_at, 0)))
           ORDER BY s.scope_id`,
         [brainId, CONVERSATION_SCOPE],
       );
@@ -1843,17 +2396,22 @@ export class Memory {
     const { scopeId } = target;
     // The watermark is read here, in the scope's turn: a compile that waited for another compile of the scope starts
     // where that one left it, and sends none of the same traces to the model again. A scope deleted meanwhile is done.
-    const current = await this._brain.get<{ compiled_at: number | string | null }>(
-      `SELECT compiled_at FROM memory_scopes WHERE brain_id = ? AND scope = ? AND scope_id = ?`,
+    const current = await this._brain.get<{ compiled_at: number | string | null; rebuild_sources: string | null }>(
+      `SELECT compiled_at, rebuild_sources FROM memory_scopes WHERE brain_id = ? AND scope = ? AND scope_id = ?`,
       [this._brain.brainId, CONVERSATION_SCOPE, scopeId],
     );
     if (!current) return undefined;
     const store = wiki.storeFor(scopeId);
     let sinceMs = current.compiled_at === null || current.compiled_at === undefined ? 0 : Number(current.compiled_at);
+    // The traces a deleted page is to be rebuilt from: read by id, beside the traces after the watermark, in the
+    // scope's first batch. They stay listed until a batch that holds them has compiled.
+    const listed = current.rebuild_sources ?? null;
+    let rebuild: MemoryTrace[] = listed === null ? [] : await this._rebuildSourceTraces(scopeId, listed);
+    let rebuildPending = listed !== null;
     for (;;) {
       const belowMs = this._beginCompileRead();
       const read = await this._compileTraces(scopeId, { sinceMs, belowMs, limit: BATCH });
-      if (read.length === 0) break;
+      if (read.length === 0 && !rebuildPending) break;
       const full = read.length === BATCH;
       let batch = read;
       if (full) {
@@ -1864,6 +2422,13 @@ export class Memory {
 
       // The scope's own page chunks are never compiled back into its pages.
       let traces = batch.filter((trace) => !trace.tags.includes('wiki'));
+      if (rebuildPending) {
+        // Each trace once, oldest first.
+        const inBatch = new Set(traces.map((trace) => trace.id));
+        traces = [...rebuild.filter((trace) => !inBatch.has(trace.id)), ...traces].sort(
+          (a, b) => Number(a.createdAt) - Number(b.createdAt) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+        );
+      }
       if (traces.length > 0) {
         if (wiki.beforeScopeCompile) {
           const answer = await wiki.beforeScopeCompile(scopeId, traces);
@@ -1875,6 +2440,19 @@ export class Memory {
         aggregate.tracesConsumed += result.tracesConsumed;
         aggregate.conflicts.push(...result.conflicts);
       }
+
+      if (rebuildPending) {
+        // The listed traces are compiled: the list is cleared while it still holds what was read, so ids another
+        // writer added meanwhile wait for the next compile.
+        await this._brain.run(
+          `UPDATE memory_scopes SET rebuild_sources = NULL
+            WHERE brain_id = ? AND scope = ? AND scope_id = ? AND rebuild_sources = ?`,
+          [this._brain.brainId, CONVERSATION_SCOPE, scopeId, listed],
+        );
+        rebuildPending = false;
+        rebuild = [];
+      }
+      if (batch.length === 0) break;
 
       // A trace stored meanwhile, by an import or another writer, under a time the batch spans is read next time: the
       // watermark stops just before the oldest such trace.
@@ -2596,6 +3174,8 @@ export class Memory {
    */
   async close(): Promise<void> {
     await this._initPromise;
+    // A rewrite of the vector index reads the traces through the Brain: it finishes before the Brain closes.
+    await this._vectorIndexWork;
     await this._brain.close();
   }
 
@@ -2705,32 +3285,37 @@ export class Memory {
     // The embedding is stored in the memory_traces table; if it's non-null,
     // also index it in the HNSW sidecar for fast ANN recall. The sidecar is
     // this brain's: its threshold counts this brain's traces and its rebuild
-    // reads this brain's embeddings.
-    if (this._hnswSidecar) {
-      const stored = await this._brain.get<{ embedding: Buffer | null }>(
-        'SELECT embedding FROM memory_traces WHERE brain_id = ? AND id = ?',
-        [this._brain.brainId, row.id],
-      );
-      if (stored?.embedding && stored.embedding.length > 0) {
-        const { blobCodec } = this._brain.features;
-        const isLegacy = typeof stored.embedding === 'string' ||
-          (stored.embedding && stored.embedding[0] === 0x5b); // '[' character = JSON array
-        const vec = isLegacy
-          ? JSON.parse(stored.embedding as unknown as string) as number[]
-          : blobCodec.decode(stored.embedding);
-        const countRow = await this._brain.get<{ c: number }>(
-          'SELECT COUNT(*) as c FROM memory_traces WHERE brain_id = ? AND deleted = 0',
-          [this._brain.brainId],
+    // reads this brain's embeddings. The row is written first and the index
+    // step runs after any rewrite already asked for, so a rewrite that read the
+    // traces before this row existed does not drop it from the index.
+    const sidecar = this._hnswSidecar;
+    if (sidecar) {
+      await this._onVectorIndex(async () => {
+        const stored = await this._brain.get<{ embedding: Buffer | null }>(
+          'SELECT embedding FROM memory_traces WHERE brain_id = ? AND id = ?',
+          [this._brain.brainId, row.id],
         );
-        const count = countRow?.c ?? 0;
+        if (stored?.embedding && stored.embedding.length > 0) {
+          const { blobCodec } = this._brain.features;
+          const isLegacy = typeof stored.embedding === 'string' ||
+            (stored.embedding && stored.embedding[0] === 0x5b); // '[' character = JSON array
+          const vec = isLegacy
+            ? JSON.parse(stored.embedding as unknown as string) as number[]
+            : blobCodec.decode(stored.embedding);
+          const countRow = await this._brain.get<{ c: number }>(
+            'SELECT COUNT(*) as c FROM memory_traces WHERE brain_id = ? AND deleted = 0',
+            [this._brain.brainId],
+          );
+          const count = countRow?.c ?? 0;
 
-        if (!this._hnswSidecar.isActive && count >= 1000) {
-          // Threshold crossed — rebuild the index from this brain's embeddings.
-          await this._hnswSidecar.rebuildFromData(await this._ownEmbeddedTraces());
-        } else {
-          await this._hnswSidecar.add(row.id, vec, count);
+          if (!sidecar.isActive && count >= 1000) {
+            // Threshold crossed — rebuild the index from this brain's embeddings.
+            await sidecar.rebuildFromData(await this._ownEmbeddedTraces());
+          } else {
+            await sidecar.add(row.id, vec, count);
+          }
         }
-      }
+      });
     }
   }
 
@@ -3048,16 +3633,54 @@ export class Memory {
    * into the ANN sidecar explicitly to keep hybrid recall accurate.
    */
   private async _rebuildHnswIndex(): Promise<void> {
-    if (!this._hnswSidecar) return;
+    const sidecar = this._hnswSidecar;
+    if (!sidecar) return;
 
     try {
-      const items = await this._ownEmbeddedTraces();
-      if (items.length > 0) {
-        await this._hnswSidecar.rebuildFromData(items);
-      }
+      await this._onVectorIndex(async () => {
+        const items = await this._ownEmbeddedTraces();
+        if (items.length > 0) await sidecar.rebuildFromData(items);
+      });
     } catch {
       // Best-effort; import should still succeed even if HNSW rebuild fails.
     }
+  }
+
+  /**
+   * Brings a vector index loaded from its files up to date with the store at open, and builds nothing when nothing
+   * differs. The files are written by a whole build and by this check's adds, never after a delete, so they hold the
+   * vectors of the ids their map names and no other. An id that is no live trace with an embedding any more leaves a
+   * deleted trace's vector in the files: the index is written again from the store. A live trace the map lacks, stored
+   * after the last write, is read and added, and the files are saved.
+   */
+  private async _checkLoadedVectorIndex(sidecar: import('../../retrieval/store/HnswSidecar.js').HnswSidecar): Promise<void> {
+    const rows = await this._brain.all<{ id: string }>(
+      'SELECT id FROM memory_traces WHERE brain_id = ? AND deleted = 0 AND embedding IS NOT NULL',
+      [this._brain.brainId],
+    );
+    const live = new Set(rows.map((row) => row.id));
+    const indexed = sidecar.ids();
+    if (indexed.some((id) => !live.has(id))) {
+      await sidecar.rewrite(await this._ownEmbeddedTraces());
+      return;
+    }
+    const held = new Set(indexed);
+    const missing = [...live].filter((id) => !held.has(id));
+    if (missing.length === 0) return;
+    const items: { id: string; embedding: number[] }[] = [];
+    for (let offset = 0; offset < missing.length; offset += 400) {
+      const slice = missing.slice(offset, offset + 400);
+      items.push(
+        ...this._decodedEmbeddings(
+          await this._brain.all<{ id: string; embedding: Uint8Array | string | null }>(
+            `SELECT id, embedding FROM memory_traces
+              WHERE brain_id = ? AND deleted = 0 AND embedding IS NOT NULL AND id IN (${slice.map(() => '?').join(', ')})`,
+            [this._brain.brainId, ...slice],
+          ),
+        ),
+      );
+    }
+    await sidecar.addMissing(items);
   }
 
   /**
@@ -3070,7 +3693,13 @@ export class Memory {
       'SELECT id, embedding FROM memory_traces WHERE brain_id = ? AND deleted = 0 AND embedding IS NOT NULL',
       [this._brain.brainId],
     );
+    return this._decodedEmbeddings(rows);
+  }
 
+  /** Embedding rows decoded into vectors; an empty embedding is left out. */
+  private _decodedEmbeddings(
+    rows: { id: string; embedding: Uint8Array | string | null }[],
+  ): { id: string; embedding: number[] }[] {
     const { blobCodec } = this._brain.features;
     return rows
       .filter((row) => row.embedding && row.embedding.length > 0)

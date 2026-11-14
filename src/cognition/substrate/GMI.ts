@@ -79,11 +79,19 @@ import { feedbackTraceMessage, type NormalizedUserFeedback } from './userFeedbac
 import { resolveReasoningTraceLimits, type ReasoningTraceLimits } from './reasoningTraceLimits';
 import { settlesWithin, shutdownTimeoutOrDefault } from './shutdownBound';
 import { turnContentText } from './turnContent';
+import { moduleLogger } from '../../core/logging/loggerFactory';
 
 const DEFAULT_MAX_CONVERSATION_HISTORY_TURNS = 20;
 const DEFAULT_SELF_REFLECTION_INTERVAL_TURNS = 5;
 /** How long a turn waits for its learner session's preparation before it goes on without it, in milliseconds. */
 const LEARNING_PREPARE_BUDGET_MS = 2_000;
+/** The turn's sentiment log: one `gmi.sentiment_late` line for an analysis the post-turn check drops. */
+const sentimentTurnLog = moduleLogger('GMI', 'library');
+/**
+ * How long, from the start of a turn's sentiment analysis, its first tool round and its post-turn metaprompt check
+ * together wait for it, in milliseconds. It bounds the wait, not the analysis.
+ */
+const SENTIMENT_SETTLE_BUDGET_MS = 2_000;
 
 /** The completion options a persona's defaults and a turn's `metadata.options` may set. */
 const FORWARDED_COMPLETION_OPTION_KEYS = [
@@ -489,6 +497,9 @@ export class GMI implements IGMI {
       },
       (type, message, details) => this.addTraceEntry(type as ReasoningEntryType, message, details),
       () => this.gmiId,
+      // The history holds the turn. A turn's own analysis also stops once shutdown or a newer turn takes the
+      // lifecycle state (see processTurnStream).
+      (turnId) => this.turnInputs.has(turnId),
     );
 
     // Initialize metaprompt executor
@@ -1541,6 +1552,38 @@ export class GMI implements IGMI {
       }),
     });
 
+    // The turn's sentiment analysis runs beside its first model call. Its readers, the first tool round and the
+    // post-turn metaprompt check, wait for it within one budget counted from its start; an analysis the post-turn
+    // check drops, or one the turn leaves behind when it ends, writes nothing more.
+    let sentimentWork: Promise<void> | undefined;
+    let sentimentStartedAt = 0;
+    let sentimentSettled = false;
+    let sentimentAbandoned = false;
+    let sentimentCommitted = false;
+    let sentimentApplied = false;
+    let firstToolSentimentRead = false;
+    // The readers wait until the result is applied; a scrub the tracker runs again after a forget may go on after it.
+    const sentimentDone = (): boolean => sentimentSettled || sentimentApplied;
+    const settleSentiment = async (postTurn: boolean): Promise<void> => {
+      if (!sentimentWork || sentimentDone() || sentimentAbandoned) return;
+      const remaining = Math.max(0, SENTIMENT_SETTLE_BUDGET_MS - (Date.now() - sentimentStartedAt));
+      // An abort or a shutdown during either wait ends it at once.
+      if (remaining > 0 && !stop.signal.aborted) await settlesWithin(sentimentWork, remaining, stop.signal);
+      if (postTurn && !sentimentDone() && sentimentCommitted && !stop.signal.aborted) {
+        // The reply came in time and its writes have begun: finish them (store writes and event detection, no model
+        // call), at most the shutdown bound, so the check consumes the turn's own events and nothing is half written.
+        // A history write that outlasts the bound lands after the drop below, and the tracker takes it back.
+        const bound = shutdownTimeoutOrDefault(this.config?.shutdownTimeoutMs);
+        if (await settlesWithin(sentimentWork, bound, stop.signal)) return;
+      }
+      if (postTurn && !sentimentDone()) {
+        sentimentAbandoned = true;
+        sentimentTurnLog.warn('gmi.sentiment_late', {
+          waitedMs: Math.max(0, Math.round(Date.now() - sentimentStartedAt)),
+        });
+      }
+    };
+
     try {
       // A history replaced or cleared just before this turn has finished dropping
       // the sentiment records of the turns it removed.
@@ -1618,7 +1661,17 @@ export class GMI implements IGMI {
           const userInputText = typeof lastMsg.content === 'string'
             ? lastMsg.content
             : JSON.stringify(lastMsg.content);
-          await this.sentimentTracker.analyzeTurnSentiment(turnId, userInputText);
+          sentimentStartedAt = Date.now();
+          // The result applies while the turn owns the lifecycle state: a newer turn, or shutdown, takes it, and the
+          // reasoning trace then records another turn's entries.
+          let markApplied: () => void = () => {};
+          const applied = new Promise<void>((resolve) => { markApplied = resolve; });
+          const analysis = this.sentimentTracker.analyzeTurnSentiment(
+            turnId, userInputText, () => !sentimentAbandoned && !stop.signal.aborted && ownsState(),
+            () => { sentimentCommitted = true; },
+            () => { sentimentApplied = true; markApplied(); },
+          ).finally(() => { sentimentSettled = true; });
+          sentimentWork = Promise.race([analysis, applied]);
         }
       }
 
@@ -2414,6 +2467,11 @@ export class GMI implements IGMI {
         turnMessages.push(assistantMessage);
 
         if (currentIterationToolCallRequests.length > 0) {
+          // The first tool round reads the turn's user context: the sentiment analysis settles first, within its budget.
+          if (!firstToolSentimentRead) {
+            firstToolSentimentRead = true;
+            await settleSentiment(false);
+          }
           if (ownsState()) this.state = GMIPrimeState.AWAITING_TOOL_RESULT;
           const toolExecutionResults: ToolCallResult[] = [];
           // The call awaiting its result; cleared once processToolCall returns.
@@ -2525,6 +2583,9 @@ export class GMI implements IGMI {
         turnInput.metadata?.isToolContinuation !== true &&
         (turnInput.type === GMIInteractionType.TEXT ||
           turnInput.type === GMIInteractionType.MULTIMODAL_CONTENT);
+      // The check reads the events the turn's sentiment analysis raised: it waits for the rest of the budget, and an
+      // analysis that has not answered by then is dropped.
+      await settleSentiment(true);
       await this.metapromptExecutor.checkAndTriggerMetaprompts(turnId, { countTurn: isUserTurn });
 
       // Prepare the final GMIOutput for the generator's return value
@@ -2553,6 +2614,9 @@ export class GMI implements IGMI {
         { turnId },
         `Error in GMI turn '${turnId}'.`,
       );
+      // A failed turn takes no sentiment result: the host may start its next turn while this stream waits at the
+      // error chunk below, before the finally runs.
+      if (!sentimentSettled) sentimentAbandoned = true;
       if (ownsState()) this.state = GMIPrimeState.ERRORED;
       lastErrorForOutput = { code: gmiError.code, message: gmiError.message, details: gmiError.details };
       this.addTraceEntry(ReasoningEntryType.ERROR, `GMI processing error: ${gmiError.message}`, gmiError.toPlainObject());
@@ -2569,6 +2633,8 @@ export class GMI implements IGMI {
         ...(turnHistoryOmitted ? { historyOmitted: turnHistoryOmitted } : {}),
       };
     } finally {
+      // An analysis the turn did not wait for applies nothing once the turn ends.
+      if (!sentimentSettled) sentimentAbandoned = true;
       // The turn's work is done: shutdown() stops waiting for it, and the
       // caller's signal no longer reaches it.
       this.runningTurns.delete(turnNumber);

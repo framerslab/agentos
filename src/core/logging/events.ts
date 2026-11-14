@@ -59,6 +59,15 @@ export const AGENTOS_EVENTS = {
   'console_line': { method: { enum: ['debug', 'info', 'log', 'warn', 'error', 'trace', 'dir', 'table', 'assert', 'count', 'countReset', 'time', 'timeEnd', 'timeLog', 'group', 'groupCollapsed', 'groupEnd', 'clear', 'dirxml', 'profile', 'profileEnd', 'timeStamp'] }, type: 'word', code: 'word' },
   'process.uncaught': { type: 'word', code: 'word' },
   'process.shutdown': { signal: { enum: ['SIGTERM', 'SIGINT'] } },
+  // A GMI turn's sentiment analysis failed (a provider error, or a reply that did not parse after its repair): the
+  // error's listed type and code, never its message. The turn goes on without the analysis.
+  'gmi.sentiment_failed': { type: 'word', code: 'word' },
+  // A GMI turn's sentiment analysis had not answered by the turn's post-turn metaprompt check, or its store writes
+  // outlasted the shutdown bound there, and was dropped; `waitedMs` counts from the analysis start.
+  'gmi.sentiment_late': { waitedMs: 'int' },
+  // A dropped GMI sentiment analysis' store write landed, or one landed after a forget it did not see, and putting
+  // the store back failed: the error's listed type and code, never its message.
+  'gmi.sentiment_take_back_failed': { type: 'word', code: 'word' },
   'http.request': { method: { enum: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS', 'CONNECT', 'TRACE', 'OTHER'] }, route: 'path', status: 'int', ms: 'int', outcome: { enum: ['ok', 'aborted', 'error'] } },
   'http.handler_failed': { type: 'word', code: 'word' },
   'llm.provider_ready': { provider, count: 'int' },
@@ -94,12 +103,24 @@ export const AGENTOS_EVENTS = {
   'memory.legacy_traces': { count: 'int' },
   // A one-shot generate() or stream() on a souled agent names no user: nothing is filed for it and it recalls the operator's pages alone. Written once an agent.
   'memory.one_shot_unfiled': {},
-  // A scope's wiki compile did not run in a compile call: a spend budget refused its model call, the account's memory policy keeps raw traces only, the screen hook failed or had no turn of the scope to run for, or the agent compiles no wiki at all. The scope's traces wait for a later compile. Written once a reason a call, with no scope.
-  'memory.compile_skipped': { reason: { enum: ['budget', 'policy_raw', 'compile_off', 'screen_failed'] } },
-  // A souled agent did not file a turn's text, or left a trace out of a compile: the account's memory policy keeps no memory (said once a session), the policy hook failed, the screen hook dropped the text, or the screen hook failed.
-  'memory.write_refused': { reason: { enum: ['policy_off', 'policy_failed', 'screened', 'screen_failed'] } },
-  // read_memory_page answered a page as not found, or a call as invalid, for a page the asker may not read: another subject's page, a user's page asked with no user, a page an earlier version compiled asked by a user, or a call that named a scope or a user.
-  'memory.page_read_refused': { reason: { enum: ['other_user', 'no_user', 'legacy', 'caller_filter'] } },
+  // A scope's wiki compile did not run in a compile call: a spend budget refused its model call, the account's memory policy keeps raw traces only, the screen hook failed or had no turn of the scope to run for, the agent compiles no wiki at all, or the scope's subject is forgotten (its traces are not compiled, and a page a compile made after the tombstone is taken back). The scope's traces wait for a later compile, a forgotten subject's for its deletion. Written once a reason a call, and once for each page taken back, with no scope.
+  'memory.compile_skipped': { reason: { enum: ['budget', 'policy_raw', 'compile_off', 'screen_failed', 'forgotten'] } },
+  // A souled agent did not file a turn's text, or left a trace out of a compile: the account's memory policy keeps no memory (said once a session), the policy hook failed, the screen hook dropped the text, the screen hook failed, or the turn's subject is forgotten (a write that landed after the tombstone is taken back); or a correction named a trace that is not one of the person's own live traces, and changed nothing.
+  'memory.write_refused': { reason: { enum: ['policy_off', 'policy_failed', 'screened', 'screen_failed', 'forgotten', 'foreign_trace'] } },
+  // read_memory_page answered a page as not found, or a call as invalid, for a page the asker may not read: another subject's page, a user's page asked with no user, a page an earlier version compiled asked by a user, a call that named a scope or a user, or any page or listing asked by a forgotten subject.
+  'memory.page_read_refused': { reason: { enum: ['other_user', 'no_user', 'legacy', 'caller_filter', 'forgotten'] } },
+  // A subject's memory was deleted for good, or a deletion was run again for a subject already forgotten: how many stores the call reached and did not reach, the pages deleted and the pages that could not be, the subject's pending writes it waited for and those still running at its deadline, and whether the deletion is complete. Never the subject's id.
+  'memory.forget_done': { stores: 'int', unreached: 'int', pages: 'int', pagesFailed: 'int', drained: 'int', pendingAtDeadline: 'int', complete: { enum: ['yes', 'no'] } },
+  // The tombstones were applied again, at an open or on demand: how many forgotten subjects the store still held something of (each deleted again, with a memory.forget_done line of its own), and how many tombstones came back from the ledger's copy into the store, as after a restore from an older backup. Written only when either is above 0.
+  'memory.tombstone_reapplied': { subjects: 'int', reconciled: 'int' },
+  // A forgotten-user ledger refused to open, or refused a call on an open handle: its tombstone copy is missing or is another store's, a key it needs was not given, its identity or state rows are damaged, or the adapter has no transactions or the runtime no secure random source. Written once, where the refusal is thrown, with the error's listed type and code.
+  'memory.ledger_refused': { type: 'word', code: 'word' },
+  // A retention sweep ran over at least one subject with a period: the traces it deleted for good, the pages compiled from them that it deleted, and the subjects it removed from the registry because nothing of them was left.
+  'memory.retention_swept': { traces: 'int', pages: 'int', scopes: 'int' },
+  // A rewrite of the vector index, or a checkpoint of the store's write-ahead log, that deletes for good left owed failed where no report names it: in a correction, in a re-application of the tombstones, or at an open whose check of the index file found a trace that is gone. The deleted vectors or bytes stay in the files until the next deletion, sweep or re-application of the tombstones runs it. Written once a failure, with the error's listed type and code.
+  'memory.erasure_unfinished': { type: 'word', code: 'word' },
+  // A single person's install attributed the memory a store held from before per-user scope to its one user (the legacyMemory option): the legacy traces and the legacy compiled pages it counted. Written once, when the attribution is made.
+  'memory.legacy_attributed': { traces: 'int', pages: 'int' },
   // A translation failed, answered with no text, ran past the transcript translator's own timeout, stopped at its output cap or stopped for another reason (a content filter); it throws TranslationProviderError, and status is 0 when no HTTP status came back.
   'language.translation_failed': { provider: { enum: ['openai', 'deepl'] }, reason: { enum: ['request_failed', 'empty_output', 'timeout', 'truncated', 'incomplete'] }, status: 'int', type: 'word', code: 'word' },
   // A configured detection provider id LanguageService does not build (whisper_stub, or an id it does not know).

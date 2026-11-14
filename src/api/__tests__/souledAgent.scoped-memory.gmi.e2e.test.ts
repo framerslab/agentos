@@ -52,8 +52,16 @@ import { sessionSeat } from '../runtime/agencyLaunch/sessionSeat';
 
 let n = 0;
 const key = () => `k-souled-scoped-${++n}`;
+// The cases here file the memory of several users and sessions in one store, which needs a retention choice.
 const stubbed = (apiKey: string, extra: Partial<AgentOptions> = {}) =>
-  ({ provider: 'openai', model: 'stub-model', apiKey, fallbackProviders: [], ...extra }) as unknown as AgentOptions;
+  ({
+    provider: 'openai',
+    model: 'stub-model',
+    apiKey,
+    fallbackProviders: [],
+    retention: { traces: 'until-deletion' },
+    ...extra,
+  }) as unknown as AgentOptions;
 
 type Souled = Awaited<ReturnType<typeof souledAgent>>;
 
@@ -1072,7 +1080,9 @@ describe.each(runtimes)("the host's memory policy for an account, on %s", (_name
   it.each<[string, () => unknown]>([
     ['a word that is none of the three', () => ({ longTerm: 'forever' })],
     ['nothing', () => null],
-    ['a field beside the one it takes', () => ({ longTerm: 'raw', retentionDays: 7 })],
+    ['a field beside the ones it takes', () => ({ longTerm: 'raw', keepFor: 7 })],
+    ['a period that is not a positive number', () => ({ longTerm: 'raw', retentionDays: 0 })],
+    ['a period on a policy that keeps nothing', () => ({ longTerm: 'off', retentionDays: 7 })],
     ['no answer in time', () => new Promise(() => undefined)],
   ])('a policy that answers %s fails the same way', async (_case, memoryPolicy) => {
     const { a } = await opened(runtime, { memoryPolicy, memoryProviderOptions: { timeoutMs: 50 } });

@@ -614,7 +614,7 @@ export interface AvatarIdentityPackage {
     faceSimilarity: number;
     /** Whether to reject images below the similarity threshold. */
     rejectBelowThreshold: boolean;
-    /** Maximum retries when generated face drifts too far. */
+    /** Maximum attempts per image (draws in all, the first included) when its face drifts too far. */
     maxRegenerationAttempts: number;
   };
   /** Image generation parameters for reproducibility. */
