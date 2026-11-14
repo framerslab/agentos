@@ -236,6 +236,31 @@ describe('OpenAIProvider.buildResponsesPayload', () => {
     ]);
   });
 
+  // A user turn of several text parts is several texts (a note from the application before the person's own words):
+  // joined with a newline, the words would read as the note's next line.
+  it('keeps the text parts of a user turn apart, as input_text parts', () => {
+    const convo: ChatMessage[] = [
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'A note from the application.\n- The bar opens at five.' },
+          { type: 'text', text: 'Hey! Slow afternoon at work.' },
+        ],
+      },
+    ];
+    const input = build('gpt-6-astra', convo, { tools: toolsOpt, effort: 'xhigh' })
+      .input as Array<Record<string, unknown>>;
+    expect(input).toEqual([
+      {
+        role: 'user',
+        content: [
+          { type: 'input_text', text: 'A note from the application.\n- The bar opens at five.' },
+          { type: 'input_text', text: 'Hey! Slow afternoon at work.' },
+        ],
+      },
+    ]);
+  });
+
   it('drops an empty assistant turn but keeps assistant text when tool_calls also present', () => {
     const convo: ChatMessage[] = [
       { role: 'assistant', content: null }, // empty → dropped
