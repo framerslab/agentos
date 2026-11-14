@@ -306,10 +306,12 @@ export interface ModelCompletionOptions {
    * completions are stored by default for new accounts. To disable storage
    * when using either API, set store: false."
    * (https://developers.openai.com/api/docs/guides/migrate-to-responses).
-   * The providers built on the OpenAI provider (Groq, xAI, Together,
-   * Mistral, LiteLLM, MiniMax) send it to their own endpoint too; the other
-   * providers ignore it. A `store` key in `customModelParams` replaces it, as
-   * the passthrough does for every typed field.
+   * Other providers ignore it, those built on the OpenAI provider (Groq, xAI,
+   * Together, Mistral, LiteLLM, MiniMax) included: they leave it out of the
+   * request to their own endpoint, which can refuse a field outside its
+   * schema (Mistral answers "Extra inputs are not permitted"). A `store` key
+   * in `customModelParams` replaces it, as the passthrough does for every
+   * typed field, and reaches those endpoints too.
    */
   store?: boolean;
   /**
@@ -465,6 +467,15 @@ export interface ModelCompletionChoice {
   text?: string;
   logprobs?: unknown;
   finishReason: string | null;
+  /**
+   * The model's refusal message, when it declined the request with one (OpenAI's `message.refusal` on Chat
+   * Completions, a `refusal` content part on the Responses API), on a completion and on the stream chunk that ends the
+   * answer; the message's `content` holds no answer text then. Present only when the model refused, and possibly the
+   * empty string. `finishReason` is the one the provider gave beside it: `'stop'` with a whole message, `'length'` or
+   * `'content_filter'` with the piece that came before the output cap or a content filter cut it off, `'tool_calls'`
+   * when function calls came beside it.
+   */
+  refusal?: string;
 }
 
 /**
@@ -548,6 +559,11 @@ export interface ModelCompletionResponse {
    * `ChatMessage.reasoningText`). Never part of `responseTextDelta`.
    */
   reasoningTextDelta?: string;
+  /**
+   * Incremental append-only piece of the model's refusal message for streaming. Never part of `responseTextDelta`;
+   * the chunk that ends the answer carries the whole message in `choices[0].refusal`.
+   */
+  refusalDelta?: string;
   /** Array of incremental tool/function call argument deltas building up tool invocation payloads. */
   toolCallsDeltas?: Array<{
     /** Choice index if multiple parallel choices produce tool calls. */

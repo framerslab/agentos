@@ -1024,6 +1024,10 @@ async function generateWithValidation(
       if (!tookInput) observeValidatedExchange(memory.provider, memory.turn, result.text);
       return { result, object: undefined, retried: false, tookInput };
     }
+    // A refusal from the model is its answer, not JSON to repair: the call ends on it, its message kept.
+    if (result.refusal !== undefined) {
+      throw new ObjectGenerationError('The model refused the request instead of writing the reply', result.text, undefined, result.refusal);
+    }
 
     let failure: ObjectGenerationError;
     try {

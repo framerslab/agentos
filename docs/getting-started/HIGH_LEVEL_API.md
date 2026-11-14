@@ -209,6 +209,36 @@ const totals = await getRecordedAgentOSUsage({ enabled: true, sessionId: 'demo-s
 console.log(totals.totalTokens);
 ```
 
+### A refusal from the model
+
+```ts
+import { generateText } from '@framers/agentos';
+
+const result = await generateText({
+  provider: 'openai',
+  prompt: 'Draft a reply to this message.',
+});
+
+if (result.refusal !== undefined) {
+  console.log(result.refusal); // the model's refusal message
+}
+```
+
+When an OpenAI model refuses a request with a refusal message, `generateText()` returns the message in `refusal`, beside the `finishReason` and the empty `text` such an answer has always come back with: `'stop'`, or `'length'` when the output cap cut the message off. `refusal` is set only when the model refused, so `result.refusal !== undefined` tells a refusal from an empty answer. An explicit refusal with an empty message is a refusal too, its `refusal` the empty string, on both OpenAI endpoints, whole or streamed, and when the output cap cut it. On Chat Completions an empty refusal field beside text or tool calls holds no refusal: the answer is that text or those calls. The call does not throw, and nothing is sent to a fallback provider. `streamText()` sends no text part for it. Its `finishReason` and `refusal` promises settle as the stream is read, as `text` does: once `textStream` or `fullStream` has been read to its end, `await result.refusal` is the message, `await result.finishReason` is `'stop'` (`'length'` when the output cap cut the message off) and `await result.text` is the empty string, also when an earlier tool step streamed text of its own. When the model wrote text beside the refusal message in the same reply, `text` keeps that text on both functions, and `refusal` still says the model refused. A stream that ends inside a refusal message, an empty one included, before the answer's finish ends on an `error` part, with `finishReason` `'error'` and no `refusal`.
+
+A call with tools returns a refusal the same way, in prompt tool mode (`toolMode: 'prompt'`) too. When the model sends tool calls beside its refusal message, the call ends on the refusal with `finishReason` `'stop'`, and those tool calls are not run. A refusal the output cap cut off is a cut answer: `finishReason` is `'length'`, `refusal` holds the piece of the message that came and `text` is empty, in prompt tool mode as well. A result the model did not refuse has no `refusal`. `generateObject()` and an agent's `responseSchema` end on a refusal without asking for a repair: they throw [`ObjectGenerationError`](../orchestration/STRUCTURED_OUTPUT_API.md#errors) with the message in its `refusal`. The usage event of a refused call carries `refused: true` ([a refused call](../observability/OBSERVABILITY.md#a-refused-call)). A GMI session (`runtime: 'gmi'`) and a runtime agency seat return a refused answer with its finish reason and an empty text, and no `refusal`; tool calls the model sent beside the refusal are not run there either, and the turn ends on `'stop'`. A structured turn on the full runtime (`processRequest()` with `structuredReply`) ends on a refusal without a repair request too ([structured reply](../features/STRUCTURED_REPLY.md#what-the-turn-does)). [OpenAI](../features/LLM_PROVIDERS.md#openai) describes what the provider reads. Claude's refusal arrives another way: the provider throws an error with code `content_filter` ([Anthropic](../features/LLM_PROVIDERS.md#anthropic)).
+
+The finish reasons are the four they were (`'stop'`, `'length'`, `'tool-calls'`, `'error'`), so code that lists every one of them compiles and runs as it did. A caller that does not read `refusal` sees these differences from the releases before the field:
+
+- **Tool calls beside a refusal are not run.** The call ends there with `'stop'`, in `generateText()`, `streamText()`, a GMI session and a runtime agency seat. Before, the tools ran and the loop went on, acting on a request the model had declined, and the refusal was lost.
+- **`generateObject()` and an agent's `responseSchema` throw at once.** Before, the empty text of a refusal was sent back for repair, and the call threw after the last attempt or returned what a repair attempt wrote. A refusal is the model's answer, not JSON to repair.
+- **A structured turn on the full runtime ends on a refusal.** With `structuredReply`, the turn ends with `GMI_STRUCTURED_OUTPUT_INVALID` and `refused: true` under `onExhausted: 'error'`, or returns `value: null` with `meta.valid: false` under `return_invalid`, with no repair request. Before, the empty text was sent back for repair, and the turn ended as invalid after the last attempt or returned what a repair attempt wrote.
+- **A Chat Completions stream cut inside a refusal message is an error.** Before, a stream that ended inside a refusal, an empty one included, and before its finish chunk read as a finished, empty answer. It ends on the provider's `stream_truncated` error, which goes on to a fallback provider when one is set.
+- **The output guards judge the refusal message.** With `guards` set, a guard that blocks the message stops a call that returned an empty reply before, and the call's usage event and root span say `finishReason` `'error'`. The message is text the model wrote, and it reaches the caller.
+- **`streamText()` resolves `text` empty when its last step is refused.** Before, after a tool step that streamed text, `text` resolved to that earlier text, where `generateText()` returned the empty string.
+- **Prompt tool mode reports a reply the output cap cut off as `'length'`.** Before, it reported `'stop'`, where the native tool loop reported `'length'`.
+- **The usage event and root span of `streamText()` name the reason the call resolved to.** Before, after tool steps and a last step with no text, they said `'tool-calls'` while `finishReason` resolved to another reason.
+
 ### OpenAI response storage
 
 ```ts
@@ -218,7 +248,7 @@ await generateText({ provider: 'openai', prompt: 'Summarize this call.', store: 
 await generateObject({ provider: 'openai', schema, prompt: transcript, store: false });
 ```
 
-`store` is sent to OpenAI as `store` on the request body, on `/v1/chat/completions` and `/v1/responses` alike. OpenAI's [migration guide](https://developers.openai.com/api/docs/guides/migrate-to-responses) says "Responses are stored by default. Chat completions are stored by default for new accounts. To disable storage when using either API, set `store: false`." `streamText()` takes it too. Every request the call makes carries the option, which covers each step of the tool loop, the planning request, each attempt of `generateObject()` and a fallback leg to OpenAI. Left out, a chat completion sends no `store` key and a Responses request sends `store: false`. The providers built on the OpenAI provider (Groq, xAI, Together, Mistral, LiteLLM, MiniMax) send it to their own endpoint too; the other providers ignore it. `ModelCompletionOptions.store` sets it on a direct `generateCompletion()` call.
+`store` is sent to OpenAI as `store` on the request body, on `/v1/chat/completions` and `/v1/responses` alike. OpenAI's [migration guide](https://developers.openai.com/api/docs/guides/migrate-to-responses) says "Responses are stored by default. Chat completions are stored by default for new accounts. To disable storage when using either API, set `store: false`." `streamText()` takes it too. Every request the call makes carries the option, which covers each step of the tool loop, the planning request, each attempt of `generateObject()` and a fallback leg to OpenAI. Left out, a chat completion sends no `store` key and a Responses request sends `store: false`. The other providers ignore it, those built on the OpenAI provider (Groq, xAI, Together, Mistral, LiteLLM, MiniMax) included: they leave it out of the request to their own endpoint, since such an endpoint can refuse a field outside its schema (Mistral's chat completion request sets `additionalProperties: false` in its [OpenAPI document](https://docs.mistral.ai/openapi.yaml) and answers "Extra inputs are not permitted"). `customModelParams: { store: false }` reaches such an endpoint, for a gateway known to take the field. `ModelCompletionOptions.store` sets it on a direct `generateCompletion()` call.
 
 ### Guards on a call
 
@@ -259,7 +289,7 @@ The guards run in three stages:
 
 - **Input, once, before the first provider request.** The call's own user turn is judged: `prompt`, else the last message when its role is `user`. A call whose messages end on another role has no input stage. The guards with `evaluateInput` read the turn's text and its images (a `data:` URL as its bytes, any other URL as a URL). A `BLOCK` stops the call before any request is made. A `BLOCK` whose evaluation carries a non-empty `replacementText` is the reply instead: no request is made, `text` is that text, `usage` is zero and `transcriptDelta` is empty. A rewrite sends the rewritten text in the turn's place; in multi-part content one text part takes the place of the text parts and the images stay. A text a guard removed (`modifiedText: null`) is sent as an empty turn, never as the original.
 - **Tool calls, each one, in every tool loop.** The guards with `evaluateOutput` and `config.evaluateToolCalls: true` judge each call the model makes, in the native tool loop and the prompt-tool loop of every leg, on the arguments the model sent, before `onBeforeToolExecution` and before any approval gate. A refused call does not run and no hook sees it: the model reads `This tool call was refused by a guardrail.` as its result, with the guard's `reasonCode` when it gave one, and the loop goes on. In `streamText()` a call's `tool-call` part goes out after the guards passed it; a refused call shows as its `tool-result` part alone. A caller's `abortSignal` that fires while the guards are judging ends the call before any hook or tool runs. A hold refuses the call too. A refused tool call is not a stop.
-- **Output, the whole reply, before the caller receives it.** A `BLOCK` stops the call. A `BLOCK` that carries a `replacementText` puts that text in the reply's place, and a rewrite replaces the reply, a rewrite of the reply's streamed pieces by a guard with `evaluateStreamingChunks` included. An empty reply is not judged. A caller's `abortSignal` that fires while the guards judge the prompt or the reply rejects `generateText()` with the signal's reason; `streamText()` ends with an `error` part that carries it, before any held text goes out.
+- **Output, the whole reply, before the caller receives it.** A `BLOCK` stops the call. A `BLOCK` that carries a `replacementText` puts that text in the reply's place, and a rewrite replaces the reply, a rewrite of the reply's streamed pieces by a guard with `evaluateStreamingChunks` included. An empty reply is not judged. A [refusal message](#a-refusal-from-the-model) is text the model wrote, so it is judged as the reply is: a `BLOCK` stops the call, a `replacementText` or a rewrite is what `refusal` holds (the empty string when a rewrite removes the whole message, so the field goes on saying the model refused), and in a dry run it is judged and returned as it came. `streamText()` judges it once the stream has been read to its end, and a stop there is the stream's `error` part. A caller's `abortSignal` that fires while the guards judge the prompt, the reply or a refusal message rejects `generateText()` with the signal's reason; `streamText()` ends with an `error` part that carries it, before any held text goes out, and a refusal message is not delivered after it.
 
 What decides a stage is what decides `moderateContent()`: a rule's `BLOCK`, else a hold, else a closed guard's failure, else a `FLAG`. A screen with `sequential: true` answers first, as it does there.
 
@@ -935,7 +965,9 @@ On the default runtime, `agent({ responseSchema })` validates `generate()`'s
 final text with the supplied Zod schema and returns the value in `result.parsed`.
 It can extract JSON from a code fence. `controls.maxValidationRetries` defaults
 to 1, so an invalid reply gets one more attempt. Set it to 0 to throw
-`ObjectGenerationError` on the first invalid reply.
+`ObjectGenerationError` on the first invalid reply. A [refusal](#a-refusal-from-the-model)
+is not retried: the send throws `ObjectGenerationError` with the model's
+refusal message in its `refusal`.
 `output` is the `agency()` option: `agent()` accepts it, does not apply it
 and names it in its construction warning, so pass an agent's schema as
 `responseSchema`.

@@ -3,10 +3,10 @@
  * A structured turn on the real runtime with an OpenAI provider stub: the schema instruction closes the system prompt,
  * no delta reaches the caller before the check, a matching reply returns its parsed value on the final chunk, a reply
  * that does not match is asked for again inside the turn with the issues named, an exhausted turn ends as
- * GMI_STRUCTURED_OUTPUT_INVALID or returns the last reply as invalid, a sanitizer that breaks the shape is caught after
- * the guardrails, a schemaRef resolves through the registry, and a JSON Schema checks like a Zod one, sent anew with
- * each request under one $id too. A JSON Schema that does not compile is refused before the provider is called, and
- * the requests after it compile theirs.
+ * GMI_STRUCTURED_OUTPUT_INVALID or returns the last reply as invalid, a refusal from the model ends the turn with no
+ * repair request and no schema check (text or a lifted value beside it included), a sanitizer that breaks the shape is caught after the guardrails, a schemaRef resolves through the
+ * registry, and a JSON Schema checks like a Zod one, sent anew with each request under one $id too. A JSON Schema that
+ * does not compile is refused before the provider is called, and the requests after it compile theirs.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
@@ -47,6 +47,16 @@ const week = z.object({ items: z.array(z.object({ date: z.string(), title: z.str
 const reply = (text: string) => [
   { responseTextDelta: text },
   { isFinal: true, choices: [{ message: { role: 'assistant', content: text }, finishReason: 'stop' }], usage: { promptTokens: 3, completionTokens: 2, totalTokens: 5 } },
+];
+/**
+ * A refusal as OpenAIProvider streams it (openai-refusal.e2e.test.ts pins the shape on the real provider): the message
+ * in refusal pieces, never as text, and a final chunk whose choice holds the whole message beside `stop`.
+ */
+const REFUSAL = "I'm sorry, I cannot assist with that request.";
+const refusal = () => [
+  { refusalDelta: "I'm sorry, " },
+  { refusalDelta: 'I cannot assist with that request.' },
+  { isFinal: true, choices: [{ index: 0, message: { role: 'assistant', content: null }, finishReason: 'stop', refusal: REFUSAL }], usage: { promptTokens: 81, completionTokens: 11, totalTokens: 92 } },
 ];
 const GOOD = '{"items":[{"date":"2026-10-13","title":"Chapter 2 drill","heavy":false}]}';
 const BAD = '{"items":[{"date":"2026-10-13","title":"Chapter 2 drill"}]}';
@@ -127,6 +137,70 @@ describe('a structured reply on processRequest', () => {
     expect(final.structured?.meta.issues?.join('\n')).toContain('items.0.heavy');
     expect(final.structured?.value).toEqual(JSON.parse(BAD));
     expect(provider.calls).toHaveLength(3);
+  });
+
+  it('ends the turn on a refusal without asking again: as refused under onExhausted error, as an invalid null value under return_invalid', async () => {
+    booted = await boot();
+    // Retries are left and a matching reply waits: a repair request would get it.
+    provider.replies.push(refusal(), reply(GOOD));
+    const failed = await collect(booted, { structuredReply: { schema: week, name: 'week', maxRetries: 2 } }, 's-refused');
+    expect(provider.calls).toHaveLength(1);
+    expect(errorOf(failed)?.code).toBe(GMIErrorCode.STRUCTURED_OUTPUT_INVALID);
+    expect(errorOf(failed)?.message).toContain('refused');
+    expect(errorOf(failed)?.details).toMatchObject({ schemaName: 'week', attempts: 1, refused: true });
+    expect(errorOf(failed)?.details).not.toHaveProperty('issues');
+    // The final chunk that carries the error holds no structured value.
+    expect(finalOf(failed)?.structured).toBeUndefined();
+    expect(deltasOf(failed)).toHaveLength(0);
+
+    provider.calls.length = 0;
+    provider.replies.length = 0;
+    provider.replies.push(refusal(), reply(GOOD));
+    const kept = await collect(booted, { structuredReply: { schema: week, name: 'week', maxRetries: 2, onExhausted: 'return_invalid' } }, 's-refused-kept');
+    expect(provider.calls).toHaveLength(1);
+    expect(errorOf(kept)).toBeUndefined();
+    const final = finalOf(kept)!;
+    expect(final.structured).toMatchObject({ value: null, meta: { schemaName: 'week', valid: false, attempts: 1, stage: 'model' } });
+    expect(final.structured?.meta.issues).toEqual(['The model refused the request instead of writing the reply.']);
+    expect(final.finalResponseText ?? '').toBe('');
+  });
+
+  it('never runs the schema check on a refused step that also carries a matching reply, as text or as a lifted value', async () => {
+    booted = await boot();
+    // A check that counts its runs and throws, as a refinement that throws (or an async one under safeParse) does.
+    let checks = 0;
+    const watched = week.superRefine(() => {
+      checks += 1;
+      throw new Error('the schema check ran on a refused step');
+    });
+    const usage = { promptTokens: 81, completionTokens: 11, totalTokens: 92 };
+    // The refusal beside text that parses and matches.
+    provider.replies.push([
+      { responseTextDelta: GOOD },
+      { isFinal: true, choices: [{ index: 0, message: { role: 'assistant', content: GOOD }, finishReason: 'stop', refusal: REFUSAL }], usage },
+    ], reply(GOOD));
+    const failed = await collect(booted, { structuredReply: { schema: watched, name: 'week', maxRetries: 2 } }, 's-refused-text');
+    expect(checks).toBe(0);
+    expect(provider.calls).toHaveLength(1);
+    expect(errorOf(failed)?.code).toBe(GMIErrorCode.STRUCTURED_OUTPUT_INVALID);
+    expect(errorOf(failed)?.details).toMatchObject({ schemaName: 'week', attempts: 1, refused: true });
+    expect(errorOf(failed)?.details).not.toHaveProperty('issues');
+    expect(finalOf(failed)?.structured).toBeUndefined();
+
+    provider.calls.length = 0;
+    provider.replies.length = 0;
+    // The refusal beside a value the gateway lifted from a schema tool call.
+    provider.replies.push([
+      { refusalDelta: REFUSAL },
+      { isFinal: true, structuredOutput: JSON.parse(GOOD), choices: [{ index: 0, message: { role: 'assistant', content: null }, finishReason: 'stop', refusal: REFUSAL }], usage },
+    ], reply(GOOD));
+    const kept = await collect(booted, { structuredReply: { schema: watched, name: 'week', maxRetries: 2, onExhausted: 'return_invalid' } }, 's-refused-lifted');
+    expect(checks).toBe(0);
+    expect(provider.calls).toHaveLength(1);
+    expect(errorOf(kept)).toBeUndefined();
+    const final = finalOf(kept)!;
+    expect(final.structured).toMatchObject({ value: null, meta: { schemaName: 'week', valid: false, attempts: 1, stage: 'model' } });
+    expect(final.structured?.meta.issues).toEqual(['The model refused the request instead of writing the reply.']);
   });
 
   it('streams the deltas when asked', async () => {
