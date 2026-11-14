@@ -79,6 +79,7 @@ vi.mock('../../core/llm/providers/implementations/OpenAIProvider', () => ({
 import { AgentOS } from '../AgentOS';
 import { GMI } from '../../cognition/substrate/GMI';
 import { GMIEventType } from '../../cognition/substrate/GMIEvent';
+import { AgentOSResponseChunkType } from '../types/AgentOSResponse';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -285,5 +286,15 @@ describe('full-runtime sentiment overlap', () => {
     current.currentUserContext = { ...current.currentUserContext, language: 'fr', preferences: { verbosity: 'detailed' } };
     held.resolve(negative); main.resolve(); await done;
     expect(current.currentUserContext).toMatchObject({ language: 'fr', preferences: { verbosity: 'detailed' }, currentSentiment: 'negative' });
+  });
+  it('preserves optional cache counters on FINAL_RESPONSE usage', async () => {
+    wire.usage = { promptTokens: 3, completionTokens: 2, totalTokens: 5,
+      cacheReadInputTokens: 11, cacheCreationInputTokens: 17, cacheCreationExtendedInputTokens: 0, inclusiveInputTokens: 31 };
+    await boot();
+    const chunks = await turn();
+    const final = chunks.find((chunk) => chunk.type === AgentOSResponseChunkType.FINAL_RESPONSE);
+    expect(final, 'the runtime must emit FINAL_RESPONSE').toBeDefined();
+    expect(final.usage).toMatchObject({ cacheReadTokens: 11, cacheCreationTokens: 17,
+      cacheCreationExtendedTokens: 0, inclusiveInputTokens: 31 });
   });
 });

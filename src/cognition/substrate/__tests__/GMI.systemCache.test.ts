@@ -6,7 +6,7 @@
  * over a scripted provider.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createScriptedGmi, scriptedProvider, textReply, textTurn, runTurn, systemTextOf } from './helpers/scriptedGmi';
+import { createScriptedGmi, scriptedProvider, textReply, textTurn, runTurn, systemTextOf, toolCallReply } from './helpers/scriptedGmi';
 
 afterEach(() => { vi.unstubAllEnvs(); });
 const base = [
@@ -113,6 +113,23 @@ describe('GMI cache eligibility', () => {
       expect((construct.mock.calls[0][0].systemPrompts as any[]).find((entry) => entry.source === 'learning:personality').stability).toBe('conversation');
       expect(Array.isArray(provider.received[0][0].content), 'the fixed block is a text part').toBe(true);
       expect((provider.received[0][0].content as any[])[0].text).toBe('Policy\n\nLearned traits');
+    } finally { await gmi.shutdown(); }
+  });
+  it('sums reported cache counters on raw GMIOutput and leaves absent counters absent', async () => {
+    const usage = { promptTokens: 3, completionTokens: 2, totalTokens: 5,
+      cacheReadInputTokens: 11, cacheCreationInputTokens: 17, cacheCreationExtendedInputTokens: 0, inclusiveInputTokens: 31 };
+    const tool = toolCallReply([{ id: 'lookup-cache', name: 'lookup', args: { q: 'x' } }]);
+    tool.at(-1)!.usage = usage;
+    const p = scriptedProvider([tool, textReply('Done.', usage), textReply('No cache fields.')]);
+    const { gmi } = await createScriptedGmi({ provider: p.provider });
+    try {
+      const first = await runTurn(gmi, textTurn('usage-1', 'Look up x.'));
+      expect(first.output.usage).toMatchObject({ cacheReadTokens: 22, cacheCreationTokens: 34,
+        cacheCreationExtendedTokens: 0, inclusiveInputTokens: 62 });
+      const second = await runTurn(gmi, textTurn('usage-2', 'Hi.'));
+      for (const field of ['cacheReadTokens', 'cacheCreationTokens', 'cacheCreationExtendedTokens', 'inclusiveInputTokens']) {
+        expect(second.output.usage).not.toHaveProperty(field);
+      }
     } finally { await gmi.shutdown(); }
   });
 });

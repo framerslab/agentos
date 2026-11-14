@@ -42,7 +42,7 @@ vi.mock('../../core/llm/providers/implementations/OpenRouterProvider', async (im
 });
 import { agent, type AgentOptions } from '../agent';
 import { SpendBudget } from '../runtime/spendBudget';
-import { reply, script } from './helpers/stubProviders';
+import { reply, script, systemTextOf } from './helpers/stubProviders';
 import { setGlobalLlmObserver, type LlmUsageEvent } from '../observers';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 import { GMIErrorCode } from '../../core/utils/errors';
@@ -344,5 +344,54 @@ describe("agent({ runtime: 'gmi' }) usage", () => {
     } finally {
       usageLine.open();
     }
+  });
+
+  it('keeps cache counts across a tool step and the final answer', async () => {
+    const usage = { promptTokens: 12, completionTokens: 3, totalTokens: 15,
+      cacheReadInputTokens: 20, cacheCreationInputTokens: 30, cacheCreationExtendedInputTokens: 5, inclusiveInputTokens: 62 };
+    const tool = reply.tools([{ id: 'cache-tool', name: 'lookup', args: { q: 'x' } }]);
+    (tool.at(-1) as any).usage = usage;
+    const k = key(); script('openai', k, { replies: [tool, reply.text('Found.', 'stub-model', usage)] });
+    const a = agent(base(k, { tools: [lookup] }));
+    try {
+      const result = await a.session('cache-usage').send('Find x.');
+      expect(result.usage).toMatchObject({ cacheReadTokens: 40, cacheCreationTokens: 60,
+        cacheCreationExtendedTokens: 10, inclusiveInputTokens: 124 });
+    } finally { await a.close(); }
+  });
+
+  it('keeps an OpenAI GMI system as one string and onBeforeGeneration system as the joined base', async () => {
+    const k = key(); const s = script('openai', k, { replies: [reply.text('Hello.')] });
+    let baseSystem: unknown;
+    const a = agent(base(k, { systemBlocks: [{ text: 'Policy' }],
+      onBeforeGeneration: (context: any) => { baseSystem = context.system; },
+    }));
+    try {
+      const result = await a.generate('Hello.');
+      const system = s.seen[0].messages.filter((message) => message.role === 'system');
+      expect(system).toEqual([{ role: 'system', content: 'Policy' }]);
+      expect(systemTextOf(s.seen[0].messages)).toBe('Policy');
+      expect(baseSystem).toBe('Policy');
+      expect(result.usage).not.toHaveProperty('cacheReadTokens');
+      expect(result.usage).not.toHaveProperty('cacheCreationTokens');
+      expect(result.usage).not.toHaveProperty('cacheCreationExtendedTokens');
+    } finally { await a.close(); }
+  });
+
+  it('rebuilds the split as one system string on an OpenAI fallback hop', async () => {
+    const k = key(); const fallbackKey = key();
+    const primary = script('anthropic', k, { replies: [Object.assign(new Error('overloaded'), { httpStatus: 529 })] });
+    const fallback = script('openai', fallbackKey, { replies: [reply.text('Recovered.')] });
+    vi.stubEnv('OPENAI_API_KEY', fallbackKey);
+    const a = agent({ ...base(k), provider: 'anthropic', model: 'claude-sonnet-4-6',
+      systemBlocks: [{ text: 'Policy', cacheBreakpoint: true }, { text: 'Clock' }],
+      fallbackProviders: [{ provider: 'openai', model: 'stub-model' }],
+    });
+    try {
+      await a.generate('Hi.');
+      expect(primary.seen[0].messages.filter((message) => message.role === 'system')).toHaveLength(2);
+      expect(fallback.seen[0].messages.filter((message) => message.role === 'system')).toEqual([{ role: 'system', content: 'Policy\n\nClock' }]);
+      expect(systemTextOf(primary.seen[0].messages)).toBe(systemTextOf(fallback.seen[0].messages));
+    } finally { await a.close(); }
   });
 });
