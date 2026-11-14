@@ -21,12 +21,15 @@ vi.mock('../../../cognition/memory/core/prompt/MemoryPromptAssembler', async (or
 import { agent, type AgentOptions } from '../../agent';
 import { script, systemTextOf } from '../../__tests__/helpers/stubProviders';
 import { globalLLMProviderHealth } from '../../../core/safety/LLMProviderHealthRegistry';
-import { PromptEngine } from '../../../core/llm/PromptEngine';
+import { APPLICATION_NOTE_FRAME, PromptEngine } from '../../../core/llm/PromptEngine';
 import { promptEngineConfig } from '../../../cognition/substrate/__tests__/helpers/scriptedGmi';
 import { MEMORY_RECALL_SYSTEM_LINE } from '../memoryDataBlock';
 import { AgentOS } from '../../AgentOS';
 import { DEFAULT_PROMPT_PROFILE_CONFIG } from '../../structured/prompting/PromptProfileRouter';
+import { createCurrentDateTimeTool } from '../../../core/tools/builtins/currentDateTime';
 
+/** The frame line the prompt engine opens retrieved text with. */
+const FRAME = APPLICATION_NOTE_FRAME;
 type Json = Record<string, any>;
 let bodies: Json[];
 let agents: ReturnType<typeof agent>[];
@@ -262,6 +265,26 @@ describe('GMI Anthropic wire', () => {
     expect(body.system[0].cache_control).toEqual({ type: 'ephemeral' });
     expect(systemTextOf([{ role: 'system', content: body.system }])).toContain('Policy');
   });
+  it("sends the memory block as a text block of its own before the person's words, which arrive untouched", async () => {
+    const embeddingKey = `embedding-${++serial}`; script('openai', embeddingKey, { replies: [] });
+    vi.stubEnv('OPENAI_API_KEY', embeddingKey);
+    const a = make({ cognition: { memory: { embedding: { provider: 'openai' } }, mechanisms: false }, cache: { tail: false } });
+    const session = a.session('words');
+    await session.send("Work at the hotel front desk is slow in the afternoon, so I end up bothering Tess when I'm bored.");
+    session.clear();
+    const words = "Hey Tess! Slow afternoon at work so I'm bothering you.";
+    await session.send(words);
+    const block = capture.assemblies.at(-1)!;
+    expect(block.contextText.length).toBeGreaterThan(0);
+    const body = bodies.at(-1)!;
+    const newest = body.messages.filter((message: any) => message.role === 'user').at(-1);
+    expect(newest.content).toEqual([
+      { type: 'text', text: `${FRAME}\n${block.contextText}` },
+      { type: 'text', text: words },
+    ]);
+    expect(JSON.stringify(body)).not.toContain('User Query:');
+    expect(JSON.stringify(body)).not.toContain('Context:\\n');
+  });
 });
 
 describe('full-runtime Anthropic wire', () => {
@@ -269,6 +292,8 @@ describe('full-runtime Anthropic wire', () => {
     const os = await AgentOS.create({
       modelProviderManagerConfig: { providers: [{ providerId: 'anthropic', enabled: true, isDefault: true, config: { apiKey: `wire-runtime-${++serial}` } }] },
       turnPlanning: { enabled: false },
+      // the runtime registers no tool of its own, so the host names one: the requests then carry a tool list to compare
+      tools: [createCurrentDateTimeTool()],
       orchestratorConfig: {
         enableConversationalPersistence: false,
         promptProfileConfig: { ...DEFAULT_PROMPT_PROFILE_CONFIG, routing: { ...DEFAULT_PROMPT_PROFILE_CONFIG.routing, reviewEveryNTurns: 1 } },
@@ -294,6 +319,7 @@ describe('full-runtime Anthropic wire', () => {
       }
       expect(second.system[0]).toEqual(third.system[0]);
       expect(JSON.stringify(second.tools)).toBe(JSON.stringify(third.tools));
+      expect(second.tools.map((tool: Json) => tool.name)).toContain('getCurrentDateTime');
       expect(systemTextOf([{ role: 'system', content: second.system }])).toContain('Meta-Preset: Concise');
       expect(systemTextOf([{ role: 'system', content: third.system }])).toContain('Meta-Preset: Deep Dive');
     } finally {

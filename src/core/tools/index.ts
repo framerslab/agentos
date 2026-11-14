@@ -29,3 +29,5 @@ export {
   type ToolPermissionManagerConfig,
 } from './permissions/IToolPermissionManager.js';
 export { ToolPermissionManager } from './permissions/ToolPermissionManager.js';
+
+export { createCurrentDateTimeTool } from './builtins/currentDateTime.js';

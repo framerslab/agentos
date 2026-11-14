@@ -2,8 +2,8 @@
  * @file agentos-tool-schemas.e2e.test.ts
  * Tool calls on the full runtime, checked against the tools' JSON Schemas: AgentOS.create() with the OpenAI provider
  * class stubbed at its module boundary, a first completion that calls the tools, and the tool messages the next
- * completion receives. The built-in getCurrentDateTime, whose input schema names a format Ajv does not define ("time-zone"),
- * answers the time; two host tools whose input schemas are copies of one schema under a shared $id both run, and a
+ * completion receives. The date tool a host registers from createCurrentDateTimeTool(), whose input schema names a format
+ * Ajv does not define ("time-zone"), answers the time; two host tools whose input schemas are copies of one schema under a shared $id both run, and a
  * call that leaves out a required argument is answered with the schema's error.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -38,6 +38,7 @@ vi.mock('../../core/llm/providers/implementations/OpenAIProvider', () => {
 
 import { AgentOS } from '../AgentOS';
 import type { IPersonaDefinition } from '../../cognition/substrate/personas/IPersonaDefinition';
+import { createCurrentDateTimeTool } from '../../core/tools/builtins/currentDateTime';
 
 const assistant = {
   id: 'assistant', name: 'Assistant', description: 'Answers with its tools.', version: '1.0.0',
@@ -88,8 +89,8 @@ afterEach(async () => {
 });
 
 describe('tool calls checked against their JSON Schemas on the full runtime', () => {
-  it('run the built-in getCurrentDateTime, whose input schema names a format Ajv does not define', async () => {
-    booted = await boot();
+  it('run the host-registered getCurrentDateTime, whose input schema names a format Ajv does not define', async () => {
+    booted = await boot({ tools: [createCurrentDateTimeTool()] });
     provider.replies.push(toolCalls([{ id: 'call-time', name: 'getCurrentDateTime', args: { timezone: 'UTC' } }]));
     await send(booted, 's-time');
     const results = toolMessages(provider.seenMessages[1]);

@@ -716,6 +716,22 @@ function toResponsesInputContent(
 }
 
 /**
+ * The `/v1/responses` form of a user message's content. A user turn of two or
+ * more text parts keeps them apart, as `input_text` parts: they are separate
+ * texts (a note from the application before the person's own words), and
+ * joined with a newline the words would read as the note's next line. Any
+ * other content takes {@link toResponsesInputContent}'s form.
+ */
+function toResponsesUserContent(
+  content: ChatMessage['content'],
+): string | Array<Record<string, unknown>> {
+  if (Array.isArray(content) && content.length > 1 && content.every(isTextPart)) {
+    return content.map((part) => ({ type: 'input_text', text: (part as { text: string }).text }));
+  }
+  return toResponsesInputContent(content);
+}
+
+/**
  * Whether a call goes to `/v1/responses` instead of `/v1/chat/completions`.
  * Streamed and non-streamed calls follow this one rule.
  *
@@ -2238,7 +2254,7 @@ export class OpenAIProvider implements IProvider {
         continue;
       }
       if (m.role === 'user') {
-        input.push({ role: 'user', content: toResponsesInputContent(m.content) });
+        input.push({ role: 'user', content: toResponsesUserContent(m.content) });
         continue;
       }
       const text = flattenResponsesTextContent(m.content);

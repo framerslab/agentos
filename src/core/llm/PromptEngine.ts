@@ -38,7 +38,7 @@ import {
 } from '../../cognition/substrate/personas/IPersonaDefinition';
 import { ConversationMessage as Message, MessageRole, ConversationToolCallRequest } from '../conversation/ConversationMessage'; // Corrected import: Used alias and added MessageRole
 import { toolRoundBounds } from '../conversation/toolRounds';
-import { ChatMessage, MessageContentPart } from './providers/IProvider'; // Added MessageContentPart
+import { ChatMessage, MessageContent, MessageContentPart } from './providers/IProvider'; // Added MessageContentPart
 import { ITool, JSONSchemaObject } from '../tools/ITool'; // Corrected import path
 import { sha256Hex } from '../utils/sha256';
 
@@ -140,6 +140,64 @@ function retrievedContextAsText(retrievedContext: PromptComponents['retrievedCon
   return typeof retrievedContext === 'string'
     ? retrievedContext
     : retrievedContext.map((r) => `Source: ${r.source}\nContent: ${r.content}`).join('\n\n');
+}
+
+/**
+ * The line that opens retrieved text in the newest user message. It tells the model that what follows is a note from
+ * the application and not something the person wrote, that the note serves the reply being written, and that the
+ * reply never quotes or mentions it. The line is fixed, so a host can find the note in a request it captured.
+ */
+export const APPLICATION_NOTE_FRAME =
+  '[Note from the application, not from the person. It is for this reply only: never quote it or mention it.]';
+
+/**
+ * The providers whose adapter sends each text part of a user message on as a part of its own: `anthropic` (a text
+ * block a part), `gemini` (a part a part), `openai` and `openrouter` (the parts array as given). Every other provider
+ * gets the note and the person's words as one string: `ollama` trims each text part and joins them with a newline,
+ * the `claude-code-cli` and `gemini-cli` bridges join them with nothing between, and the remaining adapters hand the
+ * array to an endpoint whose handling of two text parts this engine does not assume.
+ */
+const USER_TEXT_PART_PROVIDERS: ReadonlySet<string> = new Set(['anthropic', 'gemini', 'openai', 'openrouter']);
+
+/**
+ * Retrieved text as the note the model receives: the frame line, then the text whole.
+ *
+ * @param retrieved - The retrieved text (the memory block first, when the turn has one). Not empty.
+ * @returns The note.
+ */
+function applicationNoteOf(retrieved: string): string {
+  return `${APPLICATION_NOTE_FRAME}\n${retrieved}`;
+}
+
+/**
+ * The newest user message's content with the note in front of it. The person's words are never changed: no label
+ * goes in front of them and nothing is trimmed.
+ *
+ * A provider that takes text parts gets the note as a text part of its own, before the words and any image parts.
+ * Any other provider gets one text: the note, a blank line, then the words. When its message already holds parts
+ * (a turn with an image), the note joins the message's first text part the same way, wherever that part stands (an
+ * image may come before it), because its adapter joins text parts itself, with a newline or with nothing between.
+ * A message with no text part gets the note as a part of its own, in front.
+ *
+ * @param content - The message's content as built so far: the person's words, or parts.
+ * @param note - The note ({@link applicationNoteOf}).
+ * @param takesParts - Whether the target provider's adapter sends text parts on as parts.
+ * @returns The content to send.
+ */
+function withApplicationNote(content: ChatMessage['content'], note: string, takesParts: boolean): MessageContent {
+  const notePart: MessageContentPart = { type: 'text', text: note };
+  if (Array.isArray(content)) {
+    if (!takesParts) {
+      const at = content.findIndex((part) => part?.type === 'text' && typeof part.text === 'string');
+      const words = at === -1 ? undefined : content[at];
+      if (words?.type === 'text' && typeof words.text === 'string') {
+        return [...content.slice(0, at), { ...words, text: `${note}\n\n${words.text}` }, ...content.slice(at + 1)];
+      }
+    }
+    return [notePart, ...content];
+  }
+  if (typeof content !== 'string' || content === '') return note;
+  return takesParts ? [notePart, { type: 'text', text: content }] : `${note}\n\n${content}`;
 }
 
 /**
@@ -1373,17 +1431,17 @@ export class PromptEngine implements IPromptEngine {
       if (userMessageParts.length > 0) {
         messages.push({ role: 'user', content: userMessageParts.length === 1 && userMessageParts[0].type === 'text' ? userMessageParts[0].text! : userMessageParts });
       }
-      if (components.retrievedContext) {
-        const ragContent = typeof components.retrievedContext === 'string' ? components.retrievedContext : components.retrievedContext.map(r => `Source: ${r.source}\nContent: ${r.content}`).join('\n\n');
-        if (messages.length > 0 && messages[messages.length-1].role === 'user') {
-          const lastUserMsg = messages[messages.length-1];
-          // A multimodal message keeps its parts: the context goes in front
-          // as a text part instead of flattening the parts into a string.
-          lastUserMsg.content = Array.isArray(lastUserMsg.content)
-            ? [{ type: 'text', text: `Context:\n${ragContent}\n\nUser Query:` }, ...lastUserMsg.content]
-            : `Context:\n${ragContent}\n\nUser Query: ${lastUserMsg.content}`;
+      // The retrieved text (the memory block first, when one was given) goes in the newest user message as a note
+      // from the application, in front of the person's words, which are sent exactly as written.
+      const ragContent = retrievedContextAsText(components.retrievedContext);
+      if (ragContent) {
+        const note = applicationNoteOf(ragContent);
+        const newest = messages[messages.length - 1];
+        if (newest?.role === 'user') {
+          newest.content = withApplicationNote(newest.content, note, USER_TEXT_PART_PROVIDERS.has(modelInfo.providerId));
         } else {
-          messages.push({role: 'user', content: `Based on the following context:\n${ragContent}\n\nPlease respond to the implicit or explicit user query.`});
+          // No user message is the newest (a call after tool results): the note is a user message of its own.
+          messages.push({ role: 'user', content: note });
         }
       }
       return messages;
@@ -1433,17 +1491,6 @@ export class PromptEngine implements IPromptEngine {
       }
 
       const currentUserInputParts: MessageContentPart[] = []; // Use MessageContentPart
-      // The retrieved context (the memory block first, when one was given) goes in front of the query, as in the
-      // OpenAI chat template.
-      const ragContent = retrievedContextAsText(components.retrievedContext);
-      if (ragContent) {
-        currentUserInputParts.push({
-          type: 'text',
-          text: components.userInput
-            ? `Context:\n${ragContent}\n\nUser Query:`
-            : `Based on the following context:\n${ragContent}\n\nPlease respond to the implicit or explicit user query.`,
-        });
-      }
       if(components.userInput) currentUserInputParts.push({type: 'text', text: components.userInput});
       if(components.visionInputs && modelInfo.visionSupport?.supported){
         components.visionInputs.forEach(vis => {
@@ -1456,6 +1503,23 @@ export class PromptEngine implements IPromptEngine {
             }
           } as any); // Use 'as any' if 'image' type with 'source' is not yet in MessageContentPart
         });
+      }
+      // The retrieved text (the memory block first, when one was given) goes in the newest user message as a note
+      // from the application, a text part of its own in front of the person's words, as in the OpenAI chat template.
+      // With no new input that message is the last one of the history, unless it carries tool results, whose blocks
+      // open their message: then the note is a user message of its own.
+      const ragContent = retrievedContextAsText(components.retrievedContext);
+      const newest = messages[messages.length - 1];
+      if (
+        ragContent &&
+        currentUserInputParts.length === 0 &&
+        newest?.role === 'user' &&
+        Array.isArray(newest.content) &&
+        !newest.content.some((part) => part?.type === 'tool_result')
+      ) {
+        newest.content = withApplicationNote(newest.content, applicationNoteOf(ragContent), true);
+      } else if (ragContent) {
+        currentUserInputParts.unshift({ type: 'text', text: applicationNoteOf(ragContent) });
       }
       if (currentUserInputParts.length > 0) {
         messages.push({role: 'user', content: currentUserInputParts});
@@ -1479,9 +1543,10 @@ export class PromptEngine implements IPromptEngine {
       if (components.conversationHistory) {
         promptString += components.conversationHistory.map(m => `${m.role}: ${typeof m.content === 'string' ? m.content : JSON.stringify(m.content)}`).join("\n") + "\n\n";
       }
-      // The retrieved context (the memory block first, when one was given) goes in front of the query.
+      // The retrieved text (the memory block first, when one was given) goes in front of the person's words as a
+      // note from the application.
       const ragContent = retrievedContextAsText(components.retrievedContext);
-      if (ragContent) promptString += `Context:\n${ragContent}\n\n`;
+      if (ragContent) promptString += `${applicationNoteOf(ragContent)}\n\n`;
       if (components.userInput) promptString += `user: ${components.userInput}\nassistant:`;
       return promptString;
     };
