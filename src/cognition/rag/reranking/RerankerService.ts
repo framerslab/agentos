@@ -191,9 +191,14 @@ export class RerankerService {
 
       return result;
     } catch (error) {
-      this.logger?.error(`RerankerService: Reranking failed with provider '${providerId}'`, {
-        error: error instanceof Error ? error.message : String(error),
-      });
+      // A stop by the caller's own signal is not a provider failure; a timeout that fired first has another reason.
+      if (fullConfig.signal?.aborted && error === fullConfig.signal.reason) {
+        this.logger?.debug?.(`RerankerService: Reranking with provider '${providerId}' stopped by the caller's signal`);
+      } else {
+        this.logger?.error(`RerankerService: Reranking failed with provider '${providerId}'`, {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
       throw error;
     }
   }
