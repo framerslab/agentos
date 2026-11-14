@@ -177,6 +177,34 @@ function cacheMarkerOf(part: MessageContentPart | undefined): unknown {
   return part && 'cache_control' in part ? part.cache_control : undefined;
 }
 
+/** Whether `value` holds a `cache_control` marker with the one-hour lifetime, at any depth. */
+function holdsOneHourMarker(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false;
+  return Object.entries(value).some(([key, nested]) =>
+    key === 'cache_control'
+      ? typeof nested === 'object' && nested !== null && (nested as { ttl?: unknown }).ttl === '1h'
+      : holdsOneHourMarker(nested),
+  );
+}
+
+/**
+ * Whether a one-hour cache marker comes after the part `isMarked` picks, in the order Anthropic reads the request's
+ * markers: the system messages' parts in message order (the provider sends every system message as the request's
+ * `system`), then the other messages' parts. Anthropic refuses a request with a one-hour marker after a five-minute one.
+ */
+function oneHourMarkerFollows(messages: readonly ChatMessage[], isMarked: (part: MessageContentPart) => boolean): boolean {
+  const ordered = [...messages.filter((message) => message.role === 'system'), ...messages.filter((message) => message.role !== 'system')];
+  let after = false;
+  for (const message of ordered) {
+    if (!Array.isArray(message.content)) continue;
+    for (const part of message.content) {
+      if (isMarked(part)) after = true;
+      else if (after && holdsOneHourMarker(part)) return true;
+    }
+  }
+  return false;
+}
+
 /** `value` when it is an abort signal: an object that takes abort listeners. */
 function asAbortSignal(value: unknown): AbortSignal | undefined {
   return value && typeof value === 'object' && typeof (value as AbortSignal).addEventListener === 'function'
@@ -2278,14 +2306,17 @@ export class GMI implements IGMI {
               this.addTraceEntry(ReasoningEntryType.WARNING, `beforeModelCall hook failed: ${hookError instanceof Error ? hookError.message : String(hookError)}`);
             }
           }
-          // Anthropic takes at most four cache markers a request. When the hook's messages carry more and one of them
-          // is the GMI's own (the hook kept the fixed block and its marker), the GMI removes that one and leaves the
+          // Anthropic takes at most four cache markers a request, and no one-hour marker after a five-minute one. When
+          // the hook's messages keep the GMI's own marker (the hook kept the fixed block and its marker) and carry more
+          // than four, or a one-hour marker after the GMI's five-minute one, the GMI removes its own and leaves the
           // host's markers as they are. It adds no marker to messages the hook built itself.
-          if (
-            markedSystemPart
-            && countCacheMarkers(sendMessages) > 4
-            && sendMessages.some((message) => Array.isArray(message.content) && message.content.some(carriesOwnMarker))
-          ) {
+          const keepsOwnMarker = markedSystemPart !== undefined
+            && sendMessages.some((message) => Array.isArray(message.content) && message.content.some(carriesOwnMarker));
+          const overMarkerCap = keepsOwnMarker && countCacheMarkers(sendMessages) > 4;
+          const outlivedByHook = keepsOwnMarker && !overMarkerCap
+            && (ownMarker as { ttl?: unknown } | undefined)?.ttl !== '1h'
+            && oneHourMarkerFollows(sendMessages, carriesOwnMarker);
+          if (overMarkerCap || outlivedByHook) {
             sendMessages = sendMessages.map((message) => !Array.isArray(message.content) ? message : ({
               ...message,
               content: message.content.map((part) => {
@@ -2297,7 +2328,9 @@ export class GMI implements IGMI {
             }));
             this.addTraceEntry(
               ReasoningEntryType.WARNING,
-              'Dropped the GMI system cache marker because the hook supplied more than four markers.',
+              overMarkerCap
+                ? 'Dropped the GMI system cache marker because the hook supplied more than four markers.'
+                : 'Dropped the GMI system cache marker because the hook put a one-hour marker after it.',
             );
           }
 
