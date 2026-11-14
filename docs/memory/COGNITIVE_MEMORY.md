@@ -665,10 +665,10 @@ Every line carries the trace's age and the UTC date it was stored (`createdAt`):
 - [episodic] user: which locker did we pick? ... (26 days ago, 2026-10-13 | moderate confidence | relevance: 0.62)
 ```
 
-A trace with sourceType `agent_inference` holds the agent's own words: a GMI files each reply that way, as a semantic trace. The block shows it as a past exchange in the agent's words, never as a fact: an `[episodic]` line whose content starts `You said: `, in Recent Experiences, or in the one recall section under `retrieval: 'hybrid'`. A graph association and the involuntary memory that lead to such a trace read the same way. The block reads the sourceType each time it is built and the stored trace is not changed, so a reply an earlier version filed is shown the same way, with no migration. Every other trace, a semantic fact a host filed or one consolidation wrote among them, is shown as it is. A reply recalled a day later reads:
+A GMI files each reply as a semantic trace with sourceType `agent_inference` under the bridge's tags, its role `assistant` first, then the persona id and the user id. The block shows such a trace as a past exchange in the agent's words, never as a fact: an `[episodic]` line whose content starts `You said: `, in Recent Experiences, or in the one recall section under `retrieval: 'hybrid'`. A graph association and the involuntary memory that lead to such a trace read the same way. The block reads the sourceType and the `assistant` tag each time it is built and the stored trace is not changed, so a reply an earlier version filed, under the same tags, is shown the same way, with no migration. Every other trace is shown as it is: a semantic fact a host filed, one consolidation wrote, and a trace a host filed itself with sourceType `agent_inference` and without the `assistant` tag, a conclusion it drew, among them. A reply recalled a day later reads:
 
 ```
-- [episodic] You said: Green tea, from what you told me. (1d ago, 2026-11-13 | moderate confidence | relevance: 0.71)
+- [episodic] You said: Green tea, from what you told me. (1d ago, 2026-11-13 | moderate confidence | relevance: 0.71 | tags: assistant, tutor, user-42)
 ```
 
 ### Personality -> Formatting Style
@@ -727,7 +727,7 @@ Token estimation uses ~4 chars per token heuristic.
 
 ### Upgrading from 0.17.3 or earlier
 
-- The agent's own earlier replies, the traces with sourceType `agent_inference` that a GMI files after each turn as semantic traces, are shown as past exchanges in its words and not under the facts heading. Under `retrieval: 'dense'` such a trace is shown in Recent Experiences, and under `'hybrid'` in the one recall section, as an `[episodic]` line whose content starts `You said: `; a graph association to one reads the same way ([Trace Lines](#trace-lines)). The stored traces are not changed: the block reads the sourceType each time it is built, so the replies a store holds from earlier versions are shown the new way with no migration. In a dense block such a trace draws on Recent Episodic's share, and `lineOutcomes` and the recall capture report it under `recentEpisodic` where 0.17.3 reported `semanticRecall`, so which recalled memories fit the block may shift.
+- The agent's own earlier replies, the traces with sourceType `agent_inference` and the tag `assistant` that a GMI files after each turn as semantic traces, are shown as past exchanges in its words and not under the facts heading. Under `retrieval: 'dense'` such a trace is shown in Recent Experiences, and under `'hybrid'` in the one recall section, as an `[episodic]` line whose content starts `You said: `; a graph association to one reads the same way ([Trace Lines](#trace-lines)). The stored traces are not changed: the block reads the sourceType and the tag each time it is built, so the replies a store holds from earlier versions, which carry the same tag, are shown the new way with no migration. A trace a host files with sourceType `agent_inference` and without the `assistant` tag is shown as before. In a dense block such a trace draws on Recent Episodic's share, and `lineOutcomes` and the recall capture report it under `recentEpisodic` where 0.17.3 reported `semanticRecall`, so which recalled memories fit the block may shift.
 
 ### Upgrading from 0.17.2 or earlier
 
@@ -1290,10 +1290,11 @@ await cognitiveMemory.encode(assistantResponse, mood, gmiMood, {
   scope: 'user',
   scopeId: sessionId,
   sourceType: 'agent_inference',
+  tags: ['assistant', personaId, userId],
 });
 ```
 
-A later turn's block shows the reply as the agent's own earlier words, a past exchange whose line starts `You said: `, and never as a fact; it reads that from the `agent_inference` sourceType ([Trace Lines](#trace-lines)).
+A later turn's block shows the reply as the agent's own earlier words, a past exchange whose line starts `You said: `, and never as a fact; it reads that from the `agent_inference` sourceType and the `assistant` tag ([Trace Lines](#trace-lines)).
 
 With a learning layer the GMI reads and files under the scope ids its learner session gives the turn: the user's message and the reply both go under the turn's own user scope id (the learner's, or the session's form on a turn with no learner), each encode runs inside the user's write chain with the tombstone read before it and once it has committed, and the recall lists only the turn's own scopes ([Where a turn's memory is filed and read](../GMI.md#where-a-turns-memory-is-filed-and-read)).
 
