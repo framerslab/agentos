@@ -138,6 +138,20 @@ describe('GMI Anthropic wire', () => {
     expect(markerCount(bodies[0])).toBe(4);
     expect(bodies[0].system[0]).not.toHaveProperty('cache_control');
   });
+  // Anthropic reads markers in the order tools, system, messages, and refuses a one-hour marker after a five-minute one.
+  it('sends no five-minute marker before a one-hour marker the hook adds', async () => {
+    await make({ onBeforeGeneration: ({ messages }: any) => ({ messages: [...messages,
+      { role: 'system', content: [{ type: 'text', text: 'Host', cache_control: { type: 'ephemeral', ttl: '1h' } }] },
+    ] }) }).generate('hi');
+    const blocks = [
+      ...(Array.isArray(bodies[0].system) ? bodies[0].system : []),
+      ...bodies[0].messages.flatMap((message: any) => Array.isArray(message.content) ? message.content : []),
+    ];
+    const lifetimes = blocks.filter((block: any) => block?.cache_control).map((block: any) => block.cache_control.ttl ?? '5m');
+    const firstShort = lifetimes.indexOf('5m');
+    expect(firstShort < 0 || lifetimes.lastIndexOf('1h') < firstShort, `every one-hour marker comes first: ${lifetimes.join(', ')}`).toBe(true);
+    expect(bodies[0].system.find((block: any) => block.text === 'Host')?.cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+  });
   it('uses the last breakpoint and keeps the recall line in the hook base text', async () => {
     let system: unknown;
     await make({

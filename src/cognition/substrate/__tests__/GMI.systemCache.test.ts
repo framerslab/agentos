@@ -84,6 +84,35 @@ describe('GMI cache eligibility', () => {
       entry.type === 'WARNING' && entry.message === 'Dropped the GMI system cache marker because the hook supplied more than four markers.',
     )).toHaveLength(0);
   });
+  // Anthropic refuses a one-hour marker after a five-minute one (tools, then system, then messages), so the GMI's
+  // marker with the default lifetime gives way to a one-hour marker the hook puts after it, and only then.
+  const hostPart = { type: 'text', text: 'Host', cache_control: { type: 'ephemeral', ttl: '1h' } };
+  const outlivedWarning = (gmi: unknown) => (gmi as any).reasoningTrace.entries.filter((entry: any) =>
+    entry.type === 'WARNING' && entry.message === 'Dropped the GMI system cache marker because the hook put a one-hour marker after it.');
+  it('removes its own five-minute marker when the hook adds a one-hour marker after it', async () => {
+    const result = await request({}, { config: { beforeModelCall: ({ messages }: any) => [
+      ...messages, { role: 'system', content: [{ ...hostPart }] },
+    ] } });
+    expect((systems(result.received[0])[0].content as any[])[0], "the GMI's five-minute marker is removed")
+      .not.toHaveProperty('cache_control');
+    expect(systems(result.received[0]).at(-1).content).toEqual([hostPart]);
+    expect(markers(result.received[0])).toBe(1);
+    expect(outlivedWarning(result.gmi)).toHaveLength(1);
+  });
+  it.each([
+    { when: 'its own marker is a one-hour marker', options: { cache: { ttl: '1h' } }, at: 'end' },
+    { when: "the hook's one-hour marker comes first", options: {}, at: 'start' },
+  ])('keeps its own marker when $when', async ({ options, at }) => {
+    const result = await request(options, { config: { beforeModelCall: ({ messages }: any) => {
+      const host = { role: 'system', content: [{ ...hostPart }] };
+      return at === 'start' ? [host, ...messages] : [...messages, host];
+    } } });
+    const own = systems(result.received[0]).find((message: any) =>
+      Array.isArray(message.content) && message.content.some((part: any) => part.text === 'Policy'));
+    expect(own.content.find((part: any) => part.text === 'Policy')).toHaveProperty('cache_control');
+    expect(markers(result.received[0])).toBe(2);
+    expect(outlivedWarning(result.gmi)).toHaveLength(0);
+  });
   it('includes hard limits in the marked block when all entries are fixed', async () => {
     const result = await request({}, { persona: { defaultModelId: 'claude-sonnet-4-6', baseSystemPrompt: 'Policy', hardLimits: ['Final constraint.'] } });
     const system = systems(result.received[0]);
