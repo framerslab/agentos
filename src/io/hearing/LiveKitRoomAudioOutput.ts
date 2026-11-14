@@ -15,9 +15,10 @@
  *   it asks anything of its listener and the listener holds the track when the
  *   first clip comes.
  * - {@link LiveKitRoomAudioOutput.play} cuts a clip into chunks of at most the
- *   publisher's `maxDurationMs` ({@link pcmChunks}), hands them to the track in
- *   order, each carrying the clip's mark, and resolves once the track has played
- *   the last one out. Nobody subscribed within `receiptTimeoutMs` rejects it
+ *   publisher's `maxDurationMs`, shorter when a chunk's bytes and the bytes it
+ *   is resampled to would pass `maxBytes`, hands them to the track in order,
+ *   each carrying the clip's mark, and resolves once the track has played the
+ *   last one out. Nobody subscribed within `receiptTimeoutMs` rejects it
  *   with the code {@link ROOM_AUDIO_NO_SUBSCRIBER}, before any frame.
  * - {@link LiveKitRoomAudioOutput.clear}, an aborted signal and
  *   {@link LiveKitRoomAudioOutput.close} empty the track's queue and reject the
@@ -97,9 +98,10 @@ export interface LiveKitRoomAudioOutputOptions {
    */
   room: LiveKitRoomAudioOutputRoomLike;
   /**
-   * The publisher's options: the track's rate, `maxBytes`, `maxDurationMs` (also the longest chunk a clip is cut
-   * into) and `receiptTimeoutMs` (also how long a play or an open waits for a subscriber). The output plays natively
-   * and sets each chunk's mark from its clip, so `playout` and `mark` are its own.
+   * The publisher's options: the track's rate, `maxBytes` (also what a chunk's bytes and the bytes it is resampled to
+   * fit), `maxDurationMs` (also the longest chunk a clip is cut into) and `receiptTimeoutMs` (also how long a play or
+   * an open waits for a subscriber). The output plays natively and sets each chunk's mark from its clip, so `playout`
+   * and `mark` are its own.
    */
   publisher: Omit<LiveKitAudioPublisherOptions, 'playout' | 'mark'>;
   /** The `@livekit/rtc-node` module, or a structural one; `publisher.rtc` comes first, and with neither it is imported. */
@@ -125,11 +127,30 @@ export interface RoomAudioPlayed {
  * @throws {RangeError} When `maxMs` at `sampleRate` holds no whole sample.
  */
 export function pcmChunks(audio: Buffer, sampleRate: number, maxMs: number): Buffer[] {
-  const bytes = Math.floor((sampleRate * maxMs) / 1000) * 2;
-  if (!(bytes >= 2)) throw new RangeError('pcmChunks: maxMs at sampleRate must hold at least one whole sample');
+  const samples = Math.floor((sampleRate * maxMs) / 1000);
+  if (!(samples >= 1)) throw new RangeError('pcmChunks: maxMs at sampleRate must hold at least one whole sample');
+  return cut(audio, samples);
+}
+
+/** A PCM16 mono clip cut into chunks of at most `samples` samples. */
+function cut(audio: Buffer, samples: number): Buffer[] {
+  const bytes = samples * 2;
   const chunks: Buffer[] = [];
   for (let at = 0; at < audio.length; at += bytes) chunks.push(audio.subarray(at, Math.min(audio.length, at + bytes)));
   return chunks;
+}
+
+/**
+ * The most samples one chunk of a clip at `clipRate` holds: at most `maxDurationMs` of it, and few enough that its
+ * PCM16 bytes and the bytes it is resampled to at `trackRate` fit `maxBytes`, as the publisher counts a chunk. The
+ * largest whole `n` with `n + ceil(n * trackRate / clipRate)` within half of `maxBytes` is
+ * `floor(floor(maxBytes / 2) * clipRate / (clipRate + trackRate))`. Bounds that hold no sample give one, which the
+ * publisher refuses with its own bound.
+ */
+function chunkSamples(clipRate: number, trackRate: number, maxDurationMs: number, maxBytes: number): number {
+  const byDuration = Math.floor((clipRate * maxDurationMs) / 1000);
+  const byBytes = Math.floor((Math.floor(maxBytes / 2) * clipRate) / (clipRate + trackRate));
+  return Math.max(1, Math.min(byDuration, byBytes));
 }
 
 /**
@@ -302,11 +323,12 @@ export class LiveKitRoomAudioOutput {
   }
 
   /**
-   * Plays one whole clip: cut into chunks of at most `maxDurationMs` ({@link pcmChunks}), handed to the track in
-   * order, each carrying the clip's mark when it has one (set once, before the clip's first frame), and resolved once
-   * the track has played the last one out. One play runs at a time, and it hands the track nothing until a clear
-   * asked before it has finished. A clear or an abort ends the play's wait for the track's publication or for a
-   * subscriber at once, and the output keeps nothing of that wait.
+   * Plays one whole clip: cut into chunks of at most `maxDurationMs`, shorter when a chunk's PCM16 bytes and the
+   * bytes it is resampled to at the track's rate would pass `maxBytes` (both as the publisher counts them), handed to
+   * the track in order, each carrying the clip's mark when it has one (set once, before the clip's first frame), and
+   * resolved once the track has played the last one out. One play runs at a time, and it hands the track nothing
+   * until a clear asked before it has finished. A clear or an abort ends the play's wait for the track's publication
+   * or for a subscriber at once, and the output keeps nothing of that wait.
    *
    * @param clip - PCM16 mono at its own rate, from 8000 to 192000 Hz; another rate than the track's is resampled
    *   chunk by chunk.
@@ -329,6 +351,8 @@ export class LiveKitRoomAudioOutput {
       throw new RangeError('LiveKitRoomAudioOutput: a clip is whole PCM16 mono at a rate from 8000 to 192000 Hz');
     }
     if (signal?.aborted) throw failure('room audio aborted', { cause: signal.reason });
+    const { sampleRate: trackRate, maxDurationMs, maxBytes } = this.options.publisher;
+    const samples = chunkSamples(sampleRate, trackRate, maxDurationMs, maxBytes);
     const run = startRun();
     this.run = run;
     const abort = (): void => {
@@ -345,7 +369,7 @@ export class LiveKitRoomAudioOutput {
       await this.within(run, this.listener(Date.now(), run));
       // A clear asked before this play, of the clip before it, finishes first.
       while (this.clearing) await this.within(run, this.clearing);
-      for (const pcm of pcmChunks(audio, sampleRate, this.options.publisher.maxDurationMs)) {
+      for (const pcm of cut(audio, samples)) {
         const chunk: EncodedAudioChunk = {
           audio: wavChunk(pcm, sampleRate),
           format: 'pcm',
