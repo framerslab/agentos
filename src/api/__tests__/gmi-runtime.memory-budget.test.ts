@@ -41,16 +41,23 @@ function textOf(message: ChatMessage): string {
   return '';
 }
 
-/** The memory block of the provider request `call`: the text from the preamble heading to where the prompt engine resumes with the user's query. */
+/** The texts of a message: its one string, or the text of each of its text parts. */
+function textPartsOf(message: ChatMessage): string[] {
+  const content = message.content as unknown;
+  if (typeof content === 'string') return [content];
+  if (!Array.isArray(content)) return [];
+  return content.flatMap((part) => (part && typeof part === 'object' && typeof (part as { text?: unknown }).text === 'string' ? [(part as { text: string }).text] : []));
+}
+
+/** The memory block of the provider request `call`: the text from the preamble heading to the end of the text part that carries it. */
 function memoryBlockOf(s: ProviderScript, call: number): string {
   const request = s.seen[call];
   expect(request, `model call ${call}`).toBeDefined();
   const holders = request.messages.map(textOf).filter((text) => text.includes(PREAMBLE_HEADING));
   expect(holders, 'messages that carry the memory block').toHaveLength(1);
-  const text = holders[0];
-  const start = text.indexOf(PREAMBLE_HEADING);
-  const end = text.indexOf('\n\nUser Query:', start);
-  return text.slice(start, end === -1 ? undefined : end);
+  // The block travels in a text part of its own, before the person's words: it runs to the end of that part.
+  const text = request.messages.flatMap(textPartsOf).find((part) => part.includes(PREAMBLE_HEADING)) ?? holders[0];
+  return text.slice(text.indexOf(PREAMBLE_HEADING));
 }
 
 /** Tokens of a text by the assembler's estimate (about four characters a token). */
@@ -368,14 +375,12 @@ describe("agent({ runtime: 'gmi' }) memory.recall beside the other memory option
 describe("agent({ runtime: 'gmi' }) memory budget across a fallback hop", () => {
   const overloaded = () => Object.assign(new Error('overloaded'), { httpStatus: 529 });
 
-  /** The block in a provider request: from the preamble heading to where the prompt engine resumes with the query; '' when none. */
+  /** The block in a provider request: from the preamble heading to the end of the text part that carries it; '' when none. */
   function blockIn(request: ProviderScript['seen'][number] | undefined): string {
     expect(request, 'the model call').toBeDefined();
-    const holder = request!.messages.map(textOf).find((text) => text.includes(PREAMBLE_HEADING));
+    const holder = request!.messages.flatMap(textPartsOf).find((text) => text.includes(PREAMBLE_HEADING));
     if (!holder) return '';
-    const start = holder.indexOf(PREAMBLE_HEADING);
-    const end = holder.indexOf('\n\nUser Query:', start);
-    return holder.slice(start, end === -1 ? undefined : end);
+    return holder.slice(holder.indexOf(PREAMBLE_HEADING));
   }
 
   /**
