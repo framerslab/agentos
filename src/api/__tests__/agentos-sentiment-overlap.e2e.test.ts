@@ -79,6 +79,7 @@ vi.mock('../../core/llm/providers/implementations/OpenAIProvider', () => ({
 import { AgentOS } from '../AgentOS';
 import { GMI } from '../../cognition/substrate/GMI';
 import { GMIEventType } from '../../cognition/substrate/GMIEvent';
+import { AgentOSResponseChunkType } from '../types/AgentOSResponse';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -235,7 +236,8 @@ describe('full-runtime sentiment overlap', () => {
     const second = turn('Next question.'); await mainStarted(2); await second;
     const before = await snapshot(); held.resolve(negative); await vi.advanceTimersByTimeAsync(0);
     expect(await snapshot()).toBe(before);
-    expect(await snapshot()).not.toContain('1234');
+    // The forgotten text, not its digits alone: the trace holds random turn ids, and a hex id can contain '1234'.
+    expect(await snapshot()).not.toContain('PIN is 1234');
   });
 
   it('drops a forgotten result even before the turn reaches its post-turn reader', async () => {
@@ -246,7 +248,8 @@ describe('full-runtime sentiment overlap', () => {
     await vi.waitFor(() => expect(current.sentimentTracker.events).toEqual([]));
     main.resolve(); await done;
     expect(await current.workingMemory.get('gmi_sentiment_history')).toBeUndefined();
-    expect(await snapshot()).not.toContain('1234');
+    // The forgotten text, not its digits alone: the trace holds random turn ids, and a hex id can contain '1234'.
+    expect(await snapshot()).not.toContain('PIN is 1234');
   });
 
   it.each(['failure', 'abort', 'shutdown'] as const)('abandons analysis on %s', async (ending) => {
@@ -285,5 +288,15 @@ describe('full-runtime sentiment overlap', () => {
     current.currentUserContext = { ...current.currentUserContext, language: 'fr', preferences: { verbosity: 'detailed' } };
     held.resolve(negative); main.resolve(); await done;
     expect(current.currentUserContext).toMatchObject({ language: 'fr', preferences: { verbosity: 'detailed' }, currentSentiment: 'negative' });
+  });
+  it('preserves optional cache counters on FINAL_RESPONSE usage', async () => {
+    wire.usage = { promptTokens: 3, completionTokens: 2, totalTokens: 5,
+      cacheReadInputTokens: 11, cacheCreationInputTokens: 17, cacheCreationExtendedInputTokens: 0, inclusiveInputTokens: 31 };
+    await boot();
+    const chunks = await turn();
+    const final = chunks.find((chunk) => chunk.type === AgentOSResponseChunkType.FINAL_RESPONSE);
+    expect(final, 'the runtime must emit FINAL_RESPONSE').toBeDefined();
+    expect(final.usage).toMatchObject({ cacheReadTokens: 11, cacheCreationTokens: 17,
+      cacheCreationExtendedTokens: 0, inclusiveInputTokens: 31 });
   });
 });

@@ -13,6 +13,8 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { Readable } from 'node:stream';
 import { OpenRouterProvider } from '../OpenRouterProvider';
 import type { ChatMessage } from '../../IProvider';
+import { agent } from '../../../../../api/agent';
+import { systemTextOf } from '../../../../../api/__tests__/helpers/stubProviders';
 
 type WirePart = {
   type?: string;
@@ -434,5 +436,43 @@ describe('OpenRouter anthropic/* zero-config cache_control', () => {
     expect(Array.isArray(wire[0].content)).toBe(true);
     const systemParts = wire[0].content as WirePart[];
     expect(systemParts[0].cache_control).toEqual({ type: 'ephemeral' });
+  });
+
+  it('marks the fixed first system message of a GMI-shaped request and its tail', async () => {
+    const messages = await capture('anthropic/claude-sonnet-4-6', [
+      { role: 'system', content: 'Policy' }, { role: 'system', content: 'Clock' }, { role: 'user', content: 'Hello.' },
+    ]);
+    expect((messages[0].content as WirePart[])[0]).toEqual({ type: 'text', text: 'Policy', cache_control: { type: 'ephemeral' } });
+    expect(messages[1].content).toBe('Clock');
+    expect((messages[2].content as WirePart[])[0].cache_control).toEqual({ type: 'ephemeral' });
+  });
+
+  it('a gmi send reaches OpenRouter with two system messages and a marked first message', async () => {
+    const sent: any[] = [];
+    vi.spyOn(OpenRouterProvider.prototype as any, 'makeApiRequest').mockImplementation(async (...args: any[]) => {
+      const [endpoint, , , payload, streaming] = args;
+      if (endpoint === '/models') return { data: [] };
+      sent.push(payload);
+      if (!streaming) return chatBody();
+      return Readable.from([
+        `data: ${JSON.stringify({ id: 'gmi-or', object: 'chat.completion.chunk', choices: [{ index: 0, delta: { content: 'Hi.' }, finish_reason: null }] })}\n\n`,
+        `data: ${JSON.stringify({ id: 'gmi-or', object: 'chat.completion.chunk', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 } })}\n\n`,
+        'data: [DONE]\n\n',
+      ]);
+    });
+    const a = agent({ runtime: 'gmi', provider: 'openrouter', model: 'anthropic/claude-sonnet-4-6',
+      apiKey: 'or-gmi-two-blocks', fallbackProviders: [], cognition: { mechanisms: false }, chainOfThought: false,
+      systemBlocks: [{ text: 'Policy', cacheBreakpoint: true }, { text: 'Clock' }],
+    } as unknown as Parameters<typeof agent>[0]);
+    try {
+      await a.generate('Hi.');
+      expect(sent.length, 'the gmi send reached the provider').toBeGreaterThan(0);
+      const messages = sent.at(-1).messages;
+      expect(messages.filter((message: any) => message.role === 'system')).toHaveLength(2);
+      expect(systemTextOf(messages)).toBe('Policy\n\nClock');
+      expect(messages[0].content[0].cache_control).toEqual({ type: 'ephemeral' });
+      expect(messages[1].content).toBe('Clock');
+      expect(messages.at(-1).content.at(-1).cache_control).toEqual({ type: 'ephemeral' });
+    } finally { await a.close(); }
   });
 });

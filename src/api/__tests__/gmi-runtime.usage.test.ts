@@ -15,8 +15,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
 vi.mock('../../core/llm/providers/implementations/AnthropicProvider', async () => ({ AnthropicProvider: (await import('./helpers/stubProviders')).stubProviderClass('anthropic') }));
 
-/** The response bodies the next OpenRouter chat requests stream, in order. */
-const openRouter = vi.hoisted(() => ({ bodies: [] as Array<() => NodeJS.ReadableStream> }));
+/** The response bodies the next OpenRouter chat requests stream, in order, and a copy of each chat request's payload. */
+const openRouter = vi.hoisted(() => ({ bodies: [] as Array<() => NodeJS.ReadableStream>, sent: [] as Array<Record<string, any>> }));
 // The real OpenRouter provider over a scripted HTTP client (its initialize() would fetch the model list).
 vi.mock('../../core/llm/providers/implementations/OpenRouterProvider', async (importOriginal) => {
   const real = await importOriginal<typeof import('../../core/llm/providers/implementations/OpenRouterProvider')>();
@@ -27,8 +27,9 @@ vi.mock('../../core/llm/providers/implementations/OpenRouterProvider', async (im
         config: { apiKey: config.apiKey, baseURL: 'https://openrouter.test/api/v1', requestTimeout: 1_000, streamRequestTimeout: 5_000 },
         keyPool: new ApiKeyPool(config.apiKey),
         client: {
-          request: async ({ url }: { url: string }) => {
+          request: async ({ url, data }: { url: string; data?: unknown }) => {
             if (url === '/models') return { data: { data: [] } };
+            openRouter.sent.push(JSON.parse(JSON.stringify(data ?? {})));
             const body = openRouter.bodies.shift();
             if (!body) throw new Error('openrouter: unexpected request');
             return { data: body() };
@@ -42,7 +43,7 @@ vi.mock('../../core/llm/providers/implementations/OpenRouterProvider', async (im
 });
 import { agent, type AgentOptions } from '../agent';
 import { SpendBudget } from '../runtime/spendBudget';
-import { reply, script } from './helpers/stubProviders';
+import { reply, script, systemTextOf } from './helpers/stubProviders';
 import { setGlobalLlmObserver, type LlmUsageEvent } from '../observers';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 import { GMIErrorCode } from '../../core/utils/errors';
@@ -93,6 +94,7 @@ function ledgerRows(): Array<Record<string, unknown>> {
 beforeEach(() => {
   globalLLMProviderHealth.reset();
   openRouter.bodies.length = 0;
+  openRouter.sent.length = 0;
   ledgerDir = mkdtempSync(join(tmpdir(), 'agentos-gmi-usage-'));
   ledgerPath = join(ledgerDir, 'ledger.jsonl');
   events = [];
@@ -344,5 +346,101 @@ describe("agent({ runtime: 'gmi' }) usage", () => {
     } finally {
       usageLine.open();
     }
+  });
+
+  it('keeps cache counts across a tool step and the final answer', async () => {
+    const usage = { promptTokens: 12, completionTokens: 3, totalTokens: 15,
+      cacheReadInputTokens: 20, cacheCreationInputTokens: 30, cacheCreationExtendedInputTokens: 5, inclusiveInputTokens: 62 };
+    const tool = reply.tools([{ id: 'cache-tool', name: 'lookup', args: { q: 'x' } }]);
+    (tool.at(-1) as any).usage = usage;
+    const k = key(); script('openai', k, { replies: [tool, reply.text('Found.', 'stub-model', usage)] });
+    const a = agent(base(k, { tools: [lookup] }));
+    try {
+      const result = await a.session('cache-usage').send('Find x.');
+      expect(result.usage).toMatchObject({ cacheReadTokens: 40, cacheCreationTokens: 60,
+        cacheCreationExtendedTokens: 10, inclusiveInputTokens: 124 });
+    } finally { await a.close(); }
+  });
+
+  it('keeps an OpenAI GMI system as one string and onBeforeGeneration system as the joined base', async () => {
+    const k = key(); const s = script('openai', k, { replies: [reply.text('Hello.')] });
+    let baseSystem: unknown;
+    const a = agent(base(k, { systemBlocks: [{ text: 'Policy' }],
+      onBeforeGeneration: (context: any) => { baseSystem = context.system; },
+    }));
+    try {
+      const result = await a.generate('Hello.');
+      const system = s.seen[0].messages.filter((message) => message.role === 'system');
+      expect(system).toEqual([{ role: 'system', content: 'Policy' }]);
+      expect(systemTextOf(s.seen[0].messages)).toBe('Policy');
+      expect(baseSystem).toBe('Policy');
+      expect(result.usage).not.toHaveProperty('cacheReadTokens');
+      expect(result.usage).not.toHaveProperty('cacheCreationTokens');
+      expect(result.usage).not.toHaveProperty('cacheCreationExtendedTokens');
+    } finally { await a.close(); }
+  });
+
+  it('rebuilds the split as one system string on an OpenAI fallback hop', async () => {
+    const k = key(); const fallbackKey = key();
+    const primary = script('anthropic', k, { replies: [Object.assign(new Error('overloaded'), { httpStatus: 529 })] });
+    const fallback = script('openai', fallbackKey, { replies: [reply.text('Recovered.')] });
+    vi.stubEnv('OPENAI_API_KEY', fallbackKey);
+    const a = agent({ ...base(k), provider: 'anthropic', model: 'claude-sonnet-4-6',
+      systemBlocks: [{ text: 'Policy', cacheBreakpoint: true }, { text: 'Clock' }],
+      fallbackProviders: [{ provider: 'openai', model: 'stub-model' }],
+    });
+    try {
+      await a.generate('Hi.');
+      expect(primary.seen[0].messages.filter((message) => message.role === 'system')).toHaveLength(2);
+      expect(fallback.seen[0].messages.filter((message) => message.role === 'system')).toEqual([{ role: 'system', content: 'Policy\n\nClock' }]);
+      expect(systemTextOf(primary.seen[0].messages)).toBe(systemTextOf(fallback.seen[0].messages));
+    } finally { await a.close(); }
+  });
+
+  // A fallback entry's own `cache` replaces the turn's on its hop (the gateway sends the hop with it), so the hop's
+  // prompt is built for that setting, not for the turn's.
+  it("sends one system string to an OpenRouter Claude fallback hop whose entry sets cache false", async () => {
+    const k = key();
+    script('openai', k, { replies: [Object.assign(new Error('overloaded'), { httpStatus: 529 })] });
+    vi.stubEnv('OPENROUTER_API_KEY', key());
+    openRouter.bodies.push(() =>
+      sseBody([
+        orLine({ choices: [{ index: 0, delta: { role: 'assistant', content: 'Recovered.' }, finish_reason: null }] }),
+        orLine({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }),
+        orLine({ choices: [], usage: { prompt_tokens: 12, completion_tokens: 4, total_tokens: 16 } }),
+        'data: [DONE]',
+      ]),
+    );
+    const a = agent(base(k, { cognition: { mechanisms: false }, chainOfThought: false,
+      systemBlocks: [{ text: 'Policy', cacheBreakpoint: true }, { text: 'Clock' }],
+      fallbackProviders: [{ provider: 'openrouter', model: 'anthropic/claude-sonnet-4-6', cache: false }],
+    }));
+    try {
+      expect(await a.session('s').send('Hi.')).toMatchObject({ text: 'Recovered.', provider: 'openrouter' });
+      expect(openRouter.sent.map((payload) => payload.model)).toEqual(['anthropic/claude-sonnet-4-6']);
+      const system = openRouter.sent[0].messages.filter((message: { role: string }) => message.role === 'system');
+      expect(system.map((message: { content: unknown }) => message.content), 'a hop sent with caching off gets one system string').toEqual(['Policy\n\nClock']);
+      expect(JSON.stringify(openRouter.sent[0])).not.toContain('cache_control');
+    } finally { await a.close(); }
+  });
+
+  it("marks the fixed block for one hour on an Anthropic fallback hop whose entry sets that lifetime over the agent's cache false", async () => {
+    const k = key(); const fallbackKey = key();
+    script('openai', k, { replies: [Object.assign(new Error('overloaded'), { httpStatus: 529 })] });
+    const fallback = script('anthropic', fallbackKey, { replies: [reply.text('Recovered.')] });
+    vi.stubEnv('ANTHROPIC_API_KEY', fallbackKey);
+    const a = agent(base(k, { cache: false,
+      systemBlocks: [{ text: 'Policy', cacheBreakpoint: true }, { text: 'Clock' }],
+      fallbackProviders: [{ provider: 'anthropic', model: 'claude-sonnet-4-6', cache: { ttl: '1h' } }],
+    }));
+    try {
+      expect(await a.session('s').send('Hi.')).toMatchObject({ text: 'Recovered.', provider: 'anthropic' });
+      // The precondition: the gateway sends the hop with its entry's setting.
+      expect(fallback.seen[0].options.cache).toEqual({ ttl: '1h' });
+      expect(fallback.seen[0].messages.filter((message) => message.role === 'system'), 'a hop sent with caching on gets the marked fixed block').toEqual([
+        { role: 'system', content: [{ type: 'text', text: 'Policy', cache_control: { type: 'ephemeral', ttl: '1h' } }] },
+        { role: 'system', content: 'Clock' },
+      ]);
+    } finally { await a.close(); }
   });
 });
