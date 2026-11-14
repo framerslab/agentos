@@ -53,7 +53,7 @@ import { IWorkingMemory } from './memory/IWorkingMemory';
 import { IPromptEngine, PromptExecutionContext, PromptComponents, PromptEngineResult, ModelTargetInfo, type PromptHistoryOmission } from '../../core/llm/IPromptEngine';
 import { IRetrievalAugmentor, RagRetrievalOptions, RagDocumentInput, RagIngestionOptions, RagMemoryCategory } from '../rag/IRetrievalAugmentor';
 
-import { ChatMessage, IProvider, ModelCompletionOptions, ModelCompletionResponse, ModelUsage, ThinkingBlock } from '../../core/llm/providers/IProvider';
+import { ChatMessage, IProvider, MessageContentPart, ModelCompletionOptions, ModelCompletionResponse, ModelUsage, ThinkingBlock } from '../../core/llm/providers/IProvider';
 import { resolveCacheCapabilities } from '../../core/llm/providers/model-cache-capabilities';
 import type { ZodType } from 'zod';
 import type { CompletionAttempt, CompletionOutcome, CompletionResolution, CompletionRoute } from '../../api/runtime/completionGateway.js';
@@ -139,7 +139,7 @@ function withSystemMessage(messages: ChatMessage[], text: string): ChatMessage[]
  * `customModelParams.model` is the model checked, as the provider sends it.
  *
  * @param target - The hop's model and provider.
- * @param options - The call's completion options.
+ * @param options - The completion options the hop is sent with: the turn's, under a fallback entry's own overrides.
  * @returns `{ ttl: '1h' }` with `cache: { ttl: '1h' }`, `{}` for the default lifetime, or undefined.
  */
 function systemCacheMarkerFor(
@@ -170,6 +170,11 @@ function countCacheMarkers(value: unknown): number {
     (count, [key, nested]) => count + (key === 'cache_control' ? 1 : countCacheMarkers(nested)),
     0,
   );
+}
+
+/** The cache marker on a content part, or undefined when the part carries none. */
+function cacheMarkerOf(part: MessageContentPart | undefined): unknown {
+  return part && 'cache_control' in part ? part.cache_control : undefined;
 }
 
 /** `value` when it is an abort signal: an object that takes abort listeners. */
@@ -2145,8 +2150,12 @@ export class GMI implements IGMI {
           // An engine that reads `memoryContextText` takes the block on its own; any other (a host's own IPromptEngine)
           // takes it joined in front of the other retrieved context, as before the field existed, so it is still sent.
           const hopMemoryText = hopMemoryContext?.contextText;
-          // Asked per hop: a fallback hop to another provider or model rebuilds the prompt for its own target.
-          const systemCacheMarker = systemCacheMarkerFor(modelTargetInfo, llmOptions);
+          // Asked per hop: a fallback hop to another provider or model rebuilds the prompt for its own target, and
+          // with the options the gateway sends that hop (a fallback entry's own `cache` replaces the turn's there).
+          const systemCacheMarker = systemCacheMarkerFor(
+            modelTargetInfo,
+            resolution ? { ...llmOptions, ...resolution.optionOverrides } : llmOptions,
+          );
           const hopComponents: PromptComponents = {
             ...promptComponents,
             ...(systemCacheMarker ? { systemCacheMarker } : {}),
@@ -2228,12 +2237,18 @@ export class GMI implements IGMI {
           }
 
           // The text part of the fixed first system block that carries this GMI's cache marker, when the prompt has
-          // one. The hook gets a copy of the message list, not of the messages, so a hook that keeps the block keeps
-          // this very part, and the GMI can tell its own marker from the host's after the hook.
+          // one, with the marker as the GMI set it. The hook gets a copy of the message list, not of the messages, so
+          // a hook that keeps the block keeps this very part, and the GMI can tell its own marker from the host's
+          // after the hook: the marker is the GMI's while the part carries the same marker object, unchanged. A
+          // marker the hook sets on the part, or changes in place, is the host's.
           const firstSystemContent = promptForHook.find((message) => message.role === 'system')?.content;
           const markedSystemPart = promptEngineResult.metadata?.systemSplit?.marked === true && Array.isArray(firstSystemContent)
             ? firstSystemContent.find((part) => 'cache_control' in part && part.cache_control !== undefined)
             : undefined;
+          const ownMarker = cacheMarkerOf(markedSystemPart);
+          const ownMarkerText = JSON.stringify(ownMarker);
+          const carriesOwnMarker = (part: MessageContentPart): boolean =>
+            part === markedSystemPart && cacheMarkerOf(part) === ownMarker && JSON.stringify(cacheMarkerOf(part)) === ownMarkerText;
 
           // The host's hook sees each attempt's prompt, a fallback hop's rebuilt one
           // included, and may replace it for that attempt; the history is untouched.
@@ -2264,17 +2279,17 @@ export class GMI implements IGMI {
             }
           }
           // Anthropic takes at most four cache markers a request. When the hook's messages carry more and one of them
-          // is the GMI's own (the hook kept the fixed block), the GMI removes that one and leaves the host's markers as
-          // they are. It adds no marker to messages the hook built itself.
+          // is the GMI's own (the hook kept the fixed block and its marker), the GMI removes that one and leaves the
+          // host's markers as they are. It adds no marker to messages the hook built itself.
           if (
             markedSystemPart
             && countCacheMarkers(sendMessages) > 4
-            && sendMessages.some((message) => Array.isArray(message.content) && message.content.includes(markedSystemPart))
+            && sendMessages.some((message) => Array.isArray(message.content) && message.content.some(carriesOwnMarker))
           ) {
             sendMessages = sendMessages.map((message) => !Array.isArray(message.content) ? message : ({
               ...message,
               content: message.content.map((part) => {
-                if (part !== markedSystemPart) return part;
+                if (!carriesOwnMarker(part)) return part;
                 const unmarked: Record<string, unknown> = { ...part };
                 delete unmarked.cache_control;
                 return unmarked as typeof part;
