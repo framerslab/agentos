@@ -520,7 +520,7 @@ export class Ledger {
       else await this.store.deleteUserRows(namespace, userId);
     } catch (error) {
       console.warn(
-        `[agentos] learning: the rows an append wrote after its user was forgotten (tombstone ${tomb.slice(0, 16)}) were not deleted (${messageOf(error)}); a second forgetUser call deletes them.`,
+        `[agentos] learning: the rows an append wrote after its user was forgotten were not deleted (${messageOf(error)}); a second forgetUser call deletes them.`,
       );
     }
     return true;

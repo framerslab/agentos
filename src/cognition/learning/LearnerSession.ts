@@ -641,9 +641,9 @@ export class LearnerSession implements ILearnerSession {
       await undo(result, reason);
     } catch (error) {
       if (reason === 'forgotten' && write.user) {
-        const hash = (await tombstoneHash(write.user.namespace, write.user.userId)).slice(0, 16);
+        // No hash of the user's id: an unkeyed hash in a log lets anyone with a list of ids find who was forgotten.
         console.warn(
-          `[agentos] learning: a memory write that finished after its user was forgotten (tombstone ${hash}) was not taken back (${messageOf(error)}); what it wrote stays in ${placeOf(touched)} until it is deleted there.`,
+          `[agentos] learning: a memory write that finished after its user was forgotten was not taken back (${messageOf(error)}); what it wrote stays in ${placeOf(touched)} until it is deleted there.`,
         );
       } else {
         const row = touched.recorded ? '; its pending ledger row stays to be decided by whether the write holds' : '';
