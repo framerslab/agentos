@@ -1,0 +1,53 @@
+{
+  "id": "plain-budget-review",
+  "set": "plain",
+  "kind": "document",
+  "language": "en",
+  "title": "Q3 budget review",
+  "headings": [
+    "Summary",
+    "Spending by team",
+    "Hiring plan",
+    "Open questions"
+  ],
+  "path": null,
+  "text": "# Summary\n\nThe third quarter closed with total spending at 96 percent of the approved budget. Most teams stayed inside their lines, and the savings came from travel and from software licences we stopped renewing in August. The budget for the fourth quarter keeps the same shape, with one change: the hiring line grows, and the events line shrinks to cover it.\n\n# Spending by team\n\nEngineering spent close to its full allocation, mostly on cloud hosting and on two contractors who finished the data migration. Design came in under budget because the research study moved to October. Sales overspent on travel by a small amount after the trade show in Lyon, which the events line absorbed. Support stayed flat. Finance asks every team lead to close open purchase orders before the end of the month, so the accounts reflect what was actually spent.\n\n# Hiring plan\n\nThe hiring plan for the fourth quarter adds three roles: a backend engineer, a product designer and a second support specialist. Hiring for the backend role starts first, because the on-call rotation is thin. The designer role waits until the research study ends, so the new hire can join the next round of interviews with customers. Each role has a salary band that finance has signed off, and recruiting fees are inside the hiring line.\n\n# Open questions\n\nQ3 planning left two questions open. First, whether the cloud hosting contract should move to a yearly commitment, which would lower the monthly rate but lock in the volume. Second, whether the events line should keep a reserve for a spring conference. Both questions go to the leadership meeting next week, with a short note from finance on each.\n",
+  "vocabulary": [
+    {
+      "label": "budget",
+      "uses": 9,
+      "lastUsed": 1762300800000
+    },
+    {
+      "label": "Q3 Planning",
+      "uses": 8,
+      "lastUsed": 1762214400000
+    },
+    {
+      "label": "finance",
+      "uses": 7,
+      "lastUsed": 1762128000000
+    },
+    {
+      "label": "events",
+      "uses": 6,
+      "lastUsed": 1762041600000
+    }
+  ],
+  "typed": [
+    "budget",
+    "Q3 Planning"
+  ],
+  "expected": {
+    "existing": [
+      "budget",
+      "q3planning",
+      "finance"
+    ],
+    "new": [
+      "hiring"
+    ]
+  },
+  "mustNot": [],
+  "asks": []
+}

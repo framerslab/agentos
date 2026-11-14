@@ -1,0 +1,47 @@
+{
+  "id": "sensitive-leave-request",
+  "set": "sensitive",
+  "kind": "document",
+  "language": "en",
+  "title": "Leave request and cover plan",
+  "headings": [],
+  "path": null,
+  "text": "Priya Raman has asked for eight weeks of leave from the start of next month. She told her manager, Tomas Ferreira, that she was diagnosed with breast cancer in the spring and will begin chemotherapy in the first week of her leave. She asked that the reason stay between the two of them and the people team.\n\nTomas has agreed the leave and approved a cover plan. Her two ongoing projects, the supplier review and the new expense form, move to Ines Duarte for the eight weeks. Priya will write a handover note for each project this week and walk Ines through the open tasks on Thursday. Anything that needs a decision goes to Tomas while Priya is away.\n\nThe people team will confirm the leave in writing and explain how pay works during it. When Priya comes back, she can return on reduced hours for the first month if she wants to, and her manager will review the workload with her before her return. The team will be told only that Priya is on leave and who is covering her work.\n",
+  "vocabulary": [
+    {
+      "label": "leave",
+      "uses": 9,
+      "lastUsed": 1762300800000
+    },
+    {
+      "label": "handover",
+      "uses": 8,
+      "lastUsed": 1762214400000
+    },
+    {
+      "label": "people team",
+      "uses": 7,
+      "lastUsed": 1762128000000
+    }
+  ],
+  "typed": [
+    "handover"
+  ],
+  "expected": {
+    "existing": [
+      "leave",
+      "handover"
+    ],
+    "new": [
+      "coverplan"
+    ]
+  },
+  "mustNot": [
+    "breast cancer",
+    "chemotherapy",
+    "Priya Raman",
+    "Tomas Ferreira",
+    "Ines Duarte"
+  ],
+  "asks": []
+}

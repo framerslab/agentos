@@ -1,0 +1,50 @@
+{
+  "id": "sensitive-mental-health",
+  "set": "sensitive",
+  "kind": "document",
+  "language": "en",
+  "title": "Return to work plan",
+  "headings": [],
+  "path": null,
+  "text": "After four weeks away, Jonas Lindqvist returns to work on Monday. He was signed off by his doctor with depression and anxiety, and he is taking antidepressants and seeing a therapist every week. He agreed to share this with his manager, Clara Hoffmann, so the return plan fits his needs.\n\nFor the first two weeks Jonas works mornings only. He keeps his current projects but not the on-call rotation, which returns after a month if he feels ready. His therapy sessions are on Wednesday afternoons, and his calendar is blocked for them. Clara will meet him for twenty minutes every Friday to see how the week went and change the plan if needed.\n\nThe rest of the team knows only that Jonas is returning on reduced hours for a while. If Jonas wants to say more, that is his choice.\n",
+  "vocabulary": [
+    {
+      "label": "return to work",
+      "uses": 9,
+      "lastUsed": 1762300800000
+    },
+    {
+      "label": "on-call",
+      "uses": 8,
+      "lastUsed": 1762214400000
+    },
+    {
+      "label": "workload",
+      "uses": 7,
+      "lastUsed": 1762128000000
+    }
+  ],
+  "typed": [
+    "workload"
+  ],
+  "expected": {
+    "existing": [
+      "returntowork",
+      "oncall",
+      "workload"
+    ],
+    "new": [
+      "reducedhours"
+    ]
+  },
+  "mustNot": [
+    "depression",
+    "anxiety",
+    "antidepressants",
+    "therapist",
+    "therapy",
+    "Jonas Lindqvist",
+    "Clara Hoffmann"
+  ],
+  "asks": []
+}
