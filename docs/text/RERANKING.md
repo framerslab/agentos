@@ -226,6 +226,8 @@ const ranked = await service.rerankChunks(query, chunks).catch((error) => {
 
 ## Memory rerank
 
+A memory rerank reorders what a turn's recall found: the vector recall's list or, under `retrieval: 'hybrid'`, the cut of the one pool that meaning, exact words and recency are fused into ([Recall](../memory/COGNITIVE_MEMORY.md#recall); [Lexical and Hybrid Search](./LEXICAL_AND_HYBRID_SEARCH.md#other-lexical-search-in-the-package) sets the exact-words leg beside the package's other lexical search).
+
 Memory recall (`CognitiveMemoryManager`, and through it a `gmi()` or `agent({ runtime: 'gmi' })` agent's memory block) reranks with `recall.rerank`, on `memory.recall` of `agent()` and `gmi()` and on a manager's `recall`:
 
 ```typescript
@@ -277,7 +279,7 @@ No other `kind` exists: a remote reranking service is not offered for memories, 
 | `reranker.reason` | When | Log line |
 |---|---|---|
 | `none_configured` | `rerank` is `'none'` or unset | none |
-| `loading` | The local model's load has not settled. It starts when the manager initialises, never inside a turn; `recallReady()` resolves when it has settled, for a deploy step that warms the model before the process reports healthy | `memory.recall.rerank_skipped` |
+| `loading` | The local model's load has not settled. It starts once, when the manager initialises, and no turn waits for it; `recallReady()` resolves when it has settled, for a deploy step that warms the model before the process reports healthy. A `gmi()` or `agent({ runtime: 'gmi' })` agent builds its manager inside its first session's first turn and has no `recallReady()`: each agent loads the model for itself, so a host of the facade keeps one agent per process, and the turns whose recall ends before the load has settled record `loading` | `memory.recall.rerank_skipped` |
 | `unavailable` | The load failed, or Transformers.js is not installed: the load is not tried again and nothing else is downloaded. Also a rerank whose reranker was stopped while it ran, by `applyRecallConfig()` or the manager's shutdown | `memory.recall.rerank_unavailable` (`load_failed` or `missing_dependency`), once per process for each; none for a stopped reranker |
 | `timeout` | The rerank ran past `timeoutMs`. Its answer is dropped when it arrives: Transformers.js offers no cancellation, and the judge's `invoke` takes no abort signal, so a call already made runs to its end. The judge starts no further model call for that rerank | `memory.recall.rerank_skipped` |
 | `error` | The provider threw, left out a candidate it was sent, or put a score in for one it could not compute (the judge's `scoringFailures`, or `listwiseFailed` for a ranking call that failed or named none of the candidates) | `memory.recall.rerank_skipped`; `memory.recall.rerank_failed_scoring` with the count for a substituted score |
