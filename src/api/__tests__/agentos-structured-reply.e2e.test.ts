@@ -40,6 +40,7 @@ import { AgentOSResponseChunkType, type AgentOSFinalResponseChunk } from '../typ
 import type { IPersonaDefinition } from '../../cognition/substrate/personas/IPersonaDefinition';
 import { GMIErrorCode } from '../../core/utils/errors.js';
 import { GuardrailAction, type IGuardrailService } from '../../safety/guardrails/IGuardrailService';
+import { STRUCTURED_REPLY_REFUSED_ISSUE } from '../runtime/structuredReply';
 
 const persona = { id: 'planner', name: 'Planner', description: 'Drafts a week.', version: '1.0.0', baseSystemPrompt: 'You draft the week from the path.' } as unknown as IPersonaDefinition;
 const week = z.object({ items: z.array(z.object({ date: z.string(), title: z.string(), heavy: z.boolean() })) });
@@ -161,7 +162,7 @@ describe('a structured reply on processRequest', () => {
     expect(errorOf(kept)).toBeUndefined();
     const final = finalOf(kept)!;
     expect(final.structured).toMatchObject({ value: null, meta: { schemaName: 'week', valid: false, attempts: 1, stage: 'model' } });
-    expect(final.structured?.meta.issues).toEqual(['The model refused the request instead of writing the reply.']);
+    expect(final.structured?.meta.issues).toEqual([STRUCTURED_REPLY_REFUSED_ISSUE]);
     expect(final.finalResponseText ?? '').toBe('');
   });
 
@@ -200,7 +201,7 @@ describe('a structured reply on processRequest', () => {
     expect(errorOf(kept)).toBeUndefined();
     const final = finalOf(kept)!;
     expect(final.structured).toMatchObject({ value: null, meta: { schemaName: 'week', valid: false, attempts: 1, stage: 'model' } });
-    expect(final.structured?.meta.issues).toEqual(['The model refused the request instead of writing the reply.']);
+    expect(final.structured?.meta.issues).toEqual([STRUCTURED_REPLY_REFUSED_ISSUE]);
   });
 
   it.each([
@@ -241,7 +242,7 @@ describe('a structured reply on processRequest', () => {
       value: null,
       meta: {
         schemaName: 'week', valid: false, attempts: 1, enforcement: 'prompt_only', stage: 'model',
-        issues: ['The model refused the request instead of writing the reply.'],
+        issues: [STRUCTURED_REPLY_REFUSED_ISSUE],
       },
     });
   });
