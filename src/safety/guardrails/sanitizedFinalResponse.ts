@@ -6,7 +6,7 @@
  * @module backend/agentos/safety/guardrails/sanitizedFinalResponse
  */
 
-import type { StructuredReplyOutput } from '../../api/runtime/structuredReply';
+import { isRefusedStructuredReply, type StructuredReplyOutput } from '../../api/runtime/structuredReply';
 import { renderPlainText } from '../../api/runtime/turnFinalResponse';
 import type { AgentOSFinalResponseChunk } from '../../api/types/AgentOSResponse';
 import type { AudioOutputConfig } from '../../cognition/substrate/IGMI';
@@ -25,6 +25,8 @@ export const STRUCTURED_REPLY_WITHDRAWN_ISSUE =
  * @returns The withdrawn value, which keeps the schema's name, the attempts and the enforcement.
  */
 export function withdrawnStructuredReply(structured: StructuredReplyOutput): StructuredReplyOutput {
+  // A refusal has no parsed value to withdraw, and remains a refusal after a text rewrite.
+  if (isRefusedStructuredReply(structured)) return structured;
   return {
     value: null,
     meta: { ...structured.meta, valid: false, stage: 'post_guardrail', issues: [STRUCTURED_REPLY_WITHDRAWN_ISSUE] },

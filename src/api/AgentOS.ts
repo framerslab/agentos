@@ -131,6 +131,7 @@ import {
 } from '../safety/guardrails/requiredGuardrails';
 import { SpendMeterUnavailableError, type ISpendMeter, type SpendDenyReason } from '../safety/runtime/SpendMeter';
 import {
+  isRefusedStructuredReply,
   recheckStructuredReply,
   resolveStructuredReply,
   resolveStructuredReplySpec,
@@ -2335,7 +2336,7 @@ export class AgentOS implements IAgentOS {
         if (structuredSpec && chunk.type === AgentOSResponseChunkType.FINAL_RESPONSE) {
           const finalChunk = chunk as AgentOSFinalResponseChunk;
           const sanitized = Array.isArray(finalChunk.metadata?.guardrail?.output) && finalChunk.metadata.guardrail.output.some((e: { action?: unknown }) => String(e?.action).toLowerCase() === 'sanitize');
-          if (finalChunk.structured && sanitized) {
+          if (finalChunk.structured && sanitized && !isRefusedStructuredReply(finalChunk.structured)) {
             const rechecked = recheckStructuredReply(finalChunk.finalResponseText, finalChunk.structured, structuredSpec);
             if (!rechecked.meta.valid && structuredSpec.onExhausted === 'error') {
               yield {
