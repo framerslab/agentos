@@ -1033,7 +1033,8 @@ export class AgentOS implements IAgentOS {
       };
     }
     const instance = new AgentOS(logger);
-    instance.persistenceFrom = configOverrides.orchestratorConfig?.enableConversationalPersistence !== undefined
+    // A null field is left out, as the value merge above reads it.
+    instance.persistenceFrom = configOverrides.orchestratorConfig?.enableConversationalPersistence != null
       ? 'host'
       : process.env.ENABLE_PERSISTENCE ? 'environment' : 'default';
     await instance.initialize(mergedConfig);
@@ -1487,7 +1488,7 @@ export class AgentOS implements IAgentOS {
       promptProfile: this.config.orchestratorConfig.promptProfileConfig == null ? 'none' : 'host',
       persistence: this.conversationalPersistenceOn() ? 'on' : 'off',
       persistenceFrom: this.persistenceFrom
-        ?? (this.config.orchestratorConfig.enableConversationalPersistence !== undefined ? 'host' : 'default'),
+        ?? (this.config.orchestratorConfig.enableConversationalPersistence != null ? 'host' : 'default'),
       dateTool: this.toolExecutor.getTool('getCurrentDateTime') ? 'on' : 'off',
     });
     this.logger.info('AgentOS initialization complete');
