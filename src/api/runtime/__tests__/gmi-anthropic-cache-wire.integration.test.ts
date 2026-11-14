@@ -56,6 +56,14 @@ const markerCount = (value: unknown): number => !value || typeof value !== 'obje
   : Object.entries(value).reduce((sum, [key, nested]) => sum + (key === 'cache_control' ? 1 : markerCount(nested)), 0);
 /** The text of each block of a request's `system`, or the one string it is. */
 const systemTexts = (system: unknown): unknown[] => Array.isArray(system) ? system.map((part: any) => part.text) : [system];
+/** The lifetime of each marker of a request, in the order Anthropic reads them: the system blocks, then the messages. */
+const lifetimesOf = (body: Json): string[] => [
+  ...(Array.isArray(body.system) ? body.system : []),
+  ...body.messages.flatMap((message: any) => Array.isArray(message.content) ? message.content : []),
+].filter((block: any) => block?.cache_control).map((block: any) => block.cache_control.ttl ?? '5m');
+/** Whether every one-hour marker comes before every five-minute one, the only order Anthropic accepts. */
+const hourFirst = (lifetimes: string[]): boolean =>
+  lifetimes.indexOf('5m') < 0 || lifetimes.lastIndexOf('1h') < lifetimes.indexOf('5m');
 beforeEach(() => {
   bodies = []; agents = []; capture.assemblies.length = 0; globalLLMProviderHealth.reset();
   vi.stubEnv('AGENTOS_ANTHROPIC_AUTO_CACHE', '1');
@@ -151,6 +159,58 @@ describe('GMI Anthropic wire', () => {
     const firstShort = lifetimes.indexOf('5m');
     expect(firstShort < 0 || lifetimes.lastIndexOf('1h') < firstShort, `every one-hour marker comes first: ${lifetimes.join(', ')}`).toBe(true);
     expect(bodies[0].system.find((block: any) => block.text === 'Host')?.cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+  });
+  // A hook that copies the parts holds a copy of the GMI's marked part: another object with the same text and marker.
+  it('leaves four markers when a hook copies the parts and adds four of its own', async () => {
+    await make({ onBeforeGeneration: ({ messages }: any) => ({ messages: [...structuredClone(messages),
+      ...Array.from({ length: 4 }, (_, i) => ({ role: 'system', content: [{
+        type: 'text', text: `Host ${i}`, cache_control: { type: 'ephemeral' },
+      }] })),
+    ] }) }).generate('hi');
+    expect(markerCount(bodies[0]), 'at most four markers reach the provider').toBe(4);
+    expect(bodies[0].system[0]).not.toHaveProperty('cache_control');
+  });
+  it('sends no five-minute marker before a one-hour marker when the hook copies each part', async () => {
+    await make({ onBeforeGeneration: ({ messages }: any) => ({ messages: [
+      ...messages.map((message: any) => ({
+        ...message,
+        content: Array.isArray(message.content) ? message.content.map((part: any) => ({ ...part })) : message.content,
+      })),
+      { role: 'system', content: [{ type: 'text', text: 'Host', cache_control: { type: 'ephemeral', ttl: '1h' } }] },
+    ] }) }).generate('hi');
+    const lifetimes = lifetimesOf(bodies[0]);
+    expect(hourFirst(lifetimes), `copied parts: every one-hour marker comes first: ${lifetimes.join(', ')}`).toBe(true);
+    expect(bodies[0].system.find((block: any) => block.text === 'Host')?.cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+  });
+  it('keeps the marker on a copied part as the hook returned it when the request is valid', async () => {
+    await make({ cache: { tail: false }, onBeforeGeneration: ({ messages }: any) => ({ messages: structuredClone(messages) }) }).generate('hi');
+    expect(bodies[0].system[0]).toEqual({ type: 'text', text: 'Policy', cache_control: { type: 'ephemeral' } });
+    expect(markerCount(bodies[0])).toBe(1);
+  });
+  it('sends no one-hour marker after a shorter one the hook puts before it', async () => {
+    await make({ cache: { ttl: '1h' }, onBeforeGeneration: ({ messages }: any) => {
+      const newest = messages.map((message: any) => message.role).lastIndexOf('user');
+      return { messages: [
+        { role: 'system', content: [{ type: 'text', text: 'Org', cache_control: { type: 'ephemeral' } }] },
+        ...messages.map((message: any, index: number) => index !== newest ? message : {
+          ...message,
+          content: [{ type: 'text', text: String(message.content), cache_control: { type: 'ephemeral' } }],
+        }),
+      ] };
+    } }).generate('hi');
+    const lifetimes = lifetimesOf(bodies[0]);
+    expect(hourFirst(lifetimes), `host markers before the GMI's: every one-hour marker comes first: ${lifetimes.join(', ')}`).toBe(true);
+    expect(bodies[0].system[0]).toEqual({ type: 'text', text: 'Org', cache_control: { type: 'ephemeral' } });
+  });
+  it('splits at the last breakpoint when a blank block comes before it', async () => {
+    await make({ systemBlocks: [{ text: '  ' }, { text: 'Policy', cacheBreakpoint: true }, { text: 'Clock' }] }).generate('hi');
+    expect(systemTexts(bodies[0].system), 'a leading blank block').toEqual(['Policy', 'Clock']);
+    expect(bodies[0].system[0].cache_control).toEqual({ type: 'ephemeral' });
+  });
+  it('keeps every block through the last breakpoint in the marked block when a blank block sits among them', async () => {
+    await make({ systemBlocks: [{ text: 'A' }, { text: ' ' }, { text: 'B', cacheBreakpoint: true }, { text: 'C' }] }).generate('hi');
+    expect(systemTexts(bodies[0].system), 'a blank block before the breakpoint').toEqual(['A\n\n \n\nB', 'C']);
+    expect(bodies[0].system[0].cache_control).toEqual({ type: 'ephemeral' });
   });
   it('uses the last breakpoint and keeps the recall line in the hook base text', async () => {
     let system: unknown;
