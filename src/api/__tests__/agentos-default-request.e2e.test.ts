@@ -5,7 +5,9 @@
  * completion request the stub receives and the orchestrator's effective persistence setting, and checks the one
  * `runtime.defaults` event initialization writes. No prompt profile and no date tool reach a request unless the host
  * passes one; `AgentOS.create()` keeps the factory's ENABLE_PERSISTENCE value when the host's orchestrator config
- * leaves that field out.
+ * leaves that field out. A persona that names the date tool gets it only when the host registers it: the bundled
+ * architect persona, whose definition lists the tool, is served either way, and strict persona validation refuses a
+ * persona whose `toolIds` name a date tool the host did not register.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -71,6 +73,15 @@ async function create(orchestratorConfig: Record<string, unknown> = {}, tools?: 
 async function send() {
   for await (const chunk of os!.processRequest({ userId: 'u', sessionId: 's', selectedPersonaId: 'defaults', textInput: 'Hello.' } as any)) void chunk;
 }
+/** Sends one turn as a persona and returns every chunk the stream yields. */
+async function turnAs(personaId: string): Promise<any[]> {
+  const chunks: any[] = [];
+  for await (const chunk of os!.processRequest({ userId: 'u', sessionId: `s-${personaId}`, selectedPersonaId: personaId, textInput: 'Hello.' } as any)) chunks.push(chunk);
+  return chunks;
+}
+/** Whether one captured completion request offers the date tool. */
+const offersDate = (call: any): boolean => (call.options.tools ?? [])
+  .some((definition: any) => definition.function?.name === 'getCurrentDateTime' || definition.name === 'getCurrentDateTime');
 const defaults = () => wire.logs.filter((line) => line.event === 'runtime.defaults');
 const persistence = () => (os as any).agentOSOrchestrator.config.enableConversationalPersistence;
 beforeEach(() => { wire.calls.length = 0; wire.logs.length = 0; wire.askDate = false; });
@@ -136,5 +147,32 @@ describe('full-runtime explicit defaults', () => {
   it('does not log resolved defaults twice when initialize is called again', async () => {
     await create(); await os!.initialize((os as any).config);
     expect(defaults()).toHaveLength(1);
+  });
+  it.each([false, true])('serves the bundled architect persona, whose definition lists the date tool, and offers that tool only when the host registers it (registered: %s)', async (registered) => {
+    const architect = exportsOf.getBuiltInPersona('atlas-systems-architect');
+    expect(architect.tools.enabled).toContain('getCurrentDateTime');
+    os = await AgentOS.create({ modelProviderManagerConfig: providers, personas: [architect], turnPlanning: { enabled: false },
+      ...(registered ? { tools: [exportsOf.createCurrentDateTimeTool()] } : {}),
+    } as any);
+    const chunks = await turnAs(architect.id);
+    expect(chunks.filter((chunk) => chunk.type === 'error')).toEqual([]);
+    expect(wire.calls.length).toBeGreaterThan(0);
+    for (const call of wire.calls) expect(offersDate(call)).toBe(registered);
+  });
+  it.each([false, true])('under strict persona validation, refuses a persona whose toolIds name the date tool unless the host registers it (registered: %s)', async (registered) => {
+    const factory = await createAgentOSConfig();
+    os = await AgentOS.create({ modelProviderManagerConfig: providers, turnPlanning: { enabled: false },
+      personas: [{ ...personas[0], toolIds: ['getCurrentDateTime'] }],
+      gmiManagerConfig: { ...factory.gmiManagerConfig, personaValidationStrict: { enabled: true } },
+      ...(registered ? { tools: [exportsOf.createCurrentDateTimeTool()] } : {}),
+    } as any);
+    const errors = (await turnAs('defaults')).filter((chunk) => chunk.type === 'error');
+    if (registered) {
+      expect(errors).toEqual([]);
+      expect(wire.calls.length).toBeGreaterThan(0);
+    } else {
+      expect(wire.calls).toHaveLength(0);
+      expect(JSON.stringify(errors)).toContain('blocked by strict validation');
+    }
   });
 });
