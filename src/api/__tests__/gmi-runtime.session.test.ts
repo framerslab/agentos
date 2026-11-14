@@ -317,6 +317,32 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
     }
   });
 
+  it.each([
+    { name: 'beside JSON that matches the schema', content: '{"city":"Lyon"}' },
+    { name: 'with no text', content: null },
+  ])('a structured send the model refused ($name) rejects naming the refusal, keeps nothing and asks for no repair', async ({ content }) => {
+    // OpenAI's refusal field on the final chunk; the JSON beside it is no answer to parse.
+    const chunk = { id: 'stub', object: 'chat.completion.chunk', created: 0, modelId: 'stub-model' };
+    const refused = [
+      ...(content ? [{ ...chunk, choices: [], responseTextDelta: content }] : []),
+      {
+        ...chunk,
+        isFinal: true,
+        choices: [{ index: 0, message: { role: 'assistant', content }, finishReason: 'stop', refusal: "I'm sorry, I cannot assist with that request." }],
+        usage: { promptTokens: 12, completionTokens: 11, totalTokens: 23 },
+      },
+    ];
+    const k = key(); const s = script('openai', k, { replies: [refused] });
+    const session = agent(base(k)).session('s');
+    const error = await session
+      .send('where?', { responseSchema: z.object({ city: z.string() }) })
+      .then(() => undefined, (e: unknown) => e);
+    expect(error).toBeInstanceOf(ObjectGenerationError);
+    expect((error as ObjectGenerationError).message).toContain('the model refused the request');
+    expect(session.messages()).toEqual([]);
+    expect(s.seen).toHaveLength(1);
+  });
+
   it('a structured send stopped at maxTokens whose JSON parses but misses a required field rejects naming the cut-off, not a schema mismatch', async () => {
     // The cut-off is read from the step's own finish reason, and the error carries the issues.
     const k = key(); script('anthropic', k, { replies: [reply.cutOff('{"city":"Lyon"}')] });
