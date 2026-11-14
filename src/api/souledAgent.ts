@@ -29,6 +29,33 @@ import {
 import { generateText } from './generateText.js';
 import type { StreamTextResult } from './streamText.js';
 import { Memory, type AttachedWiki, type ScoredTrace } from '../cognition/memory/io/facade/Memory.js';
+import type { StorageAdapter } from '@framers/sql-storage-adapter';
+import {
+  ForgottenLedger,
+  copyUnavailableError,
+  type SuppressionSubject,
+  type TombstoneKey,
+} from '../cognition/memory/suppression/ForgottenLedger.js';
+import {
+  forgetUserMemory,
+  reapplyTombstones,
+  type ForgetMemoryReport,
+  type ForgetUserMemoryOptions,
+} from '../cognition/memory/io/forgetUserMemory.js';
+import { openForgottenCopy } from '../cognition/memory/suppression/forgottenCopy.js';
+import { shareForgottenLedger } from '../cognition/memory/suppression/learnerTombstones.js';
+import { guardedWrite } from '../cognition/memory/suppression/guardedWrite.js';
+import { sweepRetention, type RetentionPeriod } from '../cognition/memory/io/retentionSweep.js';
+import { correctSubjectMemory, exportSubjectMemory, type UserMemoryExport } from '../cognition/memory/io/userMemoryExport.js';
+import {
+  assertLegacyMemory,
+  attributeLegacyMemory,
+  LEGACY_SCOPE,
+  legacyScopeIds,
+  type LegacyMemoryReason,
+} from '../cognition/memory/io/legacyMemory.js';
+import type { WikiPage } from '../cognition/substrate/memory/wiki/types.js';
+import { WriteChains } from '../cognition/learning/writeChains.js';
 import { conversationScopeKey, parseConversationScopeKey } from '../cognition/memory/retrieval/store/conversationScopeKey.js';
 import { encodePlainScopeId } from '../cognition/memory/retrieval/store/scopeIdForm.js';
 import { memoryLog } from '../cognition/memory/log.js';
@@ -87,7 +114,67 @@ const RECALL_LIMIT = 8;
  * - `{ longTerm: 'raw' }`: its turns are filed and recalled as traces, and no page is compiled for it.
  * - `{ longTerm: 'compiled' }`: its turns are filed, recalled and compiled into its pages. The default.
  */
-export type MemoryPolicy = { longTerm: 'off' } | { longTerm: 'raw' } | { longTerm: 'compiled' };
+export type MemoryPolicy =
+  | { longTerm: 'off' }
+  | { longTerm: 'raw'; retentionDays?: number }
+  | { longTerm: 'compiled'; retentionDays?: number };
+
+/**
+ * How long a souled agent's store keeps what people said.
+ *
+ * A store that holds, or would hold, the memory of more than one user or session does not open, and opens no second
+ * subject's session, without it.
+ */
+export interface MemoryRetention {
+  /**
+   * How long a subject's conversation traces are kept from the time they were stored, or until the subject's deletion
+   * by name.
+   */
+  traces: RetentionPeriod;
+  /** The same for the sessions that named no user; unset, `traces` applies to them too. Operator pages are exempt. */
+  sessions?: RetentionPeriod;
+  /**
+   * What happens to a per-user page when a trace it was compiled from expires. `'delete-whole'` (the default) deletes
+   * the page; `'rebuild'` deletes it and has the next compile build it again from the traces that are left, one model
+   * call a page, charged to the budget.
+   */
+  pages?: 'delete-whole' | 'rebuild';
+}
+
+/** What the open of a store more than one subject shares, and the open of a second subject's session, is refused with. */
+const RETENTION_REQUIRED =
+  "souledAgent: this store holds memory of more than one person or session; set retention: { traces: { days } } or { traces: 'until-deletion' }";
+
+/** Whether a tombstone copy's ledger table holds no row; false when the table cannot be read. */
+async function holdsNoLedgerRow(copy: StorageAdapter): Promise<boolean> {
+  try {
+    return (await copy.get('SELECT hash FROM agentos_learning_forgotten LIMIT 1')) == null;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Throws unless `retention` names a period for traces (and, when given, for sessions) that is `'until-deletion'` or a
+ * positive number of days, and a page rule that is one of the two.
+ *
+ * @throws TypeError naming what the option must hold.
+ */
+function assertRetention(retention: unknown): void {
+  const given = (retention !== null && typeof retention === 'object' ? retention : {}) as Record<string, unknown>;
+  const assertPeriod = (period: unknown): void => {
+    if (period === 'until-deletion') return;
+    const days = period !== null && typeof period === 'object' ? (period as { days?: unknown }).days : undefined;
+    if (typeof days !== 'number' || !Number.isFinite(days) || days <= 0) {
+      throw new TypeError('souledAgent: retention days must be a positive number');
+    }
+  };
+  assertPeriod(given.traces);
+  if (given.sessions !== undefined) assertPeriod(given.sessions);
+  if (given.pages !== undefined && given.pages !== 'delete-whole' && given.pages !== 'rebuild') {
+    throw new TypeError("souledAgent: retention pages must be 'delete-whole' or 'rebuild'");
+  }
+}
 
 /** The policy of an agent that names none. */
 const COMPILED: MemoryPolicy = { longTerm: 'compiled' };
@@ -125,13 +212,18 @@ async function within<T>(work: Promise<T>, ms: number): Promise<T | typeof TIMED
   }
 }
 
-/** True for an object whose only key is `longTerm`, holding one of the three words a policy takes. */
+/**
+ * True for an object that holds `longTerm`, one of the three words a policy takes, and nothing else but, on a policy
+ * that keeps memory, `retentionDays` as a positive number.
+ */
 function isMemoryPolicy(value: unknown): value is MemoryPolicy {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
-  const keys = Object.keys(value);
-  if (keys.length !== 1 || keys[0] !== 'longTerm') return false;
-  const { longTerm } = value as { longTerm?: unknown };
-  return longTerm === 'off' || longTerm === 'raw' || longTerm === 'compiled';
+  const { longTerm, retentionDays, ...others } = value as { longTerm?: unknown; retentionDays?: unknown };
+  if (Object.keys(others).length > 0) return false;
+  if (longTerm === 'off') return !Object.prototype.hasOwnProperty.call(value, 'retentionDays');
+  if (longTerm !== 'raw' && longTerm !== 'compiled') return false;
+  if (!Object.prototype.hasOwnProperty.call(value, 'retentionDays')) return true;
+  return typeof retentionDays === 'number' && Number.isFinite(retentionDays) && retentionDays > 0;
 }
 
 /** What `sharedMemory` must be, as the rejection of an option that is not says it. */
@@ -323,7 +415,8 @@ export interface SouledAgentOptions extends AgentOptions {
    * The host's policy for the account a turn serves; asked once a session and kept for it. A hook that throws,
    * rejects, does not answer within the memory hooks' timeout (`memoryProviderOptions.timeoutMs`) or answers anything
    * but one of the three policies fails closed: nothing is filed for that turn, it recalls the operator's pages alone,
-   * and the next turn asks again.
+   * and the next turn asks again. `retentionDays` on a policy that keeps memory shortens the agent's `retention`
+   * period for that account, in the sweeps of the process that asked; it never lengthens it.
    */
   memoryPolicy?: (context: MemoryHookContext) => MemoryPolicy | Promise<MemoryPolicy>;
   /**
@@ -332,16 +425,96 @@ export interface SouledAgentOptions extends AgentOptions {
    * answers anything else fails closed: the text is not filed, and a compile that needs it does not run.
    */
   screen?: (text: string, context: MemoryHookContext & { stage: 'file' | 'compile' }) => Promise<string | null>;
+  /**
+   * How long conversation traces, and the pages compiled from them, are kept. Required once the store holds, or would
+   * hold, the memory of a second user or session: a session that names no user is a subject of its own, so a product
+   * that opens one anonymous session a visitor chooses a period. One stable `userId`, or `sharedMemory`, is one subject
+   * and needs none. Expired memory is deleted by `close()` and by `agent.sweepRetention()`.
+   */
+  retention?: MemoryRetention;
+  /**
+   * The secret that keys the tombstones (HMAC-SHA-256). Without it tombstones are unkeyed SHA-256 hashes, which can be
+   * matched by hashing a guessed id. After a rotation the previous keys are still needed to check the old tombstones.
+   * A store whose tombstones are keyed does not open without it.
+   */
+  tombstoneKey?: TombstoneKey | { current: TombstoneKey; previous?: ReadonlyArray<TombstoneKey> };
+  /**
+   * Where the second copy of the tombstones lives, out of what a restore of the store replaces: a SQLite file path, or
+   * an adapter (left open on close). Default: `memory/.store/forgotten.sqlite`. A store whose copy is missing or
+   * unreadable does not open.
+   */
+  tombstoneCopy?: { path: string } | { adapter: StorageAdapter };
+  /**
+   * For a single person's own machine: attributes all memory the store holds from before per-user scope (traces
+   * under the agent's plain scope, pages an earlier version compiled under `memory/`) to one named user, who then
+   * recalls it, reads and lists those pages, gets both in an export, and whose deletion removes them. Unset, the
+   * default, that memory stays in place and is read by nobody new. The store refuses the attribution when it records
+   * any other user or session, and it is never moved to another user. A page whose front matter does not parse is
+   * never attributed.
+   */
+  legacyMemory?: { attributeTo: string; reason: LegacyMemoryReason };
 }
 
 /**
  * Return type of {@link souledAgent}: an {@link Agent} with its backing
  * {@link Memory} store exposed as `memory`, so callers can fold conversation
- * into the wiki mid-session via `await agent.memory.compileWiki()`. `memory` is
- * present whenever the soul resolves to a workspace directory; it is absent for
+ * into the wiki mid-session via `await agent.memory.compileWiki()`. `memory` and the
+ * members below are present whenever the soul resolves to a workspace directory; they are absent for
  * inline souls that fall back to a plain agent.
  */
-export type SouledAgent = Agent & { memory?: Memory };
+export type SouledAgent = Agent & {
+  memory?: Memory;
+  /**
+   * Deletes one person's memory from this agent's store for good and keeps it deleted: it waits for the person's
+   * pending writes (up to `pendingWritesTimeoutMs`), records a tombstone, deletes their traces, document chunks,
+   * compiled pages and registry row, writes the vector index again, and clears the history of the sessions this
+   * handle holds open for them. With a learning layer, the layer's own `forgetUser` runs first. `linkedSessions`
+   * names the anonymous sessions the host has tied to the person: each is deleted the same way.
+   *
+   * @returns One report for the user and the linked sessions: each store with `reached` and a count or a reason,
+   *   the pages deleted and those that failed, `drained`, `pendingAtDeadline` and `complete`. It never holds the
+   *   user's id or any text.
+   * @throws TypeError when `userId`, or an entry of `linkedSessions`, is not a non-empty string, or holds a NUL or a
+   *   lone surrogate, so no memory key can be built from it; nothing is deleted and no tombstone is written.
+   */
+  forgetUser?(userId: string, options?: { linkedSessions?: readonly string[] }): Promise<ForgetMemoryReport>;
+  /**
+   * Applies the tombstones again, as every open does: brings the store's ledger up to date from its copy, then
+   * deletes again whatever the store holds of a forgotten user or session. For a restore runbook, and for a schedule
+   * when several processes share one store on PostgreSQL.
+   *
+   * @returns One report a subject deleted again; none on a store that holds nothing of a forgotten subject.
+   */
+  applyTombstones?(): Promise<ForgetMemoryReport[]>;
+  /**
+   * Deletes for good what the agent's `retention` no longer keeps: each subject's traces older than its period, and
+   * the pages compiled from them (whole, or rebuilt from the traces that are left with `pages: 'rebuild'`). `close()`
+   * runs it too. Without `retention` it deletes nothing.
+   *
+   * @returns How many traces and pages it deleted, and how many subjects it removed from the registry.
+   */
+  sweepRetention?(): Promise<{ traces: number; pages: number; scopes: number }>;
+  /**
+   * One person's memory as JSON: their conversation traces (id, time, speaker, text, tags) and their compiled pages
+   * (id, summary, updated, sources, body), read from their own scope alone. Operator pages, other people's memory and
+   * a gmi() session's history are not in it; a forgotten person's export is empty.
+   *
+   * @throws TypeError when `userId` is not a non-empty string.
+   */
+  exportUserMemory?(userId: string): Promise<UserMemoryExport>;
+  /**
+   * Corrects one person's memory: deletes the named traces for good, files `text` as a trace tagged `correction`,
+   * deletes each page built from a deleted trace and has the next compile build it again from the traces that are
+   * left. It rejects, and changes nothing, when any id is not one of that person's live traces.
+   *
+   * @returns How many traces and pages it deleted, and the id of the correction's trace.
+   * @throws TypeError when `userId`, the trace ids or the text is missing.
+   */
+  correctUserMemory?(
+    userId: string,
+    correction: { traceIds: readonly string[]; text: string },
+  ): Promise<{ deleted: number; pagesDeleted: number; correctionTraceId: string }>;
+};
 
 /**
  * Create an agent whose long-term memory is its soul-file `memory/` wiki.
@@ -357,8 +530,8 @@ export type SouledAgent = Agent & { memory?: Memory };
  * it recalls the operator's pages alone, and one `memory.one_shot_unfiled` line an agent says so. With
  * {@link SouledAgentOptions.sharedMemory} every session that names no user, and every one-shot call, runs as one
  * user. Traces an earlier version filed under the agent's plain id stay in the store, are read by no turn, and are
- * counted in one `memory.legacy_traces` line at open. The store's folder, `memory/.store/`, gets a `.gitignore` that
- * keeps it out of version control.
+ * counted in one `memory.legacy_traces` line at open. The store's folder, `memory/.store/`, gets a `.gitignore` holding
+ * `*` when it has none; a file git tracked before stays tracked until the host removes it from the index.
  *
  * Each stored turn records who spoke it in the trace's metadata ({@link SPEAKER_METADATA_KEY}), outside its text and
  * its tags, so recall never matches a trace by its speaker; each recalled trace is sent as one record, with its
@@ -401,11 +574,24 @@ export type SouledAgent = Agent & { memory?: Memory };
  *   in a store of its own, which none of them reaches; nothing is opened.
  */
 export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent> {
-  const { pendingWritesTimeoutMs, sharedMemory, compile, memoryPolicy, screen, ...rest } = opts;
+  const {
+    pendingWritesTimeoutMs,
+    sharedMemory,
+    compile,
+    memoryPolicy,
+    screen,
+    tombstoneKey,
+    tombstoneCopy,
+    retention,
+    legacyMemory,
+    ...rest
+  } = opts;
   /** The ids the agent itself reads as naming nobody, beside the built-in ones. */
   const anonymousUserIds =
     typeof rest.learning === 'object' && rest.learning !== null ? rest.learning.anonymousUserIds : undefined;
   if (sharedMemory !== undefined) assertSharedMemory(sharedMemory, anonymousUserIds);
+  if (retention !== undefined) assertRetention(retention);
+  if (legacyMemory !== undefined) assertLegacyMemory(legacyMemory, (id) => isAnonymousUserId(id, anonymousUserIds));
   // The two hooks and sharedMemory act on this agent's own store. A GMI's cognitive memory files and recalls in a store
   // of its own, which none of them reaches: an account the policy turns off would still be remembered there, and
   // sessions sharedMemory runs as one user would not share it. They are refused together, before the soul is loaded:
@@ -455,36 +641,94 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   await fs.mkdir(storeDir, { recursive: true });
   // The store holds what people said: it stays out of version control. A .gitignore already there is left as it is.
   createFileOutsideLinksSync(path.join(storeDir, '.gitignore'), '*\n');
-  const memory = await Memory.createSqlite(path.join(storeDir, 'memory.sqlite'), {
-    graph: true,
-    selfImprove: true,
-  });
+  // The tombstones' second copy, outside the store's database, so a restore of the store does not replace it. A copy
+  // the host passes as an adapter is the host's to close.
+  const copyPath =
+    tombstoneCopy && 'adapter' in tombstoneCopy
+      ? undefined
+      : (tombstoneCopy?.path ?? path.join(storeDir, 'forgotten.sqlite'));
+  let ownCopy: { adapter: StorageAdapter; existed: boolean } | undefined;
+  if (copyPath !== undefined) {
+    try {
+      ownCopy = await openForgottenCopy(copyPath);
+    } catch {
+      // The ledger is not reached: the refusal's one line is written here.
+      const refused = copyUnavailableError();
+      memoryLog.warn('memory.ledger_refused', errorFields(refused));
+      throw refused;
+    }
+  }
+  const copy = ownCopy?.adapter ?? (tombstoneCopy as { adapter: StorageAdapter }).adapter;
+  /** Closes the copy this function opened; an adapter the host passed is left open. */
+  const closeCopy = async (): Promise<void> => {
+    await ownCopy?.adapter.close().catch(() => undefined);
+  };
+  const key =
+    tombstoneKey === undefined
+      ? undefined
+      : typeof tombstoneKey === 'string' || tombstoneKey instanceof Uint8Array
+        ? { current: tombstoneKey }
+        : tombstoneKey;
+  // A learning layer gmi() builds writes tombstones under its namespace: the ledger reads it beside the store-wide one.
+  const learningConfig = typeof rest.learning === 'object' && rest.learning !== null ? rest.learning : undefined;
+  const namespaces =
+    rest.runtime === 'gmi' && (rest.learning === true || learningConfig !== undefined) ? [learningConfig?.namespace ?? ''] : [];
+  let memory: Memory;
+  try {
+    memory = await Memory.createSqlite(path.join(storeDir, 'memory.sqlite'), {
+      graph: true,
+      selfImprove: true,
+      forgotten: { copy, ...(key ? { key } : {}), namespaces },
+    });
+  } catch (err) {
+    // A store whose copy is missing or unreadable, or whose tombstones need a key not given, serves nothing. A copy
+    // file this open made is removed with it while its ledger table holds no row, so the next open still finds the
+    // copy missing; a copy that already received the ledger, or that cannot be read, is kept for the next open.
+    const emptyNewCopy = ownCopy !== undefined && !ownCopy.existed && (await holdsNoLedgerRow(ownCopy.adapter));
+    await closeCopy();
+    if (emptyNewCopy && copyPath !== undefined) await fs.rm(copyPath, { force: true }).catch(() => undefined);
+    throw err;
+  }
+  /** The store's forgotten-user ledger: every write and read of a subject asks it. */
+  const forgotten = memory.forgotten as ForgottenLedger;
+  /** Closes the store, then the copy. */
+  const closeStore = async (): Promise<void> => {
+    try {
+      await memory.close();
+    } finally {
+      await closeCopy();
+    }
+  };
   /** Runs a step of the open; a step that throws closes the store first, so a failed open leaves no handle open. */
   const closingOnThrow = async <T>(step: () => T | Promise<T>): Promise<T> => {
     try {
       return await step();
     } catch (err) {
-      await memory.close().catch(() => undefined);
+      await closeStore().catch(() => undefined);
       throw err;
     }
   };
 
   /** The user every session that names none, and every one-shot call, runs as; undefined without `sharedMemory`. */
   const sharedUser = sharedMemory?.as;
-  if (sharedUser !== undefined) {
-    // One person's memory: a store that holds another user's, or a session's, is not opened as theirs.
-    const others = (await closingOnThrow(() => memory.listScopes())).filter((row) => {
-      if (row.kind === 'operator') return false;
-      const subject = parseConversationScopeKey(row.scopeId)?.subject;
-      return !(subject?.kind === 'user' && subject.id === sharedUser);
-    });
-    if (others.length > 0) {
-      await memory.close();
-      throw new Error(
-        "souledAgent: sharedMemory runs one person's memory, and this store already holds memory of another user or session",
-      );
+
+  /**
+   * This agent's key of every subject this store holds memory of, and of every session this process opened: read
+   * from the registry once the open has applied the tombstones, and kept current by the session wrapper and the
+   * deletions. A subject the store holds under several agent ids counts once. Without `retention`, a second one is
+   * refused.
+   */
+  const subjects = new Set<string>();
+  /** This agent's key of the user or session a stored key names; undefined for the operator's and for none. */
+  const ownKeyOf = (scopeId: string): string | undefined => {
+    const subject = parseConversationScopeKey(scopeId)?.subject;
+    if (!subject || subject.kind === 'operator') return undefined;
+    try {
+      return conversationScopeKey(agentId, subject);
+    } catch {
+      return undefined;
     }
-  }
+  };
 
   // Traces an earlier version filed under the agent's plain id, in either form it was written in: no turn reads
   // them, and nothing here deletes, moves or rewrites them.
@@ -495,6 +739,13 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       (encodedAgentId !== agentId ? await memory.countScope('persona', encodedAgentId) : 0),
   );
   if (earlierTraces > 0) memoryLog.warn('memory.legacy_traces', { count: earlierTraces });
+  /** The written forms of the agent's plain scope id the older traces sit under. */
+  const legacyForms = legacyScopeIds(agentId);
+  /**
+   * The conversation key of the user the older memory is attributed to (`legacyMemory`), as the store records it: an
+   * attribution made by an earlier open stands without the option.
+   */
+  let legacyOwnerKey = await closingOnThrow(() => memory.legacyOwner(agentId));
 
   /** The subject a turn's memory is kept under: the one user of `sharedMemory` for a subject that names none. */
   const subjectOf = (subject: MemorySubject): MemorySubject =>
@@ -554,6 +805,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   const offSaid = new Set<string>();
   /** For each scope a turn of this process served under a policy that keeps memory: the policy and the turn's context. */
   const served = new Map<string, { policy: MemoryPolicy; context: MemoryHookContext }>();
+  /** For each scope, the shortest `retentionDays` the host's policy answered in this process: its sweep's own period. */
+  const policyDays = new Map<string, number>();
 
   /**
    * Asks the host's policy for the account a turn serves. A throw, a rejection, no answer in time or any answer but
@@ -599,6 +852,9 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       // A failed answer is the latest: no compile reads an earlier permission for the subject.
       if (latest) served.delete(scopeId);
       return policy;
+    }
+    if (policy.longTerm !== 'off' && policy.retentionDays !== undefined) {
+      policyDays.set(scopeId, Math.min(policyDays.get(scopeId) ?? Number.POSITIVE_INFINITY, policy.retentionDays));
     }
     // Kept only where a hook reads it later: the session's answer for its next turns, the scope's for its compile. An
     // answer that came after its session closed is not kept for the session's next opening.
@@ -673,11 +929,18 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
    * lets the text through. Each write that is not made says why in one `memory.write_refused` line, except under an
    * `off` policy, the host's standing choice for the account, which is said once a session.
    */
-  const fileTurn = async (role: Speaker, text: string, context: MemoryHookContext): Promise<void> => {
-    const subject = turnSubjectOf(context);
-    if (!subject) return;
-    // An id no key can be built from rejects the write: the runtime logs the hook's failure and the turn goes on.
-    const scopeId = conversationScopeKey(agentId, subject);
+  const fileTurn = async (
+    role: Speaker,
+    text: string,
+    context: MemoryHookContext,
+    subject: MemorySubject,
+    scopeId: string,
+  ): Promise<void> => {
+    // A forgotten subject's text goes nowhere: not to the host's hooks, not to the store.
+    if (await forgotten.isForgotten(subject)) {
+      memoryLog.warn('memory.write_refused', { reason: 'forgotten' });
+      return;
+    }
     const policy = await turnPolicyOf(context, subject, scopeId, role);
     if (policy === 'failed') {
       memoryLog.warn('memory.write_refused', { reason: 'policy_failed' });
@@ -701,17 +964,37 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     }
     written.add(scopeId);
     // The user's message and the reply alike go under the subject's key. Who spoke goes in the trace's metadata:
-    // outside its text and its tags, which full-text search reads.
-    await memory.remember(filed, {
-      type: 'episodic',
-      scope: 'conversation',
-      scopeId,
-      metadata: {
-        [SPEAKER_METADATA_KEY]: role,
-        subject: { kind: subject.kind, id: subject.id },
-        ...(subject.kind === 'user' ? { turnUserId: subject.id } : {}),
+    // outside its text and its tags, which full-text search reads. The tombstone is read again once the trace is
+    // stored: a trace that landed after the subject was forgotten is deleted again.
+    let landed = false;
+    const outcome = await guardedWrite(
+      forgotten,
+      subject,
+      async () => {
+        const trace = await memory.remember(filed, {
+          type: 'episodic',
+          scope: 'conversation',
+          scopeId,
+          metadata: {
+            [SPEAKER_METADATA_KEY]: role,
+            subject: { kind: subject.kind, id: subject.id },
+            ...(subject.kind === 'user' ? { turnUserId: subject.id } : {}),
+          },
+        });
+        landed = true;
+        return trace;
       },
-    });
+      async (trace) => {
+        await memory.deleteTraces([trace.id]);
+      },
+    );
+    if (outcome.status !== 'refused') return;
+    memoryLog.warn('memory.write_refused', { reason: 'forgotten' });
+    if (landed) {
+      // The write landed after the subject's tombstone and is taken back. Its scope's registry row, which the write
+      // made again when the subject's deletion had already run, goes with whatever the scope still holds.
+      await memory.deleteScope('conversation', scopeId).catch(() => undefined);
+    }
   };
   /**
    * Asked before a scope's traces are compiled. Under a policy hook, a scope no turn of this process was served for,
@@ -755,6 +1038,35 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     void work.then(settle, settle);
     return work;
   };
+  /**
+   * One promise chain per subject key: every write and compile of a subject runs on it, one after another, and a
+   * deletion of the subject takes it too. Each run is held in {@link pendingBySubject} from before it starts until it
+   * settles, so a deletion that waits for a subject's pending work sees a write before its first check.
+   */
+  const chains = new WriteChains();
+  const pendingBySubject = new Map<string, Set<Promise<unknown>>>();
+  /** Runs `work` on the subject's chain; close() waits for it. */
+  const onSubject = <T>(key: string, work: () => Promise<T>): Promise<T> => {
+    const run = chains.run(key, work);
+    let ofSubject = pendingBySubject.get(key);
+    if (!ofSubject) {
+      ofSubject = new Set();
+      pendingBySubject.set(key, ofSubject);
+    }
+    const held = ofSubject;
+    held.add(run);
+    const settle = () => {
+      held.delete(run);
+      if (held.size === 0 && pendingBySubject.get(key) === held) pendingBySubject.delete(key);
+    };
+    void run.then(settle, settle);
+    return awaitedOnClose(run);
+  };
+  /**
+   * True once close() has waited for the pending writes: it then sweeps and compiles what is stored at once, past any
+   * write still running, which holds its subject's chain.
+   */
+  let closing = false;
   /**
    * A stream is settled once its usage and its text are known; its text settles after its observation has started.
    * On the default runtime a stream runs only once a consumer reads it, so one whose `signal` aborts before anything
@@ -805,8 +1117,17 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     observe: (role, text, context) => {
       // Nothing is ever filed without the subject of its turn.
       if (!context) return Promise.reject(new TypeError('souledAgent: a memory write needs the hook context of its turn'));
-      // The whole write, its policy and its screening with it, is what close() waits for.
-      return awaitedOnClose(fileTurn(role, text, context));
+      const subject = turnSubjectOf(context);
+      if (!subject) return Promise.resolve();
+      let scopeId: string;
+      try {
+        scopeId = conversationScopeKey(agentId, subject);
+      } catch (err) {
+        // An id no key can be built from rejects the write: the runtime logs the hook's failure and the turn goes on.
+        return Promise.reject(err);
+      }
+      // The whole write, its policy and its screening with it, runs on the subject's chain, and close() waits for it.
+      return onSubject(scopeId, () => fileTurn(role, text, context, subject, scopeId));
     },
     getContext: async (text, options) => {
       // Two reads, each of one key, by equality: the turn's own subject, and the operator's pages. Nothing a caller
@@ -814,6 +1135,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       // keeps no memory (or whose policy hook failed) read the operator's pages alone.
       const context = options?.context;
       const subject = context ? turnSubjectOf(context) : undefined;
+      // A forgotten subject is recalled nothing: neither their memory nor the operator's pages.
+      if (subject && (await forgotten.isForgotten(subject))) return null;
       let own: ScoredTrace[] = [];
       if (context && subject) {
         let scopeId: string | undefined;
@@ -827,6 +1150,13 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
           const policy = await turnPolicyOf(context, subject, scopeId, 'recall');
           if (policy !== 'failed' && policy.longTerm !== 'off') {
             own = await memory.recall(text, { scope: 'conversation', scopeId, limit: RECALL_LIMIT });
+            // The older memory attributed to this user is theirs too: a third read, of each form of the agent's plain
+            // scope, merged with the other two under the same budget. No other subject reads it.
+            if (legacyOwnerKey !== undefined && scopeId === legacyOwnerKey) {
+              for (const form of legacyForms) {
+                own.push(...(await memory.recall(text, { scope: LEGACY_SCOPE, scopeId: form, limit: RECALL_LIMIT })));
+              }
+            }
           }
         }
       }
@@ -925,7 +1255,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   const chunker = new SemanticChunker();
   const priorTools = rest.tools;
   const memoryDir = loaded.memoryDir;
-  const { tools: augmentedTools } = await closingOnThrow(() => attachMemoryWiki({
+  const { tools: augmentedTools, store: operatorPages, storeFor: pagesOf } = await closingOnThrow(() => attachMemoryWiki({
     memory,
     memoryDir,
     agentId,
@@ -941,6 +1271,12 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     ...(memoryPolicy || screen ? { beforeScopeCompile } : {}),
     // No compile at all: raw traces only, and no page is ever written.
     ...(compile === false ? { compile: false as const } : {}),
+    // A forgotten subject reads no page and is compiled no page.
+    isForgotten: (subject) => forgotten.isForgotten(subject),
+    // The user older memory is attributed to reads the pages an earlier version compiled as their own.
+    legacyOwnerKey: async () => legacyOwnerKey,
+    // Each subject's compile runs on its chain, after its writes; close() compiles what is stored at its deadline.
+    runScope: (scopeId, work) => (closing ? work() : onSubject(scopeId, work)),
   }));
   if (compile === false) memoryLog.warn('memory.compile_skipped', { reason: 'compile_off' });
 
@@ -951,9 +1287,10 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     priorTools && !Array.isArray(priorTools) ? priorTools : augmentedTools
   ) as AgentOptions['tools'];
 
-  const built = (await closingOnThrow(() =>
-    agent({ ...rest, ...(budget ? { budget } : {}), memoryProvider: provider, tools }),
-  )) as SouledAgent;
+  const agentOptions: AgentOptions = { ...rest, ...(budget ? { budget } : {}), memoryProvider: provider, tools };
+  // A learning layer gmi() builds from these options writes and reads the store's ledger.
+  shareForgottenLedger(agentOptions, forgotten);
+  const built = (await closingOnThrow(() => agent(agentOptions))) as SouledAgent;
 
   // Every turn joins what close() waits for: its promise, or a stream's settled usage. The default runtime's own close
   // does not wait for a running turn, and the GMI runtime's does not wait for a one-shot call.
@@ -963,7 +1300,36 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   built.stream = (prompt, extra) => awaitStreamOnClose(streamTurn(prompt, extra), extra?.abortSignal);
   const openSession = built.session.bind(built);
   const trackedSessions = new WeakSet<AgentSession>();
+  /** The sessions this handle gave out and has not closed, by the key of the subject each one's memory is kept under. */
+  const sessionsBySubject = new Map<string, Set<AgentSession>>();
+  /**
+   * The key a session's memory is kept under: its user's when it named one, else the session's own; undefined for an
+   * id no key can be built from, whose turns file nothing.
+   */
+  const sessionKeyOf = (sessionId: string, userId: unknown): string | undefined => {
+    const subject: MemorySubject =
+      typeof userId === 'string' && !isAnonymousUserId(userId, anonymousUserIds)
+        ? { kind: 'user', id: userId }
+        : { kind: 'session', id: sessionId };
+    try {
+      return conversationScopeKey(agentId, subjectOf(subject));
+    } catch {
+      return undefined;
+    }
+  };
+  /** The key an open session this handle gave out is kept under, by the session's id; undefined when none is open. */
+  const openSessionKeyOf = (sessionId: string | undefined): string | undefined => {
+    if (sessionId === undefined) return undefined;
+    for (const [key, held] of sessionsBySubject) {
+      for (const session of held) if (session.id === sessionId) return key;
+    }
+    return undefined;
+  };
   built.session = (id, sessionOptions) => {
+    // The runtime hands an open session asked for by its id alone back as the user it runs as: so is its subject.
+    const userId: unknown = sessionOptions?.userId;
+    const namesUser = typeof userId === 'string' && !isAnonymousUserId(userId, anonymousUserIds);
+    const reopened = namesUser ? undefined : openSessionKeyOf(id);
     if (sharedUser !== undefined) {
       // One person's memory: a session runs as that user, by name or by naming nobody.
       const asked: unknown = sessionOptions?.userId;
@@ -971,7 +1337,21 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
         throw new Error('souledAgent: sharedMemory runs every session as one user; this session named another');
       }
     }
+    if (retention === undefined) {
+      // A second subject needs a retention choice. A session opened with no id is a new session, and so a new
+      // subject, unless it names a user or runs as the one user of sharedMemory.
+      const asked = reopened ?? sessionKeyOf(id ?? '', sessionOptions?.userId);
+      const held = asked !== undefined && subjects.has(asked);
+      if (!held && subjects.size > 0) throw new Error(RETENTION_REQUIRED);
+    }
     const session = openSession(id, sessionOptions);
+    const subjectKey = reopened ?? sessionKeyOf(session.id, sessionOptions?.userId);
+    if (subjectKey !== undefined) {
+      subjects.add(subjectKey);
+      const ofSubject = sessionsBySubject.get(subjectKey) ?? new Set<AgentSession>();
+      ofSubject.add(session);
+      sessionsBySubject.set(subjectKey, ofSubject);
+    }
     // A runtime that hands the same session object back is wrapped once.
     if (!trackedSessions.has(session)) {
       trackedSessions.add(session);
@@ -984,6 +1364,10 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
           sessionPolicies.delete(session.id);
           offSaid.delete(session.id);
           sessionCloses.set(session.id, (sessionCloses.get(session.id) ?? 0) + 1);
+          for (const [key, held] of sessionsBySubject) {
+            held.delete(session);
+            if (held.size === 0) sessionsBySubject.delete(key);
+          }
           return closeSession(...args);
         };
       }
@@ -991,6 +1375,238 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       session.stream = (input, streamOpts) => awaitStreamOnClose(streamSession(input, streamOpts), streamOpts?.abortSignal);
     }
     return session;
+  };
+
+  /** Waits for a subject's pending writes and compiles, up to the deadline close() waits by. */
+  const drainSubject = async (key: string): Promise<{ drained: number; pendingAtDeadline: number }> => {
+    const held = pendingBySubject.get(key);
+    if (!held || held.size === 0) return { drained: 0, pendingAtDeadline: 0 };
+    const before = held.size;
+    const left = await waitForWrites(held, waitMs);
+    return { drained: Math.max(before - left, 0), pendingAtDeadline: left };
+  };
+  /**
+   * Whether the store holds memory from before per-user scope that nobody attributed: traces under the agent's plain
+   * id, in either form it was written in, or page files under memory/ that are not the operator's, while no user owns
+   * them; and, whoever owns the rest, a page file whose front matter cannot be read, which is never attributed.
+   */
+  const legacyUnattributed = async (): Promise<boolean> => {
+    const withheld = await operatorPages.withheldPages();
+    if (withheld.some((page) => page.origin === 'uncertain')) return true;
+    if ((await memory.legacyOwner(agentId)) !== undefined) return false;
+    // A soft-deleted trace still holds its words until a delete for good.
+    for (const form of legacyForms) if ((await memory.countScope(LEGACY_SCOPE, form, { includeDeleted: true })) > 0) return true;
+    return withheld.length > 0;
+  };
+  /** The older pages under memory/: those an earlier version compiled (`parsed`), and those that cannot be read. */
+  const legacyPageEntries = async (): Promise<Array<{ id: string; parsed: boolean }>> =>
+    (await operatorPages.withheldPages()).map((page) => ({ id: page.id, parsed: page.origin === 'compiled' }));
+  /** The pages an earlier version compiled under memory/, read whole. */
+  const legacyCompiledPages = async (): Promise<WikiPage[]> => {
+    const pages: WikiPage[] = [];
+    for (const entry of await legacyPageEntries()) {
+      if (!entry.parsed) continue;
+      const page = await operatorPages.readPage(entry.id);
+      if (page) pages.push(page);
+    }
+    return pages;
+  };
+  /** What a deletion of the owner of the older memory also deletes; any other subject's deletion leaves it. */
+  const legacyDeletionOf = async (): Promise<NonNullable<ForgetUserMemoryOptions['legacy']>> => ({
+    ownerKey: await memory.legacyOwner(agentId),
+    forms: legacyForms,
+    pages: { list: legacyPageEntries, deletePage: (id) => operatorPages.deletePage(id) },
+    clearOwner: async () => {
+      await memory.clearLegacyOwner(agentId);
+      legacyOwnerKey = undefined;
+    },
+  });
+  /**
+   * What a deletion of one subject reaches beside the store: the history of the sessions this handle holds open for
+   * the subject, which the default runtime keeps in this process. A gmi() session keeps its own messages.
+   */
+  const sessionHistoryOf = (key: string): ForgetMemoryReport['stores'][number] => {
+    if (rest.runtime === 'gmi') {
+      return {
+        store: "a gmi() session's history",
+        reached: false,
+        reason: 'a gmi() session keeps its messages until the host closes it',
+      };
+    }
+    let cleared = 0;
+    for (const session of sessionsBySubject.get(key) ?? []) {
+      session.clear();
+      cleared += 1;
+    }
+    return { store: 'session history in this process', reached: true, deleted: cleared };
+  };
+  /**
+   * The parts of one subject's deletion that are this agent's: the wait for the subject's pending writes, its chain,
+   * and what the agent reached beside the store.
+   */
+  const deletionPartsOf = (
+    subject: SuppressionSubject,
+    extra: { stores: ForgetMemoryReport['stores']; incomplete: boolean },
+  ): Pick<ForgetUserMemoryOptions, 'drain' | 'onChain' | 'extraStores' | 'alsoIncomplete'> => {
+    const key = conversationScopeKey(agentId, subject);
+    return {
+      drain: () => drainSubject(key),
+      onChain: (work) => onSubject(key, work),
+      // The history goes once the tombstone is written: a deletion that cannot write it deletes nothing.
+      extraStores: () => [...extra.stores, sessionHistoryOf(key)],
+      alsoIncomplete: extra.incomplete,
+    };
+  };
+  /** Deletes one subject's memory on its own chain, after its pending writes. */
+  const forgetSubject = async (
+    subject: SuppressionSubject,
+    extra: { stores: ForgetMemoryReport['stores']; incomplete: boolean },
+  ): Promise<ForgetMemoryReport> =>
+    forgetUserMemory({
+      memory,
+      ledger: forgotten,
+      wiki: { storeFor: pagesOf },
+      subject,
+      agentId,
+      ...deletionPartsOf(subject, extra),
+      legacy: await legacyDeletionOf(),
+      legacyUnattributed,
+    });
+  /** What the agent's learning layer deleted of a user, as entries of a deletion report; none when it runs no layer. */
+  const forgetLearner = async (userId: string): Promise<{ stores: ForgetMemoryReport['stores']; incomplete: boolean }> => {
+    const forget = built.learning?.forgetUser;
+    if (!forget) {
+      return {
+        stores: [{ store: 'learning store', reached: false, reason: 'this agent runs no learning layer' }],
+        incomplete: false,
+      };
+    }
+    const learned = await forget.call(built.learning, userId);
+    const stores = learned.stores.map((entry): ForgetMemoryReport['stores'][number] =>
+      entry.reached
+        ? {
+            store: entry.store,
+            reached: true,
+            deleted: typeof entry.deleted === 'number' ? entry.deleted : Object.values(entry.deleted).reduce((sum, n) => sum + n, 0),
+          }
+        : { store: entry.store, reached: false, reason: entry.reason },
+    );
+    return { stores, incomplete: learned.stores.some((entry) => entry.store === 'learning store' && !entry.reached) };
+  };
+  built.forgetUser = (userId, options) => {
+    const linked: unknown = options?.linkedSessions ?? [];
+    if (typeof userId !== 'string' || userId === '') {
+      return Promise.reject(new TypeError('souledAgent: forgetUser needs a non-empty user id'));
+    }
+    if (!Array.isArray(linked) || linked.some((id) => typeof id !== 'string' || id === '')) {
+      return Promise.reject(new TypeError('souledAgent: forgetUser needs each linked session as a non-empty id'));
+    }
+    const sessions = [...new Set(linked as string[])];
+    // An id no memory key can be built from (a NUL, a lone surrogate) is refused before the learning layer or the
+    // store is reached: a deletion that stopped at its key would have deleted the learner's rows alone.
+    try {
+      conversationScopeKey(agentId, { kind: 'user', id: userId });
+      for (const id of sessions) conversationScopeKey(agentId, { kind: 'session', id });
+    } catch {
+      return Promise.reject(
+        new TypeError('souledAgent: forgetUser needs a user id and linked session ids with no NUL and no lone surrogate'),
+      );
+    }
+    const run = async (): Promise<ForgetMemoryReport> => {
+      const ofUser = await forgetSubject({ kind: 'user', id: userId }, await forgetLearner(userId));
+      // A subject the store holds nothing more of no longer counts toward the retention requirement.
+      const forgottenSubjects: SuppressionSubject[] = [{ kind: 'user', id: userId }, ...sessions.map((id) => ({ kind: 'session' as const, id }))];
+      const report: ForgetMemoryReport = { ...ofUser, stores: [...ofUser.stores], pages: { ...ofUser.pages, failed: [...ofUser.pages.failed] } };
+      for (const sessionId of sessions) {
+        const ofSession = await forgetSubject({ kind: 'session', id: sessionId }, { stores: [], incomplete: false });
+        report.stores.push(...ofSession.stores.map((entry) => ({ ...entry, store: `${entry.store} (linked session)` })));
+        report.pages.deleted += ofSession.pages.deleted;
+        report.pages.failed.push(...ofSession.pages.failed);
+        report.drained += ofSession.drained;
+        report.pendingAtDeadline += ofSession.pendingAtDeadline;
+        report.complete = report.complete && ofSession.complete;
+      }
+      if (report.complete) for (const subject of forgottenSubjects) subjects.delete(conversationScopeKey(agentId, subject));
+      return report;
+    };
+    // close() waits for a deletion that is running, as it waits for a write.
+    return awaitedOnClose(run());
+  };
+  /**
+   * Brings the ledger up to date from its copy and deletes again whatever the store holds of a forgotten subject. A
+   * forgotten user's learner rows are deleted again by the learning layer first, when the agent runs one.
+   */
+  const applyTombstones = async (): Promise<ForgetMemoryReport[]> => {
+    /** The subjects deleted again, in the order of their reports. */
+    const reapplied: SuppressionSubject[] = [];
+    const reports = await reapplyTombstones({
+      memory,
+      ledger: forgotten,
+      wiki: { storeFor: pagesOf },
+      agentId,
+      legacyUnattributed,
+      forSubject: async (subject) => {
+        reapplied.push(subject);
+        return {
+          ...deletionPartsOf(subject, subject.kind === 'user' ? await forgetLearner(subject.id) : { stores: [], incomplete: false }),
+          legacy: await legacyDeletionOf(),
+        };
+      },
+    });
+    // A subject the store holds nothing more of no longer counts toward the retention requirement.
+    reports.forEach((report, at) => {
+      const subject = reapplied[at];
+      if (report.complete && subject) subjects.delete(conversationScopeKey(agentId, subject));
+    });
+    return reports;
+  };
+  built.applyTombstones = () => awaitedOnClose(applyTombstones());
+  /** Deletes what the agent's retention no longer keeps, each subject on its own chain. */
+  const sweep = async (): Promise<{ traces: number; pages: number; scopes: number }> => {
+    if (retention === undefined) return { traces: 0, pages: 0, scopes: 0 };
+    return sweepRetention({
+      memory,
+      wiki: { storeFor: pagesOf },
+      retention,
+      daysFor: (scopeId) => policyDays.get(scopeId),
+      onChain: (scopeId, work) => (closing ? work() : onSubject(scopeId, work)),
+    });
+  };
+  built.sweepRetention = () => awaitedOnClose(sweep());
+  built.exportUserMemory = (userId) => {
+    if (typeof userId !== 'string' || userId === '') {
+      return Promise.reject(new TypeError('souledAgent: exportUserMemory needs a non-empty user id'));
+    }
+    const subject: SuppressionSubject = { kind: 'user', id: userId };
+    const run = async (): Promise<UserMemoryExport> => {
+      // The owner of the older memory gets it in their export too.
+      const owns = legacyOwnerKey !== undefined && conversationScopeKey(agentId, subject) === legacyOwnerKey;
+      return exportSubjectMemory({
+        memory,
+        wiki: { storeFor: pagesOf },
+        agentId,
+        subject,
+        ...(owns ? { legacy: { forms: legacyForms, pages: legacyCompiledPages } } : {}),
+      });
+    };
+    return awaitedOnClose(run());
+  };
+  built.correctUserMemory = (userId, correction) => {
+    if (typeof userId !== 'string' || userId === '') {
+      return Promise.reject(new TypeError('souledAgent: correctUserMemory needs a non-empty user id'));
+    }
+    const subject: SuppressionSubject = { kind: 'user', id: userId };
+    // The change runs on the person's chain, after their writes and compiles; close() waits for it.
+    return awaitedOnClose(
+      correctSubjectMemory({
+        memory,
+        wiki: { storeFor: pagesOf },
+        agentId,
+        subject,
+        correction,
+        onChain: (work) => onSubject(conversationScopeKey(agentId, subject), work),
+      }),
+    );
   };
 
   // On teardown: close the agent (with runtime: 'gmi' that stops its running session turns and shuts its sessions
@@ -1017,6 +1633,18 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
             'reaches the store once it is closed is not stored.',
         );
       }
+      closing = true;
+      if (retention !== undefined) {
+        try {
+          // Expired memory goes before the compile, so no page is built from it.
+          await sweep();
+        } catch {
+          // A failed sweep never blocks the close. No error text: it may hold what a store said.
+          console.warn(
+            '[agentos] souledAgent: the retention sweep on close failed; expired memory stays in the store until the next sweep.',
+          );
+        }
+      }
       try {
         // The subjects this agent's turns wrote to; a trace stored another way waits for memory.compileWiki(). With
         // `compile: false` no wiki is attached, and this compiles nothing.
@@ -1030,7 +1658,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
         );
       }
     } finally {
-      await memory.close();
+      await closeStore();
     }
     if (closeFailed) throw closeError;
   };
@@ -1038,6 +1666,55 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   // Expose the store so callers can fold conversation into the wiki mid-session
   // (`await agent.memory.compileWiki()`) without waiting for close().
   built.memory = memory;
+
+  // Every open applies the tombstones again, before the agent serves a turn: a store put back from a backup taken
+  // before a deletion, and a deletion that did not finish, hold nothing of a forgotten subject once this returns. A
+  // ledger whose copy cannot be read fails the open, and no memory is served.
+  try {
+    await applyTombstones();
+    // The checks of who the store holds read it once the tombstones are applied: a forgotten subject a restore put
+    // back is deleted again first, and counts for neither.
+    if (sharedUser !== undefined) {
+      // One person's memory: a store that holds another user's, or a session's, is not opened as theirs.
+      const others = (await memory.listScopes()).filter((row) => {
+        if (row.kind === 'operator') return false;
+        const subject = parseConversationScopeKey(row.scopeId)?.subject;
+        return !(subject?.kind === 'user' && subject.id === sharedUser);
+      });
+      if (others.length > 0) {
+        throw new Error(
+          "souledAgent: sharedMemory runs one person's memory, and this store already holds memory of another user or session",
+        );
+      }
+    }
+    for (const row of await memory.listScopes()) {
+      if (row.kind !== 'user' && row.kind !== 'session') continue;
+      const key = ownKeyOf(row.scopeId);
+      if (key !== undefined) subjects.add(key);
+    }
+    if (retention === undefined && subjects.size > 1) throw new Error(RETENTION_REQUIRED);
+    // On a single person's own machine the older memory is attributed to its one user, once the tombstones are
+    // applied: a forgotten user, an attribution to another user, and a store that records anyone else refuse the open.
+    if (legacyMemory !== undefined) {
+      await attributeLegacyMemory({
+        memory,
+        ledger: forgotten,
+        agentId,
+        attributeTo: legacyMemory.attributeTo,
+        reason: legacyMemory.reason,
+        legacyPages: legacyPageEntries,
+        isAnonymous: (id) => isAnonymousUserId(id, anonymousUserIds),
+      });
+    }
+    legacyOwnerKey = await memory.legacyOwner(agentId);
+    // An attributed owner already has memory even if no turn has registered their conversation scope yet.
+    if (legacyOwnerKey !== undefined) subjects.add(legacyOwnerKey);
+    if (retention === undefined && subjects.size > 1) throw new Error(RETENTION_REQUIRED);
+  } catch (err) {
+    await originalClose().catch(() => undefined);
+    await closeStore().catch(() => undefined);
+    throw err;
+  }
 
   return built;
 }

@@ -231,6 +231,7 @@ const publicationManifest = [
   agentosDoc('PII_REDACTION.md', 'features/pii-redaction.md', 'PII Redaction (and PHI scrubbing)', 'Guardrails & Safety', 1.9),
   agentosDoc('CREATING_GUARDRAILS.md', 'features/creating-guardrails.md', 'Creating Custom Guardrails', 'Guardrails & Safety', 2),
   agentosDoc('SAFETY_PRIMITIVES.md', 'features/safety-primitives.md', 'Safety Primitives', 'Guardrails & Safety', 3),
+  agentosDoc('MEMORY_HOST_DUTIES.md', 'features/memory-host-duties.md', 'Your Duties as the Controller', 'Guardrails & Safety', 3.5),
 
   agentosDoc('features/VOICE_PLATFORM.md', 'features/voice-platform.md', 'Voice Platform Runtime', 'Voice & Speech', 0.5),
   agentosDoc('VOICE_PIPELINE.md', 'features/voice-pipeline.md', 'Voice Pipeline', 'Voice & Speech', 1),

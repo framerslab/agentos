@@ -121,7 +121,7 @@ export {
   type AgentCognitiveMemoryOptions,
 } from './runtime/agentCognitiveMemory.js';
 export { souledAgent } from './souledAgent.js';
-export type { SouledAgentOptions, SouledAgent, MemoryPolicy } from './souledAgent.js';
+export type { SouledAgentOptions, SouledAgent, MemoryPolicy, MemoryRetention } from './souledAgent.js';
 export { exportAgent } from './exportAgent.js';
 
 // --- Model routing ---

@@ -3,8 +3,10 @@ import { messageOf } from '../../../api/runtime/memoryObserveFailures.js';
 import { WikiMemoryStore, WikiCompiler, UserWikiStore, originOfPage } from '../../substrate/memory/wiki/index.js';
 import type { UserWikiPagesPort } from '../../substrate/memory/wiki/index.js';
 import type { AttachedWiki } from './facade/Memory.js';
-import { conversationScopeKey } from '../retrieval/store/conversationScopeKey.js';
+import { conversationScopeKey, parseConversationScopeKey } from '../retrieval/store/conversationScopeKey.js';
 import { memoryLog } from '../log.js';
+import { guardedWrite } from '../suppression/guardedWrite.js';
+import type { WikiCompilerStorePort } from '../../substrate/memory/wiki/WikiCompiler.js';
 import { ReadMemoryPageTool, type ReadMemoryPagePort } from './tools/ReadMemoryPageTool.js';
 
 interface TraceLike {
@@ -80,6 +82,24 @@ export interface AttachMemoryWikiOptions {
    * subject's page is ever made; the operator's pages are indexed and read as before.
    */
   compile?: false;
+  /**
+   * Whether a subject is forgotten: the forgotten-user ledger's check (`ForgottenLedger.isForgotten`). With it, a
+   * forgotten asker of `read_memory_page` gets no page and an empty listing, a forgotten subject's scope is not
+   * compiled, and a page a compile wrote after the subject's tombstone is deleted once that compile is done. Each
+   * refusal writes one line with the reason `forgotten`.
+   */
+  isForgotten?: (subject: { kind: 'user' | 'session'; id: string }) => Promise<boolean>;
+  /**
+   * Runs one scope's compile: a host that orders each subject's writes, compiles and deletion one after another
+   * passes it, and runs `work` in the subject's turn. Unset: the compile runs at once.
+   */
+  runScope?: <T>(scopeId: string, work: () => Promise<T>) => Promise<T>;
+  /**
+   * The conversation key of the user the memory from before per-user scope is attributed to (a souled agent's
+   * `legacyMemory`), or undefined. For that asker alone, `read_memory_page` reads and lists the pages an earlier
+   * version compiled under memory/ as their own; a page whose front matter cannot be read stays withheld from them too.
+   */
+  legacyOwnerKey?: () => Promise<string | undefined>;
 }
 
 export interface AttachMemoryWikiResult {
@@ -169,9 +189,8 @@ export async function attachMemoryWiki(opts: AttachMemoryWikiOptions): Promise<A
 
   if (opts.compile !== false) {
     opts.memory.attachWiki({
-      storeFor,
+      ...compileGuardsOf(opts, storeFor),
       compiler,
-      ...(opts.beforeScopeCompile ? { beforeScopeCompile: opts.beforeScopeCompile } : {}),
       ...(opts.compileSkipReasonOf ? { compileSkipReasonOf: opts.compileSkipReasonOf } : {}),
     });
   }
@@ -199,23 +218,107 @@ export async function attachMemoryWiki(opts: AttachMemoryWikiOptions): Promise<A
 }
 
 /**
+ * The compile's side of the wiki the facade is given: the page store of each scope, the hook asked before a scope's
+ * traces go to the compiler, and the runner of each scope's compile.
+ *
+ * With `isForgotten`, a forgotten subject's scope is skipped before any of its text reaches the compiler, and the
+ * store a compile writes through checks the subject again around each page it writes: a page written after the
+ * subject's tombstone is deleted once the scope's compile is done (the scope's own compile holds the scope, so its
+ * page cannot be deleted from inside it).
+ */
+function compileGuardsOf(
+  opts: AttachMemoryWikiOptions,
+  storeFor: (scopeId: string) => UserWikiStore,
+): Pick<AttachedWiki, 'storeFor' | 'beforeScopeCompile' | 'runScope'> {
+  const isForgotten = opts.isForgotten;
+  const subjectOfScope = (scopeId: string) => {
+    const subject = parseConversationScopeKey(scopeId)?.subject;
+    return subject && subject.kind !== 'operator' ? subject : undefined;
+  };
+  if (!isForgotten) {
+    return {
+      storeFor,
+      ...(opts.beforeScopeCompile ? { beforeScopeCompile: opts.beforeScopeCompile } : {}),
+      ...(opts.runScope ? { runScope: opts.runScope } : {}),
+    };
+  }
+  /** The pages a compile wrote for a subject forgotten while it ran, by scope: deleted once the scope's compile is done. */
+  const takenBack = new Map<string, Set<string>>();
+  const guardedStoreFor = (scopeId: string): WikiCompilerStorePort => {
+    const inner = storeFor(scopeId);
+    const subject = subjectOfScope(scopeId);
+    if (!subject) return inner;
+    return {
+      readPage: (id) => inner.readPage(id),
+      writePage: async (page) => {
+        const outcome = await guardedWrite(
+          { isForgotten },
+          subject,
+          () => inner.writePage(page),
+          async () => {
+            const ids = takenBack.get(scopeId) ?? new Set<string>();
+            ids.add(page.id);
+            takenBack.set(scopeId, ids);
+          },
+        );
+        if (outcome.status === 'refused') memoryLog.warn('memory.compile_skipped', { reason: 'forgotten' });
+      },
+    };
+  };
+  const runScope = async <T>(scopeId: string, work: () => Promise<T>): Promise<T> => {
+    const compile = async (): Promise<T> => {
+      try {
+        return await work();
+      } finally {
+        const ids = takenBack.get(scopeId);
+        takenBack.delete(scopeId);
+        for (const id of ids ?? []) {
+          try {
+            await storeFor(scopeId).deletePage(id);
+          } catch {
+            // The page stays until the subject's deletion, or the next re-application of the tombstones, removes it;
+            // its subject is forgotten, so no read serves it meanwhile.
+          }
+        }
+      }
+    };
+    return opts.runScope ? opts.runScope(scopeId, compile) : compile();
+  };
+  const beforeScopeCompile: NonNullable<AttachedWiki['beforeScopeCompile']> = async (scopeId, traces) => {
+    const subject = subjectOfScope(scopeId);
+    if (subject && (await isForgotten(subject))) return { skip: 'forgotten' };
+    return opts.beforeScopeCompile ? opts.beforeScopeCompile(scopeId, traces) : { traces };
+  };
+  return { storeFor: guardedStoreFor, beforeScopeCompile, runScope };
+}
+
+/**
  * What `read_memory_page` reads through: the asker's own pages (rows of the store under the asker's conversation
  * key), then the operator's folder. Every refusal answers null, as a page that does not exist does, and writes one
- * `memory.page_read_refused` line with its reason.
+ * `memory.page_read_refused` line with its reason. A forgotten asker (`isForgotten`) is answered no page and an
+ * empty listing.
  */
 function pagePortOf(opts: AttachMemoryWikiOptions, operatorStore: WikiMemoryStore): ReadMemoryPagePort {
-  const refused = (reason: 'other_user' | 'no_user' | 'legacy'): null => {
+  const refused = (reason: 'other_user' | 'no_user' | 'legacy' | 'forgotten'): null => {
     memoryLog.warn('memory.page_read_refused', { reason });
     return null;
   };
+  /** The subject an asker's pages are kept for. */
+  const subjectFor = (asker: { kind: 'user' | 'session'; id: string }) => (opts.subjectOf ? opts.subjectOf(asker) : asker);
   /** The store of one subject's own pages, and the key they are filed under. */
   const ownPages = (asker: { kind: 'user' | 'session'; id: string }) => {
-    const subject = opts.subjectOf ? opts.subjectOf(asker) : asker;
-    const key = conversationScopeKey(opts.agentId, subject);
+    const key = conversationScopeKey(opts.agentId, subjectFor(asker));
     return { key, own: new UserWikiStore({ scopeId: key, pages: opts.memory, chunk: opts.chunk }) };
   };
+  /** Whether the older memory under memory/ is attributed to the asker whose pages are kept under `key`. */
+  const ownsLegacy = async (key: string): Promise<boolean> =>
+    opts.legacyOwnerKey ? (await opts.legacyOwnerKey()) === key : false;
+  /** Whether the asker's memory is forgotten: such an asker is answered nothing at all. */
+  const forgotten = async (asker: { kind: 'user' | 'session'; id: string }): Promise<boolean> =>
+    opts.isForgotten ? opts.isForgotten(subjectFor(asker)) : false;
   return {
     readPage: async (id, asker) => {
+      if (asker.subject && (await forgotten(asker.subject))) return refused('forgotten');
       const shared = await operatorStore.readPage(id);
       if (!asker.subject) {
         // Nobody: the operator's folder as it is, the pages an earlier version compiled among them.
@@ -228,8 +331,10 @@ function pagePortOf(opts: AttachMemoryWikiOptions, operatorStore: WikiMemoryStor
       const served = opts.ownPagesServed ? await opts.ownPagesServed(key) : true;
       const page = served ? await own.readPage(id) : null;
       if (page) return page;
-      // The folder's page is served only when the text just read is an operator page's.
+      // The folder's page is served only when the text just read is an operator page's, or a page an earlier version
+      // compiled and the older memory is attributed to the asker.
       if (shared && originOfPage(shared) === 'operator') return shared;
+      if (served && shared && originOfPage(shared) === 'compiled' && (await ownsLegacy(key))) return shared;
       // A page an earlier version compiled, or one that cannot be told from one, may hold what someone else said:
       // no user is served it.
       const origin = shared ? originOfPage(shared) : await operatorStore.pageOrigin(id);
@@ -237,14 +342,20 @@ function pagePortOf(opts: AttachMemoryWikiOptions, operatorStore: WikiMemoryStor
       return (await opts.memory.pageExistsOutside(key, id)) ? refused('other_user') : null;
     },
     listPages: async (asker) => {
+      if (asker.subject && (await forgotten(asker.subject))) {
+        memoryLog.warn('memory.page_read_refused', { reason: 'forgotten' });
+        return [];
+      }
       const shared = await operatorStore.load();
       if (!asker.subject) {
         return shared.map((page) => ({ id: page.id, summary: page.summary, owner: 'operator' as const }));
       }
       const { key, own } = ownPages(asker.subject);
       const served = opts.ownPagesServed ? await opts.ownPagesServed(key) : true;
+      const legacy = served && (await ownsLegacy(key)) ? shared.filter((page) => originOfPage(page) === 'compiled') : [];
       return [
         ...(served ? await own.listPages() : []).map((page) => ({ id: page.id, summary: page.summary, owner: 'own' as const })),
+        ...legacy.map((page) => ({ id: page.id, summary: page.summary, owner: 'own' as const })),
         ...shared
           .filter((page) => originOfPage(page) === 'operator')
           .map((page) => ({ id: page.id, summary: page.summary, owner: 'operator' as const })),

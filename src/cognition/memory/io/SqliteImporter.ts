@@ -54,6 +54,9 @@
  *     list. Any other page comes in with its chunks, which are written as
  *     traces of their own, never merged into a trace the brain holds, and the
  *     row lists the ids they were written under.
+ * - **memory_legacy_owner**: the user each agent's memory from before
+ *   per-user scope is attributed to. An owner comes in for an agent the brain
+ *   records no owner of; an owner it records is never moved.
  *
  * ## Full-text index
  * The brain's full-text index covers each trace's content and tags. Once the
@@ -110,6 +113,7 @@ import { keyTraceCopies, storedCopyTraceId } from '../retrieval/store/SqlKnowled
 import { parseTraceMetadata } from '../retrieval/store/tracePersistence.js';
 import {
   conversationPagesOf,
+  mergeImportedLegacyOwners,
   mergeImportedScopesAndPages,
   registeredConversationScopes,
   splitImportedPages,
@@ -269,10 +273,10 @@ export class SqliteImporter {
       // without the record keeps its plain form.
       const sourceEncoded = sourceRecord && holdsScopeIdsTheFormChanges(rows.traces ?? [], rows.nodes ?? []);
 
-      // The registry of conversation scopes and the wiki pages. A file older than the two tables holds neither; a
-      // table the file holds and that cannot be read stops the import before anything is written, so no page is
-      // left behind unsaid.
-      const readOwn = async <T>(table: 'memory_scopes' | 'memory_pages'): Promise<T[] | undefined> => {
+      // The registry of conversation scopes, the wiki pages and the owners of older memory. A file older than the
+      // tables holds none of them; a table the file holds and that cannot be read stops the import before anything is
+      // written, so no page or owner is left behind unsaid.
+      const readOwn = async <T>(table: 'memory_scopes' | 'memory_pages' | 'memory_legacy_owner'): Promise<T[] | undefined> => {
         let columns: Array<{ name: string }> = [];
         try {
           columns = await sourceAdapter.all<{ name: string }>(`PRAGMA table_info(${table})`);
@@ -293,6 +297,8 @@ export class SqliteImporter {
       if (ownScopes === undefined) return result;
       const ownPages = await readOwn<unknown>('memory_pages');
       if (ownPages === undefined) return result;
+      const sourceOwners = await readOwn<unknown>('memory_legacy_owner');
+      if (sourceOwners === undefined) return result;
       const sourceScopes = ownScopes;
       const sourcePages = conversationPagesOf(ownPages);
 
@@ -332,6 +338,8 @@ export class SqliteImporter {
           },
           result.errors,
         );
+        // The owner of each agent's older memory, where this brain records none: an owner it records is never moved.
+        await mergeImportedLegacyOwners(trx, this.brain.brainId, sourceOwners, result.errors);
         const nodes = await this._mergeNodes(rows.nodes, result, trx, merged.unfiled, encodePlainIds);
         await this._mergeEdges(rows.edges, result, trx, nodes.skipped);
         // A trace's copy is found by its trace's key: one the file holds under another node id gets the key here.
@@ -374,8 +382,9 @@ export class SqliteImporter {
         if (row.brain_id != null) brainIds.add(row.brain_id);
       }
     }
-    // A brain's scope registry and pages name it too: a file of pages alone, of two brains, is a file of two brains.
-    for (const table of ['memory_scopes', 'memory_pages'] as const) {
+    // A brain's scope registry, pages and owners of older memory name it too: a file of pages alone, of two brains, is
+    // a file of two brains.
+    for (const table of ['memory_scopes', 'memory_pages', 'memory_legacy_owner'] as const) {
       let rows: { brain_id: string | null }[];
       try {
         const columns = await src.all<{ name: string }>(`PRAGMA table_info(${table})`);

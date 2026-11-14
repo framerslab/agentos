@@ -133,6 +133,12 @@ export interface LedgerOptions {
    * committed. Default: the store's `deleteUserRows`.
    */
   onForgottenAfterCommit?: (namespace: string, userId: string) => Promise<void>;
+  /**
+   * Whether a user is forgotten in a namespace, for the read made once an append has committed. Default: the store's
+   * own tombstone row. A layer whose agent shares a forgotten-user ledger with its memory store reads both here. The
+   * read inside an append's transaction is always the store's own row.
+   */
+  isForgotten?: (namespace: string, userId: string) => Promise<boolean>;
   /** The versions every row records, beside what a candidate names. */
   versions?: Partial<LedgerVersions>;
 }
@@ -501,7 +507,8 @@ export class Ledger {
    */
   private async forgottenSinceCommit(namespace: string, userId: string, tomb: string): Promise<boolean> {
     try {
-      if (!(await this.store.isForgotten(tomb))) return false;
+      const forgotten = await (this.options.isForgotten ? this.options.isForgotten(namespace, userId) : this.store.isForgotten(tomb));
+      if (!forgotten) return false;
     } catch (error) {
       console.warn(
         `[agentos] learning: the ledger did not read the tombstone again once an append had committed (${messageOf(error)}); the append stands, and if its user was forgotten meanwhile, a second forgetUser call deletes its rows.`,
@@ -513,7 +520,7 @@ export class Ledger {
       else await this.store.deleteUserRows(namespace, userId);
     } catch (error) {
       console.warn(
-        `[agentos] learning: the rows an append wrote after its user was forgotten (tombstone ${tomb.slice(0, 16)}) were not deleted (${messageOf(error)}); a second forgetUser call deletes them.`,
+        `[agentos] learning: the rows an append wrote after its user was forgotten were not deleted (${messageOf(error)}); a second forgetUser call deletes them.`,
       );
     }
     return true;

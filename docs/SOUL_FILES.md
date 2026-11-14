@@ -70,7 +70,8 @@ Long-term memory is an **LLM wiki** in two layers:
 
 `.store/` holds what people said to the agent, so it is kept out of version control:
 the store's folder is made with a `.gitignore` holding `*`, and one already there is
-left as it is.
+left as it is. A file git tracked before the `.gitignore` existed stays tracked:
+remove it from the index with `git rm --cached`.
 
 Pages are markdown with YAML frontmatter and `[[wikilinks]]`. The agent reads
 the index from its prelude, then opens any page with the `read_memory_page` tool.
@@ -169,6 +170,20 @@ if (encoded !== agentId) await agent.memory.deleteScope('persona', encoded);
 
 Then delete the compiled page files (the ones whose front matter lists `sources`), and
 the next start writes `index.md` again and logs no `memory.legacy_traces` line.
+
+On a single person's own machine, `legacyMemory: { attributeTo, reason:
+'one-persons-machine' }` on `souledAgent()` attributes that older memory to one user:
+the user recalls the old traces, reads and lists the old compiled pages, gets both in an
+export, and a deletion you request for that user removes them. The option is a statement
+you make. The library refuses it when the store records another user, any anonymous
+session, a trace that names another user, another forgotten subject or another learner,
+and it cannot check more than that. The attribution is recorded in the store, stands for
+the store's life whether later opens pass the option or not, and is never moved to
+another user; one `memory.legacy_attributed` log line counts the traces and pages it
+attributed. A page whose front matter does not parse is never attributed: it stays
+withheld from every user, and a deletion report goes on naming it as legacy memory nobody
+attributed. A person who uses the agent later is another subject and never reads the
+attributed memory.
 
 The memory index in the system prompt is rendered from the operator's page files and
 the text migrated from `MEMORY.md` (below), not read from `index.md`; `loadSoul()` and
@@ -401,6 +416,8 @@ The exceptions:
 - `gmi()` accepts guardrails, RAG and approval settings without applying them, and says so in one warning line at construction.
 - A soul that fails to load throws `SoulLoadError` when the agent is built, unless it is given as `{ path, optional: true }` or `{ content, optional: true }`.
 - On the full runtime, the trait paragraph from the `hexaco:` scores reaches the prompt with or without a learning layer; with one, the layer prepares it each turn ([GMI.md](./GMI.md#learning)).
+
+A product that serves other people with a souled agent is the controller of what memory holds: [Your Duties as the Controller](./safety/MEMORY_HOST_DUTIES.md) says what the library does and what is yours.
 
 ## Loading Order at Agent Boot
 
