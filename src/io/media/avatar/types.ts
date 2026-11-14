@@ -68,8 +68,10 @@ export interface AvatarAcceptanceVerdict {
  * `driftGuard.maxRegenerationAttempts` draws in all; a job whose every attempt is
  * refused fails with the last reason and its image is left out of the
  * identity package. A check that throws fails that job with the error's
- * message and draws no more for it, so a caller that wants to keep a render
- * its check could not judge returns `{ accepted: true }` itself.
+ * message and draws no more for it; the job keeps the draws made in
+ * `attempts` and the check's last verdict in `acceptance`. A caller that
+ * wants to keep a render its check could not judge returns
+ * `{ accepted: true }` itself.
  */
 export type AvatarAcceptanceCheck = (
   args: AvatarAcceptanceCheckArgs,
@@ -130,7 +132,8 @@ export interface AvatarGenerationRequest {
     rejectBelowThreshold?: boolean;
     /**
      * Maximum attempts per image when its face drifts or the acceptance check
-     * refuses it: draws in all, the first included. Below 1, or NaN, counts as 1.
+     * refuses it: draws in all, the first included. Below 1, or NaN, counts as 1,
+     * and the identity package's `driftGuard` records the limit drawn under.
      */
     maxRegenerationAttempts?: number;
   };

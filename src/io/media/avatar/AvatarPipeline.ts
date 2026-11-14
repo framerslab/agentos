@@ -128,6 +128,14 @@ async function runBounded<T>(
   await Promise.all(Array.from({ length: workerCount }, () => worker()));
 }
 
+/**
+ * Sets a key as the map's own property, so a caller's emotion named `__proto__` is kept as a key like any other
+ * instead of reaching the object's prototype.
+ */
+function setOwn(map: Record<string, string>, key: string, value: string): void {
+  Object.defineProperty(map, key, { value, enumerable: true, writable: true, configurable: true });
+}
+
 /** A caller's list with repeats removed, first occurrence kept, or the default list. */
 function listOrDefault(list: readonly string[] | undefined, fallback: readonly string[]): string[] {
   return [...new Set(list ?? fallback)];
@@ -150,6 +158,8 @@ interface CheckedDraw {
   bestScore: number;
   /** The acceptance check's last verdict, when the caller's check ran. */
   verdict?: AvatarAcceptanceVerdict;
+  /** The message of the acceptance check's throw, which ended the draws. */
+  error?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -213,7 +223,8 @@ export class AvatarPipeline {
     const driftConfig: DriftConfig = {
       faceSimilarity: request.driftGuard?.faceSimilarity ?? DEFAULT_DRIFT_SIMILARITY,
       rejectBelowThreshold: request.driftGuard?.rejectBelowThreshold ?? DEFAULT_REJECT_BELOW_THRESHOLD,
-      maxRegenerationAttempts: request.driftGuard?.maxRegenerationAttempts ?? DEFAULT_MAX_REGEN_ATTEMPTS,
+      // Every checked image is drawn at least once, so below 1 or NaN means one draw, and the package records that.
+      maxRegenerationAttempts: Math.max(1, (request.driftGuard?.maxRegenerationAttempts ?? DEFAULT_MAX_REGEN_ATTEMPTS) || 1),
     };
 
     // Mutable state accumulated across stages
@@ -327,7 +338,7 @@ export class AvatarPipeline {
             driftRegenerated,
           });
           if (drawn.imageUrl) {
-            expressionSheet[emotion] = drawn.imageUrl;
+            setOwn(expressionSheet, emotion, drawn.imageUrl);
           }
           settle(job, drawn);
         } catch (err) {
@@ -360,7 +371,7 @@ export class AvatarPipeline {
             stage: 'animated_emotes',
             label,
           });
-          animatedEmotes[emotion] = url;
+          setOwn(animatedEmotes, emotion, url);
           job.imageUrl = url;
           job.status = 'completed';
           job.attempts = 1;
@@ -529,7 +540,9 @@ export class AvatarPipeline {
    * compared with the anchor embedding by cosine similarity: the best-scoring
    * candidate is kept and drawing stops at the first match; a candidate whose
    * face cannot be extracted is kept as it is. With neither, the first
-   * candidate is kept. A throw from the generator or the check propagates.
+   * candidate is kept. A throw from the generator propagates. A throw from the
+   * check ends the draws and comes back as `error`, with the attempts made and
+   * the check's last verdict, so the job records them.
    */
   private async drawChecked(args: {
     stage: AvatarGenerationStage;
@@ -556,13 +569,19 @@ export class AvatarPipeline {
       const url = await this.generateImage(prompt, options);
 
       if (acceptanceCheck) {
-        const answer = await acceptanceCheck({
-          referenceUrl,
-          candidateUrl: url,
-          stage,
-          label,
-          attempt: attempts,
-        });
+        let answer: Awaited<ReturnType<AvatarAcceptanceCheck>>;
+        try {
+          answer = await acceptanceCheck({
+            referenceUrl,
+            candidateUrl: url,
+            stage,
+            label,
+            attempt: attempts,
+          });
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err);
+          return { imageUrl: undefined, attempts, bestScore, verdict, error };
+        }
         const accepted = answer?.accepted === true;
         verdict = answer?.reason !== undefined ? { accepted, reason: answer.reason } : { accepted };
         if (accepted) {
@@ -632,9 +651,9 @@ export class AvatarPipeline {
       }
     } else {
       job.status = 'failed';
-      job.error = callerChecked
+      job.error = drawn.error ?? (callerChecked
         ? (drawn.verdict?.reason ?? 'Refused by the acceptance check.')
-        : 'All regeneration attempts failed drift check.';
+        : 'All regeneration attempts failed drift check.');
     }
 
     job.attempts = drawn.attempts;
