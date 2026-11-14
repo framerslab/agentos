@@ -167,6 +167,12 @@ const unavailable = (): ForgottenLedgerError =>
     'ForgottenLedger: the ledger needs a storage adapter with transactions and a secure random source (globalThis.crypto.getRandomValues); no row was changed.',
   );
 
+const lockNotTaken = (): ForgottenLedgerError =>
+  new ForgottenLedgerError(
+    'LEDGER_UNAVAILABLE',
+    "ForgottenLedger: the ledger table's write lock was not taken; another connection held it. No row was changed.",
+  );
+
 /** Writes the one line of a refusal, where the refusal is thrown; callers pass the error on without another line. */
 function logRefusal(error: unknown): void {
   if (error instanceof ForgottenLedgerError) memoryLog.warn('memory.ledger_refused', listedErrorFields(error));
@@ -264,11 +270,16 @@ function nextMark(previous: string | undefined): string {
 /**
  * Runs one side's step in a transaction of its own whose first statement takes the table's write lock, so no other
  * writer changes the side between the step's reads and its commit. Every statement of the step runs on `trx`. A
- * step never opens the other side's transaction.
+ * step never opens the other side's transaction. A lock that is not taken (another connection holds it past the
+ * wait the driver allows) is a `LEDGER_UNAVAILABLE` refusal, and the transaction ends with nothing written.
  */
 function locked<T>(adapter: StorageAdapter, step: (trx: StorageAdapter) => Promise<T>): Promise<T> {
   return adapter.transaction(async (trx) => {
-    await trx.run(adapter.kind.includes('postgres') ? LOCK_POSTGRES : LOCK_SQLITE);
+    try {
+      await trx.run(adapter.kind.includes('postgres') ? LOCK_POSTGRES : LOCK_SQLITE);
+    } catch {
+      throw lockNotTaken();
+    }
     return step(trx);
   });
 }
@@ -370,8 +381,8 @@ export class ForgottenLedger {
    *   that was not passed; `LEDGER_IDENTITY_MISMATCH` when the store and the copy hold different identities, or the
    *   side without an identity holds a tombstone or key marker the other lacks; `LEDGER_STATE_INVALID` when a side
    *   holds one of the two rows without the other, a malformed one, or a tombstone the other side holds with another
-   *   namespace or time; `LEDGER_UNAVAILABLE` when an adapter has no transactions or the runtime has no secure random
-   *   source. Nothing is copied or marked by an open that is refused, and each refusal writes one
+   *   namespace or time; `LEDGER_UNAVAILABLE` when an adapter has no transactions, the runtime has no secure random
+   *   source, or a side's write lock is held by another connection past the driver's wait. Nothing is copied or marked by an open that is refused, and each refusal writes one
    *   `memory.ledger_refused` line.
    */
   static async open(options: ForgottenLedgerOptions): Promise<ForgottenLedger> {
