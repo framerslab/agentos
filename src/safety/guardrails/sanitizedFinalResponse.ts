@@ -20,9 +20,12 @@ export const STRUCTURED_REPLY_WITHDRAWN_ISSUE =
  * value, marked invalid at the `post_guardrail` stage. `processRequest()` holds the turn's schema and checks the
  * rewritten reply against it, which replaces this value; a stream that holds no schema (a tool-result continuation, a
  * cross-agent supervisor's) hands it to the host as it is, so no value parsed from the replaced reply reaches the host.
+ * A refused reply ({@link isRefusedStructuredReply}) has no parsed value to withdraw: it is returned unchanged (no
+ * value, invalid, at the `model` stage, with its refusal issue), and `processRequest()` does not check it again.
  *
- * @param structured - The value parsed from the reply the guardrail replaced.
- * @returns The withdrawn value, which keeps the schema's name, the attempts and the enforcement.
+ * @param structured - The value parsed from the reply the guardrail replaced, or a refused reply.
+ * @returns The withdrawn value, which keeps the schema's name, the attempts and the enforcement; a refused reply as it
+ *   came.
  */
 export function withdrawnStructuredReply(structured: StructuredReplyOutput): StructuredReplyOutput {
   // A refusal has no parsed value to withdraw, and remains a refusal after a text rewrite.
@@ -78,7 +81,8 @@ export function withReplyRewritten<T>(context: T, from: string | null, to: strin
 /**
  * The final response with its reply replaced by a guardrail's text: the reply and the reply in the serialized
  * conversation the chunk carries read `text`, its plain text is `text` rendered as a turn renders its own reply
- * (`renderPlainText()`), a structured value parsed from the replaced reply is withdrawn (`withdrawnStructuredReply()`),
+ * (`renderPlainText()`), a structured value parsed from the replaced reply is withdrawn (`withdrawnStructuredReply()`;
+ * a refused one stays as it is),
  * and the audio output speaks `text` with no audio file of the replaced reply (`rewrittenAudioOutput()`), so no field
  * keeps the reply the guardrail rewrote. When `text` is the reply the chunk carries, the guardrail rewrote nothing, and
  * the chunk is returned as it is, with the value parsed and the audio made from its reply.
