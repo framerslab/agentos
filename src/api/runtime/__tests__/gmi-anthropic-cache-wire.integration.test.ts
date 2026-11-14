@@ -182,6 +182,17 @@ describe('GMI Anthropic wire', () => {
     expect(hourFirst(lifetimes), `copied parts: every one-hour marker comes first: ${lifetimes.join(', ')}`).toBe(true);
     expect(bodies[0].system.find((block: any) => block.text === 'Host')?.cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
   });
+  // A marker equal to the GMI's that the hook sets on the fixed part is removed only where the request would be refused.
+  it('drops an equal marker the hook sets on the fixed part when the request would hold five markers', async () => {
+    await make({ onBeforeGeneration: ({ messages }: any) => {
+      messages.find((message: any) => message.role === 'system').content[0].cache_control = { type: 'ephemeral' };
+      return { messages: [...messages, ...Array.from({ length: 4 }, (_, i) => ({ role: 'system', content: [{
+        type: 'text', text: `Host ${i}`, cache_control: { type: 'ephemeral' },
+      }] }))] };
+    } }).generate('hi');
+    expect(markerCount(bodies[0]), 'at most four markers reach the provider').toBe(4);
+    expect(bodies[0].system[0]).not.toHaveProperty('cache_control');
+  });
   it('keeps the marker on a copied part as the hook returned it when the request is valid', async () => {
     await make({ cache: { tail: false }, onBeforeGeneration: ({ messages }: any) => ({ messages: structuredClone(messages) }) }).generate('hi');
     expect(bodies[0].system[0]).toEqual({ type: 'text', text: 'Policy', cache_control: { type: 'ephemeral' } });
