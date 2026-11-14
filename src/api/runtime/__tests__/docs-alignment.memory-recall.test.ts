@@ -42,6 +42,24 @@ describe('memory recall docs', () => {
     expect(step).not.toContain('their final score blends 0.7 cognitive and 0.3 reranker');
   });
 
+  it('say the in-process exact-words index serves a store with no Brain and holds the traces this process filed or loaded', () => {
+    // pipeline.ts uses the in-process index whenever MemoryStore.getBrain() returns null, a store over a vector index
+    // that outlives the process included, and lexical.ts fills it from this process's writes and loads alone: a
+    // trace another process filed into that index is not in it.
+    const memory = 'docs/memory/COGNITIVE_MEMORY.md';
+    const lines = [
+      lineOf('docs/architecture/hybrid-retriever.md', '`HybridRetriever` and [`SessionRetriever`]'),
+      lineOf('docs/text/LEXICAL_AND_HYBRID_SEARCH.md', "- Cognitive memory's `recall.retrieval: 'hybrid'`"),
+      lineOf(memory, '| `exact_words` | '),
+    ];
+    for (const line of lines) {
+      expect(line).toContain('a store with no Brain');
+      expect(line).toContain('the traces this process filed or loaded');
+      expect(line).not.toContain('a memory with no store');
+    }
+    expect(lineOf(memory, '| `lexicalBackend` | ')).toContain('`in_process` (a store with no Brain)');
+  });
+
   it('state the numbers the source holds: the default budget, the hybrid recall constants and the rerank bounds', () => {
     // A constant a measured run moves (RECALL_CONSTANTS, RERANK_DEFAULTS) must move in these tables with it.
     const cell = (row: string, n: number) => row.split('|')[n].trim();
