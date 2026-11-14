@@ -58,6 +58,7 @@ import {
   type MemoryAssemblerInput,
   type MemoryGraphAssociation,
 } from './core/prompt/MemoryPromptAssembler.js';
+import { asShownInMemoryBlock } from './core/prompt/MemoryFormatters.js';
 
 // Batch 2 imports
 import type { IMemoryGraph, ActivatedNode } from './retrieval/graph/IMemoryGraph.js';
@@ -1252,10 +1253,10 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
           ) {
             // Whole: the assembler shows an association whole or leaves it out when it does not fit its section, and
             // leaves it out when the block already holds its trace (a retrieved trace past the three seeds may be
-            // associated).
+            // associated). The agent's own earlier reply reads as its words there too.
             graphContext.push({
               traceId: node.memoryId,
-              text: `[associated, activation=${node.activation.toFixed(2)}] ${trace.content}`,
+              text: `[associated, activation=${node.activation.toFixed(2)}] ${asShownInMemoryBlock(trace).content}`,
             });
           }
         }

@@ -271,6 +271,50 @@ describe('Pipeline integration: involuntary recall via assembleMemoryContext', (
     expect(result.contextText).not.toContain('Something This Reminds Me Of');
   });
 
+  it("shows a reply of the agent's own as its words, and a host's own inference as it is", () => {
+    const old = {
+      createdAt: Date.now() - 30 * DAY_MS,
+      encodingStrength: 0.6,
+      emotionalContext: { valence: 0.8, arousal: 0.9, dominance: 0.5, intensity: 0.72, gmiMood: 'FOCUSED' },
+    };
+    const provenance = { sourceType: 'agent_inference' as const, confidence: 0.8, verificationCount: 0, sourceTimestamp: Date.now() };
+    // A GMI files its reply so: semantic, agent_inference, the bridge's tags with the role first.
+    const reply = makeTrace({
+      ...old,
+      id: 'old_reply',
+      type: 'semantic',
+      content: 'I promised to look at the outage report with you',
+      tags: ['assistant', 'ops', 'u1'],
+      provenance,
+    });
+    // A conclusion a host filed itself with the same sourceType and without the tag.
+    const inference = makeTrace({
+      ...old,
+      id: 'host_inference',
+      type: 'semantic',
+      content: 'The user probably works night shifts',
+      tags: [],
+      provenance,
+    });
+    const recall = (trace: MemoryTrace) =>
+      assembleMemoryContext({
+        totalTokenBudget: 2000,
+        traits: { openness: 0.7, conscientiousness: 0.6 },
+        retrievedTraces: [],
+        mechanismsEngine: new CognitiveMechanismsEngine({ involuntaryRecall: { probability: 1.0 } }),
+        allTraces: [trace],
+      }).contextText;
+
+    const withReply = recall(reply);
+    expect(withReply).toContain('Something This Reminds Me Of');
+    expect(withReply).toContain(`You said: ${reply.content}`);
+
+    const withInference = recall(inference);
+    expect(withInference).toContain('Something This Reminds Me Of');
+    expect(withInference).toContain(inference.content);
+    expect(withInference).not.toContain(`You said: ${inference.content}`);
+  });
+
   it('does not inject when no engine provided (backward compatible)', () => {
     const result = assembleMemoryContext({
       totalTokenBudget: 2000,

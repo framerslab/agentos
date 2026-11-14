@@ -586,4 +586,37 @@ describe('assembleForPrompt memory block', () => {
       await manager.shutdown();
     }
   });
+
+  it("a reply of the agent's own that the graph walk reaches reads as its words; a host's own inference reads as it is", async () => {
+    const manager = new CognitiveMemoryManager();
+    await manager.initialize(makeManagerConfig(makeMocks(), 'graph-own-words'));
+    try {
+      // A GMI files its reply so: semantic, agent_inference, the bridge's tags with the role first.
+      const reply = {
+        ...traceOf('reply-1', 'semantic', 'I told you the ferry leaves from pier 3.'),
+        tags: ['assistant', 'guide', 'u1'],
+        provenance: { sourceType: 'agent_inference', sourceTimestamp: Date.now(), confidence: 1, verificationCount: 0 },
+      };
+      // A conclusion a host filed itself with the same sourceType and without the tag.
+      const inference = {
+        ...traceOf('inference-1', 'semantic', 'The user probably takes the morning ferry.'),
+        provenance: { sourceType: 'agent_inference', sourceTimestamp: Date.now(), confidence: 1, verificationCount: 0 },
+      };
+      await manager.getStore().store(reply as never);
+      await manager.getStore().store(inference as never);
+      retrievalOf(manager, [traceOf('seed-1', 'semantic', 'We plan a day trip to the island.')]);
+      vi.spyOn(manager.getGraph()!, 'spreadingActivation').mockResolvedValue([
+        { memoryId: reply.id, activation: 0.8, depth: 1, activatedBy: ['seed-1'] },
+        { memoryId: inference.id, activation: 0.6, depth: 1, activatedBy: ['seed-1'] },
+      ]);
+
+      const out = await manager.assembleForPrompt('where does the ferry leave from', 1600, MOOD);
+      expect(out.contextText).toContain('## Related Context');
+      expect(out.contextText).toContain(`[associated, activation=0.80] You said: ${reply.content}`);
+      expect(out.contextText).toContain(`[associated, activation=0.60] ${inference.content}`);
+      expect(out.contextText).not.toContain(`You said: ${inference.content}`);
+    } finally {
+      await manager.shutdown();
+    }
+  });
 });
