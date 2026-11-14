@@ -92,8 +92,17 @@ export interface RerankerRequestConfig {
   /**
    * Request timeout in milliseconds. `RerankerService.rerank()` sends the call's, else the provider settings'
    * `defaultTimeoutMs`, else none, and the provider applies its own: 30000 for Cohere and the LLM judge.
+   * Cohere's provider bounds the whole call with it, the response's body included; the LLM judge bounds each
+   * call of its `llmCallFn`.
    */
   timeoutMs?: number;
+  /**
+   * Ends the request at its abort. `RerankerService.rerank()` passes it to the provider. Cohere's provider joins it
+   * with its timer: an abort before the request is sent sends nothing, and one while it runs ends the request or
+   * its body read and closes the connection; the call rejects with the signal's reason. The local cross-encoder
+   * and the LLM judge do not read it.
+   */
+  signal?: AbortSignal;
   /** Provider-specific parameters */
   params?: Record<string, unknown>;
 }
