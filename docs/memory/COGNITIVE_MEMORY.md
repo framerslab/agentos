@@ -717,6 +717,28 @@ The preamble appears when the budget has room for it and 100 more tokens. `assem
 
 Token estimation uses ~4 chars per token heuristic.
 
+### Where the block goes in the request
+
+A GMI sends the block in the turn's newest user message, never in the system text. PromptEngine puts the block first, then the turn's other retrieved context (the RAG and long-term-memory text) after `\n\n---\n\n`, and opens the whole with one fixed line, `APPLICATION_NOTE_FRAME` in [`PromptEngine.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/PromptEngine.ts):
+
+```
+[Note from the application, not from the person. It is for this reply only: never quote it or mention it.]
+```
+
+The person's message follows exactly as they wrote it, with no label in front of it and nothing trimmed. On a provider whose adapter sends each text part of a user message on as a part of its own (`anthropic`, `gemini`, `openai` and `openrouter`), the message holds two text parts, the note and then the words; OpenAI's `/v1/responses` route sends them as two `input_text` parts:
+
+```json
+{
+  "role": "user",
+  "content": [
+    { "type": "text", "text": "[Note from the application, not from the person. ...]\n## How To Use Your Memories\n..." },
+    { "type": "text", "text": "Hey Tess! Slow afternoon at work so I'm bothering you." }
+  ]
+}
+```
+
+Every other provider gets one string: the note, a blank line, then the words. A message with images keeps its image parts. PromptEngine counts the block, not the line, in `metadata.contextTokens.memory`, and the recall record's `delivery` reports that count. A host that reads the person's words out of a captured request finds them in the last text part of the newest user message, or at the end of its string on a one-string provider.
+
 ### Upgrading from 0.17.3 or earlier
 
 - A store loads traces stored in the same millisecond by id, compared character code by character code, in the whole-brain hydration of its first recall and in `hydrateScope`. Through 0.17.3 they loaded in an order each engine's query plan left open: on SQLite it followed how the rows were read (in the order they were stored in one store, the newest first in another), and on PostgreSQL it also changed as rows were updated, so two loads of the same traces could differ. A host sees it in the memory block a GMI sends (`agent({ runtime: 'gmi' })`, `gmi()`) and in a turn's `memoryRecall.candidates`: equally scored traces of one millisecond are listed by id, and the same traces give the same block on SQLite and on PostgreSQL, and from one load to the next. On either engine, two such traces can come back in the other order than before. Traces stored in different milliseconds load as before.
@@ -748,7 +770,7 @@ Token estimation uses ~4 chars per token heuristic.
 
 - A GMI turn sizes the memory block for the model each hop is sent to. When what the model's retrieved-context share (20% of its context) leaves after the turn's RAG and long-term-memory text is smaller than the block, the block is rendered again at that remainder from the turn's one recall: no second retrieval and no embedding call, and memories drop whole. Through 0.16.0 every model was sent the block assembled at the full budget, joined to the other context, and PromptEngine cut or summarised the joined text when the share was smaller. A model whose share holds the block gets the same block as before. See [Budget and the prompt share](#budget-and-the-prompt-share).
 - PromptEngine takes the memory block as `PromptComponents.memoryContextText`, counts it into the prompt and never reduces it: when the prompt must be reduced, only `retrievedContext` is summarised or truncated, to what the share leaves beside the block. Through 0.16.0 the GMI joined the block into `retrievedContext`, so a reduction could cut or summarise it. A prompt nothing was reduced in is the same byte for byte: the block goes first, joined to the other context with `\n\n---\n\n`, as the GMI joined it.
-- For a host that calls PromptEngine itself: the `anthropic_messages` and `generic_completion` templates send `retrievedContext`, and with it the memory block, in front of the query (`Context:`), as `openai_chat` does; through 0.16.0 they left it out. A prompt over its budget whose other context already fits beside the block leaves that context as it is and reports no cut.
+- For a host that calls PromptEngine itself: the `anthropic_messages` and `generic_completion` templates send `retrievedContext`, and with it the memory block, in front of the person's words ([Where the block goes in the request](#where-the-block-goes-in-the-request)), as `openai_chat` does; through 0.16.0 they left it out. A prompt over its budget whose other context already fits beside the block leaves that context as it is and reports no cut.
 - For a host that calls PromptEngine itself: on a prompt over its budget, `retrievedContext` is truncated to what the summariser is asked for (the share less the overrun), where through 0.16.0 the truncation kept the whole share; a target of 0 removes it (`removedComponents`) instead of asking the summariser for an empty summary. `PromptEngineResult.metadata.contextTokens` holds PromptEngine's counts of the memory block and of the other context before and after the budget step.
 - A GMI turn's recall record (`GMIOutput.memoryRecall`, a session's `memoryRecall`) is the record of the hop that served the turn: its `budget` names the hop, the share and any clamp or re-render, and `delivery` says what reached the model. The `MEMORY_SOURCES_AVAILABLE` chunk and the runtime stream's `memorySources` update carry the assembly's record, without those fields. See [Recall Capture](#recall-capture).
 - `ICognitiveMemoryManager` gains the optional `reassembleForBudget(context, tokenBudget)`, which `CognitiveMemoryManager` implements; the bridge asks a manager without it through `assembleForPrompt` again, at the lower budget, with the turn's query and scopes. A manager whose `reassembleForBudget` rejects is not asked again: the hop is sent no block.
