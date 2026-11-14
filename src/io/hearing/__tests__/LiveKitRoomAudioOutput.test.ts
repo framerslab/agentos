@@ -115,6 +115,54 @@ describe('LiveKitRoomAudioOutput', () => {
     await output.close();
   });
 
+  it("plays a clip whole on rtc-node's own resampler when its last whole chunk would leave a few samples over", async () => {
+    // rtc-node's AudioResampler (soxr) gives a chunk of n samples at 48,000 Hz round(n / 3) samples at 16,000 Hz, so
+    // one sample gives none, which the publisher refuses. A clip of 96,001 samples cut on whole 2,000 ms chunks leaves
+    // that one sample last.
+    const rtc = await import('@livekit/rtc-node');
+    try {
+      const room = new FakeRoom();
+      const output = new LiveKitRoomAudioOutput({
+        room,
+        publisher: { sampleRate: 16_000, maxBytes: 256_000, maxDurationMs: 2_000, receiptTimeoutMs: 1_000 },
+        rtc: { ...fakePublishingRtc(), AudioFrame: rtc.AudioFrame, AudioResampler: rtc.AudioResampler },
+      });
+      const audio = Buffer.alloc(96_001 * 2);
+      for (let i = 0; i < 96_001; i++) audio.writeInt16LE(Math.round(8_000 * Math.sin(i / 20)), i * 2);
+      let settled = false;
+      const playing = output.play({ audio, sampleRate: 48_000 }).finally(() => {
+        settled = true;
+      });
+      playing.catch(() => {});
+      await until(() => settled || capturedSamples() >= 31_998, 2_000);
+      await settle();
+      source().playOut();
+      await expect(playing).resolves.toEqual({ playedMs: 2_000 });
+      expect(Math.abs(capturedSamples() - 32_000)).toBeLessThanOrEqual(2);
+      await output.close();
+    } finally {
+      await rtc.dispose();
+    }
+  });
+
+  it('admits a play asked in the same turn as the clear that stopped the play before it', async () => {
+    const room = new FakeRoom();
+    const output = outputOn(room);
+    await output.open();
+    const first = output.play({ audio: clip(1_000), sampleRate: RATE });
+    first.catch(() => {});
+    await until(() => source().captured.length === 1);
+    const cleared = output.clear();
+    const second = output.play({ audio: clip(1_000), sampleRate: RATE });
+    second.catch(() => {});
+    await expect(first).rejects.toThrow('room audio cleared');
+    await cleared;
+    await until(() => source().captured.length === 2);
+    source().playOut();
+    await expect(second).resolves.toEqual({ playedMs: 1_000 });
+    await output.close();
+  });
+
   it('empties the queue when cleared during a play, and rejects that play', async () => {
     const room = new FakeRoom();
     const output = outputOn(room);
