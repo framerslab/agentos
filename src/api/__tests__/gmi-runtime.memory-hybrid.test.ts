@@ -228,7 +228,8 @@ describe("agent({ runtime: 'gmi' }) memory.recall.retrieval", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gmi-hybrid-'));
     try {
       const durable = await turn({ retrieval: 'hybrid' }, { learning: { agentKey: 'hybrid-e2e', mode: 'off' } }, { store: { path: path.join(dir, 'brain.sqlite') } });
-      expect(durable.memoryRecall.lexicalBackend).toBe('fts5');
+      // FTS5, or FTS4 where the file opened through sql.js (no better-sqlite3).
+      expect(['fts5', 'fts4']).toContain(durable.memoryRecall.lexicalBackend);
       expect(durable.memoryRecall.legs.every((l) => l.ran)).toBe(true);
       expect(durable.block).toContain('XQ7Z');
     } finally {

@@ -1044,16 +1044,23 @@ const tutor = agent({
   provider: 'openai',
   memory: {
     embedding: { provider: 'openai' },
-    recall: { budget: { totalTokens: 2400 }, retrieval: 'hybrid', capture: 'off' },
+    recall: {
+      budget: { totalTokens: 2400 },
+      retrieval: 'hybrid',
+      rerank: { kind: 'local', model: 'cross-encoder/ms-marco-MiniLM-L6-v2', revision: '233902d25c440f23af6f7d6e94d2946bac0bee0a' },
+      capture: 'metadata',
+    },
   },
 });
 ```
+
+Each field is optional, and a memory that sets none recalls, renders and records as one that sets each to its default:
 
 | Field | Default | What it does |
 |---|---|---|
 | `budget.totalTokens` | 1600 | The budget of the whole memory block a turn sends, its preamble included, in tokens of about four characters. An integer of at least 0; at 0 the turn sends no block. A model whose share of the prompt for retrieved context (20% of its context, less the turn's RAG and long-term-memory text) is smaller is sent the block rendered again at that remainder, from the same recall ([Budget and the prompt share](../memory/COGNITIVE_MEMORY.md#budget-and-the-prompt-share)). |
 | `retrieval` | `'dense'` | How a turn finds its memories. `'dense'`: by meaning, shown in Relevant Memories and Recent Experiences. `'hybrid'`: by meaning, by the turn's exact words (the store's full-text index with `memory.store`, an in-process index without it) and by recency, fused into one deduped pool and shown as one Relevant Memories section. Both embed the query once and call no other vendor ([Recall](../memory/COGNITIVE_MEMORY.md#recall)). |
-| `rerank` | `'none'` | Reranks the recalled memories before they are shown. `'none'`: no reranker. `{ kind: 'local', model, revision }`: a cross-encoder run in this process, at a pinned commit of the model's repository, so the memories never leave the process. `{ kind: 'llm', invoke, model }`: your own model call judges them, which sends the turn's text and the first 200 characters of each candidate to that model's provider. Both take `timeoutMs` (1,500 for `local`, 10,000 for `llm`) and `maxCandidates` (20). A reranker that is loading, unavailable, slow or failing never fails a turn: the order stands and the turn's record says why. No remote reranking service is offered for memories ([Memory rerank](../text/RERANKING.md#memory-rerank)). |
+| `rerank` | `'none'` | Reranks the recalled memories before they are shown. `'none'`: no reranker. `{ kind: 'local', model, revision }`: a cross-encoder run in this process, at a pinned commit of the model's repository, so the memories never leave the process. `{ kind: 'llm', invoke, model }`: your own model call judges them, which sends the turn's text and the first 200 characters of each candidate to that model's provider. Both take `timeoutMs` (1,500 for `local`, 10,000 for `llm`) and `maxCandidates` (20). A reranker that is loading, unavailable, slow or failing never fails a turn: the order stands and the turn's record says why. The agent builds its memory manager, and starts the local model's load, inside its first session's first turn, and has no `recallReady()`: each agent loads the model for itself, so keep one agent per process, and the turns whose recall ends before the load has settled record `reranker: { provider: 'none', reason: 'loading' }`. No remote reranking service is offered for memories ([Memory rerank](../text/RERANKING.md#memory-rerank)). |
 | `capture` | `'metadata'` | What a turn records of its recall: `'metadata'` puts the record on a session's `send()` result (`memoryRecall`) and on its `stream()` result (a `memoryRecall` promise, which also settles with the record when the turn fails after its memory assembly), `'off'` records nothing. `'metadata+stream'` records the same on these sessions, whose `stream()` parts carry no memory part; the record goes on a runtime stream only for a host of `AgentOS.create()` whose memory manager sets that value. The record holds ids, ranks, scores, counts and timings, never a memory's text ([Recall Capture](../memory/COGNITIVE_MEMORY.md#recall-capture)). |
 
 The construction rules:
@@ -1065,6 +1072,8 @@ The construction rules:
 - A `rerank` that is neither `'none'` nor an object throws, naming `rerank`; so does one whose `kind` is neither `'local'` nor `'llm'`, with the reason `unsupported_provider`. A blank `model` (`rerank.model`), a `local` whose `revision` is not a whole commit id of the model's repository in lower case (`rerank.revision`; a branch, a tag or an upper-case id is refused), an `llm` whose `invoke` is not a function (`rerank.invoke`), a `timeoutMs` or `maxCandidates` that is not a positive integer, and a `timeoutMs` above 2,147,483,647 throw, naming the field.
 
 Each refusal writes one `memory.recall.option_rejected` line before the throw.
+
+A host of `AgentOS.create()` sets the same four fields as `recall` on the memory manager its `gmiManagerConfig.cognitiveMemoryFactory` builds, which checks them when it initialises ([Recall](../memory/COGNITIVE_MEMORY.md#recall)).
 
 `learning: true`, or a `LearningConfig`, turns on the agent's learning layer: every GMI of the agent sends the persona's personality section as a system prompt of its own on every turn, in the words `agent()` writes, a session opened with a `userId` is bound to a learner when the id is not one the layer reads as anonymous (`anonymous_user`, `guest` and the others, with `learning.anonymousUserIds`) and the agent has a `name` or `learning.agentKey`, and `agent.learning.manifest()` says which loops run. `agent.learning` also carries the operator's calls (`freeze`, `unfreeze`, `suspend`, `unsuspend`, `operatorSet`, `revert`, `exportLearnedState`, `importLearnedState` and `forgetUser`), with the agent's key and namespace filled in. Unset or `false` (the default), the agent builds no layer and the persona's base prompt carries the section; `agent()` without `runtime: 'gmi'` ignores the option. [Learning](../GMI.md#learning) has the rules.
 
