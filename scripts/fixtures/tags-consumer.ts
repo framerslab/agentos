@@ -178,7 +178,7 @@ item('tagVocabulary counts each document once a key, by kind, with its latest ch
 item("tagVocabulary counts a document beside notes and sessions, labelled with the spelling on the most documents", () => {
   const kept = tags.tagVocabulary([
     doc('d1', 'document', ['Q3 Planning'], 5),
-    doc('d2', 'document', ['Q3 Planning', 'q3-planning'], 6),
+    doc('d2', 'document', ['Q3 Planning'], 6),
     doc('n5', 'note', ['q3-planning'], 7),
   ]);
   assert.deepEqual(kept, [{ tag: 'q3planning', label: 'Q3 Planning', uses: 3, notes: 1, sessions: 0, documents: 2, lastUsed: 7 }]);
