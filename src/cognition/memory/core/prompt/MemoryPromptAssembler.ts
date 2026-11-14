@@ -36,11 +36,11 @@
  * next association, and a trace section does not take a trace Related Context
  * already shows through its association.
  *
- * A trace with sourceType `agent_inference` holds the agent's own earlier
- * reply. The block shows it as a past exchange in the agent's words, never as
- * a fact: as an episodic trace whose line starts `You said: `, in Recent
- * Experiences (in a hybrid block, the one recall section), and the same way as
- * the involuntary memory.
+ * A trace with sourceType `agent_inference` and the tag `assistant` holds the
+ * agent's own earlier reply: a GMI files each reply so. The block shows it as
+ * a past exchange in the agent's words, never as a fact: as an episodic trace
+ * whose line starts `You said: `, in Recent Experiences (in a hybrid block,
+ * the one recall section), and the same way as the involuntary memory.
  *
  * @module agentos/memory/prompt/MemoryPromptAssembler
  */
@@ -175,8 +175,8 @@ export interface MemoryAssemblerInput {
   workingMemoryText?: string;
   /**
    * Scored semantic/episodic traces from retrieval. Episodic traces are shown in Recent Experiences, the others in
-   * Relevant Memories; a trace with sourceType `agent_inference` (the agent's own reply) is shown as an episodic one
-   * whose line starts `You said: `.
+   * Relevant Memories; a trace with sourceType `agent_inference` and the tag `assistant` (the agent's own reply) is
+   * shown as an episodic one whose line starts `You said: `.
    */
   retrievedTraces?: ScoredMemoryTrace[];
   /**
@@ -526,11 +526,12 @@ function renderInvoluntary(
  * are reported under `recall`, and the returned `allocation` carries that
  * share as `recall` with `semanticRecall` and `recentEpisodic` at 0.
  *
- * A retrieved trace with sourceType `agent_inference`, the agent's own earlier
- * reply, is shown as an episodic trace whose content starts `You said: `: in
- * Recent Experiences, or in a hybrid block's one recall section, and reported
- * under the section that shows it. The involuntary memory is shown the same
- * way. Every other trace is shown as it is.
+ * A retrieved trace with sourceType `agent_inference` and the tag `assistant`,
+ * the agent's own earlier reply, is shown as an episodic trace whose content
+ * starts `You said: `: in Recent Experiences, or in a hybrid block's one
+ * recall section, and reported under the section that shows it. The
+ * involuntary memory is shown the same way. Every other trace is shown as it
+ * is, an `agent_inference` trace without the tag among them.
  */
 export function assembleMemoryContext(input: MemoryAssemblerInput): AssembledMemoryContext {
   return assemble(input, true);
