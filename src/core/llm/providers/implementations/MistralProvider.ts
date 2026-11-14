@@ -23,6 +23,7 @@ import {
 } from '../IProvider';
 import { sha256Hex } from '../../../utils/sha256';
 import { OpenAIProvider, type OpenAIProviderConfig } from './OpenAIProvider';
+import { withoutOpenAiStore } from './openaiGatewayOptions';
 import { keyPoolStrategyFromEnv } from '../../../providers/ApiKeyPool.js';
 import { createContentSafeConsole } from '../../../logging/contentSafeConsole.js';
 
@@ -220,7 +221,7 @@ export class MistralProvider implements IProvider {
     messages: ChatMessage[],
     options: ModelCompletionOptions,
   ): Promise<ModelCompletionResponse> {
-    return this.delegate.generateCompletion(modelId, withMistralToolCallIds(messages), options);
+    return this.delegate.generateCompletion(modelId, withMistralToolCallIds(messages), withoutOpenAiStore(options));
   }
 
   /** @inheritdoc */
@@ -229,7 +230,7 @@ export class MistralProvider implements IProvider {
     messages: ChatMessage[],
     options: ModelCompletionOptions,
   ): AsyncGenerator<ModelCompletionResponse, void, undefined> {
-    yield* this.delegate.generateCompletionStream(modelId, withMistralToolCallIds(messages), options);
+    yield* this.delegate.generateCompletionStream(modelId, withMistralToolCallIds(messages), withoutOpenAiStore(options));
   }
 
   /**
