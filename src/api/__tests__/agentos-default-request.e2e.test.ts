@@ -156,6 +156,7 @@ describe('full-runtime explicit defaults', () => {
   });
   it('offers no tool or tool choice when the host and discovery supply none', async () => {
     await create(); await send();
+    expect(wire.calls.length).toBeGreaterThan(0);
     for (const call of wire.calls) {
       expect(call.options.tools).toBeUndefined();
       expect(call.options.toolChoice).toBeUndefined();
