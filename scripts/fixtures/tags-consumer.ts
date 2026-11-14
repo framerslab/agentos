@@ -1,12 +1,16 @@
 // An application's use of the packed package's tags module: it imports @framers/agentos/cognition/library/tags, the
 // subpath the package's "./*" export serves, compiles against the installed declarations alone and runs with network
-// access refused. Every document, tag and count in it is synthetic. scripts/tags-package.test.mjs installs and runs it.
+// access refused. It also reads the grammar's types from the library's two entries, @framers/agentos/cognition/library
+// and its browser entry, as types alone, so the compile checks that both entries declare them. Every document, tag and
+// count in it is synthetic. scripts/tags-package.test.mjs installs and runs it.
 import assert from 'node:assert/strict';
 import net from 'node:net';
 import http from 'node:http';
 import https from 'node:https';
 import { syncBuiltinESMExports } from 'node:module';
 import type { LegacyTagClass, TagDocument, TagResolution, TagUse } from '@framers/agentos/cognition/library/tags';
+import type * as library from '@framers/agentos/cognition/library';
+import type * as browser from '@framers/agentos/cognition/library/browser';
 
 const refuse = (): never => { throw new Error('the tags module attempted network access'); };
 net.Socket.prototype.connect = refuse; http.request = refuse; http.get = refuse;
@@ -30,15 +34,23 @@ function item(name: string, run: () => void): void {
 const doc = (id: string, kind: TagDocument['kind'], labels: string[], changedAt: number | null): TagDocument =>
   ({ id, kind, title: `Document ${id}`, text: 'Synthetic text.', keywords: [], tags: labels, changedAt });
 /** A vocabulary row as an application may keep one in its own store. */
-const use = (tag: string, uses: number, lastUsed: number | null): TagUse => ({ tag, uses, notes: uses, sessions: 0, lastUsed });
+const use = (tag: string, uses: number, lastUsed: number | null): TagUse => ({ tag, label: tag, uses, notes: uses, sessions: 0, documents: 0, lastUsed });
+
+/** The grammar's types as each entry declares them: the same types the subpath declares, read in both directions. */
+const asEntries = (row: TagUse, document: TagDocument, resolution: TagResolution, legacy: LegacyTagClass) => {
+  const fromLibrary: [library.TagUse, library.TagDocument, library.TagResolution, library.LegacyTagClass] = [row, document, resolution, legacy];
+  const fromBrowser: [browser.TagUse, browser.TagDocument, browser.TagResolution, browser.LegacyTagClass] = fromLibrary;
+  const back: [TagUse, TagDocument, TagResolution, LegacyTagClass] = fromBrowser;
+  return back;
+};
 
 /** Reads a resolution through its declared union, which the compiler checks is whole. */
 function describeResolution(resolution: TagResolution): string {
   switch (resolution.kind) {
     case 'existing':
-      return `${resolution.from} -> ${resolution.tag} by ${resolution.via}`;
+      return `${resolution.from} -> ${resolution.tag} by ${resolution.via}, shown as ${resolution.label}`;
     case 'new':
-      return `${resolution.from} -> new ${resolution.tag}`;
+      return `${resolution.from} -> new ${resolution.tag}, shown as ${resolution.label}`;
     default: {
       const unreachable: never = resolution;
       return unreachable;
@@ -49,7 +61,7 @@ function describeResolution(resolution: TagResolution): string {
 item('the subpath serves every value the module declares', () => {
   // Each name is read through the installed declarations, so one they lack fails the compile before this runs.
   for (const name of ['isTag', 'normalizeTag', 'tagKey', 'canonicalTag', 'classifyLegacyTag', 'compareCodePoints',
-    'tagKeysOf', 'tagVocabulary', 'preferredTagOrder', 'resolveTag'] as const) {
+    'tagKeysOf', 'tagVocabulary', 'preferredTagOrder', 'resolveTag', 'renameTag', 'mergeTags'] as const) {
     assert.equal(typeof tags[name], 'function', name);
   }
   assert.equal(tags.TAG_MAX_CHARS, 40);
@@ -154,13 +166,31 @@ item('tagVocabulary counts each document once a key, by kind, with its latest ch
   }
   vocabulary = tags.tagVocabulary(stream());
   assert.deepEqual(vocabulary, [
-    { tag: 'budget', uses: 2, notes: 2, sessions: 0, lastUsed: 30 },
-    { tag: 'q3planning', uses: 2, notes: 1, sessions: 1, lastUsed: 20 },
-    { tag: 'roadmap', uses: 2, notes: 0, sessions: 2, lastUsed: 20 },
-    { tag: 'alpha', uses: 1, notes: 1, sessions: 0, lastUsed: 30 },
+    { tag: 'budget', label: 'budget', uses: 2, notes: 2, sessions: 0, documents: 0, lastUsed: 30 },
+    { tag: 'q3planning', label: 'q3planning', uses: 2, notes: 1, sessions: 1, documents: 0, lastUsed: 20 },
+    { tag: 'roadmap', label: 'roadmap', uses: 2, notes: 0, sessions: 2, documents: 0, lastUsed: 20 },
+    { tag: 'alpha', label: 'alpha', uses: 1, notes: 1, sessions: 0, documents: 0, lastUsed: 30 },
   ]);
   assert.equal(vocabulary.some((row) => row.tag === 'c'), false);
   assert.deepEqual(tags.tagVocabulary([]), []);
+});
+
+item("tagVocabulary counts a document beside notes and sessions, labelled with the spelling on the most documents", () => {
+  const kept = tags.tagVocabulary([
+    doc('d1', 'document', ['Q3 Planning'], 5),
+    doc('d2', 'document', ['Q3 Planning', 'q3-planning'], 6),
+    doc('n5', 'note', ['q3-planning'], 7),
+  ]);
+  assert.deepEqual(kept, [{ tag: 'q3planning', label: 'Q3 Planning', uses: 3, notes: 1, sessions: 0, documents: 2, lastUsed: 7 }]);
+  assert.deepEqual(tags.resolveTag('q3 planning', kept), { kind: 'existing', tag: 'q3planning', label: 'Q3 Planning', via: 'key', from: 'q3 planning' });
+  assert.deepEqual(asEntries(kept[0]!, doc('d3', 'document', ['C++'], null), { kind: 'new', tag: 'x', label: 'x', from: 'X' }, tags.classifyLegacyTag('C++'))[0], kept[0]);
+});
+
+item('renameTag and mergeTags work by key, keep the list\'s order and leave a label with no key where it stands', () => {
+  assert.deepEqual(tags.renameTag(['Budget', 'q3', 'budget '], 'budget', 'Finance'), ['Finance', 'q3']);
+  assert.deepEqual(tags.renameTag(['q3', 'Finance', 'budget'], 'budget', 'finance'), ['q3', 'finance']);
+  assert.deepEqual(tags.mergeTags(['budget', 'q3', 'Finance'], 'budget', 'finance'), ['Finance', 'q3']);
+  assert.deepEqual(tags.renameTag(['C++', 'c'], 'c', 'clang'), ['C++', 'clang']);
 });
 
 item('preferredTagOrder: the most used, then the latest used with never used last, then the first by code point', () => {
@@ -169,43 +199,43 @@ item('preferredTagOrder: the most used, then the latest used with never used las
 });
 
 item('resolveTag by key, whatever the spelling, against the vocabulary the documents give', () => {
-  assert.deepEqual(tags.resolveTag('Q3 Planning', vocabulary), { kind: 'existing', tag: 'q3planning', via: 'key', from: 'Q3 Planning' });
-  assert.deepEqual(tags.resolveTag('road-map', vocabulary), { kind: 'existing', tag: 'roadmap', via: 'key', from: 'road-map' });
-  assert.deepEqual(tags.resolveTag('Road map', vocabulary), { kind: 'existing', tag: 'roadmap', via: 'key', from: 'Road map' });
+  assert.deepEqual(tags.resolveTag('Q3 Planning', vocabulary), { kind: 'existing', tag: 'q3planning', label: 'q3planning', via: 'key', from: 'Q3 Planning' });
+  assert.deepEqual(tags.resolveTag('road-map', vocabulary), { kind: 'existing', tag: 'roadmap', label: 'roadmap', via: 'key', from: 'road-map' });
+  assert.deepEqual(tags.resolveTag('Road map', vocabulary), { kind: 'existing', tag: 'roadmap', label: 'roadmap', via: 'key', from: 'Road map' });
 });
 
 item('resolveTag by stem for one spaced word, and not for a hyphenated one', () => {
-  assert.deepEqual(tags.resolveTag('Budgets', vocabulary), { kind: 'existing', tag: 'budget', via: 'stem', from: 'Budgets' });
-  assert.deepEqual(tags.resolveTag('roadmaps', vocabulary), { kind: 'existing', tag: 'roadmap', via: 'stem', from: 'roadmaps' });
-  assert.deepEqual(tags.resolveTag('road-maps', vocabulary), { kind: 'existing', tag: 'roadmap', via: 'edit', from: 'road-maps' });
+  assert.deepEqual(tags.resolveTag('Budgets', vocabulary), { kind: 'existing', tag: 'budget', label: 'budget', via: 'stem', from: 'Budgets' });
+  assert.deepEqual(tags.resolveTag('roadmaps', vocabulary), { kind: 'existing', tag: 'roadmap', label: 'roadmap', via: 'stem', from: 'roadmaps' });
+  assert.deepEqual(tags.resolveTag('road-maps', vocabulary), { kind: 'existing', tag: 'roadmap', label: 'roadmap', via: 'edit', from: 'road-maps' });
 });
 
 item('resolveTag one edit away only for keys of five code points or more, with the same digits, in a spaced script', () => {
-  assert.deepEqual(tags.resolveTag('budgte', vocabulary), { kind: 'existing', tag: 'budget', via: 'edit', from: 'budgte' });
+  assert.deepEqual(tags.resolveTag('budgte', vocabulary), { kind: 'existing', tag: 'budget', label: 'budget', via: 'edit', from: 'budgte' });
   const kept = [use('roadmap', 5, 100), use('q3', 3, 50), use('budget', 9, 10), use('2025budget', 1, 1), use('会議', 4, 1), use('plan', 1, 1)];
-  assert.deepEqual(tags.resolveTag('Q3', kept), { kind: 'existing', tag: 'q3', via: 'key', from: 'Q3' });
-  assert.deepEqual(tags.resolveTag('budgets', kept), { kind: 'existing', tag: 'budget', via: 'stem', from: 'budgets' });
-  assert.deepEqual(tags.resolveTag('roadmaps', kept), { kind: 'existing', tag: 'roadmap', via: 'stem', from: 'roadmaps' });
-  assert.deepEqual(tags.resolveTag('budgte', kept), { kind: 'existing', tag: 'budget', via: 'edit', from: 'budgte' });
+  assert.deepEqual(tags.resolveTag('Q3', kept), { kind: 'existing', tag: 'q3', label: 'q3', via: 'key', from: 'Q3' });
+  assert.deepEqual(tags.resolveTag('budgets', kept), { kind: 'existing', tag: 'budget', label: 'budget', via: 'stem', from: 'budgets' });
+  assert.deepEqual(tags.resolveTag('roadmaps', kept), { kind: 'existing', tag: 'roadmap', label: 'roadmap', via: 'stem', from: 'roadmaps' });
+  assert.deepEqual(tags.resolveTag('budgte', kept), { kind: 'existing', tag: 'budget', label: 'budget', via: 'edit', from: 'budgte' });
   assert.equal(tags.resolveTag('!!!', kept), null);
-  assert.deepEqual(tags.resolveTag('q4', kept), { kind: 'new', tag: 'q4', from: 'q4' });
-  assert.deepEqual(tags.resolveTag('2026budget', kept), { kind: 'new', tag: '2026budget', from: '2026budget' });
-  assert.deepEqual(tags.resolveTag('play', kept), { kind: 'new', tag: 'play', from: 'play' });
-  assert.deepEqual(tags.resolveTag('会义', kept), { kind: 'new', tag: '会义', from: '会义' });
+  assert.deepEqual(tags.resolveTag('q4', kept), { kind: 'new', tag: 'q4', label: 'q4', from: 'q4' });
+  assert.deepEqual(tags.resolveTag('2026budget', kept), { kind: 'new', tag: '2026budget', label: '2026budget', from: '2026budget' });
+  assert.deepEqual(tags.resolveTag('play', kept), { kind: 'new', tag: 'play', label: 'play', from: 'play' });
+  assert.deepEqual(tags.resolveTag('会义', kept), { kind: 'new', tag: '会义', label: '会义', from: '会义' });
 });
 
 item('resolveTag takes the most used, then the latest used, then the first by code point among several matches', () => {
   assert.equal(tags.resolveTag('abcdz', [use('abcdx', 2, 5), use('abcdy', 2, 5), use('abcdw', 3, 1)])?.tag, 'abcdw');
   assert.equal(tags.resolveTag('abcdz', [use('abcdx', 2, 5), use('abcdy', 2, 9)])?.tag, 'abcdy');
   assert.equal(tags.resolveTag('abcdz', [use('abcdy', 2, 5), use('abcdx', 2, 5)])?.tag, 'abcdx');
-  assert.deepEqual(tags.resolveTag('budgeted', [use('budget', 1, 9), use('budgets', 3, 1)]), { kind: 'existing', tag: 'budgets', via: 'stem', from: 'budgeted' });
+  assert.deepEqual(tags.resolveTag('budgeted', [use('budget', 1, 9), use('budgets', 3, 1)]), { kind: 'existing', tag: 'budgets', label: 'budgets', via: 'stem', from: 'budgeted' });
   assert.equal(tags.resolveTag('budgeted', [use('budget', 2, 5), use('budgets', 2, 9)])?.tag, 'budgets');
   assert.equal(tags.resolveTag('budgeted', [use('budgets', 2, 5), use('budget', 2, 5)])?.tag, 'budget');
 });
 
-item('resolveTag leaves a new tag spelled as its key, keeps what was typed, and answers null where there is no key', () => {
+item("resolveTag leaves a new tag spelled as its key, labelled in normalizeTag's form, keeps what was typed, and answers null where there is no key", () => {
   const fresh = tags.resolveTag('New Idea!', vocabulary);
-  assert.deepEqual(fresh, { kind: 'new', tag: 'newidea', from: 'New Idea!' });
+  assert.deepEqual(fresh, { kind: 'new', tag: 'newidea', label: 'new-idea', from: 'New Idea!' });
   assert.equal(fresh?.tag, tags.canonicalTag('New Idea!'));
   assert.equal(tags.isTag(fresh?.tag ?? ''), true);
   for (const nothing of ['!!!', '', '\u{1F600}', 'a'.repeat(41)]) assert.equal(tags.resolveTag(nothing, vocabulary), null, JSON.stringify(nothing));
@@ -214,7 +244,7 @@ item('resolveTag leaves a new tag spelled as its key, keeps what was typed, and 
 item('the installed declarations type a resolution as a whole union', () => {
   const read = [tags.resolveTag('Road map', vocabulary), tags.resolveTag('New Idea!', vocabulary)]
     .map((resolution) => (resolution === null ? 'none' : describeResolution(resolution)));
-  assert.deepEqual(read, ['Road map -> roadmap by key', 'New Idea! -> new newidea']);
+  assert.deepEqual(read, ['Road map -> roadmap by key, shown as roadmap', 'New Idea! -> new newidea, shown as new-idea']);
 });
 
 console.log(`installed tags module passes: ${passed} items`);
