@@ -699,6 +699,16 @@ describe('AvatarPipeline caller-owned options', () => {
       expect(generateImage).toHaveBeenCalledTimes(4);
     });
 
+    it('records the attempt limit it drew under in the identity package, 0 and NaN as 1', async () => {
+      for (const asked of [0, -2, Number(undefined)]) {
+        const result = await pipeline.generate(
+          makeRequest({ stages: ['neutral_portrait'], driftGuard: { maxRegenerationAttempts: asked } }),
+        );
+        expect(result.identityPackage.driftGuard.maxRegenerationAttempts).toBe(1);
+        expect(JSON.parse(JSON.stringify(result.identityPackage)).driftGuard.maxRegenerationAttempts).toBe(1);
+      }
+    });
+
     it('fails the job when the check throws and draws no more for it', async () => {
       const acceptanceCheck = vi.fn<AvatarAcceptanceCheck>().mockImplementation(async ({ label }) => {
         if (label === 'expression:angry') throw new Error('judge unavailable');
@@ -719,6 +729,39 @@ describe('AvatarPipeline caller-owned options', () => {
       expect(result.identityPackage.anchors.expressionSheet!.angry).toBeUndefined();
       // 1 portrait + 6 expressions, no regeneration after the throw
       expect(generateImage).toHaveBeenCalledTimes(7);
+    });
+
+    it('keeps the draws made and the last verdict when the check throws after a refusal', async () => {
+      const acceptanceCheck = vi.fn<AvatarAcceptanceCheck>().mockImplementation(async ({ attempt }) => {
+        if (attempt === 1) return { accepted: false, reason: 'eyes differ' };
+        throw new Error('judge unavailable');
+      });
+      const completed: Array<{ label: string; attempts: number; acceptance: unknown }> = [];
+
+      const result = await pipeline.generate(
+        makeRequest({
+          stages: ['neutral_portrait', 'expression_sheet'],
+          emotions: ['happy'],
+          driftGuard: { maxRegenerationAttempts: 3 },
+          acceptanceCheck,
+          onJobComplete: (job) => {
+            completed.push({ label: job.label, attempts: job.attempts, acceptance: job.acceptance });
+          },
+        }),
+      );
+
+      const happy = result.jobs.find((j) => j.label === 'expression:happy');
+      expect(happy?.status).toBe('failed');
+      expect(happy?.error).toBe('judge unavailable');
+      expect(happy?.attempts).toBe(2);
+      expect(happy?.acceptance).toEqual({ accepted: false, reason: 'eyes differ' });
+      expect(completed.find((j) => j.label === 'expression:happy')).toEqual({
+        label: 'expression:happy',
+        attempts: 2,
+        acceptance: { accepted: false, reason: 'eyes differ' },
+      });
+      // 1 portrait + 2 draws of the expression, none after the throw
+      expect(generateImage).toHaveBeenCalledTimes(3);
     });
 
     it('a refusal of one angle stops that angle alone', async () => {
@@ -905,6 +948,18 @@ describe('AvatarPipeline caller-owned options', () => {
       const sheet = result.identityPackage.anchors.expressionSheet!;
       expect(sheet.neutral).toBe(result.identityPackage.anchors.neutralPortrait);
       expect(result.jobs.filter((j) => j.label === 'expression:happy')).toHaveLength(1);
+    });
+
+    it('returns an emotion named __proto__ as its own key in both maps', async () => {
+      const result = await pipeline.generate(
+        makeRequest({ stages: ['neutral_portrait', 'expression_sheet', 'animated_emotes'], emotions: ['__proto__', 'happy'] }),
+      );
+
+      const { expressionSheet, animatedEmotes } = result.identityPackage.anchors;
+      expect(Object.keys(expressionSheet!).sort()).toEqual(['__proto__', 'happy']);
+      expect(Object.keys(animatedEmotes!).sort()).toEqual(['__proto__', 'happy']);
+      expect(typeof Object.getOwnPropertyDescriptor(expressionSheet, '__proto__')?.value).toBe('string');
+      expect(JSON.parse(JSON.stringify(result.identityPackage.anchors)).expressionSheet).toHaveProperty(['__proto__']);
     });
 
     it('keeps the default set without a list', async () => {
