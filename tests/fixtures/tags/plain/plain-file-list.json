@@ -1,0 +1,29 @@
+{
+  "id": "plain-file-list",
+  "set": "plain",
+  "kind": "document",
+  "language": "en",
+  "title": "Folder contents",
+  "headings": [],
+  "path": null,
+  "text": "IMG_001.jpg\nscan_002.pdf\nDSC_003.png\nexport_004.csv\nuntitled_005.txt\ncopy_006.bak\nIMG_007.jpg\nscan_008.pdf\nDSC_009.png\nexport_010.csv\nuntitled_011.txt\ncopy_012.bak\nIMG_013.jpg\nscan_014.pdf\nDSC_015.png\nexport_016.csv\nuntitled_017.txt\ncopy_018.bak\nIMG_019.jpg\nscan_020.pdf\nDSC_021.png\nexport_022.csv\nuntitled_023.txt\ncopy_024.bak\nIMG_025.jpg\nscan_026.pdf\nDSC_027.png\nexport_028.csv\nuntitled_029.txt\ncopy_030.bak\nIMG_031.jpg\nscan_032.pdf\nDSC_033.png\nexport_034.csv\nuntitled_035.txt\ncopy_036.bak\nIMG_037.jpg\nscan_038.pdf\nDSC_039.png\nexport_040.csv\nuntitled_041.txt\ncopy_042.bak\nIMG_043.jpg\nscan_044.pdf\nDSC_045.png\nexport_046.csv\nuntitled_047.txt\ncopy_048.bak\nIMG_049.jpg\nscan_050.pdf\nDSC_051.png\nexport_052.csv\nuntitled_053.txt\ncopy_054.bak\nIMG_055.jpg\nscan_056.pdf\nDSC_057.png\nexport_058.csv\nuntitled_059.txt\ncopy_060.bak\nIMG_061.jpg\nscan_062.pdf\nDSC_063.png\nexport_064.csv\nuntitled_065.txt\ncopy_066.bak\nIMG_067.jpg\nscan_068.pdf\nDSC_069.png\nexport_070.csv\nuntitled_071.txt\ncopy_072.bak\nIMG_073.jpg\nscan_074.pdf\nDSC_075.png\nexport_076.csv\nuntitled_077.txt\ncopy_078.bak\nIMG_079.jpg\nscan_080.pdf\nDSC_081.png\nexport_082.csv\nuntitled_083.txt\ncopy_084.bak\nIMG_085.jpg\nscan_086.pdf\nDSC_087.png\nexport_088.csv\nuntitled_089.txt\ncopy_090.bak\nIMG_091.jpg\nscan_092.pdf\nDSC_093.png\nexport_094.csv\nuntitled_095.txt\ncopy_096.bak\nIMG_097.jpg\nscan_098.pdf\nDSC_099.png\nexport_100.csv\nuntitled_101.txt\ncopy_102.bak\nIMG_103.jpg\nscan_104.pdf\nDSC_105.png\nexport_106.csv\nuntitled_107.txt\ncopy_108.bak\nIMG_109.jpg\nscan_110.pdf\nDSC_111.png\nexport_112.csv\nuntitled_113.txt\ncopy_114.bak\nIMG_115.jpg\nscan_116.pdf\nDSC_117.png\nexport_118.csv\nuntitled_119.txt\ncopy_120.bak\nIMG_121.jpg\nscan_122.pdf\nDSC_123.png\nexport_124.csv\nuntitled_125.txt\ncopy_126.bak\nIMG_127.jpg\nscan_128.pdf\nDSC_129.png\nexport_130.csv\nuntitled_131.txt\ncopy_132.bak\nIMG_133.jpg\nscan_134.pdf\nDSC_135.png\nexport_136.csv\nuntitled_137.txt\ncopy_138.bak\nIMG_139.jpg\nscan_140.pdf\nDSC_141.png\nexport_142.csv\nuntitled_143.txt\ncopy_144.bak\nIMG_145.jpg\nscan_146.pdf\nDSC_147.png\nexport_148.csv\nuntitled_149.txt\ncopy_150.bak\nIMG_151.jpg\nscan_152.pdf\nDSC_153.png\nexport_154.csv\nuntitled_155.txt\ncopy_156.bak\nIMG_157.jpg\nscan_158.pdf\nDSC_159.png\nexport_160.csv\nuntitled_161.txt\ncopy_162.bak\nIMG_163.jpg\nscan_164.pdf\nDSC_165.png\nexport_166.csv\nuntitled_167.txt\ncopy_168.bak\nIMG_169.jpg\nscan_170.pdf\nDSC_171.png\nexport_172.csv\nuntitled_173.txt\ncopy_174.bak\nIMG_175.jpg\nscan_176.pdf\nDSC_177.png\nexport_178.csv\nuntitled_179.txt\ncopy_180.bak\nIMG_181.jpg\nscan_182.pdf\nDSC_183.png\nexport_184.csv\nuntitled_185.txt\ncopy_186.bak\nIMG_187.jpg\nscan_188.pdf\nDSC_189.png\nexport_190.csv\nuntitled_191.txt\ncopy_192.bak\nIMG_193.jpg\nscan_194.pdf\nDSC_195.png\nexport_196.csv\nuntitled_197.txt\ncopy_198.bak\nIMG_199.jpg\nscan_200.pdf\nDSC_201.png\nexport_202.csv\nuntitled_203.txt\ncopy_204.bak\nIMG_205.jpg\nscan_206.pdf\nDSC_207.png\nexport_208.csv\nuntitled_209.txt\ncopy_210.bak\n",
+  "vocabulary": [
+    {
+      "label": "photos",
+      "uses": 9,
+      "lastUsed": 1762300800000
+    },
+    {
+      "label": "invoices",
+      "uses": 8,
+      "lastUsed": 1762214400000
+    }
+  ],
+  "typed": [],
+  "expected": {
+    "existing": [],
+    "new": []
+  },
+  "mustNot": [],
+  "asks": []
+}

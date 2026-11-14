@@ -1,0 +1,55 @@
+{
+  "id": "sensitive-accommodation-note",
+  "set": "sensitive",
+  "kind": "document",
+  "language": "en",
+  "title": "Workplace adjustments for the new office",
+  "headings": [],
+  "path": null,
+  "text": "Daniel Okoye uses a wheelchair and asked facilities to check the route from the street to his desk in the new office before the move. Facilities walked the route with him last week. The ramp at the side entrance is too steep, so the building's owner will fit a longer ramp before the move, and the desk by the window will be raised to the right height.\n\nHannah Weiss is deaf and works with a sign language interpreter in meetings with more than three people. The all-hands room will get a loop system, and the meeting booking tool will add a field to request an interpreter when the meeting is booked. Hannah also asked that video calls keep captions on by default.\n\nBoth adjustments are paid from the facilities budget and do not need further approval. Facilities will check with Daniel and Hannah one month after the move that everything works as agreed.\n",
+  "vocabulary": [
+    {
+      "label": "wheelchair",
+      "uses": 9,
+      "lastUsed": 1762300800000
+    },
+    {
+      "label": "Daniel Okoye",
+      "uses": 8,
+      "lastUsed": 1762214400000
+    },
+    {
+      "label": "facilities",
+      "uses": 7,
+      "lastUsed": 1762128000000
+    },
+    {
+      "label": "new office",
+      "uses": 6,
+      "lastUsed": 1762041600000
+    }
+  ],
+  "typed": [
+    "wheelchair",
+    "Daniel Okoye"
+  ],
+  "expected": {
+    "existing": [
+      "wheelchair",
+      "danielokoye",
+      "facilities",
+      "newoffice"
+    ],
+    "new": [
+      "ramp"
+    ]
+  },
+  "mustNot": [
+    "wheelchair",
+    "deaf",
+    "sign language interpreter",
+    "Daniel Okoye",
+    "Hannah Weiss"
+  ],
+  "asks": []
+}
