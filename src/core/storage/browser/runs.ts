@@ -79,11 +79,11 @@ export interface RunJob { key: string; kind: string; way: string | null; unit: R
 /** The locks of runs' lives: a hold that is refused at once when the name is held, never queued. */
 export interface RunLocks { hold(name: string): Promise<{ release(): void } | null>; free(name: string): Promise<boolean>; waitFree(name: string, ms: number): Promise<boolean> }
 /**
- * What the owners of one account tell each other: a run's counts and state (`ended` once it has ended), or the
- * account's stop. A message carries no name, no file and no word.
+ * What the owners of one account tell each other: a run's counts and state (`ended` once it has ended, with the run's
+ * cut mark when it ended cut), or the account's stop. A message carries no name, no file and no word.
  */
 export type RunMessage =
-  | { account: string; id: string; key: string; counts: RunCounts; state: RunState; phase: RunPhase; at: number; ended?: RunEnd['ended'] }
+  | { account: string; id: string; key: string; counts: RunCounts; state: RunState; phase: RunPhase; at: number; ended?: RunEnd['ended']; cut?: RunCut }
   | { account: string; stop: 'removal' | 'signout' | 'session' };
 /** A channel between the tabs of one origin, as `BroadcastChannel` is: a post never reaches its own sender. */
 export interface RunChannel { post(message: RunMessage): void; listen(hear: (message: RunMessage) => void): void; close(): void }
@@ -295,7 +295,8 @@ function isRunMessage(value: unknown): value is RunMessage {
     STATES.includes(value.state as RunState) &&
     PHASES.includes(value.phase as RunPhase) &&
     typeof value.at === 'number' &&
-    (value.ended === undefined || ENDS.includes(value.ended as Ended))
+    (value.ended === undefined || ENDS.includes(value.ended as Ended)) &&
+    (value.cut === undefined || CUTS.includes(value.cut as RunCut))
   );
 }
 
@@ -1648,7 +1649,8 @@ class BrowserRunOwner implements RunOwner {
     // drawn and counted afresh.
     const again = message.ended === undefined && seen.ended !== null && LIVE.includes(message.state);
     if (again) seen.ended = null;
-    const cut = again ? null : record.cut;
+    // A run that ended cut carries the mark it gave its record, so a finish here compares the record with the mark it has.
+    const cut = again ? null : message.ended === 'cut' && message.cut !== undefined ? message.cut : record.cut;
     seen.read = { record: { ...record, counts: { ...message.counts }, state: message.state, phase: message.phase, progressed: message.at, cut }, status: 'watched', cut };
     seen.heard = this.now();
     seen.local = false;
@@ -1723,6 +1725,7 @@ class BrowserRunOwner implements RunOwner {
     const message: RunMessage = {
       account: this.account, id: record.id, key: record.key, counts: { ...record.counts }, state: record.state, phase: record.phase, at: this.now(),
       ...(held.ended !== null && held.ended !== 'fenced' ? { ended: held.ended } : {}),
+      ...(held.ended === 'cut' ? { cut: record.cut } : {}),
     };
     try {
       this.channel.post(message);
