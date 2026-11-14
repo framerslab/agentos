@@ -17,7 +17,9 @@ vi.mock('../../core/logging/loggerFactory', async (original) => {
     return { ...log, info: (event: any, fields: any) => { wire.logs.push({ event, fields }); log.info(event, fields); } };
   } };
 });
-vi.mock('../../core/llm/providers/implementations/OpenAIProvider', () => ({
+// The root barrel this file imports reads the module's other exports too, so they are kept.
+vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../core/llm/providers/implementations/OpenAIProvider')>()),
   OpenAIProvider: class {
     readonly providerId = 'openai'; isInitialized = false;
     async initialize() { this.isInitialized = true; }
