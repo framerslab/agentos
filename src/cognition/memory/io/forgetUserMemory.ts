@@ -25,8 +25,8 @@ export interface ForgetMemoryReport {
   /** How many of them were still running at the deadline. */
   pendingAtDeadline: number;
   /**
-   * False when anything was still pending at the deadline, a store the call deletes from failed (the vector index and
-   * the write-ahead log included), a page failed, or the store holds memory from before per-user scope that nobody
+   * False when anything was still pending at the deadline, a store the call deletes from failed (the full-text index,
+   * the vector index and the write-ahead log included), a page failed, or the store holds memory from before per-user scope that nobody
    * attributed. The stores the call never reaches by design are named and do not count. The next open, or the next
    * re-application of the tombstones, resumes an incomplete deletion.
    */
@@ -194,7 +194,8 @@ async function deleteWhatTheUserSaidElsewhere(input: {
  * traces that name the user under other scopes, after each page of another user or session compiled from one of
  * them, which the next compile builds again from that subject's own traces; each compiled page of the subject with
  * its chunks; the scope's registry row; for the user older memory is attributed to (`legacy`), that memory and the
- * attribution; then the vector index is written again from what is left, and the write-ahead log is emptied. A
+ * attribution; then the full-text index is rebuilt where a delete's own rebuild failed, the vector index is written
+ * again from what is left, and the write-ahead log is emptied. A
  * page left keeps the traces it was found by, so the deletion made again finds it. A store that throws is named as
  * not reached and the next one still runs. No model call is made, and `Memory.forget()` (a soft delete) is never used.
  *
@@ -327,6 +328,13 @@ export async function forgetUserMemory(options: ForgetUserMemoryOptions): Promis
       stores.push(
         legacyFailure === undefined ? { store, reached: true, deleted: legacyTraces } : { store, reached: false, reason: legacyFailure },
       );
+    }
+
+    // Each delete rebuilt the full-text index; one whose rebuild failed left the deleted words in it, tried again here.
+    try {
+      await memory.finishFullTextIndex();
+    } catch (error) {
+      stores.push({ store: 'full-text index', reached: false, reason: messageOf(error) });
     }
 
     // A delete only marks a vector in the index: the index is written again from the traces that are left.

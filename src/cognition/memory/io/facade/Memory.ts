@@ -471,9 +471,10 @@ export class Memory {
   /**
    * What deletes for good left to do in the store's files ({@link finishErasure}): the vector index is owed a rewrite
    * from a delete until a rewrite succeeds, and from an open whose check of the index failed; the write-ahead log is
-   * owed a checkpoint while deletes were made after the last checkpoint that emptied it.
+   * owed a checkpoint while deletes were made after the last checkpoint that emptied it; on SQLite the full-text index
+   * is owed a rebuild while deletes were made after the last rebuild that succeeded.
    */
-  private readonly _erasureOwed = { vectorIndex: false, deletes: 0, checkpointed: 0 };
+  private readonly _erasureOwed = { vectorIndex: false, deletes: 0, checkpointed: 0, fullTextRebuilt: 0 };
 
   /** Optional embedding function for vector search (set via config.embed). */
   private readonly _embed: ((text: string) => Promise<number[]>) | null;
@@ -1260,9 +1261,45 @@ export class Memory {
         if (deleted > 0) this._erasureOwed.vectorIndex = true;
       });
     }
-    // Postgres keeps the index in each row's own column, which went with the row.
-    if (this._brain.features.dialect.name !== 'postgres') await this._rebuildFtsIndex();
+    // Postgres keeps the index in each row's own column, which went with the row. On SQLite the index keeps the words
+    // of a deleted row until it is rebuilt: a rebuild that fails stays owed, for finishFullTextIndex().
+    if (this._brain.features.dialect.name !== 'postgres') await this._rebuildFullText().catch(() => undefined);
     return { deleted };
+  }
+
+  /**
+   * Rebuilds the full-text index from the rows that are left, and records the deletes it covers. A database that holds
+   * no full-text index has nothing to rebuild.
+   *
+   * @throws What the rebuild throws; the deletes before it stay owed.
+   */
+  private async _rebuildFullText(): Promise<void> {
+    // The deletes made before the rebuild starts are the ones it leaves no word of.
+    const before = this._erasureOwed.deletes;
+    try {
+      const rebuild = this._brain.fullTextRebuild();
+      await this._brain.run(rebuild.sql, rebuild.params);
+    } catch (error) {
+      if (!isFtsUnavailableError(error)) throw error;
+    }
+    this._erasureOwed.fullTextRebuilt = Math.max(this._erasureOwed.fullTextRebuilt, before);
+  }
+
+  /**
+   * Rebuilds the full-text index when a delete for good could not: until a rebuild succeeds, the index keeps the words
+   * of the rows deleted. Nothing owed, nothing runs; PostgreSQL keeps the index in each row, which goes with the row.
+   * A person's deletion calls it once its deletes are done, and {@link finishErasure} calls it too.
+   *
+   * @returns `'rebuilt'`, or `'not owed'`.
+   * @throws What the rebuild throws; it stays owed.
+   */
+  async finishFullTextIndex(): Promise<{ fullText: 'rebuilt' | 'not owed' }> {
+    await this._initPromise;
+    if (this._brain.features.dialect.name === 'postgres' || this._erasureOwed.deletes <= this._erasureOwed.fullTextRebuilt) {
+      return { fullText: 'not owed' };
+    }
+    await this._rebuildFullText();
+    return { fullText: 'rebuilt' };
   }
 
   /**
@@ -1455,31 +1492,44 @@ export class Memory {
   }
 
   /**
-   * Finishes what deletes for good left in the store's files: the vector index is written again
+   * Finishes what deletes for good left in the store's files: on SQLite the full-text index is rebuilt
+   * ({@link finishFullTextIndex}) when a delete's own rebuild failed; the vector index is written again
    * ({@link rebuildVectorIndex}) when a delete, or an open whose check of the index failed, left it naming a trace that
    * is gone; the write-ahead log is emptied ({@link checkpointLog}) when deletes were made after the last checkpoint
-   * that emptied it. Nothing owed, nothing runs. A retention sweep, a correction and a re-application of the
-   * tombstones call it, so a rewrite or a checkpoint that failed in an earlier call runs again.
+   * that emptied it, or the full-text index was rebuilt here. Nothing owed, nothing runs. A retention sweep, a
+   * correction and a re-application of the tombstones call it, so a rebuild, a rewrite or a checkpoint that failed in
+   * an earlier call runs again.
    *
-   * @returns Whether the index was written again, and what the checkpoint answered; `'not owed'` for a step that had
-   *   nothing to do.
-   * @throws What the rewrite throws, once the checkpoint was tried as well, or what the checkpoint throws. A step that
-   *   fails, and a checkpoint another connection held (`'busy'`), stay owed.
+   * @returns Whether the full-text index was rebuilt and the vector index written again, and what the checkpoint
+   *   answered; `'not owed'` for a step that had nothing to do.
+   * @throws What the first failed step throws, once every step was tried. A step that fails, and a checkpoint another
+   *   connection held (`'busy'`), stay owed.
    */
-  async finishErasure(): Promise<{ vectorIndex: 'rewritten' | 'not owed'; log: 'emptied' | 'busy' | 'none' | 'not owed' }> {
+  async finishErasure(): Promise<{
+    fullText: 'rebuilt' | 'not owed';
+    vectorIndex: 'rewritten' | 'not owed';
+    log: 'emptied' | 'busy' | 'none' | 'not owed';
+  }> {
     await this._initPromise;
     let failure: unknown;
+    let fullText: 'rebuilt' | 'not owed' = 'not owed';
+    try {
+      fullText = (await this.finishFullTextIndex()).fullText;
+    } catch (error) {
+      failure = error;
+    }
     let vectorIndex: 'rewritten' | 'not owed' = 'not owed';
     if (this._erasureOwed.vectorIndex) {
       try {
         await this.rebuildVectorIndex();
         vectorIndex = 'rewritten';
       } catch (error) {
-        failure = error;
+        failure ??= error;
       }
     }
     let log: 'emptied' | 'busy' | 'none' | 'not owed' = 'not owed';
-    if (this._erasureOwed.deletes > this._erasureOwed.checkpointed) {
+    // A late rebuild of the full-text index leaves the pages of the old index in the store's file until a checkpoint.
+    if (this._erasureOwed.deletes > this._erasureOwed.checkpointed || fullText === 'rebuilt') {
       try {
         log = (await this.checkpointLog()).log;
       } catch (error) {
@@ -1487,7 +1537,7 @@ export class Memory {
       }
     }
     if (failure !== undefined) throw failure;
-    return { vectorIndex, log };
+    return { fullText, vectorIndex, log };
   }
 
   /**
