@@ -1,0 +1,61 @@
+{
+  "id": "sessions-board-prep",
+  "set": "sessions",
+  "kind": "session",
+  "language": "en",
+  "title": "Board meeting preparation",
+  "headings": [],
+  "path": null,
+  "text": "Ada: The board meets in two weeks. Let's agree on the deck outline today.\nLuis: Start with the quarter's numbers: revenue, burn and runway.\nAda: Then the product update. Shared reports shipped, and the early numbers look good.\nLuis: We should be honest about the northern region. They missed their target.\nAda: Agreed. With the reason and the plan to fix it.\nLuis: The board will ask about hiring. We planned six roles and filled four.\nAda: I will add a slide on hiring with the two open roles and when we expect to fill them.\nLuis: And the fundraising question. Do we raise this year or next?\nAda: Let's present both paths with the runway for each, and ask for their view.\nLuis: Who writes which part?\nAda: I will write the product and hiring parts. You take the numbers and the fundraising options.\nLuis: Draft by Monday, then we review it together on Wednesday.\nAda: Good. I will send the outline to everyone after this call.\n",
+  "vocabulary": [
+    {
+      "label": "board",
+      "uses": 9,
+      "lastUsed": 1762300800000
+    },
+    {
+      "label": "board meetings",
+      "uses": 8,
+      "lastUsed": 1762214400000
+    },
+    {
+      "label": "fundraising",
+      "uses": 7,
+      "lastUsed": 1762128000000
+    },
+    {
+      "label": "hiring",
+      "uses": 6,
+      "lastUsed": 1762041600000
+    }
+  ],
+  "typed": [
+    "board meetings"
+  ],
+  "expected": {
+    "existing": [
+      "boardmeetings",
+      "fundraising",
+      "hiring"
+    ],
+    "new": [
+      "runway"
+    ]
+  },
+  "mustNot": [],
+  "asks": [],
+  "report": [
+    {
+      "label": "board meeting",
+      "quotes": [
+        "The board meets in two weeks."
+      ]
+    },
+    {
+      "label": "runway",
+      "quotes": [
+        "Let's present both paths with the runway for each, and ask for their view."
+      ]
+    }
+  ]
+}

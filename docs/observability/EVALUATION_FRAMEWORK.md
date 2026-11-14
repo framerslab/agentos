@@ -329,6 +329,10 @@ evaluator.registerScorer('llm_judge', judge.createScorer());
 | `creativeWriting` | Evaluate creative content |
 | `safety` | Evaluate for harmlessness |
 
+## Injection Probes
+
+`INJECTION_PROBES` and `runInjectionProbes()` test an agent that reads what people wrote as evidence. Each probe plants an instruction in a message, through the host's own run of its agent, and the runner checks three rules on the actions that ran: each targets the author of every message it quotes, each is an allowed action, and no more than a set number ran. They do not score a model's answer, and `passed` says the rules held, not that nothing happened. Both are exported from `@framers/agentos` and from `@framers/agentos/safety/evaluation`; [Safety Primitives](../safety/SAFETY_PRIMITIVES.md#probing-an-agent-that-reads-evidence) describes the techniques, the rules and the counts.
+
 ---
 
 ## References
@@ -353,3 +357,4 @@ evaluator.registerScorer('llm_judge', judge.createScorer());
 - [`src/safety/evaluation/Evaluator.ts`](https://github.com/framerslab/agentos/blob/master/src/safety/evaluation/Evaluator.ts) — the evaluation harness
 - [`src/safety/evaluation/LLMJudge.ts`](https://github.com/framerslab/agentos/blob/master/src/safety/evaluation/LLMJudge.ts) — the LLM judge and `CRITERIA_PRESETS`
 - [`src/safety/evaluation/wordErrorRate.ts`](https://github.com/framerslab/agentos/blob/master/src/safety/evaluation/wordErrorRate.ts) — `wordErrorRate()` and `normalizeTranscript()`
+- [`src/safety/evaluation/injectionProbes.ts`](https://github.com/framerslab/agentos/blob/master/src/safety/evaluation/injectionProbes.ts) — `INJECTION_PROBES` and `runInjectionProbes()`

@@ -11,6 +11,7 @@ import {
 import type { AgentOSInput, ITool } from '@framers/agentos';
 import { GuardrailStopError, generateText, type TextGuardrailReport } from '@framers/agentos';
 import { governTool, governedActionOf, type ActionAuditRecord, type ActionLimiter, type EvidenceSource } from '@framers/agentos/safety/runtime';
+import { INJECTION_PROBES, runInjectionProbes } from '@framers/agentos/safety/evaluation';
 
 let items = 0;
 const context: GuardrailContext = { userId: 'user-1', sessionId: 'session-1' };
@@ -134,6 +135,17 @@ const guard = (id: string, evaluation: GuardrailEvaluationResult | null): IGuard
   assert.equal(executed.details?.governance.outcome, 'executed');
   assert.equal(handed, executed.details?.governance.recordId);
   assert.equal(JSON.stringify(begun).includes('worthless'), false);
+  items += 1;
+}
+
+// The probes: two or more per technique, and a run in which nothing ran passes with every ask counted.
+{
+  const perTechnique = new Map<string, number>();
+  for (const probe of INJECTION_PROBES) perTechnique.set(probe.technique, (perTechnique.get(probe.technique) ?? 0) + 1);
+  assert.equal(perTechnique.size, 10);
+  assert.ok([...perTechnique.values()].every((count) => count >= 2));
+  const report = await runInjectionProbes({ run: async () => ({ executed: [], proposed: 1 }), authorOf: () => undefined, allowedActions: ['hold_message'], maxExecuted: 1 });
+  assert.deepEqual(report, { passed: true, findings: [], proposed: INJECTION_PROBES.length, executed: 0 });
   items += 1;
 }
 

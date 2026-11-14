@@ -1,0 +1,164 @@
+{
+  "id": "plain-grant-application-draft",
+  "set": "plain",
+  "kind": "document",
+  "language": "en",
+  "title": "Grant application draft: community repair workshops",
+  "headings": [
+    "Summary",
+    "The need",
+    "The plan",
+    "Budget and reporting"
+  ],
+  "path": null,
+  "text": "# Summary\n\nWe ask for funding to run monthly repair workshops in three neighbourhood libraries for one year. At each workshop volunteers help residents repair small electrical items, clothes, bicycles and furniture, and teach them how to do it themselves next time. The grant would pay for tools, materials, training for volunteers and a part-time coordinator.\n\n# The need\n\nMany households throw away items with small faults because a repair shop costs more than a new item, or because there is no repair shop nearby. Our pilot workshops last year, held in one library, saw long queues every month. Volunteers repaired about two thirds of the items brought in, and people told us they valued learning the repair as much as the repair itself. The libraries have offered rooms at no cost, and all three are on bus routes.\n\n# The plan\n\nFrom the second month, each library hosts one workshop a month on a Saturday. The coordinator recruits and trains volunteers, keeps a simple record of items brought in and repaired, and runs a short training session for new volunteers every quarter. Safety comes first: every electrical repair is tested before the item goes home, and only trained volunteers work on electrical items. We will also lend basic tool kits through the libraries' lending system.\n\n# Budget and reporting\n\nHalf of the grant pays the coordinator. A quarter buys tools and test equipment, which stay with the libraries after the year ends. The rest covers materials, volunteer training and printing. Every quarter we report the number of workshops, items repaired and volunteers trained, and at the end of the year we publish a short report on what worked, with the record of repairs.\n",
+  "vocabulary": [
+    {
+      "label": "Grants",
+      "uses": 9,
+      "lastUsed": 1762300800000
+    },
+    {
+      "label": "grant-application",
+      "uses": 8,
+      "lastUsed": 1762214400000
+    },
+    {
+      "label": "Grant Applications",
+      "uses": 7,
+      "lastUsed": 1762128000000
+    },
+    {
+      "label": "Funding",
+      "uses": 6,
+      "lastUsed": 1762041600000
+    },
+    {
+      "label": "fundraising",
+      "uses": 5,
+      "lastUsed": 1761955200000
+    },
+    {
+      "label": "Volunteers",
+      "uses": 4,
+      "lastUsed": 1761868800000
+    },
+    {
+      "label": "volunteering",
+      "uses": 3,
+      "lastUsed": 1761782400000
+    },
+    {
+      "label": "Workshops",
+      "uses": 2,
+      "lastUsed": 1761696000000
+    },
+    {
+      "label": "workshop",
+      "uses": 1,
+      "lastUsed": 1761609600000
+    },
+    {
+      "label": "Repair Cafe",
+      "uses": 9,
+      "lastUsed": 1761523200000
+    },
+    {
+      "label": "repair-cafe",
+      "uses": 8,
+      "lastUsed": 1761436800000
+    },
+    {
+      "label": "Repairs",
+      "uses": 7,
+      "lastUsed": 1761350400000
+    },
+    {
+      "label": "Libraries",
+      "uses": 6,
+      "lastUsed": 1761264000000
+    },
+    {
+      "label": "library",
+      "uses": 5,
+      "lastUsed": 1761177600000
+    },
+    {
+      "label": "Community",
+      "uses": 4,
+      "lastUsed": 1761091200000
+    },
+    {
+      "label": "Neighbourhood",
+      "uses": 3,
+      "lastUsed": 1761004800000
+    },
+    {
+      "label": "Neighborhood",
+      "uses": 2,
+      "lastUsed": 1760918400000
+    },
+    {
+      "label": "Training",
+      "uses": 1,
+      "lastUsed": 1760832000000
+    },
+    {
+      "label": "Safety",
+      "uses": 9,
+      "lastUsed": 1760745600000
+    },
+    {
+      "label": "Tools",
+      "uses": 8,
+      "lastUsed": 1760659200000
+    },
+    {
+      "label": "Tool Library",
+      "uses": 7,
+      "lastUsed": 1760572800000
+    },
+    {
+      "label": "Budget",
+      "uses": 6,
+      "lastUsed": 1760486400000
+    },
+    {
+      "label": "Reporting",
+      "uses": 5,
+      "lastUsed": 1760400000000
+    },
+    {
+      "label": "Impact",
+      "uses": 4,
+      "lastUsed": 1760313600000
+    },
+    {
+      "label": "Pilot",
+      "uses": 3,
+      "lastUsed": 1760227200000
+    },
+    {
+      "label": "Coordinators",
+      "uses": 2,
+      "lastUsed": 1760140800000
+    }
+  ],
+  "typed": [
+    "Grants",
+    "Volunteers",
+    "Repair Cafe"
+  ],
+  "expected": {
+    "existing": [
+      "grants",
+      "volunteers",
+      "workshops",
+      "repairs",
+      "libraries"
+    ],
+    "new": []
+  },
+  "mustNot": [],
+  "asks": []
+}

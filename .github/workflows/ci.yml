@@ -619,6 +619,55 @@ jobs:
           src/cognition/emergent/__tests__/adapt-personality.test.ts
           src/cognition/rag/__tests__/neo4j-graphrag-export.test.ts
 
+  # Scores the tag suggestion module on the fixture texts under tests/fixtures/tags and reports each figure; a part the
+  # module does not hold reads "missing". The hard checks (quotes found, nothing refused proposed, no asked tag in an
+  # answer, the browser entry's import graph, the model input's bytes) fail this job; the scores carry no threshold.
+  tags:
+    name: Tag suggestions (fixtures and scores)
+    if: github.event_name != 'push' || github.ref != 'refs/heads/master'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Install PNPM
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Score the fixtures
+        env:
+          TAGS_REPORT_DIR: ${{ runner.temp }}/tags-report
+        run: >-
+          pnpm exec vitest run
+          src/cognition/library/__tests__/tags.fixtures.test.ts
+          src/cognition/library/__tests__/tags.scoring.test.ts
+
+      - name: Write the scores to the run's summary
+        if: always()
+        run: node scripts/tags/summary.mjs "$RUNNER_TEMP/tags-report/report.json" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tags-report-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/tags-report
+          if-no-files-found: error
+          retention-days: 30
+
   # Exercises the release configuration without tagging or publishing: the
   # commit analyser and the release-notes generator read the commits since
   # the last release tag, fed the way the Release workflow feeds them.

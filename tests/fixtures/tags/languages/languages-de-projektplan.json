@@ -1,0 +1,41 @@
+{
+  "id": "languages-de-projektplan",
+  "set": "languages",
+  "kind": "document",
+  "language": "de",
+  "title": "Projektplan für den Umzug des Büros",
+  "headings": [
+    "Ziel",
+    "Ablauf"
+  ],
+  "path": null,
+  "text": "# Ziel\n\nDer Mietvertrag für das jetzige Büro endet im Juni, und das Gebäude passt nicht mehr zu unserer Arbeitsweise. Die meisten Teams kommen zwei oder drei Tage pro Woche ins Büro, die Besprechungsräume sind ständig belegt, während die Hälfte der Schreibtische leer bleibt. Das neue Büro hat weniger feste Arbeitsplätze und mehr Räume in verschiedenen Größen. Dieser Projektplan beschreibt, wie der Umzug ablaufen soll.\n\n# Ablauf\n\nDer Umzug findet in der letzten Woche im Mai statt. Am Montag und Dienstag packen alle ihre Sachen in die beschrifteten Kisten, die das Facility-Team verteilt. Am Mittwoch holt die Umzugsfirma die Kisten, die Bildschirme und die gemeinsamen Geräte ab. Der Donnerstag ist für alle ein Tag im Homeoffice, während das Netzwerk und die Technik in den Besprechungsräumen eingerichtet werden. Am Freitag öffnet das neue Büro mit einem gemeinsamen Frühstück, und das Facility-Team führt jedes Team durch die Etagen.\n\nFragen zum Umzug sammelt das Facility-Team in einem gemeinsamen Dokument und beantwortet sie jeden Montag bis zum Umzug. Wer für seine Gesundheit einen bestimmten Stuhl oder Tisch braucht, kann sich vertraulich melden. Der Projektplan wird jede Woche aktualisiert.\n",
+  "vocabulary": [
+    {
+      "label": "Projektplan",
+      "uses": 9,
+      "lastUsed": 1762300800000
+    },
+    {
+      "label": "office",
+      "uses": 8,
+      "lastUsed": 1762214400000
+    },
+    {
+      "label": "facilities",
+      "uses": 7,
+      "lastUsed": 1762128000000
+    }
+  ],
+  "typed": [
+    "Projektplan"
+  ],
+  "expected": {
+    "existing": [
+      "projektplan"
+    ],
+    "new": []
+  },
+  "mustNot": [],
+  "asks": []
+}
