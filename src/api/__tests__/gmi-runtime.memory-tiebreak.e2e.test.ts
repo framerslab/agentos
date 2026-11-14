@@ -1,14 +1,16 @@
 /**
  * Memories filed in one millisecond, through agent({ runtime: 'gmi' }) over a durable store, as a host sees them: one
- * agent files them and closes, and a second agent built on the same store answers a question they all match equally.
- * The memory block the model is sent, and the turn's `memoryRecall` record, list the equally scored memories by id,
- * compared character code by character code, on SQLite and on PostgreSQL alike, and two stores holding the same
- * memories, with different rows updated since they were filed, send the same block.
+ * agent files them and closes, and a second agent built on the same store answers a question. The memory block the
+ * model is sent, and the turn's `memoryRecall` record, list equally scored memories by id, compared character code by
+ * character code, on SQLite and on PostgreSQL alike, and two stores holding the same memories, with different rows
+ * updated since they were filed, send the same block and the same record.
  *
  * The real provider manager, completion gateway, GMI, prompt engine, memory bridge, cognitive memory manager and Brain
- * run; only the provider class is stubbed (helpers/stubProviders.ts), and its embeddings hash words, so the six memories
- * that share one word with the question, and no other, score the same against it. The clock stands still, so every
- * memory the first agent files has one filing time.
+ * run; only the provider class is stubbed (helpers/stubProviders.ts), and its embeddings hash words. The clock stands
+ * still, so every memory the first agent files has one filing time, and memories with the same words in common with the
+ * question, the same strength and the same accesses score the same: the six lanterns, which share one word with the
+ * question, and the statements and replies no recall accessed, which share none. The user's statements and the agent's
+ * replies are filed under one scope.
  *
  * Each case runs on a SQLite file and, where `AGENTOS_TEST_POSTGRES_URL` is set (CI's `Test & Lint` job), on
  * PostgreSQL, whose default collation sorts by language (`a` before `B`), and which stores an updated row as a new
@@ -19,18 +21,19 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
-// Trace ids from a counter each ask starts again, so two stores fed the same turns hold the same ids. Their first
-// letters alternate in case and skip about the alphabet, so the order the memories were filed in is neither the ids'
-// order by character code nor their order by a language's collation.
+// Trace ids from a counter each ask starts again, so two stores fed the same turns hold the same ids: a letter, then
+// the count, so an id's number is the order it was minted in, which is the order its memory was filed in. The letters
+// mix cases out of order, so within each group of equally scored memories the order of filing, its reverse, the ids'
+// order by character code and their order by a language's collation all differ (checked below).
 const ids = vi.hoisted(() => ({ next: 0 }));
 vi.mock('../../cognition/memory/core/util/crossPlatformCrypto', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../cognition/memory/core/util/crossPlatformCrypto')>();
-  const letters = 'aBcDeFgHiJkLmNoPqRsTuVwXyZ';
+  const letters = 'anMGzsBTjyLuHqcDWbaRPfeKvOiYdXgUhVkSmQoNpZrIlJtE';
   return {
     ...actual,
     uuid: () => {
       const n = ++ids.next;
-      return `${letters[(n * 11) % letters.length]}${String(n).padStart(4, '0')}`;
+      return `${letters[(n - 1) % letters.length]}${String(n).padStart(4, '0')}`;
     },
   };
 });
@@ -58,7 +61,7 @@ interface OpenStore {
   store: () => Promise<DurableStore>;
   /** The learning namespace of the agents built on the store, where the engine is shared between stores. */
   namespace?: string;
-  /** Writes again, unchanged, the rows of the memories holding each text. */
+  /** Writes again, unchanged, the rows of the memories holding each text: PostgreSQL moves each to its table's end. */
   touch: (contents: readonly string[]) => Promise<void>;
   close: () => Promise<void>;
 }
@@ -175,8 +178,8 @@ afterEach(() => {
 const FILED_AT = Date.UTC(2026, 10, 14, 9, 0, 0);
 const QUESTION = 'Which lantern glows tonight?';
 /**
- * The agent's replies the question matches, in the order they are filed: each shares the one word `lantern` with the
- * question and with nothing else filed, so each scores the same against it.
+ * Six of the agent's replies, in the order they are filed: each shares the one word `lantern` with the question and
+ * with nothing else filed, so each scores the same against it.
  */
 const LANTERNS = [
   'Lantern amber quarry violet.',
@@ -189,14 +192,14 @@ const LANTERNS = [
 /**
  * The user's statements: each turn's recall reads the statement, and records an access of the five memories it scores
  * highest. Six turns come before the first lantern, so those five are always earlier statements, which share words with
- * each other and none with a lantern, and no lantern is accessed before the question: the six differ in nothing a
+ * each other and none with a lantern: no lantern is accessed before the question, and the six differ in nothing a
  * score reads.
  */
 const STATEMENTS = Array.from({ length: 6 + LANTERNS.length }, (_, i) => `Garden row ${i + 1} weeded, hose coiled near fence.`);
 const REPLIES = [...Array.from({ length: 6 }, () => 'Noted.'), ...LANTERNS];
 
 /**
- * Files the turns through one agent's session, closes it, writes again the rows of the lanterns in `touched`, and asks
+ * Files the turns through one agent's session, closes it, writes again the rows of the memories in `touched`, and asks
  * the question in the same session of a second agent built on the store. Returns the question's memory block as the
  * provider received it and the turn's recall record.
  */
@@ -243,27 +246,40 @@ async function askAfterRestart(db: OpenStore, touched: readonly string[]) {
   }
 }
 
-/**
- * The lanterns are the candidates the question scores highest, all equal, and the record and the block list them by
- * id in character-code order. Returns their ids in that order.
- */
-function expectLanternsById(out: Awaited<ReturnType<typeof askAfterRestart>>): string[] {
-  const { block, capture } = out;
-  const top = Math.max(...capture.candidates.map((c) => c.fusedScore));
-  const tied = capture.candidates.filter((c) => c.fusedScore === top);
-  expect(tied, 'the lanterns score the same, and highest').toHaveLength(LANTERNS.length);
-  expect(capture.candidates.slice(0, LANTERNS.length)).toEqual(tied);
-  for (const c of tied) expect(c.outcome).toBe('included');
-  const tiedIds = tied.map((c) => c.id);
-  expect(tiedIds, 'equally scored memories of one millisecond, by id in character-code order').toEqual([...tiedIds].sort());
-  // The ids tell the two orders an engine could give apart: a language's collation puts them in another order.
-  expect([...tiedIds].sort((a, b) => a.localeCompare(b, 'en'))).not.toEqual([...tiedIds].sort());
+/** The order an id was minted in, which is the order its memory was filed in. */
+const filed = (id: string): number => Number(id.slice(-4));
+const byCharCode = (list: readonly string[]) => [...list].sort();
+const byFiling = (list: readonly string[]) => [...list].sort((a, b) => filed(a) - filed(b));
+const byCollation = (list: readonly string[]) => [...list].sort((a, b) => a.localeCompare(b, 'en'));
 
-  // The block shows each lantern, in the record's order, which is not the order they were filed in.
+/**
+ * Every group of equally scored candidates the record holds is listed by id in character-code order, and the block
+ * lists the lanterns in that order. Returns the record's ids in its order.
+ */
+function expectTiesById(out: Awaited<ReturnType<typeof askAfterRestart>>): string[] {
+  const { block, capture } = out;
+  const groups = new Map<number, string[]>();
+  for (const c of capture.candidates) groups.set(c.fusedScore, [...(groups.get(c.fusedScore) ?? []), c.id]);
+  const ties = [...groups.values()].filter((group) => group.length > 1);
+  for (const group of ties) {
+    expect(group, 'equally scored memories of one millisecond, by id in character-code order').toEqual(byCharCode(group));
+  }
+  // The groups tell apart every order an engine could give: the order of filing, its reverse, and a language's
+  // collation each differ from the ids' order by character code in at least one group.
+  expect(ties.some((group) => byFiling(group).join() !== byCharCode(group).join() && byFiling(group).reverse().join() !== byCharCode(group).join())).toBe(true);
+  expect(ties.some((group) => byCollation(group).join() !== byCharCode(group).join())).toBe(true);
+
+  // The lanterns: one group of six, each shown in the block, in the record's order, which is neither the order they
+  // were filed in nor its reverse.
+  const lanterns = ties.find((group) => group.length === LANTERNS.length && group.every((id) => capture.candidates.find((c) => c.id === id)?.section === 'semanticRecall'));
+  expect(lanterns, `a group of the ${LANTERNS.length} lanterns among ${JSON.stringify(capture.candidates.map((c) => [c.id, c.fusedScore, c.section]))}`).toBeDefined();
+  const textOfId = new Map(byFiling(lanterns!).map((id, i) => [id, LANTERNS[i]]));
   for (const lantern of LANTERNS) expect(block).toContain(lantern);
   const shown = [...LANTERNS].sort((a, b) => block.indexOf(a) - block.indexOf(b));
-  expect(shown, 'the block does not list them in the order they were filed').not.toEqual(LANTERNS);
-  return tiedIds;
+  expect(shown, 'the block lists the lanterns in the record\'s order').toEqual(lanterns!.map((id) => textOfId.get(id)));
+  expect(shown).not.toEqual(LANTERNS);
+  expect(shown).not.toEqual([...LANTERNS].reverse());
+  return capture.candidates.map((c) => c.id);
 }
 
 describe.each(ENGINES)("agent({ runtime: 'gmi' }) memories of one millisecond over a durable store on $name", ({ open }) => {
@@ -271,11 +287,10 @@ describe.each(ENGINES)("agent({ runtime: 'gmi' }) memories of one millisecond ov
     const a = await open();
     const b = await open();
     try {
-      const first = await askAfterRestart(a, [LANTERNS[1], LANTERNS[3]]);
-      const second = await askAfterRestart(b, [LANTERNS[0], LANTERNS[2], LANTERNS[4]]);
-      expect(expectLanternsById(second)).toEqual(expectLanternsById(first));
+      const first = await askAfterRestart(a, [LANTERNS[1], LANTERNS[3], STATEMENTS[0], STATEMENTS[2], STATEMENTS[8]]);
+      const second = await askAfterRestart(b, [LANTERNS[0], LANTERNS[2], LANTERNS[4], STATEMENTS[1], STATEMENTS[6], STATEMENTS[10]]);
+      expect(expectTiesById(second)).toEqual(expectTiesById(first));
       expect(second.block).toBe(first.block);
-      expect(second.capture.candidates.map((c) => c.id)).toEqual(first.capture.candidates.map((c) => c.id));
     } finally {
       await a.close();
       await b.close();
@@ -288,10 +303,9 @@ it.runIf(Boolean(POSTGRES_URL))('SQLite and PostgreSQL send the same block for m
   const onPostgres = await postgres(POSTGRES_URL!).open();
   try {
     const fromSqlite = await askAfterRestart(onSqlite, []);
-    const fromPostgres = await askAfterRestart(onPostgres, [LANTERNS[0], LANTERNS[5]]);
-    expect(expectLanternsById(fromPostgres)).toEqual(expectLanternsById(fromSqlite));
+    const fromPostgres = await askAfterRestart(onPostgres, [LANTERNS[0], LANTERNS[5], STATEMENTS[3], STATEMENTS[7]]);
+    expect(expectTiesById(fromPostgres)).toEqual(expectTiesById(fromSqlite));
     expect(fromPostgres.block).toBe(fromSqlite.block);
-    expect(fromPostgres.capture.candidates.map((c) => c.id)).toEqual(fromSqlite.capture.candidates.map((c) => c.id));
   } finally {
     await onSqlite.close();
     await onPostgres.close();
