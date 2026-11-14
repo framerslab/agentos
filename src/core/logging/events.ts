@@ -59,6 +59,15 @@ export const AGENTOS_EVENTS = {
   'console_line': { method: { enum: ['debug', 'info', 'log', 'warn', 'error', 'trace', 'dir', 'table', 'assert', 'count', 'countReset', 'time', 'timeEnd', 'timeLog', 'group', 'groupCollapsed', 'groupEnd', 'clear', 'dirxml', 'profile', 'profileEnd', 'timeStamp'] }, type: 'word', code: 'word' },
   'process.uncaught': { type: 'word', code: 'word' },
   'process.shutdown': { signal: { enum: ['SIGTERM', 'SIGINT'] } },
+  // A GMI turn's sentiment analysis failed (a provider error, or a reply that did not parse after its repair): the
+  // error's listed type and code, never its message. The turn goes on without the analysis.
+  'gmi.sentiment_failed': { type: 'word', code: 'word' },
+  // A GMI turn's sentiment analysis had not answered by the turn's post-turn metaprompt check, or its store writes
+  // outlasted the shutdown bound there, and was dropped; `waitedMs` counts from the analysis start.
+  'gmi.sentiment_late': { waitedMs: 'int' },
+  // A dropped GMI sentiment analysis' store write landed, or one landed after a forget it did not see, and putting
+  // the store back failed: the error's listed type and code, never its message.
+  'gmi.sentiment_take_back_failed': { type: 'word', code: 'word' },
   'http.request': { method: { enum: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS', 'CONNECT', 'TRACE', 'OTHER'] }, route: 'path', status: 'int', ms: 'int', outcome: { enum: ['ok', 'aborted', 'error'] } },
   'http.handler_failed': { type: 'word', code: 'word' },
   'llm.provider_ready': { provider, count: 'int' },

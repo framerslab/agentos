@@ -266,11 +266,10 @@ export interface SentimentTrackingConfig {
     enabled: boolean;
 
     /**
-     * The `method` the tracker passes to the GMI's utility class with each turn. The utility class decides how a
-     * turn is scored: `LLMUtilityAI` makes a provider call for each turn (and a repair call when its reply does not
-     * parse) and `StatisticalUtilityAI` scores with a word lexicon and makes none, whatever this names. A `HybridUtilityAI` that holds both sends `'llm'` to its
-     * LLM-backed class and `'lexicon_based'` or `'trained_classifier'` to its statistical class.
-     * @default 'lexicon_based'
+     * Unset, the utility class chooses its normal method: LLMUtilityAI asks the model;
+     * StatisticalUtilityAI and HybridUtilityAI use a lexicon. Explicit `lexicon_based`
+     * uses a statistical lexicon on every class, with no sentiment model call.
+     * Other methods keep the utility class's existing routing.
      */
     method?: 'lexicon_based' | 'llm' | 'trained_classifier';
 
