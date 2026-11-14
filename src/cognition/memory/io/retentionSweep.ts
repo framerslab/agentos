@@ -56,8 +56,8 @@ const daysOf = (period: RetentionPeriod | undefined): number | undefined =>
  * `memory.retention_swept` line counts what went, for a sweep in which at least one scope had a period.
  *
  * @returns How many traces and pages it deleted, and how many scopes it removed from the registry.
- * @throws What the store throws, once the index and the log were tried; the scopes swept before it keep what the
- *   sweep did.
+ * @throws The first error a scope, the index or the log threw, once every scope, the index and the log were tried;
+ *   what the sweep did in the other scopes stands, and the next sweep finishes the scope that failed.
  */
 export async function sweepRetention(options: RetentionSweepOptions): Promise<{ traces: number; pages: number; scopes: number }> {
   const { memory, retention } = options;
@@ -106,9 +106,16 @@ export async function sweepRetention(options: RetentionSweepOptions): Promise<{ 
 
   let failure: unknown;
   try {
-    for (const row of await memory.listScopes({ scope: CONVERSATION_SCOPE })) await sweepOne(row);
+    // Each scope is swept on its own: one that fails leaves the scopes after it to this sweep, not to the next.
+    for (const row of await memory.listScopes({ scope: CONVERSATION_SCOPE })) {
+      try {
+        await sweepOne(row);
+      } catch (error) {
+        failure ??= error;
+      }
+    }
   } catch (error) {
-    failure = error;
+    failure ??= error;
   }
   try {
     // A delete only marks a vector in the index, and the log still holds the pages written before the deletes: both
