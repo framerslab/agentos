@@ -53,7 +53,7 @@ import { ContextWindowExceededError } from '../core/llm/providers/errors/Context
 import { checkContextFit } from './runtime/contextWindowFit.js';
 import { asSpendBudget, costOfUsageUSD, holdCall, withReservation, type HelperCall } from './runtime/spendBudget.js';
 import { isCallerStop, markHookStop } from './runtime/callerStop.js';
-import { guardedStreamText, type TextGuardrailReport } from './runtime/textGuardrails.js';
+import { guardedStreamText, refusalGuardEnd, type TextGuardrailReport } from './runtime/textGuardrails.js';
 import type { CacheDiagnostics } from '../core/llm/providers/IProvider.js';
 import { toProviderReplayMessage } from './sessionTranscript.js';
 import type { ModelRouteParams } from '../core/llm/routing/IModelRouter.js';
@@ -316,6 +316,11 @@ export interface StreamTextResult {
    *   final text (maxSteps exhaustion).
    * - `'error'` — the stream emitted an `error` part.
    *
+   * An answer the model refused keeps the reason it reports here (`'stop'`,
+   * or `'length'` when the output cap cut the refusal message off);
+   * {@link refusal} resolves to the message, and the text stream carried
+   * none of it.
+   *
    * Historically the streaming surface discarded the provider's reason
    * and fabricated `'stop'`; the provider layer always had it (final
    * chunk `choices[0].finishReason`; Anthropic maps `max_tokens` →
@@ -323,10 +328,22 @@ export interface StreamTextResult {
    * early abandonment too, so awaiting it after a partial consume does
    * not hang. On a stream the consumer abandoned it does not say why the
    * stream ended: it reports the latest step that finished. The
-   * prompt-shim tool-emulation path reports `'stop'` (its internal calls
-   * do not thread per-step reasons).
+   * prompt-shim tool-emulation path reports `'length'` when the output cap
+   * cut off the reply that ended it, and `'stop'` otherwise (its internal
+   * calls do not thread any other per-step reason).
    */
   finishReason: Promise<StreamFinishReason>;
+  /**
+   * The model's refusal message when the final step declined the request
+   * with one (OpenAI's refusal): resolves with {@link finishReason}, to the
+   * whole message (possibly the empty string) when that is `'stop'`, to the
+   * piece that came when the output cap cut the message off (`'length'`),
+   * and to `undefined` when the model did not refuse or the stream ended on
+   * an error. The message never goes out as a `text` part. Read this promise
+   * to tell a refusal from an empty answer. Set by `streamText()`; other
+   * surfaces that return this shape may leave it unset.
+   */
+  refusal?: Promise<string | undefined>;
   /**
    * Cache-diagnostics verdict of the FINAL step (Anthropic beta; see
    * {@link GenerateTextOptions.cacheDiagnostics}). Resolves when the stream
@@ -458,9 +475,23 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
   // path plus the generator's finally (belt-and-suspenders for early
   // abandonment); Promise semantics make later settles no-ops, so the
   // most specific settle wins.
+  // The finish reason the stream settled on, the first settle's (the usage
+  // event and the root span report it).
+  let settledFinishReason: StreamFinishReason | undefined;
   const finishReasonPromise = new Promise<StreamFinishReason>((r) => {
-    resolveFinishReason = r;
+    resolveFinishReason = (reason) => {
+      settledFinishReason ??= reason;
+      r(reason);
+    };
   });
+  // The refusal message of the step (or fallback leg) that ended the stream,
+  // set before the finish reason settles: a whole one (finish reason 'stop')
+  // or the piece the output cap cut off ('length'). Set only when the model
+  // refused, so it is also the call's "was refused" flag. The refusal
+  // promise follows the finish reason, so every terminal path settles both;
+  // a stream that ended on an error has none.
+  let finalRefusal: string | undefined;
+  const refusalPromise = finishReasonPromise.then((reason) => (reason === 'error' ? undefined : finalRefusal));
   // The failover trail, settled at every terminal and in the generator's
   // finally (first settle wins): who answered, and every hop tried.
   let resolveFallback: (v: FallbackSignal | undefined) => void;
@@ -1009,9 +1040,14 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             // its usage is counted above, and the stream stops here.
             opts.abortSignal?.throwIfAborted();
             const cc = r.choices?.[0]?.message?.content;
+            const answer = r.choices?.[0];
             return {
               text: typeof cc === 'string' ? cc : ((cc as any)?.text ?? ''),
               usage: { totalTokens: r.usage?.totalTokens ?? 0 },
+              // The provider's finish reason: the loop ends on the output cap as the native loop does.
+              ...(answer?.finishReason ? { finishReason: answer.finishReason } : {}),
+              // The model's refusal message, a whole one or the piece the cap cut off: the loop ends on it.
+              ...(typeof answer?.refusal === 'string' ? { refusal: answer.refusal } : {}),
             };
           },
         });
@@ -1019,6 +1055,18 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         // signal's reason, once the round has run, instead of settling it.
         opts.abortSignal?.throwIfAborted();
         finalText = loopResult.text;
+        // A loop whose last reply the output cap cut off, a refused one
+        // included, settles the stream on `length`: the finish reason follows
+        // lastStepFinishReason where the stream ends. The refusal message of
+        // a reply that held one goes with it.
+        if (loopResult.cut) lastStepFinishReason = 'length';
+        // A refused reply ends the stream on the model's answer: a stop, or
+        // `length` when the cap cut it. A native tool step before the shim
+        // took over left its own reason here, which no longer holds.
+        if (loopResult.refusal !== undefined) {
+          finalRefusal = loopResult.refusal;
+          lastStepFinishReason = loopResult.cut ? 'length' : 'stop';
+        }
         const shimToolCalls: ToolCallRecord[] = loopResult.toolCalls.map((c) => ({
           name: c.name,
           args: c.args,
@@ -1032,6 +1080,18 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         resolveText!(finalText);
         resolveUsage!(usage); resolveResponseModel!(lastResponseModelId); resolveServiceTier!(lastServiceTier);
         resolveToolCalls!(shimToolCalls);
+        // A refusal settles the stream here, before the generator's finally,
+        // so the finally reads it as a finished stream: the output guards
+        // judge the message there, and the span and the usage event say how
+        // the call ended. The tool calls of a native step before the shim do
+        // not make it a 'tool-calls' ending.
+        // The root span names that ending too; a block by the guards turns it
+        // into 'error' in the finally.
+        if (loopResult.refusal !== undefined) {
+          const refusalFinish = normalizeStreamFinishReason(lastStepFinishReason);
+          resolveFinishReason!(refusalFinish);
+          rootSpan?.setAttribute('agentos.api.finish_reason', refusalFinish);
+        }
         settleFallback(true);
       }
       if (tools.length > 0 && toolMode === 'prompt') {
@@ -1159,12 +1219,29 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
 
         const reconstructor = new StreamingReconstructor();
         let stepReasoningText = '';
+        // The model's refusal message for this step: its streamed pieces, or
+        // the whole message a chunk that ends the answer carries.
+        let stepRefusal = '';
+        // Whether a chunk that ends the answer reported a refusal message (an
+        // empty one included). Pieces alone do not make the step a refusal:
+        // an answer that never finished is no refusal the caller can rely on.
+        let stepRefused = false;
+        // The finish reason of the chunk that carried the whole message: a
+        // message the output cap cut off ends the step on that reason instead.
+        let stepRefusalReason: string | null = null;
         stepTextSoFar = '';
 
         try {
           for await (const chunk of stream) {
             if (resolved.providerId === 'minimax' && chunk.reasoningTextDelta) {
               stepReasoningText += chunk.reasoningTextDelta;
+            }
+            if (chunk.refusalDelta) stepRefusal += chunk.refusalDelta;
+            const chunkRefusal = chunk.choices?.[0]?.refusal;
+            if (typeof chunkRefusal === 'string') {
+              stepRefusal = chunkRefusal;
+              stepRefused = true;
+              stepRefusalReason = chunk.choices?.[0]?.finishReason ?? null;
             }
             // Capture the provider-reported identity from EVERY chunk (not
             // only the usage-final one) so an error or abandonment after a
@@ -1395,7 +1472,22 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         // The step's text is settled; finalText reports it from here on.
         stepTextSoFar = '';
 
+        // A step that holds the model's refusal message ends the stream on it.
+        // OpenAI may send function calls beside the refusal: they are not run.
+        if (stepRefused && streamedToolCalls && streamedToolCalls.length > 0) streamedToolCalls = [];
+
         if (!streamedToolCalls || streamedToolCalls.length === 0) {
+          // A refused step ends on the reason its answer always reported: a
+          // stop, or, for a message the output cap or a content filter cut
+          // off, the reason the provider gave with it, the piece that came
+          // kept. The chunk that carried the message decides it: the OpenAI
+          // chat stream's last final chunk is its usage-only chunk, which
+          // names no reason, and the reason of calls that came beside the
+          // message and were dropped no longer holds.
+          if (stepRefused) {
+            lastStepFinishReason = stepRefusalReason === 'length' || stepRefusalReason === 'content_filter' ? stepRefusalReason : 'stop';
+            finalRefusal = stepRefusal;
+          }
           const stepFinish = normalizeStreamFinishReason(lastStepFinishReason);
           rootSpan?.setAttribute('agentos.api.finish_reason', stepFinish);
           rootSpan?.setAttribute('agentos.api.tool_calls', allToolCalls.length);
@@ -1411,7 +1503,10 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               ...(lastServiceTier !== undefined ? { responseServiceTier: lastServiceTier } : {}),
             });
           }
-          resolveText!(finalText);
+          // A refused step with no text of its own resolves the text empty,
+          // as generateText() returns it: finalText may hold what an earlier
+          // tool step wrote, which is not the answer the model declined to give.
+          resolveText!(stepRefused && !effectiveStepText ? '' : finalText);
           resolveUsage!(usage); resolveResponseModel!(lastResponseModelId); resolveServiceTier!(lastServiceTier);
           resolveToolCalls!(allToolCalls);
           resolveFinishReason!(stepFinish);
@@ -1941,6 +2036,8 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             // The recursive leg computed its own reason; the stream was
             // drained above, so the promise is already settled.
             fallbackFinishReason = await fallbackResult.finishReason;
+            // A leg that ended on a refusal, or on a refusal the cap cut off, hands its refusal message on.
+            finalRefusal = await fallbackResult.refusal;
             if (opts.cacheDiagnostics) {
               // Adopt the leg's verdict + thread key. Resolving with the
               // child promises locks ours to follow them; the outer
@@ -2039,6 +2136,9 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         resolveFinishReason!('error');
       }
     } finally {
+      // Whether a terminal settled the stream before this block: an early
+      // abandonment settles it below.
+      const settledAtTerminal = settledFinishReason !== undefined;
       // Belt-and-suspenders for the routing Promises: if the stream
       // errored before routing completed (e.g. resolveProvider option
       // threw), settle the Promises with whatever recorded ids exist
@@ -2078,11 +2178,25 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         opts.cacheDiagnostics && sawFinalProviderChunk ? lastProviderMessageId : null,
       );
       rootSpan?.setAttribute('agentos.api.tool_calls', allToolCalls.length);
-      if (metricStatus === 'error') {
+      // With guards set, the output guards judge the model's refusal message
+      // before the caller reads it, and a block ends the call on an error. The
+      // verdict is the one the guards' wrapper delivers, judged once, so the
+      // span and the usage event say how the call ended.
+      const guardEnd =
+        settledAtTerminal && metricStatus !== 'error'
+          ? await refusalGuardEnd(opts.__guardRun, finalRefusal, opts.abortSignal)
+          : undefined;
+      const endedOnError = metricStatus === 'error' || guardEnd !== undefined;
+      // Whether the model refused: the answer that ended the stream held a refusal message, and nothing ended the call
+      // on an error but the guards' block of that message.
+      const refused = finalRefusal !== undefined && metricStatus !== 'error' && guardEnd !== 'aborted';
+      if (endedOnError) {
         rootSpan?.setAttribute('agentos.api.finish_reason', 'error');
-      } else if (allToolCalls.length > 0 && !finalText) {
+      } else if (settledFinishReason === 'tool-calls') {
         rootSpan?.setAttribute('agentos.api.finish_reason', 'tool-calls');
       }
+      if (refused) rootSpan?.setAttribute('agentos.api.refused', true);
+      if (guardEnd === 'blocked') rootSpan?.setAttribute('agentos.api.guard_blocked', true);
       attachUsageAttributes(rootSpan, usage);
       if (recordedProviderId && recordedModelId) {
         attachGenAiAttributes(rootSpan, {
@@ -2133,7 +2247,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       //   left real spend unmetered; zero-usage failures stay silent.
       const accruedBillableUsage = hasBillableUsage(usage);
       // The caller's signal ended the call: its event says so, and says when an output count in it is an estimate.
-      const endedByAbort = metricStatus === 'error' && opts.abortSignal?.aborted === true;
+      const endedByAbort = (metricStatus === 'error' || guardEnd === 'aborted') && opts.abortSignal?.aborted === true;
       if (fallbackLegRan && attemptUsage && hasBillableUsage(attemptUsage)) {
         fireLlmUsageObserver({
           provider: recordedProviderId ?? '',
@@ -2155,12 +2269,12 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           usage,
           source: opts.source,
           ...(opts.__fallbackDepth ? { fallbackDepth: opts.__fallbackDepth } : {}),
+          // The reason the stream settled on, as the caller reads it, and whether the model refused.
           finishReason:
-            metricStatus === 'error'
+            endedOnError
               ? 'error'
-              : allToolCalls.length > 0 && !finalText
-                ? 'tool-calls'
-                : normalizeStreamFinishReason(lastStepFinishReason),
+              : settledFinishReason ?? normalizeStreamFinishReason(lastStepFinishReason),
+          ...(refused ? { refused: true as const } : {}),
           ...(endedByAbort ? { aborted: true } : {}),
           ...(usage.completionTokensEstimated ? { usageEstimated: true } : {}),
           surface: 'streamText',
@@ -2228,6 +2342,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
     model: modelPromise,
     fallback: fallbackPromise,
     finishReason: finishReasonPromise,
+    refusal: refusalPromise,
     cacheDiagnostics: cacheDiagnosticsPromise,
     providerMessageId: providerMessageIdPromise,
   };

@@ -1973,6 +1973,8 @@ export class GMI implements IGMI {
         let currentIterationThinkingBlocks: ThinkingBlock[] = [];
         let stepUsage: ModelUsage | undefined;
         let stepFinishReason: string | null = null;
+        // Whether the step's answer held the model's refusal (OpenAI's `refusal` field, an empty message included).
+        let stepRefused = false;
         let stepFinalChunk: ModelCompletionResponse | undefined;
         let stepStructuredOutput: unknown;
         // Whether the answering attempt's provider payload carried the response schema (the gateway says).
@@ -2179,7 +2181,11 @@ export class GMI implements IGMI {
               const structured = (chunk as { structuredOutput?: unknown }).structuredOutput;
               if (structured !== undefined) stepStructuredOutput = structured;
 
-              if (choice?.message?.tool_calls && choice.message.tool_calls.length > 0) {
+              // An answer that holds the model's refusal ends the turn on it: OpenAI may send tool calls beside the
+              // refusal, and they are neither requested nor run, as generateText() and streamText() drop them.
+              if (chunk.isFinal && typeof choice?.refusal === 'string') stepRefused = true;
+
+              if (!stepRefused && choice?.message?.tool_calls && choice.message.tool_calls.length > 0) {
                 currentIterationToolCallRequests = choice.message.tool_calls.map((tc: any) => ({ // tc is from IProvider.ChatMessage.tool_calls
                     id: tc.id || `toolcall-${uuidv4()}`, // Ensure ID
                     name: tc.function.name,
@@ -2214,7 +2220,8 @@ export class GMI implements IGMI {
               }
 
               if (chunk.isFinal && choice?.finishReason) {
-                stepFinishReason = choice.finishReason;
+                // The calls' own reason no longer holds once they are dropped: the turn stopped on the model's answer.
+                stepFinishReason = stepRefused && choice.finishReason === 'tool_calls' ? 'stop' : choice.finishReason;
                 this.addTraceEntry(ReasoningEntryType.LLM_CALL_COMPLETE, `LLM stream part finished. Reason: ${choice.finishReason}`, { usage: chunk.usage });
               }
               if (chunk.isFinal) stepFinalChunk = chunk;
@@ -2279,6 +2286,7 @@ export class GMI implements IGMI {
               currentIterationThinkingBlocks = [];
               stepUsage = undefined;
               stepFinishReason = null;
+              stepRefused = false;
               stepFinalChunk = undefined;
               stepStructuredOutput = undefined;
               stepSchemaRoute = undefined;
@@ -2334,7 +2342,6 @@ export class GMI implements IGMI {
         if (structuredReply && currentIterationToolCallRequests.length === 0) {
           structuredAttempts += 1;
           const lifted = stepStructuredOutput !== undefined;
-          const check = lifted ? structuredReply.checkValue(stepStructuredOutput) : checkStructuredReply(currentIterationTextResponse, structuredReply);
           // 'forced_tool' when the gateway lifted a forced schema tool call; a JSON text answer the gateway lifted
           // from an Anthropic hop on the JSON output format is 'provider_schema', as any payload that carried the
           // schema; a hop that sent it in the prompt alone reports 'prompt_only'. The route is the one the hop's
@@ -2346,30 +2353,47 @@ export class GMI implements IGMI {
               : gateway && stepSchemaInPayload !== false
                 ? 'provider_schema'
                 : 'prompt_only';
-          if (check.ok) {
-            structuredResult = { value: check.value, meta: { schemaName: structuredReply.name, valid: true, attempts: structuredAttempts, enforcement, stage: 'model' } };
-            if (lifted && !currentIterationTextResponse) {
-              // the forced tool call carried the reply: its text is the value, so the final response holds it too
-              currentIterationTextResponse = JSON.stringify(check.value);
-              aggregatedResponseText += currentIterationTextResponse;
-            }
-          } else {
-            const canRetry = structuredAttempts <= structuredReply.maxRetries && safetyBreak < maxToolLoopIterations;
-            if (canRetry) {
-              this.addTraceEntry(ReasoningEntryType.WARNING, `The reply did not match the schema "${structuredReply.name}" (attempt ${structuredAttempts}); asking again.`, { issues: check.issues });
-              turnMessages.push({ role: 'assistant', content: currentIterationTextResponse || null });
-              turnMessages.push({ role: 'user', content: structuredRepairMessage(check.issues, structuredReply, currentIterationTextResponse) });
-              aggregatedResponseText = '';
-              continue main_processing_loop;
-            }
+          if (stepRefused) {
+            // A refusal is the model's answer, not JSON to repair: the turn ends on it with no repair request, as
+            // generateObject() ends. Its message stays out of the error and the value, as out of any GMI turn's
+            // output: the turn's output guards have not judged it.
             if (structuredReply.onExhausted === 'error') {
               throw new GMIError(
-                `The reply did not match the schema "${structuredReply.name}" after ${structuredAttempts} attempt(s).`,
+                `The model refused the request instead of writing the reply "${structuredReply.name}".`,
                 GMIErrorCode.STRUCTURED_OUTPUT_INVALID,
-                { schemaName: structuredReply.name, attempts: structuredAttempts, issues: check.issues },
+                { schemaName: structuredReply.name, attempts: structuredAttempts, refused: true },
               );
             }
-            structuredResult = { value: check.value ?? null, meta: { schemaName: structuredReply.name, valid: false, attempts: structuredAttempts, enforcement, stage: 'model', issues: check.issues } };
+            structuredResult = { value: null, meta: { schemaName: structuredReply.name, valid: false, attempts: structuredAttempts, enforcement, stage: 'model', issues: ['The model refused the request instead of writing the reply.'] } };
+          } else {
+            // The schema's check runs on a step the model answered, never on a refusal: a check that throws (a refinement
+            // that throws, an async one under safeParse) would end the turn on its own error in place of the refusal.
+            const check = lifted ? structuredReply.checkValue(stepStructuredOutput) : checkStructuredReply(currentIterationTextResponse, structuredReply);
+            if (check.ok) {
+              structuredResult = { value: check.value, meta: { schemaName: structuredReply.name, valid: true, attempts: structuredAttempts, enforcement, stage: 'model' } };
+              if (lifted && !currentIterationTextResponse) {
+                // the forced tool call carried the reply: its text is the value, so the final response holds it too
+                currentIterationTextResponse = JSON.stringify(check.value);
+                aggregatedResponseText += currentIterationTextResponse;
+              }
+            } else {
+              const canRetry = structuredAttempts <= structuredReply.maxRetries && safetyBreak < maxToolLoopIterations;
+              if (canRetry) {
+                this.addTraceEntry(ReasoningEntryType.WARNING, `The reply did not match the schema "${structuredReply.name}" (attempt ${structuredAttempts}); asking again.`, { issues: check.issues });
+                turnMessages.push({ role: 'assistant', content: currentIterationTextResponse || null });
+                turnMessages.push({ role: 'user', content: structuredRepairMessage(check.issues, structuredReply, currentIterationTextResponse) });
+                aggregatedResponseText = '';
+                continue main_processing_loop;
+              }
+              if (structuredReply.onExhausted === 'error') {
+                throw new GMIError(
+                  `The reply did not match the schema "${structuredReply.name}" after ${structuredAttempts} attempt(s).`,
+                  GMIErrorCode.STRUCTURED_OUTPUT_INVALID,
+                  { schemaName: structuredReply.name, attempts: structuredAttempts, issues: check.issues },
+                );
+              }
+              structuredResult = { value: check.value ?? null, meta: { schemaName: structuredReply.name, valid: false, attempts: structuredAttempts, enforcement, stage: 'model', issues: check.issues } };
+            }
           }
         }
 

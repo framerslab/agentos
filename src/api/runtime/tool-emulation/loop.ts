@@ -28,8 +28,12 @@ export interface RunEmulatedToolLoopOptions {
    */
   currentTools?: () => ITool[];
   messages: EmulatedLoopMessage[];
-  /** Buffered model call. Returns the full assistant text + usage. */
-  callModel: (messages: EmulatedLoopMessage[]) => Promise<{ text: string; usage?: { totalTokens?: number } }>;
+  /**
+   * Buffered model call. Returns the full assistant text + usage, the
+   * provider's finish reason, and the model's refusal message when the reply
+   * holds one.
+   */
+  callModel: (messages: EmulatedLoopMessage[]) => Promise<{ text: string; usage?: { totalTokens?: number }; finishReason?: string | null; refusal?: string }>;
   maxRoundtrips: number;
   /** Execution context passed to each tool.execute(). */
   toolContext?: ToolExecutionContext;
@@ -83,6 +87,17 @@ export interface EmulatedToolLoopResult {
   text: string;
   toolCalls: EmulatedToolCallRecord[];
   finishReason: 'stop' | 'tool-calls';
+  /**
+   * Set when the output cap cut off the reply that ended the loop (the
+   * provider's finish reason `length`), a refused one included. `finishReason`
+   * is `stop` then, and the caller reports the cut.
+   */
+  cut?: true;
+  /**
+   * The model's refusal message when the reply that ended the loop held one
+   * (an empty one included), or the piece of it the output cap cut off.
+   */
+  refusal?: string;
   totalTokens: number;
 }
 
@@ -90,7 +105,10 @@ export interface EmulatedToolLoopResult {
  * Buffered prompt-based tool loop. Renders the tool system block, then on each
  * roundtrip calls the model (buffered), parses <tool_call> blocks, executes the
  * matched tools, appends <tool_response> blocks, and repeats until the model
- * replies with no tool calls or maxRoundtrips is hit.
+ * replies with no tool calls or maxRoundtrips is hit. A reply that holds the
+ * model's refusal message ends the loop with the message in `refusal`, and the
+ * tool calls beside it, if any, are not run. A reply the output cap cut off
+ * and that calls no tool ends it with `cut` set.
  */
 export async function runEmulatedToolLoop(
   opts: RunEmulatedToolLoopOptions
@@ -115,12 +133,17 @@ export async function runEmulatedToolLoop(
         messages[0] = { role: 'system', content: renderToolSystemBlock(current) };
       }
     }
-    const { text, usage } = await opts.callModel(messages);
+    const { text, usage, finishReason: modelFinish, refusal: modelRefusal } = await opts.callModel(messages);
     totalTokens += usage?.totalTokens ?? 0;
     const { calls, cleanedText, parseErrors } = parseToolCalls(text);
+    const cut = modelFinish === 'length' ? { cut: true as const } : {};
 
+    // The model declined: the loop ends on its refusal, and no call it wrote beside it runs.
+    if (modelRefusal !== undefined) {
+      return { text: cleanedText, toolCalls, finishReason: 'stop', ...cut, refusal: modelRefusal, totalTokens };
+    }
     if (calls.length === 0 && parseErrors.length === 0) {
-      return { text: cleanedText, toolCalls, finishReason: 'stop', totalTokens };
+      return { text: cleanedText, toolCalls, finishReason: 'stop', ...cut, totalTokens };
     }
 
     messages.push({ role: 'assistant', content: text });
