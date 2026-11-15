@@ -227,12 +227,13 @@ export class GmiTurnFolder {
   }
 
   /**
-   * The text a result reports: a refused last step's own text, as generateText keeps only the text written beside
-   * the refusal in the same reply; else {@link text}.
+   * The text a result reports: a refused last step's own text (the hook's replacement, else the step's text, never
+   * its lifted value, which is no answer), as generateText keeps only the text written beside the refusal in the
+   * same reply; else {@link text}.
    */
   replyText(): string {
     const last = this.steps.at(-1);
-    return last?.refused === true ? this.stepText(last) : this.text();
+    return last?.refused === true ? this.overrides.get(last.stepIndex) ?? last.text : this.text();
   }
 
   /** Each step's usage once, plus every billed failed attempt. */
