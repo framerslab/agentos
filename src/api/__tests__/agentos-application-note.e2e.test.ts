@@ -471,14 +471,16 @@ describe('PromptEngine: a host note and the token budget', () => {
     expect((result.issues ?? []).map((issue) => issue.code)).toContain('TOKEN_BUDGET_EXCEEDED_POST_OPT');
   });
 
-  it('counts what the note adds to the prompt as sent beside the memory block: the note and the separator after it', async () => {
+  it('counts the note as it is sent beside the memory block: the frame line, the note and the separator, then the block', async () => {
     const note = 'Ring the desk bell. '.repeat(20);
-    const plain = await build(base);
-    const noted = await build(withNote(note));
-    expect(firstTextOf(newestUser(noted.prompt))).toBe(`${FRAME}\n${note}\n\n---\n\n${MEMORY}`);
-    expect(
-      noted.result.modificationDetails!.originalEstimatedTokenCount! - plain.result.modificationDetails!.originalEstimatedTokenCount!,
-    ).toBeGreaterThanOrEqual(await engine.estimateTokenCount(`${note}\n\n---\n\n`, 'stub-model'));
+    const components = { systemPrompts: base.systemPrompts, userInput: WORDS, memoryContextText: MEMORY, applicationNote: note } as PromptComponents;
+    const { result, prompt } = await build(components);
+    const estimate = (text: string) => engine.estimateTokenCount(text, 'stub-model');
+    const sent = firstTextOf(newestUser(prompt));
+    expect(sent).toBe(`${FRAME}\n${note}\n\n---\n\n${MEMORY}`);
+    expect(result.modificationDetails!.originalEstimatedTokenCount!).toBeGreaterThanOrEqual(
+      (await estimate(sent)) + (await estimate(WORDS)) + (await estimate('You are Tess.')),
+    );
   });
 
   it('a note larger than the whole budget is sent whole, byte for byte, after the earlier history is reduced and the budget warning written', async () => {
