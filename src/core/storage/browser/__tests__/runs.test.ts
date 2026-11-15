@@ -1721,6 +1721,32 @@ describe('the run owner', () => {
     c.close();
   });
 
+  it("keeps a failed end's last write after close, so another owner reads the run as failed with its counts", async () => {
+    const store = new MemoryKeyValueStore();
+    const runLocks = memoryLocks();
+    const channel = bus();
+    const a = owner(store, runLocks, channel);
+    const b = owner(store, runLocks, channel);
+    const gate = deferred();
+    const started = await a.start({
+      ...countingJob(2, []),
+      async run(context) {
+        await gate.promise;
+        context.item(1, 'failed', 'b.md');
+        context.counts({ applied: 1, pending: 0, failed: 1 });
+        return { ended: 'failed', counts: context.record().counts };
+      },
+    });
+    const id = 'id' in started ? started.id : '';
+    a.close();
+    gate.resolve();
+    expect((await a.whenIdle()).get(id)?.ended).toBe('failed');
+    expect(await runLocks.free(runLockName('test-run-', ACCOUNT, KEY))).toBe(true);
+    expect(await store.get<RunRecord>(`lib/j/${id}`)).toMatchObject({ state: 'failed', cut: null, counts: { applied: 1, pending: 0, failed: 1 } });
+    expect(await b.records()).toEqual([expect.objectContaining({ status: 'failed', record: expect.objectContaining({ id, state: 'failed' }) })]);
+    b.close();
+  });
+
   it("draws no cut end in a closed owner's snapshot: the lock goes and another owner reads the record as cut", async () => {
     const store = new MemoryKeyValueStore();
     const runLocks = memoryLocks();

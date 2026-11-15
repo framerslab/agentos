@@ -207,8 +207,9 @@ export interface RunOwner {
   beat(): void;
   /**
    * Stops the owner's timers, listeners and channel. A run it holds that has ended lets its lock go now, and one still
-   * running goes on to its end and lets its lock go once its job returns; its record stays as a page's going leaves it,
-   * so another tab reads a live one as cut. Its end is not drawn, shown or saved by this owner.
+   * running goes on to its end, its last record write included, and lets its lock go once its job returns. The record
+   * stays as a page's going after that end leaves it: another tab reads a failed or unsaved one as failed and a live
+   * one as cut. Its end is not drawn, shown or saved by this owner, and the run leaves `snapshot()` with its lock.
    */
   close(): void;
 }
@@ -1510,6 +1511,8 @@ class BrowserRunOwner implements RunOwner {
     if (ended === 'cut') {
       this.post(held);
       this.drop(held);
+      // A closed owner draws no end: the lock has gone, and the record stays for another tab to read as cut.
+      if (this.closed) return;
       // A job's own cut, without `context.cut`, left the record unmarked: it reads as a load's cut, as every tab reads it.
       const read: RunRead = { record: copyRecord(held.record), status: 'cut', cut: held.cutSelf ?? 'load' };
       this.see(read);
@@ -1529,7 +1532,8 @@ class BrowserRunOwner implements RunOwner {
       this.touch();
       return;
     }
-    // A closed owner draws no end, so nothing would call `shown` or `saved`: the lock goes and the record stays as stored.
+    // A closed owner draws no end, so nothing would call `shown` or `saved`: the lock goes and the record stays as that
+    // last write left it, failed or unsaved for another tab to read as failed, else live for it to read as cut.
     if (this.closed) {
       this.drop(held);
       return;
@@ -1540,12 +1544,14 @@ class BrowserRunOwner implements RunOwner {
     this.touch();
   }
 
-  /** Lets the run's lock go and forgets it. */
+  /** Lets the run's lock go and forgets it; the next snapshot is built without it, whether or not a listener hears. */
   private drop(held: Held): void {
     this.clearTimers(held);
     held.release?.();
     held.release = null;
-    if (this.held.get(held.record.id) === held) this.held.delete(held.record.id);
+    if (this.held.get(held.record.id) !== held) return;
+    this.held.delete(held.record.id);
+    this.cached = null;
   }
 
   /** Stops a run's paced write and its pending message. */
