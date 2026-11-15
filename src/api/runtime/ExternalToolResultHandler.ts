@@ -1374,10 +1374,12 @@ export class ExternalToolResultHandler {
     const resolvedOrganizationId = this.resolveOrganizationContext(
       options.organizationId ?? storedOrganizationId,
     );
-    // the pause never stores the turn's note: the resume's own, else the paused stream's while this process holds it
+    // the pause never stores the turn's note: the resume's own (a blank one sends none), else the paused stream's while
+    // this process holds it
     const applicationNote =
-      hostApplicationNote(options.applicationNote) ??
-      this.activeStreamContexts.get(pendingRequest.streamId)?.applicationNote;
+      options.applicationNote !== undefined
+        ? hostApplicationNote(options.applicationNote)
+        : this.activeStreamContexts.get(pendingRequest.streamId)?.applicationNote;
 
     const streamContext: ActiveStreamContext = {
       gmi,

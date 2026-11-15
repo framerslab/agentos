@@ -192,6 +192,19 @@ function noteTextOf(components: Readonly<PromptComponents>): string {
 }
 
 /**
+ * What the host's note adds to the prompt as sent, for the token count: beside a memory block or other retrieved text,
+ * the note and the separator after it; alone, the frame line and the note, since the frame opens the note for it.
+ *
+ * @param note - The host's note ({@link hostNoteOf}).
+ * @param components - The prompt's components, before the budget step.
+ * @returns The text to count for the note.
+ */
+function hostNoteAsSent(note: string, components: Readonly<PromptComponents>): string {
+  const beside = Boolean(components.memoryContextText) || Boolean(retrievedContextAsText(components.retrievedContext));
+  return beside ? `${note}\n\n---\n\n` : applicationNoteOf(note);
+}
+
+/**
  * The newest user message's content with the note in front of it. The person's words are never changed: no label
  * goes in front of them and nothing is trimmed.
  *
@@ -1167,9 +1180,10 @@ export class PromptEngine implements IPromptEngine {
     let total = 0;
     if(components.systemPrompts) total += (await Promise.all(components.systemPrompts.map(sp => this.estimateTokenCount(sp.content, modelId)))).reduce((a,b) => a+b, 0);
     if(components.userInput) total += await this.estimateTokenCount(components.userInput, modelId);
-    // The host's note is counted with the user's message: never in the retrieved context's share, and never reduced.
+    // The host's note is counted with the user's message, as it is sent: never in the retrieved context's share, and
+    // never reduced.
     const hostNote = hostNoteOf(components);
-    if (hostNote) total += await this.estimateTokenCount(hostNote, modelId);
+    if (hostNote) total += await this.estimateTokenCount(hostNoteAsSent(hostNote, components), modelId);
     if(components.memoryContextText) total += await this.estimateTokenCount(memoryTextAsSent(components.memoryContextText, components.retrievedContext), modelId);
     if(components.conversationHistory) total += await this.calculateTokensForMessages(components.conversationHistory, modelId, sendsThinking);
     if(components.retrievedContext) {

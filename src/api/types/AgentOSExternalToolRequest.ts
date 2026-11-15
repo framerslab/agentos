@@ -34,8 +34,8 @@ export interface AgentOSResumeExternalToolRequestOptions {
   organizationId?: string;
   /**
    * The note of the turn this resume continues (`AgentOSInput.applicationNote`). Unset, the continuation sends the
-   * paused stream's note while this process holds that stream, and none after a restart. Runtime-only like
-   * `organizationId`: the pause never stores it.
+   * paused stream's note while this process holds that stream, and none after a restart; an empty or blank note sends
+   * none. Runtime-only like `organizationId`: the pause never stores it.
    */
   applicationNote?: string;
 }
