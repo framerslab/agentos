@@ -73,4 +73,27 @@ describe('gmi() session responseSchema refusals', () => {
       }
     },
   );
+
+  it('reports a refused answer beside a lifted object with the text the model wrote, not the object, on send and stream', async () => {
+    // No schema on the turn: the provider's chunk carries a value beside its refusal. A refused step's value is no
+    // answer, so the result's text is only what the model wrote beside the refusal (here nothing), as generateText's.
+    provider.chunks = [
+      {
+        isFinal: true,
+        structuredOutput: JSON.parse(GOOD),
+        choices: [{ index: 0, message: { role: 'assistant', content: null }, finishReason: 'stop', refusal: REFUSAL }],
+      },
+    ];
+    const runtime = gmi({ provider: 'openai', model: 'stub-model', apiKey: 'test', fallbackProviders: [] });
+    try {
+      const session = runtime.session('planner');
+      const sent = await session.send('plan my week');
+      expect(sent).toMatchObject({ text: '', refusal: REFUSAL });
+      const streamed = session.stream('plan my week');
+      expect(await streamed.text).toBe('');
+      expect(await streamed.refusal).toBe(REFUSAL);
+    } finally {
+      await runtime.close();
+    }
+  });
 });
