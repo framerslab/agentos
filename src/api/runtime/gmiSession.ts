@@ -555,14 +555,17 @@ export async function* runGmiTurn(
  * generateObject does: JSON that does not parse, and JSON that parses, which a cut can leave too (an answer the limit
  * stops just after its closing brace parses whole). JSON in which an object repeats a key is refused as JSON that does
  * not parse, its raw text attached. When the JSON parses and does not match the schema, the error carries the issues.
+ * A turn the model refused (a step marked `refused`) rejects before any parse, whatever JSON its text or a lifted
+ * value holds: a refusal is the model's answer, not an object. Any refused step counts, and the error's `refusal` is
+ * the latest refused step's message (possibly the empty string).
  *
  * @param maxTokens - The turn's `maxTokens`, named in the cut-off's message when the turn set one.
  */
 function parseStructured(folder: GmiTurnFolder, schema: ZodType, maxTokens?: number): unknown {
-  const refusal = folder.steps.at(-1)?.refusal;
-  // A refusal ends the turn before parsing or schema validation, even beside an otherwise valid answer.
-  if (refusal !== undefined) {
-    throw new ObjectGenerationError('The model refused the request instead of writing the reply', folder.text(), undefined, refusal);
+  // Any refused step, not the last only: a provider may send whole tool calls before the chunk that refuses.
+  const refused = [...folder.steps].reverse().find((step) => step.refused === true);
+  if (refused) {
+    throw new ObjectGenerationError('session.send: the model refused the request instead of writing the object', folder.text(), undefined, refused.refusal);
   }
   // The last step's own stop reason, not the folder's: the folder reports 'stop' for any step whose answer a
   // gateway lifted, and the turn's gateway is the host's to choose.

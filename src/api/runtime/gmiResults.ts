@@ -298,7 +298,7 @@ export class GmiTurnFolder {
       ...(this.options.cacheDiagnostics ? { providerMessageId: this.providerMessageId() } : {}),
       ...(last?.cacheDiagnostics !== undefined ? { cacheDiagnostics: last.cacheDiagnostics as GenerateTextResult['cacheDiagnostics'] } : {}),
       text: this.text(),
-      ...(last?.refusal !== undefined ? { refusal: last.refusal } : {}),
+      ...(last?.refused === true ? { refusal: last.refusal ?? '' } : {}),
       usage: this.usage(),
       toolCalls: this.toolCalls(),
       finishReason: this.finishReason(),
