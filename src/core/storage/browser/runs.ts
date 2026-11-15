@@ -16,7 +16,8 @@
  * and never makes one, so a write in flight after a removal cannot bring the record back.
  *
  * The run's lock (`RunLocks`, `webRunLocks()`) is held from `start` until the end has been shown (an export's until it
- * is saved or dismissed); a second `start` of the same job while it is held is refused at once, never queued. A record
+ * is saved or dismissed) or, once the owner is closed, until the job has returned; a second `start` of the same job
+ * while it is held is refused at once, never queued. A record
  * in a live state whose lock is free was cut by a load (or marked by a sign-out or a session's end); one whose lock is
  * held is another tab's, watched. Silence on the channel never makes a run cut: only a free lock does.
  *
@@ -51,7 +52,10 @@ export interface RunCounts { total: number | null; pending: number; applied: num
 export interface RunItem { index: number; state: RunItemState; name?: string }
 /** The record of one run attempt: these fourteen fields and no other. */
 export interface RunRecord { id: string; key: string; account: string; kind: string; way: string | null; unit: RunUnit; chosen: unknown; counts: RunCounts; items: RunItem[]; state: RunState; cut: RunCut; phase: RunPhase; began: number; progressed: number }
-/** How a job ended; `fenced` is a job the write gate refused or the account's stop reached, which draws no row. */
+/**
+ * How a job ended; `fenced` is a job the write gate refused or the account's stop reached, which draws no row. A job
+ * that ends `cut` without `context.cut` leaves its record unmarked, so it reads as cut by a load (`'load'`).
+ */
 export type RunEnd = { ended: 'finished' | 'stopped' | 'failed' | 'unsaved' | 'cut' | 'fenced'; counts: RunCounts };
 /** What a job is handed while it runs. */
 export interface RunContext {
@@ -201,7 +205,13 @@ export interface RunOwner {
   whenIdle(): Promise<Map<string, RunEnd>>;
   /** Sends every live run's message now. */
   beat(): void;
-  /** Stops the owner's timers, listeners and channel; a run it holds goes on to its end. */
+  /**
+   * Stops the owner's timers, listeners and channel. A run it holds that has ended lets its lock go now (once its last
+   * record write lands, when that write is in flight), and one still running goes on to its end, its last record write
+   * included, and lets its lock go once its job has returned and that write has landed. The record
+   * stays as a page's going after that end leaves it: another tab reads a failed or unsaved one as failed and a live
+   * one as cut. Its end is not drawn, shown or saved by this owner, and the run leaves `snapshot()` with its lock.
+   */
   close(): void;
 }
 
@@ -408,7 +418,10 @@ function pageNames(): RunLocks {
 /**
  * Run locks on the browser's Web Locks: `hold` with `ifAvailable`, kept until `release()`; `free` from `query()`'s
  * held names; `waitFree` requests the name without `ifAvailable` under a timeout and lets it go at once. A page with
- * no Web Locks keeps the names in a set of its own, so the one-job rule holds inside that tab alone.
+ * no Web Locks, or one whose Web Locks refuse the request, keeps the names in a set of its own, which `hold`, `free`
+ * and `waitFree` then use, so the one-job rule holds inside that tab alone. When the wait request is refused, a name
+ * in the page's own names is waited for there first, and any name then answers free only when `query()` does not list
+ * it, or when that read is refused too.
  */
 export function webRunLocks(): RunLocks {
   const manager = (globalThis as unknown as { navigator?: { locks?: Partial<LockManagerLike> } }).navigator?.locks;
@@ -445,11 +458,26 @@ export function webRunLocks(): RunLocks {
       }
     },
     async waitFree(name, ms) {
+      const began = Date.now();
+      const signal = timeoutSignal(ms);
       try {
-        await locks.request(name, { mode: 'exclusive', signal: timeoutSignal(ms) }, () => undefined);
+        await locks.request(name, { mode: 'exclusive', signal }, () => undefined);
         return true;
       } catch {
-        return false;
+        // The timeout ended the wait: the name is still held.
+        if (signal.aborted) return false;
+        // The browser refused the request itself. A name `hold` kept in the page's own names is waited for there.
+        const names = pageNames();
+        if (!(await names.free(name)) && !(await names.waitFree(name, ms - (Date.now() - began)))) return false;
+        // The name is free only when the browser's held names lack it too, since another tab may hold it there; where
+        // that read is refused too, the page's own names are all this page can read, as for `free`, and they do not
+        // hold it.
+        try {
+          const state = await locks.query();
+          return !(state.held ?? []).some((lock) => lock.name === name);
+        } catch {
+          return names.free(name);
+        }
       }
     },
   };
@@ -537,6 +565,8 @@ interface Held {
   /** The run's first record was written, so a listing that lacks it read the record after another owner removed it. */
   written: boolean;
   ended: Ended | null;
+  /** The job has returned and its last record write is in flight: `close` leaves the lock until that write lands. */
+  ending: boolean;
   /** The account's stop reached the run, here or from another tab. */
   stopCut: AccountStop | null;
   /** `dismiss` dropped the run while it ran. */
@@ -993,11 +1023,16 @@ class BrowserRunOwner implements RunOwner {
     for (const held of this.held.values()) if (this.beats(held)) this.post(held);
   }
 
-  /** Stops the timers, the listeners and the channel; a held run goes on to its end. */
+  /** Stops the timers, the listeners and the channel; an ended run lets its lock go once its last write has landed. */
   close(): void {
     if (this.closed) return;
     this.closed = true;
-    for (const held of this.held.values()) this.clearTimers(held);
+    for (const held of [...this.held.values()]) {
+      // No end is drawn here any more, so nothing would call `shown` or `saved`: the lock goes, the record stays. A run
+      // whose last record write is in flight keeps its lock until that write lands, so no other tab takes the job under it.
+      if (held.ended !== null && !held.ending) this.drop(held);
+      else this.clearTimers(held);
+    }
     if (this.noticeTimer !== null) clearTimeout(this.noticeTimer);
     this.noticeTimer = null;
     this.ensureTimers();
@@ -1060,7 +1095,7 @@ class BrowserRunOwner implements RunOwner {
       }
       const id = record.id;
       const held: Held = {
-        record, job, controller: new AbortController(), release, memoryOnly: false, written: false, ended: null, stopCut: null, dropped: false, cutSelf: null,
+        record, job, controller: new AbortController(), release, memoryOnly: false, written: false, ended: null, ending: false, stopCut: null, dropped: false, cutSelf: null,
         lastWrite: now, dirty: false, paceTimer: null, lastPost: 0, postTimer: null, done: null,
       };
       this.held.set(id, held);
@@ -1482,7 +1517,10 @@ class BrowserRunOwner implements RunOwner {
     if (ended === 'cut') {
       this.post(held);
       this.drop(held);
-      const read: RunRead = { record: copyRecord(held.record), status: 'cut', cut: held.cutSelf };
+      // A closed owner draws no end: the lock has gone, and the record stays for another tab to read as cut.
+      if (this.closed) return;
+      // A job's own cut, without `context.cut`, left the record unmarked: it reads as a load's cut, as every tab reads it.
+      const read: RunRead = { record: copyRecord(held.record), status: 'cut', cut: held.cutSelf ?? 'load' };
       this.see(read);
       this.fire(read, 'cut');
       this.ensureTimers();
@@ -1493,11 +1531,19 @@ class BrowserRunOwner implements RunOwner {
     else if (ended === 'unsaved') held.record.state = 'unsaved';
     else if (ended === 'stopped') held.record.state = 'stopping';
     held.record.progressed = this.now();
+    held.ending = true;
     await this.persist(held);
+    held.ending = false;
     // Dismissed, or reached by the account's stop, while that write was in flight: no end is posted or heard.
     if (this.held.get(held.record.id) !== held || this.isFenced(held)) {
       this.ensureTimers();
       this.touch();
+      return;
+    }
+    // A closed owner draws no end, so nothing would call `shown` or `saved`: the lock goes and the record stays as that
+    // last write left it, failed or unsaved for another tab to read as failed, else live for it to read as cut.
+    if (this.closed) {
+      this.drop(held);
       return;
     }
     this.post(held);
@@ -1506,12 +1552,14 @@ class BrowserRunOwner implements RunOwner {
     this.touch();
   }
 
-  /** Lets the run's lock go and forgets it. */
+  /** Lets the run's lock go and forgets it; the next snapshot is built without it, whether or not a listener hears. */
   private drop(held: Held): void {
     this.clearTimers(held);
     held.release?.();
     held.release = null;
-    if (this.held.get(held.record.id) === held) this.held.delete(held.record.id);
+    if (this.held.get(held.record.id) !== held) return;
+    this.held.delete(held.record.id);
+    this.cached = null;
   }
 
   /** Stops a run's paced write and its pending message. */
@@ -1651,7 +1699,9 @@ class BrowserRunOwner implements RunOwner {
     if (again) seen.ended = null;
     // A run that ended cut carries the mark it gave its record, so a finish here compares the record with the mark it has.
     const cut = again ? null : message.ended === 'cut' && message.cut !== undefined ? message.cut : record.cut;
-    seen.read = { record: { ...record, counts: { ...message.counts }, state: message.state, phase: message.phase, progressed: message.at, cut }, status: 'watched', cut };
+    // A job's own cut posts no mark: it reads as a load's cut, as the holder reads it, and the record copy keeps no mark.
+    const readCut = message.ended === 'cut' && cut === null ? 'load' : cut;
+    seen.read = { record: { ...record, counts: { ...message.counts }, state: message.state, phase: message.phase, progressed: message.at, cut }, status: 'watched', cut: readCut };
     seen.heard = this.now();
     seen.local = false;
     if (message.ended !== undefined && seen.ended === null) {
