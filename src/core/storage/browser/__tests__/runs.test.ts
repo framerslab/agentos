@@ -1666,6 +1666,32 @@ describe('the run owner', () => {
     own.close();
   });
 
+  it("tells a watching owner's end listener that a job's own cut was a load's, its record copy keeping no mark", async () => {
+    const store = new MemoryKeyValueStore();
+    const runLocks = memoryLocks();
+    const channel = bus();
+    const holder = owner(store, runLocks, channel);
+    const watcher = owner(store, runLocks, channel);
+    const ends: Array<[string | null, string | null, string]> = [];
+    watcher.subscribeEnds((read, ended) => ends.push([read.cut, read.record.cut, ended]));
+    const gate = deferred();
+    const started = await holder.start({
+      ...countingJob(1, []),
+      async run(context) {
+        await gate.promise;
+        return { ended: 'cut', counts: context.record().counts };
+      },
+    });
+    const id = 'id' in started ? started.id : '';
+    await vi.waitFor(() => expect(watcher.snapshot().runs).toEqual([expect.objectContaining({ status: 'watched', record: expect.objectContaining({ id }) })]));
+    gate.resolve();
+    await holder.whenIdle();
+    await vi.waitFor(() => expect(ends).toHaveLength(1));
+    expect(ends).toEqual([['load', null, 'cut']]);
+    holder.close();
+    watcher.close();
+  });
+
   it("lets a run's lock go once its job returns after close, and at once for a run that had ended, so another owner can start the job", async () => {
     const store = new MemoryKeyValueStore();
     const runLocks = memoryLocks();
