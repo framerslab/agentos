@@ -2715,6 +2715,18 @@ describe('AgentOS tool-result continuations', () => {
       expect((continuation.at(-1) as AgentOSFinalResponseChunk).finalResponseText).toBe(NOTES_REPLY);
       expect(notesHanded(rt)).toEqual(['A private note', carried]);
     });
+
+    it("a resume given a blank note continues with none, though this runtime holds the paused stream's note", async () => {
+      const rt = await sharedSessionRuntime({}, [{ text: 'I will read the notes file first.' }, { text: NOTES_REPLY }]);
+      const { saved } = await rt.pauseNotesTurn('A private note');
+
+      const continuation = await collect(
+        rt.agentos.resumeExternalToolRequest(saved, [READ_RESULT], { applicationNote: ' \n\t ' }),
+      );
+
+      expect((continuation.at(-1) as AgentOSFinalResponseChunk).finalResponseText).toBe(NOTES_REPLY);
+      expect(notesHanded(rt)).toEqual(['A private note', undefined]);
+    });
   });
 
   describe('with the rolling summary on', () => {

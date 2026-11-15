@@ -455,6 +455,32 @@ describe('PromptEngine: a host note and the token budget', () => {
     expect(noted.result.metadata.contextTokens!.memory).toBe(plain.result.metadata.contextTokens!.memory);
   });
 
+  it('counts what the note adds to the prompt as sent: the frame line it opens when it is alone, so a prompt the frame takes over the budget writes the warning', async () => {
+    // 7,900 characters, 1,975 tokens: with the 13-character system text and the words, 1,993 tokens counted raw, under
+    // the budget of 2,000; the frame line in front of the note takes the prompt as sent over it
+    const note = 'Ring the desk bell. '.repeat(395);
+    expect(note.length).toBe(7_900);
+    const components = { systemPrompts: base.systemPrompts, userInput: WORDS, applicationNote: note } as PromptComponents;
+    const { result, prompt } = await build(components);
+    const estimate = (text: string) => engine.estimateTokenCount(text, 'stub-model');
+    const sent = firstTextOf(newestUser(prompt));
+    expect(sent).toBe(`${FRAME}\n${note}`);
+    expect(result.modificationDetails!.originalEstimatedTokenCount!).toBeGreaterThanOrEqual(
+      (await estimate(sent)) + (await estimate(WORDS)) + (await estimate('You are Tess.')),
+    );
+    expect((result.issues ?? []).map((issue) => issue.code)).toContain('TOKEN_BUDGET_EXCEEDED_POST_OPT');
+  });
+
+  it('counts what the note adds to the prompt as sent beside the memory block: the note and the separator after it', async () => {
+    const note = 'Ring the desk bell. '.repeat(20);
+    const plain = await build(base);
+    const noted = await build(withNote(note));
+    expect(firstTextOf(newestUser(noted.prompt))).toBe(`${FRAME}\n${note}\n\n---\n\n${MEMORY}`);
+    expect(
+      noted.result.modificationDetails!.originalEstimatedTokenCount! - plain.result.modificationDetails!.originalEstimatedTokenCount!,
+    ).toBeGreaterThanOrEqual(await engine.estimateTokenCount(`${note}\n\n---\n\n`, 'stub-model'));
+  });
+
   it('a note larger than the whole budget is sent whole, byte for byte, after the earlier history is reduced and the budget warning written', async () => {
     const note = noteOf(120);
     expect(await engine.estimateTokenCount(note, 'stub-model')).toBeGreaterThan(SMALL.maxContextTokens);
