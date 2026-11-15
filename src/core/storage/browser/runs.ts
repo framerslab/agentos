@@ -1675,7 +1675,9 @@ class BrowserRunOwner implements RunOwner {
     if (again) seen.ended = null;
     // A run that ended cut carries the mark it gave its record, so a finish here compares the record with the mark it has.
     const cut = again ? null : message.ended === 'cut' && message.cut !== undefined ? message.cut : record.cut;
-    seen.read = { record: { ...record, counts: { ...message.counts }, state: message.state, phase: message.phase, progressed: message.at, cut }, status: 'watched', cut };
+    // A job's own cut posts no mark: it reads as a load's cut, as the holder reads it, and the record copy keeps no mark.
+    const readCut = message.ended === 'cut' && cut === null ? 'load' : cut;
+    seen.read = { record: { ...record, counts: { ...message.counts }, state: message.state, phase: message.phase, progressed: message.at, cut }, status: 'watched', cut: readCut };
     seen.heard = this.now();
     seen.local = false;
     if (message.ended !== undefined && seen.ended === null) {
