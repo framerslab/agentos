@@ -1762,4 +1762,29 @@ describe('webRunLocks where the browser refuses the request', () => {
       vi.unstubAllGlobals();
     }
   });
+
+  it('answers a held Web Lock as not free when only the wait request is refused, and free once it goes', async () => {
+    const held = new Set<string>();
+    const request = (name: string, options: { ifAvailable?: boolean }, callback: (lock: { name: string } | null) => unknown): Promise<unknown> => {
+      if (!options.ifAvailable) return Promise.reject(new Error('SecurityError'));
+      if (held.has(name)) return Promise.resolve(callback(null));
+      held.add(name);
+      return Promise.resolve(callback({ name })).finally(() => held.delete(name));
+    };
+    const query = async (): Promise<{ held: Array<{ name: string }> }> => ({ held: [...held].map((name) => ({ name })) });
+    vi.stubGlobal('navigator', { locks: { request, query } });
+    try {
+      const runLocks = webRunLocks();
+      const name = `run-wait-refused-${Math.random().toString(36).slice(2, 10)}`;
+      const grant = await runLocks.hold(name);
+      expect(grant).not.toBeNull();
+      expect(await runLocks.free(name)).toBe(false);
+      expect(await runLocks.waitFree(name, 30)).toBe(false);
+      grant?.release();
+      await vi.waitFor(() => expect(held.has(name)).toBe(false));
+      expect(await runLocks.waitFree(name, 30)).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
