@@ -1912,4 +1912,25 @@ describe('webRunLocks where the browser refuses the request', () => {
       vi.unstubAllGlobals();
     }
   });
+
+  it("answers a name not free when this page's own hold goes but another tab still holds it on Web Locks", async () => {
+    const otherTab = new Set<string>();
+    const refused = (): Promise<never> => Promise.reject(new Error('SecurityError'));
+    const query = async (): Promise<{ held: Array<{ name: string }> }> => ({ held: [...otherTab].map((name) => ({ name })) });
+    vi.stubGlobal('navigator', { locks: { request: refused, query } });
+    try {
+      const runLocks = webRunLocks();
+      const name = `run-both-held-${Math.random().toString(36).slice(2, 10)}`;
+      otherTab.add(name);
+      const grant = await runLocks.hold(name);
+      expect(grant).not.toBeNull();
+      const waiting = runLocks.waitFree(name, 5_000);
+      grant?.release();
+      expect(await waiting).toBe(false);
+      otherTab.delete(name);
+      expect(await runLocks.waitFree(name, 30)).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
