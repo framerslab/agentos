@@ -15,6 +15,7 @@ import {
   type RunMessage,
   type RunOwnerOptions,
   type RunRecord,
+  webRunLocks,
 } from '../runs.js';
 
 /** Web Locks in memory, shared by every owner of the test: a held name refuses a second hold at once. */
@@ -1642,5 +1643,97 @@ describe('the run owner', () => {
     expect(await store.get<RunRecord>(`lib/j/${id}`)).toMatchObject({ cut: 'session' });
     expect(await own.records()).toEqual([expect.objectContaining({ status: 'cut', cut: 'session' })]);
     own.close();
+  });
+
+  it("reads a run whose job returned cut without context.cut as cut by a load, here and in its stored record", async () => {
+    const store = new MemoryKeyValueStore();
+    const own = owner(store, memoryLocks(), bus());
+    const ends: Array<[string | null, string]> = [];
+    own.subscribeEnds((read, ended) => ends.push([read.cut, ended]));
+    const started = await own.start({
+      ...countingJob(1, []),
+      async run(context) {
+        return { ended: 'cut', counts: context.record().counts };
+      },
+    });
+    const id = 'id' in started ? started.id : '';
+    expect((await own.whenIdle()).get(id)?.ended).toBe('cut');
+    expect(own.snapshot().runs).toEqual([expect.objectContaining({ status: 'cut', cut: 'load' })]);
+    expect(ends).toEqual([['load', 'cut']]);
+    // The record carries no mark, so every tab reads it as a load's cut once its lock is free.
+    expect(await store.get<RunRecord>(`lib/j/${id}`)).toMatchObject({ cut: null, state: 'running' });
+    expect(await own.records()).toEqual([expect.objectContaining({ status: 'cut', cut: 'load' })]);
+    own.close();
+  });
+
+  it("lets a run's lock go once its job returns after close, and at once for a run that had ended, so another owner can start the job", async () => {
+    const store = new MemoryKeyValueStore();
+    const runLocks = memoryLocks();
+    const channel = bus();
+    const name = runLockName('test-run-', ACCOUNT, KEY);
+    const a = owner(store, runLocks, channel);
+    const b = owner(store, runLocks, channel);
+    const gate = deferred();
+    const started = await a.start(countingJob(1, [() => gate.promise]));
+    const id = 'id' in started ? started.id : '';
+    a.close();
+    gate.resolve();
+    expect((await a.whenIdle()).get(id)?.ended).toBe('finished');
+    expect(await runLocks.free(name)).toBe(true);
+    // Its record stays as a page's going leaves it: live with its lock free, so the other owner reads it as cut.
+    expect(await b.records()).toEqual([expect.objectContaining({ status: 'cut', cut: 'load', record: expect.objectContaining({ id }) })]);
+    const again = await b.start(countingJob(1, []));
+    expect('id' in again).toBe(true);
+    await b.whenIdle();
+    // That run has ended and its end was never drawn: closing its owner lets its lock go at once.
+    expect(await runLocks.free(name)).toBe(false);
+    b.close();
+    expect(await runLocks.free(name)).toBe(true);
+    const c = owner(store, runLocks, channel);
+    expect('id' in (await c.start(countingJob(1, [])))).toBe(true);
+    await c.whenIdle();
+    c.close();
+  });
+});
+
+describe('webRunLocks where the browser refuses the request', () => {
+  it("waits for the page's own name that hold fell back to, so the account's stop waits for this page's run to return", async () => {
+    const refused = (): Promise<never> => Promise.reject(new Error('SecurityError'));
+    vi.stubGlobal('navigator', { locks: { request: refused, query: refused } });
+    try {
+      const runLocks = webRunLocks();
+      const name = `run-refused-${Math.random().toString(36).slice(2, 10)}`;
+      const grant = await runLocks.hold(name);
+      expect(grant).not.toBeNull();
+      expect(await runLocks.hold(name)).toBeNull();
+      expect(await runLocks.free(name)).toBe(false);
+      expect(await runLocks.waitFree(name, 30)).toBe(false);
+      const waiting = runLocks.waitFree(name, 5_000);
+      grant?.release();
+      expect(await waiting).toBe(true);
+
+      const key = 'd'.repeat(64);
+      const store = new MemoryKeyValueStore();
+      const own = owner(store, runLocks, bus());
+      let returned = false;
+      await own.start({
+        ...countingJob(1, []), key,
+        async run(context) {
+          await new Promise<void>((resolve) => {
+            if (context.signal.aborted) resolve();
+            else context.signal.addEventListener('abort', () => resolve());
+          });
+          await new Promise<void>((resolve) => setTimeout(resolve, 200));
+          returned = true;
+          return { ended: 'stopped', counts: context.record().counts };
+        },
+      });
+      expect(await own.stopAccount('removal')).toEqual({ complete: true });
+      expect(returned).toBe(true);
+      expect(await runLocks.free(runLockName('test-run-', ACCOUNT, key))).toBe(true);
+      own.close();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
