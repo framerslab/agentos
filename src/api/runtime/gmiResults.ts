@@ -217,6 +217,24 @@ export class GmiTurnFolder {
     return '';
   }
 
+  /**
+   * The model's refusal message when the last step refused (possibly the empty string), else undefined: the
+   * `refusal` that `generateText` and `streamText` report. Read from the step's `refused` flag.
+   */
+  refusal(): string | undefined {
+    const last = this.steps.at(-1);
+    return last?.refused === true ? last.refusal ?? '' : undefined;
+  }
+
+  /**
+   * The text a result reports: a refused last step's own text, as generateText keeps only the text written beside
+   * the refusal in the same reply; else {@link text}.
+   */
+  replyText(): string {
+    const last = this.steps.at(-1);
+    return last?.refused === true ? this.stepText(last) : this.text();
+  }
+
   /** Each step's usage once, plus every billed failed attempt. */
   usage(): TokenUsage {
     const total = emptyUsage();
@@ -283,13 +301,14 @@ export class GmiTurnFolder {
 
   /**
    * The turn as `generateText` reports a run: provider, model and response
-   * metadata from the last step, the text, the usage, the tool calls and the
-   * finish reason.
+   * metadata from the last step, the text, the refusal message when the last
+   * step refused, the usage, the tool calls and the finish reason.
    *
    * @param transcriptDelta - The messages the turn added to the session store.
    */
   toGenerateTextResult(transcriptDelta?: SessionTranscriptMessage[]): GenerateTextResult {
     const last = this.steps.at(-1);
+    const refusal = this.refusal();
     return {
       provider: last?.providerId ?? '',
       model: last?.modelId ?? '',
@@ -297,8 +316,8 @@ export class GmiTurnFolder {
       ...(last?.serviceTier ? { serviceTier: last.serviceTier } : {}),
       ...(this.options.cacheDiagnostics ? { providerMessageId: this.providerMessageId() } : {}),
       ...(last?.cacheDiagnostics !== undefined ? { cacheDiagnostics: last.cacheDiagnostics as GenerateTextResult['cacheDiagnostics'] } : {}),
-      text: this.text(),
-      ...(last?.refused === true ? { refusal: last.refusal ?? '' } : {}),
+      text: this.replyText(),
+      ...(refusal !== undefined ? { refusal } : {}),
       usage: this.usage(),
       toolCalls: this.toolCalls(),
       finishReason: this.finishReason(),
@@ -357,8 +376,9 @@ export interface GmiStreamOptions {
  * TEXT_DELTA to `text`, TOOL_CALL_REQUEST to `tool-call`, TOOL_RESULT to
  * `tool-result` and ERROR (or a thrown error) to a final `error` part, whose
  * error is `options.stoppedBy`'s when it gives one. `text`
- * is the latest step's text; after an error it is the text the failed step
- * delivered, as streamText resolves it. `memoryRecall` is the recall capture of
+ * is the latest step's text (a refused last step's own text); after an error it is the text the failed step
+ * delivered, as streamText resolves it. `refusal` is the refused last step's message, undefined when the last step
+ * did not refuse or the turn ended on an error. `memoryRecall` is the recall capture of
  * the GMI's output that ended the turn (`GmiTurnFolder.finish`), undefined when
  * the turn stopped before it returned one; `historyOmitted` is that output's
  * report of the history the turn's requests left out, undefined likewise or
@@ -392,6 +412,7 @@ export function streamFromGmiTurn(turn: AsyncIterable<GMIOutputChunk>, options: 
   };
   const p = {
     text: deferred<string>(),
+    refusal: deferred<string | undefined>(),
     usage: deferred<TokenUsage>(),
     toolCalls: deferred<ToolCallRecord[]>(),
     provider: deferred<string>(),
@@ -448,7 +469,9 @@ export function streamFromGmiTurn(turn: AsyncIterable<GMIOutputChunk>, options: 
       parts.push({ type: 'error', error: options.stoppedBy?.() ?? (error instanceof Error ? error : new Error(String(error))) });
     } finally {
       const last = folder.steps.at(-1);
-      p.text.resolve(folder.error() && stepDelivered ? stepDelivered : folder.text());
+      p.text.resolve(folder.error() && stepDelivered ? stepDelivered : folder.replyText());
+      // As streamText's: the last step's refusal message, undefined when the turn ended on an error.
+      p.refusal.resolve(folder.error() ? undefined : folder.refusal());
       p.usage.resolve(folder.usage());
       p.toolCalls.resolve(folder.toolCalls());
       // Already resolved when the turn was routed; '' when it failed before routing.
@@ -493,6 +516,7 @@ export function streamFromGmiTurn(turn: AsyncIterable<GMIOutputChunk>, options: 
     textStream: replay(texts),
     fullStream: replay(parts),
     text: p.text.promise,
+    refusal: p.refusal.promise,
     usage: p.usage.promise,
     toolCalls: p.toolCalls.promise,
     provider: p.provider.promise,
