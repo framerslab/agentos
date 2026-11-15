@@ -43,6 +43,7 @@ import {
 } from './turn-phases/rolling-summary';
 import { executePromptProfilePhase } from './turn-phases/prompt-profile';
 import { executeLongTermMemoryPhase } from './turn-phases/long-term-memory';
+import { hostApplicationNote } from './applicationNote';
 import { assembleConversationHistory } from './turn-phases/conversation-history';
 import type { RollingSummaryCompactionConfig, RollingSummaryCompactionResult } from '../../core/conversation/RollingSummaryCompactor';
 import type {
@@ -113,6 +114,11 @@ export interface PipelineStreamContext {
   toolCallGate?: GuardrailToolCallGate;
   /** The recall capture the stream announced for its turn; the turn's FINAL_RESPONSE (or its continuation's) carries it. */
   streamedMemoryRecall?: import('../../cognition/memory/retrieval/recall/capture.js').MemoryRecallCapture;
+  /**
+   * The host's note for the stream's turn (`AgentOSInput.applicationNote`), trimmed; unset when the turn has none. The
+   * stream keeps it, not the GMI, so a continuation of the turn sends it on whatever GMI it runs.
+   */
+  applicationNote?: string;
 }
 
 /**
@@ -305,6 +311,7 @@ export class TurnExecutionPipeline {
     // -------------------------------------------------------------------
     // eslint-disable-next-line prefer-const -- assigned in Phase 7, used in later phases
     let organizationIdForMemory: string | undefined;
+    const applicationNote = hostApplicationNote(input.applicationNote);
     const streamContext: PipelineStreamContext = {
       gmi,
       userId: input.userId,
@@ -315,6 +322,7 @@ export class TurnExecutionPipeline {
       conversationContext,
       userApiKeys: input.userApiKeys,
       processingOptions: input.options,
+      ...(applicationNote ? { applicationNote } : {}),
     };
     this.activeStreamContexts.set(agentOSStreamId, streamContext);
 

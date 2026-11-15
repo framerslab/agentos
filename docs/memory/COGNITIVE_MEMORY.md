@@ -727,7 +727,7 @@ Token estimation uses ~4 chars per token heuristic.
 
 ### Where the block goes in the request
 
-A GMI sends the block in the turn's newest user message, never in the system text. PromptEngine puts the block first, then the turn's other retrieved context (the RAG and long-term-memory text) after `\n\n---\n\n`, and opens the whole with one fixed line, `APPLICATION_NOTE_FRAME` in [`PromptEngine.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/PromptEngine.ts):
+A GMI sends the block in the turn's newest user message, never in the system text. PromptEngine puts the block first (after the host's note, when the request carries one: [A host's note for one reply](#a-hosts-note-for-one-reply)), then the turn's other retrieved context (the RAG and long-term-memory text) after `\n\n---\n\n`, and opens the whole with one fixed line, `APPLICATION_NOTE_FRAME` in [`PromptEngine.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/PromptEngine.ts):
 
 ```
 [Note from the application, not from the person. It is for this reply only: never quote it or mention it.]
@@ -746,6 +746,44 @@ The person's message follows exactly as they wrote it, with no label in front of
 ```
 
 Every other provider gets one string: the note, a blank line, then the words. A message with images keeps its image parts; on a one-string provider the note joins the message's first text part, a blank line before the words it held, wherever that part stands among the images. PromptEngine counts the block, not the line, in `metadata.contextTokens.memory`, and the recall record's `delivery` reports that count. A host that reads the person's words out of a captured request finds them, when the person's message is one string, in the last text part of the newest user message, or at the end of its string on a one-string provider. A message the person sent as parts (several text parts, images, or both) keeps all of its parts in their order: on a provider that takes parts, every part after the note is the person's; on a one-string provider the note opens the first text part, a blank line before the words that part held, and every other part is the person's, including an image that comes before that text part.
+
+### A host's note for one reply
+
+A host can add its own text to a reply's note with `applicationNote` on the request it hands `processRequest()`. The host's note comes first in the note: the frame line, the host's note, then `\n\n---\n\n` and the memory block and the other retrieved text, when the turn has them. A turn with a host note and no retrieved text sends the frame line and the host's note alone.
+
+```ts
+for await (const chunk of agentos.processRequest({
+  userId: 'user-42',
+  sessionId: 'front-desk',
+  textInput: "Hey Tess! Slow afternoon at work so I'm bothering you.",
+  applicationNote: 'The person is on a ten-minute break. Keep the reply short.',
+})) {
+  // ...
+}
+```
+
+On `anthropic`, the newest user message of that turn's request holds:
+
+```json
+{
+  "role": "user",
+  "content": [
+    { "type": "text", "text": "[Note from the application, not from the person. ...]\nThe person is on a ten-minute break. Keep the reply short.\n\n---\n\n## How To Use Your Memories\n..." },
+    { "type": "text", "text": "Hey Tess! Slow afternoon at work so I'm bothering you." }
+  ]
+}
+```
+
+- **Every request of the turn's own model calls carries it**: each step of the turn's tool loop, each fallback hop, and each continuation of an external tool result (`handleToolResult()`, `handleToolResults()`). The memory block rides the turn's first request only, so a later request's note holds the host's note without the block; after a tool's result, where no user message is the newest, the note is a user message of its own.
+- **A continuation keeps its own turn's note.** The stream of the turn keeps the note, not the GMI: one GMI serves every conversation of a session and holds no note between calls, so a turn of another conversation that runs while the host runs a tool never changes the note a continuation sends, and a continuation that runs on a GMI built again sends it too.
+- **A resume** (`resumeExternalToolRequest()`) takes `applicationNote` among its options. Unset, the continuation sends the paused stream's note while this process holds that stream, and none after a restart: like `organizationId`, the note is never stored with the pause.
+- **It is never stored.** The note never enters the system prompt, the conversation's stored history or the GMI's own history, so a later turn carries its own note and no earlier one.
+- **It is never cut to fit.** PromptEngine counts the host's note into the prompt's tokens with the person's message, and never charges it to the memory block's share: the recall record's `budget.otherContextTokens` is the same with a note and without. A note that takes the prompt over the model's budget makes PromptEngine reduce the earlier history and the other retrieved text, as a long prompt does; the note itself is never summarised, truncated or dropped. A prompt over the budget after those reductions goes out with the note whole, as one with long words from the person does: PromptEngine writes the `TOKEN_BUDGET_EXCEEDED_POST_OPT` warning and the GMI records it in its reasoning trace. A provider that refuses the request fails that model call before any output: the turn fails with the provider's error, or, on a GMI with a completion gateway, moves to its route's next hop, whose prompt is built again for that hop's model, and fails when no hop is left. AgentOS adds no check of its own before the call.
+- **A blank note sends nothing.** The note's leading and trailing whitespace is trimmed, and an empty or blank note sends the request a turn without the field sends.
+- **Where it does not go.** Agents the turn launches do not receive it: each `launch_agency` seat runs on a session of its own and reads what the model writes in its task. Nor do the runtime's side calls (the summaries of earlier history, of retrieved text and of documents, the sentiment tracker, metaprompts and self-reflection), or the tools the turn runs, whose session data carries no note. Sessions of `agent({ runtime: 'gmi' })` take no note: the field belongs to `AgentOSInput`, which `processRequest()` takes.
+- **A prompt engine of the host's own** receives the note as `PromptComponents.applicationNote`. PromptEngine's `openai_chat`, `anthropic_messages` and `generic_completion` templates send it; an engine that does not read the field sends no host note.
+
+A host that is handed an AgentOS module checks for the root export `APPLICATION_NOTE_INPUT_FIELD`, whose value is `'applicationNote'`, to learn whether that module carries the field.
 
 ### Upgrading from 0.18.0 or earlier
 

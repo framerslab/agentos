@@ -55,9 +55,6 @@ import type { ChatMessage } from '../../core/llm/providers/IProvider';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 import { reply, script, systemTextOf, type ProviderScript } from './helpers/stubProviders';
 
-/** A turn's input, the host's note included. */
-type HostInput = AgentOSInput & { applicationNote?: string };
-
 /** The frame line the prompt engine opens the note with. */
 const FRAME = APPLICATION_NOTE_FRAME;
 /** Starts every memory block (the assembler's preamble). */
@@ -165,8 +162,8 @@ async function boot(providerId: 'anthropic' | 'ollama', options: BootOptions = {
 }
 
 /** Every chunk of one turn, sent on session `s-note` and conversation `c-note` unless `input` names others. */
-async function send(agentos: AgentOS, input: Partial<HostInput> & { textInput: string }): Promise<AgentOSResponse[]> {
-  const request: HostInput = { userId: 'user-1', sessionId: 's-note', conversationId: 'c-note', selectedPersonaId: PERSONA_ID, ...input };
+async function send(agentos: AgentOS, input: Partial<AgentOSInput> & { textInput: string }): Promise<AgentOSResponse[]> {
+  const request: AgentOSInput = { userId: 'user-1', sessionId: 's-note', conversationId: 'c-note', selectedPersonaId: PERSONA_ID, ...input };
   const chunks: AgentOSResponse[] = [];
   for await (const chunk of agentos.processRequest(request)) chunks.push(chunk);
   return chunks;
@@ -188,7 +185,7 @@ function served(chunks: AgentOSResponse[], answer: string): Record<string, unkno
 async function turn(
   agentos: AgentOS,
   model: ProviderScript,
-  input: Partial<HostInput> & { textInput: string },
+  input: Partial<AgentOSInput> & { textInput: string },
   ...answers: Array<ReturnType<typeof reply.text> | ReturnType<typeof reply.tools>>
 ): Promise<{ final: Record<string, unknown>; request: ChatMessage[] }> {
   const before = model.seen.length;
@@ -210,7 +207,7 @@ function textOfReply(answer: ReturnType<typeof reply.text> | ReturnType<typeof r
 async function turnWithBlock(
   agentos: AgentOS,
   model: ProviderScript,
-  input: Partial<HostInput> & { textInput: string },
+  input: Partial<AgentOSInput> & { textInput: string },
   answer: string,
 ): Promise<{ final: Record<string, unknown>; request: ChatMessage[]; block: string }> {
   assemblies.length = 0;

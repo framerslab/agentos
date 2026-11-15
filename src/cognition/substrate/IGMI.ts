@@ -171,6 +171,11 @@ export interface GMIToolResultOptions {
   preferredModelId?: string;
   /** The provider the continuation's model calls go to, with `preferredModelId`. */
   preferredProviderId?: string;
+  /**
+   * The note the continuation's requests carry: the host's note of the turn it continues (`AgentOSInput.applicationNote`).
+   * Unset, they carry none.
+   */
+  applicationNote?: string;
 }
 
 /**

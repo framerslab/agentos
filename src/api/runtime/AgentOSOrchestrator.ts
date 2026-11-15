@@ -223,6 +223,8 @@ interface ActiveStreamContext {
   ragSources?: import('../../cognition/rag/IRetrievalAugmentor.js').RagRetrievedChunk[];
   /** The recall capture the stream announced for its turn; the turn's FINAL_RESPONSE (or its continuation's) carries it. */
   streamedMemoryRecall?: import('../../cognition/memory/retrieval/recall/capture.js').MemoryRecallCapture;
+  /** The host's note for the stream's turn, trimmed; a continuation of the turn sends it. Unset when the turn has none. */
+  applicationNote?: string;
   // Iterator is managed within the orchestrateTurn method directly
 }
 

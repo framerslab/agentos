@@ -2705,7 +2705,7 @@ describe('AgentOS tool-result continuations', () => {
 
     it.each([
       ['a note of its own', { applicationNote: 'Resumed note.' }, 'Resumed note.'],
-      ['no note, while this runtime still holds the paused stream', {}, 'A private note'],
+      ['no note, while this runtime holds the paused stream', {}, 'A private note'],
     ] as const)('a resume given %s continues with that note', async (_label, options, carried) => {
       const rt = await sharedSessionRuntime({}, [{ text: 'I will read the notes file first.' }, { text: NOTES_REPLY }]);
       const { saved } = await rt.pauseNotesTurn('A private note');

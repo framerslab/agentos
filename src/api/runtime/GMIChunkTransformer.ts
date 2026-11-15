@@ -468,6 +468,8 @@ export class GMIChunkTransformer {
       userFeedback: input.userFeedback,
       explicitPersonaSwitchId: input.selectedPersonaId,
       skillPromptContext: input.skillPromptContext,
+      // the host's note for this reply; the GMI trims it and sends none when it is blank
+      applicationNote: input.applicationNote,
       taskHint: input.textInput
         ? 'user_text_query'
         : input.visionInputs || input.audioInput
