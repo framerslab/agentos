@@ -502,9 +502,15 @@ export interface StepFinishedChunkPayload {
   structuredOutput?: unknown;
   /**
    * Set when the step's answer held the model's refusal (a provider refusal field, such as OpenAI's `refusal`). Its
-   * `text` and `structuredOutput` are then no answer. The refusal message is not carried.
+   * `text` and `structuredOutput` are then no answer. Read this flag to tell a refused step; {@link refusal} holds
+   * the message.
    */
   refused?: true;
+  /**
+   * The model's refusal message, possibly the empty string: set on a step marked {@link refused}, and only there.
+   * The GMI writes both from one value, so they never disagree.
+   */
+  refusal?: string;
   /** The step's extended-thinking blocks (Anthropic), so a session store can replay the step. */
   thinkingBlocks?: ThinkingBlock[];
 }
