@@ -192,8 +192,9 @@ function noteTextOf(components: Readonly<PromptComponents>): string {
 }
 
 /**
- * What the host's note adds to the prompt as sent, for the token count: beside a memory block or other retrieved text,
- * the note and the separator after it; alone, the frame line and the note, since the frame opens the note for it.
+ * The host's note as the prompt sends it, for the token count: the frame line and the note ({@link applicationNoteOf}),
+ * and, beside a memory block or other retrieved text, the separator before them. No other count of the budget step
+ * holds the frame line.
  *
  * @param note - The host's note ({@link hostNoteOf}).
  * @param components - The prompt's components, before the budget step.
@@ -201,7 +202,7 @@ function noteTextOf(components: Readonly<PromptComponents>): string {
  */
 function hostNoteAsSent(note: string, components: Readonly<PromptComponents>): string {
   const beside = Boolean(components.memoryContextText) || Boolean(retrievedContextAsText(components.retrievedContext));
-  return beside ? `${note}\n\n---\n\n` : applicationNoteOf(note);
+  return beside ? `${applicationNoteOf(note)}\n\n---\n\n` : applicationNoteOf(note);
 }
 
 /**
