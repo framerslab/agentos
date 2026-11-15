@@ -1747,6 +1747,49 @@ describe('the run owner', () => {
     b.close();
   });
 
+  it("keeps a run's lock through its last record write when its owner closes meanwhile, so no other owner takes the job under that write", async () => {
+    const store = new MemoryKeyValueStore();
+    const runLocks = memoryLocks();
+    const channel = bus();
+    const name = runLockName('test-run-', ACCOUNT, KEY);
+    const a = owner(store, runLocks, channel);
+    const b = owner(store, runLocks, channel);
+    const gate = deferred();
+    const write = deferred();
+    let returned = false;
+    let writing = false;
+    const started = await a.start({
+      ...countingJob(1, []),
+      async run(context) {
+        await gate.promise;
+        context.counts({ pending: 0, failed: 1 });
+        returned = true;
+        return { ended: 'failed', counts: context.record().counts };
+      },
+    });
+    const id = 'id' in started ? started.id : '';
+    const set = store.set.bind(store);
+    // The run's last record write waits, once its job has returned, until the test lets it go.
+    store.set = (async (...args: Parameters<typeof set>) => {
+      if (returned) {
+        writing = true;
+        await write.promise;
+      }
+      return set(...args);
+    }) as typeof store.set;
+    gate.resolve();
+    await vi.waitFor(() => expect(writing).toBe(true));
+    a.close();
+    expect(await runLocks.free(name)).toBe(false);
+    expect(await b.start(countingJob(1, []))).toEqual({ refused: 'another-tab' });
+    write.resolve();
+    expect((await a.whenIdle()).get(id)?.ended).toBe('failed');
+    expect(await runLocks.free(name)).toBe(true);
+    expect(a.snapshot().runs).toEqual([]);
+    expect(await b.records()).toEqual([expect.objectContaining({ status: 'failed', record: expect.objectContaining({ id, state: 'failed' }) })]);
+    b.close();
+  });
+
   it("draws no cut end in a closed owner's snapshot: the lock goes and another owner reads the record as cut", async () => {
     const store = new MemoryKeyValueStore();
     const runLocks = memoryLocks();
