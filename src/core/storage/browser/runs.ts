@@ -420,7 +420,8 @@ function pageNames(): RunLocks {
  * held names; `waitFree` requests the name without `ifAvailable` under a timeout and lets it go at once. A page with
  * no Web Locks, or one whose Web Locks refuse the request, keeps the names in a set of its own, which `hold`, `free`
  * and `waitFree` then use, so the one-job rule holds inside that tab alone. When the wait request is refused, a name
- * not in the page's own names answers free only when `query()` does not list it, or when that read is refused too.
+ * in the page's own names is waited for there first, and any name then answers free only when `query()` does not list
+ * it, or when that read is refused too.
  */
 export function webRunLocks(): RunLocks {
   const manager = (globalThis as unknown as { navigator?: { locks?: Partial<LockManagerLike> } }).navigator?.locks;
@@ -467,9 +468,10 @@ export function webRunLocks(): RunLocks {
         if (signal.aborted) return false;
         // The browser refused the request itself. A name `hold` kept in the page's own names is waited for there.
         const names = pageNames();
-        if (!(await names.free(name))) return names.waitFree(name, ms - (Date.now() - began));
-        // Any other name is free only when the browser's held names lack it; where that read is refused too, the page's
-        // own names are all this page can read, as for `free`, and they do not hold it.
+        if (!(await names.free(name)) && !(await names.waitFree(name, ms - (Date.now() - began)))) return false;
+        // The name is free only when the browser's held names lack it too, since another tab may hold it there; where
+        // that read is refused too, the page's own names are all this page can read, as for `free`, and they do not
+        // hold it.
         try {
           const state = await locks.query();
           return !(state.held ?? []).some((lock) => lock.name === name);
