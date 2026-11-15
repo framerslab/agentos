@@ -117,7 +117,7 @@ describe('the spend meter on processRequest', () => {
     provider.replies.push(reply('Monday: chapter 2.'));
     const first = await collect(booted, { operationId: 'op-1' });
     expect(first.some((c) => c.type === AgentOSResponseChunkType.FINAL_RESPONSE)).toBe(true);
-    await vi.waitFor(async () => expect((await meter.snapshot('person-1')).used).toBe(1));
+    expect(await meter.snapshot('person-1')).toMatchObject({ used: 1, reserved: 0 });
     const second = await collect(booted, { operationId: 'op-2', sessionId: 's-metered-2' });
     expect(errorOf(second)?.code).toBe(GMIErrorCode.ALLOWANCE_EXHAUSTED);
     expect(errorOf(second)?.details).toMatchObject({ reason: 'allowance_exhausted', remaining: 0 });
@@ -129,7 +129,7 @@ describe('the spend meter on processRequest', () => {
     booted = await boot({ meter });
     provider.replies.push(reply('Done.'));
     await collect(booted, { operationId: 'op-same' });
-    await vi.waitFor(async () => expect((await meter.snapshot('person-1')).used).toBe(1));
+    expect(await meter.snapshot('person-1')).toMatchObject({ used: 1, reserved: 0 });
     const again = await collect(booted, { operationId: 'op-same', sessionId: 's-metered-retry' });
     expect(errorOf(again)?.code).toBe(GMIErrorCode.ALREADY_EXISTS);
     expect(provider.calls).toBe(1);
@@ -161,10 +161,8 @@ describe('the spend meter on processRequest', () => {
     provider.replies.push([{ isFinal: true, choices: [], error: { message: 'rate limited', type: 'rate_limit' } }]);
     const chunks = await collect(booted, { operationId: 'op-error' });
     expect(errorOf(chunks)?.code).toBe(GMIErrorCode.LLM_PROVIDER_ERROR);
-    await vi.waitFor(async () => {
-      const row = await db!.get<{ state: string }>('SELECT state FROM agentos_spend_reservations WHERE operation_id = ?', ['op-error']);
-      expect(row?.state).toBe('released');
-    });
+    const row = await db!.get<{ state: string }>('SELECT state FROM agentos_spend_reservations WHERE operation_id = ?', ['op-error']);
+    expect(row?.state).toBe('released');
     expect(await meter.snapshot('person-1')).toMatchObject({ used: 0, reserved: 0 });
   });
 
@@ -192,10 +190,10 @@ describe('the spend meter on processRequest', () => {
     provider.replies.push(reply('You will pass for sure.'));
     const chunks = await collect(booted, { operationId: 'op-blocked' });
     expect(errorOf(chunks)?.code).toBe('NEVER_DO');
-    await vi.waitFor(async () => {
-      const row = await db!.get<{ state: string; outcome: string }>('SELECT state, outcome FROM agentos_spend_reservations WHERE operation_id = ?', ['op-blocked']);
-      expect(row).toMatchObject({ state: 'released', outcome: 'replaced' });
-      expect(await meter.snapshot('person-1')).toMatchObject({ used: 0, reserved: 0, remaining: 5 });
-    });
+    const row = await db!.get<{ state: string; outcome: string }>('SELECT state, outcome FROM agentos_spend_reservations WHERE operation_id = ?', ['op-blocked']);
+    expect(row).toMatchObject({ state: 'released', outcome: 'replaced' });
+    expect(await meter.snapshot('person-1')).toMatchObject({ used: 0, reserved: 0, remaining: 5 });
+    await meter.settle({ operationId: 'op-blocked', outcome: 'replaced' });
+    expect(await meter.snapshot('person-1')).toMatchObject({ used: 0, reserved: 0, remaining: 5 });
   });
 });

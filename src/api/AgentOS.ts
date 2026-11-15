@@ -2402,11 +2402,15 @@ export class AgentOS implements IAgentOS {
           break;
         }
         if (chunk.isFinal && chunk.type !== AgentOSResponseChunkType.ERROR) {
-          // If a non-error chunk is final, the primary interaction part might be done.
-          // The stream itself might remain open for a short while for cleanup or late messages.
-          // The bridge's consume() will end when notifyStreamClosed is called.
+          // The reply is complete; wait for the turn's settlement below before this generator ends.
           break;
         }
+      }
+      // A final chunk or host-tool request can end this loop before the orchestrator closes the stream.
+      // Wait before returning to the caller and before applying an output-guardrail refund in finally.
+      // A caller that stops reading early skips this point; its turn still settles in the background.
+      if (meteredOperationId) {
+        await this.agentOSOrchestrator.waitForTurnCompletion(streamIdToListen);
       }
     } catch (error: unknown) {
       const serviceError = AgentOSServiceError.wrap(

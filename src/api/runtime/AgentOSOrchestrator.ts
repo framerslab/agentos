@@ -693,6 +693,15 @@ export class AgentOSOrchestrator {
   }
 
   /**
+   * Waits for the current turn on a stream, including its allowance settlement. A turn paused for host tools
+   * finishes this work while leaving its stream open; an already finished turn has nothing left to wait for.
+   * @param streamId - The stream whose current turn must finish.
+   */
+  public async waitForTurnCompletion(streamId: StreamId): Promise<void> {
+    await this.streamRuns.get(streamId);
+  }
+
+  /**
    * Drops the pause a stream saved after an output guardrail blocked the stream. With `toolCallIds`, the calls the
    * block withheld from the caller (the verdict's `toolCallIds`), it drops the pause that holds one of them; without,
    * for a block that withheld no call (a streamed delta, or the chunk of calls the runtime runs itself, after which the
@@ -1143,7 +1152,6 @@ export class AgentOSOrchestrator {
           activePersonaDetails: snapshotPersonaDetails(gmi?.getPersona?.()),
         }
       );
-      await this.dependencies.streamingManager.closeStream(agentOSStreamId, 'Processing complete.');
     } catch (error: any) {
       turnMetricsStatus = 'error';
       // the stream closes below and no result continues it: a pause the turn saved before it failed ends below, so
@@ -1215,10 +1223,6 @@ export class AgentOSOrchestrator {
       // a pause the turn saved before it failed never reached the host: its calls are answered as not run, so the
       // next turn sends the model no call without its result
       await this.toolResultHandler.endPauseOfFailedStream(agentOSStreamId, conversationContext, currentPersonaId);
-      await this.dependencies.streamingManager.closeStream(
-        agentOSStreamId,
-        'Error during turn processing.'
-      );
     } finally {
       // The turn counts when it finished, when it stopped for a tool the host runs (its continuation reserves nothing)
       // or when any of its text reached the stream before an error; a turn that failed before any output is released,
@@ -1240,10 +1244,13 @@ export class AgentOSOrchestrator {
         taskOutcomeScore: turnMetricsTaskOutcome?.score,
       });
 
-      // Stream is closed explicitly in the success/error paths; this finally block always
-      // clears internal state to avoid leaks, unless we are waiting for an external
-      // tool result to continue this same stream.
+      // Close only after settlement, so stream readers can immediately read the turn's charge or release.
+      // A host-tool pause keeps the stream and its context for the continuation.
       if (!keepStreamContextActive) {
+        await this.dependencies.streamingManager.closeStream(
+          agentOSStreamId,
+          turnMetricsStatus === 'error' ? 'Error during turn processing.' : 'Processing complete.'
+        );
         this.activeStreamContexts.delete(agentOSStreamId);
         console.log(
           `AgentOSOrchestrator: Finished processing for AgentOS Stream ${agentOSStreamId}. Context removed.`
