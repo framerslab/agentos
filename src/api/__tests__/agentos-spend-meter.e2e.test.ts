@@ -89,6 +89,28 @@ describe('the spend meter on processRequest', () => {
     return new SqlSpendMeter({ db, allowanceFor: () => allowance, periodOf: (now) => new Date(now).toISOString().slice(0, 7), requireShared: false });
   }
 
+  it('settles before the public stream ends, with repeated reads, charges and refunds applied once', async () => {
+    const meter = await sqlMeter(5);
+    const settle = meter.settle.bind(meter);
+    // Model an asynchronous store: completion must wait for its write, not just start it.
+    vi.spyOn(meter, 'settle').mockImplementation(async (request) => {
+      await new Promise<void>((resolve) => setTimeout(resolve, 50));
+      return settle(request);
+    });
+    booted = await boot({ meter });
+    provider.replies.push(reply('Done.'));
+    const chunks = await collect(booted, { operationId: 'op-completion' });
+    expect(chunks.some((c) => c.type === AgentOSResponseChunkType.FINAL_RESPONSE)).toBe(true);
+    expect(await meter.snapshot('person-1')).toMatchObject({ used: 1, reserved: 0, remaining: 4 });
+    expect(await meter.snapshot('person-1')).toMatchObject({ used: 1, reserved: 0, remaining: 4 });
+    expect(await meter.settle({ operationId: 'op-completion', outcome: 'consumed' })).toMatchObject({ status: 'already_settled' });
+    expect(await meter.snapshot('person-1')).toMatchObject({ used: 1, reserved: 0 });
+    await meter.settle({ operationId: 'op-completion', outcome: 'replaced' });
+    expect(await meter.snapshot('person-1')).toMatchObject({ used: 0, reserved: 0, remaining: 5 });
+    expect(await meter.settle({ operationId: 'op-completion', outcome: 'replaced' })).toMatchObject({ status: 'already_settled' });
+    expect(await meter.snapshot('person-1')).toMatchObject({ used: 0, reserved: 0, remaining: 5 });
+  });
+
   it('counts a finished turn, then refuses the next with ALLOWANCE_EXHAUSTED before any provider call', async () => {
     const meter = await sqlMeter(1);
     booted = await boot({ meter });
