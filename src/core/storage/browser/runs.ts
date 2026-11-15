@@ -16,7 +16,8 @@
  * and never makes one, so a write in flight after a removal cannot bring the record back.
  *
  * The run's lock (`RunLocks`, `webRunLocks()`) is held from `start` until the end has been shown (an export's until it
- * is saved or dismissed); a second `start` of the same job while it is held is refused at once, never queued. A record
+ * is saved or dismissed) or, once the owner is closed, until the job has returned; a second `start` of the same job
+ * while it is held is refused at once, never queued. A record
  * in a live state whose lock is free was cut by a load (or marked by a sign-out or a session's end); one whose lock is
  * held is another tab's, watched. Silence on the channel never makes a run cut: only a free lock does.
  *
@@ -51,7 +52,10 @@ export interface RunCounts { total: number | null; pending: number; applied: num
 export interface RunItem { index: number; state: RunItemState; name?: string }
 /** The record of one run attempt: these fourteen fields and no other. */
 export interface RunRecord { id: string; key: string; account: string; kind: string; way: string | null; unit: RunUnit; chosen: unknown; counts: RunCounts; items: RunItem[]; state: RunState; cut: RunCut; phase: RunPhase; began: number; progressed: number }
-/** How a job ended; `fenced` is a job the write gate refused or the account's stop reached, which draws no row. */
+/**
+ * How a job ended; `fenced` is a job the write gate refused or the account's stop reached, which draws no row. A job
+ * that ends `cut` without `context.cut` leaves its record unmarked, so it reads as cut by a load (`'load'`).
+ */
 export type RunEnd = { ended: 'finished' | 'stopped' | 'failed' | 'unsaved' | 'cut' | 'fenced'; counts: RunCounts };
 /** What a job is handed while it runs. */
 export interface RunContext {
@@ -201,7 +205,11 @@ export interface RunOwner {
   whenIdle(): Promise<Map<string, RunEnd>>;
   /** Sends every live run's message now. */
   beat(): void;
-  /** Stops the owner's timers, listeners and channel; a run it holds goes on to its end. */
+  /**
+   * Stops the owner's timers, listeners and channel. A run it holds that has ended lets its lock go now, and one still
+   * running goes on to its end and lets its lock go once its job returns; its record stays as a page's going leaves it,
+   * so another tab reads a live one as cut. Its end is not drawn, shown or saved by this owner.
+   */
   close(): void;
 }
 
@@ -408,7 +416,8 @@ function pageNames(): RunLocks {
 /**
  * Run locks on the browser's Web Locks: `hold` with `ifAvailable`, kept until `release()`; `free` from `query()`'s
  * held names; `waitFree` requests the name without `ifAvailable` under a timeout and lets it go at once. A page with
- * no Web Locks keeps the names in a set of its own, so the one-job rule holds inside that tab alone.
+ * no Web Locks, or one whose Web Locks refuse the request, keeps the names in a set of its own, which `hold`, `free`
+ * and `waitFree` then use, so the one-job rule holds inside that tab alone.
  */
 export function webRunLocks(): RunLocks {
   const manager = (globalThis as unknown as { navigator?: { locks?: Partial<LockManagerLike> } }).navigator?.locks;
@@ -445,11 +454,16 @@ export function webRunLocks(): RunLocks {
       }
     },
     async waitFree(name, ms) {
+      const began = Date.now();
+      const signal = timeoutSignal(ms);
       try {
-        await locks.request(name, { mode: 'exclusive', signal: timeoutSignal(ms) }, () => undefined);
+        await locks.request(name, { mode: 'exclusive', signal }, () => undefined);
         return true;
       } catch {
-        return false;
+        // The timeout ended the wait: the name is still held.
+        if (signal.aborted) return false;
+        // The browser refused the request itself: `hold` kept the name in the page's own names, so the wait is there.
+        return pageNames().waitFree(name, ms - (Date.now() - began));
       }
     },
   };
@@ -993,11 +1007,15 @@ class BrowserRunOwner implements RunOwner {
     for (const held of this.held.values()) if (this.beats(held)) this.post(held);
   }
 
-  /** Stops the timers, the listeners and the channel; a held run goes on to its end. */
+  /** Stops the timers, the listeners and the channel; an ended run lets its lock go now, a running one at its end. */
   close(): void {
     if (this.closed) return;
     this.closed = true;
-    for (const held of this.held.values()) this.clearTimers(held);
+    for (const held of [...this.held.values()]) {
+      // No end is drawn here any more, so nothing would call `shown` or `saved`: the lock goes, the record stays.
+      if (held.ended !== null) this.drop(held);
+      else this.clearTimers(held);
+    }
     if (this.noticeTimer !== null) clearTimeout(this.noticeTimer);
     this.noticeTimer = null;
     this.ensureTimers();
@@ -1482,7 +1500,8 @@ class BrowserRunOwner implements RunOwner {
     if (ended === 'cut') {
       this.post(held);
       this.drop(held);
-      const read: RunRead = { record: copyRecord(held.record), status: 'cut', cut: held.cutSelf };
+      // A job's own cut, without `context.cut`, left the record unmarked: it reads as a load's cut, as every tab reads it.
+      const read: RunRead = { record: copyRecord(held.record), status: 'cut', cut: held.cutSelf ?? 'load' };
       this.see(read);
       this.fire(read, 'cut');
       this.ensureTimers();
@@ -1498,6 +1517,11 @@ class BrowserRunOwner implements RunOwner {
     if (this.held.get(held.record.id) !== held || this.isFenced(held)) {
       this.ensureTimers();
       this.touch();
+      return;
+    }
+    // A closed owner draws no end, so nothing would call `shown` or `saved`: the lock goes and the record stays as stored.
+    if (this.closed) {
+      this.drop(held);
       return;
     }
     this.post(held);
