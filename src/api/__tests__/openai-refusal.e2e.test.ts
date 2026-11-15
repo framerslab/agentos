@@ -866,8 +866,9 @@ describe('an OpenAI refusal beside a tool call', () => {
 
     try {
       const result = (await seat.generate('A request.')) as GenerateTextResult;
-      // The GMI turn carries no refusal field (a documented limit); it ends on the model's answer, never on its calls.
+      // The GMI turn carries the refusal message as generateText does; it ends on the model's answer, never on its calls.
       expect(result.finishReason).toBe('stop');
+      expect(result.refusal).toBe(REFUSAL);
       expect(result.text).toBe('');
       expect(result.toolCalls).toEqual([]);
     } finally {

@@ -2138,8 +2138,8 @@ export class GMI implements IGMI {
         let currentIterationThinkingBlocks: ThinkingBlock[] = [];
         let stepUsage: ModelUsage | undefined;
         let stepFinishReason: string | null = null;
-        // Whether the step's answer held the model's refusal (OpenAI's `refusal` field, an empty message included).
-        let stepRefused = false;
+        // The step's refusal message (OpenAI's `refusal` field, an empty message included).
+        let stepRefusal: string | undefined;
         let stepFinalChunk: ModelCompletionResponse | undefined;
         let stepStructuredOutput: unknown;
         // Whether the answering attempt's provider payload carried the response schema (the gateway says).
@@ -2414,9 +2414,9 @@ export class GMI implements IGMI {
 
               // An answer that holds the model's refusal ends the turn on it: OpenAI may send tool calls beside the
               // refusal, and they are neither requested nor run, as generateText() and streamText() drop them.
-              if (chunk.isFinal && typeof choice?.refusal === 'string') stepRefused = true;
+              if (chunk.isFinal && typeof choice?.refusal === 'string') stepRefusal = choice.refusal;
 
-              if (!stepRefused && choice?.message?.tool_calls && choice.message.tool_calls.length > 0) {
+              if (stepRefusal === undefined && choice?.message?.tool_calls && choice.message.tool_calls.length > 0) {
                 currentIterationToolCallRequests = choice.message.tool_calls.map((tc: any) => ({ // tc is from IProvider.ChatMessage.tool_calls
                     id: tc.id || `toolcall-${uuidv4()}`, // Ensure ID
                     name: tc.function.name,
@@ -2452,7 +2452,7 @@ export class GMI implements IGMI {
 
               if (chunk.isFinal && choice?.finishReason) {
                 // The calls' own reason no longer holds once they are dropped: the turn stopped on the model's answer.
-                stepFinishReason = stepRefused && choice.finishReason === 'tool_calls' ? 'stop' : choice.finishReason;
+                stepFinishReason = stepRefusal !== undefined && choice.finishReason === 'tool_calls' ? 'stop' : choice.finishReason;
                 this.addTraceEntry(ReasoningEntryType.LLM_CALL_COMPLETE, `LLM stream part finished. Reason: ${choice.finishReason}`, { usage: chunk.usage });
               }
               if (chunk.isFinal) stepFinalChunk = chunk;
@@ -2517,7 +2517,7 @@ export class GMI implements IGMI {
               currentIterationThinkingBlocks = [];
               stepUsage = undefined;
               stepFinishReason = null;
-              stepRefused = false;
+              stepRefusal = undefined;
               stepFinalChunk = undefined;
               stepStructuredOutput = undefined;
               stepSchemaRoute = undefined;
@@ -2561,8 +2561,9 @@ export class GMI implements IGMI {
           ...(stepFinalChunk?.cacheDiagnostics !== undefined ? { cacheDiagnostics: stepFinalChunk.cacheDiagnostics } : {}),
           ...(stepStructuredOutput !== undefined ? { structuredOutput: stepStructuredOutput } : {}),
           // A refused step's text and lifted value are no answer: a host that parses them (a session's structured
-          // send) reads this flag first. The refusal message stays out, as out of the turn's output.
-          ...(stepRefused ? { refused: true as const } : {}),
+          // send) reads the flag first. The flag and the message come from one value, so they never disagree. The
+          // message stays on this payload only, out of the turn's output and its structured value and error.
+          ...(stepRefusal !== undefined ? { refused: true as const, refusal: stepRefusal } : {}),
           ...(currentIterationThinkingBlocks.length > 0 ? { thinkingBlocks: [...currentIterationThinkingBlocks] } : {}),
         };
         yield this.createOutputChunk(turnInput.interactionId, GMIOutputChunkType.STEP_FINISHED, stepPayload, {
@@ -2587,10 +2588,10 @@ export class GMI implements IGMI {
               : gateway && stepSchemaInPayload !== false
                 ? 'provider_schema'
                 : 'prompt_only';
-          if (stepRefused) {
+          if (stepRefusal !== undefined) {
             // A refusal is the model's answer, not JSON to repair: the turn ends on it with no repair request, as
-            // generateObject() ends. Its message stays out of the error and the value, as out of any GMI turn's
-            // output: the turn's output guards have not judged it.
+            // generateObject() ends. Its message stays out of this structured error and value: the turn's output
+            // guards have not judged it. The step payload keeps it for session callers, as generateText does.
             if (structuredReply.onExhausted === 'error') {
               throw new GMIError(
                 `The model refused the request instead of writing the reply "${structuredReply.name}".`,
