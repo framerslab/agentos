@@ -206,8 +206,9 @@ export interface RunOwner {
   /** Sends every live run's message now. */
   beat(): void;
   /**
-   * Stops the owner's timers, listeners and channel. A run it holds that has ended lets its lock go now, and one still
-   * running goes on to its end, its last record write included, and lets its lock go once its job returns. The record
+   * Stops the owner's timers, listeners and channel. A run it holds that has ended lets its lock go now (once its last
+   * record write lands, when that write is in flight), and one still running goes on to its end, its last record write
+   * included, and lets its lock go once its job has returned and that write has landed. The record
    * stays as a page's going after that end leaves it: another tab reads a failed or unsaved one as failed and a live
    * one as cut. Its end is not drawn, shown or saved by this owner, and the run leaves `snapshot()` with its lock.
    */
@@ -562,6 +563,8 @@ interface Held {
   /** The run's first record was written, so a listing that lacks it read the record after another owner removed it. */
   written: boolean;
   ended: Ended | null;
+  /** The job has returned and its last record write is in flight: `close` leaves the lock until that write lands. */
+  ending: boolean;
   /** The account's stop reached the run, here or from another tab. */
   stopCut: AccountStop | null;
   /** `dismiss` dropped the run while it ran. */
@@ -1018,13 +1021,14 @@ class BrowserRunOwner implements RunOwner {
     for (const held of this.held.values()) if (this.beats(held)) this.post(held);
   }
 
-  /** Stops the timers, the listeners and the channel; an ended run lets its lock go now, a running one at its end. */
+  /** Stops the timers, the listeners and the channel; an ended run lets its lock go once its last write has landed. */
   close(): void {
     if (this.closed) return;
     this.closed = true;
     for (const held of [...this.held.values()]) {
-      // No end is drawn here any more, so nothing would call `shown` or `saved`: the lock goes, the record stays.
-      if (held.ended !== null) this.drop(held);
+      // No end is drawn here any more, so nothing would call `shown` or `saved`: the lock goes, the record stays. A run
+      // whose last record write is in flight keeps its lock until that write lands, so no other tab takes the job under it.
+      if (held.ended !== null && !held.ending) this.drop(held);
       else this.clearTimers(held);
     }
     if (this.noticeTimer !== null) clearTimeout(this.noticeTimer);
@@ -1089,7 +1093,7 @@ class BrowserRunOwner implements RunOwner {
       }
       const id = record.id;
       const held: Held = {
-        record, job, controller: new AbortController(), release, memoryOnly: false, written: false, ended: null, stopCut: null, dropped: false, cutSelf: null,
+        record, job, controller: new AbortController(), release, memoryOnly: false, written: false, ended: null, ending: false, stopCut: null, dropped: false, cutSelf: null,
         lastWrite: now, dirty: false, paceTimer: null, lastPost: 0, postTimer: null, done: null,
       };
       this.held.set(id, held);
@@ -1525,7 +1529,9 @@ class BrowserRunOwner implements RunOwner {
     else if (ended === 'unsaved') held.record.state = 'unsaved';
     else if (ended === 'stopped') held.record.state = 'stopping';
     held.record.progressed = this.now();
+    held.ending = true;
     await this.persist(held);
+    held.ending = false;
     // Dismissed, or reached by the account's stop, while that write was in flight: no end is posted or heard.
     if (this.held.get(held.record.id) !== held || this.isFenced(held)) {
       this.ensureTimers();
