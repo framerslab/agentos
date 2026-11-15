@@ -1720,6 +1720,62 @@ describe('the run owner', () => {
     await c.whenIdle();
     c.close();
   });
+
+  it("draws no cut end in a closed owner's snapshot: the lock goes and another owner reads the record as cut", async () => {
+    const store = new MemoryKeyValueStore();
+    const runLocks = memoryLocks();
+    const channel = bus();
+    const name = runLockName('test-run-', ACCOUNT, KEY);
+    const a = owner(store, runLocks, channel);
+    const b = owner(store, runLocks, channel);
+    const gate = deferred();
+    const started = await a.start({
+      ...countingJob(1, []),
+      async run(context) {
+        await gate.promise;
+        return { ended: 'cut', counts: context.record().counts };
+      },
+    });
+    const id = 'id' in started ? started.id : '';
+    a.close();
+    gate.resolve();
+    expect((await a.whenIdle()).get(id)?.ended).toBe('cut');
+    expect(await runLocks.free(name)).toBe(true);
+    expect(a.snapshot().runs).toEqual([]);
+    expect(await b.records()).toEqual([expect.objectContaining({ status: 'cut', cut: 'load', record: expect.objectContaining({ id }) })]);
+    b.close();
+  });
+
+  it("leaves a run out of a closed owner's snapshot once its lock has gone, at close for an ended run and at its end for a running one", async () => {
+    const store = new MemoryKeyValueStore();
+    const runLocks = memoryLocks();
+    const channel = bus();
+    const name = runLockName('test-run-', ACCOUNT, KEY);
+    const a = owner(store, runLocks, channel);
+    await a.start(countingJob(1, []));
+    await a.whenIdle();
+    expect(a.snapshot().runs).toEqual([expect.objectContaining({ status: 'held', ended: 'finished' })]);
+    a.close();
+    expect(await runLocks.free(name)).toBe(true);
+    expect(a.snapshot().runs).toEqual([]);
+
+    const b = owner(new MemoryKeyValueStore(), runLocks, channel);
+    const gate = deferred();
+    const started = await b.start({
+      ...countingJob(1, []),
+      async run(context) {
+        await gate.promise;
+        return { ended: 'finished', counts: context.record().counts };
+      },
+    });
+    const id = 'id' in started ? started.id : '';
+    b.close();
+    expect(b.snapshot().runs).toEqual([expect.objectContaining({ status: 'held', ended: null, record: expect.objectContaining({ id }) })]);
+    gate.resolve();
+    expect((await b.whenIdle()).get(id)?.ended).toBe('finished');
+    expect(await runLocks.free(name)).toBe(true);
+    expect(b.snapshot().runs).toEqual([]);
+  });
 });
 
 describe('webRunLocks where the browser refuses the request', () => {
