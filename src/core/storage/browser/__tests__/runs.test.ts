@@ -1925,6 +1925,8 @@ describe('webRunLocks where the browser refuses the request', () => {
       const grant = await runLocks.hold(name);
       expect(grant).not.toBeNull();
       const waiting = runLocks.waitFree(name, 5_000);
+      // Let the wait reach this page's own name before that hold goes.
+      await new Promise<void>((resolve) => setTimeout(resolve, 50));
       grant?.release();
       expect(await waiting).toBe(false);
       otherTab.delete(name);
