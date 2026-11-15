@@ -39,27 +39,35 @@ describe('gmi() session responseSchema refusals', () => {
     vi.restoreAllMocks();
   });
 
-  it.each(['text', 'lifted object', 'no text'] as const)(
-    'rejects a refused %s answer with ObjectGenerationError and the refusal before checking the schema',
-    async (kind) => {
+  it.each([
+    { kind: 'text', refusal: REFUSAL },
+    { kind: 'lifted object', refusal: REFUSAL },
+    { kind: 'no text', refusal: REFUSAL },
+    // A Responses refusal part with an empty message beside output text is still a refusal.
+    { kind: 'text', refusal: '' },
+  ] as const)(
+    'rejects a refused $kind answer (refusal $refusal) with ObjectGenerationError and the refusal before checking the schema, keeping nothing',
+    async ({ kind, refusal }) => {
       provider.chunks = [
         ...(kind === 'text' ? [{ responseTextDelta: GOOD }] : []),
         {
           isFinal: true,
           ...(kind === 'lifted object' ? { structuredOutput: JSON.parse(GOOD) } : {}),
-          choices: [{ index: 0, message: { role: 'assistant', content: kind === 'text' ? GOOD : null }, finishReason: 'stop', refusal: REFUSAL }],
+          choices: [{ index: 0, message: { role: 'assistant', content: kind === 'text' ? GOOD : null }, finishReason: 'stop', refusal }],
         },
       ];
       const validate = vi.fn(() => true);
       const runtime = gmi({ provider: 'openai', model: 'stub-model', apiKey: 'test', fallbackProviders: [] });
       try {
-        const error = await runtime.session('planner').send('plan my week', {
+        const session = runtime.session('planner');
+        const error = await session.send('plan my week', {
           responseSchema: week.refine(validate),
         }).then(() => undefined, (reason: unknown) => reason);
         expect(error).toBeInstanceOf(ObjectGenerationError);
-        expect(error).toMatchObject({ refusal: REFUSAL, message: expect.stringContaining('refused') });
+        expect(error).toMatchObject({ refusal, message: 'session.send: the model refused the request instead of writing the object' });
         expect(validate).not.toHaveBeenCalled();
         expect(provider.calls).toBe(1);
+        expect(session.messages()).toEqual([]);
       } finally {
         await runtime.close();
       }

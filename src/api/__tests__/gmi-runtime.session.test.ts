@@ -343,6 +343,59 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
     expect(s.seen).toHaveLength(1);
   });
 
+  it('a structured send whose first step was refused after whole tool calls rejects though a later step answers the schema', async () => {
+    // A provider that sends the calls on a chunk before the final one: the GMI takes them before the refusal arrives,
+    // the tool round runs and a second step answers. The refused step still ends the send.
+    const chunk = { id: 'stub', object: 'chat.completion.chunk', created: 0, modelId: 'stub-model' };
+    const callsThenRefusal = [
+      { ...chunk, choices: [{ index: 0, message: { role: 'assistant', content: null, tool_calls: [{ id: 'c1', type: 'function', function: { name: 'lookup', arguments: '{}' } }] }, finishReason: null }] },
+      { ...chunk, isFinal: true, choices: [{ index: 0, message: { role: 'assistant', content: null }, finishReason: 'stop', refusal: 'No.' }], usage: { promptTokens: 12, completionTokens: 2, totalTokens: 14 } },
+    ];
+    const k = key(); const s = script('openai', k, { replies: [callsThenRefusal, reply.text('{"city":"Lyon"}')] });
+    const session = agent(base(k, { tools: [lookupTool(async () => ({ success: true, output: 'x' }))] })).session('s');
+    const error = await session
+      .send('where?', { responseSchema: z.object({ city: z.string() }) })
+      .then((value: unknown) => value, (e: unknown) => e);
+    expect(s.seen).toHaveLength(2);
+    expect(error).toBeInstanceOf(ObjectGenerationError);
+    expect(error).toMatchObject({ refusal: 'No.', message: 'session.send: the model refused the request instead of writing the object' });
+    expect(session.messages()).toEqual([]);
+  });
+
+  it('a send whose last step refused after a tool step returns that step\'s own text beside the refusal, not the earlier step\'s', async () => {
+    const chunk = { id: 'stub', object: 'chat.completion.chunk', created: 0, modelId: 'stub-model' };
+    const refused = [
+      { ...chunk, isFinal: true, choices: [{ index: 0, message: { role: 'assistant', content: null }, finishReason: 'stop', refusal: "I can't help with that." }], usage: { promptTokens: 12, completionTokens: 6, totalTokens: 18 } },
+    ];
+    const k = key(); script('openai', k, { replies: [reply.tools([{ id: 'c1', name: 'lookup', args: { q: 'room' } }], 'Let me check.'), refused] });
+    const r = await agent(base(k, { tools: [lookupTool(async () => ({ success: true, output: 'room 4' }))] })).session('s').send('book the room');
+    expect(r).toMatchObject({ text: '', refusal: "I can't help with that.", finishReason: 'stop' });
+  });
+
+  it('a stream the model refused resolves its refusal message beside empty text, as send() returns it', async () => {
+    const chunk = { id: 'stub', object: 'chat.completion.chunk', created: 0, modelId: 'stub-model' };
+    const refusal = "I'm sorry, I cannot assist with that request.";
+    const refused = () => [
+      { ...chunk, choices: [], refusalDelta: "I'm sorry, " },
+      { ...chunk, choices: [], refusalDelta: 'I cannot assist with that request.' },
+      { ...chunk, isFinal: true, choices: [{ index: 0, message: { role: 'assistant', content: null }, finishReason: 'stop', refusal }], usage: { promptTokens: 12, completionTokens: 11, totalTokens: 23 } },
+    ];
+    const k = key(); script('openai', k, { replies: [refused(), refused(), reply.text('Plain.')] });
+    const a = agent(base(k));
+    const session = a.session('s');
+    const streamed = session.stream('plan my week');
+    expect(await streamed.text).toBe('');
+    expect(await streamed.finishReason).toBe('stop');
+    expect(await streamed.refusal).toBe(refusal);
+    // The agent's own stream reports it the same way, and a turn the model answered resolves no refusal.
+    const direct = a.stream('plan my week');
+    expect(await direct.refusal).toBe(refusal);
+    const plain = session.stream('hi');
+    expect(await plain.text).toBe('Plain.');
+    expect(await plain.refusal).toBeUndefined();
+    await a.close();
+  });
+
   it('a structured send stopped at maxTokens whose JSON parses but misses a required field rejects naming the cut-off, not a schema mismatch', async () => {
     // The cut-off is read from the step's own finish reason, and the error carries the issues.
     const k = key(); script('anthropic', k, { replies: [reply.cutOff('{"city":"Lyon"}')] });
