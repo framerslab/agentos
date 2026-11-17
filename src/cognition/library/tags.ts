@@ -9,9 +9,12 @@
  *   `tagKey` and `canonicalTag` drop the hyphens, so `q3-planning` and `q3planning` are one tag, spelled `q3planning`.
  * - `classifyLegacyTag` reads a label stored before the grammar: an alias when case, Unicode normalization and
  *   separators alone stand between it and its key; unresolved otherwise (`C++`, `C#`, emoji, empty or overlong).
- * - `tagVocabulary` counts each document once a key; `resolveTag` makes a candidate an existing tag by its key, by its
- *   stem (one spaced word) or one edit away (both keys 5 code points or more, the same digits, no script written
- *   without spaces), or leaves it new.
+ * - `tagVocabulary` counts each document once a key, by kind (a note, a kept session or a document), and gives each key
+ *   the person's own spelling of it, `label`, read from the labels the documents hold; no stored label is rewritten.
+ *   `resolveTag` makes a candidate an existing tag by its key, by its stem (one spaced word) or one edit away (both keys
+ *   5 code points or more, the same digits, no script written without spaces), with that tag's label, or leaves it new,
+ *   labelled in `normalizeTag`'s form.
+ * - `renameTag` and `mergeTags` change one list of labels by key, keeping its order, each tag once.
  *
  * @module agentos/cognition/library/tags
  */
@@ -147,33 +150,45 @@ export function compareCodePoints(a: string, b: string): number {
   return left.length - right.length;
 }
 
-/** A document the vocabulary and the suggester read: a note, or a kept session. */
+/** A document the vocabulary and the suggester read: a note, a kept session, or a document. */
 export interface TagDocument {
   /** Its id, unique among the documents. */
   id: string;
-  /** A note, or a kept session. */
-  kind: 'note' | 'session';
+  /** A note, a kept session, or a document a person keeps (a file, a page, a sheet). */
+  kind: 'note' | 'session' | 'document';
   /** Its title. */
   title: string;
-  /** Its text: a note's, or a kept session's report lines and the person's notes on it. */
+  /** Its text: a note's, a kept session's report lines and the person's notes on it, or a document's text. */
   text: string;
-  /** A note's keywords; none for a session. */
+  /** A note's keywords; none for a session or a document. */
   keywords: readonly string[];
   /**
    * Its tags; each is read through `classifyLegacyTag`: a tag or an alias counts under its key, and a label left
    * unresolved (`C++`, `budget.`) or with no key is left out, never counted under its candidate key.
    */
   tags: readonly string[];
-  /** When it last changed (a note's latest change, a session's start), in milliseconds since 1970, or null. */
+  /** When it last changed (a note's or a document's latest change, a session's start), in milliseconds since 1970, or null. */
   changedAt: number | null;
 }
 
-/** One tag of a vocabulary: the documents that hold it, of each kind, and the latest change among them. */
+/** One tag of a vocabulary: its key, the person's own spelling of it, the documents that hold it by kind, and the latest change among them. */
 export interface TagUse {
+  /** The key, which every match reads. */
   tag: string;
+  /**
+   * The person's own spelling of the key: of the labels the documents hold for it, the one on the most documents, then
+   * the one on the latest changed document, then the first by code point. A label as stored, never rewritten.
+   */
+  label: string;
+  /** The documents that hold the key, each counted once. */
   uses: number;
+  /** The notes among them. */
   notes: number;
+  /** The kept sessions among them. */
   sessions: number;
+  /** The documents of kind `document` among them. */
+  documents: number;
+  /** The latest `changedAt` among them, or null when none has one. */
   lastUsed: number | null;
 }
 
@@ -190,24 +205,85 @@ export function tagKeysOf(document: Pick<TagDocument, 'tags'>): string[] {
   return keys;
 }
 
-/** The tags the documents hold, each document counted once a key: most used first, ties by code point. */
+/** The later of two times, either of which may be unknown. */
+function later(a: number | null, b: number | null): number | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  return b > a ? b : a;
+}
+
+/** One spelling of a key: the documents whose labels hold it, and the latest change among them. */
+interface Spelling {
+  documents: number;
+  lastSeen: number | null;
+}
+
+/** The order among a key's spellings: on the most documents, then seen latest (unknown last), then the first by code point. */
+function preferredSpelling([a, left]: [string, Spelling], [b, right]: [string, Spelling]): number {
+  if (left.documents !== right.documents) return right.documents - left.documents;
+  if (left.lastSeen !== right.lastSeen) return (right.lastSeen ?? Number.NEGATIVE_INFINITY) - (left.lastSeen ?? Number.NEGATIVE_INFINITY);
+  return compareCodePoints(a, b);
+}
+
+/**
+ * The tags the documents hold, each document counted once a key and by its kind: most used first, ties by code point.
+ * Each key's `label` is the person's own spelling: every label a document holds that `classifyLegacyTag` reads as an
+ * alias of the key is a spelling of it, counted once a document, and the label is the spelling on the most documents,
+ * then the one seen on the latest changed document, then the first by `compareCodePoints`. The documents are read and
+ * never changed.
+ */
 export function tagVocabulary(documents: Iterable<TagDocument>): TagUse[] {
   const uses = new Map<string, TagUse>();
+  const spellings = new Map<string, Map<string, Spelling>>();
   for (const document of documents) {
-    for (const key of tagKeysOf(document)) {
-      const found: TagUse = uses.get(key) ?? { tag: key, uses: 0, notes: 0, sessions: 0, lastUsed: null };
-      found.uses += 1;
-      if (document.kind === 'note') found.notes += 1;
-      else found.sessions += 1;
-      if (document.changedAt !== null && (found.lastUsed === null || document.changedAt > found.lastUsed)) found.lastUsed = document.changedAt;
-      uses.set(key, found);
+    const held = new Map<string, Set<string>>();
+    for (const label of document.tags) {
+      const { state, key } = classifyLegacyTag(label);
+      if (state !== 'alias' || key === null) continue;
+      const labels = held.get(key) ?? new Set<string>();
+      labels.add(label);
+      held.set(key, labels);
     }
+    for (const [key, labels] of held) {
+      const found: TagUse = uses.get(key) ?? { tag: key, label: key, uses: 0, notes: 0, sessions: 0, documents: 0, lastUsed: null };
+      found.uses += 1;
+      switch (document.kind) {
+        case 'note':
+          found.notes += 1;
+          break;
+        case 'session':
+          found.sessions += 1;
+          break;
+        case 'document':
+          found.documents += 1;
+          break;
+      }
+      found.lastUsed = later(found.lastUsed, document.changedAt);
+      uses.set(key, found);
+      const seen = spellings.get(key) ?? new Map<string, Spelling>();
+      for (const label of labels) {
+        const spelling = seen.get(label) ?? { documents: 0, lastSeen: null };
+        spelling.documents += 1;
+        spelling.lastSeen = later(spelling.lastSeen, document.changedAt);
+        seen.set(label, spelling);
+      }
+      spellings.set(key, seen);
+    }
+  }
+  for (const [key, found] of uses) {
+    const best = [...(spellings.get(key) ?? new Map<string, Spelling>())].sort(preferredSpelling)[0];
+    if (best !== undefined) found.label = best[0];
   }
   return [...uses.values()].sort((a, b) => b.uses - a.uses || compareCodePoints(a.tag, b.tag));
 }
 
-/** What a candidate becomes: an existing tag, by its key, its stem or one edit, or a new one; with what it was. */
-export type TagResolution = { kind: 'existing'; tag: string; via: 'key' | 'stem' | 'edit'; from: string } | { kind: 'new'; tag: string; from: string };
+/**
+ * What a candidate becomes: an existing tag, by its key, its stem or one edit, with the vocabulary's label for it; or a
+ * new one, its label `normalizeTag`'s form of the candidate; each with its key as `tag` and what it was as `from`.
+ */
+export type TagResolution =
+  | { kind: 'existing'; tag: string; label: string; via: 'key' | 'stem' | 'edit'; from: string }
+  | { kind: 'new'; tag: string; label: string; from: string };
 
 /** The order among several matches: the most used, then the latest used, then the first by code point. */
 export function preferredTagOrder(a: TagUse, b: TagUse): number {
@@ -232,17 +308,89 @@ export function resolveTag(candidate: string, vocabulary: readonly TagUse[]): Ta
   if (normalized === null) return null;
   const key = keyOf(normalized);
   const exact = vocabulary.find((found) => found.tag === key);
-  if (exact !== undefined) return { kind: 'existing', tag: exact.tag, via: 'key', from: candidate };
+  if (exact !== undefined) return { kind: 'existing', tag: exact.tag, label: exact.label, via: 'key', from: candidate };
   const spaced = !isUnspacedScript(key);
   if (spaced && !normalized.includes('-')) {
     const stem = stemWord(key);
     const stemmed = vocabulary.filter((found) => !isUnspacedScript(found.tag) && stemWord(found.tag) === stem);
-    if (stemmed.length > 0) return { kind: 'existing', tag: [...stemmed].sort(preferredTagOrder)[0]!.tag, via: 'stem', from: candidate };
+    const best = [...stemmed].sort(preferredTagOrder)[0];
+    if (best !== undefined) return { kind: 'existing', tag: best.tag, label: best.label, via: 'stem', from: candidate };
   }
   if (spaced && codePoints(key) >= 5) {
     const digits = digitsIn(key);
     const near = vocabulary.filter((found) => codePoints(found.tag) >= 5 && !isUnspacedScript(found.tag) && digitsIn(found.tag) === digits && withinOneEdit(found.tag, key));
-    if (near.length > 0) return { kind: 'existing', tag: [...near].sort(preferredTagOrder)[0]!.tag, via: 'edit', from: candidate };
+    const best = [...near].sort(preferredTagOrder)[0];
+    if (best !== undefined) return { kind: 'existing', tag: best.tag, label: best.label, via: 'edit', from: candidate };
   }
-  return { kind: 'new', tag: key, from: candidate };
+  return { kind: 'new', tag: key, label: normalized, from: candidate };
+}
+
+/**
+ * Whether a label stands for a given one in a list: by key when the given label is an alias of one (as
+ * `classifyLegacyTag` reads it), and as written when it has no key, so `C++` stands only for `C++` and never for `c`.
+ */
+function standsFor(given: string): (label: string) => boolean {
+  const { state, key } = classifyLegacyTag(given);
+  if (state !== 'alias' || key === null) return (label) => label === given;
+  return (label) => {
+    const read = classifyLegacyTag(label);
+    return read.state === 'alias' && read.key === key;
+  };
+}
+
+/** What a label is the same tag as in a list: its key when it is an alias of one, and itself as written otherwise. */
+function sameTagAs(label: string): string {
+  const { state, key } = classifyLegacyTag(label);
+  return state === 'alias' && key !== null ? `key:${key}` : `as:${label}`;
+}
+
+/**
+ * A list with every label of `from` and of `target` gone and `written` at the first place any of them stood, and every
+ * other tag once, at its first place and spelling (a list stored before the grammar can hold `q3-planning` and
+ * `Q3 Planning`); the list itself, copied, when it holds no label of `from`.
+ */
+function replaceAtFirst(tags: readonly string[], from: string, target: string, written: (tags: readonly string[]) => string): string[] {
+  const isFrom = standsFor(from);
+  if (!tags.some(isFrom)) return [...tags];
+  const isTarget = standsFor(target);
+  const spelling = written(tags);
+  const result: string[] = [];
+  const kept = new Set<string>();
+  let placed = false;
+  for (const label of tags) {
+    if (!isFrom(label) && !isTarget(label)) {
+      const same = sameTagAs(label);
+      if (!kept.has(same)) {
+        kept.add(same);
+        result.push(label);
+      }
+    } else if (!placed) {
+      result.push(spelling);
+      placed = true;
+    }
+  }
+  return result;
+}
+
+/**
+ * A list with every label of `from`'s key written as `to`, each tag once, in the list's order: where the list holds
+ * `to`'s key too, the two become one `to` at the first place either stood, and any other key the list holds twice
+ * keeps its first label. A label with no key (`C++`) is compared as
+ * written, so renaming `c` leaves `C++` where it stands. A list that holds no label of `from` comes back unchanged.
+ * `to` is written as given; the host passes a label it accepts. Pure: the list given is not changed.
+ */
+export function renameTag(tags: readonly string[], from: string, to: string): string[] {
+  return replaceAtFirst(tags, from, to, () => to);
+}
+
+/**
+ * A list with every label of `from`'s key gone and `into` at the first place either stood, in the spelling the list
+ * holds for it (its first label of `into`'s key), else as given; each tag once, in the list's order, any other key the
+ * list holds twice at its first label. A label with no key
+ * (`C++`) is compared as written. A list that holds no label of `from` comes back unchanged. Pure: the list given is not
+ * changed.
+ */
+export function mergeTags(tags: readonly string[], from: string, into: string): string[] {
+  const isInto = standsFor(into);
+  return replaceAtFirst(tags, from, into, (held) => held.find(isInto) ?? into);
 }
