@@ -130,8 +130,9 @@ function isMissingDependency(error: unknown): boolean {
  * `start()` begins the local model's load; turns before it settles run unreranked (`loading`). A load that fails, or
  * a missing Transformers.js, marks the reranker unavailable for good: no retry and no second download. A call is
  * bounded by `timeoutMs`; one that runs past it is dropped when it arrives, and the judge starts no further model call
- * for it. A provider that put a score in for one it
- * could not compute (`providerMetrics.scoringFailures`, `listwiseFailed`) is read as failed. After
+ * for it. The local model's forward pass runs on the calling thread, so its deadline cannot fire while the pass runs:
+ * a call that answers after `timeoutMs` is read as a timeout when it returns, and its order is not used. A provider
+ * that put a score in for one it could not compute (`providerMetrics.scoringFailures`, `listwiseFailed`) is read as failed. After
  * {@link RERANK_DEFAULTS}`.failuresToBackOff` failures or timeouts in a row the provider is not called for
  * `backoffMs`. `rerank()` never throws.
  */
@@ -297,6 +298,14 @@ export class RecallReranker {
       if (this.disposed || output === 'stopped') return kept('unavailable');
       // The provider's work is abandoned; its late answer is dropped.
       if (output === 'timeout') return failed('timeout');
+      // An answer that came after the deadline is a timeout too. A provider that holds the thread for its whole call
+      // (the local cross-encoder: onnxruntime-node runs a forward pass synchronously inside one setImmediate) wins the
+      // race whatever it took, since the deadline's timer cannot run until the call returns and its answer settles
+      // first; read on the same clock, its order is dropped, so a recall does not depend on how the thread was shared.
+      if (performance.now() - started > timeoutMs) {
+        abandoned.abort();
+        return failed('timeout');
+      }
 
       const metrics = (output.diagnostics?.providerMetrics ?? {}) as { scoringFailures?: unknown; listwiseFailed?: unknown };
       const unscored = typeof metrics.scoringFailures === 'number' && metrics.scoringFailures > 0 ? Math.ceil(metrics.scoringFailures) : 0;
