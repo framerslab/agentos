@@ -494,4 +494,113 @@ describe('PromptEngine: a host note and the token budget', () => {
       { type: 'text', text: WORDS },
     ]);
   });
+
+  it('counts the note without its separator once the retrieved text is removed, so a prompt that fits as sent writes no budget warning', async () => {
+    const estimate = (text: string) => engine.estimateTokenCount(text, 'stub-model');
+    const system = 'You are Tess.';
+    // 2,016 characters, 504 tokens: over the retrieved text's share of 400, and the prompt is over its budget, so the
+    // budget step removes it (a target of 0)
+    const retrieved = 'Front desk notes. '.repeat(112);
+    // the frame line and the note together are 7,928 characters, 1,982 tokens: with the system text (4) and the words
+    // (14) the prompt as sent counts 2,000, the budget; a separator still counted after the retrieved text is removed
+    // adds 2 and takes the count to 2,002
+    const fits = 'Ring the desk bell. '.repeat(400).slice(0, 4 * 1_982 - FRAME.length - 1);
+    // four characters more: 2,001 as sent, over the budget
+    const over = 'Ring the desk bell. '.repeat(400).slice(0, 4 * 1_983 - FRAME.length - 1);
+    const run = async (note: string) =>
+      build({ systemPrompts: [{ content: system, priority: 1 }], userInput: WORDS, retrievedContext: retrieved, applicationNote: note } as PromptComponents);
+
+    const fitting = await run(fits);
+    const sent = firstTextOf(newestUser(fitting.prompt));
+    expect(sent).toBe(`${FRAME}\n${fits}`);
+    expect((await estimate(sent)) + (await estimate(WORDS)) + (await estimate(system))).toBe(SMALL.maxContextTokens);
+    expect(fitting.result.modificationDetails!.originalEstimatedTokenCount).toBe(
+      (await estimate(`${sent}\n\n---\n\n`)) + (await estimate(WORDS)) + (await estimate(system)) + (await estimate(retrieved)),
+    );
+    expect(fitting.result.modificationDetails!.removedComponents ?? []).toContain('retrievedContext');
+    expect((fitting.result.issues ?? []).map((issue) => issue.code)).not.toContain('TOKEN_BUDGET_EXCEEDED_POST_OPT');
+
+    const overrun = await run(over);
+    expect(firstTextOf(newestUser(overrun.prompt))).toBe(`${FRAME}\n${over}`);
+    expect(overrun.result.modificationDetails!.removedComponents ?? []).toContain('retrievedContext');
+    expect((overrun.result.issues ?? []).map((issue) => issue.code)).toContain('TOKEN_BUDGET_EXCEEDED_POST_OPT');
+  });
+});
+
+describe('PromptEngine: a host note in the generic_completion template', () => {
+  const NOTE = 'The person is on a ten-minute break. Keep the reply short.';
+  const GENERIC: ModelTargetInfo = {
+    modelId: 'stub-model',
+    providerId: 'stub',
+    maxContextTokens: 8_000,
+    capabilities: ['completion'],
+    promptFormatType: 'generic_completion',
+    toolSupport: { supported: false, format: 'openai_functions' },
+  };
+  const executionContext = {
+    activePersona: { id: 'tess', name: 'Tess', description: 'A friend.', baseSystemPrompt: 'You are Tess.', contextualPromptElements: [] },
+    workingMemory: {},
+  } as unknown as PromptExecutionContext;
+
+  let engine: PromptEngine;
+  beforeEach(async () => {
+    engine = new PromptEngine();
+    await engine.initialize(promptEngineConfig());
+  });
+
+  const build = async (components: PromptComponents): Promise<string> => {
+    const result = await engine.constructPrompt(components, GENERIC, executionContext);
+    expect(result.issues?.filter((issue) => issue.type === 'error') ?? [], 'prompt construction errors').toEqual([]);
+    expect(typeof result.prompt).toBe('string');
+    return result.prompt as string;
+  };
+
+  it("puts the note in front of the person's words when they arrive as the history's newest user message, and leaves the stored message as it was", async () => {
+    const history = [
+      createConversationMessage(MessageRole.USER, 'Earlier words.'),
+      createConversationMessage(MessageRole.ASSISTANT, 'Hi there.'),
+      createConversationMessage(MessageRole.USER, 'Hello'),
+    ];
+    const prompt = await build({
+      systemPrompts: [{ content: 'You are Tess.', priority: 1 }],
+      conversationHistory: history,
+      currentTurnMessageCount: 1,
+      applicationNote: NOTE,
+    } as PromptComponents);
+    expect(prompt.endsWith(`user: Earlier words.\nassistant: Hi there.\n\n${FRAME}\n${NOTE}\n\nuser: Hello\n\n`)).toBe(true);
+    expect(prompt.split('user: Hello').length - 1).toBe(1);
+    expect(history[2].content).toBe('Hello');
+
+    const alone = await build({
+      systemPrompts: [{ content: 'You are Tess.', priority: 1 }],
+      conversationHistory: [createConversationMessage(MessageRole.USER, 'Hello')],
+      currentTurnMessageCount: 1,
+      applicationNote: NOTE,
+    } as PromptComponents);
+    expect(alone.endsWith(`You are Tess.\n\n${FRAME}\n${NOTE}\n\nuser: Hello\n\n`)).toBe(true);
+  });
+
+  it('keeps the note in front of userInput, and after a history that ends with no user message', async () => {
+    const withInput = await build({
+      systemPrompts: [{ content: 'You are Tess.', priority: 1 }],
+      conversationHistory: [
+        createConversationMessage(MessageRole.USER, 'Earlier words.'),
+        createConversationMessage(MessageRole.ASSISTANT, 'Hi there.'),
+      ],
+      userInput: 'Hello',
+      applicationNote: NOTE,
+    } as PromptComponents);
+    expect(withInput.endsWith(`user: Earlier words.\nassistant: Hi there.\n\n${FRAME}\n${NOTE}\n\nuser: Hello\nassistant:`)).toBe(true);
+
+    const afterReply = await build({
+      systemPrompts: [{ content: 'You are Tess.', priority: 1 }],
+      conversationHistory: [
+        createConversationMessage(MessageRole.USER, 'Hello'),
+        createConversationMessage(MessageRole.ASSISTANT, 'Hi there.'),
+      ],
+      currentTurnMessageCount: 2,
+      applicationNote: NOTE,
+    } as PromptComponents);
+    expect(afterReply.endsWith(`user: Hello\nassistant: Hi there.\n\n${FRAME}\n${NOTE}\n\n`)).toBe(true);
+  });
 });
