@@ -390,9 +390,11 @@ describe('rerank in a turn', () => {
     'under %s every recall of a reranker whose passes end late keeps the order of rerank none, the back-off skips the provider until backoffMs has passed, and then it is called again',
     async (retrieval) => {
       // A local provider whose every pass holds the thread past the deadline, as on a slow host; `holdMs` set to 0
-      // makes it a fast host again.
+      // makes it a fast host again. The deadline is wide enough that the fast pass answers inside it on a loaded
+      // runner, and every slow pass ends 50 ms after it whatever the runner does.
+      const timeoutMs = 250;
       let calls = 0;
-      let holdMs = 120;
+      let holdMs = timeoutMs + 50;
       const local: RecallRerankProvider = {
         providerId: 'local',
         isAvailable: async () => true,
@@ -414,7 +416,7 @@ describe('rerank in a turn', () => {
       const plain = await memoryWith({ retrieval }, new WordHashEmbedder());
       const slow = await memoryWith({ retrieval }, new WordHashEmbedder());
       for (const mem of [plain, slow]) for (let i = 0; i < 8; i++) await plant(mem, `t${i}`, NOTE(i), at(i));
-      await rerankWith(slow.manager, local, { timeoutMs: 50 });
+      await rerankWith(slow.manager, local, { timeoutMs });
       // Each memory recalls as often as the other, so their stores stay alike.
       const both = async () => [await plain.manager.retrieve(query, NEUTRAL, { scopes: U1 }), await slow.manager.retrieve(query, NEUTRAL, { scopes: U1 })] as const;
 
