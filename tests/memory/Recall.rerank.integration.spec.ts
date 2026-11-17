@@ -11,9 +11,9 @@ import { resetLoggerFactory, setLogger } from '../../src/core/logging/loggerFact
 import type { PADState } from '../../src/cognition/memory/core/config';
 import type { MemoryTrace, ScoredMemoryTrace } from '../../src/cognition/memory/core/types';
 import { resetRecallLogOnce } from '../../src/cognition/memory/retrieval/recall/log';
-import { RecallReranker, RERANK_DEFAULTS } from '../../src/cognition/memory/retrieval/recall/rerank';
+import { RecallReranker, RERANK_DEFAULTS, type RecallRerankProvider } from '../../src/cognition/memory/retrieval/recall/rerank';
 import { FlatEmbedder, U1, WordHashEmbedder } from './helpers/recallFixtures';
-import { memoryWith, plant } from './helpers/recallMemory';
+import { memoryWith, plant, rerankWith } from './helpers/recallMemory';
 
 const NEUTRAL: PADState = { valence: 0, arousal: 0, dominance: 0 };
 const T0 = Date.UTC(2026, 10, 1);
@@ -338,6 +338,53 @@ describe('rerank in a turn', () => {
     await plain.close();
     await judged.close();
   });
+
+  it.each(['dense', 'hybrid'] as const)(
+    'under %s a rerank that answers after its deadline is a timeout though it held the thread so no timer could run: the block of rerank none, byte for byte, and three in a row back off',
+    async (retrieval) => {
+      // The local cross-encoder runs its pass on the calling thread inside one setImmediate, as onnxruntime-node does:
+      // while it runs no timer can fire, and its answer settles before the timers phase that would have ended it.
+      let calls = 0;
+      const blocking: RecallRerankProvider = {
+        providerId: 'local',
+        isAvailable: async () => true,
+        rerank: (input) => {
+          calls += 1;
+          return new Promise((resolve) => {
+            setImmediate(() => {
+              const until = performance.now() + 120;
+              while (performance.now() < until) {
+                // Holds the thread, as a forward pass does.
+              }
+              resolve(reversed(input as Docs) as never);
+            });
+          });
+        },
+      };
+      const plain = await memoryWith({ retrieval }, new WordHashEmbedder());
+      const slow = await memoryWith({ retrieval }, new WordHashEmbedder());
+      for (const mem of [plain, slow]) for (let i = 0; i < 8; i++) await plant(mem, `t${i}`, NOTE(i), at(i));
+      await rerankWith(slow.manager, blocking, { timeoutMs: 50 });
+      const a = await plain.manager.assembleForPrompt('which switchback had the best view', 1600, NEUTRAL, { scopes: U1 });
+      const b = await slow.manager.assembleForPrompt('which switchback had the best view', 1600, NEUTRAL, { scopes: U1 });
+      expect(calls).toBe(1);
+      expect(b.capture!.reranker).toEqual({ provider: 'none', reason: 'timeout' });
+      expect(b.contextText).toBe(a.contextText);
+      expect(events('memory.recall.rerank_skipped').map((e) => e.reason)).toEqual(['timeout']);
+      // Two more late answers make three failures in a row: the reranker backs off, and the next turn does not call it.
+      for (let i = 0; i < 2; i++) {
+        const late = await slow.manager.retrieve('which switchback had the best view', NEUTRAL, { scopes: U1 });
+        expect(late.diagnostics.reranker).toEqual({ provider: 'none', reason: 'timeout' });
+      }
+      expect(calls).toBe(3);
+      expect(events('memory.recall.rerank_skipped').filter((e) => e.reason === 'backoff')).toHaveLength(1);
+      const backedOff = await slow.manager.retrieve('which switchback had the best view', NEUTRAL, { scopes: U1 });
+      expect(backedOff.diagnostics.reranker).toEqual({ provider: 'none', reason: 'backoff' });
+      expect(calls).toBe(3);
+      await plain.close();
+      await slow.close();
+    },
+  );
 
   it('under dense a rerank that answers blends each recalled score with its rerank score at 0.7 and 0.3, and orders the recall by the blend', async () => {
     // The judge's favourite is the trace the plain recall ranks last, named once that recall has run.
