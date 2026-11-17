@@ -42,6 +42,7 @@ import { AgentOSResponseChunkType } from '../types/AgentOSResponse';
 import type { IPersonaDefinition } from '../../cognition/substrate/personas/IPersonaDefinition';
 import { GMIErrorCode } from '../../core/utils/errors.js';
 import { GuardrailAction, type IGuardrailService } from '../../safety/guardrails/IGuardrailService';
+import { StreamingManager } from '../../core/streaming/StreamingManager';
 import { SqlSpendMeter } from '../../safety/runtime/SqlSpendMeter';
 import { SpendMeterUnavailableError, type ISpendMeter } from '../../safety/runtime/SpendMeter';
 
@@ -176,11 +177,15 @@ describe('the spend meter on processRequest', () => {
     vi.spyOn(metrics, 'getMeter').mockImplementation(() => {
       throw new Error('the host meter provider failed');
     });
+    // every client of the stream receives what the runtime pushes to it, a host's own stream client as well as this one
+    const pushed = vi.spyOn(StreamingManager.prototype, 'pushChunk');
     booted = await boot({ meter }, { observability: { metrics: { enabled: true, meterName: 'agentos-spend-meter-e2e' } } });
     provider.replies.push([{ isFinal: true, choices: [], error: { message: 'rate limited', type: 'rate_limit' } }]);
     const chunks = await collect(booted, { operationId: 'op-metrics-down' });
     expect(errorOf(chunks)?.code).toBe(GMIErrorCode.LLM_PROVIDER_ERROR);
-    expect(chunks.filter((c) => c.type === AgentOSResponseChunkType.ERROR && c.code === GMIErrorCode.INTERNAL_SERVER_ERROR)).toEqual([]);
+    const internalErrors = (list: any[]) => list.filter((c) => c.type === AgentOSResponseChunkType.ERROR && c.code === GMIErrorCode.INTERNAL_SERVER_ERROR);
+    expect(internalErrors(chunks)).toEqual([]);
+    expect(internalErrors(pushed.mock.calls.map(([, chunk]) => chunk))).toEqual([]);
     expect(await meter.snapshot('person-1')).toMatchObject({ used: 0, reserved: 0 });
   });
 
