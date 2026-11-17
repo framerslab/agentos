@@ -9,7 +9,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const provider = vi.hoisted(() => ({
   calls: 0,
-  replies: [] as Array<Array<Record<string, unknown>>>,
+  // a promise in a reply holds the provider's stream there until it resolves
+  replies: [] as Array<Array<Record<string, unknown> | Promise<void>>>,
 }));
 
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', () => {
@@ -20,7 +21,10 @@ vi.mock('../../core/llm/providers/implementations/OpenAIProvider', () => {
     async generateCompletion() { return { choices: [{ message: { role: 'assistant', content: 'ok' }, finishReason: 'stop' }], responseText: 'ok' }; }
     async *generateCompletionStream() {
       provider.calls += 1;
-      yield* provider.replies.shift() ?? [];
+      for (const part of provider.replies.shift() ?? []) {
+        if (part instanceof Promise) await part;
+        else yield part;
+      }
     }
     async generateEmbeddings() { return { embeddings: [] }; }
     async listAvailableModels() { return []; }
@@ -31,6 +35,7 @@ vi.mock('../../core/llm/providers/implementations/OpenAIProvider', () => {
   return { OpenAIProvider };
 });
 
+import { metrics } from '@opentelemetry/api';
 import { resolveStorageAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
 import { AgentOS } from '../AgentOS';
 import { AgentOSResponseChunkType } from '../types/AgentOSResponse';
@@ -166,6 +171,19 @@ describe('the spend meter on processRequest', () => {
     expect(await meter.snapshot('person-1')).toMatchObject({ used: 0, reserved: 0 });
   });
 
+  it('ends a failed turn with its own error alone when the host meter provider cannot record the turn', async () => {
+    const meter = await sqlMeter(5);
+    vi.spyOn(metrics, 'getMeter').mockImplementation(() => {
+      throw new Error('the host meter provider failed');
+    });
+    booted = await boot({ meter }, { observability: { metrics: { enabled: true, meterName: 'agentos-spend-meter-e2e' } } });
+    provider.replies.push([{ isFinal: true, choices: [], error: { message: 'rate limited', type: 'rate_limit' } }]);
+    const chunks = await collect(booted, { operationId: 'op-metrics-down' });
+    expect(errorOf(chunks)?.code).toBe(GMIErrorCode.LLM_PROVIDER_ERROR);
+    expect(chunks.filter((c) => c.type === AgentOSResponseChunkType.ERROR && c.code === GMIErrorCode.INTERNAL_SERVER_ERROR)).toEqual([]);
+    expect(await meter.snapshot('person-1')).toMatchObject({ used: 0, reserved: 0 });
+  });
+
   it('settles a turn whose caller stopped reading after the first words', async () => {
     const meter = await sqlMeter(5);
     booted = await boot({ meter });
@@ -194,6 +212,68 @@ describe('the spend meter on processRequest', () => {
     expect(row).toMatchObject({ state: 'released', outcome: 'replaced' });
     expect(await meter.snapshot('person-1')).toMatchObject({ used: 0, reserved: 0, remaining: 5 });
     await meter.settle({ operationId: 'op-blocked', outcome: 'replaced' });
+    expect(await meter.snapshot('person-1')).toMatchObject({ used: 0, reserved: 0, remaining: 5 });
+  });
+
+  it('ends the stream at a block on a streamed reply, refunded, while the turn still runs', async () => {
+    const meter = await sqlMeter(5);
+    const settle = vi.spyOn(meter, 'settle');
+    const gate: IGuardrailService = {
+      config: { evaluateStreamingChunks: true },
+      evaluateOutput: async ({ chunk }) =>
+        chunk.type === AgentOSResponseChunkType.TEXT_DELTA ? { action: GuardrailAction.BLOCK, reason: 'the reply crossed a rule', reasonCode: 'NEVER_DO' } : null,
+    };
+    booted = await boot({ meter }, { guardrailService: gate });
+    let finishReply!: () => void;
+    const rest = new Promise<void>((resolve) => { finishReply = resolve; });
+    provider.replies.push([{ responseTextDelta: 'You will' }, rest, ...reply(' pass for sure.')]);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let chunks: any[] = [];
+    try {
+      chunks = await Promise.race([
+        collect(booted, { operationId: 'op-streamed-block' }),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error('the stream waited for the rest of the turn the guardrail blocked')), 2_000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+    expect(errorOf(chunks)?.code).toBe('NEVER_DO');
+    expect(await meter.snapshot('person-1')).toMatchObject({ used: 0, reserved: 0, remaining: 5 });
+    // the turn goes on inside the runtime: its own settle, when it ends, finds the refund in place
+    finishReply();
+    await vi.waitFor(() => expect(settle.mock.calls.some(([request]) => request.outcome === 'consumed')).toBe(true));
+    const turnSettle = settle.mock.results[settle.mock.calls.findIndex(([request]) => request.outcome === 'consumed')];
+    await expect(turnSettle?.value).resolves.toMatchObject({ status: 'already_settled', state: 'released' });
+    expect(await meter.snapshot('person-1')).toMatchObject({ used: 0, reserved: 0, remaining: 5 });
+  });
+
+  it('refunds a blocked reply again when the turn counted it between the refund read and its write', async () => {
+    const meter = await sqlMeter(5);
+    const settle = meter.settle.bind(meter);
+    let raced = false;
+    // a store with concurrent writers: the turn's own consumed settle commits after the refund read the row reserved
+    vi.spyOn(meter, 'settle').mockImplementation(async (request) => {
+      if (request.outcome === 'replaced' && !raced) {
+        raced = true;
+        await settle({ operationId: request.operationId, outcome: 'consumed' });
+        return { status: 'already_settled', state: 'consumed' };
+      }
+      return settle(request);
+    });
+    const gate: IGuardrailService = {
+      config: { evaluateStreamingChunks: false },
+      evaluateOutput: async ({ chunk }) =>
+        chunk.type === AgentOSResponseChunkType.FINAL_RESPONSE ? { action: GuardrailAction.BLOCK, reason: 'the reply crossed a rule', reasonCode: 'NEVER_DO' } : null,
+    };
+    booted = await boot({ meter }, { guardrailService: gate });
+    provider.replies.push(reply('You will pass for sure.'));
+    const chunks = await collect(booted, { operationId: 'op-blocked-race' });
+    expect(errorOf(chunks)?.code).toBe('NEVER_DO');
+    expect(raced).toBe(true);
+    const row = await db!.get<{ state: string; outcome: string }>('SELECT state, outcome FROM agentos_spend_reservations WHERE operation_id = ?', ['op-blocked-race']);
+    expect(row).toMatchObject({ state: 'released', outcome: 'replaced' });
     expect(await meter.snapshot('person-1')).toMatchObject({ used: 0, reserved: 0, remaining: 5 });
   });
 });
