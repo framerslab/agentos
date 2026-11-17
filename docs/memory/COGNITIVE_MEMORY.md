@@ -937,7 +937,7 @@ const context = await manager.assembleForPrompt('Which plan am I on?', 1600, moo
 | Every leg | The other sections; no recall section | every leg absent, no candidates | `memory.recall.leg_absent`, one for each leg and reason |
 | The local rerank model, while it loads | The recall, in its own order | `reranker`: `loading` | `memory.recall.rerank_skipped` |
 | The local rerank model, after a failed load or with Transformers.js not installed | The recall, in its own order; the load is not tried again | `reranker`: `unavailable` | `memory.recall.rerank_unavailable` (`load_failed` or `missing_dependency`), once per process for each |
-| A rerank answer within `timeoutMs` (a local pass holds the calling thread, so its deadline cannot fire until the pass returns; an answer that comes after it is not used) | The recall, in its own order | `reranker`: `timeout` | `memory.recall.rerank_skipped` |
+| A rerank answer within `timeoutMs`: none came by then, or one came after it (a local pass holds the calling thread, so its deadline cannot fire until the pass returns, and its late answer is not used) | The recall, in its own order | `reranker`: `timeout` | `memory.recall.rerank_skipped` |
 | A usable answer from the reranker: it threw, left out a candidate it was sent, or put a score in for one it could not compute | The recall, in its own order | `reranker`: `error` | `memory.recall.rerank_skipped`; `memory.recall.rerank_failed_scoring` with the count for a substituted score |
 | A reranker after three failures or timeouts in a row | The recall, in its own order, for 60 seconds | `reranker`: `backoff` | `memory.recall.rerank_skipped`, once when the back-off begins |
 
