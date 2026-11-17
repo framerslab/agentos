@@ -525,6 +525,7 @@ export interface AgentOSConfig {
    * A persisted per-account allowance. With one set, every `processRequest` needs an `operationId` and reserves its
    * units before any provider is called: a refusal or a meter that cannot answer ends the request with an error chunk
    * and no model call. The turn settles the reservation when it ends; a reply an output guardrail blocks is refunded.
+   * The request's stream ends after that settle or refund has answered, so the meter read after it counts the turn.
    */
   spendMeter?: AgentOSSpendMeterConfig;
   /** The schemas a request's `structuredReply.schemaRef` is looked up in. A `Map<string, ZodType | JsonSchemaObject>` is one. */
@@ -2406,10 +2407,11 @@ export class AgentOS implements IAgentOS {
           break;
         }
       }
-      // A final chunk or host-tool request can end this loop before the orchestrator closes the stream.
-      // Wait before returning to the caller and before applying an output-guardrail refund in finally.
-      // A caller that stops reading early skips this point; its turn still settles in the background.
-      if (meteredOperationId) {
+      // A final chunk or host-tool request can end this loop before the orchestrator closes the stream: the caller's
+      // stream ends once the turn has settled, so the meter counts the turn when the caller reads it. A reply an output
+      // guardrail blocked is refunded in finally instead, and its stream ends there while the turn goes on inside the
+      // runtime. A caller that stops reading early skips this point; its turn still settles in the background.
+      if (meteredOperationId && !replacedByGuardrail) {
         await this.agentOSOrchestrator.waitForTurnCompletion(streamIdToListen);
       }
     } catch (error: unknown) {
@@ -2442,7 +2444,16 @@ export class AgentOS implements IAgentOS {
       if (meteredOperationId && metering) {
         const outcome = !streamIdToListen ? 'released' : replacedByGuardrail ? 'replaced' : null;
         if (outcome) {
-          await metering.meter.settle({ operationId: meteredOperationId, outcome }).catch((settleError: unknown) => {
+          const operationId = meteredOperationId;
+          await (async () => {
+            const settled = await metering.meter.settle({ operationId, outcome });
+            // The refund runs beside the turn's own settle. On a store with concurrent writers that settle can count
+            // the turn after the refund read it reserved, so the refund finds it consumed and moves nothing; refunded
+            // again, the consumed turn is given back.
+            if (outcome === 'replaced' && settled?.status === 'already_settled' && settled.state === 'consumed') {
+              await metering.meter.settle({ operationId, outcome });
+            }
+          })().catch((settleError: unknown) => {
             this.logger.warn('The spend meter could not settle; its reconciler will', {
               outcome,
               error: settleError instanceof Error ? settleError.message : String(settleError),

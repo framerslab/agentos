@@ -299,6 +299,8 @@ A persisted allowance per account and period, for a product that sells a number 
 
 Each refusal reaches the caller before any model call. The turn settles in the orchestrator, so a caller that stops reading early still has its turn counted.
 
+A caller that reads the stream to its end finds the turn settled: the stream ends after the meter has answered the turn's `settle`, so a `snapshot()` read after the loop counts the turn. A reply an output guardrail blocked ends its stream once the refund is written; a block in the middle of a streamed reply ends the caller's stream at once while the turn goes on inside the runtime, and the turn's own settle then finds the refund in place. The end of the stream waits for the meter's `settle` as its start waits for `reserve`, so the store a meter runs on needs a bound of its own on each call, such as a statement timeout on its Postgres pool.
+
 ### Config
 
 `SqlSpendMeter` runs on a `@framers/sql-storage-adapter` store. Give it a Postgres adapter of its own (or the product's pool), never AgentOS's provenance-wrapped storage adapter.
