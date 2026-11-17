@@ -1130,6 +1130,7 @@ export class PromptEngine implements IPromptEngine {
         const target = Math.max(0, Math.floor(budgets.rag - memoryTokens - Math.max(0, currentTokens - budget)));
         // A target the other context already fits leaves it as it is: nothing is cut, summarised or reported cut.
         if (target < ragTokens) {
+          const retrievedBefore = optimized.retrievedContext;
           const truncate = (): void => {
             optimized.retrievedContext = ragTokens > 0 ? contextStr.substring(0, Math.floor(contextStr.length * (target / ragTokens))) : '';
             modifications.details!.truncatedComponents!.push('retrievedContext');
@@ -1161,6 +1162,17 @@ export class PromptEngine implements IPromptEngine {
             : 0;
           currentTokens = currentTokens - ragTokens + newRagTokens;
           ragTokens = newRagTokens;
+          // The host's note is counted as it is sent: with no retrieved text and no memory block left beside it, it
+          // goes out without the separator, so its count is taken again.
+          const hostNote = hostNoteOf(optimized);
+          if (hostNote) {
+            const noteBefore = await this.estimateTokenCount(
+              hostNoteAsSent(hostNote, { ...optimized, retrievedContext: retrievedBefore }),
+              modelInfo.modelId,
+            );
+            const noteAfter = await this.estimateTokenCount(hostNoteAsSent(hostNote, optimized), modelInfo.modelId);
+            currentTokens = currentTokens - noteBefore + noteAfter;
+          }
         }
       }
       otherAfter = ragTokens;
@@ -1583,13 +1595,20 @@ export class PromptEngine implements IPromptEngine {
     return async (components, _modelInfo, _selectedElements, _config, _estimateTokenCountFn) => {
       let promptString = "";
       if (components.systemPrompts) promptString += components.systemPrompts.map(p=>p.content).join("\n") + "\n\n";
-      if (components.conversationHistory) {
-        promptString += components.conversationHistory.map(m => `${m.role}: ${typeof m.content === 'string' ? m.content : JSON.stringify(m.content)}`).join("\n") + "\n\n";
-      }
+      const history = components.conversationHistory ?? [];
+      const lineOf = (m: Message): string => `${m.role}: ${typeof m.content === 'string' ? m.content : JSON.stringify(m.content)}`;
       // The host's note and the retrieved text (the memory block first, when one was given) go in front of the
-      // person's words as a note from the application.
+      // person's words as a note from the application. With no new input the words are the history's newest message
+      // when it is the person's, and the note goes in front of that line; the stored message is not changed.
       const noteText = noteTextOf(components);
+      const wordsInHistory =
+        Boolean(noteText) && !components.userInput && history[history.length - 1]?.role === MessageRole.USER;
+      const earlier = wordsInHistory ? history.slice(0, -1) : history;
+      if (components.conversationHistory && (!wordsInHistory || earlier.length > 0)) {
+        promptString += earlier.map(lineOf).join("\n") + "\n\n";
+      }
       if (noteText) promptString += `${applicationNoteOf(noteText)}\n\n`;
+      if (wordsInHistory) promptString += `${lineOf(history[history.length - 1])}\n\n`;
       if (components.userInput) promptString += `user: ${components.userInput}\nassistant:`;
       return promptString;
     };
