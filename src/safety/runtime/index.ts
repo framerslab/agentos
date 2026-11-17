@@ -80,6 +80,14 @@ export {
   openAITranscriptionPricing,
 } from '../../core/llm/providers/implementations/openaiPricing.js';
 export type { OpenAIModelPrice } from '../../core/llm/providers/implementations/openaiPricing.js';
+// The OpenAI models OpenAI has shut down or set a shutdown day for, each with its replacement, so a host can refuse or
+// move a call before it reserves for it.
+export {
+  OPENAI_MODEL_SHUTDOWNS,
+  openAIModelShutdown,
+  retiredOpenAIModel,
+} from '../../core/llm/providers/implementations/openaiRetirements.js';
+export type { OpenAIModelShutdown } from '../../core/llm/providers/implementations/openaiRetirements.js';
 // Claude's prices in the same shape, from the catalog module, which loads no provider either.
 export { anthropicModelPricing } from '../../core/llm/providers/implementations/anthropicCatalog.js';
 export type { AnthropicModelPrice } from '../../core/llm/providers/implementations/anthropicCatalog.js';

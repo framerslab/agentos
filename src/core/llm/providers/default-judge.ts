@@ -18,7 +18,14 @@ export interface JudgeSelection {
   effort: EffortLevel;
 }
 
-const DEFAULT: JudgeSelection = { provider: 'openai', model: 'gpt-5.6', effort: 'max' };
+/**
+ * The code default. `gpt-6.2-sol` is the Sol model that succeeds `gpt-5.6` (the alias of `gpt-5.6-sol`) at half its
+ * price: $2 input and $10 output per 1M tokens against $4 and $20 (https://developers.openai.com/api/docs/pricing, read
+ * 2026-11-17; Sol 5.6's rate is a promotion that ends 2026-11-30). A judge call sends `temperature`, a JSON response
+ * format and an effort; OpenAIProvider drops the temperature for the GPT-6 family and sends `max` as `xhigh` on Chat
+ * Completions, which `gpt-6.2-sol` takes.
+ */
+const DEFAULT: JudgeSelection = { provider: 'openai', model: 'gpt-6.2-sol', effort: 'max' };
 
 /**
  * Resolve the default judge selection.

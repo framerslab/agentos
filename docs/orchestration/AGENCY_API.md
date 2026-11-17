@@ -315,7 +315,7 @@ Each seat keeps the default provider failover. When a seat's call fails with a
 retryable error (HTTP 401, 402, 403, 429, 500, 502, 503, 504 or 529, a network
 error or a timeout), the call is retried on the providers whose keys are in the
 environment. With no `policyTier` set, the order and models are: OpenAI
-`gpt-5.6-sol`, Anthropic `claude-sonnet-5-5` (effort `low`), OpenRouter `openai/gpt-5.6-sol`,
+`gpt-6.2-sol`, Anthropic `claude-sonnet-5-5` (effort `low`), OpenRouter `openai/gpt-5.6-sol`,
 Gemini `gemini-3.1-pro-preview`; the seat's own provider is skipped. The
 seat's result and its `agentCalls` record then name the provider and model
 that answered, and the record carries `fallback`. To pin every seat and the chair to their
@@ -1097,7 +1097,7 @@ const qualityGated = agency({
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `model` | `string` | `'gpt-5.6'` | Judge model. The default comes from the central judge resolver; `AGENTOS_JUDGE_MODEL` overrides it. |
+| `model` | `string` | `'gpt-6.2-sol'` | Judge model. The default comes from the central judge resolver; `AGENTOS_JUDGE_MODEL` overrides it. |
 | `provider` | `string` | `'openai'` | Judge provider (`AGENTOS_JUDGE_PROVIDER` overrides the default). Pinning a provider other than `openai` requires an explicit `model`. |
 | `effort` | `string` | `'max'` | Reasoning effort. The default applies only when the resolver also chose the model; a caller-pinned `model` gets no effort unless one is passed. |
 | `criteria` | `string` | `'Evaluate whether this action is safe, relevant, and appropriate.'` | Custom rubric the judge evaluates against. |

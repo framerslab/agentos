@@ -23,12 +23,14 @@ import {
   openAiReasoningCapabilities,
   openAiReasoningContextWindow,
 } from '../implementations/OpenAIProvider';
+import { openAIModelPricing } from '../implementations/openaiPricing';
 
 const MODEL_IDS = [
+  'gpt-6.2-astra', 'gpt-6.2-sol', 'gpt-6.1-terra',
   'gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-6.1-sol',
   'gpt-5.6-sol', 'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.1',
   'o3', 'o4-mini', 'o3-mini', 'o3-pro', 'o1-mini', 'gpt-5-pro', 'gpt-5.3-chat-latest',
-  'gpt-4o', 'gpt-4o-2024-05-13', 'text-embedding-3-large',
+  'gpt-4o', 'gpt-4o-2024-05-13', 'gpt-4.1-nano', 'chatgpt-4o-latest', 'text-embedding-3-large',
 ];
 
 function mockModelsResponse(): Response {
@@ -103,7 +105,7 @@ describe('OpenAI model catalog mapping', () => {
     const toolCapable = (await provider.listAvailableModels({ capability: 'tool_use' })).map(m => m.modelId);
     // Every GPT-6 tool call, streamed or not, goes to /v1/responses.
     expect(toolCapable).toEqual(expect.arrayContaining([
-      'gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.5', 'o3', 'o4-mini', 'gpt-4o',
+      'gpt-6.2-astra', 'gpt-6.2-sol', 'gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.5', 'o3', 'gpt-4o',
     ]));
     // Responses-only models list as chat only.
     for (const id of ['o3-pro', 'gpt-5-pro']) {
@@ -111,12 +113,10 @@ describe('OpenAI model catalog mapping', () => {
     }
   });
 
-  it('grants vision to image-capable reasoning models and withholds it from o3-mini', async () => {
+  it('grants vision to image-capable reasoning models', async () => {
     expect((await provider.getModelInfo('gpt-6-astra'))!.capabilities).toContain('vision_input');
-    expect((await provider.getModelInfo('o4-mini'))!.capabilities).toContain('vision_input');
-    const o3mini = await provider.getModelInfo('o3-mini');
-    expect(o3mini!.capabilities).toContain('tool_use');
-    expect(o3mini!.capabilities).not.toContain('vision_input');
+    expect((await provider.getModelInfo('gpt-6.2-sol'))!.capabilities).toContain('vision_input');
+    expect((await provider.getModelInfo('o3'))!.capabilities).toContain('vision_input');
   });
 
   it('lists Responses-only GPT-5 models as chat only', async () => {
@@ -129,19 +129,32 @@ describe('OpenAI model catalog mapping', () => {
     const ids = (await provider.listAvailableModels()).map(m => m.modelId);
     expect(ids).not.toContain('o3-pro');
     expect(ids).not.toContain('o1-mini');
-    expect(ids).toEqual(expect.arrayContaining(['o3', 'o3-mini', 'o4-mini']));
+    expect(ids).toEqual(expect.arrayContaining(['o3']));
+  });
+
+  it('leaves out the models OpenAI has shut down, even when a listing names them', async () => {
+    // OpenAI shut down o3-mini, o4-mini and gpt-4.1-nano on 2026-10-23 and
+    // chatgpt-4o-latest on 2026-02-17, and the gpt-4o model page marks the
+    // 2024-05-13 snapshot shut down: a call to any of them answers 404.
+    const ids = (await provider.listAvailableModels()).map(m => m.modelId);
+    for (const retired of ['o3-mini', 'o4-mini', 'gpt-4.1-nano', 'chatgpt-4o-latest', 'gpt-4o-2024-05-13']) {
+      expect(ids).not.toContain(retired);
+      expect(await provider.getModelInfo(retired)).toBeUndefined();
+    }
+    // A model with a shutdown day still to come is listed until that day.
+    expect(ids).toEqual(expect.arrayContaining(['o3', 'gpt-5-pro', 'gpt-5.1', 'gpt-4o']));
   });
 
   it('gives reasoning models a context window', async () => {
     expect((await provider.getModelInfo('gpt-6-astra'))!.contextWindowSize).toBe(1050000);
     expect((await provider.getModelInfo('gpt-5.4-mini'))!.contextWindowSize).toBe(400000);
-    expect((await provider.getModelInfo('o4-mini'))!.contextWindowSize).toBe(200000);
+    expect((await provider.getModelInfo('o3'))!.contextWindowSize).toBe(200000);
     expect((await provider.getModelInfo('gpt-5.3-chat-latest'))!.contextWindowSize).toBe(128000);
   });
 
   it('includes the o-series in the listing', async () => {
     const ids = (await provider.listAvailableModels()).map(m => m.modelId);
-    expect(ids).toEqual(expect.arrayContaining(['o3', 'o4-mini']));
+    expect(ids).toEqual(expect.arrayContaining(['o3']));
   });
 
   it('reports ModelInfo prices per 1M tokens', async () => {
@@ -179,13 +192,42 @@ describe('OpenAI model catalog mapping', () => {
     });
   });
 
-  it('keeps a snapshot that has its own row off the alias rate', async () => {
+  it('lists gpt-6.2-astra at $8 / $40 and gpt-6.2-sol at $2 / $10 per 1M, with a 1.05M window', async () => {
+    // developers.openai.com/api/docs/pricing and the two model pages, read
+    // 2026-11-17. Before these rows the two models listed at 0 and metered
+    // costUSD undefined.
+    expect(await provider.getModelInfo('gpt-6.2-astra')).toMatchObject({
+      pricePer1MTokensInput: 8,
+      pricePer1MTokensOutput: 40,
+      contextWindowSize: 1050000,
+      capabilities: ['chat', 'json_mode', 'tool_use', 'vision_input'],
+    });
+    expect(await provider.getModelInfo('gpt-6.2-sol')).toMatchObject({
+      pricePer1MTokensInput: 2,
+      pricePer1MTokensOutput: 10,
+      contextWindowSize: 1050000,
+      capabilities: ['chat', 'json_mode', 'tool_use', 'vision_input'],
+    });
+    expect(openAIModelPricing('gpt-6.2-astra')?.cachedInput).toBeCloseTo(0.0004, 10);
+    expect(openAIModelPricing('gpt-6.2-sol')?.cachedInput).toBeCloseTo(0.0001, 10);
+  });
+
+  it('prices gpt-6.1-terra at $1 / $5 and gpt-5-pro at $15 / $120 per 1M', async () => {
+    expect(await provider.getModelInfo('gpt-6.1-terra')).toMatchObject({
+      pricePer1MTokensInput: 1,
+      pricePer1MTokensOutput: 5,
+    });
+    expect(await provider.getModelInfo('gpt-5-pro')).toMatchObject({
+      pricePer1MTokensInput: 15,
+      pricePer1MTokensOutput: 120,
+    });
+  });
+
+  it('keeps a snapshot that has its own row off the alias rate', () => {
     // gpt-4o-2024-05-13 kept its $5 / $15 launch price; the dated-snapshot
     // fallback alone would price it at the gpt-4o alias rate of $2.50 / $10.
-    expect(await provider.getModelInfo('gpt-4o-2024-05-13')).toMatchObject({
-      pricePer1MTokensInput: 5,
-      pricePer1MTokensOutput: 15,
-    });
+    // OpenAI has shut it down, so it is priced only for a usage record.
+    expect(openAIModelPricing('gpt-4o-2024-05-13')).toEqual({ input: 0.005, output: 0.015 });
   });
 
   it("prices gpt-5.6-sol at OpenAI's first-party rate", async () => {
@@ -236,7 +278,7 @@ describe('OpenAI cost metering', () => {
           created: 1,
           // OpenAI names the dated snapshot that served the call, and usage is
           // costed from this id.
-          model: 'o4-mini-2025-04-16',
+          model: 'gpt-5.4-mini-2026-03-17',
           choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
           usage: { prompt_tokens: 1000, completion_tokens: 1000, total_tokens: 2000 },
         }),
@@ -245,9 +287,9 @@ describe('OpenAI cost metering', () => {
     const provider = new OpenAIProvider();
     await provider.initialize({ apiKey: 'sk-test-key' });
 
-    const res = await provider.generateCompletion('o4-mini', [{ role: 'user', content: 'hi' }], {});
+    const res = await provider.generateCompletion('gpt-5.4-mini', [{ role: 'user', content: 'hi' }], {});
 
-    // o4-mini is $1.10 in and $4.40 out per 1M, so 1K tokens each is $0.0055.
-    expect(res.usage?.costUSD).toBeCloseTo(0.0055, 6);
+    // gpt-5.4-mini is $0.75 in and $4.50 out per 1M, so 1K tokens each is $0.00525.
+    expect(res.usage?.costUSD).toBeCloseTo(0.00525, 6);
   });
 });

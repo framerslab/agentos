@@ -42,6 +42,13 @@ export const PROVIDER_DEFAULTS: Record<string, ProviderDefaults> = {
     cheap: 'MiniMax-M3.1-Flash',
   },
   openai: {
+    // gpt-4o ($2.50 input / $10 output per 1M) and gpt-4o-mini ($0.15 / $0.60)
+    // serve and stay the defaults: they take temperature, stop and the
+    // sampling penalties, and run with no reasoning step. OpenAI has
+    // deprecated both and ends their dated snapshots on 2027-01-14
+    // (developers.openai.com/api/docs/deprecations, read 2026-11-17, which
+    // names gpt-6-luna as the replacement; whether the bare aliases end the
+    // same day is not stated). These two move before that day.
     text: 'gpt-4o',
     image: OPENAI_IMAGE_GENERATION_MODEL,
     embedding: 'text-embedding-3-small',

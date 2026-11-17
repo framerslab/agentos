@@ -39,6 +39,12 @@
  *   identically to the rest of the family.
  * Every 5.6/6 id probed rejects `in_memory` with "This model is compatible
  * only with 24h extended prompt caching", hence their ONLY_24H membership.
+ *
+ * 2026-11-17 probe (chat.completions): `gpt-6.2-sol`, `gpt-6.2-astra` and
+ * `gpt-6-luna` answered HTTP 200 to `prompt_cache_options: {ttl: '30m'}` and
+ * to `prompt_cache_retention: '24h'`, and HTTP 400 "This model is compatible
+ * only with 24h extended prompt caching" to `'in_memory'`; all three join the
+ * three lists below.
  */
 
 import { sha256Hex } from '../../utils/sha256';
@@ -49,6 +55,7 @@ export type OpenAiCacheRetention = 'in_memory' | '24h' | '30m';
 /** Families that accept `prompt_cache_options.ttl: '30m'`. */
 const TTL_30M_FAMILIES = [
   'gpt-5.6', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-6-astra',
+  'gpt-6.2-sol', 'gpt-6.2-astra', 'gpt-6-luna',
 ] as const;
 
 /**
@@ -66,6 +73,7 @@ const TTL_30M_FAMILIES = [
 const TTL_30M_ONLY_FAMILIES: readonly string[] = [];
 
 const RETENTION_24H_FAMILIES = [
+  'gpt-6.2-sol', 'gpt-6.2-astra', 'gpt-6-luna',
   'gpt-6-astra',
   'gpt-5.6', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna',
   'gpt-5.5', 'gpt-5.5-pro', 'gpt-5.4', 'gpt-5.2',
@@ -76,6 +84,7 @@ const RETENTION_24H_FAMILIES = [
 const ONLY_24H_FAMILIES = [
   'gpt-5.5', 'gpt-5.5-pro',
   'gpt-5.6', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-6-astra',
+  'gpt-6.2-sol', 'gpt-6.2-astra', 'gpt-6-luna',
 ] as const;
 
 const SNAPSHOT_SUFFIX = /^-\d{4}-\d{2}-\d{2}$/;

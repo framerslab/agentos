@@ -79,10 +79,10 @@ describe('resolveFallbackChain', () => {
 
   it('drops a policy-default suffix entry naming the failed first model, keeps a caller entry naming it', () => {
     const chain = resolveFallbackChain(
-      [{ provider: 'openai', model: 'gpt-5.6-sol' }, ...buildPolicyAwareFallbackChain('mature')],
-      { primary: { provider: 'openai', model: 'gpt-5.6-sol' } },
+      [{ provider: 'openai', model: 'gpt-6.2-sol' }, ...buildPolicyAwareFallbackChain('mature')],
+      { primary: { provider: 'openai', model: 'gpt-6.2-sol' } },
     );
-    const openai = chain.filter((e) => e.provider === 'openai' && e.model === 'gpt-5.6-sol');
+    const openai = chain.filter((e) => e.provider === 'openai' && e.model === 'gpt-6.2-sol');
     expect(openai).toHaveLength(1);
     expect(openai[0]!.origin).toBeUndefined();
   });
