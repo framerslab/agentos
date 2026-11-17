@@ -252,6 +252,12 @@ export interface AgentOSOrchestratorGuards {
    * Unset when no output guardrail sets `config.evaluateToolCalls`.
    */
   toolCallGate?: GuardrailToolCallGate;
+  /**
+   * The attempt the spend meter's `reserve()` answered for the turn's `operationId`. The turn's own settle names it,
+   * so a turn that ends after its operation was released and reserved again (a reply an output guardrail blocked and
+   * the caller retried) leaves the newer reservation to the retry. Read by `orchestrateTurn` alone.
+   */
+  spendAttempt?: number;
 }
 
 type ResolvedAgentOSOrchestratorConfig = Required<
@@ -533,7 +539,7 @@ export class AgentOSOrchestrator {
       },
     });
 
-    const run = async () => this._processTurnInternal(agentOSStreamId, input, guards.toolCallGate);
+    const run = async () => this._processTurnInternal(agentOSStreamId, input, guards.toolCallGate, guards.spendAttempt);
 
     const promise = rootSpan ? runWithSpanContext(rootSpan, run) : run();
 
@@ -761,7 +767,8 @@ export class AgentOSOrchestrator {
   private async _processTurnInternal(
     agentOSStreamId: StreamId,
     input: AgentOSInput,
-    toolCallGate?: GuardrailToolCallGate
+    toolCallGate?: GuardrailToolCallGate,
+    spendAttempt?: number
   ): Promise<void> {
     const turnStartedAt = Date.now();
     let turnMetricsStatus: 'ok' | 'error' = 'ok';
@@ -1230,7 +1237,12 @@ export class AgentOSOrchestrator {
       if (spendMeter && meteredOperationId) {
         const outcome: SpendOutcome = keepStreamContextActive || turnMetricsStatus === 'ok' || outputReached ? 'consumed' : 'released';
         try {
-          await spendMeter.settle({ operationId: meteredOperationId, outcome, usage: outcome === 'consumed' ? turnMetricsUsage : undefined });
+          await spendMeter.settle({
+            operationId: meteredOperationId,
+            outcome,
+            ...(spendAttempt === undefined ? {} : { attempt: spendAttempt }),
+            usage: outcome === 'consumed' ? turnMetricsUsage : undefined,
+          });
         } catch (settleError) {
           console.warn(`AgentOSOrchestrator: the spend meter could not settle stream ${agentOSStreamId}; its reconciler will.`, settleError);
         }

@@ -129,7 +129,7 @@ import {
   type RequiredGuardrailReport,
   type RequiredGuardrailSpec,
 } from '../safety/guardrails/requiredGuardrails';
-import { SpendMeterUnavailableError, type ISpendMeter, type SpendDenyReason } from '../safety/runtime/SpendMeter';
+import { SpendMeterUnavailableError, type ISpendMeter, type SpendDenyReason, type SpendSettleRequest } from '../safety/runtime/SpendMeter';
 import {
   isRefusedStructuredReply,
   recheckStructuredReply,
@@ -2261,6 +2261,9 @@ export class AgentOS implements IAgentOS {
     // operation id or a meter that cannot answer ends the request here with an error chunk and no model call.
     const metering = this.config.spendMeter;
     let meteredOperationId: string | undefined;
+    // the attempt reserve() answered: every settle of this request names it, so none reaches a later reservation of
+    // the operation, such as the caller's retry of a reply an output guardrail blocked while its turn still runs
+    let meteredAttempt: number | undefined;
     if (metering) {
       const refuse = (code: GMIErrorCode, message: string, details: Record<string, unknown>): AgentOSErrorChunk => ({
         type: AgentOSResponseChunkType.ERROR,
@@ -2293,6 +2296,7 @@ export class AgentOS implements IAgentOS {
           return;
         }
         meteredOperationId = operationId;
+        meteredAttempt = reservation.attempt;
       } catch (meterError) {
         this.logger.error('The spend meter could not reserve; the request was not run', {
           error: meterError instanceof Error ? meterError.message : String(meterError),
@@ -2324,8 +2328,12 @@ export class AgentOS implements IAgentOS {
         languageNegotiation,
       } as any;
       const toolCallGate = createToolCallGate(guardrailServices, guardrailContext);
-      streamIdToListen = toolCallGate
-        ? await this.agentOSOrchestrator.orchestrateTurn(turnInput, { toolCallGate })
+      const spendAttempt = meteredOperationId ? meteredAttempt : undefined;
+      streamIdToListen = toolCallGate || spendAttempt !== undefined
+        ? await this.agentOSOrchestrator.orchestrateTurn(turnInput, {
+            ...(toolCallGate ? { toolCallGate } : {}),
+            ...(spendAttempt !== undefined ? { spendAttempt } : {}),
+          })
         : await this.agentOSOrchestrator.orchestrateTurn(turnInput);
       await this.streamingManager.registerClient(streamIdToListen, bridge);
       this.logger.debug?.('Bridge registered', { bridgeId: bridge.id, streamId: streamIdToListen });
@@ -2444,14 +2452,14 @@ export class AgentOS implements IAgentOS {
       if (meteredOperationId && metering) {
         const outcome = !streamIdToListen ? 'released' : replacedByGuardrail ? 'replaced' : null;
         if (outcome) {
-          const operationId = meteredOperationId;
+          const request: SpendSettleRequest = { operationId: meteredOperationId, outcome, ...(meteredAttempt === undefined ? {} : { attempt: meteredAttempt }) };
           await (async () => {
-            const settled = await metering.meter.settle({ operationId, outcome });
+            const settled = await metering.meter.settle(request);
             // The refund runs beside the turn's own settle. On a store with concurrent writers that settle can count
             // the turn after the refund read it reserved, so the refund finds it consumed and moves nothing; refunded
             // again, the consumed turn is given back.
             if (outcome === 'replaced' && settled?.status === 'already_settled' && settled.state === 'consumed') {
-              await metering.meter.settle({ operationId, outcome });
+              await metering.meter.settle(request);
             }
           })().catch((settleError: unknown) => {
             this.logger.warn('The spend meter could not settle; its reconciler will', {
