@@ -536,8 +536,9 @@ export interface MemoryRecallConfig {
    * rerank (default 1500 for `local`, 10000 for `llm`); `maxCandidates` is
    * how many of the best candidates are scored (default 20). Both are
    * positive integers, and `timeoutMs` is at most 2,147,483,647, the longest
-   * delay a timer keeps (a timer set past it runs after 1 ms). After three failures or timeouts in a row the rerank
-   * is skipped for 60 seconds. Under `'dense'` the reranked candidates'
+   * delay a timer keeps (a timer set past it runs after 1 ms). The local model's pass runs on the calling thread, so
+   * its deadline cannot fire while it runs: a pass that ends after `timeoutMs` counts as a timeout and its order is
+   * not used. After three failures or timeouts in a row the rerank is skipped for 60 seconds. Under `'dense'` the reranked candidates'
    * scores become `0.7 × retrieval score + 0.3 × rerank score` and order
    * them; under `'hybrid'` they are ordered by `0.7 × fused score / the
    * best fused score of the cut's recalled candidates (at most 1) + 0.3 ×

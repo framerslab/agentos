@@ -127,6 +127,34 @@ describe('the library\'s browser entry', () => {
     expect(Object.keys(entry)).toEqual(expect.arrayContaining(['readCsv', 'readHtml']));
   });
 
+  it('names the tag grammar, whose module reaches the word rule and the fuzzy index alone', async () => {
+    const entry = await import('../browser.js');
+    expect(Object.keys(entry)).toEqual(
+      expect.arrayContaining([
+        'TAG_MAX_CHARS',
+        'TAGS_MAX',
+        'TAG_SUGGESTIONS_MAX',
+        'isTag',
+        'normalizeTag',
+        'tagKey',
+        'canonicalTag',
+        'classifyLegacyTag',
+        'compareCodePoints',
+        'tagKeysOf',
+        'tagVocabulary',
+        'preferredTagOrder',
+        'resolveTag',
+        'renameTag',
+        'mergeTags',
+      ]),
+    );
+    const tags = resolve(here, '../tags.ts');
+    const reached = reach(tags);
+    expect(reached.get(tags)?.sort()).toEqual(['../rag/search/FuzzyIndex.js', './tokens.js']);
+    expect(outside(reached)).toEqual([]);
+    expect([...reach(ENTRY).keys()]).toContain(tags);
+  });
+
   it('names a page\'s storage: the key-value store over IndexedDB, in memory or over a SQL table, the outbox and the comparison of lists', async () => {
     const entry = await import('../browser.js');
     expect(Object.keys(entry).sort()).toEqual(
