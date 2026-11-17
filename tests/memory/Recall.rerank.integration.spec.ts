@@ -386,6 +386,72 @@ describe('rerank in a turn', () => {
     },
   );
 
+  it.each(['dense', 'hybrid'] as const)(
+    'under %s every recall of a reranker whose passes end late keeps the order of rerank none, the back-off skips the provider until backoffMs has passed, and then it is called again',
+    async (retrieval) => {
+      // A local provider whose every pass holds the thread past the deadline, as on a slow host; `holdMs` set to 0
+      // makes it a fast host again.
+      let calls = 0;
+      let holdMs = 120;
+      const local: RecallRerankProvider = {
+        providerId: 'local',
+        isAvailable: async () => true,
+        rerank: (input) => {
+          calls += 1;
+          return new Promise((resolve) => {
+            setImmediate(() => {
+              const until = performance.now() + holdMs;
+              while (performance.now() < until) {
+                // Holds the thread, as a forward pass does.
+              }
+              resolve(reversed(input as Docs) as never);
+            });
+          });
+        },
+      };
+      const query = 'which switchback had the best view';
+      const order = (run: { retrieved: Array<{ id: string }> }) => run.retrieved.map((t) => t.id);
+      const plain = await memoryWith({ retrieval }, new WordHashEmbedder());
+      const slow = await memoryWith({ retrieval }, new WordHashEmbedder());
+      for (const mem of [plain, slow]) for (let i = 0; i < 8; i++) await plant(mem, `t${i}`, NOTE(i), at(i));
+      await rerankWith(slow.manager, local, { timeoutMs: 50 });
+      // Each memory recalls as often as the other, so their stores stay alike.
+      const both = async () => [await plain.manager.retrieve(query, NEUTRAL, { scopes: U1 }), await slow.manager.retrieve(query, NEUTRAL, { scopes: U1 })] as const;
+
+      for (let i = 0; i < 3; i++) {
+        const [a, b] = await both();
+        expect(a.retrieved.length).toBeGreaterThan(2);
+        expect(b.diagnostics.reranker).toEqual({ provider: 'none', reason: 'timeout' });
+        expect(order(b)).toEqual(order(a));
+      }
+      expect(calls).toBe(3);
+      expect(events('memory.recall.rerank_skipped').map((e) => e.reason)).toEqual(['timeout', 'timeout', 'timeout', 'backoff']);
+
+      // The fourth recall is skipped for the back-off: the provider is not called and the order is that of rerank none.
+      const backedOffAt = Date.now();
+      const [a4, b4] = await both();
+      expect(b4.diagnostics.reranker).toEqual({ provider: 'none', reason: 'backoff' });
+      expect(order(b4)).toEqual(order(a4));
+      expect(calls).toBe(3);
+
+      // Still skipped a millisecond before backoffMs has passed.
+      vi.setSystemTime(backedOffAt + RERANK_DEFAULTS.backoffMs - 1);
+      const [, b5] = await both();
+      expect(b5.diagnostics.reranker).toEqual({ provider: 'none', reason: 'backoff' });
+      expect(calls).toBe(3);
+
+      // Once backoffMs has passed the provider is called again, and an answer inside the deadline orders the recall.
+      vi.setSystemTime(backedOffAt + RERANK_DEFAULTS.backoffMs);
+      holdMs = 0;
+      const [, b6] = await both();
+      expect(calls).toBe(4);
+      expect(b6.diagnostics.reranker).toMatchObject({ provider: 'local', model: 'stub-model', revision: 'r1', candidates: expect.any(Number) });
+      expect(events('memory.recall.rerank_skipped')).toHaveLength(4);
+      await plain.close();
+      await slow.close();
+    },
+  );
+
   it('under dense a rerank that answers blends each recalled score with its rerank score at 0.7 and 0.3, and orders the recall by the blend', async () => {
     // The judge's favourite is the trace the plain recall ranks last, named once that recall has run.
     let favourite = '';
