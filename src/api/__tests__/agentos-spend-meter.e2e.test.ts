@@ -254,6 +254,37 @@ describe('the spend meter on processRequest', () => {
     expect(await meter.snapshot('person-1')).toMatchObject({ used: 0, reserved: 0, remaining: 5 });
   });
 
+  it('leaves a retry of a blocked reply to its own settle when the blocked turn ends during it', async () => {
+    const meter = await sqlMeter(5);
+    const settle = vi.spyOn(meter, 'settle');
+    const gate: IGuardrailService = {
+      config: { evaluateStreamingChunks: true },
+      evaluateOutput: async ({ chunk }) =>
+        chunk.type === AgentOSResponseChunkType.TEXT_DELTA ? { action: GuardrailAction.BLOCK, reason: 'the reply crossed a rule', reasonCode: 'NEVER_DO' } : null,
+    };
+    booted = await boot({ meter }, { guardrailService: gate });
+    let finishBlocked!: () => void;
+    let finishRetry!: () => void;
+    provider.replies.push([{ responseTextDelta: 'You will' }, new Promise<void>((resolve) => { finishBlocked = resolve; }), ...reply(' pass for sure.')]);
+    provider.replies.push([new Promise<void>((resolve) => { finishRetry = resolve; }), { isFinal: true, choices: [], error: { message: 'rate limited', type: 'rate_limit' } }]);
+    const blocked = await collect(booted, { operationId: 'op-retried' });
+    expect(errorOf(blocked)?.code).toBe('NEVER_DO');
+    // the refund released the operation, so the person's retry of it reserves again while the blocked turn runs on
+    const retried = collect(booted, { operationId: 'op-retried', sessionId: 's-metered-retry' });
+    await vi.waitFor(async () => {
+      const row = await db!.get<{ state: string; attempts: number | string }>('SELECT state, attempts FROM agentos_spend_reservations WHERE operation_id = ?', ['op-retried']);
+      expect({ state: row?.state, attempts: Number(row?.attempts) }).toEqual({ state: 'reserved', attempts: 2 });
+    });
+    finishBlocked();
+    await vi.waitFor(() => expect(settle.mock.calls.some(([request]) => request.outcome === 'consumed')).toBe(true));
+    const blockedTurnSettle = settle.mock.results[settle.mock.calls.findIndex(([request]) => request.outcome === 'consumed')];
+    await expect(blockedTurnSettle?.value).resolves.toMatchObject({ status: 'already_settled' });
+    // the retry fails before any output, so it is released, and nothing is charged for either attempt
+    finishRetry();
+    expect(errorOf(await retried)?.code).toBe(GMIErrorCode.LLM_PROVIDER_ERROR);
+    expect(await meter.snapshot('person-1')).toMatchObject({ used: 0, reserved: 0, remaining: 5 });
+  });
+
   it('refunds a blocked reply again when the turn counted it between the refund read and its write', async () => {
     const meter = await sqlMeter(5);
     const settle = meter.settle.bind(meter);
