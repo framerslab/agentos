@@ -126,6 +126,13 @@ export interface SpendSettleRequest {
    * `released` frees the whole reservation, and `replaced` gives back what the consumed settle took.
    */
   units?: number;
+  /**
+   * The `attempt` {@link ISpendMeter.reserve} answered for the reservation this settle ends. Given, the settle moves
+   * the operation's reservation only while it is still that attempt: once the operation was released and reserved
+   * again, a late settle of the earlier attempt answers `already_settled` in state `released` and leaves the newer
+   * reservation to its own settle. Left out, the settle ends whatever reservation the operation holds.
+   */
+  attempt?: number;
   usage?: SpendUsage;
   now?: number;
 }
