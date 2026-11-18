@@ -212,7 +212,7 @@ Every entry point (`generateText`, [`streamText`](https://github.com/framerslab/
 | Field | Required? | Default | Notes |
 |---|---|---|---|
 | `provider` | no | auto-detected from the environment ([Environment Setup](#environment-setup)) | One of `openai`, `anthropic`, `gemini`, `openrouter`, `requesty`, `groq`, `together`, `mistral`, `xai`, `ollama`, `litellm`, and the CLI bridges `claude-code-cli` and `gemini-cli`. `litellm` is never auto-detected and needs a `model` and an `apiKey`, on the call or in `setDefaultProvider()`, because it has no default model and reads no environment variable ([LiteLLM](../features/LLM_PROVIDERS.md#litellm)). Another OpenAI-compatible service runs through `openai` with `baseUrl`. |
-| `model` | no | provider-specific (`gpt-4o`, `claude-sonnet-4-6`, `gemini-2.5-flash`, `llama3.2` for Ollama, etc.) | Pin explicitly for stability across package upgrades. Use a current model id; retired snapshots return 404. |
+| `model` | no | provider-specific (`gpt-4o`, `claude-sonnet-5-5`, `gemini-2.5-flash`, `llama3.2` for Ollama, etc.) | Pin explicitly for stability across package upgrades. Use a current model id; retired snapshots return 404. |
 | `apiKey` | no | env auto-detect (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.; full chain in [Environment Setup](#environment-setup)) | Pass explicitly for multi-tenant apps and to avoid coupling code to env var names. |
 
 The examples below use the same explicit shape across all three levels. If you would rather rely on the auto-detect chain plus the provider's default model, omit `model` and `apiKey` — the calls still work as long as the env var is set.
@@ -243,7 +243,7 @@ import { streamText } from '@framers/agentos';
 
 const stream = streamText({
   provider: 'anthropic',
-  model: 'claude-sonnet-4-6',
+  model: 'claude-sonnet-5-5',
   apiKey: process.env.ANTHROPIC_API_KEY,
   prompt: 'Write a haiku about distributed systems.',
 });
@@ -304,7 +304,7 @@ const result = await team.generate('Explain how large language models work.');
 console.log(result.text);
 ```
 
-Per-agent overrides: any sub-agent in the `agents` map can declare its own `provider`, `model`, and `apiKey` to route specific roles to specific models (for example, a `gpt-5-mini` reviewer with a `claude-sonnet-4-6` researcher).
+Per-agent overrides: any sub-agent in the `agents` map can declare its own `provider`, `model`, and `apiKey` to route specific roles to specific models (for example, a `gpt-5-mini` reviewer with a `claude-sonnet-5-5` researcher).
 
 ---
 
@@ -365,7 +365,7 @@ console.log('Summary:', summary);
 // ── Step 2: Session that keeps its message history ─────────────────────────
 const coder = agent({
   provider: 'anthropic',
-  model: 'claude-sonnet-4-6',
+  model: 'claude-sonnet-5-5',
   instructions: 'You are an expert TypeScript developer.',
   maxSteps: 4,
 });

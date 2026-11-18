@@ -18,6 +18,7 @@ import { streamObject } from '../../streamObject.js';
 import { streamText, type StreamPart } from '../../streamText.js';
 import { agent } from '../../agent.js';
 import { globalLLMProviderHealth } from '../../../core/safety/LLMProviderHealthRegistry.js';
+import { SelfEvaluateTool } from '../../../cognition/emergent/SelfEvaluateTool.js';
 
 type Json = Record<string, any>;
 type Reply = () => Response;
@@ -1203,6 +1204,132 @@ describe('Claude Haiku 5.5 through the public API', () => {
     expect(body.model).toBe('claude-haiku-5-5');
     expect(body).not.toHaveProperty('temperature');
     expect(body.output_config).toEqual({ effort: 'low' });
+  });
+});
+
+describe('the Anthropic default models through the public API', () => {
+  // A call that names the provider and no model takes Claude Sonnet 5.5, and the cheap default is Claude Haiku 5.5.
+  // Sonnet 5.5 answers temperature, top_p, top_k, a thinking budget, `thinking: disabled` and a forced tool_choice with
+  // a 400; Claude Sonnet 4.6, the default before it, took every one of them. Each case fails on the old default: the
+  // stub has no reply for `claude-sonnet-4-6` or `claude-haiku-4-5-20251001`.
+  it('generateText with no model sends Claude Sonnet 5.5 a request it accepts', async () => {
+    route({ 'claude-sonnet-5-5': [textTurn('claude-sonnet-5-5', 'Hello.')] });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { tools, execute } = weatherTools();
+    try {
+      const result = await generateText({
+        provider: 'anthropic',
+        prompt: 'Say hello.',
+        temperature: 0.2,
+        topP: 0.9,
+        customModelParams: { top_k: 40 },
+        tools,
+        toolChoice: 'required',
+        fallbackProviders: [],
+      });
+
+      expect(result.text).toBe('Hello.');
+      expect(result.provider).toBe('anthropic');
+      const bodies = postedBodies();
+      expect(bodies).toHaveLength(1);
+      const [body] = bodies;
+      expect(body.model).toBe('claude-sonnet-5-5');
+      expect(body).not.toHaveProperty('temperature');
+      expect(body).not.toHaveProperty('top_p');
+      expect(body).not.toHaveProperty('top_k');
+      // No thinking field: the model thinks adaptively, with no budget and no `disabled`.
+      expect(body).not.toHaveProperty('thinking');
+      // The forced choice goes out as `auto`, the one form the model takes.
+      expect(body.tool_choice).toEqual({ type: 'auto' });
+      expect(body.max_tokens).toBeGreaterThan(0);
+      expect(execute).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('streamText with no model streams from Claude Sonnet 5.5, with no temperature on the request', async () => {
+    route({ 'claude-sonnet-5-5': [textTurn('claude-sonnet-5-5', 'Hi.')] });
+
+    const { textStream } = streamText({ provider: 'anthropic', prompt: 'Say hi.', temperature: 0.3, fallbackProviders: [] });
+    let text = '';
+    for await (const chunk of textStream) text += chunk;
+
+    expect(text).toBe('Hi.');
+    const [body] = postedBodies();
+    expect(body.model).toBe('claude-sonnet-5-5');
+    expect(body).not.toHaveProperty('temperature');
+  });
+
+  it('turns thinking off on the default with between_tools, and sends a thinking budget as adaptive thinking', async () => {
+    route({ 'claude-sonnet-5-5': [textTurn('claude-sonnet-5-5', 'One.'), textTurn('claude-sonnet-5-5', 'Two.')] });
+
+    await generateText({ provider: 'anthropic', prompt: 'x', thinking: false, maxTokens: 300, fallbackProviders: [] });
+    await generateText({ provider: 'anthropic', prompt: 'x', thinking: { budgetTokens: 2000 }, maxTokens: 4000, fallbackProviders: [] });
+
+    const [off, on] = postedBodies();
+    expect(off.model).toBe('claude-sonnet-5-5');
+    expect(off.thinking).toEqual({ type: 'between_tools' });
+    expect(off.max_tokens).toBe(300);
+    expect(on.model).toBe('claude-sonnet-5-5');
+    expect(on.thinking?.type).toBe('adaptive');
+    expect(on.thinking).not.toHaveProperty('budget_tokens');
+  });
+
+  it('generateObject with a record schema and no model sends Claude Sonnet 5.5 no forced tool, and parses its JSON reply', async () => {
+    // Claude Sonnet 4.6 took a record schema as a forced tool call. The JSON output format does not carry a record and
+    // Sonnet 5.5 refuses a forced tool_choice, so the schema rides the prompt.
+    route({ 'claude-sonnet-5-5': [textTurn('claude-sonnet-5-5', '{"scores":{"a":1}}')] });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const result = await generateObject({
+        provider: 'anthropic',
+        schema: z.object({ scores: z.record(z.string(), z.number()) }),
+        schemaName: 'scores',
+        prompt: 'Score a.',
+        fallbackProviders: [],
+      });
+
+      expect(result.object).toEqual({ scores: { a: 1 } });
+      const bodies = postedBodies();
+      expect(bodies).toHaveLength(1);
+      expect(bodies[0].model).toBe('claude-sonnet-5-5');
+      expect(['any', 'tool']).not.toContain(bodies[0].tool_choice?.type);
+      expect(bodies[0].tools).toBeUndefined();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('the self-evaluation judge on the cheap default sends Claude Haiku 5.5 its 200-token call with thinking off', async () => {
+    // The judge reads PROVIDER_DEFAULTS.anthropic.cheap and caps its answer at 200 tokens. Haiku 5.5 thinks unless told
+    // not to, and its thinking counts against max_tokens, so the call turns thinking off; it refuses temperature too.
+    const savedOpenAiKey = process.env.OPENAI_API_KEY;
+    // Auto-detection reads an OpenAI key ahead of Anthropic's.
+    delete process.env.OPENAI_API_KEY;
+    route({ 'claude-haiku-5-5': [textTurn('claude-haiku-5-5', '{"relevance":0.9,"clarity":0.8,"accuracy":1,"helpfulness":0.7}')] });
+    try {
+      const tool = new SelfEvaluateTool({
+        config: { autoAdjust: false, adjustableParams: [], maxEvaluationsPerSession: 5 },
+      });
+
+      const result = await tool.execute(
+        { action: 'evaluate', response: 'The capital of France is Paris.', query: 'What is the capital of France?' },
+        { gmiId: 'wire-gmi', personaId: 'wire-persona', userContext: { userId: 'wire-user' }, correlationId: 'wire-default' } as never,
+      );
+
+      expect(result.success).toBe(true);
+      expect((result.output as Json).scores).toEqual({ relevance: 0.9, clarity: 0.8, accuracy: 1, helpfulness: 0.7 });
+      const bodies = postedBodies();
+      expect(bodies).toHaveLength(1);
+      expect(bodies[0].model).toBe('claude-haiku-5-5');
+      expect(bodies[0].max_tokens).toBe(200);
+      expect(bodies[0].thinking).toEqual({ type: 'disabled' });
+      expect(bodies[0]).not.toHaveProperty('temperature');
+    } finally {
+      if (savedOpenAiKey === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = savedOpenAiKey;
+    }
   });
 });
 

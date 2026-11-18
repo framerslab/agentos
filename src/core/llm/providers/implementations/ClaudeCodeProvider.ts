@@ -33,7 +33,7 @@ import { ClaudeCodeProviderError } from '../errors/ClaudeCodeProviderError';
 
 /** Configuration for the Claude Code CLI provider. */
 export interface ClaudeCodeProviderConfig {
-  /** Override the default model. Defaults to `claude-sonnet-4-6`. */
+  /** Override the default model. Defaults to `claude-sonnet-5-5`. */
   defaultModelId?: string;
   /** Subprocess timeout in ms (default 120 000). */
   requestTimeout?: number;
@@ -94,7 +94,7 @@ const CLAUDE_CODE_MODELS: ModelInfo[] = [
     modelId: 'claude-sonnet-5-5',
     providerId: 'claude-code-cli',
     displayName: 'Claude Sonnet 5.5',
-    description: 'Current Sonnet for coding and agentic work',
+    description: 'Current Sonnet for coding and agentic work, and the default for this provider',
     capabilities: ['chat', 'vision_input', 'tool_use'],
     contextWindowSize: 1_000_000,
     inputTokenLimit: 1_000_000,
@@ -102,7 +102,7 @@ const CLAUDE_CODE_MODELS: ModelInfo[] = [
     pricePer1MTokensInput: 0,
     pricePer1MTokensOutput: 0,
     supportsStreaming: true,
-    isDefaultModel: false,
+    isDefaultModel: true,
   },
   {
     modelId: 'claude-sonnet-5',
@@ -122,7 +122,7 @@ const CLAUDE_CODE_MODELS: ModelInfo[] = [
     modelId: 'claude-sonnet-4-6',
     providerId: 'claude-code-cli',
     displayName: 'Claude Sonnet 4.6',
-    description: 'Balanced intelligence, cost and speed, and the default for this provider',
+    description: 'Balanced intelligence, cost and speed; the default before Claude Sonnet 5.5',
     capabilities: ['chat', 'vision_input', 'tool_use'],
     contextWindowSize: 1_000_000,
     inputTokenLimit: 1_000_000,
@@ -130,7 +130,7 @@ const CLAUDE_CODE_MODELS: ModelInfo[] = [
     pricePer1MTokensInput: 0,
     pricePer1MTokensOutput: 0,
     supportsStreaming: true,
-    isDefaultModel: true,
+    isDefaultModel: false,
   },
   // The 2025-05-14 Claude Opus 4 and Sonnet 4 snapshots were retired by
   // Anthropic on 2026-06-15 and return HTTP 404 on the Messages API (probed
@@ -156,7 +156,7 @@ const CLAUDE_CODE_MODELS: ModelInfo[] = [
     modelId: 'claude-sonnet-4-20250514',
     providerId: 'claude-code-cli',
     displayName: 'Claude Sonnet 4',
-    description: 'Retired 2026-06-15 and no longer served. Use claude-sonnet-4-6',
+    description: 'Retired 2026-06-15 and no longer served. Use claude-sonnet-5-5',
     capabilities: ['chat', 'vision_input', 'tool_use'],
     contextWindowSize: 200_000,
     inputTokenLimit: 200_000,
@@ -168,10 +168,24 @@ const CLAUDE_CODE_MODELS: ModelInfo[] = [
     status: 'deprecated',
   },
   {
+    modelId: 'claude-haiku-5-5',
+    providerId: 'claude-code-cli',
+    displayName: 'Claude Haiku 5.5',
+    description: 'Current Haiku for lightweight tasks and high throughput, and the cheap model for this provider',
+    capabilities: ['chat', 'vision_input', 'tool_use'],
+    contextWindowSize: 1_000_000,
+    inputTokenLimit: 1_000_000,
+    outputTokenLimit: 128_000,
+    pricePer1MTokensInput: 0,
+    pricePer1MTokensOutput: 0,
+    supportsStreaming: true,
+    isDefaultModel: false,
+  },
+  {
     modelId: 'claude-haiku-4-5-20251001',
     providerId: 'claude-code-cli',
     displayName: 'Claude Haiku 4.5',
-    description: 'Fastest Claude model — great for lightweight tasks and high throughput',
+    description: 'Previous Haiku, for lightweight tasks and high throughput',
     capabilities: ['chat', 'vision_input', 'tool_use'],
     contextWindowSize: 200_000,
     inputTokenLimit: 200_000,
@@ -246,7 +260,7 @@ export class ClaudeCodeProvider implements IProvider {
    */
   async initialize(config: ClaudeCodeProviderConfig): Promise<void> {
     this.config = {
-      defaultModelId: 'claude-sonnet-4-6',
+      defaultModelId: 'claude-sonnet-5-5',
       requestTimeout: 120_000,
       ...config,
     };
@@ -757,7 +771,7 @@ Each tool call must include "id" (unique string), "name" (tool name), and "argum
       id: responseId ?? `cc-${result.sessionId ?? Date.now()}`,
       object: 'chat.completion',
       created: Date.now(),
-      modelId: modelId ?? this.defaultModelId ?? 'claude-sonnet-4-6',
+      modelId: modelId ?? this.defaultModelId ?? 'claude-sonnet-5-5',
       choices: [{
         index: 0,
         message: { role: 'assistant', content: text },
@@ -781,7 +795,7 @@ Each tool call must include "id" (unique string), "name" (tool name), and "argum
       id: responseId ?? `cc-${result.sessionId ?? Date.now()}`,
       object: 'chat.completion',
       created: Date.now(),
-      modelId: modelId ?? this.defaultModelId ?? 'claude-sonnet-4-6',
+      modelId: modelId ?? this.defaultModelId ?? 'claude-sonnet-5-5',
       choices: [{
         index: 0,
         message: {

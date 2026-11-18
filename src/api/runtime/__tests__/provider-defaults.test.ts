@@ -20,8 +20,18 @@ describe('PROVIDER_DEFAULTS', () => {
   });
 
   it('includes CLI providers with text defaults', () => {
-    expect(PROVIDER_DEFAULTS['claude-code-cli']?.text).toBe('claude-sonnet-4-6');
+    expect(PROVIDER_DEFAULTS['claude-code-cli']?.text).toBe('claude-sonnet-5-5');
     expect(PROVIDER_DEFAULTS['gemini-cli']?.text).toBe('gemini-3.5-flash');
+  });
+
+  it('gives anthropic and claude-code-cli the current Sonnet for text and the current Haiku for cheap', () => {
+    // claude-sonnet-4-6 ($3 / $15 per 1M tokens) and claude-haiku-4-5-20251001
+    // ($1 / $5) cost more than the models that follow them ($2 / $10 and
+    // $0.10 / $0.50; platform.claude.com/docs/en/about-claude/pricing, read
+    // 2026-11-18).
+    for (const id of ['anthropic', 'claude-code-cli']) {
+      expect(PROVIDER_DEFAULTS[id]).toEqual({ text: 'claude-sonnet-5-5', cheap: 'claude-haiku-5-5' });
+    }
   });
 
   it('has image model for image providers', () => {
@@ -231,7 +241,12 @@ describe('resolveModelOption', () => {
 
   it('resolves provider-only for Claude Code CLI', () => {
     const result = resolveModelOption({ provider: 'claude-code-cli' }, 'text');
-    expect(result).toEqual({ providerId: 'claude-code-cli', modelId: 'claude-sonnet-4-6' });
+    expect(result).toEqual({ providerId: 'claude-code-cli', modelId: 'claude-sonnet-5-5' });
+  });
+
+  it('resolves provider-only for Anthropic', () => {
+    const result = resolveModelOption({ provider: 'anthropic' }, 'text');
+    expect(result).toEqual({ providerId: 'anthropic', modelId: 'claude-sonnet-5-5' });
   });
 
   it('throws for unknown provider', () => {

@@ -51,11 +51,13 @@ export interface AnthropicCacheCreationBreakdown {
  * (https://platform.claude.com/docs/en/about-claude/pricing) on 2026-10-18,
  * and every row's input, output, cache-write and cache-hit rates, with the
  * Haiku 5.5 long-context rates, were read against it again on 2026-11-04.
+ * The Claude Fable 5.2 row was read from it on 2026-11-18.
  * A cache hit costs 0.1x the input price except where a row sets
- * `pricePer1MTokensCacheRead`: Opus 5.5 and Sonnet 5.5 (0.05x) and Fable 5.1
- * (0.025x) differ, and Fable 5 states its standard 0.1x rate explicitly so
- * the Fable 5.1 rate is not mistaken for it. Cache writes cost 1.25x the input
- * price at the 5-minute TTL and 2x at the 1-hour TTL on every model; see
+ * `pricePer1MTokensCacheRead`: Opus 5.5 and Sonnet 5.5 (0.05x) and Fable 5.2
+ * and 5.1 (0.025x) differ, and Fable 5 states its standard 0.1x rate
+ * explicitly so the later Fable rate is not mistaken for it. Cache writes
+ * cost 1.25x the input price at the 5-minute TTL and 2x at the 1-hour TTL on
+ * every model; see
  * {@link estimateAnthropicCostUSD}.
  *
  * `outputTokenLimit` is the model's real max output ceiling, surfaced via
@@ -63,8 +65,8 @@ export interface AnthropicCacheCreationBreakdown {
  * not the per-request default: when a caller omits `maxTokens`, the request
  * falls back to `config.defaultMaxTokens`, but a per-call `maxTokens` is
  * clamped to it via `clampAnthropicMaxTokens` in AnthropicProvider. Anthropic's
- * limits: Opus 5.5, Opus 5, Opus 4.6-4.8, Fable 5.1, Fable 5, Sonnet 5.5,
- * Sonnet 5, Sonnet 4.6 and Haiku 5.5 take 128K output with a 1M context; Opus
+ * limits: Opus 5.5, Opus 5, Opus 4.6-4.8, Fable 5.2, Fable 5.1, Fable 5,
+ * Sonnet 5.5, Sonnet 5, Sonnet 4.6 and Haiku 5.5 take 128K output with a 1M context; Opus
  * 4.5, Sonnet 4.5 and Haiku 4.5 take 64K output with a 200K context.
  */
 export const ANTHROPIC_MODELS: AnthropicModelInfo[] = [
@@ -84,10 +86,32 @@ export const ANTHROPIC_MODELS: AnthropicModelInfo[] = [
     status: 'active',
   },
   {
+    // $8 / $40 per MTok with cache hits at $0.20, 0.025x the input price
+    // (pricing page, https://platform.claude.com/docs/en/about-claude/pricing,
+    // model table and its first footnote, read 2026-11-18); 1M context and
+    // 128K output (https://platform.claude.com/docs/en/about-claude/models/overview,
+    // read 2026-11-18). Without this row the provider priced the id by its
+    // longest catalog prefix, Claude Fable 5's row: $10 / $50 with cache hits
+    // at $1, and a host's spend guard found no price for it at all.
+    modelId: 'claude-fable-5-2',
+    providerId: 'anthropic',
+    displayName: 'Claude Fable 5.2',
+    description: "Anthropic's most capable model, for demanding reasoning and long-horizon agentic work. Priced below Claude Fable 5.1.",
+    capabilities: ['chat', 'tool_use', 'vision_input'],
+    contextWindowSize: 1000000,
+    outputTokenLimit: 128000,
+    pricePer1MTokensInput: 8,
+    pricePer1MTokensOutput: 40,
+    // Cache hits and refreshes bill at 0.025x the input price.
+    pricePer1MTokensCacheRead: 0.2,
+    supportsStreaming: true,
+    status: 'active',
+  },
+  {
     modelId: 'claude-fable-5-1',
     providerId: 'anthropic',
     displayName: 'Claude Fable 5.1',
-    description: "Anthropic's most capable model, for demanding reasoning and long-horizon agentic work.",
+    description: 'Previous Fable generation, superseded by Claude Fable 5.2.',
     capabilities: ['chat', 'tool_use', 'vision_input'],
     contextWindowSize: 1000000,
     outputTokenLimit: 128000,
@@ -102,7 +126,7 @@ export const ANTHROPIC_MODELS: AnthropicModelInfo[] = [
     modelId: 'claude-fable-5',
     providerId: 'anthropic',
     displayName: 'Claude Fable 5',
-    description: 'Previous Fable generation, superseded by Claude Fable 5.1.',
+    description: 'First Fable generation, superseded by Claude Fable 5.1 and 5.2.',
     capabilities: ['chat', 'tool_use', 'vision_input'],
     contextWindowSize: 1000000,
     outputTokenLimit: 128000,

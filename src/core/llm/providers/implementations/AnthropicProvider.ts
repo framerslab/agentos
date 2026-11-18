@@ -2182,10 +2182,14 @@ export class AnthropicProvider implements IProvider {
     // A passthrough can also carry the sampling fields the typed options
     // withhold above. The model on the wire answers them with 400, so they go
     // here too: `temperature` and `top_p` on every model that rejects
-    // `temperature`, and `top_k` on Claude Haiku 5.5, whose migration guide
-    // says to remove all three.
+    // `temperature`, and `top_k` on Claude Sonnet 5.5 and Claude Haiku 5.5,
+    // whose migration guides say to remove all three
+    // (platform.claude.com/docs/en/models/sonnet-5-5/migration-guide and
+    // .../haiku-5-5/migration-guide, read 2026-11-18). Both are the
+    // provider's default models, so a call that names no model and passes a
+    // `top_k` Claude Sonnet 4.6 accepted is not refused.
     if (options.customModelParams && !modelSupportsTemperature(wireModelId)) {
-      const sampling = /^claude-haiku-5-5\b/i.test(wireModelId)
+      const sampling = /^claude-(sonnet|haiku)-5-5\b/i.test(wireModelId)
         ? ['temperature', 'top_p', 'top_k']
         : ['temperature', 'top_p'];
       const dropped = sampling.filter((key) => Object.prototype.hasOwnProperty.call(payload, key));

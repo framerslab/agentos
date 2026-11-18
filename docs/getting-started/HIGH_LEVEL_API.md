@@ -51,7 +51,7 @@ Two styles for specifying provider and model:
 await generateText({ provider: 'openai', prompt: '...' });
 
 // 2. Provider + explicit model — full control
-await generateText({ provider: 'anthropic', model: 'claude-sonnet-4-5-20250929', prompt: '...' });
+await generateText({ provider: 'anthropic', model: 'claude-sonnet-5-5', prompt: '...' });
 ```
 
 ### Provider Defaults
@@ -62,10 +62,10 @@ for the requested task automatically:
 | Provider                 | Type  | Text default               | Image default                    | Embedding default        | Env var                           |
 | ------------------------ | ----- | -------------------------- | -------------------------------- | ------------------------ | --------------------------------- |
 | `openai`                 | Cloud | `gpt-4o`                   | `gpt-image-2.5-flare`            | `text-embedding-3-small` | `OPENAI_API_KEY`                  |
-| `anthropic`              | Cloud | `claude-sonnet-4-6`        | —                                | —                        | `ANTHROPIC_API_KEY` (`ANTHROPIC_BASE_URL` for another endpoint) |
+| `anthropic`              | Cloud | `claude-sonnet-5-5`        | —                                | —                        | `ANTHROPIC_API_KEY` (`ANTHROPIC_BASE_URL` for another endpoint) |
 | `gemini`                 | Cloud | `gemini-2.5-flash`         | —                                | —                        | `GEMINI_API_KEY`                  |
 | `openrouter`             | Cloud | `openai/gpt-4o-mini`       | —                                | —                        | `OPENROUTER_API_KEY`              |
-| `claude-code-cli`        | Local | `claude-sonnet-4-6`        | —                                | —                        | `which claude`                    |
+| `claude-code-cli`        | Local | `claude-sonnet-5-5`        | —                                | —                        | `which claude`                    |
 | `gemini-cli`             | Local | `gemini-3.5-flash`         | —                                | —                        | `which gemini`                    |
 | `stability`              | Cloud | —                          | `stable-diffusion-xl-1024-v1-0`  | —                        | `STABILITY_API_KEY`               |
 | `replicate`              | Cloud | —                          | `black-forest-labs/flux-1.1-pro` | —                        | `REPLICATE_API_TOKEN`             |
@@ -423,7 +423,7 @@ import { generateText } from '@framers/agentos';
 
 // A judge: the same rubric on every call, a new candidate each time.
 const { text } = await generateText({
-  model: 'anthropic:claude-haiku-4-5-20251001',
+  model: 'anthropic:claude-haiku-5-5',
   system: [{ text: rubric, cacheBreakpoint: true }],
   prompt: candidate,
   // Keep the rubric's cache marker; put no breakpoint on the candidate.
@@ -1103,7 +1103,7 @@ import { souledAgent } from '@framers/agentos';
 
 const aria = await souledAgent({
   provider: 'anthropic',
-  model: 'claude-sonnet-4-6',
+  model: 'claude-sonnet-5-5',
   soul: '~/.agentos/agents/aria',
 });
 ```
@@ -1120,7 +1120,7 @@ What it wires:
 
 Three options say what is kept and where it goes:
 
-- **`compile`** names where the compile's model calls go. Unset, they go on the agent's own provider and model, with its route, budget and ledger. An object (`{ provider?, model?, apiKey?, baseUrl? }`) names another provider or model, a local one included: the compile's text then goes to that provider alone, with no fallback and no router. A `model` whose `provider:` prefix names another provider (`'anthropic:claude-sonnet-4-6'` on an OpenAI agent) takes the compile there, and the agent's own key and base URL go with it only when the compile's call resolves to the provider they were set for, whether the agent names that provider or only its model does; otherwise the compile runs on the target's own `apiKey`, or that provider's key from the environment. A target that names a provider alone runs on that provider's default model, unless it is the agent's own provider, whose model it keeps. `compile: false` runs no compile: turns are kept as raw traces, no per-user page is ever written, and one `memory.compile_skipped` log line (`reason: 'compile_off'`) says so at start.
+- **`compile`** names where the compile's model calls go. Unset, they go on the agent's own provider and model, with its route, budget and ledger. An object (`{ provider?, model?, apiKey?, baseUrl? }`) names another provider or model, a local one included: the compile's text then goes to that provider alone, with no fallback and no router. A `model` whose `provider:` prefix names another provider (`'anthropic:claude-sonnet-5-5'` on an OpenAI agent) takes the compile there, and the agent's own key and base URL go with it only when the compile's call resolves to the provider they were set for, whether the agent names that provider or only its model does; otherwise the compile runs on the target's own `apiKey`, or that provider's key from the environment. A target that names a provider alone runs on that provider's default model, unless it is the agent's own provider, whose model it keeps. `compile: false` runs no compile: turns are kept as raw traces, no per-user page is ever written, and one `memory.compile_skipped` log line (`reason: 'compile_off'`) says so at start.
 - **`memoryPolicy`** is the host's policy for the account a turn serves: a function of the turn's context (`sessionId`, `userId`, `subject`, `call`) that answers `{ longTerm: 'off' }` (nothing is filed for the account and its turns recall the operator's pages alone; one `memory.write_refused` line, `reason: 'policy_off'`, a session), `{ longTerm: 'raw' }` (its turns are filed and recalled, and no page is compiled for it; a compile that meets it writes `memory.compile_skipped` with `reason: 'policy_raw'`) or `{ longTerm: 'compiled' }` (the default). It is asked once a session and its answer is kept for that session's subject until the session closes; an answer that comes after the session closed is kept for nothing, so a session id opened again for another user asks again. Each turn keeps the answer it began with until its reply is filed, even when another turn of its session overlaps it. The page tool and the compile follow the host's latest answer for the account: under `off`, or when the hook failed, `read_memory_page` serves the account none of its own pages, in reading or in its listing (the operator's pages alone), and no compile runs for it, whatever answer an older session keeps. The latest answer is the one asked for last: an answer the host gives late to an earlier ask decides that ask's turn and nothing more. A compile reads the latest answer again once the `screen` hook has answered for its traces, so an `off` answer given meanwhile stops it. A hook that throws, rejects, does not answer within the memory hooks' timeout (`memoryProviderOptions.timeoutMs`, 5 seconds by default) or answers anything else fails closed: one `memory.hook_failed` line (`hook: 'memoryPolicy'`), nothing is filed for that turn (`memory.write_refused`, `reason: 'policy_failed'`, a write), the turn recalls the operator's pages alone, and the next turn asks again.
 - **`screen`** is given each text before it is filed, and so before it is embedded (`stage: 'file'`), and each trace's text again before it is sent to a compile (`stage: 'compile'`). The string it returns is what is filed or compiled; `null` drops the text (`memory.write_refused`, `reason: 'screened'`). Any string it returns is text, the word `failed` among them. A hook that throws, rejects, times out or answers anything else fails closed: `memory.hook_failed` (`hook: 'screen'`), the text is not filed (`reason: 'screen_failed'`), and a compile it fails for does not run (`memory.compile_skipped`, `reason: 'screen_failed'`), its traces waiting with their watermark where it was.
 

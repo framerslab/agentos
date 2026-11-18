@@ -98,7 +98,7 @@ function defaultJudgeModelFor(provider: string | undefined): string | undefined 
     case 'openai':
       return 'gpt-4o-mini';
     case 'anthropic':
-      return 'claude-haiku-4-5-20251001';
+      return 'claude-haiku-5-5';
     case 'gemini':
       return 'gemini-2.5-flash';
     case 'groq':
@@ -121,7 +121,9 @@ function defaultJudgeModelFor(provider: string | undefined): string | undefined 
 function judgeProviderFor(judgeModel: string | undefined): string | undefined {
   if (!judgeModel) return undefined;
   if (judgeModel === 'gpt-4o-mini') return 'openai';
-  if (judgeModel === 'claude-haiku-4-5-20251001') return 'anthropic';
+  // claude-haiku-4-5-20251001 was the Anthropic default before
+  // claude-haiku-5-5: a caller that still names it reaches Anthropic.
+  if (judgeModel === 'claude-haiku-5-5' || judgeModel === 'claude-haiku-4-5-20251001') return 'anthropic';
   if (judgeModel === 'gemini-2.5-flash') return 'gemini';
   if (judgeModel === 'llama-3.3-70b-versatile') return 'groq';
   return undefined;

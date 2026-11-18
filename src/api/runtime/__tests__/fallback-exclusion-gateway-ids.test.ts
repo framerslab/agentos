@@ -199,16 +199,17 @@ const SKIPPED: Array<{ name: string; entry: Entry; exclusions: string[]; sentAs:
     sentAs: ['openrouter', 'openai/gpt-4o-mini'],
   },
   {
+    // An entry with no model is sent as the provider's default text model.
     name: 'a rerouted Anthropic entry, by an anthropic/ exclusion',
     entry: { provider: 'anthropic' },
-    exclusions: ['anthropic/claude-sonnet-4-6'],
-    sentAs: ['openrouter', 'anthropic/claude-sonnet-4-6'],
+    exclusions: ['anthropic/claude-sonnet-5-5'],
+    sentAs: ['openrouter', 'anthropic/claude-sonnet-5-5'],
   },
   {
     name: 'an Anthropic entry sent to Anthropic, by an anthropic/ exclusion',
     entry: { provider: 'anthropic' },
-    exclusions: ['anthropic/claude-sonnet-4-6'],
-    sentAs: ['anthropic', 'claude-sonnet-4-6'],
+    exclusions: ['anthropic/claude-sonnet-5-5'],
+    sentAs: ['anthropic', 'claude-sonnet-5-5'],
     anthropicKey: true,
   },
   {

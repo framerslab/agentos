@@ -145,7 +145,7 @@ describe('Mission Orchestrator Integration', () => {
 
     const researcher = assignments.find((a) => a.nodeId === 'researcher_1')!;
     expect(researcher.provider).toBe('anthropic');
-    expect(researcher.model).toBe('claude-sonnet-4-6');
+    expect(researcher.model).toBe('claude-sonnet-5-5');
 
     // Availability check
     const availability = engine.checkAvailability(assignments);

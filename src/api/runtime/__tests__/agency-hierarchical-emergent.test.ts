@@ -11,6 +11,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { buildHierarchicalTools } from '../strategies/hierarchical.js';
+import { generateText } from '../../generateText.js';
 import type { AgencyOptions, BaseAgentConfig, ForgeEvent } from '../types.js';
 
 function buildAgencyConfig(overrides: Partial<AgencyOptions> = {}): AgencyOptions {
@@ -269,6 +270,31 @@ describe('hierarchical strategy with emergent.enabled — judge gating', () => {
     expect(roster.approved_specialist).toBeDefined();
     expect(Object.keys(tools)).toContain('delegate_to_approved_specialist');
     expect(spawnedCount.value).toBe(1);
+  });
+
+  it('an Anthropic agency that names no judge model sends the judge call to Claude Haiku 5.5 on Anthropic', async () => {
+    vi.mocked(generateText).mockClear();
+    const { tools } = buildHierarchicalTools(
+      {},
+      buildAgencyConfig({
+        provider: 'anthropic',
+        model: 'claude-opus-5-5',
+        emergent: { enabled: true, judge: true },
+      }),
+    );
+
+    const spawnTool = tools.spawn_specialist as unknown as SpawnTool;
+    const result = await spawnTool.execute({
+      role: 'figures_checker',
+      instructions: 'Check every figure in the report against its source.',
+    });
+
+    expect(result.success).toBe(true);
+    // The judge runs on the provider's small model, not on the agency's own.
+    expect(vi.mocked(generateText)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(generateText)).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: 'anthropic', model: 'claude-haiku-5-5' }),
+    );
   });
 
   it('blocks spawn when hitl.approvals.beforeEmergent rejects', async () => {

@@ -47,8 +47,8 @@ npm install @framers/agentos
 import { agent } from '@framers/agentos';
 
 const tutor = agent({
-  provider: 'anthropic',                          // resolves to claude-sonnet-4-6 (provider default)
-  // model: 'claude-opus-4-8',                    // pin a specific model to override the default
+  provider: 'anthropic',                          // resolves to claude-sonnet-5-5 (provider default)
+  // model: 'claude-opus-5-5',                    // pin a specific model to override the default
   instructions: 'You are a patient CS tutor.',
   personality: { openness: 0.9, conscientiousness: 0.95 },
 });
@@ -186,7 +186,7 @@ import { agency } from '@framers/agentos';
 const team = agency({
   strategy: 'graph',
   agents: {
-    researcher: { provider: 'anthropic', instructions: 'Find relevant facts.' },                            // -> claude-sonnet-4-6
+    researcher: { provider: 'anthropic', instructions: 'Find relevant facts.' },                            // -> claude-sonnet-5-5
     writer:     { provider: 'openai',    instructions: 'Summarize clearly.', dependsOn: ['researcher'] },   // -> gpt-4o
     reviewer:   { provider: 'gemini',    instructions: 'Check accuracy.',    dependsOn: ['writer'] },       // -> gemini-2.5-flash
   },

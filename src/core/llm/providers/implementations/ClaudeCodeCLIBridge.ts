@@ -212,7 +212,7 @@ export class ClaudeCodeCLIBridge extends CLISubprocessBridge {
       return new ClaudeCodeProviderError(
         `Claude Code CLI timed out.`,
         'TIMEOUT',
-        'Claude Code did not respond in time. Try again or use a smaller model (claude-haiku-4-5-20251001).',
+        'Claude Code did not respond in time. Try again or use a smaller model (claude-haiku-5-5).',
         true,
         { exitCode, stderr },
       );

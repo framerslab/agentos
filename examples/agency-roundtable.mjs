@@ -45,7 +45,7 @@ const SEAT_FORMAT =
 const SEATS = {
   risk_averse_pm: {
     provider: 'anthropic',
-    model: 'claude-opus-4-8',
+    model: 'claude-opus-5-5',
     effort: 'max',
     instructions:
       `Capital-preservation portfolio manager. You care about drawdown, tail risk, and position sizing before upside. Default to the smallest exposure that keeps optionality. ${SEAT_FORMAT}`,
@@ -73,7 +73,7 @@ const SEATS = {
   },
   risk_officer: {
     provider: 'anthropic',
-    model: 'claude-opus-4-8',
+    model: 'claude-opus-5-5',
     effort: 'max',
     instructions:
       `Chief risk officer with veto power. Check every seat's stance against exposure limits and the fail-closed doctrine: missing or stale inputs mean NO new risk. State explicitly whether you veto. ${SEAT_FORMAT}`,
@@ -107,7 +107,7 @@ async function main() {
 
   // Chair (synthesis) prefers Anthropic at max effort; falls back to OpenAI.
   const chair = available.anthropic
-    ? { provider: 'anthropic', model: 'claude-opus-4-8', effort: 'max' }
+    ? { provider: 'anthropic', model: 'claude-opus-5-5', effort: 'max' }
     : { provider: 'openai', model: 'gpt-5.6', effort: 'max' };
 
   const table = agency({
