@@ -561,25 +561,14 @@ export class AgentOSOrchestrator {
           `AgentOSOrchestrator: Critical unhandled error in _processTurnInternal for stream ${agentOSStreamId}:`,
           criticalError
         );
-        try {
-          await this.chunks.pushError(
-            agentOSStreamId,
-            input.selectedPersonaId || 'unknown_persona',
-            'orchestrator_critical',
-            GMIErrorCode.INTERNAL_SERVER_ERROR,
-            `A critical orchestration error occurred: ${criticalError.message}`,
-            { name: criticalError.name, stack: criticalError.stack }
-          );
-          await this.dependencies.streamingManager.closeStream(
-            agentOSStreamId,
-            'Critical orchestrator error'
-          );
-        } catch (cleanupError: any) {
-          console.error(
-            `AgentOSOrchestrator: Error during critical error cleanup for stream ${agentOSStreamId}:`,
-            cleanupError
-          );
-        }
+        await this.endStreamOnCriticalError(
+          agentOSStreamId,
+          input.selectedPersonaId || 'unknown_persona',
+          'orchestrator_critical',
+          criticalError,
+          'A critical orchestration error occurred',
+          'Critical orchestrator error'
+        );
         this.activeStreamContexts.delete(agentOSStreamId);
       })
       .finally(() => {
@@ -654,25 +643,14 @@ export class AgentOSOrchestrator {
           `AgentOSOrchestrator: Critical unhandled error in _resumeToolResultsInternal for stream ${agentOSStreamId}:`,
           criticalError
         );
-        try {
-          await this.chunks.pushError(
-            agentOSStreamId,
-            pendingRequest.personaId || 'unknown_persona',
-            pendingRequest.gmiInstanceId || 'orchestrator_resume_critical',
-            GMIErrorCode.INTERNAL_SERVER_ERROR,
-            `A critical external-tool resume error occurred: ${criticalError.message}`,
-            { name: criticalError.name, stack: criticalError.stack }
-          );
-          await this.dependencies.streamingManager.closeStream(
-            agentOSStreamId,
-            'Critical external-tool resume error'
-          );
-        } catch (cleanupError: any) {
-          console.error(
-            `AgentOSOrchestrator: Error during resume critical-error cleanup for stream ${agentOSStreamId}:`,
-            cleanupError
-          );
-        }
+        await this.endStreamOnCriticalError(
+          agentOSStreamId,
+          pendingRequest.personaId || 'unknown_persona',
+          pendingRequest.gmiInstanceId || 'orchestrator_resume_critical',
+          criticalError,
+          'A critical external-tool resume error occurred',
+          'Critical external-tool resume error'
+        );
         this.activeStreamContexts.delete(agentOSStreamId);
       })
       .finally(() => {
@@ -684,6 +662,44 @@ export class AgentOSOrchestrator {
       }));
 
     return agentOSStreamId;
+  }
+
+  /**
+   * Ends a stream whose run failed outside its own error handling: pushes an `INTERNAL_SERVER_ERROR` chunk, then closes
+   * the stream even when that push fails, so the caller never waits on a stream nothing will close. The thrown value
+   * may be anything, `undefined` and objects without a message included.
+   */
+  private async endStreamOnCriticalError(
+    streamId: StreamId,
+    personaId: string,
+    gmiInstanceId: string,
+    criticalError: unknown,
+    messagePrefix: string,
+    closeReason: string
+  ): Promise<void> {
+    let described: string;
+    try {
+      described = criticalError instanceof Error ? criticalError.message : String(criticalError);
+    } catch {
+      described = Object.prototype.toString.call(criticalError);
+    }
+    try {
+      await this.chunks.pushError(
+        streamId,
+        personaId,
+        gmiInstanceId,
+        GMIErrorCode.INTERNAL_SERVER_ERROR,
+        `${messagePrefix}: ${described}`,
+        criticalError instanceof Error ? { name: criticalError.name, stack: criticalError.stack } : { value: described }
+      );
+    } catch (pushError: unknown) {
+      console.error(`AgentOSOrchestrator: could not push the critical error to stream ${streamId}:`, pushError);
+    }
+    try {
+      await this.dependencies.streamingManager.closeStream(streamId, closeReason);
+    } catch (closeError: unknown) {
+      console.error(`AgentOSOrchestrator: could not close stream ${streamId} after a critical error:`, closeError);
+    }
   }
 
   /** Keeps a stream's run until it ends, for the verdicts that wait for it (see {@link discardBlockedToolCalls}). */
