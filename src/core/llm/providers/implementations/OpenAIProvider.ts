@@ -1058,6 +1058,19 @@ function reconcileStreamedCall(
   return delta;
 }
 
+/**
+ * The model a completion request names: `customModelParams.model` when it is a non-blank string, since the payload
+ * builders apply `customModelParams` last and it replaces `model` in the body, else `modelId`. The shutdown check, the
+ * endpoint choice and every model-specific payload rule read this one value, so they judge the model that is sent.
+ *
+ * @param modelId The model id the caller passed.
+ * @param options The call's options.
+ */
+function effectiveOpenAiModelId(modelId: string, options: Pick<ModelCompletionOptions, 'customModelParams'> | undefined): string {
+  const override = options?.customModelParams?.model;
+  return typeof override === 'string' && override.trim() !== '' ? override : modelId;
+}
+
 export class OpenAIProvider implements IProvider {
   /** @inheritdoc */
   public readonly providerId: string = 'openai';
@@ -1419,11 +1432,13 @@ export class OpenAIProvider implements IProvider {
 
   /** @inheritdoc */
   public async generateCompletion(
-    modelId: string,
+    requestedModelId: string,
     messages: ChatMessage[],
     options: ModelCompletionOptions
   ): Promise<ModelCompletionResponse> {
     this.ensureInitialized();
+    // The model the request body will name: the shutdown check, the endpoint and the payload rules all read it.
+    const modelId = effectiveOpenAiModelId(requestedModelId, options);
     this.refuseRetiredModel(modelId);
     const apiKey = await this.getApiKey(options.apiKeyOverride, options.abortSignal);
 
@@ -1466,11 +1481,13 @@ export class OpenAIProvider implements IProvider {
 
   /** @inheritdoc */
   public async *generateCompletionStream(
-    modelId: string,
+    requestedModelId: string,
     messages: ChatMessage[],
     options: ModelCompletionOptions
   ): AsyncGenerator<ModelCompletionResponse, void, undefined> {
     this.ensureInitialized();
+    // The model the request body will name, as in generateCompletion.
+    const modelId = effectiveOpenAiModelId(requestedModelId, options);
     const abortSignal = options.abortSignal;
     // Checked before any network work, so an aborted call never reaches the
     // OAuth token fetch or the POST.
