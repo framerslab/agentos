@@ -51,7 +51,7 @@ describe('resolveFallbackChain', () => {
       `${LLAMA}(standing)`,
       `${MAGNUM}(standing)`,
       `${HERMES}(refill)`,
-      'gpt-5.6-sol',
+      'gpt-6.2-sol',
       'openai/gpt-5.6-sol',
       'gemini-3.1-pro-preview',
     ]);
@@ -99,7 +99,7 @@ describe('resolveFallbackChain', () => {
       expect(models).toContain(LLAMA);
       expect(models).not.toContain(MAGNUM);
       expect(models).not.toContain(HERMES);
-      expect(models).toContain('gpt-5.6-sol');
+      expect(models).toContain('gpt-6.2-sol');
       expect(skipped).toEqual([`${MAGNUM}:missing_capability`, `${HERMES}:missing_capability`]);
     }
   });
