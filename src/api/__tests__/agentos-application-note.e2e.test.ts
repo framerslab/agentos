@@ -38,13 +38,26 @@ vi.mock('../../cognition/memory/core/prompt/MemoryPromptAssembler', async (impor
 });
 import { AgentOS } from '../AgentOS';
 import type { AgentOSInput } from '../types/AgentOSInput';
-import { AgentOSResponseChunkType, type AgentOSResponse } from '../types/AgentOSResponse';
+import {
+  AgentOSResponseChunkType,
+  isActionableToolCallRequestChunk,
+  type AgentOSResponse,
+  type AgentOSToolCallRequestChunk,
+} from '../types/AgentOSResponse';
 import * as root from '../../index';
 import { CognitiveMemoryManager } from '../../cognition/memory/CognitiveMemoryManager';
 import type { CognitiveMemoryConfig } from '../../cognition/memory/core/config';
 import type { MemoryRecallCapture } from '../../cognition/memory/retrieval/recall/capture';
 import { InMemoryVectorStore } from '../../cognition/rag/vector_stores/InMemoryVectorStore';
 import { InMemoryWorkingMemory } from '../../cognition/substrate/memory/InMemoryWorkingMemory';
+import { GMI } from '../../cognition/substrate/GMI';
+import {
+  GMIOutputChunkType,
+  type GMIOutput,
+  type GMIOutputChunk,
+  type GMITurnInput,
+  type ToolCallRequest,
+} from '../../cognition/substrate/IGMI';
 import type { IPersonaDefinition } from '../../cognition/substrate/personas/IPersonaDefinition';
 import { promptEngineConfig } from '../../cognition/substrate/__tests__/helpers/scriptedGmi';
 import { MessageRole, createConversationMessage } from '../../core/conversation/ConversationMessage';
@@ -329,6 +342,46 @@ describe('a host note through processRequest(): a provider that takes text parts
     expect(request[request.length - 1]).toEqual({ role: 'user', content: `${FRAME}\nNote one.` });
   });
 
+  it("a tool the host runs: the continuation after the host's result carries the turn's note as a user message of its own", async () => {
+    const READ: ToolCallRequest = { id: 'call-read-1', name: 'read_file', arguments: { path: 'notes.txt' } };
+    // the turn on conversation c-paused stops for READ, as a turn whose model calls a tool the host runs does
+    const runTurn = GMI.prototype.processTurnStream;
+    vi.spyOn(GMI.prototype, 'processTurnStream').mockImplementation(async function* (this: GMI, turnInput: GMITurnInput) {
+      const output: GMIOutput = yield* runTurn.call(this, turnInput);
+      if (turnInput.metadata?.isToolContinuation === true || turnInput.metadata?.conversationId !== 'c-paused') {
+        return output;
+      }
+      const hostRequest: GMIOutputChunk = {
+        type: GMIOutputChunkType.TOOL_CALL_REQUEST,
+        content: [READ],
+        interactionId: turnInput.interactionId,
+        timestamp: new Date(),
+        metadata: { executionMode: 'external', requiresExternalToolResult: true },
+      };
+      yield hostRequest;
+      return { ...output, isFinal: false, toolCalls: [READ] };
+    });
+    const { agentos, model } = await boot('anthropic', { memory: false });
+    model.replies.push(reply.text('Let me read the notes.'));
+    const paused = await send(agentos, { conversationId: 'c-paused', textInput: WORDS_ONE, applicationNote: 'Note one.' });
+    const hostRequest = paused.find((chunk) => isActionableToolCallRequestChunk(chunk)) as AgentOSToolCallRequestChunk | undefined;
+    expect(hostRequest?.toolCalls, `the chunks: ${JSON.stringify(paused.map((c) => c.type))}`).toEqual([READ]);
+
+    model.replies.push(reply.text('Standup is at ten.'));
+    const before = model.seen.length;
+    const continued: AgentOSResponse[] = [];
+    for await (const chunk of agentos.handleToolResult(hostRequest!.streamId, READ.id, READ.name, 'Standup: ten.', true)) {
+      continued.push(chunk);
+    }
+    served(continued, 'Standup is at ten.');
+    expect(model.seen.length, 'model calls of the continuation').toBe(before + 1);
+    const request = model.seen.at(-1)!.messages;
+    // the request PromptEngine built: the host's result, then the note, a user message of its own, once
+    expect(request.some((message) => message.role === 'tool')).toBe(true);
+    expect(request[request.length - 1]).toEqual({ role: 'user', content: `${FRAME}\nNote one.` });
+    expect(JSON.stringify(request).split('Note one.').length - 1).toBe(1);
+  });
+
   it('a note larger than the model\'s context goes out whole in every request, and a provider that refuses it fails the turn', async () => {
     const { agentos, model } = await boot('anthropic', { window: 2_000 });
     await turn(agentos, model, { textInput: EARLIER }, reply.text('Noted.'));
@@ -524,6 +577,36 @@ describe('PromptEngine: a host note and the token budget', () => {
     expect(firstTextOf(newestUser(overrun.prompt))).toBe(`${FRAME}\n${over}`);
     expect(overrun.result.modificationDetails!.removedComponents ?? []).toContain('retrievedContext');
     expect((overrun.result.issues ?? []).map((issue) => issue.code)).toContain('TOKEN_BUDGET_EXCEEDED_POST_OPT');
+  });
+
+  it('with a host note, counts the separator between the memory block and the other retrieved text as it is sent', async () => {
+    const estimate = (text: string) => engine.estimateTokenCount(text, 'stub-model');
+    const memory = '## Recent Experiences\n- Sam works the late desk at the Harbor Hotel.';
+    const retrieved = 'Front desk notes: the lobby was quiet all night.';
+    const note = `${'Ring the desk bell. '.repeat(20)}Go`;
+    // every piece the count adds up is a whole number of tokens, so the count of the pieces equals the count of the
+    // text as sent only when every character of it is counted
+    expect(memory.length % 4).toBe(0);
+    expect(retrieved.length % 4).toBe(0);
+    expect((FRAME.length + 1 + note.length + '\n\n---\n\n'.length) % 4).toBe(0);
+    const components = { systemPrompts: base.systemPrompts, userInput: WORDS, memoryContextText: memory, retrievedContext: retrieved } as PromptComponents;
+    const plain = await build(components);
+    const noted = await build({ ...components, applicationNote: note } as PromptComponents);
+    const sent = firstTextOf(newestUser(noted.prompt));
+    expect(sent).toBe(`${FRAME}\n${note}\n\n---\n\n${memory}\n\n---\n\n${retrieved}`);
+    // what the note adds: the text as sent, less the memory block and the retrieved text a prompt with no note counts
+    expect(
+      noted.result.modificationDetails!.originalEstimatedTokenCount! - plain.result.modificationDetails!.originalEstimatedTokenCount!,
+    ).toBe((await estimate(sent)) - (await estimate(memory)) - (await estimate(retrieved)));
+    expect(noted.result.metadata.contextTokens!.memory).toBe(plain.result.metadata.contextTokens!.memory);
+  });
+
+  it('the preflight check counts the note as it is sent, so a note larger than the model writes POTENTIAL_TOKEN_OVERFLOW', async () => {
+    const codes = async (components: PromptComponents) =>
+      (await engine.validatePromptConfiguration(components, SMALL, executionContext)).issues.map((issue) => issue.code);
+    expect(await codes({ userInput: 'Hi' } as PromptComponents)).not.toContain('POTENTIAL_TOKEN_OVERFLOW');
+    expect(await codes({ userInput: 'Hi', applicationNote: ' \n\t ' } as PromptComponents)).not.toContain('POTENTIAL_TOKEN_OVERFLOW');
+    expect(await codes({ userInput: 'Hi', applicationNote: 'x'.repeat(9_000) } as PromptComponents)).toContain('POTENTIAL_TOKEN_OVERFLOW');
   });
 });
 
