@@ -130,6 +130,18 @@ describe('mapEffortToOpenAiResponsesEffort (model-aware /v1/responses effort)', 
     expect(mapEffortToOpenAiReasoningEffortForModel('max', 'gpt-6-astra')).toBe('xhigh');
   });
 
+  it('passes xhigh and max through on /v1/responses for gpt-6.2-sol and gpt-6.2-astra (live-probed 2026-11-17)', () => {
+    // Before the allow-lists named them, an effort of max reached both models as `high`.
+    for (const model of ['gpt-6.2-sol', 'gpt-6.2-astra']) {
+      expect(modelAcceptsXhighResponsesEffort(model)).toBe(true);
+      expect(modelAcceptsMaxResponsesEffort(model)).toBe(true);
+      expect(mapEffortToOpenAiResponsesEffort(model, 'max')).toBe('max');
+      expect(mapEffortToOpenAiResponsesEffort(model, 'xhigh')).toBe('xhigh');
+      // Chat Completions refused max on both ("Supported values are: 'low', 'medium', 'high', and 'xhigh'").
+      expect(mapEffortToOpenAiReasoningEffortForModel('max', model)).toBe('xhigh');
+    }
+  });
+
   it('allow-lists the shipped 5.6 siblings terra/luna for max (live-probed 2026-09-10)', () => {
     expect(modelAcceptsMaxResponsesEffort('gpt-5.6-terra')).toBe(true);
     expect(modelAcceptsMaxResponsesEffort('gpt-5.6-luna')).toBe(true);

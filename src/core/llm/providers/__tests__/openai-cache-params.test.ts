@@ -49,6 +49,19 @@ describe('resolveOpenAiCacheRetentionParams', () => {
     ['gpt-6-astra',            '24h',       { prompt_cache_retention: '24h' }],
     ['gpt-6-astra',            'in_memory', null],
     ['gpt-6-astra-2026-09-03', '24h',       { prompt_cache_retention: '24h' }],
+    // Live-probed 2026-11-17 on chat.completions: gpt-6.2-sol, gpt-6.2-astra
+    // and gpt-6-luna answered 200 to `prompt_cache_options: {ttl: '30m'}` and
+    // to retention 24h, and 400 to in_memory. Before, all three were on no
+    // list, so every retention a caller asked for was dropped.
+    ['gpt-6.2-sol',            '30m',       { prompt_cache_options: { ttl: '30m' } }],
+    ['gpt-6.2-sol',            '24h',       { prompt_cache_retention: '24h' }],
+    ['gpt-6.2-sol',            'in_memory', null],
+    ['gpt-6.2-astra',          '30m',       { prompt_cache_options: { ttl: '30m' } }],
+    ['gpt-6.2-astra',          '24h',       { prompt_cache_retention: '24h' }],
+    ['gpt-6.2-astra',          'in_memory', null],
+    ['gpt-6-luna',             '30m',       { prompt_cache_options: { ttl: '30m' } }],
+    ['gpt-6-luna',             '24h',       { prompt_cache_retention: '24h' }],
+    ['gpt-6-luna',             'in_memory', null],
     // An unprobed sibling must NOT be admitted by a bare `gpt-6` prefix.
     ['gpt-6-hypothetical', '30m',       null],
     ['gpt-6-hypothetical', '24h',       null],

@@ -296,7 +296,7 @@ Two providers cost nothing per token: the [CLI providers](../getting-started/CLI
 
 ## Know what a fallback costs
 
-When a call fails with a retryable error, the fallback chain retries it on another provider. The chain AgentOS builds from the environment uses flagship models: `gpt-5.6-sol` on OpenAI and OpenRouter, `claude-sonnet-5-5` on Anthropic and `gemini-3.1-pro-preview` on Gemini ([Fallback Behavior](../features/LLM_PROVIDERS.md#fallback-behavior)). A primary on a small model can therefore fail over to a model that costs many times more per token. Set the chain yourself to keep fallbacks in the same price class, or pass an empty array to turn fallback off:
+When a call fails with a retryable error, the fallback chain retries it on another provider. The chain AgentOS builds from the environment uses flagship models: `gpt-6.2-sol` on OpenAI, `openai/gpt-5.6-sol` on OpenRouter, `claude-sonnet-5-5` on Anthropic and `gemini-3.1-pro-preview` on Gemini ([Fallback Behavior](../features/LLM_PROVIDERS.md#fallback-behavior)). A primary on a small model can therefore fail over to a model that costs many times more per token. Set the chain yourself to keep fallbacks in the same price class, or pass an empty array to turn fallback off:
 
 ```typescript
 const assistant = agent({

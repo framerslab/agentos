@@ -30,6 +30,8 @@ describe('isOpenAIReasoningModel', () => {
     expect(isOpenAIReasoningModel('gpt-6-astra')).toBe(true);
     expect(isOpenAIReasoningModel('gpt-6-astra-2026-09-03')).toBe(true);
     expect(isOpenAIReasoningModel('GPT-6-ASTRA')).toBe(true);
+    expect(isOpenAIReasoningModel('gpt-6.2-sol')).toBe(true);
+    expect(isOpenAIReasoningModel('gpt-6.2-astra')).toBe(true);
     // Not generalized to gpt-\d: an unshipped family stays on the
     // conservative legacy max_tokens path until it is probed.
     expect(isOpenAIReasoningModel('gpt-7-whatever')).toBe(false);
@@ -75,6 +77,29 @@ describe('OpenAIProvider — reasoning-model sampling-param guard', () => {
       expect([modelId, build(modelId).presence_penalty, build(modelId).frequency_penalty]).toEqual([modelId, undefined, undefined]);
     }
     expect([build('gpt-4o').presence_penalty, build('gpt-4o').frequency_penalty]).toEqual([0.1, 0.1]);
+  });
+
+  it('sends the GPT-6 family no sampling penalty, stop sequence, temperature or max_tokens (probed 2026-11-17)', () => {
+    // gpt-6.2-sol, gpt-6.2-astra and gpt-6-luna answered each of these with HTTP 400 ("Unsupported parameter:
+    // 'presence_penalty' is not supported with this model.", "... 'stop' ...", "... 'max_tokens' ... Use
+    // 'max_completion_tokens' instead.", and temperature 0.7 "Only the default (1) value is supported.").
+    const build = (modelId: string) => (provider as unknown as {
+      buildChatCompletionPayload: (m: string, msgs: ChatMessage[], o: unknown, s: boolean) => Record<string, unknown>;
+    }).buildChatCompletionPayload(
+      modelId,
+      messages,
+      { presencePenalty: 0.5, frequencyPenalty: 0.5, stopSequences: ['END'], temperature: 0.7, topP: 0.9, maxTokens: 512 },
+      false,
+    );
+    for (const modelId of ['gpt-6.2-sol', 'gpt-6.2-astra', 'gpt-6-luna', 'gpt-6-sol']) {
+      const payload = build(modelId);
+      expect([modelId, 'presence_penalty' in payload, 'frequency_penalty' in payload, 'stop' in payload]).toEqual([modelId, false, false, false]);
+      expect([modelId, 'temperature' in payload, 'top_p' in payload, 'max_tokens' in payload]).toEqual([modelId, false, false, false]);
+      expect(payload.max_completion_tokens).toBe(512);
+    }
+    // A model that takes them still gets them.
+    const legacy = build('gpt-4o');
+    expect([legacy.presence_penalty, legacy.frequency_penalty, legacy.stop, legacy.max_tokens]).toEqual([0.5, 0.5, ['END'], 512]);
   });
 
   it('keeps temperature/top_p for legacy chat models', () => {

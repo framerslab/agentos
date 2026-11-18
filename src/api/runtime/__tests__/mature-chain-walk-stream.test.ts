@@ -156,7 +156,7 @@ describe('fallback walk on streamText', () => {
       fallbackProviders: buildPolicyAwareFallbackChain('mature'),
     });
     expect(await drain(result.textStream)).toBe('from the suffix');
-    expect(streamed()).toEqual([LLAMA, MAGNUM, HERMES, 'gpt-5.6-sol', 'openai/gpt-5.6-sol']);
+    expect(streamed()).toEqual([LLAMA, MAGNUM, HERMES, 'gpt-6.2-sol', 'openai/gpt-5.6-sol']);
   });
 
   it('a standing leg that cannot hold a long stream request is replaced by the refill', async () => {

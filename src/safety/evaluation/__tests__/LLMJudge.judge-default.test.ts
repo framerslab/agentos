@@ -1,7 +1,7 @@
 /**
  * @fileoverview Judge-site assertion for the safety LLMJudge (queue item:
  * only hitl had a site-level test): the central resolver default
- * (gpt-5.6 @ max effort) must reach the provider call, and a caller-pinned
+ * (gpt-6.2-sol @ max effort) must reach the provider call, and a caller-pinned
  * model must pass through with NO injected effort (zero request-shape
  * change for pinned callers).
  */
@@ -42,7 +42,7 @@ function makeManager() {
 }
 
 describe('LLMJudge default judge selection (spec batch-1 C3)', () => {
-  it('routes the default judge call to gpt-5.6 on openai with effort max', async () => {
+  it('routes the default judge call to gpt-6.2-sol on openai with effort max', async () => {
     const { manager, generateCompletion, getProvider } = makeManager();
     const judge = new LLMJudge({ llmProvider: manager });
 
@@ -50,7 +50,7 @@ describe('LLMJudge default judge selection (spec batch-1 C3)', () => {
 
     expect(getProvider).toHaveBeenCalledWith('openai');
     expect(generateCompletion).toHaveBeenCalledWith(
-      'gpt-5.6',
+      'gpt-6.2-sol',
       expect.anything(),
       expect.objectContaining({ effort: 'max' }),
     );

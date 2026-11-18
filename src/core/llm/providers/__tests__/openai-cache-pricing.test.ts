@@ -69,6 +69,13 @@ describe("OpenAIProvider's reported cost of cached input and cache writes", () =
     ['gpt-6-sol', { prompt_tokens: 1_000, completion_tokens: 0, total_tokens: 1_000, prompt_tokens_details: { cached_tokens: 0, cache_write_tokens: 600 } }, 0.0023],
     // Over 272,000 prompt tokens every rate doubles and output is 1.5x: 100,000 x $4 + 300,000 x $0.40 + 2,000 x $15.
     ['gpt-6-sol', { prompt_tokens: 400_000, completion_tokens: 2_000, total_tokens: 402_000, prompt_tokens_details: { cached_tokens: 300_000 } }, 0.55],
+    // gpt-6.2-sol over 272,000 prompt tokens, at its long-context rates (pricing page, read 2026-11-17: $4 input,
+    // $0.20 cached input, $5 for a 30-minute write, $15 output per 1M): 150,000 x $4 + 100,000 x $0.20 + 50,000 x $5
+    // + 2,000 x $15. Before its row the call reported no cost.
+    ['gpt-6.2-sol', { prompt_tokens: 300_000, completion_tokens: 2_000, total_tokens: 302_000, prompt_tokens_details: { cached_tokens: 100_000, cache_write_tokens: 50_000 } }, 0.9],
+    // gpt-6.2-astra at its standard rates ($8 input, $0.40 cached input, $10 for a 30-minute write, $40 output per 1M):
+    // 4,000 x $8 + 4,000 x $0.40 + 2,000 x $10 + 1,000 x $40.
+    ['gpt-6.2-astra', { prompt_tokens: 10_000, completion_tokens: 1_000, total_tokens: 11_000, prompt_tokens_details: { cached_tokens: 4_000, cache_write_tokens: 2_000 } }, 0.0936],
   ] as Array<[string, Record<string, unknown>, number]>)('%s with usage %j costs %f USD', async (model, usage, usd) => {
     serve({ '/chat/completions': () => jsonResponse(chatCompletion(model, usage)) });
     const provider = new OpenAIProvider();
