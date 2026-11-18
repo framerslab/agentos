@@ -1599,10 +1599,11 @@ export class PromptEngine implements IPromptEngine {
       const lineOf = (m: Message): string => `${m.role}: ${typeof m.content === 'string' ? m.content : JSON.stringify(m.content)}`;
       // The host's note and the retrieved text (the memory block first, when one was given) go in front of the
       // person's words as a note from the application. With no new input the words are the history's newest message
-      // when it is the person's, and the note goes in front of that line; the stored message is not changed.
+      // when it is the person's: a note that holds a host's note goes in front of that line, and the stored message is
+      // not changed. Retrieved text with no host note follows the history, so that prompt is the same byte for byte.
       const noteText = noteTextOf(components);
       const wordsInHistory =
-        Boolean(noteText) && !components.userInput && history[history.length - 1]?.role === MessageRole.USER;
+        Boolean(hostNoteOf(components)) && !components.userInput && history[history.length - 1]?.role === MessageRole.USER;
       const earlier = wordsInHistory ? history.slice(0, -1) : history;
       if (components.conversationHistory && (!wordsInHistory || earlier.length > 0)) {
         promptString += earlier.map(lineOf).join("\n") + "\n\n";
