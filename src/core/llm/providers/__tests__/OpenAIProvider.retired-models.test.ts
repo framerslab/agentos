@@ -115,6 +115,62 @@ describe('OpenAIProvider: shut-down models on OpenAI\'s endpoint', () => {
   });
 });
 
+/** The JSON bodies of the requests the provider sent after initialize(). */
+function sentBodies(): Array<Record<string, unknown>> {
+  return fetchMock.mock.calls
+    .filter(([url]) => !new URL(String(url)).pathname.endsWith('/models'))
+    .map(([, init]) => JSON.parse(String((init as { body?: string }).body)) as Record<string, unknown>);
+}
+
+describe('OpenAIProvider: the model a call sends is the one checked', () => {
+  // `customModelParams.model` replaces the model in the request body, so the shutdown check, the endpoint and the
+  // payload rules follow it, not the `modelId` argument.
+  let provider: OpenAIProvider;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    answerEverything();
+    provider = new OpenAIProvider();
+    await provider.initialize({ apiKey: 'sk-test-key' });
+  });
+
+  it('sends a call whose override names a served model, shaped for that model', async () => {
+    const result = await provider.generateCompletion('gpt-4-turbo', USER, {
+      customModelParams: { model: 'gpt-6.2-sol' },
+      stopSequences: ['END'],
+      temperature: 0.2,
+    });
+    expect(result.choices[0]?.message.content).toBe('ok');
+    expect(sentPaths()).toEqual(['/v1/chat/completions']);
+    const [body] = sentBodies();
+    expect(body?.model).toBe('gpt-6.2-sol');
+    // gpt-6.2-sol answers 400 to `stop` and to a temperature other than 1 on Chat Completions.
+    expect(body).not.toHaveProperty('stop');
+    expect(body).not.toHaveProperty('temperature');
+  });
+
+  it('refuses a call whose override names a shut-down model, before sending anything', async () => {
+    const error = await caught(provider.generateCompletion('gpt-6.2-sol', USER, { customModelParams: { model: 'gpt-4-turbo' } }));
+    expect([error.code, error.httpStatus]).toEqual(['MODEL_RETIRED', 404]);
+    expect(error.message).toContain('OpenAI shut down gpt-4-turbo');
+    expect(sentPaths()).toEqual([]);
+  });
+
+  it('refuses a streamed call whose override names a shut-down model, before sending anything', async () => {
+    const stream = provider.generateCompletionStream('gpt-6.2-sol', USER, { customModelParams: { model: 'o4-mini' } });
+    const error = await caught(stream.next());
+    expect([error.code, error.httpStatus]).toEqual(['MODEL_RETIRED', 404]);
+    expect(error.message).toContain('Use gpt-6-luna instead');
+    expect(sentPaths()).toEqual([]);
+  });
+
+  it('checks modelId when the override is not a model name', async () => {
+    const error = await caught(provider.generateCompletion('o1', USER, { customModelParams: { model: '  ' } }));
+    expect(error.code).toBe('MODEL_RETIRED');
+    expect(sentPaths()).toEqual([]);
+  });
+});
+
 describe('OpenAIProvider: shut-down models on another endpoint', () => {
   it('sends the call through a gateway, which keeps its own catalog', async () => {
     vi.clearAllMocks();
