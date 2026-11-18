@@ -30,7 +30,7 @@ const MODEL_IDS = [
   'gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-6.1-sol',
   'gpt-5.6-sol', 'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.1',
   'o3', 'o4-mini', 'o3-mini', 'o3-pro', 'o1-mini', 'gpt-5-pro', 'gpt-5.3-chat-latest',
-  'gpt-4o', 'gpt-4o-2024-05-13', 'gpt-4.1-nano', 'chatgpt-4o-latest', 'text-embedding-3-large',
+  'gpt-4o', 'gpt-4o-2024-05-13', 'gpt-4.1-nano', 'chatgpt-4o-latest', 'gpt-4', 'text-embedding-3-large',
 ];
 
 function mockModelsResponse(): Response {
@@ -133,11 +133,12 @@ describe('OpenAI model catalog mapping', () => {
   });
 
   it('leaves out the models OpenAI has shut down, even when a listing names them', async () => {
-    // OpenAI shut down o3-mini, o4-mini and gpt-4.1-nano on 2026-10-23 and
-    // chatgpt-4o-latest on 2026-02-17, and the gpt-4o model page marks the
-    // 2024-05-13 snapshot shut down: a call to any of them answers 404.
+    // OpenAI shut down o3-mini, o4-mini, gpt-4.1-nano, gpt-4 and the
+    // gpt-4o-2024-05-13 snapshot on 2026-10-23, gpt-5.3-chat-latest on
+    // 2026-08-10 and chatgpt-4o-latest on 2026-02-17: a call to any of them
+    // answers 404.
     const ids = (await provider.listAvailableModels()).map(m => m.modelId);
-    for (const retired of ['o3-mini', 'o4-mini', 'gpt-4.1-nano', 'chatgpt-4o-latest', 'gpt-4o-2024-05-13']) {
+    for (const retired of ['o3-mini', 'o4-mini', 'gpt-4.1-nano', 'chatgpt-4o-latest', 'gpt-4o-2024-05-13', 'gpt-4', 'gpt-5.3-chat-latest']) {
       expect(ids).not.toContain(retired);
       expect(await provider.getModelInfo(retired)).toBeUndefined();
     }
@@ -149,7 +150,6 @@ describe('OpenAI model catalog mapping', () => {
     expect((await provider.getModelInfo('gpt-6-astra'))!.contextWindowSize).toBe(1050000);
     expect((await provider.getModelInfo('gpt-5.4-mini'))!.contextWindowSize).toBe(400000);
     expect((await provider.getModelInfo('o3'))!.contextWindowSize).toBe(200000);
-    expect((await provider.getModelInfo('gpt-5.3-chat-latest'))!.contextWindowSize).toBe(128000);
   });
 
   it('includes the o-series in the listing', async () => {

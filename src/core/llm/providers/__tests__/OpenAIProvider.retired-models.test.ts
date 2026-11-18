@@ -83,6 +83,12 @@ describe('OpenAIProvider: shut-down models on OpenAI\'s endpoint', () => {
       ['gpt-4-turbo', 'gpt-6.2-sol'],
       ['chatgpt-4o-latest', 'gpt-6.2-sol'],
       ['gpt-4o-2024-05-13', 'gpt-6.2-sol'],
+      // The deprecations page lists gpt-4 and o1-pro shut down on 2026-10-23 and gpt-5.3-chat-latest on 2026-08-10.
+      ['gpt-4', 'gpt-6.2-sol'],
+      ['gpt-4-0613', 'gpt-6.2-sol'],
+      ['o1-pro', 'gpt-6.2-astra'],
+      ['o1-pro-2025-03-19', 'gpt-6.2-astra'],
+      ['gpt-5.3-chat-latest', 'gpt-6.2-sol'],
       // A dated snapshot and another case are the same model.
       ['o4-mini-2025-04-16', 'gpt-6-luna'],
       ['O3-MINI', 'gpt-6-luna'],
@@ -188,6 +194,8 @@ describe('OpenAIProvider: shut-down models on another endpoint', () => {
 describe('openAIModelShutdown', () => {
   it('tells a shut-down model from a scheduled one and from one with no shutdown', () => {
     expect(retiredOpenAIModel('o4-mini')).toMatchObject({ state: 'shut-down', shutdownOn: '2026-10-23', replacement: 'gpt-6-luna' });
+    expect(retiredOpenAIModel('gpt-4o-2024-05-13')).toMatchObject({ state: 'shut-down', shutdownOn: '2026-10-23', replacement: 'gpt-6.2-sol' });
+    expect(retiredOpenAIModel('gpt-5.3-chat-latest')).toMatchObject({ state: 'shut-down', shutdownOn: '2026-08-10', replacement: 'gpt-6.2-sol' });
     // OpenAI ends these on 2026-12-11 and serves them until then.
     expect(openAIModelShutdown('gpt-5-mini')).toMatchObject({ state: 'scheduled', shutdownOn: '2026-12-11', replacement: 'gpt-6-luna' });
     expect(openAIModelShutdown('o3')).toMatchObject({ state: 'scheduled', shutdownOn: '2026-12-11', replacement: 'gpt-6.2-sol' });
