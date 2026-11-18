@@ -108,6 +108,21 @@ export function runSpendMeterContractSuite(name: string, factory: SpendMeterFact
       expect(await meter.snapshot('a', OCT)).toMatchObject({ used: 1, reserved: 0, remaining: 4 });
     });
 
+    it('refuses a settle whose attempt is not a whole number reserve() answers, and moves nothing', async () => {
+      const meter = await open({ a: 5 });
+      await meter.reserve({ accountId: 'a', operationId: 'op', now: OCT });
+      await meter.settle({ operationId: 'op', outcome: 'released', attempt: 1, now: OCT });
+      expect(await meter.reserve({ accountId: 'a', operationId: 'op', now: OCT })).toMatchObject({ status: 'reserved', attempt: 2 });
+      // a value no reserve() answers names no reservation: settled as if none were named, it would end the second attempt
+      const malformed = [Number.NaN, Number.POSITIVE_INFINITY, 1.5, 0, -1, '1' as unknown as number, null as unknown as number];
+      for (const attempt of malformed) {
+        await expect(meter.settle({ operationId: 'op', outcome: 'consumed', attempt, now: OCT })).rejects.toBeInstanceOf(TypeError);
+      }
+      expect(await meter.snapshot('a', OCT)).toMatchObject({ used: 0, reserved: 1, remaining: 4 });
+      expect(await meter.settle({ operationId: 'op', outcome: 'consumed', attempt: 2, now: OCT })).toEqual({ status: 'settled', state: 'consumed' });
+      expect(await meter.snapshot('a', OCT)).toMatchObject({ used: 1, reserved: 0, remaining: 4 });
+    });
+
     it('settles a consumed turn at the units it used, releasing the rest of its reservation, and refunds a replaced one by what it used', async () => {
       const meter = await open({ a: 100 });
       await meter.reserve({ accountId: 'a', operationId: 'cheap', units: 10, now: OCT });
