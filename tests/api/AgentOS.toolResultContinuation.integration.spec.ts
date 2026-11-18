@@ -13,6 +13,7 @@ import {
 } from '../../src/api/types/AgentOSResponse';
 import { WorkflowFacade } from '../../src/api/runtime/WorkflowFacade';
 import { RagMemoryInitializer } from '../../src/api/runtime/RagMemoryInitializer';
+import { resumeExternalToolRequestWithRegisteredTools } from '../../src/api/runtime/resumeExternalToolRequestWithRegisteredTools';
 import type { StructuredReplyOutput } from '../../src/api/runtime/structuredReply';
 import type { RagRetrievedChunk } from '../../src/cognition/rag/IRetrievalAugmentor';
 import { GMI } from '../../src/cognition/substrate/GMI.js';
@@ -2726,6 +2727,29 @@ describe('AgentOS tool-result continuations', () => {
 
       expect((continuation.at(-1) as AgentOSFinalResponseChunk).finalResponseText).toBe(NOTES_REPLY);
       expect(notesHanded(rt)).toEqual(['A private note', undefined]);
+    });
+
+    it.each([
+      ['a note of its own', { applicationNote: 'Resumed note.' }, 'Resumed note.'],
+      ['a blank note', { applicationNote: ' \n\t ' }, undefined],
+      ['no note, while this runtime holds the paused stream', {}, 'A private note'],
+    ] as const)('a resume through resumeExternalToolRequestWithRegisteredTools given %s continues as a direct resume does', async (_label, options, carried) => {
+      const rt = await sharedSessionRuntime({}, [{ text: 'I will read the notes file first.' }, { text: NOTES_REPLY }]);
+      const { saved } = await rt.pauseNotesTurn('A private note');
+      const readNotes = vi.fn(async () => ({ success: true, output: READ_RESULT.toolOutput }));
+
+      const continuation = await collect(
+        resumeExternalToolRequestWithRegisteredTools(rt.agentos, saved, {
+          ...options,
+          externalTools: { [READ_CALL.name]: readNotes },
+        }),
+      );
+
+      expect((continuation.at(-1) as AgentOSFinalResponseChunk).finalResponseText).toBe(NOTES_REPLY);
+      expect(notesHanded(rt)).toEqual(['A private note', carried]);
+      // the helper runs the host's tool with the pause's context, which holds no note
+      expect(readNotes).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(readNotes.mock.calls)).not.toMatch(/A private note|Resumed note\./);
     });
   });
 

@@ -603,4 +603,35 @@ describe('PromptEngine: a host note in the generic_completion template', () => {
     } as PromptComponents);
     expect(afterReply.endsWith(`user: Hello\nassistant: Hi there.\n\n${FRAME}\n${NOTE}\n\n`)).toBe(true);
   });
+
+  const HISTORY_ENDING_WITH_WORDS = [
+    createConversationMessage(MessageRole.USER, 'Earlier words.'),
+    createConversationMessage(MessageRole.ASSISTANT, 'Hi there.'),
+    createConversationMessage(MessageRole.USER, 'Hello'),
+  ];
+
+  it.each([
+    ['no host note', {}],
+    ['a blank host note', { applicationNote: ' \n\t ' }],
+  ])("with %s, retrieved text stays after the history's newest user line: the prompt a host got before the field", async (_label, field) => {
+    const prompt = await build({
+      systemPrompts: [{ content: 'You are Tess.', priority: 1 }],
+      conversationHistory: HISTORY_ENDING_WITH_WORDS,
+      currentTurnMessageCount: 1,
+      retrievedContext: 'Front desk notes.',
+      ...field,
+    } as PromptComponents);
+    expect(prompt.endsWith(`You are Tess.\n\nuser: Earlier words.\nassistant: Hi there.\nuser: Hello\n\n${FRAME}\nFront desk notes.\n\n`)).toBe(true);
+  });
+
+  it("with a host note, the retrieved text goes with it in front of the history's newest user line", async () => {
+    const prompt = await build({
+      systemPrompts: [{ content: 'You are Tess.', priority: 1 }],
+      conversationHistory: HISTORY_ENDING_WITH_WORDS,
+      currentTurnMessageCount: 1,
+      retrievedContext: 'Front desk notes.',
+      applicationNote: NOTE,
+    } as PromptComponents);
+    expect(prompt.endsWith(`user: Earlier words.\nassistant: Hi there.\n\n${FRAME}\n${NOTE}\n\n---\n\nFront desk notes.\n\nuser: Hello\n\n`)).toBe(true);
+  });
 });
