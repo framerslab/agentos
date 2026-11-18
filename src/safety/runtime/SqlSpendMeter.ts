@@ -653,13 +653,21 @@ export class SqlSpendMeter implements ISpendMeter {
    * row is still that attempt and still past its lease at the pass's `now` and, with `unfenced`, still carries no
    * fence: a retry or a heartbeat made while the pass asked its resolver stands, and with `unfenced` so does a deferral
    * by an opted-in pass. A request that names its {@link SpendSettleRequest.attempt} moves the row only while it is
-   * still that attempt; a later attempt means the one named was released, so that settle moves nothing.
+   * still that attempt; a later attempt means the one named was released, so that settle moves nothing. An `attempt`
+   * that is not a whole number of 1 or more rejects with a `TypeError` before the store is read.
    */
   private settleOnce(req: SpendSettleRequest, pass?: { attempt: number; unfenced: boolean }): Promise<SpendSettleResult> {
     const now = req.now ?? Date.now();
     const { meter, reservations } = this.tables;
-    // the attempt this settle is about: the one a reconcile pass read, or the one the caller's reserve() answered
-    const named = typeof req.attempt === 'number' && Number.isFinite(req.attempt) ? Math.trunc(req.attempt) : undefined;
+    // the attempt this settle is about: the one a reconcile pass read, or the one the caller's reserve() answered. A
+    // value given that no reserve() answers names no reservation, and settled as if none were named it could end a
+    // newer attempt, so it is refused before the store is read.
+    const given: unknown = req.attempt;
+    if (given !== undefined && !(typeof given === 'number' && Number.isSafeInteger(given) && given >= 1)) {
+      const shown = typeof given === 'number' ? String(given) : given === null ? 'null' : typeof given;
+      return Promise.reject(new TypeError(`SqlSpendMeter.settle needs attempt to be the whole number reserve() answered, 1 or more, or left out; got ${shown}.`));
+    }
+    const named = given as number | undefined;
     const attempt = pass ? pass.attempt : named;
     const guard = `${attempt === undefined ? '' : ' AND attempts = ?'}${pass ? ` AND expires_at <= ?${pass.unfenced ? ` AND ${UNFENCED}` : ''}` : ''}`;
     // a caller's settle of an attempt the operation has left: that attempt was released before the next was reserved
