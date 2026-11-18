@@ -207,6 +207,21 @@ describe('OpenAIProvider.buildResponsesPayload', () => {
     expect(p).not.toHaveProperty('reasoning_effort');
   });
 
+  it('sends an output cap under 16 as 16, the least max_output_tokens Responses takes', () => {
+    // The reference lists `minimum: 16`, and a gpt-6.2-sol call with 8 answered HTTP 400 "Expected a value >= 16, but
+    // got 8 instead." (2026-11-17). A GPT-6 tool call always goes to Responses, so a caller's small cap reached it as is.
+    expect(build('gpt-6.2-sol', userMsgs, { tools: toolsOpt, maxTokens: 8 }).max_output_tokens).toBe(16);
+    expect(build('gpt-6.2-sol', userMsgs, { tools: toolsOpt, maxTokens: 16 }).max_output_tokens).toBe(16);
+    expect(build('gpt-6.2-sol', userMsgs, { tools: toolsOpt, maxTokens: 300 }).max_output_tokens).toBe(300);
+  });
+
+  it('sends gpt-6.2-sol and gpt-6.2-astra the real max effort on Responses', () => {
+    for (const model of ['gpt-6.2-sol', 'gpt-6.2-astra']) {
+      expect(build(model, userMsgs, { tools: toolsOpt, effort: 'max' }).reasoning).toEqual({ effort: 'max' });
+      expect(build(model, userMsgs, { tools: toolsOpt, effort: 'xhigh' }).reasoning).toEqual({ effort: 'xhigh' });
+    }
+  });
+
   it('carries cache-marked system blocks into input as non-empty joined text', () => {
     const p = build('gpt-6-astra', cacheMarkedSystem, { tools: toolsOpt, effort: 'xhigh' });
     const input = p.input as Array<Record<string, unknown>>;

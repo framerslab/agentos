@@ -100,9 +100,14 @@ export function mapEffortToOpenAiReasoningEffort(effort: unknown): string | unde
  * changelog lists reasoning effort `low` through `max` for `gpt-6.1-sol` on
  * `/v1/responses` and says it rejects `none` and `minimal`, which the agentos
  * effort scale never produces.
+ *
+ * Live-probed 2026-11-17 (POST /v1/responses, `reasoning: {effort}`):
+ * `gpt-6.2-sol` and `gpt-6.2-astra` answered HTTP 200 to `xhigh` and `max`
+ * and 400 to `none` and `minimal` ("Supported values are: 'low', 'medium',
+ * 'high', 'xhigh', and 'max'."), as their model pages say.
  */
 export function modelAcceptsXhighResponsesEffort(modelId: string): boolean {
-  return /^(gpt-5\.[56]|gpt-6-(astra|sol|luna)|gpt-6\.1-sol)/i.test(modelId);
+  return /^(gpt-5\.[56]|gpt-6-(astra|sol|luna)|gpt-6\.1-sol|gpt-6\.2-(sol|astra))/i.test(modelId);
 }
 
 /**
@@ -133,10 +138,16 @@ export function modelAcceptsXhighResponsesEffort(modelId: string): boolean {
  * `gpt-6-sol`, `gpt-6-luna` and `gpt-6-astra`, so Sol and Luna join Astra.
  * `gpt-6.1-sol` joins on OpenAI's 2026-09-29 changelog, which lists `max`
  * among its `/v1/responses` efforts.
+ *
+ * 2026-11-17 probe (POST /v1/responses, `reasoning: {effort: 'max'}`): HTTP
+ * 200 on `gpt-6.2-sol` and `gpt-6.2-astra`, and on `gpt-6-luna` again. Chat
+ * Completions refused `max` on all three ("Supported values are: 'low',
+ * 'medium', 'high', and 'xhigh'." on the two 6.2 models).
  */
 const RESPONSES_MAX_EFFORT_MODELS: ReadonlySet<string> = new Set([
   'gpt-5.6', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna',
   'gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-6.1-sol',
+  'gpt-6.2-sol', 'gpt-6.2-astra',
 ]);
 
 /**

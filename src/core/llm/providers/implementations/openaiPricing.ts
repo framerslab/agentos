@@ -56,9 +56,23 @@ export const OPENAI_MODEL_PRICING: Readonly<Record<string, OpenAIModelPrice>> = 
   // its calls go unmetered. "GPT-6 Pro" is a ChatGPT plan tier, and the
   // first-party pro tier is `reasoning.mode: 'pro'` on Sol, so neither has an
   // id here.
+  // GPT-6.2 (Oct-Nov 2026), from the model pages
+  // (developers.openai.com/api/docs/models/gpt-6.2-astra and /gpt-6.2-sol) and
+  // the pricing page, read 2026-11-17: Astra $8 input, $0.40 cached input,
+  // $40 output per 1M; Sol $2, $0.10, $10. Cache writes cost 1.25x input for
+  // the 30-minute lifetime and 2.5x for the 12-hour one ($10 / $20 on Astra,
+  // $2.50 / $5 on Sol), and a prompt over 272K input tokens bills at 2x input
+  // and 1.5x output, as on the other GPT-6 models. Both always reason: their
+  // reasoning tokens bill as output.
+  'gpt-6.2-astra': { input: 0.008, output: 0.04, cachedInput: 0.0004 },
+  'gpt-6.2-sol': { input: 0.002, output: 0.01, cachedInput: 0.0001 },
   'gpt-6-astra': { input: 0.01, output: 0.05, cachedInput: 0.001 },
   'gpt-6-sol': { input: 0.002, output: 0.01, cachedInput: 0.0002 },
   'gpt-6-luna': { input: 0.0001, output: 0.0005, cachedInput: 0.00001 },
+  // gpt-6.1-terra (pricing page, read 2026-11-17): $1 input, $0.05 cached
+  // input, $5 output per 1M; its long-context row ($2 / $7.50) is the same 2x
+  // input and 1.5x output.
+  'gpt-6.1-terra': { input: 0.001, output: 0.005, cachedInput: 0.00005 },
   // gpt-6.1-sol (developers.openai.com/api/docs/changelog, 2026-09-29): $2
   // input and $10 output per 1M like gpt-6-sol, with cached input at $0.10
   // (5% of input, where the other GPT-6 models charge 10%) and cache writes
@@ -70,8 +84,11 @@ export const OPENAI_MODEL_PRICING: Readonly<Record<string, OpenAIModelPrice>> = 
   'gpt-5.5': { input: 0.005, output: 0.03, cachedInput: 0.0005 },
   'gpt-5.5-pro': { input: 0.03, output: 0.18 },
   // GPT-5.6 family (Aug 2026), per the first-party model pages on
-  // 2026-09-23: Sol $4/$20 (promotional through at least 2026-11-21),
-  // Terra $2/$12 and Luna $0.20/$1.20 per 1M. OpenRouter's listing carries
+  // 2026-09-23: Sol $4/$20, Terra $2/$12 and Luna $0.20/$1.20 per 1M. Sol's
+  // rate is a promotion: "GPT-5.6 Sol's promotional pricing is available until
+  // November 30, 2026" (pricing page, read 2026-11-17), and no page states its
+  // price after that day. gpt-6.2-sol ($2/$10) costs half of Sol's
+  // promotional rate, and gpt-6-luna ($0.10/$0.50) less than Luna. OpenRouter's listing carries
   // OpenRouter's resale rates, which differ, so first-party providers are
   // priced from first-party pages. The bare `gpt-5.6` alias routes to Sol and
   // is priced with it. It is absent from the 2026-09-23 /v1/models listing,
@@ -95,25 +112,35 @@ export const OPENAI_MODEL_PRICING: Readonly<Record<string, OpenAIModelPrice>> = 
   'gpt-5.3-codex': { input: 0.00175, output: 0.014, cachedInput: 0.000175 },
   // GPT-5.2 family
   'gpt-5.2': { input: 0.00175, output: 0.014, cachedInput: 0.000175 },
-  // GPT-5.1 and GPT-5 base (legacy, same tier pricing)
+  // GPT-5.1 and GPT-5 base (legacy, same tier pricing). OpenAI ends gpt-5,
+  // gpt-5-mini, gpt-5-nano and gpt-5-pro on 2026-12-11 and gpt-5.1 on
+  // 2027-04-01 (openaiRetirements.ts).
   'gpt-5': { input: 0.00125, output: 0.010, cachedInput: 0.000125 },
   'gpt-5.1': { input: 0.00125, output: 0.010, cachedInput: 0.000125 },
   'gpt-5-mini': { input: 0.00025, output: 0.002, cachedInput: 0.000025 },
   'gpt-5-nano': { input: 0.00005, output: 0.0004, cachedInput: 0.000005 },
-  // GPT-4.1 family (legacy but still in rotation). UNVERIFIED cached input
+  // gpt-5-pro: $15 input and $120 output per 1M, no cached-input rate
+  // (pricing page, read 2026-11-17).
+  'gpt-5-pro': { input: 0.015, output: 0.12 },
+  // GPT-4.1 family (legacy; OpenAI ends the gpt-4.1 and gpt-4.1-mini
+  // snapshots on 2027-01-14). gpt-4.1-nano was shut down on 2026-10-23; its
+  // row prices a usage record of an earlier call. UNVERIFIED cached input
   // for gpt-4.1-nano: the pricing page no longer lists it.
   'gpt-4.1': { input: 0.002, output: 0.008, cachedInput: 0.0005 },
   'gpt-4.1-mini': { input: 0.0004, output: 0.0016, cachedInput: 0.0001 },
   'gpt-4.1-nano': { input: 0.0001, output: 0.0004 },
-  // GPT-4o family (legacy, repriced to current list at $2.50/$10 per 1M)
+  // GPT-4o family (legacy, repriced to current list at $2.50/$10 per 1M).
+  // OpenAI ends the gpt-4o and gpt-4o-mini snapshots on 2027-01-14.
   'gpt-4o': { input: 0.0025, output: 0.010, cachedInput: 0.00125 },
   // The first GPT-4o snapshot kept its $5 / $15 launch price. Without this
   // row the dated-snapshot fallback would price it at the gpt-4o alias rate.
   // UNVERIFIED cached input: the pricing page does not list the snapshot.
   'gpt-4o-2024-05-13': { input: 0.005, output: 0.015 },
   'gpt-4o-mini': { input: 0.00015, output: 0.0006, cachedInput: 0.000075 },
-  // Deprecated but still potentially referenced. UNVERIFIED cached input: the
-  // pricing page no longer lists these models.
+  // Retired models, kept so a usage record of an earlier call still prices:
+  // OpenAI shut down gpt-4-turbo and gpt-3.5-turbo on 2026-10-23
+  // (openaiRetirements.ts). UNVERIFIED cached input: the pricing page no
+  // longer lists these models.
   'gpt-4-turbo': { input: 0.01, output: 0.03 },
   'gpt-4-turbo-preview': { input: 0.01, output: 0.03 },
   'gpt-4-vision-preview': { input: 0.01, output: 0.03 },
@@ -123,7 +150,9 @@ export const OPENAI_MODEL_PRICING: Readonly<Record<string, OpenAIModelPrice>> = 
   'gpt-3.5-turbo-16k': { input: 0.001, output: 0.002 },
   // o-series reasoning models. The pricing page lists o3's cached input and
   // none for o3-pro; o3-mini, o4-mini, o1 and o1-pro: UNVERIFIED cached
-  // input, the page no longer lists them.
+  // input, the page no longer lists them. OpenAI shut down o1, o3-mini and
+  // o4-mini on 2026-10-23 and ends o3 and o3-pro on 2026-12-11
+  // (openaiRetirements.ts).
   'o3': { input: 0.002, output: 0.008, cachedInput: 0.0005 },
   'o3-mini': { input: 0.0011, output: 0.0044 },
   'o3-pro': { input: 0.020, output: 0.080 },

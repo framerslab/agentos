@@ -272,15 +272,14 @@ writeFileSync('report.html', await evaluator.generateReport(run.runId, 'html'));
 
 ## LLM-as-Judge
 
-`LLMJudge` grades with a model through an `AIModelProviderManager`. Without `modelId`, it uses the judge resolver's model (OpenAI `gpt-5.6`, or `AGENTOS_JUDGE_PROVIDER` / `AGENTOS_JUDGE_MODEL` / `AGENTOS_JUDGE_EFFORT`):
+`LLMJudge` grades with a model through an `AIModelProviderManager`. Without `modelId`, it uses the judge resolver's model (OpenAI `gpt-6.2-sol`, or `AGENTOS_JUDGE_PROVIDER` / `AGENTOS_JUDGE_MODEL` / `AGENTOS_JUDGE_EFFORT`):
 
 ```typescript
 import { LLMJudge, CRITERIA_PRESETS } from '@framers/agentos';
 
 const judge = new LLMJudge({
   llmProvider: aiModelProviderManager,
-  modelId: 'gpt-4-turbo',
-  temperature: 0.1,
+  modelId: 'gpt-6.2-sol', // a reasoning model: the provider sends it no temperature
 });
 
 // Single judgment

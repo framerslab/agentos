@@ -162,7 +162,7 @@ import { LLMJudge, CRITERIA_PRESETS } from '@framers/agentos';
 
 const judge = new LLMJudge({
   llmProvider: providerManager, // an initialized AIModelProviderManager
-  modelId: 'gpt-4o',            // default: the judge resolver's model (openai gpt-5.6)
+  modelId: 'gpt-4o',            // default: the judge resolver's model (openai gpt-6.2-sol)
 });
 
 const result = await judge.judge(

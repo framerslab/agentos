@@ -272,7 +272,7 @@ export const hitl = {
    *   hitl: {
    *     approvals: { beforeTool: ['delete-file'] },
    *     handler: hitl.llmJudge({
-   *       model: 'gpt-5.6',
+   *       model: 'gpt-6.2-sol',
    *       criteria: 'Is this action safe and non-destructive?',
    *       confidenceThreshold: 0.8,
    *       fallback: hitl.cli(), // escalate uncertain decisions to human
@@ -282,7 +282,7 @@ export const hitl = {
    * ```
    */
   llmJudge(config: {
-    /** LLM model to use. @default the central judge resolver (`resolveDefaultJudgeModel()` — gpt-5.6) */
+    /** LLM model to use. @default the central judge resolver (`resolveDefaultJudgeModel()`: gpt-6.2-sol) */
     model?: string;
     /** LLM provider. @default 'openai'; pinning a non-openai provider requires an explicit `model` */
     provider?: string;

@@ -51,7 +51,7 @@ describe('resolveFallbackChain', () => {
       `${LLAMA}(standing)`,
       `${MAGNUM}(standing)`,
       `${HERMES}(refill)`,
-      'gpt-5.6-sol',
+      'gpt-6.2-sol',
       'openai/gpt-5.6-sol',
       'gemini-3.1-pro-preview',
     ]);
@@ -79,10 +79,10 @@ describe('resolveFallbackChain', () => {
 
   it('drops a policy-default suffix entry naming the failed first model, keeps a caller entry naming it', () => {
     const chain = resolveFallbackChain(
-      [{ provider: 'openai', model: 'gpt-5.6-sol' }, ...buildPolicyAwareFallbackChain('mature')],
-      { primary: { provider: 'openai', model: 'gpt-5.6-sol' } },
+      [{ provider: 'openai', model: 'gpt-6.2-sol' }, ...buildPolicyAwareFallbackChain('mature')],
+      { primary: { provider: 'openai', model: 'gpt-6.2-sol' } },
     );
-    const openai = chain.filter((e) => e.provider === 'openai' && e.model === 'gpt-5.6-sol');
+    const openai = chain.filter((e) => e.provider === 'openai' && e.model === 'gpt-6.2-sol');
     expect(openai).toHaveLength(1);
     expect(openai[0]!.origin).toBeUndefined();
   });
@@ -99,7 +99,7 @@ describe('resolveFallbackChain', () => {
       expect(models).toContain(LLAMA);
       expect(models).not.toContain(MAGNUM);
       expect(models).not.toContain(HERMES);
-      expect(models).toContain('gpt-5.6-sol');
+      expect(models).toContain('gpt-6.2-sol');
       expect(skipped).toEqual([`${MAGNUM}:missing_capability`, `${HERMES}:missing_capability`]);
     }
   });
