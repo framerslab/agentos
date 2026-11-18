@@ -799,6 +799,9 @@ export class AgentOSOrchestrator {
     const spendMeter = this.dependencies.spendMeter;
     const meteredOperationId = spendMeter && typeof input.operationId === 'string' && input.operationId.trim() ? input.operationId.trim() : undefined;
     let outputReached = false;
+    // set while the turn's error handling still owes the stream its error chunk: handling that fails before the chunk
+    // leaves the stream open for orchestrateTurn's fallback, which reports the failure and closes the stream
+    let errorReportOwed = false;
 
     try {
       // --- Pre-LLM pipeline (phases 1-12) delegated to TurnExecutionPipeline ---
@@ -1166,6 +1169,7 @@ export class AgentOSOrchestrator {
       // the stream closes below and no result continues it: a pause the turn saved before it failed ends below, so
       // the stream's context goes and the turn settles as a failed turn
       keepStreamContextActive = false;
+      errorReportOwed = true;
       recordExceptionOnActiveSpan(error, `Error in orchestrateTurn for stream ${agentOSStreamId}`);
       const gmiErr =
         GMIError.wrap?.(
@@ -1229,6 +1233,7 @@ export class AgentOSOrchestrator {
         gmiErr.message,
         gmiErr.details
       );
+      errorReportOwed = false;
       // a pause the turn saved before it failed never reached the host: its calls are answered as not run, so the
       // next turn sends the model no call without its result
       await this.toolResultHandler.endPauseOfFailedStream(agentOSStreamId, conversationContext, currentPersonaId);
@@ -1259,12 +1264,16 @@ export class AgentOSOrchestrator {
       });
 
       // Close only after settlement, so stream readers can immediately read the turn's charge or release.
-      // A host-tool pause keeps the stream and its context for the continuation.
+      // A host-tool pause keeps the stream and its context for the continuation. A turn whose error handling failed
+      // before its error chunk is left open: its failure leaves this method, and orchestrateTurn's fallback pushes
+      // the error to the stream and closes it, so the caller never reads a clean end in place of the error.
       if (!keepStreamContextActive) {
-        await this.dependencies.streamingManager.closeStream(
-          agentOSStreamId,
-          turnMetricsStatus === 'error' ? 'Error during turn processing.' : 'Processing complete.'
-        );
+        if (!errorReportOwed) {
+          await this.dependencies.streamingManager.closeStream(
+            agentOSStreamId,
+            turnMetricsStatus === 'error' ? 'Error during turn processing.' : 'Processing complete.'
+          );
+        }
         this.activeStreamContexts.delete(agentOSStreamId);
         console.log(
           `AgentOSOrchestrator: Finished processing for AgentOS Stream ${agentOSStreamId}. Context removed.`
