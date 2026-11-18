@@ -208,6 +208,33 @@ describe('the spend meter on processRequest', () => {
     expect(await meter.snapshot('person-1')).toMatchObject({ used: 1, reserved: 0 });
   });
 
+  it('ends the stream with an error when what failed a turn\'s error report is no Error at all', async () => {
+    const meter = await sqlMeter(5);
+    // the store throws a value no handler can read a message from
+    const taskOutcomeTelemetryStore = {
+      loadWindows: async () => ({}),
+      saveWindow: (): Promise<void> => {
+        throw undefined;
+      },
+    };
+    booted = await boot({ meter }, { taskOutcomeTelemetryStore });
+    provider.replies.push(reply('Done.'));
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let chunks: any[] = [];
+    try {
+      chunks = await Promise.race([
+        collect(booted, { operationId: 'op-report-failed-bare' }),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error('the stream of the failed turn never ended')), 2_000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+    expect(errorOf(chunks)?.code).toBe(GMIErrorCode.INTERNAL_SERVER_ERROR);
+    expect(await meter.snapshot('person-1')).toMatchObject({ used: 1, reserved: 0 });
+  });
+
   it('settles a turn whose caller stopped reading after the first words', async () => {
     const meter = await sqlMeter(5);
     booted = await boot({ meter });
