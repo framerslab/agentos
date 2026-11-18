@@ -193,16 +193,20 @@ function noteTextOf(components: Readonly<PromptComponents>): string {
 
 /**
  * The host's note as the prompt sends it, for the token count: the frame line and the note ({@link applicationNoteOf}),
- * and, beside a memory block or other retrieved text, the separator before them. No other count of the budget step
- * holds the frame line.
+ * and, beside a memory block or other retrieved text, the separator before them. With a memory block and other
+ * retrieved text as one string, it also holds the separator between the two, which no other count of the budget step
+ * holds; a prompt with no host note counts neither, as before. No other count of the budget step holds the frame line.
  *
  * @param note - The host's note ({@link hostNoteOf}).
- * @param components - The prompt's components, before the budget step.
+ * @param components - The prompt's components: before the budget step, or after it to count the note as reduced.
  * @returns The text to count for the note.
  */
 function hostNoteAsSent(note: string, components: Readonly<PromptComponents>): string {
-  const beside = Boolean(components.memoryContextText) || Boolean(retrievedContextAsText(components.retrievedContext));
-  return beside ? `${applicationNoteOf(note)}\n\n---\n\n` : applicationNoteOf(note);
+  const other = retrievedContextAsText(components.retrievedContext);
+  const beside = Boolean(components.memoryContextText) || Boolean(other);
+  const between = Boolean(components.memoryContextText) && typeof components.retrievedContext === 'string' && Boolean(other);
+  if (!beside) return applicationNoteOf(note);
+  return between ? `${applicationNoteOf(note)}\n\n---\n\n\n\n---\n\n` : `${applicationNoteOf(note)}\n\n---\n\n`;
 }
 
 /**
@@ -638,6 +642,9 @@ export class PromptEngine implements IPromptEngine {
     if (components.systemPrompts) estimatedTokens += (await Promise.all(components.systemPrompts.map(sp => this.estimateTokenCount(sp.content, modelTargetInfo.modelId)))).reduce((a,b) => a+b, 0);
     if (components.userInput) estimatedTokens += await this.estimateTokenCount(components.userInput, modelTargetInfo.modelId);
     if (components.conversationHistory) estimatedTokens += await this.calculateTokensForMessages(components.conversationHistory, modelTargetInfo.modelId, this.thinkingSentFor(components.conversationHistory, modelTargetInfo));
+    // The host's note counts as it is sent, as the budget step counts it.
+    const hostNote = hostNoteOf(components);
+    if (hostNote) estimatedTokens += await this.estimateTokenCount(hostNoteAsSent(hostNote, components), modelTargetInfo.modelId);
 
 
     if (estimatedTokens > modelTargetInfo.maxContextTokens) {
@@ -1163,7 +1170,8 @@ export class PromptEngine implements IPromptEngine {
           currentTokens = currentTokens - ragTokens + newRagTokens;
           ragTokens = newRagTokens;
           // The host's note is counted as it is sent: with no retrieved text and no memory block left beside it, it
-          // goes out without the separator, so its count is taken again.
+          // goes out without the separator, and with no retrieved text left after the memory block, without the one
+          // between them, so its count is taken again.
           const hostNote = hostNoteOf(optimized);
           if (hostNote) {
             const noteBefore = await this.estimateTokenCount(
