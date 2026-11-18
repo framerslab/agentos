@@ -189,6 +189,25 @@ describe('the spend meter on processRequest', () => {
     expect(await meter.snapshot('person-1')).toMatchObject({ used: 0, reserved: 0 });
   });
 
+  it('ends a turn whose own error report failed with the runtime error, after the turn settled', async () => {
+    const meter = await sqlMeter(5);
+    // a host store that throws where it should reject: the turn's outcome cannot be recorded, and neither can its failure
+    const taskOutcomeTelemetryStore = {
+      loadWindows: async () => ({}),
+      saveWindow: (): Promise<void> => {
+        throw new Error('the telemetry store is closed');
+      },
+    };
+    booted = await boot({ meter }, { taskOutcomeTelemetryStore });
+    provider.replies.push(reply('Done.'));
+    const chunks = await collect(booted, { operationId: 'op-report-failed' });
+    expect(chunks.some((c) => c.type === AgentOSResponseChunkType.FINAL_RESPONSE)).toBe(false);
+    // the caller is told the turn failed: the stream never ends as if the reply were whole
+    expect(errorOf(chunks)?.code).toBe(GMIErrorCode.INTERNAL_SERVER_ERROR);
+    // the reply's words had reached the stream, so the turn counts, and it had settled when the stream ended
+    expect(await meter.snapshot('person-1')).toMatchObject({ used: 1, reserved: 0 });
+  });
+
   it('settles a turn whose caller stopped reading after the first words', async () => {
     const meter = await sqlMeter(5);
     booted = await boot({ meter });
