@@ -42,6 +42,7 @@ import { refusedToolCallResult } from '../../cognition/substrate/toolCallGate';
 import type { GuardrailToolCallGate } from '../../safety/guardrails/guardrailDispatcher';
 import { gmiToolCallGateFor } from './toolCallGate';
 import { externalToolPauseCalls } from './externalToolPause';
+import { hostApplicationNote } from './applicationNote';
 import { addReplyToConversation, finalResponseFieldsOf, keepPausedMemoryRecall, memoryRecallFieldOf } from './turnFinalResponse';
 import { GMIError, GMIErrorCode } from '../../core/utils/errors.js';
 import { snapshotPersonaDetails } from '../../orchestration/turn-planner/helpers';
@@ -96,6 +97,13 @@ export interface ActiveStreamContext {
    * again for it, keeps no gate of the paused turn.
    */
   toolCallGate?: GuardrailToolCallGate;
+  /**
+   * The host's note for the stream's turn (`AgentOSInput.applicationNote`), trimmed: the one its turn was given, or
+   * for a resumed stream the one the resume was given, else the paused stream's. A continuation of the stream sends it
+   * on whatever GMI it runs, since one GMI serves every conversation of a session and keeps no note between calls.
+   * Unset when the turn has none.
+   */
+  applicationNote?: string;
 }
 
 /**
@@ -606,12 +614,15 @@ export class ExternalToolResultHandler {
           // the model and the provider the stream's turn named go with the results: a GMI built again for the
           // continuation holds neither
           const { preferredModelId, preferredProviderId } = streamContext.processingOptions ?? {};
+          // the host's note of the stream's turn goes with the results too: the GMI keeps no note between calls
+          const { applicationNote } = streamContext;
           const continuationOptions: GMIToolResultOptions | undefined =
-            continuationGate || preferredModelId || preferredProviderId
+            continuationGate || preferredModelId || preferredProviderId || applicationNote
               ? {
                   ...(continuationGate ? { toolCallGate: continuationGate } : {}),
                   ...(preferredModelId ? { preferredModelId } : {}),
                   ...(preferredProviderId ? { preferredProviderId } : {}),
+                  ...(applicationNote ? { applicationNote } : {}),
                 }
               : undefined;
           // The caller took the pause; the store keeps that before the results reach the GMI, since the GMI takes
@@ -1343,10 +1354,10 @@ export class ExternalToolResultHandler {
 
   /**
    * Opens the stream a resume continues a pause on: its context, with the organization the runtime resolves for the
-   * resume and the tool-call gate the resume was given; while this process still holds the paused stream, also the
-   * sources the paused turn retrieved, the GMI's own history of the turn and, for a resume given no gate, the gate the
-   * paused turn ran with; and the GMI's history and turn context set from them, from the conversation and from the
-   * new stream ({@link setPausedTurnOn}).
+   * resume and the tool-call gate and the host's note the resume was given; while this process holds the paused
+   * stream, also the sources the paused turn retrieved, the GMI's own history of the turn and, for a resume given no
+   * gate or no note, the gate the paused turn ran with or its note; and the GMI's history and turn context set from
+   * them, from the conversation and from the new stream ({@link setPausedTurnOn}).
    *
    * @throws {GMIError} When the runtime refuses the resume's organization.
    */
@@ -1363,6 +1374,12 @@ export class ExternalToolResultHandler {
     const resolvedOrganizationId = this.resolveOrganizationContext(
       options.organizationId ?? storedOrganizationId,
     );
+    // the pause never stores the turn's note: the resume's own (a blank one sends none), else the paused stream's while
+    // this process holds it
+    const applicationNote =
+      options.applicationNote !== undefined
+        ? hostApplicationNote(options.applicationNote)
+        : this.activeStreamContexts.get(pendingRequest.streamId)?.applicationNote;
 
     const streamContext: ActiveStreamContext = {
       gmi,
@@ -1382,6 +1399,7 @@ export class ExternalToolResultHandler {
       ragSources: this.activeStreamContexts.get(pendingRequest.streamId)?.ragSources,
       pausedTurnHistory: this.activeStreamContexts.get(pendingRequest.streamId)?.pausedTurnHistory,
       toolCallGate: toolCallGate ?? this.activeStreamContexts.get(pendingRequest.streamId)?.toolCallGate,
+      ...(applicationNote ? { applicationNote } : {}),
     };
     this.activeStreamContexts.set(agentOSStreamId, streamContext);
 

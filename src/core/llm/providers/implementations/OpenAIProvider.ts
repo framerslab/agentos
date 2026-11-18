@@ -62,6 +62,7 @@ import {
   openAiHasLongContextPricing,
 } from './openaiPricing.js';
 import { isOpenAIReasoningModel, openAiReasoningContextWindow } from './openaiModelFamilies.js';
+import { retiredOpenAIModel, retiredOpenAIModelMessage } from './openaiRetirements.js';
 import { moduleLogger } from '../../../logging/loggerFactory.js';
 import { listedErrorFields } from '../../../logging/events.js';
 import { AttemptBudgetExhaustedError, CountingAttemptBudget } from '../../../../safety/runtime/ModelAttemptBudget.js';
@@ -80,6 +81,12 @@ export {
   openAiHasLongContextPricing,
   openAiReasoningContextWindow,
 };
+export {
+  OPENAI_MODEL_SHUTDOWNS,
+  openAIModelShutdown,
+  retiredOpenAIModel,
+  type OpenAIModelShutdown,
+} from './openaiRetirements.js';
 
 // Assuming a fetch-like interface is available globally or polyfilled (e.g., node-fetch)
 // For Node.js, ensure 'node-fetch' is a dependency or use Node's built-in fetch from v18+.
@@ -290,6 +297,13 @@ namespace OpenAIAPITypes {
  * embeddings under it too.
  */
 export const OPENAI_DEFAULT_BASE_URL = 'https://api.openai.com/v1';
+
+/**
+ * The smallest `max_output_tokens` the Responses API takes: the reference lists `minimum: 16`
+ * (https://developers.openai.com/api/reference/resources/responses/methods/create), and a call with 8 answered HTTP 400
+ * "Expected a value >= 16, but got 8 instead." on 2026-11-17.
+ */
+const OPENAI_RESPONSES_MIN_OUTPUT_TOKENS = 16;
 
 /**
  * Configuration specific to the OpenAIProvider.
@@ -554,15 +568,35 @@ export function openAiReasoningCapabilities(modelId: string): string[] {
  * for GPT-5, GPT-5 mini, o3 and o4-mini in
  * https://github.com/danny-avila/LibreChat/discussions/11689 and for a GPT-5.1
  * mini model in https://docs.nectain.com/docs/nectainium/admin_guide/2/2.14/2.14.3/.
- * GPT-6 is left out: OpenAI's GPT-6 guide
- * (https://developers.openai.com/api/docs/guides/latest-model) lists
- * temperature, top_p, top_logprobs and logprobs as unsupported and names no
- * penalty, and no rejection is on record.
+ * GPT-6 does as well: on 2026-11-17 `gpt-6.2-sol`, `gpt-6.2-astra` and
+ * `gpt-6-luna` answered a Chat Completions call with `presence_penalty` or
+ * `frequency_penalty` 0.5 with HTTP 400 "Unsupported parameter:
+ * 'presence_penalty' is not supported with this model." (only 0 passed), and
+ * `gpt-6-luna` at `reasoning_effort: 'none'` answered HTTP 500 to them. No
+ * reference page names the penalties for these models, so the provider sends
+ * the GPT-6 family neither.
  *
  * @param modelId Provider-side model identifier (e.g. `'o3'`, `'gpt-5.5'`).
  */
 function openAiRejectsPenalties(modelId: string): boolean {
-  return /^(o\d|gpt-5)/i.test(modelId);
+  return /^(o\d|gpt-5|gpt-6)/i.test(modelId);
+}
+
+/**
+ * Whether OpenAI rejects `stop` on Chat Completions for `modelId`. The GPT-6
+ * family does: on 2026-11-17 `gpt-6.2-sol`, `gpt-6.2-astra` and `gpt-6-luna`
+ * (at every effort, `none` included) answered a call with `stop` with HTTP 400
+ * "Unsupported parameter: 'stop' is not supported with this model."; the
+ * Chat Completions reference names o3 and o4-mini as refusing it too
+ * (https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create).
+ * The provider drops the caller's stop sequences for these models, so the
+ * call is answered in full instead of refused. The Responses API has no
+ * `stop` parameter, and its builder never sends one.
+ *
+ * @param modelId Provider-side model identifier (e.g. `'gpt-6.2-sol'`).
+ */
+export function openAiRejectsStop(modelId: string): boolean {
+  return /^gpt-6/i.test(modelId);
 }
 
 /**
@@ -1024,6 +1058,19 @@ function reconcileStreamedCall(
   return delta;
 }
 
+/**
+ * The model a completion request names: `customModelParams.model` when it is a non-blank string, since the payload
+ * builders apply `customModelParams` last and it replaces `model` in the body, else `modelId`. The shutdown check, the
+ * endpoint choice and every model-specific payload rule read this one value, so they judge the model that is sent.
+ *
+ * @param modelId The model id the caller passed.
+ * @param options The call's options.
+ */
+function effectiveOpenAiModelId(modelId: string, options: Pick<ModelCompletionOptions, 'customModelParams'> | undefined): string {
+  const override = options?.customModelParams?.model;
+  return typeof override === 'string' && override.trim() !== '' ? override : modelId;
+}
+
 export class OpenAIProvider implements IProvider {
   /** @inheritdoc */
   public readonly providerId: string = 'openai';
@@ -1129,6 +1176,7 @@ export class OpenAIProvider implements IProvider {
     );
 
     this.availableModelsCache.clear();
+    const native = this.isNativeOpenAiEndpoint();
     response.data.forEach((apiModel: OpenAIAPITypes.ModelAPIObject) => {
       // Basic filtering for generally usable models, can be expanded.
       // The o-series ids neither start with `gpt-` nor contain `embedding`,
@@ -1140,6 +1188,8 @@ export class OpenAIProvider implements IProvider {
       const admitOSeries = /^o\d/.test(apiModel.id)
         && !isOpenAIResponsesOnlyModel(apiModel.id)
         && this.resolvePricing(apiModel.id) !== undefined;
+      // A model OpenAI has shut down is never offered: a call to it is refused (refuseRetiredModel).
+      if (native && retiredOpenAIModel(apiModel.id)) return;
       if (apiModel.id.startsWith('gpt-') || admitOSeries || apiModel.id.includes('embedding')) {
         const modelInfo = this.mapApiToModelInfo(apiModel);
         this.availableModelsCache.set(modelInfo.modelId, modelInfo);
@@ -1382,11 +1432,14 @@ export class OpenAIProvider implements IProvider {
 
   /** @inheritdoc */
   public async generateCompletion(
-    modelId: string,
+    requestedModelId: string,
     messages: ChatMessage[],
     options: ModelCompletionOptions
   ): Promise<ModelCompletionResponse> {
     this.ensureInitialized();
+    // The model the request body will name: the shutdown check, the endpoint and the payload rules all read it.
+    const modelId = effectiveOpenAiModelId(requestedModelId, options);
+    this.refuseRetiredModel(modelId);
     const apiKey = await this.getApiKey(options.apiKeyOverride, options.abortSignal);
 
     // Responses-only models, GPT-6 tool calls and GPT-5/6 tool calls that
@@ -1428,11 +1481,13 @@ export class OpenAIProvider implements IProvider {
 
   /** @inheritdoc */
   public async *generateCompletionStream(
-    modelId: string,
+    requestedModelId: string,
     messages: ChatMessage[],
     options: ModelCompletionOptions
   ): AsyncGenerator<ModelCompletionResponse, void, undefined> {
     this.ensureInitialized();
+    // The model the request body will name, as in generateCompletion.
+    const modelId = effectiveOpenAiModelId(requestedModelId, options);
     const abortSignal = options.abortSignal;
     // Checked before any network work, so an aborted call never reaches the
     // OAuth token fetch or the POST.
@@ -1440,6 +1495,7 @@ export class OpenAIProvider implements IProvider {
       yield this.abortedStreamChunk(modelId, 'Stream aborted prior to first chunk');
       return;
     }
+    this.refuseRetiredModel(modelId);
     let apiKey: string;
     try {
       apiKey = await this.getApiKey(options.apiKeyOverride, abortSignal);
@@ -1487,6 +1543,29 @@ export class OpenAIProvider implements IProvider {
       return;
     }
     yield* this.mapChatStream(stream, modelId, abortSignal);
+  }
+
+  /**
+   * Refuses a call to a model OpenAI has shut down ({@link retiredOpenAIModel}) before a key is drawn or anything is
+   * sent, with the error OpenAI's own answer would carry (HTTP 404, `model_not_found`) and a message that names the
+   * model to use instead. Only a call to OpenAI's own endpoint is refused: a gateway or another vendor this class
+   * serves (Groq, xAI, Together, Mistral, an Azure or LiteLLM proxy) keeps its own catalog and retirement dates.
+   *
+   * @throws {OpenAIProviderError} `MODEL_RETIRED` when `modelId` is shut down.
+   * @private
+   */
+  private refuseRetiredModel(modelId: string): void {
+    if (!this.isNativeOpenAiEndpoint()) return;
+    const row = retiredOpenAIModel(modelId);
+    if (!row) return;
+    throw new OpenAIProviderError(
+      retiredOpenAIModelMessage(modelId, row),
+      'MODEL_RETIRED',
+      'model_not_found',
+      'invalid_request_error',
+      404,
+      { replacement: row.replacement, ...(row.shutdownOn ? { shutdownOn: row.shutdownOn } : {}) },
+    );
   }
 
   /**
@@ -2104,7 +2183,14 @@ export class OpenAIProvider implements IProvider {
       if (options.presencePenalty !== undefined) payload.presence_penalty = options.presencePenalty;
       if (options.frequencyPenalty !== undefined) payload.frequency_penalty = options.frequencyPenalty;
     }
-    if (options.stopSequences !== undefined) payload.stop = options.stopSequences;
+    if (options.stopSequences !== undefined) {
+      if (!openAiRejectsStop(modelId)) {
+        payload.stop = options.stopSequences;
+      } else {
+        // The GPT-6 family refuses `stop` with HTTP 400; the call is answered in full instead.
+        log.debug('llm.option_ignored', { provider: 'openai', reason: 'stop_sequences' });
+      }
+    }
     if (options.userId !== undefined) payload.user = options.userId;
     // Chat completions are stored by default for new accounts; the call's
     // `store` goes out as given, and a call without it sends no key, as before.
@@ -2296,7 +2382,10 @@ export class OpenAIProvider implements IProvider {
       payload.tool_choice = this.toResponsesToolChoice(options.toolChoice);
     }
     if (options.maxTokens !== undefined) {
-      payload.max_output_tokens = clampMaxOutputTokens(modelId, options.maxTokens) ?? options.maxTokens;
+      // Responses refuses a `max_output_tokens` under 16 with HTTP 400 ("Expected a value >= 16"; the reference lists
+      // `minimum: 16`), so a smaller cap is sent as 16.
+      const cap = clampMaxOutputTokens(modelId, options.maxTokens) ?? options.maxTokens;
+      payload.max_output_tokens = Math.max(cap, OPENAI_RESPONSES_MIN_OUTPUT_TOKENS);
     }
     if (options.userId !== undefined) payload.safety_identifier = options.userId;
     // presence/frequency penalties + stop are intentionally OMITTED — reasoning

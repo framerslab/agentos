@@ -60,6 +60,17 @@
  * a category that's missing from the active preset's table — the
  * shipped presets cover every {@link MemoryQueryCategory}.
  *
+ * **Model end dates:**
+ *
+ * The presets are records of the runs they were calibrated on, so their
+ * tiers keep the names of the models those runs used. OpenAI ends `gpt-5`
+ * and `gpt-5-mini` on 2026-12-11 and the `gpt-4o` snapshots on 2027-01-14
+ * (https://developers.openai.com/api/docs/deprecations, read 2026-11-17).
+ * A caller that dispatches on these tiers after those days needs a preset
+ * calibrated on current models; `openAIModelShutdown('gpt-5')` and
+ * `openAIModelShutdown('gpt-5-mini')` give each one's end date and the
+ * current model that does its job.
+ *
  * @module @framers/agentos/memory-router/reader-router
  */
 

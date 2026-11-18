@@ -19,7 +19,7 @@ import type { ScorerFunction } from './IEvaluator';
 export interface LLMJudgeConfig {
   /** LLM provider manager */
   llmProvider: AIModelProviderManager;
-  /** Model to use for judging. @default the central judge resolver (gpt-5.6) */
+  /** Model to use for judging. @default the central judge resolver (gpt-6.2-sol) */
   modelId?: string;
   /** Provider ID. Pinning a non-openai provider requires an explicit `modelId`. */
   providerId?: string;
@@ -150,7 +150,7 @@ export class LLMJudge {
 
   constructor(config: LLMJudgeConfig) {
     this.llmProvider = config.llmProvider;
-    // Default judge selection comes from the central resolver (gpt-5.6 at
+    // Default judge selection comes from the central resolver (gpt-6.2-sol at
     // max effort; spec batch-1 C3): the three judge sites previously
     // hardcoded stale model ids and co-drifted. `??`-style resolution with
     // an empty-string guard replaces the old falsy-swallowing `||`.

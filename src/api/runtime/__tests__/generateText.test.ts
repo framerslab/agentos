@@ -1210,13 +1210,13 @@ describe('buildFallbackChain — OpenRouter link pins a cheap model', () => {
       // A model-less OpenRouter entry silently defaults to the OpenRouter
       // provider's defaultModel, which made failover traffic the #1 LLM
       // cost in prod (2026-06-07). The entry must be PINNED — and pinned
-      // to the gpt-5.6-sol quality floor, so a primary outage neither lands
-      // on an unchosen model nor downgrades output to a mini tier.
+      // to the Sol quality floor, so a primary outage neither lands on an
+      // unchosen model nor downgrades output to a mini tier.
       expect(orEntry?.model).toBe('openai/gpt-5.6-sol');
-      // Both frontier legs move together (2026-08-06 flip): the direct
-      // OpenAI leg carries the same -sol pin.
+      // The direct OpenAI leg carries the current Sol model, gpt-6.2-sol, at
+      // half gpt-5.6-sol's price ($2 / $10 per 1M tokens against $4 / $20).
       const oaEntry = chain.find((e) => e.provider === 'openai');
-      expect(oaEntry?.model).toBe('gpt-5.6-sol');
+      expect(oaEntry?.model).toBe('gpt-6.2-sol');
     } finally {
       if (originalOrKey === undefined) delete process.env.OPENROUTER_API_KEY;
       else process.env.OPENROUTER_API_KEY = originalOrKey;

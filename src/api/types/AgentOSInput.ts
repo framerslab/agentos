@@ -120,8 +120,24 @@ export interface AgentOSInput {
   operationId?: string;
   userContextOverride?: Partial<UserContext>;
   skillPromptContext?: string;
+  /**
+   * Text from the host for this reply only. It rides the newest user message in the application note
+   * (`APPLICATION_NOTE_FRAME`), before the memory block and any retrieved text, in each request this turn's own model
+   * calls send, the continuations of an external tool result included. It never enters the system prompt, the stored
+   * history or the memory block's share, and it is never cut to fit: a request over the model's budget after the
+   * earlier history and the retrieved text are reduced goes out with the note whole, as one with long words from the
+   * person does. Agents the turn launches and the runtime's side calls do not receive it. Leading and trailing
+   * whitespace is trimmed; a blank note sends nothing.
+   */
+  applicationNote?: string;
   disabledSessionSkillIds?: string[];
 }
+
+/**
+ * The name of the {@link AgentOSInput} field that carries a host's note for one reply (`applicationNote`). A host that
+ * is handed an AgentOS module tests for this export to learn whether the module carries the field.
+ */
+export const APPLICATION_NOTE_INPUT_FIELD = 'applicationNote' as const;
 
 /**
  * Defines fine-grained control options for how AgentOS processes an individual turn.

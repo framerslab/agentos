@@ -59,6 +59,7 @@ import type { ZodType } from 'zod';
 import type { CompletionAttempt, CompletionOutcome, CompletionResolution, CompletionRoute } from '../../api/runtime/completionGateway.js';
 import { checkStructuredReply, resolveStructuredReply, STRUCTURED_REPLY_REFUSED_ISSUE, structuredRepairMessage, StructuredReplyConfigError, type StructuredReplyOutput } from '../../api/runtime/structuredReply.js';
 import type { AgencyLaunchFrame } from '../../api/runtime/agencyLaunch/types';
+import { hostApplicationNote } from '../../api/runtime/applicationNote.js';
 
 import { AIModelProviderManager } from '../../core/llm/providers/AIModelProviderManager';
 import { IUtilityAI, SummarizationOptions } from '../nlp/ai_utilities/IUtilityAI';
@@ -296,6 +297,14 @@ function memoryScopeOf(turnInput: GMITurnInput): TurnMemoryScope | undefined {
   const sessionId = visible(named.sessionId);
   if (!userId && !sessionId) return undefined;
   return { ...(userId ? { userId } : {}), ...(sessionId ? { sessionId } : {}) };
+}
+
+/**
+ * The host's note a turn carries in `metadata.applicationNote` (`AgentOSInput.applicationNote` for a user turn,
+ * `GMIToolResultOptions.applicationNote` for a continuation), trimmed; undefined when it carries none or a blank one.
+ */
+function applicationNoteOf(turnInput: GMITurnInput): string | undefined {
+  return hostApplicationNote(turnInput.metadata?.applicationNote);
 }
 
 /** The tool-call gate a turn names in `metadata.toolCallGate`; undefined when it names none. */
@@ -1596,6 +1605,10 @@ export class GMI implements IGMI {
     const toolCallGate = toolCallGateOf(turnInput) ?? this.turnToolCallGate;
     // The launched team this turn's tool calls sit in, likewise: a continuation that names none sits in its turn's.
     const launchFrame = launchFrameOf(turnInput) ?? this.turnLaunchFrame;
+    // The host's note every request of this call sends (each step of its tool loop and each hop), read from its own
+    // input alone: a user turn's from AgentOSInput, a continuation's from the options its results came with. The GMI
+    // keeps no note between calls, since one GMI serves every conversation of its session.
+    const applicationNote = applicationNoteOf(turnInput);
     // A continuation retrieves nothing of its own: the gate is asked about its calls with the sources the turn it
     // continues retrieved.
     const continuedTurnSources = turnInput.metadata?.isToolContinuation === true ? this.turnRagSources : undefined;
@@ -1991,6 +2004,9 @@ export class GMI implements IGMI {
           // The RAG text and the long-term-memory text. The memory block goes to PromptEngine on its own, per model hop
           // (`memoryContextText`), so that a reduction of the prompt never cuts or summarises it.
           retrievedContext: [augmentedContextFromRAG, injectedLongTermMemoryContext].filter(Boolean).join("\n\n---\n\n"),
+          // The host's note: PromptEngine sends it first in the application note, never reduces it and never charges it
+          // to the memory block's share. It is never written to the history.
+          ...(applicationNote ? { applicationNote } : {}),
           // tools: this.activePersona.embeddedTools, // If ITool[] and PromptComponents.tools takes ITool[]
         };
 
@@ -2940,6 +2956,8 @@ export class GMI implements IGMI {
               ? { organizationId: this.reasoningTrace.organizationId }
               : {}),
             ...(options?.toolCallGate ? { toolCallGate: options.toolCallGate } : {}),
+            // the note of the turn the results continue, which the caller keeps: this GMI keeps none between calls
+            ...(options?.applicationNote ? { applicationNote: options.applicationNote } : {}),
             ...(options?.preferredModelId || options?.preferredProviderId
               ? {
                   options: {

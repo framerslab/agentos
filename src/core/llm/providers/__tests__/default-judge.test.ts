@@ -23,7 +23,7 @@ afterAll(() => {
 
 describe('resolveDefaultJudgeModel', () => {
   it('code default', () => {
-    expect(resolveDefaultJudgeModel()).toEqual({ provider: 'openai', model: 'gpt-5.6', effort: 'max' });
+    expect(resolveDefaultJudgeModel()).toEqual({ provider: 'openai', model: 'gpt-6.2-sol', effort: 'max' });
   });
 
   it('model valve applies to the default provider', () => {
@@ -39,7 +39,7 @@ describe('resolveDefaultJudgeModel', () => {
 
   it('provider valve without a model is ignored entirely (no cross-provider mix)', () => {
     process.env.AGENTOS_JUDGE_PROVIDER = 'anthropic';
-    expect(resolveDefaultJudgeModel()).toEqual({ provider: 'openai', model: 'gpt-5.6', effort: 'max' });
+    expect(resolveDefaultJudgeModel()).toEqual({ provider: 'openai', model: 'gpt-6.2-sol', effort: 'max' });
   });
 
   it('invalid effort valve keeps the default with a warning', () => {
@@ -55,7 +55,7 @@ describe('resolveDefaultJudgeModel', () => {
 
 describe('resolveJudgeLlm', () => {
   it('no config → resolver default with effort', () => {
-    expect(resolveJudgeLlm(undefined)).toEqual({ provider: 'openai', model: 'gpt-5.6', effort: 'max' });
+    expect(resolveJudgeLlm(undefined)).toEqual({ provider: 'openai', model: 'gpt-6.2-sol', effort: 'max' });
   });
 
   it('caller-pinned model gets NO injected effort (zero-change)', () => {
@@ -84,7 +84,7 @@ describe('resolveJudgeLlm', () => {
   });
 
   it('empty-string model is treated as absent', () => {
-    expect(resolveJudgeLlm({ model: '  ' })).toEqual({ provider: 'openai', model: 'gpt-5.6', effort: 'max' });
+    expect(resolveJudgeLlm({ model: '  ' })).toEqual({ provider: 'openai', model: 'gpt-6.2-sol', effort: 'max' });
   });
 });
 
@@ -97,13 +97,22 @@ describe('gpt-5.6 chat effort ceiling (probe regression pin)', () => {
   });
 });
 
+describe('gpt-6.2-sol, the default judge model (probe regression pin)', () => {
+  it('sends the judge\'s max effort as xhigh on Chat Completions and as max on /v1/responses (probed 2026-11-17)', async () => {
+    const { mapEffortToOpenAiReasoningEffortForModel, mapEffortToOpenAiResponsesEffort } = await import('../model-effort.js');
+    // Chat Completions answered 400 to max ("Supported values are: 'low', 'medium', 'high', and 'xhigh'") and 200 to xhigh.
+    expect(mapEffortToOpenAiReasoningEffortForModel('max', 'gpt-6.2-sol')).toBe('xhigh');
+    expect(mapEffortToOpenAiResponsesEffort('gpt-6.2-sol', 'max')).toBe('max');
+  });
+});
+
 describe('layered resolution (env valves never leak into the caller rule)', () => {
   it('caller pinning the code-default provider ignores an env pair for a different provider', () => {
     process.env.AGENTOS_JUDGE_PROVIDER = 'anthropic';
     process.env.AGENTOS_JUDGE_MODEL = 'claude-sonnet-5';
     expect(resolveJudgeLlm({ provider: 'openai' })).toEqual({
       provider: 'openai',
-      model: 'gpt-5.6',
+      model: 'gpt-6.2-sol',
       effort: 'max',
     });
   });
@@ -117,6 +126,6 @@ describe('layered resolution (env valves never leak into the caller rule)', () =
   it('an unrecognized env provider disables both valves', () => {
     process.env.AGENTOS_JUDGE_PROVIDER = 'my-custom-llm';
     process.env.AGENTOS_JUDGE_MODEL = 'whatever-1';
-    expect(resolveDefaultJudgeModel()).toEqual({ provider: 'openai', model: 'gpt-5.6', effort: 'max' });
+    expect(resolveDefaultJudgeModel()).toEqual({ provider: 'openai', model: 'gpt-6.2-sol', effort: 'max' });
   });
 });

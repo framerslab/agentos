@@ -199,7 +199,7 @@ describe('judge default resolution (spec batch-1 C3)', () => {
     mockGenerateText.mockResolvedValue({
       text: '{ "approved": true, "confidence": 0.9, "reasoning": "ok" }',
       provider: 'openai',
-      model: 'gpt-5.6',
+      model: 'gpt-6.2-sol',
       usage: { promptTokens: 10, completionTokens: 20, totalTokens: 30 },
       toolCalls: [],
       finishReason: 'stop',
@@ -209,7 +209,7 @@ describe('judge default resolution (spec batch-1 C3)', () => {
     await handler(makeRequest());
 
     expect(mockGenerateText).toHaveBeenCalledWith(
-      expect.objectContaining({ model: 'gpt-5.6', provider: 'openai', effort: 'max' }),
+      expect.objectContaining({ model: 'gpt-6.2-sol', provider: 'openai', effort: 'max' }),
     );
   });
 

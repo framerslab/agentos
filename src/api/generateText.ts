@@ -1930,10 +1930,10 @@ export function isRetryableError(error: unknown): boolean {
  *
  * Each entry in the returned array contains a provider identifier and an
  * optional model suitable for fallback use.  Providers are ordered by
- * general availability; the OpenAI legs pin `gpt-5.6-sol` — the platform's
+ * general availability; the OpenAI legs pin a Sol model, the platform's
  * quality floor for failover traffic. A primary-provider outage must not
  * silently downgrade user-facing output to a mini-tier model:
- * 1. OpenAI (`gpt-5.6-sol`)
+ * 1. OpenAI (`gpt-6.2-sol`)
  * 2. Anthropic (`claude-sonnet-5-5` at effort `low`, with 1024 tokens of
  *    output headroom for thinking)
  * 3. OpenRouter (`openai/gpt-5.6-sol`)
@@ -1953,7 +1953,7 @@ export function isRetryableError(error: unknown): boolean {
  * ```ts
  * // Primary is anthropic: build fallback chain from remaining providers
  * const chain = buildFallbackChain('anthropic');
- * // => [{ provider: 'openai', model: 'gpt-5.6-sol' }, { provider: 'openrouter', model: 'openai/gpt-5.6-sol' }, ...]
+ * // => [{ provider: 'openai', model: 'gpt-6.2-sol' }, { provider: 'openrouter', model: 'openai/gpt-5.6-sol' }, ...]
  * ```
  */
 export function buildFallbackChain(
@@ -1962,14 +1962,17 @@ export function buildFallbackChain(
   const chain: FallbackProviderEntry[] = [];
 
   if (process.env.OPENAI_API_KEY && excludeProvider !== 'openai') {
-    // gpt-5.6-sol: the 5.6 flagship variant at the gpt-5.5 price class
-    // ($5/$30 per MTok, verified against the live catalogs 2026-08-06).
-    // Always the -sol pin — the bare `gpt-5.6` alias has undocumented
-    // billing and luna/terra are cheaper tiers.
-    chain.push({ provider: 'openai', model: 'gpt-5.6-sol', cache: false });
+    // gpt-6.2-sol: the current Sol model, at half gpt-5.6-sol's price ($2
+    // input, $0.10 cached input and $10 output per 1M tokens against $4,
+    // $0.40 and $20; developers.openai.com/api/docs/pricing, read
+    // 2026-11-17). It always reasons and refuses temperature, top_p, stop,
+    // the sampling penalties and Chat Completions function tools;
+    // OpenAIProvider sends it none of them and takes its tool calls to the
+    // Responses API.
+    chain.push({ provider: 'openai', model: 'gpt-6.2-sol', cache: false });
   }
   if (process.env.ANTHROPIC_API_KEY && excludeProvider !== 'anthropic') {
-    // Sonnet-class, matching the gpt-5.6-sol floor on the OpenAI legs — an
+    // Sonnet-class, matching the Sol floor on the OpenAI legs — an
     // OpenAI-primary outage keeps frontier-adjacent quality on the way down.
     // Sonnet 5.5 thinks by default and its thinking shares max_tokens: the hop
     // runs at effort `low` (it skips thinking on most simple requests) with
@@ -1988,10 +1991,11 @@ export function buildFallbackChain(
     // defaults to the provider's `defaultModel`, so failover traffic
     // silently lands on whatever that happens to be — an unpinned entry
     // made `openrouter/openai/gpt-4o` the #1 LLM cost in wilds prod
-    // (2026-06-07, ~half the LLM bill). gpt-5.6-sol is the pinned quality
-    // floor (same family as the direct leg, structured-output safe) and
-    // routes around an OpenAI-direct outage that already knocked the
-    // `openai` link above out.
+    // (2026-06-07, ~half the LLM bill). openai/gpt-5.6-sol is the pinned
+    // quality floor (the Sol class of the direct leg, structured-output safe;
+    // OpenRouter lists its own models and prices, so this leg moves only
+    // after a read of its catalog) and routes around an OpenAI-direct outage
+    // that already knocked the `openai` link above out.
     chain.push({ provider: 'openrouter', model: 'openai/gpt-5.6-sol', cache: false });
   }
   if (process.env.GEMINI_API_KEY && excludeProvider !== 'gemini') {

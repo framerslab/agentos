@@ -9,7 +9,7 @@ import { resolveDefaultJudgeModel } from './default-judge.js';
 
 /** Shared judge LLM selection fields. */
 export interface JudgeLlmConfig {
-  /** Judge model id. Default: the central resolver (`gpt-5.6`). */
+  /** Judge model id. Default: the central resolver (`gpt-6.2-sol`). */
   model?: string;
   /** Provider id. Pinning a non-openai provider REQUIRES an explicit model. */
   provider?: string;
@@ -37,14 +37,14 @@ export interface ResolvedJudgeLlm {
  *   a CALLER-pinned model is a config error (never a silent substitution) —
  *   judged against the caller's own fields, not the env-effective default.
  * - A caller pinning only `provider: 'openai'` gets the code-default model
- *   (gpt-5.6), NOT an env-valve model that was set alongside a different
+ *   (gpt-6.2-sol), NOT an env-valve model that was set alongside a different
  *   env provider (that pair travels together or not at all).
  * - Env valves apply only when the caller pinned nothing that contradicts
  *   them.
  */
 export function resolveJudgeLlm(config: JudgeLlmConfig | undefined): ResolvedJudgeLlm {
   const CODE_DEFAULT_PROVIDER = 'openai';
-  const CODE_DEFAULT_MODEL = 'gpt-5.6';
+  const CODE_DEFAULT_MODEL = 'gpt-6.2-sol';
   const def = resolveDefaultJudgeModel();
 
   const callerProvider = config?.provider?.trim().toLowerCase() || undefined;

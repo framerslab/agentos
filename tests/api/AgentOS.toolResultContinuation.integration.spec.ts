@@ -13,6 +13,7 @@ import {
 } from '../../src/api/types/AgentOSResponse';
 import { WorkflowFacade } from '../../src/api/runtime/WorkflowFacade';
 import { RagMemoryInitializer } from '../../src/api/runtime/RagMemoryInitializer';
+import { resumeExternalToolRequestWithRegisteredTools } from '../../src/api/runtime/resumeExternalToolRequestWithRegisteredTools';
 import type { StructuredReplyOutput } from '../../src/api/runtime/structuredReply';
 import type { RagRetrievedChunk } from '../../src/cognition/rag/IRetrievalAugmentor';
 import { GMI } from '../../src/cognition/substrate/GMI.js';
@@ -2229,15 +2230,30 @@ describe('AgentOS tool-result continuations', () => {
         return { ...output, isFinal: false, toolCalls: [READ_CALL] };
       });
 
-      const ask = (conversationId: string, textInput: string, selectedPersonaId: string = NOTES_PERSONA.id) =>
+      const ask = (
+        conversationId: string,
+        textInput: string,
+        selectedPersonaId: string = NOTES_PERSONA.id,
+        applicationNote?: string,
+      ) =>
         collect(
-          agentos.processRequest({ userId: 'user-1', sessionId: 'session-shared', conversationId, textInput, selectedPersonaId }),
+          agentos.processRequest({
+            userId: 'user-1',
+            sessionId: 'session-shared',
+            conversationId,
+            textInput,
+            selectedPersonaId,
+            ...(applicationNote === undefined ? {} : { applicationNote }),
+          }),
         );
       const pending = () => agentos.getPendingExternalToolRequest(NOTES_CONVERSATION, 'user-1');
 
-      /** Runs the notes turn, which stops for READ_CALL, and returns the request the host reads and the saved pause. */
-      async function pauseNotesTurn() {
-        const responses = await ask(NOTES_CONVERSATION, NOTES_QUESTION);
+      /**
+       * Runs the notes turn, with the host's note `applicationNote` when given, which stops for READ_CALL, and returns
+       * the request the host reads and the saved pause.
+       */
+      async function pauseNotesTurn(applicationNote?: string) {
+        const responses = await ask(NOTES_CONVERSATION, NOTES_QUESTION, NOTES_PERSONA.id, applicationNote);
         const request = responses.find((r) => isActionableToolCallRequestChunk(r)) as AgentOSToolCallRequestChunk | undefined;
         expect(request?.toolCalls).toEqual([READ_CALL]);
         await vi.waitFor(async () => expect(await pending()).not.toBeNull());
@@ -2616,6 +2632,124 @@ describe('AgentOS tool-result continuations', () => {
       expect(sections).toContain('Learner section for a continuation');
       expect(sections).not.toContain(`Learner section for ${TRAVEL_QUESTION}`);
       expect(prepareTurn).toHaveBeenLastCalledWith(expect.objectContaining({ continuation: true, text: null }));
+    });
+
+    /** The host's note (`applicationNote`) the GMI handed the prompt engine for each model request, in order. */
+    const notesHanded = (rt: { promptEngine: { constructPrompt: { mock: { calls: any[][] } } } }) =>
+      rt.promptEngine.constructPrompt.mock.calls.map(([components]) => components?.applicationNote);
+
+    it("a continuation on the stream carries its turn's note; the conversation's next turn, given none, carries none, and the stored history holds no note", async () => {
+      const rt = await sharedSessionRuntime({}, [
+        { text: 'I will read the notes file first.' },
+        { text: NOTES_REPLY },
+        { text: 'I will read the notes file again.' },
+      ]);
+      const { request } = await rt.pauseNotesTurn('Note one.');
+
+      const continuation = await collect(
+        rt.agentos.handleToolResult(request.streamId, READ_CALL.id, READ_CALL.name, READ_RESULT.toolOutput, true),
+      );
+      expect((continuation.at(-1) as AgentOSFinalResponseChunk).finalResponseText).toBe(NOTES_REPLY);
+      // the conversation's next turn gives no note; it stops for READ_CALL, as every user turn of the notes conversation here does
+      await rt.pauseNotesTurn();
+
+      expect(notesHanded(rt)).toEqual(['Note one.', 'Note one.', undefined]);
+      expect(JSON.stringify(rt.promptCalls[2])).not.toContain('Note one.');
+      const stored = (await rt.agentos.getConversationManager().getConversation(NOTES_CONVERSATION))?.getAllMessages() ?? [];
+      expect(stored.map((message) => message.content)).toContain(NOTES_QUESTION);
+      expect(JSON.stringify(stored)).not.toContain('Note one.');
+    });
+
+    it.each([
+      ['a note of its own', 'A private note', ['A private note', 'B private note', 'A private note']],
+      ['no note', undefined, [undefined, 'B private note', undefined]],
+    ] as const)(
+      "a continuation on the stream of a turn given %s carries that, never the note of the turn another conversation ran on the session meanwhile",
+      async (_label, note, handed) => {
+        const rt = await sharedSessionRuntime();
+        const { request } = await rt.pauseNotesTurn(note);
+        // while the host runs READ_CALL, the session's GMI runs a turn of the travel conversation with a note of its own
+        const travel = await rt.ask(TRAVEL_CONVERSATION, TRAVEL_QUESTION, NOTES_PERSONA.id, 'B private note');
+        const travelReply = travel.at(-1) as AgentOSFinalResponseChunk;
+        expect(travelReply.finalResponseText).toBe(TRAVEL_REPLY);
+        expect(travelReply.gmiInstanceId).toBe(request.gmiInstanceId);
+
+        const continuation = await collect(
+          rt.agentos.handleToolResult(request.streamId, READ_CALL.id, READ_CALL.name, READ_RESULT.toolOutput, true),
+        );
+
+        expect((continuation.at(-1) as AgentOSFinalResponseChunk).finalResponseText).toBe(NOTES_REPLY);
+        expect(notesHanded(rt)).toEqual(handed);
+        expect(JSON.stringify(rt.promptEngine.constructPrompt.mock.calls[2]?.[0])).not.toContain('B private note');
+      },
+    );
+
+    it("a continuation on the stream whose GMI a persona change on the session shut down carries its turn's note on the GMI built for it", async () => {
+      const rt = await sharedSessionRuntime();
+      const { request } = await rt.pauseNotesTurn('A private note');
+      const pausedGmi = rt.manager.getGMIByInstanceId(request.gmiInstanceId)!;
+      expect(pausedGmi).toBeDefined();
+      // the travel turn asks for another persona: the manager shuts the session's GMI down and builds one for it
+      const travel = await rt.ask(TRAVEL_CONVERSATION, TRAVEL_QUESTION, TRAVEL_PERSONA.id);
+      expect((travel.at(-1) as AgentOSFinalResponseChunk).finalResponseText).toBe(TRAVEL_REPLY);
+      expect(pausedGmi.getCurrentState()).toBe(GMIPrimeState.SHUTDOWN);
+
+      const continuation = await collect(
+        rt.agentos.handleToolResult(request.streamId, READ_CALL.id, READ_CALL.name, READ_RESULT.toolOutput, true),
+      );
+
+      const last = continuation.at(-1) as AgentOSFinalResponseChunk;
+      expect(last.finalResponseText).toBe(NOTES_REPLY);
+      expect(last.gmiInstanceId).not.toBe(request.gmiInstanceId);
+      expect(notesHanded(rt)).toEqual(['A private note', undefined, 'A private note']);
+    });
+
+    it.each([
+      ['a note of its own', { applicationNote: 'Resumed note.' }, 'Resumed note.'],
+      ['no note, while this runtime holds the paused stream', {}, 'A private note'],
+    ] as const)('a resume given %s continues with that note', async (_label, options, carried) => {
+      const rt = await sharedSessionRuntime({}, [{ text: 'I will read the notes file first.' }, { text: NOTES_REPLY }]);
+      const { saved } = await rt.pauseNotesTurn('A private note');
+
+      const continuation = await collect(rt.agentos.resumeExternalToolRequest(saved, [READ_RESULT], options));
+
+      expect((continuation.at(-1) as AgentOSFinalResponseChunk).finalResponseText).toBe(NOTES_REPLY);
+      expect(notesHanded(rt)).toEqual(['A private note', carried]);
+    });
+
+    it("a resume given a blank note continues with none, though this runtime holds the paused stream's note", async () => {
+      const rt = await sharedSessionRuntime({}, [{ text: 'I will read the notes file first.' }, { text: NOTES_REPLY }]);
+      const { saved } = await rt.pauseNotesTurn('A private note');
+
+      const continuation = await collect(
+        rt.agentos.resumeExternalToolRequest(saved, [READ_RESULT], { applicationNote: ' \n\t ' }),
+      );
+
+      expect((continuation.at(-1) as AgentOSFinalResponseChunk).finalResponseText).toBe(NOTES_REPLY);
+      expect(notesHanded(rt)).toEqual(['A private note', undefined]);
+    });
+
+    it.each([
+      ['a note of its own', { applicationNote: 'Resumed note.' }, 'Resumed note.'],
+      ['a blank note', { applicationNote: ' \n\t ' }, undefined],
+      ['no note, while this runtime holds the paused stream', {}, 'A private note'],
+    ] as const)('a resume through resumeExternalToolRequestWithRegisteredTools given %s continues as a direct resume does', async (_label, options, carried) => {
+      const rt = await sharedSessionRuntime({}, [{ text: 'I will read the notes file first.' }, { text: NOTES_REPLY }]);
+      const { saved } = await rt.pauseNotesTurn('A private note');
+      const readNotes = vi.fn(async () => ({ success: true, output: READ_RESULT.toolOutput }));
+
+      const continuation = await collect(
+        resumeExternalToolRequestWithRegisteredTools(rt.agentos, saved, {
+          ...options,
+          externalTools: { [READ_CALL.name]: readNotes },
+        }),
+      );
+
+      expect((continuation.at(-1) as AgentOSFinalResponseChunk).finalResponseText).toBe(NOTES_REPLY);
+      expect(notesHanded(rt)).toEqual(['A private note', carried]);
+      // the helper runs the host's tool with the pause's context, which holds no note
+      expect(readNotes).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(readNotes.mock.calls)).not.toMatch(/A private note|Resumed note\./);
     });
   });
 
