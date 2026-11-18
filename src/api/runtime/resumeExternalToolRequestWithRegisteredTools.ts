@@ -36,6 +36,10 @@ function buildResumeOptions(
   if (options.organizationId) {
     resumeOptions.organizationId = options.organizationId;
   }
+  // a blank note goes on too: it tells the resume to send none, over the paused stream's note
+  if (options.applicationNote !== undefined) {
+    resumeOptions.applicationNote = options.applicationNote;
+  }
 
   return resumeOptions;
 }

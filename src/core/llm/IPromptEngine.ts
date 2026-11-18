@@ -179,6 +179,14 @@ export interface PromptComponents {
    * front of `retrievedContext`.
    */
   memoryContextText?: string;
+  /**
+   * The host's note for this reply (`AgentOSInput.applicationNote`), set by the GMI on each request of the turn. The
+   * templates send it first in the application note of the newest user message, before the memory block and the other
+   * retrieved context, joined to them with `\n\n---\n\n`. PromptEngine counts it into the prompt's tokens with the
+   * user's message, never into the retrieved context's share, and never summarises, truncates or drops it. An engine
+   * that does not read it sends no host note.
+   */
+  applicationNote?: string;
   /** Assembled cognitive memory context (personality-affected, token-budgeted). Not read by PromptEngine: the GMI passes its text as `memoryContextText`. */
   assembledMemoryContext?: import('../../cognition/memory/core/types.js').AssembledMemoryContext;
   /** Task-specific data or parameters that need to be included in the prompt. */

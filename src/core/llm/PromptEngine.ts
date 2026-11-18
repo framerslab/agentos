@@ -160,13 +160,53 @@ export const APPLICATION_NOTE_FRAME =
 const USER_TEXT_PART_PROVIDERS: ReadonlySet<string> = new Set(['anthropic', 'gemini', 'openai', 'openrouter']);
 
 /**
- * Retrieved text as the note the model receives: the frame line, then the text whole.
+ * The note's text as the model receives it: the frame line, then the text whole.
  *
- * @param retrieved - The retrieved text (the memory block first, when the turn has one). Not empty.
+ * @param text - What the note carries ({@link noteTextOf}). Not empty.
  * @returns The note.
  */
-function applicationNoteOf(retrieved: string): string {
-  return `${APPLICATION_NOTE_FRAME}\n${retrieved}`;
+function applicationNoteOf(text: string): string {
+  return `${APPLICATION_NOTE_FRAME}\n${text}`;
+}
+
+/**
+ * The host's note of a prompt (`applicationNote`) as it is sent: whole, never trimmed or cut.
+ *
+ * @param components - The prompt's components.
+ * @returns The note; undefined when there is none, or it is not a string or is blank.
+ */
+function hostNoteOf(components: Readonly<PromptComponents>): string | undefined {
+  const note = components.applicationNote;
+  return typeof note === 'string' && note.trim() ? note : undefined;
+}
+
+/**
+ * What the note carries: the host's note first ({@link hostNoteOf}), then the retrieved text (the memory block first,
+ * when the turn has one), joined with the separator the memory block and the other retrieved text already use.
+ *
+ * @param components - The prompt's components, after the budget step and with the memory block placed.
+ * @returns The text; '' when there is neither a host note nor retrieved text.
+ */
+function noteTextOf(components: Readonly<PromptComponents>): string {
+  return [hostNoteOf(components), retrievedContextAsText(components.retrievedContext)].filter(Boolean).join('\n\n---\n\n');
+}
+
+/**
+ * The host's note as the prompt sends it, for the token count: the frame line and the note ({@link applicationNoteOf}),
+ * and, beside a memory block or other retrieved text, the separator before them. With a memory block and other
+ * retrieved text as one string, it also holds the separator between the two, which no other count of the budget step
+ * holds; a prompt with no host note counts neither, as before. No other count of the budget step holds the frame line.
+ *
+ * @param note - The host's note ({@link hostNoteOf}).
+ * @param components - The prompt's components: before the budget step, or after it to count the note as reduced.
+ * @returns The text to count for the note.
+ */
+function hostNoteAsSent(note: string, components: Readonly<PromptComponents>): string {
+  const other = retrievedContextAsText(components.retrievedContext);
+  const beside = Boolean(components.memoryContextText) || Boolean(other);
+  const between = Boolean(components.memoryContextText) && typeof components.retrievedContext === 'string' && Boolean(other);
+  if (!beside) return applicationNoteOf(note);
+  return between ? `${applicationNoteOf(note)}\n\n---\n\n\n\n---\n\n` : `${applicationNoteOf(note)}\n\n---\n\n`;
 }
 
 /**
@@ -602,6 +642,9 @@ export class PromptEngine implements IPromptEngine {
     if (components.systemPrompts) estimatedTokens += (await Promise.all(components.systemPrompts.map(sp => this.estimateTokenCount(sp.content, modelTargetInfo.modelId)))).reduce((a,b) => a+b, 0);
     if (components.userInput) estimatedTokens += await this.estimateTokenCount(components.userInput, modelTargetInfo.modelId);
     if (components.conversationHistory) estimatedTokens += await this.calculateTokensForMessages(components.conversationHistory, modelTargetInfo.modelId, this.thinkingSentFor(components.conversationHistory, modelTargetInfo));
+    // The host's note counts as it is sent, as the budget step counts it.
+    const hostNote = hostNoteOf(components);
+    if (hostNote) estimatedTokens += await this.estimateTokenCount(hostNoteAsSent(hostNote, components), modelTargetInfo.modelId);
 
 
     if (estimatedTokens > modelTargetInfo.maxContextTokens) {
@@ -974,6 +1017,9 @@ export class PromptEngine implements IPromptEngine {
      * Memory: `memoryContextText` counts toward the prompt and the rag share and is never reduced; the rag share's
      *  reduction falls on `retrievedContext` alone, to what the share leaves beside the memory block (less the
      *  prompt's overrun), and a target of 0 removes it.
+     * Host note: `applicationNote` counts toward the prompt with the user's message, outside the rag share, and is never
+     *  reduced; a prompt over the budget after the reductions goes out with it whole, with the
+     *  `TOKEN_BUDGET_EXCEEDED_POST_OPT` warning.
      * Failure Handling: On summarization errors pushes warning issue & falls back to truncation.
      * Returns cloned optimized components plus modification descriptors for telemetry.
      */
@@ -1091,6 +1137,7 @@ export class PromptEngine implements IPromptEngine {
         const target = Math.max(0, Math.floor(budgets.rag - memoryTokens - Math.max(0, currentTokens - budget)));
         // A target the other context already fits leaves it as it is: nothing is cut, summarised or reported cut.
         if (target < ragTokens) {
+          const retrievedBefore = optimized.retrievedContext;
           const truncate = (): void => {
             optimized.retrievedContext = ragTokens > 0 ? contextStr.substring(0, Math.floor(contextStr.length * (target / ragTokens))) : '';
             modifications.details!.truncatedComponents!.push('retrievedContext');
@@ -1122,6 +1169,18 @@ export class PromptEngine implements IPromptEngine {
             : 0;
           currentTokens = currentTokens - ragTokens + newRagTokens;
           ragTokens = newRagTokens;
+          // The host's note is counted as it is sent: with no retrieved text and no memory block left beside it, it
+          // goes out without the separator, and with no retrieved text left after the memory block, without the one
+          // between them, so its count is taken again.
+          const hostNote = hostNoteOf(optimized);
+          if (hostNote) {
+            const noteBefore = await this.estimateTokenCount(
+              hostNoteAsSent(hostNote, { ...optimized, retrievedContext: retrievedBefore }),
+              modelInfo.modelId,
+            );
+            const noteAfter = await this.estimateTokenCount(hostNoteAsSent(hostNote, optimized), modelInfo.modelId);
+            currentTokens = currentTokens - noteBefore + noteAfter;
+          }
         }
       }
       otherAfter = ragTokens;
@@ -1142,6 +1201,10 @@ export class PromptEngine implements IPromptEngine {
     let total = 0;
     if(components.systemPrompts) total += (await Promise.all(components.systemPrompts.map(sp => this.estimateTokenCount(sp.content, modelId)))).reduce((a,b) => a+b, 0);
     if(components.userInput) total += await this.estimateTokenCount(components.userInput, modelId);
+    // The host's note is counted with the user's message, as it is sent: never in the retrieved context's share, and
+    // never reduced.
+    const hostNote = hostNoteOf(components);
+    if (hostNote) total += await this.estimateTokenCount(hostNoteAsSent(hostNote, components), modelId);
     if(components.memoryContextText) total += await this.estimateTokenCount(memoryTextAsSent(components.memoryContextText, components.retrievedContext), modelId);
     if(components.conversationHistory) total += await this.calculateTokensForMessages(components.conversationHistory, modelId, sendsThinking);
     if(components.retrievedContext) {
@@ -1431,11 +1494,11 @@ export class PromptEngine implements IPromptEngine {
       if (userMessageParts.length > 0) {
         messages.push({ role: 'user', content: userMessageParts.length === 1 && userMessageParts[0].type === 'text' ? userMessageParts[0].text! : userMessageParts });
       }
-      // The retrieved text (the memory block first, when one was given) goes in the newest user message as a note
-      // from the application, in front of the person's words, which are sent exactly as written.
-      const ragContent = retrievedContextAsText(components.retrievedContext);
-      if (ragContent) {
-        const note = applicationNoteOf(ragContent);
+      // The host's note and the retrieved text (the memory block first, when one was given) go in the newest user
+      // message as a note from the application, in front of the person's words, which are sent exactly as written.
+      const noteText = noteTextOf(components);
+      if (noteText) {
+        const note = applicationNoteOf(noteText);
         const newest = messages[messages.length - 1];
         if (newest?.role === 'user') {
           newest.content = withApplicationNote(newest.content, note, USER_TEXT_PART_PROVIDERS.has(modelInfo.providerId));
@@ -1504,22 +1567,22 @@ export class PromptEngine implements IPromptEngine {
           } as any); // Use 'as any' if 'image' type with 'source' is not yet in MessageContentPart
         });
       }
-      // The retrieved text (the memory block first, when one was given) goes in the newest user message as a note
-      // from the application, a text part of its own in front of the person's words, as in the OpenAI chat template.
-      // With no new input that message is the last one of the history, unless it carries tool results, whose blocks
-      // open their message: then the note is a user message of its own.
-      const ragContent = retrievedContextAsText(components.retrievedContext);
+      // The host's note and the retrieved text (the memory block first, when one was given) go in the newest user
+      // message as a note from the application, a text part of its own in front of the person's words, as in the OpenAI
+      // chat template. With no new input that message is the last one of the history, unless it carries tool results,
+      // whose blocks open their message: then the note is a user message of its own.
+      const noteText = noteTextOf(components);
       const newest = messages[messages.length - 1];
       if (
-        ragContent &&
+        noteText &&
         currentUserInputParts.length === 0 &&
         newest?.role === 'user' &&
         Array.isArray(newest.content) &&
         !newest.content.some((part) => part?.type === 'tool_result')
       ) {
-        newest.content = withApplicationNote(newest.content, applicationNoteOf(ragContent), true);
-      } else if (ragContent) {
-        currentUserInputParts.unshift({ type: 'text', text: applicationNoteOf(ragContent) });
+        newest.content = withApplicationNote(newest.content, applicationNoteOf(noteText), true);
+      } else if (noteText) {
+        currentUserInputParts.unshift({ type: 'text', text: applicationNoteOf(noteText) });
       }
       if (currentUserInputParts.length > 0) {
         messages.push({role: 'user', content: currentUserInputParts});
@@ -1540,13 +1603,21 @@ export class PromptEngine implements IPromptEngine {
     return async (components, _modelInfo, _selectedElements, _config, _estimateTokenCountFn) => {
       let promptString = "";
       if (components.systemPrompts) promptString += components.systemPrompts.map(p=>p.content).join("\n") + "\n\n";
-      if (components.conversationHistory) {
-        promptString += components.conversationHistory.map(m => `${m.role}: ${typeof m.content === 'string' ? m.content : JSON.stringify(m.content)}`).join("\n") + "\n\n";
+      const history = components.conversationHistory ?? [];
+      const lineOf = (m: Message): string => `${m.role}: ${typeof m.content === 'string' ? m.content : JSON.stringify(m.content)}`;
+      // The host's note and the retrieved text (the memory block first, when one was given) go in front of the
+      // person's words as a note from the application. With no new input the words are the history's newest message
+      // when it is the person's: a note that holds a host's note goes in front of that line, and the stored message is
+      // not changed. Retrieved text with no host note follows the history, so that prompt is the same byte for byte.
+      const noteText = noteTextOf(components);
+      const wordsInHistory =
+        Boolean(hostNoteOf(components)) && !components.userInput && history[history.length - 1]?.role === MessageRole.USER;
+      const earlier = wordsInHistory ? history.slice(0, -1) : history;
+      if (components.conversationHistory && (!wordsInHistory || earlier.length > 0)) {
+        promptString += earlier.map(lineOf).join("\n") + "\n\n";
       }
-      // The retrieved text (the memory block first, when one was given) goes in front of the person's words as a
-      // note from the application.
-      const ragContent = retrievedContextAsText(components.retrievedContext);
-      if (ragContent) promptString += `${applicationNoteOf(ragContent)}\n\n`;
+      if (noteText) promptString += `${applicationNoteOf(noteText)}\n\n`;
+      if (wordsInHistory) promptString += `${lineOf(history[history.length - 1])}\n\n`;
       if (components.userInput) promptString += `user: ${components.userInput}\nassistant:`;
       return promptString;
     };

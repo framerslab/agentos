@@ -32,6 +32,12 @@ export interface AgentOSResumeExternalToolRequestOptions {
    * the resumed turn needs organization-scoped memory or routing.
    */
   organizationId?: string;
+  /**
+   * The note of the turn this resume continues (`AgentOSInput.applicationNote`). Unset, the continuation sends the
+   * paused stream's note while this process holds that stream, and none after a restart; an empty or blank note sends
+   * none. Runtime-only like `organizationId`: the pause never stores it.
+   */
+  applicationNote?: string;
 }
 
 export const AGENTOS_PENDING_EXTERNAL_TOOL_REQUEST_METADATA_KEY =
