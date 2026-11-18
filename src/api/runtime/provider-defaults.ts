@@ -46,9 +46,11 @@ export const PROVIDER_DEFAULTS: Record<string, ProviderDefaults> = {
     // serve and stay the defaults: they take temperature, stop and the
     // sampling penalties, and run with no reasoning step. OpenAI has
     // deprecated both and ends their dated snapshots on 2027-01-14
-    // (developers.openai.com/api/docs/deprecations, read 2026-11-17, which
-    // names gpt-6-luna as the replacement; whether the bare aliases end the
-    // same day is not stated). These two move before that day.
+    // (developers.openai.com/api/docs/deprecations, read 2026-11-17; whether
+    // the bare aliases end the same day is not stated). These two move
+    // before that day, to the models openAIModelShutdown() names by job:
+    // gpt-6.2-sol for gpt-4o, gpt-6-luna for gpt-4o-mini. The page names
+    // gpt-6-luna for both.
     text: 'gpt-4o',
     image: OPENAI_IMAGE_GENERATION_MODEL,
     embedding: 'text-embedding-3-small',

@@ -17,8 +17,8 @@
  * | Job | Replacement | Price |
  * |---|---|---|
  * | small and quick: classify, extract, tag, route, a short reply (the mini and nano models, `gpt-3.5-turbo`) | `gpt-6-luna` | $0.10 / $0.01 / $0.50 |
- * | general work and reasoning (`gpt-4-turbo`, `chatgpt-4o-latest`, `o1`, `o3`, `gpt-5`, `gpt-5.1`, the dated `gpt-4o` and `gpt-4.1` snapshots) | `gpt-6.2-sol` | $2.00 / $0.10 / $10.00 |
- * | the pro reasoning tier (`gpt-5-pro`, `o3-pro`) | `gpt-6.2-astra` | $8.00 / $0.40 / $40.00 |
+ * | general work and reasoning (`gpt-4`, `gpt-4-turbo`, `chatgpt-4o-latest`, `gpt-5.3-chat-latest`, `o1`, `o3`, `gpt-5`, `gpt-5.1`, the dated `gpt-4o` and `gpt-4.1` snapshots) | `gpt-6.2-sol` | $2.00 / $0.10 / $10.00 |
+ * | the pro reasoning tier (`o1-pro`, `gpt-5-pro`, `o3-pro`) | `gpt-6.2-astra` | $8.00 / $0.40 / $40.00 |
  *
  * `gpt-6.2-sol` and `gpt-6.2-astra` always reason and bill their reasoning tokens as output, and refuse `temperature`,
  * `top_p`, `stop`, the sampling penalties and function tools on Chat Completions; OpenAIProvider sends neither model
@@ -52,19 +52,24 @@ function rows(
 }
 
 /**
- * Every row, frozen. The deprecations page's "Past deprecations" lists the 23 October 2026 and 17 February 2026
- * shutdowns; its "Upcoming deprecations" lists the scheduled ones. `gpt-4o-2024-05-13` is marked "Shut down" on the
- * gpt-4o model page, which gives no day. The `gpt-4o`, `gpt-4o-mini`, `gpt-4.1` and `gpt-4.1-mini` aliases are not
- * rows: the page names only their dated snapshots for 14 January 2027.
+ * Every row, frozen. The deprecations page's "Past deprecations" lists the 23 October 2026, 10 August 2026 and
+ * 17 February 2026 shutdowns; its "Upcoming deprecations" lists the scheduled ones. The page names `gpt-5.6-sol` as
+ * the replacement of the shut-down chat models; a row names its successor of the same class at half the price,
+ * `gpt-6.2-sol` (`gpt-6.2-astra` for `o1-pro`, whose page line is `gpt-5.6-sol` in pro mode), or `gpt-6-luna` for the
+ * small models. The `gpt-4o`, `gpt-4o-mini`, `gpt-4.1` and `gpt-4.1-mini` aliases are not rows: the page names only
+ * their dated snapshots for 14 January 2027.
  */
 export const OPENAI_MODEL_SHUTDOWNS: readonly OpenAIModelShutdown[] = Object.freeze([
   ...rows('shut-down', '2026-10-23', 'gpt-6-luna', [
     'gpt-3.5-turbo', 'gpt-3.5-turbo-0125', 'gpt-4.1-nano', 'gpt-4.1-nano-2025-04-14',
     'o3-mini', 'o3-mini-2025-01-31', 'o4-mini', 'o4-mini-2025-04-16',
   ]),
-  ...rows('shut-down', '2026-10-23', 'gpt-6.2-sol', ['gpt-4-turbo', 'gpt-4-turbo-2024-04-09', 'o1', 'o1-2024-12-17']),
+  ...rows('shut-down', '2026-10-23', 'gpt-6.2-sol', [
+    'gpt-4', 'gpt-4-0613', 'gpt-4-turbo', 'gpt-4-turbo-2024-04-09', 'gpt-4o-2024-05-13', 'o1', 'o1-2024-12-17',
+  ]),
+  ...rows('shut-down', '2026-10-23', 'gpt-6.2-astra', ['o1-pro', 'o1-pro-2025-03-19']),
+  ...rows('shut-down', '2026-08-10', 'gpt-6.2-sol', ['gpt-5.3-chat-latest']),
   ...rows('shut-down', '2026-02-17', 'gpt-6.2-sol', ['chatgpt-4o-latest']),
-  ...rows('shut-down', undefined, 'gpt-6.2-sol', ['gpt-4o-2024-05-13'], 'https://developers.openai.com/api/docs/models/gpt-4o'),
   ...rows('scheduled', '2026-12-11', 'gpt-6-luna', ['gpt-5-mini', 'gpt-5-mini-2025-08-07', 'gpt-5-nano', 'gpt-5-nano-2025-08-07']),
   ...rows('scheduled', '2026-12-11', 'gpt-6.2-sol', ['gpt-5', 'gpt-5-2025-08-07', 'o3', 'o3-2025-04-16']),
   ...rows('scheduled', '2026-12-11', 'gpt-6.2-astra', ['gpt-5-pro', 'gpt-5-pro-2025-10-06', 'o3-pro', 'o3-pro-2025-06-10']),
