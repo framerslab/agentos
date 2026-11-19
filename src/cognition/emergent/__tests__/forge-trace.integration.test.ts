@@ -10,10 +10,16 @@
  * A third group forges on the full runtime and reads the model that answered
  * each tool call, and a fourth reads every log line a forge writes for the
  * content it must never hold. A fifth forges with every field over its cap
- * and reads the cuts, their paths and the trace's total size.
+ * and reads the cuts, their paths and the trace's total size. A sixth forges
+ * a fixed set of tools and records the sizes each trace states.
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as fs from 'node:fs';
+import * as http from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { tmpdir } from 'node:os';
+import * as path from 'node:path';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 /** What the full runtime's model answers: its streamed replies in order, the judge's reply, and the judge's calls. */
 const runtimeModel = vi.hoisted(() => ({
@@ -100,7 +106,7 @@ import {
   type ForgeToolInput,
   type WrapForgeToolOptions,
 } from '../index.js';
-import type { CreationVerdict, ForgeResult, ForgeToolRequest } from '../types.js';
+import type { CreationVerdict, ForgeResult, ForgeToolRequest, ForgedCapabilities } from '../types.js';
 import {
   FD17F220_SCHEMA,
   PINS,
@@ -2712,5 +2718,302 @@ describe('forge trace: the caps', () => {
       big: { $trace: 'unserializable', kind: 'bigint' },
       self: { $trace: 'unserializable', kind: 'cycle' },
     });
+  });
+});
+
+// ----------------------------------------------------------------------------
+// The measurement
+// ----------------------------------------------------------------------------
+
+/**
+ * What the measurement records: the sizes each fixed forge's trace states, and the time a hook adds to a forge. A
+ * case that failed leaves its key absent.
+ */
+interface ForgeTraceMeasure {
+  forges?: Array<{ id: string; codeBytes: number | null; traceBytes: number; tests: number }>;
+  latency?: {
+    runs: number;
+    p95WithMs: number;
+    p95WithoutMs: number;
+    addedMs: number;
+    byOutcome: { approved: number; judge_rejected: number; code_validation: number };
+  };
+}
+
+/** A host tool with no side effects that answers every call with `output`. */
+function fixedOutputTool(name: string, argument: string, output: Record<string, unknown>): ITool {
+  return {
+    id: `${name}-v1`,
+    name,
+    displayName: name,
+    description: `Answers every ${argument} with one fixed output.`,
+    inputSchema: { type: 'object', properties: { [argument]: { type: 'string' } }, required: [argument] },
+    hasSideEffects: false,
+    execute: async () => ({ success: true, output }),
+  };
+}
+
+/** F2: a composition of two steps, a search and a summary of the snippet it finds, with one test case. */
+function searchAndSummariseArgs(): Record<string, unknown> {
+  return composeArgs(
+    [
+      { name: 'search', tool: 'web_search', inputMapping: { q: '$input.query' } },
+      { name: 'summarise', tool: 'summarise', inputMapping: { text: '$prev.snippet' } },
+    ],
+    {
+      name: 'search_and_summarise',
+      description: 'Search the web then summarise results.',
+      inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
+      outputSchema: { type: 'object', properties: { summary: { type: 'string' } } },
+      testCases: [{ input: { query: 'quantum computing' }, expectedOutput: { summary: 'A summary.' } }],
+    },
+  );
+}
+
+/**
+ * F3's code, as the effects suite (permissions-effects.integration.test.ts) holds it, its line breaks and indentation
+ * included: it writes a file, reads it back, deletes it, reads it again and posts what it read.
+ */
+const ROUND_TRIP = `async function execute(input) {
+      await fs.writeFile(input.path, input.text);
+      const back = await fs.readFile(input.path);
+      await fs.unlink(input.path);
+      let gone = false;
+      try { await fs.readFile(input.path); } catch (e) { gone = String(e && e.message).startsWith('no_such_file'); }
+      const r = await fetch(input.url, { method: 'POST', body: back });
+      const answer = await r.json();
+      return { back, gone, id: answer.id };
+    }`;
+
+/** The effects suite's write ceiling: new files only, under `root`, within small bounds. */
+const WRITE_CEILING = (root: string): ForgedCapabilities['fs.write'] =>
+  ({
+    roots: [root],
+    mode: 'create-only',
+    maxBytesPerFile: 64,
+    maxBytesPerCall: 128,
+    maxFilesPerCall: 3,
+    timeoutMs: 5000,
+    approval: 'none',
+  }) as ForgedCapabilities['fs.write'];
+
+/**
+ * F3: the effects suite's `round_trip` forge, a code forge that asks for four capabilities. Its one test case writes
+ * and deletes under `root` and posts to `url`, and answers that request itself.
+ */
+function roundTripArgs(root: string, url: string): Record<string, unknown> {
+  return {
+    name: 'round_trip',
+    description: 'Forged round_trip.',
+    inputSchema: { type: 'object', additionalProperties: true },
+    outputSchema: { type: 'object', additionalProperties: true },
+    implementation: { mode: 'sandbox', code: ROUND_TRIP, allowlist: ['fs.read', 'fs.write', 'fs.delete', 'fetch'] },
+    testCases: [
+      {
+        input: { path: path.join(root, 'tmp.txt'), text: 'draft', url },
+        responses: [{ method: 'POST', url, status: 201, body: '{"id":"from-test"}' }],
+      },
+    ],
+  };
+}
+
+/**
+ * G1: the worked example a host's forging guidance gives its agents, with its name, description, schemas, code and
+ * three test cases. Copied from framerslab/paracosm at 1d3020d52db65c003df6cc5ccd0297bedb706146,
+ * src/runtime/orchestrator/forge-guidance.ts:123-155.
+ */
+function radiationDoseArgs(): Record<string, unknown> {
+  return {
+    name: 'radiation_dose_risk_score',
+    description: 'Scores cumulative radiation exposure risk on 0..100.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        cumulative_dose_msv: { type: 'number', description: 'mSv lifetime' },
+        age_years: { type: 'number' },
+        shielding_factor: { type: 'number', description: '0..1 reduction' },
+      },
+      required: ['cumulative_dose_msv', 'age_years', 'shielding_factor'],
+      additionalProperties: false,
+    },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        risk_score: { type: 'number', description: '0..100, higher is worse' },
+        tier: { type: 'string', enum: ['low', 'medium', 'high', 'critical'] },
+      },
+      required: ['risk_score', 'tier'],
+      additionalProperties: false,
+    },
+    implementation: {
+      mode: 'sandbox',
+      code: "function execute(input){try{const d=Number.isFinite(+input.cumulative_dose_msv)?+input.cumulative_dose_msv:0;const a=Number.isFinite(+input.age_years)?+input.age_years:30;const s=Number.isFinite(+input.shielding_factor)?Math.max(0,Math.min(1,+input.shielding_factor)):0;const eff=d*(1-s);let score=Math.max(0,Math.min(100,eff/30*(1+Math.max(0,(60-a))/100)));const tier=score>=80?'critical':score>=50?'high':score>=20?'medium':'low';return{risk_score:Math.round(score),tier};}catch(e){return{risk_score:0,tier:'low'};}}",
+      allowlist: [],
+    },
+    testCases: [
+      {
+        input: { cumulative_dose_msv: 1200, age_years: 42, shielding_factor: 0.3 },
+        expectedOutput: { tier: 'high' },
+      },
+      {
+        input: { cumulative_dose_msv: 0, age_years: 30, shielding_factor: 0 },
+        expectedOutput: { risk_score: 0, tier: 'low' },
+      },
+      {
+        input: { cumulative_dose_msv: 4000, age_years: 65, shielding_factor: 0 },
+        expectedOutput: { tier: 'critical' },
+      },
+    ],
+  };
+}
+
+/**
+ * T2: a code forge that sums two numbers through an array method, with two test cases that name no expected output.
+ * Copied from framerslab/paracosm at 1d3020d52db65c003df6cc5ccd0297bedb706146,
+ * tests/runtime/forged-code-own-context.test.ts:100-112.
+ */
+function sumTwoArgs(): Record<string, unknown> {
+  return {
+    name: 'sum_two',
+    description: 'Adds two numbers.',
+    inputSchema: { type: 'object', properties: { a: { type: 'number' }, b: { type: 'number' } }, required: ['a', 'b'] },
+    outputSchema: { type: 'object', properties: { total: { type: 'number' } } },
+    implementation: {
+      mode: 'sandbox',
+      code: 'function execute(input) { const xs = [input.a, input.b]; return { total: xs.reduce((s, x) => s + x, 0) }; }',
+      allowlist: [],
+    },
+    testCases: [{ input: { a: 1, b: 2 } }, { input: { a: 3, b: 4 } }],
+  };
+}
+
+describe('forge trace: the measurement', () => {
+  /** What the cases of this group measured, printed and written once they have all run. */
+  const measure: ForgeTraceMeasure = {};
+  const servers: http.Server[] = [];
+  const roots: string[] = [];
+
+  /** A local server that records each request and answers JSON. A forge's test never reaches it. */
+  async function serve(): Promise<{ port: number; seen: Array<{ method: string; url: string; body: string }> }> {
+    const seen: Array<{ method: string; url: string; body: string }> = [];
+    const server = http.createServer((req, res) => {
+      let body = '';
+      req.on('data', (chunk: Buffer) => {
+        body += chunk.toString('utf8');
+      });
+      req.on('end', () => {
+        seen.push({ method: req.method ?? '', url: req.url ?? '', body });
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify({ id: 'created-1', got: body }));
+      });
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    return { port: (server.address() as AddressInfo).port, seen };
+  }
+
+  /** A temporary directory, by its real path, removed after the case. */
+  function tempRoot(): string {
+    const root = fs.realpathSync(fs.mkdtempSync(path.join(tmpdir(), 'forge-trace-')));
+    roots.push(root);
+    return root;
+  }
+
+  /** A host as the effects suite builds its own: a ceiling, the isolating executor and a store for the effect records. */
+  async function hostWith(capabilities: ForgedCapabilities): Promise<ForgeHost> {
+    return makeForgeHost({
+      db: createSqliteAdapter(),
+      config: { capabilities, executor: await QuickJSExecutor.create(), audit: { content: 'digest' } },
+    });
+  }
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    vi.useRealTimers();
+    await Promise.all(
+      servers.splice(0).map((server) => {
+        server.closeAllConnections();
+        return new Promise((resolve) => server.close(resolve));
+      }),
+    );
+    for (const root of roots.splice(0)) {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  // The figures go to the job's log on one line, and to a file when the job names a directory for it.
+  afterAll(() => {
+    const report = JSON.stringify(measure);
+    console.log(`FORGE_TRACE_MEASURE ${report}`);
+    const directory = process.env.FORGE_TRACE_REPORT_DIR;
+    if (directory) {
+      fs.mkdirSync(directory, { recursive: true });
+      fs.writeFileSync(path.join(directory, 'report.json'), report);
+    }
+  });
+
+  it('measurement: the fixed forge set is cut nowhere', async () => {
+    const root = tempRoot();
+    const { port, seen } = await serve();
+
+    /** Forges `args` on an engine of its own, whose judge approves. */
+    const onFreshEngine = async (args: Record<string, unknown>, hostTools: ITool[] = []): Promise<ForgeResult> => {
+      const { engine } = await directEngine({ hostTools });
+      return engine.forge(args as unknown as ForgeToolRequest, directContext());
+    };
+
+    const fixedSet: Array<{ id: string; forge: () => Promise<ForgeResult> }> = [
+      { id: 'F1', forge: () => onFreshEngine(sandboxArgs()) },
+      {
+        id: 'F2',
+        forge: () =>
+          onFreshEngine(searchAndSummariseArgs(), [
+            fixedOutputTool('web_search', 'q', { snippet: 'Quantum computers use qubits.' }),
+            fixedOutputTool('summarise', 'text', { summary: 'A summary.' }),
+          ]),
+      },
+      {
+        id: 'F3',
+        forge: async () => {
+          const host = await hostWith({
+            'fs.read': { roots: [root] },
+            'fs.write': WRITE_CEILING(root),
+            'fs.delete': { roots: [root], maxFilesPerCall: 2, timeoutMs: 5000, approval: 'none' },
+            fetch: { domains: ['127.0.0.1'], methods: ['POST'], maxRequestBytes: 64, approval: 'none' },
+          });
+          const args = roundTripArgs(root, `http://127.0.0.1:${port}/items`);
+          return host.engine.forge(args as unknown as ForgeToolRequest, directContext());
+        },
+      },
+      { id: 'G1', forge: () => onFreshEngine(radiationDoseArgs()) },
+      { id: 'T2', forge: () => onFreshEngine(sumTwoArgs()) },
+    ];
+
+    // Every forge of the set is approved. That holds with or without a trace, so it shows each fixture forges.
+    const forged: Array<{ id: string; result: ForgeResult }> = [];
+    for (const { id, forge } of fixedSet) {
+      const result = await forge();
+      expect(result.success, `${id}: ${String(result.error ?? 'approved')}`).toBe(true);
+      forged.push({ id, result });
+    }
+    // F3's test was a dry run: nothing was written under the root and nothing was sent.
+    expect(fs.existsSync(path.join(root, 'tmp.txt'))).toBe(false);
+    expect(seen).toEqual([]);
+
+    // Each forge has a trace, and no field of it is cut.
+    const forges: NonNullable<ForgeTraceMeasure['forges']> = [];
+    for (const { id, result } of forged) {
+      const trace = traceOf(result);
+      expect(trace, `${id} has a trace`).toBeDefined();
+      expect(trace!.sizes.cut, `${id} is cut nowhere`).toEqual([]);
+      forges.push({
+        id,
+        codeBytes: trace!.sizes.codeBytes,
+        traceBytes: trace!.sizes.traceBytes,
+        tests: trace!.tests.length,
+      });
+    }
+    measure.forges = forges;
   });
 });
