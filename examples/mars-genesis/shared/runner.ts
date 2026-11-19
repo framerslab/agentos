@@ -182,7 +182,7 @@ function createEmergentEngine(toolMap: Map<string, ITool>): {
   const llmCallback = async (model: string, prompt: string): Promise<string> => {
     const result = await generateText({
       provider: 'anthropic',
-      model: model || 'claude-sonnet-4-20250514',
+      model: model || 'claude-sonnet-5-5',
       prompt,
     });
     return result.text;
@@ -190,8 +190,8 @@ function createEmergentEngine(toolMap: Map<string, ITool>): {
 
   const registry = new EmergentToolRegistry();
   const judge = new EmergentJudge({
-    judgeModel: 'claude-sonnet-4-20250514',
-    promotionModel: 'claude-opus-4-20250514',
+    judgeModel: 'claude-sonnet-5-5',
+    promotionModel: 'claude-opus-5-5',
     generateText: llmCallback,
   });
 
@@ -215,8 +215,8 @@ function createEmergentEngine(toolMap: Map<string, ITool>): {
       // nothing, and no storage adapter, so no effect records.
       capabilities: {},
       audit: { store: 'none' },
-      judgeModel: 'claude-sonnet-4-20250514',
-      promotionJudgeModel: 'claude-opus-4-20250514',
+      judgeModel: 'claude-sonnet-5-5',
+      promotionJudgeModel: 'claude-opus-5-5',
     },
     composableBuilder,
     judge,
@@ -302,7 +302,7 @@ export async function runSimulation(leader: LeaderConfig, maxTurns?: number): Pr
 
   const sim = agent({
     provider: 'anthropic',
-    model: 'claude-opus-4-20250514',
+    model: 'claude-opus-5-5',
     instructions: leader.instructions,
     personality: {
       openness: leader.hexaco.openness,

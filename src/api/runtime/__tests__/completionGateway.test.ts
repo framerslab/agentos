@@ -286,7 +286,8 @@ describe('CompletionGateway.resolve: the walk', () => {
             model: undefined,
             reason: 'excluded_model',
             sentAsProvider: 'openrouter',
-            sentAsModel: `anthropic/${PROVIDER_DEFAULTS.anthropic!.text!}`,
+            // OpenRouter lists the default (claude-sonnet-5-5) under a dotted slug.
+            sentAsModel: 'anthropic/claude-sonnet-5.5',
           },
         ]);
         expect(created.map((c) => `${c.providerId}/${c.modelId}`)).toEqual(['openai/gpt-4o', 'openrouter/x/allowed']);
@@ -304,8 +305,8 @@ describe('CompletionGateway.resolve: the walk', () => {
       );
       expect(r).toMatchObject({ providerId: 'openrouter', modelId: 'x/allowed', hop: 1 });
       expect(skipped).toEqual([
-        { provider: 'anthropic', model: 'anthropic:claude-sonnet-4-5', reason: 'excluded_model', sentAsProvider: 'openrouter', sentAsModel: 'anthropic/claude-sonnet-4-5' },
-        { provider: 'anthropic', model: 'anthropic/claude-sonnet-4-5', reason: 'excluded_model', sentAsProvider: 'openrouter', sentAsModel: 'anthropic/claude-sonnet-4-5' },
+        { provider: 'anthropic', model: 'anthropic:claude-sonnet-4-5', reason: 'excluded_model', sentAsProvider: 'openrouter', sentAsModel: 'anthropic/claude-sonnet-4.5' },
+        { provider: 'anthropic', model: 'anthropic/claude-sonnet-4-5', reason: 'excluded_model', sentAsProvider: 'openrouter', sentAsModel: 'anthropic/claude-sonnet-4.5' },
       ]);
     });
 

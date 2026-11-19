@@ -30,7 +30,7 @@ step N references step N-1.
 
 ```ts
 const result = await generateText({
-  model: 'anthropic:claude-opus-4-8',
+  model: 'anthropic:claude-opus-5-5',
   prompt: 'Build the thing.',
   tools,
   maxSteps: 30,

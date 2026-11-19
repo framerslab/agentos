@@ -254,7 +254,7 @@ import { readFileSync } from 'fs';
 
 const codeReviewer = agency({
   provider: 'anthropic',
-  model: 'claude-sonnet-4-6',
+  model: 'claude-sonnet-5-5',
   strategy: 'debate',
   maxRounds: 2,
   // Appended to the synthesizer's prompt after the last round.

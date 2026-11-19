@@ -33,7 +33,7 @@ import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegi
 /** The OpenRouter model the router sends every call to. */
 const ROUTED_MODEL = 'meta-llama/llama-3.3-70b-instruct';
 /** The OpenRouter slug an Anthropic call with no Anthropic key is sent as. */
-const REMAPPED_MODEL = 'anthropic/claude-sonnet-4-5';
+const REMAPPED_MODEL = 'anthropic/claude-sonnet-4.5';
 /** The line the schema instructions carry when the schema rides the system prompt. */
 const SCHEMA_LINE = 'The JSON MUST conform to this JSON Schema:';
 

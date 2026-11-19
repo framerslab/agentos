@@ -44,7 +44,7 @@ import {
   type KeyProbeAnswer,
   type KeyProbeOptions,
 } from '../../../providers/keyProbe.js';
-import { resolveThinkingOff, resolveThinkingPayload } from '../model-thinking.js';
+import { modelRefusesThinkingBudget, resolveThinkingOff, resolveThinkingPayload } from '../model-thinking.js';
 import { modelSupportsForcedToolChoice } from '../model-forced-tool-choice.js';
 import {
   anthropicJsonOutputSchema,
@@ -2179,13 +2179,41 @@ export class AnthropicProvider implements IProvider {
     // the schema route, the forced-choice clamp and the warnings follow it.
     const wireModelId = typeof payload.model === 'string' && payload.model ? payload.model : modelId;
 
+    // A passthrough `thinking` in the manual form, `{ type: 'enabled',
+    // budget_tokens }`, is answered with a 400 by every model after Claude
+    // Sonnet 4.6, the provider's default models (Claude Sonnet 5.5 and Claude
+    // Haiku 5.5) among them; their migration guides replace it with
+    // `{ type: 'adaptive' }` and an effort level (see modelRefusesThinkingBudget).
+    // It goes out as adaptive thinking, which keeps thinking on as the budget
+    // asked; the budget itself has no field on these models, and one warning
+    // names `options.effort` as the depth control. A model that takes the
+    // manual form, Claude Sonnet 4.6 included, gets it as passed.
+    {
+      const passed = payload.thinking as { type?: unknown; display?: unknown } | undefined;
+      if (options.customModelParams && passed?.type === 'enabled' && modelRefusesThinkingBudget(wireModelId)) {
+        payload.thinking = {
+          type: 'adaptive',
+          ...(typeof passed.display === 'string' ? { display: passed.display } : {}),
+        };
+        warnOnce(
+          `passthrough-thinking-budget:${wireModelId}`,
+          `[agentos] AnthropicProvider: ${wireModelId} takes no thinking budget; customModelParams.thinking ` +
+            `{ type: 'enabled', budget_tokens } sent as { type: 'adaptive' }. Set options.effort to control its depth.`,
+        );
+      }
+    }
+
     // A passthrough can also carry the sampling fields the typed options
     // withhold above. The model on the wire answers them with 400, so they go
     // here too: `temperature` and `top_p` on every model that rejects
-    // `temperature`, and `top_k` on Claude Haiku 5.5, whose migration guide
-    // says to remove all three.
+    // `temperature`, and `top_k` on Claude Sonnet 5.5 and Claude Haiku 5.5,
+    // whose migration guides say to remove all three
+    // (platform.claude.com/docs/en/models/sonnet-5-5/migration-guide and
+    // .../haiku-5-5/migration-guide, read 2026-11-18). Both are the
+    // provider's default models, so a call that names no model and passes a
+    // `top_k` Claude Sonnet 4.6 accepted is not refused.
     if (options.customModelParams && !modelSupportsTemperature(wireModelId)) {
-      const sampling = /^claude-haiku-5-5\b/i.test(wireModelId)
+      const sampling = /^claude-(sonnet|haiku)-5-5\b/i.test(wireModelId)
         ? ['temperature', 'top_p', 'top_k']
         : ['temperature', 'top_p'];
       const dropped = sampling.filter((key) => Object.prototype.hasOwnProperty.call(payload, key));

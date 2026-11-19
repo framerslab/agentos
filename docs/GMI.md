@@ -264,7 +264,7 @@ const gmi = new GMI('support-gmi');
 await gmi.initialize(persona, {
   ...services, // working memory, prompt engine, tool orchestrator, utility AI
   completionGateway: createCompletionGateway({
-    fallbackProviders: [{ provider: 'anthropic', model: 'claude-opus-4-8' }],
+    fallbackProviders: [{ provider: 'anthropic', model: 'claude-opus-5-5' }],
   }),
   llmProviderManager: new GatewayProviderManager().asProviderManager(),
 });
