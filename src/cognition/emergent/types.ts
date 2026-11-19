@@ -803,6 +803,28 @@ export interface ForgeTestCase {
 }
 
 /**
+ * The run of one test case, as the judge reads it while it reviews a forged
+ * tool: the input it ran with, what it returned, whether it succeeded, and its
+ * effects.
+ */
+export interface ForgeTestRun {
+  /** The input the test case ran with. */
+  input: unknown;
+
+  /** What the run returned. */
+  output: unknown;
+
+  /** Whether the run succeeded. */
+  success: boolean;
+
+  /** The executor's or the composition's message when the run failed. */
+  error?: string;
+
+  /** The test run's effects: a composition's steps that were not executed while forging, or a code tool's capability calls under a ceiling. */
+  effects?: unknown[];
+}
+
+/**
  * Request payload for the `forge_tool` system tool.
  *
  * An agent submits this to request the creation of a new emergent tool. The

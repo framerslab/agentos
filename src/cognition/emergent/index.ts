@@ -12,6 +12,30 @@
  */
 
 export * from './types.js';
+// The tool forge's own result. The package root's `ForgeResult` is the agent forge's (below), so hosts read this one
+// under a name of its own.
+export type { ForgeResult as ToolForgeResult } from './types.js';
+// The forge trace: one typed record of a forge, whatever its outcome.
+export { FORGE_TRACE_VERSION, FORGE_TRACE_STAGES } from './ForgeTrace.js';
+export type {
+  ForgeTraceOutcome,
+  KnownForgeTraceStage,
+  ForgeTraceStage,
+  ForgeTraceCut,
+  ForgeTraceUnserializable,
+  ForgeTraceValue,
+  ForgeTraceText,
+  ForgeTraceRequest,
+  ForgeTraceTest,
+  ForgeTraceTestRun,
+  ForgeTraceJudgeDetail,
+  ForgeTraceExecutor,
+  ForgeTraceAuthor,
+  ForgeTraceVerdict,
+  ForgeTraceProvenance,
+  ForgeTraceSizes,
+  ForgeTrace,
+} from './ForgeTrace.js';
 export { type SelfImprovementConfig, DEFAULT_SELF_IMPROVEMENT_CONFIG } from './SelfImprovementConfig.js';
 export { ComposableToolBuilder } from './ComposableToolBuilder.js';
 export { createStepGate, checkChainable, COMPOSE_NEEDS_GATE_MESSAGE, MAX_COMPOSITION_DEPTH } from './StepGate.js';

@@ -28,6 +28,7 @@ import type {
   ReuseVerdict,
   PromotionVerdict,
   EmergentTool,
+  ForgeTestRun,
 } from './types.js';
 import type { JSONSchemaObject } from '../../core/tools/ITool.js';
 
@@ -80,14 +81,7 @@ export interface ToolCandidate {
    * Each entry contains the input, output, success flag, and optional error.
    * The judge uses these to assess correctness and determinism.
    */
-  testResults: Array<{
-    input: unknown;
-    output: unknown;
-    success: boolean;
-    error?: string;
-    /** The test run's effects: a composition's steps that were not executed while forging, or a code tool's capability calls under a ceiling. */
-    effects?: unknown[];
-  }>;
+  testResults: ForgeTestRun[];
 }
 
 // ============================================================================
