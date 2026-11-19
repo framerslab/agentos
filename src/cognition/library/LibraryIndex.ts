@@ -351,6 +351,8 @@ export interface LibraryPlanCounts {
  */
 export interface LibrarySourcePlan {
   readonly sourceId: string;
+  /** The source's tenant, whose lock `applySourcePlan` holds in shared mode beside the source's. */
+  readonly tenantId: string;
   readonly embedding: LibraryEmbedding;
   /** The inputs that need a vector, in order. Empty when every passage keeps a stored vector. */
   readonly toEmbed: readonly string[];
@@ -897,6 +899,7 @@ export class LibraryIndex {
     const remove = stored.filter((row) => !kept.has(row.id)).map((row) => row.id);
     return {
       sourceId: source.sourceId,
+      tenantId: source.tenantId,
       embedding: { model: embedding.model, dimensions: embedding.dimensions },
       toEmbed,
       counts: { embed: toEmbed.length, reuse, rewrite, remove: remove.length },

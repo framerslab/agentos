@@ -274,6 +274,63 @@ describe('LibraryIndex indexes a source by content', () => {
     expect(await store.listSourcePassages('library', 'document:d1#part')).toEqual(before);
   });
 
+  it('removes a tenant only once a plan being applied for one of its sources has written, so none of its passages is left', async () => {
+    /** A store whose next upsert waits on a gate, telling the test when it is reached. */
+    class PausingStore extends InMemoryVectorStore {
+      pause: { gate: Promise<void>; reached: () => void } | null = null;
+      override async upsert(...args: Parameters<InMemoryVectorStore['upsert']>) {
+        const pause = this.pause;
+        if (pause) {
+          this.pause = null;
+          pause.reached();
+          await pause.gate;
+        }
+        return super.upsert(...args);
+      }
+    }
+    const pausing = new PausingStore();
+    await pausing.initialize({ id: 'mem-pause', type: 'in_memory' });
+    await pausing.createCollection('library', 4);
+    library = new LibraryIndex({ store: pausing, collection: 'library', embed, dimensions: 4 });
+    const older = documentSource({ sourceId: 'document:d0', passages: passages(2) });
+    const olderPlan = await library.planSource(older, { embedding: MODEL, inputs: texts(older) });
+    await library.applySourcePlan(olderPlan, await embed([...olderPlan.toEmbed]));
+
+    // A new source of the same tenant: its plan keeps and removes nothing, so no stale check can catch a removal.
+    const fresh = documentSource({ passages: passages(3, (n) => `A new passage ${n}.`) });
+    const plan = await library.planSource(fresh, { embedding: MODEL, inputs: texts(fresh) });
+    const made = await embed([...plan.toEmbed]);
+    let open: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    let reached: () => void = () => {};
+    const atWrite = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    pausing.pause = { gate, reached };
+    const applying = library.applySourcePlan(plan, made);
+    let removing: Promise<number> = Promise.resolve(0);
+    let removed = false;
+    try {
+      await atWrite;
+      // The plan has passed its check and waits to write; the tenant's removal starts now and must wait for it.
+      removing = library.removeTenant('org1').then((count) => {
+        removed = true;
+        return count;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(removed).toBe(false);
+    } finally {
+      open();
+      await Promise.allSettled([applying, removing]);
+    }
+    await applying;
+    expect(await removing).toBe(5);
+    expect(await pausing.listSourcePassages('library', 'document:d1')).toEqual([]);
+    expect(await pausing.listSourcePassages('library', 'document:d0')).toEqual([]);
+  });
+
   it('refuses to apply a plan that reuses stored rows through an index whose store cannot plan by content', async () => {
     await index(documentSource());
     const edited = documentSource({ passages: passages(40, (n) => (n === 3 ? 'Passage 3 changed.' : undefined)) });

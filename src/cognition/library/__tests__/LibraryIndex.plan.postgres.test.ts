@@ -42,6 +42,8 @@ const texts = (source: LibrarySource): string[] => source.passages.map((passage)
 
 /** A pause the next UPDATE a transaction sends waits on, once, telling the test when it is reached. */
 let pauseUpdate: { gate: Promise<void>; reached: () => void } | null = null;
+/** The same for the next INSERT a transaction sends. */
+let pauseInsert: { gate: Promise<void>; reached: () => void } | null = null;
 
 describe.skipIf(!URL)('LibraryIndex by content over PostgresVectorStore on Postgres', () => {
   let pool: pg.Pool;
@@ -95,6 +97,12 @@ describe.skipIf(!URL)('LibraryIndex by content over PostgresVectorStore on Postg
               pause.reached();
               await pause.gate;
             }
+            const insert = pauseInsert;
+            if (insert && /^\s*INSERT\b/.test(sql)) {
+              pauseInsert = null;
+              insert.reached();
+              await insert.gate;
+            }
             return client.query(sql, params);
           },
           release: () => client.release(),
@@ -113,6 +121,7 @@ describe.skipIf(!URL)('LibraryIndex by content over PostgresVectorStore on Postg
     statements = [];
     sent = [];
     pauseUpdate = null;
+    pauseInsert = null;
     await pool.query(`DELETE FROM "${TABLE}"`);
     library = new LibraryIndex({ store, collection: 'library', embed, dimensions: 4 });
   });
@@ -218,6 +227,46 @@ describe.skipIf(!URL)('LibraryIndex by content over PostgresVectorStore on Postg
       await Promise.allSettled([first, second]);
     }
     expect(order).toEqual(['first holds', 'another source', 'first ends', 'second holds']);
+  });
+
+  it('removes a tenant only once a plan being applied for one of its sources has committed, so none of its passages is left', async () => {
+    await index(documentSource({ sourceId: 'document:d0', passages: passages(2) }));
+    // A new source of the same tenant: its plan keeps and removes nothing, so no stale check can catch a removal.
+    const fresh = documentSource({ passages: passages(3, (n) => `A new passage ${n}.`) });
+    const plan = await library.planSource(fresh, { embedding: MODEL, inputs: texts(fresh) });
+    const made = await embed([...plan.toEmbed]);
+    let open: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    let reached: () => void = () => {};
+    const atInsert = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    pauseInsert = { gate, reached };
+    const applying = library.applySourcePlan(plan, made);
+    let removing: Promise<number> = Promise.resolve(0);
+    try {
+      await atInsert;
+      // The plan has passed its check inside its transaction and waits to write; the tenant's removal starts now.
+      removing = library.removeTenant('org1');
+      const waiter = async (): Promise<string> => {
+        for (let tries = 0; tries < 100; tries += 1) {
+          const waiting = await pool.query<{ n: string }>("SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted");
+          if (Number(waiting.rows[0].n) > 0) return 'waits for the plan';
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        return 'never waited';
+      };
+      expect(await Promise.race([removing.then(() => 'removed first'), waiter()])).toBe('waits for the plan');
+    } finally {
+      open();
+      await Promise.allSettled([applying, removing]);
+    }
+    await applying;
+    expect(await removing).toBe(5);
+    const left = await pool.query<{ n: string }>(`SELECT count(*) AS n FROM "${TABLE}" WHERE metadata_json->>'tenantId' = 'org1'`);
+    expect(Number(left.rows[0].n)).toBe(0);
   });
 
   it("applies a plan in the caller's transaction, so a rollback leaves the source as it was", async () => {

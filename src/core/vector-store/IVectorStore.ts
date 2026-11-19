@@ -613,8 +613,25 @@ export interface IVectorStore {
    * transaction: make them one at a time, awaiting each, and keep the store no longer than `work` runs. The lock is
    * not re-entrant: `work` must not take it again, through this store or a LibraryIndex over it (`removeSource`,
    * `setSourceScope` and `applySourcePlan` take it), or it waits on itself.
+   *
+   * With `options.tenantId`, the store holds that tenant's lock too, in shared mode and taken before the source's: a
+   * `withTenantLock` on the same tenant waits until `work` ends, and `work` waits while one holds it. `applySourcePlan`
+   * and `indexSource` pass their source's tenant.
    */
-  withSourceLock?<T>(collectionName: string, sourceId: string, work: (store: IVectorStore) => Promise<T>): Promise<T>;
+  withSourceLock?<T>(
+    collectionName: string,
+    sourceId: string,
+    work: (store: IVectorStore) => Promise<T>,
+    options?: { tenantId?: string },
+  ): Promise<T>;
+
+  /**
+   * Optional: runs `work` holding one tenant's lock of a collection exclusively, in one transaction, and answers what
+   * `work` answers. It waits until every `withSourceLock` given that tenant has ended, and each one asked for after it
+   * waits until `work` ends. `work` receives a store whose calls run in that transaction, as `withSourceLock`'s does.
+   * The lock is not re-entrant. A store that has it honours `tenantId` in `withSourceLock`. `removeTenant` takes it.
+   */
+  withTenantLock?<T>(collectionName: string, tenantId: string, work: (store: IVectorStore) => Promise<T>): Promise<T>;
 
   /**
    * Deletes documents from a specified collection by their IDs or by a metadata filter.
