@@ -989,16 +989,17 @@ export class LibraryIndex {
   }
 
   /**
-   * Indexes a source, replacing whatever the collection held under its id: the old passages are deleted first, then
-   * the new ones are embedded and written `batchSize` at a time. A failed batch leaves the passages written before
-   * it, and indexing the source again replaces them. A delete or a write the store reports as failed in its result,
-   * instead of throwing, fails the call as well.
+   * Indexes a source, replacing whatever the collection held under its id. Every passage is embedded first, `batchSize`
+   * at a time, so a failed embedding leaves the stored source as it was. Then, under the store's lock on the source
+   * where it has one (in one transaction on PostgresVectorStore), the old passages are deleted and the new ones written
+   * `batchSize` at a time, so a plan applied meanwhile is replaced whole. On a store without transactions a failed
+   * batch leaves the passages written before it, and indexing the source again replaces them. A delete or a write the
+   * store reports as failed in its result, instead of throwing, fails the call as well.
    */
   async indexSource(source: LibrarySource): Promise<{ passages: number }> {
     if (!source.tenantId || source.aclGroups.length === 0) {
       throw new Error('LibraryIndex.indexSource needs a tenant and at least one access group.');
     }
-    await this.removeSource(source.sourceId);
     const owned: Record<string, MetadataValue> = {
       tenantId: source.tenantId,
       aclGroups: source.aclGroups,
@@ -1010,18 +1011,29 @@ export class LibraryIndex {
     if (source.folderId) owned.folderId = source.folderId;
     if (source.title) owned.title = source.title;
     const inherited = withoutSourceFields(source.metadata);
+    const documents: VectorDocument[] = [];
     for (let from = 0; from < source.passages.length; from += this.batchSize) {
       const batch = source.passages.slice(from, from + this.batchSize);
       const vectors = await this.embed(batch.map((passage) => passage.text));
       if (vectors.length !== batch.length) throw new Error(VECTOR_COUNT_MISMATCH);
-      const documents: VectorDocument[] = batch.map((passage, offset) => ({
-        id: `${source.sourceId}#${from + offset}`,
-        embedding: vectors[offset],
-        textContent: passage.text,
-        metadata: { ...withoutSourceFields(passage.metadata), ...inherited, ...owned, index: from + offset },
-      }));
-      throwOnReportedFailure(await this.store.upsert(this.collection, documents), `write the passages of ${source.sourceId}`);
+      batch.forEach((passage, offset) => {
+        documents.push({
+          id: `${source.sourceId}#${from + offset}`,
+          embedding: vectors[offset],
+          textContent: passage.text,
+          metadata: { ...withoutSourceFields(passage.metadata), ...inherited, ...owned, index: from + offset },
+        });
+      });
     }
+    const replace = async (store: IVectorStore): Promise<void> => {
+      await this.deleteSourceIn(store, source.sourceId);
+      for (let from = 0; from < documents.length; from += this.batchSize) {
+        throwOnReportedFailure(await store.upsert(this.collection, documents.slice(from, from + this.batchSize)), `write the passages of ${source.sourceId}`);
+      }
+    };
+    // Under the source's lock where the store has one, so a plan applied while the passages were embedded is replaced.
+    if (this.store.withSourceLock) await this.store.withSourceLock(this.collection, source.sourceId, replace);
+    else await replace(this.store);
     return { passages: source.passages.length };
   }
 
@@ -1031,13 +1043,16 @@ export class LibraryIndex {
    * on PineconeVectorStore, 0 on QdrantVectorStore). Throws when the store reports the delete as failed.
    */
   async removeSource(sourceId: string): Promise<number> {
-    const remove = async (store: IVectorStore): Promise<number> => {
-      const result = await store.delete(this.collection, undefined, { filter: { sourceId } });
-      throwOnReportedFailure(result, `delete the passages of ${sourceId}`);
-      return result.deletedCount;
-    };
+    const remove = (store: IVectorStore): Promise<number> => this.deleteSourceIn(store, sourceId);
     // Under the source's lock where the store has one, so a plan that is writing the source finishes first.
     return this.store.withSourceLock ? this.store.withSourceLock(this.collection, sourceId, remove) : remove(this.store);
+  }
+
+  /** Deletes a source's passages through `store` and answers its `deletedCount`; throws on a reported failure. */
+  private async deleteSourceIn(store: IVectorStore, sourceId: string): Promise<number> {
+    const result = await store.delete(this.collection, undefined, { filter: { sourceId } });
+    throwOnReportedFailure(result, `delete the passages of ${sourceId}`);
+    return result.deletedCount;
   }
 
   /**

@@ -1508,12 +1508,12 @@ export class PostgresVectorStore implements IVectorStore {
 
   /**
    * The vectors of the rows among `ids` that `filter` admits, with the filter in the statement, so a row it refuses
-   * is never read out of the table.
+   * is never read out of the table. The filter compares JSON values, so a number never matches a text that spells it.
    */
   async fetchVectors(collectionName: string, ids: string[], filter: MetadataFilter): Promise<StoredVector[]> {
     if (ids.length === 0) return [];
     await this._ensureInit();
-    const { clause, filterParams } = this._buildMetadataFilter(filter, 2);
+    const { clause, filterParams } = this._buildMetadataFilter(filter, 2, true);
     const result = await this.pool.query(
       `SELECT id, embedding::text, metadata_json FROM ${this._t(collectionName)} WHERE id = ANY($1::text[])${clause ? ` AND ${clause}` : ''}`,
       [ids, ...filterParams],
