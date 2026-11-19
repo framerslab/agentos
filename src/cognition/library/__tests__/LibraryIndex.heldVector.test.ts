@@ -68,7 +68,10 @@ describe('LibraryIndex search with a vector the caller holds', () => {
   });
 
   it('refuses, before any call, a vector of another size than the index, an empty one, or one holding a value that is not a finite number', async () => {
-    for (const vector of [[1, 0, 0], [], [1, Number.NaN, 0, 0], [1, Number.POSITIVE_INFINITY, 0, 0]]) {
+    // A sparse array of the right length: its missing places read as undefined.
+    const sparse: number[] = new Array(4);
+    sparse[0] = 1;
+    for (const vector of [[1, 0, 0], [], [1, Number.NaN, 0, 0], [1, Number.POSITIVE_INFINITY, 0, 0], sparse]) {
       await expect(library.search({ text: 'budget', scope: SCOPE, mode: 'dense', vector })).rejects.toThrow('vector');
     }
     expect(sent).toEqual([]);
