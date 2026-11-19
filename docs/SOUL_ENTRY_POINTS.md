@@ -10,7 +10,7 @@ Three calls build an agent from a soul. A soul is a folder of Markdown files tha
 | You are building | Call | What it gives |
 |---|---|---|
 | A character that remembers each user: a game character, a companion, a tutor, a support agent | `await souledAgent({ soul })` | Long-term memory kept under each user id in a store beside the soul; notes compiled from each user's own conversation; one call each to delete, export and correct a user's memory; a retention period; the wiki pages you write for every user |
-| The character as a mind | `gmi({ soul })`, or `agent({ runtime: 'gmi', soul })` | The agent's persona on a GMI and, with `memory` set, cognitive memory scoped by user id. A user's memory is deleted through the learning layer, and no call exports or corrects it |
+| The character as a mind | `gmi({ soul })`, or `agent({ runtime: 'gmi', soul })` | The agent's persona on a GMI and, with `memory` set, cognitive memory scoped by user id. With the learning layer on, a user's memory is deleted through it; no call exports or corrects it |
 | The character's identity, with nothing kept | `agent({ soul })` | The soul's prose, style, traits and hard limits in the system prompt. Long-term memory only from a `memoryProvider` you pass |
 
 `souledAgent()` runs on either engine: `runtime: 'legacy'`, the default ([`agent.ts` L400-L405](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/api/agent.ts#L400-L405)), or `runtime: 'gmi'`.
