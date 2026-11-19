@@ -580,8 +580,11 @@ export interface QueryRouterConfig {
    * takes that provider's own key variable (`MINIMAX_API_KEY` for
    * `minimax`), and none when it is unset, so `generateText` resolves the
    * provider's credentials and no other vendor's key reaches it. An OpenAI
-   * one prefers `OPENAI_API_KEY` and falls back to `OPENROUTER_API_KEY` with
-   * the OpenRouter compatibility base URL.
+   * one takes `OPENAI_API_KEY`, else `OPENROUTER_API_KEY` with the OpenRouter
+   * compatibility base URL, else no key: another vendor's key never reaches
+   * OpenAI. One that names no provider gets no key from the router, and
+   * `generateText` reads the key of the provider it detects. An empty value
+   * counts as omitted.
    */
   apiKey?: string;
 

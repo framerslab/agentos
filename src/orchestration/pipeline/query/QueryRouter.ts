@@ -1610,9 +1610,7 @@ export class QueryRouter {
     if (this.config.embeddingApiKey) return this.config.embeddingApiKey;
     if (this.config.apiKey && this.embeddingSharesLlmCredentials()) return this.config.apiKey;
     const provider = this.config.embeddingProvider;
-    if (!provider || provider === 'openai') {
-      return process.env.OPENAI_API_KEY || process.env.OPENROUTER_API_KEY || '';
-    }
+    if (!provider || provider === 'openai') return this.openAiEnvCredentials().apiKey;
     const ownKey = providerEnvVars(provider).key;
     return (ownKey && process.env[ownKey]) || '';
   }
@@ -1650,77 +1648,62 @@ export class QueryRouter {
       return undefined;
     }
 
-    if (process.env.OPENAI_API_KEY) {
-      return undefined;
-    }
-
-    // The URL goes with the OpenRouter key alone, so no other key reaches OpenRouter.
-    if (process.env.OPENROUTER_API_KEY && this.getEmbeddingApiKey() === process.env.OPENROUTER_API_KEY) {
-      return 'https://openrouter.ai/api/v1';
-    }
-
-    return undefined;
+    return this.openAiEnvCredentials().baseUrl;
   }
 
   /**
-   * Resolve API key for LLM calls.
+   * The key an OpenAI call (the classifier, the generator or embeddings)
+   * takes from the environment, with the base URL that goes with it:
+   * `OPENAI_API_KEY` on OpenAI's own endpoint, else `OPENROUTER_API_KEY` on
+   * OpenRouter's compatibility URL, else no key (an empty string). No other
+   * vendor's key is read: with only `ANTHROPIC_API_KEY` set, an OpenAI call
+   * carries no key. The URL goes with the OpenRouter key alone, so no other
+   * key reaches OpenRouter.
+   */
+  private openAiEnvCredentials(): { apiKey: string; baseUrl?: string } {
+    if (process.env.OPENAI_API_KEY) return { apiKey: process.env.OPENAI_API_KEY };
+    if (process.env.OPENROUTER_API_KEY) {
+      return { apiKey: process.env.OPENROUTER_API_KEY, baseUrl: 'https://openrouter.ai/api/v1' };
+    }
+    return { apiKey: '' };
+  }
+
+  /**
+   * Resolve API key for LLM calls. A classifier or generator call carries
+   * only a key of the vendor it goes to.
    *
-   * Checks config override first. A call to a provider other than OpenAI
-   * then takes that provider's own key variable, or no key when it is unset
-   * or the provider has none (Ollama, the CLIs), so `generateText` resolves
-   * the provider's credentials and one vendor's key never reaches another.
-   * An OpenAI call, and one that names no provider (the embedding check),
-   * scans the provider env vars in priority order. Returns an empty string
-   * when that scan finds none, which is fine for keyless providers
-   * (claude-code-cli, gemini-cli): generateText() handles them via
-   * CLISubprocessBridge.
+   * The router's `apiKey` comes first. Otherwise an OpenAI call takes
+   * `OPENAI_API_KEY`, else `OPENROUTER_API_KEY` (sent to OpenRouter's URL, see
+   * {@link getLlmBaseUrl}), else no key ({@link openAiEnvCredentials}); a call
+   * to another provider takes that provider's own key variable, or no key
+   * when it is unset or the provider has none (Ollama, the CLIs). A call that
+   * names no provider gets no key from the router: `generateText` detects the
+   * provider from the environment and reads that provider's own key, so the
+   * two always match (the detection puts OpenRouter before OpenAI, so a key
+   * picked here could go to the other vendor). With no key, `generateText`
+   * resolves the provider's credentials itself, and one vendor's key never
+   * reaches another.
    *
    * @param provider - The provider the call goes to, when it names one.
    */
   private getLlmApiKey(provider?: string): string | undefined {
     if (this.config.apiKey) return this.config.apiKey;
-    if (provider !== undefined && provider !== 'openai') {
-      const ownKey = providerEnvVars(provider).key;
-      return (ownKey && process.env[ownKey]) || undefined;
-    }
-    return this.scanProviderEnvKeys();
-  }
-
-  /**
-   * The first provider key variable that is set, in priority order. Direct
-   * provider keys (OpenAI, Anthropic, etc.) take precedence over aggregator
-   * keys (OpenRouter) so that the native endpoint is used when both are
-   * configured. Returns an empty string when none is set: keyless providers
-   * (CLI) don't need an API key.
-   */
-  private scanProviderEnvKeys(): string {
-    const envKeys = [
-      'OPENAI_API_KEY',
-      'ANTHROPIC_API_KEY',
-      'GEMINI_API_KEY',
-      'GROQ_API_KEY',
-      'TOGETHER_API_KEY',
-      'MISTRAL_API_KEY',
-      'XAI_API_KEY',
-      'OPENROUTER_API_KEY',
-    ];
-
-    for (const key of envKeys) {
-      if (process.env[key]) return process.env[key]!;
-    }
-
-    return '';
+    if (provider === undefined) return undefined;
+    if (provider === 'openai') return this.openAiEnvCredentials().apiKey || undefined;
+    const ownKey = providerEnvVars(provider).key;
+    return (ownKey && process.env[ownKey]) || undefined;
   }
 
   /**
    * Resolve base URL for LLM calls.
    *
-   * Only OpenRouter and Ollama need custom base URLs. All other providers
-   * (including CLI) use their default endpoints via generateText() resolution.
-   * A call to a provider other than OpenAI gets none here: generateText()
-   * reads that provider's own URL variable (`MINIMAX_BASE_URL`,
-   * `OPENROUTER_BASE_URL`, `OLLAMA_BASE_URL`) or uses its default, so an
-   * OpenRouter or Ollama URL meant for another key never carries its key.
+   * The router's `baseUrl` comes first. An OpenAI call on the OpenRouter key
+   * {@link getLlmApiKey} picks gets OpenRouter's compatibility URL, and one
+   * on `OPENAI_API_KEY` gets none (OpenAI's own endpoint). A call to another
+   * provider, or one that names none, gets none here: generateText() reads
+   * that provider's own URL variable (`MINIMAX_BASE_URL`,
+   * `OPENROUTER_BASE_URL`, `OLLAMA_BASE_URL`) or uses its default, so a URL
+   * meant for another key never carries its key.
    *
    * @param provider - The provider the call goes to, when it names one.
    */
@@ -1731,41 +1714,18 @@ export class QueryRouter {
       return this.config.baseUrl as string;
     }
 
-    // If user provided an explicit API key, don't override the URL
-    if (this.config.apiKey !== undefined) {
+    // The router's own key goes where the caller sends it. An empty one is
+    // unset, as getLlmApiKey reads it: the key comes from the environment,
+    // and the URL that goes with that key applies.
+    if (this.config.apiKey) {
       return undefined;
     }
 
-    if (provider !== undefined && provider !== 'openai') {
+    if (provider !== 'openai') {
       return undefined;
     }
 
-    // Direct provider keys don't need a custom base URL — only fall through
-    // to OpenRouter when no direct key is present.
-    const directKeys = [
-      'OPENAI_API_KEY',
-      'ANTHROPIC_API_KEY',
-      'GEMINI_API_KEY',
-      'GROQ_API_KEY',
-      'TOGETHER_API_KEY',
-      'MISTRAL_API_KEY',
-      'XAI_API_KEY',
-    ];
-    if (directKeys.some((k) => process.env[k])) {
-      return undefined;
-    }
-
-    // OpenRouter needs a custom base URL
-    if (process.env.OPENROUTER_API_KEY) {
-      return 'https://openrouter.ai/api/v1';
-    }
-
-    // Ollama needs its base URL
-    if (process.env.OLLAMA_BASE_URL) {
-      return process.env.OLLAMA_BASE_URL;
-    }
-
-    return undefined;
+    return this.openAiEnvCredentials().baseUrl;
   }
 
   /**

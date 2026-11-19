@@ -67,3 +67,34 @@
 export function modelSupportsForcedToolChoice(modelId: string): boolean {
   return !/^claude-(fable-5|mythos-5-1|opus-5-5|sonnet-5-5)\b/i.test(modelId);
 }
+
+/**
+ * Whether a caller's `toolChoice` forces a tool on Anthropic: `'required'`
+ * (sent as `{ type: 'any' }`) or a named function (sent as
+ * `{ type: 'tool', name }`), the two forms AnthropicProvider's
+ * convertToolChoice forces. Any other value is sent as `{ type: 'auto' }`.
+ *
+ * @param choice The caller's `toolChoice`, as `generateText` takes it.
+ * @returns `true` when the choice forces a tool call.
+ */
+export function toolChoiceForcesTool(choice: unknown): boolean {
+  if (choice === 'required') return true;
+  if (!choice || typeof choice !== 'object') return false;
+  const name = (choice as { function?: { name?: unknown } }).function?.name;
+  return typeof name === 'string' && name !== '';
+}
+
+/**
+ * The Claude model a Sonnet-class call that forces a tool takes in place of
+ * one that refuses a forced choice ({@link modelSupportsForcedToolChoice}).
+ *
+ * Claude Sonnet 5.5 answers `tool_choice` `any` or `tool` with a 400, and
+ * AnthropicProvider sends such a choice to it as `auto`, under which the
+ * model may answer with no tool call. Claude Sonnet 5 takes the forced
+ * choice: the Sonnet 5.5 migration guide says "Every earlier model on this
+ * page accepts a `tool_choice` of type `any` or `tool`" and shows a forced
+ * call to `claude-sonnet-5`
+ * (https://platform.claude.com/docs/en/models/sonnet-5-5/migration-guide#forced-tool-use,
+ * read 2026-11-19).
+ */
+export const ANTHROPIC_FORCED_TOOL_SONNET = 'claude-sonnet-5';
