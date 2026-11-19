@@ -120,21 +120,21 @@ export interface WrapForgeToolOptions {
 }
 
 /**
- * Who wrote a wrapped forge's request: a model called forge_tool, so the request is model-written. The answering
- * model on the call's context wins; else the model the host named in `author`, as asked for; else a model whose
- * provider and model are unknown.
+ * Who wrote a wrapped forge's request: a model called forge_tool, so the request is model-written. The call's model on
+ * its context wins (`answered`, or `requested` when its `modelSource` says the step's answer named no model); else the
+ * model the host named in `author`, as asked for; else a model whose provider and model are unknown.
  */
 function wrapperAuthor(ctx: unknown, author: WrapForgeToolOptions['author']): ForgeCallAuthor {
   try {
     const answered: unknown = (ctx as { callerModel?: unknown } | null | undefined)?.callerModel;
     if (answered !== null && typeof answered === 'object') {
-      const { providerId, modelId } = answered as { providerId?: unknown; modelId?: unknown };
+      const { providerId, modelId, modelSource } = answered as { providerId?: unknown; modelId?: unknown; modelSource?: unknown };
       return {
         kind: 'model',
         role: 'forging_agent',
         provider: typeof providerId === 'string' ? providerId : null,
         model: typeof modelId === 'string' ? modelId : null,
-        modelSource: 'answered',
+        modelSource: modelSource === 'requested' ? 'requested' : 'answered',
       };
     }
   } catch {
@@ -212,6 +212,26 @@ function traceField(record: ForgeCallRecord): { trace?: ForgeTrace } {
 export function wrapForgeTool(options: WrapForgeToolOptions): ITool {
   const { raw, agentId, sessionId, capture, scope, log, author } = options;
 
+  /** The trace of a forge the wrapper ended. */
+  const wrapperTrace = (
+    record: ForgeCallRecord,
+    stage: KnownForgeTraceStage,
+    reason: unknown,
+    traceArgs: unknown,
+    ctx: unknown,
+  ): ForgeTrace =>
+    buildForgeTrace({
+      record,
+      recordedBy: 'wrapper',
+      via: 'forge_tool',
+      stage,
+      reason,
+      args: traceArgs,
+      agentId,
+      sessionId,
+      correlationId: callCorrelationId(ctx),
+    });
+
   /** Builds the trace of a forge the wrapper ended, keeps it on the call's record and delivers it once. */
   const settle = (
     record: ForgeCallRecord,
@@ -220,21 +240,7 @@ export function wrapForgeTool(options: WrapForgeToolOptions): ITool {
     traceArgs: unknown,
     ctx: unknown,
   ): Promise<ForgeTrace> =>
-    settleForgeTrace(
-      record,
-      buildForgeTrace({
-        record,
-        recordedBy: 'wrapper',
-        via: 'forge_tool',
-        stage,
-        reason,
-        args: traceArgs,
-        agentId,
-        sessionId,
-        correlationId: callCorrelationId(ctx),
-      }),
-      deliveryOf(raw),
-    );
+    settleForgeTrace(record, wrapperTrace(record, stage, reason, traceArgs, ctx), deliveryOf(raw));
 
   return {
     ...(raw as unknown as ITool),
@@ -246,9 +252,13 @@ export function wrapForgeTool(options: WrapForgeToolOptions): ITool {
       record.author = wrapperAuthor(ctx, author);
       const refusal = typeof raw.refusalBeforeApproval === 'function' ? raw.refusalBeforeApproval(args, ctx) : undefined;
       if (refusal) {
-        // The method is synchronous, so the delivery is not awaited: the settle keeps the trace on the record and
-        // marks it delivered before its first await, and the hook receives it after this call returns.
-        settle(record, 'refused_before_approval', refusal.error, args, ctx).catch(() => undefined);
+        // The method is synchronous: the trace is kept on the record now, so the capture below carries it, and its
+        // delivery waits for a microtask, so the hook receives it after this call has returned.
+        const trace = wrapperTrace(record, 'refused_before_approval', refusal.error, args, ctx);
+        record.trace = trace;
+        Promise.resolve()
+          .then(() => settleForgeTrace(record, trace, deliveryOf(raw)))
+          .catch(() => undefined);
         const toolName = String(args?.name ?? 'unnamed');
         const reason = String(refusal.error ?? 'refused').slice(0, 240);
         log?.({ kind: 'rejected', scope, toolName, reason });

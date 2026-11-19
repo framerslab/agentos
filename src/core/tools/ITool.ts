@@ -167,11 +167,12 @@ export interface ToolExecutionContext {
   callerTurn?: CallerTurnContext;
   /**
    * The model that asked for this call, as the GMI's step answered it: the step's provider, and the model its final
-   * chunk names (the model the step asked for when the chunk names none). Set by a GMI on the calls its steps make;
-   * absent from other callers and from the steps of a composed tool. Read by forge_tool for its trace's provenance.
-   * Never sent to a model.
+   * chunk names, with `modelSource: 'answered'`; when the chunk names none, the model the step asked for, with
+   * `modelSource: 'requested'`. Set by a GMI on the calls its steps make; absent from other callers and from the steps
+   * of a composed tool. Read by forge_tool for its trace's provenance, which reads a missing `modelSource` as
+   * `'answered'`. Never sent to a model.
    */
-  callerModel?: { providerId: string; modelId: string };
+  callerModel?: { providerId: string; modelId: string; modelSource?: 'answered' | 'requested' };
 }
 
 /**

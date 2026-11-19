@@ -307,6 +307,20 @@ function applicationNoteOf(turnInput: GMITurnInput): string | undefined {
   return hostApplicationNote(turnInput.metadata?.applicationNote);
 }
 
+/**
+ * The model that asked for a tool call: the model the step's final chunk names, as answered; when it names none, the
+ * model the step asked for, as requested.
+ */
+function callerModelOf(
+  providerId: string,
+  requestedModelId: string,
+  answeredModelId: string | undefined,
+): NonNullable<ToolExecutionRequestDetails['callerModel']> {
+  return answeredModelId
+    ? { providerId, modelId: answeredModelId, modelSource: 'answered' }
+    : { providerId, modelId: requestedModelId, modelSource: 'requested' };
+}
+
 /** The tool-call gate a turn names in `metadata.toolCallGate`; undefined when it names none. */
 function toolCallGateOf(turnInput: GMITurnInput): GMIToolCallGate | undefined {
   const gate = turnInput.metadata?.toolCallGate;
@@ -1181,6 +1195,18 @@ export class GMI implements IGMI {
       const message = error instanceof Error ? error.message : String(error);
       this.addTraceEntry(ReasoningEntryType.WARNING, `The tool-call gate failed on '${call.name}'; the call is refused.`, { reqId: call.id, error: message });
       return { reason: `The call to '${call.name}' was refused because its check failed: ${message}`, reasonCode: 'TOOL_CALL_GATE_ERROR' };
+    }
+  }
+
+  /**
+   * Tells the tool orchestrator of a call the turn's tool-call gate refused, when it records such calls (a refused
+   * forge_tool call gets its forge trace there). Never throws: the refusal stands whatever the orchestrator does.
+   */
+  private async recordRefusedToolCall(requestDetails: ToolExecutionRequestDetails, refusal: GMIToolCallRefusal): Promise<void> {
+    try {
+      await this.toolOrchestrator.recordRefusedToolCall?.(requestDetails, refusal);
+    } catch {
+      // The model reads the refusal either way.
     }
   }
 
@@ -2695,14 +2721,17 @@ export class GMI implements IGMI {
                 // The gate the turn asks before each call, beside the turn's sources: a team the call launches has its
                 // seats' calls asked it too.
                 ...(toolCallGate ? { callerTurn: { toolCallGate: withTurnSources(toolCallGate, lastRagSources ?? continuedTurnSources) } } : {}),
-                // The model that asked for the call: the step's provider, and the model its final chunk names (the
-                // model the step asked for when the chunk names none). Tools read it; it is never sent to a model.
-                callerModel: { providerId: modelTargetInfo.providerId, modelId: stepFinalChunk?.modelId || modelTargetInfo.modelId },
+                // The model that asked for the call: the step's provider, and the model its final chunk names, or the
+                // model the step asked for when the chunk names none, labelled requested. Tools read it; it is never
+                // sent to a model.
+                callerModel: callerModelOf(modelTargetInfo.providerId, modelTargetInfo.modelId, stepFinalChunk?.modelId),
               };
               this.addTraceEntry(ReasoningEntryType.TOOL_EXECUTION_START, `Orchestrating tool: ${toolCallReq.name}`, { reqId: toolCallReq.id });
               callInFlight = toolCallReq;
-              // A call the gate refused is recorded as a refused result the model reads; the tool is not called.
+              // A call the gate refused is recorded as a refused result the model reads; the tool is not called. The
+              // orchestrator is told of it, so a refused forge_tool call has its forge trace.
               const refusal = refusals[callIndex] ?? null;
+              if (refusal) await this.recordRefusedToolCall(requestDetails, refusal);
               const result = refusal
                 ? refusedToolCallResult(toolCallReq, refusal)
                 : await this.toolOrchestrator.processToolCall(requestDetails);

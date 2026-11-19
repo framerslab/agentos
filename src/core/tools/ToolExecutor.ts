@@ -74,7 +74,7 @@ export interface ToolExecutionRequestDetails {
    * The model that asked for this call, as the GMI's step answered it; set by a GMI, absent from other callers.
    * Copied into the tool's context (see ToolExecutionContext.callerModel). Never sent to a model.
    */
-  callerModel?: { providerId: string; modelId: string };
+  callerModel?: { providerId: string; modelId: string; modelSource?: 'answered' | 'requested' };
   /**
    * Whether this call's console lines carry the tool's arguments, its output and the details of a failure.
    * Set by `ToolOrchestrator.processToolCall` from the orchestrator's own `logToolCalls`, so two orchestrators

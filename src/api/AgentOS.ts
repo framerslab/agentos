@@ -1300,13 +1300,16 @@ export class AgentOS implements IAgentOS {
         { builtInTools: false },
       );
       this.toolOrchestrator = new ToolOrchestrator();
+      // The emergent judge's provider: the default provider when each review request is sent. The request and the
+      // provider its trace names both read it through this one function.
+      const judgeProvider = () => this.modelProviderManager.getDefaultProvider();
       // Build emergent options from config when emergent: true.
       const emergentOptions = this.config.emergent
         ? {
             enabled: true,
             config: this.config.emergentConfig,
             generateText: async (model: string, prompt: string): Promise<string> => {
-              const provider = this.modelProviderManager.getDefaultProvider();
+              const provider = judgeProvider();
               if (!provider) {
                 throw new Error('No LLM provider available for the emergent judge.');
               }
@@ -1339,8 +1342,9 @@ export class AgentOS implements IAgentOS {
                   })
                 : undefined,
             onForgeTrace: this.config.onForgeTrace,
-            // The judge's calls go through the default provider (generateText above).
-            judgeProviderId: this.modelProviderManager.getDefaultProvider()?.providerId,
+            // Read by the judge as each review request is sent, with no await before generateText above reads the
+            // provider, so each verdict names the provider its request went to.
+            judgeProviderId: () => judgeProvider()?.providerId,
           }
         : undefined;
       const initialConfigTools = adaptTools(this.config.tools);

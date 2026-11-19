@@ -34,6 +34,7 @@ export type ForgeTraceOutcome =
 
 /** The stage codes this release writes. The set grows: read a stage as a string and keep a default branch. */
 export const FORGE_TRACE_STAGES = [
+  'guardrail_refused',
   'schema_check',
   'refused_before_approval',
   'shape_check',
@@ -41,6 +42,7 @@ export const FORGE_TRACE_STAGES = [
   'orchestrator_refused',
   'permission_check_failed',
   'human_denied',
+  'approval_timed_out',
   'approval_failed',
   'self_change_refused',
   'name_refused',
@@ -57,6 +59,7 @@ export const FORGE_TRACE_STAGES = [
   'executor_unavailable',
   'test_responses_refused',
   'judge_rejected',
+  'test_output_unserializable',
   'compose_refused_after_judge',
   'step_cycle',
   'removed_while_forging',
@@ -211,6 +214,7 @@ export interface ForgeTrace {
 
 /** The outcome each stage code ends a forge with. */
 const STAGE_OUTCOME: Readonly<Record<KnownForgeTraceStage, ForgeTraceOutcome>> = Object.freeze({
+  guardrail_refused: 'refused',
   schema_check: 'refused',
   refused_before_approval: 'refused',
   shape_check: 'refused',
@@ -218,6 +222,7 @@ const STAGE_OUTCOME: Readonly<Record<KnownForgeTraceStage, ForgeTraceOutcome>> =
   orchestrator_refused: 'refused',
   permission_check_failed: 'failed',
   human_denied: 'refused',
+  approval_timed_out: 'refused',
   approval_failed: 'failed',
   self_change_refused: 'refused',
   name_refused: 'refused',
@@ -234,6 +239,7 @@ const STAGE_OUTCOME: Readonly<Record<KnownForgeTraceStage, ForgeTraceOutcome>> =
   executor_unavailable: 'failed',
   test_responses_refused: 'refused',
   judge_rejected: 'rejected',
+  test_output_unserializable: 'refused',
   compose_refused_after_judge: 'refused',
   step_cycle: 'refused',
   removed_while_forging: 'failed',

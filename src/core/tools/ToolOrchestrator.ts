@@ -39,6 +39,7 @@ import {
 import { ToolExecutor, ToolExecutionRequestDetails } from './ToolExecutor';
 import { ToolOrchestratorConfig } from '../config/ToolOrchestratorConfig';
 import { ToolCallResult, UserContext } from '../../cognition/substrate/IGMI';
+import type { GMIToolCallRefusal } from '../../cognition/substrate/IGMI';
 import { GMIError, GMIErrorCode, createGMIErrorFromError } from '../utils/errors.js';
 import type {
   ActionSeverity,
@@ -214,8 +215,11 @@ export class ToolOrchestrator implements IToolOrchestrator {
        * Awaited up to 1,000 ms; a throw or rejection is caught and never changes the forge's result.
        */
       onForgeTrace?: (trace: ForgeTrace) => void | Promise<void>;
-      /** The provider the judge's `generateText` calls, written into each trace's provenance; absent means unknown. */
-      judgeProviderId?: string;
+      /**
+       * The provider the judge's `generateText` calls, written into each trace's provenance; absent means unknown. A
+       * function is called as each review request is sent, so it names the provider that request went to.
+       */
+      judgeProviderId?: string | (() => string | undefined);
     }
   ): Promise<void> {
     if (this.isInitialized) {
@@ -1082,6 +1086,8 @@ export class ToolOrchestrator implements IToolOrchestrator {
             const rejectedWords = `Human rejected tool '${toolName}'.`;
             const errorMsg = decision.rejectionReason || rejectedWords;
             console.warn(`${logPrefix} ${quietForge ? rejectedWords : errorMsg}`);
+            // A decision the system made (an approval that timed out under autoRejectOnTimeout) is nobody's denial.
+            const decidedBySystem = readSafely(() => decision.decidedBy) === 'system';
             return ended(
               {
                 toolCallId: llmProvidedCallId,
@@ -1095,7 +1101,7 @@ export class ToolOrchestrator implements IToolOrchestrator {
                   details: decision,
                 },
               },
-              'human_denied',
+              decidedBySystem ? 'approval_timed_out' : 'human_denied',
             );
           }
         } catch (hitlError: any) {
@@ -1230,9 +1236,36 @@ export class ToolOrchestrator implements IToolOrchestrator {
   }
 
   /**
+   * Records a call that a turn's tool-call gate refused before {@link processToolCall}: a forge trace with the stage
+   * `guardrail_refused`, the refusal's reason as its reason, for a call to this orchestrator's own forge_tool, handed
+   * to the engine's `onForgeTrace` once; nothing for any other call. Never throws.
+   *
+   * @param requestDetails - The refused call, as processToolCall would have received it.
+   * @param refusal - Why the gate refused it.
+   */
+  public async recordRefusedToolCall(
+    requestDetails: ToolExecutionRequestDetails,
+    refusal: GMIToolCallRefusal,
+  ): Promise<void> {
+    try {
+      const toolName = readSafely(() => requestDetails.toolCallRequest.name);
+      if (!this.isInitialized || typeof toolName !== 'string') {
+        return;
+      }
+      const record = this.ownForgeRecord(requestDetails, toolName);
+      if (record) {
+        await this.traceOwnForgeEnd(record, requestDetails, 'guardrail_refused', readSafely(() => refusal.reason) ?? null);
+      }
+    } catch {
+      // A trace that cannot be recorded changes nothing about the refused call.
+    }
+  }
+
+  /**
    * The forge record of a call to this orchestrator's own forge_tool, made at the call's start; undefined for every
-   * other call. The request's author is the model that answered the call's step when the call names it, else a model
-   * whose provider and model are unknown: a model called forge_tool, so the request is model-written.
+   * other call. The request's author is the call's model when the call names it (`callerModel`: the model that answered
+   * the call's step, or the model the step asked for, labelled `requested`), else a model whose provider and model are
+   * unknown: a model called forge_tool, so the request is model-written.
    */
   private ownForgeRecord(requestDetails: ToolExecutionRequestDetails, toolName: string): ForgeCallRecord | undefined {
     const forgeTool = this.emergentForgeTool;
@@ -1567,20 +1600,23 @@ function readSafely(read: () => unknown): unknown {
 }
 
 /**
- * Who wrote an own forge call's request: the model that answered the call's step, when the request names it (a GMI
- * sets it); else a model whose provider and model are unknown.
+ * Who wrote an own forge call's request: the call's model, when the request names it (a GMI sets it): `answered`, or
+ * `requested` when its `modelSource` says the step's answer named no model; else a model whose provider and model are
+ * unknown.
  */
 function answeringModelAuthor(requestDetails: ToolExecutionRequestDetails): ForgeCallAuthor {
   const answered = readSafely(() => requestDetails.callerModel);
   if (answered !== null && typeof answered === 'object') {
     const providerId = readSafely(() => (answered as { providerId?: unknown }).providerId);
     const modelId = readSafely(() => (answered as { modelId?: unknown }).modelId);
+    const modelSource = readSafely(() => (answered as { modelSource?: unknown }).modelSource);
     return {
       kind: 'model',
       role: 'forging_agent',
       provider: typeof providerId === 'string' ? providerId : null,
       model: typeof modelId === 'string' ? modelId : null,
-      modelSource: 'answered',
+      // The model the step asked for, when its answer named none, is requested; else the model answered.
+      modelSource: modelSource === 'requested' ? 'requested' : 'answered',
     };
   }
   return { kind: 'model', role: 'forging_agent', provider: null, model: null, modelSource: null };

@@ -124,10 +124,13 @@ export interface EmergentJudgeConfig {
 
   /**
    * The provider the host's `generateText` calls for the judge, written into a forge trace's provenance as the
-   * verdict's provider. Absent means AgentOS does not know it, and the trace says `null`.
+   * verdict's provider. A function is called each time a review request is sent, in the same synchronous step as the
+   * call to `generateText`, so a host whose callback picks its provider when it is called names the provider that
+   * request went to. Absent, or a function that returns no string or throws, means AgentOS does not know it, and the
+   * trace says `null`.
    * @example "openai"
    */
-  providerId?: string;
+  providerId?: string | (() => string | undefined);
 
   /**
    * Optional structured callback that receives a stable `system` prefix and
@@ -358,15 +361,26 @@ export class EmergentJudge {
    * `'reply_unparsable'`. In both, the reply's fields are null and its lists empty, and neither the provider's error
    * nor the raw reply is kept.
    *
+   * `author` is {@link judgeAuthor} as it reads when the request is sent: its provider is read in the same synchronous
+   * step as the call to the host's callback.
+   *
    * @param candidate - The tool candidate to evaluate.
-   * @returns The verdict {@link reviewCreation} returns, and the reply's detail.
+   * @returns The verdict {@link reviewCreation} returns, the reply's detail, and the model and provider the request
+   *   was sent to.
    */
   async reviewCreationWithDetail(
     candidate: ToolCandidate,
-  ): Promise<{ verdict: CreationVerdict; detail: ForgeTraceJudgeDetail }> {
+  ): Promise<{
+    verdict: CreationVerdict;
+    detail: ForgeTraceJudgeDetail;
+    author: { model: string | null; providerId: string | null };
+  }> {
     const { system, user } = this.buildCreationPromptParts(candidate);
     const judgeModel = typeof this.config.judgeModel === 'string' ? this.config.judgeModel : null;
 
+    // Read with no await before the call below, so a provider the host picks when its callback is called is the one
+    // this request goes to.
+    const author = this.judgeAuthor();
     let rawResponse: string;
     try {
       rawResponse = await this.invokeLlm(this.config.judgeModel, system, user);
@@ -374,6 +388,7 @@ export class EmergentJudge {
       return {
         verdict: this.rejectedVerdict('LLM call failed during creation review.'),
         detail: unreadReplyDetail(judgeModel, 'llm_call_failed'),
+        author,
       };
     }
 
@@ -387,6 +402,7 @@ export class EmergentJudge {
           'Failed to parse LLM response as JSON during creation review.',
         ),
         detail: unreadReplyDetail(judgeModel, 'reply_unparsable'),
+        author,
       };
     }
 
@@ -413,7 +429,7 @@ export class EmergentJudge {
       reasoning: parsed.reasoning ?? '',
     };
 
-    return { verdict, detail: parsedReplyDetail(parsed, judgeModel) };
+    return { verdict, detail: parsedReplyDetail(parsed, judgeModel), author };
   }
 
   // --------------------------------------------------------------------------
@@ -422,12 +438,24 @@ export class EmergentJudge {
 
   /**
    * The model and provider this judge's creation review asks for, as its configuration names them, for a forge
-   * trace's provenance. A provider fallback in the host's `generateText` can answer with another model.
+   * trace's provenance. A `providerId` function is called now. A provider fallback in the host's `generateText` can
+   * answer with another model.
    *
-   * @returns The configured `judgeModel` and `providerId`, each `null` when unset.
+   * @returns The configured `judgeModel` and the provider, each `null` when unset or unknown.
    */
   judgeAuthor(): { model: string | null; providerId: string | null } {
-    return { model: this.config.judgeModel ?? null, providerId: this.config.providerId ?? null };
+    return { model: this.config.judgeModel ?? null, providerId: this.configuredProviderId() };
+  }
+
+  /** The configured provider: the string, or what the function returns now; null when unset, not a string, or the function throws. */
+  private configuredProviderId(): string | null {
+    try {
+      const configured = this.config.providerId;
+      const providerId = typeof configured === 'function' ? configured() : configured;
+      return typeof providerId === 'string' ? providerId : null;
+    } catch {
+      return null;
+    }
   }
 
   // --------------------------------------------------------------------------

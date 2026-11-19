@@ -124,9 +124,10 @@ function forgeCallIds(context: ToolExecutionContext | undefined): ForgeCallIds {
 
 /**
  * Who wrote a forge_tool call's request: a model called forge_tool, so the
- * request is model-written. The answering model on the call's context wins;
- * else the author an outer layer set on the record; else a model whose
- * provider and model are unknown.
+ * request is model-written. The call's model on its context wins (`answered`,
+ * or `requested` when its `modelSource` says the step's answer named no
+ * model); else the author an outer layer set on the record; else a model
+ * whose provider and model are unknown.
  */
 function forgingAgentAuthor(
   context: ToolExecutionContext | undefined,
@@ -135,13 +136,13 @@ function forgingAgentAuthor(
   try {
     const answered: unknown = context?.callerModel;
     if (answered !== null && typeof answered === 'object') {
-      const { providerId, modelId } = answered as { providerId?: unknown; modelId?: unknown };
+      const { providerId, modelId, modelSource } = answered as { providerId?: unknown; modelId?: unknown; modelSource?: unknown };
       return {
         kind: 'model',
         role: 'forging_agent',
         provider: typeof providerId === 'string' ? providerId : null,
         model: typeof modelId === 'string' ? modelId : null,
-        modelSource: 'answered',
+        modelSource: modelSource === 'requested' ? 'requested' : 'answered',
       };
     }
   } catch {

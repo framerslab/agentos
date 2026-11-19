@@ -184,18 +184,18 @@ export const AGENTOS_EVENTS = {
   'memory.recall.rerank_failed_scoring': { provider: { enum: ['local', 'llm'] }, failures: 'int' },
   // One forge ended: how, where, its sizes and counts. No name, code, text, reason or id. `stage` lists the stage codes
   // of the forge trace (FORGE_TRACE_STAGES, in its order): an enum, since a word field refuses a run of 20 or more
-  // letters, digits and underscores, which 11 of the codes are.
+  // letters, digits and underscores, which 12 of the codes are.
   'emergent.forge_done': {
     outcome: { enum: ['approved', 'rejected', 'refused', 'failed'] },
     stage: {
       enum: [
-        'schema_check', 'refused_before_approval', 'shape_check', 'host_refused', 'orchestrator_refused',
-        'permission_check_failed', 'human_denied', 'approval_failed', 'self_change_refused', 'name_refused',
-        'description_missing', 'engine_disabled', 'compose_refused', 'compose_needs_step_output',
-        'caller_context_required', 'sandbox_disabled', 'allowlist_unknown', 'effects_need_ceiling',
-        'capability_not_granted', 'code_validation', 'executor_unavailable', 'test_responses_refused',
-        'judge_rejected', 'compose_refused_after_judge', 'step_cycle', 'removed_while_forging', 'activation_failed',
-        'registration_failed', 'approved', 'thrown',
+        'guardrail_refused', 'schema_check', 'refused_before_approval', 'shape_check', 'host_refused',
+        'orchestrator_refused', 'permission_check_failed', 'human_denied', 'approval_timed_out', 'approval_failed',
+        'self_change_refused', 'name_refused', 'description_missing', 'engine_disabled', 'compose_refused',
+        'compose_needs_step_output', 'caller_context_required', 'sandbox_disabled', 'allowlist_unknown',
+        'effects_need_ceiling', 'capability_not_granted', 'code_validation', 'executor_unavailable',
+        'test_responses_refused', 'judge_rejected', 'test_output_unserializable', 'compose_refused_after_judge',
+        'step_cycle', 'removed_while_forging', 'activation_failed', 'registration_failed', 'approved', 'thrown',
       ],
     },
     recordedBy: { enum: ['engine', 'forge_tool', 'wrapper', 'orchestrator'] },

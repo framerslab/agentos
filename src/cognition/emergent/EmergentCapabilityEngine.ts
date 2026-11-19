@@ -457,13 +457,59 @@ function directCallAuthor(author: unknown): ForgeCallAuthor | undefined {
 }
 
 /** The session id the forging caller's context carries, when it is a string. */
-function callerSessionId(caller: ToolExecutionContext | undefined): string | null {
+function callerSessionId(caller: unknown): string | null {
   try {
-    const sessionId: unknown = caller?.sessionData?.sessionId;
+    const sessionId: unknown = (caller as ToolExecutionContext | null | undefined)?.sessionData?.sessionId;
     return typeof sessionId === 'string' ? sessionId : null;
   } catch {
     return null;
   }
+}
+
+/**
+ * The value a forge's context holds under `key`, read so that a getter that
+ * throws reads as undefined: the trace of a forge is built from it, and a
+ * refusal is returned whatever the context's getters do.
+ */
+function contextValue(context: unknown, key: 'agentId' | 'sessionId' | 'caller' | 'forgeId' | 'author'): unknown {
+  try {
+    return (context as Record<string, unknown> | null | undefined)?.[key];
+  } catch {
+    return undefined;
+  }
+}
+
+/** The string a forge's context holds under `key`, else null. */
+function contextString(context: unknown, key: 'agentId' | 'sessionId' | 'forgeId'): string | null {
+  const value = contextValue(context, key);
+  return typeof value === 'string' ? value : null;
+}
+
+/** A test case's run as the trace and the judge read it, from what the composition returned. */
+function composeTestRun(input: unknown, result: ToolExecutionResult): ForgeTestRun {
+  return {
+    input,
+    output: result.output,
+    success: result.success,
+    error: result.error,
+    ...(result.effects && result.effects.length > 0 ? { effects: result.effects } : {}),
+  };
+}
+
+/**
+ * The position of the first test run whose output JSON cannot write (a
+ * BigInt, a cycle, a `toJSON` that throws), else null. A conversation holds a
+ * tool's result as JSON text, so such a tool fails its first call there.
+ */
+function unserializableTestOutput(runs: readonly ForgeTestRun[]): number | null {
+  for (let index = 0; index < runs.length; index += 1) {
+    try {
+      JSON.stringify(runs[index].output);
+    } catch {
+      return index;
+    }
+  }
+  return null;
 }
 
 // ============================================================================
@@ -644,7 +690,9 @@ export class EmergentCapabilityEngine {
    * 2. Build or validate implementation (compose vs. sandbox).
    * 3. Execute all declared test cases and collect results.
    * 4. Submit candidate to the judge for creation review.
-   * 5. If approved: create {@link EmergentTool}, register at session tier, index.
+   * 5. If approved: refuse a tool whose test output JSON cannot write
+   *    (`test_output_unserializable`), else create {@link EmergentTool},
+   *    register at session tier, index.
    * 6. If rejected: return failure with the judge's reasoning.
    *
    * Every result carries the forge's trace as its last key, `trace`: what was
@@ -676,10 +724,9 @@ export class EmergentCapabilityEngine {
     // forge_tool hands over its call's record, keyed by the context object it
     // built; a direct call gets a record of its own.
     const handed = forgeContextRecords.get(context);
-    const record =
-      handed ?? newForgeCallRecord(typeof context?.forgeId === 'string' ? context.forgeId : undefined);
+    const record = handed ?? newForgeCallRecord(contextString(context, 'forgeId') ?? undefined);
     if (!handed) {
-      const author = directCallAuthor(context?.author);
+      const author = directCallAuthor(contextValue(context, 'author'));
       if (author) {
         record.author = author;
       }
@@ -751,9 +798,10 @@ export class EmergentCapabilityEngine {
       stage,
       reason,
       args: request,
-      agentId: context?.agentId ?? null,
-      sessionId: callerSessionId(context?.caller),
-      correlationId: context?.sessionId ?? null,
+      // Each read is guarded: a context whose getters throw keeps its forge's refusal, traced with null ids.
+      agentId: contextString(context, 'agentId'),
+      sessionId: callerSessionId(contextValue(context, 'caller')),
+      correlationId: contextString(context, 'sessionId'),
       testRuns: call.testRuns,
       testsFinishedAt: call.testsFinishedAt,
       executor: call.executor,
@@ -841,6 +889,10 @@ export class EmergentCapabilityEngine {
         }
         const details = result.details as { code?: string; missingCapabilities?: unknown } | undefined;
         if (details?.code === 'dry_run_needs_output') {
+          // The test case ran up to the step with no stand-in output: the
+          // steps before it ran, so its run and its effects so far are kept.
+          testResults.push(composeTestRun(tc.input, result));
+          call.testsFinishedAt = Date.now();
           call.stage = 'compose_needs_step_output';
           return { success: false, error: result.error };
         }
@@ -854,7 +906,10 @@ export class EmergentCapabilityEngine {
         if (capabilityRefused && !context.caller) {
           // A step needs a capability the stand-in context does not carry:
           // the test says nothing about the tool, so the forge asks for the
-          // caller instead of recording a failed test.
+          // caller instead of recording a failed test. The steps before it
+          // ran, so the trace keeps the test case's run up to that step.
+          testResults.push(composeTestRun(tc.input, result));
+          call.testsFinishedAt = Date.now();
           call.stage = 'caller_context_required';
           return {
             success: false,
@@ -863,13 +918,7 @@ export class EmergentCapabilityEngine {
               "pass the forging caller's context (forge(request, { ..., caller }))",
           };
         }
-        testResults.push({
-          input: tc.input,
-          output: result.output,
-          success: result.success,
-          error: result.error,
-          ...(result.effects && result.effects.length > 0 ? { effects: result.effects } : {}),
-        });
+        testResults.push(composeTestRun(tc.input, result));
       }
       call.testsFinishedAt = Date.now();
     } else {
@@ -1005,7 +1054,8 @@ export class EmergentCapabilityEngine {
       const reviewed = await this.judge.reviewCreationWithDetail(candidate);
       verdict = reviewed.verdict;
       call.judgeDetail = reviewed.detail;
-      call.judge = this.judge.judgeAuthor();
+      // The model and provider read as the request was sent.
+      call.judge = reviewed.author;
     } else {
       verdict = await this.judge.reviewCreation(candidate);
       call.judgeDetail = null;
@@ -1016,6 +1066,21 @@ export class EmergentCapabilityEngine {
 
     // Step 5: Register if approved.
     if (verdict.approved) {
+      // The judge read each test output JSON cannot write through a marker. A
+      // conversation holds a tool's result as JSON text, so a tool whose
+      // output JSON cannot write is refused before anything is registered.
+      const unwritable = unserializableTestOutput(testResults);
+      if (unwritable !== null) {
+        call.stage = 'test_output_unserializable';
+        return {
+          success: false,
+          verdict,
+          error:
+            `test_output_unserializable: the output of test case ${unwritable + 1} cannot be written as JSON, ` +
+            "so a conversation could not hold the tool's result",
+        };
+      }
+
       if (request.implementation.mode === 'compose') {
         // The tests and the judge took time, and what the steps name may have
         // changed meanwhile (another forge registered a composition that

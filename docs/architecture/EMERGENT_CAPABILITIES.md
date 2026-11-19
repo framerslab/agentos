@@ -612,27 +612,29 @@ Every forge yields one trace, whatever its outcome: a typed record of what was a
 
 A trace leaves out a provider's reasoning items, the judge's prompt and raw reply, a thrown error's stack and promotion verdicts.
 
-**Provenance.** `provenance` names the author of each part: `request` (the code or steps, the schemas, the description and the test cases), `justification`, `verdict` (with `judgeDetail`) and `testResults`; a part the trace does not have is null. Each author has a `kind` (`model`, `caller` or `execution`), a `role` (`forging_agent`, `judge`, `direct_caller` or `executor`), `aiGenerated` (true for a model, false for an execution, null for a caller, which is never guessed), `provider`, `model`, `modelSource` and `at`. Through `forge_tool` the request is model-written: its provider and model are the ones that answered the step when the call's context carries them (`modelSource: 'answered'`; a GMI sets them on each of its tool calls), else the ones `wrapForgeTool`'s `author` option names (`'requested'`), else null. A direct `engine.forge` call is a `caller`, or a `model` with `modelSource: 'requested'` when the caller passed `author` in the context. The judge's model is `'requested'`: the judge's callback returns text alone, and a provider fallback can answer with another model. A reader shows a `'requested'` model as the model asked for and never as the author. `EmergentJudgeConfig.providerId` names the judge's provider, and `new AgentOS()` passes its default provider's id. A host judge that overrides `reviewCreation` is named with no provider and no model.
+**Provenance.** `provenance` names the author of each part: `request` (the code or steps, the schemas, the description and the test cases), `justification`, `verdict` (with `judgeDetail`) and `testResults`; a part the trace does not have is null. Each author has a `kind` (`model`, `caller` or `execution`), a `role` (`forging_agent`, `judge`, `direct_caller` or `executor`), `aiGenerated` (true for a model, false for an execution, null for a caller, which is never guessed), `provider`, `model`, `modelSource` and `at`. Through `forge_tool` the request is model-written: its provider and model are the call's model when the call's context carries one, else the ones `wrapForgeTool`'s `author` option names (`'requested'`), else null. A GMI sets the call's model on each of its tool calls: the model the step's final chunk names (`modelSource: 'answered'`), or the model the step asked for when that chunk names none (`'requested'`). A direct `engine.forge` call is a `caller`, or a `model` with `modelSource: 'requested'` when the caller passed `author` in the context. The judge's model is `'requested'`: the judge's callback returns text alone, and a provider fallback can answer with another model. A reader shows a `'requested'` model as the model asked for and never as the author. `EmergentJudgeConfig.providerId` names the judge's provider: a string, or a function the judge calls as it sends each review request, with no wait between the two. `new AgentOS()` passes a function that reads its default provider, the provider its judge's request goes to at that moment. A host judge that overrides `reviewCreation` is named with no provider and no model.
 
 **Stages.** `stage` says where the forge ended and `recordedBy` which layer ended it. Exactly one layer records each forge, and an outer layer passes an inner layer's trace on. The set of codes grows: a reader takes `stage` as a string and keeps a default branch. A host never maps a forge to a category by matching the words of `reason`, which come from AgentOS, from a host's own tool and from whichever executor ran; the stage code is the structured cause.
 
 | Stage | Outcome | Recorded by | Where the forge ended |
 |---|---|---|---|
+| `guardrail_refused` | refused | orchestrator | A turn's tool-call gate (an output guardrail with `evaluateToolCalls`) refused the call before the orchestrator ran it. `reason` is the refusal's reason. |
 | `schema_check` | refused | orchestrator | The tool executor refused the arguments before `forge_tool` ran: they did not parse, or they failed its input schema. `request` is null and `rawArguments` holds the arguments. |
 | `refused_before_approval` | refused | wrapper, orchestrator | The learning layer's refusal, answered before the approval gate ([Refusals where a learning layer exists](#refusals-where-a-learning-layer-exists)). |
 | `shape_check` | refused | wrapper | `validateForgeShape` refused the arguments as the wrapper normalized them. |
 | `host_refused` | refused | wrapper | The wrapped tool returned a failure before `forge_tool`'s own `execute` ran: a host subclass's refusal. |
 | `orchestrator_refused` | refused | orchestrator | The orchestrator ended the call before the executor: the tool disabled, the permission check refused, side effects with no approval manager, the turn stopped, or the tool's registration replaced meanwhile. |
 | `permission_check_failed` | failed | orchestrator | The permission check threw. |
-| `human_denied` | refused | orchestrator | The approval manager's decision was not an approval. `reason` is the decision's rejection reason when it gave one. |
+| `human_denied` | refused | orchestrator | The approval manager's decision was not an approval, and `system` did not make it. `reason` is the decision's rejection reason when it gave one. |
+| `approval_timed_out` | refused | orchestrator | The decision was not an approval and `system` made it: `HumanInteractionManager` decides so when nobody answers in time under `autoRejectOnTimeout`. `reason` is the decision's rejection reason. |
 | `approval_failed` | failed | orchestrator | The approval request threw. |
 | `self_change_refused` | refused | forge_tool | The learning layer's refusal, inside `execute`. |
 | `name_refused` | refused | forge_tool, engine | The name breaks the forge's name rule. |
 | `description_missing` | refused | forge_tool | The arguments hold no description. |
 | `engine_disabled` | refused | engine | Emergent capabilities are off in the engine's config. |
 | `compose_refused` | refused | engine | A step cannot be chained, or the composition reaches itself, before any test ran. |
-| `compose_needs_step_output` | refused | engine | A test's dry run needs a stand-in output for a step, and the test case gave none. |
-| `caller_context_required` | refused | engine | A step needs a capability and the forge was given no caller. |
+| `compose_needs_step_output` | refused | engine | A test's dry run needs a stand-in output for a step, and the test case gave none. That test case keeps its run up to the step: `ran` is true, and its `result` holds the error and the effects so far. |
+| `caller_context_required` | refused | engine | A step needs a capability and the forge was given no caller. That test case keeps its run up to the step, as above. |
 | `sandbox_disabled` | refused | engine | `allowSandboxTools` is off. |
 | `allowlist_unknown` | refused | engine | The allowlist names a capability outside the catalogue. |
 | `effects_need_ceiling` | refused | engine | The allowlist asks for a write, a delete or a state-changing request on a host with no ceiling. |
@@ -641,6 +643,7 @@ A trace leaves out a provider's reasoning items, the judge's prompt and raw repl
 | `executor_unavailable` | failed | engine | The executor's `ready()` rejected. |
 | `test_responses_refused` | refused | engine | A test case's `responses` are not valid. |
 | `judge_rejected` | rejected | engine | The judge did not approve. `reason` is the verdict's reasoning. |
+| `test_output_unserializable` | refused | engine | The judge approved, and a test's output cannot be written as JSON (a BigInt, a cycle). A conversation holds a tool's result as JSON text, so the tool is not registered. The judge reads such an output through the markers below. |
 | `compose_refused_after_judge` | refused | engine | The composition's steps stopped being chainable between the tests and the registration. |
 | `step_cycle` | refused | engine | The composition reaches itself, seen after the judge's approval. |
 | `removed_while_forging` | failed | engine | The tool left the registry while it was forged. |
@@ -649,7 +652,7 @@ A trace leaves out a provider's reasoning items, the judge's prompt and raw repl
 | `approved` | approved | engine | Forged, judged, approved and registered. |
 | `thrown` | failed | the innermost layer the error passed through | An error thrown out of the engine, `forge_tool`, the wrapped tool or the orchestrator's executor call. `reason` is the error's message, or the thrown value's JSON text when it is not an `Error`. |
 
-The traces from `judge_rejected` down to `approved` carry the verdict, and a `thrown` trace carries it when the judge had run. The orchestrator records its stages only for a call to the `forge_tool` it registered itself, which is the full runtime's.
+The traces from `judge_rejected` down to `approved` carry the verdict, and a `thrown` trace carries it when the judge had run. The orchestrator records its stages only for a call to the `forge_tool` it registered itself, which is the full runtime's; a GMI tells it of a call its turn's tool-call gate refused, which it records as `guardrail_refused`.
 
 **Caps and markers.** Every value is copied JSON-safe, and every field has a cap on its bytes in the trace's own JSON, escaping included. With every field at its cap a trace's JSON is under 512 KiB.
 
@@ -685,8 +688,8 @@ The verdict is a model's review and needs checking: `approved` means that one mo
 
 **Limits.**
 
-- A host that registers `wrapForgeTool`'s tool in an orchestrator it built itself gets no trace for a call that orchestrator ends before the wrapper runs: no `schema_check`, `orchestrator_refused`, `permission_check_failed`, `human_denied` or `approval_failed`. The refusal reads as the tool result's `errorDetails`.
-- The wrapper's `refused_before_approval` delivery is not awaited, because `ITool.refusalBeforeApproval` is synchronous: the capture carries the trace at once, and the hook receives it after that call returns, under the same 1,000 ms bound.
+- A host that registers `wrapForgeTool`'s tool in an orchestrator it built itself gets no trace for a call that orchestrator ends before the wrapper runs: no `guardrail_refused`, `schema_check`, `orchestrator_refused`, `permission_check_failed`, `human_denied`, `approval_timed_out` or `approval_failed`. The refusal reads as the tool result's `errorDetails`.
+- The wrapper's `refused_before_approval` delivery is not awaited, because `ITool.refusalBeforeApproval` is synchronous: the capture carries the trace at once, and the hook receives it in a microtask after that call has returned, under the same 1,000 ms bound.
 - A host subclass of `ForgeToolMetaTool` calls `super.execute` within the call it was given, with the context it was given, a copy of it or one it built. One that runs `super.execute` outside the call's async chain (a worker, or a queue that carries no async context) splits the call in two: the engine delivers the forge's trace under a record of its own, and the wrapper's capture has no `trace` on a success. On a failure the capture carries a second trace, with the stage `host_refused`, which the hook receives too.
 - The package marks some names of its forge-record plumbing `@internal`. They are no part of the public surface, and a host that imports them by a module path can shape only the forge records of its own process.
 

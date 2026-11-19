@@ -337,7 +337,7 @@ function judgeDetail(overrides: Partial<ForgeTraceJudgeDetail> = {}): ForgeTrace
   };
 }
 
-const OUTCOMES: Record<string, string> = {
+const OUTCOMES: Record<KnownForgeTraceStage, string> = {
   guardrail_refused: 'refused',
   schema_check: 'refused',
   refused_before_approval: 'refused',
