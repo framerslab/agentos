@@ -1,5 +1,5 @@
 // @ts-check
-// Runs in CI (node --test); it needs mikefarah's yq v4, and bash, GNU env and git for the steps it runs, which
+// Runs in CI (node --test); it needs mikefarah's yq v4, and bash, an env with -C and git for the steps it runs, which
 // GitHub's Ubuntu runners carry.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -1688,7 +1688,13 @@ describe('the command, against what bash and git do', () => {
   // a runner runs it, under bash -e (a composite action's bash step under bash --noprofile --norc -eo pipefail), from
   // a root cloned from a bare remote's side branch, with base a clone of its master, each a commit ahead of the
   // remote. The command must report the steps after which the remote's master has moved, each on its step's line,
-  // and no other. Beside git it needs bash and GNU env (env -C), which GitHub's Ubuntu runners carry.
+  // and no other. Beside git it needs bash and an env with -C.
+  //
+  // GNU env changes to the last of several -C directories. uutils' env, the coreutils of GitHub's ubuntu-26.04 image,
+  // refuses a second -C and exits 125 before it runs anything, so there a step with two cannot push. The command keeps
+  // GNU's reading, the one under which such a step pushes, and the table says what GNU env does; a step that gives env
+  // two -C directories runs only where the local env accepts them.
+  const repeatedChdir = spawnSync('env', ['-C', '.', '-C', '.', 'true']).status === 0;
   /** @type {{ name: string, pushes: boolean, run: string }[]} */
   const steps = [
     // Each checkout keeps a branch of its own: the root's is the pull request's, base's is master.
@@ -1858,10 +1864,12 @@ describe('the command, against what bash and git do', () => {
     const shown = `${printed.map((f) => `${f.file}:${f.line}: ${f.message}`).join('\n')}\n${result.stderr}`;
     const named = new Map(cases.map((c) => [c.file, c]));
     const reported = [...new Set(printed.map((f) => named.get(f.file)?.name ?? f.file))].sort();
-    const moved = cases.filter((c) => movesMaster(c.run, c.options)).map((c) => c.name).sort();
+    const runnable = cases.filter((c) => repeatedChdir || !/\benv -C \S+ -C /.test(c.run));
+    const moved = runnable.filter((c) => movesMaster(c.run, c.options)).map((c) => c.name).sort();
     const pushes = cases.filter((c) => c.pushes).map((c) => c.name).sort();
+    const runnablePushes = runnable.filter((c) => c.pushes).map((c) => c.name).sort();
     // What the command reports, what running each step does, and what the table above says, all one list.
-    assert.deepEqual({ reported, moved }, { reported: pushes, moved: pushes }, shown);
+    assert.deepEqual({ reported, moved }, { reported: pushes, moved: runnablePushes }, shown);
     assert.equal(result.status, 1, shown);
     assert.match(result.stderr, /Its rules refuse a direct push \(GH006\)/);
     // Each finding is on its step's line, and annotated there, where a pull request's checks show it.
