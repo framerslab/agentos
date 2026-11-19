@@ -121,3 +121,77 @@ describe('CitationVerifier', () => {
     expect(claims).toEqual(['One.', 'Two.', 'Three.']);
   });
 });
+
+describe('CitationVerifier with known vectors and pickOnly', () => {
+  /** An embedder that records what it is sent and answers a fixed vector a text. */
+  function recordingEmbed(vectors: Record<string, number[]>) {
+    const sent: string[][] = [];
+    const embedFn = vi.fn(async (texts: string[]) => {
+      sent.push([...texts]);
+      return texts.map((text) => vectors[text] ?? [0, 0]);
+    });
+    return { embedFn, sent };
+  }
+
+  it('sends the embedder the claims and only the sources without a vector, and scores with the vector given', async () => {
+    const { embedFn, sent } = recordingEmbed({ c: [1, 0], a: [1, 0], b: [0, 1] });
+    const verifier = new CitationVerifier({ embedFn });
+    const result = await verifier.verify(['c'], [{ content: 'a', embedding: [1, 0] }, { content: 'b' }]);
+    expect(sent).toEqual([['c', 'b']]);
+    expect(result.claims[0]).toMatchObject({ sourceIndex: 0, confidence: 1, verdict: 'supported' });
+    expect(result.claims[0].scored).toBeUndefined();
+
+    // A source whose vector is given ranks by that vector, not by its text.
+    const swapped = await verifier.verify(['c'], [{ content: 'a', embedding: [0, 1] }, { content: 'b', embedding: [1, 0] }]);
+    expect(sent[1]).toEqual(['c']);
+    expect(swapped.claims[0]).toMatchObject({ sourceIndex: 1, confidence: 1 });
+  });
+
+  it('sends every source as before when none carries a vector', async () => {
+    const { embedFn, sent } = recordingEmbed({ c: [1, 0], a: [1, 0], b: [0, 1] });
+    await new CitationVerifier({ embedFn }).verify(['c'], [{ content: 'a' }, { content: 'b' }]);
+    expect(sent).toEqual([['c', 'a', 'b']]);
+  });
+
+  it('refuses a source vector whose length differs from the claims\' vectors', async () => {
+    const { embedFn } = recordingEmbed({ c: [1, 0] });
+    await expect(new CitationVerifier({ embedFn }).verify(['c'], [{ content: 'a', embedding: [1, 0, 0] }])).rejects.toThrow(RangeError);
+  });
+
+  it('with pickOnly and one source names it without an embedding, and the judge still runs', async () => {
+    // The vectors the embedder would answer are orthogonal, so a cosine would have named nothing.
+    const { embedFn } = recordingEmbed({ c: [1, 0], a: [0, 1] });
+    const nliFn = vi.fn().mockResolvedValue({ label: 'entailment', score: 1 });
+    const verifier = new CitationVerifier({ embedFn, nliFn, pickOnly: true, supportThreshold: 0, unverifiableThreshold: 0 });
+    const result = await verifier.verify(['c'], [{ content: 'a', url: 'https://example.org/a' }]);
+    expect(embedFn).not.toHaveBeenCalled();
+    expect(nliFn).toHaveBeenCalledWith('a', 'c');
+    expect(result.claims[0]).toEqual({
+      text: 'c', verdict: 'supported', confidence: 0, scored: false, sourceIndex: 0, sourceSnippet: 'a', sourceRef: 'https://example.org/a',
+    });
+
+    nliFn.mockResolvedValue({ label: 'contradiction', score: 0.9 });
+    expect((await verifier.verify(['c'], [{ content: 'a' }])).claims[0]).toMatchObject({ verdict: 'contradicted', sourceIndex: 0, scored: false });
+    nliFn.mockResolvedValue({ label: 'neutral', score: 0 });
+    expect((await verifier.verify(['c'], [{ content: 'a' }])).claims[0]).toMatchObject({ verdict: 'unverifiable', sourceIndex: 0, scored: false });
+    nliFn.mockRejectedValue(new Error('judge down'));
+    expect((await verifier.verify(['c'], [{ content: 'a' }])).claims[0]).toMatchObject({ verdict: 'unverifiable', sourceIndex: 0, scored: false });
+    expect(embedFn).not.toHaveBeenCalled();
+
+    // Without a judge nothing decides the claim.
+    const alone = await new CitationVerifier({ embedFn, pickOnly: true }).verify(['c', 'd'], [{ content: 'a' }]);
+    expect(embedFn).not.toHaveBeenCalled();
+    expect(alone.claims.map((claim) => [claim.verdict, claim.sourceIndex, claim.confidence, claim.scored])).toEqual([
+      ['unverifiable', 0, 0, false],
+      ['unverifiable', 0, 0, false],
+    ]);
+  });
+
+  it('with pickOnly and more than one source ranks by cosine as before', async () => {
+    const { embedFn, sent } = recordingEmbed({ c: [1, 0], a: [0, 1], b: [1, 0] });
+    const result = await new CitationVerifier({ embedFn, pickOnly: true }).verify(['c'], [{ content: 'a' }, { content: 'b' }]);
+    expect(sent).toEqual([['c', 'a', 'b']]);
+    expect(result.claims[0]).toMatchObject({ sourceIndex: 1, confidence: 1, verdict: 'supported' });
+    expect(result.claims[0].scored).toBeUndefined();
+  });
+});
