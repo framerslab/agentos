@@ -66,4 +66,32 @@ describe('AnthropicProvider — streaming output-token accounting', () => {
 
     expect(finalCompletionTokens).toBe(120);
   });
+
+  it('names the requested model on every chunk, marked as filled in from the request', async () => {
+    const events = [
+      d({ type: 'message_start', message: { id: 'msg_y', type: 'message', role: 'assistant', model: 'claude-sonnet-4-20250514', content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 20, output_tokens: 1 } } }),
+      d({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }),
+      d({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hello' } }),
+      d({ type: 'content_block_stop', index: 0 }),
+      d({ type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 5 } }),
+      d({ type: 'message_stop' }),
+    ];
+    fetchMock.mockResolvedValueOnce(sseResponse(events));
+
+    const chunks: Array<{ modelId?: string; modelIdSource?: string; isFinal?: boolean }> = [];
+    for await (const chunk of provider.generateCompletionStream(
+      'claude-sonnet-4-20250514',
+      [{ role: 'user', content: 'hi' }],
+      {},
+    )) {
+      chunks.push(chunk as { modelId?: string; modelIdSource?: string; isFinal?: boolean });
+    }
+
+    // The adapter writes the model the request named on each chunk; it never reads the answer's, so it marks each one.
+    expect(chunks.some((chunk) => chunk.isFinal)).toBe(true);
+    for (const chunk of chunks) {
+      expect(chunk.modelId).toBe('claude-sonnet-4-20250514');
+      expect(chunk.modelIdSource).toBe('requested');
+    }
+  });
 });

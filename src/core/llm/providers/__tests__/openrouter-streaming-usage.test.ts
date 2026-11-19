@@ -285,4 +285,37 @@ describe('OpenRouterProvider streaming final message', () => {
     expect(tools.toolCalls).toHaveLength(1);
     expect(tools.toolCalls[0].arguments).toEqual({ q: 'x' });
   });
+
+  it('a usage-only final chunk that names no model carries the requested id, marked as filled in from the request', async () => {
+    const { provider, client } = await mountProvider();
+    const { model: _named, ...usageOnly } = makeUsageOnlyChunk(7, 11);
+    client.request.mockResolvedValueOnce({
+      data: makeReadableSse([
+        `data: ${JSON.stringify({
+          id: 'gen-1',
+          object: 'chat.completion.chunk',
+          created: 1,
+          model: 'openai/gpt-4o-2024-08-06',
+          choices: [{ index: 0, delta: { role: 'assistant', content: 'hello' }, finish_reason: 'stop' }],
+        })}\n\n`,
+        `data: ${JSON.stringify(usageOnly)}\n\n`,
+        'data: [DONE]\n\n',
+      ]),
+    });
+
+    const chunks: Array<{ modelId?: string; modelIdSource?: string; usage?: unknown }> = [];
+    for await (const chunk of provider.generateCompletionStream('openai/gpt-4o', [{ role: 'user', content: 'hi' }], {})) {
+      chunks.push(chunk as { modelId?: string; modelIdSource?: string; usage?: unknown });
+    }
+
+    // A chunk that names its model carries it, with no mark.
+    const named = chunks.find((chunk) => chunk.modelId === 'openai/gpt-4o-2024-08-06');
+    expect(named).toBeDefined();
+    expect(named!.modelIdSource).toBeUndefined();
+    // The usage-only chunk named none: its id is the request's, and it says so.
+    const usageChunk = chunks.find((chunk) => chunk.usage !== undefined && chunk.modelId !== 'openai/gpt-4o-2024-08-06');
+    expect(usageChunk).toBeDefined();
+    expect(usageChunk!.modelId).toBe('openai/gpt-4o');
+    expect(usageChunk!.modelIdSource).toBe('requested');
+  });
 });

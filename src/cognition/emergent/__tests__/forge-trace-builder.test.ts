@@ -1092,6 +1092,33 @@ type ScoresAdmitNull = [
   : false;
 const scoresAdmitNull: ScoresAdmitNull = true;
 
+/**
+ * An array-shaped value whose `length` reads `length`: its first `throwing` element reads throw, the later ones give 0,
+ * and every element read is counted.
+ */
+function arrayShapedList(length: number, throwing: number): { value: unknown[]; reads: () => number } {
+  let reads = 0;
+  const value = new Proxy([] as unknown[], {
+    get(target, key, receiver) {
+      if (key === 'length') {
+        return length;
+      }
+      if (typeof key === 'string' && /^(0|[1-9][0-9]*)$/.test(key)) {
+        reads += 1;
+        if (reads <= throwing) {
+          throw new Error('slot unreadable');
+        }
+        return 0;
+      }
+      return Reflect.get(target, key, receiver);
+    },
+  });
+  return { value, reads: () => reads };
+}
+
+/** The most values the JSON-safe copy reads before it gives up on a value and writes an `other` marker. */
+const COPY_READ_BOUND = 1_048_576;
+
 describe('forge trace: a bounded walk of each field', () => {
   it('a value far over its cap keeps the start that fits, lists its path, and is not read to its end', () => {
     const count = 200_000;
@@ -1197,4 +1224,28 @@ describe('forge trace: a bounded walk of each field', () => {
     expect(trace.verdict!.correctness).toBe(REJECTION.correctness);
     expect(scoresAdmitNull).toBe(true);
   });
+
+  it('an array-shaped value with a length of 1e9 whose slots throw stops within the budget, its size unknown', () => {
+    // The first million slots throw; a walk that read a slot before counting it would read them all uncounted.
+    const { value, reads } = arrayShapedList(1e9, 1_000_000);
+    const cut: string[] = [];
+
+    const result = traceValue(value, 512, 'tests[0].result.output', cut);
+
+    expect(result).toMatchObject({ $trace: 'cut', bytes: null });
+    expect(cut).toEqual(['tests[0].result.output']);
+    // One unit a slot, counted before the slot is read, within 64 times the cap.
+    expect(reads()).toBeGreaterThan(0);
+    expect(reads()).toBeLessThanOrEqual(64 * 512);
+  }, 30_000);
+
+  it('the JSON-safe copy of an array-shaped value longer than it reads is one other marker', () => {
+    const { value, reads } = arrayShapedList(3_000_000, 0);
+
+    const copy = jsonSafeCopy(value);
+
+    expect(Array.isArray(copy)).toBe(false);
+    expect(copy).toEqual({ $trace: 'unserializable', kind: 'other' });
+    expect(reads()).toBeLessThanOrEqual(COPY_READ_BOUND);
+  }, 30_000);
 });

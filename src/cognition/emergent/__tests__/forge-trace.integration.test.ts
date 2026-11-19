@@ -3232,6 +3232,55 @@ function throwingIdsContext(): ForgeContext {
   } as unknown as ForgeContext;
 }
 
+/** A model step on the full runtime that calls each of `calls` in order. */
+function toolCallsStep(calls: Array<{ id: string; name: string; args: Record<string, unknown> }>): Array<Record<string, unknown>> {
+  return [
+    {
+      isFinal: true,
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: 'assistant',
+            content: null,
+            tool_calls: calls.map((call) => ({
+              id: call.id,
+              type: 'function',
+              function: { name: call.name, arguments: JSON.stringify(call.args) },
+            })),
+          },
+          finishReason: 'tool_calls',
+        },
+      ],
+      usage: { promptTokens: 10, completionTokens: 4, totalTokens: 14 },
+    },
+  ];
+}
+
+/** One turn on the full runtime whose model answers `step` first: what it streamed, and what it threw, if it threw. */
+async function turnThroughRuntime(
+  os: AgentOS,
+  step: Array<Record<string, unknown>>,
+): Promise<{ chunks: unknown[]; thrown: unknown }> {
+  runtimeModel.replies.push(step);
+  const input: AgentOSInput = {
+    userId: 'user-1',
+    sessionId: 'session-1',
+    textInput: 'Forge it.',
+    selectedPersonaId: FORGER.id,
+  };
+  const chunks: unknown[] = [];
+  let thrown: unknown;
+  try {
+    for await (const chunk of os.processRequest(input)) {
+      chunks.push(chunk);
+    }
+  } catch (error) {
+    thrown = error;
+  }
+  return { chunks, thrown };
+}
+
 /** A call's answering-model record as a GMI writes it when the step's final chunk names no model. */
 const REQUESTED_CALLER_MODEL = { providerId: 'caller-provider', modelId: 'caller-model', modelSource: 'requested' };
 
@@ -3392,6 +3441,58 @@ describe('forge trace: review follow-ups', () => {
       model: 'stream-model-7',
       modelSource: 'answered',
     });
+  });
+
+  it('stage guardrail_refused: a refused forge_tool call after a failed call under fail_closed reaches the hook', async () => {
+    const { onForgeTrace, traces } = hookRecorder();
+    runtimeModel.judgeReply = APPROVED_JSON;
+    runtime = await bootRuntime(onForgeTrace, {
+      guardrailService: noForgingGuard(),
+      turnPlanning: {
+        enabled: true,
+        defaultToolFailureMode: 'fail_closed',
+        discovery: { enabled: false, defaultToolSelectionMode: 'all' },
+      },
+    });
+
+    // One step of two calls: a tool the runtime does not have, which fails and ends the round under fail_closed, then a
+    // forge_tool call the guardrail refused, which the round never reaches.
+    await turnThroughRuntime(
+      runtime,
+      toolCallsStep([
+        { id: 'call-missing', name: 'missing_tool', args: {} },
+        { id: 'call-forge', name: 'forge_tool', args: sandboxArgs() },
+      ]),
+    );
+    expect(runtimeModel.judgeCalls).toBe(0);
+
+    expect(traces).toHaveLength(1);
+    const trace = traces[0];
+    expectTraceBy(trace, 'orchestrator', 'forge_tool');
+    expect(trace.stage).toBe('guardrail_refused');
+    expect(trace.outcome).toBe('refused');
+    expect(trace.reason).toBe('No forging in this workspace.');
+    expect(trace.request).toMatchObject({ name: 'add_numbers', description: 'Add two numbers.' });
+  });
+
+  it("a forge whose step's model its adapter filled in from the request is authored by the requested model", async () => {
+    const { onForgeTrace, traces } = hookRecorder();
+    runtimeModel.judgeReply = APPROVED_JSON;
+    runtime = await bootRuntime(onForgeTrace);
+
+    // The adapter names a model on the final chunk and marks it as the request's, filled in where the answer named none.
+    await forgeThroughRuntime(runtime, sandboxArgs(), { modelId: 'filled-in-model', modelIdSource: 'requested' });
+
+    expect(traces).toHaveLength(1);
+    const author = traces[0].provenance.request as Record<string, unknown>;
+    expect(author).toMatchObject({
+      kind: 'model',
+      role: 'forging_agent',
+      provider: 'openai',
+      model: expect.any(String),
+      modelSource: 'requested',
+    });
+    expect(author.model).not.toBe('filled-in-model');
   });
 
   it('the GMI labels the model it asked for requested when the step names no model', async () => {
