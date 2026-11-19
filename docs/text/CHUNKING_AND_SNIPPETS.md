@@ -62,7 +62,7 @@ Each chunk is `{ text, index, startOffset, endOffset, boundaryType, metadata }`.
 
 ## Documents for a memory brain
 
-`new ChunkingEngine().chunk(content, { strategy, chunkSize, chunkOverlap, embedFn })` answers a promise of `{ content, index, heading, metadata }` chunks, with `chunkSize` 512 and `chunkOverlap` 64 characters unless given. `strategy` is `'fixed'`, `'semantic'` (cuts where the cosine similarity of two neighbouring sentences' embeddings falls below 0.3, and runs as `'fixed'` without `embedFn`), `'hierarchical'` (at Markdown headings), `'layout'` (keeps code blocks and tables whole) or `'anchored'` (below). A `chunkSize` under 1 throws a `RangeError`. `Memory.ingest()` cuts documents with the first four: [Document Ingestion: Chunking Strategies](../memory/MEMORY_DOCUMENT_INGESTION.md#chunking-strategies) describes each of them.
+`new ChunkingEngine().chunk(content, { strategy, chunkSize, chunkOverlap, embedFn })` answers a promise of `{ content, index, heading, metadata }` chunks, with `chunkSize` 512 and `chunkOverlap` 64 characters unless given. `strategy` is `'fixed'`, `'semantic'` (cuts where the cosine similarity of two neighbouring sentences' embeddings falls below 0.3, and runs as `'fixed'` without `embedFn`), `'hierarchical'` (at Markdown headings), `'layout'` (keeps code blocks and tables whole) or `'anchored'` (below). A `chunkSize` under 1 throws a `RangeError`; `'anchored'` uses the whole part of `chunkSize` and throws a `RangeError` under 2, so a passage always has room for a surrogate pair. `Memory.ingest()` cuts documents with the first four: [Document Ingestion: Chunking Strategies](../memory/MEMORY_DOCUMENT_INGESTION.md#chunking-strategies) describes each of them.
 
 ### Passages that survive an edit
 
@@ -78,7 +78,7 @@ const chunks = await new ChunkingEngine().chunk(text, { strategy: 'anchored', ch
 2. The pieces are packed into passages in order. A passage ends after a piece whose SHA-256 (of its UTF-8) has a first byte divisible by 4, an anchor decided by the piece's own words and about one piece in four, or before a piece that would take it past `chunkSize`. Packing starts again after each anchor, so an edit changes only the passages from the anchor before it to the first anchor after it; every later passage keeps its text, and only its offsets move. An edit that makes or removes an anchor splits or merges the runs beside it.
 3. There is no overlap; `chunkOverlap` is ignored. `start` and `end` are offsets in UTF-16 code units into the text given. `edges.first` and `edges.last` are false on a side where a sentence or a word was cut to fit.
 
-With `markdown: true`, a heading line (`#` to `######` at a line's start) always starts a passage, and every passage of its section carries `heading`, `metadata.headingLevel` and `metadata.ancestorHeadings` as `'hierarchical'` gives them.
+With `markdown: true`, a heading line (`#` to `######` at a line's start) always starts a passage, and every passage of its section carries `heading`, `metadata.headingLevel` and `metadata.ancestorHeadings` as `'hierarchical'` gives them. A heading line longer than `chunkSize` is cut as a long sentence is; its first piece starts the passage, and every passage it fills carries its section.
 
 ## Snippets
 

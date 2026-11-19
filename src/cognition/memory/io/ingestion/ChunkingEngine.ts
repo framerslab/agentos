@@ -250,7 +250,7 @@ interface AnchoredPiece {
   startWhole: boolean;
   /** Whether the piece ends where a sentence or a block ends. */
   endWhole: boolean;
-  /** True for a Markdown heading line, which always starts a passage and never ends one. */
+  /** True for a Markdown heading line, or the first piece of one cut for length: it always starts a passage and never ends one. */
   isHeading: boolean;
   /** The heading section the piece is in, when Markdown headings are read. */
   section: AnchoredSection | undefined;
@@ -258,9 +258,10 @@ interface AnchoredPiece {
 
 /**
  * A sentence ends after one or more of `.`, `!`, `?`, `…`, `。`, `！` or `？`, with any closing quotes or brackets after
- * them, where white space follows.
+ * them, where white space follows. A match starts only at the first mark of a run, so a run with no white space after
+ * it is scanned once rather than once from each of its marks.
  */
-const SENTENCE_END = /[.!?…。！？]+["'”’)\]]*(?=\s)/g;
+const SENTENCE_END = /(?<![.!?…。！？])[.!?…。！？]+["'”’)\]]*(?=\s)/g;
 
 /** A Markdown heading line, as the hierarchical strategy matches one. */
 const MARKDOWN_HEADING = /^(#{1,6})\s+(.+)$/;
@@ -315,8 +316,8 @@ function cutSentence(
       continue;
     }
     // A word longer than chunkSize: cut it at that length, one unit sooner where that would split a surrogate pair.
-    let cut = splitsPair(text, limit) ? limit - 1 : limit;
-    if (cut === at) cut = at + 2; // chunkSize 1 and a pair: the pair stays whole
+    // chunkSize is at least 2, so the cut always moves forward.
+    const cut = splitsPair(text, limit) ? limit - 1 : limit;
     pieces.push({ start: at, end: cut, startWhole: at === start, endWhole: false, isHeading: false, section });
     at = cut;
   }
@@ -383,7 +384,14 @@ function anchoredPieces(text: string, chunkSize: number, markdown: boolean): Anc
         while (headings.length > 0 && headings[headings.length - 1].level >= level) headings.pop();
         section = { text: heading[2].trim(), level, ancestors: headings.map((h) => h.text) };
         headings.push(section);
-        pieces.push({ start: lineStart + first, end: lastEnd, startWhole: true, endWhole: true, isHeading: true, section });
+        if (lastEnd - (lineStart + first) <= chunkSize) {
+          pieces.push({ start: lineStart + first, end: lastEnd, startWhole: true, endWhole: true, isHeading: true, section });
+        } else {
+          // A heading longer than chunkSize is cut as a long sentence is; its first piece starts the passage.
+          const at = pieces.length;
+          cutSentence(text, lineStart + first, lastEnd, chunkSize, section, pieces);
+          pieces[at].isHeading = true;
+        }
       } else {
         if (blockStart < 0) blockStart = lineStart + first;
         blockEnd = lastEnd;
@@ -401,7 +409,7 @@ function anchoredPieces(text: string, chunkSize: number, markdown: boolean): Anc
  * past `chunkSize`, and before a Markdown heading.
  *
  * @param content - Text to split.
- * @param chunkSize - Largest passage, in UTF-16 code units.
+ * @param chunkSize - Largest passage, in UTF-16 code units: a whole number of at least 2.
  * @param markdown - Whether heading lines start sections.
  * @returns Ordered `DocumentChunk[]`, each with `start`, `end` and `edges`.
  */
@@ -488,8 +496,12 @@ export class ChunkingEngine {
       case 'layout':
         return this._chunkLayout(content, chunkSize, chunkOverlap);
 
-      case 'anchored':
-        return anchoredChunks(content, chunkSize, options.markdown === true);
+      case 'anchored': {
+        // Whole code units, and room for a surrogate pair, which a passage never splits.
+        const size = Math.floor(chunkSize);
+        if (size < 2) throw new RangeError(`chunkSize must be at least 2 for the anchored strategy, got ${chunkSize}`);
+        return anchoredChunks(content, size, options.markdown === true);
+      }
 
       default: {
         // TypeScript exhaustiveness guard.
