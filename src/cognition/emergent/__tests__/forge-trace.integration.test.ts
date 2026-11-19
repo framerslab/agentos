@@ -11,7 +11,9 @@
  * each tool call, and a fourth reads every log line a forge writes for the
  * content it must never hold. A fifth forges with every field over its cap
  * and reads the cuts, their paths and the trace's total size. A sixth forges
- * a fixed set of tools and records the sizes each trace states.
+ * a fixed set of tools and records the sizes each trace states, then times
+ * forges on an engine with a no-op hook and on one with none, and records
+ * what the hook adds.
  */
 
 import * as fs from 'node:fs';
@@ -2887,6 +2889,24 @@ function sumTwoArgs(): Record<string, unknown> {
   };
 }
 
+/** The outcomes the latency runs cycle through: approved, rejected by the judge, and refused before the judge. */
+const LATENCY_OUTCOMES = ['approved', 'judge_rejected', 'code_validation'] as const;
+type LatencyOutcome = (typeof LATENCY_OUTCOMES)[number];
+
+/** Code the engine's validation refuses before the judge runs: it calls `eval`. */
+const EVAL_CODE = 'function execute(input) { return eval("1"); }';
+
+/** The 95th percentile of `samples` by nearest rank: the smallest sample that 95 percent of them do not exceed. */
+function percentile95(samples: readonly number[]): number {
+  const sorted = [...samples].sort((a, b) => a - b);
+  return sorted[Math.ceil(0.95 * sorted.length) - 1];
+}
+
+/** Milliseconds to the thousandth, as the measurement records them. */
+function toThousandth(ms: number): number {
+  return Math.round(ms * 1000) / 1000;
+}
+
 describe('forge trace: the measurement', () => {
   /** What the cases of this group measured, printed and written once they have all run. */
   const measure: ForgeTraceMeasure = {};
@@ -3015,5 +3035,81 @@ describe('forge trace: the measurement', () => {
       });
     }
     measure.forges = forges;
+  });
+
+  it('measurement: a no-op hook adds under 5 ms at the 95th percentile across outcomes', async () => {
+    // 120 forges, each under its own name and session. Run i ends at outcome i % 3 and runs on the engine with the
+    // hook when i is odd, so the two engines take turns and each outcome runs 20 times on each.
+    const runs = Array.from({ length: 120 }, (_, i) => ({
+      i,
+      outcome: LATENCY_OUTCOMES[i % 3],
+      hooked: i % 2 === 1,
+    }));
+    // Each engine's judge answers its judged forges in the order they run.
+    const repliesOf = (hooked: boolean): string[] =>
+      runs
+        .filter((run) => run.hooked === hooked && run.outcome !== 'code_validation')
+        .map((run) => (run.outcome === 'approved' ? APPROVED_JSON : REJECTED_JSON));
+    let calls = 0;
+    const bare = await directEngine({ judgeReplies: repliesOf(false) });
+    const withHook = await directEngine({
+      judgeReplies: repliesOf(true),
+      onForgeTrace: () => {
+        calls += 1;
+      },
+    });
+
+    const samples: Array<{ outcome: LatencyOutcome; hooked: boolean; ms: number }> = [];
+    for (const { i, outcome, hooked } of runs) {
+      const { engine } = hooked ? withHook : bare;
+      const name = `add_numbers_${i}`;
+      const args =
+        outcome === 'code_validation'
+          ? sandboxArgs({ name, implementation: { mode: 'sandbox', code: EVAL_CODE, allowlist: [] } })
+          : sandboxArgs({ name });
+      const context: ForgeContext = { agentId: 'agent-1', sessionId: `latency-${i}` };
+      const { value: result, ms } = await timed(() => engine.forge(args as unknown as ForgeToolRequest, context));
+      // Each run ended at its outcome. That holds with or without a trace, so it shows what each figure measured.
+      if (outcome === 'approved') {
+        expect(result.success, `run ${i}: ${String(result.error ?? 'approved')}`).toBe(true);
+      } else if (outcome === 'judge_rejected') {
+        expect(result.success, `run ${i}`).toBe(false);
+        expect(result.verdict?.approved, `run ${i}: ${String(result.error)}`).toBe(false);
+      } else {
+        expect(result.error, `run ${i}`).toMatch(/^Code validation failed: /);
+      }
+      // The session's tool goes once the run is timed: the registry holds ten session tools at most, and every
+      // approved forge then registers beside none.
+      engine.cleanupSession(context.sessionId);
+      samples.push({ outcome, hooked, ms });
+    }
+
+    // The hook ran once for each of the 60 forges on its engine.
+    expect(calls).toBe(60);
+
+    /** The 95th percentile with the hook, without it, and what the hook added, over the runs of `outcome` or all. */
+    const added = (outcome?: LatencyOutcome): { withMs: number; withoutMs: number; addedMs: number } => {
+      const msOf = (hooked: boolean): number[] =>
+        samples
+          .filter((sample) => sample.hooked === hooked && (outcome === undefined || sample.outcome === outcome))
+          .map((sample) => sample.ms);
+      const withMs = percentile95(msOf(true));
+      const withoutMs = percentile95(msOf(false));
+      return { withMs, withoutMs, addedMs: withMs - withoutMs };
+    };
+    const across = added();
+    const latency: NonNullable<ForgeTraceMeasure['latency']> = {
+      runs: samples.length,
+      p95WithMs: toThousandth(across.withMs),
+      p95WithoutMs: toThousandth(across.withoutMs),
+      addedMs: toThousandth(across.addedMs),
+      byOutcome: {
+        approved: toThousandth(added('approved').addedMs),
+        judge_rejected: toThousandth(added('judge_rejected').addedMs),
+        code_validation: toThousandth(added('code_validation').addedMs),
+      },
+    };
+    expect(across.addedMs, JSON.stringify(latency)).toBeLessThan(5);
+    measure.latency = latency;
   });
 });
