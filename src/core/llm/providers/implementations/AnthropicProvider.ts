@@ -537,11 +537,14 @@ function systemStatesSchema(system: unknown): boolean {
 
 /**
  * What a JSON output format refusal is remembered by, beside the model: the
- * schema, and the strict tools the request carried beside it, which the
+ * schema as the format is sent it (the wire copy, which the vendor compiles,
+ * so two schemas that differ only in a constraint the copy leaves out share
+ * one key), and the strict tools the request carried beside it, which the
  * vendor counts toward the same grammar. The same schema without those tools
  * is a different request, and still goes on the format.
  */
-function refusalSchemaKey(schema: unknown, tools: unknown): unknown {
+function refusalSchemaKey(inputSchema: unknown, tools: unknown): unknown {
+  const schema = anthropicJsonOutputSchema(inputSchema);
   const strictTools = strictToolInputSchemas(tools);
   return strictTools.length > 0 ? { schema, strictTools } : schema;
 }

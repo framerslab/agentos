@@ -372,6 +372,20 @@ describe('Anthropic: a schema the JSON output format refuses as too large', () =
     expect(formatOf(messagesPosts()[0])).toBeUndefined();
   });
 
+  it('shares the remembered refusal between schemas whose wire copy is the same', async () => {
+    answer = JSON.stringify({ ...LAYOUT, checkpoints: [...LAYOUT.checkpoints, { x: 80, z: 0, banked: false }] });
+    const checkpoint = z.object({ x: z.number(), z: z.number(), banked: z.boolean() });
+
+    await layoutCall(CLAUDE, { schema: Layout.extend({ checkpoints: z.array(checkpoint).min(2) }) });
+    expect(messagesPosts()).toHaveLength(2);
+
+    // `minItems` above 1 is left out of the format's copy, so this schema is sent the same format: no second refusal.
+    received.length = 0;
+    await layoutCall(CLAUDE, { schema: Layout.extend({ checkpoints: z.array(checkpoint).min(3) }) });
+    expect(messagesPosts()).toHaveLength(1);
+    expect(formatOf(messagesPosts()[0])).toBeUndefined();
+  });
+
   it('drops a passthrough output format on the re-send and keeps the rest of output_config', async () => {
     answer = JSON.stringify(LAYOUT);
 
