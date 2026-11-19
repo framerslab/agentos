@@ -94,7 +94,7 @@ These need the store's optional `listSourcePassages`, `patchPassages` and `withS
 
 ## Search
 
-`search({ text, scope, mode, topK, kinds, folderId, folderIds, tags, sourceIds, anyOf, match, prefix, signal })` answers passages, at most `topK` (10 unless given).
+`search({ text, scope, mode, topK, kinds, folderId, folderIds, tags, sourceIds, anyOf, match, prefix, signal, vector })` answers passages, at most `topK` (10 unless given).
 
 | `mode` | What runs | The store member it calls |
 |---|---|---|
@@ -105,6 +105,8 @@ These need the store's optional `listSourcePassages`, `patchPassages` and `withS
 A search with `anyOf` calls the store's legs apart and ranks them itself: see [Several narrowings at once](#several-narrowings-at-once).
 
 A `dense` or `hybrid` search asks the embedding function for one vector, the query's, and needs exactly one back: an answer of any other count, an empty list included, fails the search after that one call and before the store is asked anything, with the error `indexSource` throws for a miscounted batch (`LibraryIndex: the embedder answered a different number of vectors than texts.`). A search whose `signal` aborted while the query was embedded rejects with the signal's `reason` instead, whatever the embedding function answered.
+
+`vector` is the text's embedding when the caller holds it already, made by the index's embedding model, such as a host that embeds a question once under its own cost reservation and then reads further with a larger `topK`: a `dense` or `hybrid` search, with `anyOf` too, sends nothing to the embedder and searches with it, and a `lexical` search reads no vector. It is refused, before the embedder or the store is asked anything, when it is empty, holds a value that is not a finite number (a missing place of a sparse array among them), or, with the index's `dimensions`, has another size.
 
 `match` asks for any word of the query (`'any'`, the default) or every word (`'all'`), and `prefix` (false by default) lets a stored word match when it begins with a query word; both go to the lexical leg of a `lexical` or `hybrid` search.
 
