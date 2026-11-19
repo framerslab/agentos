@@ -5,7 +5,8 @@
  * real provider manager, the real ClaudeCodeProvider and the real
  * ClaudeCodeCLIBridge run, and only the subprocess (`execa`) is stubbed, so
  * no CLI runs. The test reads the arguments the bridge launched `claude`
- * with.
+ * with. A run that times out is read from the real bridge too: the advice it
+ * gives names the smaller default model and the Claude Code it needs.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -16,6 +17,8 @@ vi.mock('execa', () => ({
 }));
 
 import { generateText } from '../../../../api/generateText.js';
+import { ClaudeCodeCLIBridge } from '../implementations/ClaudeCodeCLIBridge.js';
+import { ClaudeCodeProviderError } from '../errors/ClaudeCodeProviderError.js';
 
 /** The stdin of the bridge's login check (buildAuthCheckArgs in ClaudeCodeCLIBridge). */
 const AUTH_PING = 'Reply with exactly: pong';
@@ -67,5 +70,26 @@ describe('generateText on claude-code-cli with no model', () => {
     expect(modelFlag).toBeGreaterThan(-1);
     expect(run.args[modelFlag + 1]).toBe('claude-sonnet-5-5');
     expect(run.input).toContain('Say hello.');
+  });
+});
+
+describe('a Claude Code run that times out', () => {
+  it('advises claude-haiku-5-5 with the Claude Code version it needs and `claude update`', async () => {
+    // Claude Haiku 5.5 needs Claude Code 2.1.293 or later, and Claude Sonnet 5.5 runs from 2.1.284
+    // (code.claude.com/docs/en/model-config, read 2026-11-19): a CLI that times out on the default can refuse Haiku 5.5.
+    execaMock.mockImplementation(async () => {
+      throw Object.assign(new Error('Command timed out after 120000 milliseconds'), { timedOut: true, stderr: '' });
+    });
+
+    const error = await new ClaudeCodeCLIBridge()
+      .execute({ prompt: 'Say hello.', model: 'claude-sonnet-5-5' })
+      .then(() => undefined, (e: unknown) => e);
+
+    expect(error).toBeInstanceOf(ClaudeCodeProviderError);
+    const { code, guidance } = error as ClaudeCodeProviderError;
+    expect(code).toBe('TIMEOUT');
+    expect(guidance).toContain('claude-haiku-5-5');
+    expect(guidance).toContain('2.1.293 or later');
+    expect(guidance).toContain('`claude update`');
   });
 });

@@ -13,6 +13,7 @@ import { keyPoolConfigFor, keyPoolDefaultsVersion } from './keyPoolDefaults.js';
 import { AIModelProviderManager } from '../core/llm/providers/AIModelProviderManager.js';
 import { baseUrlCredentials } from '../core/llm/providers/url-secrets.js';
 import { PROVIDER_DEFAULTS, autoDetectProvider } from './runtime/provider-defaults.js';
+import { modelSupportsForcedToolChoice } from '../core/llm/providers/model-forced-tool-choice.js';
 import { getDefaultProvider } from './runtime/global-default.js';
 import { createContentSafeConsole } from '../core/logging/contentSafeConsole.js';
 
@@ -541,6 +542,59 @@ export interface ModelOption {
 }
 
 /**
+ * The model a text call that names Anthropic and no model takes when its
+ * `toolChoice` forces a tool and the default model refuses a forced choice.
+ *
+ * Claude Sonnet 5.5, the default, answers `tool_choice` `any` or `tool` with
+ * a 400, and AnthropicProvider sends such a choice to it as `auto`, under
+ * which the model may answer with no tool run. Claude Sonnet 4.6, the default
+ * before it, took the forced choice. Claude Sonnet 5 takes it: the Sonnet 5.5
+ * migration guide says "Every earlier model on this page accepts a
+ * `tool_choice` of type `any` or `tool`" and shows a forced call to
+ * `claude-sonnet-5`
+ * (https://platform.claude.com/docs/en/models/sonnet-5-5/migration-guide#forced-tool-use).
+ * It is Active, with retirement not sooner than June 30, 2027
+ * (https://platform.claude.com/docs/en/about-claude/model-deprecations), and
+ * costs what Claude Sonnet 5.5 does, $2 input and $10 output per million
+ * tokens (https://platform.claude.com/docs/en/models/overview); all read
+ * 2026-11-19. Of the latest four models only Claude Haiku 5.5 takes a forced
+ * choice (https://platform.claude.com/docs/en/models/haiku-5-5/migration-guide),
+ * a smaller model than the text default stands for. A caller that names a
+ * model keeps it.
+ */
+const ANTHROPIC_FORCED_TOOL_MODEL = 'claude-sonnet-5';
+
+/**
+ * Whether a caller's `toolChoice` forces a tool on Anthropic: `'required'`
+ * (sent as `{ type: 'any' }`) or a named function (sent as `{ type: 'tool' }`),
+ * the two forms AnthropicProvider's convertToolChoice forces.
+ */
+function toolChoiceForcesTool(choice: unknown): boolean {
+  if (choice === 'required') return true;
+  if (!choice || typeof choice !== 'object') return false;
+  const name = (choice as { function?: { name?: unknown } }).function?.name;
+  return typeof name === 'string' && name !== '';
+}
+
+/**
+ * The provider's default model for `task`, or {@link ANTHROPIC_FORCED_TOOL_MODEL}
+ * for an Anthropic text call that forces a tool the default would not force.
+ */
+function providerDefaultModel(providerId: string, task: TaskType, opts: ModelOption): string | undefined {
+  const modelId = PROVIDER_DEFAULTS[providerId]?.[task];
+  if (
+    providerId === 'anthropic' &&
+    task === 'text' &&
+    modelId &&
+    !modelSupportsForcedToolChoice(modelId) &&
+    toolChoiceForcesTool((opts as { toolChoice?: unknown }).toolChoice)
+  ) {
+    return ANTHROPIC_FORCED_TOOL_MODEL;
+  }
+  return modelId;
+}
+
+/**
  * Resolves a `{ providerId, modelId }` pair from flexible caller-supplied options.
  *
  * Resolution priority:
@@ -553,6 +607,10 @@ export interface ModelOption {
  *    in {@link PROVIDER_DEFAULTS}.
  * 3. **Neither** — auto-detect the first provider with a set API key/URL env
  *    var and use its default model for the requested `task`.
+ *
+ * In 2 and 3, a text call to Anthropic whose `toolChoice` forces a tool takes
+ * {@link ANTHROPIC_FORCED_TOOL_MODEL} when the default model refuses a forced
+ * tool choice, so the tool stays required.
  *
  * @param opts - Caller options containing optional `provider` and/or `model`.
  * @param task - Task type used to select the correct default model. Defaults to `"text"`.
@@ -622,7 +680,7 @@ export function resolveModelOption(opts: ModelOption, task: TaskType = 'text'): 
         `Unknown provider "${opts.provider}". Known providers: ${Object.keys(PROVIDER_DEFAULTS).join(', ')}.`
       );
     }
-    const modelId = defaults[task];
+    const modelId = providerDefaultModel(opts.provider, task, opts);
     if (!modelId) {
       throw new Error(
         `Provider "${opts.provider}" has no default ${task} model. Specify model explicitly.`
@@ -634,8 +692,7 @@ export function resolveModelOption(opts: ModelOption, task: TaskType = 'text'): 
   // 3. Neither — auto-detect provider from environment
   const detected = autoDetectProvider(task);
   if (detected) {
-    const defaults = PROVIDER_DEFAULTS[detected];
-    const modelId = defaults?.[task];
+    const modelId = providerDefaultModel(detected, task, opts);
     if (modelId) return { providerId: detected, modelId };
   }
 

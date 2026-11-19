@@ -50,6 +50,28 @@ export function modelSupportsThinking(modelId: string): boolean {
   return /^claude-(opus-4-(7|8)|opus-5|sonnet-5|fable-5)\b/i.test(modelId);
 }
 
+/**
+ * Whether the given Claude model refuses the manual thinking form
+ * `thinking: { type: 'enabled', budget_tokens }` with a 400.
+ *
+ * Anthropic's models overview says the manual form "is deprecated on Claude
+ * Opus 4.6 and Claude Sonnet 4.6 and not accepted on later models"
+ * (https://platform.claude.com/docs/en/models/overview, read 2026-11-19): the
+ * Opus 4.7 / 4.8 line, Opus 5.x, Sonnet 5.x, Haiku 5.5, Fable 5.x and Mythos
+ * 5.x. The Claude Sonnet 5.5 and Claude Haiku 5.5 migration guides give the
+ * 400 and the replacement, `{ type: 'adaptive' }` with the depth set by
+ * `output_config.effort`
+ * (https://platform.claude.com/docs/en/models/sonnet-5-5/migration-guide,
+ * https://platform.claude.com/docs/en/models/haiku-5-5/migration-guide, read
+ * 2026-11-19). Claude Sonnet 4.6 and earlier models accept it, and are left
+ * out.
+ *
+ * @param modelId Anthropic-side model id, bare or dated.
+ */
+export function modelRefusesThinkingBudget(modelId: string): boolean {
+  return /^claude-(opus-4-(7|8)|opus-5|sonnet-5|haiku-5-5|fable-5|mythos-5)\b/i.test(modelId);
+}
+
 /** The resolved extended-thinking payload plus the max_tokens to send. */
 export interface ResolvedThinkingPayload {
   thinking: { type: 'adaptive' };

@@ -1224,7 +1224,7 @@ describe('the Anthropic default models through the public API', () => {
         topP: 0.9,
         customModelParams: { top_k: 40 },
         tools,
-        toolChoice: 'required',
+        toolChoice: 'auto',
         fallbackProviders: [],
       });
 
@@ -1239,10 +1239,64 @@ describe('the Anthropic default models through the public API', () => {
       expect(body).not.toHaveProperty('top_k');
       // No thinking field: the model thinks adaptively, with no budget and no `disabled`.
       expect(body).not.toHaveProperty('thinking');
-      // The forced choice goes out as `auto`, the one form the model takes.
       expect(body.tool_choice).toEqual({ type: 'auto' });
       expect(body.max_tokens).toBeGreaterThan(0);
       expect(execute).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('generateText with no model and a required tool choice sends Claude Sonnet 5 the forced tool_choice, never auto', async () => {
+    // Claude Sonnet 5.5 refuses a forced tool_choice, and the provider would send it `auto`, under which the call can
+    // succeed with no tool run. A call that names no model and forces a tool goes to Claude Sonnet 5, which takes it.
+    route({ 'claude-sonnet-5': [textTurn('claude-sonnet-5', 'Checking.'), textTurn('claude-sonnet-5', 'Checking.')] });
+    const { tools } = weatherTools();
+
+    await generateText({ provider: 'anthropic', prompt: 'Weather in Paris?', tools, toolChoice: 'required', fallbackProviders: [] });
+    await generateText({
+      provider: 'anthropic',
+      prompt: 'Weather in Paris?',
+      tools,
+      toolChoice: { type: 'function', function: { name: 'get_weather' } },
+      fallbackProviders: [],
+    });
+
+    const [required, named] = postedBodies();
+    expect(required.model).toBe('claude-sonnet-5');
+    expect(required.tool_choice).toEqual({ type: 'any' });
+    expect(named.model).toBe('claude-sonnet-5');
+    expect(named.tool_choice).toEqual({ type: 'tool', name: 'get_weather' });
+  });
+
+  it('sends a legacy thinking budget passed to the default as adaptive thinking, and leaves it alone on Claude Sonnet 4.6', async () => {
+    // Claude Sonnet 5.5 answers `thinking: { type: 'enabled', budget_tokens }` with a 400; its migration guide replaces
+    // the budget with adaptive thinking and an effort level. Claude Sonnet 4.6 takes the manual form.
+    route({
+      'claude-sonnet-5-5': [textTurn('claude-sonnet-5-5', 'One.')],
+      'claude-sonnet-4-6': [textTurn('claude-sonnet-4-6', 'Two.')],
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const legacy = { thinking: { type: 'enabled', budget_tokens: 2048 } };
+    try {
+      await generateText({ provider: 'anthropic', prompt: 'x', maxTokens: 4000, customModelParams: legacy, fallbackProviders: [] });
+      await generateText({
+        provider: 'anthropic',
+        model: 'claude-sonnet-4-6',
+        prompt: 'x',
+        maxTokens: 4000,
+        customModelParams: legacy,
+        fallbackProviders: [],
+      });
+
+      const [onDefault, onSonnet46] = postedBodies();
+      expect(onDefault.model).toBe('claude-sonnet-5-5');
+      expect(onDefault.thinking).toEqual({ type: 'adaptive' });
+      expect(onSonnet46.model).toBe('claude-sonnet-4-6');
+      expect(onSonnet46.thinking).toEqual({ type: 'enabled', budget_tokens: 2048 });
+      const budgetWarnings = warn.mock.calls.filter(([message]) => String(message).includes('takes no thinking budget'));
+      expect(budgetWarnings).toHaveLength(1);
+      expect(String(budgetWarnings[0][0])).toContain('claude-sonnet-5-5');
     } finally {
       warn.mockRestore();
     }
