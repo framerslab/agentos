@@ -284,3 +284,52 @@ describe("ChunkingEngine — 'anchored' strategy", () => {
     await expect(engine.chunk('abc', { strategy: 'fixed', chunkSize: 1, chunkOverlap: 0 })).resolves.toBeInstanceOf(Array);
   });
 });
+
+describe("ChunkingEngine — 'anchored' strategy with a minimum passage size", () => {
+  /** Four hundred short blocks, each a line of about twenty units: most anchors would end a passage of a few. */
+  const items = Array.from({ length: 400 }, (_, n) => `Item ${n} on the list.`);
+  const withMin = (text: string, minChunkSize: number, markdown = false): Promise<DocumentChunk[]> =>
+    engine.chunk(text, { strategy: 'anchored', chunkSize: SIZE, minChunkSize, markdown });
+
+  it('makes passages of at least the minimum from a text of many short blocks, where every anchor would end one', async () => {
+    const text = join(items);
+    const loose = await anchored(text);
+    const packed = await withMin(text, 400);
+    expectOffsets(text, packed);
+    for (const chunk of packed.slice(0, -1)) expect(chunk.content.length).toBeGreaterThanOrEqual(400);
+    expect(packed.length).toBeLessThanOrEqual(Math.ceil(text.length / 400));
+    // Without the minimum most passages hold a block or a few.
+    expect(loose.length).toBeGreaterThan(packed.length * 3);
+  });
+
+  it('keeps every passage but the edited one when the passage an edit falls in ends where it ended before', async () => {
+    const before = await withMin(join(items), 400);
+    for (const at of [3, 100, 250]) {
+      const edited = items.map((item, n) => (n === at ? `${item} An inserted clause.` : item));
+      const text = join(edited);
+      const after = await withMin(text, 400);
+      expectOffsets(text, after);
+      const kept = new Set(contents(before));
+      expect(after.filter((chunk) => kept.has(chunk.content)).length).toBeGreaterThanOrEqual(after.length - 1);
+    }
+  });
+
+  it('still ends a short passage before a heading and before a piece that would take it past the size', async () => {
+    const sections = '# One\n\nShort.\n\n# Two\n\nAlso short.';
+    expect(contents(await withMin(sections, 400, true))).toEqual(['# One\n\nShort.', '# Two\n\nAlso short.']);
+    const sized = `${'a'.repeat(300)}\n\n${'b'.repeat(1000)}`;
+    expect(contents(await withMin(sized, 400))).toEqual(['a'.repeat(300), 'b'.repeat(1000)]);
+  });
+
+  it('cuts as it cuts with no minimum when the minimum is 0, the default', async () => {
+    const text = join(items);
+    expect(contents(await withMin(text, 0))).toEqual(contents(await anchored(text)));
+  });
+
+  it('refuses a minimum that is not a whole number from 0 to the size', async () => {
+    for (const minChunkSize of [-1, 1.5, SIZE + 1, Number.NaN]) {
+      await expect(withMin('abc', minChunkSize)).rejects.toThrow(RangeError);
+    }
+    await expect(withMin('abc', SIZE)).resolves.toHaveLength(1);
+  });
+});

@@ -59,7 +59,7 @@ export interface ChunkOptions {
    * is no overlap, and `chunkOverlap` is ignored. Each chunk carries `start` and `end`, its offsets in the text given
    * (`content.slice(start, end)` is the chunk), and `edges`. With `markdown`, a heading line always starts a passage,
    * and each chunk carries `heading` and `metadata.headingLevel` and `metadata.ancestorHeadings` as `'hierarchical'`
-   * gives them.
+   * gives them. With `minChunkSize`, an anchor ends a passage only once the passage holds that many units.
    *
    * @see ChunkStrategy
    */
@@ -95,6 +95,17 @@ export interface ChunkOptions {
    * @default false
    */
   markdown?: boolean;
+
+  /**
+   * For `'anchored'`: the fewest UTF-16 code units a passage holds, from its first piece's start to an anchor's end,
+   * before that anchor may end it. A text of many short blocks then makes passages of at least this size rather than
+   * one every few blocks. A heading, a piece that would take the passage past `chunkSize`, and the text's end still
+   * end a passage sooner. An anchor that a passage too short to end passes over can move the boundaries after an edit
+   * until a passage ends at an anchor where one ended before; from there on every passage keeps its text. A whole
+   * number from 0 to `chunkSize`; 0 makes every anchor end its passage. Ignored by the other strategies.
+   * @default 0
+   */
+  minChunkSize?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -405,15 +416,16 @@ function anchoredPieces(text: string, chunkSize: number, markdown: boolean): Anc
 }
 
 /**
- * The anchored strategy: pieces packed into passages that end after an anchor, before a piece that would take them
- * past `chunkSize`, and before a Markdown heading.
+ * The anchored strategy: pieces packed into passages that end after an anchor once they hold `minChunkSize` units,
+ * before a piece that would take them past `chunkSize`, and before a Markdown heading.
  *
  * @param content - Text to split.
  * @param chunkSize - Largest passage, in UTF-16 code units: a whole number of at least 2.
  * @param markdown - Whether heading lines start sections.
+ * @param minChunkSize - Fewest units a passage holds before an anchor ends it: a whole number from 0 to `chunkSize`.
  * @returns Ordered `DocumentChunk[]`, each with `start`, `end` and `edges`.
  */
-function anchoredChunks(content: string, chunkSize: number, markdown: boolean): DocumentChunk[] {
+function anchoredChunks(content: string, chunkSize: number, markdown: boolean, minChunkSize: number): DocumentChunk[] {
   const chunks: DocumentChunk[] = [];
   let open: AnchoredPiece[] = [];
   const close = () => {
@@ -440,7 +452,7 @@ function anchoredChunks(content: string, chunkSize: number, markdown: boolean): 
   for (const piece of anchoredPieces(content, chunkSize, markdown)) {
     if (piece.isHeading || (open.length > 0 && piece.end - open[0].start > chunkSize)) close();
     open.push(piece);
-    if (!piece.isHeading && isAnchor(content.slice(piece.start, piece.end))) close();
+    if (!piece.isHeading && piece.end - open[0].start >= minChunkSize && isAnchor(content.slice(piece.start, piece.end))) close();
   }
   close();
   return chunks;
@@ -500,7 +512,11 @@ export class ChunkingEngine {
         // Whole code units, and room for a surrogate pair, which a passage never splits.
         const size = Math.floor(chunkSize);
         if (size < 2) throw new RangeError(`chunkSize must be at least 2 for the anchored strategy, got ${chunkSize}`);
-        return anchoredChunks(content, size, options.markdown === true);
+        const minChunkSize = options.minChunkSize ?? 0;
+        if (!Number.isInteger(minChunkSize) || minChunkSize < 0 || minChunkSize > size) {
+          throw new RangeError(`minChunkSize must be a whole number from 0 to ${size} for the anchored strategy, got ${minChunkSize}`);
+        }
+        return anchoredChunks(content, size, options.markdown === true, minChunkSize);
       }
 
       default: {
