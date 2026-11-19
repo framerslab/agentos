@@ -153,6 +153,21 @@ describe('CitationVerifier with known vectors and pickOnly', () => {
     expect(sent).toEqual([['c', 'a', 'b']]);
   });
 
+  it('reads each source\'s vector once, before the embedder answers, so a vector set meanwhile moves no other source\'s', async () => {
+    const sources: Array<{ content: string; embedding?: number[] }> = [{ content: 'a' }, { content: 'b' }];
+    const sent: string[][] = [];
+    const embedFn = vi.fn(async (texts: string[]) => {
+      sent.push([...texts]);
+      // While the embedder works, the host gives the first source a vector of its own.
+      sources[0].embedding = [0, 1];
+      return texts.map((text) => ({ c: [1, 0], a: [0, 1], b: [1, 0] } as Record<string, number[]>)[text] ?? [0, 0]);
+    });
+    const result = await new CitationVerifier({ embedFn }).verify(['c'], sources);
+    expect(sent).toEqual([['c', 'a', 'b']]);
+    // b is scored with its own vector, the one made for it, and named.
+    expect(result.claims[0]).toMatchObject({ sourceIndex: 1, confidence: 1 });
+  });
+
   it('refuses a source vector whose length differs from the claims\' vectors', async () => {
     const { embedFn } = recordingEmbed({ c: [1, 0] });
     await expect(new CitationVerifier({ embedFn }).verify(['c'], [{ content: 'a', embedding: [1, 0, 0] }])).rejects.toThrow(RangeError);
