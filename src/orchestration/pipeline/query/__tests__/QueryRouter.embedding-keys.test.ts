@@ -290,4 +290,3 @@ describe("QueryRouter: an embedding call carries only its own vendor's key", () 
     expect(sent.filter((r) => r.carried.includes('test-openai-key'))).toEqual([]);
   });
 });
-

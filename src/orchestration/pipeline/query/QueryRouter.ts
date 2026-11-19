@@ -1374,7 +1374,7 @@ export class QueryRouter {
     chunks: Array<{ heading: string; content: string; sourcePath: string }>,
   ): CorpusChunk[] {
     const existingKeys = new Set(
-      this.corpus.map((chunk) => `${chunk.sourcePath}\^@${chunk.heading}\^@${chunk.content}`),
+      this.corpus.map((chunk) => `${chunk.sourcePath}\u0000${chunk.heading}\u0000${chunk.content}`),
     );
     const filteredChunks = chunks
       .map((chunk) => ({
@@ -1387,7 +1387,7 @@ export class QueryRouter {
           return false;
         }
 
-        const dedupeKey = `${chunk.sourcePath}\^@${chunk.heading}\^@${chunk.content}`;
+        const dedupeKey = `${chunk.sourcePath}\u0000${chunk.heading}\u0000${chunk.content}`;
         if (existingKeys.has(dedupeKey)) {
           return false;
         }
