@@ -281,7 +281,7 @@ The [spend meter](./SAFETY_PRIMITIVES.md#spend-meter) is the other limit that ou
 
 ## Choose a cheaper model
 
-A provider named without a model uses that provider's default text model (`gpt-4o` for OpenAI, `claude-sonnet-4-6` for Anthropic; [the full table](../features/LLM_PROVIDERS.md#provider-matrix)). Name the model to choose a cheaper one:
+A provider named without a model uses that provider's default text model (`gpt-4o` for OpenAI, `claude-sonnet-5-5` for Anthropic; [the full table](../features/LLM_PROVIDERS.md#provider-matrix)). Name the model to choose a cheaper one:
 
 ```typescript
 const assistant = agent({ provider: 'openai', model: 'gpt-4o-mini' });
@@ -302,7 +302,7 @@ When a call fails with a retryable error, the fallback chain retries it on anoth
 const assistant = agent({
   provider: 'openai',
   model: 'gpt-4o-mini',
-  fallbackProviders: [{ provider: 'anthropic', model: 'claude-haiku-4-5-20251001' }],
+  fallbackProviders: [{ provider: 'anthropic', model: 'claude-haiku-5-5' }],
   onFallback: (error, provider) => console.warn(`fell back to ${provider}: ${error.message}`),
 });
 ```

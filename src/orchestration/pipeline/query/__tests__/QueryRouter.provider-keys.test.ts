@@ -175,6 +175,21 @@ describe('QueryRouter credentials per route', () => {
     }
   });
 
+  it("defaults the classifier and the plain tiers to Claude Haiku 5.5 and the deep tiers to Claude Sonnet 5.5 when Anthropic's key is the only one set", async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'test-anthropic-key');
+    // The defaults are read from the environment when the module loads.
+    vi.resetModules();
+    const { DEFAULT_QUERY_ROUTER_CONFIG } = await import('../types.js');
+
+    expect(DEFAULT_QUERY_ROUTER_CONFIG).toMatchObject({
+      classifierProvider: 'anthropic',
+      classifierModel: 'claude-haiku-5-5',
+      generationProvider: 'anthropic',
+      generationModel: 'claude-haiku-5-5',
+      generationModelDeep: 'claude-sonnet-5-5',
+    });
+  });
+
   it("sends a MiniMax route MiniMax's key, never another vendor's", async () => {
     vi.stubEnv('OPENAI_API_KEY', 'test-openai-key');
     vi.stubEnv('MINIMAX_API_KEY', 'test-minimax-key');

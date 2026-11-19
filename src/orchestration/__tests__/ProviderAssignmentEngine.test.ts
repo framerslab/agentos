@@ -28,7 +28,7 @@ describe('ProviderAssignmentEngine', () => {
       });
       expect(assignments[1]).toMatchObject({
         provider: 'anthropic',
-        model: 'claude-haiku-4-5-20251001',
+        model: 'claude-haiku-5-5',
       });
     });
   });
@@ -48,7 +48,7 @@ describe('ProviderAssignmentEngine', () => {
       const assignments = engine.assign(nodes, { strategy: 'best' });
 
       expect(assignments[0]!.provider).toBe('anthropic');
-      expect(assignments[0]!.model).toBe('claude-sonnet-4-6');
+      expect(assignments[0]!.model).toBe('claude-sonnet-5-5');
     });
   });
 

@@ -38,6 +38,36 @@ describe('anthropicModelPricing (prices for a host, USD per 1K tokens)', () => {
     });
   });
 
+  it('prices Claude Fable 5.2 by its own row, below Claude Fable 5.1 and Claude Fable 5', () => {
+    // https://platform.claude.com/docs/en/about-claude/pricing, read 2026-11-18: $8 input, $10 5-minute write, $16
+    // 1-hour write, $0.20 cache hit, $40 output per MTok.
+    expect(anthropicModelPricing('claude-fable-5-2')).toEqual({
+      input: 0.008,
+      output: 0.04,
+      cacheRead: 0.0002,
+      cacheWrite: 0.01,
+      cacheWriteOneHour: 0.016,
+    });
+    // The provider prices an id with no row of its own by the longest catalog id that prefixes it: without the row
+    // this call cost what Claude Fable 5 costs, $10 input, $1 cache hit and $50 output per MTok, $61 in all.
+    expect(
+      estimateAnthropicCostUSD('claude-fable-5-2', {
+        input_tokens: 1_000_000,
+        cache_read_input_tokens: 1_000_000,
+        output_tokens: 1_000_000,
+      }),
+    ).toBeCloseTo(8 + 0.2 + 40, 9);
+    expect(resolveAnthropicModelEntry('claude-fable-5-2')).toMatchObject({
+      modelId: 'claude-fable-5-2',
+      contextWindowSize: 1000000,
+      outputTokenLimit: 128000,
+      status: 'active',
+    });
+    // The two earlier Fable rows keep their prices.
+    expect(anthropicModelPricing('claude-fable-5-1')).toMatchObject({ input: 0.01, output: 0.05, cacheRead: 0.00025 });
+    expect(anthropicModelPricing('claude-fable-5')).toMatchObject({ input: 0.01, output: 0.05, cacheRead: 0.001 });
+  });
+
   it('gives a host the shape it reads for OpenAI', () => {
     const openai = openAIModelPricing('gpt-4o');
     const claude = anthropicModelPricing('claude-opus-5-5');

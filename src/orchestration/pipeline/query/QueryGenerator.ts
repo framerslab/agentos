@@ -184,6 +184,13 @@ export class QueryGenerator {
       prompt: query,
       temperature,
       maxTokens,
+      // The answer gets all of the 512 or 1024 tokens only when none of them go
+      // to thinking: Claude Haiku 5.5 and Claude Sonnet 5.5, the Anthropic
+      // models of both tiers, think unless told not to, and their thinking
+      // counts against maxTokens. Each model turns it off in its own shape
+      // (model-thinking.ts); models that do not think by default, and other
+      // providers, ignore the switch.
+      thinking: false,
     });
 
     return {

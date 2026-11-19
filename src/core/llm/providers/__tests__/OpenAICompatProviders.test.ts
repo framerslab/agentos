@@ -288,8 +288,8 @@ describe('OpenAI-compatible provider wrappers', () => {
 
     it('still has anthropic defaults', () => {
       expect(PROVIDER_DEFAULTS.anthropic).toBeDefined();
-      expect(PROVIDER_DEFAULTS.anthropic.text).toBe('claude-sonnet-4-6');
-      expect(PROVIDER_DEFAULTS.anthropic.cheap).toBe('claude-haiku-4-5-20251001');
+      expect(PROVIDER_DEFAULTS.anthropic.text).toBe('claude-sonnet-5-5');
+      expect(PROVIDER_DEFAULTS.anthropic.cheap).toBe('claude-haiku-5-5');
     });
   });
 

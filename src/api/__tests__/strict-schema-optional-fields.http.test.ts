@@ -30,9 +30,9 @@ import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegi
 /** The model of the strict leg. */
 const LEG_MODEL = 'openai/gpt-4o-mini';
 /** The OpenRouter slug an Anthropic call with no Anthropic key is sent as; the server answers it 503. */
-const OVERLOADED_MODEL = 'anthropic/claude-sonnet-4-5';
+const OVERLOADED_MODEL = 'anthropic/claude-sonnet-4.5';
 /** A Claude model on OpenRouter that serves: its strict schema is held to Anthropic's limits. */
-const CLAUDE_MODEL = 'anthropic/claude-haiku-4-5';
+const CLAUDE_MODEL = 'anthropic/claude-haiku-4.5';
 /** Anthropic's limit on parameters that use a type array or `anyOf`, summed over a request's strict schemas. */
 const ANTHROPIC_UNION_LIMIT = 16;
 

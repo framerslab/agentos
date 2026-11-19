@@ -101,6 +101,13 @@ export interface LibraryPassage {
 export interface LibrarySearch {
   text: string;
   scope: LibraryScope;
+  /**
+   * The text's embedding, made by the index's embedding model, when the caller holds it already: a dense or hybrid
+   * search sends nothing to the embedder and searches with it, also with `anyOf`. A lexical search reads no vector.
+   * Refused, before any call, when it is empty, holds a value that is not a finite number, or, with the index's
+   * `dimensions`, has another size.
+   */
+  vector?: readonly number[];
   /** `lexical` embeds nothing; `hybrid` fuses both legs where the store can; `dense` is the embedding alone. @default 'hybrid' */
   mode?: 'lexical' | 'hybrid' | 'dense';
   /** The most passages answered. @default 10 */
@@ -1130,8 +1137,9 @@ export class LibraryIndex {
     if (!query.scope.tenantId || query.scope.aclGroups.length === 0) {
       throw new Error('LibraryIndex.search needs a tenant and at least one access group.');
     }
+    const held = query.vector === undefined ? undefined : this.heldVector(query.vector);
     const { anyOf, ...base } = query;
-    if (anyOf === undefined) return this.searchWith(query, undefined);
+    if (anyOf === undefined) return this.searchWith(query, held);
     // A branch narrows and nothing more: the text, the scope and the signal stay the search's own, whatever a branch
     // holds at run time. A branch that finds nothing by its own narrowing is left out, so a choice of nothing embeds
     // nothing.
@@ -1146,7 +1154,7 @@ export class LibraryIndex {
     // A hybrid answer's score is a rank among one branch's own candidates, so a choice of several branches is searched
     // leg by leg, each leg's score the passage's own, and the two legs are fused once over every branch.
     const pool = dense && lexical ? topK * 3 : topK;
-    const vector = dense ? await this.embedQuery(base.text, base.signal) : undefined;
+    const vector = dense ? (held ?? (await this.embedQuery(base.text, base.signal))) : undefined;
     const byDense = new Map<string, LibraryPassage>();
     const byLexical = new Map<string, LibraryPassage>();
     for (const narrowed of branches) {
@@ -1164,6 +1172,23 @@ export class LibraryIndex {
         const passage = byDense.get(id) ?? byLexical.get(id);
         return passage === undefined ? [] : [{ ...passage, score }];
       });
+  }
+
+  /**
+   * A copy of a search's own vector, refused when it is empty, holds a value that is not finite (a missing place of a
+   * sparse array among them), or has another size.
+   */
+  private heldVector(vector: readonly number[]): number[] {
+    const copy: number[] = [];
+    // Every place by its index, so a missing place reads as undefined and is refused, where every() would skip it.
+    for (let at = 0; Array.isArray(vector) && at < vector.length; at += 1) copy.push(vector[at]);
+    if (copy.length === 0 || !copy.every((value) => typeof value === 'number' && Number.isFinite(value))) {
+      throw new Error('LibraryIndex.search: the vector must hold one or more finite numbers.');
+    }
+    if (this.dimensions !== undefined && vector.length !== this.dimensions) {
+      throw new Error(`LibraryIndex.search: the vector holds ${vector.length} numbers; the index's dimensions are ${this.dimensions}.`);
+    }
+    return copy;
   }
 
   /**

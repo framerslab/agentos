@@ -14,7 +14,7 @@ import { generateText } from '@framers/agentos';
 // automatically. Turn 2+ reads the prefix back at the provider's cache-read
 // rate instead of re-billing it at full price.
 const result = await generateText({
-  model: 'anthropic:claude-sonnet-4-6',
+  model: 'anthropic:claude-sonnet-5-5',
   system: worldRules,
   messages: history,
   prompt: playerAction,
@@ -111,7 +111,7 @@ Costs and floors (Anthropic pricing rules):
 // Slow loops (agent steps gapped minutes apart, human think-time): give the
 // auto markers and the moving tail a 1-hour TTL.
 await generateText({
-  model: 'anthropic:claude-opus-4-8',
+  model: 'anthropic:claude-opus-5-5',
   system: orchestratorRules,
   messages: transcript,
   tools,
@@ -124,7 +124,7 @@ await generateText({
 // candidate each time. The rubric stays cached; no breakpoint goes on the
 // candidate, which no later call would read back.
 await generateText({
-  model: 'anthropic:claude-haiku-4-5-20251001',
+  model: 'anthropic:claude-haiku-5-5',
   system: [{ text: judgeRubric, cacheBreakpoint: true }],
   prompt: candidate,
   cache: { tail: false },
@@ -133,7 +133,7 @@ await generateText({
 // True one-shots (nothing in the request is sent again): opt out so the call
 // never pays a cache-write premium it cannot amortize.
 await generateText({
-  model: 'anthropic:claude-sonnet-4-6',
+  model: 'anthropic:claude-sonnet-5-5',
   system: oneOffInstructions,
   prompt: question,
   cache: false,
@@ -142,7 +142,7 @@ await generateText({
 // Custom prefix split: mark the stable block yourself, keep volatile bytes
 // after the last breakpoint. The auto tail marker still caches history.
 await streamText({
-  model: 'anthropic:claude-sonnet-4-6',
+  model: 'anthropic:claude-sonnet-5-5',
   system: [
     { text: stableRules, cacheBreakpoint: true, cacheTtl: '1h' },
     { text: perTurnState }, // unmarked, after the breakpoint

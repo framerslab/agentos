@@ -574,6 +574,13 @@ export class QueryClassifier {
         temperature: 0.1,
         apiKey: this.config.apiKey,
         baseUrl: this.config.baseUrl,
+        // The JSON reply carries its own reasoning field, so the model's
+        // thinking adds nothing to it and shares its output budget: Claude
+        // Haiku 5.5, the Anthropic classifier model, thinks unless told not
+        // to, and a reply cut short fails to parse and falls back to T1.
+        // Models that do not think by default, and other providers, ignore
+        // the switch.
+        thinking: false,
       });
 
       const parsed = this.parseResponse(response.text);
@@ -637,6 +644,13 @@ export class QueryClassifier {
         temperature: 0.1,
         apiKey: this.config.apiKey,
         baseUrl: this.config.baseUrl,
+        // The JSON reply carries its own reasoning field, so the model's
+        // thinking adds nothing to it and shares its output budget: Claude
+        // Haiku 5.5, the Anthropic classifier model, thinks unless told not
+        // to, and a reply cut short fails to parse and falls back to T1.
+        // Models that do not think by default, and other providers, ignore
+        // the switch.
+        thinking: false,
       });
 
       const { classification, plan } = this.parsePlanResponse(response.text);

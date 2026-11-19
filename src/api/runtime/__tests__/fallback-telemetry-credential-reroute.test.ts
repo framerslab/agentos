@@ -3,7 +3,8 @@
  * What both failover walkers report about a fallback entry the credential
  * layer sends to another provider: `{ provider: 'anthropic', model:
  * 'claude-sonnet-4-5' }` with no Anthropic key or base URL and
- * `OPENROUTER_API_KEY` set goes to OpenRouter as `anthropic/claude-sonnet-4-5`
+ * `OPENROUTER_API_KEY` set goes to OpenRouter as `anthropic/claude-sonnet-4.5`,
+ * the slug OpenRouter's model list gives it
  * (`resolveProvider()`). `onFallback`, the `llm.fallback_fired`,
  * `llm.fallback_succeeded`, `llm.fallback_failed_after_output` and
  * `llm.fallback_skipped` lines, the leg's hop and the walker's breaker read
@@ -41,7 +42,7 @@ import { PROVIDER_DEFAULTS } from '../provider-defaults.js';
 
 const PRIMARY_MODEL = 'gpt-4o-mini';
 const REROUTED = { provider: 'anthropic', model: 'claude-sonnet-4-5' };
-const SENT_MODEL = 'anthropic/claude-sonnet-4-5';
+const SENT_MODEL = 'anthropic/claude-sonnet-4.5';
 const RESCUE = { provider: 'gemini', model: 'gemini-x' };
 
 const usage = { promptTokens: 1, completionTokens: 1, totalTokens: 2 };
@@ -391,15 +392,17 @@ describe('streamText reports an Anthropic entry the credential layer sends to Op
  * rerouted Anthropic entry is matched by its model as written, as the model
  * resolution names it (the provider's default when the entry names none, the
  * id after an `anthropic:` or `anthropic/` prefix) and as it is sent
- * (`anthropic/<model>` on OpenRouter), so an excluded model is never sent
+ * (`anthropic/<model>` on OpenRouter, the version dotted), so an excluded model is never sent
  * through OpenRouter.
  */
 describe('both walkers skip a rerouted Anthropic entry whose model an exclusion names in any spelling', () => {
   // An entry with no model is sent as the provider's default.
   const DEFAULT_MODEL = PROVIDER_DEFAULTS.anthropic!.text!;
+  // OpenRouter lists the default (claude-sonnet-5-5) as anthropic/claude-sonnet-5.5.
+  const DEFAULT_SENT = 'anthropic/claude-sonnet-5.5';
   const cases: Array<{ name: string; entry: { provider: string; model?: string }; exclusion: string; sentModel: string }> = [
-    { name: 'no model, bare exclusion', entry: { provider: 'anthropic' }, exclusion: DEFAULT_MODEL, sentModel: `anthropic/${DEFAULT_MODEL}` },
-    { name: 'no model, prefixed exclusion', entry: { provider: 'anthropic' }, exclusion: `anthropic:${DEFAULT_MODEL}`, sentModel: `anthropic/${DEFAULT_MODEL}` },
+    { name: 'no model, bare exclusion', entry: { provider: 'anthropic' }, exclusion: DEFAULT_MODEL, sentModel: DEFAULT_SENT },
+    { name: 'no model, prefixed exclusion', entry: { provider: 'anthropic' }, exclusion: `anthropic:${DEFAULT_MODEL}`, sentModel: DEFAULT_SENT },
     { name: 'colon-prefixed model', entry: { provider: 'anthropic', model: 'anthropic:claude-sonnet-4-5' }, exclusion: 'claude-sonnet-4-5', sentModel: SENT_MODEL },
     { name: 'slash-prefixed model', entry: { provider: 'anthropic', model: 'anthropic/claude-sonnet-4-5' }, exclusion: 'claude-sonnet-4-5', sentModel: SENT_MODEL },
   ];

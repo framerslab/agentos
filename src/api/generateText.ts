@@ -39,6 +39,11 @@ import { CONTEXT_WINDOW_EXCEEDED_CODE } from '../core/llm/providers/errors/error
 import { ContextWindowExceededError } from '../core/llm/providers/errors/ContextWindowExceededError.js';
 import { OPENROUTER_ONLY_PARAM_KEYS } from '../core/llm/providers/openrouter-only-params.js';
 import {
+  ANTHROPIC_FORCED_TOOL_SONNET,
+  modelSupportsForcedToolChoice,
+  toolChoiceForcesTool,
+} from '../core/llm/providers/model-forced-tool-choice.js';
+import {
   catalogEntryHasCapability,
   createUncensoredModelCatalog,
   findCatalogTextModel,
@@ -695,7 +700,8 @@ export interface GenerateTextOptions {
    * that turns thinking off only at effort `high` or below (Opus 5, Sonnet
    * 5.5, Haiku 5.5), an `output_config.effort` of `xhigh` or `max` passed here
    * is sent as `high`; a `temperature` or `top_p` passed here for a model that
-   * rejects them is dropped (and `top_k` on Claude Haiku 5.5); and a `model`
+   * rejects them is dropped (and `top_k` on Claude Sonnet 5.5 and Claude
+   * Haiku 5.5); and a `model`
    * passed here is the one the request is shaped for.
    *
    * With `planning` on, the planning call takes OpenRouter's routing controls
@@ -1935,12 +1941,16 @@ export function isRetryableError(error: unknown): boolean {
  * silently downgrade user-facing output to a mini-tier model:
  * 1. OpenAI (`gpt-6.2-sol`)
  * 2. Anthropic (`claude-sonnet-5-5` at effort `low`, with 1024 tokens of
- *    output headroom for thinking)
+ *    output headroom for thinking; `claude-sonnet-5` for a call whose
+ *    `toolChoice` forces a tool, since Sonnet 5.5 refuses a forced choice and
+ *    would be sent `auto`)
  * 3. OpenRouter (`openai/gpt-5.6-sol`)
  * 4. Gemini (`gemini-3.1-pro-preview`)
  *
  * @param excludeProvider - Provider to omit from the chain (typically the
  *   primary provider that already failed).
+ * @param call - The call the chain rescues: its `toolChoice` picks the
+ *   Anthropic leg's model, so a required tool stays required on that hop.
  * Every leg pins `cache: false`: failover hops are sporadic one-shots, so
  * prompt-cache writes on a rescue leg almost never earn their reads back
  * (see {@link FallbackProviderEntry.cache}). Callers wanting a cached hop
@@ -1958,6 +1968,7 @@ export function isRetryableError(error: unknown): boolean {
  */
 export function buildFallbackChain(
   excludeProvider?: string,
+  call?: { toolChoice?: GenerateTextOptions['toolChoice'] },
 ): FallbackProviderEntry[] {
   const chain: FallbackProviderEntry[] = [];
 
@@ -1978,9 +1989,14 @@ export function buildFallbackChain(
     // runs at effort `low` (it skips thinking on most simple requests) with
     // 1024 tokens of headroom over the caller's budget. A caller's
     // `thinking: false` still reaches the hop and turns thinking off.
+    // Sonnet 5.5 refuses a forced tool_choice, which AnthropicProvider sends
+    // it as `auto`: a call that forces a tool takes Claude Sonnet 5, which
+    // takes the forced choice, so the tool stays required on this hop.
+    const rescueSonnet = 'claude-sonnet-5-5';
+    const needsForcedToolModel = toolChoiceForcesTool(call?.toolChoice) && !modelSupportsForcedToolChoice(rescueSonnet);
     chain.push({
       provider: 'anthropic',
-      model: 'claude-sonnet-5-5',
+      model: needsForcedToolModel ? ANTHROPIC_FORCED_TOOL_SONNET : rescueSonnet,
       effort: 'low',
       maxTokensHeadroom: 1024,
       cache: false,
@@ -2418,13 +2434,15 @@ const NEVER_A_LEG_MODEL = 'meta-llama/llama-3.1-8b-instruct';
  *   (typically the failed primary's). The ladder legs ignore it: another
  *   model on the same provider is a valid rescue, and the walk drops the
  *   exact failed model.
+ * @param call - The call the chain rescues, passed to {@link buildFallbackChain}.
  */
 export function buildPolicyAwareFallbackChain(
   tier: 'safe' | 'standard' | 'mature' | 'private-adult' | undefined,
   excludeProvider?: string,
+  call?: { toolChoice?: GenerateTextOptions['toolChoice'] },
 ): FallbackProviderEntry[] {
   if (tier !== 'mature' && tier !== 'private-adult') {
-    return buildFallbackChain(excludeProvider);
+    return buildFallbackChain(excludeProvider, call);
   }
 
   const chain: FallbackProviderEntry[] = [];
@@ -2445,7 +2463,7 @@ export function buildPolicyAwareFallbackChain(
     }
   }
 
-  for (const entry of buildFallbackChain(excludeProvider)) {
+  for (const entry of buildFallbackChain(excludeProvider, call)) {
     const listed = chain.some((e) => e.provider === entry.provider && e.model === entry.model);
     if (!listed) chain.push({ ...entry, origin: 'policy-default' });
   }
@@ -3856,7 +3874,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
     // refills. A leg receives its resolved slice and never resolves it again.
     const walkTier = resolvePolicyTier(opts);
     const chainEntries = opts.fallbackProviders === undefined
-      ? buildPolicyAwareFallbackChain(walkTier, metricProviderId)
+      ? buildPolicyAwareFallbackChain(walkTier, metricProviderId, { toolChoice: opts.toolChoice })
       : opts.fallbackProviders;
     // A seat's legs resolve strictly: no Anthropic to OpenRouter reroute.
     const strictLegs = opts.__strictCredentials === true;

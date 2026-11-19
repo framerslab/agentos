@@ -271,6 +271,10 @@ describe('hierarchical strategy with emergent.enabled — judge gating', () => {
     expect(spawnedCount.value).toBe(1);
   });
 
+  // The judge model an Anthropic agency gets when it names none (Claude
+  // Haiku 5.5) is tested on the wire, through the real provider, in
+  // agency-hierarchical-judge-anthropic-wire.test.ts.
+
   it('blocks spawn when hitl.approvals.beforeEmergent rejects', async () => {
     const { tools, roster, spawnedCount } = buildHierarchicalTools(
       {},

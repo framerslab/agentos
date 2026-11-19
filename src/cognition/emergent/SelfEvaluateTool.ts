@@ -347,6 +347,11 @@ export class SelfEvaluateTool implements ITool<SelfEvaluateInput> {
         prompt: `User query: ${query}\n\nResponse to evaluate: ${response}`,
         temperature: 0,
         maxTokens: 200,
+        // The scores fit in 200 tokens only when none of them go to thinking:
+        // Claude Haiku 5.5, the cheap Anthropic default, thinks unless told
+        // not to, and its thinking counts against maxTokens. Models that do
+        // not think by default, and other providers, ignore the switch.
+        thinking: false,
       });
 
       const parsed = this.parseEvaluation(result.text);

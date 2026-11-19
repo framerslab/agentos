@@ -53,7 +53,7 @@ AgentOS abstracts LLM access behind a unified [`IProvider`](https://github.com/f
 | Provider | Env Var | Default Model | Streaming | Tool Calling | Vision | Embedding | Default model's price (input / output, USD per 1M tokens) |
 |----------|---------|---------------|-----------|--------------|--------|-----------|-----------|
 | **OpenAI** | `OPENAI_API_KEY` | `gpt-4o` | Yes | Yes | Yes | Yes | $2.50 / $10.00 |
-| **Anthropic** | `ANTHROPIC_API_KEY` | `claude-sonnet-4-6` | Yes | Yes | Yes | No | $3.00 / $15.00 |
+| **Anthropic** | `ANTHROPIC_API_KEY` | `claude-sonnet-5-5` | Yes | Yes | Yes | No | $2.00 / $10.00 |
 | **Gemini** | `GEMINI_API_KEY` | `gemini-2.5-flash` | Yes | Yes | Yes | Yes | $0.30 / $2.50 |
 | **Groq** | `GROQ_API_KEY` | `llama-3.3-70b-versatile` | Yes | Yes | No | No | Enterprise contracts only |
 | **Together** | `TOGETHER_API_KEY` | `meta-llama/Llama-3.3-70B-Instruct-Turbo` | Yes | Yes | No | No | $1.04 / $1.04 |
@@ -63,7 +63,7 @@ AgentOS abstracts LLM access behind a unified [`IProvider`](https://github.com/f
 | **Requesty** | `REQUESTY_API_KEY` | `openai/gpt-4o` | Yes | Yes | Yes* | Yes* | $2.50 / $10.00 |
 | **LiteLLM** | _(none read; pass `apiKey`)_ | _(none; pass `model`)_ | Yes | Yes* | Yes* | Yes* | Your proxy's upstream prices |
 | **Ollama** | `OLLAMA_BASE_URL` | `llama3.2` | Yes | Partial | Model-dep. | Yes | Free |
-| **Claude Code CLI** | _(PATH detection)_ | `claude-sonnet-4-6` | Yes | Yes | Yes | No | Free* |
+| **Claude Code CLI** | _(PATH detection)_ | `claude-sonnet-5-5` | Yes | Yes | Yes | No | Free* |
 | **Gemini CLI** | _(PATH detection)_ | `gemini-3.5-flash` | Yes | Partial** | Yes | No | Free* |
 
 Prices are the vendors' list prices, read on 2026-10-12 (OpenRouter's on 2026-11-11); [Prices and Cost Reporting](#prices-and-cost-reporting) links each source.
@@ -102,7 +102,7 @@ import { agent } from '@framers/agentos';
 
 const myAgent = agent({
   provider: 'anthropic',
-  model: 'claude-sonnet-4-5-20250929',
+  model: 'claude-sonnet-5-5',
 });
 ```
 
@@ -187,7 +187,7 @@ import { agent } from '@framers/agentos';
 
 const writer = agent({
   provider: 'anthropic',
-  model: 'claude-sonnet-4-5-20250929',
+  model: 'claude-sonnet-5-5',
   apiKey: process.env.ANTHROPIC_API_KEY, // optional override
 });
 ```
@@ -258,7 +258,9 @@ Error returned to caller
 The auto-built chain ([`buildFallbackChain()`](https://github.com/framerslab/agentos/blob/master/src/api/generateText.ts))
 takes these legs in this order, each when its key is set, and leaves out the
 primary's own provider: OpenAI `gpt-6.2-sol`, Anthropic `claude-sonnet-5-5`
-(effort `low`, 1024 tokens of output headroom), OpenRouter
+(effort `low`, 1024 tokens of output headroom; `claude-sonnet-5` for a call
+whose `toolChoice` forces a tool, `'required'` or a named function, since
+Sonnet 5.5 refuses a forced `tool_choice` and would be sent `auto`), OpenRouter
 `openai/gpt-5.6-sol`, and Gemini `gemini-3.1-pro-preview` (effort `low`, 1024
 tokens of output headroom). Every leg runs with prompt caching off
 (`cache: false`). Ollama is not in the auto-built chain; list it in
@@ -274,10 +276,10 @@ import { agent } from '@framers/agentos';
 
 const myAgent = agent({
   provider: 'anthropic',
-  model: 'claude-sonnet-4-5-20250929',
+  model: 'claude-sonnet-5-5',
   // Ordered fallback chain — each entry can override the model.
   fallbackProviders: [
-    { provider: 'openrouter', model: 'anthropic/claude-sonnet-4-5-20250929' },
+    { provider: 'openrouter', model: 'anthropic/claude-sonnet-5.5' },
     { provider: 'ollama',     model: 'llama3.2' },
   ],
   onFallback: (err, next) => {
@@ -316,20 +318,20 @@ Every provider reports each call's token usage. Whether the result also carries 
 
 Prices for a host: `openAIModelPricing(modelId)` and `anthropicModelPricing(modelId)`, exported from `@framers/agentos/safety/runtime` and from the package root with the types `OpenAIModelPrice` and `AnthropicModelPrice`, give a spend guard a call's list price in USD per 1K tokens before the call is made, without loading a provider: `{ input, output, cachedInput? }` for OpenAI, `cachedInput` being the cached-input rate [OpenAI's pricing page](https://developers.openai.com/api/docs/pricing) lists for the model (absent where it lists none, for the pro models, or no longer lists the model; such a model's cache reads are billed at `input`), and `{ input, output, cacheRead, cacheWrite, cacheWriteOneHour, longContext? }` for Claude, `cacheWrite` and `cacheWriteOneHour` being the 5-minute and 1-hour prompt-cache writes at 1.25x and 2x the input rate. `modelPricing(providerId, modelId)` reads both tables, and a table a host registers for any other provider with `registerModelPricing()`, in one shape in USD per million tokens with every tier a request can reach; `estimateMaxCallCostUSD()` bounds a call's cost with it ([Pricing a call before it is sent](../safety/SAFETY_PRIMITIVES.md#pricing-a-call-before-it-is-sent)). `anthropicModelPricing` resolves an exact catalog id, a dated snapshot of a bare id (`claude-sonnet-5-5-20261001`) and the bare alias of a dated row (`claude-opus-4-5`), and answers `undefined` for any other id (`claude-opus-4`, `claude-sonnet-4`, `claude`), never a prefix guess; a retired snapshot (`claude-opus-4-20250514`) prices by its exact id alone. `longContext` is present on a model priced by prompt length (Claude Haiku 5.5: `{ fromTokens: 100000, input, output, cacheRead, cacheWrite, cacheWriteOneHour }`) and names the prompt size above which its long `input`, `output` and `cacheRead` rates apply; `estimateAnthropicCostUSD` bills a response whose prompt, cached tokens included, is over that size at the same long rates.
 
-The list prices of the default text models, in USD per 1M tokens, as each vendor's page gave them on 2026-10-12 (OpenRouter's on 2026-11-11). Each vendor's other models cost more or less; the linked pages list them.
+The list prices of the default text models, in USD per 1M tokens, as each vendor's page gave them on 2026-10-12 (OpenRouter's on 2026-11-11, Anthropic's on 2026-11-18). Each vendor's other models cost more or less; the linked pages list them.
 
 | Provider | Default text model | Input | Output | Source |
 |----------|--------------------|-------|--------|--------|
 | Ollama | `llama3.2` | 0 | 0 | Runs on your machine |
-| Claude Code CLI | `claude-sonnet-4-6` | 0 | 0 | Uses your existing subscription |
+| Claude Code CLI | `claude-sonnet-5-5` | 0 | 0 | Uses your existing subscription |
 | Gemini CLI | `gemini-3.5-flash` | 0 | 0 | Uses your existing subscription |
 | OpenRouter | `openai/gpt-4o-mini` | $0.15 | $0.60 | [OpenRouter: GPT-4o-mini](https://openrouter.ai/openai/gpt-4o-mini) |
 | Gemini | `gemini-2.5-flash` | $0.30 ($1.00 for audio) | $2.50, thinking included | [Gemini API pricing](https://ai.google.dev/gemini-api/docs/pricing) |
 | Mistral | `mistral-large-latest` (Mistral Large 3) | $0.50 | $1.50 | [Mistral Large 3](https://docs.mistral.ai/models/mistral-large-3-25-12) |
 | Together | `meta-llama/Llama-3.3-70B-Instruct-Turbo` | $1.04 | $1.04 | [Together AI pricing](https://www.together.ai/pricing) |
+| Anthropic | `claude-sonnet-5-5` | $2.00 | $10.00 | [Anthropic pricing](https://platform.claude.com/docs/en/about-claude/pricing) |
 | OpenAI | `gpt-4o` | $2.50 | $10.00 | [OpenAI pricing](https://developers.openai.com/api/docs/pricing) |
 | Requesty | `openai/gpt-4o` | $2.50 | $10.00 | [Requesty model list](https://router.requesty.ai/v1/models) |
-| Anthropic | `claude-sonnet-4-6` | $3.00 | $15.00 | [Anthropic pricing](https://platform.claude.com/docs/en/about-claude/pricing) |
 | Groq | `llama-3.3-70b-versatile` | On request | On request | [Groq models](https://console.groq.com/docs/models): enterprise contracts only ([Groq](#groq)) |
 | xAI | `grok-2` | Not listed | Not listed | [xAI models](https://docs.x.ai/developers/models) ([xAI](#xai-grok)) |
 | LiteLLM | none; pass `model` | Your proxy's upstream | Your proxy's upstream | |
@@ -444,20 +446,21 @@ export ANTHROPIC_API_KEY=sk-ant-...
 | Model | Context | Vision | Tool Calling | Notes |
 |-------|---------|--------|-------------|-------|
 | `claude-opus-5-5` | 1M | Yes | Yes | Recommended starting model ($4/$20 per MTok) |
-| `claude-fable-5-1` | 1M | Yes | Yes | Most capable ($10/$50 per MTok) |
+| `claude-fable-5-2` | 1M | Yes | Yes | Most capable ($8/$40 per MTok) |
+| `claude-fable-5-1` | 1M | Yes | Yes | Previous Fable ($10/$50 per MTok) |
 | `claude-sonnet-5-5` | 1M | Yes | Yes | Current Sonnet ($2/$10 per MTok) |
 | `claude-sonnet-5` | 1M | Yes | Yes | Near-Opus coding and agentic work ($2/$10 per MTok) |
 | `claude-opus-5` | 1M | Yes | Yes | Previous Opus ($5/$25 per MTok) |
-| `claude-sonnet-4-6` | 1M | Yes | Yes | Best value |
+| `claude-sonnet-4-6` | 1M | Yes | Yes | Previous Sonnet ($3/$15 per MTok) |
 | `claude-haiku-5-5` | 1M | Yes | Yes | Current Haiku ($0.10/$0.50 per MTok up to a 100K-token prompt) |
 | `claude-haiku-4-5-20251001` | 200K | Yes | Yes | Previous Haiku ($1/$5 per MTok) |
 | `claude-opus-4-5-20251101` | 200K | Yes | Yes | Legacy Opus, 64K output ($5/$25 per MTok) |
 
-Reasoning-default models (`claude-opus-5-5`, `claude-fable-5-1`, `claude-sonnet-5-5`, `claude-opus-5`, `claude-fable-5`, `claude-sonnet-5`, `claude-opus-4-8`, `claude-opus-4-7`) reject `temperature` and `top_p` with HTTP 400; the provider drops both automatically for these models and sends adaptive thinking when a thinking budget is requested. `claude-haiku-5-5` rejects any non-default `temperature`, `top_p` or `top_k` too, so the provider drops `temperature` and `top_p` for it as well; it thinks adaptively by default, so a thinking budget sends no `thinking` block there. The same fields passed through `customModelParams` are dropped too (`top_k` as well on Claude Haiku 5.5, whose migration guide says to remove it), with a one-time warning. A `customModelParams.model` replaces the model on the wire, and the provider shapes the request (sampling, thinking, effort, `max_tokens` and caching) for that model rather than the one given. Claude Opus 5.5, Claude Sonnet 5.5, Claude Mythos 5.1 and the Fable models also reject a forced `tool_choice`, so the provider sends `auto` for them; a schema request on these models takes the native JSON output format (`output_config.format`, see Tool Calling Support below) when the schema fits the format's limits, and the provider's own schema block in the system prompt when it does not. The provider sends a forced `tool_choice` to every other Claude model, so a schema the format cannot carry goes to it as a forced tool call (Claude Haiku 5.5 among them, probed on 2026-10-19). Anthropic retired `claude-opus-4-20250514` and `claude-sonnet-4-20250514` on 2026-06-15 (the API answers 404 for both; the catalog keeps them as `deprecated`); a schema request on those two ids takes the forced tool.
+Reasoning-default models (`claude-opus-5-5`, `claude-fable-5-2`, `claude-fable-5-1`, `claude-sonnet-5-5`, `claude-opus-5`, `claude-fable-5`, `claude-sonnet-5`, `claude-opus-4-8`, `claude-opus-4-7`) reject `temperature` and `top_p` with HTTP 400; the provider drops both automatically for these models and sends adaptive thinking when a thinking budget is requested. `claude-haiku-5-5` rejects any non-default `temperature`, `top_p` or `top_k` too, so the provider drops `temperature` and `top_p` for it as well; it thinks adaptively by default, so a thinking budget sends no `thinking` block there. The same fields passed through `customModelParams` are dropped too (`top_k` as well on Claude Sonnet 5.5 and Claude Haiku 5.5, whose migration guides say to remove it), with a one-time warning. A `customModelParams.thinking` in the manual form, `{ type: 'enabled', budget_tokens }`, is sent as `{ type: 'adaptive' }` to the models after Claude Sonnet 4.6 (Opus 4.7 and later, Sonnet 5 and later, Haiku 5.5, Fable and Mythos), which answer the manual form with HTTP 400, with a one-time warning; `effort` sets how much they think. Claude Sonnet 4.6 and older models get it as passed. A `customModelParams.model` replaces the model on the wire, and the provider shapes the request (sampling, thinking, effort, `max_tokens` and caching) for that model rather than the one given. Claude Opus 5.5, Claude Sonnet 5.5, Claude Mythos 5.1 and the Fable models also reject a forced `tool_choice`, so the provider sends `auto` for them. A text call that names Anthropic and no model and forces a tool (`toolChoice: 'required'` or a named function) runs on `claude-sonnet-5` instead of the default `claude-sonnet-5-5`, so the tool stays required: Claude Sonnet 5 takes a forced choice and costs the same ([Sonnet 5.5 migration guide](https://platform.claude.com/docs/en/models/sonnet-5-5/migration-guide#forced-tool-use)). The one exception is a call that also turns thinking on (a thinking budget, which goes out as adaptive thinking): Anthropic refuses thinking together with a forced `tool_choice`, so the provider sends `auto` with a one-time warning, and the model may answer without calling the tool. Leave thinking off on a call whose tool must run. A call that names one of these models keeps it, and gets `auto`. a schema request on these models takes the native JSON output format (`output_config.format`, see Tool Calling Support below) when the schema fits the format's limits, and the provider's own schema block in the system prompt when it does not. The provider sends a forced `tool_choice` to every other Claude model when thinking is off, so a schema the format cannot carry goes to it as a forced tool call (Claude Haiku 5.5 among them, probed on 2026-10-19); with thinking on, Anthropic refuses a forced `tool_choice`, so that schema goes in the system prompt instead. Anthropic retired `claude-opus-4-20250514` and `claude-sonnet-4-20250514` on 2026-06-15 (the API answers 404 for both; the catalog keeps them as `deprecated`); a schema request on those two ids takes the forced tool.
 
 Opus 5 and later, Sonnet 5 and later, Haiku 5.5, Fable and Mythos think by default. Pass `thinking: false` to turn thinking off: the provider sends `{ type: 'between_tools' }` on `claude-sonnet-5-5` and `{ type: 'disabled' }` on `claude-opus-5`, `claude-sonnet-5` and `claude-haiku-5-5`, and lowers `effort` to `high` on Sonnet 5.5, Opus 5 and Haiku 5.5, which turn thinking off only at that level or below; an `effort` passed through `customModelParams.output_config` is lowered the same way, and the rest of that `output_config` is sent as given. `claude-opus-5-5`, the Fable models and Mythos always think; `thinking: false` sends nothing there and logs a warning once. Older models think only when asked, so `thinking: false` leaves the field out. `effort` follows each model's ladder: `claude-opus-4-5` takes `low`, `medium` and `high`, `claude-opus-4-6` and `claude-sonnet-4-6` add `max`, and later models (`claude-haiku-5-5` among them) take all five levels; a level a model does not take is sent as `high`. `claude-haiku-4-5` takes no `effort`, so the provider leaves it out there. `generateObject` and `streamObject` take the same `thinking` and `effort` options and forward them unchanged; a structured call on a model that thinks by default needs `thinking: false` or room in `maxTokens` for the thinking.
 
-`usage.costUSD` prices cache reads at 0.1x the input price, except Claude Opus 5.5 and Claude Sonnet 5.5 (0.05x) and Claude Fable 5.1 (0.025x), and cache writes at 1.25x for the 5-minute TTL and 2x for the 1-hour TTL, read from the response's `cache_creation` split; a response without the split is priced as 5-minute writes, the TTL a `cache_control` without `ttl` writes with. The 1-hour count reaches the call's usage as `cacheCreationExtendedInputTokens` (`cacheCreationExtendedTokens` on a `generateText()` or `streamText()` result), so a spend budget that prices the tokens itself (a model the catalog lacks, priced at a host's row) prices the two TTLs apart.
+`usage.costUSD` prices cache reads at 0.1x the input price, except Claude Opus 5.5 and Claude Sonnet 5.5 (0.05x) and Claude Fable 5.2 and 5.1 (0.025x), and cache writes at 1.25x for the 5-minute TTL and 2x for the 1-hour TTL, read from the response's `cache_creation` split; a response without the split is priced as 5-minute writes, the TTL a `cache_control` without `ttl` writes with. The 1-hour count reaches the call's usage as `cacheCreationExtendedInputTokens` (`cacheCreationExtendedTokens` on a `generateText()` or `streamText()` result), so a spend budget that prices the tokens itself (a model the catalog lacks, priced at a host's row) prices the two TTLs apart.
 
 A call on the anthropic provider is sent to `ANTHROPIC_BASE_URL` when it is set (`https://api.anthropic.com` form, without `/v1`, as Anthropic's own SDKs read it), after the call's own `baseUrl` and the global default's, as `OPENAI_BASE_URL` routes the openai provider. A value with surrounding whitespace is read trimmed, trailing slashes are dropped before `/v1/messages` is appended, and an empty or whitespace-only value is unset.
 
@@ -554,13 +557,13 @@ import { agent } from '@framers/agentos';
 
 const myAgent = agent({
   provider: 'openrouter',
-  model: 'anthropic/claude-sonnet-4-5-20250929',
+  model: 'anthropic/claude-sonnet-5.5',
 });
 ```
 
 Popular OpenRouter models:
 - `openai/gpt-4o`
-- `anthropic/claude-sonnet-4-5-20250929`
+- `anthropic/claude-sonnet-5.5`
 - `google/gemini-2.5-flash`
 - `meta-llama/llama-3.3-70b-instruct`
 
@@ -583,7 +586,7 @@ import { agent } from '@framers/agentos';
 
 const myAgent = agent({
   provider: 'requesty',
-  model: 'anthropic/claude-sonnet-4-5-20250929',
+  model: 'anthropic/claude-sonnet-5-5',
 });
 ```
 
@@ -601,7 +604,7 @@ import { generateText } from '@framers/agentos';
 
 const { text } = await generateText({
   provider: 'litellm',
-  model: 'anthropic/claude-sonnet-4-6',     // a model name your proxy serves
+  model: 'anthropic/claude-sonnet-5-5',     // a model name your proxy serves
   apiKey: process.env.LITELLM_API_KEY,      // the proxy's master or virtual key
   baseUrl: 'http://localhost:4000/v1',      // the default when omitted
   prompt: 'Hello',
@@ -656,7 +659,7 @@ import { agent } from '@framers/agentos';
 
 const myAgent = agent({
   provider: 'anthropic',
-  model: 'claude-sonnet-4-5-20250929',
+  model: 'claude-sonnet-5-5',
   apiKey: process.env.ANTHROPIC_API_KEY,        // optional override
   baseUrl: undefined,                           // optional custom base URL
 });
@@ -787,11 +790,15 @@ the prefix names, and `onFallback`, the `llm.fallback_fired` line (its
 (`openrouter`, `anthropic/claude-sonnet-4.5`). An Anthropic entry the
 credential layer sends to OpenRouter (`{ provider: 'anthropic', model:
 'claude-sonnet-4-5' }` with no Anthropic key or base URL and
-`OPENROUTER_API_KEY` set) is named the same way, `openrouter` and
-`anthropic/claude-sonnet-4-5`, in both `generateText()` and `streamText()`:
+`OPENROUTER_API_KEY` set) is sent under the slug OpenRouter's model list
+gives it, the version dotted and any `-YYYYMMDD` release date dropped
+(`claude-sonnet-5-5` as `anthropic/claude-sonnet-5.5`,
+`claude-haiku-4-5-20251001` as `anthropic/claude-haiku-4.5`), and is named
+that way, `openrouter` and `anthropic/claude-sonnet-4.5`, in both
+`generateText()` and `streamText()`:
 in `onFallback`, the `llm.fallback_fired`, `llm.fallback_succeeded` and
 `llm.fallback_failed_after_output` lines and the hops; its breaker read is
-OpenRouter's, its capability check judges `anthropic/claude-sonnet-4-5`, and
+OpenRouter's, its capability check judges `anthropic/claude-sonnet-4.5`, and
 an `llm.fallback_skipped` line names the provider and model
 (`fallbackProvider`, `fallbackModel`) the entry would have been sent as. An
 excluded model (`routerParams.excludedModelIds`: a bare id, a
@@ -850,7 +857,7 @@ property limits count a direct caller's `strict: true` tools with the format's
 schema. A forced tool call whose input is the schema, sent without `strict` and
 with `tool_choice` forced on it, carries a schema the format cannot carry (a
 record, say) on every model that accepts a forced tool choice, Claude Sonnet
-4.6 (the provider's default text model), Opus 4.5 to 4.8, Opus 5, Sonnet 4.5,
+4.6, Opus 4.5 to 4.8, Opus 5, Sonnet 4.5,
 Sonnet 5, Haiku 4.5 and Haiku 5.5 among them. It carries every schema on Claude
 Opus 4 and Claude Sonnet 4 (the May 2025 ids, retired on 2026-06-15), which have
 no JSON output format. The call's input is the answer: it becomes the message's

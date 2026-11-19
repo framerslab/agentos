@@ -222,8 +222,8 @@ describe('QueryRouter', () => {
 
     const router = createRouter();
 
-    expect((router as any).getLlmApiKey()).toBe('test-openrouter-key');
-    expect((router as any).getLlmBaseUrl()).toBe('https://openrouter.ai/api/v1');
+    expect((router as any).getLlmApiKey('openai')).toBe('test-openrouter-key');
+    expect((router as any).getLlmBaseUrl('openai')).toBe('https://openrouter.ai/api/v1');
     expect((router as any).getEmbeddingApiKey()).toBe('test-openrouter-key');
     expect((router as any).getEmbeddingBaseUrl()).toBe('https://openrouter.ai/api/v1');
   });
@@ -234,10 +234,22 @@ describe('QueryRouter', () => {
 
     const router = createRouter();
 
-    expect((router as any).getLlmApiKey()).toBe('test-openai-key');
-    expect((router as any).getLlmBaseUrl()).toBeUndefined();
+    expect((router as any).getLlmApiKey('openai')).toBe('test-openai-key');
+    expect((router as any).getLlmBaseUrl('openai')).toBeUndefined();
     expect((router as any).getEmbeddingApiKey()).toBe('test-openai-key');
     expect((router as any).getEmbeddingBaseUrl()).toBeUndefined();
+  });
+
+  it('gives an LLM call that names no provider no key or URL, so generateText picks the provider and its own key together', () => {
+    // generateText detects OpenRouter before OpenAI: a key picked here by
+    // another order would be OpenAI's, sent to OpenRouter.
+    process.env.OPENAI_API_KEY = 'test-openai-key';
+    process.env.OPENROUTER_API_KEY = 'test-openrouter-key';
+
+    const router = createRouter();
+
+    expect((router as any).getLlmApiKey()).toBeUndefined();
+    expect((router as any).getLlmBaseUrl()).toBeUndefined();
   });
 
   // -------------------------------------------------------------------------

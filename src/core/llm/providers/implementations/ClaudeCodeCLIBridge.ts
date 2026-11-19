@@ -207,12 +207,16 @@ export class ClaudeCodeCLIBridge extends CLISubprocessBridge {
       return ClaudeCodeProviderError.requestAborted({ exitCode, stderr });
     }
 
-    /* Timeout */
+    /* Timeout. Claude Haiku 5.5 needs Claude Code 2.1.293 or later, and
+     * Claude Sonnet 5.5 runs from 2.1.284, so a CLI old enough to time out on
+     * the default can refuse the smaller model
+     * (code.claude.com/docs/en/model-config, read 2026-11-19). */
     if (error.timedOut || error.isTerminated) {
       return new ClaudeCodeProviderError(
         `Claude Code CLI timed out.`,
         'TIMEOUT',
-        'Claude Code did not respond in time. Try again or use a smaller model (claude-haiku-4-5-20251001).',
+        'Claude Code did not respond in time. Try again or use a smaller model (claude-haiku-5-5), ' +
+          'which needs Claude Code 2.1.293 or later: run `claude update` first.',
         true,
         { exitCode, stderr },
       );

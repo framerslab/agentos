@@ -219,6 +219,13 @@ describe('resolveModelCatalogEntry', () => {
     expect(resolveModelCatalogEntry(catalog, 'claude-nova-9')).toBeUndefined();
   });
 
+  it('matches a catalog id only up to a boundary, so a dated id is never read as a later model', () => {
+    // `claude-fable-5-2` is the start of the text `claude-fable-5-20260601`, a dated Fable 5 id.
+    const fables = [row('claude-fable-5', 10), row('claude-fable-5-2', 8)];
+    expect(resolveModelCatalogEntry(fables, 'claude-fable-5-20260601')?.modelId).toBe('claude-fable-5');
+    expect(resolveModelCatalogEntry(fables, 'claude-fable-5-2-20261101')?.modelId).toBe('claude-fable-5-2');
+  });
+
   it('prices the real catalog at Opus 5.5 rates for bare and dated Opus 5.5 ids', () => {
     expect(resolveAnthropicModelEntry('claude-opus-5-5')?.pricePer1MTokensInput).toBe(4);
     expect(resolveAnthropicModelEntry('claude-opus-5-5-20260901')?.pricePer1MTokensInput).toBe(4);

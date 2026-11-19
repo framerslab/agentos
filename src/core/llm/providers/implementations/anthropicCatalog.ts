@@ -51,11 +51,13 @@ export interface AnthropicCacheCreationBreakdown {
  * (https://platform.claude.com/docs/en/about-claude/pricing) on 2026-10-18,
  * and every row's input, output, cache-write and cache-hit rates, with the
  * Haiku 5.5 long-context rates, were read against it again on 2026-11-04.
+ * The Claude Fable 5.2 row was read from it on 2026-11-18.
  * A cache hit costs 0.1x the input price except where a row sets
- * `pricePer1MTokensCacheRead`: Opus 5.5 and Sonnet 5.5 (0.05x) and Fable 5.1
- * (0.025x) differ, and Fable 5 states its standard 0.1x rate explicitly so
- * the Fable 5.1 rate is not mistaken for it. Cache writes cost 1.25x the input
- * price at the 5-minute TTL and 2x at the 1-hour TTL on every model; see
+ * `pricePer1MTokensCacheRead`: Opus 5.5 and Sonnet 5.5 (0.05x) and Fable 5.2
+ * and 5.1 (0.025x) differ, and Fable 5 states its standard 0.1x rate
+ * explicitly so the later Fable rate is not mistaken for it. Cache writes
+ * cost 1.25x the input price at the 5-minute TTL and 2x at the 1-hour TTL on
+ * every model; see
  * {@link estimateAnthropicCostUSD}.
  *
  * `outputTokenLimit` is the model's real max output ceiling, surfaced via
@@ -63,8 +65,8 @@ export interface AnthropicCacheCreationBreakdown {
  * not the per-request default: when a caller omits `maxTokens`, the request
  * falls back to `config.defaultMaxTokens`, but a per-call `maxTokens` is
  * clamped to it via `clampAnthropicMaxTokens` in AnthropicProvider. Anthropic's
- * limits: Opus 5.5, Opus 5, Opus 4.6-4.8, Fable 5.1, Fable 5, Sonnet 5.5,
- * Sonnet 5, Sonnet 4.6 and Haiku 5.5 take 128K output with a 1M context; Opus
+ * limits: Opus 5.5, Opus 5, Opus 4.6-4.8, Fable 5.2, Fable 5.1, Fable 5,
+ * Sonnet 5.5, Sonnet 5, Sonnet 4.6 and Haiku 5.5 take 128K output with a 1M context; Opus
  * 4.5, Sonnet 4.5 and Haiku 4.5 take 64K output with a 200K context.
  */
 export const ANTHROPIC_MODELS: AnthropicModelInfo[] = [
@@ -84,10 +86,32 @@ export const ANTHROPIC_MODELS: AnthropicModelInfo[] = [
     status: 'active',
   },
   {
+    // $8 / $40 per MTok with cache hits at $0.20, 0.025x the input price
+    // (pricing page, https://platform.claude.com/docs/en/about-claude/pricing,
+    // model table and its first footnote, read 2026-11-18); 1M context and
+    // 128K output (https://platform.claude.com/docs/en/about-claude/models/overview,
+    // read 2026-11-18). Without this row the provider priced the id by its
+    // longest catalog prefix, Claude Fable 5's row: $10 / $50 with cache hits
+    // at $1, and a host's spend guard found no price for it at all.
+    modelId: 'claude-fable-5-2',
+    providerId: 'anthropic',
+    displayName: 'Claude Fable 5.2',
+    description: "Anthropic's most capable model, for demanding reasoning and long-horizon agentic work. Priced below Claude Fable 5.1.",
+    capabilities: ['chat', 'tool_use', 'vision_input'],
+    contextWindowSize: 1000000,
+    outputTokenLimit: 128000,
+    pricePer1MTokensInput: 8,
+    pricePer1MTokensOutput: 40,
+    // Cache hits and refreshes bill at 0.025x the input price.
+    pricePer1MTokensCacheRead: 0.2,
+    supportsStreaming: true,
+    status: 'active',
+  },
+  {
     modelId: 'claude-fable-5-1',
     providerId: 'anthropic',
     displayName: 'Claude Fable 5.1',
-    description: "Anthropic's most capable model, for demanding reasoning and long-horizon agentic work.",
+    description: 'Previous Fable generation, superseded by Claude Fable 5.2.',
     capabilities: ['chat', 'tool_use', 'vision_input'],
     contextWindowSize: 1000000,
     outputTokenLimit: 128000,
@@ -102,7 +126,7 @@ export const ANTHROPIC_MODELS: AnthropicModelInfo[] = [
     modelId: 'claude-fable-5',
     providerId: 'anthropic',
     displayName: 'Claude Fable 5',
-    description: 'Previous Fable generation, superseded by Claude Fable 5.1.',
+    description: 'First Fable generation, superseded by Claude Fable 5.1 and 5.2.',
     capabilities: ['chat', 'tool_use', 'vision_input'],
     contextWindowSize: 1000000,
     outputTokenLimit: 128000,
@@ -334,8 +358,12 @@ export const ANTHROPIC_MODELS: AnthropicModelInfo[] = [
  * `claude-opus-5` is a prefix of `claude-opus-5-5`. A first-match scan makes
  * the answer depend on array order and can resolve a dated
  * `claude-opus-5-5-…` snapshot to Opus 5's row, pricing it at $5/$25 instead
- * of $4/$20. An id that is itself a prefix of a catalog id, such as the bare
- * alias `claude-haiku-4-5`, resolves to the first catalog id it prefixes.
+ * of $4/$20. A catalog id prefixes `modelId` only up to a boundary: the
+ * character after it is not a letter or a digit. Without that, the Claude
+ * Fable 5.2 row `claude-fable-5-2` would prefix the dated Fable 5 id
+ * `claude-fable-5-20260601` and price it as Fable 5.2. An id that is itself a
+ * prefix of a catalog id, such as the bare alias `claude-haiku-4-5`, resolves
+ * to the first catalog id it prefixes.
  */
 export function resolveAnthropicModelEntry(modelId: string): AnthropicModelInfo | undefined {
   return resolveModelCatalogEntry(ANTHROPIC_MODELS, modelId);
@@ -349,7 +377,7 @@ export function resolveAnthropicModelEntry(modelId: string): AnthropicModelInfo 
  * @param catalog Model rows to search, in any order.
  * @param modelId Caller-supplied model id, bare or dated.
  * @returns The exact row, else the row with the longest id that prefixes
- *   `modelId`, else the first row whose id starts with `modelId`. An empty id
+ *   `modelId` up to a boundary, else the first row whose id starts with `modelId`. An empty id
  *   resolves to nothing: every catalog id starts with `''`, so the last rule
  *   would otherwise price a response with no model echo as the first row.
  */
@@ -362,7 +390,11 @@ export function resolveModelCatalogEntry<T extends ModelInfo>(
   if (exact) return exact;
   let longest: T | undefined;
   for (const m of catalog) {
-    if (modelId.startsWith(m.modelId) && (!longest || m.modelId.length > longest.modelId.length)) {
+    if (
+      modelId.startsWith(m.modelId) &&
+      !/[a-z0-9]/i.test(modelId.charAt(m.modelId.length)) &&
+      (!longest || m.modelId.length > longest.modelId.length)
+    ) {
       longest = m;
     }
   }

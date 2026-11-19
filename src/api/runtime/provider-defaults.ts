@@ -57,8 +57,18 @@ export const PROVIDER_DEFAULTS: Record<string, ProviderDefaults> = {
     cheap: 'gpt-4o-mini',
   },
   anthropic: {
-    text: 'claude-sonnet-4-6',
-    cheap: 'claude-haiku-4-5-20251001',
+    // claude-sonnet-5-5 ($2 input / $10 output per 1M) and claude-haiku-5-5
+    // ($0.10 / $0.50 for a prompt up to 100,000 tokens, $0.50 / $2.50 over
+    // it) are the current Sonnet and Haiku and cost less than the models they
+    // follow here, claude-sonnet-4-6 ($3 / $15) and claude-haiku-4-5-20251001
+    // ($1 / $5) (platform.claude.com/docs/en/about-claude/pricing, read
+    // 2026-11-18). Both think when a call leaves `thinking` out, and their
+    // thinking counts against max_tokens: a call with a small `maxTokens`
+    // passes `thinking: false` or a low `effort`. Both refuse temperature,
+    // top_p, top_k and a thinking budget, and Sonnet 5.5 a forced tool_choice;
+    // AnthropicProvider sends neither model any of them.
+    text: 'claude-sonnet-5-5',
+    cheap: 'claude-haiku-5-5',
   },
   ollama: {
     text: 'llama3.2',
@@ -86,8 +96,10 @@ export const PROVIDER_DEFAULTS: Record<string, ProviderDefaults> = {
     cheap: 'gemini-2.5-flash-lite',
   },
   'claude-code-cli': {
-    text: 'claude-sonnet-4-6',
-    cheap: 'claude-haiku-4-5-20251001',
+    // The models of the `anthropic` entry. The CLI takes a full model name
+    // for `--model` (code.claude.com/docs/en/model-config, read 2026-11-18).
+    text: 'claude-sonnet-5-5',
+    cheap: 'claude-haiku-5-5',
   },
   'gemini-cli': {
     // The CLI answers gemini-2.5-flash with gemini-3.5-flash (probed

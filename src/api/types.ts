@@ -434,7 +434,7 @@ export interface EmergentPlannerConfig {
    * Defaults to a small, cheap model appropriate for the agency's
    * provider:
    * - `openai`     → `gpt-4o-mini`
-   * - `anthropic`  → `claude-haiku-4-5-20251001`
+   * - `anthropic`  → `claude-haiku-5-5`
    * - `gemini`     → `gemini-2.5-flash`
    * - `groq`       → `llama-3.3-70b-versatile`
    * - other        → falls back to the agency-level model

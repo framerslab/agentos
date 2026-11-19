@@ -580,8 +580,11 @@ export interface QueryRouterConfig {
    * takes that provider's own key variable (`MINIMAX_API_KEY` for
    * `minimax`), and none when it is unset, so `generateText` resolves the
    * provider's credentials and no other vendor's key reaches it. An OpenAI
-   * one prefers `OPENAI_API_KEY` and falls back to `OPENROUTER_API_KEY` with
-   * the OpenRouter compatibility base URL.
+   * one takes `OPENAI_API_KEY`, else `OPENROUTER_API_KEY` with the OpenRouter
+   * compatibility base URL, else no key: another vendor's key never reaches
+   * OpenAI. One that names no provider gets no key from the router, and
+   * `generateText` reads the key of the provider it detects. An empty value
+   * counts as omitted.
    */
   apiKey?: string;
 
@@ -855,7 +858,7 @@ function resolveDefaultEmbeddingProvider(): string {
 /** Provider → cheap model mapping for classifier/T0-T1 generation. */
 const CHEAP_MODELS: Record<string, string> = {
   openai: 'gpt-4o-mini',
-  anthropic: 'claude-haiku-4-5-20251001',
+  anthropic: 'claude-haiku-5-5',
   openrouter: 'openai/gpt-4o-mini',
   // gemini-2.0-flash and gemini-2.0-flash-lite are retired (probed 2026-09-29).
   gemini: 'gemini-2.5-flash-lite',
@@ -865,14 +868,14 @@ const CHEAP_MODELS: Record<string, string> = {
   xai: 'grok-2-mini',
   ollama: 'llama3.2',
   minimax: 'MiniMax-M3.1-Flash',
-  'claude-code-cli': 'claude-haiku-4-5-20251001',
+  'claude-code-cli': 'claude-haiku-5-5',
   'gemini-cli': 'gemini-2.5-flash-lite',
 };
 
 /** Provider → strong model mapping for T2/T3 deep generation. */
 const STRONG_MODELS: Record<string, string> = {
   openai: 'gpt-4o',
-  anthropic: 'claude-sonnet-4-6',
+  anthropic: 'claude-sonnet-5-5',
   openrouter: 'openai/gpt-4o',
   gemini: 'gemini-2.5-flash',
   groq: 'llama-3.3-70b-versatile',
@@ -882,7 +885,7 @@ const STRONG_MODELS: Record<string, string> = {
   ollama: 'llama3.2',
   // MiniMax's default text model, as in PROVIDER_DEFAULTS and the mission planner.
   minimax: 'MiniMax-M3.1-Flash',
-  'claude-code-cli': 'claude-sonnet-4-6',
+  'claude-code-cli': 'claude-sonnet-5-5',
   'gemini-cli': 'gemini-3.5-flash',
 };
 
