@@ -389,7 +389,7 @@ The loader reads the soul's files (SOUL.md, STYLE.md, IDENTITY.md, AGENTS.md, ME
 
 ## What Applies on Each Path
 
-What a soul gives an agent depends on how it is loaded:
+What a soul gives an agent depends on how it is loaded. [Which Call to Use](./SOUL_ENTRY_POINTS.md) says which path to pick, and for each one what it stores about a user and which call exports, corrects and deletes it.
 
 | Path | Soul prose and style in the prompt | Index of the operator's pages in the prompt | Front matter applied (traits, mood, hard limits, `agentId`) | Recall each turn (a data block in a user-role message) | `read_memory_page` tool | Wiki compiled |
 |---|---|---|---|---|---|---|
@@ -486,10 +486,11 @@ the same identity. For example:
 - **LangChain / CrewAI / Mastra**: pass `soulContent` as system prompt
 - **Claude Code, OpenCode, Codex, Goose**: point the agent at the workspace folder
 
-Cross-model calibration tip: run the same prompts through both a strong model
-(Claude Opus, GPT-4) and a cheap one (GPT-4o-mini, Llama). Where the cheap
-model drifts off-character, your SOUL.md is too vague: tighten those sections
-and re-test.
+To check that a soul holds its character on more than one model, send one set of
+test messages to the model your agent runs on and to a smaller one, and compare
+the replies. A reply in which the smaller model leaves the character points at a
+section of SOUL.md that says too little: add a specific rule or an example of the
+voice there, then send the set again.
 
 ## What Goes Where
 
