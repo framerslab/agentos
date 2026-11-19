@@ -62,6 +62,26 @@ function recording(db: StorageAdapter, statements: string[]): StorageAdapter {
   });
 }
 
+/** The run a statement takes through `db`, so a case can do something just before it and then send it on. */
+function beforeRun(db: StorageAdapter, before: (statement: string) => Promise<void>): StorageAdapter {
+  return new Proxy(db, {
+    get(target, property, receiver) {
+      if (property === 'run') {
+        return async (statement: string, params?: unknown) => {
+          await before(statement);
+          return Reflect.apply(Reflect.get(target, 'run') as (...args: unknown[]) => unknown, target, [statement, params]);
+        };
+      }
+      const value = Reflect.get(target, property, receiver);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
+
+/**
+ * Registers the cases on `engine`: each engine's test file calls it once, inside its own `describe`, with how it opens,
+ * names, reads and closes its database.
+ */
 export function embeddingStoreCases(engine: EmbeddingStoreEngine): void {
   /** Runs `body` on a fresh database and prefix, with a clock the case moves. */
   async function withStore(
@@ -146,6 +166,57 @@ export function embeddingStoreCases(engine: EmbeddingStoreEngine): void {
       expect(await count('input_sha256 = $1', [HASHES[1]])).toBe(0);
       expect(await count('input_sha256 = $1', [HASHES[0]])).toBe(1);
     });
+  });
+
+  it('deletes a vector of the wrong length only while it holds what was read, so a vector stored meanwhile stays', async () => {
+    const db = await engine.open();
+    const prefix = engine.prefix();
+    try {
+      const writer = new SqlEmbeddingStore({ adapter: db, prefix, clock: () => T0 });
+      await writer.put({ tenant: 'tenant-a' }, MODEL, rows().slice(0, 1));
+      const table = embeddingStoreTables(prefix).vectors;
+      const short = createStorageFeatures(db).blobCodec.encode([0.5, 0.25, 0.125]);
+      await db.run(
+        `INSERT INTO ${table} (tenant_id, model, dimensions, input_sha256, vector, tokens, created_at, last_used_at)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        ['tenant-a', MODEL.model, MODEL.dimensions, HASHES[1], short, 3, T0, T0],
+      );
+      // Between the read and its cleanup, another call stores a good vector under the same key.
+      let repaired = false;
+      const racing = beforeRun(db, async (statement) => {
+        if (repaired || !/^\s*DELETE\b/.test(statement)) return;
+        repaired = true;
+        await writer.put({ tenant: 'tenant-a' }, MODEL, [{ hash: HASHES[1], vector: VECTORS[1] }]);
+      });
+      const reader = new SqlEmbeddingStore({ adapter: racing, prefix, clock: () => T0 });
+      expect([...(await reader.get({ tenant: 'tenant-a' }, MODEL, HASHES)).keys()]).toEqual([HASHES[0]]);
+      expect(repaired).toBe(true);
+      expect((await writer.get({ tenant: 'tenant-a' }, MODEL, [HASHES[1]])).get(HASHES[1])).toEqual(four(VECTORS[1]));
+    } finally {
+      await engine.close(db, prefix);
+    }
+  });
+
+  it('runs a schema statement again when another session made its object first', async () => {
+    const db = await engine.open();
+    const prefix = engine.prefix();
+    try {
+      let lost = 0;
+      // The first two creates find another session's object committed after their check, and fail as Postgres fails
+      // a create that lost that race.
+      const racing = beforeRun(db, async (statement) => {
+        if (lost >= 2 || !/^\s*CREATE\b/.test(statement)) return;
+        lost += 1;
+        await db.run(statement);
+        throw Object.assign(new Error('relation already exists'), { code: '42P07' });
+      });
+      const store = new SqlEmbeddingStore({ adapter: racing, prefix, clock: () => T0 });
+      expect(await store.put({ tenant: 'tenant-a' }, MODEL, rows())).toBe(3);
+      expect(lost).toBe(2);
+      expect((await store.get({ tenant: 'tenant-a' }, MODEL, HASHES)).size).toBe(3);
+    } finally {
+      await engine.close(db, prefix);
+    }
   });
 
   it('removes with remove and removeUnusedSince only the rows of the tenant named', async () => {
