@@ -454,8 +454,8 @@ export interface QueryRouterConfig {
    * Embedding provider name. Without one, the router takes the provider of
    * the first provider key set, as for the classifier, except MiniMax: it
    * publishes no embedding model, so a MiniMax key alone leaves embeddings on
-   * `openai`. A provider other than OpenAI that has a key variable of its own
-   * embeds with that key alone (see `embeddingApiKey`).
+   * `openai`. Each provider embeds with a key of its own vendor alone, or
+   * none (see `embeddingApiKey`).
    * @default 'openai'
    */
   embeddingProvider?: string;
@@ -599,14 +599,18 @@ export interface QueryRouterConfig {
   /**
    * Optional API key override for embeddings only.
    *
-   * When omitted, embeddings fall back to `apiKey` when they use the
-   * classifier's or the generator's provider, and never take it for another
-   * vendor's. Without that, an embedding provider other than OpenAI that has
-   * a key variable of its own takes that key (`GEMINI_API_KEY` for `gemini`,
-   * `MINIMAX_API_KEY` for `minimax`), or none when it is unset, so another
-   * vendor's key never reaches it; an OpenAI one, or one without a key
-   * variable such as Ollama, takes the first provider key set,
-   * `OPENAI_API_KEY` first and `OPENROUTER_API_KEY` last.
+   * An embedding call carries only a key of the vendor it goes to. When
+   * omitted, embeddings fall back to `apiKey` only when the embedding
+   * provider is named and is the classifier's or the generator's provider,
+   * and never take it for another vendor's. Without that, an OpenAI
+   * embedding provider takes `OPENAI_API_KEY`, else `OPENROUTER_API_KEY`
+   * (with the OpenRouter compatibility URL), else no key, and vector
+   * retrieval stays off (`disabled-no-key`): `ANTHROPIC_API_KEY` or another
+   * vendor's key is never sent to OpenAI. An embedding provider other than
+   * OpenAI that has a key variable of its own takes that key
+   * (`GEMINI_API_KEY` for `gemini`, `MINIMAX_API_KEY` for `minimax`), or none
+   * when it is unset. A provider without a key variable, such as Ollama,
+   * takes no key and embeds without one when it has a base URL.
    * This is useful when generation uses an OpenAI-compatible endpoint like
    * OpenRouter but embeddings should stay on a direct OpenAI key.
    */

@@ -1198,8 +1198,11 @@ export class QueryRouter {
     // Quick check: bail out early if there's obviously no API key configured.
     // This avoids the overhead of dynamic imports and provider initialization
     // in test environments and when no embedding provider is available.
+    // A provider with no key variable (Ollama) embeds without a key when it
+    // has a base URL; any other needs a key of its own vendor.
     const embeddingApiKey = this.getEmbeddingApiKey();
-    if (!embeddingApiKey) {
+    const embeddingBaseUrl = this.getEmbeddingBaseUrl();
+    if (!embeddingApiKey && !(this.embeddingProviderIsKeyless() && embeddingBaseUrl)) {
       this.disableVectorRetrieval('disabled-no-key');
       console.debug(
         '[QueryRouter] No embedding API key configured; skipping vector store embedding (keyword fallback active).',
@@ -1221,14 +1224,13 @@ export class QueryRouter {
 
       // --- 1. Initialise the AI model provider manager ---
       const pm = new AIModelProviderManagerClass();
-      const embeddingBaseUrl = this.getEmbeddingBaseUrl();
       await pm.initialize({
         providers: [
           {
             providerId: this.config.embeddingProvider,
             enabled: true,
             config: {
-              apiKey: embeddingApiKey,
+              ...(embeddingApiKey ? { apiKey: embeddingApiKey } : {}),
               // OpenAI's and OpenRouter's providers read `baseURL`, Ollama's either,
               // as resolveProvider hands them both.
               ...(embeddingBaseUrl ? { baseURL: embeddingBaseUrl, baseUrl: embeddingBaseUrl } : {}),
@@ -1567,36 +1569,52 @@ export class QueryRouter {
   }
 
   /**
-   * Whether embeddings go to a provider the classifier or the generator uses,
-   * so the router's `apiKey` and `baseUrl`, which configure those calls,
-   * apply to embeddings too. A key given for one vendor's classifier never
+   * Whether embeddings go to the provider the classifier or the generator
+   * uses, so the router's `apiKey` and `baseUrl`, which configure those
+   * calls, apply to embeddings too. The embedding provider has to be named
+   * and be that same provider: a key given for one vendor's classifier never
    * reaches another vendor's embedding endpoint.
    */
   private embeddingSharesLlmCredentials(): boolean {
     const provider = this.config.embeddingProvider;
-    return !provider || provider === this.config.classifierProvider || provider === this.config.generationProvider;
+    if (!provider) return false;
+    return provider === this.config.classifierProvider || provider === this.config.generationProvider;
   }
 
   /**
-   * Resolve API key for embedding calls.
+   * Whether the embedding provider is named and has no key variable of its
+   * own (Ollama): it is sent no key from the environment, and embeds without
+   * one when it has a base URL.
+   */
+  private embeddingProviderIsKeyless(): boolean {
+    const provider = this.config.embeddingProvider;
+    if (!provider || provider === 'openai') return false;
+    return !providerEnvVars(provider).key;
+  }
+
+  /**
+   * Resolve API key for embedding calls. An embedding call carries only a
+   * key of the vendor it goes to.
    *
    * The embedding-specific key comes first, then the global `apiKey` when
-   * embeddings use the classifier's or the generator's provider. An embedding
-   * provider other than OpenAI that has a key variable of its own then takes
-   * that key alone, or none when it is unset, so another vendor's key never
-   * reaches it (an OpenAI key sent to Gemini or MiniMax). An OpenAI embedding
-   * provider, and one without a key variable (Ollama), scans the provider env
-   * vars in priority order.
+   * embeddings use the classifier's or the generator's provider. Otherwise
+   * an OpenAI embedding provider takes
+   * `OPENAI_API_KEY`, else `OPENROUTER_API_KEY` (sent to OpenRouter's URL,
+   * see {@link getEmbeddingBaseUrl}), else none; another provider with a key
+   * variable of its own takes that key alone, or none when it is unset; a
+   * provider with no key variable (Ollama) takes none. No other vendor's key
+   * is read: with only `ANTHROPIC_API_KEY` set, an OpenAI embedding provider
+   * gets no key and vector retrieval stays off (`disabled-no-key`).
    */
   private getEmbeddingApiKey(): string {
     if (this.config.embeddingApiKey) return this.config.embeddingApiKey;
     if (this.config.apiKey && this.embeddingSharesLlmCredentials()) return this.config.apiKey;
     const provider = this.config.embeddingProvider;
-    if (provider && provider !== 'openai') {
-      const ownKey = providerEnvVars(provider).key;
-      if (ownKey) return process.env[ownKey] || '';
+    if (!provider || provider === 'openai') {
+      return process.env.OPENAI_API_KEY || process.env.OPENROUTER_API_KEY || '';
     }
-    return this.scanProviderEnvKeys();
+    const ownKey = providerEnvVars(provider).key;
+    return (ownKey && process.env[ownKey]) || '';
   }
 
   private getEmbeddingBaseUrl(): string | undefined {
@@ -1636,8 +1654,7 @@ export class QueryRouter {
       return undefined;
     }
 
-    // The URL goes with the OpenRouter key alone: the key scan may have picked
-    // another vendor's key, which must not reach OpenRouter.
+    // The URL goes with the OpenRouter key alone, so no other key reaches OpenRouter.
     if (process.env.OPENROUTER_API_KEY && this.getEmbeddingApiKey() === process.env.OPENROUTER_API_KEY) {
       return 'https://openrouter.ai/api/v1';
     }

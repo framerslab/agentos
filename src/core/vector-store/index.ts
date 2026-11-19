@@ -27,6 +27,9 @@ export type {
   LexicalGroupSearchOptions,
   LexicalGroupSearchResult,
   LexicalMatchKind,
+  PassagePatch,
+  SourcePassageRow,
+  StoredVector,
 } from './IVectorStore.js';
 
 export type {

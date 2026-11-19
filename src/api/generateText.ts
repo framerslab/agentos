@@ -2214,35 +2214,50 @@ const VENDOR_SLUG_GATEWAYS: ReadonlySet<string> = new Set(['openrouter', 'reques
 const RELEASE_DATE_SUFFIX = /-\d{8}$/;
 
 /**
+ * A Claude id with its version written in dashes: Anthropic's API names
+ * Sonnet 5.5 `claude-sonnet-5-5` and OpenRouter names it
+ * `anthropic/claude-sonnet-5.5`, so `claude-sonnet-5.5` reads as
+ * `claude-sonnet-5-5`. Any other id is returned as it is.
+ */
+function claudeVersionInDashes(id: string): string {
+  return id.includes('claude-') ? id.replace(/(\d)\.(?=\d)/g, '$1-') : id;
+}
+
+/**
  * The spellings an exclusion names a model by: the id as written, the id
  * after a known `provider:` prefix, and the id after a known `provider/`
  * prefix, the way {@link resolveModelOption} reads `anthropic/claude-sonnet-4-6`
- * with no provider as Anthropic's `claude-sonnet-4-6`. A colon id keeps its
- * slash, as the model resolution keeps it, so `openrouter:anthropic/<model>`
- * names OpenRouter's slug and not Anthropic's own API.
+ * with no provider as Anthropic's `claude-sonnet-4-6`; and each of those with
+ * a Claude version in dashes (see {@link claudeVersionInDashes}), so
+ * OpenRouter's `claude-sonnet-5.5` names Anthropic's `claude-sonnet-5-5` too.
+ * A colon id keeps its slash, as the model resolution keeps it, so
+ * `openrouter:anthropic/<model>` names OpenRouter's slug and not Anthropic's
+ * own API.
  */
 function exclusionSpellings(id: string): string[] {
   const spellings = [id];
   const colonPrefix = knownProviderPrefixOf(id);
   if (colonPrefix) {
     spellings.push(id.slice(colonPrefix.length + 1));
-    return spellings;
+  } else {
+    const slash = id.includes(':') ? -1 : id.indexOf('/');
+    if (slash > 0 && Object.prototype.hasOwnProperty.call(PROVIDER_DEFAULTS, id.slice(0, slash))) {
+      spellings.push(id.slice(slash + 1));
+    }
   }
-  const slash = id.includes(':') ? -1 : id.indexOf('/');
-  if (slash > 0 && Object.prototype.hasOwnProperty.call(PROVIDER_DEFAULTS, id.slice(0, slash))) {
-    spellings.push(id.slice(slash + 1));
-  }
-  return spellings;
+  return [...spellings, ...spellings.map(claudeVersionInDashes)];
 }
 
 /**
  * The ids a fallback leg is matched against an exclusion by: its model as
  * written, as the model resolution names it, and as it is sent; on a gateway
- * that names models `vendor/model`, the sent id after the vendor; and each of
- * those without a `-YYYYMMDD` release date. So a leg sent to OpenRouter as
+ * that names models `vendor/model`, the sent id after the vendor; each of
+ * those without a `-YYYYMMDD` release date; and each with a Claude version in
+ * dashes (see {@link claudeVersionInDashes}). So a leg sent to OpenRouter as
  * `anthropic/claude-haiku-4-5` is matched by `claude-haiku-4-5` however its
- * entry is written, and an entry's verdict does not change with the key that
- * decides where it is sent.
+ * entry is written, Anthropic's `claude-sonnet-5-5` and OpenRouter's
+ * `anthropic/claude-sonnet-5.5` are matched by both spellings, and an entry's
+ * verdict does not change with the key that decides where it is sent.
  */
 function legMatchIds(
   entry: FallbackProviderEntry,
@@ -2252,9 +2267,11 @@ function legMatchIds(
   const ids = new Set<string>();
   const add = (id: string | undefined): void => {
     if (!id) return;
-    ids.add(id);
-    const dateless = id.replace(RELEASE_DATE_SUFFIX, '');
-    if (dateless !== id) ids.add(dateless);
+    for (const spelling of new Set([id, claudeVersionInDashes(id)])) {
+      ids.add(spelling);
+      const dateless = spelling.replace(RELEASE_DATE_SUFFIX, '');
+      if (dateless !== spelling) ids.add(dateless);
+    }
   };
   add(entry.model);
   add(resolvedModel);
@@ -2275,7 +2292,9 @@ function legMatchIds(
  * written, as the model resolution names it (the provider's default when the
  * entry names none, a prefix split off) or as it is sent names it, a
  * gateway's `vendor/model` id read also as the model after the vendor, and
- * every id also without a `-YYYYMMDD` release date (see {@link legMatchIds});
+ * every id also without a `-YYYYMMDD` release date and with a Claude version
+ * in dashes, so `claude-sonnet-5.5` and `claude-sonnet-5-5` skip the same
+ * legs (see {@link legMatchIds});
  * the uncensored group's first two remaining entries become standing legs and
  * the rest refills. Caller-written entries keep their order.
  *
