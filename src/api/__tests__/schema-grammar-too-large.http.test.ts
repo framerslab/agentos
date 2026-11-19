@@ -62,7 +62,11 @@ const unexpected: string[] = [];
 const outside: string[] = [];
 const logged: Record<string, unknown>[] = [];
 
-/** How the server answers a request that carries the layout schema in its format. */
+/**
+ * How the server answers a request that carries the layout schema in its format. OpenRouter answers a Claude
+ * endpoint's refusal with HTTP 400, streamed or not, its message "Provider returned error" and Anthropic's own body
+ * as `metadata.raw` (read from a live refused call on 2026-11-19).
+ */
 let refusal: { status: number; message: string; openRouterRaw?: boolean } = { status: 400, message: GRAMMAR_MESSAGE };
 /** The JSON the model writes. */
 let answer = '{}';
@@ -264,7 +268,7 @@ function withoutFormat(body: Record<string, unknown>): Record<string, unknown> {
   return Object.keys(keptConfig).length > 0 ? { ...rest, output_config: keptConfig } : rest;
 }
 
-const layoutCall = (model: string) =>
+const layoutCall = (model: string, extra: Record<string, unknown> = {}) =>
   generateObject({
     provider: 'anthropic',
     model,
@@ -276,7 +280,16 @@ const layoutCall = (model: string) =>
     prompt: PROMPT,
     thinking: false,
     maxRetries: 0,
+    ...extra,
   });
+
+/** A strict tool a direct caller sends beside the schema; the vendor counts it toward the same grammar. */
+const STRICT_LOOKUP = {
+  name: 'lookup',
+  description: 'Look a place up.',
+  strict: true,
+  input_schema: { type: 'object', properties: { q: { type: 'string' } }, required: ['q'], additionalProperties: false },
+};
 
 describe('Anthropic: a schema the JSON output format refuses as too large', () => {
   it('is sent once more on the prompt route, and generateObject returns the validated object', async () => {
@@ -345,6 +358,47 @@ describe('Anthropic: a schema the JSON output format refuses as too large', () =
     expect(warned.filter((line) => line.includes('rides the prompt alone'))).toEqual([]);
   });
 
+  it('keeps the re-send inside the call\'s maxAttempts, and still remembers the refusal', async () => {
+    answer = JSON.stringify(LAYOUT);
+
+    await expect(layoutCall(CLAUDE, { maxAttempts: 1 })).rejects.toThrow(/compiled grammar is too large/);
+    expect(messagesPosts()).toHaveLength(1);
+    expect(refusalLines()).toHaveLength(1);
+
+    received.length = 0;
+    const next = await layoutCall(CLAUDE, { maxAttempts: 1 });
+    expect(next.object).toEqual(LAYOUT);
+    expect(messagesPosts()).toHaveLength(1);
+    expect(formatOf(messagesPosts()[0])).toBeUndefined();
+  });
+
+  it('drops a passthrough output format on the re-send and keeps the rest of output_config', async () => {
+    answer = JSON.stringify(LAYOUT);
+
+    const result = await layoutCall(CLAUDE, {
+      customModelParams: { output_config: { effort: 'low', format: { type: 'json_schema', schema: { type: 'object' } } } },
+    });
+
+    expect(result.object).toEqual(LAYOUT);
+    const [, retried] = messagesPosts();
+    expect(messagesPosts()).toHaveLength(2);
+    expect(formatOf(retried)).toBeUndefined();
+    expect((retried.output_config as { effort?: string }).effort).toBe('low');
+  });
+
+  it('remembers a refusal with strict tools beside the schema apart from the schema alone', async () => {
+    answer = JSON.stringify(LAYOUT);
+
+    await layoutCall(CLAUDE, { customModelParams: { tools: [STRICT_LOOKUP] } });
+    expect(messagesPosts()).toHaveLength(2);
+
+    // The same schema without the strict tool is another request: it still goes on the format first.
+    received.length = 0;
+    await layoutCall(CLAUDE);
+    expect(messagesPosts()).toHaveLength(2);
+    expect(formatOf(messagesPosts()[0])).toBeDefined();
+  });
+
   it('keeps any other 400 as it was: no second request, the error reaches the caller', async () => {
     refusal = {
       status: 400,
@@ -409,6 +463,7 @@ describe('OpenRouter: a Claude model refuses the strict json_schema as too large
 
   it('is sent once more as json_object, with the schema in its system prompt, and remembered', async () => {
     answer = JSON.stringify(LAYOUT);
+    refusal = { status: 400, message: GRAMMAR_MESSAGE, openRouterRaw: true };
 
     const result = await openRouterCall();
 
@@ -432,9 +487,8 @@ describe('OpenRouter: a Claude model refuses the strict json_schema as too large
     expect(JSON.stringify(logged)).not.toContain(OPENROUTER_KEY);
   });
 
-  it('reads the refusal from the upstream body OpenRouter wraps, on the stream path too', async () => {
+  it('reads the refusal from the message as well, on the stream path too', async () => {
     answer = JSON.stringify(LAYOUT);
-    refusal = { status: 400, message: GRAMMAR_MESSAGE, openRouterRaw: true };
     const responseFormat = buildResponseFormat({ provider: 'openai', schema: Layout, schemaName: 'RaceTrackLayout' });
 
     const provider = new OpenRouterProvider();
