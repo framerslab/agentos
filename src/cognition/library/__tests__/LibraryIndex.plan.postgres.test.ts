@@ -162,8 +162,9 @@ describe.skipIf(!URL)('LibraryIndex by content over PostgresVectorStore on Postg
     for (const vector of found.values()) expect(vector).toHaveLength(4);
     const read = statements.find((sql) => sql.includes('embedding::text'));
     expect(read).toBeDefined();
-    expect(read).toContain("metadata_json->>'tenantId' = $");
-    expect(read).toContain("metadata_json->>'embedModel' = $");
+    // The scope and the model compared as JSON values, in the statement.
+    expect(read).toContain("metadata_json->'tenantId' = $");
+    expect(read).toContain("metadata_json->'embedModel' = $");
     expect(read).toContain('aclGroups');
     // Asked for another tenant's passages alone, the statement answers no row.
     expect((await library.passageVectors(theirs, ANN, MODEL)).size).toBe(0);
