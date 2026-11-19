@@ -864,6 +864,15 @@ export interface ForgeToolRequest {
    * At least one test case is required for the forge request to be accepted.
    */
   testCases: [ForgeTestCase, ...ForgeTestCase[]];
+
+  /**
+   * Optional: the forging agent's own statement of the gap the tool fills, a
+   * string when the agent follows the description in forge_tool's input
+   * schema. Any JSON value is accepted. The forge's trace records it: a string
+   * as given, cut to its cap; any other value as its JSON-safe text; a cut one
+   * with its path in the trace's `sizes.cut`. The judge does not read it.
+   */
+  justification?: unknown;
 }
 
 /**

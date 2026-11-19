@@ -23,6 +23,16 @@ import type { ForgeToolRequest, ForgeResult, ForgeTestResponse } from './types.j
 import type { EmergentCapabilityEngine } from './EmergentCapabilityEngine.js';
 import { InvalidToolNameError, forgedToolNameProblem } from './ToolName.js';
 import { refusedSelfChange, selfChangeRefusal } from '../learning/toolContext.js';
+import {
+  FORGE_TRACE_DELIVER,
+  buildForgeTrace,
+  forgeCallScope,
+  forgeContextRecords,
+  newForgeCallRecord,
+  settleForgeTrace,
+  thrownReason,
+} from './ForgeTrace.js';
+import type { ForgeCallAuthor, ForgeCallRecord, ForgeTrace, KnownForgeTraceStage } from './ForgeTrace.js';
 
 // ============================================================================
 // INPUT TYPE
@@ -71,6 +81,73 @@ export interface ForgeToolInput extends Record<string, any> {
     stepOutputs?: Record<string, unknown>;
     responses?: ForgeTestResponse[];
   }>;
+
+  /**
+   * Optional: the forging agent's own statement of the gap the tool fills, a
+   * string when the agent follows the schema's description. Any JSON value is
+   * accepted. The forge's trace records it: a string as given, cut to its cap;
+   * any other value as its JSON-safe text; a cut one with its path in the
+   * trace's `sizes.cut`. The judge does not read it.
+   */
+  justification?: unknown;
+}
+
+/** The ids a forge's trace names, read from forge_tool's call context. */
+interface ForgeCallIds {
+  agentId: string | null;
+  sessionId: string | null;
+  correlationId: string | null;
+}
+
+/**
+ * The ids forge_tool hands the engine (the persona and the correlation id, or
+ * `'unknown'`), and the call's session id when it is a string, so a forge's ids
+ * read the same whichever layer ends it. A field that cannot be read is null.
+ */
+function forgeCallIds(context: ToolExecutionContext | undefined): ForgeCallIds {
+  const read = (pick: () => unknown): unknown => {
+    try {
+      return pick();
+    } catch {
+      return null;
+    }
+  };
+  const agentId = read(() => context?.personaId ?? 'unknown');
+  const correlationId = read(() => context?.correlationId ?? 'unknown');
+  const sessionId = read(() => context?.sessionData?.sessionId);
+  return {
+    agentId: typeof agentId === 'string' ? agentId : null,
+    sessionId: typeof sessionId === 'string' ? sessionId : null,
+    correlationId: typeof correlationId === 'string' ? correlationId : null,
+  };
+}
+
+/**
+ * Who wrote a forge_tool call's request: a model called forge_tool, so the
+ * request is model-written. The answering model on the call's context wins;
+ * else the author an outer layer set on the record; else a model whose
+ * provider and model are unknown.
+ */
+function forgingAgentAuthor(
+  context: ToolExecutionContext | undefined,
+  set: ForgeCallAuthor | undefined,
+): ForgeCallAuthor {
+  try {
+    const answered: unknown = context?.callerModel;
+    if (answered !== null && typeof answered === 'object') {
+      const { providerId, modelId } = answered as { providerId?: unknown; modelId?: unknown };
+      return {
+        kind: 'model',
+        role: 'forging_agent',
+        provider: typeof providerId === 'string' ? providerId : null,
+        model: typeof modelId === 'string' ? modelId : null,
+        modelSource: 'answered',
+      };
+    }
+  } catch {
+    // A getter that throws: the answering model cannot be read.
+  }
+  return set ?? { kind: 'model', role: 'forging_agent', provider: null, model: null, modelSource: null };
 }
 
 // ============================================================================
@@ -247,6 +324,10 @@ export class ForgeToolMetaTool implements ITool<ForgeToolInput, ForgeResult> {
         },
         minItems: 1,
       },
+      // No type: any JSON value is accepted, so no forge is refused for it. The trace keeps it; the judge never reads it.
+      justification: {
+        description: 'Optional: What gap this tool fills that no tool you already have covers, in one to three sentences.',
+      },
     },
     required: ['name', 'description', 'inputSchema', 'implementation', 'testCases'],
   };
@@ -285,8 +366,14 @@ export class ForgeToolMetaTool implements ITool<ForgeToolInput, ForgeResult> {
    * Extracts the agent ID and session/correlation ID from the execution context
    * and delegates to {@link EmergentCapabilityEngine.forge}.
    *
+   * Every call ends with one trace of the forge. The engine records the forges
+   * it runs; forge_tool records the ones it refuses before the engine runs (a
+   * self-change refusal, a refused name, a missing description) and the ones
+   * its own code throws on, and hands each to the engine's `onForgeTrace`. The
+   * result the model reads is the same either way.
+   *
    * @param args - The forge tool input arguments (name, description, schemas,
-   *   implementation, test cases).
+   *   implementation, test cases, and the optional justification).
    * @param context - The tool execution context providing agent and session IDs.
    * @returns A {@link ToolExecutionResult} wrapping the {@link ForgeResult}
    *   without its `trace`, which the model never reads.
@@ -295,50 +382,120 @@ export class ForgeToolMetaTool implements ITool<ForgeToolInput, ForgeResult> {
     args: ForgeToolInput,
     context: ToolExecutionContext
   ): Promise<ToolExecutionResult<ForgeResult>> {
-    // The freeze, then the turn's mode, then its learner: refused before the engine runs (docs/GMI.md, "Learning").
-    const refusal = selfChangeRefusal(context.sessionData);
-    if (refusal) return refusedSelfChange(this.name, refusal);
+    // The call's record: the one an outer layer runs this call under, when no
+    // forge_tool has taken it yet; else one of this call's own. Taken and seen
+    // in one step.
+    const scoped = forgeCallScope.getStore();
+    const record = scoped && !scoped.seen ? scoped : newForgeCallRecord();
+    record.seen = true;
+    record.author = forgingAgentAuthor(context, record.author);
 
-    // Validate required fields before delegating to the engine.
-    // The LLM may omit or mistype fields; catching this early produces
-    // a clear error instead of a cryptic downstream failure.
-    // The name names the tool's folder when the tool is exported as a skill, so a name the forge's rule refuses
-    // is refused here with its typed details, before the engine runs. The engine holds a direct forge to the same
-    // rule. A missing, empty or non-string name keeps its own message, with the same details as any other refusal.
-    const nameProblem = forgedToolNameProblem(args.name);
-    if (nameProblem) {
-      const refused = new InvalidToolNameError(nameProblem, args.name);
-      return {
-        success: false,
-        error:
-          nameProblem === 'type' || nameProblem === 'empty'
-            ? 'name is required and must be a string'
-            : refused.message,
-        details: { code: refused.code, problem: refused.problem },
+    try {
+      // The freeze, then the turn's mode, then its learner: refused before the engine runs (docs/GMI.md, "Learning").
+      const refusal = selfChangeRefusal(context.sessionData);
+      if (refusal) {
+        return await this.refuse(record, 'self_change_refused', args, context, refusedSelfChange(this.name, refusal));
+      }
+
+      // Validate required fields before delegating to the engine.
+      // The LLM may omit or mistype fields; catching this early produces
+      // a clear error instead of a cryptic downstream failure.
+      // The name names the tool's folder when the tool is exported as a skill, so a name the forge's rule refuses
+      // is refused here with its typed details, before the engine runs. The engine holds a direct forge to the same
+      // rule. A missing, empty or non-string name keeps its own message, with the same details as any other refusal.
+      const nameProblem = forgedToolNameProblem(args.name);
+      if (nameProblem) {
+        const refused = new InvalidToolNameError(nameProblem, args.name);
+        return await this.refuse(record, 'name_refused', args, context, {
+          success: false,
+          error:
+            nameProblem === 'type' || nameProblem === 'empty'
+              ? 'name is required and must be a string'
+              : refused.message,
+          details: { code: refused.code, problem: refused.problem },
+        });
+      }
+      if (!args.description || typeof args.description !== 'string') {
+        return await this.refuse(record, 'description_missing', args, context, {
+          success: false,
+          error: 'description is required and must be a string',
+        });
+      }
+
+      const engineContext = {
+        // The agent identity of a forged tool is the persona that forged it: a
+        // GMI instance id is minted per session, so a tool owned by one would
+        // be callable in no later session. Nullish coalescing (??), not ||, so
+        // an empty string is kept as given.
+        agentId: context.personaId ?? 'unknown',
+        sessionId: context.correlationId ?? 'unknown',
+        // A composition's test steps run as this caller.
+        caller: context,
       };
-    }
-    if (!args.description || typeof args.description !== 'string') {
-      return { success: false, error: 'description is required and must be a string' };
-    }
+      // The engine records the forge under this call's record and delivers its
+      // trace once.
+      forgeContextRecords.set(engineContext, record);
+      const result = await this.engine.forge(args as unknown as ForgeToolRequest, engineContext);
 
-    const result = await this.engine.forge(args as unknown as ForgeToolRequest, {
-      // The agent identity of a forged tool is the persona that forged it: a
-      // GMI instance id is minted per session, so a tool owned by one would
-      // be callable in no later session. Nullish coalescing (??), not ||, so
-      // an empty string is kept as given.
-      agentId: context.personaId ?? 'unknown',
-      sessionId: context.correlationId ?? 'unknown',
-      // A composition's test steps run as this caller.
-      caller: context,
+      // The trace is for the host, never for the model: the output is the result
+      // without it, its other keys in their order.
+      const { trace: _trace, ...forgeResult } = result;
+      return {
+        success: forgeResult.success,
+        output: forgeResult,
+        error: forgeResult.error,
+      };
+    } catch (error: unknown) {
+      // A throw from forge_tool's own code has no trace yet: this layer records
+      // it. One from the engine was recorded there. Either way the caller gets
+      // back the value that was thrown.
+      if (record.trace === undefined) {
+        await this.settleOwnTrace(record, 'thrown', thrownReason(error), args, context);
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Hands a forge's trace to the engine's `onForgeTrace` and writes the
+   * forge's log line, through the engine's own delivery. Never throws.
+   *
+   * @param trace - The forge's trace.
+   * @internal
+   */
+  async [FORGE_TRACE_DELIVER](trace: ForgeTrace): Promise<void> {
+    return this.engine[FORGE_TRACE_DELIVER](trace);
+  }
+
+  /** Records and delivers a refusal of forge_tool's own, and returns the refusal as it is. */
+  private async refuse(
+    record: ForgeCallRecord,
+    stage: KnownForgeTraceStage,
+    args: unknown,
+    context: ToolExecutionContext,
+    refusal: ToolExecutionResult<ForgeResult>,
+  ): Promise<ToolExecutionResult<ForgeResult>> {
+    await this.settleOwnTrace(record, stage, refusal.error, args, context);
+    return refusal;
+  }
+
+  /** Builds the trace of a forge forge_tool ended, keeps it on the call's record and delivers it once. */
+  private async settleOwnTrace(
+    record: ForgeCallRecord,
+    stage: KnownForgeTraceStage,
+    reason: unknown,
+    args: unknown,
+    context: ToolExecutionContext | undefined,
+  ): Promise<void> {
+    const trace = buildForgeTrace({
+      record,
+      recordedBy: 'forge_tool',
+      via: 'forge_tool',
+      stage,
+      reason,
+      args,
+      ...forgeCallIds(context),
     });
-
-    // The trace is for the host, never for the model: the output is the result
-    // without it, its other keys in their order.
-    const { trace: _trace, ...forgeResult } = result;
-    return {
-      success: forgeResult.success,
-      output: forgeResult,
-      error: forgeResult.error,
-    };
+    await settleForgeTrace(record, trace, (kept) => this[FORGE_TRACE_DELIVER](kept));
   }
 }
