@@ -274,6 +274,73 @@ describe('LibraryIndex indexes a source by content', () => {
     expect(await store.listSourcePassages('library', 'document:d1#part')).toEqual(before);
   });
 
+  it('replaces a source under one source lock on a store that cannot plan by content, so two plans applied at once leave one set of rows', async () => {
+    let pause: { gate: Promise<void>; reached: () => void } | null = null;
+    // A store with the source lock and none of the members a plan by content reads; its next upsert waits on a gate.
+    const locking: IVectorStore = {
+      initialize: async () => {},
+      upsert: async (collection, documents, options) => {
+        const held = pause;
+        if (held) {
+          pause = null;
+          held.reached();
+          await held.gate;
+        }
+        return store.upsert(collection, documents, options);
+      },
+      query: (collection, vector, options) => store.query(collection, vector, options),
+      delete: (collection, ids, options) => store.delete(collection, ids, options),
+      withSourceLock<T>(collection: string, sourceId: string, work: (held: IVectorStore) => Promise<T>, options?: { tenantId?: string }): Promise<T> {
+        return store.withSourceLock(collection, sourceId, () => work(locking), options);
+      },
+      checkHealth: async () => ({ isHealthy: true }),
+      shutdown: async () => {},
+    };
+    library = new LibraryIndex({ store: locking, collection: 'library', embed, dimensions: 4 });
+    const source = documentSource({ passages: passages(3) });
+    const first = await library.planSource(source, { embedding: MODEL, inputs: texts(source) });
+    const second = await library.planSource(source, { embedding: MODEL, inputs: texts(source) });
+    expect(first.digest).toBeNull();
+    let open: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    let reached: () => void = () => {};
+    const atWrite = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    pause = { gate, reached };
+    const applyingFirst = library.applySourcePlan(first, await embed([...first.toEmbed]));
+    let applyingSecond: Promise<unknown> = Promise.resolve();
+    try {
+      await atWrite;
+      // The first plan has deleted the source and waits to write; the second is applied now.
+      applyingSecond = library.applySourcePlan(second, await embed([...second.toEmbed]));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    } finally {
+      open();
+      await Promise.allSettled([applyingFirst, applyingSecond]);
+    }
+    await applyingFirst;
+    await applyingSecond;
+    expect((await stored()).map((row) => row.id).sort()).toEqual(second.rows.map((row) => row.id).sort());
+  });
+
+  it("drops the planning hashes from the metadata indexSource is given, so a later plan never reuses another text's vector", async () => {
+    // A passage of text A indexed by content, whose metadata carries A's input hash, text hash, model and size.
+    const a = 'The budget doubled in March.';
+    const b = 'The plan moved to June.';
+    await index(documentSource({ sourceId: 'document:a', passages: [{ text: a }] }));
+    const [row] = await store.listSourcePassages('library', 'document:a');
+    const copied = Object.fromEntries(['inputHash', 'textHash', 'embedModel', 'embedDimensions'].map((key) => [key, row.metadata[key]]));
+    // indexSource of text B with A's metadata copied onto it.
+    await library.indexSource(documentSource({ passages: [{ text: b, metadata: copied as Record<string, string | number> }] }));
+    // A plan of text A for that source must embed A: the row holds B's text and B's vector.
+    const plan = await library.planSource(documentSource({ passages: [{ text: a }] }), { embedding: MODEL, inputs: [a] });
+    expect(plan.toEmbed).toEqual([a]);
+    expect(plan.counts).toMatchObject({ embed: 1, reuse: 0, rewrite: 0 });
+  });
+
   it('removes a tenant only once a plan being applied for one of its sources has written, so none of its passages is left', async () => {
     /** A store whose next upsert waits on a gate, telling the test when it is reached. */
     class PausingStore extends InMemoryVectorStore {
