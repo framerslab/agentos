@@ -78,6 +78,15 @@ const chunks = await new ChunkingEngine().chunk(text, { strategy: 'anchored', ch
 2. The pieces are packed into passages in order. A passage ends after a piece whose SHA-256 (of its UTF-8) has a first byte divisible by 4, an anchor decided by the piece's own words and about one piece in four, or before a piece that would take it past `chunkSize`. Packing starts again after each anchor, so an edit changes only the passages from the anchor before it to the first anchor after it; every later passage keeps its text, and only its offsets move. An edit that makes or removes an anchor splits or merges the runs beside it.
 3. There is no overlap; `chunkOverlap` is ignored. `start` and `end` are offsets in UTF-16 code units into the text given. `edges.first` and `edges.last` are false on a side where a sentence or a word was cut to fit.
 
+A text of many short blocks (a list with an empty line between its items, a chat export) has an anchor every few lines, so every anchor ending a passage gives passages of a few dozen units, each embedded and stored. `minChunkSize` sets the fewest units a passage holds before an anchor may end it:
+
+```ts
+const chunks = await new ChunkingEngine().chunk(text, { strategy: 'anchored', chunkSize: 1200, minChunkSize: 400 });
+// four hundred twenty-unit list items: 19 passages of 400 units or more, where every anchor ending one gives 118
+```
+
+A heading, a piece that would take the passage past `chunkSize`, and the text's end still end a passage sooner. A passage too short at an anchor reads on to the next, so an edit can move the boundaries after it until a passage ends at an anchor where one ended before; from there every later passage keeps its text, as it does with no minimum. `minChunkSize` is a whole number from 0 to `chunkSize` (a `RangeError` otherwise); 0, the default, makes every anchor end its passage.
+
 With `markdown: true`, a heading line (`#` to `######` at a line's start) always starts a passage, and every passage of its section carries `heading`, `metadata.headingLevel` and `metadata.ancestorHeadings` as `'hierarchical'` gives them. A heading line longer than `chunkSize` is cut as a long sentence is; its first piece starts the passage, and every passage it fills carries its section.
 
 ## Snippets
