@@ -30,6 +30,7 @@ import type {
   EmergentTool,
   ForgeTestRun,
 } from './types.js';
+import { jsonSafeCopy, type ForgeTraceJudgeDetail } from './ForgeTrace.js';
 import type { JSONSchemaObject } from '../../core/tools/ITool.js';
 
 // ============================================================================
@@ -122,6 +123,13 @@ export interface EmergentJudgeConfig {
   generateText: (model: string, prompt: string) => Promise<string>;
 
   /**
+   * The provider the host's `generateText` calls for the judge, written into a forge trace's provenance as the
+   * verdict's provider. Absent means AgentOS does not know it, and the trace says `null`.
+   * @example "openai"
+   */
+  providerId?: string;
+
+  /**
    * Optional structured callback that receives a stable `system` prefix and
    * a candidate-specific `user` payload separately. When supplied, the
    * judge prefers this path over {@link generateText} so hosts can attach
@@ -167,6 +175,91 @@ interface PromotionReviewerResponse {
   approved: boolean;
   confidence: number;
   reasoning: string;
+}
+
+// ============================================================================
+// INTERNAL: THE REPLY'S DETAIL AND THE PROMPT'S TEST OUTPUTS
+// ============================================================================
+
+/** `value[key]` when `value` is a non-null object; `undefined` otherwise. A parsed reply holds plain data only. */
+function replyField(value: unknown, key: string): unknown {
+  return typeof value === 'object' && value !== null ? (value as Record<string, unknown>)[key] : undefined;
+}
+
+/** The reply's boolean, or `null` when its value is not a boolean. */
+function replyBoolean(value: unknown): boolean | null {
+  return typeof value === 'boolean' ? value : null;
+}
+
+/** A reply text: a string as given, any other value as its JSON text. */
+function replyText(value: unknown): string {
+  return typeof value === 'string' ? value : (JSON.stringify(jsonSafeCopy(value)) ?? 'null');
+}
+
+/** A reply text that may be absent: `null` for `undefined` and `null`, else {@link replyText}. */
+function replyTextOrNull(value: unknown): string | null {
+  return value === undefined || value === null ? null : replyText(value);
+}
+
+/** The detail of a review whose reply was never read: the call failed, or the reply did not parse. */
+function unreadReplyDetail(
+  judgeModel: string | null,
+  judgeError: 'llm_call_failed' | 'reply_unparsable',
+): ForgeTraceJudgeDetail {
+  return {
+    judgeModel,
+    replyParsed: false,
+    judgeError,
+    judgeApproved: null,
+    safetyPassed: null,
+    safetyConcerns: [],
+    correctnessPassed: null,
+    failedTests: [],
+    deterministic: null,
+    determinismReasoning: null,
+    bounded: null,
+    boundedReasoning: null,
+  };
+}
+
+/** The detail of a parsed reply: its own fields, whole, as {@link EmergentJudge.reviewCreationWithDetail} names them. */
+function parsedReplyDetail(parsed: unknown, judgeModel: string | null): ForgeTraceJudgeDetail {
+  const safety = replyField(parsed, 'safety');
+  const correctness = replyField(parsed, 'correctness');
+  const determinism = replyField(parsed, 'determinism');
+  const bounded = replyField(parsed, 'bounded');
+  const concerns = replyField(safety, 'concerns');
+  const failedTests = replyField(correctness, 'failedTests');
+  return {
+    judgeModel,
+    replyParsed: true,
+    judgeError: null,
+    judgeApproved: replyBoolean(replyField(parsed, 'approved')),
+    safetyPassed: replyBoolean(replyField(safety, 'passed')),
+    safetyConcerns: Array.isArray(concerns) ? concerns.map(replyText) : [],
+    correctnessPassed: replyBoolean(replyField(correctness, 'passed')),
+    failedTests: Array.isArray(failedTests)
+      ? failedTests.filter((entry): entry is number => typeof entry === 'number' && Number.isFinite(entry))
+      : [],
+    deterministic: replyBoolean(replyField(determinism, 'likely')),
+    determinismReasoning: replyTextOrNull(replyField(determinism, 'reasoning')),
+    bounded: replyBoolean(replyField(bounded, 'likely')),
+    boundedReasoning: replyTextOrNull(replyField(bounded, 'reasoning')),
+  };
+}
+
+/**
+ * A test output as the creation prompt writes it: its `JSON.stringify` text, byte for byte. Only when
+ * `JSON.stringify` throws on it (a BigInt, a cycle, a `toJSON` that throws) is it written as the JSON text of its
+ * JSON-safe copy, which holds a marker in each such place, so the forge is judged rather than thrown. The copy is not
+ * used for any other output: it would write a marker where `JSON.stringify` drops a function-valued key.
+ */
+function promptOutputText(output: unknown): string {
+  try {
+    return JSON.stringify(output);
+  } catch {
+    return JSON.stringify(jsonSafeCopy(output));
+  }
 }
 
 // ============================================================================
@@ -244,13 +337,44 @@ export class EmergentJudge {
    *   per-dimension scores and reasoning.
    */
   async reviewCreation(candidate: ToolCandidate): Promise<CreationVerdict> {
+    return (await this.reviewCreationWithDetail(candidate)).verdict;
+  }
+
+  // --------------------------------------------------------------------------
+  // PUBLIC: reviewCreationWithDetail
+  // --------------------------------------------------------------------------
+
+  /**
+   * The creation review of {@link reviewCreation}, with the reply's own fields that its verdict drops.
+   *
+   * Makes the same one call and returns the same verdict: approved only when the reply's `safety.passed` and
+   * `correctness.passed` are both `true`, with `determinism` and `bounded` at 1.0 or 0.5. Beside it, `detail` holds
+   * what the reply said for itself: its own `approved`, each pass and likely flag (null when the reply's value is not
+   * a boolean), every safety concern (a non-string written as its JSON text), the finite numbers of its failed-test
+   * list in order, and the determinism and boundedness reasoning (a non-string written as its JSON text, null when
+   * absent). Texts and lists are kept whole; a forge trace cuts them to its caps.
+   *
+   * When the call fails, `detail.judgeError` is `'llm_call_failed'`; when the reply does not parse as JSON, it is
+   * `'reply_unparsable'`. In both, the reply's fields are null and its lists empty, and neither the provider's error
+   * nor the raw reply is kept.
+   *
+   * @param candidate - The tool candidate to evaluate.
+   * @returns The verdict {@link reviewCreation} returns, and the reply's detail.
+   */
+  async reviewCreationWithDetail(
+    candidate: ToolCandidate,
+  ): Promise<{ verdict: CreationVerdict; detail: ForgeTraceJudgeDetail }> {
     const { system, user } = this.buildCreationPromptParts(candidate);
+    const judgeModel = typeof this.config.judgeModel === 'string' ? this.config.judgeModel : null;
 
     let rawResponse: string;
     try {
       rawResponse = await this.invokeLlm(this.config.judgeModel, system, user);
     } catch {
-      return this.rejectedVerdict('LLM call failed during creation review.');
+      return {
+        verdict: this.rejectedVerdict('LLM call failed during creation review.'),
+        detail: unreadReplyDetail(judgeModel, 'llm_call_failed'),
+      };
     }
 
     // Parse the JSON response from the LLM.
@@ -258,9 +382,12 @@ export class EmergentJudge {
     try {
       parsed = JSON.parse(this.extractJson(rawResponse));
     } catch {
-      return this.rejectedVerdict(
-        'Failed to parse LLM response as JSON during creation review.',
-      );
+      return {
+        verdict: this.rejectedVerdict(
+          'Failed to parse LLM response as JSON during creation review.',
+        ),
+        detail: unreadReplyDetail(judgeModel, 'reply_unparsable'),
+      };
     }
 
     // Map LLM response to CreationVerdict.
@@ -269,7 +396,7 @@ export class EmergentJudge {
     const correctnessPassed = parsed.correctness?.passed === true;
     const approved = safetyPassed && correctnessPassed;
 
-    return {
+    const verdict: CreationVerdict = {
       approved,
       confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0,
       // Preserve the LLM's granular score when available instead of collapsing
@@ -285,6 +412,22 @@ export class EmergentJudge {
       bounded: parsed.bounded?.likely ? 1.0 : 0.5,
       reasoning: parsed.reasoning ?? '',
     };
+
+    return { verdict, detail: parsedReplyDetail(parsed, judgeModel) };
+  }
+
+  // --------------------------------------------------------------------------
+  // PUBLIC: judgeAuthor
+  // --------------------------------------------------------------------------
+
+  /**
+   * The model and provider this judge's creation review asks for, as its configuration names them, for a forge
+   * trace's provenance. A provider fallback in the host's `generateText` can answer with another model.
+   *
+   * @returns The configured `judgeModel` and `providerId`, each `null` when unset.
+   */
+  judgeAuthor(): { model: string | null; providerId: string | null } {
+    return { model: this.config.judgeModel ?? null, providerId: this.config.providerId ?? null };
   }
 
   // --------------------------------------------------------------------------
@@ -435,7 +578,7 @@ export class EmergentJudge {
     const testResultsFormatted = candidate.testResults
       .map(
         (r, i) =>
-          `Test ${i + 1}: input=${JSON.stringify(r.input)} output=${JSON.stringify(r.output)} success=${r.success}` +
+          `Test ${i + 1}: input=${JSON.stringify(r.input)} output=${promptOutputText(r.output)} success=${r.success}` +
           `${r.error ? ` error=${r.error}` : ''}` +
           `${r.effects && r.effects.length > 0 ? ` effects=${JSON.stringify(r.effects)}` : ''}`,
       )
