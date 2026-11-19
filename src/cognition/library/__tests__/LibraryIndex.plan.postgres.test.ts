@@ -40,6 +40,9 @@ const documentSource = (over: Partial<LibrarySource> = {}): LibrarySource => ({
 
 const texts = (source: LibrarySource): string[] => source.passages.map((passage) => passage.text);
 
+/** A pause the next UPDATE a transaction sends waits on, once, telling the test when it is reached. */
+let pauseUpdate: { gate: Promise<void>; reached: () => void } | null = null;
+
 describe.skipIf(!URL)('LibraryIndex by content over PostgresVectorStore on Postgres', () => {
   let pool: pg.Pool;
   let statements: string[];
@@ -84,8 +87,14 @@ describe.skipIf(!URL)('LibraryIndex by content over PostgresVectorStore on Postg
       connect: async () => {
         const client = await pool.connect();
         return {
-          query: (sql: string, params?: unknown[]) => {
+          query: async (sql: string, params?: unknown[]) => {
             statements.push(sql);
+            const pause = pauseUpdate;
+            if (pause && /^\s*UPDATE\b/.test(sql)) {
+              pauseUpdate = null;
+              pause.reached();
+              await pause.gate;
+            }
             return client.query(sql, params);
           },
           release: () => client.release(),
@@ -103,6 +112,7 @@ describe.skipIf(!URL)('LibraryIndex by content over PostgresVectorStore on Postg
   beforeEach(async () => {
     statements = [];
     sent = [];
+    pauseUpdate = null;
     await pool.query(`DELETE FROM "${TABLE}"`);
     library = new LibraryIndex({ store, collection: 'library', embed, dimensions: 4 });
   });
@@ -220,6 +230,73 @@ describe.skipIf(!URL)('LibraryIndex by content over PostgresVectorStore on Postg
       expect((await rows()).map((row) => row.text_content).sort()).toEqual([...texts(edited)].sort());
     } finally {
       await db.close();
+    }
+  });
+
+  it('lists a source through the metadata index, never a scan of the table', async () => {
+    await index(documentSource());
+    statements.length = 0;
+    expect(await store.listSourcePassages('library', 'document:d1')).toHaveLength(40);
+    const listing = statements.find((sql) => /^\s*SELECT id, metadata_json\b/.test(sql));
+    expect(listing).toBeDefined();
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      // With a scan of the table and a plain index scan both off, only an index that serves the condition can answer.
+      await client.query('SET LOCAL enable_seqscan = off');
+      await client.query('SET LOCAL enable_indexscan = off');
+      await client.query('SET LOCAL enable_indexonlyscan = off');
+      const plan = (await client.query<{ 'QUERY PLAN': string }>(`EXPLAIN ${listing}`, ['document:d1'])).rows.map((row) => row['QUERY PLAN']).join('\n');
+      expect(plan).toContain(`${TABLE}_metadata`);
+      expect(plan).not.toContain('Seq Scan');
+    } finally {
+      await client.query('ROLLBACK');
+      client.release();
+    }
+  });
+
+  it('moves no row when nothing changed, with a passage metadata value left undefined', async () => {
+    const source = documentSource({
+      passages: passages(40).map((passage) => ({ ...passage, metadata: { note: undefined } as unknown as Record<string, string> })),
+    });
+    await index(source);
+    const before = await rows();
+    sent.length = 0;
+    const again = await index(source);
+    expect(sent).toEqual([]);
+    expect(again.patches).toEqual([]);
+    expect(await rows()).toEqual(before);
+  });
+
+  it('changes the scope after a plan that holds the source lock, so a group revoked meanwhile stays revoked', async () => {
+    const shared = { aclGroups: ['acct:ann', 'org:org1'] };
+    await index(documentSource(shared));
+    const retitled = documentSource({ ...shared, title: 'Plan, second draft' });
+    const plan = await library.planSource(retitled, { embedding: MODEL, inputs: texts(retitled) });
+    expect(plan.patches).toHaveLength(40);
+    let reached: () => void = () => {};
+    const atUpdate = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    let go: () => void = () => {};
+    pauseUpdate = { gate: new Promise<void>((resolve) => {
+      go = resolve;
+    }), reached };
+    // The plan has checked the rows under the source lock and waits before its first write.
+    const applied = library.applySourcePlan(plan, []);
+    await atUpdate;
+    const revoked = library.setSourceScope('document:d1', { aclGroups: ['acct:ann'] });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    go();
+    await applied;
+    expect(await revoked).toBe(40);
+    const stored = (await pool.query<{ groups: unknown; title: unknown }>(
+      `SELECT metadata_json->'aclGroups' AS groups, metadata_json->>'title' AS title FROM "${TABLE}" WHERE metadata_json->>'sourceId' = 'document:d1'`,
+    )).rows;
+    expect(stored).toHaveLength(40);
+    for (const row of stored) {
+      expect(row.groups).toEqual(['acct:ann']);
+      expect(row.title).toBe('Plan, second draft');
     }
   });
 });

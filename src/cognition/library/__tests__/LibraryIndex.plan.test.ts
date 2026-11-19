@@ -249,4 +249,57 @@ describe('LibraryIndex indexes a source by content', () => {
     expect(await stored()).toHaveLength(40);
     expect((await library.passageVectors((await stored()).map((row) => row.id), ANN, MODEL)).size).toBe(0);
   });
+
+  it('refuses a newId that gives an id twice, or the id of a stored row', async () => {
+    await expect(library.planSource(documentSource({ passages: passages(2) }), { embedding: MODEL, inputs: texts(documentSource({ passages: passages(2) })), newId: () => 'same' }))
+      .rejects.toThrow('twice');
+    await index(documentSource({ passages: passages(1) }), texts(documentSource({ passages: passages(1) })));
+    const [row] = await stored();
+    const suffix = row.id.slice('document:d1#'.length);
+    const two = documentSource({ passages: passages(2, (n) => `A new passage ${n}.`) });
+    await expect(library.planSource(two, { embedding: MODEL, inputs: texts(two), newId: () => suffix })).rejects.toThrow('twice');
+  });
+
+  it('refuses to apply a plan that reuses stored rows through an index whose store cannot plan by content', async () => {
+    await index(documentSource());
+    const edited = documentSource({ passages: passages(40, (n) => (n === 3 ? 'Passage 3 changed.' : undefined)) });
+    const plan = await library.planSource(edited, { embedding: MODEL, inputs: texts(edited) });
+    const plain: IVectorStore = {
+      initialize: async () => {},
+      upsert: (collection, documents, options) => store.upsert(collection, documents, options),
+      query: (collection, vector, options) => store.query(collection, vector, options),
+      delete: (collection, ids, options) => store.delete(collection, ids, options),
+      checkHealth: async () => ({ isHealthy: true }),
+      shutdown: async () => {},
+    };
+    const elsewhere = new LibraryIndex({ store: plain, collection: 'library', embed, dimensions: 4 });
+    const before = await stored();
+    await expect(elsewhere.applySourcePlan(plan, await embed([...plan.toEmbed]))).rejects.toThrow('cannot plan by content');
+    expect(await stored()).toEqual(before);
+  });
+
+  it('removes a source only once the source lock is free', async () => {
+    await index(documentSource());
+    let free: () => void = () => {};
+    const held = store.withSourceLock('library', 'document:d1', () => new Promise<void>((resolve) => {
+      free = resolve;
+    }));
+    const removed = library.removeSource('document:d1');
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(await stored()).toHaveLength(40);
+    free();
+    await held;
+    expect(await removed).toBe(40);
+    expect(await stored()).toHaveLength(0);
+  });
+
+  it('throws LibraryPlanStale when the store patches fewer rows than the plan reuses', async () => {
+    await index(documentSource());
+    const short = Object.assign(Object.create(store) as InMemoryVectorStore, { patchPassages: async () => ({ updatedCount: 0 }) });
+    const shortIndex = new LibraryIndex({ store: short, collection: 'library', embed, dimensions: 4 });
+    const retitled = documentSource({ title: 'Plan, second draft' });
+    const plan = await shortIndex.planSource(retitled, { embedding: MODEL, inputs: texts(retitled) });
+    expect(plan.patches).toHaveLength(40);
+    await expect(shortIndex.applySourcePlan(plan, [])).rejects.toBeInstanceOf(LibraryPlanStale);
+  });
 });
