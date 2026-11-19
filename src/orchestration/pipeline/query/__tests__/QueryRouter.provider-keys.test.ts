@@ -230,15 +230,15 @@ describe('QueryRouter credentials per route', () => {
     }
   });
 
-  it("sends OpenRouter's URL for OpenAI embeddings only with the OpenRouter key", async () => {
+  it("gives OpenAI embeddings the OpenRouter key with OpenRouter's URL, never Anthropic's key", async () => {
     vi.stubEnv('ANTHROPIC_API_KEY', 'test-anthropic-key');
     vi.stubEnv('OPENROUTER_API_KEY', 'test-openrouter-key');
     const { QueryRouter } = await loadRouter();
 
     await routeOnce(QueryRouter, { embeddingProvider: 'openai' });
 
-    expect(embeddingProviders).toEqual([{ providerId: 'openai', apiKey: 'test-anthropic-key' }]);
-    expect(embeddingBaseUrls).toEqual([undefined]);
+    expect(embeddingProviders).toEqual([{ providerId: 'openai', apiKey: 'test-openrouter-key' }]);
+    expect(embeddingBaseUrls).toEqual(['https://openrouter.ai/api/v1']);
   });
 
   it("keeps a caller's embedding key on OpenAI when MiniMax's key is the only one set", async () => {
