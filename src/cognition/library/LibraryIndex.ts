@@ -796,7 +796,11 @@ export class LibraryIndex {
 
   /** Whether the store can plan by content: list a source's rows, patch rows, and lock a source. */
   private plansByContent(): boolean {
-    return false;
+    return (
+      typeof this.store.listSourcePassages === 'function' &&
+      typeof this.store.patchPassages === 'function' &&
+      typeof this.store.withSourceLock === 'function'
+    );
   }
 
   /**
@@ -945,7 +949,7 @@ export class LibraryIndex {
     this.checkEmbedding(embedding, 'passageVectors');
     const found = new Map<string, number[]>();
     const wanted = [...new Set(ids)];
-    if (wanted.length === 0 || typeof this.store.fetchVectors !== 'function' || found.size === 0) return found;
+    if (wanted.length === 0 || typeof this.store.fetchVectors !== 'function') return found;
     const filter = mergeMetadataFilters(
       { embedModel: embedding.model, embedDimensions: embedding.dimensions },
       scopeToMetadataFilter({ tenantId: scope.tenantId, aclGroups: scope.aclGroups }),

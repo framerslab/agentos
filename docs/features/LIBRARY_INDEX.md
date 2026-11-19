@@ -71,6 +71,27 @@ The keys in this table come from the source's own fields: they win over the same
 
 `setSourceScope(sourceId, { aclGroups, folderId, tags, title })` writes the keys it is given onto every passage of the source through the store's `updateMetadata` and answers how many passages changed. `folderId: null` takes the source out of its folder; an empty `aclGroups` is refused. `removeSource(sourceId)` and `removeTenant(tenantId)` delete by filter and answer the store's `deletedCount`: how many passages went on a store that counts a delete by filter, and the store's own value on one that does not (see [Stores](#stores)). A delete the store reports as failed throws.
 
+### Indexing by content
+
+`indexSource` embeds every passage of a source each time. `planSource` and `applySourcePlan` embed only the passages whose embedding input is new, and a change of access, folder, title or place embeds nothing:
+
+```ts
+const plan = await index.planSource(source, { embedding: { model: 'text-embedding-3-small', dimensions: 1536 }, inputs });
+// inputs: the exact text the embedder is sent for each passage, in order, after your own redaction and cut
+const made = plan.toEmbed.length === 0 ? [] : await embed([...plan.toEmbed]);
+await index.applySourcePlan(plan, made); // inside your storage transaction, when other writes commit with it
+// plan.counts: { embed, reuse, rewrite, remove }
+const vectors = await index.passageVectors(ids, scope, { model: 'text-embedding-3-small', dimensions: 1536 });
+```
+
+Each passage's metadata gains `inputHash` (the SHA-256 of the model, a NUL, the dimensions, a NUL and the input), `textHash` (of the stored text), `embedModel` and `embedDimensions`. A passage takes the vector of a stored passage of the source with the same `inputHash`. When the text is the same too, the row is kept and its metadata is rewritten only where it differs; when only the input is the same (two texts that redact to one input), the row keeps its vector and its text and metadata are rewritten, so a lexical search never answers the old words. Every other passage gets a new row, `<sourceId>#<newId()>`, with a random UUID unless `newId` is given, so an id never comes from content; stored rows no passage takes are removed. A stored row without an `inputHash` (one `indexSource` wrote) counts as absent, so the first plan embeds every passage once, and another model or size embeds every passage again. With `dimensions` in its options the index refuses an embedding of any other size: a new model or size means a new collection.
+
+`applySourcePlan` takes the store's lock on the source (on Postgres `pg_advisory_xact_lock`, held to the end of the transaction, the caller's on a view from `withStorageTransaction`), reads the source's rows again, and throws `LibraryPlanStale`, writing nothing, when any row's id or metadata differs from what the plan was made from: plan the source again. Then it removes, rewrites and adds rows; a row nothing changed is not written. It throws when the vectors are not one per input of the plan's size.
+
+`passageVectors(ids, scope, embedding)` answers the stored vectors, by id, of the passages the scope may see that the model and size made. The store reads them with the scope, the model and the size in its own filter (on Postgres, in the statement), and the index checks each row again.
+
+These need the store's optional `listSourcePassages`, `patchPassages` and `withSourceLock`, and `passageVectors` its `fetchVectors`; `PostgresVectorStore` and `InMemoryVectorStore` have them. On another store a plan embeds and writes every passage, replacing the source as `indexSource` does, and `passageVectors` answers nothing.
+
 ## Search
 
 `search({ text, scope, mode, topK, kinds, folderId, folderIds, tags, sourceIds, anyOf, match, prefix, signal })` answers passages, at most `topK` (10 unless given).
@@ -269,8 +290,8 @@ The index asks the store's own filter for the scope and the narrowing, checks wh
 | `Neo4jVectorStore` | `$in` compares an array field as one value, and `delete` with a filter alone deletes nothing and answers 0. | A dense search finds nothing, and a hybrid search answers only what its lexical leg finds within the scope; a hybrid search with `anyOf`, which runs the dense leg alone there, finds nothing. `removeSource` and `removeTenant` leave the passages, and indexing a source again leaves those past its new count. |
 | `PineconeVectorStore`, `QdrantVectorStore` | Their filters drop `$all`, and a delete by filter answers -1 (Pinecone) or 0 (Qdrant) in place of a count. | A search with `tags` can answer fewer than `topK` passages, since the index drops those without every tag. `removeSource` and `removeTenant` answer the store's value. |
 
-- `PostgresVectorStore` has every member the index calls, the optional ones included: `lexicalSearch`, `hybridSearch` with `match` and `prefix`, `lexicalGroupSearch`, `updateMetadata` and `delete` by filter. Its options, its text search configuration and its filter rules are in [Postgres + pgvector Backend](../memory/POSTGRES_BACKEND.md). `removeSource`, `removeTenant` and `setSourceScope` filter on `metadata_json->>'sourceId'` or `metadata_json->>'tenantId'`, which the store's GIN index on `metadata_json` does not serve: without an index of your own on that expression, each reads every row of the collection.
-- `InMemoryVectorStore` honours `delete` by filter and runs `dense` and `hybrid` searches, the latter as its dense search. It has no `lexicalSearch`, no `lexicalGroupSearch` and no `updateMetadata`, so a `lexical` search, `searchGroups` or `setSourceScope` throws on it.
+- `PostgresVectorStore` has every member the index calls, the optional ones included: `lexicalSearch`, `hybridSearch` with `match` and `prefix`, `lexicalGroupSearch`, `updateMetadata`, `delete` by filter, and `listSourcePassages`, `patchPassages`, `fetchVectors` and `withSourceLock` for [indexing by content](#indexing-by-content). Its options, its text search configuration and its filter rules are in [Postgres + pgvector Backend](../memory/POSTGRES_BACKEND.md). `removeSource`, `removeTenant` and `setSourceScope` filter on `metadata_json->>'sourceId'` or `metadata_json->>'tenantId'`, which the store's GIN index on `metadata_json` does not serve: without an index of your own on that expression, each reads every row of the collection.
+- `InMemoryVectorStore` honours `delete` by filter and runs `dense` and `hybrid` searches, the latter as its dense search. It has no `lexicalSearch`, no `lexicalGroupSearch` and no `updateMetadata`, so a `lexical` search, `searchGroups` or `setSourceScope` throws on it. It has `listSourcePassages`, `patchPassages`, `fetchVectors` and `withSourceLock` (a lock in the process, with no transaction), so it plans by content.
 
 ## A transcript's passages
 
