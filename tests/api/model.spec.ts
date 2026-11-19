@@ -77,7 +77,7 @@ describe('resolveProvider', () => {
 
     expect(resolveProvider('anthropic', 'claude-opus-5-5')).toMatchObject({
       providerId: 'openrouter',
-      modelId: 'anthropic/claude-opus-5-5',
+      modelId: 'anthropic/claude-opus-5.5',
     });
     // A gateway the caller named: OpenRouter in its place would drop it.
     expect(() => resolveProvider('anthropic', 'claude-opus-5-5', { baseUrl: 'https://llm-gw.example/anthropic' })).toThrow(

@@ -358,8 +358,12 @@ export const ANTHROPIC_MODELS: AnthropicModelInfo[] = [
  * `claude-opus-5` is a prefix of `claude-opus-5-5`. A first-match scan makes
  * the answer depend on array order and can resolve a dated
  * `claude-opus-5-5-…` snapshot to Opus 5's row, pricing it at $5/$25 instead
- * of $4/$20. An id that is itself a prefix of a catalog id, such as the bare
- * alias `claude-haiku-4-5`, resolves to the first catalog id it prefixes.
+ * of $4/$20. A catalog id prefixes `modelId` only up to a boundary: the
+ * character after it is not a letter or a digit. Without that, the Claude
+ * Fable 5.2 row `claude-fable-5-2` would prefix the dated Fable 5 id
+ * `claude-fable-5-20260601` and price it as Fable 5.2. An id that is itself a
+ * prefix of a catalog id, such as the bare alias `claude-haiku-4-5`, resolves
+ * to the first catalog id it prefixes.
  */
 export function resolveAnthropicModelEntry(modelId: string): AnthropicModelInfo | undefined {
   return resolveModelCatalogEntry(ANTHROPIC_MODELS, modelId);
@@ -373,7 +377,7 @@ export function resolveAnthropicModelEntry(modelId: string): AnthropicModelInfo 
  * @param catalog Model rows to search, in any order.
  * @param modelId Caller-supplied model id, bare or dated.
  * @returns The exact row, else the row with the longest id that prefixes
- *   `modelId`, else the first row whose id starts with `modelId`. An empty id
+ *   `modelId` up to a boundary, else the first row whose id starts with `modelId`. An empty id
  *   resolves to nothing: every catalog id starts with `''`, so the last rule
  *   would otherwise price a response with no model echo as the first row.
  */
@@ -386,7 +390,11 @@ export function resolveModelCatalogEntry<T extends ModelInfo>(
   if (exact) return exact;
   let longest: T | undefined;
   for (const m of catalog) {
-    if (modelId.startsWith(m.modelId) && (!longest || m.modelId.length > longest.modelId.length)) {
+    if (
+      modelId.startsWith(m.modelId) &&
+      !/[a-z0-9]/i.test(modelId.charAt(m.modelId.length)) &&
+      (!longest || m.modelId.length > longest.modelId.length)
+    ) {
       longest = m;
     }
   }
