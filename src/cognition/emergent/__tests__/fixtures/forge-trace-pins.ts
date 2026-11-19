@@ -449,20 +449,7 @@ export const PINS: {
   gmiPart: Record<PinOutcome, unknown>;
 } = {
   gmiToolMessage: {
-    approved:
-      '{"success":true,"toolId":"emergent_1794960000000_i",' +
-      '"tool":{"id":"emergent_1794960000000_i","name":"add_numbers","description":"Add two numbers.",' +
-      '"inputSchema":{"type":"object","properties":{"a":{"type":"number"},"b":{"type":"number"}},"required":["a","b"]},' +
-      '"outputSchema":{"type":"object","properties":{"sum":{"type":"number"}}},' +
-      '"implementation":{"mode":"sandbox","code":"function execute(input) { return { sum: input.a + input.b }; }","allowlist":[]},' +
-      '"tier":"session","createdBy":"scripted-persona","createdAt":"2026-11-18T00:00:00.000Z",' +
-      '"judgeVerdicts":[{"approved":true,"confidence":0.95,"safety":1,"correctness":1,"determinism":1,"bounded":1,' +
-      '"reasoning":"Tool is safe and correct."}],' +
-      '"usageStats":{"totalUses":0,"successCount":0,"failureCount":0,"avgExecutionTimeMs":0,"lastUsedAt":null,' +
-      '"confidenceScore":0.95},' +
-      '"source":"forged by agent scripted-persona during session t1"},' +
-      '"verdict":{"approved":true,"confidence":0.95,"safety":1,"correctness":1,"determinism":1,"bounded":1,' +
-      '"reasoning":"Tool is safe and correct."}}',
+    approved: approvedJson('scripted-persona', 't1'),
     judge_rejected: TOOL_ERROR + '{"message":"Tool contains unsafe patterns."}',
     code_validation: TOOL_ERROR + '{"message":"Code validation failed: eval() is forbidden"}',
     description_missing: TOOL_ERROR + '{"message":"description is required and must be a string"}',

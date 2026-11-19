@@ -580,7 +580,14 @@ describe('forge trace: the builder, the record and the delivery', () => {
     const objectJustification = buildForgeTrace(inputOf({ args: f1({ justification: { gap: 'sensor data' } }) }));
     expect(objectJustification.justification).toBe('{"gap":"sensor data"}');
     expect(objectJustification.provenance.justification).toEqual(objectJustification.provenance.request);
-    expect(buildForgeTrace(inputOf({ args: f1({ justification: null }) })).provenance.justification).toBeNull();
+    // An explicit null is a value the request carried: its JSON text, the request author's. Only an absent key is none.
+    const nullJustification = buildForgeTrace(inputOf({ record: recordAt(T0, author), args: f1({ justification: null }) }));
+    expect(nullJustification.justification).toBe('null');
+    expect(nullJustification.provenance.justification).toEqual(nullJustification.provenance.request);
+    expect(nullJustification.provenance.justification).toMatchObject({ kind: 'model', role: 'forging_agent', model: 'gpt-x' });
+    const absent = buildForgeTrace(inputOf({ record: recordAt(T0, author), args: f1() }));
+    expect(absent.justification).toBeNull();
+    expect(absent.provenance.justification).toBeNull();
   });
 
   it("the judge's detail is cut and its lists shortened, with their paths", () => {
@@ -1032,5 +1039,143 @@ describe('forge trace: the builder, the record and the delivery', () => {
     expect(thrownReason('text')).toBe('text');
     expect(thrownReason(7)).toBe(7);
     expect(thrownReason(undefined)).toBeUndefined();
+  });
+});
+
+// ----------------------------------------------------------------------------
+// A bounded walk: a value's copy and its JSON text stop once the field's cap is passed and its measure is spent
+// ----------------------------------------------------------------------------
+
+/** `count` objects whose one key is a getter that counts its reads, and the plain list JSON writes the same way. */
+function countedList(count: number): { value: unknown[]; plain: unknown[]; reads: () => number } {
+  let reads = 0;
+  const value = Array.from({ length: count }, (_, i) => ({
+    get v(): number {
+      reads += 1;
+      return i;
+    },
+  }));
+  const plain = Array.from({ length: count }, (_, i) => ({ v: i }));
+  return { value, plain, reads: () => reads };
+}
+
+/**
+ * `result` is a cut of `text` at `capBytes` whose whole size was not measured: `bytes` is null, its own JSON fits the
+ * cap, and its head is the longest start of `text` that fits (one more character would not).
+ */
+function expectUnmeasuredCutOf(text: string, capBytes: number, result: unknown): ForgeTraceCut {
+  expect(result).toMatchObject({ $trace: 'cut' });
+  const cut = result as ForgeTraceCut;
+  expect(cut.bytes).toBeNull();
+  expect(cut.head.length).toBeGreaterThan(0);
+  expect(text.startsWith(cut.head)).toBe(true);
+  expect(jsonBytes(cut)).toBeLessThanOrEqual(capBytes);
+  expect(jsonBytes({ ...cut, head: text.slice(0, cut.head.length + 1) })).toBeGreaterThan(capBytes);
+  return cut;
+}
+
+describe('forge trace: a bounded walk of each field', () => {
+  it('a value far over its cap keeps the start that fits, lists its path, and is not read to its end', () => {
+    const count = 200_000;
+    const { value, plain, reads } = countedList(count);
+    const cut: string[] = [];
+
+    expectUnmeasuredCutOf(JSON.stringify(plain), 512, traceValue(value, 512, 'tests[0].input', cut));
+    expect(cut).toEqual(['tests[0].input']);
+    // The walk stopped far short of the value: most of its getters never ran.
+    expect(reads()).toBeGreaterThan(0);
+    expect(reads()).toBeLessThan(count / 4);
+  });
+
+  it('a text field given a value far over its cap is cut the same way, from its JSON text', () => {
+    const count = 200_000;
+    const { value, plain, reads } = countedList(count);
+    const cut: string[] = [];
+
+    expectUnmeasuredCutOf(JSON.stringify(plain), 4 * KIB, traceText(value, 4 * KIB, 'reason', cut));
+    expect(cut).toEqual(['reason']);
+    expect(reads()).toBeLessThan(count / 4);
+  });
+
+  it('a value over its cap whose walk ends within its measure keeps its whole size', () => {
+    const value = { items: Array.from({ length: 500 }, (_, i) => ({ id: i, label: `item ${i} ✓ \u{1F600} "q" \\ \u0001` })) };
+    const json = JSON.stringify(value);
+    const result = traceValue(value, 512, 'tests[0].input', []) as ForgeTraceCut;
+    expect(result.bytes).toBe(Buffer.byteLength(json));
+    expect(json.startsWith(result.head)).toBe(true);
+  });
+
+  it("the walk's text is the copy's JSON text, markers, key order and escapes included", () => {
+    const cyclic: Record<string, unknown> = { name: 'root' };
+    cyclic.self = cyclic;
+    const { proxy: revoked, revoke } = Proxy.revocable({}, {});
+    revoke();
+    const hostile = {
+      keys: JSON.parse('{"b":1,"2":"two","1":"one","__proto__":"p"}') as unknown,
+      big: 10n,
+      cyclic,
+      fn: () => 1,
+      throwing: {
+        ok: 1,
+        get bad(): number {
+          throw new Error('getter');
+        },
+      },
+      revoked,
+      keyed: { toJSON: (key: string) => `key:${key}` },
+      absent: undefined,
+      list: [undefined, NaN, -0, 1e21, () => 2, new Date(Date.UTC(2026, 10, 18))],
+      boxed: [new Number(3), new String('s'), new Boolean(false)],
+      text: 'x\ud800y\udc00z\u{1F600}"\\\u0000\u001f\u007f  tab\t',
+    };
+    const copy = jsonSafeCopy(hostile);
+    const json = JSON.stringify(copy);
+    expect(json.length).toBeGreaterThan(256);
+
+    // Within the cap the field is the copy itself; over it, the cut's head is the start of the copy's JSON text.
+    expect(traceValue(hostile, 64 * KIB, 'tests[0].input', [])).toEqual(copy);
+    expectCutOf(json, 256, traceValue(hostile, 256, 'tests[0].input', []));
+    expect(traceText(hostile, 64 * KIB, 'reason', [])).toBe(json);
+  });
+
+  it("a composition's steps are read once, and codeBytes is the size the walk measured", () => {
+    let reads = 0;
+    const step = {
+      name: 'say',
+      tool: 'echo',
+      get inputMapping(): Record<string, string> {
+        reads += 1;
+        return { text: '$input.text' };
+      },
+    };
+    const trace = buildForgeTrace(inputOf({ args: f1({ implementation: { mode: 'compose', steps: [step] } }) }));
+    expect(reads).toBe(1);
+    const plain = [{ name: 'say', tool: 'echo', inputMapping: { text: '$input.text' } }];
+    expect(trace.request!.implementation).toEqual({ mode: 'compose', steps: plain });
+    expect(trace.sizes.codeBytes).toBe(Buffer.byteLength(JSON.stringify(plain)));
+  });
+
+  it('steps whose JSON runs past what the walk measures have an unknown codeBytes and a cut with an unknown size', () => {
+    const huge = 'w'.repeat(5 * 1024 * KIB);
+    const steps = [{ name: 'say', tool: 'echo', inputMapping: { text: huge } }];
+    const trace = buildForgeTrace(inputOf({ args: f1({ implementation: { mode: 'compose', steps } }) }));
+    expect(trace.sizes.codeBytes).toBeNull();
+    const implementation = trace.request!.implementation as { steps: ForgeTraceCut };
+    expectUnmeasuredCutOf(JSON.stringify(steps), 64 * KIB, implementation.steps);
+    expect(trace.sizes.cut).toContain('request.implementation.steps');
+    expect(jsonBytes(trace)).toBe(trace.sizes.traceBytes);
+  });
+
+  it("a verdict score JSON cannot write (an infinity from the judge's reply) is null in the trace", () => {
+    const trace = buildForgeTrace(
+      inputOf({
+        stage: 'judge_rejected',
+        reason: 'no',
+        verdict: { ...REJECTION, confidence: Number.POSITIVE_INFINITY, safety: Number.NEGATIVE_INFINITY },
+      }),
+    );
+    expect(trace.verdict!.confidence).toBeNull();
+    expect(trace.verdict!.safety).toBeNull();
+    expect(trace.verdict!.correctness).toBe(REJECTION.correctness);
   });
 });

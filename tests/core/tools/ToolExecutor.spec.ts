@@ -297,8 +297,12 @@ describe('ToolExecutor', () => {
             execute: async (): Promise<ToolExecutionResult> => ({ success: false, error: 'refused', details: { text: words } }),
           }),
         );
+        // only what the call prints is read
+        clear();
         const failed = await quiet.executeTool(request());
         expect(failed.success).toBe(false);
+        // the result keeps the tool's error text; the line leaves it out
+        expect(failed.error).toBe('refused');
         expect(printed()).toContain('reported failure');
         // the tool's error text stays out too: it can quote what the tool was given
         expect(printed()).not.toContain('refused');
@@ -335,17 +339,22 @@ describe('ToolExecutor', () => {
       });
 
     it("a thrown tool's quiet line names its listed error type, never its message", async () => {
-      const { printed, restore } = spies();
+      const { printed, clear, restore } = spies();
       try {
         const quiet = new ToolExecutor(undefined, undefined, undefined, { builtInTools: false });
         await quiet.registerTool(thrower());
+        // only what the call prints is read: the registration's own line names the tool too
+        clear();
         const thrown = await quiet.executeTool({ ...request(), toolCallRequest: makeRequest('thrower', { text: 'hi' }) });
         expect(thrown.success).toBe(false);
         // the tool's result keeps the message, as before
         expect(thrown.error).toContain('MARKER-thrown');
-        expect(printed()).toContain('thrower');
-        expect(printed()).toContain('thrower-tool');
-        expect(printed()).toContain('TypeError');
+        // one line names the tool, its id and the error's type
+        const line = printed()
+          .split('\n')
+          .find((printedLine) => printedLine.includes('thrower-tool') && printedLine.includes('TypeError'));
+        expect(line).toBeDefined();
+        expect(line).toContain('thrower');
         expect(printed()).not.toContain('MARKER-thrown');
       } finally {
         restore();
@@ -353,10 +362,11 @@ describe('ToolExecutor', () => {
     });
 
     it("a thrown tool's line keeps its message when logToolCalls is on", async () => {
-      const { printed, restore } = spies();
+      const { printed, clear, restore } = spies();
       try {
         const loud = new ToolExecutor(undefined, undefined, undefined, { logToolCalls: true, builtInTools: false });
         await loud.registerTool(thrower());
+        clear();
         const thrown = await loud.executeTool({ ...request(), toolCallRequest: makeRequest('thrower', { text: 'hi' }) });
         expect(thrown.success).toBe(false);
         expect(printed()).toContain('MARKER-thrown');

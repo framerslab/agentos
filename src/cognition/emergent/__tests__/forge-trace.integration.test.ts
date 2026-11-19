@@ -1348,12 +1348,12 @@ describe('forge trace: one trace per forge, on every carrier that applies', () =
       sessionId: 'sess-cycle',
     });
     await gate.entered;
+    // The gate opens once forge B has ended, and in a failed run too, so forge A always settles inside the case.
     const forgedB = await callTool(host.orchestrator, 'forge_tool', composeOver('loop_b', 'loop_a'), {
       sessionId: 'sess-cycle',
-    });
-    expect(forgedB.isError).toBeFalsy();
-    gate.release();
+    }).finally(() => gate.release());
     const forgedA = await forgingA;
+    expect(forgedB.isError).toBeFalsy();
     expect(forgedA.isError).toBe(true);
     expect(String(forgedA.errorDetails?.message)).toContain('step_cycle');
 
@@ -1385,12 +1385,12 @@ describe('forge trace: one trace per forge, on every carrier that applies', () =
       sessionId: 'sess-restore',
     });
     await shutdownEntered;
+    // The shutdown is let go once forge B has ended, and in a failed run too, so forge A always settles inside the case.
     const forgedB = await callTool(host.orchestrator, 'forge_tool', composeOver('loop_b', 'loop_a'), {
       sessionId: 'sess-restore',
-    });
-    expect(forgedB.isError).toBeFalsy();
-    releaseShutdown();
+    }).finally(() => releaseShutdown());
     const forgedA = await forgingA;
+    expect(forgedB.isError).toBeFalsy();
     expect(forgedA.isError).toBe(true);
     expect(String(forgedA.errorDetails?.message)).toContain('step_cycle');
 
@@ -1929,11 +1929,14 @@ describe('forge trace: what the model reads and what a host streams are unchange
 
   it("pin 5: the judge's prompt is unchanged for an output JSON can write", async () => {
     const h = await directEngine({ hostTools: [richOutputTool()] });
+    // The request carries a justification, which the judge never reads: the prompt is the pinned one all the same.
+    const args = { ...judgePromptArgs(), justification: 'JUSTIFICATION-MARKER: no tool reads rich_output yet.' };
 
-    await h.engine.forge(judgePromptArgs() as unknown as ForgeToolRequest, directContext());
+    await h.engine.forge(args as unknown as ForgeToolRequest, directContext());
 
     expect(h.generateText).toHaveBeenCalledTimes(1);
     expect(h.generateText.mock.calls[0]).toEqual(PINS.judgePrompt);
+    expect(String(h.generateText.mock.calls[0][1])).not.toContain('JUSTIFICATION-MARKER');
   });
 });
 
@@ -2829,6 +2832,12 @@ const ROUND_TRIP = `async function execute(input) {
       return { back, gone, id: answer.id };
     }`;
 
+/** Code that writes one file and returns: a forge test of it shows whether a dry run's write reaches the host. */
+const WRITE_ONCE = `async function execute(input) {
+      await fs.writeFile(input.path, input.text);
+      return { wrote: true };
+    }`;
+
 /** The effects suite's write ceiling: new files only, under `root`, within small bounds. */
 const WRITE_CEILING = (root: string): ForgedCapabilities['fs.write'] =>
   ({
@@ -3062,6 +3071,23 @@ describe('forge trace: the measurement', () => {
     // F3's test was a dry run: nothing was written under the root and nothing was sent.
     expect(fs.existsSync(path.join(root, 'tmp.txt'))).toBe(false);
     expect(seen).toEqual([]);
+    // F3 deletes the file it writes, so the check above cannot see a write that reached the root and was then deleted.
+    // A forge that only writes, under the same ceiling, shows it: its test ran, and the file is not under the root.
+    const writeOnly = await hostWith({ 'fs.write': WRITE_CEILING(root) });
+    const wrote = await writeOnly.engine.forge(
+      {
+        name: 'write_once',
+        description: 'Writes one file.',
+        inputSchema: { type: 'object', additionalProperties: true },
+        outputSchema: { type: 'object', additionalProperties: true },
+        implementation: { mode: 'sandbox', code: WRITE_ONCE, allowlist: ['fs.write'] },
+        testCases: [{ input: { path: path.join(root, 'tmp.txt'), text: 'draft' } }],
+      } as unknown as ForgeToolRequest,
+      directContext(),
+    );
+    expect(wrote.success, String(wrote.error ?? 'approved')).toBe(true);
+    expect(traceOf(wrote)?.tests[0]?.ran).toBe(true);
+    expect(fs.existsSync(path.join(root, 'tmp.txt'))).toBe(false);
 
     // Each forge has a trace, and no field of it is cut.
     const forges: NonNullable<ForgeTraceMeasure['forges']> = [];
