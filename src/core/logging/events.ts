@@ -182,6 +182,40 @@ export const AGENTOS_EVENTS = {
   'memory.recall.reserve_fired': { added: 'int' },
   'memory.recall.supplied_rejected': { out_of_scope: 'int', ineligible: 'int' },
   'memory.recall.rerank_failed_scoring': { provider: { enum: ['local', 'llm'] }, failures: 'int' },
+  // One forge ended: how, where, its sizes and counts. No name, code, text, reason or id. `stage` lists the stage codes
+  // of the forge trace (FORGE_TRACE_STAGES, in its order): an enum, since a word field refuses a run of 20 or more
+  // letters, digits and underscores, which 12 of the codes are.
+  'emergent.forge_done': {
+    outcome: { enum: ['approved', 'rejected', 'refused', 'failed'] },
+    stage: {
+      enum: [
+        'guardrail_refused', 'schema_check', 'refused_before_approval', 'shape_check', 'host_refused',
+        'orchestrator_refused', 'permission_check_failed', 'human_denied', 'approval_timed_out', 'approval_failed',
+        'self_change_refused', 'name_refused', 'description_missing', 'engine_disabled', 'compose_refused',
+        'compose_needs_step_output', 'caller_context_required', 'sandbox_disabled', 'allowlist_unknown',
+        'effects_need_ceiling', 'capability_not_granted', 'code_validation', 'executor_unavailable',
+        'test_responses_refused', 'judge_rejected', 'test_output_unserializable', 'compose_refused_after_judge',
+        'step_cycle', 'removed_while_forging', 'activation_failed', 'registration_failed', 'approved', 'thrown',
+      ],
+    },
+    recordedBy: { enum: ['engine', 'forge_tool', 'wrapper', 'orchestrator'] },
+    via: { enum: ['forge_tool', 'direct'] },
+    mode: { enum: ['sandbox', 'compose', 'none'] },
+    tests: 'int',
+    testsPassed: 'int',
+    testsOmitted: 'int',
+    codeBytes: 'int',
+    traceBytes: 'int',
+    cutFields: 'int',
+    justificationChars: 'int',
+    judgeRan: { enum: ['yes', 'no'] },
+    executorIsolates: { enum: ['yes', 'no', 'none'] },
+    durationMs: 'int',
+  },
+  // A host's onForgeTrace threw or rejected: the error's listed type and code, never its message.
+  'emergent.forge_trace_hook_failed': { type: 'word', code: 'word' },
+  // A host's onForgeTrace was running at its bound; the forge went on.
+  'emergent.forge_trace_hook_slow': { boundMs: 'int' },
 } as const satisfies EventMap;
 
 /** The type of {@link AGENTOS_EVENTS}, which `lazyLogger`'s handles are typed over. */

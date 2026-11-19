@@ -410,8 +410,10 @@ export interface EmergentPlannerConfig {
   /**
    * When `true`, the `spawn_specialist` tool requires a `justification`
    * argument explaining why an existing roster agent cannot handle the
-   * task. Surfaced on the `emergentForge` callback's `ForgeEvent` for
-   * audit trails. Defaults to `false`.
+   * task. The justification is carried in the details of the
+   * `beforeEmergent` approval request (`checkBeforeEmergentSpawn` in
+   * `src/api/runtime/strategies/shared.ts`); the `emergentForge` callback's
+   * `ForgeEvent` has no field for it. Defaults to `false`.
    */
   requireJustification?: boolean;
   /**

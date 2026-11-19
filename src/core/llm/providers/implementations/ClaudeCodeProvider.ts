@@ -24,6 +24,7 @@ import {
   type ProviderEmbeddingOptions,
   type ProviderEmbeddingResponse,
 } from '../IProvider';
+import { requestedModel } from '../responseModel';
 import { ClaudeCodeCLIBridge, type CLIBridgeOptions, type StreamEvent } from './ClaudeCodeCLIBridge';
 import { ClaudeCodeProviderError } from '../errors/ClaudeCodeProviderError';
 
@@ -771,7 +772,7 @@ Each tool call must include "id" (unique string), "name" (tool name), and "argum
       id: responseId ?? `cc-${result.sessionId ?? Date.now()}`,
       object: 'chat.completion',
       created: Date.now(),
-      modelId: modelId ?? this.defaultModelId ?? 'claude-sonnet-5-5',
+      ...requestedModel(modelId ?? this.defaultModelId ?? 'claude-sonnet-5-5'),
       choices: [{
         index: 0,
         message: { role: 'assistant', content: text },
@@ -795,7 +796,7 @@ Each tool call must include "id" (unique string), "name" (tool name), and "argum
       id: responseId ?? `cc-${result.sessionId ?? Date.now()}`,
       object: 'chat.completion',
       created: Date.now(),
-      modelId: modelId ?? this.defaultModelId ?? 'claude-sonnet-5-5',
+      ...requestedModel(modelId ?? this.defaultModelId ?? 'claude-sonnet-5-5'),
       choices: [{
         index: 0,
         message: {

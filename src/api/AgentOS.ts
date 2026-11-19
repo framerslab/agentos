@@ -141,6 +141,7 @@ import {
   type StructuredReplySpec,
 } from './runtime/structuredReply';
 import type { EmergentConfig } from '../cognition/emergent/types.js';
+import type { ForgeTrace } from '../cognition/emergent/ForgeTrace.js';
 // SelfImprovementToolDeps reserved for emergent capability integration
 import { GuardrailAction } from '../safety/guardrails/IGuardrailService';
 import {
@@ -810,6 +811,15 @@ export interface AgentOSConfig {
   emergentConfig?: Partial<EmergentConfig>;
 
   /**
+   * Receives every forge's trace when `emergent` is on: once a forge, after its outcome is final, whatever the
+   * outcome. On the full runtime it is the one carrier of a trace, since the runtime's stream carries no tool result.
+   * The promise it returns is awaited up to 1,000 ms; its synchronous work runs to its end before that bound starts,
+   * and no timer cuts it short. A throw or rejection is caught and never changes the forge's result. The model reads
+   * no trace, and AgentOS stores none.
+   */
+  onForgeTrace?: (trace: ForgeTrace) => void | Promise<void>;
+
+  /**
    * Optional observability config for tracing, metrics, and log correlation.
    * Default: disabled (opt-in).
    */
@@ -1291,13 +1301,16 @@ export class AgentOS implements IAgentOS {
         { builtInTools: false },
       );
       this.toolOrchestrator = new ToolOrchestrator();
+      // The emergent judge's provider: the default provider when each review request is sent. The request and the
+      // provider its trace names both read it through this one function.
+      const judgeProvider = () => this.modelProviderManager.getDefaultProvider();
       // Build emergent options from config when emergent: true.
       const emergentOptions = this.config.emergent
         ? {
             enabled: true,
             config: this.config.emergentConfig,
             generateText: async (model: string, prompt: string): Promise<string> => {
-              const provider = this.modelProviderManager.getDefaultProvider();
+              const provider = judgeProvider();
               if (!provider) {
                 throw new Error('No LLM provider available for the emergent judge.');
               }
@@ -1329,6 +1342,10 @@ export class AgentOS implements IAgentOS {
                     getToolOrchestrator: () => this.toolOrchestrator,
                   })
                 : undefined,
+            onForgeTrace: this.config.onForgeTrace,
+            // Read by the judge as each review request is sent, with no await before generateText above reads the
+            // provider, so each verdict names the provider its request went to.
+            judgeProviderId: () => judgeProvider()?.providerId,
           }
         : undefined;
       const initialConfigTools = adaptTools(this.config.tools);

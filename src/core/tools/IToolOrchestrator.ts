@@ -16,11 +16,13 @@ import { IToolPermissionManager } from './permissions/IToolPermissionManager';
 import { ToolExecutor, ToolExecutionRequestDetails } from './ToolExecutor';
 import { ToolOrchestratorConfig } from '../config/ToolOrchestratorConfig';
 import { ToolCallResult, UserContext } from '../../cognition/substrate/IGMI';
+import type { GMIToolCallRefusal } from '../../cognition/substrate/IGMI';
 import type { IHumanInteractionManager } from '../../orchestration/hitl/IHumanInteractionManager';
 import type { CapabilityDiscoveryResult } from '../../cognition/discovery/types';
 import type { EmergentConfig, EmergentTool } from '../../cognition/emergent/types.js';
 import type { EmergentCapabilityEngine } from '../../cognition/emergent/EmergentCapabilityEngine.js';
 import type { SelfImprovementToolDeps } from '../../cognition/emergent/EmergentCapabilityEngine.js';
+import type { ForgeTrace } from '../../cognition/emergent/ForgeTrace.js';
 
 /**
  * Represents the information about a tool that is suitable for an LLM
@@ -83,6 +85,18 @@ export interface IToolOrchestrator {
        * Only used when `config.selfImprovement.enabled` is `true`.
        */
       selfImprovementDeps?: SelfImprovementToolDeps;
+      /**
+       * Called once for every forge, after its outcome is final, with its trace: the forges the engine runs and the
+       * calls to this orchestrator's own forge_tool that the orchestrator or the executor ends before the tool runs.
+       * The promise it returns is awaited up to 1,000 ms; its synchronous work runs to its end before that bound
+       * starts, and no timer cuts it short. A throw or rejection is caught and never changes the forge's result.
+       */
+      onForgeTrace?: (trace: ForgeTrace) => void | Promise<void>;
+      /**
+       * The provider the judge's `generateText` calls, written into each trace's provenance; absent means unknown. A
+       * function is called as each review request is sent, so it names the provider that request went to.
+       */
+      judgeProviderId?: string | (() => string | undefined);
     }
   ): Promise<void>;
 
@@ -144,6 +158,17 @@ export interface IToolOrchestrator {
    * This will include success/failure status, output, or error information.
    */
   processToolCall(requestDetails: ToolExecutionRequestDetails): Promise<ToolCallResult>;
+
+  /**
+   * Records a call that a turn's tool-call gate (an output guardrail) refused before it reached
+   * {@link processToolCall}. The GMI calls it with the call as `processToolCall` would have received it. A call to this
+   * orchestrator's own forge_tool gets a forge trace with the stage `guardrail_refused`, handed to `onForgeTrace`;
+   * any other call records nothing. Optional: an orchestrator without it records nothing. Never throws.
+   *
+   * @param requestDetails - The refused call.
+   * @param refusal - Why the gate refused it.
+   */
+  recordRefusedToolCall?(requestDetails: ToolExecutionRequestDetails, refusal: GMIToolCallRefusal): Promise<void>;
 
   /**
    * Lists only the tools that appear in a CapabilityDiscoveryResult.

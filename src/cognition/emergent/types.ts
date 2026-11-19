@@ -18,6 +18,7 @@
 import type { JSONSchemaObject } from '../../core/tools/ITool.js';
 import type { SelfImprovementConfig } from './SelfImprovementConfig.js';
 import type { ForgedCodeExecutor } from './executor/types.js';
+import type { ForgeTrace } from './ForgeTrace.js';
 
 // ============================================================================
 // TIER SYSTEM
@@ -803,6 +804,28 @@ export interface ForgeTestCase {
 }
 
 /**
+ * The run of one test case, as the judge reads it while it reviews a forged
+ * tool: the input it ran with, what it returned, whether it succeeded, and its
+ * effects.
+ */
+export interface ForgeTestRun {
+  /** The input the test case ran with. */
+  input: unknown;
+
+  /** What the run returned. */
+  output: unknown;
+
+  /** Whether the run succeeded. */
+  success: boolean;
+
+  /** The executor's or the composition's message when the run failed. */
+  error?: string;
+
+  /** The test run's effects: a composition's steps that were not executed while forging, or a code tool's capability calls under a ceiling. */
+  effects?: unknown[];
+}
+
+/**
  * Request payload for the `forge_tool` system tool.
  *
  * An agent submits this to request the creation of a new emergent tool. The
@@ -841,6 +864,15 @@ export interface ForgeToolRequest {
    * At least one test case is required for the forge request to be accepted.
    */
   testCases: [ForgeTestCase, ...ForgeTestCase[]];
+
+  /**
+   * Optional: the forging agent's own statement of the gap the tool fills, a
+   * string when the agent follows the description in forge_tool's input
+   * schema. Any JSON value is accepted. The forge's trace records it: a string
+   * as given, cut to its cap; any other value as its JSON-safe text; a cut one
+   * with its path in the trace's `sizes.cut`. The judge does not read it.
+   */
+  justification?: unknown;
 }
 
 /**
@@ -878,6 +910,15 @@ export interface ForgeResult {
    * schema parse error). Distinct from judge rejection — check `verdict` for those.
    */
   error?: string;
+
+  /**
+   * The forge's trace: what was asked, what ran, what the judge said and
+   * where the forge ended, JSON-safe, capped and frozen. Set by
+   * `EmergentCapabilityEngine.forge` on every result it returns, as the last
+   * key. It is for the host: forge_tool takes it off the result before the
+   * result reaches the model, so the model never reads it.
+   */
+  trace?: ForgeTrace;
 }
 
 /**
@@ -952,13 +993,19 @@ export interface EmergentConfig {
   /**
    * Whether sandbox source code should be persisted at rest.
    *
-   * When `false`, sandbox tools still run in memory for the active process, but
-   * durable storage only receives redacted metadata instead of raw source code.
+   * When `false`, sandbox tools run in memory for the active process, and a
+   * fresh forge's row receives redacted metadata instead of raw source code.
    * This reduces the blast radius of runtime-forged code while preserving audit
-   * visibility and non-source tool metadata.
+   * visibility and non-source tool metadata. A rewrite of a row that already
+   * holds a source, stored by a host or while this option was on, keeps that
+   * source: turning the option off removes nothing, and a host deletes stored
+   * source itself.
    *
    * Persisting raw sandbox source should be an explicit opt-in for trusted
    * environments that need restart-time rehydration of sandbox tools.
+   *
+   * A forge's trace is apart from this option: a host that stores a trace
+   * stores the forged code it holds.
    *
    * @default false
    */

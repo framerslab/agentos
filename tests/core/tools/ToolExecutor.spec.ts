@@ -235,9 +235,16 @@ describe('ToolExecutor', () => {
       const log = vi.spyOn(console, 'log').mockImplementation(() => {});
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+      // an Error is printed as the console prints it, its stack with its message, since JSON writes one as {}
       const printed = () =>
         [...log.mock.calls, ...warn.mock.calls, ...error.mock.calls]
-          .map((call) => call.map((part) => (typeof part === 'string' ? part : JSON.stringify(part))).join(' '))
+          .map((call) =>
+            call
+              .map((part) =>
+                typeof part === 'string' ? part : part instanceof Error ? String(part.stack ?? `${part.name}: ${part.message}`) : JSON.stringify(part),
+              )
+              .join(' '),
+          )
           .join('\n');
       const clear = () => { log.mockClear(); warn.mockClear(); error.mockClear(); };
       const restore = () => { log.mockRestore(); warn.mockRestore(); error.mockRestore(); };
@@ -290,9 +297,15 @@ describe('ToolExecutor', () => {
             execute: async (): Promise<ToolExecutionResult> => ({ success: false, error: 'refused', details: { text: words } }),
           }),
         );
+        // only what the call prints is read
+        clear();
         const failed = await quiet.executeTool(request());
         expect(failed.success).toBe(false);
-        expect(printed()).toContain('refused');
+        // the result keeps the tool's error text; the line leaves it out
+        expect(failed.error).toBe('refused');
+        expect(printed()).toContain('reported failure');
+        // the tool's error text stays out too: it can quote what the tool was given
+        expect(printed()).not.toContain('refused');
         expect(printed()).not.toContain(words);
 
         clear();
@@ -311,6 +324,52 @@ describe('ToolExecutor', () => {
         expect(extra.success).toBe(false);
         expect(printed()).toContain('Argument schema validation failed');
         expect(printed()).not.toContain('the_persons_own_key');
+      } finally {
+        restore();
+      }
+    });
+
+    const thrower = () =>
+      makeTool({
+        id: 'thrower-tool',
+        name: 'thrower',
+        execute: async (): Promise<ToolExecutionResult> => {
+          throw new TypeError('MARKER-thrown');
+        },
+      });
+
+    it("a thrown tool's quiet line names its listed error type, never its message", async () => {
+      const { printed, clear, restore } = spies();
+      try {
+        const quiet = new ToolExecutor(undefined, undefined, undefined, { builtInTools: false });
+        await quiet.registerTool(thrower());
+        // only what the call prints is read: the registration's own line names the tool too
+        clear();
+        const thrown = await quiet.executeTool({ ...request(), toolCallRequest: makeRequest('thrower', { text: 'hi' }) });
+        expect(thrown.success).toBe(false);
+        // the tool's result keeps the message, as before
+        expect(thrown.error).toContain('MARKER-thrown');
+        // one line names the tool, its id and the error's type
+        const line = printed()
+          .split('\n')
+          .find((printedLine) => printedLine.includes('thrower-tool') && printedLine.includes('TypeError'));
+        expect(line).toBeDefined();
+        expect(line).toContain('thrower');
+        expect(printed()).not.toContain('MARKER-thrown');
+      } finally {
+        restore();
+      }
+    });
+
+    it("a thrown tool's line keeps its message when logToolCalls is on", async () => {
+      const { printed, clear, restore } = spies();
+      try {
+        const loud = new ToolExecutor(undefined, undefined, undefined, { logToolCalls: true, builtInTools: false });
+        await loud.registerTool(thrower());
+        clear();
+        const thrown = await loud.executeTool({ ...request(), toolCallRequest: makeRequest('thrower', { text: 'hi' }) });
+        expect(thrown.success).toBe(false);
+        expect(printed()).toContain('MARKER-thrown');
       } finally {
         restore();
       }

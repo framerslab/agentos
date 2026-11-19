@@ -15,6 +15,10 @@
  * 11. reviewPromotion() rejects when safety judge rejects
  * 12. reviewPromotion() rejects when correctness judge rejects
  * 13. reviewPromotion() makes two separate LLM calls (verify mock called twice)
+ * 14. reviewCreationWithDetail() keeps the reply's own fields, names a failed call and an unparsable reply, and
+ *     returns reviewCreation()'s verdict
+ * 15. judgeAuthor() names the configured model and provider
+ * 16. the creation prompt writes a test output JSON.stringify refuses as markers instead of throwing
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -595,6 +599,163 @@ describe('EmergentJudge', () => {
       expect(verdict.approved).toBe(true);
       // But confidence should fall back to 0 because it's not a number.
       expect(verdict.confidence).toBe(0);
+    });
+  });
+
+  // =========================================================================
+  // reviewCreationWithDetail, judgeAuthor and the prompt's test outputs
+  // =========================================================================
+
+  describe('reviewCreationWithDetail()', () => {
+    /** A reply whose own fields the verdict drops or recomputes: its approved, the concerns, the failed tests. */
+    const MIXED_REPLY = JSON.stringify({
+      safety: { passed: false, concerns: ['Reads the clock.'] },
+      correctness: { passed: true, failedTests: [2] },
+      determinism: { likely: false, reasoning: 'Uses Date.' },
+      bounded: { likely: true, reasoning: 'One loop.' },
+      confidence: 0.4,
+      approved: true,
+      reasoning: 'Mixed.',
+    });
+
+    it("reviewCreationWithDetail keeps the reply's own fields that the verdict drops", async () => {
+      generateText.mockResolvedValueOnce(MIXED_REPLY);
+
+      const { verdict, detail } = await judge.reviewCreationWithDetail(makeCandidate());
+
+      expect(generateText).toHaveBeenCalledTimes(1);
+      expect(verdict).toEqual({
+        approved: false,
+        confidence: 0.4,
+        safety: 0,
+        correctness: 1,
+        determinism: 0.5,
+        bounded: 1,
+        reasoning: 'Mixed.',
+      });
+      expect(detail).toEqual({
+        judgeModel: 'gpt-4o-mini',
+        replyParsed: true,
+        judgeError: null,
+        judgeApproved: true,
+        safetyPassed: false,
+        safetyConcerns: ['Reads the clock.'],
+        correctnessPassed: true,
+        failedTests: [2],
+        deterministic: false,
+        determinismReasoning: 'Uses Date.',
+        bounded: true,
+        boundedReasoning: 'One loop.',
+      });
+    });
+
+    it('reviewCreationWithDetail names a failed call and an unparsable reply', async () => {
+      const unread = {
+        judgeModel: 'gpt-4o-mini',
+        replyParsed: false,
+        judgeApproved: null,
+        safetyPassed: null,
+        safetyConcerns: [],
+        correctnessPassed: null,
+        failedTests: [],
+        deterministic: null,
+        determinismReasoning: null,
+        bounded: null,
+        boundedReasoning: null,
+      };
+
+      generateText.mockRejectedValueOnce(new Error('provider down'));
+      const failed = await judge.reviewCreationWithDetail(makeCandidate());
+      expect(failed.detail).toEqual({ ...unread, judgeError: 'llm_call_failed' });
+      expect(failed.verdict.reasoning).toBe('LLM call failed during creation review.');
+      expect(JSON.stringify(failed)).not.toContain('provider down');
+
+      generateText.mockResolvedValueOnce('not json, a sentence instead');
+      const unparsable = await judge.reviewCreationWithDetail(makeCandidate());
+      expect(unparsable.detail).toEqual({ ...unread, judgeError: 'reply_unparsable' });
+      expect(JSON.stringify(unparsable)).not.toContain('a sentence instead');
+    });
+
+    it("its verdicts equal reviewCreation's for the same replies", async () => {
+      const replies: Array<string | Error> = [
+        new Error('provider down'),
+        'not json',
+        MIXED_REPLY,
+        approvedCreationResponse(),
+        safetyFailedResponse(),
+        JSON.stringify({}),
+      ];
+      for (const reply of replies) {
+        for (let call = 0; call < 2; call += 1) {
+          if (reply instanceof Error) {
+            generateText.mockRejectedValueOnce(reply);
+          } else {
+            generateText.mockResolvedValueOnce(reply);
+          }
+        }
+        const withDetail = await judge.reviewCreationWithDetail(makeCandidate());
+        const alone = await judge.reviewCreation(makeCandidate());
+        expect(withDetail.verdict).toEqual(alone);
+      }
+      expect(generateText).toHaveBeenCalledTimes(replies.length * 2);
+    });
+
+    it('the detail writes a non-string as JSON text and keeps only numbers in failedTests', async () => {
+      // Written as text: 1e400 parses to Infinity, which is not a finite number.
+      generateText.mockResolvedValueOnce(
+        '{"safety":{"passed":true,"concerns":[{"api":"fs"},7,null,"Plain words."]},' +
+          '"correctness":{"passed":true,"failedTests":[1,"two",3,1e400,null]},' +
+          '"determinism":{"likely":true,"reasoning":7},"bounded":{"likely":"yes"},' +
+          '"confidence":0.9,"approved":"yes","reasoning":"Ok."}',
+      );
+
+      const { detail } = await judge.reviewCreationWithDetail(makeCandidate());
+
+      expect(detail.determinismReasoning).toBe('7');
+      expect(detail.failedTests).toEqual([1, 3]);
+      expect(detail.safetyConcerns).toEqual(['{"api":"fs"}', '7', 'null', 'Plain words.']);
+      expect(detail.deterministic).toBe(true);
+      // Not booleans in the reply, so not booleans in the detail; an absent reasoning is null.
+      expect(detail.bounded).toBeNull();
+      expect(detail.boundedReasoning).toBeNull();
+      expect(detail.judgeApproved).toBeNull();
+    });
+  });
+
+  describe('judgeAuthor()', () => {
+    it('judgeAuthor names the configured model and provider', () => {
+      expect(judge.judgeAuthor()).toEqual({ model: 'gpt-4o-mini', providerId: null });
+
+      const named = new EmergentJudge({
+        judgeModel: 'judge-model',
+        promotionModel: 'promotion-model',
+        generateText,
+        providerId: 'judge-provider',
+      });
+      expect(named.judgeAuthor()).toEqual({ model: 'judge-model', providerId: 'judge-provider' });
+    });
+  });
+
+  describe('the creation prompt and its test outputs', () => {
+    it('the prompt writes a BigInt and a cycle in a test output as markers instead of throwing', async () => {
+      generateText.mockResolvedValueOnce(approvedCreationResponse());
+      const output: Record<string, unknown> = { big: 10n };
+      output.self = output;
+
+      const verdict = await judge.reviewCreation(
+        makeCandidate({ testResults: [{ input: { a: 1, b: 2 }, output, success: true }] }),
+      );
+
+      expect(verdict.approved).toBe(true);
+      expect(generateText).toHaveBeenCalledTimes(1);
+      const prompt = generateText.mock.calls[0][1] as string;
+      for (const word of ['unserializable', 'bigint', 'cycle']) {
+        expect(prompt).toContain(word);
+      }
+      expect(prompt).toContain(
+        'Test 1: input={"a":1,"b":2} output={"big":{"$trace":"unserializable","kind":"bigint"},' +
+          '"self":{"$trace":"unserializable","kind":"cycle"}} success=true',
+      );
     });
   });
 

@@ -20,6 +20,15 @@ import type { ITool, ToolExecutionContext } from '../../core/tools/ITool.js';
 import { ForgeToolMetaTool, type ForgeToolInput } from './ForgeToolMetaTool.js';
 import { validateForgeShape } from './ForgeShapeValidator.js';
 import { inferSchemaFromTestCases } from './ForgeSchemaInference.js';
+import {
+  FORGE_TRACE_DELIVER,
+  buildForgeTrace,
+  forgeCallScope,
+  newForgeCallRecord,
+  settleForgeTrace,
+  thrownReason,
+} from './ForgeTrace.js';
+import type { ForgeCallAuthor, ForgeCallRecord, ForgeTrace, KnownForgeTraceStage } from './ForgeTrace.js';
 
 /**
  * Captured forge event — ground-truth record of an actual forge call,
@@ -40,7 +49,12 @@ export interface CapturedForge {
   approved: boolean;
   /** Judge confidence for approved tools; 0 on rejection. */
   confidence: number;
-  /** Judge verdict payload or shape-check context. */
+  /**
+   * The forge_tool result's `output`: after a judged forge, the whole `ForgeResult` without its trace; null when the
+   * call ended before the engine returned.
+   *
+   * @deprecated Read `trace`.
+   */
   output: unknown;
   /** Populated on rejection or error. Truncated to 240 chars. */
   errorReason?: string;
@@ -52,6 +66,13 @@ export interface CapturedForge {
   scope?: string;
   /** Wall-clock ms so captures can be attributed to surrounding events. */
   timestamp: number;
+  /**
+   * This forge's trace: the same object the engine's `onForgeTrace` hook receives. Absent only when a call succeeded
+   * with no trace on its record: behind a host subclass that runs `super.execute` outside the call's async chain
+   * (forge_tool then records the forge under a record of its own), or around a wrapped tool that never calls
+   * forge_tool's `execute`.
+   */
+  trace?: ForgeTrace;
 }
 
 /**
@@ -90,6 +111,81 @@ export interface WrapForgeToolOptions {
    * no log events are emitted (quiet mode).
    */
   log?: (event: ForgeLogEvent) => void;
+  /**
+   * Optional: the model the forging agent runs on, as the host asked for it. A forge's trace names it as the
+   * request's author with `modelSource: 'requested'`. The model that answered the call, when the call's context
+   * carries it (`ToolExecutionContext.callerModel`), wins over it.
+   */
+  author?: { provider?: string; model?: string };
+}
+
+/**
+ * Who wrote a wrapped forge's request: a model called forge_tool, so the request is model-written. The call's model on
+ * its context wins (`answered`, or `requested` when its `modelSource` says the step's answer named no model); else the
+ * model the host named in `author`, as asked for; else a model whose provider and model are unknown.
+ */
+function wrapperAuthor(ctx: unknown, author: WrapForgeToolOptions['author']): ForgeCallAuthor {
+  try {
+    const answered: unknown = (ctx as { callerModel?: unknown } | null | undefined)?.callerModel;
+    if (answered !== null && typeof answered === 'object') {
+      const { providerId, modelId, modelSource } = answered as { providerId?: unknown; modelId?: unknown; modelSource?: unknown };
+      return {
+        kind: 'model',
+        role: 'forging_agent',
+        provider: typeof providerId === 'string' ? providerId : null,
+        model: typeof modelId === 'string' ? modelId : null,
+        modelSource: modelSource === 'requested' ? 'requested' : 'answered',
+      };
+    }
+  } catch {
+    // A getter that throws: the answering model cannot be read.
+  }
+  try {
+    if (author !== null && typeof author === 'object') {
+      const provider = typeof author.provider === 'string' ? author.provider : null;
+      const model = typeof author.model === 'string' ? author.model : null;
+      return {
+        kind: 'model',
+        role: 'forging_agent',
+        provider,
+        model,
+        modelSource: provider || model ? 'requested' : null,
+      };
+    }
+  } catch {
+    // A getter that throws: the host's statement cannot be read.
+  }
+  return { kind: 'model', role: 'forging_agent', provider: null, model: null, modelSource: null };
+}
+
+/** The call's correlation id when its context carries one as a string, else null. */
+function callCorrelationId(ctx: unknown): string | null {
+  try {
+    const id: unknown = (ctx as { correlationId?: unknown } | null | undefined)?.correlationId;
+    return typeof id === 'string' ? id : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The wrapped tool's delivery to its engine's `onForgeTrace`, when it has one (forge_tool, or a subclass of it).
+ * Without it the capture gets its trace all the same; only the hook delivery is skipped.
+ */
+function deliveryOf(raw: ForgeToolMetaTool): ((trace: ForgeTrace) => Promise<void>) | undefined {
+  try {
+    if (typeof raw[FORGE_TRACE_DELIVER] === 'function') {
+      return (trace) => raw[FORGE_TRACE_DELIVER](trace);
+    }
+  } catch {
+    // A getter or a `Proxy` that throws: no delivery.
+  }
+  return undefined;
+}
+
+/** The capture's `trace` key: the call's trace when a layer recorded one, else no key. */
+function traceField(record: ForgeCallRecord): { trace?: ForgeTrace } {
+  return record.trace === undefined ? {} : { trace: record.trace };
 }
 
 /**
@@ -103,17 +199,66 @@ export interface WrapForgeToolOptions {
  * on failure the judge is skipped and a rejection record is captured
  * immediately. On success, the raw meta-tool executes and the result's
  * verdict is folded into a capture record.
+ *
+ * Every call has one forge record, made here, so the wrapper mints the
+ * forge's id. The raw tool runs inside that record's async scope, where
+ * forge_tool and the engine find it, and the capture carries the trace the
+ * layer that ended the forge kept on it. The wrapper records the forges it
+ * ends itself: a refusal before the approval gate, a failed shape check, a
+ * failure the wrapped tool returned before forge_tool's `execute` ran, and a
+ * throw no other layer recorded. Each trace reaches the engine's
+ * `onForgeTrace` once.
  */
 export function wrapForgeTool(options: WrapForgeToolOptions): ITool {
-  const { raw, agentId, sessionId, capture, scope, log } = options;
+  const { raw, agentId, sessionId, capture, scope, log, author } = options;
+
+  /** The trace of a forge the wrapper ended. */
+  const wrapperTrace = (
+    record: ForgeCallRecord,
+    stage: KnownForgeTraceStage,
+    reason: unknown,
+    traceArgs: unknown,
+    ctx: unknown,
+  ): ForgeTrace =>
+    buildForgeTrace({
+      record,
+      recordedBy: 'wrapper',
+      via: 'forge_tool',
+      stage,
+      reason,
+      args: traceArgs,
+      agentId,
+      sessionId,
+      correlationId: callCorrelationId(ctx),
+    });
+
+  /** Builds the trace of a forge the wrapper ended, keeps it on the call's record and delivers it once. */
+  const settle = (
+    record: ForgeCallRecord,
+    stage: KnownForgeTraceStage,
+    reason: unknown,
+    traceArgs: unknown,
+    ctx: unknown,
+  ): Promise<ForgeTrace> =>
+    settleForgeTrace(record, wrapperTrace(record, stage, reason, traceArgs, ctx), deliveryOf(raw));
+
   return {
     ...(raw as unknown as ITool),
     // A spread copies the tool's fields, not its methods: the forge's refusal before the approval gate is the raw
     // tool's, read with the caller's session data, which the wrapper forwards unchanged. The call then ends without
     // `execute`, so the attempt is recorded here, once.
     refusalBeforeApproval(args: Record<string, any>, ctx: ToolExecutionContext) {
+      const record = newForgeCallRecord();
+      record.author = wrapperAuthor(ctx, author);
       const refusal = typeof raw.refusalBeforeApproval === 'function' ? raw.refusalBeforeApproval(args, ctx) : undefined;
       if (refusal) {
+        // The method is synchronous: the trace is kept on the record now, so the capture below carries it, and its
+        // delivery waits for a microtask, so the hook receives it after this call has returned.
+        const trace = wrapperTrace(record, 'refused_before_approval', refusal.error, args, ctx);
+        record.trace = trace;
+        Promise.resolve()
+          .then(() => settleForgeTrace(record, trace, deliveryOf(raw)))
+          .catch(() => undefined);
         const toolName = String(args?.name ?? 'unnamed');
         const reason = String(refusal.error ?? 'refused').slice(0, 240);
         log?.({ kind: 'rejected', scope, toolName, reason });
@@ -129,193 +274,223 @@ export function wrapForgeTool(options: WrapForgeToolOptions): ITool {
           errorReason: reason,
           scope,
           timestamp: Date.now(),
+          ...traceField(record),
         });
       }
       return refusal;
     },
     async execute(args: Record<string, unknown>, ctx: unknown) {
-      const fixed = { ...args } as Record<string, unknown>;
-      for (const k of ['implementation', 'inputSchema', 'outputSchema', 'testCases']) {
-        if (typeof fixed[k] === 'string') {
-          try {
-            fixed[k] = JSON.parse(fixed[k] as string);
-          } catch {
-            // Leave as-is; downstream normalization backstops most failures.
+      // The call's record: the wrapper is the outermost layer that sees the call, so it mints the forge's id.
+      const record = newForgeCallRecord();
+      record.author = wrapperAuthor(ctx, author);
+      try {
+        const fixed = { ...args } as Record<string, unknown>;
+        for (const k of ['implementation', 'inputSchema', 'outputSchema', 'testCases']) {
+          if (typeof fixed[k] === 'string') {
+            try {
+              fixed[k] = JSON.parse(fixed[k] as string);
+            } catch {
+              // Leave as-is; downstream normalization backstops most failures.
+            }
           }
         }
-      }
-      // Normalize implementation. Strict `mode === 'compose'` check in
-      // the engine means anything else falls into the sandbox branch.
-      // Unfamiliar mode strings + missing fields can crash deep in
-      // SandboxedToolForge.validateCode. Normalize to exactly
-      // 'sandbox' or 'compose', infer from field shape when the mode
-      // string is unfamiliar, backstop every required field.
-      if (fixed.implementation && typeof fixed.implementation === 'object') {
-        const impl = fixed.implementation as Record<string, unknown>;
-        if (impl.mode === 'code' || impl.mode === 'javascript' || impl.mode === 'js') {
-          impl.mode = 'sandbox';
-        }
-        if (
-          impl.mode === 'composed' ||
-          impl.mode === 'composition' ||
-          impl.mode === 'composable' ||
-          impl.mode === 'chain' ||
-          impl.mode === 'pipeline'
-        ) {
-          impl.mode = 'compose';
-        }
-        if (impl.mode !== 'sandbox' && impl.mode !== 'compose') {
-          if (Array.isArray(impl.steps)) impl.mode = 'compose';
-          else if (typeof impl.code === 'string') impl.mode = 'sandbox';
-          else impl.mode = 'sandbox';
-        }
-        if (impl.mode === 'sandbox') {
-          if (!Array.isArray(impl.allowlist)) impl.allowlist = [];
-          if (impl.code != null && typeof impl.code !== 'string') impl.code = String(impl.code);
-          if (!impl.code || typeof impl.code !== 'string') {
-            impl.code = 'function execute(input) { return { error: "No code provided in forge request" }; }';
+        // Normalize implementation. Strict `mode === 'compose'` check in
+        // the engine means anything else falls into the sandbox branch.
+        // Unfamiliar mode strings + missing fields can crash deep in
+        // SandboxedToolForge.validateCode. Normalize to exactly
+        // 'sandbox' or 'compose', infer from field shape when the mode
+        // string is unfamiliar, backstop every required field.
+        if (fixed.implementation && typeof fixed.implementation === 'object') {
+          const impl = fixed.implementation as Record<string, unknown>;
+          if (impl.mode === 'code' || impl.mode === 'javascript' || impl.mode === 'js') {
+            impl.mode = 'sandbox';
           }
-          if (!(impl.code as string).includes('function execute')) {
-            impl.code = `function execute(input) {\n${impl.code as string}\n}`;
+          if (
+            impl.mode === 'composed' ||
+            impl.mode === 'composition' ||
+            impl.mode === 'composable' ||
+            impl.mode === 'chain' ||
+            impl.mode === 'pipeline'
+          ) {
+            impl.mode = 'compose';
           }
-        } else if (impl.mode === 'compose') {
-          if (!Array.isArray(impl.steps)) impl.steps = [];
-          for (const step of impl.steps as Array<Record<string, unknown>>) {
-            if (step && typeof step === 'object') {
-              if (typeof step.tool !== 'string') step.tool = '';
-              if (typeof step.name !== 'string') step.name = (step.tool as string) || 'step';
-              if (!step.inputMapping || typeof step.inputMapping !== 'object') {
-                step.inputMapping = {};
+          if (impl.mode !== 'sandbox' && impl.mode !== 'compose') {
+            if (Array.isArray(impl.steps)) impl.mode = 'compose';
+            else if (typeof impl.code === 'string') impl.mode = 'sandbox';
+            else impl.mode = 'sandbox';
+          }
+          if (impl.mode === 'sandbox') {
+            if (!Array.isArray(impl.allowlist)) impl.allowlist = [];
+            if (impl.code != null && typeof impl.code !== 'string') impl.code = String(impl.code);
+            if (!impl.code || typeof impl.code !== 'string') {
+              impl.code = 'function execute(input) { return { error: "No code provided in forge request" }; }';
+            }
+            if (!(impl.code as string).includes('function execute')) {
+              impl.code = `function execute(input) {\n${impl.code as string}\n}`;
+            }
+          } else if (impl.mode === 'compose') {
+            if (!Array.isArray(impl.steps)) impl.steps = [];
+            for (const step of impl.steps as Array<Record<string, unknown>>) {
+              if (step && typeof step === 'object') {
+                if (typeof step.tool !== 'string') step.tool = '';
+                if (typeof step.name !== 'string') step.name = (step.tool as string) || 'step';
+                if (!step.inputMapping || typeof step.inputMapping !== 'object') {
+                  step.inputMapping = {};
+                }
               }
             }
           }
         }
-      }
-      if (!fixed.inputSchema || typeof fixed.inputSchema !== 'object') {
-        fixed.inputSchema = { type: 'object', additionalProperties: true };
-      }
-      if (!fixed.outputSchema || typeof fixed.outputSchema !== 'object') {
-        fixed.outputSchema = { type: 'object', additionalProperties: true };
-      }
-      if (!Array.isArray(fixed.testCases) || (fixed.testCases as unknown[]).length === 0) {
-        fixed.testCases = [{ input: {}, expectedOutput: {} }];
-      }
-      for (const tc of fixed.testCases as Array<Record<string, unknown>>) {
-        if (!tc.input || typeof tc.input !== 'object') tc.input = {};
-        if (tc.expectedOutput === undefined) tc.expectedOutput = {};
-      }
-
-      // Rescue concrete-testCases-without-formal-schema forges. Still
-      // strict: tool code must handle the inferred inputs, but the
-      // shape check passes deterministically on intent-clear input.
-      inferSchemaFromTestCases(fixed);
-
-      const mode = String((fixed.implementation as { mode?: unknown } | undefined)?.mode ?? '?');
-      const toolName = String((fixed as { name?: unknown }).name ?? 'unnamed');
-      const toolDescription = String((fixed as { description?: unknown }).description ?? toolName);
-
-      // Pre-judge shape check. On failure, capture + emit a rejection
-      // event and short-circuit without invoking the judge LLM.
-      const shapeErrors = validateForgeShape(
-        fixed as {
-          inputSchema?: unknown;
-          outputSchema?: unknown;
-          testCases?: unknown;
-        },
-      );
-      if (shapeErrors.length > 0) {
-        const reason = `Shape check failed: ${shapeErrors.join('; ')}`;
-        log?.({ kind: 'rejected', scope, toolName, reason });
-        capture({
-          name: toolName,
-          description: toolDescription,
-          mode,
-          inputSchema: fixed.inputSchema,
-          outputSchema: fixed.outputSchema,
-          approved: false,
-          confidence: 0,
-          output: null,
-          errorReason: reason.slice(0, 240),
-          scope,
-          timestamp: Date.now(),
-        });
-        return {
-          success: false,
-          error: reason,
-          output: { success: false, verdict: { approved: false, confidence: 0, reasoning: reason } },
-        } as unknown;
-      }
-
-      log?.({ kind: 'start', scope, toolName, mode });
-      const patched = {
-        ...(ctx as Record<string, unknown>),
-        // The identity the wrapper is given is the forging agent's: the
-        // forge records the persona as a tool's owner, so both are set.
-        gmiId: agentId,
-        personaId: agentId,
-        sessionData: {
-          ...((ctx as { sessionData?: Record<string, unknown> })?.sessionData ?? {}),
-          sessionId,
-        },
-      };
-      try {
-        // Cast is intentional: the wrapper's job is to normalize
-        // arbitrary LLM output into something the engine can handle.
-        // By this point `fixed` is shape-validated enough to run; TS
-        // cannot statically prove it matches every ForgeToolInput
-        // field because the source is untyped LLM output.
-        const r = await raw.execute(
-          fixed as unknown as ForgeToolInput,
-          patched as unknown as ToolExecutionContext,
-        );
-        const out = r.output as { verdict?: { approved?: boolean; confidence?: number; reasoning?: string }; testResults?: unknown; result?: unknown; error?: unknown } | undefined;
-        const verdict = out?.verdict ?? {};
-        // Judge confidence is the judge's score for whether the tool is
-        // safe + correct. When rejected, the judge's confidence is in
-        // REJECTING the tool; surfacing that as the tool's own quality
-        // score would be misleading. So: approved → judge confidence (or
-        // 0.85 fallback); rejected → 0.
-        const judgeConfidence = typeof verdict.confidence === 'number' ? verdict.confidence : null;
-        const confidence = r.success ? (judgeConfidence ?? 0.85) : 0;
-        const errorReason = !r.success
-          ? String(r.error ?? verdict.reasoning ?? out?.error ?? '').slice(0, 240)
-          : undefined;
-        if (r.success) {
-          log?.({ kind: 'approved', scope, toolName, confidence });
-        } else {
-          log?.({ kind: 'rejected', scope, toolName, reason: errorReason ?? '' });
+        if (!fixed.inputSchema || typeof fixed.inputSchema !== 'object') {
+          fixed.inputSchema = { type: 'object', additionalProperties: true };
         }
-        capture({
-          name: toolName,
-          description: toolDescription,
-          mode,
-          inputSchema: fixed.inputSchema,
-          outputSchema: fixed.outputSchema,
-          approved: !!r.success,
-          confidence,
-          output: out?.testResults ?? out?.result ?? out ?? null,
-          errorReason,
-          scope,
-          timestamp: Date.now(),
-        });
-        return r;
-      } catch (err) {
-        const message = String(err).slice(0, 240);
-        log?.({ kind: 'error', scope, toolName, error: message });
-        capture({
-          name: toolName,
-          description: toolDescription,
-          mode,
-          inputSchema: fixed.inputSchema,
-          outputSchema: fixed.outputSchema,
-          approved: false,
-          confidence: 0,
-          output: null,
-          errorReason: message,
-          scope,
-          timestamp: Date.now(),
-        });
-        return { success: false, error: String(err) };
+        if (!fixed.outputSchema || typeof fixed.outputSchema !== 'object') {
+          fixed.outputSchema = { type: 'object', additionalProperties: true };
+        }
+        if (!Array.isArray(fixed.testCases) || (fixed.testCases as unknown[]).length === 0) {
+          fixed.testCases = [{ input: {}, expectedOutput: {} }];
+        }
+        for (const tc of fixed.testCases as Array<Record<string, unknown>>) {
+          if (!tc.input || typeof tc.input !== 'object') tc.input = {};
+          if (tc.expectedOutput === undefined) tc.expectedOutput = {};
+        }
+
+        // Rescue concrete-testCases-without-formal-schema forges. Still
+        // strict: tool code must handle the inferred inputs, but the
+        // shape check passes deterministically on intent-clear input.
+        inferSchemaFromTestCases(fixed);
+
+        const mode = String((fixed.implementation as { mode?: unknown } | undefined)?.mode ?? '?');
+        const toolName = String((fixed as { name?: unknown }).name ?? 'unnamed');
+        const toolDescription = String((fixed as { description?: unknown }).description ?? toolName);
+
+        // Pre-judge shape check. On failure, capture + emit a rejection
+        // event and short-circuit without invoking the judge LLM.
+        const shapeErrors = validateForgeShape(
+          fixed as {
+            inputSchema?: unknown;
+            outputSchema?: unknown;
+            testCases?: unknown;
+          },
+        );
+        if (shapeErrors.length > 0) {
+          const reason = `Shape check failed: ${shapeErrors.join('; ')}`;
+          // The trace's request is the arguments as the wrapper normalized them.
+          await settle(record, 'shape_check', reason, fixed, ctx);
+          log?.({ kind: 'rejected', scope, toolName, reason });
+          capture({
+            name: toolName,
+            description: toolDescription,
+            mode,
+            inputSchema: fixed.inputSchema,
+            outputSchema: fixed.outputSchema,
+            approved: false,
+            confidence: 0,
+            output: null,
+            errorReason: reason.slice(0, 240),
+            scope,
+            timestamp: Date.now(),
+            ...traceField(record),
+          });
+          return {
+            success: false,
+            error: reason,
+            output: { success: false, verdict: { approved: false, confidence: 0, reasoning: reason } },
+          } as unknown;
+        }
+
+        log?.({ kind: 'start', scope, toolName, mode });
+        const patched = {
+          ...(ctx as Record<string, unknown>),
+          // The identity the wrapper is given is the forging agent's: the
+          // forge records the persona as a tool's owner, so both are set.
+          gmiId: agentId,
+          personaId: agentId,
+          sessionData: {
+            ...((ctx as { sessionData?: Record<string, unknown> })?.sessionData ?? {}),
+            sessionId,
+          },
+        };
+        try {
+          // Cast is intentional: the wrapper's job is to normalize
+          // arbitrary LLM output into something the engine can handle.
+          // By this point `fixed` is shape-validated enough to run; TS
+          // cannot statically prove it matches every ForgeToolInput
+          // field because the source is untyped LLM output.
+          // The raw tool runs inside the call's record, so forge_tool takes it
+          // whatever context a host subclass hands `super.execute`.
+          const r = await forgeCallScope.run(record, () =>
+            raw.execute(fixed as unknown as ForgeToolInput, patched as unknown as ToolExecutionContext),
+          );
+          // A failure no layer recorded, returned before forge_tool's `execute`
+          // ran for this call: a host's own refusal.
+          if (record.trace === undefined && !record.seen && !r.success) {
+            await settle(record, 'host_refused', r.error, fixed, ctx);
+          }
+          const out = r.output as { verdict?: { approved?: boolean; confidence?: number; reasoning?: string }; testResults?: unknown; result?: unknown; error?: unknown } | undefined;
+          const verdict = out?.verdict ?? {};
+          // Judge confidence is the judge's score for whether the tool is
+          // safe + correct. When rejected, the judge's confidence is in
+          // REJECTING the tool; surfacing that as the tool's own quality
+          // score would be misleading. So: approved → judge confidence (or
+          // 0.85 fallback); rejected → 0.
+          const judgeConfidence = typeof verdict.confidence === 'number' ? verdict.confidence : null;
+          const confidence = r.success ? (judgeConfidence ?? 0.85) : 0;
+          const errorReason = !r.success
+            ? String(r.error ?? verdict.reasoning ?? out?.error ?? '').slice(0, 240)
+            : undefined;
+          if (r.success) {
+            log?.({ kind: 'approved', scope, toolName, confidence });
+          } else {
+            log?.({ kind: 'rejected', scope, toolName, reason: errorReason ?? '' });
+          }
+          capture({
+            name: toolName,
+            description: toolDescription,
+            mode,
+            inputSchema: fixed.inputSchema,
+            outputSchema: fixed.outputSchema,
+            approved: !!r.success,
+            confidence,
+            output: out?.testResults ?? out?.result ?? out ?? null,
+            errorReason,
+            scope,
+            timestamp: Date.now(),
+            ...traceField(record),
+          });
+          return r;
+        } catch (err) {
+          // A throw no layer recorded: from the wrapped tool's own code before
+          // forge_tool's `execute`, or from reading what it returned.
+          if (record.trace === undefined) {
+            await settle(record, 'thrown', thrownReason(err), fixed, ctx);
+          }
+          const message = String(err).slice(0, 240);
+          log?.({ kind: 'error', scope, toolName, error: message });
+          capture({
+            name: toolName,
+            description: toolDescription,
+            mode,
+            inputSchema: fixed.inputSchema,
+            outputSchema: fixed.outputSchema,
+            approved: false,
+            confidence: 0,
+            output: null,
+            errorReason: message,
+            scope,
+            timestamp: Date.now(),
+            ...traceField(record),
+          });
+          return { success: false, error: String(err) };
+        }
+      } catch (error: unknown) {
+        // A throw from the wrapper's own normalization, before the wrapped
+        // tool runs: recorded with the arguments as they arrived, then
+        // rethrown unchanged, with no capture.
+        if (record.trace === undefined) {
+          await settle(record, 'thrown', thrownReason(error), args, ctx);
+        }
+        throw error;
       }
     },
   } as ITool;

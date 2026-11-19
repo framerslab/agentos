@@ -34,6 +34,8 @@ export interface ForgeHostOptions {
   registry?: ExtensionRegistry<ITool>;
   /** Wire the self-improvement tools through the real session manager. */
   selfImprovement?: boolean;
+  /** The host's hook for a forge's trace, passed on with the emergent options. */
+  onForgeTrace?: (trace: unknown) => void | Promise<void>;
 }
 
 export interface ForgeHost {
@@ -86,7 +88,8 @@ export async function makeForgeHost(options: ForgeHostOptions = {}): Promise<For
       generateText: judge,
       storageAdapter: options.db,
       selfImprovementDeps,
-    },
+      ...(options.onForgeTrace ? { onForgeTrace: options.onForgeTrace } : {}),
+    } as Parameters<ToolOrchestrator['initialize']>[5],
   );
   const engine = orchestrator.getEmergentEngine();
   if (!engine) {

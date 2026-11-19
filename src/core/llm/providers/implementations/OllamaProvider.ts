@@ -30,6 +30,7 @@ import {
   ProviderEmbeddingResponse,
   EmbeddingObject,
 } from '../IProvider';
+import { requestedModel, responseModel } from '../responseModel';
 import { stripForeignVendorParams } from '../openrouter-only-params';
 import { OllamaProviderError } from '../errors/OllamaProviderError';
 import { createContentSafeConsole } from '../../../logging/contentSafeConsole.js';
@@ -466,7 +467,7 @@ export class OllamaProvider implements IProvider {
         id: `ollama-${modelId}-${Date.now()}`,
         object: 'chat.completion',
         created: data.created_at ? new Date(data.created_at).getTime() / 1000 : Math.floor(Date.now() / 1000),
-        modelId: data.model || modelId,
+        ...responseModel(data.model, modelId),
         choices: data.message ? [{
           index: 0,
           message: {
@@ -607,7 +608,7 @@ export class OllamaProvider implements IProvider {
           if (parsedChunk.error) {
               yield {
                   id: responseId, object: 'chat.completion.chunk', created: new Date(parsedChunk.created_at).getTime()/1000,
-                  modelId: parsedChunk.model || modelId, choices: [], isFinal: true,
+                  ...responseModel(parsedChunk.model, modelId), choices: [], isFinal: true,
                   error: { message: parsedChunk.error, type: 'ollama_api_error' }
               };
               return; // Terminate stream on error
@@ -642,7 +643,7 @@ export class OllamaProvider implements IProvider {
             id: responseId,
             object: 'chat.completion.chunk',
             created: new Date(parsedChunk.created_at).getTime() / 1000,
-            modelId: parsedChunk.model || modelId,
+            ...responseModel(parsedChunk.model, modelId),
             choices: parsedChunk.message ? [{
               index: 0,
               message: {
@@ -678,7 +679,7 @@ export class OllamaProvider implements IProvider {
       // Yield a final error chunk to the consumer
       yield {
         id: responseId, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000),
-        modelId: modelId, choices: [], isFinal: true,
+        ...requestedModel(modelId), choices: [], isFinal: true,
         error: { message, type: 'STREAM_PROCESSING_ERROR' }
       };
     } finally {

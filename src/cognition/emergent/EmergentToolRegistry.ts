@@ -14,7 +14,9 @@
  *   across sessions.
  *
  * - **Shared tier**: Same SQLite table, discoverable by all agents. Promotion
- *   to shared tier requires explicit human or system approval.
+ *   to the shared tier is an explicit `promote()` call. The row records the
+ *   approver the caller passes as `approvedBy`; a promotion with none keeps
+ *   the approver the row already holds, if it holds one.
  *
  * All state changes are logged to an in-memory audit trail (and to the
  * `agentos_emergent_audit_log` table when a storage adapter is provided).

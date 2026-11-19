@@ -15,9 +15,11 @@
  */
 
 import type {
+  CreationVerdict,
   EmergentConfig,
   ForgeToolRequest,
   ForgeResult,
+  ForgeTestRun,
   PromotionResult,
   EmergentTool,
   ToolUsageStats,
@@ -70,6 +72,20 @@ import { SandboxedToolForge } from './SandboxedToolForge.js';
 import { EmergentJudge } from './EmergentJudge.js';
 import { EmergentToolRegistry } from './EmergentToolRegistry.js';
 import { InvalidToolNameError, forgedToolNameProblem } from './ToolName.js';
+import {
+  FORGE_TRACE_DELIVER,
+  buildForgeTrace,
+  deliverForgeTrace,
+  forgeContextRecords,
+  newForgeCallRecord,
+  settleForgeTrace,
+  thrownReason,
+  type ForgeCallAuthor,
+  type ForgeCallRecord,
+  type ForgeTrace,
+  type ForgeTraceJudgeDetail,
+  type KnownForgeTraceStage,
+} from './ForgeTrace.js';
 import { selfChangeRefusal } from '../learning/toolContext.js';
 
 // ============================================================================
@@ -352,6 +368,18 @@ export interface EmergentCapabilityEngineDeps {
   /** Optional callback used to activate a newly forged tool immediately. */
   onToolForged?: (tool: EmergentTool, executable: ITool) => Promise<void>;
 
+  /**
+   * Called once for every forge, after its outcome is final, with its trace.
+   * Never called for loads or re-registrations.
+   *
+   * The forge waits for the promise the handler returns up to one second and
+   * then returns; a handler running at that bound is left running. The bound
+   * starts when the handler returns: its synchronous work runs on the forge's
+   * own call, to its end, and no timer cuts it short. A handler that throws or
+   * rejects never changes the forge's result.
+   */
+  onForgeTrace?: (trace: ForgeTrace) => void | Promise<void>;
+
   /** Optional callback used when a tool is promoted to a persisted tier. */
   onToolPromoted?: (tool: EmergentTool) => Promise<void>;
 
@@ -381,6 +409,109 @@ interface ToolIndex {
   bySession: Map<string, Set<string>>;
   /** Agent ID → set of tool IDs created by that agent. */
   byAgent: Map<string, Set<string>>;
+}
+
+// ============================================================================
+// FORGE TRACE
+// ============================================================================
+
+/**
+ * What one forge learns on its way, for its trace: where it ended, the test
+ * runs, the executor, the judge's verdict and detail, and the tool id. Each
+ * return of the forge's steps sets `stage`.
+ */
+interface ForgeCall {
+  stage: KnownForgeTraceStage;
+  /** Test case i's run is entry i, in request order. */
+  testRuns: ForgeTestRun[];
+  testsFinishedAt?: number;
+  executor: { name: string; isolates: boolean } | null;
+  verdict: CreationVerdict | null;
+  verdictAt?: number;
+  judgeDetail: ForgeTraceJudgeDetail | null;
+  judge: { model: string | null; providerId: string | null } | null;
+  toolId: string | null;
+}
+
+/**
+ * A direct caller's statement of who wrote the request: a model, as the
+ * caller asked for it, with null for a name the caller did not give.
+ * Undefined when the caller passed no author.
+ */
+function directCallAuthor(author: unknown): ForgeCallAuthor | undefined {
+  if (author === null || typeof author !== 'object') {
+    return undefined;
+  }
+  try {
+    const { provider, model } = author as { provider?: unknown; model?: unknown };
+    return {
+      kind: 'model',
+      role: 'direct_caller',
+      provider: typeof provider === 'string' ? provider : null,
+      model: typeof model === 'string' ? model : null,
+      modelSource: 'requested',
+    };
+  } catch {
+    // A getter that throws: the caller's statement cannot be read, and the
+    // trace names the direct caller with no model.
+    return undefined;
+  }
+}
+
+/** The session id the forging caller's context carries, when it is a string. */
+function callerSessionId(caller: unknown): string | null {
+  try {
+    const sessionId: unknown = (caller as ToolExecutionContext | null | undefined)?.sessionData?.sessionId;
+    return typeof sessionId === 'string' ? sessionId : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The value a forge's context holds under `key`, read so that a getter that
+ * throws reads as undefined: the trace of a forge is built from it, and a
+ * refusal is returned whatever the context's getters do.
+ */
+function contextValue(context: unknown, key: 'agentId' | 'sessionId' | 'caller' | 'forgeId' | 'author'): unknown {
+  try {
+    return (context as Record<string, unknown> | null | undefined)?.[key];
+  } catch {
+    return undefined;
+  }
+}
+
+/** The string a forge's context holds under `key`, else null. */
+function contextString(context: unknown, key: 'agentId' | 'sessionId' | 'forgeId'): string | null {
+  const value = contextValue(context, key);
+  return typeof value === 'string' ? value : null;
+}
+
+/** A test case's run as the trace and the judge read it, from what the composition returned. */
+function composeTestRun(input: unknown, result: ToolExecutionResult): ForgeTestRun {
+  return {
+    input,
+    output: result.output,
+    success: result.success,
+    error: result.error,
+    ...(result.effects && result.effects.length > 0 ? { effects: result.effects } : {}),
+  };
+}
+
+/**
+ * The position of the first test run whose output JSON cannot write (a
+ * BigInt, a cycle, a `toJSON` that throws), else null. A conversation holds a
+ * tool's result as JSON text, so such a tool fails its first call there.
+ */
+function unserializableTestOutput(runs: readonly ForgeTestRun[]): number | null {
+  for (let index = 0; index < runs.length; index += 1) {
+    try {
+      JSON.stringify(runs[index].output);
+    } catch {
+      return index;
+    }
+  }
+  return null;
 }
 
 // ============================================================================
@@ -450,6 +581,7 @@ export class EmergentCapabilityEngine {
   private readonly judge: EmergentJudge;
   private readonly registry: EmergentToolRegistry;
   private readonly onToolForged?: (tool: EmergentTool, executable: ITool) => Promise<void>;
+  private readonly onForgeTrace?: (trace: ForgeTrace) => void | Promise<void>;
   private readonly onToolPromoted?: (tool: EmergentTool) => Promise<void>;
   private readonly onToolRemoved?: (tool: EmergentTool) => Promise<void>;
   private readonly onToolRestored?: (tool: ITool) => Promise<void>;
@@ -484,6 +616,7 @@ export class EmergentCapabilityEngine {
     this.judge = deps.judge;
     this.registry = deps.registry;
     this.onToolForged = deps.onToolForged;
+    this.onForgeTrace = deps.onForgeTrace;
     this.onToolPromoted = deps.onToolPromoted;
     this.onToolRemoved = deps.onToolRemoved;
     this.onToolRestored = deps.onToolRestored;
@@ -559,21 +692,142 @@ export class EmergentCapabilityEngine {
    * 2. Build or validate implementation (compose vs. sandbox).
    * 3. Execute all declared test cases and collect results.
    * 4. Submit candidate to the judge for creation review.
-   * 5. If approved: create {@link EmergentTool}, register at session tier, index.
+   * 5. If approved: refuse a tool whose test output JSON cannot write
+   *    (`test_output_unserializable`), else create {@link EmergentTool},
+   *    register at session tier, index.
    * 6. If rejected: return failure with the judge's reasoning.
+   *
+   * Every result carries the forge's trace as its last key, `trace`: what was
+   * asked, what ran, what the judge said and where the forge ended. The same
+   * trace goes to `onForgeTrace`, once, before the forge returns. A forge that
+   * throws records its trace on the call's record, hands it to `onForgeTrace`
+   * and rethrows the same value.
    *
    * @param request - The forge request describing the desired tool.
    * @param context - The agent and session ids. `caller` is the forging
    *   call's own context: a composition's test steps run as that caller, so
-   *   they meet the checks the caller's direct calls meet.
-   * @returns A {@link ForgeResult} indicating success or failure.
+   *   they meet the checks the caller's direct calls meet. `forgeId` and
+   *   `author` are for a direct caller's trace.
+   * @returns A {@link ForgeResult} indicating success or failure, with its
+   *   trace.
    */
   async forge(
     request: ForgeToolRequest,
-    context: { agentId: string; sessionId: string; caller?: ToolExecutionContext }
+    context: {
+      agentId: string;
+      sessionId: string;
+      caller?: ToolExecutionContext;
+      /** Optional: this forge's trace id. Minted (a random UUID with the prefix `forge_`) when absent. */
+      forgeId?: string;
+      /** Optional: who wrote the request, for the trace's provenance. */
+      author?: { provider?: string; model?: string };
+    }
+  ): Promise<ForgeResult> {
+    // forge_tool hands over its call's record, keyed by the context object it
+    // built; a direct call gets a record of its own.
+    const handed = forgeContextRecords.get(context);
+    const record = handed ?? newForgeCallRecord(contextString(context, 'forgeId') ?? undefined);
+    if (!handed) {
+      const author = directCallAuthor(contextValue(context, 'author'));
+      if (author) {
+        record.author = author;
+      }
+    }
+    const via: ForgeTrace['via'] = handed ? 'forge_tool' : 'direct';
+    const call: ForgeCall = {
+      // Each return of forgeSteps sets its own stage; a throw is recorded as thrown below.
+      stage: 'thrown',
+      testRuns: [],
+      executor: null,
+      verdict: null,
+      judgeDetail: null,
+      judge: null,
+      toolId: null,
+    };
+
+    let result: ForgeResult;
+    try {
+      result = await this.forgeSteps(request, context, call);
+    } catch (error: unknown) {
+      // thrownReason never throws and the delivery never throws, so the caller
+      // gets back the value that was thrown, whatever it is.
+      await this.recordForgeTrace(record, via, request, context, call, 'thrown', thrownReason(error));
+      throw error;
+    }
+    const trace = await this.recordForgeTrace(
+      record,
+      via,
+      request,
+      context,
+      call,
+      call.stage,
+      call.stage === 'approved' ? null : (result.error ?? null),
+    );
+    return { ...result, trace };
+  }
+
+  /**
+   * Hands a forge's trace to the host's `onForgeTrace` and writes the forge's
+   * log line. Every layer that ends a forge (this engine, forge_tool, the
+   * wrapper, the orchestrator) delivers through this one method. Never throws.
+   *
+   * @param trace - The forge's trace.
+   * @internal
+   */
+  async [FORGE_TRACE_DELIVER](trace: ForgeTrace): Promise<void> {
+    return deliverForgeTrace(trace, this.onForgeTrace);
+  }
+
+  /**
+   * Builds the trace of a forge this engine ended, keeps it on the call's
+   * record and delivers it. The record keeps the first trace set on it and is
+   * delivered once: a record an outer layer already delivered is not
+   * delivered again.
+   */
+  private async recordForgeTrace(
+    record: ForgeCallRecord,
+    via: ForgeTrace['via'],
+    request: ForgeToolRequest,
+    context: Parameters<EmergentCapabilityEngine['forge']>[1],
+    call: ForgeCall,
+    stage: KnownForgeTraceStage,
+    reason: unknown,
+  ): Promise<ForgeTrace> {
+    const trace = buildForgeTrace({
+      record,
+      recordedBy: 'engine',
+      via,
+      stage,
+      reason,
+      args: request,
+      // Each read is guarded: a context whose getters throw keeps its forge's refusal, traced with null ids.
+      agentId: contextString(context, 'agentId'),
+      sessionId: callerSessionId(contextValue(context, 'caller')),
+      correlationId: contextString(context, 'sessionId'),
+      testRuns: call.testRuns,
+      testsFinishedAt: call.testsFinishedAt,
+      executor: call.executor,
+      verdict: call.verdict,
+      verdictAt: call.verdictAt,
+      judgeDetail: call.judgeDetail,
+      judge: call.judge,
+      toolId: call.toolId,
+    });
+    return settleForgeTrace(record, trace, (kept) => this[FORGE_TRACE_DELIVER](kept));
+  }
+
+  /**
+   * The forge's steps, as {@link forge} describes them. Each return sets
+   * `call.stage`, and the steps fill the rest of `call` as they learn it.
+   */
+  private async forgeSteps(
+    request: ForgeToolRequest,
+    context: Parameters<EmergentCapabilityEngine['forge']>[1],
+    call: ForgeCall,
   ): Promise<ForgeResult> {
     // Guard: engine must be enabled.
     if (!this.config.enabled) {
+      call.stage = 'engine_disabled';
       return { success: false, error: 'Emergent capabilities are disabled.' };
     }
 
@@ -582,14 +836,17 @@ export class EmergentCapabilityEngine {
     // host's direct call as for forge_tool.
     const nameProblem = forgedToolNameProblem(request.name);
     if (nameProblem) {
+      call.stage = 'name_refused';
       return { success: false, error: new InvalidToolNameError(nameProblem, request.name).message };
     }
 
     // Step 1: Generate a unique tool ID.
     const toolId = `emergent_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    call.toolId = toolId;
 
-    // Step 2 & 3: Build implementation and run test cases.
-    const testResults: ToolCandidate['testResults'] = [];
+    // Step 2 & 3: Build implementation and run test cases. The runs are the
+    // trace's too.
+    const testResults: ToolCandidate['testResults'] = call.testRuns;
     let source: string;
 
     if (request.implementation.mode === 'compose') {
@@ -600,6 +857,7 @@ export class EmergentCapabilityEngine {
       // composition must not reach itself, through any nesting.
       const refused = this.composeRefusal(request.name, request.implementation);
       if (refused) {
+        call.stage = 'compose_refused';
         return { success: false, error: refused };
       }
 
@@ -633,6 +891,11 @@ export class EmergentCapabilityEngine {
         }
         const details = result.details as { code?: string; missingCapabilities?: unknown } | undefined;
         if (details?.code === 'dry_run_needs_output') {
+          // The test case ran up to the step with no stand-in output: the
+          // steps before it ran, so its run and its effects so far are kept.
+          testResults.push(composeTestRun(tc.input, result));
+          call.testsFinishedAt = Date.now();
+          call.stage = 'compose_needs_step_output';
           return { success: false, error: result.error };
         }
         // Refused a capability by the permission manager (permission_denied),
@@ -645,7 +908,11 @@ export class EmergentCapabilityEngine {
         if (capabilityRefused && !context.caller) {
           // A step needs a capability the stand-in context does not carry:
           // the test says nothing about the tool, so the forge asks for the
-          // caller instead of recording a failed test.
+          // caller instead of recording a failed test. The steps before it
+          // ran, so the trace keeps the test case's run up to that step.
+          testResults.push(composeTestRun(tc.input, result));
+          call.testsFinishedAt = Date.now();
+          call.stage = 'caller_context_required';
           return {
             success: false,
             error:
@@ -653,17 +920,13 @@ export class EmergentCapabilityEngine {
               "pass the forging caller's context (forge(request, { ..., caller }))",
           };
         }
-        testResults.push({
-          input: tc.input,
-          output: result.output,
-          success: result.success,
-          error: result.error,
-          ...(result.effects && result.effects.length > 0 ? { effects: result.effects } : {}),
-        });
+        testResults.push(composeTestRun(tc.input, result));
       }
+      call.testsFinishedAt = Date.now();
     } else {
       // ---- SANDBOX MODE ----
       if (!this.config.allowSandboxTools) {
+        call.stage = 'sandbox_disabled';
         return {
           success: false,
           error:
@@ -678,6 +941,7 @@ export class EmergentCapabilityEngine {
       // narrowed reading of it.
       const list = normalizeAllowlist(request.implementation.allowlist);
       if (list.unknown.length > 0) {
+        call.stage = 'allowlist_unknown';
         return {
           success: false,
           error: `allowlist names capabilities outside the catalogue: ${list.unknown.join(', ')}`,
@@ -689,6 +953,7 @@ export class EmergentCapabilityEngine {
       if (!this.ceiling) {
         const effects = list.capabilities.filter((name) => EFFECT_CAPABILITIES.includes(name));
         if (effects.length > 0) {
+          call.stage = 'effects_need_ceiling';
           return {
             success: false,
             error:
@@ -703,6 +968,7 @@ export class EmergentCapabilityEngine {
       if (this.ceiling) {
         const fit = checkRequest(list.capabilities, this.ceiling);
         if (!fit.ok) {
+          call.stage = 'capability_not_granted';
           return {
             success: false,
             error:
@@ -720,6 +986,7 @@ export class EmergentCapabilityEngine {
       );
 
       if (!validation.valid) {
+        call.stage = 'code_validation';
         return {
           success: false,
           error: `Code validation failed: ${validation.violations.join('; ')}`,
@@ -730,10 +997,12 @@ export class EmergentCapabilityEngine {
       // case runs, so a forge on an executor that cannot run is refused with
       // its reason and reaches neither a test nor the judge.
       const executor = this.sandboxForge.executor;
+      call.executor = { name: executor.name, isolates: executor.isolates };
       if (executor.ready) {
         try {
           await executor.ready();
         } catch (error: unknown) {
+          call.stage = 'executor_unavailable';
           return { success: false, error: error instanceof Error ? error.message : String(error) };
         }
       }
@@ -741,6 +1010,7 @@ export class EmergentCapabilityEngine {
       // Step 2e: the answers a test case gives its state-changing requests.
       const answersRefused = this.refuseTestResponses(request.testCases);
       if (answersRefused) {
+        call.stage = 'test_responses_refused';
         return { success: false, error: answersRefused };
       }
 
@@ -762,6 +1032,7 @@ export class EmergentCapabilityEngine {
           ...(sandboxResult.effects ? { effects: sandboxResult.effects } : {}),
         });
       }
+      call.testsFinishedAt = Date.now();
     }
 
     // Step 4: Build candidate and submit to judge.
@@ -777,10 +1048,41 @@ export class EmergentCapabilityEngine {
       testResults,
     };
 
-    const verdict = await this.judge.reviewCreation(candidate);
+    // The class's own review keeps the reply's detail for the trace; a host's
+    // override of reviewCreation is called as it is, never bypassed, and the
+    // trace then has no detail and names no judge model.
+    let verdict: CreationVerdict;
+    if (this.judge.reviewCreation === EmergentJudge.prototype.reviewCreation) {
+      const reviewed = await this.judge.reviewCreationWithDetail(candidate);
+      verdict = reviewed.verdict;
+      call.judgeDetail = reviewed.detail;
+      // The model and provider read as the request was sent.
+      call.judge = reviewed.author;
+    } else {
+      verdict = await this.judge.reviewCreation(candidate);
+      call.judgeDetail = null;
+      call.judge = null;
+    }
+    call.verdict = verdict;
+    call.verdictAt = Date.now();
 
     // Step 5: Register if approved.
     if (verdict.approved) {
+      // The judge read each test output JSON cannot write through a marker. A
+      // conversation holds a tool's result as JSON text, so a tool whose
+      // output JSON cannot write is refused before anything is registered.
+      const unwritable = unserializableTestOutput(testResults);
+      if (unwritable !== null) {
+        call.stage = 'test_output_unserializable';
+        return {
+          success: false,
+          verdict,
+          error:
+            `test_output_unserializable: the output of test case ${unwritable + 1} cannot be written as JSON, ` +
+            "so a conversation could not hold the tool's result",
+        };
+      }
+
       if (request.implementation.mode === 'compose') {
         // The tests and the judge took time, and what the steps name may have
         // changed meanwhile (another forge registered a composition that
@@ -788,6 +1090,7 @@ export class EmergentCapabilityEngine {
         // is registered.
         const refused = this.composeRefusal(request.name, request.implementation);
         if (refused) {
+          call.stage = 'compose_refused_after_judge';
           return { success: false, verdict, error: refused };
         }
       }
@@ -838,6 +1141,7 @@ export class EmergentCapabilityEngine {
         // change while the state was written, such as a load of the session
         // that adopted the tool from its row, leaves it registered: the forge
         // goes on with the object the registry holds.)
+        call.stage = 'removed_while_forging';
         return { success: false, error: 'the tool was removed while it was being forged' };
       }
       if (written && written.state === 'demoted' && written.reason === 'removed') {
@@ -883,6 +1187,7 @@ export class EmergentCapabilityEngine {
           if (held && registeredMeanwhile) {
             await this.dropExecutable(held);
           }
+          call.stage = 'step_cycle';
           return {
             success: false,
             verdict,
@@ -905,6 +1210,7 @@ export class EmergentCapabilityEngine {
         } catch (error: unknown) {
           this.registry.remove(toolId);
           this.removeIndexedTool(toolId, context.agentId, context.sessionId);
+          call.stage = 'activation_failed';
           return {
             success: false,
             error: error instanceof Error ? error.message : 'Failed to activate forged tool.',
@@ -914,6 +1220,7 @@ export class EmergentCapabilityEngine {
         try {
           settled = await this.settleRegistration(live);
         } catch (error: unknown) {
+          call.stage = 'registration_failed';
           return {
             success: false,
             error: error instanceof Error ? error.message : 'the forged tool could not be registered',
@@ -921,6 +1228,7 @@ export class EmergentCapabilityEngine {
         }
         if (settled && settled.reason === 'removed') {
           // Removed while the host was registering it: nothing is registered.
+          call.stage = 'removed_while_forging';
           return { success: false, error: 'the tool was removed while it was being forged' };
         }
       }
@@ -941,6 +1249,7 @@ export class EmergentCapabilityEngine {
           this.registry.remove(toolId);
           this.removeIndexedToolEverywhere(toolId);
           await this.restoreDisplaced(request.name, displaced, toolId);
+          call.stage = 'step_cycle';
           return {
             success: false,
             verdict,
@@ -949,6 +1258,7 @@ export class EmergentCapabilityEngine {
         }
       }
 
+      call.stage = 'approved';
       return {
         success: true,
         toolId,
@@ -958,6 +1268,7 @@ export class EmergentCapabilityEngine {
     }
 
     // Step 6: Rejected.
+    call.stage = 'judge_rejected';
     return {
       success: false,
       verdict,

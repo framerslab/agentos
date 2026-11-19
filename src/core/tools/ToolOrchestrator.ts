@@ -39,6 +39,7 @@ import {
 import { ToolExecutor, ToolExecutionRequestDetails } from './ToolExecutor';
 import { ToolOrchestratorConfig } from '../config/ToolOrchestratorConfig';
 import { ToolCallResult, UserContext } from '../../cognition/substrate/IGMI';
+import type { GMIToolCallRefusal } from '../../cognition/substrate/IGMI';
 import { GMIError, GMIErrorCode, createGMIErrorFromError } from '../utils/errors.js';
 import type {
   ActionSeverity,
@@ -54,6 +55,22 @@ import { EmergentJudge } from '../../cognition/emergent/EmergentJudge.js';
 import { EmergentToolRegistry } from '../../cognition/emergent/EmergentToolRegistry.js';
 import type { IStorageAdapter as EmergentStorageAdapter } from '../../cognition/emergent/EmergentToolRegistry.js';
 import { ForgeToolMetaTool } from '../../cognition/emergent/ForgeToolMetaTool.js';
+import {
+  FORGE_TRACE_CAPS,
+  FORGE_TRACE_DELIVER,
+  buildForgeTrace,
+  forgeCallScope,
+  newForgeCallRecord,
+  settleForgeTrace,
+  thrownReason,
+  traceString,
+} from '../../cognition/emergent/ForgeTrace.js';
+import type {
+  ForgeCallAuthor,
+  ForgeCallRecord,
+  ForgeTrace,
+  KnownForgeTraceStage,
+} from '../../cognition/emergent/ForgeTrace.js';
 import type { StepGate } from '../../cognition/emergent/StepGate.js';
 import type { SelfImprovementToolDeps } from '../../cognition/emergent/EmergentCapabilityEngine.js';
 
@@ -105,6 +122,11 @@ export class ToolOrchestrator implements IToolOrchestrator {
    * @private
    */
   private emergentEngine?: EmergentCapabilityEngine;
+  /**
+   * This orchestrator's own forge_tool, made with the engine. A call to it gets a forge record at its start, and the
+   * orchestrator records the forge's trace when it ends the call before the tool runs.
+   */
+  private emergentForgeTool?: ForgeToolMetaTool;
   /** Removes this orchestrator's registration listener; set while forging is enabled. */
   private stopWatchingRegistrations?: () => void;
   /** Which forged tool owns the executable registered under each name (the newest wins). */
@@ -187,6 +209,18 @@ export class ToolOrchestrator implements IToolOrchestrator {
        * attempts tool creation but any deps-dependent tools are skipped.
        */
       selfImprovementDeps?: SelfImprovementToolDeps;
+      /**
+       * Called once for every forge, after its outcome is final, with its trace: the forges the engine runs and the
+       * calls to this orchestrator's own forge_tool that the orchestrator or the executor ends before the tool runs.
+       * The promise it returns is awaited up to 1,000 ms; its synchronous work runs to its end before that bound
+       * starts, and no timer cuts it short. A throw or rejection is caught and never changes the forge's result.
+       */
+      onForgeTrace?: (trace: ForgeTrace) => void | Promise<void>;
+      /**
+       * The provider the judge's `generateText` calls, written into each trace's provenance; absent means unknown. A
+       * function is called as each review request is sent, so it names the provider that request went to.
+       */
+      judgeProviderId?: string | (() => string | undefined);
     }
   ): Promise<void> {
     if (this.isInitialized) {
@@ -299,6 +333,7 @@ export class ToolOrchestrator implements IToolOrchestrator {
         judgeModel: emergentConfig.judgeModel,
         promotionModel: emergentConfig.promotionJudgeModel,
         generateText,
+        providerId: emergentOptions.judgeProviderId,
       });
 
       const registry = new EmergentToolRegistry(emergentConfig, emergentOptions.storageAdapter);
@@ -311,6 +346,7 @@ export class ToolOrchestrator implements IToolOrchestrator {
         judge,
         registry,
         stepGate,
+        onForgeTrace: emergentOptions.onForgeTrace,
         onToolForged: async (tool, executable) => {
           await this.registerInitialTool(executable);
           // The executor holds one executable per name; the newest forged tool
@@ -340,6 +376,7 @@ export class ToolOrchestrator implements IToolOrchestrator {
 
       // Create and register the forge_tool meta-tool.
       const forgeMetaTool = new ForgeToolMetaTool(this.emergentEngine);
+      this.emergentForgeTool = forgeMetaTool;
       await this.registerInitialTool(forgeMetaTool);
 
       // A composition suspended for a missing or refused step is re-checked
@@ -750,6 +787,7 @@ export class ToolOrchestrator implements IToolOrchestrator {
       ...(personaCapabilities ? { personaCapabilities } : {}),
       ...(signal ? { signal } : {}),
       ...(requestDetails.callerTurn ? { callerTurn: requestDetails.callerTurn } : {}),
+      ...(requestDetails.callerModel ? { callerModel: requestDetails.callerModel } : {}),
     };
     try {
       const refusal = tool.refusalBeforeApproval(args, context);
@@ -782,6 +820,19 @@ export class ToolOrchestrator implements IToolOrchestrator {
     }
     const toolName = toolCallRequest.name;
     const llmProvidedCallId = toolCallRequest.id;
+    // A call to this orchestrator's own forge_tool is a forge from its start: its record holds the forge's id and
+    // start time, and every layer inside (forge_tool, the engine) records the forge under it.
+    const forgeRecord = this.ownForgeRecord(requestDetails, toolName);
+    // With logToolCalls off, the lines of an own forge call that would print a reason or an error print fixed words:
+    // the text stays in the tool result and in the forge's trace, where a host reads it.
+    const quietForge = forgeRecord !== undefined && this.config.logToolCalls !== true;
+    /** Records an own forge call's trace for a stage the orchestrator ended, then hands back the result as it is. */
+    const ended = async (result: ToolCallResult, stage: KnownForgeTraceStage): Promise<ToolCallResult> => {
+      if (forgeRecord) {
+        await this.traceOwnForgeEnd(forgeRecord, requestDetails, stage, result.errorDetails?.message ?? null);
+      }
+      return result;
+    };
 
     const logPrefix = `ToolOrchestrator (ID: ${this.orchestratorId}, GMI: ${gmiId}, Persona: ${personaId}, LLMCallID: ${llmProvidedCallId}, Tool: ${toolName}):`;
     /** The refusal of a call whose stop came before it was delegated (its turn stopped, or its time ran out): nothing ran. */
@@ -807,17 +858,20 @@ export class ToolOrchestrator implements IToolOrchestrator {
     if (this.config.globalDisabledTools?.includes(toolName)) {
       const errorMsg = `Attempted to execute globally disabled tool '${toolName}'. Execution denied.`;
       console.warn(`${logPrefix} ${errorMsg}`);
-      return {
-        toolCallId: llmProvidedCallId,
-        toolName,
-        output: null,
-        isError: true,
-        errorDetails: {
-          message: errorMsg,
-          code: GMIErrorCode.PERMISSION_DENIED,
-          reason: 'Tool is globally disabled.',
+      return ended(
+        {
+          toolCallId: llmProvidedCallId,
+          toolName,
+          output: null,
+          isError: true,
+          errorDetails: {
+            message: errorMsg,
+            code: GMIErrorCode.PERMISSION_DENIED,
+            reason: 'Tool is globally disabled.',
+          },
         },
-      };
+        'orchestrator_refused',
+      );
     }
 
     // A composed step arrives with the instance its pipeline checked; every
@@ -843,17 +897,20 @@ export class ToolOrchestrator implements IToolOrchestrator {
     ) {
       const errorMsg = `Attempted to execute globally disabled tool '${toolName}' (ID: '${tool.id}'). Execution denied.`;
       console.warn(`${logPrefix} ${errorMsg}`);
-      return {
-        toolCallId: llmProvidedCallId,
-        toolName,
-        output: null,
-        isError: true,
-        errorDetails: {
-          message: errorMsg,
-          code: GMIErrorCode.PERMISSION_DENIED,
-          reason: 'Tool is globally disabled.',
+      return ended(
+        {
+          toolCallId: llmProvidedCallId,
+          toolName,
+          output: null,
+          isError: true,
+          errorDetails: {
+            message: errorMsg,
+            code: GMIErrorCode.PERMISSION_DENIED,
+            reason: 'Tool is globally disabled.',
+          },
         },
-      };
+        'orchestrator_refused',
+      );
     }
 
     const permissionContext: PermissionCheckContext = {
@@ -868,49 +925,62 @@ export class ToolOrchestrator implements IToolOrchestrator {
       permissionResult = await this.permissionManager.isExecutionAllowed(permissionContext);
     } catch (permError: any) {
       const errorMsg = `An unexpected error occurred during permission check for tool '${toolName}'.`;
-      console.error(`${logPrefix} ${errorMsg}`, permError);
+      if (quietForge) {
+        console.error(`${logPrefix} ${errorMsg}`);
+      } else {
+        console.error(`${logPrefix} ${errorMsg}`, permError);
+      }
       const wrappedError = createGMIErrorFromError(
         permError,
         GMIErrorCode.PERMISSION_DENIED,
         permissionContext,
         errorMsg
       );
-      return {
-        toolCallId: llmProvidedCallId,
-        toolName,
-        output: null,
-        isError: true,
-        errorDetails: {
-          message: wrappedError.message,
-          code: wrappedError.code,
-          details: wrappedError.details,
+      return ended(
+        {
+          toolCallId: llmProvidedCallId,
+          toolName,
+          output: null,
+          isError: true,
+          errorDetails: {
+            message: wrappedError.message,
+            code: wrappedError.code,
+            details: wrappedError.details,
+          },
         },
-      };
+        'permission_check_failed',
+      );
     }
 
     if (!permissionResult.isAllowed) {
-      const errorMsg =
-        permissionResult.reason ||
-        `Permission denied by ToolPermissionManager for tool '${toolName}'.`;
-      console.warn(`${logPrefix} ${errorMsg}`, permissionResult.details);
-      return {
-        toolCallId: llmProvidedCallId,
-        toolName,
-        output: null,
-        isError: true,
-        errorDetails: {
-          message: errorMsg,
-          code: GMIErrorCode.PERMISSION_DENIED,
-          details: permissionResult.details,
+      const deniedWords = `Permission denied by ToolPermissionManager for tool '${toolName}'.`;
+      const errorMsg = permissionResult.reason || deniedWords;
+      if (quietForge) {
+        console.warn(`${logPrefix} ${deniedWords}`);
+      } else {
+        console.warn(`${logPrefix} ${errorMsg}`, permissionResult.details);
+      }
+      return ended(
+        {
+          toolCallId: llmProvidedCallId,
+          toolName,
+          output: null,
+          isError: true,
+          errorDetails: {
+            message: errorMsg,
+            code: GMIErrorCode.PERMISSION_DENIED,
+            details: permissionResult.details,
+          },
         },
-      };
+        'orchestrator_refused',
+      );
     }
 
     // A call whose stop has already come (the next call of a turn that stopped, a step its composed call or workflow
     // reached after the stop) is refused here, after its checks and before its approval, so no one is asked about a
     // call that cannot run; a stop that comes while the approval is pending refuses the call after it, below.
     if (signal?.aborted) {
-      return stopped();
+      return ended(stopped(), 'orchestrator_refused');
     }
 
     // Optional HITL gating for side-effect tools.
@@ -928,16 +998,19 @@ export class ToolOrchestrator implements IToolOrchestrator {
     const refusedBeforeApproval = requiresSideEffectsApproval ? this.refusalBeforeApproval(tool, requestDetails) : undefined;
     if (refusedBeforeApproval) {
       console.warn(`${logPrefix} Tool '${toolName}' refused the call before the approval gate: ${refusedBeforeApproval.error ?? 'refused'}`);
-      return {
-        toolCallId: llmProvidedCallId,
-        toolName,
-        output: null,
-        isError: true,
-        errorDetails: {
-          message: refusedBeforeApproval.error || `Tool '${toolName}' refused the call.`,
-          details: refusedBeforeApproval.details,
+      return ended(
+        {
+          toolCallId: llmProvidedCallId,
+          toolName,
+          output: null,
+          isError: true,
+          errorDetails: {
+            message: refusedBeforeApproval.error || `Tool '${toolName}' refused the call.`,
+            details: refusedBeforeApproval.details,
+          },
         },
-      };
+        'refused_before_approval',
+      );
     }
 
     if (requiresSideEffectsApproval) {
@@ -946,18 +1019,21 @@ export class ToolOrchestrator implements IToolOrchestrator {
         if (!autoApprove) {
           const errorMsg = `Tool '${toolName}' has side effects and requires approval, but no HITL manager is configured.`;
           console.warn(`${logPrefix} ${errorMsg}`);
-          return {
-            toolCallId: llmProvidedCallId,
-            toolName,
-            output: null,
-            isError: true,
-            errorDetails: {
-              message: errorMsg,
-              code: GMIErrorCode.PERMISSION_DENIED,
-              reason: 'HITL manager missing',
-              details: { hitlEnabled: true, toolHasSideEffects: true },
+          return ended(
+            {
+              toolCallId: llmProvidedCallId,
+              toolName,
+              output: null,
+              isError: true,
+              errorDetails: {
+                message: errorMsg,
+                code: GMIErrorCode.PERMISSION_DENIED,
+                reason: 'HITL manager missing',
+                details: { hitlEnabled: true, toolHasSideEffects: true },
+              },
             },
-          };
+            'orchestrator_refused',
+          );
         }
       } else {
         // The tool's id is in the action id: an approval is for this
@@ -991,6 +1067,8 @@ export class ToolOrchestrator implements IToolOrchestrator {
             gmiId,
             personaId,
             llmProvidedCallId,
+            // An own forge call's justification, beside the preview that can cut it off, up to the trace's cap for it.
+            ...(forgeRecord ? approvalJustification(requestDetails) : {}),
           },
           reversible: false,
           requestedAt: new Date(),
@@ -1006,9 +1084,32 @@ export class ToolOrchestrator implements IToolOrchestrator {
         try {
           const decision = await this.hitlManager.requestApproval(pending);
           if (!decision.approved) {
-            const errorMsg = decision.rejectionReason || `Human rejected tool '${toolName}'.`;
-            console.warn(`${logPrefix} ${errorMsg}`);
-            return {
+            const rejectedWords = `Human rejected tool '${toolName}'.`;
+            const errorMsg = decision.rejectionReason || rejectedWords;
+            console.warn(`${logPrefix} ${quietForge ? rejectedWords : errorMsg}`);
+            // A decision the system made (an approval that timed out under autoRejectOnTimeout) is nobody's denial.
+            const decidedBySystem = readSafely(() => decision.decidedBy) === 'system';
+            return ended(
+              {
+                toolCallId: llmProvidedCallId,
+                toolName,
+                output: null,
+                isError: true,
+                errorDetails: {
+                  message: errorMsg,
+                  code: GMIErrorCode.PERMISSION_DENIED,
+                  reason: 'HITL rejected',
+                  details: decision,
+                },
+              },
+              decidedBySystem ? 'approval_timed_out' : 'human_denied',
+            );
+          }
+        } catch (hitlError: any) {
+          const errorMsg = `Approval request failed: ${hitlError?.message ?? String(hitlError)}`;
+          console.warn(`${logPrefix} ${quietForge ? 'Approval request failed.' : errorMsg}`);
+          return ended(
+            {
               toolCallId: llmProvidedCallId,
               toolName,
               output: null,
@@ -1016,25 +1117,11 @@ export class ToolOrchestrator implements IToolOrchestrator {
               errorDetails: {
                 message: errorMsg,
                 code: GMIErrorCode.PERMISSION_DENIED,
-                reason: 'HITL rejected',
-                details: decision,
+                reason: 'HITL error',
               },
-            };
-          }
-        } catch (hitlError: any) {
-          const errorMsg = `Approval request failed: ${hitlError?.message ?? String(hitlError)}`;
-          console.warn(`${logPrefix} ${errorMsg}`);
-          return {
-            toolCallId: llmProvidedCallId,
-            toolName,
-            output: null,
-            isError: true,
-            errorDetails: {
-              message: errorMsg,
-              code: GMIErrorCode.PERMISSION_DENIED,
-              reason: 'HITL error',
             },
-          };
+            'approval_failed',
+          );
         }
       }
     }
@@ -1046,7 +1133,7 @@ export class ToolOrchestrator implements IToolOrchestrator {
     }
 
     if (signal?.aborted) {
-      return stopped();
+      return ended(stopped(), 'orchestrator_refused');
     }
     // Every call runs the instance its checks and approval were for: a
     // composed step the one its pipeline checked, a direct call the one
@@ -1059,26 +1146,43 @@ export class ToolOrchestrator implements IToolOrchestrator {
         ? `step_replaced: the tool registered as '${toolName}' changed after it was checked; nothing ran.`
         : `tool_replaced: the tool registered as '${toolName}' is not the one this call's checks and approval were for (it was replaced or unregistered meanwhile); nothing ran.`;
       console.warn(`${logPrefix} ${errorMsg}`);
-      return {
-        toolCallId: llmProvidedCallId,
-        toolName,
-        output: null,
-        isError: true,
-        errorDetails: { message: errorMsg, code: resolvedForStep ? 'STEP_REPLACED' : 'TOOL_REPLACED' },
-      };
+      return ended(
+        {
+          toolCallId: llmProvidedCallId,
+          toolName,
+          output: null,
+          isError: true,
+          errorDetails: { message: errorMsg, code: resolvedForStep ? 'STEP_REPLACED' : 'TOOL_REPLACED' },
+        },
+        'orchestrator_refused',
+      );
     }
 
     let coreExecutorResult: ToolExecutionResult;
     try {
       // the executor's console lines follow this orchestrator's setting for this call (another orchestrator may share the executor)
-      coreExecutorResult = await this.toolExecutor.executeTool({ ...requestDetails, logToolCalls: this.config.logToolCalls === true });
+      const executorRequest: ToolExecutionRequestDetails = { ...requestDetails, logToolCalls: this.config.logToolCalls === true };
+      // An own forge call runs in its record's scope, so forge_tool takes the record this call started with. The
+      // executor is still entered synchronously: forgeCallScope.run calls its function at once.
+      coreExecutorResult = await (forgeRecord
+        ? forgeCallScope.run(forgeRecord, () => this.toolExecutor.executeTool(executorRequest))
+        : this.toolExecutor.executeTool(executorRequest));
     } catch (executorPipelineError: any) {
       const errorMsg = `Critical error within ToolExecutor's internal pipeline while processing '${toolName}'. This is not an error from the tool's execute method itself.`;
-      console.error(`${logPrefix} ${errorMsg}`, executorPipelineError);
+      if (quietForge) {
+        console.error(`${logPrefix} ${errorMsg}`);
+      } else {
+        console.error(`${logPrefix} ${errorMsg}`, executorPipelineError);
+      }
+      // An own forge call whose forge_tool recorded nothing: the executor's pipeline threw around it.
+      if (forgeRecord && forgeRecord.trace === undefined) {
+        await this.traceOwnForgeEnd(forgeRecord, requestDetails, 'thrown', thrownReason(executorPipelineError));
+      }
       // The failure's details go into the tool message the model receives and into the trace, both serialised: the
       // request's facts, without the live objects a call carries (the calling turn's budget, gate, names and hooks, its
-      // stop, the resolved tool instance) or the session data its caller supplied, which can hold any value.
-      const { callerTurn: _callerTurn, signal: _signal, tool: _tool, sessionData: _sessionData, ...requestFacts } = requestDetails;
+      // stop, the resolved tool instance), the session data its caller supplied, which can hold any value, or the model
+      // that answered the call's step, which nothing the model reads carries.
+      const { callerTurn: _callerTurn, signal: _signal, tool: _tool, sessionData: _sessionData, callerModel: _callerModel, ...requestFacts } = requestDetails;
       const wrappedError = createGMIErrorFromError(
         executorPipelineError,
         GMIErrorCode.TOOL_EXECUTION_FAILED,
@@ -1108,7 +1212,7 @@ export class ToolOrchestrator implements IToolOrchestrator {
       );
     }
 
-    return {
+    const callResult: ToolCallResult = {
       toolCallId: llmProvidedCallId,
       toolName: toolName,
       output: coreExecutorResult.success ? coreExecutorResult.output : null,
@@ -1123,6 +1227,85 @@ export class ToolOrchestrator implements IToolOrchestrator {
         : undefined,
       ...(coreExecutorResult.effects ? { effects: coreExecutorResult.effects } : {}),
     };
+    // An own forge call that failed before forge_tool took its record: the executor refused it before `execute` (its
+    // argument parse or its schema check), and nothing inside recorded the forge.
+    if (forgeRecord && !coreExecutorResult.success && !forgeRecord.seen && forgeRecord.trace === undefined) {
+      const refusal = executorRefusal(callResult.errorDetails?.message ?? '', coreExecutorResult.details);
+      await this.traceOwnForgeEnd(forgeRecord, requestDetails, 'schema_check', refusal.reason, refusal.args);
+    }
+    return callResult;
+  }
+
+  /**
+   * Records a call that a turn's tool-call gate refused before {@link processToolCall}: a forge trace with the stage
+   * `guardrail_refused`, the refusal's reason as its reason, for a call to this orchestrator's own forge_tool, handed
+   * to the engine's `onForgeTrace` once; nothing for any other call. Never throws.
+   *
+   * @param requestDetails - The refused call, as processToolCall would have received it.
+   * @param refusal - Why the gate refused it.
+   */
+  public async recordRefusedToolCall(
+    requestDetails: ToolExecutionRequestDetails,
+    refusal: GMIToolCallRefusal,
+  ): Promise<void> {
+    try {
+      const toolName = readSafely(() => requestDetails.toolCallRequest.name);
+      if (!this.isInitialized || typeof toolName !== 'string') {
+        return;
+      }
+      const record = this.ownForgeRecord(requestDetails, toolName);
+      if (record) {
+        await this.traceOwnForgeEnd(record, requestDetails, 'guardrail_refused', readSafely(() => refusal.reason) ?? null);
+      }
+    } catch {
+      // A trace that cannot be recorded changes nothing about the refused call.
+    }
+  }
+
+  /**
+   * The forge record of a call to this orchestrator's own forge_tool, made at the call's start; undefined for every
+   * other call. The request's author is the call's model when the call names it (`callerModel`: the model that answered
+   * the call's step, or the model the step asked for, labelled `requested`), else a model whose provider and model are
+   * unknown: a model called forge_tool, so the request is model-written.
+   */
+  private ownForgeRecord(requestDetails: ToolExecutionRequestDetails, toolName: string): ForgeCallRecord | undefined {
+    const forgeTool = this.emergentForgeTool;
+    if (forgeTool === undefined || (requestDetails.tool ?? this.toolExecutor.getTool(toolName)) !== forgeTool) {
+      return undefined;
+    }
+    const record = newForgeCallRecord();
+    record.author = answeringModelAuthor(requestDetails);
+    return record;
+  }
+
+  /**
+   * Builds the trace of an own forge call the orchestrator ended, keeps it on the call's record and hands it to the
+   * engine's `onForgeTrace` once. Never throws.
+   *
+   * @param record - The call's forge record.
+   * @param requestDetails - The call as the orchestrator received it.
+   * @param stage - Where the call ended.
+   * @param reason - The refusal's or error's text, or the thrown value.
+   * @param args - The arguments the trace keeps; the call's arguments, parsed when they arrived as JSON text, by default.
+   */
+  private async traceOwnForgeEnd(
+    record: ForgeCallRecord,
+    requestDetails: ToolExecutionRequestDetails,
+    stage: KnownForgeTraceStage,
+    reason: unknown,
+    args: unknown = forgeCallArguments(requestDetails),
+  ): Promise<void> {
+    const trace = buildForgeTrace({
+      record,
+      recordedBy: 'orchestrator',
+      via: 'forge_tool',
+      stage,
+      reason,
+      args,
+      ...forgeCallIds(requestDetails),
+    });
+    const engine = this.emergentEngine;
+    await settleForgeTrace(record, trace, engine ? (kept) => engine[FORGE_TRACE_DELIVER](kept) : undefined);
   }
 
   // --------------------------------------------------------------------------
@@ -1406,4 +1589,108 @@ function stepCodeFor(code: string | undefined, reason: string | undefined): stri
     default:
       return 'permission_denied';
   }
+}
+
+/** A read of a host's request that answers undefined where a getter throws. */
+function readSafely(read: () => unknown): unknown {
+  try {
+    return read();
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Who wrote an own forge call's request: the call's model, when the request names it (a GMI sets it): `answered`, or
+ * `requested` when its `modelSource` says the step's answer named no model; else a model whose provider and model are
+ * unknown.
+ */
+function answeringModelAuthor(requestDetails: ToolExecutionRequestDetails): ForgeCallAuthor {
+  const answered = readSafely(() => requestDetails.callerModel);
+  if (answered !== null && typeof answered === 'object') {
+    const providerId = readSafely(() => (answered as { providerId?: unknown }).providerId);
+    const modelId = readSafely(() => (answered as { modelId?: unknown }).modelId);
+    const modelSource = readSafely(() => (answered as { modelSource?: unknown }).modelSource);
+    return {
+      kind: 'model',
+      role: 'forging_agent',
+      provider: typeof providerId === 'string' ? providerId : null,
+      model: typeof modelId === 'string' ? modelId : null,
+      // The model the step asked for, when its answer named none, is requested; else the model answered.
+      modelSource: modelSource === 'requested' ? 'requested' : 'answered',
+    };
+  }
+  return { kind: 'model', role: 'forging_agent', provider: null, model: null, modelSource: null };
+}
+
+/** An own forge call's arguments as a trace keeps them: JSON text parsed, and kept as the text when it does not parse. */
+function forgeCallArguments(requestDetails: ToolExecutionRequestDetails): unknown {
+  const raw = readSafely(() => requestDetails.toolCallRequest.arguments);
+  if (typeof raw !== 'string') {
+    return raw;
+  }
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    return raw;
+  }
+}
+
+/** An own forge call's persona, session and correlation ids, each null when the request does not carry it as a string. */
+function forgeCallIds(requestDetails: ToolExecutionRequestDetails): {
+  agentId: string | null;
+  sessionId: string | null;
+  correlationId: string | null;
+} {
+  const agentId = readSafely(() => requestDetails.personaId);
+  const sessionId = readSafely(() => requestDetails.sessionData?.sessionId);
+  const correlationId = readSafely(() => requestDetails.correlationId);
+  return {
+    agentId: typeof agentId === 'string' ? agentId : null,
+    sessionId: typeof sessionId === 'string' ? sessionId : null,
+    correlationId: typeof correlationId === 'string' ? correlationId : null,
+  };
+}
+
+/**
+ * The justification an own forge call's approval request shows: the arguments' string `justification`, as its
+ * whole-character start within the trace's justification cap; nothing when the arguments carry no string one.
+ */
+function approvalJustification(requestDetails: ToolExecutionRequestDetails): { justification?: string } {
+  const args = forgeCallArguments(requestDetails);
+  if (args === null || typeof args !== 'object') {
+    return {};
+  }
+  const justification = readSafely(() => (args as { justification?: unknown }).justification);
+  if (typeof justification !== 'string') {
+    return {};
+  }
+  return { justification: traceString(justification, FORGE_TRACE_CAPS.justification, 'justification', []) };
+}
+
+/**
+ * The reason and arguments of an own forge call the executor refused before forge_tool ran: its schema check's
+ * messages with the arguments it checked, or its argument parse's error with the arguments as they arrived.
+ */
+function executorRefusal(message: string, details: unknown): { reason: string; args: unknown } {
+  const read = (key: string): unknown =>
+    details !== null && typeof details === 'object' ? readSafely(() => (details as Record<string, unknown>)[key]) : undefined;
+  try {
+    const validationErrors = read('validationErrors');
+    if (Array.isArray(validationErrors)) {
+      const messages = validationErrors
+        .map((entry: unknown) =>
+          entry !== null && typeof entry === 'object' ? readSafely(() => (entry as { message?: unknown }).message) : undefined,
+        )
+        .join('; ');
+      return { reason: `${message} ${messages}`, args: read('providedParsedArgs') };
+    }
+    const parseError = read('argumentParsingError');
+    if (parseError !== undefined) {
+      return { reason: `${message} ${String(parseError)}`, args: read('rawArguments') };
+    }
+  } catch {
+    // A detail that cannot be written as text: the refusal's own message stands alone.
+  }
+  return { reason: message, args: undefined };
 }

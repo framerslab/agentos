@@ -20,6 +20,7 @@ import {
   ProviderEmbeddingResponse,
   ModelCompletionChoice,
 } from '../IProvider';
+import { responseModel } from '../responseModel';
 import { OpenRouterProviderError } from '../errors/OpenRouterProviderError';
 import { ApiKeyPool, keyPoolStrategyFromEnv, type ApiKeyPoolConfig, type ProbeResult } from '../../../providers/ApiKeyPool.js';
 import { classifyKeyFailure, retryAfterMs, statusOfKinds, type KeyFailureKind } from '../../../providers/quotaErrors.js';
@@ -1329,7 +1330,7 @@ export class OpenRouterProvider implements IProvider {
               id: apiChunk.id ?? `openrouter-error-${Date.now()}`,
               object: 'chat.completion.chunk',
               created: apiChunk.created ?? Math.floor(Date.now() / 1000),
-              modelId: apiChunk.model || modelId,
+              ...responseModel(apiChunk.model, modelId),
               choices: [],
               isFinal: true,
               ...(errUsage ? { usage: errUsage } : {}),
@@ -1592,7 +1593,7 @@ export class OpenRouterProvider implements IProvider {
       id: apiResponse.id,
       object: apiResponse.object,
       created: apiResponse.created,
-      modelId: apiResponse.model || requestedModelId,
+      ...responseModel(apiResponse.model, requestedModelId),
       // Serving-host attribution (Groq vs DeepInfra etc.) — load-bearing for
       // latency telemetry since provider routing prefs (customModelParams
       // `provider.sort`) change which host serves the same model.
@@ -1628,7 +1629,7 @@ export class OpenRouterProvider implements IProvider {
           id: apiChunk.id,
           object: apiChunk.object,
           created: apiChunk.created,
-          modelId: apiChunk.model || requestedModelId,
+          ...responseModel(apiChunk.model, requestedModelId),
           ...(apiChunk.provider ? { servingProvider: apiChunk.provider } : {}),
           choices: [],
           isFinal: true,
@@ -1639,7 +1640,7 @@ export class OpenRouterProvider implements IProvider {
       if (!choice) {
         return {
           id: apiChunk.id, object: apiChunk.object, created: apiChunk.created,
-          modelId: apiChunk.model || requestedModelId, choices: [], isFinal: true,
+          ...responseModel(apiChunk.model, requestedModelId), choices: [], isFinal: true,
           error: { message: "Stream chunk contained no choices.", type: "invalid_response" }
         };
       }
@@ -1732,7 +1733,7 @@ export class OpenRouterProvider implements IProvider {
         id: apiChunk.id,
         object: apiChunk.object,
         created: apiChunk.created,
-        modelId: apiChunk.model || requestedModelId,
+        ...responseModel(apiChunk.model, requestedModelId),
         ...(apiChunk.provider ? { servingProvider: apiChunk.provider } : {}),
         choices: finalChoices,
         // The finish chunk can carry the last text or tool-argument fragment,

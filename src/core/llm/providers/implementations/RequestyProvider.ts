@@ -20,6 +20,7 @@ import {
   ProviderEmbeddingResponse,
   ModelCompletionChoice,
 } from '../IProvider';
+import { responseModel } from '../responseModel';
 import { RequestyProviderError } from '../errors/RequestyProviderError';
 import { ApiKeyPool, keyPoolStrategyFromEnv, type ApiKeyPoolConfig, type ProbeResult } from '../../../providers/ApiKeyPool.js';
 import { classifyKeyFailure, retryAfterMs, statusOfKinds, type KeyFailureKind } from '../../../providers/quotaErrors.js';
@@ -735,7 +736,7 @@ export class RequestyProvider implements IProvider {
       id: apiResponse.id,
       object: apiResponse.object,
       created: apiResponse.created,
-      modelId: apiResponse.model || requestedModelId,
+      ...responseModel(apiResponse.model, requestedModelId),
       choices: apiResponse.choices.map(c => ({
         index: c.index,
         message: { 
@@ -767,7 +768,7 @@ export class RequestyProvider implements IProvider {
           id: apiChunk.id,
           object: apiChunk.object,
           created: apiChunk.created,
-          modelId: apiChunk.model || requestedModelId,
+          ...responseModel(apiChunk.model, requestedModelId),
           choices: [],
           isFinal: true,
           usage: {
@@ -782,7 +783,7 @@ export class RequestyProvider implements IProvider {
       if (!choice) {
         return {
           id: apiChunk.id, object: apiChunk.object, created: apiChunk.created,
-          modelId: apiChunk.model || requestedModelId, choices: [], isFinal: true,
+          ...responseModel(apiChunk.model, requestedModelId), choices: [], isFinal: true,
           error: { message: "Stream chunk contained no choices.", type: "invalid_response" }
         };
       }
@@ -875,7 +876,7 @@ export class RequestyProvider implements IProvider {
         id: apiChunk.id,
         object: apiChunk.object,
         created: apiChunk.created,
-        modelId: apiChunk.model || requestedModelId,
+        ...responseModel(apiChunk.model, requestedModelId),
         choices: finalChoices,
         responseTextDelta: isFinal ? undefined : responseTextDelta,
         toolCallsDeltas: isFinal ? undefined : toolCallsDeltas,
