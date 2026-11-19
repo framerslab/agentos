@@ -426,8 +426,13 @@ jobs:
 
       # The whole suite with coverage on. A run under the thresholds in vitest.config.ts
       # fails here. The totals print at the end of the step; coverage/ holds
-      # coverage-summary.json (the totals and each file's figures) and lcov.info.
+      # coverage-summary.json (the totals and each file's figures) and lcov.info. The forge
+      # trace's measurement (the fixed forge set's trace sizes and the hook's added latency)
+      # prints on one FORGE_TRACE_MEASURE line and is written to report.json in the
+      # directory named here.
       - name: Test with coverage
+        env:
+          FORGE_TRACE_REPORT_DIR: ${{ runner.temp }}/forge-trace-report
         run: pnpm run test:coverage
 
       # The logging surface as an application installs it: the packed candidate in an empty project, imported through
@@ -457,6 +462,18 @@ jobs:
           path: |
             coverage/coverage-summary.json
             coverage/lcov.info
+          if-no-files-found: ignore
+          retention-days: 14
+          overwrite: true
+
+      # The forge trace's measurement of this run: one small file, report.json. A re-run
+      # of the job replaces the artifact an earlier attempt kept.
+      - name: Keep the forge trace measurement
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: forge-trace-measure
+          path: ${{ runner.temp }}/forge-trace-report
           if-no-files-found: ignore
           retention-days: 14
           overwrite: true
