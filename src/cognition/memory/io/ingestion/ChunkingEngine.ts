@@ -22,6 +22,7 @@
  * @module memory/ingestion/ChunkingEngine
  */
 
+import { sha256Hex } from '../../../../core/utils/sha256.js';
 import type { DocumentChunk } from '../facade/types.js';
 
 // ---------------------------------------------------------------------------
@@ -228,6 +229,216 @@ function fixedChunks(
 }
 
 // ---------------------------------------------------------------------------
+// Helper — anchored strategy
+// ---------------------------------------------------------------------------
+
+/** A Markdown heading and the headings above it, as the hierarchical strategy reads them. */
+interface AnchoredSection {
+  text: string;
+  level: number;
+  ancestors: string[];
+}
+
+/**
+ * A stretch of text the anchored strategy packs into passages: a block, a sentence, or part of a sentence or of a
+ * word. Offsets are UTF-16 code units into the text given, with no white space at either end.
+ */
+interface AnchoredPiece {
+  start: number;
+  end: number;
+  /** Whether the piece begins where a sentence or a block begins. */
+  startWhole: boolean;
+  /** Whether the piece ends where a sentence or a block ends. */
+  endWhole: boolean;
+  /** True for a Markdown heading line, which always starts a passage and never ends one. */
+  isHeading: boolean;
+  /** The heading section the piece is in, when Markdown headings are read. */
+  section: AnchoredSection | undefined;
+}
+
+/**
+ * A sentence ends after one or more of `.`, `!`, `?`, `…`, `。`, `！` or `？`, with any closing quotes or brackets after
+ * them, where white space follows.
+ */
+const SENTENCE_END = /[.!?…。！？]+["'”’)\]]*(?=\s)/g;
+
+/** A Markdown heading line, as the hierarchical strategy matches one. */
+const MARKDOWN_HEADING = /^(#{1,6})\s+(.+)$/;
+
+/** Whether a UTF-16 code unit is white space. */
+function isSpaceAt(text: string, at: number): boolean {
+  return /\s/.test(text[at] ?? '');
+}
+
+/** Whether the code units at `at - 1` and `at` are one surrogate pair, which a cut at `at` would split. */
+function splitsPair(text: string, at: number): boolean {
+  const before = text.charCodeAt(at - 1);
+  const after = text.charCodeAt(at);
+  return before >= 0xd800 && before <= 0xdbff && after >= 0xdc00 && after <= 0xdfff;
+}
+
+/**
+ * Whether a passage ends after this piece: the first byte of the SHA-256 of its text (as UTF-8) is divisible by 4.
+ * The piece's own words decide, so the same piece is an anchor wherever it sits in the text.
+ */
+function isAnchor(piece: string): boolean {
+  return Number.parseInt(sha256Hex(piece).slice(0, 2), 16) % 4 === 0;
+}
+
+/**
+ * Cuts a sentence longer than `chunkSize` at white space, and a word longer than `chunkSize` at that length, never
+ * inside a surrogate pair. Only the cut sides are marked as not whole.
+ */
+function cutSentence(
+  text: string,
+  start: number,
+  end: number,
+  chunkSize: number,
+  section: AnchoredSection | undefined,
+  pieces: AnchoredPiece[],
+): void {
+  let at = start;
+  while (at < end) {
+    if (end - at <= chunkSize) {
+      pieces.push({ start: at, end, startWhole: at === start, endWhole: true, isHeading: false, section });
+      return;
+    }
+    const limit = at + chunkSize;
+    let space = limit;
+    while (space > at && !isSpaceAt(text, space)) space -= 1;
+    if (space > at) {
+      let pieceEnd = space;
+      while (pieceEnd > at && isSpaceAt(text, pieceEnd - 1)) pieceEnd -= 1;
+      pieces.push({ start: at, end: pieceEnd, startWhole: at === start, endWhole: false, isHeading: false, section });
+      at = space;
+      while (at < end && isSpaceAt(text, at)) at += 1;
+      continue;
+    }
+    // A word longer than chunkSize: cut it at that length, one unit sooner where that would split a surrogate pair.
+    let cut = splitsPair(text, limit) ? limit - 1 : limit;
+    if (cut === at) cut = at + 2; // chunkSize 1 and a pair: the pair stays whole
+    pieces.push({ start: at, end: cut, startWhole: at === start, endWhole: false, isHeading: false, section });
+    at = cut;
+  }
+}
+
+/** Cuts a block into pieces: whole when it fits, else at sentence ends, and a sentence that does not fit with `cutSentence`. */
+function blockPieces(
+  text: string,
+  start: number,
+  end: number,
+  chunkSize: number,
+  section: AnchoredSection | undefined,
+  pieces: AnchoredPiece[],
+): void {
+  if (end - start <= chunkSize) {
+    pieces.push({ start, end, startWhole: true, endWhole: true, isHeading: false, section });
+    return;
+  }
+  const sentence = (from: number, to: number) => {
+    if (to - from <= chunkSize) pieces.push({ start: from, end: to, startWhole: true, endWhole: true, isHeading: false, section });
+    else cutSentence(text, from, to, chunkSize, section, pieces);
+  };
+  const block = text.slice(start, end);
+  let from = start;
+  SENTENCE_END.lastIndex = 0;
+  for (let match = SENTENCE_END.exec(block); match !== null; match = SENTENCE_END.exec(block)) {
+    const to = start + match.index + match[0].length;
+    if (to > from) sentence(from, to);
+    from = to;
+    while (from < end && isSpaceAt(text, from)) from += 1;
+  }
+  if (from < end) sentence(from, end);
+}
+
+/**
+ * The pieces of a text in order: blocks between empty lines, cut further where a block is longer than `chunkSize`.
+ * With `markdown`, a heading line is a piece of its own that starts a section.
+ */
+function anchoredPieces(text: string, chunkSize: number, markdown: boolean): AnchoredPiece[] {
+  const pieces: AnchoredPiece[] = [];
+  const headings: AnchoredSection[] = [];
+  let section: AnchoredSection | undefined;
+  let blockStart = -1;
+  let blockEnd = -1;
+  const endBlock = () => {
+    if (blockStart >= 0) blockPieces(text, blockStart, blockEnd, chunkSize, section, pieces);
+    blockStart = -1;
+  };
+  let lineStart = 0;
+  for (;;) {
+    const newline = text.indexOf('\n', lineStart);
+    const lineEnd = newline === -1 ? text.length : newline;
+    // The line's own characters, without its line break (\n or \r\n).
+    const line = text.slice(lineStart, lineEnd).replace(/\r$/, '');
+    const first = line.search(/\S/);
+    if (first === -1) {
+      endBlock();
+    } else {
+      const lastEnd = lineStart + line.trimEnd().length;
+      const heading = markdown ? MARKDOWN_HEADING.exec(line) : null;
+      if (heading) {
+        endBlock();
+        const level = heading[1].length;
+        while (headings.length > 0 && headings[headings.length - 1].level >= level) headings.pop();
+        section = { text: heading[2].trim(), level, ancestors: headings.map((h) => h.text) };
+        headings.push(section);
+        pieces.push({ start: lineStart + first, end: lastEnd, startWhole: true, endWhole: true, isHeading: true, section });
+      } else {
+        if (blockStart < 0) blockStart = lineStart + first;
+        blockEnd = lastEnd;
+      }
+    }
+    if (newline === -1) break;
+    lineStart = newline + 1;
+  }
+  endBlock();
+  return pieces;
+}
+
+/**
+ * The anchored strategy: pieces packed into passages that end after an anchor, before a piece that would take them
+ * past `chunkSize`, and before a Markdown heading.
+ *
+ * @param content - Text to split.
+ * @param chunkSize - Largest passage, in UTF-16 code units.
+ * @param markdown - Whether heading lines start sections.
+ * @returns Ordered `DocumentChunk[]`, each with `start`, `end` and `edges`.
+ */
+function anchoredChunks(content: string, chunkSize: number, markdown: boolean): DocumentChunk[] {
+  const chunks: DocumentChunk[] = [];
+  let open: AnchoredPiece[] = [];
+  const close = () => {
+    if (open.length === 0) return;
+    const first = open[0];
+    const last = open[open.length - 1];
+    const chunk: DocumentChunk = {
+      content: content.slice(first.start, last.end),
+      index: chunks.length,
+      start: first.start,
+      end: last.end,
+      edges: { first: first.startWhole, last: last.endWhole },
+    };
+    if (first.section) {
+      chunk.heading = first.section.text;
+      chunk.metadata = {
+        headingLevel: first.section.level,
+        ...(first.section.ancestors.length > 0 ? { ancestorHeadings: first.section.ancestors } : {}),
+      };
+    }
+    chunks.push(chunk);
+    open = [];
+  };
+  for (const piece of anchoredPieces(content, chunkSize, markdown)) {
+    if (piece.isHeading || (open.length > 0 && piece.end - open[0].start > chunkSize)) close();
+    open.push(piece);
+    if (!piece.isHeading && isAnchor(content.slice(piece.start, piece.end))) close();
+  }
+  close();
+  return chunks;
+}
+
+// ---------------------------------------------------------------------------
 // ChunkingEngine
 // ---------------------------------------------------------------------------
 
@@ -278,7 +489,7 @@ export class ChunkingEngine {
         return this._chunkLayout(content, chunkSize, chunkOverlap);
 
       case 'anchored':
-        return [];
+        return anchoredChunks(content, chunkSize, options.markdown === true);
 
       default: {
         // TypeScript exhaustiveness guard.

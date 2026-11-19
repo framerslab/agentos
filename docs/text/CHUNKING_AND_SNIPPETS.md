@@ -32,7 +32,7 @@ snippetAround('The refund goes back to the card that paid.', lexicalTokens('refu
 |---|---|---|
 | [`SemanticChunker`](../../src/cognition/rag/chunking/SemanticChunker.ts) | Markdown and prose, at headings, then paragraphs, then sentences, keeping a fenced code block whole up to `maxSize` | `@framers/agentos/cognition/rag`; also the package root |
 | [`chunkTurns`](../../src/cognition/library/chunkTurns.ts) | A transcript's turns, never cutting a turn | `@framers/agentos/cognition/library/browser`; also `@framers/agentos/cognition/library`, `@framers/agentos/cognition/rag` and the package root |
-| [`ChunkingEngine`](../../src/cognition/memory/io/ingestion/ChunkingEngine.ts) | A document by a fixed size, by embedding similarity, by Markdown headings, or around code blocks and tables | `@framers/agentos/cognition/memory`; also the package root |
+| [`ChunkingEngine`](../../src/cognition/memory/io/ingestion/ChunkingEngine.ts) | A document by a fixed size, by embedding similarity, by Markdown headings, around code blocks and tables, or into passages that keep their text when the document is edited elsewhere | `@framers/agentos/cognition/memory`; also the package root |
 
 ## SemanticChunker
 
@@ -62,7 +62,23 @@ Each chunk is `{ text, index, startOffset, endOffset, boundaryType, metadata }`.
 
 ## Documents for a memory brain
 
-`new ChunkingEngine().chunk(content, { strategy, chunkSize, chunkOverlap, embedFn })` answers a promise of `{ content, index, heading, metadata }` chunks, with `chunkSize` 512 and `chunkOverlap` 64 characters unless given. `strategy` is `'fixed'`, `'semantic'` (cuts where the cosine similarity of two neighbouring sentences' embeddings falls below 0.3, and runs as `'fixed'` without `embedFn`), `'hierarchical'` (at Markdown headings) or `'layout'` (keeps code blocks and tables whole). A `chunkSize` under 1 throws a `RangeError`. `Memory.ingest()` cuts documents with it: [Document Ingestion: Chunking Strategies](../memory/MEMORY_DOCUMENT_INGESTION.md#chunking-strategies) describes each strategy.
+`new ChunkingEngine().chunk(content, { strategy, chunkSize, chunkOverlap, embedFn })` answers a promise of `{ content, index, heading, metadata }` chunks, with `chunkSize` 512 and `chunkOverlap` 64 characters unless given. `strategy` is `'fixed'`, `'semantic'` (cuts where the cosine similarity of two neighbouring sentences' embeddings falls below 0.3, and runs as `'fixed'` without `embedFn`), `'hierarchical'` (at Markdown headings), `'layout'` (keeps code blocks and tables whole) or `'anchored'` (below). A `chunkSize` under 1 throws a `RangeError`. `Memory.ingest()` cuts documents with the first four: [Document Ingestion: Chunking Strategies](../memory/MEMORY_DOCUMENT_INGESTION.md#chunking-strategies) describes each of them.
+
+### Passages that survive an edit
+
+```ts
+const chunks = await new ChunkingEngine().chunk(text, { strategy: 'anchored', chunkSize: 1200, markdown: true });
+// [{ content, index, start, end, edges: { first, last }, heading?, metadata? }, ...]
+// text.slice(chunk.start, chunk.end) === chunk.content
+```
+
+`'fixed'` places each chunk from the end of the one before, so a sentence inserted near the top moves every later boundary and changes every later chunk. `'anchored'` decides each boundary from the text around it, so an index that hashes its passages embeds only those an edit reaches:
+
+1. The text is cut into blocks at empty lines. A block longer than `chunkSize` is cut at sentence ends (`.`, `!`, `?`, `…`, `。`, `！` or `？`, with any closing quotes or brackets, before white space), a sentence longer than `chunkSize` at white space, and a word longer than `chunkSize` at that length, one unit sooner where that would split a surrogate pair.
+2. The pieces are packed into passages in order. A passage ends after a piece whose SHA-256 (of its UTF-8) has a first byte divisible by 4, an anchor decided by the piece's own words and about one piece in four, or before a piece that would take it past `chunkSize`. Packing starts again after each anchor, so an edit changes only the passages from the anchor before it to the first anchor after it; every later passage keeps its text, and only its offsets move. An edit that makes or removes an anchor splits or merges the runs beside it.
+3. There is no overlap; `chunkOverlap` is ignored. `start` and `end` are offsets in UTF-16 code units into the text given. `edges.first` and `edges.last` are false on a side where a sentence or a word was cut to fit.
+
+With `markdown: true`, a heading line (`#` to `######` at a line's start) always starts a passage, and every passage of its section carries `heading`, `metadata.headingLevel` and `metadata.ancestorHeadings` as `'hierarchical'` gives them.
 
 ## Snippets
 
