@@ -235,9 +235,24 @@ export function openRouterReasoningEffort(modelId: string, effort: unknown): Eff
   return match && isOpenAIReasoningModel(match[1]) ? effort : undefined;
 }
 
-/** The `reasoning` request field for {@link openRouterReasoningEffort}, or an empty object. */
-function reasoningField(modelId: string, effort: unknown): { reasoning?: { effort: EffortLevel } } {
-  const level = openRouterReasoningEffort(modelId, effort);
+/**
+ * The `reasoning` request field for {@link openRouterReasoningEffort}, or an
+ * empty object. Decided on the model the request carries: a string
+ * `customModelParams.model` replaces `modelId` on the wire, so it decides.
+ * Nothing is added when the caller passes `customModelParams.reasoning`
+ * (which replaces it anyway) or `customModelParams.reasoning_effort`:
+ * OpenRouter's chat reference says that shorthand "Cannot be used
+ * simultaneously with reasoning.effort if they differ"
+ * (https://openrouter.ai/docs/api/api-reference/chat/create-a-chat-completion).
+ */
+function reasoningField(
+  modelId: string,
+  effort: unknown,
+  customModelParams: Record<string, unknown> | undefined,
+): { reasoning?: { effort: EffortLevel } } {
+  if (customModelParams?.reasoning !== undefined || customModelParams?.reasoning_effort !== undefined) return {};
+  const wireModel = typeof customModelParams?.model === 'string' ? customModelParams.model : modelId;
+  const level = openRouterReasoningEffort(wireModel, effort);
   return level ? { reasoning: { effort: level } } : {};
 }
 
@@ -827,7 +842,7 @@ export class OpenRouterProvider implements IProvider {
       // Reasoning depth for OpenAI reasoning slugs (see
       // openRouterReasoningEffort). Before the customModelParams spread so a
       // caller's own `reasoning` object replaces it.
-      ...reasoningField(modelId, options.effort),
+      ...reasoningField(modelId, options.effort, options.customModelParams),
       // Gemini's request fields never apply here (a Gemini call that fell
       // over to OpenRouter still carries them); routing controls stay.
       ...(stripGeminiOnlyParams(options.customModelParams) || {}),
@@ -1071,7 +1086,7 @@ export class OpenRouterProvider implements IProvider {
       // Reasoning depth for OpenAI reasoning slugs (see
       // openRouterReasoningEffort). Before the customModelParams spread so a
       // caller's own `reasoning` object replaces it.
-      ...reasoningField(modelId, options.effort),
+      ...reasoningField(modelId, options.effort, options.customModelParams),
       // Gemini's request fields never apply here (a Gemini call that fell
       // over to OpenRouter still carries them); routing controls stay.
       ...(stripGeminiOnlyParams(options.customModelParams) || {}),
