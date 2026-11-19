@@ -288,7 +288,8 @@ export class ForgeToolMetaTool implements ITool<ForgeToolInput, ForgeResult> {
    * @param args - The forge tool input arguments (name, description, schemas,
    *   implementation, test cases).
    * @param context - The tool execution context providing agent and session IDs.
-   * @returns A {@link ToolExecutionResult} wrapping the {@link ForgeResult}.
+   * @returns A {@link ToolExecutionResult} wrapping the {@link ForgeResult}
+   *   without its `trace`, which the model never reads.
    */
   async execute(
     args: ForgeToolInput,
@@ -331,10 +332,13 @@ export class ForgeToolMetaTool implements ITool<ForgeToolInput, ForgeResult> {
       caller: context,
     });
 
+    // The trace is for the host, never for the model: the output is the result
+    // without it, its other keys in their order.
+    const { trace: _trace, ...forgeResult } = result;
     return {
-      success: result.success,
-      output: result,
-      error: result.error,
+      success: forgeResult.success,
+      output: forgeResult,
+      error: forgeResult.error,
     };
   }
 }

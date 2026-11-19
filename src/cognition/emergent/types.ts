@@ -18,6 +18,7 @@
 import type { JSONSchemaObject } from '../../core/tools/ITool.js';
 import type { SelfImprovementConfig } from './SelfImprovementConfig.js';
 import type { ForgedCodeExecutor } from './executor/types.js';
+import type { ForgeTrace } from './ForgeTrace.js';
 
 // ============================================================================
 // TIER SYSTEM
@@ -900,6 +901,15 @@ export interface ForgeResult {
    * schema parse error). Distinct from judge rejection — check `verdict` for those.
    */
   error?: string;
+
+  /**
+   * The forge's trace: what was asked, what ran, what the judge said and
+   * where the forge ended, JSON-safe, capped and frozen. Set by
+   * `EmergentCapabilityEngine.forge` on every result it returns, as the last
+   * key. It is for the host: forge_tool takes it off the result before the
+   * result reaches the model, so the model never reads it.
+   */
+  trace?: ForgeTrace;
 }
 
 /**
