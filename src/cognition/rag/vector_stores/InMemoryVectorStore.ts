@@ -37,6 +37,9 @@ import {
   MetadataValue,
   MetadataFieldCondition,
   MetadataScalarValue,
+  PassagePatch,
+  SourcePassageRow,
+  StoredVector,
 } from '../IVectorStore';
 import { InMemoryVectorStoreConfig } from '../../../core/config/VectorStoreConfiguration';
 import { GMIError } from '../../../core/utils/errors.js'; // Assuming a GMIError utility
@@ -69,6 +72,10 @@ export class InMemoryVectorStore implements IVectorStore {
   private collections: Map<string, InMemoryCollection>; // collectionName -> InMemoryCollection
   private isInitialized: boolean = false;
   private readonly providerId: string;
+  /** The tail of each source's lock queue, by collection and source id. */
+  private readonly sourceLocks = new Map<string, Promise<void>>();
+  /** The tail of each tenant's lock queue, by collection and tenant id. */
+  private readonly tenantLocks = new Map<string, Promise<void>>();
 
   /**
    * Constructs an InMemoryVectorStore instance.
@@ -415,6 +422,88 @@ export class InMemoryVectorStore implements IVectorStore {
       failedCount: errors.length > 0 ? errors.length : undefined,
       errors: errors.length > 0 ? errors : undefined,
     };
+  }
+
+  /** The id and metadata of each document of a source, ordered by id, with no vector and no text. */
+  public async listSourcePassages(collectionName: string, sourceId: string): Promise<SourcePassageRow[]> {
+    const collection = this.getCollection(collectionName);
+    return [...collection.documents.values()]
+      .filter((doc) => doc.metadata?.sourceId === sourceId)
+      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      .map((doc) => ({ id: doc.id, metadata: { ...(doc.metadata ?? {}) } }));
+  }
+
+  /** Replaces each document's whole metadata, and its text where given, keeping its vector. Absent ids are skipped. */
+  public async patchPassages(collectionName: string, rows: PassagePatch[]): Promise<{ updatedCount: number }> {
+    const collection = this.getCollection(collectionName);
+    let updatedCount = 0;
+    for (const row of rows) {
+      const doc = collection.documents.get(row.id);
+      if (!doc) continue;
+      collection.documents.set(row.id, {
+        ...doc,
+        metadata: { ...row.metadata },
+        ...(row.textContent !== undefined ? { textContent: row.textContent } : {}),
+      });
+      updatedCount += 1;
+    }
+    return { updatedCount };
+  }
+
+  /** The vectors of the documents among `ids` that `filter` admits. */
+  public async fetchVectors(collectionName: string, ids: string[], filter: MetadataFilter): Promise<StoredVector[]> {
+    const collection = this.getCollection(collectionName);
+    const found: StoredVector[] = [];
+    for (const id of new Set(ids)) {
+      const doc = collection.documents.get(id);
+      if (doc && this.matchesFilter(doc, filter)) found.push({ id, embedding: [...doc.embedding], metadata: { ...(doc.metadata ?? {}) } });
+    }
+    return found;
+  }
+
+  /**
+   * Runs `work` after every earlier holder of the same source's lock has finished, and holds the lock until `work`
+   * settles. With `options.tenantId` it first takes that tenant's lock as `withTenantLock` does: this store has no
+   * shared mode, so the holders of one tenant's lock run one at a time. The store has no transactions: `work`
+   * receives the store itself.
+   */
+  public async withSourceLock<T>(
+    collectionName: string,
+    sourceId: string,
+    work: (store: IVectorStore) => Promise<T>,
+    options?: { tenantId?: string },
+  ): Promise<T> {
+    this.getCollection(collectionName);
+    const source = (): Promise<T> => InMemoryVectorStore.hold(this.sourceLocks, `${collectionName}:${sourceId}`, () => work(this));
+    const tenantId = options?.tenantId;
+    return tenantId === undefined ? source() : InMemoryVectorStore.hold(this.tenantLocks, `${collectionName}:${tenantId}`, source);
+  }
+
+  /**
+   * Runs `work` after every earlier holder of the same tenant's lock has finished, `withSourceLock` holders given that
+   * tenant among them, and holds the lock until `work` settles. `work` receives the store itself.
+   */
+  public async withTenantLock<T>(collectionName: string, tenantId: string, work: (store: IVectorStore) => Promise<T>): Promise<T> {
+    this.getCollection(collectionName);
+    return InMemoryVectorStore.hold(this.tenantLocks, `${collectionName}:${tenantId}`, () => work(this));
+  }
+
+  /** Runs `work` once every earlier holder of `key` in `locks` has finished, holding `key` until `work` settles. */
+  private static async hold<T>(locks: Map<string, Promise<void>>, key: string, work: () => Promise<T>): Promise<T> {
+    const before = locks.get(key) ?? Promise.resolve();
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = before.then(() => held);
+    locks.set(key, tail);
+    await before;
+    try {
+      return await work();
+    } finally {
+      release();
+      if (locks.get(key) === tail) locks.delete(key);
+    }
   }
 
   /**

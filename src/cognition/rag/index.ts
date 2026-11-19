@@ -110,6 +110,9 @@ export type {
   LexicalGroupSearchOptions,
   LexicalGroupSearchResult,
   LexicalMatchKind,
+  PassagePatch,
+  SourcePassageRow,
+  StoredVector,
 } from '../../core/vector-store/IVectorStore.js';
 
 export type {

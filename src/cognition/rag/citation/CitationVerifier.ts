@@ -4,7 +4,7 @@
  *
  * Algorithm:
  * 1. Extract claims (LLM decomposition or sentence splitting fallback)
- * 2. Batch-embed all claims + source contents (one embedding call)
+ * 2. Batch-embed all claims + the contents of the sources that carry no vector (one embedding call)
  * 3. Compute cosine similarity matrix: claims × sources
  * 4. Assign per-claim verdict based on best similarity score
  * 5. Optional NLI contradiction check on "supported" claims
@@ -30,6 +30,7 @@ export class CitationVerifier {
   private readonly unverifiableThreshold: number;
   private readonly nliFn?: CitationVerifierConfig['nliFn'];
   private readonly extractClaimsFn?: CitationVerifierConfig['extractClaims'];
+  private readonly pickOnly: boolean;
 
   constructor(config: CitationVerifierConfig) {
     this.embedFn = config.embedFn;
@@ -37,6 +38,7 @@ export class CitationVerifier {
     this.unverifiableThreshold = config.unverifiableThreshold ?? DEFAULT_UNVERIFIABLE;
     this.nliFn = config.nliFn;
     this.extractClaimsFn = config.extractClaims;
+    this.pickOnly = config.pickOnly === true;
   }
 
   /**
@@ -60,8 +62,12 @@ export class CitationVerifier {
    * and (optionally) NLI contradiction detection, then return a single
    * {@link VerifiedResponse} with per-claim verdicts.
    *
+   * A source that carries `embedding` is scored with it and is not sent to `embedFn`. With `pickOnly` and exactly one
+   * source, nothing is embedded: see {@link CitationVerifierConfig.pickOnly}.
+   *
    * @param input   - Either the raw text or a pre-decomposed claim list.
    * @param sources - Sources to score every claim against.
+   * @throws {RangeError} When a source's `embedding` is not as long as the claims' vectors.
    */
   async verify(
     input: string | string[],
@@ -72,11 +78,23 @@ export class CitationVerifier {
       : await this.extractClaims(input);
 
     if (claims.length === 0) return this.emptyResult();
+    if (this.pickOnly && sources.length === 1) return this.pickLone(claims, sources[0]);
 
-    const allTexts = [...claims, ...sources.map(s => s.content)];
-    const allEmbeddings = await this.embedFn(allTexts);
+    // Only the sources without a vector of their own are embedded, after the claims, in the sources' order. Each
+    // source's vector is read once, here, so one set while the embedder works moves no other source's.
+    const supplied = sources.map(s => (s.embedding === undefined ? undefined : [...s.embedding]));
+    const unknown = sources.filter((_, i) => supplied[i] === undefined);
+    const allEmbeddings = await this.embedFn([...claims, ...unknown.map(s => s.content)]);
     const claimEmbeddings = allEmbeddings.slice(0, claims.length);
-    const sourceEmbeddings = allEmbeddings.slice(claims.length);
+    const made = allEmbeddings.slice(claims.length);
+    let next = 0;
+    const sourceEmbeddings = supplied.map(vector => vector ?? made[next++]);
+    const size = claimEmbeddings[0]?.length;
+    for (const vector of supplied) {
+      if (vector !== undefined && vector.length !== size) {
+        throw new RangeError(`a source's embedding has ${vector.length} numbers where the claims' vectors have ${size}`);
+      }
+    }
 
     const verdicts: ClaimVerdict[] = [];
 
@@ -120,6 +138,33 @@ export class CitationVerifier {
       });
     }
 
+    return this.aggregate(verdicts);
+  }
+
+  /**
+   * `pickOnly` with a single source: every claim names it with no cosine, and the NLI function, when given, decides.
+   */
+  private async pickLone(claims: string[], source: VerificationSource): Promise<VerifiedResponse> {
+    const verdicts: ClaimVerdict[] = [];
+    for (const claim of claims) {
+      let verdict: ClaimVerdict['verdict'] = 'unverifiable';
+      if (this.nliFn) {
+        try {
+          const nli = await this.nliFn(source.content, claim);
+          if (nli.label === 'entailment' && nli.score > 0.7) verdict = 'supported';
+          else if (nli.label === 'contradiction' && nli.score > 0.7) verdict = 'contradicted';
+        } catch { /* NLI failure — nothing decides the claim */ }
+      }
+      verdicts.push({
+        text: claim,
+        verdict,
+        confidence: 0,
+        scored: false,
+        sourceIndex: 0,
+        sourceSnippet: source.content.slice(0, 200),
+        sourceRef: source.url,
+      });
+    }
     return this.aggregate(verdicts);
   }
 
