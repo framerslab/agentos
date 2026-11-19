@@ -258,7 +258,9 @@ Error returned to caller
 The auto-built chain ([`buildFallbackChain()`](https://github.com/framerslab/agentos/blob/master/src/api/generateText.ts))
 takes these legs in this order, each when its key is set, and leaves out the
 primary's own provider: OpenAI `gpt-6.2-sol`, Anthropic `claude-sonnet-5-5`
-(effort `low`, 1024 tokens of output headroom), OpenRouter
+(effort `low`, 1024 tokens of output headroom; `claude-sonnet-5` for a call
+whose `toolChoice` forces a tool, `'required'` or a named function, since
+Sonnet 5.5 refuses a forced `tool_choice` and would be sent `auto`), OpenRouter
 `openai/gpt-5.6-sol`, and Gemini `gemini-3.1-pro-preview` (effort `low`, 1024
 tokens of output headroom). Every leg runs with prompt caching off
 (`cache: false`). Ollama is not in the auto-built chain; list it in
