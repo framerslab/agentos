@@ -14,6 +14,7 @@ import {
   type StorageFeatures,
 } from '@framers/sql-storage-adapter';
 import { sha256Hex } from '../../../core/utils/sha256.js';
+import { retryLostCreate } from '../../memory/retrieval/store/migrations/lost-create.js';
 
 /** The part of the store a call reads or writes: one tenant's rows. Every call names one. */
 export interface EmbeddingStoreScope {
@@ -213,7 +214,8 @@ export class SqlEmbeddingStore {
   /**
    * The stored vectors of these input hashes, for one tenant, model and size. A hash with no row, a row of another
    * tenant, model or size, a row unused for longer than `maxIdleMs`, and a row whose vector is not `dimensions`
-   * numbers are all left out; the last kind is deleted. A row answered whose last recorded use is more than a day
+   * numbers are all left out; the last kind is deleted while it still holds the vector read, so a vector another call
+   * stored under the key since stays. A row answered whose last recorded use is more than a day
    * old has its use recorded now.
    *
    * @param scope - The tenant.
@@ -233,7 +235,7 @@ export class SqlEmbeddingStore {
     const now = this.now();
     const dialect = this.features.dialect;
     const floor = this.maxIdleMs === undefined ? undefined : now - this.maxIdleMs;
-    const malformed: string[] = [];
+    const malformed: Array<{ hash: string; vector: unknown }> = [];
     const stale: string[] = [];
     for (const part of parts(wanted, HASHES_PER_STATEMENT)) {
       const params: unknown[] = [tenant, model, dimensions, part];
@@ -246,17 +248,18 @@ export class SqlEmbeddingStore {
       for (const row of await this.adapter.all<VectorRow>(statement, params)) {
         const vector = this.decode(row.vector, dimensions);
         if (!vector) {
-          malformed.push(row.input_sha256);
+          malformed.push({ hash: row.input_sha256, vector: row.vector });
           continue;
         }
         found.set(row.input_sha256, vector);
         if (Number(row.last_used_at) < now - DAY_MS) stale.push(row.input_sha256);
       }
     }
-    for (const part of parts(malformed, HASHES_PER_STATEMENT)) {
+    // Each row only while it holds the vector read, so a vector another call stored since stays.
+    for (const { hash, vector } of malformed) {
       await this.adapter.run(
-        `DELETE FROM ${this.table} WHERE tenant_id = $1 AND model = $2 AND dimensions = $3 AND ${dialect.inArray('input_sha256', '$4')}`,
-        [tenant, model, dimensions, part],
+        `DELETE FROM ${this.table} WHERE tenant_id = $1 AND model = $2 AND dimensions = $3 AND input_sha256 = $4 AND vector = $5`,
+        [tenant, model, dimensions, hash, vector],
       );
     }
     for (const part of parts(stale, HASHES_PER_STATEMENT)) {
@@ -348,11 +351,17 @@ export class SqlEmbeddingStore {
     return result.changes;
   }
 
-  /** Creates the table on first use when `manageSchema` is on; a failed attempt is tried again on the next call. */
+  /**
+   * Creates the table on first use when `manageSchema` is on; a failed attempt is tried again on the next call. A
+   * statement that loses its create to another session (on Postgres, `CREATE ... IF NOT EXISTS` is not atomic) runs
+   * again and finds the object made.
+   */
   private ensure(): Promise<void> {
     if (!this.manageSchema) return Promise.resolve();
     this.ready ??= (async () => {
-      for (const statement of embeddingStoreSchema(this.prefix, this.features.dialect)) await this.adapter.run(statement);
+      for (const statement of embeddingStoreSchema(this.prefix, this.features.dialect)) {
+        await retryLostCreate(() => this.adapter.run(statement));
+      }
     })().catch((error: unknown) => {
       this.ready = undefined;
       throw error;

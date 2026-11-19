@@ -177,9 +177,9 @@ await store.put({ tenant }, model, made.map((vector, i) => ({ hash: embeddingInp
 
 - A row is a tenant, a model, a vector size, an input hash, the vector as four-byte floats, a token count and two times. No column holds text, so the store can sit beside data whose text must not be copied.
 - `embeddingInputHash(model, input)` is the SHA-256 of the model, NUL, the dimensions, NUL and the input: the hash `LibraryIndex` gives a passage's `inputHash`.
-- Every call names its tenant, and a row is answered only to its own tenant, model and size. A stored vector of the wrong length counts as absent and is deleted.
+- Every call names its tenant, and a row is answered only to its own tenant, model and size. A stored vector of the wrong length counts as absent and is deleted, only while its row still holds that vector, so a vector another call stored under the key meanwhile stays.
 - `get` records a row's use at most once a day. With `maxIdleMs` (more than a day) a row unused that long is not answered; `removeUnusedSince(time, { tenant })`, on the host's own timer, deletes such rows, and `remove({ tenant })` deletes a tenant's rows.
-- `manageSchema` (true unless given) creates the table on first use. A host whose migrations own the schema runs `embeddingStoreSchema(prefix, dialect)` there and passes `manageSchema: false`.
+- `manageSchema` (true unless given) creates the table on first use. On Postgres, where `CREATE ... IF NOT EXISTS` is not atomic, a statement that loses its create to another store's first use runs again and finds the object made. A host whose migrations own the schema runs `embeddingStoreSchema(prefix, dialect)` there and passes `manageSchema: false`.
 
 ---
 
