@@ -414,11 +414,6 @@ export interface LexicalGroupSearchResult {
   more: boolean;
 }
 
-/**
- * @interface IVectorStore
- * @description Defines the contract for interacting with a specific vector database or storage backend.
- * Implementations will wrap specific clients (e.g., Pinecone client, Weaviate client, in-memory store logic).
- */
 /** A stored row's id and metadata, as `listSourcePassages` answers it: no vector and no text. */
 export interface SourcePassageRow {
   id: string;
@@ -439,6 +434,11 @@ export interface StoredVector {
   metadata: Record<string, MetadataValue>;
 }
 
+/**
+ * @interface IVectorStore
+ * @description Defines the contract for interacting with a specific vector database or storage backend.
+ * Implementations will wrap specific clients (e.g., Pinecone client, Weaviate client, in-memory store logic).
+ */
 export interface IVectorStore {
   /**
    * Initializes the vector store provider with its specific configuration.
