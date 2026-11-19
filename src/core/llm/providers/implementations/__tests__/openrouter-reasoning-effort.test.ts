@@ -138,6 +138,37 @@ describe('OpenRouter options.effort', () => {
     expect(payload.reasoning).toEqual({ effort: 'high', exclude: true });
   });
 
+  // OpenRouter's chat reference: `reasoning_effort` is "Shorthand for setting
+  // reasoning effort. Equivalent to setting reasoning.effort. Cannot be used
+  // simultaneously with reasoning.effort if they differ."
+  // https://openrouter.ai/docs/api/api-reference/chat/create-a-chat-completion
+  it("sends no reasoning object beside a caller's customModelParams.reasoning_effort", async () => {
+    for (const send of [sendCompletion, sendStream]) {
+      const payload = await send('openai/gpt-6.2-astra', {
+        effort: 'low',
+        customModelParams: { reasoning_effort: 'high' },
+      });
+      expect(payload.reasoning_effort).toBe('high');
+      expect('reasoning' in payload).toBe(false);
+    }
+  });
+
+  it('decides on the model customModelParams.model puts on the wire', async () => {
+    const toClaude = await sendCompletion('openai/o3', {
+      effort: 'high',
+      customModelParams: { model: 'anthropic/claude-sonnet-4-6' },
+    });
+    expect(toClaude.model).toBe('anthropic/claude-sonnet-4-6');
+    expect('reasoning' in toClaude).toBe(false);
+
+    const toO3 = await sendStream('anthropic/claude-sonnet-4-6', {
+      effort: 'high',
+      customModelParams: { model: 'openai/o3' },
+    });
+    expect(toO3.model).toBe('openai/o3');
+    expect(toO3.reasoning).toEqual({ effort: 'high' });
+  });
+
   it('omits reasoning when effort is unset or not an agentos level', async () => {
     expect('reasoning' in (await sendCompletion('openai/gpt-6.2-astra', {}))).toBe(false);
     expect('reasoning' in (await sendCompletion('openai/gpt-6.2-astra', { effort: 'ultra' }))).toBe(false);
