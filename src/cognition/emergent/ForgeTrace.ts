@@ -5,13 +5,18 @@
  * its reply, the executor that ran the code, who wrote each part, and the stage where the forge ended. Every value in
  * it is a JSON-safe copy under its own cap, so a trace is plain data whose JSON stays under a fixed total.
  *
- * This module holds the trace's types, its stage codes, the caps, and the JSON-safe copy and cuts every field goes
- * through.
+ * This module holds the trace's types, its stage codes, the caps, the JSON-safe copy and cuts every field goes
+ * through, the builder every layer uses, the per-call record that carries a forge's trace from the layer that ended
+ * it to the layers around it, and the delivery that writes the forge's log line and hands the trace to a host's hook.
  *
  * @module agentos/emergent/ForgeTrace
  */
 
-import type { CreationVerdict } from './types.js';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { randomUUID } from 'node:crypto';
+import { moduleLogger } from '../../core/logging/loggerFactory.js';
+import { listedErrorFields } from '../../core/logging/events.js';
+import type { CreationVerdict, ForgeTestRun } from './types.js';
 
 // ============================================================================
 // TYPES
@@ -271,6 +276,14 @@ export const FORGE_TRACE_CAPS: Readonly<{
   tests: 16,
   total: 524_288,
 } as const);
+
+/**
+ * How long a forge waits, in milliseconds, for a host's onForgeTrace to settle. A hook running past it is left
+ * running, and the forge goes on.
+ *
+ * @internal
+ */
+export const FORGE_TRACE_HOOK_BOUND_MS = 1_000;
 
 // ============================================================================
 // THE JSON-SAFE COPY
@@ -553,4 +566,769 @@ export function traceString(text: string, capBytes: number, path: string, cut: s
   const start = longestFittingStart(whole, capBytes, (candidate) => jsonBytes(candidate) <= capBytes);
   cut.push(path);
   return start;
+}
+
+// ============================================================================
+// THE PER-CALL RECORD
+// ============================================================================
+
+/**
+ * Who wrote a forge's request, as the layer that saw it knows it: a model through forge_tool (`forging_agent`), or the
+ * code that called the engine itself (`direct_caller`), with the provider and model when that layer knows them.
+ *
+ * @internal
+ */
+export interface ForgeCallAuthor {
+  kind: 'model' | 'caller';
+  role: 'forging_agent' | 'direct_caller';
+  provider: string | null;
+  model: string | null;
+  modelSource: 'answered' | 'requested' | null;
+}
+
+/**
+ * One forge call's record: the forge's id, when the call started, who wrote the request, the trace once a layer ended
+ * the forge, and whether that trace has been delivered. The outermost layer that sees the call makes it, and every
+ * layer inside reads it. forge_tool's `execute` sets `seen` in the same step that takes the record.
+ *
+ * @internal
+ */
+export interface ForgeCallRecord {
+  readonly forgeId: string;
+  /** When the call started, in epoch milliseconds. */
+  readonly startedAt: number;
+  author?: ForgeCallAuthor;
+  trace?: ForgeTrace;
+  delivered: boolean;
+  seen: boolean;
+}
+
+/**
+ * The record of the forge call an async chain belongs to. A layer that makes a record runs the call inside
+ * `forgeCallScope.run(record, ...)`, and forge_tool reads it there, so a host subclass that hands `super.execute` a
+ * copied or rebuilt context reaches the record of its own call all the same.
+ *
+ * @internal
+ */
+export const forgeCallScope: AsyncLocalStorage<ForgeCallRecord> = new AsyncLocalStorage<ForgeCallRecord>();
+
+/**
+ * forge_tool's hand-over to the engine: the call's record, keyed by the context object forge_tool builds and passes to
+ * `forge`.
+ *
+ * @internal
+ */
+export const forgeContextRecords: WeakMap<object, ForgeCallRecord> = new WeakMap<object, ForgeCallRecord>();
+
+/**
+ * A new forge id: `forge_` followed by a random UUID.
+ *
+ * @internal
+ */
+export function mintForgeId(): string {
+  return `forge_${randomUUID()}`;
+}
+
+/**
+ * A new record for one forge call, started now, under `forgeId` or a newly minted id.
+ *
+ * @param forgeId - The forge's id, when the caller has one.
+ * @returns The record, neither delivered nor seen.
+ * @internal
+ */
+export function newForgeCallRecord(forgeId?: string): ForgeCallRecord {
+  return { forgeId: forgeId ?? mintForgeId(), startedAt: Date.now(), delivered: false, seen: false };
+}
+
+// ============================================================================
+// THE BUILDER
+// ============================================================================
+
+/**
+ * What a layer knows when it ends a forge, which the builder turns into its trace.
+ *
+ * @internal
+ */
+export interface ForgeTraceInput {
+  /** The call's record: the forge's id, when it started and who wrote the request come from it. */
+  record: ForgeCallRecord;
+  recordedBy: ForgeTrace['recordedBy'];
+  via: ForgeTrace['via'];
+  /** Where the forge ended. Its outcome follows from it. */
+  stage: KnownForgeTraceStage;
+  /** The refusal's, rejection's or error's text, or the thrown value; null when approved. */
+  reason: unknown;
+  /** The arguments as the layer received them. */
+  args: unknown;
+  agentId: string | null;
+  sessionId: string | null;
+  correlationId: string | null;
+  /** `testRuns[i]` is test case i's run, in request order. */
+  testRuns?: readonly ForgeTestRun[];
+  /** When the test runs ended, in epoch milliseconds. */
+  testsFinishedAt?: number;
+  executor?: { name: string; isolates: boolean } | null;
+  verdict?: CreationVerdict | null;
+  /** When the judge's verdict came back, in epoch milliseconds. */
+  verdictAt?: number;
+  judgeDetail?: ForgeTraceJudgeDetail | null;
+  /** The judge's model and provider, when a judge whose configuration AgentOS reads ran. */
+  judge?: { model: string | null; providerId: string | null } | null;
+  toolId?: string | null;
+  /** When the forge ended, in epoch milliseconds; now when absent. */
+  finishedAt?: number;
+}
+
+/** What a read returns when reading the property threw: a getter, a `Proxy` trap or a revoked `Proxy`. */
+const UNREADABLE: unique symbol = Symbol('unreadable');
+
+/** `source[key]`, read once; {@link UNREADABLE} when the read throws. */
+function readKey(source: unknown, key: string | number): unknown {
+  try {
+    return (source as Record<string | number, unknown>)[key];
+  } catch {
+    return UNREADABLE;
+  }
+}
+
+function isObject(value: unknown): value is object {
+  return typeof value === 'object' && value !== null;
+}
+
+/** Whether a value is an array; false for a revoked `Proxy`, on which `Array.isArray` throws. */
+function isList(value: unknown): value is readonly unknown[] {
+  try {
+    return Array.isArray(value);
+  } catch {
+    return false;
+  }
+}
+
+/** A list's length, read once; 0 when the read throws or gives no whole number. */
+function lengthOf(list: readonly unknown[]): number {
+  const length = readKey(list, 'length');
+  return typeof length === 'number' && Number.isInteger(length) && length > 0 ? length : 0;
+}
+
+/** The first `limit` entries of a list, each read once, {@link UNREADABLE} in the place of one whose read threw. */
+function entriesOf(list: readonly unknown[], limit = Number.POSITIVE_INFINITY): unknown[] {
+  const count = Math.min(lengthOf(list), limit);
+  const entries: unknown[] = [];
+  for (let index = 0; index < count; index += 1) {
+    entries.push(readKey(list, index));
+  }
+  return entries;
+}
+
+/** A value field from a read: an `other` marker when the read threw, else {@link traceValue}. */
+function readValue(read: unknown, capBytes: number, path: string, cut: string[]): ForgeTraceValue | undefined {
+  return read === UNREADABLE ? unserializable('other') : traceValue(read, capBytes, path, cut);
+}
+
+/** A text field from a read: the `other` marker's JSON text when the read threw, else {@link traceText}. */
+function readText(read: unknown, capBytes: number, path: string, cut: string[]): ForgeTraceText {
+  return traceText(read === UNREADABLE ? unserializable('other') : read, capBytes, path, cut);
+}
+
+/** A text field that may be absent: null for null or undefined, else {@link readText}. */
+function readTextOrNull(read: unknown, capBytes: number, path: string, cut: string[]): ForgeTraceText | null {
+  return read === null || read === undefined ? null : readText(read, capBytes, path, cut);
+}
+
+/** A plain-string field: its start under the cap ({@link traceString}) when it is a string, else null. */
+function readString(read: unknown, capBytes: number, path: string, cut: string[]): string | null {
+  return typeof read === 'string' ? traceString(read, capBytes, path, cut) : null;
+}
+
+function readBoolean(read: unknown): boolean | null {
+  return typeof read === 'boolean' ? read : null;
+}
+
+/** Sets `key` on `target` unless `value` is undefined, which JSON leaves out. */
+function setField(target: Record<string, unknown>, key: string, value: unknown): void {
+  if (value !== undefined) {
+    target[key] = value;
+  }
+}
+
+function finiteOr(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+/** An epoch time in milliseconds as ISO 8601 UTC; the epoch itself for a time a `Date` cannot hold. */
+function isoAt(ms: number): string {
+  const date = new Date(ms);
+  return Number.isNaN(date.getTime()) ? new Date(0).toISOString() : date.toISOString();
+}
+
+/** The arguments' fields a trace reads, each read once, so a getter that answers differently each time is read once. */
+interface ArgumentReads {
+  name: unknown;
+  description: unknown;
+  inputSchema: unknown;
+  outputSchema: unknown;
+  implementation: unknown;
+  mode: unknown;
+  code: unknown;
+  allowlist: unknown;
+  steps: unknown;
+  testCases: unknown;
+  justification: unknown;
+}
+
+/** The fields of `args`, each read once; null when `args` is not an object. */
+function readArguments(args: unknown): ArgumentReads | null {
+  if (!isObject(args)) {
+    return null;
+  }
+  const name = readKey(args, 'name');
+  const description = readKey(args, 'description');
+  const inputSchema = readKey(args, 'inputSchema');
+  const outputSchema = readKey(args, 'outputSchema');
+  const implementation = readKey(args, 'implementation');
+  const mode = isObject(implementation) ? readKey(implementation, 'mode') : undefined;
+  return {
+    name,
+    description,
+    inputSchema,
+    outputSchema,
+    implementation,
+    mode,
+    code: mode === 'sandbox' ? readKey(implementation, 'code') : undefined,
+    allowlist: mode === 'sandbox' ? readKey(implementation, 'allowlist') : undefined,
+    steps: mode === 'compose' ? readKey(implementation, 'steps') : undefined,
+    testCases: readKey(args, 'testCases'),
+    justification: readKey(args, 'justification'),
+  };
+}
+
+/**
+ * The test cases, each read once, when the arguments have a request's shape: string `name` and `description`, an
+ * object `inputSchema`, an absent or object `outputSchema`, a sandbox implementation with a string `code` and an
+ * array `allowlist` or a compose implementation with an array `steps`, and a `testCases` array whose every entry is
+ * an object. Null otherwise.
+ */
+function requestTestCases(reads: ArgumentReads | null): unknown[] | null {
+  if (reads === null || typeof reads.name !== 'string' || typeof reads.description !== 'string') {
+    return null;
+  }
+  if (!isObject(reads.inputSchema) || (reads.outputSchema !== undefined && !isObject(reads.outputSchema))) {
+    return null;
+  }
+  if (reads.mode === 'sandbox') {
+    if (typeof reads.code !== 'string' || !isList(reads.allowlist)) {
+      return null;
+    }
+  } else if (reads.mode === 'compose') {
+    if (!isList(reads.steps)) {
+      return null;
+    }
+  } else {
+    return null;
+  }
+  if (!isList(reads.testCases)) {
+    return null;
+  }
+  const testCases = entriesOf(reads.testCases);
+  return testCases.every(isObject) ? testCases : null;
+}
+
+function buildRequest(reads: ArgumentReads, cut: string[]): ForgeTraceRequest {
+  const request: Record<string, unknown> = {
+    name: traceText(reads.name, FORGE_TRACE_CAPS.name, 'request.name', cut),
+    description: traceText(reads.description, FORGE_TRACE_CAPS.description, 'request.description', cut),
+    inputSchema: traceValue(reads.inputSchema, FORGE_TRACE_CAPS.schema, 'request.inputSchema', cut),
+  };
+  setField(request, 'outputSchema', traceValue(reads.outputSchema, FORGE_TRACE_CAPS.schema, 'request.outputSchema', cut));
+  request.implementation =
+    reads.mode === 'sandbox'
+      ? {
+          mode: 'sandbox',
+          code: traceText(reads.code, FORGE_TRACE_CAPS.code, 'request.implementation.code', cut),
+          allowlist: buildAllowlist(reads.allowlist as readonly unknown[], cut),
+        }
+      : {
+          mode: 'compose',
+          steps: traceValue(reads.steps, FORGE_TRACE_CAPS.code, 'request.implementation.steps', cut),
+        };
+  return request as unknown as ForgeTraceRequest;
+}
+
+/** The first 64 allowlist entries, each capped; the list's own path is listed when it held more. */
+function buildAllowlist(allowlist: readonly unknown[], cut: string[]): ForgeTraceText[] {
+  if (lengthOf(allowlist) > FORGE_TRACE_CAPS.allowlistEntries) {
+    cut.push('request.implementation.allowlist');
+  }
+  return entriesOf(allowlist, FORGE_TRACE_CAPS.allowlistEntries).map((entry, index) =>
+    readText(entry, FORGE_TRACE_CAPS.allowlistEntry, `request.implementation.allowlist[${index}]`, cut),
+  );
+}
+
+/** The UTF-8 length of the whole code, or of the steps' JSON, before any cut. */
+function codeBytesOf(reads: ArgumentReads): number {
+  if (reads.mode === 'sandbox') {
+    return Buffer.byteLength(reads.code as string);
+  }
+  try {
+    const json = JSON.stringify(reads.steps);
+    return json === undefined ? 0 : Buffer.byteLength(json);
+  } catch {
+    return Buffer.byteLength(jsonText(reads.steps));
+  }
+}
+
+/** The first 16 test cases in request order; entry i ran when `runs` holds a run at i. */
+function buildTests(testCases: readonly unknown[], runs: readonly unknown[], cut: string[]): ForgeTraceTest[] {
+  const tests: ForgeTraceTest[] = [];
+  const kept = Math.min(testCases.length, FORGE_TRACE_CAPS.tests);
+  for (let index = 0; index < kept; index += 1) {
+    const testCase = testCases[index];
+    const prefix = `tests[${index}]`;
+    const test: Record<string, unknown> = { index };
+    setField(test, 'input', readValue(readKey(testCase, 'input'), FORGE_TRACE_CAPS.testField, `${prefix}.input`, cut));
+    setField(
+      test,
+      'expectedOutput',
+      readValue(readKey(testCase, 'expectedOutput'), FORGE_TRACE_CAPS.testField, `${prefix}.expectedOutput`, cut),
+    );
+    setField(
+      test,
+      'stepOutputs',
+      readValue(readKey(testCase, 'stepOutputs'), FORGE_TRACE_CAPS.testField, `${prefix}.stepOutputs`, cut),
+    );
+    setField(
+      test,
+      'responses',
+      readValue(readKey(testCase, 'responses'), FORGE_TRACE_CAPS.testField, `${prefix}.responses`, cut),
+    );
+    const ran = index < runs.length;
+    test.ran = ran;
+    if (ran) {
+      test.result = buildRun(runs[index], prefix, cut);
+    }
+    tests.push(test as unknown as ForgeTraceTest);
+  }
+  return tests;
+}
+
+function buildRun(run: unknown, prefix: string, cut: string[]): ForgeTraceTestRun {
+  const result: Record<string, unknown> = {};
+  setField(result, 'output', readValue(readKey(run, 'output'), FORGE_TRACE_CAPS.testOutput, `${prefix}.result.output`, cut));
+  result.success = readKey(run, 'success') === true;
+  setField(result, 'error', readTextOrNull(readKey(run, 'error'), FORGE_TRACE_CAPS.text, `${prefix}.result.error`, cut) ?? undefined);
+  setField(
+    result,
+    'effects',
+    readValue(readKey(run, 'effects'), FORGE_TRACE_CAPS.testEffects, `${prefix}.result.effects`, cut),
+  );
+  return result as ForgeTraceTestRun;
+}
+
+function buildExecutor(executor: unknown, cut: string[]): ForgeTraceExecutor | null {
+  if (!isObject(executor)) {
+    return null;
+  }
+  const name = readKey(executor, 'name');
+  return {
+    name: traceString((name === UNREADABLE ? unserializable('other') : name) as string, FORGE_TRACE_CAPS.other, 'executor.name', cut),
+    isolates: readKey(executor, 'isolates') === true,
+  };
+}
+
+/** The verdict's scores and approval as given, each JSON-safe, and its reasoning capped. Other keys are left out. */
+const VERDICT_SCORES = ['approved', 'confidence', 'safety', 'correctness', 'determinism', 'bounded'] as const;
+
+function buildVerdict(verdict: unknown, cut: string[]): ForgeTraceVerdict | null {
+  if (!isObject(verdict)) {
+    return null;
+  }
+  const copy: Record<string, unknown> = {};
+  for (const key of VERDICT_SCORES) {
+    setField(copy, key, readValue(readKey(verdict, key), FORGE_TRACE_CAPS.other, `verdict.${key}`, cut));
+  }
+  copy.reasoning = readText(readKey(verdict, 'reasoning'), FORGE_TRACE_CAPS.verdictReasoning, 'verdict.reasoning', cut);
+  return copy as unknown as ForgeTraceVerdict;
+}
+
+function buildJudgeDetail(detail: unknown, cut: string[]): ForgeTraceJudgeDetail | null {
+  if (!isObject(detail)) {
+    return null;
+  }
+  const judgeError = readKey(detail, 'judgeError');
+  return {
+    judgeModel: readString(readKey(detail, 'judgeModel'), FORGE_TRACE_CAPS.other, 'judgeDetail.judgeModel', cut),
+    replyParsed: readKey(detail, 'replyParsed') === true,
+    judgeError: judgeError === 'llm_call_failed' || judgeError === 'reply_unparsable' ? judgeError : null,
+    judgeApproved: readBoolean(readKey(detail, 'judgeApproved')),
+    safetyPassed: readBoolean(readKey(detail, 'safetyPassed')),
+    safetyConcerns: buildConcerns(readKey(detail, 'safetyConcerns'), cut),
+    correctnessPassed: readBoolean(readKey(detail, 'correctnessPassed')),
+    failedTests: buildFailedTests(readKey(detail, 'failedTests'), cut),
+    deterministic: readBoolean(readKey(detail, 'deterministic')),
+    determinismReasoning: readTextOrNull(
+      readKey(detail, 'determinismReasoning'),
+      FORGE_TRACE_CAPS.judgeText,
+      'judgeDetail.determinismReasoning',
+      cut,
+    ),
+    bounded: readBoolean(readKey(detail, 'bounded')),
+    boundedReasoning: readTextOrNull(readKey(detail, 'boundedReasoning'), FORGE_TRACE_CAPS.judgeText, 'judgeDetail.boundedReasoning', cut),
+  };
+}
+
+/** The first 16 concerns, each cut at 1 KiB; the list's own path is listed when it held more. */
+function buildConcerns(concerns: unknown, cut: string[]): ForgeTraceText[] {
+  if (!isList(concerns)) {
+    return [];
+  }
+  if (lengthOf(concerns) > FORGE_TRACE_CAPS.judgeConcerns) {
+    cut.push('judgeDetail.safetyConcerns');
+  }
+  return entriesOf(concerns, FORGE_TRACE_CAPS.judgeConcerns).map((concern, index) =>
+    readText(concern, FORGE_TRACE_CAPS.judgeText, `judgeDetail.safetyConcerns[${index}]`, cut),
+  );
+}
+
+/** The first 64 finite numbers of the list, in order; the list's own path is listed when it held more. */
+function buildFailedTests(failedTests: unknown, cut: string[]): number[] {
+  if (!isList(failedTests)) {
+    return [];
+  }
+  const numbers = entriesOf(failedTests).filter(
+    (entry): entry is number => typeof entry === 'number' && Number.isFinite(entry),
+  );
+  if (numbers.length > FORGE_TRACE_CAPS.failedTests) {
+    cut.push('judgeDetail.failedTests');
+  }
+  return numbers.slice(0, FORGE_TRACE_CAPS.failedTests);
+}
+
+/**
+ * The author of the request (and of the justification): the record's author, or the direct caller with no model
+ * named when the record has none.
+ */
+function requestAuthor(author: unknown, at: string, path: string, cut: string[]): ForgeTraceAuthor {
+  if (!isObject(author)) {
+    return { kind: 'caller', role: 'direct_caller', aiGenerated: null, provider: null, model: null, modelSource: null, at };
+  }
+  const kind = readKey(author, 'kind') === 'model' ? 'model' : 'caller';
+  const modelSource = readKey(author, 'modelSource');
+  return {
+    kind,
+    role: readKey(author, 'role') === 'forging_agent' ? 'forging_agent' : 'direct_caller',
+    aiGenerated: kind === 'model' ? true : null,
+    provider: readString(readKey(author, 'provider'), FORGE_TRACE_CAPS.other, `${path}.provider`, cut),
+    model: readString(readKey(author, 'model'), FORGE_TRACE_CAPS.other, `${path}.model`, cut),
+    modelSource: modelSource === 'answered' || modelSource === 'requested' ? modelSource : null,
+    at,
+  };
+}
+
+/** The author of the verdict: the judge's configured provider and model, as asked for, when AgentOS reads them. */
+function judgeAuthor(judge: unknown, at: string, cut: string[]): ForgeTraceAuthor {
+  const provider = isObject(judge) ? readKey(judge, 'providerId') : null;
+  const model = isObject(judge) ? readKey(judge, 'model') : null;
+  return {
+    kind: 'model',
+    role: 'judge',
+    aiGenerated: true,
+    provider: readString(provider, FORGE_TRACE_CAPS.other, 'provenance.verdict.provider', cut),
+    model: readString(model, FORGE_TRACE_CAPS.other, 'provenance.verdict.model', cut),
+    modelSource: typeof model === 'string' && model !== '' ? 'requested' : null,
+    at,
+  };
+}
+
+function executionAuthor(at: string): ForgeTraceAuthor {
+  return { kind: 'execution', role: 'executor', aiGenerated: false, provider: null, model: null, modelSource: null, at };
+}
+
+/** The trace's reason: null when approved; a refusal's text capped; a thrown value as its JSON text when not a string. */
+function reasonOf(stage: KnownForgeTraceStage, reason: unknown, cut: string[]): ForgeTraceText | null {
+  if (stage === 'approved' || ((reason === null || reason === undefined) && stage !== 'thrown')) {
+    return null;
+  }
+  return traceText(reason, FORGE_TRACE_CAPS.text, 'reason', cut);
+}
+
+/** Freezes `value` and every object and array inside it. A trace holds only its own copies, never a caller's object. */
+function deepFreeze<T>(value: T): T {
+  if (isObject(value)) {
+    Object.freeze(value);
+    for (const key of Object.keys(value)) {
+      deepFreeze((value as Record<string, unknown>)[key]);
+    }
+  }
+  return value;
+}
+
+/** Each trace's justification length as it arrived, for its log line; never a field of the trace. */
+const JUSTIFICATION_CHARS = new WeakMap<ForgeTrace, number>();
+
+/**
+ * Builds a forge's trace: JSON-safe, every field under its cap, sized and deep-frozen. The request is filled when the
+ * arguments have a request's shape (and the stage is not `schema_check`); otherwise `rawArguments` holds the
+ * arguments' copy and `tests` is empty. Never throws: a field it cannot read becomes an `other` marker.
+ *
+ * @param input - What the layer that ended the forge knows.
+ * @returns The trace.
+ * @internal
+ */
+export function buildForgeTrace(input: ForgeTraceInput): ForgeTrace {
+  const cut: string[] = [];
+  const { record, stage } = input;
+  const finishedMs = finiteOr(input.finishedAt, Date.now());
+  const startedMs = finiteOr(record.startedAt, finishedMs);
+  const startedAt = isoAt(startedMs);
+  const reads = readArguments(input.args);
+  const testCases = stage === 'schema_check' ? null : requestTestCases(reads);
+  const runs = isList(input.testRuns) ? entriesOf(input.testRuns) : [];
+
+  const forgeId = traceString(record.forgeId, FORGE_TRACE_CAPS.other, 'forgeId', cut);
+  const agentId = readString(input.agentId, FORGE_TRACE_CAPS.other, 'agentId', cut);
+  const sessionId = readString(input.sessionId, FORGE_TRACE_CAPS.other, 'sessionId', cut);
+  const correlationId = readString(input.correlationId, FORGE_TRACE_CAPS.other, 'correlationId', cut);
+  const toolName =
+    reads !== null && typeof reads.name === 'string' ? traceText(reads.name, FORGE_TRACE_CAPS.name, 'toolName', cut) : null;
+  const mode = reads !== null && (reads.mode === 'sandbox' || reads.mode === 'compose') ? reads.mode : null;
+  const reason = reasonOf(stage, input.reason, cut);
+  const request = testCases === null || reads === null ? null : buildRequest(reads, cut);
+  const rawArguments =
+    request === null ? traceValue(input.args, FORGE_TRACE_CAPS.rawArguments, 'rawArguments', cut) : undefined;
+  const justificationRead = reads === null ? undefined : reads.justification;
+  const justification = readTextOrNull(justificationRead, FORGE_TRACE_CAPS.justification, 'justification', cut);
+  const tests = testCases === null ? [] : buildTests(testCases, runs, cut);
+  const executor = buildExecutor(input.executor, cut);
+  const verdict = buildVerdict(input.verdict, cut);
+  const judgeDetail = buildJudgeDetail(input.judgeDetail, cut);
+  const toolId = readString(input.toolId, FORGE_TRACE_CAPS.other, 'toolId', cut);
+  const provenance: ForgeTraceProvenance = {
+    provenanceVersion: 1,
+    request: requestAuthor(record.author, startedAt, 'provenance.request', cut),
+    justification:
+      justification === null ? null : requestAuthor(record.author, startedAt, 'provenance.justification', cut),
+    verdict: verdict === null ? null : judgeAuthor(input.judge, isoAt(finiteOr(input.verdictAt, finishedMs)), cut),
+    testResults: runs.length > 0 ? executionAuthor(isoAt(finiteOr(input.testsFinishedAt, finishedMs))) : null,
+  };
+  const duration = Math.round(finishedMs - startedMs);
+  const sizes = {
+    traceBytes: 0,
+    codeBytes: request === null || reads === null ? null : codeBytesOf(reads),
+    cut,
+    testsOmitted: request === null || testCases === null ? 0 : Math.max(0, testCases.length - FORGE_TRACE_CAPS.tests),
+  };
+  const trace = {
+    traceVersion: FORGE_TRACE_VERSION as typeof FORGE_TRACE_VERSION,
+    forgeId,
+    recordedBy: input.recordedBy,
+    via: input.via,
+    agentId,
+    sessionId,
+    correlationId,
+    toolName,
+    mode,
+    outcome: STAGE_OUTCOME[stage] ?? 'failed',
+    stage,
+    reason,
+    startedAt,
+    finishedAt: isoAt(finishedMs),
+    durationMs: Number.isFinite(duration) ? duration : 0,
+    request,
+    ...(rawArguments === undefined ? {} : { rawArguments }),
+    justification,
+    tests,
+    executor,
+    verdict,
+    judgeDetail,
+    toolId,
+    provenance,
+    sizes,
+  } satisfies ForgeTrace;
+
+  // traceBytes is the length of the trace's own JSON, its own digits included: measured with a placeholder, then again
+  // with each measured figure until the figure holds, which takes at most three rounds.
+  let measured = Buffer.byteLength(JSON.stringify(trace));
+  for (let round = 0; round < 3 && measured !== sizes.traceBytes; round += 1) {
+    sizes.traceBytes = measured;
+    measured = Buffer.byteLength(JSON.stringify(trace));
+  }
+
+  const frozen = deepFreeze(trace) as ForgeTrace;
+  JUSTIFICATION_CHARS.set(frozen, typeof justificationRead === 'string' ? justificationRead.length : 0);
+  return frozen;
+}
+
+/**
+ * The `reason` of a `thrown` trace: the error's `message` when it is an `Error` whose `message` reads as a string,
+ * else the thrown value itself, which the builder writes as its JSON text (`Object.create(null)` gives `'{}'`). Never
+ * throws, so the layer that caught the value rethrows the same value.
+ *
+ * @param error - The thrown value.
+ * @returns The message, or the value.
+ * @internal
+ */
+export function thrownReason(error: unknown): unknown {
+  try {
+    if (error instanceof Error) {
+      const message: unknown = error.message;
+      if (typeof message === 'string') {
+        return message;
+      }
+    }
+  } catch {
+    // A `message` getter or a `Proxy` that throws: the value itself is the reason.
+  }
+  return error;
+}
+
+// ============================================================================
+// DELIVERY
+// ============================================================================
+
+/**
+ * A host's handler for every forge's trace.
+ *
+ * @internal
+ */
+export type ForgeTraceHook = (trace: ForgeTrace) => void | Promise<void>;
+
+/**
+ * The key of the package-internal delivery method on `EmergentCapabilityEngine` and `ForgeToolMetaTool`.
+ *
+ * @internal
+ */
+export const FORGE_TRACE_DELIVER: unique symbol = Symbol('agentos.emergent.forgeTraceDeliver');
+
+const forgeLog = moduleLogger('emergent', 'library');
+
+/** How the wait for a hook ended: it settled, it threw or rejected, or the bound came first. */
+type HookEnd = { readonly kind: 'done' } | { readonly kind: 'failed'; readonly error: unknown } | { readonly kind: 'slow' };
+
+/** Writes `emergent.forge_done`: ints, words and enums alone, at info for an approved forge and warn for the rest. */
+function writeForgeDone(trace: ForgeTrace): void {
+  try {
+    const fields = {
+      outcome: trace.outcome,
+      stage: trace.stage as KnownForgeTraceStage,
+      recordedBy: trace.recordedBy,
+      via: trace.via,
+      mode: trace.mode ?? 'none',
+      tests: trace.tests.length,
+      testsPassed: trace.tests.filter((test) => test.result?.success === true).length,
+      testsOmitted: trace.sizes.testsOmitted,
+      ...(trace.sizes.codeBytes === null ? {} : { codeBytes: trace.sizes.codeBytes }),
+      traceBytes: trace.sizes.traceBytes,
+      cutFields: trace.sizes.cut.length,
+      justificationChars: JUSTIFICATION_CHARS.get(trace) ?? 0,
+      judgeRan: trace.verdict === null ? 'no' : 'yes',
+      executorIsolates: trace.executor === null ? 'none' : trace.executor.isolates ? 'yes' : 'no',
+      durationMs: trace.durationMs,
+    } as const;
+    if (trace.outcome === 'approved') {
+      forgeLog.info('emergent.forge_done', fields);
+    } else {
+      forgeLog.warn('emergent.forge_done', fields);
+    }
+  } catch {
+    // A line that cannot be written (a refused field under NODE_ENV=test) never keeps the trace from the hook.
+  }
+}
+
+function writeHookFailed(error: unknown): void {
+  try {
+    forgeLog.warn('emergent.forge_trace_hook_failed', listedErrorFields(error));
+  } catch {
+    // The hook's failure is the forge's last step: a line that cannot be written changes nothing.
+  }
+}
+
+function writeHookSlow(): void {
+  try {
+    forgeLog.warn('emergent.forge_trace_hook_slow', { boundMs: FORGE_TRACE_HOOK_BOUND_MS });
+  } catch {
+    // As above: the forge goes on.
+  }
+}
+
+/** Calls the hook, and waits for it up to the bound. A throw, a rejection or the bound writes its line. */
+async function awaitHook(trace: ForgeTrace, hook: ForgeTraceHook): Promise<void> {
+  let running: Promise<void>;
+  try {
+    running = Promise.resolve(hook(trace));
+  } catch (error) {
+    writeHookFailed(error);
+    return;
+  }
+  // The rejection handler is attached now, so a hook that rejects after the bound is caught here and writes nothing.
+  const settled: Promise<HookEnd> = running.then(
+    (): HookEnd => ({ kind: 'done' }),
+    (error: unknown): HookEnd => ({ kind: 'failed', error }),
+  );
+  // The timer keeps its hold on the process: a lone script that awaits a forge returns at the bound at the latest.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const bound = new Promise<HookEnd>((resolve) => {
+    timer = setTimeout(() => resolve({ kind: 'slow' }), FORGE_TRACE_HOOK_BOUND_MS);
+  });
+  const first = await Promise.race([settled, bound]);
+  clearTimeout(timer);
+  if (first.kind === 'slow') {
+    writeHookSlow();
+  } else if (first.kind === 'failed') {
+    writeHookFailed(first.error);
+  }
+}
+
+/**
+ * Delivers a forge's trace: writes `emergent.forge_done`, then calls the hook, when one is set, and waits for it up
+ * to {@link FORGE_TRACE_HOOK_BOUND_MS}. A hook that throws or rejects writes `emergent.forge_trace_hook_failed`; one
+ * running at the bound writes `emergent.forge_trace_hook_slow` and is left running. Never throws.
+ *
+ * @param trace - The forge's trace.
+ * @param hook - The host's handler, when it set one.
+ * @internal
+ */
+export async function deliverForgeTrace(trace: ForgeTrace, hook: ForgeTraceHook | undefined): Promise<void> {
+  writeForgeDone(trace);
+  if (typeof hook !== 'function') {
+    return;
+  }
+  try {
+    await awaitHook(trace, hook);
+  } catch {
+    // awaitHook settles every path itself; nothing a hook does reaches the forge.
+  }
+}
+
+/**
+ * Settles a forge call's trace on its record: keeps the first trace a layer set, and delivers it once. Sets
+ * `record.trace` when it is unset; when the record has not been delivered, marks it delivered and awaits
+ * `deliver(record.trace)`. Both are set before the first await, so a second settle on the same record delivers
+ * nothing. A `deliver` that throws changes nothing.
+ *
+ * @param record - The call's record.
+ * @param trace - The trace this layer built or was handed.
+ * @param deliver - The engine's delivery method, when the layer reaches one.
+ * @returns The record's trace: the first one set.
+ * @internal
+ */
+export async function settleForgeTrace(
+  record: ForgeCallRecord,
+  trace: ForgeTrace,
+  deliver: ((trace: ForgeTrace) => Promise<void>) | undefined,
+): Promise<ForgeTrace> {
+  if (record.trace === undefined) {
+    record.trace = trace;
+  }
+  const kept = record.trace;
+  if (!record.delivered) {
+    record.delivered = true;
+    if (deliver !== undefined) {
+      try {
+        await deliver(kept);
+      } catch {
+        // A delivery that throws never changes the forge's result.
+      }
+    }
+  }
+  return kept;
 }
