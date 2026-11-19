@@ -676,7 +676,7 @@ Runnable source: [`examples/query-router-host-hooks.mjs`](https://github.com/fra
 
 ## 13. Per-Agent Identity via SOUL.md
 
-Load an agent's identity from a markdown workspace. `agent({ soul })` puts the `SOUL.md` body at the head of the system prompt, followed by `STYLE.md` and the `memory/index.md` catalog. The loader also parses the YAML frontmatter (HEXACO scores, voice, mood, hard limits) into an [`IPersonaDefinition`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/IPersonaDefinition.ts), which the full runtime takes as a persona; `agent()` does not read those fields. Compatible with the [aaronjmars/soul.md](https://github.com/aaronjmars/soul.md) and OpenClaw conventions.
+Load an agent's identity from a markdown workspace. `agent({ soul })` puts the `SOUL.md` body at the head of the system prompt, followed by `STYLE.md` and the `memory/index.md` catalog. The loader also parses the YAML frontmatter (HEXACO scores, voice, mood, hard limits) into an [`IPersonaDefinition`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/IPersonaDefinition.ts), which the full runtime takes as a persona; `agent()` does not read those fields. Compatible with the [soul.md](https://github.com/aeonfun/soul.md) and OpenClaw conventions.
 
 Workspace layout (per agent):
 

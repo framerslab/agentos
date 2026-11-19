@@ -357,7 +357,7 @@ export interface AgentOptions extends BaseAgentConfig {
    */
   history?: false | Partial<SessionHistoryConfig>;
   /**
-   * Per-agent identity loaded from a SOUL.md workspace (the OpenClaw / aaronjmars-soul.md
+   * Per-agent identity loaded from a SOUL.md workspace (the OpenClaw / soul.md
    * convention). Three forms are accepted:
    *
    * - **Workspace path** — points at a directory containing SOUL.md and optional
@@ -394,7 +394,7 @@ export interface AgentOptions extends BaseAgentConfig {
    *
    * @see `loadSoul` in `@framers/agentos/cognition/substrate/personas/SoulLoader`
    * for the loader implementation and full SOUL.md format spec.
-   * @see https://github.com/aaronjmars/soul.md for the cross-framework convention.
+   * @see https://github.com/aeonfun/soul.md for the cross-framework convention.
    */
   soul?: string | { content: string; optional?: boolean } | { path: string; optional?: boolean };
   /**

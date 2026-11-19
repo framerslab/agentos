@@ -1,7 +1,7 @@
 # Soul Files & the Markdown Memory Wiki
 
 AgentOS supports a markdown-based identity convention for agents, modeled after
-the OpenClaw workspace pattern and the [aaronjmars/soul.md](https://github.com/aaronjmars/soul.md)
+the OpenClaw workspace pattern and the [soul.md](https://github.com/aeonfun/soul.md)
 spec. Identity, voice, procedural rules, and long-term memory all live in plain
 markdown files inside a per-agent workspace directory. The loader parses YAML frontmatter into structured [`IPersonaDefinition`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/IPersonaDefinition.ts) fields, and
 `agent({ soul })` puts the prose at the head of the system prompt.
@@ -15,7 +15,7 @@ The agent's long-term memory is an **LLM wiki** in two layers (the "LLM keeps a 
 The soul-file convention and the `memory/` LLM wiki build on prior work:
 
 - **[Andrej Karpathy, "LLM Wiki"](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)**: the pattern of an LLM that incrementally maintains a persistent, interlinked markdown wiki (entity pages, concept pages, cross-references) instead of retrieving raw chunks at query time. AgentOS's `memory/` directory is a runtime implementation of this idea.
-- **[aaronjmars/soul.md](https://github.com/aaronjmars/soul.md)** and the **OpenClaw** workspace pattern: the markdown identity-file convention (`SOUL.md` plus companion files) the soul workspace follows.
+- **[soul.md](https://github.com/aeonfun/soul.md)** and the **OpenClaw** workspace pattern: the markdown identity-file convention (`SOUL.md` plus companion files) the soul workspace follows.
 - **[MemGPT: Towards LLMs as Operating Systems](https://arxiv.org/abs/2310.08560)** (Packer et al., 2023): LLM-managed, self-editing memory across an in-context window and an external store.
 - **[Generative Agents: Interactive Simulacra of Human Behavior](https://arxiv.org/abs/2304.03442)** (Park et al., UIST 2023): the memory-stream-plus-reflection design for long-running agent memory.
 
@@ -506,6 +506,6 @@ the agent IS; AGENTS.md describes what the agent DOES.
 
 - [SoulLoader source](../src/cognition/substrate/personas/SoulLoader.ts)
 - [SOUL.template.md](../src/cognition/substrate/personas/SOUL.template.md)
-- [aaronjmars/soul.md spec](https://github.com/aaronjmars/soul.md)
+- [soul.md spec](https://github.com/aeonfun/soul.md)
 - [OpenClaw workspace files explained](https://capodieci.medium.com/ai-agents-003-openclaw-workspace-files-explained-soul-md-agents-md-heartbeat-md-and-more-5bdfbee4827a)
 - [HEXACO Personality model in AgentOS](./memory/HEXACO_PERSONALITY.md)
