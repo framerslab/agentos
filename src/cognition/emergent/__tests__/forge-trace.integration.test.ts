@@ -7,17 +7,78 @@
  * the same trace, with that stage's outcome, reason, verdict, executor and
  * tool id. A second group pins what a forge_tool call looks like to the model,
  * to a host's stream and to a wrapper's capture, so a trace changes none of it.
+ * A third group forges on the full runtime and reads the model that answered
+ * each tool call, and a fourth reads every log line a forge writes for the
+ * content it must never hold.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+/** What the full runtime's model answers: its streamed replies in order, the judge's reply, and the judge's calls. */
+const runtimeModel = vi.hoisted(() => ({
+  replies: [] as Array<Array<Record<string, unknown>>>,
+  judgeReply: '',
+  judgeCalls: 0,
+}));
+
+// The OpenAI provider class the full runtime starts, stubbed at its module boundary. A streamed call answers the next
+// scripted reply, each final chunk naming the model that answered it; an unstreamed call (the emergent judge's, on the
+// full runtime) answers the judge's reply. Only the tests that build AgentOS start a provider of this class.
+vi.mock('../../../core/llm/providers/implementations/OpenAIProvider', async (importOriginal) => {
+  class OpenAIProvider {
+    readonly providerId = 'openai';
+    isInitialized = false;
+    async initialize() {
+      this.isInitialized = true;
+    }
+    async generateCompletion() {
+      runtimeModel.judgeCalls += 1;
+      return {
+        choices: [{ message: { role: 'assistant', content: runtimeModel.judgeReply }, finishReason: 'stop' }],
+        responseText: runtimeModel.judgeReply,
+      };
+    }
+    async *generateCompletionStream() {
+      const reply = runtimeModel.replies.shift() ?? [
+        { responseTextDelta: 'Done.' },
+        { isFinal: true, choices: [{ message: { role: 'assistant', content: 'Done.' }, finishReason: 'stop' }] },
+      ];
+      for (const chunk of reply) {
+        yield chunk.isFinal ? { ...chunk, modelId: 'stream-model-7' } : chunk;
+      }
+    }
+    async generateEmbeddings() {
+      return { embeddings: [] };
+    }
+    async listAvailableModels() {
+      return [];
+    }
+    async getModelInfo() {
+      return undefined;
+    }
+    async checkHealth() {
+      return { isHealthy: true };
+    }
+    async shutdown() {}
+  }
+  return {
+    ...(await importOriginal<typeof import('../../../core/llm/providers/implementations/OpenAIProvider.js')>()),
+    OpenAIProvider,
+  };
+});
+
+import { AgentOS } from '../../../api/AgentOS.js';
+import type { AgentOSInput } from '../../../api/types/AgentOSInput.js';
+import { AGENTOS_CONTEXT, AGENTOS_EVENTS, valid, type EventMap } from '../../../core/logging/events.js';
 import type { ITool, ToolExecutionContext, ToolExecutionResult } from '../../../core/tools/ITool.js';
-import type { ToolExecutionRequestDetails } from '../../../core/tools/ToolExecutor.js';
+import { ToolExecutor, type ToolExecutionRequestDetails } from '../../../core/tools/ToolExecutor.js';
 import type {
   ApprovalDecision,
   IHumanInteractionManager,
   PendingAction,
 } from '../../../orchestration/hitl/IHumanInteractionManager.js';
 import { GMIOutputChunkType, type ToolCallResult, type UserContext } from '../../substrate/IGMI.js';
+import type { IPersonaDefinition } from '../../substrate/personas/IPersonaDefinition.js';
 import {
   createScriptedGmi,
   runTurn,
@@ -1839,5 +1900,571 @@ describe('forge trace: what the model reads and what a host streams are unchange
 
     expect(h.generateText).toHaveBeenCalledTimes(1);
     expect(h.generateText.mock.calls[0]).toEqual(PINS.judgePrompt);
+  });
+});
+
+/** The persona the full runtime's model answers as. */
+const FORGER = {
+  id: 'forger',
+  name: 'Forger',
+  description: 'Forges the tools a task needs.',
+  version: '1.0.0',
+  baseSystemPrompt: 'You forge the tools a task needs.',
+} as unknown as IPersonaDefinition;
+
+/** The full runtime that is running, shut down after each test. */
+let runtime: AgentOS | undefined;
+
+/** The full runtime with forging on, its one provider the stubbed OpenAI class, and the host's trace hook. */
+async function bootRuntime(onForgeTrace: (trace: unknown) => void): Promise<AgentOS> {
+  return AgentOS.create({
+    modelProviderManagerConfig: {
+      providers: [{ providerId: 'openai', enabled: true, isDefault: true, config: { apiKey: 'test' } }],
+    },
+    turnPlanning: { enabled: false },
+    personas: [FORGER],
+    emergent: true,
+    emergentConfig: { allowSandboxTools: true },
+    onForgeTrace,
+  } as any);
+}
+
+/** A model step on the full runtime that calls forge_tool with `args`. */
+function forgeToolStep(args: Record<string, unknown>): Array<Record<string, unknown>> {
+  return [
+    {
+      isFinal: true,
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: 'assistant',
+            content: null,
+            tool_calls: [
+              { id: 'call-forge', type: 'function', function: { name: 'forge_tool', arguments: JSON.stringify(args) } },
+            ],
+          },
+          finishReason: 'tool_calls',
+        },
+      ],
+      usage: { promptTokens: 10, completionTokens: 4, totalTokens: 14 },
+    },
+  ];
+}
+
+/** One turn on the full runtime whose model calls forge_tool with `args` and then answers text; every chunk it streamed. */
+async function forgeThroughRuntime(os: AgentOS, args: Record<string, unknown>): Promise<unknown[]> {
+  runtimeModel.replies.push(forgeToolStep(args));
+  const input: AgentOSInput = {
+    userId: 'user-1',
+    sessionId: 'session-1',
+    textInput: 'Forge it.',
+    selectedPersonaId: FORGER.id,
+  };
+  const chunks: unknown[] = [];
+  for await (const chunk of os.processRequest(input)) {
+    chunks.push(chunk);
+  }
+  return chunks;
+}
+
+/** JSON text of `value` that a cycle or a BigInt cannot stop: a repeated object is written once. */
+function serialized(value: unknown): string {
+  const seen = new WeakSet<object>();
+  return JSON.stringify(value, (_key, item: unknown) => {
+    if (typeof item === 'bigint') {
+      return item.toString();
+    }
+    if (typeof item === 'object' && item !== null) {
+      if (seen.has(item)) {
+        return '[seen]';
+      }
+      seen.add(item);
+    }
+    return item;
+  });
+}
+
+/** Shuts down the full runtime a test started, and clears what its model was scripted to answer. */
+async function resetRuntime(): Promise<void> {
+  if (runtime) {
+    await runtime.shutdown();
+  }
+  runtime = undefined;
+  runtimeModel.replies.length = 0;
+  runtimeModel.judgeReply = '';
+  runtimeModel.judgeCalls = 0;
+}
+
+/** A host tool that records the context of every call it is given. */
+function contextRecorder(contexts: ToolExecutionContext[]): ITool {
+  return {
+    id: 'record-context-v1',
+    name: 'record_context',
+    displayName: 'Record context',
+    description: 'Records the context it is called with.',
+    inputSchema: { type: 'object', properties: {} },
+    hasSideEffects: false,
+    execute: async (_args: Record<string, unknown>, context: ToolExecutionContext) => {
+      contexts.push(context);
+      return { success: true, output: { ok: true } };
+    },
+  };
+}
+
+/** A call of `record_context`, with the request's facts and nothing else. */
+function recordContextCall(id: string): ToolExecutionRequestDetails {
+  return {
+    toolCallRequest: { id, name: 'record_context', arguments: {} },
+    gmiId: 'gmi-1',
+    personaId: 'persona-1',
+    personaCapabilities: [],
+    userContext: { userId: 'user-1' } as UserContext,
+  };
+}
+
+describe('forge trace: the full runtime and the answering model', () => {
+  afterEach(async () => {
+    await resetRuntime();
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    vi.useRealTimers();
+  });
+
+  it('the full runtime: the hook receives the forge with the answering model, and the runtime stream carries no trace', async () => {
+    const { onForgeTrace, traces } = hookRecorder();
+    runtimeModel.judgeReply = APPROVED_JSON;
+    runtime = await bootRuntime(onForgeTrace);
+
+    const chunks = await forgeThroughRuntime(runtime, sandboxArgs());
+    // The forge reached its judge, which the full runtime calls through its default provider.
+    expect(runtimeModel.judgeCalls).toBe(1);
+
+    expect(traces).toHaveLength(1);
+    const trace = traces[0];
+    expect(trace.outcome).toBe('approved');
+    expect(trace.recordedBy).toBe('engine');
+    expect(trace.via).toBe('forge_tool');
+    expect(trace.forgeId).toMatch(FORGE_ID);
+    // The request's author is the model that answered the step, as its final chunk names it.
+    expect(trace.provenance.request).toMatchObject({
+      kind: 'model',
+      role: 'forging_agent',
+      aiGenerated: true,
+      provider: 'openai',
+      model: 'stream-model-7',
+      modelSource: 'answered',
+    });
+    // The judge's author is the model the judge asked for, on the provider the runtime calls it through.
+    expect(trace.provenance.verdict).toMatchObject({ provider: 'openai', model: 'gpt-4o-mini', modelSource: 'requested' });
+
+    const json = serialized(chunks);
+    for (const name of TRACE_NAMES) {
+      expect(json).not.toContain(name);
+    }
+  });
+
+  it('the GMI puts the answering model on its tool call', async () => {
+    const scripted = scriptedProvider([toolCallReply([{ id: 'c1', name: 'lookup', args: { q: 'x' } }]), textReply('Done.')]);
+    const { gmi, processToolCall } = await createScriptedGmi({ provider: scripted.provider });
+
+    await runTurn(gmi, textTurn('t1', 'Look it up.'));
+
+    expect(processToolCall).toHaveBeenCalledTimes(1);
+    expect((processToolCall.mock.calls[0][0] as { callerModel?: unknown }).callerModel).toEqual({
+      providerId: 'scripted',
+      modelId: 'scripted-model',
+    });
+  });
+
+  it("ToolExecutor copies callerModel into the tool's context", async () => {
+    const contexts: ToolExecutionContext[] = [];
+    const tools = new ToolExecutor(undefined, undefined, undefined, { builtInTools: false });
+    await tools.registerTool(contextRecorder(contexts));
+
+    const withModel = await tools.executeTool({
+      ...recordContextCall('c1'),
+      callerModel: { providerId: 'p', modelId: 'm' },
+    } as ToolExecutionRequestDetails);
+    const withoutModel = await tools.executeTool(recordContextCall('c2'));
+    expect(withModel.success).toBe(true);
+    expect(withoutModel.success).toBe(true);
+
+    expect(contexts).toHaveLength(2);
+    expect((contexts[0] as { callerModel?: unknown }).callerModel).toEqual({ providerId: 'p', modelId: 'm' });
+    // A call that names no model gives the tool a context without the key.
+    expect(Object.prototype.hasOwnProperty.call(contexts[1], 'callerModel')).toBe(false);
+  });
+
+  it("an executor pipeline error's tool result names no callerModel", async () => {
+    const host = await makeForgeHost();
+    vi.spyOn(host.executor, 'executeTool').mockRejectedValueOnce(new Error('pipeline down'));
+
+    const result = await host.orchestrator.processToolCall({
+      toolCallRequest: { id: 'c1', name: 'forge_tool', arguments: sandboxArgs() },
+      gmiId: 'gmi-1',
+      personaId: 'persona-1',
+      personaCapabilities: [],
+      userContext: { userId: 'user-1' },
+      callerModel: { providerId: 'p', modelId: 'm' },
+    } as unknown as ToolExecutionRequestDetails);
+
+    expect(host.executor.executeTool).toHaveBeenCalledTimes(1);
+    expect(result.isError).toBe(true);
+    expect(result.errorDetails.message).toMatch(/internal pipeline/);
+    // The details reach the model's tool message, so they carry the request's facts without the answering model.
+    expect(JSON.stringify(result.errorDetails)).not.toContain('callerModel');
+  });
+});
+
+/** A marker string a forge carries in its code, its test values and its reason: no log line may hold it. */
+const MARKER = 'MARKER-7d1e';
+
+/** The code forge of `sandboxArgs` with the marker in its code and in its test case's input. */
+function markedArgs(): Record<string, unknown> {
+  return sandboxArgs({
+    implementation: {
+      mode: 'sandbox',
+      code: `function execute(input) { const m = '${MARKER}'; return { sum: input.a + input.b }; }`,
+      allowlist: [],
+    },
+    testCases: [{ input: { a: 2, b: 3, note: MARKER }, expectedOutput: { sum: 5 } }],
+  });
+}
+
+/** The judge's rejection, its reasoning and its one concern quoting the marker. */
+const MARKED_REJECTION = JSON.stringify({
+  ...(JSON.parse(REJECTED_JSON) as Record<string, unknown>),
+  safety: { passed: false, concerns: [`The code quotes ${MARKER}.`] },
+  reasoning: `Rejected: the code quotes ${MARKER}.`,
+});
+
+/** Every printed line and every captured event that holds `text`: a printed line by its text, an event by its name. */
+function linesHolding(capture: ReturnType<typeof captureLines>, text: string): string[] {
+  const printed = capture
+    .printed()
+    .split('\n')
+    .filter((line) => line.includes(text))
+    .map((line) => line.slice(0, 240));
+  const events = capture.lines
+    .filter((line) => JSON.stringify(line).includes(text))
+    .map((line) => `event ${String(line.event)}`);
+  return [...printed, ...events];
+}
+
+/** The log line's own fields: the line without its level, time, event name and bound context. */
+function eventFields(line: Record<string, unknown>): Record<string, unknown> {
+  const fields: Record<string, unknown> = { ...line };
+  for (const key of ['level', 'time', 'event', ...Object.keys(AGENTOS_CONTEXT)]) {
+    delete fields[key];
+  }
+  return fields;
+}
+
+/** The stage codes a forge can end at, in the order of the stage table. */
+const FORGE_STAGE_CODES = [
+  'schema_check',
+  'refused_before_approval',
+  'shape_check',
+  'host_refused',
+  'orchestrator_refused',
+  'permission_check_failed',
+  'human_denied',
+  'approval_failed',
+  'self_change_refused',
+  'name_refused',
+  'description_missing',
+  'engine_disabled',
+  'compose_refused',
+  'compose_needs_step_output',
+  'caller_context_required',
+  'sandbox_disabled',
+  'allowlist_unknown',
+  'effects_need_ceiling',
+  'capability_not_granted',
+  'code_validation',
+  'executor_unavailable',
+  'test_responses_refused',
+  'judge_rejected',
+  'compose_refused_after_judge',
+  'step_cycle',
+  'removed_while_forging',
+  'activation_failed',
+  'registration_failed',
+  'approved',
+  'thrown',
+];
+
+/** The fields of `emergent.forge_done` and their kinds: an integer, or one of a list of words. */
+const FORGE_DONE_KINDS: Record<string, 'int' | readonly string[]> = {
+  outcome: ['approved', 'rejected', 'refused', 'failed'],
+  stage: FORGE_STAGE_CODES,
+  recordedBy: ['engine', 'forge_tool', 'wrapper', 'orchestrator'],
+  via: ['forge_tool', 'direct'],
+  mode: ['sandbox', 'compose', 'none'],
+  tests: 'int',
+  testsPassed: 'int',
+  testsOmitted: 'int',
+  codeBytes: 'int',
+  traceBytes: 'int',
+  cutFields: 'int',
+  justificationChars: 'int',
+  judgeRan: ['yes', 'no'],
+  executorIsolates: ['yes', 'no', 'none'],
+  durationMs: 'int',
+};
+
+/** One way an orchestrator ends a call to its own forge_tool with the marker in its reason. */
+interface QuietRefusal {
+  label: string;
+  stage: string;
+  /** The host's options beside the hook. */
+  host?: () => Omit<ForgeHostOptions, 'onForgeTrace'>;
+  /** What the host's managers and executor do before the call. */
+  before?: (host: ForgeHost) => void;
+}
+
+const QUIET_REFUSALS: QuietRefusal[] = [
+  {
+    label: 'permission refused',
+    stage: 'orchestrator_refused',
+    before: (host) => {
+      host.permissionManager.isExecutionAllowed.mockResolvedValueOnce({ isAllowed: false, reason: MARKER });
+    },
+  },
+  {
+    label: 'permission check threw',
+    stage: 'permission_check_failed',
+    before: (host) => {
+      host.permissionManager.isExecutionAllowed.mockRejectedValueOnce(new Error(MARKER));
+    },
+  },
+  {
+    label: 'approval failed',
+    stage: 'approval_failed',
+    host: () => ({
+      orchestratorConfig: { hitl: { enabled: true } },
+      hitlManager: scriptedHitl(async () => {
+        throw new Error(MARKER);
+      }).manager,
+    }),
+  },
+  {
+    label: 'executor pipeline threw',
+    stage: 'thrown',
+    before: (host) => {
+      vi.spyOn(host.executor, 'executeTool').mockRejectedValueOnce(new Error(MARKER));
+    },
+  },
+];
+
+describe('forge trace: no content in any log line', () => {
+  afterEach(async () => {
+    await resetRuntime();
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    vi.useRealTimers();
+  });
+
+  it('no trace content in any log line through ToolExecutor with logToolCalls off', async () => {
+    const capture = captureLines();
+    try {
+      const { onForgeTrace } = hookRecorder();
+      const host = await makeForgeHost({ onForgeTrace });
+      host.judge.mockResolvedValueOnce(MARKED_REJECTION);
+
+      const result = await callTool(host.orchestrator, 'forge_tool', markedArgs(), CALLER);
+      expect(result.isError).toBe(true);
+      // The model reads the judge's reason in the tool result, as before.
+      expect(result.errorDetails.message).toContain(MARKER);
+
+      expect(linesHolding(capture, MARKER)).toEqual([]);
+      const done = eventLines(capture.lines, 'emergent.forge_done');
+      expect(done).toHaveLength(1);
+      expect(done[0]).toMatchObject({ outcome: 'rejected', stage: 'judge_rejected' });
+    } finally {
+      capture.restore();
+    }
+  });
+
+  it('no trace content in any log line through the full runtime', async () => {
+    const capture = captureLines();
+    try {
+      const { onForgeTrace } = hookRecorder();
+      runtimeModel.judgeReply = MARKED_REJECTION;
+      runtime = await bootRuntime(onForgeTrace);
+
+      await forgeThroughRuntime(runtime, markedArgs());
+      expect(runtimeModel.judgeCalls).toBe(1);
+
+      expect(linesHolding(capture, MARKER)).toEqual([]);
+      const done = eventLines(capture.lines, 'emergent.forge_done');
+      expect(done).toHaveLength(1);
+      expect(done[0]).toMatchObject({ outcome: 'rejected', stage: 'judge_rejected' });
+    } finally {
+      capture.restore();
+    }
+  });
+
+  it('no reason text in the quiet lines of a thrown forge', async () => {
+    const capture = captureLines();
+    try {
+      const { onForgeTrace } = hookRecorder();
+      const host = await makeForgeHost({ onForgeTrace });
+      vi.spyOn(EmergentToolRegistry.prototype, 'register').mockImplementationOnce(() => {
+        throw new Error(MARKER);
+      });
+
+      const result = await callTool(host.orchestrator, 'forge_tool', sandboxArgs(), CALLER);
+      expect(result.isError).toBe(true);
+
+      expect(linesHolding(capture, MARKER)).toEqual([]);
+      const done = eventLines(capture.lines, 'emergent.forge_done');
+      expect(done).toHaveLength(1);
+      expect(done[0]).toMatchObject({ outcome: 'failed', stage: 'thrown' });
+    } finally {
+      capture.restore();
+    }
+  });
+
+  it('no reason text in the quiet lines of a human denial', async () => {
+    const capture = captureLines();
+    try {
+      const { onForgeTrace, traces } = hookRecorder();
+      const hitl = scriptedHitl(async (action) => decision(action, false, MARKER));
+      const host = await makeForgeHost({
+        onForgeTrace,
+        orchestratorConfig: { hitl: { enabled: true } },
+        hitlManager: hitl.manager,
+      });
+
+      const result = await callTool(host.orchestrator, 'forge_tool', sandboxArgs(), CALLER);
+      expect(result.isError).toBe(true);
+      expect(result.errorDetails.message).toBe(MARKER);
+
+      expect(linesHolding(capture, MARKER)).toEqual([]);
+      expect(traces).toHaveLength(1);
+      expect(traces[0].stage).toBe('human_denied');
+      expect(traces[0].reason).toBe(MARKER);
+    } finally {
+      capture.restore();
+    }
+  });
+
+  it.each(QUIET_REFUSALS.map((row): [string, QuietRefusal] => [row.label, row]))(
+    'no reason text in the quiet lines of an orchestrator refusal (%s)',
+    async (_label, row) => {
+      const capture = captureLines();
+      try {
+        const { onForgeTrace, traces } = hookRecorder();
+        const host = await makeForgeHost({ ...(row.host?.() ?? {}), onForgeTrace });
+        row.before?.(host);
+
+        const result = await callTool(host.orchestrator, 'forge_tool', sandboxArgs(), CALLER);
+        expect(result.isError).toBe(true);
+
+        expect(linesHolding(capture, MARKER)).toEqual([]);
+        // The reason stays in the trace, which the host reads.
+        expect(traces).toHaveLength(1);
+        expect(traces[0].stage).toBe(row.stage);
+        expect(traces[0].recordedBy).toBe('orchestrator');
+        expect(String(traces[0].reason)).toContain(MARKER);
+      } finally {
+        capture.restore();
+      }
+    },
+  );
+
+  it("every new event's fields pass the catalogue's checks", async () => {
+    const capture = captureLines();
+    try {
+      const { onForgeTrace, traces } = hookRecorder();
+      const { engine } = await directEngine({ onForgeTrace });
+
+      const approved = await forgeDirect(engine);
+      expect(approved.success).toBe(true);
+      // A stage code of 22 characters: a word field takes no run of 20 or more letters, digits and underscores.
+      const refused = await forgeDirect(engine, {
+        name: 'add_with_answers',
+        testCases: [
+          { input: { a: 2, b: 3 }, expectedOutput: { sum: 5 }, responses: [{ method: 'POST', url: 'items', status: 201 }] },
+        ],
+      });
+      expect(refused.error).toMatch(/^invalid_test_responses: /);
+      expect(valid('word', 'test_responses_refused', 'stage')).toBe(false);
+
+      const done = eventLines(capture.lines, 'emergent.forge_done');
+      expect(done).toHaveLength(2);
+      expect(traces).toHaveLength(2);
+
+      // The catalogue declares the event with exactly these fields, each of its kind.
+      const declared = (AGENTOS_EVENTS as EventMap)['emergent.forge_done'];
+      expect(declared).toBeDefined();
+      expect(Object.keys(declared).sort()).toEqual(Object.keys(FORGE_DONE_KINDS).sort());
+      for (const [key, kind] of Object.entries(FORGE_DONE_KINDS)) {
+        if (kind === 'int') {
+          expect(declared[key]).toBe('int');
+        } else {
+          expect([...(declared[key] as { enum: readonly string[] }).enum].sort()).toEqual([...kind].sort());
+        }
+      }
+
+      for (const line of done) {
+        expect(line).toHaveProperty('level');
+        expect(line).toHaveProperty('time');
+        expect(line.component).toBe('emergent');
+        expect(line.event).toBe('emergent.forge_done');
+        // Both forges carry a request, so both lines carry codeBytes.
+        const fields = eventFields(line);
+        expect(Object.keys(fields).sort()).toEqual(Object.keys(FORGE_DONE_KINDS).sort());
+        for (const [key, value] of Object.entries(fields)) {
+          const kind = FORGE_DONE_KINDS[key];
+          if (kind === 'int') {
+            expect(Number.isInteger(value)).toBe(true);
+          } else {
+            expect(kind).toContain(value);
+          }
+          expect(valid(declared[key], value, key)).toBe(true);
+        }
+      }
+
+      // Info for an approved forge, warn for the rest; the figures are the trace's own.
+      expect(done[0]).toMatchObject({
+        level: 30,
+        outcome: 'approved',
+        stage: 'approved',
+        recordedBy: 'engine',
+        via: 'direct',
+        mode: 'sandbox',
+        tests: 1,
+        testsPassed: 1,
+        testsOmitted: 0,
+        codeBytes: Buffer.byteLength(ADD_CODE),
+        traceBytes: traces[0].sizes.traceBytes,
+        cutFields: 0,
+        justificationChars: 0,
+        judgeRan: 'yes',
+        executorIsolates: 'no',
+      });
+      expect(done[1]).toMatchObject({
+        level: 40,
+        outcome: 'refused',
+        stage: 'test_responses_refused',
+        recordedBy: 'engine',
+        via: 'direct',
+        mode: 'sandbox',
+        tests: 1,
+        testsPassed: 0,
+        testsOmitted: 0,
+        codeBytes: Buffer.byteLength(ADD_CODE),
+        traceBytes: traces[1].sizes.traceBytes,
+        cutFields: 0,
+        justificationChars: 0,
+        judgeRan: 'no',
+        executorIsolates: 'no',
+      });
+    } finally {
+      capture.restore();
+    }
   });
 });
