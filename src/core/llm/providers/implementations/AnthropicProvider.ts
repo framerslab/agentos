@@ -64,15 +64,21 @@ import {
   type AnthropicUsageForCost,
 } from './anthropicCatalog.js';
 import { resolveAnthropicEffort } from '../model-effort.js';
-import { computeRetryBackoffMs, resolveAttemptCount, waitForRetry } from './retry-backoff.js';
+import { computeRetryBackoffMs, resolveAttemptCount, waitForRetry, type AttemptTally } from './retry-backoff.js';
 import { operationIdHeaderNamed, operationIdHeaders, resolveOperationIdHeader } from './operation-id.js';
 import { recordCacheUsage } from './cacheLeakDetector.js';
 import { resolveCacheCapabilities } from '../model-cache-capabilities.js';
 import { redactUrlSecrets } from '../url-secrets';
 import { createContentSafeConsole } from '../../../logging/contentSafeConsole.js';
+import { moduleLogger } from '../../../logging/loggerFactory.js';
+import { safePath, safeWord } from '../../../logging/events.js';
+import { isSchemaGrammarTooLarge, rememberSchemaFormatRefusal, schemaFormatRefused } from '../schema-format-refusals.js';
+import { SCHEMA_INSTRUCTION_LEAD } from '../../../../api/runtime/structuredReply.js';
 
 /** This module's fixed diagnostic origin; no runtime name enters telemetry. */
 const console = createContentSafeConsole('anthropic_provider');
+/** Typed lines through the host's logger when it set one. */
+const log = moduleLogger('llm', 'anthropic_provider');
 
 /**
  * Characters a token is taken to hold when a stream's output count has to be estimated: an abort before
@@ -502,6 +508,47 @@ function schemaPromptText(schema: unknown): string {
   return `Answer with JSON only, matching this schema: ${JSON.stringify(schema)}`;
 }
 
+/** The structured-output marker a request carries, when it carries one. */
+function schemaMarkerOf(
+  options: ModelCompletionOptions,
+): { name: string; input_schema: Record<string, unknown> } | undefined {
+  const sf = options.responseFormat as
+    | { _agentosUseToolForStructuredOutput?: boolean; tool?: { name: string; input_schema: Record<string, unknown> } }
+    | undefined;
+  return sf?._agentosUseToolForStructuredOutput && sf.tool ? sf.tool : undefined;
+}
+
+/**
+ * Whether a system prompt states a schema already in generateObject's words
+ * (`buildSchemaInstructionText`), so the prompt route of a request the JSON
+ * output format refused adds no second copy of a large schema.
+ */
+function systemStatesSchema(system: unknown): boolean {
+  if (typeof system === 'string') return system.includes(SCHEMA_INSTRUCTION_LEAD);
+  if (!Array.isArray(system)) return false;
+  return system.some(
+    (block) =>
+      block !== null &&
+      typeof block === 'object' &&
+      typeof (block as { text?: unknown }).text === 'string' &&
+      ((block as { text: string }).text).includes(SCHEMA_INSTRUCTION_LEAD),
+  );
+}
+
+/**
+ * What a JSON output format refusal is remembered by, beside the model: the
+ * schema as the format is sent it (the wire copy, which the vendor compiles,
+ * so two schemas that differ only in a constraint the copy leaves out share
+ * one key), and the strict tools the request carried beside it, which the
+ * vendor counts toward the same grammar. The same schema without those tools
+ * is a different request, and still goes on the format.
+ */
+function refusalSchemaKey(inputSchema: unknown, tools: unknown): unknown {
+  const schema = anthropicJsonOutputSchema(inputSchema);
+  const strictTools = strictToolInputSchemas(tools);
+  return strictTools.length > 0 ? { schema, strictTools } : schema;
+}
+
 /**
  * Appends the prompt-only route's schema block to a system prompt the caller's
  * passthrough set (`customModelParams.system`): a string gets the block joined
@@ -824,20 +871,39 @@ export class AnthropicProvider implements IProvider {
     // Escape hatch: single-shot JSON transport for SSE-hostile proxies.
     // On both transports the caller's signal aborts the request in flight and
     // stops its retries.
+    //
+    // A request whose schema the JSON output format refuses as too large
+    // (HTTP 400, "The compiled grammar is too large") is built once more, and
+    // the builder, which now finds the refusal remembered, sends the schema in
+    // the system prompt instead (schemaGrammarRefusedBy).
+    // The re-send is part of the call: it gets only what is left of the
+    // call's attempt count, and none when the refused request used it all.
     if (this.config.streamCompletions === false) {
+      const attempts = resolveAttemptCount(options.maxAttempts, this.config.maxRetries!);
+      const send = async (payload: Record<string, unknown>, maxAttempts: number | undefined, tally?: AttemptTally): Promise<ModelCompletionResponse> => {
+        const structuredOutputName = forcedSchemaToolName(payload, options);
+        const apiResponse = await this.makeApiRequest<AnthropicMessagesResponse>(
+          '/v1/messages',
+          'POST',
+          payload,
+          options.requestTimeout,
+          options.abortSignal,
+          maxAttempts,
+          options.operationId,
+          tally,
+        );
+        this.recordCacheLeakSample(modelId, payload, apiResponse, options.cache === false);
+        return withSchemaRoute(this.mapResponseToCompletion(apiResponse, structuredOutputName, modelId, forcedToolChoiceName(payload)), payload);
+      };
       const payload = this.buildRequestPayload(modelId, messages, options, false);
-      const structuredOutputName = forcedSchemaToolName(payload, options);
-      const apiResponse = await this.makeApiRequest<AnthropicMessagesResponse>(
-        '/v1/messages',
-        'POST',
-        payload,
-        options.requestTimeout,
-        options.abortSignal,
-        options.maxAttempts,
-        options.operationId,
-      );
-      this.recordCacheLeakSample(modelId, payload, apiResponse, options.cache === false);
-      return withSchemaRoute(this.mapResponseToCompletion(apiResponse, structuredOutputName, modelId, forcedToolChoiceName(payload)), payload);
+      const tally: AttemptTally = { sent: 0 };
+      try {
+        return await send(payload, options.maxAttempts, tally);
+      } catch (error: unknown) {
+        const remaining = attempts - tally.sent;
+        if (!this.schemaGrammarRefusedBy(payload, options, error) || remaining < 1) throw error;
+        return send(this.buildRequestPayload(modelId, messages, options, false), remaining);
+      }
     }
 
     // Default: ride the SSE path so parseSseStream's idle watchdog bounds
@@ -847,18 +913,67 @@ export class AnthropicProvider implements IProvider {
     // streamed deltas keep flowing on a healthy call, so a quiet gap of
     // streamIdleTimeoutMs means the connection is dead — fail fast and
     // let the caller (or the retry loop below) recover in seconds.
+    const attempts = resolveAttemptCount(options.maxAttempts, Math.max(1, this.config.maxRetries ?? 1));
+    const send = async (payload: Record<string, unknown>, maxAttempts: number | undefined, tally?: AttemptTally): Promise<ModelCompletionResponse> => {
+      const structuredOutputName = forcedSchemaToolName(payload, options);
+      const apiResponse = await this.streamMessagesToResponse(
+        payload,
+        options.requestTimeout,
+        options.abortSignal,
+        structuredOutputName,
+        maxAttempts,
+        options.operationId,
+        tally,
+      );
+      this.recordCacheLeakSample(modelId, payload, apiResponse, options.cache === false);
+      return withSchemaRoute(this.mapResponseToCompletion(apiResponse, structuredOutputName, modelId, forcedToolChoiceName(payload)), payload);
+    };
     const payload = this.buildRequestPayload(modelId, messages, options, true);
-    const structuredOutputName = forcedSchemaToolName(payload, options);
-    const apiResponse = await this.streamMessagesToResponse(
-      payload,
-      options.requestTimeout,
-      options.abortSignal,
-      structuredOutputName,
-      options.maxAttempts,
-      options.operationId,
-    );
-    this.recordCacheLeakSample(modelId, payload, apiResponse, options.cache === false);
-    return withSchemaRoute(this.mapResponseToCompletion(apiResponse, structuredOutputName, modelId, forcedToolChoiceName(payload)), payload);
+    const tally: AttemptTally = { sent: 0 };
+    try {
+      return await send(payload, options.maxAttempts, tally);
+    } catch (error: unknown) {
+      const remaining = attempts - tally.sent;
+      if (!this.schemaGrammarRefusedBy(payload, options, error) || remaining < 1) throw error;
+      return send(this.buildRequestPayload(modelId, messages, options, true), remaining);
+    }
+  }
+
+  /**
+   * Whether `error` is the JSON output format's refusal of the schema `payload`
+   * sent on that format, as too large for its grammar (HTTP 400, "The compiled
+   * grammar is too large ..."). When it is, the refusal is remembered for the
+   * process by the model on the wire and the schema (schema-format-refusals),
+   * so the caller's rebuild of the request, and every later request with that
+   * schema on that model, takes the prompt route: no `output_config.format`,
+   * no schema tool, the schema in the system prompt. One log line names the
+   * model, the schema's name and the reason; nothing of the prompt or the key.
+   * Any other error, a request on another route and an aborted call answer
+   * `false`, and the error goes to the caller as before. The refusal is
+   * remembered and logged even when the call has no attempt left to re-send
+   * it, so the next call takes the prompt route.
+   * @private
+   */
+  private schemaGrammarRefusedBy(
+    payload: Record<string, unknown>,
+    options: ModelCompletionOptions,
+    error: unknown,
+  ): boolean {
+    if (options.abortSignal?.aborted) return false;
+    if (!(error instanceof AnthropicProviderError)) return false;
+    if (schemaRouteOfPayload.get(payload) !== 'json_schema') return false;
+    if (!isSchemaGrammarTooLarge(error.httpStatus, error.message)) return false;
+    const marker = schemaMarkerOf(options);
+    const wireModel = typeof payload.model === 'string' ? payload.model : '';
+    if (!marker || !wireModel) return false;
+    rememberSchemaFormatRefusal('anthropic', wireModel, refusalSchemaKey(marker.input_schema, payload.tools));
+    log.warn('llm.schema_format_refused', {
+      provider: 'anthropic',
+      model: safePath(wireModel),
+      schema: safeWord(marker.name),
+      reason: 'grammar_too_large',
+    });
+    return true;
   }
 
   /**
@@ -926,6 +1041,8 @@ export class AnthropicProvider implements IProvider {
    *   together; key hops are not counted.
    * @param operationId The call's own operation id, sent in the operation id
    *   header in place of one this request makes.
+   * @param tally Filled in with the attempts sent, so a re-send on another
+   *   route gets only what is left of the call's count.
    * @throws {AnthropicProviderError} `REQUEST_ABORTED` when the caller's signal
    *   ends the request.
    * @throws {RangeError} When `maxAttempts` is not a whole number of 1 or more,
@@ -939,6 +1056,7 @@ export class AnthropicProvider implements IProvider {
     schemaToolName?: string,
     maxAttempts?: number,
     operationId?: string,
+    tally?: AttemptTally,
   ): Promise<AnthropicMessagesResponse> {
     let lastError: AnthropicProviderError = new AnthropicProviderError(
       'Streaming completion failed after all retries.',
@@ -957,6 +1075,8 @@ export class AnthropicProvider implements IProvider {
       if (abortSignal?.aborted) {
         throw new AnthropicProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
       }
+      // A key hop re-sends within the same attempt, so the count stays.
+      if (tally) tally.sent = attempt + 1;
       const attemptInfo: { apiKey?: string; startedAt?: number } = {};
       try {
         const stream = await this.makeStreamRequest(
@@ -1311,13 +1431,31 @@ export class AnthropicProvider implements IProvider {
       yield* this.streamRequest(modelId, options, payload);
       return;
     }
-    const schemaToolName = forcedSchemaToolName(payload, options);
     // A schema request: every chunk names the route the payload took, and one
     // whose schema rode the prompt says `schemaInPayload: false` (as
     // OpenRouter's json_object retry does), so a gateway lifts the answer from
     // where this request put it, or lifts nothing.
-    for await (const chunk of this.streamRequest(modelId, options, payload, schemaToolName)) {
-      yield withSchemaRoute(chunk, payload);
+    //
+    // The JSON output format's refusal of a schema too large for its grammar
+    // is an HTTP 400 on the connection, before any chunk: the request is built
+    // once more and goes on the prompt route (schemaGrammarRefusedBy). An
+    // error after a chunk has reached the caller is never re-sent.
+    // The stream sends one request, so the re-send needs a second attempt:
+    // a call that names `maxAttempts: 1` gets none.
+    let yielded = false;
+    try {
+      for await (const chunk of this.streamRequest(modelId, options, payload, forcedSchemaToolName(payload, options))) {
+        yielded = true;
+        yield withSchemaRoute(chunk, payload);
+      }
+      return;
+    } catch (error: unknown) {
+      const attempts = resolveAttemptCount(options.maxAttempts, Math.max(1, this.config.maxRetries ?? 1));
+      if (yielded || !this.schemaGrammarRefusedBy(payload, options, error) || attempts < 2) throw error;
+    }
+    const retry = this.buildRequestPayload(modelId, messages, options, true);
+    for await (const chunk of this.streamRequest(modelId, options, retry, forcedSchemaToolName(retry, options))) {
+      yield withSchemaRoute(chunk, retry);
     }
   }
 
@@ -2141,10 +2279,7 @@ export class AnthropicProvider implements IProvider {
     // Every completion and stream chunk of a schema request names the route it
     // took (`schemaRoute`), so a completion gateway lifts the answer from where
     // this request put it, not from where the marker's builder expected it.
-    const sf = options.responseFormat as
-      | { _agentosUseToolForStructuredOutput?: boolean; tool?: { name: string; input_schema: Record<string, unknown> } }
-      | undefined;
-    const schemaMarker = sf?._agentosUseToolForStructuredOutput && sf.tool ? sf.tool : undefined;
+    const schemaMarker = schemaMarkerOf(options);
 
     // Pass through any custom model params — minus OpenRouter's routing
     // controls and Gemini's request fields, which only those vendors' bodies
@@ -2273,6 +2408,20 @@ export class AnthropicProvider implements IProvider {
       // Why the request takes the prompt route, when the payload rather than
       // the model and the schema sent it there.
       let promptOnlyReason: string | undefined;
+      // The JSON output format refused this schema on this model earlier in
+      // the process as too large for its grammar (see schema-format-refusals
+      // and the re-send in generateCompletion): the request goes straight to
+      // the prompt, with no schema tool, rather than paying the refusal again.
+      // The refusal wrote its own log line, so this route warns no more.
+      // A passthrough `output_config.format` goes too (the rest of
+      // output_config stays), or the refused format would be sent again.
+      const grammarRefused =
+        schemaRoute === 'json_schema' &&
+        schemaFormatRefused('anthropic', wireModelId, refusalSchemaKey(schemaMarker.input_schema, payload.tools));
+      if (grammarRefused) {
+        schemaRoute = 'none';
+        dropOutputConfigFormat(payload);
+      }
       if (messagesEnableCitations(payload.messages)) {
         // Citations and the JSON output format answer 400 together, so a
         // passthrough format goes (the rest of output_config stays), and the
@@ -2342,7 +2491,12 @@ export class AnthropicProvider implements IProvider {
               'or more union-typed or optional properties than it takes, a strict tool beside it counted), and the model ' +
               'refuses a forced tool choice');
         const text = schemaPromptText(schemaMarker.input_schema);
-        if (customSystemOverride) {
+        // A request the format refused whose system prompt states the schema
+        // already (generateObject's) gets no second copy: a schema too large
+        // for the format would only add its tokens again.
+        if (grammarRefused && systemStatesSchema(payload.system)) {
+          // nothing to add
+        } else if (customSystemOverride) {
           appendSchemaSystemBlock(payload, text);
         } else {
           // The provider's own system blocks take the schema block, so the
@@ -2353,11 +2507,13 @@ export class AnthropicProvider implements IProvider {
             ? systemBlocks
             : systemBlocks.map((b) => b.text).join('\n\n');
         }
-        warnOnce(
-          `structured-output-prompt-only:${wireModelId}:${reason}`,
-          `[agentos] AnthropicProvider: structured output for '${schemaMarker.name}' on model ${wireModelId} rides the ` +
-            `prompt alone: ${reason}. The schema was added to the system prompt; the caller's schema validates the answer.`,
-        );
+        if (!grammarRefused) {
+          warnOnce(
+            `structured-output-prompt-only:${wireModelId}:${reason}`,
+            `[agentos] AnthropicProvider: structured output for '${schemaMarker.name}' on model ${wireModelId} rides the ` +
+              `prompt alone: ${reason}. The schema was added to the system prompt; the caller's schema validates the answer.`,
+          );
+        }
       }
       if (
         schemaRoute !== 'forced_tool' &&
@@ -3414,6 +3570,8 @@ export class AnthropicProvider implements IProvider {
    *   `config.maxRetries`; key hops are not counted, and no backoff is waited after the last attempt.
    * @param {string} [operationId] - The call's own operation id, sent in the operation id header in place of one
    *   this request makes.
+   * @param {AttemptTally} [tally] - Filled in with the attempts sent, so a re-send on another route gets only what
+   *   is left of the call's count.
    * @returns {Promise<T>} Parsed JSON response.
    * @throws {AnthropicProviderError} On authentication, validation, rate-limit, or network errors;
    *   `REQUEST_ABORTED` when the caller's signal ends the request.
@@ -3429,6 +3587,7 @@ export class AnthropicProvider implements IProvider {
     abortSignal?: AbortSignal,
     maxAttempts?: number,
     operationId?: string,
+    tally?: AttemptTally,
   ): Promise<T> {
     const url = `${this.config.baseURL}${endpoint}`;
     const attempts = resolveAttemptCount(maxAttempts, this.config.maxRetries!);
@@ -3466,6 +3625,8 @@ export class AnthropicProvider implements IProvider {
       }
       if (apiKey === '') throw this.allKeysFailedError();
       const attemptStartedAt = Date.now();
+      // A key hop re-sends within the same attempt, so the count stays.
+      if (tally) tally.sent = attempt + 1;
       const headers = this.buildHeaders(apiKey);
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), effRequestTimeout);

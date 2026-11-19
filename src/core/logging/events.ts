@@ -97,6 +97,9 @@ export const AGENTOS_EVENTS = {
   'llm.output_mismatch': { provider, reason: { enum: ['tool_arguments', 'text'] } },
   'llm.output_empty': { provider, count: 'int' },
   'llm.format_fallback': { provider, reason: { enum: ['json_schema'] } },
+  // The JSON output format (Anthropic's, or a Claude model's through OpenRouter) refused a schema; the request went
+  // once more without it. `model` is the model on the wire, `schema` the schema's name (`unknown` when it is not a word).
+  'llm.schema_format_refused': { provider, model: 'path', schema: 'word', reason: { enum: ['grammar_too_large'] } },
   'llm.response_format_failed': { provider, type: 'word', code: 'word' },
   // `fallbackProvider` and `fallbackModel` name the provider and model the passed-over entry would be sent as.
   'llm.fallback_skipped': { ...fallback, fallbackModel: 'path', reason: { enum: ['duplicate', 'excluded', 'capability', 'refusal', 'refill', 'unknown'] } },

@@ -13,7 +13,11 @@ import { keyPoolConfigFor, keyPoolDefaultsVersion } from './keyPoolDefaults.js';
 import { AIModelProviderManager } from '../core/llm/providers/AIModelProviderManager.js';
 import { baseUrlCredentials } from '../core/llm/providers/url-secrets.js';
 import { PROVIDER_DEFAULTS, autoDetectProvider } from './runtime/provider-defaults.js';
-import { modelSupportsForcedToolChoice } from '../core/llm/providers/model-forced-tool-choice.js';
+import {
+  ANTHROPIC_FORCED_TOOL_SONNET,
+  modelSupportsForcedToolChoice,
+  toolChoiceForcesTool,
+} from '../core/llm/providers/model-forced-tool-choice.js';
 import { getDefaultProvider } from './runtime/global-default.js';
 import { createContentSafeConsole } from '../core/logging/contentSafeConsole.js';
 
@@ -562,19 +566,7 @@ export interface ModelOption {
  * a smaller model than the text default stands for. A caller that names a
  * model keeps it.
  */
-const ANTHROPIC_FORCED_TOOL_MODEL = 'claude-sonnet-5';
-
-/**
- * Whether a caller's `toolChoice` forces a tool on Anthropic: `'required'`
- * (sent as `{ type: 'any' }`) or a named function (sent as `{ type: 'tool' }`),
- * the two forms AnthropicProvider's convertToolChoice forces.
- */
-function toolChoiceForcesTool(choice: unknown): boolean {
-  if (choice === 'required') return true;
-  if (!choice || typeof choice !== 'object') return false;
-  const name = (choice as { function?: { name?: unknown } }).function?.name;
-  return typeof name === 'string' && name !== '';
-}
+const ANTHROPIC_FORCED_TOOL_MODEL = ANTHROPIC_FORCED_TOOL_SONNET;
 
 /**
  * The provider's default model for `task`, or {@link ANTHROPIC_FORCED_TOOL_MODEL}
