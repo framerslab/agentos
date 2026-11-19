@@ -337,7 +337,8 @@ function judgeDetail(overrides: Partial<ForgeTraceJudgeDetail> = {}): ForgeTrace
   };
 }
 
-const OUTCOMES: Record<KnownForgeTraceStage, string> = {
+const OUTCOMES: Record<string, string> = {
+  guardrail_refused: 'refused',
   schema_check: 'refused',
   refused_before_approval: 'refused',
   shape_check: 'refused',
@@ -345,6 +346,7 @@ const OUTCOMES: Record<KnownForgeTraceStage, string> = {
   orchestrator_refused: 'refused',
   permission_check_failed: 'failed',
   human_denied: 'refused',
+  approval_timed_out: 'refused',
   approval_failed: 'failed',
   self_change_refused: 'refused',
   name_refused: 'refused',
@@ -361,6 +363,7 @@ const OUTCOMES: Record<KnownForgeTraceStage, string> = {
   executor_unavailable: 'failed',
   test_responses_refused: 'refused',
   judge_rejected: 'rejected',
+  test_output_unserializable: 'refused',
   compose_refused_after_judge: 'refused',
   step_cycle: 'refused',
   removed_while_forging: 'failed',
@@ -894,8 +897,8 @@ describe('forge trace: the builder, the record and the delivery', () => {
     for (const code of FORGE_TRACE_STAGES) {
       expect(valid(stage, code, 'stage'), code).toBe(true);
     }
-    // A word field would refuse 11 of them as credential-shaped.
-    expect(FORGE_TRACE_STAGES.filter((code) => !valid('word', code, 'stage'))).toHaveLength(11);
+    // A word field would refuse 12 of them as credential-shaped.
+    expect(FORGE_TRACE_STAGES.filter((code) => !valid('word', code, 'stage'))).toHaveLength(12);
   });
 
   it("the forge_done line holds the trace's figures and no content", async () => {
