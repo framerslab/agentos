@@ -9,7 +9,8 @@
  * to a host's stream and to a wrapper's capture, so a trace changes none of it.
  * A third group forges on the full runtime and reads the model that answered
  * each tool call, and a fourth reads every log line a forge writes for the
- * content it must never hold.
+ * content it must never hold. A fifth forges with every field over its cap
+ * and reads the cuts, their paths and the trace's total size.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -2466,5 +2467,250 @@ describe('forge trace: no content in any log line', () => {
     } finally {
       capture.restore();
     }
+  });
+});
+
+// ----------------------------------------------------------------------------
+// The caps
+// ----------------------------------------------------------------------------
+
+const KIB = 1024;
+
+/** What a trace holds each field to: the bytes of the field's own JSON, or the entries it keeps of a list. */
+const CAPS = {
+  code: 64 * KIB,
+  description: 2 * KIB,
+  schema: 8 * KIB,
+  testField: 2 * KIB,
+  testOutput: 4 * KIB,
+  testEffects: 2 * KIB,
+  judgeText: KIB,
+  judgeConcerns: 16,
+  failedTests: 64,
+  verdictReasoning: 16 * KIB,
+  name: 256,
+  allowlistEntries: 64,
+  justification: 2 * KIB,
+  tests: 16,
+  total: 512 * KIB,
+};
+
+/** The UTF-8 length of `value`'s JSON text. */
+function jsonBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value));
+}
+
+/**
+ * `value` is a cut: the marker that stands for a text or a value over its cap, with the whole length and the start
+ * kept, its own JSON within `capBytes`. `wholeBytes`, when given, is the UTF-8 length of the whole text.
+ */
+function expectCut(value: unknown, capBytes: number, wholeBytes?: number): void {
+  expect(value).toMatchObject({ $trace: 'cut' });
+  const cut = value as { bytes: unknown; head: unknown };
+  expect(typeof cut.head).toBe('string');
+  expect(typeof cut.bytes).toBe('number');
+  expect(jsonBytes(value)).toBeLessThanOrEqual(capBytes);
+  if (wholeBytes !== undefined) {
+    expect(cut.bytes).toBe(wholeBytes);
+  }
+}
+
+/** A host tool with no side effects whose output JSON cannot write: it holds a BigInt and itself. */
+function oddOutputTool(): ITool {
+  return {
+    id: 'odd-output-v1',
+    name: 'odd_output',
+    displayName: 'Odd output',
+    description: 'Returns an output that holds a BigInt and itself.',
+    inputSchema: { type: 'object', properties: {} },
+    hasSideEffects: false,
+    execute: async () => {
+      const output: Record<string, unknown> = { big: 10n };
+      output.self = output;
+      return { success: true, output };
+    },
+  };
+}
+
+describe('forge trace: the caps', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    vi.useRealTimers();
+  });
+
+  it('caps: every field over its cap is cut, its path listed, and the trace stays under 512 KiB', async () => {
+    // The code returns 5,000 characters and ends with a comment line of quotes, backslashes and control characters,
+    // each of which JSON writes as an escape. The newline after the comment lets the code parse inside the function
+    // that runs it.
+    const code =
+      'function execute(input) { return { v: "' + 'z'.repeat(5000) + '" }; }\n// ' + '"\\\u0001'.repeat(30000) + '\n';
+    const f1 = sandboxArgs();
+    const args = {
+      name: 'big_tool',
+      description: 'd'.repeat(5 * KIB),
+      inputSchema: { ...(f1.inputSchema as Record<string, unknown>), description: 's'.repeat(20 * KIB) },
+      outputSchema: { ...(f1.outputSchema as Record<string, unknown>), description: 's'.repeat(20 * KIB) },
+      implementation: { mode: 'sandbox', code, allowlist: Array<string>(200).fill('crypto') },
+      justification: 'j'.repeat(5 * KIB),
+      testCases: Array.from({ length: 20 }, (_, i) => ({
+        input: { a: i, b: 1, pad: 'i'.repeat(3 * KIB) },
+        expectedOutput: { v: 'e'.repeat(3 * KIB) },
+        responses: [{ method: 'POST', url: 'https://example.com/x', status: 201, body: 'y'.repeat(3000) }],
+      })),
+    };
+    const reasoning = 'x'.repeat(614400);
+    const rejection = JSON.stringify({
+      safety: { passed: false, concerns: Array.from({ length: 20 }, (_, i) => `concern ${i} ` + 'c'.repeat(2 * KIB)) },
+      correctness: { passed: false, failedTests: Array.from({ length: 100 }, (_, i) => i + 1) },
+      determinism: { likely: false, reasoning: 'n'.repeat(2 * KIB) },
+      bounded: { likely: true, reasoning: 'Bounded.' },
+      confidence: 0.2,
+      approved: false,
+      reasoning,
+    });
+    const { engine } = await directEngine({ judgeReplies: [rejection] });
+
+    const result = await engine.forge(args as unknown as ForgeToolRequest, directContext());
+
+    // The model's view is unchanged: the result keeps the judge's reasoning whole.
+    expect(result.success).toBe(false);
+    expect(result.verdict?.reasoning).toHaveLength(614400);
+    expect(result.error === reasoning).toBe(true);
+
+    const trace = traceOf(result);
+    expect(trace).toBeDefined();
+    expect(trace!.stage).toBe('judge_rejected');
+    expect(trace!.outcome).toBe('rejected');
+
+    // The first 16 test cases are kept, in order. Each ran (the code parsed and returned), and each of its values is cut.
+    expect(trace!.tests).toHaveLength(CAPS.tests);
+    expect(trace!.sizes.testsOmitted).toBe(4);
+    for (const [index, test] of trace!.tests.entries()) {
+      expect(test.index).toBe(index);
+      expect(test.ran).toBe(true);
+      expect(test.result.success).toBe(true);
+      expectCut(test.input, CAPS.testField);
+      expectCut(test.expectedOutput, CAPS.testField);
+      expectCut(test.responses, CAPS.testField);
+      expectCut(test.result.output, CAPS.testOutput);
+    }
+
+    // The request: its code, description and schemas are cut, and its allowlist keeps 64 entries.
+    expectCut(trace!.request.implementation.code, CAPS.code, Buffer.byteLength(code));
+    expectCut(trace!.request.description, CAPS.description, 5 * KIB);
+    expectCut(trace!.request.inputSchema, CAPS.schema);
+    expectCut(trace!.request.outputSchema, CAPS.schema);
+    expect(trace!.request.implementation.allowlist).toEqual(Array<string>(CAPS.allowlistEntries).fill('crypto'));
+    expectCut(trace!.justification, CAPS.justification, 5 * KIB);
+
+    // The judge: its reasoning is cut, and its detail keeps the first 16 concerns, each cut, and the first 64 numbers.
+    expectCut(trace!.verdict.reasoning, CAPS.verdictReasoning, 614400);
+    const concerns = trace!.judgeDetail.safetyConcerns as Array<{ head: string }>;
+    expect(concerns).toHaveLength(CAPS.judgeConcerns);
+    for (const [index, concern] of concerns.entries()) {
+      expectCut(concern, CAPS.judgeText);
+      expect(concern.head.startsWith(`concern ${index} `)).toBe(true);
+    }
+    expect(trace!.judgeDetail.failedTests).toEqual(Array.from({ length: CAPS.failedTests }, (_, i) => i + 1));
+    expectCut(trace!.judgeDetail.determinismReasoning, CAPS.judgeText, 2 * KIB);
+
+    expect(trace!.sizes.cut).toEqual(
+      expect.arrayContaining([
+        'request.implementation.code',
+        'request.description',
+        'request.inputSchema',
+        'request.outputSchema',
+        'request.implementation.allowlist',
+        'justification',
+        'verdict.reasoning',
+        'judgeDetail.safetyConcerns',
+        'judgeDetail.safetyConcerns[0]',
+        'judgeDetail.failedTests',
+        'judgeDetail.determinismReasoning',
+        'tests[0].input',
+        'tests[0].expectedOutput',
+        'tests[0].responses',
+        'tests[0].result.output',
+      ]),
+    );
+
+    // The whole trace: its own figure is its JSON's length, under the total.
+    const traceBytes = jsonBytes(trace);
+    expect(traceBytes).toBe(trace!.sizes.traceBytes);
+    expect(traceBytes).toBeLessThan(CAPS.total);
+  });
+
+  it('caps: a 1 MiB name is refused by the name rule and cut to 256 bytes', async () => {
+    const name = 'a'.repeat(1048576);
+    const { engine } = await directEngine();
+
+    const result = await forgeDirect(engine, { name });
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/ refused: a tool name is at most \d+ bytes in UTF-8$/);
+
+    const trace = traceOf(result);
+    expect(trace).toBeDefined();
+    expect(trace!.stage).toBe('name_refused');
+    expect(trace!.outcome).toBe('refused');
+    expectCut(trace!.toolName, CAPS.name, 1048576);
+    expectCut(trace!.request.name, CAPS.name, 1048576);
+    expect(trace!.sizes.cut).toEqual(expect.arrayContaining(['toolName', 'request.name']));
+  });
+
+  it("caps: a composition's effects over 2 KiB are cut", async () => {
+    const { engine } = await directEngine({
+      hostTools: [sendNoteTool()],
+      config: { compose: { sideEffectingTools: ['send_note'] } },
+    });
+    // The step has side effects, so the test does not execute it: its output is the test case's own, and the step is
+    // listed as an effect with the arguments it would have run with, the 3 KiB text among them.
+    const args = composeArgs([{ name: 'send', tool: 'send_note', inputMapping: { text: '$input.text' } }], {
+      testCases: [
+        {
+          input: { text: 't'.repeat(3 * KIB) },
+          expectedOutput: { text: 'sent' },
+          stepOutputs: { send: { text: 'sent' } },
+        },
+      ],
+    });
+
+    const result = await engine.forge(args as unknown as ForgeToolRequest, directContext());
+    expect(result.success).toBe(true);
+
+    const trace = traceOf(result);
+    expect(trace).toBeDefined();
+    expect(trace!.tests).toHaveLength(1);
+    expect(trace!.tests[0].ran).toBe(true);
+    expectCut(trace!.tests[0].result.effects, CAPS.testEffects);
+    expect(trace!.sizes.cut).toContain('tests[0].result.effects');
+  });
+
+  it('caps: a BigInt and a cycle in a test output become markers', async () => {
+    const { onForgeTrace, traces } = hookRecorder();
+    const h = await directEngine({ hostTools: [oddOutputTool()], judgeReplies: [REJECTED_JSON], onForgeTrace });
+    const args = composeArgs([{ name: 'odd', tool: 'odd_output', inputMapping: {} }]);
+
+    // The forge is judged, so it resolves: the judge's prompt carries the output JSON cannot write as markers.
+    const forging = h.engine.forge(args as unknown as ForgeToolRequest, directContext());
+    await expect(forging).resolves.toMatchObject({ success: false, error: 'Tool contains unsafe patterns.' });
+    const result = await forging;
+
+    expect(h.generateText).toHaveBeenCalledTimes(1);
+    const prompt = String(h.generateText.mock.calls[0][1]);
+    for (const word of ['unserializable', 'bigint', 'cycle']) {
+      expect(prompt).toContain(word);
+    }
+
+    expect(traces).toHaveLength(1);
+    const trace = traces[0];
+    expect(traceOf(result)).toBe(trace);
+    expect(trace.stage).toBe('judge_rejected');
+    expect(trace.outcome).toBe('rejected');
+    expect(trace.verdict).toMatchObject({ approved: false, reasoning: 'Tool contains unsafe patterns.' });
+    expect(trace.tests[0].result.output).toEqual({
+      big: { $trace: 'unserializable', kind: 'bigint' },
+      self: { $trace: 'unserializable', kind: 'cycle' },
+    });
   });
 });
