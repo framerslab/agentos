@@ -2,16 +2,16 @@
  * @fileoverview What a forge_tool call looks like to the model, to a host's
  * stream and to a wrapper's capture, pinned as it stood at commit
  * fd17f220b43352ceab1a8746d0d52dc5b28fa681. Every value here is written from
- * that commit's code, and the CI run of the commit that added this file is its
- * record: the pins that read these values passed there on code that had not
- * changed. A change that moves one of these representations fails its pin.
+ * that commit's code, and the CI run of the commit that added a value is its
+ * record: the pins that read it passed there on code that had not changed. A
+ * change that moves one of these representations fails its pin.
  *
  * The values are those of the forges `pinArgs` names, made under
  * `freezeClock()`: the clock holds at 2026-11-18T00:00:00.000Z and
  * `Math.random` at 0.5, so a forged tool's id is `emergent_1794960000000_i`.
  */
 
-import { vi } from 'vitest';
+import { expect, vi } from 'vitest';
 import type { ITool, JSONSchemaObject } from '../../../../core/tools/ITool.js';
 import { EmergentToolRegistry } from '../../EmergentToolRegistry.js';
 import { APPROVED_JSON, REJECTED_JSON, composeArgs, wrapperArgs } from '../helpers/forge-trace-harness.js';
@@ -312,6 +312,64 @@ function approvedResult(agentId: string, sessionId: string): Record<string, unkn
   };
 }
 
+/** The result of the approved forge as JSON writes it, for the agent that forged it and the session it forged in. */
+function approvedJson(agentId: string, sessionId: string): string {
+  return (
+    '{"success":true,"toolId":"emergent_1794960000000_i",' +
+    '"tool":{"id":"emergent_1794960000000_i","name":"add_numbers","description":"Add two numbers.",' +
+    '"inputSchema":{"type":"object","properties":{"a":{"type":"number"},"b":{"type":"number"}},"required":["a","b"]},' +
+    '"outputSchema":{"type":"object","properties":{"sum":{"type":"number"}}},' +
+    '"implementation":{"mode":"sandbox","code":"function execute(input) { return { sum: input.a + input.b }; }","allowlist":[]},' +
+    `"tier":"session","createdBy":"${agentId}","createdAt":"2026-11-18T00:00:00.000Z",` +
+    '"judgeVerdicts":[{"approved":true,"confidence":0.95,"safety":1,"correctness":1,"determinism":1,"bounded":1,' +
+    '"reasoning":"Tool is safe and correct."}],' +
+    '"usageStats":{"totalUses":0,"successCount":0,"failureCount":0,"avgExecutionTimeMs":0,"lastUsedAt":null,' +
+    '"confidenceScore":0.95},' +
+    `"source":"forged by agent ${agentId} during session ${sessionId}"},` +
+    '"verdict":{"approved":true,"confidence":0.95,"safety":1,"correctness":1,"determinism":1,"bounded":1,' +
+    '"reasoning":"Tool is safe and correct."}}'
+  );
+}
+
+/** The result of the forge the judge rejects, as JSON writes it. */
+const REJECTED_RESULT_JSON =
+  '{"success":false,' +
+  '"verdict":{"approved":false,"confidence":0.3,"safety":0,"correctness":1,"determinism":1,"bounded":1,' +
+  '"reasoning":"Tool contains unsafe patterns."},' +
+  '"error":"Tool contains unsafe patterns."}';
+
+/** The result of the forge the code validator refuses, as JSON writes it. */
+const CODE_VALIDATION_RESULT_JSON = '{"success":false,"error":"Code validation failed: eval() is forbidden"}';
+
+/** forge_tool's own refusal of an empty description. */
+const DESCRIPTION_MISSING = 'description is required and must be a string';
+
+/**
+ * The agent and session of a forge made through generateText and streamText: each names its tool calls' persona
+ * after itself, and forge_tool takes the session from the call's correlation id, the tool call's id `call_forge`.
+ */
+const GENERATE_TEXT_AGENT = 'generateText:persona';
+const STREAM_TEXT_AGENT = 'streamText:persona';
+const HELPER_SESSION = 'call_forge';
+
+/**
+ * The approved forge's result as gmi()'s tool-result part carries it, for an agent named `Forger` (persona `forger`).
+ * gmi() names each turn `turn-` and a random UUID, and forge_tool takes the session from the turn, so the one place
+ * that names the turn is pinned as that pattern; every other value is as written.
+ */
+function gmiApprovedPart(): Record<string, unknown> {
+  const result = approvedResult('forger', 'turn');
+  return {
+    ...result,
+    tool: {
+      ...(result.tool as Record<string, unknown>),
+      source: expect.stringMatching(
+        /^forged by agent forger during session turn-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      ),
+    },
+  };
+}
+
 /** What the GMI's tool message begins with when the call failed. */
 const TOOL_ERROR = "Error from tool 'forge_tool': ";
 
@@ -370,14 +428,25 @@ const JUDGE_CANDIDATE = [
  * - `captureOutput`: `CapturedForge.output` of a wrapper whose agent is `dept-agent`, called in turn `turn-1`.
  * - `judgePrompt`: the arguments of the judge's one model call for the forge of `judgePromptArgs()`. The test output
  *   holds a date, a function and a list with an empty place, which JSON writes as a text, nothing and `null`.
+ * - `generateTextTurn`: the content of the `tool` message generateText sends with its next model call. A failed
+ *   call's output is its result when it has one; forge_tool's own refusal has none, so its turn is the error text's
+ *   JSON, and a throw from forge_tool's `execute` is sent as `{ error }`.
+ * - `streamTextTurn`: the same for streamText, which sends a failed call with no output as `{ error }`.
+ * - `streamTextPart`: the `result` of streamText's `tool-result` part: the output when there is one, else `{ error }`.
+ * - `gmiPart`: the `result` of gmi()'s `tool-result` part: the output of a call that succeeded, else `{ error }`
+ *   with the message the tool result carries.
  *
- * The `thrown` values hold no stack text: see `withoutThrownStacks`.
+ * The `thrown` values of the GMI hold no stack text: see `withoutThrownStacks`.
  */
 export const PINS: {
   gmiToolMessage: Record<PinOutcome, string>;
   gmiToolResultChunk: Record<PinOutcome, unknown>;
   captureOutput: Record<PinOutcome, unknown>;
   judgePrompt: [model: string, prompt: string];
+  generateTextTurn: Record<PinOutcome, string>;
+  streamTextTurn: Record<PinOutcome, string>;
+  streamTextPart: Record<PinOutcome, unknown>;
+  gmiPart: Record<PinOutcome, unknown>;
 } = {
   gmiToolMessage: {
     approved:
@@ -448,4 +517,32 @@ export const PINS: {
     thrown: null,
   },
   judgePrompt: ['judge-model', `${JUDGE_RUBRIC}\n\n${JUDGE_CANDIDATE}`],
+  generateTextTurn: {
+    approved: approvedJson(GENERATE_TEXT_AGENT, HELPER_SESSION),
+    judge_rejected: REJECTED_RESULT_JSON,
+    code_validation: CODE_VALIDATION_RESULT_JSON,
+    description_missing: JSON.stringify(DESCRIPTION_MISSING),
+    thrown: '{"error":"register failed"}',
+  },
+  streamTextTurn: {
+    approved: approvedJson(STREAM_TEXT_AGENT, HELPER_SESSION),
+    judge_rejected: REJECTED_RESULT_JSON,
+    code_validation: CODE_VALIDATION_RESULT_JSON,
+    description_missing: '{"error":"description is required and must be a string"}',
+    thrown: '{"error":"register failed"}',
+  },
+  streamTextPart: {
+    approved: approvedResult(STREAM_TEXT_AGENT, HELPER_SESSION),
+    judge_rejected: { success: false, verdict: REJECTED_VERDICT, error: 'Tool contains unsafe patterns.' },
+    code_validation: { success: false, error: 'Code validation failed: eval() is forbidden' },
+    description_missing: { error: DESCRIPTION_MISSING },
+    thrown: { error: 'register failed' },
+  },
+  gmiPart: {
+    approved: gmiApprovedPart(),
+    judge_rejected: { error: 'Tool contains unsafe patterns.' },
+    code_validation: { error: 'Code validation failed: eval() is forbidden' },
+    description_missing: { error: DESCRIPTION_MISSING },
+    thrown: { error: THROWN_MESSAGE },
+  },
 };
