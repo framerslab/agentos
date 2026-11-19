@@ -171,6 +171,46 @@ resolver.on('provider_fallback', ({ from, to, error }) => {
 
 ---
 
+## A multi-speaker dialogue with line times (ElevenLabs)
+
+```typescript
+import { ElevenLabsTextToSpeechProvider } from '@framers/agentos/io/speech';
+
+const provider = new ElevenLabsTextToSpeechProvider({ apiKey: process.env.ELEVENLABS_API_KEY! });
+const dialogue = await provider.synthesizeDialogue(
+  [
+    { text: 'Can you hear me?', voiceId: 'voice-a' },
+    { text: 'Loud and clear.', voiceId: 'voice-b' },
+  ],
+  { model: 'eleven_v4', outputFormat: 'mp3_44100_128', seed: 7 },
+);
+
+dialogue.audioBuffer; // one audio file for every line
+dialogue.segments;    // [{ lineIndex: 0, voiceId: 'voice-a', startSeconds: 0, endSeconds: 1.25, ... }, ...]
+dialogue.alignment;   // each character's start and end seconds, or undefined
+```
+
+`synthesizeDialogue(lines, options)` voices several speakers in one request through ElevenLabs' [Text to Dialogue with timestamps](https://elevenlabs.io/docs/api-reference/text-to-dialogue/convert-with-timestamps) and returns where each line sits in the audio. It sends `POST {baseUrl}/text-to-dialogue/with-timestamps?output_format=<format>` with the body `{ inputs: [{ text, voice_id }], model_id, seed }`; `seed` is left out when the call gives none. The key and the base URL are the ones `synthesize()` uses, and a key that answers with a spent quota hands over to the next key of the pool.
+
+| Option | Default | Sent as |
+|---|---|---|
+| `model` | `eleven_v4` | `model_id` in the body. Text to Dialogue runs on Eleven v4 and Eleven v3; the endpoint's own default is `eleven_v3`, so the method always names one. The constructor's `model` is `synthesize()`'s and is not read here. |
+| `outputFormat` | `mp3_44100_128` | The `output_format` query parameter. ElevenLabs writes a format as codec, sample rate and bitrate (`wav_44100`, `pcm_24000`, `opus_48000_64`); some formats need a paid ElevenLabs tier. |
+| `seed` | none | `seed` in the body, a whole number from 0 to 4294967295. ElevenLabs makes a best effort at the same audio for the same seed and parameters, without a guarantee. |
+
+The result:
+
+- `audioBuffer` holds the bytes of the answer's `audio_base64`, decoded with no re-encode.
+- `outputFormat` is the format as sent. `mimeType` is `audio/mpeg` for `mp3_*`, `audio/wav` for `wav_*`, and `application/octet-stream` for the rest.
+- `segments` has one entry per `voice_segments` entry, in the API's order. Each carries `lineIndex` (the input line it belongs to), `voiceId`, `startSeconds`, `endSeconds`, `characterStartIndex` and `characterEndIndex`. No segments are merged.
+- `alignment` and `normalizedAlignment` give the time of each character of the text as written and as normalized. Each is absent when the answer has none.
+
+Before any request, the method throws a `RangeError` for an empty dialogue, for a line without text or voice id, and for a seed outside 0 to 4294967295. An error answer throws an `ElevenLabsApiError` carrying `status` and `body`.
+
+ElevenLabs' reference gives two limits that the method leaves to the API. A request takes at most 10 unique voice ids. For reliable generation, keep the text of all lines at or below 2,000 characters, since longer requests can end early or return a validation error. Split a longer dialogue into several requests.
+
+---
+
 ## A speech-to-text chain from entries
 
 `createSttChain(entries, options)` in [`env-constructor.ts`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/env-constructor.ts) builds the voice pipeline's [`StreamingSTTChain`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/providers/StreamingSTTChain.ts) from a list the host chooses, such as a setting per audience, where `createVoiceProvidersFromEnv()` and `createSttChainFromEnv()` build it from the environment's keys in a fixed order:
