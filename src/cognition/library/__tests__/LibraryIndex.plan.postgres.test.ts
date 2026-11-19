@@ -1,0 +1,372 @@
+/**
+ * @fileoverview Indexing a source by content on PostgresVectorStore over a real Postgres with pgvector: what reaches
+ * the embedder after an edit, rows left untouched when nothing changed, the lexical column after a text is
+ * rewritten, the scope in the statement that reads stored vectors, the source lock, a stale plan, and a plan applied
+ * in the caller's own transaction. Gated on AGENTOS_TEST_POSTGRES_URL, as LibraryIndex.postgres.test.ts is.
+ */
+import { createPostgresAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
+import pg from 'pg';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+
+import { PostgresVectorStore } from '../../rag/vector_stores/PostgresVectorStore.js';
+import type { PgPoolLike } from '../../rag/vector_stores/PostgresVectorStore.js';
+import { LibraryIndex, LibraryPlanStale, type LibraryEmbedding, type LibrarySource } from '../LibraryIndex.js';
+
+const URL = process.env.AGENTOS_TEST_POSTGRES_URL;
+const PREFIX = `plan${Date.now().toString(36)}_`;
+const TABLE = `${PREFIX}library`;
+const MODEL: LibraryEmbedding = { model: 'test-embed', dimensions: 4 };
+const ANN = { tenantId: 'org1', aclGroups: ['acct:ann'] };
+
+/** A vector of a text: the same text, the same vector. */
+function vectorOf(text: string): number[] {
+  let hash = 7;
+  for (const char of text) hash = (Math.imul(hash, 31) + char.charCodeAt(0)) >>> 0;
+  return [1, (hash % 97) / 97, (hash % 89) / 89, (hash % 83) / 83];
+}
+
+const passages = (count: number, change: (n: number) => string | undefined = () => undefined) =>
+  Array.from({ length: count }, (_, n) => ({ text: change(n) ?? `Passage ${n} is about the budget and the plan.` }));
+
+const documentSource = (over: Partial<LibrarySource> = {}): LibrarySource => ({
+  sourceId: 'document:d1',
+  kind: 'document',
+  tenantId: 'org1',
+  aclGroups: ['acct:ann'],
+  title: 'Plan',
+  passages: passages(40),
+  ...over,
+});
+
+const texts = (source: LibrarySource): string[] => source.passages.map((passage) => passage.text);
+
+/** A pause the next UPDATE a transaction sends waits on, once, telling the test when it is reached. */
+let pauseUpdate: { gate: Promise<void>; reached: () => void } | null = null;
+/** The same for the next INSERT a transaction sends. */
+let pauseInsert: { gate: Promise<void>; reached: () => void } | null = null;
+
+describe.skipIf(!URL)('LibraryIndex by content over PostgresVectorStore on Postgres', () => {
+  let pool: pg.Pool;
+  let statements: string[];
+  let store: PostgresVectorStore;
+  let sent: string[];
+  let library: LibraryIndex;
+  const embed = async (batch: string[]): Promise<number[][]> => {
+    sent.push(...batch);
+    return batch.map(vectorOf);
+  };
+  const config = { id: 'pg-plan', type: 'postgres' as const, manageSchema: false, tablePrefix: PREFIX, textSearchConfig: 'simple', similarityMetric: 'cosine' as const };
+
+  /** Plans a source, embeds what the plan asks for, and applies it. */
+  const index = async (source: LibrarySource, inputs = texts(source), on = library) => {
+    const plan = await on.planSource(source, { embedding: MODEL, inputs });
+    await on.applySourcePlan(plan, plan.toEmbed.length === 0 ? [] : await embed([...plan.toEmbed]));
+    return plan;
+  };
+  const rows = async (sourceId = 'document:d1') =>
+    (await pool.query<{ id: string; updated_at: string; text_content: string }>(
+      `SELECT id, updated_at, text_content FROM "${TABLE}" WHERE metadata_json->>'sourceId' = $1 ORDER BY id`,
+      [sourceId],
+    )).rows;
+
+  beforeAll(async () => {
+    pool = new pg.Pool({ connectionString: URL, max: 4 });
+    try {
+      await pool.query('CREATE EXTENSION IF NOT EXISTS vector');
+    } catch (error) {
+      // Another suite made the extension at the same moment (unique_violation); it exists now.
+      if ((error as { code?: unknown } | null)?.code !== '23505') throw error;
+    }
+    for (const statement of PostgresVectorStore.schemaSql('library', 4, { tablePrefix: PREFIX, textSearchConfig: 'simple' })) {
+      await pool.query(statement);
+    }
+    // The store's statements, recorded on their way to the real pool.
+    const recording: PgPoolLike = {
+      query: (sql, params) => {
+        statements.push(sql);
+        return pool.query(sql, params);
+      },
+      connect: async () => {
+        const client = await pool.connect();
+        return {
+          query: async (sql: string, params?: unknown[]) => {
+            statements.push(sql);
+            const pause = pauseUpdate;
+            if (pause && /^\s*UPDATE\b/.test(sql)) {
+              pauseUpdate = null;
+              pause.reached();
+              await pause.gate;
+            }
+            const insert = pauseInsert;
+            if (insert && /^\s*INSERT\b/.test(sql)) {
+              pauseInsert = null;
+              insert.reached();
+              await insert.gate;
+            }
+            return client.query(sql, params);
+          },
+          release: () => client.release(),
+        };
+      },
+    };
+    store = new PostgresVectorStore({ ...config, pool: recording });
+  });
+
+  afterAll(async () => {
+    await pool.query(`DROP TABLE IF EXISTS "${TABLE}" CASCADE`);
+    await pool.end();
+  });
+
+  beforeEach(async () => {
+    statements = [];
+    sent = [];
+    pauseUpdate = null;
+    pauseInsert = null;
+    await pool.query(`DELETE FROM "${TABLE}"`);
+    library = new LibraryIndex({ store, collection: 'library', embed, dimensions: 4 });
+  });
+
+  it('embeds one input of a 40-passage source after an edit, and moves no row when nothing changed', async () => {
+    await index(documentSource());
+    expect(sent).toHaveLength(40);
+    sent.length = 0;
+    const edited = documentSource({ passages: passages(40, (n) => (n === 7 ? 'Passage 7 now says the budget doubled.' : undefined)) });
+    const plan = await index(edited);
+    expect(sent).toEqual(['Passage 7 now says the budget doubled.']);
+    expect(plan.counts).toEqual({ embed: 1, reuse: 39, rewrite: 0, remove: 1 });
+    const before = await rows();
+    expect(before.map((row) => row.text_content).sort()).toEqual([...texts(edited)].sort());
+
+    sent.length = 0;
+    const again = await index(edited);
+    expect(sent).toEqual([]);
+    expect(again.counts).toEqual({ embed: 0, reuse: 40, rewrite: 0, remove: 0 });
+    expect(await rows()).toEqual(before);
+  });
+
+  it('rewrites the text of two texts that redact to one input, so a lexical search finds the new words alone', async () => {
+    const input = ['Call Ann on [number] about the budget.'];
+    await index(documentSource({ passages: [{ text: 'Call Ann about zebra budget.' }] }), input);
+    sent.length = 0;
+    const plan = await index(documentSource({ passages: [{ text: 'Call Ann about walrus budget.' }] }), input);
+    expect(sent).toEqual([]);
+    expect(plan.counts).toEqual({ embed: 0, reuse: 0, rewrite: 1, remove: 0 });
+    expect((await library.search({ text: 'walrus', mode: 'lexical', scope: ANN })).map((found) => found.text)).toEqual(['Call Ann about walrus budget.']);
+    expect(await library.search({ text: 'zebra', mode: 'lexical', scope: ANN })).toEqual([]);
+  });
+
+  it('embeds nothing for a change of access, and reads stored vectors with the scope and the model in the statement', async () => {
+    await index(documentSource());
+    await index(documentSource({ sourceId: 'document:other', tenantId: 'org2' }));
+    sent.length = 0;
+    const shared = await index(documentSource({ aclGroups: ['acct:ann', 'org:org1'] }));
+    expect(sent).toEqual([]);
+    expect(shared.counts).toEqual({ embed: 0, reuse: 40, rewrite: 0, remove: 0 });
+
+    const ours = (await rows()).map((row) => row.id);
+    const theirs = (await rows('document:other')).map((row) => row.id);
+    statements.length = 0;
+    const found = await library.passageVectors([...ours, ...theirs], { tenantId: 'org1', aclGroups: ['org:org1'] }, MODEL);
+    expect([...found.keys()].sort()).toEqual([...ours].sort());
+    for (const vector of found.values()) expect(vector).toHaveLength(4);
+    const read = statements.find((sql) => sql.includes('embedding::text'));
+    expect(read).toBeDefined();
+    // The scope and the model compared as JSON values, in the statement.
+    expect(read).toContain("metadata_json->'tenantId' = $");
+    expect(read).toContain("metadata_json->'embedModel' = $");
+    expect(read).toContain('aclGroups');
+    // Asked for another tenant's passages alone, the statement answers no row.
+    expect((await library.passageVectors(theirs, ANN, MODEL)).size).toBe(0);
+  });
+
+  it('throws LibraryPlanStale and writes nothing when another plan changed only the access groups', async () => {
+    await index(documentSource());
+    const retitled = documentSource({ title: 'Plan, second draft' });
+    const first = await library.planSource(retitled, { embedding: MODEL, inputs: texts(retitled) });
+    await index(documentSource({ aclGroups: ['acct:ann', 'org:org1'] }));
+    const before = await rows();
+    await expect(library.applySourcePlan(first, [])).rejects.toBeInstanceOf(LibraryPlanStale);
+    expect(await rows()).toEqual(before);
+  });
+
+  it('holds a source lock until the transaction that took it ends', async () => {
+    const order: string[] = [];
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let holding: () => void = () => {};
+    const holds = new Promise<void>((resolve) => {
+      holding = resolve;
+    });
+    const first = store.withSourceLock('library', 'document:d1', async () => {
+      order.push('first holds');
+      holding();
+      await held;
+      order.push('first ends');
+    });
+    let second: Promise<void> = Promise.resolve();
+    try {
+      await holds;
+      second = store.withSourceLock('library', 'document:d1', async () => {
+        order.push('second holds');
+      });
+      const other = store.withSourceLock('library', 'document:d2', async () => {
+        order.push('another source');
+      });
+      await other;
+      // The second holder is waiting once Postgres lists an advisory lock it has asked for and not been granted.
+      for (let tries = 0; tries < 100; tries += 1) {
+        const waiting = await pool.query<{ n: string }>("SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted");
+        if (Number(waiting.rows[0].n) > 0) break;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(order).toEqual(['first holds', 'another source']);
+    } finally {
+      release();
+      await Promise.allSettled([first, second]);
+    }
+    expect(order).toEqual(['first holds', 'another source', 'first ends', 'second holds']);
+  });
+
+  it('removes a tenant only once a plan being applied for one of its sources has committed, so none of its passages is left', async () => {
+    await index(documentSource({ sourceId: 'document:d0', passages: passages(2) }));
+    // A new source of the same tenant: its plan keeps and removes nothing, so no stale check can catch a removal.
+    const fresh = documentSource({ passages: passages(3, (n) => `A new passage ${n}.`) });
+    const plan = await library.planSource(fresh, { embedding: MODEL, inputs: texts(fresh) });
+    const made = await embed([...plan.toEmbed]);
+    let open: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    let reached: () => void = () => {};
+    const atInsert = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    pauseInsert = { gate, reached };
+    const applying = library.applySourcePlan(plan, made);
+    let removing: Promise<number> = Promise.resolve(0);
+    try {
+      await atInsert;
+      // The plan has passed its check inside its transaction and waits to write; the tenant's removal starts now.
+      removing = library.removeTenant('org1');
+      const waiter = async (): Promise<string> => {
+        for (let tries = 0; tries < 100; tries += 1) {
+          const waiting = await pool.query<{ n: string }>("SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted");
+          if (Number(waiting.rows[0].n) > 0) return 'waits for the plan';
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        return 'never waited';
+      };
+      expect(await Promise.race([removing.then(() => 'removed first'), waiter()])).toBe('waits for the plan');
+    } finally {
+      open();
+      await Promise.allSettled([applying, removing]);
+    }
+    await applying;
+    expect(await removing).toBe(5);
+    const left = await pool.query<{ n: string }>(`SELECT count(*) AS n FROM "${TABLE}" WHERE metadata_json->>'tenantId' = 'org1'`);
+    expect(Number(left.rows[0].n)).toBe(0);
+  });
+
+  it("applies a plan in the caller's transaction, so a rollback leaves the source as it was", async () => {
+    const db: StorageAdapter = createPostgresAdapter({ connectionString: URL!, max: 2 });
+    await db.open();
+    try {
+      const vectors = new PostgresVectorStore({ ...config, adapter: db });
+      await vectors.initialize();
+      const outer = new LibraryIndex({ store: vectors, collection: 'library', embed, dimensions: 4 });
+      await index(documentSource(), texts(documentSource()), outer);
+      const before = await rows();
+      const edited = documentSource({ passages: passages(40, (n) => (n === 2 ? 'Passage 2 changed.' : undefined)) });
+      const plan = await outer.planSource(edited, { embedding: MODEL, inputs: texts(edited) });
+      const made = await embed([...plan.toEmbed]);
+      await expect(db.transaction((tx) => vectors.withStorageTransaction(tx, async (view) => {
+        await new LibraryIndex({ store: view, collection: 'library', embed, dimensions: 4 }).applySourcePlan(plan, made);
+        expect((await view.listSourcePassages('library', 'document:d1')).length).toBe(40);
+        throw new Error('roll back');
+      }))).rejects.toThrow('roll back');
+      expect(await rows()).toEqual(before);
+
+      await db.transaction((tx) => vectors.withStorageTransaction(tx, async (view) => {
+        await new LibraryIndex({ store: view, collection: 'library', embed, dimensions: 4 }).applySourcePlan(plan, made);
+      }));
+      expect((await rows()).map((row) => row.text_content).sort()).toEqual([...texts(edited)].sort());
+    } finally {
+      await db.close();
+    }
+  });
+
+  it('lists a source through the metadata index, never a scan of the table', async () => {
+    await index(documentSource());
+    statements.length = 0;
+    expect(await store.listSourcePassages('library', 'document:d1')).toHaveLength(40);
+    const listing = statements.find((sql) => /^\s*SELECT id, metadata_json\b/.test(sql));
+    expect(listing).toBeDefined();
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      // With a scan of the table and a plain index scan both off, only an index that serves the condition can answer.
+      await client.query('SET LOCAL enable_seqscan = off');
+      await client.query('SET LOCAL enable_indexscan = off');
+      await client.query('SET LOCAL enable_indexonlyscan = off');
+      const plan = (await client.query<{ 'QUERY PLAN': string }>(`EXPLAIN ${listing}`, ['document:d1'])).rows.map((row) => row['QUERY PLAN']).join('\n');
+      expect(plan).toContain(`${TABLE}_metadata`);
+      expect(plan).not.toContain('Seq Scan');
+    } finally {
+      await client.query('ROLLBACK');
+      client.release();
+    }
+  });
+
+  it('moves no row when nothing changed, with a passage metadata value left undefined', async () => {
+    const source = documentSource({
+      passages: passages(40).map((passage) => ({ ...passage, metadata: { note: undefined } as unknown as Record<string, string> })),
+    });
+    await index(source);
+    const before = await rows();
+    sent.length = 0;
+    const again = await index(source);
+    expect(sent).toEqual([]);
+    expect(again.patches).toEqual([]);
+    expect(await rows()).toEqual(before);
+  });
+
+  it('changes the scope after a plan that holds the source lock, so a group revoked meanwhile stays revoked', async () => {
+    const shared = { aclGroups: ['acct:ann', 'org:org1'] };
+    await index(documentSource(shared));
+    const retitled = documentSource({ ...shared, title: 'Plan, second draft' });
+    const plan = await library.planSource(retitled, { embedding: MODEL, inputs: texts(retitled) });
+    expect(plan.patches).toHaveLength(40);
+    let reached: () => void = () => {};
+    const atUpdate = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    let go: () => void = () => {};
+    pauseUpdate = { gate: new Promise<void>((resolve) => {
+      go = resolve;
+    }), reached };
+    // The plan has checked the rows under the source lock and waits before its first write.
+    const applied = library.applySourcePlan(plan, []);
+    await atUpdate;
+    const revoked = library.setSourceScope('document:d1', { aclGroups: ['acct:ann'] });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    go();
+    await applied;
+    expect(await revoked).toBe(40);
+    const stored = (await pool.query<{ groups: unknown; title: unknown }>(
+      `SELECT metadata_json->'aclGroups' AS groups, metadata_json->>'title' AS title FROM "${TABLE}" WHERE metadata_json->>'sourceId' = 'document:d1'`,
+    )).rows;
+    expect(stored).toHaveLength(40);
+    for (const row of stored) {
+      expect(row.groups).toEqual(['acct:ann']);
+      expect(row.title).toBe('Plan, second draft');
+    }
+  });
+
+  it('reads vectors with the filter compared as JSON values, so a numeric tenant id never answers a text one', async () => {
+    await store.upsert('library', [{ id: 'typed#1', embedding: [1, 0, 0, 0], textContent: 'A row.', metadata: { sourceId: 'typed', tenantId: 7 } }]);
+    expect(await store.fetchVectors('library', ['typed#1'], { tenantId: '7' })).toEqual([]);
+    expect((await store.fetchVectors('library', ['typed#1'], { tenantId: 7 })).map((row) => row.id)).toEqual(['typed#1']);
+  });
+});
