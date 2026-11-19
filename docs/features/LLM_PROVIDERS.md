@@ -801,7 +801,11 @@ as written, as the model resolves (the provider's default for an entry with no
 model, the id after a `provider:` or `provider/` prefix) or as it is sent; on
 a gateway that names models `vendor/model` (OpenRouter, Requesty) the sent id
 is also read after the vendor, and every id also without a `-YYYYMMDD` release
-date. So `claude-sonnet-4-6` and `anthropic:claude-sonnet-4-6` skip
+date and with a Claude version written in dashes, so an exclusion names a model
+by either spelling: `claude-sonnet-5.5` (OpenRouter's) skips
+`{ provider: 'anthropic', model: 'claude-sonnet-5-5' }` sent to Anthropic's own
+API, and `claude-sonnet-5-5` skips `{ provider: 'openrouter', model:
+'anthropic/claude-sonnet-5.5' }`. So `claude-sonnet-4-6` and `anthropic:claude-sonnet-4-6` skip
 `{ provider: 'openrouter', model: 'anthropic/claude-sonnet-4-6' }`, `gpt-4o-mini`
 skips `{ provider: 'openrouter' }` (sent as `openai/gpt-4o-mini`),
 `anthropic/claude-sonnet-4-6` skips an Anthropic entry whether it is sent to
