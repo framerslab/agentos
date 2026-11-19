@@ -80,17 +80,19 @@ export class CitationVerifier {
     if (claims.length === 0) return this.emptyResult();
     if (this.pickOnly && sources.length === 1) return this.pickLone(claims, sources[0]);
 
-    // Only the sources without a vector of their own are embedded, after the claims, in the sources' order.
-    const unknown = sources.filter(s => s.embedding === undefined);
+    // Only the sources without a vector of their own are embedded, after the claims, in the sources' order. Each
+    // source's vector is read once, here, so one set while the embedder works moves no other source's.
+    const supplied = sources.map(s => (s.embedding === undefined ? undefined : [...s.embedding]));
+    const unknown = sources.filter((_, i) => supplied[i] === undefined);
     const allEmbeddings = await this.embedFn([...claims, ...unknown.map(s => s.content)]);
     const claimEmbeddings = allEmbeddings.slice(0, claims.length);
     const made = allEmbeddings.slice(claims.length);
     let next = 0;
-    const sourceEmbeddings = sources.map(s => (s.embedding === undefined ? made[next++] : [...s.embedding]));
+    const sourceEmbeddings = supplied.map(vector => vector ?? made[next++]);
     const size = claimEmbeddings[0]?.length;
-    for (const source of sources) {
-      if (source.embedding !== undefined && source.embedding.length !== size) {
-        throw new RangeError(`a source's embedding has ${source.embedding.length} numbers where the claims' vectors have ${size}`);
+    for (const vector of supplied) {
+      if (vector !== undefined && vector.length !== size) {
+        throw new RangeError(`a source's embedding has ${vector.length} numbers where the claims' vectors have ${size}`);
       }
     }
 
