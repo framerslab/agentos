@@ -36,6 +36,8 @@ export {
 export {
   LibraryCursorError,
   LibraryIndex,
+  LibraryPlanStale,
+  type LibraryEmbedding,
   type LibraryGroup,
   type LibraryGroupAnswer,
   type LibraryGroupHit,
@@ -45,10 +47,13 @@ export {
   type LibraryIndexOptions,
   type LibraryPartKind,
   type LibraryPassage,
+  type LibraryPlanCounts,
+  type LibraryPlanOptions,
   type LibraryRankProfile,
   type LibraryScope,
   type LibrarySearch,
   type LibrarySource,
+  type LibrarySourcePlan,
 } from './LibraryIndex.js';
 export { LexicalIndex, type LexicalIndexConfig, type LexicalIndexJSON, type LexicalSearchOptions } from '../rag/search/LexicalIndex.js';
 export {

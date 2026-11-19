@@ -419,6 +419,26 @@ export interface LexicalGroupSearchResult {
  * @description Defines the contract for interacting with a specific vector database or storage backend.
  * Implementations will wrap specific clients (e.g., Pinecone client, Weaviate client, in-memory store logic).
  */
+/** A stored row's id and metadata, as `listSourcePassages` answers it: no vector and no text. */
+export interface SourcePassageRow {
+  id: string;
+  metadata: Record<string, MetadataValue>;
+}
+
+/** A change to one stored row that keeps its vector: its whole metadata, and its text where `textContent` is given. */
+export interface PassagePatch {
+  id: string;
+  metadata: Record<string, MetadataValue>;
+  textContent?: string;
+}
+
+/** A stored row's vector and metadata, as `fetchVectors` answers it. */
+export interface StoredVector {
+  id: string;
+  embedding: number[];
+  metadata: Record<string, MetadataValue>;
+}
+
 export interface IVectorStore {
   /**
    * Initializes the vector store provider with its specific configuration.
@@ -567,6 +587,32 @@ export interface IVectorStore {
     filter: MetadataFilter,
     patch: Record<string, MetadataValue | null>,
   ): Promise<{ updatedCount: number }>;
+
+  /**
+   * Optional: the id and metadata of every row whose `sourceId` metadata key is `sourceId`, ordered by id, with no
+   * vector and no text.
+   */
+  listSourcePassages?(collectionName: string, sourceId: string): Promise<SourcePassageRow[]>;
+
+  /**
+   * Optional: replaces each row's whole metadata, and its text where `textContent` is given, keeping its vector. A row
+   * that does not exist is skipped. Answers how many rows changed.
+   */
+  patchPassages?(collectionName: string, rows: PassagePatch[]): Promise<{ updatedCount: number }>;
+
+  /**
+   * Optional: the vectors of the rows among `ids` that `filter` admits. The filter is applied where the rows are read
+   * (in the statement, on a SQL store), so a row it refuses never leaves the store.
+   */
+  fetchVectors?(collectionName: string, ids: string[], filter: MetadataFilter): Promise<StoredVector[]>;
+
+  /**
+   * Optional: runs `work` holding the store's lock on one source of a collection, in one transaction, and answers what
+   * `work` answers. A second holder of the same lock waits until the first's transaction ends; on a view of a caller's
+   * transaction the lock is held until that transaction ends. `work` receives a store whose calls run in that
+   * transaction: make them one at a time, awaiting each, and keep the store no longer than `work` runs.
+   */
+  withSourceLock?<T>(collectionName: string, sourceId: string, work: (store: IVectorStore) => Promise<T>): Promise<T>;
 
   /**
    * Deletes documents from a specified collection by their IDs or by a metadata filter.

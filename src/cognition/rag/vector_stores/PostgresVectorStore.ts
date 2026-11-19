@@ -46,6 +46,9 @@ import type {
   LexicalGroupSearchOptions,
   LexicalGroupSearchResult,
   LexicalMatchKind,
+  PassagePatch,
+  SourcePassageRow,
+  StoredVector,
 } from '../IVectorStore.js';
 import { sha256Hex } from '../../../core/utils/sha256.js';
 import {
@@ -345,6 +348,11 @@ export class PostgresVectorStore implements IVectorStore {
    * so that it refuses that adapter too and may lend on the transaction it holds.
    */
   private ownAdapter: StorageAdapter | undefined;
+  /**
+   * Set on the view `withSourceLock` lends: its statements run on the lock's transaction, and a write that would open
+   * a transaction of its own runs there instead.
+   */
+  private boundSql: VectorSqlExecutor | null = null;
   private readonly manageSchema: boolean;
   private readonly textConfig: string;
 
@@ -1456,6 +1464,89 @@ export class PostgresVectorStore implements IVectorStore {
     return `(m.date < ${date} OR m.date IS NULL OR (m.date = ${date} AND ${lower}))`;
   }
 
+  /** The id and metadata of each row of a source, ordered by id, with no vector and no text. */
+  async listSourcePassages(collectionName: string, sourceId: string): Promise<SourcePassageRow[]> {
+    await this._ensureInit();
+    const result = await this.pool.query(
+      `SELECT id, metadata_json FROM ${this._t(collectionName)} WHERE metadata_json->>'sourceId' = $1 ORDER BY id`,
+      [sourceId],
+    );
+    return result.rows.map((row: { id: unknown; metadata_json: Record<string, MetadataValue> | null }) => ({
+      id: String(row.id),
+      metadata: row.metadata_json ?? {},
+    }));
+  }
+
+  /**
+   * Replaces each row's whole metadata, and its text where given (the lexical column follows the text), keeping its
+   * vector, in one transaction. A row that does not exist is skipped.
+   */
+  async patchPassages(collectionName: string, rows: PassagePatch[]): Promise<{ updatedCount: number }> {
+    if (rows.length === 0) return { updatedCount: 0 };
+    await this._ensureInit();
+    const table = this._t(collectionName);
+    const now = Date.now();
+    let updatedCount = 0;
+    await this._transaction(async (sql) => {
+      for (const row of rows) {
+        const result = row.textContent === undefined
+          ? await sql.query(`UPDATE ${table} SET metadata_json = $2::jsonb, updated_at = $3 WHERE id = $1`, [row.id, JSON.stringify(row.metadata), now])
+          : await sql.query(
+            `UPDATE ${table} SET metadata_json = $2::jsonb, text_content = $3, updated_at = $4 WHERE id = $1`,
+            [row.id, JSON.stringify(row.metadata), row.textContent, now],
+          );
+        updatedCount += result.rowCount;
+      }
+    });
+    return { updatedCount };
+  }
+
+  /**
+   * The vectors of the rows among `ids` that `filter` admits, with the filter in the statement, so a row it refuses
+   * is never read out of the table.
+   */
+  async fetchVectors(collectionName: string, ids: string[], filter: MetadataFilter): Promise<StoredVector[]> {
+    if (ids.length === 0) return [];
+    await this._ensureInit();
+    const { clause, filterParams } = this._buildMetadataFilter(filter, 2);
+    const result = await this.pool.query(
+      `SELECT id, embedding::text, metadata_json FROM ${this._t(collectionName)} WHERE id = ANY($1::text[])${clause ? ` AND ${clause}` : ''}`,
+      [ids, ...filterParams],
+    );
+    return result.rows.map((row: { id: unknown; embedding: string; metadata_json: Record<string, MetadataValue> | null }) => ({
+      id: String(row.id),
+      embedding: this._parseVectorString(row.embedding),
+      metadata: row.metadata_json ?? {},
+    }));
+  }
+
+  /**
+   * Runs `work` in one transaction holding `pg_advisory_xact_lock` on the collection's table and the source id. On a
+   * view of a caller's transaction the transaction is the caller's, and the lock is held until it ends. `work`
+   * receives a view whose statements run in that transaction.
+   */
+  async withSourceLock<T>(collectionName: string, sourceId: string, work: (store: IVectorStore) => Promise<T>): Promise<T> {
+    await this._ensureInit();
+    // A table name holds no colon, so the key names one source of one table. Postgres text holds no NUL.
+    const key = `${this._t(collectionName)}:${sourceId}`;
+    return this._transaction(async (sql) => {
+      await sql.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [key]);
+      const view = new PostgresVectorStore({ ...this.config, manageSchema: false });
+      view.ownAdapter = this.ownAdapter;
+      view.pool = sql;
+      view.boundSql = sql;
+      view.isInitialized = true;
+      try {
+        return await work(view);
+      } finally {
+        view.borrowedEnded = true;
+        view.boundSql = null;
+        view.pool = null;
+        view.isInitialized = false;
+      }
+    });
+  }
+
   /**
    * Change the metadata of every document the filter matches: a key given as `null` is removed, the others
    * replace the stored ones, and the rest of the stored metadata stays.
@@ -1632,6 +1723,7 @@ export class PostgresVectorStore implements IVectorStore {
    * the adapter's `transaction` runs `work` on that same transaction, which commits when the caller's does.
    */
   private async _transaction<T>(work: (sql: VectorSqlExecutor) => Promise<T>): Promise<T> {
+    if (this.boundSql) return work(this.boundSql);
     if (this.config.adapter) {
       return this.config.adapter.transaction((tx) => work(adapterExecutor(tx)));
     }

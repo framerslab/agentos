@@ -14,10 +14,17 @@
  * group counted, ranked and paged) its optional lexicalGroupSearch. PostgresVectorStore honours every rule and has
  * the three members; InMemoryVectorStore honours every rule and has none of them.
  *
+ * `planSource` and `applySourcePlan` index a source by content: a passage's vector is kept while the exact text it
+ * was embedded from, the model and the dimensions stay the same, so an edit embeds only what it changed and a change
+ * of access embeds nothing. They need the store's optional listSourcePassages, patchPassages and withSourceLock, which
+ * PostgresVectorStore and InMemoryVectorStore have; on another store a plan embeds and writes every passage.
+ * `passageVectors` reads stored vectors through the optional fetchVectors.
+ *
  * @module agentos/cognition/library/LibraryIndex
  */
 
 import { sha256Hex } from '../../core/utils/sha256.js';
+import { generateUUID } from '../../core/utils/uuid.js';
 import type {
   IVectorStore,
   LexicalGroupKey,
@@ -26,7 +33,9 @@ import type {
   MetadataScalarValue,
   MetadataValue,
   QueryResult,
+  PassagePatch,
   RetrievedVectorDocument,
+  SourcePassageRow,
   VectorDocument,
 } from '../../core/vector-store/IVectorStore.js';
 import {
@@ -298,6 +307,91 @@ export interface LibraryIndexOptions {
   embed: (texts: string[], options?: { signal?: AbortSignal }) => Promise<number[][]>;
   /** How many passages one `embed` call and one upsert carry. @default 64 */
   batchSize?: number;
+  /**
+   * The number of dimensions of the collection's vectors. When given, `planSource` and `passageVectors` refuse an
+   * embedding of any other: vectors of two sizes, or of two models, are never ranked together, and a change of model
+   * or size means a new collection.
+   */
+  dimensions?: number;
+}
+
+/** The model a source's passages are embedded with, and the size of its vectors. */
+export interface LibraryEmbedding {
+  model: string;
+  dimensions: number;
+}
+
+/** What `planSource` needs beside the source. */
+export interface LibraryPlanOptions {
+  embedding: LibraryEmbedding;
+  /**
+   * The exact text the embedder is sent for each passage, in order, one per passage: what the host embeds after its
+   * own redaction and cut. A passage keeps a stored passage's vector when the stored one was embedded from the same
+   * input, model and dimensions.
+   */
+  inputs: string[];
+  /** The part after `#` of a new passage's id. A random UUID by default; it never comes from the passage's content. */
+  newId?: () => string;
+}
+
+/** What a plan does: passages to embed, kept as they are or with new metadata, kept with their text rewritten, removed. */
+export interface LibraryPlanCounts {
+  embed: number;
+  reuse: number;
+  rewrite: number;
+  remove: number;
+}
+
+/**
+ * A source's plan, from `planSource`: embed `toEmbed` (in order, in one call or several) and hand the vectors to
+ * `applySourcePlan`. The other fields are what `applySourcePlan` writes; read them, never change them.
+ */
+export interface LibrarySourcePlan {
+  readonly sourceId: string;
+  readonly embedding: LibraryEmbedding;
+  /** The inputs that need a vector, in order. Empty when every passage keeps a stored vector. */
+  readonly toEmbed: readonly string[];
+  readonly counts: LibraryPlanCounts;
+  /** The digest of the source's stored rows when the plan was made; null on a store that cannot plan by content. */
+  readonly digest: string | null;
+  /** Ids of the stored rows the plan removes. */
+  readonly remove: readonly string[];
+  /** Kept rows whose metadata, or metadata and text, the plan rewrites. */
+  readonly patches: readonly PassagePatch[];
+  /** New rows, each with the place of its input in `toEmbed`. */
+  readonly rows: ReadonlyArray<{ id: string; text: string; metadata: Record<string, MetadataValue>; at: number }>;
+}
+
+/**
+ * What `applySourcePlan` throws, writing nothing, when the source's stored rows (an id, an access group, a folder, a
+ * title, a place, a text) changed after the plan was made. Plan the source again.
+ */
+export class LibraryPlanStale extends Error {
+  constructor(sourceId: string) {
+    super(`LibraryIndex: the passages of ${sourceId} changed after the plan was made; plan it again.`);
+    this.name = 'LibraryPlanStale';
+  }
+}
+
+/** A value as JSON with every object's keys in order, so two equal metadata records read the same. */
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value !== null && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
+
+/** The digest of a source's stored rows: each id with its whole metadata, in id order. */
+function digestOf(rows: readonly SourcePassageRow[]): string {
+  const ordered = [...rows].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  return sha256Hex(canonicalJson(ordered.map((row) => [row.id, row.metadata])));
+}
+
+/** The hash a passage's vector is reused by: the model, the dimensions and the exact input, NUL between them. */
+function inputHashOf(embedding: LibraryEmbedding, input: string): string {
+  return sha256Hex(`${embedding.model}\u0000${embedding.dimensions}\u0000${input}`);
 }
 
 /**
@@ -664,6 +758,7 @@ export class LibraryIndex {
   private readonly collection: string;
   private readonly embed: (texts: string[], options?: { signal?: AbortSignal }) => Promise<number[][]>;
   private readonly batchSize: number;
+  private readonly dimensions: number | undefined;
 
   /** An index over a collection the store already holds; the index makes no collection. */
   constructor(options: LibraryIndexOptions) {
@@ -671,6 +766,202 @@ export class LibraryIndex {
     this.collection = options.collection;
     this.embed = options.embed;
     this.batchSize = Math.max(1, options.batchSize ?? 64);
+    this.dimensions = options.dimensions;
+  }
+
+  /** The metadata keys the index writes from a source's own fields. */
+  private ownedMetadata(source: LibrarySource): Record<string, MetadataValue> {
+    const owned: Record<string, MetadataValue> = {
+      tenantId: source.tenantId,
+      aclGroups: source.aclGroups,
+      status: 'active',
+      sourceId: source.sourceId,
+      kind: source.kind,
+      tags: source.tags ?? [],
+    };
+    if (source.folderId) owned.folderId = source.folderId;
+    if (source.title) owned.title = source.title;
+    return owned;
+  }
+
+  /** Refuses an embedding without a model or a whole size, or of a size other than the collection's. */
+  private checkEmbedding(embedding: LibraryEmbedding, caller: string): void {
+    if (!embedding.model || !Number.isInteger(embedding.dimensions) || embedding.dimensions < 1) {
+      throw new Error(`LibraryIndex.${caller} needs an embedding model and a whole number of dimensions.`);
+    }
+    if (this.dimensions !== undefined && embedding.dimensions !== this.dimensions) {
+      throw new Error(`LibraryIndex.${caller}: the collection's vectors have ${this.dimensions} dimensions, not ${embedding.dimensions}.`);
+    }
+  }
+
+  /** Whether the store can plan by content: list a source's rows, patch rows, and lock a source. */
+  private plansByContent(): boolean {
+    return false;
+  }
+
+  /**
+   * Plans indexing a source by content, without writing anything. Each passage's metadata gains `inputHash` (the
+   * SHA-256 of the model, the dimensions and its input), `textHash` (the SHA-256 of its text), `embedModel` and
+   * `embedDimensions`. A passage takes the vector of a stored passage of the source with the same `inputHash`: when
+   * the text is the same too, the row is kept and its metadata rewritten only where it differs (its place, title,
+   * folder, tags, access groups); when only the input is the same (two texts that redact to one input), the row keeps
+   * its vector and its text and metadata are rewritten, so a lexical search never finds the old words. A stored row
+   * without an `inputHash`, or embedded by another model or size, counts as absent. Other passages get new rows,
+   * `<sourceId>#<newId()>`, and their inputs go in `toEmbed`; stored rows no passage takes are removed.
+   *
+   * On a store without listSourcePassages, patchPassages and withSourceLock, every passage is embedded and the
+   * source is replaced whole when the plan is applied.
+   *
+   * @throws When the source has no tenant or no group, when there is not one input per passage, or when the
+   *   embedding has no model, a size that is not a whole number, or a size other than `dimensions`.
+   */
+  async planSource(source: LibrarySource, options: LibraryPlanOptions): Promise<LibrarySourcePlan> {
+    if (!source.tenantId || source.aclGroups.length === 0) {
+      throw new Error('LibraryIndex.planSource needs a tenant and at least one access group.');
+    }
+    const { embedding, inputs } = options;
+    if (inputs.length !== source.passages.length) throw new Error('LibraryIndex.planSource needs one input for each passage.');
+    this.checkEmbedding(embedding, 'planSource');
+    const newId = options.newId ?? generateUUID;
+    const owned = this.ownedMetadata(source);
+    const inherited = withoutSourceFields(source.metadata);
+    const content = this.plansByContent();
+    const stored = content && this.store.listSourcePassages ? await this.store.listSourcePassages(this.collection, source.sourceId) : [];
+    const byInput = new Map<string, SourcePassageRow[]>();
+    for (const row of stored) {
+      const { inputHash, embedModel, embedDimensions } = row.metadata;
+      if (typeof inputHash !== 'string' || embedModel !== embedding.model || embedDimensions !== embedding.dimensions) continue;
+      byInput.set(inputHash, [...(byInput.get(inputHash) ?? []), row]);
+    }
+    const kept = new Set<string>();
+    const patches: PassagePatch[] = [];
+    const rows: Array<{ id: string; text: string; metadata: Record<string, MetadataValue>; at: number }> = [];
+    const toEmbed: string[] = [];
+    let reuse = 0;
+    let rewrite = 0;
+    source.passages.forEach((passage, index) => {
+      const input = inputs[index];
+      const inputHash = inputHashOf(embedding, input);
+      const textHash = sha256Hex(passage.text);
+      const metadata: Record<string, MetadataValue> = {
+        ...withoutSourceFields(passage.metadata),
+        ...inherited,
+        ...owned,
+        index,
+        inputHash,
+        textHash,
+        embedModel: embedding.model,
+        embedDimensions: embedding.dimensions,
+      };
+      const candidates = (byInput.get(inputHash) ?? []).filter((row) => !kept.has(row.id));
+      const match = candidates.find((row) => row.metadata.textHash === textHash) ?? candidates[0];
+      if (!match) {
+        rows.push({ id: `${source.sourceId}#${newId()}`, text: passage.text, metadata, at: toEmbed.length });
+        toEmbed.push(input);
+        return;
+      }
+      kept.add(match.id);
+      if (match.metadata.textHash === textHash) {
+        reuse += 1;
+        if (canonicalJson(match.metadata) !== canonicalJson(metadata)) patches.push({ id: match.id, metadata });
+      } else {
+        rewrite += 1;
+        patches.push({ id: match.id, metadata, textContent: passage.text });
+      }
+    });
+    const remove = stored.filter((row) => !kept.has(row.id)).map((row) => row.id);
+    return {
+      sourceId: source.sourceId,
+      embedding: { model: embedding.model, dimensions: embedding.dimensions },
+      toEmbed,
+      counts: { embed: toEmbed.length, reuse, rewrite, remove: remove.length },
+      digest: content ? digestOf(stored) : null,
+      remove,
+      patches,
+      rows,
+    };
+  }
+
+  /**
+   * Writes a plan, with one vector for each input of its `toEmbed`, in order. Run it inside the host's storage
+   * transaction (an index over a view from PostgresVectorStore.withStorageTransaction) when other writes must commit
+   * with it. It takes the store's lock on the source, reads the source's rows again and throws `LibraryPlanStale`,
+   * writing nothing, when they are not the rows the plan was made from; then it removes, rewrites and adds rows,
+   * `batchSize` new rows to an upsert. Unchanged rows are not written. On a store that cannot plan by content it
+   * replaces the source whole, as `indexSource` does.
+   *
+   * @returns The plan's counts.
+   * @throws `LibraryPlanStale`; when the vectors are not one per input of the plan's size; when the store fails or
+   *   reports a failed write or delete.
+   */
+  async applySourcePlan(plan: LibrarySourcePlan, vectors: number[][]): Promise<LibraryPlanCounts> {
+    if (vectors.length !== plan.toEmbed.length) throw new Error(VECTOR_COUNT_MISMATCH);
+    for (const vector of vectors) {
+      if (vector.length !== plan.embedding.dimensions) {
+        throw new Error(`LibraryIndex.applySourcePlan: a vector has ${vector.length} dimensions, not ${plan.embedding.dimensions}.`);
+      }
+    }
+    const documents: VectorDocument[] = plan.rows.map((row) => ({
+      id: row.id,
+      embedding: vectors[row.at],
+      textContent: row.text,
+      metadata: row.metadata,
+    }));
+    const write = async (store: IVectorStore): Promise<void> => {
+      for (let from = 0; from < documents.length; from += this.batchSize) {
+        throwOnReportedFailure(await store.upsert(this.collection, documents.slice(from, from + this.batchSize)), `write the passages of ${plan.sourceId}`);
+      }
+    };
+    if (plan.digest === null || !this.store.withSourceLock) {
+      await this.removeSource(plan.sourceId);
+      await write(this.store);
+      return plan.counts;
+    }
+    const digest = plan.digest;
+    await this.store.withSourceLock(this.collection, plan.sourceId, async (store) => {
+      if (!store.listSourcePassages || !store.patchPassages) throw new Error('LibraryIndex: the store cannot plan by content.');
+      if (digestOf(await store.listSourcePassages(this.collection, plan.sourceId)) !== digest) throw new LibraryPlanStale(plan.sourceId);
+      if (plan.remove.length > 0) {
+        throwOnReportedFailure(await store.delete(this.collection, [...plan.remove]), `delete the passages of ${plan.sourceId}`);
+      }
+      if (plan.patches.length > 0) await store.patchPassages(this.collection, [...plan.patches]);
+      await write(store);
+    });
+    return plan.counts;
+  }
+
+  /**
+   * The stored vectors of the passages among `ids` that the scope may see and that the model and size made, by id. The
+   * store reads them with the scope, the model and the size in its own filter (its optional fetchVectors), and the
+   * index checks each row again, so a passage of another tenant, outside the scope's groups, not active, or of another
+   * model never answers. On a store without fetchVectors the answer is empty.
+   *
+   * @throws When the scope has no tenant or no group, or the embedding is refused as `planSource` refuses it.
+   */
+  async passageVectors(ids: string[], scope: LibraryScope, embedding: LibraryEmbedding): Promise<Map<string, number[]>> {
+    if (!scope.tenantId || scope.aclGroups.length === 0) {
+      throw new Error('LibraryIndex.passageVectors needs a tenant and at least one access group.');
+    }
+    this.checkEmbedding(embedding, 'passageVectors');
+    const found = new Map<string, number[]>();
+    const wanted = [...new Set(ids)];
+    if (wanted.length === 0 || typeof this.store.fetchVectors !== 'function' || found.size === 0) return found;
+    const filter = mergeMetadataFilters(
+      { embedModel: embedding.model, embedDimensions: embedding.dimensions },
+      scopeToMetadataFilter({ tenantId: scope.tenantId, aclGroups: scope.aclGroups }),
+    ) ?? {};
+    for (const row of await this.store.fetchVectors(this.collection, wanted, filter)) {
+      if (
+        wanted.includes(row.id) &&
+        meetsScope(row.metadata, scope) &&
+        row.metadata.embedModel === embedding.model &&
+        row.metadata.embedDimensions === embedding.dimensions &&
+        row.embedding.length === embedding.dimensions
+      ) {
+        found.set(row.id, row.embedding);
+      }
+    }
+    return found;
   }
 
   /**
