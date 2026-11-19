@@ -495,6 +495,13 @@ export interface ModelCompletionResponse {
   /** Resolved model identifier actually used (may differ from requested if routing / aliasing applied). */
   modelId: string;
   /**
+   * `'requested'` when `modelId` is the model the request named (or the provider's default model), filled in by the
+   * adapter because the answer named no model or the adapter does not read the model the answer names. Absent when
+   * `modelId` is the model the answer named. A reader shows a `'requested'` id as the model asked for, never as the
+   * model that answered.
+   */
+  modelIdSource?: 'requested';
+  /**
    * Upstream host that actually served the request when the provider is an
    * aggregator/router (e.g. OpenRouter returns `provider: 'Groq'` in the
    * completion body). Undefined for direct providers and on aggregators

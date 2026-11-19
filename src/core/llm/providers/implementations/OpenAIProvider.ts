@@ -33,6 +33,7 @@ import {
   ProviderEmbeddingResponse,
   AttemptOutcome,
 } from '../IProvider';
+import { responseModel } from '../responseModel';
 import { stripParamsForOpenAI } from '../openrouter-only-params';
 import { resolveOpenAiCacheRetentionParams, resolvePromptCacheKey } from '../openai-cache-params';
 import { OpenAIProviderError } from '../errors/OpenAIProviderError';
@@ -2590,7 +2591,7 @@ export class OpenAIProvider implements IProvider {
       id: apiResponse.id,
       object: 'chat.completion',
       created: apiResponse.created_at ?? Math.floor(Date.now() / 1000),
-      modelId: apiResponse.model ?? modelId,
+      ...responseModel(apiResponse.model, modelId),
       ...(typeof apiResponse.service_tier === 'string' ? { serviceTier: apiResponse.service_tier } : {}),
       choices: [{
         index: 0,

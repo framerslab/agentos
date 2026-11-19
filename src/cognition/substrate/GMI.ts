@@ -308,16 +308,17 @@ function applicationNoteOf(turnInput: GMITurnInput): string | undefined {
 }
 
 /**
- * The model that asked for a tool call: the model the step's final chunk names, as answered; when it names none, the
- * model the step asked for, as requested.
+ * The model that asked for a tool call: the model the step's final chunk names, as answered; when it names none, or
+ * its adapter marks the id it names as filled in from the request (`modelIdSource: 'requested'`), the model the step
+ * asked for, as requested.
  */
 function callerModelOf(
   providerId: string,
   requestedModelId: string,
-  answeredModelId: string | undefined,
+  finalChunk: Pick<ModelCompletionResponse, 'modelId' | 'modelIdSource'> | undefined,
 ): NonNullable<ToolExecutionRequestDetails['callerModel']> {
-  return answeredModelId
-    ? { providerId, modelId: answeredModelId, modelSource: 'answered' }
+  return finalChunk?.modelId && finalChunk.modelIdSource !== 'requested'
+    ? { providerId, modelId: finalChunk.modelId, modelSource: 'answered' }
     : { providerId, modelId: requestedModelId, modelSource: 'requested' };
 }
 
@@ -2701,31 +2702,34 @@ export class GMI implements IGMI {
           // The call awaiting its result; cleared once processToolCall returns.
           let callInFlight: ToolCallRequest | undefined;
           let toolRoundFailure: { error: unknown } | undefined;
+          // Each call's refusal by the turn's tool-call gate, or null, by the call's position in the step.
+          let refusals: Array<GMIToolCallRefusal | null> = [];
+          const requestDetailsFor = (toolCallReq: ToolCallRequest): ToolExecutionRequestDetails => ({
+            toolCallRequest: toolCallReq,
+            gmiId: this.gmiId, personaId: this.activePersona.id,
+            personaCapabilities: this.activePersona.allowedCapabilities || [],
+            userContext: this.currentUserContext, correlationId: turnId,
+            sessionData: this.buildToolSessionData(turnInput, turnLearning, launchFrame),
+            // The turn's stop: a call whose checks or approval finish after the turn stopped is refused before it
+            // runs (STEP_ABORTED), and the tool receives it as its context's signal; a composed tool hands it to
+            // each step, so it stops between steps. A call already running is never cut.
+            signal: stop.signal,
+            // The gate the turn asks before each call, beside the turn's sources: a team the call launches has its
+            // seats' calls asked it too.
+            ...(toolCallGate ? { callerTurn: { toolCallGate: withTurnSources(toolCallGate, lastRagSources ?? continuedTurnSources) } } : {}),
+            // The model that asked for the call: the step's provider, and the model its final chunk names, or the
+            // model the step asked for, labelled requested, when the chunk names none or its adapter marks the id as
+            // the request's. Tools read it; it is never sent to a model.
+            callerModel: callerModelOf(modelTargetInfo.providerId, modelTargetInfo.modelId, stepFinalChunk),
+          });
           try {
             // The gate is asked about every call of the step before any of them runs, as the stream's chunk for the
             // step holds them all.
-            const refusals = toolCallGate
+            refusals = toolCallGate
               ? await this.askToolCallGateForStep(toolCallGate, currentIterationToolCallRequests, lastRagSources ?? continuedTurnSources)
               : [];
             for (const [callIndex, toolCallReq] of currentIterationToolCallRequests.entries()) {
-              const requestDetails: ToolExecutionRequestDetails = {
-                toolCallRequest: toolCallReq,
-                gmiId: this.gmiId, personaId: this.activePersona.id,
-                personaCapabilities: this.activePersona.allowedCapabilities || [],
-                userContext: this.currentUserContext, correlationId: turnId,
-                sessionData: this.buildToolSessionData(turnInput, turnLearning, launchFrame),
-                // The turn's stop: a call whose checks or approval finish after the turn stopped is refused before it
-                // runs (STEP_ABORTED), and the tool receives it as its context's signal; a composed tool hands it to
-                // each step, so it stops between steps. A call already running is never cut.
-                signal: stop.signal,
-                // The gate the turn asks before each call, beside the turn's sources: a team the call launches has its
-                // seats' calls asked it too.
-                ...(toolCallGate ? { callerTurn: { toolCallGate: withTurnSources(toolCallGate, lastRagSources ?? continuedTurnSources) } } : {}),
-                // The model that asked for the call: the step's provider, and the model its final chunk names, or the
-                // model the step asked for when the chunk names none, labelled requested. Tools read it; it is never
-                // sent to a model.
-                callerModel: callerModelOf(modelTargetInfo.providerId, modelTargetInfo.modelId, stepFinalChunk?.modelId),
-              };
+              const requestDetails = requestDetailsFor(toolCallReq);
               this.addTraceEntry(ReasoningEntryType.TOOL_EXECUTION_START, `Orchestrating tool: ${toolCallReq.name}`, { reqId: toolCallReq.id });
               callInFlight = toolCallReq;
               // A call the gate refused is recorded as a refused result the model reads; the tool is not called. The
@@ -2755,6 +2759,16 @@ export class GMI implements IGMI {
             }
           } catch (error) {
             toolRoundFailure = { error };
+            // A call the gate refused that the round never reached (a call before it failed under fail_closed, or the
+            // turn stopped) is told to the orchestrator here, so a refused forge_tool call has its forge trace all the
+            // same. A call the round reached was told as it was reached.
+            for (let callIndex = toolExecutionResults.length; callIndex < currentIterationToolCallRequests.length; callIndex += 1) {
+              const refusal = refusals[callIndex] ?? null;
+              const toolCallReq = currentIterationToolCallRequests[callIndex];
+              if (refusal && toolCallReq !== callInFlight) {
+                await this.recordRefusedToolCall(requestDetailsFor(toolCallReq), refusal);
+              }
+            }
             toolExecutionResults.push(...this.resultsForUnfinishedToolCalls(
               currentIterationToolCallRequests,
               toolExecutionResults.length,

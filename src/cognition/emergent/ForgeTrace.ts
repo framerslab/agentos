@@ -319,6 +319,13 @@ const MAX_COPY_DEPTH = 256;
  */
 const MEASURE_FACTOR = 64;
 
+/**
+ * How many values the JSON-safe copy visits before it stops: a value with more (an array-shaped value whose length runs
+ * to a billion, a host object with as many keys) is copied as one `other` marker. String lengths are not counted: the
+ * copy holds a string as it is.
+ */
+const COPY_READ_BOUND = 1_048_576;
+
 /** What the copy returns for `undefined`: an object leaves the key out, and an array holds `null` in its place. */
 const OMITTED: unique symbol = Symbol('omitted');
 
@@ -604,16 +611,28 @@ function walkArray(
 ): unknown[] {
   const out: unknown[] = [];
   writeRaw(walk, '[');
-  for (let index = 0; index < length && !walk.stopped; index += 1) {
+  for (let index = 0; index < length; index += 1) {
+    // A slot is counted before it is read, as an object's value is, so a slot whose read throws is counted too and an
+    // array-shaped value with a huge length stops at the budget.
+    if (!spend(walk)) {
+      break;
+    }
     if (index > 0) {
       writeRaw(walk, ',');
     }
-    let copy: unknown;
+    let item: unknown;
+    let unreadable = false;
     try {
-      copy = walkValue(walk, list[index], String(index), ancestors, depth + 1);
+      item = list[index];
     } catch {
-      copy = writeMarker(walk, 'other');
+      unreadable = true;
     }
+    const key = String(index);
+    const resolved = unreadable ? null : resolveJson(item, key);
+    const copy =
+      resolved === null || 'thrown' in resolved
+        ? writeMarker(walk, 'other')
+        : walkResolved(walk, resolved.value, ancestors, depth + 1);
     if (copy === OMITTED && !walk.stopped) {
       writeRaw(walk, 'null');
     }
@@ -709,15 +728,20 @@ function isArrayIndex(key: string): boolean {
  * kind; a value that repeats one of its own ancestors becomes a `cycle` marker there; a property, a `toJSON` or a
  * `Proxy` trap that throws becomes an `other` marker in its place, as does a value nested more than 256 levels deep.
  * `toJSON` is called as `JSON.stringify` calls it, so a `Date` becomes its ISO text. `undefined` leaves an object's
- * key absent and is `null` in an array; `NaN` and the infinities are `null`. Never throws.
+ * key absent and is `null` in an array; `NaN` and the infinities are `null`. A value holding more than 1,048,576 values
+ * (strings, numbers, objects and array slots, each counted once it is visited) is copied as one `other` marker, so an
+ * array-shaped value whose length runs to a billion ends. Never throws.
  *
  * @param value - Any value.
  * @returns The copy; `undefined` for `undefined`.
  * @internal
  */
 export function jsonSafeCopy(value: unknown): unknown {
-  const walk = newWalk(0, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
+  const walk = newWalk(0, Number.POSITIVE_INFINITY, COPY_READ_BOUND);
   const copy = walkValue(walk, value, '', new Set<object>(), 0);
+  if (walk.stopped) {
+    return unserializable('other');
+  }
   return copy === OMITTED ? undefined : copy;
 }
 

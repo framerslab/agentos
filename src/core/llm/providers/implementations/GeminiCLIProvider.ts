@@ -18,6 +18,7 @@ import {
   type ProviderEmbeddingOptions,
   type ProviderEmbeddingResponse,
 } from '../IProvider';
+import { requestedModel } from '../responseModel';
 import { GeminiCLIBridge, type BridgeOptions, type StreamEvent } from './GeminiCLIBridge';
 import { GeminiCLIProviderError } from '../errors/GeminiCLIProviderError';
 
@@ -804,7 +805,7 @@ Each tool_call must include id (unique string), name (tool name), and a JSON bod
       id: responseId ?? `gc-${result.sessionId ?? Date.now()}`,
       object: 'chat.completion',
       created: Date.now(),
-      modelId: modelId ?? this.defaultModelId ?? GEMINI_CLI_DEFAULT_MODEL,
+      ...requestedModel(modelId ?? this.defaultModelId ?? GEMINI_CLI_DEFAULT_MODEL),
       choices: [{
         index: 0,
         message: { role: 'assistant', content: text },
@@ -827,7 +828,7 @@ Each tool_call must include id (unique string), name (tool name), and a JSON bod
       id: responseId ?? `gc-${result.sessionId ?? Date.now()}`,
       object: 'chat.completion',
       created: Date.now(),
-      modelId: modelId ?? this.defaultModelId ?? GEMINI_CLI_DEFAULT_MODEL,
+      ...requestedModel(modelId ?? this.defaultModelId ?? GEMINI_CLI_DEFAULT_MODEL),
       choices: [{
         index: 0,
         message: {

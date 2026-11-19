@@ -33,6 +33,7 @@ import {
   ProviderEmbeddingResponse,
   CacheDiagnostics,
 } from '../IProvider';
+import { requestedModel } from '../responseModel';
 import { stripParamsForAnthropic } from '../openrouter-only-params';
 import { AnthropicProviderError } from '../errors/AnthropicProviderError';
 import { ApiKeyPool, keyPoolStrategyFromEnv, type ApiKeyPoolConfig, type ProbeResult } from '../../../providers/ApiKeyPool.js';
@@ -1645,7 +1646,7 @@ export class AnthropicProvider implements IProvider {
                 id: responseId,
                 object: 'chat.completion.chunk',
                 created: Math.floor(Date.now() / 1000),
-                modelId,
+                ...requestedModel(modelId),
                 choices: [{
                   index: 0,
                   message: { role: 'assistant', content: textDelta },
@@ -1664,7 +1665,7 @@ export class AnthropicProvider implements IProvider {
                   id: responseId,
                   object: 'chat.completion.chunk',
                   created: Math.floor(Date.now() / 1000),
-                  modelId,
+                  ...requestedModel(modelId),
                   choices: [{
                     index: 0,
                     message: { role: 'assistant', content: null },
@@ -1793,7 +1794,7 @@ export class AnthropicProvider implements IProvider {
               id: responseId,
               object: 'chat.completion.chunk',
               created: Math.floor(Date.now() / 1000),
-              modelId,
+              ...requestedModel(modelId),
               choices: [{
                 index: 0,
                 message: {
@@ -1828,7 +1829,7 @@ export class AnthropicProvider implements IProvider {
               id: responseId,
               object: 'chat.completion.chunk',
               created: Math.floor(Date.now() / 1000),
-              modelId,
+              ...requestedModel(modelId),
               choices: [],
               error: {
                 message: event.error.message,
@@ -1863,7 +1864,7 @@ export class AnthropicProvider implements IProvider {
         id: responseId,
         object: 'chat.completion.chunk',
         created: Math.floor(Date.now() / 1000),
-        modelId,
+        ...requestedModel(modelId),
         choices: [],
         isFinal: true,
         error: { message, type: 'STREAM_PROCESSING_ERROR' },
@@ -3429,7 +3430,7 @@ export class AnthropicProvider implements IProvider {
       id: `anthropic-abort-${Date.now()}`,
       object: 'chat.completion.chunk',
       created: Math.floor(Date.now() / 1000),
-      modelId,
+      ...requestedModel(modelId),
       choices: [],
       error: { message: 'Stream aborted by caller', type: 'abort' },
       ...(usage !== undefined && { usage }),
