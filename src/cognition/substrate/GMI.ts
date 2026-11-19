@@ -2695,6 +2695,9 @@ export class GMI implements IGMI {
                 // The gate the turn asks before each call, beside the turn's sources: a team the call launches has its
                 // seats' calls asked it too.
                 ...(toolCallGate ? { callerTurn: { toolCallGate: withTurnSources(toolCallGate, lastRagSources ?? continuedTurnSources) } } : {}),
+                // The model that asked for the call: the step's provider, and the model its final chunk names (the
+                // model the step asked for when the chunk names none). Tools read it; it is never sent to a model.
+                callerModel: { providerId: modelTargetInfo.providerId, modelId: stepFinalChunk?.modelId || modelTargetInfo.modelId },
               };
               this.addTraceEntry(ReasoningEntryType.TOOL_EXECUTION_START, `Orchestrating tool: ${toolCallReq.name}`, { reqId: toolCallReq.id });
               callInFlight = toolCallReq;

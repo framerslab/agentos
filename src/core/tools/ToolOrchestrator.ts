@@ -750,6 +750,7 @@ export class ToolOrchestrator implements IToolOrchestrator {
       ...(personaCapabilities ? { personaCapabilities } : {}),
       ...(signal ? { signal } : {}),
       ...(requestDetails.callerTurn ? { callerTurn: requestDetails.callerTurn } : {}),
+      ...(requestDetails.callerModel ? { callerModel: requestDetails.callerModel } : {}),
     };
     try {
       const refusal = tool.refusalBeforeApproval(args, context);
@@ -1077,8 +1078,9 @@ export class ToolOrchestrator implements IToolOrchestrator {
       console.error(`${logPrefix} ${errorMsg}`, executorPipelineError);
       // The failure's details go into the tool message the model receives and into the trace, both serialised: the
       // request's facts, without the live objects a call carries (the calling turn's budget, gate, names and hooks, its
-      // stop, the resolved tool instance) or the session data its caller supplied, which can hold any value.
-      const { callerTurn: _callerTurn, signal: _signal, tool: _tool, sessionData: _sessionData, ...requestFacts } = requestDetails;
+      // stop, the resolved tool instance), the session data its caller supplied, which can hold any value, or the model
+      // that answered the call's step, which nothing the model reads carries.
+      const { callerTurn: _callerTurn, signal: _signal, tool: _tool, sessionData: _sessionData, callerModel: _callerModel, ...requestFacts } = requestDetails;
       const wrappedError = createGMIErrorFromError(
         executorPipelineError,
         GMIErrorCode.TOOL_EXECUTION_FAILED,

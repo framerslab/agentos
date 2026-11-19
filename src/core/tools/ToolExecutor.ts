@@ -21,6 +21,7 @@ import type { IAuthService, ISubscriptionService } from '../types/auth';
 import { GMIError, GMIErrorCode, createGMIErrorFromError } from '../utils/errors.js';
 import { ExtensionRegistry, EXTENSION_KIND_TOOL, ToolDescriptor } from '../../extensions';
 import type { CallerTurnContext } from '../../api/runtime/agencyLaunch/types.js';
+import { listedErrorFields } from '../logging/events.js';
 
 /**
  * @interface ToolExecutionRequestDetails
@@ -70,6 +71,11 @@ export interface ToolExecutionRequestDetails {
   /** The calling turn's live objects; copied into the tool's context (see ToolExecutionContext.callerTurn). */
   callerTurn?: CallerTurnContext;
   /**
+   * The model that asked for this call, as the GMI's step answered it; set by a GMI, absent from other callers.
+   * Copied into the tool's context (see ToolExecutionContext.callerModel). Never sent to a model.
+   */
+  callerModel?: { providerId: string; modelId: string };
+  /**
    * Whether this call's console lines carry the tool's arguments, its output and the details of a failure.
    * Set by `ToolOrchestrator.processToolCall` from the orchestrator's own `logToolCalls`, so two orchestrators
    * sharing one executor each keep their own policy. Unset, the executor's own setting applies.
@@ -101,8 +107,12 @@ export class ToolExecutor {
   private readonly schemaChecks = new SchemaChecks({ allErrors: true, coerceTypes: true, useDefaults: true, strict: false });
   /**
    * Whether the console lines of `executeTool` carry a tool's arguments, its output and the details of a failure.
-   * Off, the lines name the tool, the duration and the error only: a tool that reads a person's record must not put
-   * their words in the process log. A call's own `logToolCalls` (set by `ToolOrchestrator.processToolCall`) overrides it.
+   * Off, a failure the tool reports is printed as the tool's name, its id and the duration, and a tool that throws as
+   * its name, its id, the duration and the error's listed type and code (`listedErrorFields`), never the error's text:
+   * a tool that reads a person's record must not put their words in the process log, and an error's message can quote
+   * them. On, the lines carry the validated arguments, an output preview, a reported failure's error text and details,
+   * and a thrown error whole, as a host that asked for them in its log reads them. A call's own `logToolCalls` (set by
+   * `ToolOrchestrator.processToolCall`) overrides it.
    * @private
    */
   private logToolCalls: boolean;
@@ -120,8 +130,10 @@ export class ToolExecutor {
   * Similarly used for potential future feature-based tool access control at the executor level.
   * @param {ExtensionRegistry<ITool>} [toolRegistry] - Optional. The registry the tools live in; a new one when omitted.
   * @param {{ logToolCalls?: boolean; builtInTools?: boolean }} [options] - Optional. `logToolCalls` controls content-bearing
-  * tool logs: each tool's arguments, an output preview and failure details in the console lines of `executeTool`; off by
-  * default (see `setLogToolCalls`). `builtInTools` defaults to true; false starts without the built-in date tool.
+  * tool logs, off by default (see `setLogToolCalls`). On, the console lines of `executeTool` print each tool's arguments,
+  * an output preview, a reported failure's error text and details, and a thrown error whole. Off, a reported failure's
+  * line names the tool, its id and the duration, and a thrown tool's line adds the error's listed type and code; neither
+  * prints the error's text. `builtInTools` defaults to true; false starts without the built-in date tool.
   */
   constructor(
     authService?: IAuthService,
@@ -146,7 +158,8 @@ export class ToolExecutor {
   * and the details of a failure, for calls that do not carry their own `logToolCalls`.
   *
   * @public
-  * @param {boolean} on - True to print them, false to print the tool's name, the duration and the error only.
+  * @param {boolean} on - True to print them; false to print a failure as the tool's name, its id and the duration, and a
+  * thrown error as its listed type and code.
   * @returns {void}
   */
   public setLogToolCalls(on: boolean): void {
@@ -379,11 +392,13 @@ export class ToolExecutor {
       // A composed tool passes the expiry on to its own steps.
       ...(signal ? { signal } : {}),
       ...(requestDetails.callerTurn ? { callerTurn: requestDetails.callerTurn } : {}),
+      ...(requestDetails.callerModel ? { callerModel: requestDetails.callerModel } : {}),
     };
 
+    let startTime = Date.now();
     try {
       if (logToolCalls) console.log(`${logContext}: Executing tool '${tool.name}' (ID: '${tool.id}') with validated arguments:`, parsedArgs);
-      const startTime = Date.now();
+      startTime = Date.now();
       const result: ToolExecutionResult = await tool.execute(parsedArgs, executionContext);
       const durationMs = Date.now() - startTime;
       
@@ -393,7 +408,9 @@ export class ToolExecutor {
       } else if (logToolCalls) {
         console.warn(`${logContext}: Tool execution reported failure. Duration: ${durationMs}ms. Error: ${result.error}`, result.details);
       } else {
-        console.warn(`${logContext}: Tool execution reported failure. Duration: ${durationMs}ms. Error: ${result.error}`);
+        // A tool's error text can quote what it was given (a forge's error quotes its brief or its code): off, the line
+        // names the tool alone.
+        console.warn(`${logContext}: Tool '${tool.name}' (ID: '${tool.id}') reported failure. Duration: ${durationMs}ms.`);
       }
       
       if (tool.outputSchema && result.success && result.output !== undefined) {
@@ -441,7 +458,14 @@ export class ToolExecutor {
 
     } catch (err: any) {
       const execErrorMsg = `Critical unhandled error during the execution of tool '${tool.name}'.`;
-      console.error(`${logContext}: ${execErrorMsg}`, logToolCalls ? err : `${err?.name || 'Error'}: ${err?.message ?? String(err)}`);
+      if (logToolCalls) {
+        console.error(`${logContext}: ${execErrorMsg}`, err);
+      } else {
+        // A thrown message can quote what the tool was given (a thrown forge's is its trace's reason): off, the line
+        // names the tool and the error's listed type and code, never its message.
+        const { type, code } = listedErrorFields(err);
+        console.error(`${logContext}: Critical unhandled error during the execution of tool '${tool.name}' (ID: '${tool.id}'). Duration: ${Date.now() - startTime}ms. Error type: ${type}, code: ${code}.`);
+      }
       const gmiErr = createGMIErrorFromError(err, GMIErrorCode.TOOL_EXECUTION_FAILED, { toolName: tool.name, arguments: parsedArgs }, execErrorMsg);
       return { 
         success: false, 
