@@ -5,10 +5,11 @@
  * forge per stage a forge can end at, each asserting that every carrier that
  * applies (the forge's result, the host's hook, the wrapper's capture) holds
  * the same trace, with that stage's outcome, reason, verdict, executor and
- * tool id.
+ * tool id. A second group pins what a forge_tool call looks like to the model,
+ * to a host's stream and to a wrapper's capture, so a trace changes none of it.
  */
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ITool, ToolExecutionContext, ToolExecutionResult } from '../../../core/tools/ITool.js';
 import type { ToolExecutionRequestDetails } from '../../../core/tools/ToolExecutor.js';
 import type {
@@ -16,7 +17,15 @@ import type {
   IHumanInteractionManager,
   PendingAction,
 } from '../../../orchestration/hitl/IHumanInteractionManager.js';
-import type { ToolCallResult, UserContext } from '../../substrate/IGMI.js';
+import { GMIOutputChunkType, type ToolCallResult, type UserContext } from '../../substrate/IGMI.js';
+import {
+  createScriptedGmi,
+  runTurn,
+  scriptedProvider,
+  textReply,
+  textTurn,
+  toolCallReply,
+} from '../../substrate/__tests__/helpers/scriptedGmi.js';
 import type { EmergentCapabilityEngine } from '../EmergentCapabilityEngine.js';
 import { EmergentJudge } from '../EmergentJudge.js';
 import { EmergentToolRegistry } from '../EmergentToolRegistry.js';
@@ -30,6 +39,18 @@ import {
   type WrapForgeToolOptions,
 } from '../index.js';
 import type { CreationVerdict, ForgeResult, ForgeToolRequest } from '../types.js';
+import {
+  FD17F220_SCHEMA,
+  PINS,
+  PIN_OUTCOMES,
+  failNextRegistration,
+  judgePromptArgs,
+  pinArgs,
+  pinJudgeReply,
+  richOutputTool,
+  withoutThrownStacks,
+  type PinOutcome,
+} from './fixtures/forge-trace-pins.js';
 import {
   approvingHitl,
   callTool,
@@ -45,6 +66,7 @@ import {
   captureLines,
   composeArgs,
   directEngine,
+  freezeClock,
   hookRecorder,
   sandboxArgs,
   traceOf,
@@ -1658,5 +1680,164 @@ describe('forge trace: one trace per forge, on every carrier that applies', () =
     expect(refusedResult.error).toMatch(/^Code validation failed: /);
     expect(traceOf(refusedResult)).toBeDefined();
     expect(traceOf(refusedResult)!.executor).toBeNull();
+  });
+});
+
+// ----------------------------------------------------------------------------
+// What the model reads and what a host streams
+// ----------------------------------------------------------------------------
+
+/** The names only a trace carries: none may reach what the model reads, a host's stream or a capture's own fields. */
+const TRACE_NAMES = ['traceVersion', 'forgeId', 'provenanceVersion'];
+
+/** What the GMI's tool message begins with when the call failed. */
+const TOOL_ERROR_PREFIX = "Error from tool 'forge_tool': ";
+
+/** The details of a failed call, as far as the pins read them. */
+type FailedCallDetails = {
+  details?: { stack?: unknown; errorDetailsFromGMIError?: { underlyingError?: { stack?: unknown } } };
+};
+
+/** A thrown forge's details hold two stack texts; the pins compare the details without them. */
+function expectThrownStacks(errorDetails: unknown): void {
+  const details = (errorDetails as FailedCallDetails | null)?.details;
+  expect(typeof details?.stack).toBe('string');
+  expect(typeof details?.errorDetailsFromGMIError?.underlyingError?.stack).toBe('string');
+}
+
+/**
+ * One GMI turn over a real orchestrator in which the model calls forge_tool with the outcome's arguments and then
+ * answers in text. Returns the content of the `tool` message the second model call received and the content of the
+ * TOOL_RESULT chunk the turn yielded.
+ */
+async function forgeTurn(outcome: PinOutcome): Promise<{ toolMessage: unknown; toolResult: unknown }> {
+  const host = await makeForgeHost();
+  host.judge.mockResolvedValueOnce(pinJudgeReply(outcome));
+  if (outcome === 'thrown') {
+    failNextRegistration();
+  }
+  const scripted = scriptedProvider([
+    toolCallReply([{ id: 'call_forge', name: 'forge_tool', args: pinArgs(outcome) }]),
+    textReply('Done.'),
+  ]);
+  const { gmi } = await createScriptedGmi({
+    provider: scripted.provider,
+    config: { toolOrchestrator: host.orchestrator },
+  });
+
+  const { chunks } = await runTurn(gmi, textTurn('t1', 'Forge it.'));
+
+  expect(scripted.received).toHaveLength(2);
+  const toolMessages = scripted.received[1].filter((message) => message.role === 'tool');
+  expect(toolMessages).toHaveLength(1);
+  const toolResults = chunks.filter((chunk) => chunk.type === GMIOutputChunkType.TOOL_RESULT);
+  expect(toolResults).toHaveLength(1);
+  return { toolMessage: toolMessages[0].content, toolResult: toolResults[0].content };
+}
+
+/** The tool message as its pin holds it: whole, and for a thrown forge with the two stack texts out of its JSON. */
+function comparableToolMessage(content: string, outcome: PinOutcome): string {
+  if (outcome !== 'thrown') {
+    return content;
+  }
+  expect(content.startsWith(TOOL_ERROR_PREFIX)).toBe(true);
+  const errorDetails: unknown = JSON.parse(content.slice(TOOL_ERROR_PREFIX.length));
+  expectThrownStacks(errorDetails);
+  return TOOL_ERROR_PREFIX + JSON.stringify(withoutThrownStacks(errorDetails));
+}
+
+/** The TOOL_RESULT chunk's content as its pin holds it: as yielded, and for a thrown forge its JSON without the two stack texts. */
+function comparableToolResult(content: unknown, outcome: PinOutcome): unknown {
+  if (outcome !== 'thrown') {
+    return content;
+  }
+  const copy = JSON.parse(JSON.stringify(content)) as { errorDetails?: unknown };
+  expectThrownStacks(copy.errorDetails);
+  return { ...copy, errorDetails: withoutThrownStacks(copy.errorDetails) };
+}
+
+describe('forge trace: what the model reads and what a host streams are unchanged', () => {
+  let releaseClock: () => void = () => undefined;
+
+  beforeEach(() => {
+    releaseClock = freezeClock();
+  });
+
+  afterEach(() => {
+    releaseClock();
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    vi.useRealTimers();
+  });
+
+  it.each(PIN_OUTCOMES)("pin 1: the GMI's tool message is unchanged (%s)", async (outcome) => {
+    const { toolMessage } = await forgeTurn(outcome);
+
+    expect(typeof toolMessage).toBe('string');
+    const content = toolMessage as string;
+    expect(comparableToolMessage(content, outcome)).toBe(PINS.gmiToolMessage[outcome]);
+    for (const name of TRACE_NAMES) {
+      expect(content).not.toContain(name);
+    }
+  });
+
+  it.each(PIN_OUTCOMES)("pin 2: the GMI's TOOL_RESULT chunk is unchanged (%s)", async (outcome) => {
+    const { toolResult } = await forgeTurn(outcome);
+
+    expect(comparableToolResult(toolResult, outcome)).toEqual(PINS.gmiToolResultChunk[outcome]);
+    const json = JSON.stringify(toolResult);
+    for (const name of TRACE_NAMES) {
+      expect(json).not.toContain(name);
+    }
+  });
+
+  it.each(PIN_OUTCOMES)('pin 3: CapturedForge.output is unchanged (%s)', async (outcome) => {
+    const h = await directEngine({ judgeReplies: [pinJudgeReply(outcome)] });
+    if (outcome === 'thrown') {
+      failNextRegistration();
+    }
+    const captures: CapturedForge[] = [];
+    const wrapped = departmentWrapper(h.forgeTool, captures);
+
+    await wrapped.execute(pinArgs(outcome), toolContext());
+
+    expect(captures).toHaveLength(1);
+    expect(captures[0].output).toEqual(PINS.captureOutput[outcome]);
+    // The capture's own fields, apart from the trace it carries.
+    const ownFields: Record<string, unknown> = { ...captures[0] };
+    delete ownFields.trace;
+    const json = JSON.stringify(ownFields);
+    for (const name of TRACE_NAMES) {
+      expect(json).not.toContain(name);
+    }
+  });
+
+  it("pin 4: forge_tool's input schema gains only justification", async () => {
+    const { engine } = await directEngine();
+    const schema = new ForgeToolMetaTool(engine).inputSchema;
+
+    // The property is its description alone: it names no type, so it takes any JSON value.
+    expect(schema).toEqual({
+      ...FD17F220_SCHEMA,
+      properties: {
+        ...FD17F220_SCHEMA.properties,
+        justification: {
+          description:
+            'Optional: What gap this tool fills that no tool you already have covers, in one to three sentences.',
+        },
+      },
+    });
+    expect(schema.required).toEqual(FD17F220_SCHEMA.required);
+    const names = Object.keys(schema.properties);
+    expect(names[names.length - 1]).toBe('justification');
+  });
+
+  it("pin 5: the judge's prompt is unchanged for an output JSON can write", async () => {
+    const h = await directEngine({ hostTools: [richOutputTool()] });
+
+    await h.engine.forge(judgePromptArgs() as unknown as ForgeToolRequest, directContext());
+
+    expect(h.generateText).toHaveBeenCalledTimes(1);
+    expect(h.generateText.mock.calls[0]).toEqual(PINS.judgePrompt);
   });
 });
