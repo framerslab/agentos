@@ -676,7 +676,7 @@ Runnable source: [`examples/query-router-host-hooks.mjs`](https://github.com/fra
 
 ## 13. Per-Agent Identity via SOUL.md
 
-Load an agent's identity from a markdown workspace. `agent({ soul })` puts the `SOUL.md` body at the head of the system prompt, followed by `STYLE.md` and the `memory/index.md` catalog. The loader also parses the YAML frontmatter (HEXACO scores, voice, mood, hard limits) into an [`IPersonaDefinition`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/IPersonaDefinition.ts), which the full runtime takes as a persona; `agent()` does not read those fields. Compatible with the [aaronjmars/soul.md](https://github.com/aaronjmars/soul.md) and OpenClaw conventions.
+Load an agent's identity from a markdown workspace. `agent({ soul })` puts the `SOUL.md` body at the head of the system prompt, followed by `STYLE.md` and the `memory/index.md` catalog. The loader also parses the YAML frontmatter (HEXACO scores, voice, mood, hard limits) into an [`IPersonaDefinition`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/IPersonaDefinition.ts), which the full runtime takes as a persona; `agent()` renders the hard limits, the `hexaco` trait paragraph and the name from it, and has no renderer for mood or voice. Compatible with the [soul.md](https://github.com/aeonfun/soul.md) and OpenClaw conventions.
 
 Workspace layout (per agent):
 
@@ -748,7 +748,7 @@ const ephemeral = agent({
 const reply = await aria.generate('I need help with my invoice.');
 ```
 
-`agent({ soul })` does not read the `hexaco` scores; pass `personality` to give the agent its trait directives. On the full runtime the scores become the persona's `personalityTraits`. See [SOUL_FILES.md](../SOUL_FILES.md) for the full 6-file workspace spec.
+`agent({ soul })` renders the soul's `hexaco` scores as the trait paragraph; a `personality` you pass takes their place, and `systemBlocks`, which replace the assembled prompt, leave the paragraph out ([`agent.ts` L794](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/api/agent.ts#L794)). On the full runtime the scores become the persona's `personalityTraits`. See [SOUL_FILES.md](../SOUL_FILES.md) for the full 6-file workspace spec.
 
 For an agent with long-term memory, use `souledAgent()` instead of `agent()`. It injects the index of the operator's pages (the markdown files under `memory/`) into the prelude, adds the `read_memory_page` tool, keeps what each user says apart under that user's own key, and folds it into that user's own pages, which are rows of the store and never files:
 

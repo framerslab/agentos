@@ -52,6 +52,8 @@
 
 #### Memory & Storage
 
+- [**Soul Files & the Markdown Memory Wiki**](./SOUL_FILES.md): a character's identity in Markdown files, and the `memory/` wiki kept per user
+- [**A Character That Remembers Each User: Which Call to Use**](./SOUL_ENTRY_POINTS.md): what `souledAgent()`, `gmi({ soul })` and `agent({ soul })` each store about a user, where and for how long, and which call exports, corrects and deletes it
 - [**Cognitive Memory**](./memory/COGNITIVE_MEMORY.md) — Personality-modulated memory with Ebbinghaus decay, Baddeley's working memory, spreading activation, HEXACO-driven encoding, and the consolidation loop
 - [**RAG Memory Configuration**](./memory/RAG_MEMORY_CONFIGURATION.md) — Vector storage and retrieval setup
 - [**SQL Storage Quickstart**](./getting-started/SQL_STORAGE_QUICKSTART.md) — Database integration guide
