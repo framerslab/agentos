@@ -330,7 +330,10 @@ export interface LibraryPlanOptions {
    * input, model and dimensions.
    */
   inputs: string[];
-  /** The part after `#` of a new passage's id. A random UUID by default; it never comes from the passage's content. */
+  /**
+   * The part after `#` of a new passage's id, holding no `#`. A random UUID by default; it never comes from the passage's
+   * content.
+   */
   newId?: () => string;
 }
 
@@ -822,8 +825,9 @@ export class LibraryIndex {
    * On a store without listSourcePassages, patchPassages and withSourceLock, every passage is embedded and the
    * source is replaced whole when the plan is applied.
    *
-   * @throws When the source has no tenant or no group, when there is not one input per passage, or when the
-   *   embedding has no model, a size that is not a whole number, or a size other than `dimensions`.
+   * @throws When the source has no tenant or no group, when there is not one input per passage, when the
+   *   embedding has no model, a size that is not a whole number, or a size other than `dimensions`, or when `newId`
+   *   gives an id twice, the id of a stored row, or a suffix holding a `#`.
    */
   async planSource(source: LibrarySource, options: LibraryPlanOptions): Promise<LibrarySourcePlan> {
     if (!source.tenantId || source.aclGroups.length === 0) {
@@ -868,7 +872,13 @@ export class LibraryIndex {
       const candidates = (byInput.get(inputHash) ?? []).filter((row) => !kept.has(row.id));
       const match = candidates.find((row) => row.metadata.textHash === textHash) ?? candidates[0];
       if (!match) {
-        const id = `${source.sourceId}#${newId()}`;
+        const suffix = newId();
+        // The last `#` of an id separates its source from its suffix, so a suffix with no `#` never makes the id of
+        // another source's row (`indexSource`'s suffixes are numbers).
+        if (suffix.includes('#')) {
+          throw new Error(`LibraryIndex.planSource: newId gave ${suffix}, which holds a #; an id with it could be another source's row.`);
+        }
+        const id = `${source.sourceId}#${suffix}`;
         if (taken.has(id)) throw new Error(`LibraryIndex.planSource: newId gave the id ${id} twice.`);
         taken.add(id);
         rows.push({ id, text: passage.text, metadata, at: toEmbed.length });
