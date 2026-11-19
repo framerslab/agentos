@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@framers/sql-storage-adapter':
-        specifier: ^0.9.6
-        version: 0.9.6(better-sqlite3@13.0.3)
+        specifier: ^0.9.7
+        version: 0.9.7(better-sqlite3@13.0.3)
       '@livekit/rtc-node':
         specifier: ^1.1.0
         version: 1.1.0
@@ -106,11 +106,11 @@ importers:
         specifier: link:.
         version: 'link:'
       '@framers/agentos-ext-account-sources':
-        specifier: ^0.11.3
-        version: 0.11.3(@framers/agentos@)(better-sqlite3@13.0.3)
+        specifier: ^0.11.4
+        version: 0.11.4(@framers/agentos@)(better-sqlite3@13.0.3)
       '@framers/agentos-extensions-registry':
-        specifier: ^0.18.20
-        version: 0.18.20(@aws-sdk/client-polly@3.1045.0)(@framers/agentos-ext-account-sources@0.11.3(@framers/agentos@)(better-sqlite3@13.0.3))(@framers/agentos@)(@google-cloud/speech@6.7.1)(@google-cloud/text-to-speech@5.8.1)(@picovoice/porcupine-node@3.0.6)(@types/express@4.17.25)(@whiskeysockets/baileys@6.7.21(sharp@0.34.5))(express@5.3.0)(mammoth@1.13.0)(nostr-wasm@0.1.0)(onnxruntime-node@1.21.0)(pdf-parse@1.1.4)(react@19.3.0)(request@2.88.2)(tesseract.js@7.0.0)(typescript@5.9.3)(undici@7.30.0)(vosk@0.3.39)
+        specifier: ^0.18.21
+        version: 0.18.21(@aws-sdk/client-polly@3.1045.0)(@framers/agentos-ext-account-sources@0.11.4(@framers/agentos@)(better-sqlite3@13.0.3))(@framers/agentos@)(@google-cloud/speech@6.7.1)(@google-cloud/text-to-speech@5.8.1)(@picovoice/porcupine-node@3.0.6)(@types/express@4.17.25)(@whiskeysockets/baileys@6.7.21(sharp@0.34.5))(express@5.3.0)(mammoth@1.13.0)(nostr-wasm@0.1.0)(onnxruntime-node@1.21.0)(pdf-parse@1.1.4)(react@19.3.0)(request@2.88.2)(tesseract.js@7.0.0)(typescript@5.9.3)(undici@7.30.0)(vosk@0.3.39)
       '@jitl/quickjs-wasmfile-release-sync':
         specifier: 0.32.0
         version: 0.32.0
@@ -764,11 +764,11 @@ packages:
   '@fast-csv/parse@4.3.6':
     resolution: {integrity: sha512-uRsLYksqpbDmWaSmzvJcuApSEe38+6NQZBUsuAyMZKqHxH0g1wcJgsKUvN3WC8tewaqFjBMMGrkHmC+T7k8LvA==}
 
-  '@framers/agentos-ext-account-sources@0.11.3':
-    resolution: {integrity: sha512-8Zz1K9RjNGfjyLAZ+PoJENDlh9qhN2G/ovtRiS0ZlE0XzVsUXXwBl2/yYFNwt0sh/ZuGZfK6HIutnzUclgzpCw==}
+  '@framers/agentos-ext-account-sources@0.11.4':
+    resolution: {integrity: sha512-iH9e671pnqqcfdTX5p38xBBQLbcqkBr0pkvmISV+6L1cIod4vtur6QZcL/D/r91xoWwGhYOTltNYZjMjtgpnAA==}
     engines: {node: '>=22'}
     peerDependencies:
-      '@framers/agentos': '>=0.16.0'
+      '@framers/agentos': '>=0.19.3'
 
   '@framers/agentos-ext-agent-delegation@0.1.5':
     resolution: {integrity: sha512-E/sg3H4ZfY6HUBHzvmUSGDYqTfJtGEwNZ40bOy1VA//tCgjms12LCo005xvYTZDstLhHkU8/z2hz1AcIwwxr8g==}
@@ -1285,14 +1285,14 @@ packages:
       '@framers/agentos': '>=0.10.40'
       '@picovoice/porcupine-node': ^3.0.0
 
-  '@framers/agentos-ext-public-sources@0.2.1':
-    resolution: {integrity: sha512-psvsV4xwybP0iDXw4JkX6MFtdgkt1zq/HAQpd1vNpB5eRuDCyHtxRGje3SKGf7BLR28s8eUzrx/b09ZnQCWGrg==}
+  '@framers/agentos-ext-public-sources@0.2.3':
+    resolution: {integrity: sha512-ObVL0WtdSObfLBQU8t88Nla20sqc/da7+dqlfm2v5hzlHjxEQLK0XpiwzvtVFrM5jceuiwFGB4eMD4FX48Ig/Q==}
     engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-public-sources@0.2.3':
-    resolution: {integrity: sha512-ObVL0WtdSObfLBQU8t88Nla20sqc/da7+dqlfm2v5hzlHjxEQLK0XpiwzvtVFrM5jceuiwFGB4eMD4FX48Ig/Q==}
+  '@framers/agentos-ext-public-sources@0.3.0':
+    resolution: {integrity: sha512-usO+O1TDnqHLZG4nkDMXxjCyVLxnxsLyuj0akMMqhSO8ffu/TE64iUiQdRUFgVUHlBRmWhtSX8bB3RLa+HMiiw==}
     engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
@@ -1417,8 +1417,8 @@ packages:
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-extensions-registry@0.18.20':
-    resolution: {integrity: sha512-NIWcutrg9kVxYemhrBn1R3oaSQSB0mrEnP3SJzM1S0s3XuO439YRVyAb398guECeNNkrvdoZXo7aqADhuNNblg==}
+  '@framers/agentos-extensions-registry@0.18.21':
+    resolution: {integrity: sha512-B6tihMd0R24YUEJ9vT/ihOCfrc7A+EmnsheV2KdUnboqHvcxJLSPN+i89tIaszd0cqyMm1MuHWG5yjr+O+wLPQ==}
     peerDependencies:
       '@framers/agentos': '>=0.10.34'
     peerDependenciesMeta:
@@ -1428,8 +1428,8 @@ packages:
   '@framers/agentos-skills@0.10.4':
     resolution: {integrity: sha512-ZFlO+ijBVZBmTQwPDZUUeFlpAGlYlfJBnQhJ3OIH85IkzqC20AO4YQmf1AhZb+LjcH2lDf6wIlzexzx2dUkelw==}
 
-  '@framers/sql-storage-adapter@0.9.6':
-    resolution: {integrity: sha512-BhyUgUPNJCnG9eBMtZsHUbDEpboT4jW0102Z7ZsXN8BRHBTkEvmm47wPyM5dxWNijLV9ScFMOnuSjyWruKwZyA==}
+  '@framers/sql-storage-adapter@0.9.7':
+    resolution: {integrity: sha512-GXQaUCgYPjfGZIv9Ry20GbUxrIJzwuXEfOuGD7TqqVLdT5A+nko7Co56MOGNo2gN9CPU+q/9FgEbp6IJdLjOuA==}
     peerDependencies:
       '@aws-sdk/client-s3': ^3.0.0
       '@capacitor-community/sqlite': ^6.0.0 || ^7.0.0 || ^8.0.0
@@ -8689,11 +8689,11 @@ snapshots:
       lodash.uniq: 4.5.0
     optional: true
 
-  '@framers/agentos-ext-account-sources@0.11.3(@framers/agentos@)(better-sqlite3@13.0.3)':
+  '@framers/agentos-ext-account-sources@0.11.4(@framers/agentos@)(better-sqlite3@13.0.3)':
     dependencies:
       '@framers/agentos': 'link:'
-      '@framers/agentos-ext-public-sources': 0.2.1(@framers/agentos@)
-      '@framers/sql-storage-adapter': 0.9.6(better-sqlite3@13.0.3)
+      '@framers/agentos-ext-public-sources': 0.3.0(@framers/agentos@)
+      '@framers/sql-storage-adapter': 0.9.7(better-sqlite3@13.0.3)
     transitivePeerDependencies:
       - '@aws-sdk/client-s3'
       - '@capacitor-community/sqlite'
@@ -8732,11 +8732,11 @@ snapshots:
       - encoding
     optional: true
 
-  '@framers/agentos-ext-calendar-google@1.0.6(@framers/agentos-ext-account-sources@0.11.3(@framers/agentos@)(better-sqlite3@13.0.3))(@framers/agentos@)':
+  '@framers/agentos-ext-calendar-google@1.0.6(@framers/agentos-ext-account-sources@0.11.4(@framers/agentos@)(better-sqlite3@13.0.3))(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
-      '@framers/agentos-ext-account-sources': 0.11.3(@framers/agentos@)(better-sqlite3@13.0.3)
-      '@framers/agentos-ext-google-drive': 1.4.0(@framers/agentos-ext-account-sources@0.11.3(@framers/agentos@)(better-sqlite3@13.0.3))(@framers/agentos@)
+      '@framers/agentos-ext-account-sources': 0.11.4(@framers/agentos@)(better-sqlite3@13.0.3)
+      '@framers/agentos-ext-google-drive': 1.4.0(@framers/agentos-ext-account-sources@0.11.4(@framers/agentos@)(better-sqlite3@13.0.3))(@framers/agentos@)
       googleapis: 183.0.0
     transitivePeerDependencies:
       - supports-color
@@ -9184,10 +9184,10 @@ snapshots:
       '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-github@0.11.0(@framers/agentos-ext-account-sources@0.11.3(@framers/agentos@)(better-sqlite3@13.0.3))(@framers/agentos@)':
+  '@framers/agentos-ext-github@0.11.0(@framers/agentos-ext-account-sources@0.11.4(@framers/agentos@)(better-sqlite3@13.0.3))(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
-      '@framers/agentos-ext-account-sources': 0.11.3(@framers/agentos@)(better-sqlite3@13.0.3)
+      '@framers/agentos-ext-account-sources': 0.11.4(@framers/agentos@)(better-sqlite3@13.0.3)
       '@octokit/rest': 22.0.1
     optional: true
 
@@ -9203,10 +9203,10 @@ snapshots:
       '@google-cloud/text-to-speech': 5.8.1
     optional: true
 
-  '@framers/agentos-ext-google-drive@1.4.0(@framers/agentos-ext-account-sources@0.11.3(@framers/agentos@)(better-sqlite3@13.0.3))(@framers/agentos@)':
+  '@framers/agentos-ext-google-drive@1.4.0(@framers/agentos-ext-account-sources@0.11.4(@framers/agentos@)(better-sqlite3@13.0.3))(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
-      '@framers/agentos-ext-account-sources': 0.11.3(@framers/agentos@)(better-sqlite3@13.0.3)
+      '@framers/agentos-ext-account-sources': 0.11.4(@framers/agentos@)(better-sqlite3@13.0.3)
       micromark: 4.0.3
     transitivePeerDependencies:
       - supports-color
@@ -9294,16 +9294,16 @@ snapshots:
       '@picovoice/porcupine-node': 3.0.6
     optional: true
 
-  '@framers/agentos-ext-public-sources@0.2.1(@framers/agentos@)':
-    dependencies:
-      '@framers/agentos': 'link:'
-      htmlparser2: 12.0.0
-
   '@framers/agentos-ext-public-sources@0.2.3(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
       htmlparser2: 12.0.0
     optional: true
+
+  '@framers/agentos-ext-public-sources@0.3.0(@framers/agentos@)':
+    dependencies:
+      '@framers/agentos': 'link:'
+      htmlparser2: 12.0.0
 
   '@framers/agentos-ext-self-harm-referral@0.1.3(@framers/agentos@)':
     dependencies:
@@ -9461,14 +9461,14 @@ snapshots:
       '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-extensions-registry@0.18.20(@aws-sdk/client-polly@3.1045.0)(@framers/agentos-ext-account-sources@0.11.3(@framers/agentos@)(better-sqlite3@13.0.3))(@framers/agentos@)(@google-cloud/speech@6.7.1)(@google-cloud/text-to-speech@5.8.1)(@picovoice/porcupine-node@3.0.6)(@types/express@4.17.25)(@whiskeysockets/baileys@6.7.21(sharp@0.34.5))(express@5.3.0)(mammoth@1.13.0)(nostr-wasm@0.1.0)(onnxruntime-node@1.21.0)(pdf-parse@1.1.4)(react@19.3.0)(request@2.88.2)(tesseract.js@7.0.0)(typescript@5.9.3)(undici@7.30.0)(vosk@0.3.39)':
+  '@framers/agentos-extensions-registry@0.18.21(@aws-sdk/client-polly@3.1045.0)(@framers/agentos-ext-account-sources@0.11.4(@framers/agentos@)(better-sqlite3@13.0.3))(@framers/agentos@)(@google-cloud/speech@6.7.1)(@google-cloud/text-to-speech@5.8.1)(@picovoice/porcupine-node@3.0.6)(@types/express@4.17.25)(@whiskeysockets/baileys@6.7.21(sharp@0.34.5))(express@5.3.0)(mammoth@1.13.0)(nostr-wasm@0.1.0)(onnxruntime-node@1.21.0)(pdf-parse@1.1.4)(react@19.3.0)(request@2.88.2)(tesseract.js@7.0.0)(typescript@5.9.3)(undici@7.30.0)(vosk@0.3.39)':
     optionalDependencies:
       '@framers/agentos': 'link:'
       '@framers/agentos-ext-agent-delegation': 0.1.5(@framers/agentos@)
       '@framers/agentos-ext-amazon-polly': 0.2.4(@aws-sdk/client-polly@3.1045.0)(@framers/agentos@)
       '@framers/agentos-ext-auth': 1.2.2(@framers/agentos@)
       '@framers/agentos-ext-browser-automation': 0.3.3(@framers/agentos@)
-      '@framers/agentos-ext-calendar-google': 1.0.6(@framers/agentos-ext-account-sources@0.11.3(@framers/agentos@)(better-sqlite3@13.0.3))(@framers/agentos@)
+      '@framers/agentos-ext-calendar-google': 1.0.6(@framers/agentos-ext-account-sources@0.11.4(@framers/agentos@)(better-sqlite3@13.0.3))(@framers/agentos@)
       '@framers/agentos-ext-channel-blog-publisher': 0.1.7(@framers/agentos@)
       '@framers/agentos-ext-channel-bluesky': 0.1.6(@framers/agentos@)
       '@framers/agentos-ext-channel-discord': 0.2.1(@framers/agentos@)
@@ -9531,7 +9531,7 @@ snapshots:
       '@framers/agentos-ext-email-gmail': 0.1.9(@framers/agentos@)
       '@framers/agentos-ext-endpoint-semantic': 0.2.4(@framers/agentos@)
       '@framers/agentos-ext-giphy': 1.1.3(@framers/agentos@)
-      '@framers/agentos-ext-github': 0.11.0(@framers/agentos-ext-account-sources@0.11.3(@framers/agentos@)(better-sqlite3@13.0.3))(@framers/agentos@)
+      '@framers/agentos-ext-github': 0.11.0(@framers/agentos-ext-account-sources@0.11.4(@framers/agentos@)(better-sqlite3@13.0.3))(@framers/agentos@)
       '@framers/agentos-ext-google-cloud-stt': 0.3.7(@framers/agentos@)(@google-cloud/speech@6.7.1)
       '@framers/agentos-ext-google-cloud-tts': 0.3.7(@framers/agentos@)(@google-cloud/text-to-speech@5.8.1)
       '@framers/agentos-ext-grounding-guard': 0.12.0(@framers/agentos@)
@@ -9602,7 +9602,7 @@ snapshots:
   '@framers/agentos-skills@0.10.4':
     optional: true
 
-  '@framers/sql-storage-adapter@0.9.6(better-sqlite3@13.0.3)':
+  '@framers/sql-storage-adapter@0.9.7(better-sqlite3@13.0.3)':
     dependencies:
       '@types/sql.js': 1.4.11
       pg: 8.23.1

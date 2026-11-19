@@ -294,8 +294,18 @@ function getMetricInstruments(): AgentOSMetricsInstruments | null {
 
   if (instruments && instrumentsMeterName === state.meterName) return instruments;
 
+  // Metrics are best-effort: a host meter provider that throws while the instruments are made leaves this call
+  // unrecorded, never the turn, so a caller's stream still ends as its turn ends. The next call tries again.
+  try {
+    return createMetricInstruments();
+  } catch {
+    return null;
+  }
+}
+
+function createMetricInstruments(): AgentOSMetricsInstruments {
   const meter = metrics.getMeter(state.meterName);
-  instruments = {
+  const made: AgentOSMetricsInstruments = {
     turns: meter.createCounter('agentos.turns', {
       description: 'Number of AgentOS turns completed.',
       unit: '1',
@@ -346,8 +356,9 @@ function getMetricInstruments(): AgentOSMetricsInstruments | null {
       unit: 'ms',
     }),
   };
+  instruments = made;
   instrumentsMeterName = state.meterName;
-  return instruments;
+  return made;
 }
 
 export type AgentOSTurnMetricInput = Readonly<{

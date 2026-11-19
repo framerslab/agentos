@@ -652,21 +652,36 @@ export class SqlSpendMeter implements ISpendMeter {
    * the settlement a {@link reconcile} pass decided for an expired reservation it read: the move is made only while the
    * row is still that attempt and still past its lease at the pass's `now` and, with `unfenced`, still carries no
    * fence: a retry or a heartbeat made while the pass asked its resolver stands, and with `unfenced` so does a deferral
-   * by an opted-in pass.
+   * by an opted-in pass. A request that names its {@link SpendSettleRequest.attempt} moves the row only while it is
+   * still that attempt; a later attempt means the one named was released, so that settle moves nothing. An `attempt`
+   * that is not a whole number of 1 or more rejects with a `TypeError` before the store is read.
    */
   private settleOnce(req: SpendSettleRequest, pass?: { attempt: number; unfenced: boolean }): Promise<SpendSettleResult> {
     const now = req.now ?? Date.now();
     const { meter, reservations } = this.tables;
-    const guard = pass ? ` AND attempts = ? AND expires_at <= ?${pass.unfenced ? ` AND ${UNFENCED}` : ''}` : '';
+    // the attempt this settle is about: the one a reconcile pass read, or the one the caller's reserve() answered. A
+    // value given that no reserve() answers names no reservation, and settled as if none were named it could end a
+    // newer attempt, so it is refused before the store is read.
+    const given: unknown = req.attempt;
+    if (given !== undefined && !(typeof given === 'number' && Number.isSafeInteger(given) && given >= 1)) {
+      const shown = typeof given === 'number' ? String(given) : given === null ? 'null' : typeof given;
+      return Promise.reject(new TypeError(`SqlSpendMeter.settle needs attempt to be the whole number reserve() answered, 1 or more, or left out; got ${shown}.`));
+    }
+    const named = given as number | undefined;
+    const attempt = pass ? pass.attempt : named;
+    const guard = `${attempt === undefined ? '' : ' AND attempts = ?'}${pass ? ` AND expires_at <= ?${pass.unfenced ? ` AND ${UNFENCED}` : ''}` : ''}`;
+    // a caller's settle of an attempt the operation has left: that attempt was released before the next was reserved
+    const stale = (row: { attempts?: unknown } | null | undefined) => !pass && named !== undefined && !!row && num(row.attempts) !== named;
     // whether the table holds settled_units is known once the schema is ready, inside run()
     return this.run(() =>
       this.db.transaction(async (trx): Promise<SpendSettleResult> => {
         const tracked = this.settledUnits;
         const row = await trx.get<ReservationRow>(
-          `SELECT operation_id, account_id, period, units, state${tracked ? ', settled_units' : ''} FROM ${reservations} WHERE operation_id = ?`,
+          `SELECT operation_id, account_id, period, units, state, attempts${tracked ? ', settled_units' : ''} FROM ${reservations} WHERE operation_id = ?`,
           [req.operationId],
         );
         if (!row) return { status: 'not_found' };
+        if (stale(row)) return { status: 'already_settled', state: 'released' };
         const move = transition(row.state, req.outcome);
         if (!move) return { status: 'already_settled', state: row.state };
         const reservation = num(row.units);
@@ -681,8 +696,9 @@ export class SqlSpendMeter implements ISpendMeter {
         // of that retry there is counted and refunded by its whole reservation
         const settledUnits = move.used > 0 ? moved : null;
         // the move only from the state just read: a concurrent settle that got there first leaves nothing to change.
-        // A reconcile's move also names the attempt it decided about and its lease, and on Postgres a row another
-        // transaction changed meanwhile is tested again in its new version, so a deferral that committed first stands.
+        // A reconcile's move also names the attempt it decided about and its lease, a caller's move the attempt it
+        // reserved, and on Postgres a row another transaction changed meanwhile is tested again in its new version, so a
+        // deferral that committed first stands, and so does a retry reserved after a release that committed first.
         const changed = await trx.run(
           `UPDATE ${reservations} SET state = ?, outcome = ?, settled_at = ?, usage_json = ?${tracked ? ', settled_units = ?' : ''} WHERE operation_id = ? AND state = ?${guard}`,
           [
@@ -693,11 +709,13 @@ export class SqlSpendMeter implements ISpendMeter {
             ...(tracked ? [settledUnits] : []),
             req.operationId,
             row.state,
-            ...(pass ? [pass.attempt, now] : []),
+            ...(attempt === undefined ? [] : [attempt]),
+            ...(pass ? [now] : []),
           ],
         );
         if (!changed.changes) {
-          const current = await trx.get<{ state: SpendReservationState }>(`SELECT state FROM ${reservations} WHERE operation_id = ?`, [req.operationId]);
+          const current = await trx.get<{ state: SpendReservationState; attempts: unknown }>(`SELECT state, attempts FROM ${reservations} WHERE operation_id = ?`, [req.operationId]);
+          if (stale(current)) return { status: 'already_settled', state: 'released' };
           return { status: 'already_settled', state: current?.state };
         }
         const sets: string[] = [];
