@@ -241,4 +241,46 @@ describe("ChunkingEngine — 'anchored' strategy", () => {
     expect(plain.every((chunk) => chunk.heading === undefined && chunk.metadata === undefined)).toBe(true);
     expectOffsets(text, plain);
   });
+
+  it('cuts a Markdown heading longer than the chunk size, with its section on every passage', async () => {
+    for (const [text, size] of [
+      [`# ${'heading '.repeat(200)}\nBody.`, 100],
+      [`# ${'x'.repeat(600)}\n\nThe text under it.`, 512],
+    ] as const) {
+      const chunks = await engine.chunk(text, { strategy: 'anchored', chunkSize: size, markdown: true });
+      const title = text.slice(2, text.indexOf('\n')).trim();
+      expect(chunks.length).toBeGreaterThan(1);
+      expect(chunks[0].start).toBe(0);
+      for (const chunk of chunks) {
+        expect(chunk.content.length).toBeLessThanOrEqual(size);
+        expect(text.slice(chunk.start, chunk.end)).toBe(chunk.content);
+        expect(chunk.heading).toBe(title);
+        expect(chunk.metadata).toEqual({ headingLevel: 1 });
+      }
+      expect(chunks.map((chunk) => chunk.content).join(' ').replace(/\s+/g, '')).toBe(text.replace(/\s+/g, ''));
+    }
+  });
+
+  it('finds the sentence ends of a long run of punctuation in linear time', async () => {
+    const text = `${'!'.repeat(64_000)}`;
+    const began = performance.now();
+    const chunks = await anchored(text);
+    const took = performance.now() - began;
+    expectOffsets(text, chunks);
+    expect(chunks.map((chunk) => chunk.content).join('')).toBe(text);
+    expect(took).toBeLessThan(1_000);
+  }, 60_000);
+
+  it('floors a fractional chunk size and needs room for a surrogate pair', async () => {
+    const text = '\u{1F600}\u{1F600}\u{1F600}';
+    const chunks = await engine.chunk(text, { strategy: 'anchored', chunkSize: 2.5 });
+    expect(chunks.map((chunk) => chunk.content)).toEqual(['\u{1F600}', '\u{1F600}', '\u{1F600}']);
+    expect(chunks.every((chunk) => Number.isInteger(chunk.start) && Number.isInteger(chunk.end))).toBe(true);
+    expect(chunks.map(({ start, end }) => [start, end])).toEqual([[0, 2], [2, 4], [4, 6]]);
+    for (const chunkSize of [1, 1.5, 1.99]) {
+      await expect(engine.chunk('\u{1F600}x', { strategy: 'anchored', chunkSize })).rejects.toThrow(RangeError);
+    }
+    // The other strategies still take a size of 1.
+    await expect(engine.chunk('abc', { strategy: 'fixed', chunkSize: 1, chunkOverlap: 0 })).resolves.toBeInstanceOf(Array);
+  });
 });
