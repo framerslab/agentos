@@ -195,6 +195,38 @@ describe('ElevenLabsTextToSpeechProvider.synthesizeDialogue', () => {
     await expect(provider.synthesizeDialogue(LINES)).rejects.toThrow(/audio_base64/);
   });
 
+  it('refuses a voice segment whose line index is outside the lines sent', async () => {
+    for (const lineIndex of [2, -1]) {
+      const segments = (dialogueAnswer().voice_segments as Array<Record<string, unknown>>).map((segment, position) =>
+        position === 1 ? { ...segment, dialogue_input_index: lineIndex } : segment
+      );
+      const fetchImpl = answering({ status: 200, body: dialogueAnswer({ voice_segments: segments }) });
+      const provider = new ElevenLabsTextToSpeechProvider({ apiKey: 'xi-test', fetchImpl });
+
+      await expect(provider.synthesizeDialogue(LINES)).rejects.toThrow(/voice segment at position 1/);
+    }
+  });
+
+  it('refuses an alignment that is present but malformed', async () => {
+    const malformed = [
+      { characters: ['H', 'i'], character_start_times_seconds: [null], character_end_times_seconds: ['bad'] },
+      { characters: ['H', 'i'], character_start_times_seconds: [0, 0.1], character_end_times_seconds: [0.1] },
+      { characters: ['H', 2], character_start_times_seconds: [0, 0.1], character_end_times_seconds: [0.1, 0.2] },
+      { characters: ['H'] },
+    ];
+    for (const alignment of malformed) {
+      const asWritten = answering({ status: 200, body: dialogueAnswer({ alignment }) });
+      await expect(
+        new ElevenLabsTextToSpeechProvider({ apiKey: 'xi-test', fetchImpl: asWritten }).synthesizeDialogue(LINES)
+      ).rejects.toThrow(/malformed alignment/);
+
+      const normalized = answering({ status: 200, body: dialogueAnswer({ normalized_alignment: alignment }) });
+      await expect(
+        new ElevenLabsTextToSpeechProvider({ apiKey: 'xi-test', fetchImpl: normalized }).synthesizeDialogue(LINES)
+      ).rejects.toThrow(/malformed normalized_alignment/);
+    }
+  });
+
   it('refuses a 200 answer whose audio_base64 decodes to no bytes', async () => {
     const fetchImpl = answering({ status: 200, body: dialogueAnswer({ audio_base64: '   ' }) });
     const provider = new ElevenLabsTextToSpeechProvider({ apiKey: 'xi-test', fetchImpl });
