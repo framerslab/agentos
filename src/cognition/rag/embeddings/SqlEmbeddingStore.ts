@@ -178,9 +178,10 @@ function parts<T>(items: readonly T[], size: number): T[][] {
  * const model = { model: 'text-embedding-3-small', dimensions: 1536 };
  * const hashes = inputs.map((input) => embeddingInputHash(model, input));
  * const known = await store.get({ tenant }, model, hashes);
- * const missing = inputs.filter((_, i) => !known.has(hashes[i]));
- * const made = await embed(missing);
- * await store.put({ tenant }, model, made.map((vector, i) => ({ hash: embeddingInputHash(model, missing[i]), vector })));
+ * // One input a hash, so a sentence the batch holds twice is embedded once.
+ * const missing = [...new Map(inputs.map((input, i) => [hashes[i], input])).entries()].filter(([hash]) => !known.has(hash));
+ * const made = await embed(missing.map(([, input]) => input));
+ * await store.put({ tenant }, model, made.map((vector, i) => ({ hash: missing[i][0], vector })));
  * ```
  */
 export class SqlEmbeddingStore {

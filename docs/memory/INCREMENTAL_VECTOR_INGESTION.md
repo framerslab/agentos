@@ -170,9 +170,10 @@ const store = new SqlEmbeddingStore({ adapter, prefix: 'shared_sentence', maxIdl
 const model = { model: 'text-embedding-3-small', dimensions: 1536 };
 const hashes = inputs.map((input) => embeddingInputHash(model, input));
 const known = await store.get({ tenant }, model, hashes); // Map of hash to vector
-const missing = inputs.filter((_, i) => !known.has(hashes[i]));
-const made = await embed(missing);
-await store.put({ tenant }, model, made.map((vector, i) => ({ hash: embeddingInputHash(model, missing[i]), vector })));
+// One input a hash, so a sentence the batch holds twice is embedded once.
+const missing = [...new Map(inputs.map((input, i) => [hashes[i], input])).entries()].filter(([hash]) => !known.has(hash));
+const made = await embed(missing.map(([, input]) => input));
+await store.put({ tenant }, model, made.map((vector, i) => ({ hash: missing[i][0], vector })));
 ```
 
 - A row is a tenant, a model, a vector size, an input hash, the vector as four-byte floats, a token count and two times. No column holds text, so the store can sit beside data whose text must not be copied.
