@@ -18,7 +18,9 @@ import type {
 } from '../../../orchestration/hitl/IHumanInteractionManager.js';
 import type { ToolCallResult, UserContext } from '../../substrate/IGMI.js';
 import type { EmergentCapabilityEngine } from '../EmergentCapabilityEngine.js';
+import { EmergentJudge } from '../EmergentJudge.js';
 import { EmergentToolRegistry } from '../EmergentToolRegistry.js';
+import { QuickJSExecutor } from '../executor/QuickJSExecutor.js';
 import type { ForgedCodeExecutor } from '../executor/types.js';
 import {
   ForgeToolMetaTool,
@@ -27,7 +29,7 @@ import {
   type ForgeToolInput,
   type WrapForgeToolOptions,
 } from '../index.js';
-import type { ForgeResult, ForgeToolRequest } from '../types.js';
+import type { CreationVerdict, ForgeResult, ForgeToolRequest } from '../types.js';
 import {
   approvingHitl,
   callTool,
@@ -38,7 +40,9 @@ import {
   type ForgeHostOptions,
 } from './helpers/forge-host.js';
 import {
+  APPROVED_JSON,
   REJECTED_JSON,
+  captureLines,
   composeArgs,
   directEngine,
   hookRecorder,
@@ -47,8 +51,11 @@ import {
   wrapperArgs,
   type TraceShape,
 } from './helpers/forge-trace-harness.js';
+import { TEXT_IN, TEXT_OUT } from './helpers/seed-rows.js';
+import { createSqliteAdapter } from './helpers/sqlite-adapter.js';
 
 type DirectEngineOptions = NonNullable<Parameters<typeof directEngine>[0]>;
+type DirectEngine = Awaited<ReturnType<typeof directEngine>>;
 type ForgeContext = Parameters<EmergentCapabilityEngine['forge']>[1];
 
 const FORGE_ID = /^forge_[0-9a-f-]{36}$/;
@@ -417,6 +424,13 @@ class RefusingForgeTool extends ForgeToolMetaTool {
   }
 }
 
+/** A forge_tool a host subclasses to hand forge_tool's own `execute` a copy of the call's context. */
+class CopyingForgeTool extends ForgeToolMetaTool {
+  override execute(args: ForgeToolInput, context: ToolExecutionContext): Promise<ToolExecutionResult<ForgeResult>> {
+    return super.execute(args, { ...context });
+  }
+}
+
 /** A department's wrapper over `raw`, which records every attempt in `captures` and names the model it asked when `author` is set. */
 function departmentWrapper(raw: ForgeToolMetaTool, captures: CapturedForge[], author = true): ITool {
   return wrapForgeTool({
@@ -560,6 +574,105 @@ const ORCHESTRATOR_REFUSALS: OrchestratorRefusal[] = [
     message: /^tool_replaced: /,
   },
 ];
+
+/** A direct forge of the code forge of `sandboxArgs`, with its fields replaced by `overrides`. */
+function forgeDirect(engine: EmergentCapabilityEngine, overrides: Record<string, unknown> = {}): Promise<ForgeResult> {
+  return engine.forge(sandboxArgs(overrides) as unknown as ForgeToolRequest, directContext());
+}
+
+/** The judge's approval, as a trace keeps it when the forge ends after the judge. */
+const JUDGE_APPROVAL = { approved: true, reasoning: 'Tool is safe and correct.' };
+
+/** A composition with one step over the host tool `echo`. */
+function echoComposition(): Record<string, unknown> {
+  return composeArgs([{ name: 'say', tool: 'echo', inputMapping: { text: '$input.text' } }]);
+}
+
+/** A one-step composition named `name` over the tool `tool`, as the composition suite forges its cycles. */
+function composeOver(name: string, tool: string): Record<string, unknown> {
+  return {
+    name,
+    description: `Runs ${tool}.`,
+    inputSchema: TEXT_IN,
+    outputSchema: TEXT_OUT,
+    implementation: { mode: 'compose', steps: [{ name: 's', tool, inputMapping: { text: '$input.text' } }] },
+    testCases: [{ input: { text: 'hi' }, expectedOutput: { text: 'hi' } }],
+  };
+}
+
+/** The captured lines of one event. */
+function eventLines(lines: Array<Record<string, unknown>>, event: string): Array<Record<string, unknown>> {
+  return lines.filter((line) => line.event === event);
+}
+
+/** The captured lines of the forge trace's own events. */
+function forgeTraceLines(lines: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  return lines.filter((line) => {
+    const event = line.event;
+    return typeof event === 'string' && event.startsWith('emergent.forge');
+  });
+}
+
+/** How long a forge waits for a host's hook. */
+const HOOK_BOUND_MS = 1_000;
+/** A Node timer can fire up to a millisecond before its delay as `performance.now()` reads it. */
+const TIMER_SLACK_MS = 5;
+
+/** Resolves after `ms` milliseconds. */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** What `work` resolves to, and the milliseconds it took. */
+async function timed<T>(work: () => Promise<T>): Promise<{ value: T; ms: number }> {
+  const start = performance.now();
+  const value = await work();
+  return { value, ms: performance.now() - start };
+}
+
+/** The forge's own time: one approved direct forge on an engine with no hook. */
+async function ownForgeMs(): Promise<number> {
+  const { engine } = await directEngine();
+  const { value, ms } = await timed(() => forgeDirect(engine));
+  expect(value.success).toBe(true);
+  return ms;
+}
+
+/** A judge whose review a host replaced: it rejects every forge, and counts its calls. */
+class FixedJudge extends EmergentJudge {
+  calls = 0;
+
+  override async reviewCreation(): Promise<CreationVerdict> {
+    this.calls += 1;
+    return {
+      approved: false,
+      confidence: 1,
+      safety: 0,
+      correctness: 1,
+      determinism: 1,
+      bounded: 1,
+      reasoning: 'override says no',
+    };
+  }
+}
+
+/** The judge's detail when its call failed or its reply did not parse: no reply field, and empty lists. */
+function noReplyDetail(judgeError: 'llm_call_failed' | 'reply_unparsable'): Record<string, unknown> {
+  return {
+    judgeModel: 'judge-model',
+    replyParsed: false,
+    judgeError,
+    judgeApproved: null,
+    safetyPassed: null,
+    safetyConcerns: [],
+    correctnessPassed: null,
+    failedTests: [],
+    deterministic: null,
+    determinismReasoning: null,
+    bounded: null,
+    boundedReasoning: null,
+  };
+}
 
 describe('forge trace: one trace per forge, on every carrier that applies', () => {
   afterEach(() => {
@@ -1047,5 +1160,503 @@ describe('forge trace: one trace per forge, on every carrier that applies', () =
     expect(trace.outcome).toBe('approved');
     expect(trace.justification).toBe('{"gap":"sensor data"}');
     expect(trace.provenance.justification).toMatchObject({ kind: 'model', role: 'forging_agent' });
+  });
+
+  // The stages after the judge: the judge approved, and a later check or the host's registration ended the forge.
+
+  /** The one trace of a direct forge that ended after the judge approved it, on both carriers. */
+  function afterJudgeTrace(traces: TraceShape[], result: ForgeResult, stage: string, outcome: string): TraceShape {
+    expect(traces).toHaveLength(1);
+    const trace = traces[0];
+    expect(traceOf(result)).toBe(trace);
+    expectDirectEngineTrace(trace);
+    expect(trace.stage).toBe(stage);
+    expect(trace.outcome).toBe(outcome);
+    expect(trace.reason).toBe(result.error);
+    // The trace keeps the judge's verdict, also where the result leaves it out.
+    expect(trace.verdict).toMatchObject(JUDGE_APPROVAL);
+    return trace;
+  }
+
+  it('stage compose_refused_after_judge (engine)', async () => {
+    const { onForgeTrace, traces } = hookRecorder();
+    let late!: DirectEngine;
+    late = await directEngine({
+      onForgeTrace,
+      hostTools: [echoTool('echo')],
+      // The step's tool goes while the judge reviews, so the check after the judge refuses.
+      judgeReplies: [
+        async () => {
+          await late.tools.unregisterTool('echo');
+          return APPROVED_JSON;
+        },
+      ],
+    });
+
+    const result = await late.engine.forge(echoComposition() as unknown as ForgeToolRequest, directContext());
+    expect(result.success).toBe(false);
+    expect(result.toolId).toBeUndefined();
+    expect(result.error).toMatch(/^step_missing: /);
+    expect(result.verdict).toMatchObject(JUDGE_APPROVAL);
+
+    const trace = afterJudgeTrace(traces, result, 'compose_refused_after_judge', 'refused');
+    expect(trace.verdict).toEqual(result.verdict);
+  });
+
+  /** The two traces of a cycle closed by two forges: loop_a's ended at step_cycle after the judge, loop_b's was approved. */
+  function expectCycleTraces(traces: TraceShape[]): void {
+    expect(traces).toHaveLength(2);
+    const loopA = traces.find((trace) => trace.toolName === 'loop_a');
+    const loopB = traces.find((trace) => trace.toolName === 'loop_b');
+    expect(loopA).toBeDefined();
+    expect(loopB).toBeDefined();
+    expect(loopA!.stage).toBe('step_cycle');
+    expect(loopA!.outcome).toBe('refused');
+    expect(loopA!.recordedBy).toBe('engine');
+    expect(loopA!.via).toBe('forge_tool');
+    expect(loopA!.reason).toMatch(/^step_cycle: "loop_a" reaches itself through /);
+    expect(loopA!.verdict).toMatchObject(JUDGE_APPROVAL);
+    expect(loopB!.stage).toBe('approved');
+    expect(loopB!.outcome).toBe('approved');
+  }
+
+  it('stage step_cycle (engine, while the state is written)', async () => {
+    const { onForgeTrace, traces } = hookRecorder();
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db, tools: [echoTool('loop_a'), echoTool('loop_b')], onForgeTrace });
+
+    // loop_a passed its checks and is registered; its state write is held while loop_b is forged in full.
+    const gate = db.gateNext('INSERT INTO agentos_emergent_tool_state');
+    const forgingA = callTool(host.orchestrator, 'forge_tool', composeOver('loop_a', 'loop_b'), {
+      sessionId: 'sess-cycle',
+    });
+    await gate.entered;
+    const forgedB = await callTool(host.orchestrator, 'forge_tool', composeOver('loop_b', 'loop_a'), {
+      sessionId: 'sess-cycle',
+    });
+    expect(forgedB.isError).toBeFalsy();
+    gate.release();
+    const forgedA = await forgingA;
+    expect(forgedA.isError).toBe(true);
+    expect(String(forgedA.errorDetails?.message)).toContain('step_cycle');
+
+    expectCycleTraces(traces);
+  });
+
+  it('stage step_cycle (engine, after its executable is registered)', async () => {
+    const { onForgeTrace, traces } = hookRecorder();
+    let enterShutdown!: () => void;
+    const shutdownEntered = new Promise<void>((resolve) => {
+      enterShutdown = resolve;
+    });
+    let releaseShutdown!: () => void;
+    const shutdownHeld = new Promise<void>((resolve) => {
+      releaseShutdown = resolve;
+    });
+    // The executor shuts the host's loop_a down when loop_a's executable takes its name, and holds the name meanwhile.
+    const hostLoopA: ITool = {
+      ...echoTool('loop_a'),
+      shutdown: async () => {
+        enterShutdown();
+        await shutdownHeld;
+      },
+    };
+    const host = await makeForgeHost({ tools: [hostLoopA, echoTool('loop_b')], onForgeTrace });
+
+    // loop_a passed every check and its executable is being registered when loop_b is forged in full.
+    const forgingA = callTool(host.orchestrator, 'forge_tool', composeOver('loop_a', 'loop_b'), {
+      sessionId: 'sess-restore',
+    });
+    await shutdownEntered;
+    const forgedB = await callTool(host.orchestrator, 'forge_tool', composeOver('loop_b', 'loop_a'), {
+      sessionId: 'sess-restore',
+    });
+    expect(forgedB.isError).toBeFalsy();
+    releaseShutdown();
+    const forgedA = await forgingA;
+    expect(forgedA.isError).toBe(true);
+    expect(String(forgedA.errorDetails?.message)).toContain('step_cycle');
+
+    expectCycleTraces(traces);
+  });
+
+  it('stage removed_while_forging (engine)', async () => {
+    const { onForgeTrace, traces } = hookRecorder();
+    let late!: DirectEngine;
+    late = await directEngine({
+      onForgeTrace,
+      // The host's registration removes the tool it is handed.
+      onToolForged: async (tool) => {
+        await late.engine.removeTool(tool.id);
+      },
+    });
+
+    const result = await forgeDirect(late.engine);
+    expect(result.success).toBe(false);
+    expect(result.error).toBe('the tool was removed while it was being forged');
+    expect(result.verdict).toBeUndefined();
+
+    const trace = afterJudgeTrace(traces, result, 'removed_while_forging', 'failed');
+    expect(trace.reason).toBe('the tool was removed while it was being forged');
+  });
+
+  it('stage activation_failed (engine)', async () => {
+    const { onForgeTrace, traces } = hookRecorder();
+    const { engine } = await directEngine({
+      onForgeTrace,
+      onToolForged: async () => {
+        throw new Error('host registration refused');
+      },
+    });
+
+    const result = await forgeDirect(engine);
+    expect(result.success).toBe(false);
+    expect(result.error).toBe('host registration refused');
+    // The result leaves the verdict out; the trace keeps the judge's.
+    expect(result.verdict).toBeUndefined();
+
+    const trace = afterJudgeTrace(traces, result, 'activation_failed', 'failed');
+    expect(trace.reason).toBe('host registration refused');
+  });
+
+  it('stage registration_failed (engine)', async () => {
+    const { onForgeTrace, traces } = hookRecorder();
+    let registrations = 0;
+    let late!: DirectEngine;
+    late = await directEngine({
+      onForgeTrace,
+      // The first registration replaces the tool under its id, and registering the replacement fails.
+      onToolForged: async (tool) => {
+        registrations += 1;
+        if (registrations === 1) {
+          late.registry.remove(tool.id);
+          late.registry.register({ ...tool }, 'session');
+          return;
+        }
+        throw new Error('second registration failed');
+      },
+    });
+
+    const result = await forgeDirect(late.engine);
+    expect(registrations).toBe(2);
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/^the executable of /);
+    expect(result.verdict).toBeUndefined();
+
+    afterJudgeTrace(traces, result, 'registration_failed', 'failed');
+  });
+
+  // One delivery per forge, whatever layers a host puts between its wrapper and forge_tool.
+
+  it('one delivery per forge: a subclass that refuses before super.execute', async () => {
+    const { onForgeTrace, traces } = hookRecorder();
+    const { engine } = await directEngine({ onForgeTrace });
+    const captures: CapturedForge[] = [];
+    const wrapped = departmentWrapper(new RefusingForgeTool(engine), captures);
+
+    const result = await wrapped.execute(wrapperArgs(), toolContext());
+    expect(result.success).toBe(false);
+    expect(captures).toHaveLength(1);
+    // A second delivery would arrive after the call returns.
+    await sleep(20);
+
+    expect(traces).toHaveLength(1);
+    expect(traces[0].stage).toBe('host_refused');
+    expect(traceOf(captures[0])).toBe(traces[0]);
+  });
+
+  it('one delivery per forge: a subclass that hands super.execute a copied context and is judge-rejected', async () => {
+    const { onForgeTrace, traces } = hookRecorder();
+    const { engine } = await directEngine({ onForgeTrace, judgeReplies: [REJECTED_JSON] });
+    const captures: CapturedForge[] = [];
+    const wrapped = departmentWrapper(new CopyingForgeTool(engine), captures);
+
+    const result = await wrapped.execute(wrapperArgs(), toolContext());
+    expect(result.success).toBe(false);
+    expect(result.error).toBe('Tool contains unsafe patterns.');
+    expect(captures).toHaveLength(1);
+    await sleep(20);
+
+    // The engine's outcome, once: the record travelled with the call, not with the context object.
+    expect(traces).toHaveLength(1);
+    const trace = traces[0];
+    expect(trace.stage).toBe('judge_rejected');
+    expect(trace.recordedBy).toBe('engine');
+    expect(traceOf(captures[0])).toBe(trace);
+  });
+
+  it('one delivery per forge: two wrapped calls in parallel', async () => {
+    const { onForgeTrace, traces } = hookRecorder();
+    const { forgeTool } = await directEngine({ onForgeTrace });
+    const captures: CapturedForge[] = [];
+    const wrapped = departmentWrapper(forgeTool, captures);
+
+    const results = await Promise.all([
+      wrapped.execute(wrapperArgs({ name: 'add_one' }), toolContext()),
+      wrapped.execute(wrapperArgs({ name: 'add_two' }), toolContext()),
+    ]);
+    for (const result of results) {
+      expect(result.success).toBe(true);
+    }
+    expect(captures.map((capture) => capture.name).sort()).toEqual(['add_one', 'add_two']);
+    await sleep(20);
+
+    expect(traces).toHaveLength(2);
+    expect(traces[0].forgeId).not.toBe(traces[1].forgeId);
+    // Each capture holds its own call's trace.
+    for (const capture of captures) {
+      const trace = traceOf(capture);
+      expect(trace).toBeDefined();
+      expect(traces).toContain(trace);
+      expect(trace!.toolName).toBe(capture.name);
+    }
+  });
+
+  // The hook's failures and its bound: the forge goes on, and only a content-free line says what happened.
+
+  it('a hook that throws leaves the result unchanged and writes one hook_failed line', async () => {
+    const capture = captureLines();
+    try {
+      const hooks = [
+        vi.fn((_trace: unknown): void => {
+          throw new TypeError('hook broke');
+        }),
+        vi.fn(async (_trace: unknown): Promise<void> => {
+          throw new RangeError('hook broke later');
+        }),
+      ];
+      const types = ['TypeError', 'RangeError'];
+      for (let i = 0; i < hooks.length; i += 1) {
+        const { engine } = await directEngine({ onForgeTrace: hooks[i] });
+        const result = await forgeDirect(engine);
+        expect(result.success).toBe(true);
+        expect(result.toolId).toMatch(MINTED_TOOL_ID);
+        expect(hooks[i]).toHaveBeenCalledTimes(1);
+
+        const failed = eventLines(capture.lines, 'emergent.forge_trace_hook_failed');
+        expect(failed).toHaveLength(i + 1);
+        expect(failed[i]).toMatchObject({ type: types[i], code: 'unknown' });
+      }
+      // The lines name the error's type, never its message.
+      expect(capture.printed()).not.toContain('hook broke');
+      expect(JSON.stringify(capture.lines)).not.toContain('hook broke');
+    } finally {
+      capture.restore();
+    }
+  });
+
+  it('a hook that never settles returns the forge at the bound with one hook_slow line', async () => {
+    const capture = captureLines();
+    try {
+      const ownMs = await ownForgeMs();
+      const hook = vi.fn((_trace: unknown) => new Promise<void>(() => undefined));
+      const { engine } = await directEngine({ onForgeTrace: hook });
+
+      const { value: result, ms } = await timed(() => forgeDirect(engine));
+      expect(hook).toHaveBeenCalledTimes(1);
+      expect(result.success).toBe(true);
+      expect(ms).toBeGreaterThanOrEqual(HOOK_BOUND_MS - TIMER_SLACK_MS);
+      expect(ms).toBeLessThan(HOOK_BOUND_MS + ownMs + 500);
+
+      const slow = eventLines(capture.lines, 'emergent.forge_trace_hook_slow');
+      expect(slow).toHaveLength(1);
+      expect(slow[0]).toMatchObject({ boundMs: 1000 });
+    } finally {
+      capture.restore();
+    }
+  });
+
+  it('a hook that sleeps 2 s returns the forge at the bound with one hook_slow line', async () => {
+    const capture = captureLines();
+    try {
+      const ownMs = await ownForgeMs();
+      let hookResolved = false;
+      const hook = vi.fn(
+        (_trace: unknown) =>
+          new Promise<void>((resolve) => {
+            setTimeout(() => {
+              hookResolved = true;
+              resolve();
+            }, 2_000);
+          }),
+      );
+      const { engine } = await directEngine({ onForgeTrace: hook });
+
+      const { value: result, ms } = await timed(() => forgeDirect(engine));
+      expect(hook).toHaveBeenCalledTimes(1);
+      expect(result.success).toBe(true);
+      expect(ms).toBeGreaterThanOrEqual(HOOK_BOUND_MS - TIMER_SLACK_MS);
+      expect(ms).toBeLessThan(HOOK_BOUND_MS + ownMs + 500);
+      expect(eventLines(capture.lines, 'emergent.forge_trace_hook_slow')).toHaveLength(1);
+      expect(eventLines(capture.lines, 'emergent.forge_trace_hook_failed')).toHaveLength(0);
+      const linesAtReturn = forgeTraceLines(capture.lines).length;
+
+      // The hook finishes after the forge returned, and nothing more is written for it.
+      await sleep(1_200);
+      expect(hookResolved).toBe(true);
+      expect(forgeTraceLines(capture.lines)).toHaveLength(linesAtReturn);
+    } finally {
+      capture.restore();
+    }
+  });
+
+  it('a hook that rejects after the bound is caught without a line', async () => {
+    const capture = captureLines();
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+    try {
+      const ownMs = await ownForgeMs();
+      const hook = vi.fn(
+        (_trace: unknown) =>
+          new Promise<void>((_resolve, reject) => {
+            setTimeout(() => reject(new Error('the hook failed late')), 1_500);
+          }),
+      );
+      const { engine } = await directEngine({ onForgeTrace: hook });
+
+      const { value: result, ms } = await timed(() => forgeDirect(engine));
+      expect(hook).toHaveBeenCalledTimes(1);
+      expect(result.success).toBe(true);
+      expect(ms).toBeGreaterThanOrEqual(HOOK_BOUND_MS - TIMER_SLACK_MS);
+      expect(ms).toBeLessThan(HOOK_BOUND_MS + ownMs + 500);
+
+      // The hook rejects after the forge returned: nothing reaches the process, and no failure line is written.
+      await sleep(700);
+      expect(unhandled).not.toHaveBeenCalled();
+      expect(eventLines(capture.lines, 'emergent.forge_trace_hook_slow')).toHaveLength(1);
+      expect(eventLines(capture.lines, 'emergent.forge_trace_hook_failed')).toHaveLength(0);
+    } finally {
+      process.off('unhandledRejection', unhandled);
+      capture.restore();
+    }
+  });
+
+  it('parallel forges with a slow hook each return at the bound', async () => {
+    const capture = captureLines();
+    try {
+      const ownMs = await ownForgeMs();
+      const hook = vi.fn((_trace: unknown) => new Promise<void>((resolve) => setTimeout(resolve, 1_500)));
+      const { engine } = await directEngine({ onForgeTrace: hook });
+
+      const runs = await Promise.all(
+        [1, 2, 3].map((n) => timed(() => forgeDirect(engine, { name: `add_numbers_${n}` }))),
+      );
+      expect(hook).toHaveBeenCalledTimes(3);
+      // Each forge's trace reached the hook once.
+      expect(new Set(hook.mock.calls.map(([trace]) => (trace as TraceShape).forgeId)).size).toBe(3);
+      for (const run of runs) {
+        expect(run.value.success).toBe(true);
+        expect(run.ms).toBeLessThan(HOOK_BOUND_MS + ownMs + 500);
+      }
+      expect(eventLines(capture.lines, 'emergent.forge_trace_hook_slow')).toHaveLength(3);
+    } finally {
+      capture.restore();
+    }
+  });
+
+  // The judge: a host's override is called as it is, and the class's own judge keeps the detail its verdict drops.
+
+  it("a judge subclass's reviewCreation override is called and judgeDetail is null", async () => {
+    const judge = new FixedJudge({
+      judgeModel: 'judge-model',
+      promotionModel: 'judge-model',
+      generateText: async () => APPROVED_JSON,
+    });
+    const { engine } = await directEngine({ judge });
+
+    const result = await forgeDirect(engine);
+    expect(judge.calls).toBe(1);
+    expect(result.success).toBe(false);
+    expect(result.error).toBe('override says no');
+
+    const trace = traceOf(result);
+    expect(trace).toBeDefined();
+    expect(trace!.judgeDetail).toBeNull();
+    expect(trace!.stage).toBe('judge_rejected');
+    expect(trace!.reason).toBe('override says no');
+    // AgentOS cannot know what an override asked: the verdict's author names no provider or model.
+    expect(trace!.provenance.verdict).toMatchObject({ provider: null, model: null, modelSource: null });
+  });
+
+  it("the class's own judge keeps the detail the verdict drops", async () => {
+    const reply = JSON.stringify({
+      safety: { passed: false, concerns: ['Reads the clock.'] },
+      correctness: { passed: true, failedTests: [2] },
+      determinism: { likely: false, reasoning: 'Uses Date.' },
+      bounded: { likely: true, reasoning: 'One loop.' },
+      confidence: 0.4,
+      approved: true,
+      reasoning: 'Mixed.',
+    });
+    const { engine } = await directEngine({ judgeReplies: [reply] });
+
+    const result = await forgeDirect(engine);
+    expect(result.success).toBe(false);
+
+    const trace = traceOf(result);
+    expect(trace).toBeDefined();
+    expect(trace!.stage).toBe('judge_rejected');
+    // The verdict rejects on safety and scores determinism 0.5; the detail keeps what the reply said.
+    expect(trace!.verdict).toMatchObject({ approved: false, determinism: 0.5 });
+    expect(trace!.judgeDetail).toEqual({
+      judgeModel: 'judge-model',
+      replyParsed: true,
+      judgeError: null,
+      judgeApproved: true,
+      safetyPassed: false,
+      safetyConcerns: ['Reads the clock.'],
+      correctnessPassed: true,
+      failedTests: [2],
+      deterministic: false,
+      determinismReasoning: 'Uses Date.',
+      bounded: true,
+      boundedReasoning: 'One loop.',
+    });
+  });
+
+  it('a judge whose call fails or whose reply does not parse names the category', async () => {
+    const failing = await directEngine({ judgeReplies: [new Error('provider down')] });
+    const failed = traceOf(await forgeDirect(failing.engine));
+    expect(failed).toBeDefined();
+    expect(failed!.verdict.reasoning).toBe('LLM call failed during creation review.');
+    expect(failed!.judgeDetail).toEqual(noReplyDetail('llm_call_failed'));
+    // The provider's error text is kept nowhere in the trace.
+    expect(JSON.stringify(failed)).not.toContain('provider down');
+
+    const garbled = await directEngine({ judgeReplies: ['not json'] });
+    const unparsed = traceOf(await forgeDirect(garbled.engine));
+    expect(unparsed).toBeDefined();
+    expect(unparsed!.judgeDetail).toEqual(noReplyDetail('reply_unparsable'));
+  });
+
+  // The executor record, read from forges on engines with no hook: the trace is built and returned all the same.
+
+  it('the executor record: in-process, quickjs-wasm, and none for a composition', async () => {
+    const inProcess = await directEngine();
+    const inProcessResult = await forgeDirect(inProcess.engine);
+    expect(inProcessResult.success).toBe(true);
+    expect(traceOf(inProcessResult)).toBeDefined();
+    expect(traceOf(inProcessResult)!.executor).toEqual(IN_PROCESS);
+
+    const quickjs = await directEngine({ config: { executor: await QuickJSExecutor.create() } });
+    const quickjsResult = await forgeDirect(quickjs.engine);
+    expect(quickjsResult.success).toBe(true);
+    expect(traceOf(quickjsResult)).toBeDefined();
+    expect(traceOf(quickjsResult)!.executor).toEqual({ name: 'quickjs-wasm', isolates: true });
+
+    const composed = await directEngine({ hostTools: [echoTool('echo')] });
+    const composedResult = await composed.engine.forge(echoComposition() as unknown as ForgeToolRequest, directContext());
+    expect(composedResult.success).toBe(true);
+    expect(traceOf(composedResult)).toBeDefined();
+    expect(traceOf(composedResult)!.executor).toBeNull();
+
+    // Refused before an executor was chosen.
+    const refused = await directEngine();
+    const refusedResult = await forgeDirect(refused.engine, {
+      implementation: { mode: 'sandbox', code: 'function execute(input) { return eval("1"); }', allowlist: [] },
+    });
+    expect(refusedResult.error).toMatch(/^Code validation failed: /);
+    expect(traceOf(refusedResult)).toBeDefined();
+    expect(traceOf(refusedResult)!.executor).toBeNull();
   });
 });
