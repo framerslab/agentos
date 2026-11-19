@@ -92,6 +92,13 @@ export interface LibraryPassage {
 export interface LibrarySearch {
   text: string;
   scope: LibraryScope;
+  /**
+   * The text's embedding, made by the index's embedding model, when the caller holds it already: a dense or hybrid
+   * search sends nothing to the embedder and searches with it, also with `anyOf`. A lexical search reads no vector.
+   * Refused, before any call, when it is empty, holds a value that is not a finite number, or, with the index's
+   * `dimensions`, has another size.
+   */
+  vector?: readonly number[];
   /** `lexical` embeds nothing; `hybrid` fuses both legs where the store can; `dense` is the embedding alone. @default 'hybrid' */
   mode?: 'lexical' | 'hybrid' | 'dense';
   /** The most passages answered. @default 10 */
