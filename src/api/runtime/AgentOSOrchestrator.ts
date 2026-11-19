@@ -254,6 +254,12 @@ export interface AgentOSOrchestratorGuards {
    * Unset when no output guardrail sets `config.evaluateToolCalls`.
    */
   toolCallGate?: GuardrailToolCallGate;
+  /**
+   * The attempt the spend meter's `reserve()` answered for the turn's `operationId`. The turn's own settle names it,
+   * so a turn that ends after its operation was released and reserved again (a reply an output guardrail blocked and
+   * the caller retried) leaves the newer reservation to the retry. Read by `orchestrateTurn` alone.
+   */
+  spendAttempt?: number;
 }
 
 type ResolvedAgentOSOrchestratorConfig = Required<
@@ -535,7 +541,7 @@ export class AgentOSOrchestrator {
       },
     });
 
-    const run = async () => this._processTurnInternal(agentOSStreamId, input, guards.toolCallGate);
+    const run = async () => this._processTurnInternal(agentOSStreamId, input, guards.toolCallGate, guards.spendAttempt);
 
     const promise = rootSpan ? runWithSpanContext(rootSpan, run) : run();
 
@@ -555,25 +561,14 @@ export class AgentOSOrchestrator {
           `AgentOSOrchestrator: Critical unhandled error in _processTurnInternal for stream ${agentOSStreamId}:`,
           criticalError
         );
-        try {
-          await this.chunks.pushError(
-            agentOSStreamId,
-            input.selectedPersonaId || 'unknown_persona',
-            'orchestrator_critical',
-            GMIErrorCode.INTERNAL_SERVER_ERROR,
-            `A critical orchestration error occurred: ${criticalError.message}`,
-            { name: criticalError.name, stack: criticalError.stack }
-          );
-          await this.dependencies.streamingManager.closeStream(
-            agentOSStreamId,
-            'Critical orchestrator error'
-          );
-        } catch (cleanupError: any) {
-          console.error(
-            `AgentOSOrchestrator: Error during critical error cleanup for stream ${agentOSStreamId}:`,
-            cleanupError
-          );
-        }
+        await this.endStreamOnCriticalError(
+          agentOSStreamId,
+          input.selectedPersonaId || 'unknown_persona',
+          'orchestrator_critical',
+          criticalError,
+          'A critical orchestration error occurred',
+          'Critical orchestrator error'
+        );
         this.activeStreamContexts.delete(agentOSStreamId);
       })
       .finally(() => {
@@ -648,25 +643,14 @@ export class AgentOSOrchestrator {
           `AgentOSOrchestrator: Critical unhandled error in _resumeToolResultsInternal for stream ${agentOSStreamId}:`,
           criticalError
         );
-        try {
-          await this.chunks.pushError(
-            agentOSStreamId,
-            pendingRequest.personaId || 'unknown_persona',
-            pendingRequest.gmiInstanceId || 'orchestrator_resume_critical',
-            GMIErrorCode.INTERNAL_SERVER_ERROR,
-            `A critical external-tool resume error occurred: ${criticalError.message}`,
-            { name: criticalError.name, stack: criticalError.stack }
-          );
-          await this.dependencies.streamingManager.closeStream(
-            agentOSStreamId,
-            'Critical external-tool resume error'
-          );
-        } catch (cleanupError: any) {
-          console.error(
-            `AgentOSOrchestrator: Error during resume critical-error cleanup for stream ${agentOSStreamId}:`,
-            cleanupError
-          );
-        }
+        await this.endStreamOnCriticalError(
+          agentOSStreamId,
+          pendingRequest.personaId || 'unknown_persona',
+          pendingRequest.gmiInstanceId || 'orchestrator_resume_critical',
+          criticalError,
+          'A critical external-tool resume error occurred',
+          'Critical external-tool resume error'
+        );
         this.activeStreamContexts.delete(agentOSStreamId);
       })
       .finally(() => {
@@ -678,6 +662,44 @@ export class AgentOSOrchestrator {
       }));
 
     return agentOSStreamId;
+  }
+
+  /**
+   * Ends a stream whose run failed outside its own error handling: pushes an `INTERNAL_SERVER_ERROR` chunk, then closes
+   * the stream even when that push fails, so the caller never waits on a stream nothing will close. The thrown value
+   * may be anything, `undefined` and objects without a message included.
+   */
+  private async endStreamOnCriticalError(
+    streamId: StreamId,
+    personaId: string,
+    gmiInstanceId: string,
+    criticalError: unknown,
+    messagePrefix: string,
+    closeReason: string
+  ): Promise<void> {
+    let described: string;
+    try {
+      described = criticalError instanceof Error ? criticalError.message : String(criticalError);
+    } catch {
+      described = Object.prototype.toString.call(criticalError);
+    }
+    try {
+      await this.chunks.pushError(
+        streamId,
+        personaId,
+        gmiInstanceId,
+        GMIErrorCode.INTERNAL_SERVER_ERROR,
+        `${messagePrefix}: ${described}`,
+        criticalError instanceof Error ? { name: criticalError.name, stack: criticalError.stack } : { value: described }
+      );
+    } catch (pushError: unknown) {
+      console.error(`AgentOSOrchestrator: could not push the critical error to stream ${streamId}:`, pushError);
+    }
+    try {
+      await this.dependencies.streamingManager.closeStream(streamId, closeReason);
+    } catch (closeError: unknown) {
+      console.error(`AgentOSOrchestrator: could not close stream ${streamId} after a critical error:`, closeError);
+    }
   }
 
   /** Keeps a stream's run until it ends, for the verdicts that wait for it (see {@link discardBlockedToolCalls}). */
@@ -692,6 +714,15 @@ export class AgentOSOrchestrator {
         this.streamRuns.delete(streamId);
       }
     });
+  }
+
+  /**
+   * Waits for the current turn on a stream, including its allowance settlement. A turn paused for host tools
+   * finishes this work while leaving its stream open; an already finished turn has nothing left to wait for.
+   * @param streamId - The stream whose current turn must finish.
+   */
+  public async waitForTurnCompletion(streamId: StreamId): Promise<void> {
+    await this.streamRuns.get(streamId);
   }
 
   /**
@@ -754,7 +785,8 @@ export class AgentOSOrchestrator {
   private async _processTurnInternal(
     agentOSStreamId: StreamId,
     input: AgentOSInput,
-    toolCallGate?: GuardrailToolCallGate
+    toolCallGate?: GuardrailToolCallGate,
+    spendAttempt?: number
   ): Promise<void> {
     const turnStartedAt = Date.now();
     let turnMetricsStatus: 'ok' | 'error' = 'ok';
@@ -783,6 +815,9 @@ export class AgentOSOrchestrator {
     const spendMeter = this.dependencies.spendMeter;
     const meteredOperationId = spendMeter && typeof input.operationId === 'string' && input.operationId.trim() ? input.operationId.trim() : undefined;
     let outputReached = false;
+    // set while the turn's error handling still owes the stream its error chunk: handling that fails before the chunk
+    // leaves the stream open for orchestrateTurn's fallback, which reports the failure and closes the stream
+    let errorReportOwed = false;
 
     try {
       // --- Pre-LLM pipeline (phases 1-12) delegated to TurnExecutionPipeline ---
@@ -1145,12 +1180,12 @@ export class AgentOSOrchestrator {
           activePersonaDetails: snapshotPersonaDetails(gmi?.getPersona?.()),
         }
       );
-      await this.dependencies.streamingManager.closeStream(agentOSStreamId, 'Processing complete.');
     } catch (error: any) {
       turnMetricsStatus = 'error';
       // the stream closes below and no result continues it: a pause the turn saved before it failed ends below, so
       // the stream's context goes and the turn settles as a failed turn
       keepStreamContextActive = false;
+      errorReportOwed = true;
       recordExceptionOnActiveSpan(error, `Error in orchestrateTurn for stream ${agentOSStreamId}`);
       const gmiErr =
         GMIError.wrap?.(
@@ -1214,13 +1249,10 @@ export class AgentOSOrchestrator {
         gmiErr.message,
         gmiErr.details
       );
+      errorReportOwed = false;
       // a pause the turn saved before it failed never reached the host: its calls are answered as not run, so the
       // next turn sends the model no call without its result
       await this.toolResultHandler.endPauseOfFailedStream(agentOSStreamId, conversationContext, currentPersonaId);
-      await this.dependencies.streamingManager.closeStream(
-        agentOSStreamId,
-        'Error during turn processing.'
-      );
     } finally {
       // The turn counts when it finished, when it stopped for a tool the host runs (its continuation reserves nothing)
       // or when any of its text reached the stream before an error; a turn that failed before any output is released,
@@ -1228,7 +1260,12 @@ export class AgentOSOrchestrator {
       if (spendMeter && meteredOperationId) {
         const outcome: SpendOutcome = keepStreamContextActive || turnMetricsStatus === 'ok' || outputReached ? 'consumed' : 'released';
         try {
-          await spendMeter.settle({ operationId: meteredOperationId, outcome, usage: outcome === 'consumed' ? turnMetricsUsage : undefined });
+          await spendMeter.settle({
+            operationId: meteredOperationId,
+            outcome,
+            ...(spendAttempt === undefined ? {} : { attempt: spendAttempt }),
+            usage: outcome === 'consumed' ? turnMetricsUsage : undefined,
+          });
         } catch (settleError) {
           console.warn(`AgentOSOrchestrator: the spend meter could not settle stream ${agentOSStreamId}; its reconciler will.`, settleError);
         }
@@ -1242,10 +1279,17 @@ export class AgentOSOrchestrator {
         taskOutcomeScore: turnMetricsTaskOutcome?.score,
       });
 
-      // Stream is closed explicitly in the success/error paths; this finally block always
-      // clears internal state to avoid leaks, unless we are waiting for an external
-      // tool result to continue this same stream.
+      // Close only after settlement, so stream readers can immediately read the turn's charge or release.
+      // A host-tool pause keeps the stream and its context for the continuation. A turn whose error handling failed
+      // before its error chunk is left open: its failure leaves this method, and orchestrateTurn's fallback pushes
+      // the error to the stream and closes it, so the caller never reads a clean end in place of the error.
       if (!keepStreamContextActive) {
+        if (!errorReportOwed) {
+          await this.dependencies.streamingManager.closeStream(
+            agentOSStreamId,
+            turnMetricsStatus === 'error' ? 'Error during turn processing.' : 'Processing complete.'
+          );
+        }
         this.activeStreamContexts.delete(agentOSStreamId);
         console.log(
           `AgentOSOrchestrator: Finished processing for AgentOS Stream ${agentOSStreamId}. Context removed.`
