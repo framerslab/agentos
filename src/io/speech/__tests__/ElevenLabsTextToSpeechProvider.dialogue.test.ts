@@ -1,5 +1,9 @@
 import { describe, it, expect, vi } from 'vitest';
-import { ElevenLabsTextToSpeechProvider } from '../providers/ElevenLabsTextToSpeechProvider.js';
+import {
+  ElevenLabsApiError,
+  ElevenLabsTextToSpeechProvider,
+  type ElevenLabsDialogueLine,
+} from '../providers/ElevenLabsTextToSpeechProvider.js';
 
 type FetchMock = ReturnType<typeof vi.fn>;
 
@@ -60,8 +64,17 @@ function answering(...answers: Array<{ status: number; body: unknown }>): typeof
       status: answer.status,
       json: async () => JSON.parse(text),
       text: async () => text,
+      arrayBuffer: async () => AUDIO.slice().buffer,
     };
   }) as unknown as typeof fetch;
+}
+
+const SPENT = { status: 429, body: { detail: { status: 'quota_exceeded', message: 'This request exceeds your quota.' } } };
+
+function keysUsed(fetchImpl: typeof fetch): string[] {
+  return (fetchImpl as unknown as FetchMock).mock.calls.map(
+    ([, init]) => ((init as RequestInit).headers as Record<string, string>)['xi-api-key']
+  );
 }
 
 function call(fetchImpl: typeof fetch, index = 0): { url: URL; init: RequestInit } {
@@ -74,7 +87,7 @@ describe('ElevenLabsTextToSpeechProvider.synthesizeDialogue', () => {
     const fetchImpl = answering({ status: 200, body: dialogueAnswer() });
     const provider = new ElevenLabsTextToSpeechProvider({ apiKey: 'xi-test', fetchImpl });
 
-    await provider.synthesizeDialogue(LINES, { model: 'eleven_v4', outputFormat: 'mp3_44100_192', seed: 4294967295 });
+    await provider.synthesizeDialogue(LINES, { model: 'eleven_v3', outputFormat: 'mp3_44100_192', seed: 4294967295 });
 
     expect(fetchImpl).toHaveBeenCalledOnce();
     const { url, init } = call(fetchImpl);
@@ -87,7 +100,7 @@ describe('ElevenLabsTextToSpeechProvider.synthesizeDialogue', () => {
         { text: 'Can you hear me?', voice_id: 'voice-a' },
         { text: 'Loud and clear.', voice_id: 'voice-b' },
       ],
-      model_id: 'eleven_v4',
+      model_id: 'eleven_v3',
       seed: 4294967295,
     });
   });
@@ -182,6 +195,13 @@ describe('ElevenLabsTextToSpeechProvider.synthesizeDialogue', () => {
     await expect(provider.synthesizeDialogue(LINES)).rejects.toThrow(/audio_base64/);
   });
 
+  it('refuses a 200 answer whose audio_base64 decodes to no bytes', async () => {
+    const fetchImpl = answering({ status: 200, body: dialogueAnswer({ audio_base64: '   ' }) });
+    const provider = new ElevenLabsTextToSpeechProvider({ apiKey: 'xi-test', fetchImpl });
+
+    await expect(provider.synthesizeDialogue(LINES)).rejects.toThrow(/audio_base64/);
+  });
+
   it('moves to the next key when the first answers with a spent quota', async () => {
     const fetchImpl = answering(
       { status: 429, body: { detail: { status: 'quota_exceeded', message: 'This request exceeds your quota.' } } },
@@ -198,6 +218,28 @@ describe('ElevenLabsTextToSpeechProvider.synthesizeDialogue', () => {
     expect(result.audioBuffer.equals(Buffer.from(AUDIO))).toBe(true);
   });
 
+  it('tries each key of the pool once while each answers with a spent quota', async () => {
+    const served = answering(SPENT, SPENT, { status: 200, body: dialogueAnswer() });
+    const provider = new ElevenLabsTextToSpeechProvider({ apiKey: 'xi-one,xi-two,xi-three', fetchImpl: served });
+
+    const result = await provider.synthesizeDialogue(LINES);
+
+    expect(keysUsed(served)).toHaveLength(3);
+    expect(new Set(keysUsed(served))).toEqual(new Set(['xi-one', 'xi-two', 'xi-three']));
+    expect(result.audioBuffer.equals(Buffer.from(AUDIO))).toBe(true);
+
+    const spent = answering(SPENT);
+    const allSpent = new ElevenLabsTextToSpeechProvider({ apiKey: 'xi-one,xi-two,xi-three', fetchImpl: spent });
+    const error = await allSpent.synthesizeDialogue(LINES).then(
+      () => undefined,
+      (caught: unknown) => caught
+    );
+    expect(error).toBeInstanceOf(ElevenLabsApiError);
+    expect((error as ElevenLabsApiError).status).toBe(429);
+    expect(new Set(keysUsed(spent))).toEqual(new Set(['xi-one', 'xi-two', 'xi-three']));
+    expect(keysUsed(spent)).toHaveLength(3);
+  });
+
   it('refuses an empty dialogue, a line with no text or voice, and a seed outside 0 to 4294967295 before any request', async () => {
     const fetchImpl = answering({ status: 200, body: dialogueAnswer() });
     const provider = new ElevenLabsTextToSpeechProvider({ apiKey: 'xi-test', fetchImpl });
@@ -205,9 +247,26 @@ describe('ElevenLabsTextToSpeechProvider.synthesizeDialogue', () => {
     await expect(provider.synthesizeDialogue([])).rejects.toThrow(RangeError);
     await expect(provider.synthesizeDialogue([{ text: '', voiceId: 'voice-a' }])).rejects.toThrow(/line 0/);
     await expect(provider.synthesizeDialogue([{ text: 'Hi.', voiceId: '' }])).rejects.toThrow(/line 0/);
+    // A preallocated array with an unfilled slot: forEach and map skip the hole, and JSON would send it as null.
+    const sparse = new Array<ElevenLabsDialogueLine>(2);
+    sparse[1] = LINES[1];
+    await expect(provider.synthesizeDialogue(sparse)).rejects.toThrow(/line 0/);
     await expect(provider.synthesizeDialogue(LINES, { seed: -1 })).rejects.toThrow(/seed/);
     await expect(provider.synthesizeDialogue(LINES, { seed: 4294967296 })).rejects.toThrow(/seed/);
     await expect(provider.synthesizeDialogue(LINES, { seed: 1.5 })).rejects.toThrow(/seed/);
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
+describe('ElevenLabsTextToSpeechProvider.synthesize key failover', () => {
+  it('tries each key of the pool once while each answers with a spent quota', async () => {
+    const fetchImpl = answering(SPENT, SPENT, { status: 200, body: '' });
+    const provider = new ElevenLabsTextToSpeechProvider({ apiKey: 'xi-one,xi-two,xi-three', fetchImpl });
+
+    const result = await provider.synthesize('Hello there.');
+
+    expect(new Set(keysUsed(fetchImpl))).toEqual(new Set(['xi-one', 'xi-two', 'xi-three']));
+    expect(keysUsed(fetchImpl)).toHaveLength(3);
+    expect(result.audioBuffer.equals(Buffer.from(AUDIO))).toBe(true);
   });
 });
