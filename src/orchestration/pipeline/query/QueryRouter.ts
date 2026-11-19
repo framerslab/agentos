@@ -1623,7 +1623,11 @@ export class QueryRouter {
       return this.config.embeddingBaseUrl as string;
     }
 
-    if (this.config.embeddingApiKey !== undefined) {
+    // A key given for embeddings goes to the provider's own endpoint. An empty
+    // one is unset, as getEmbeddingApiKey reads it: the environment's key and
+    // the URL that goes with it apply together, so an OpenRouter key never goes
+    // to OpenAI's endpoint.
+    if (this.config.embeddingApiKey) {
       return undefined;
     }
 
@@ -1635,7 +1639,7 @@ export class QueryRouter {
         return this.config.baseUrl as string;
       }
 
-      if (this.config.apiKey !== undefined) {
+      if (this.config.apiKey) {
         return undefined;
       }
     }

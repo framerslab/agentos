@@ -211,6 +211,35 @@ describe("QueryRouter: an embedding call carries only its own vendor's key", () 
     expect(sent.map((r) => r.url)).toContain('https://openrouter.ai/api/v1/embeddings');
   });
 
+  it("with an empty embeddingApiKey and only OpenRouter's key set, embeds through OpenRouter's URL, never OpenAI's", async () => {
+    const QueryRouter = await loadRouter();
+    vi.stubEnv('OPENROUTER_API_KEY', 'test-openrouter-key');
+
+    // An empty key is unset: the environment's key applies, and its URL with it.
+    await initRouter(QueryRouter, { embeddingProvider: 'openai', embeddingApiKey: '' });
+
+    expect(sent.filter(toOpenAi)).toEqual([]);
+    expect(sent.map((r) => r.url)).toContain('https://openrouter.ai/api/v1/embeddings');
+    for (const r of sent) expect(r.authorization).toBe('Bearer test-openrouter-key');
+  });
+
+  it("with an empty router apiKey shared with OpenAI embeddings and only OpenRouter's key set, embeds through OpenRouter's URL", async () => {
+    const QueryRouter = await loadRouter();
+    vi.stubEnv('OPENROUTER_API_KEY', 'test-openrouter-key');
+
+    // The classifier's provider is the embedding provider, so the router's apiKey applies to embeddings; empty, it is unset.
+    await initRouter(QueryRouter, {
+      embeddingProvider: 'openai',
+      classifierProvider: 'openai',
+      generationProvider: 'openai',
+      apiKey: '',
+    });
+
+    expect(sent.filter(toOpenAi)).toEqual([]);
+    expect(sent.map((r) => r.url)).toContain('https://openrouter.ai/api/v1/embeddings');
+    for (const r of sent) expect(r.authorization).toBe('Bearer test-openrouter-key');
+  });
+
   it("with OpenAI's key set, embeds through OpenAI with that key and no other vendor's", async () => {
     const QueryRouter = await loadRouter();
     vi.stubEnv('OPENAI_API_KEY', 'test-openai-key');
