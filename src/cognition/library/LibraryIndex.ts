@@ -408,12 +408,17 @@ function inputHashOf(embedding: LibraryEmbedding, input: string): string {
 /**
  * Metadata without `folderId` and `title`: like the other keys the index writes, a passage holds them only when the
  * source's own fields set them, so a source indexed without a folder is in none, whatever its metadata or a
- * passage's own says.
+ * passage's own says. Without the planning keys (`inputHash`, `textHash`, `embedModel`, `embedDimensions`) too: only
+ * a plan writes them, from the input it embedded, so a row `indexSource` writes never claims another text's vector.
  */
 function withoutSourceFields(metadata: Record<string, MetadataValue> | undefined): Record<string, MetadataValue> {
   const rest: Record<string, MetadataValue> = { ...(metadata ?? {}) };
   delete rest.folderId;
   delete rest.title;
+  delete rest.inputHash;
+  delete rest.textHash;
+  delete rest.embedModel;
+  delete rest.embedDimensions;
   return rest;
 }
 
@@ -941,8 +946,14 @@ export class LibraryIndex {
       }
     };
     if (plan.digest === null) {
-      await this.removeSource(plan.sourceId);
-      await write(this.store);
+      // The source is replaced whole: its delete and its writes under one hold of the source's lock where the store has
+      // one, so a second plan of the source applied meanwhile replaces this one's rows rather than adding beside them.
+      const replace = async (store: IVectorStore): Promise<void> => {
+        await this.deleteSourceIn(store, plan.sourceId);
+        await write(store);
+      };
+      if (this.store.withSourceLock) await this.store.withSourceLock(this.collection, plan.sourceId, replace, { tenantId: plan.tenantId });
+      else await replace(this.store);
       return plan.counts;
     }
     // A plan made by content leaves out the rows it keeps; a store that can only replace the source whole would lose them.
