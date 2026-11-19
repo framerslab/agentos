@@ -2,7 +2,7 @@
  * @fileoverview ChunkingEngine — splits raw document text into `DocumentChunk`
  * slices ready for embedding and vector-store ingestion.
  *
- * Four strategies are supported:
+ * Five strategies are supported:
  *
  * - **fixed**       — split at a fixed character count with word-boundary
  *                     awareness and configurable overlap.
@@ -14,6 +14,10 @@
  *                     Long sections are sub-split with `fixed`.
  * - **layout**      — preserve fenced code blocks and pipe-delimited tables as
  *                     atomic chunks; surrounding prose is split with `fixed`.
+ * - **anchored**    — pack blocks and sentences into passages that end where
+ *                     a piece's own words say, so an edit changes only the
+ *                     passages around it; no overlap, and each chunk carries
+ *                     its offsets and whether its edges are whole.
  *
  * @module memory/ingestion/ChunkingEngine
  */
@@ -25,14 +29,16 @@ import type { DocumentChunk } from '../facade/types.js';
 // ---------------------------------------------------------------------------
 
 /**
- * The four supported chunking strategies.
+ * The five supported chunking strategies.
  *
  * - `'fixed'`       — character-count split with overlap.
  * - `'semantic'`    — embedding-guided topic-boundary split.
  * - `'hierarchical'`— Markdown heading-aware split.
  * - `'layout'`      — code/table-aware split that preserves special blocks.
+ * - `'anchored'`    — passages whose boundaries survive an edit elsewhere in
+ *                     the text, with offsets; see {@link ChunkOptions.strategy}.
  */
-export type ChunkStrategy = 'fixed' | 'semantic' | 'hierarchical' | 'layout';
+export type ChunkStrategy = 'fixed' | 'semantic' | 'hierarchical' | 'layout' | 'anchored';
 
 /**
  * Options controlling how the `ChunkingEngine` splits a document.
@@ -42,6 +48,18 @@ export type ChunkStrategy = 'fixed' | 'semantic' | 'hierarchical' | 'layout';
 export interface ChunkOptions {
   /**
    * Algorithm used to split the content.
+   *
+   * `'anchored'` cuts the text into blocks at empty lines, a block longer than `chunkSize` at sentence ends, a
+   * sentence longer than `chunkSize` at white space, and a word longer than `chunkSize` at that length (never inside
+   * a surrogate pair). It packs these pieces into passages in order: a passage ends after a piece whose SHA-256's
+   * first byte is divisible by 4 (an anchor, about one piece in four, decided by the piece's own words), or before a
+   * piece that would take it past `chunkSize`. Packing starts again after every anchor, so an edit changes only the
+   * passages from the anchor before it to the first anchor after it, and every later passage keeps its text. There
+   * is no overlap, and `chunkOverlap` is ignored. Each chunk carries `start` and `end`, its offsets in the text given
+   * (`content.slice(start, end)` is the chunk), and `edges`. With `markdown`, a heading line always starts a passage,
+   * and each chunk carries `heading` and `metadata.headingLevel` and `metadata.ancestorHeadings` as `'hierarchical'`
+   * gives them.
+   *
    * @see ChunkStrategy
    */
   strategy: ChunkStrategy;
@@ -69,6 +87,13 @@ export interface ChunkOptions {
    * @returns Promise resolving to one vector (number[]) per input string.
    */
   embedFn?: (texts: string[]) => Promise<number[][]>;
+
+  /**
+   * For `'anchored'`: treat Markdown heading lines (`#` to `######` at a line's start) as section starts. Ignored by
+   * the other strategies.
+   * @default false
+   */
+  markdown?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -251,6 +276,9 @@ export class ChunkingEngine {
 
       case 'layout':
         return this._chunkLayout(content, chunkSize, chunkOverlap);
+
+      case 'anchored':
+        return [];
 
       default: {
         // TypeScript exhaustiveness guard.

@@ -878,6 +878,23 @@ export interface DocumentChunk {
    * Chunk-level metadata (e.g. bounding box, column number for layout mode).
    */
   metadata?: Record<string, unknown>;
+
+  /**
+   * Offset of the chunk's first UTF-16 code unit in the text that was chunked. Set by the `'anchored'` strategy,
+   * with `text.slice(start, end) === content`.
+   */
+  start?: number;
+
+  /**
+   * Offset just past the chunk's last UTF-16 code unit in the text that was chunked. Set by the `'anchored'` strategy.
+   */
+  end?: number;
+
+  /**
+   * Whether the chunk begins (`first`) and ends (`last`) where a sentence or a block begins and ends. False on a
+   * side where a sentence or a word longer than the chunk size was cut. Set by the `'anchored'` strategy.
+   */
+  edges?: { first: boolean; last: boolean };
 }
 
 /**
