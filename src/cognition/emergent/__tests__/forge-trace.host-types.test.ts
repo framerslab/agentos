@@ -15,6 +15,15 @@ import type { ExecutorRunRequest, ExecutorRunResult, ForgedCodeExecutor } from '
 import { DEFAULT_EMERGENT_CONFIG } from '../types.js';
 import type { EmergentTool, ForgeResult, ForgeToolRequest } from '../types.js';
 import type { CapturedForge } from '../wrapForgeTool.js';
+import type { ForgeTrace } from '../index.js';
+import type { TraceShape } from './helpers/forge-trace-harness.js';
+
+/**
+ * The fields the forge trace's tests read, through the harness's loose shape, that the exported `ForgeTrace` does not
+ * have. It has to be `never`: with a field missing, `covered` below takes the type `false` and Type check fails.
+ */
+type Missing = Exclude<keyof TraceShape, keyof ForgeTrace>;
+const covered: [Missing] extends [never] ? true : false = true;
 
 /** What a host keeps of a wrapper's capture: the fields the wrapper has always written. */
 function summarizeCapture(capture: CapturedForge): string {
@@ -133,5 +142,9 @@ describe('forge trace: host code written before it', () => {
       candidateRuns: 1,
       executorStatus: 'ok',
     });
+  });
+
+  it('the exported ForgeTrace has every field the tests read', () => {
+    expect(covered).toBe(true);
   });
 });
