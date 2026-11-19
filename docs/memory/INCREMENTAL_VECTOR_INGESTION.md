@@ -159,6 +159,30 @@ The skip depends on `fetchByIds`, an optional method. A store that does not impl
 
 ---
 
+## Vectors by input, kept apart from any collection
+
+The content hash above skips a chunk whose row is still in the collection. When the same input reaches the embedder from many places (a sentence quoted by many pages, a passage asked about in every check), [`SqlEmbeddingStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/embeddings/SqlEmbeddingStore.ts) keeps each vector once, by the hash of its exact input, on any database [`@framers/sql-storage-adapter`](https://www.npmjs.com/package/@framers/sql-storage-adapter) opens:
+
+```ts
+import { SqlEmbeddingStore, embeddingInputHash } from '@framers/agentos/cognition/rag';
+
+const store = new SqlEmbeddingStore({ adapter, prefix: 'shared_sentence', maxIdleMs: 31 * 86_400_000 });
+const model = { model: 'text-embedding-3-small', dimensions: 1536 };
+const hashes = inputs.map((input) => embeddingInputHash(model, input));
+const known = await store.get({ tenant }, model, hashes); // Map of hash to vector
+const missing = inputs.filter((_, i) => !known.has(hashes[i]));
+const made = await embed(missing);
+await store.put({ tenant }, model, made.map((vector, i) => ({ hash: embeddingInputHash(model, missing[i]), vector })));
+```
+
+- A row is a tenant, a model, a vector size, an input hash, the vector as four-byte floats, a token count and two times. No column holds text, so the store can sit beside data whose text must not be copied.
+- `embeddingInputHash(model, input)` is the SHA-256 of the model, NUL, the dimensions, NUL and the input: the hash `LibraryIndex` gives a passage's `inputHash`.
+- Every call names its tenant, and a row is answered only to its own tenant, model and size. A stored vector of the wrong length counts as absent and is deleted.
+- `get` records a row's use at most once a day. With `maxIdleMs` (more than a day) a row unused that long is not answered; `removeUnusedSince(time, { tenant })`, on the host's own timer, deletes such rows, and `remove({ tenant })` deletes a tenant's rows.
+- `manageSchema` (true unless given) creates the table on first use. A host whose migrations own the schema runs `embeddingStoreSchema(prefix, dialect)` there and passes `manageSchema: false`.
+
+---
+
 ## Querying what you ingested
 
 ```ts
@@ -197,6 +221,7 @@ When you want agent memory rather than a static index, with traces that decay an
 | `core/vector-store/IVectorStore.ts` | The interface: `createCollection`, `upsert`, `fetchByIds`, `query`, `delete`. |
 | `cognition/rag/vector_stores/PostgresVectorStore.ts` | pgvector backend with HNSW index, tsvector FTS, and `fetchByIds`. |
 | `cognition/rag/vector_stores/InMemoryVectorStore.ts` | In-process backend for tests and small corpora (no `fetchByIds`). |
+| `cognition/rag/embeddings/SqlEmbeddingStore.ts` | Vectors by the hash of their exact input, per tenant, model and size, on any SQL adapter. |
 
 ---
 

@@ -230,7 +230,42 @@ export class SqlEmbeddingStore {
     const found = new Map<string, number[]>();
     if (wanted.length === 0) return found;
     await this.ensure();
-    // Declared: nothing is read yet.
+    const now = this.now();
+    const dialect = this.features.dialect;
+    const floor = this.maxIdleMs === undefined ? undefined : now - this.maxIdleMs;
+    const malformed: string[] = [];
+    const stale: string[] = [];
+    for (const part of parts(wanted, HASHES_PER_STATEMENT)) {
+      const params: unknown[] = [tenant, model, dimensions, part];
+      let statement = `SELECT input_sha256, vector, last_used_at FROM ${this.table}
+        WHERE tenant_id = $1 AND model = $2 AND dimensions = $3 AND ${dialect.inArray('input_sha256', '$4')}`;
+      if (floor !== undefined) {
+        statement += ' AND last_used_at >= $5';
+        params.push(floor);
+      }
+      for (const row of await this.adapter.all<VectorRow>(statement, params)) {
+        const vector = this.decode(row.vector, dimensions);
+        if (!vector) {
+          malformed.push(row.input_sha256);
+          continue;
+        }
+        found.set(row.input_sha256, vector);
+        if (Number(row.last_used_at) < now - DAY_MS) stale.push(row.input_sha256);
+      }
+    }
+    for (const part of parts(malformed, HASHES_PER_STATEMENT)) {
+      await this.adapter.run(
+        `DELETE FROM ${this.table} WHERE tenant_id = $1 AND model = $2 AND dimensions = $3 AND ${dialect.inArray('input_sha256', '$4')}`,
+        [tenant, model, dimensions, part],
+      );
+    }
+    for (const part of parts(stale, HASHES_PER_STATEMENT)) {
+      await this.adapter.run(
+        `UPDATE ${this.table} SET last_used_at = $5
+          WHERE tenant_id = $1 AND model = $2 AND dimensions = $3 AND ${dialect.inArray('input_sha256', '$4')} AND last_used_at < $6`,
+        [tenant, model, dimensions, part, now, now - DAY_MS],
+      );
+    }
     return found;
   }
 
@@ -263,8 +298,22 @@ export class SqlEmbeddingStore {
     }
     if (unique.size === 0) return 0;
     await this.ensure();
-    // Declared: nothing is written yet.
-    return 0;
+    const now = this.now();
+    const statement = this.features.dialect.upsert(
+      this.table,
+      COLUMNS,
+      COLUMNS.map((_, i) => `$${i + 1}`),
+      KEY,
+      ['vector', 'tokens', 'last_used_at'],
+    );
+    const write = async (db: StorageAdapter): Promise<void> => {
+      for (const [hash, { vector, tokens }] of unique) {
+        await db.run(statement, [tenant, model, dimensions, hash, this.features.blobCodec.encode(vector), tokens, now, now]);
+      }
+    };
+    if (this.adapter.capabilities.has('transactions')) await this.adapter.transaction(write);
+    else await write(this.adapter);
+    return unique.size;
   }
 
   /**
@@ -277,8 +326,8 @@ export class SqlEmbeddingStore {
   async remove(scope: EmbeddingStoreScope): Promise<number> {
     const tenant = checkedTenant(scope);
     await this.ensure();
-    // Declared: nothing is deleted yet.
-    return tenant.length * 0;
+    const result = await this.adapter.run(`DELETE FROM ${this.table} WHERE tenant_id = $1`, [tenant]);
+    return result.changes;
   }
 
   /**
@@ -295,8 +344,8 @@ export class SqlEmbeddingStore {
     const at = checkedTime(before instanceof Date ? before.getTime() : before);
     const tenant = checkedTenant(scope);
     await this.ensure();
-    // Declared: nothing is deleted yet.
-    return tenant.length * 0 + at * 0;
+    const result = await this.adapter.run(`DELETE FROM ${this.table} WHERE tenant_id = $1 AND last_used_at < $2`, [tenant, at]);
+    return result.changes;
   }
 
   /** Creates the table on first use when `manageSchema` is on; a failed attempt is tried again on the next call. */
