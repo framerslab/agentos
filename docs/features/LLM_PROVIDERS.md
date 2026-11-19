@@ -572,6 +572,19 @@ a persona that names no model on an `AgentOS` runtime whose default provider is
 OpenRouter, unless the runtime's `gmiManagerConfig.defaultGMIBaseConfigDefaults`
 names another model. Name the model for a stronger one.
 
+`effort` reaches the OpenAI reasoning models on OpenRouter (`openai/o*`,
+`openai/gpt-5*`, `openai/gpt-6*`, and their `~openai/` aliases) as
+`reasoning: { effort }`, streamed or not, tool calls included. Each of the
+five levels goes as given: OpenRouter maps a level the model does not take to
+the nearest one it does
+([Reasoning Tokens](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens)).
+Other models get no `reasoning` field from `effort`; on Anthropic models
+OpenRouter would turn it into a thinking budget sized from `max_tokens`. A
+`reasoning` object or a `reasoning_effort` passed through `customModelParams`
+takes the place of the one `effort` sets, for any model (OpenRouter refuses
+`reasoning_effort` beside a different `reasoning.effort`), and a
+`customModelParams.model` is the model that decides.
+
 ### Requesty
 
 ```bash

@@ -172,6 +172,7 @@ const publicationManifest = [
   agentosDoc('PERSONAS.md', 'features/personas.md', 'Defining and Loading Personas', 'Personas', 1),
   agentosDoc('HEXACO_PERSONALITY.md', 'features/hexaco-personality.md', 'HEXACO Personality', 'Personas', 4),
   agentosDoc('SOUL_FILES.md', 'features/soul-files.md', 'Soul Files & the Markdown Memory Wiki', 'Personas', 5),
+  agentosDoc('SOUL_ENTRY_POINTS.md', 'features/soul-entry-points.md', 'A Character That Remembers Each User: Which Call to Use', 'Personas', 5.2),
   agentosDoc('ADAPTIVE_PROMPT_INTELLIGENCE.md', 'features/adaptive-prompt-intelligence.md', 'Adaptive Prompt Intelligence', 'Personas', 5.5),
   agentosDoc('WORKING_MEMORY.md', 'features/working-memory.md', 'Working Memory', 'Memory', 6),
 

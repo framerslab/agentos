@@ -1096,7 +1096,7 @@ agent({ provider: 'openai', soul: { content: SOUL_MARKDOWN_STRING } });
 
 ### `souledAgent()`: soul plus a `memory/` wiki
 
-`agent({ soul })` loads identity but leaves long-term memory to you. `souledAgent()` is the async factory that wires the whole loop in one call: it loads the soul, opens one `Memory` store under the workspace's `memory/.store/`, indexes the operator's pages under `memory/`, and keeps what each subject says (the session's `userId`, else the session) in that store, apart from every other subject's.
+`agent({ soul })` loads identity but leaves long-term memory to you. `souledAgent()` is the async factory that wires the whole loop in one call: it loads the soul, opens one `Memory` store under the workspace's `memory/.store/`, indexes the operator's pages under `memory/`, and keeps what each subject says (the session's `userId`, else the session) in that store, apart from every other subject's. [Which Call to Use](../SOUL_ENTRY_POINTS.md) sets it beside `gmi({ soul })` and `agent({ soul })`: what each stores about a user, and which call exports, corrects and deletes it (`exportUserMemory`, `correctUserMemory`, `forgetUser`, `sweepRetention`).
 
 ```ts
 import { souledAgent } from '@framers/agentos';

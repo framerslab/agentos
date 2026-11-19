@@ -1,6 +1,6 @@
 /**
  * @fileoverview SoulLoader — load agent identity from SOUL.md (and companion files)
- * into an `IPersonaDefinition`. Mirrors the OpenClaw/aaronjmars-soul.md convention:
+ * into an `IPersonaDefinition`. Mirrors the OpenClaw / soul.md convention:
  * personality lives in markdown (with YAML frontmatter for structured config),
  * not JSON.
  *

@@ -205,7 +205,11 @@ export interface ModelCompletionOptions {
    * Reasoning-effort control. On effort-capable Claude models (Opus 4.5+,
    * Sonnet 4.6, Fable/Mythos 5) the provider sends `output_config.effort`
    * (low|medium|high|xhigh|max). Independent of `thinking` and tool_choice;
-   * dropped on unsupported models or invalid values.
+   * dropped on unsupported models or invalid values. The OpenAI provider
+   * sends it as `reasoning_effort` (Chat Completions) or `reasoning.effort`
+   * (Responses) on its reasoning models, and OpenRouter as
+   * `reasoning: { effort }` on the OpenAI
+   * reasoning slugs (`openai/o*`, `openai/gpt-5*`, `openai/gpt-6*`).
    */
   effort?: string;
   /**
