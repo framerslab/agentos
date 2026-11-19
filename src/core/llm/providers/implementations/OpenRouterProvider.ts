@@ -33,6 +33,8 @@ import {
 } from '../../../providers/keyProbe.js';
 import { createGMIErrorFromError, GMIErrorCode } from '../../../utils/errors.js'; // Corrected import path
 import { clampMaxOutputTokens } from '../model-output-limits.js';
+import { isEffortLevel, type EffortLevel } from '../model-effort.js';
+import { isOpenAIReasoningModel } from './openaiModelFamilies.js';
 import { CONTEXT_WINDOW_EXCEEDED_CODE } from '../errors/errorCodes.js';
 import { stripGeminiOnlyParams } from '../openrouter-only-params';
 import { baseUrlCredentials, redactUrlSecrets } from '../url-secrets.js';
@@ -204,6 +206,39 @@ export function defaultOpenRouterProviderPrefs(
   }
   if (sort) return { sort };
   return undefined;
+}
+
+/**
+ * The `reasoning.effort` to send to OpenRouter for `options.effort`, or
+ * undefined to leave the field out.
+ *
+ * OpenRouter takes reasoning depth in a unified `reasoning` object on Chat
+ * Completions, `reasoning: { effort }`, whose values (`max`, `xhigh`,
+ * `high`, `medium`, `low`, `minimal`, `none`) include every agentos level,
+ * and maps a level the model does not support to the nearest one it does
+ * (https://openrouter.ai/docs/guides/best-practices/reasoning-tokens), so the
+ * level passes through unchanged. It is sent for the OpenAI reasoning slugs
+ * (`openai/o*`, `openai/gpt-5*`, `openai/gpt-6*`, and their `~openai/`
+ * aliases), the family OpenRouter documents for effort and the one
+ * `OpenAIProvider` sends `reasoning_effort` for. Other slugs keep
+ * their request unchanged: on Anthropic slugs OpenRouter turns
+ * `reasoning.effort` into a thinking budget derived from `max_tokens`, which
+ * a short call cannot hold. A caller's own `customModelParams.reasoning`
+ * replaces this value.
+ *
+ * @param modelId OpenRouter model slug (e.g. `'openai/gpt-6.2-astra'`).
+ * @param effort Caller-supplied `options.effort`.
+ */
+export function openRouterReasoningEffort(modelId: string, effort: unknown): EffortLevel | undefined {
+  if (!isEffortLevel(effort)) return undefined;
+  const match = /^~?openai\/(.+)$/i.exec(modelId);
+  return match && isOpenAIReasoningModel(match[1]) ? effort : undefined;
+}
+
+/** The `reasoning` request field for {@link openRouterReasoningEffort}, or an empty object. */
+function reasoningField(modelId: string, effort: unknown): { reasoning?: { effort: EffortLevel } } {
+  const level = openRouterReasoningEffort(modelId, effort);
+  return level ? { reasoning: { effort: level } } : {};
 }
 
 /**
@@ -789,6 +824,10 @@ export class OpenRouterProvider implements IProvider {
       // usage chunk on streams). Placed before the customModelParams spread
       // so callers can override it.
       usage: { include: true },
+      // Reasoning depth for OpenAI reasoning slugs (see
+      // openRouterReasoningEffort). Before the customModelParams spread so a
+      // caller's own `reasoning` object replaces it.
+      ...reasoningField(modelId, options.effort),
       // Gemini's request fields never apply here (a Gemini call that fell
       // over to OpenRouter still carries them); routing controls stay.
       ...(stripGeminiOnlyParams(options.customModelParams) || {}),
@@ -1029,6 +1068,10 @@ export class OpenRouterProvider implements IProvider {
       // usage chunk on streams). Placed before the customModelParams spread
       // so callers can override it.
       usage: { include: true },
+      // Reasoning depth for OpenAI reasoning slugs (see
+      // openRouterReasoningEffort). Before the customModelParams spread so a
+      // caller's own `reasoning` object replaces it.
+      ...reasoningField(modelId, options.effort),
       // Gemini's request fields never apply here (a Gemini call that fell
       // over to OpenRouter still carries them); routing controls stay.
       ...(stripGeminiOnlyParams(options.customModelParams) || {}),
