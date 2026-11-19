@@ -385,8 +385,8 @@ export class ElevenLabsTextToSpeechProvider implements TextToSpeechProvider {
    *   is not a whole number from 0 to 4294967295.
    * @throws {ElevenLabsApiError} When ElevenLabs answers with an error status (401 for a bad key, 422 for a request
    *   it refuses, 429 for a spent quota), with the status and the body.
-   * @throws {Error} When a successful answer has no `audio_base64`, one that decodes to no bytes, or no well-formed
-   *   `voice_segments`.
+   * @throws {Error} When a successful answer has no `audio_base64`, one that decodes to no bytes, no well-formed
+   *   `voice_segments` (a line index outside the lines sent included), or an alignment that is present but malformed.
    *
    * @example
    * ```ts
@@ -467,9 +467,9 @@ export class ElevenLabsTextToSpeechProvider implements TextToSpeechProvider {
       throw new Error('ElevenLabs dialogue answer has an audio_base64 that decodes to no bytes');
     }
 
-    const segments = readDialogueSegments(payload.voice_segments);
-    const alignment = readCharacterAlignment(payload.alignment);
-    const normalizedAlignment = readCharacterAlignment(payload.normalized_alignment);
+    const segments = readDialogueSegments(payload.voice_segments, inputs.length);
+    const alignment = readCharacterAlignment(payload.alignment, 'alignment');
+    const normalizedAlignment = readCharacterAlignment(payload.normalized_alignment, 'normalized_alignment');
 
     return {
       audioBuffer,
@@ -602,10 +602,11 @@ function isWholeNumber(value: unknown): value is number {
 
 /**
  * Maps the answer's `voice_segments`. The field is required by the API reference and is what a caller reads the
- * line times from, so a missing list or a segment without its numbers is refused rather than skipped: a skipped
- * segment would leave a line without its times and nothing to say so.
+ * line times from, so a missing list, a segment without its numbers, or a segment whose line index is outside the
+ * `lineCount` lines sent is refused rather than skipped: a skipped segment would leave a line without its times and
+ * nothing to say so.
  */
-function readDialogueSegments(value: unknown): ElevenLabsDialogueSegment[] {
+function readDialogueSegments(value: unknown, lineCount: number): ElevenLabsDialogueSegment[] {
   if (!Array.isArray(value)) {
     throw new Error('ElevenLabs dialogue answer has no voice_segments list');
   }
@@ -613,6 +614,8 @@ function readDialogueSegments(value: unknown): ElevenLabsDialogueSegment[] {
     if (
       !isRecord(segment) ||
       !isWholeNumber(segment.dialogue_input_index) ||
+      segment.dialogue_input_index < 0 ||
+      segment.dialogue_input_index >= lineCount ||
       typeof segment.voice_id !== 'string' ||
       !isFiniteNumber(segment.start_time_seconds) ||
       !isFiniteNumber(segment.end_time_seconds) ||
@@ -632,21 +635,34 @@ function readDialogueSegments(value: unknown): ElevenLabsDialogueSegment[] {
   });
 }
 
-/** Maps an `alignment` or `normalized_alignment`; `undefined` when the answer has none (absent or null). */
-function readCharacterAlignment(value: unknown): ElevenLabsCharacterAlignment | undefined {
-  if (!isRecord(value)) {
+/**
+ * Maps an `alignment` or `normalized_alignment` (named by `field`). `undefined` when the answer has none (absent or
+ * null). One that is present is refused unless its three arrays run in step: the same length, each character a
+ * string and each time a finite number. A malformed alignment is never passed on as absent or as mismatched arrays.
+ */
+function readCharacterAlignment(value: unknown, field: string): ElevenLabsCharacterAlignment | undefined {
+  if (value === undefined || value === null) {
     return undefined;
   }
-  const characters = value.characters;
-  const starts = value.character_start_times_seconds;
-  const ends = value.character_end_times_seconds;
-  if (!Array.isArray(characters) || !Array.isArray(starts) || !Array.isArray(ends)) {
-    return undefined;
+  const characters = isRecord(value) ? value.characters : undefined;
+  const starts = isRecord(value) ? value.character_start_times_seconds : undefined;
+  const ends = isRecord(value) ? value.character_end_times_seconds : undefined;
+  if (
+    !Array.isArray(characters) ||
+    !Array.isArray(starts) ||
+    !Array.isArray(ends) ||
+    starts.length !== characters.length ||
+    ends.length !== characters.length ||
+    !characters.every((character) => typeof character === 'string') ||
+    !starts.every((time) => isFiniteNumber(time)) ||
+    !ends.every((time) => isFiniteNumber(time))
+  ) {
+    throw new Error(`ElevenLabs dialogue answer has a malformed ${field}`);
   }
   return {
-    characters: characters.map((character) => String(character)),
-    characterStartTimesSeconds: starts.map((time) => Number(time)),
-    characterEndTimesSeconds: ends.map((time) => Number(time)),
+    characters: [...characters] as string[],
+    characterStartTimesSeconds: [...starts] as number[],
+    characterEndTimesSeconds: [...ends] as number[],
   };
 }
 

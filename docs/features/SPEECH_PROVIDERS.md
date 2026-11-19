@@ -205,7 +205,7 @@ The result:
 - `segments` has one entry per `voice_segments` entry, in the API's order. Each carries `lineIndex` (the input line it belongs to), `voiceId`, `startSeconds`, `endSeconds`, `characterStartIndex` and `characterEndIndex`. No segments are merged.
 - `alignment` and `normalizedAlignment` give the time of each character of the text as written and as normalized. Each is absent when the answer has none.
 
-Before any request, the method throws a `RangeError` for an empty dialogue, for a line without text or voice id, and for a seed outside 0 to 4294967295. An error answer throws an `ElevenLabsApiError` carrying `status` and `body`, and so does a spent quota on every key. A successful answer whose `audio_base64` decodes to no bytes, or whose `voice_segments` are missing or malformed, throws an `Error`.
+Before any request, the method throws a `RangeError` for an empty dialogue, for a line without text or voice id, and for a seed outside 0 to 4294967295. An error answer throws an `ElevenLabsApiError` carrying `status` and `body`, and so does a spent quota on every key. A successful answer throws an `Error` when its `audio_base64` decodes to no bytes, when its `voice_segments` are missing or malformed (a line index outside the lines sent included), or when an alignment is present but malformed (arrays of different lengths, a character that is not a string, a time that is not a finite number).
 
 ElevenLabs' reference gives two limits that the method leaves to the API. A request takes at most 10 unique voice ids. For reliable generation, keep the text of all lines at or below 2,000 characters, since longer requests can end early or return a validation error. Split a longer dialogue into several requests.
 
