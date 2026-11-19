@@ -24,6 +24,7 @@ import {
   type ForgeTraceCut,
   type ForgeTraceInput,
   type ForgeTraceJudgeDetail,
+  type ForgeTraceVerdict,
   type KnownForgeTraceStage,
 } from '../ForgeTrace.js';
 import type { CreationVerdict, ForgeTestRun } from '../types.js';
@@ -1074,6 +1075,23 @@ function expectUnmeasuredCutOf(text: string, capBytes: number, result: unknown):
   return cut;
 }
 
+/**
+ * Every score of a trace's verdict admits null, the copy of a number JSON cannot write. Type check is the check: with
+ * a score typed number alone, `scoresAdmitNull` takes the type `false` and fails to compile.
+ */
+type ScoresAdmitNull = [
+  ForgeTraceVerdict['confidence'],
+  ForgeTraceVerdict['safety'],
+  ForgeTraceVerdict['correctness'],
+  ForgeTraceVerdict['determinism'],
+  ForgeTraceVerdict['bounded'],
+] extends [infer A, infer B, infer C, infer D, infer E]
+  ? null extends A & B & C & D & E
+    ? true
+    : false
+  : false;
+const scoresAdmitNull: ScoresAdmitNull = true;
+
 describe('forge trace: a bounded walk of each field', () => {
   it('a value far over its cap keeps the start that fits, lists its path, and is not read to its end', () => {
     const count = 200_000;
@@ -1092,7 +1110,7 @@ describe('forge trace: a bounded walk of each field', () => {
     const { value, plain, reads } = countedList(count);
     const cut: string[] = [];
 
-    expectUnmeasuredCutOf(JSON.stringify(plain), 4 * KIB, traceText(value, 4 * KIB, 'reason', cut));
+    expectUnmeasuredCutOf(JSON.stringify(plain), 512, traceText(value, 512, 'reason', cut));
     expect(cut).toEqual(['reason']);
     expect(reads()).toBeLessThan(count / 4);
   });
@@ -1177,5 +1195,6 @@ describe('forge trace: a bounded walk of each field', () => {
     expect(trace.verdict!.confidence).toBeNull();
     expect(trace.verdict!.safety).toBeNull();
     expect(trace.verdict!.correctness).toBe(REJECTION.correctness);
+    expect(scoresAdmitNull).toBe(true);
   });
 });

@@ -71,11 +71,14 @@ export const FORGE_TRACE_STAGES = [
 export type KnownForgeTraceStage = (typeof FORGE_TRACE_STAGES)[number];
 export type ForgeTraceStage = KnownForgeTraceStage | (string & {});
 
-/** A text or a value cut at its cap: its whole UTF-8 length, and the start kept, ending on a whole character. */
+/**
+ * A text or a value cut at its cap: its whole UTF-8 length, and the start kept, ending on a whole character. A value is
+ * read no further than 64 times its field's cap, so the whole length of a larger one is not known: `bytes` is null.
+ */
 export interface ForgeTraceCut {
   readonly $trace: 'cut';
-  readonly bytes: number;      // UTF-8 length of the whole text (of its JSON text, for a value)
-  readonly head: string;       // the start kept: the text itself, or the start of the value's JSON text
+  readonly bytes: number | null; // UTF-8 length of the whole text (of its JSON text, for a value); null when not measured
+  readonly head: string;         // the start kept: the text itself, or the start of the value's JSON text
 }
 
 /** A value that could not be written as JSON, in its place. */
@@ -159,8 +162,15 @@ export interface ForgeTraceAuthor {
   readonly at: string;                    // ISO 8601 UTC: when the part was received or produced
 }
 
-/** The verdict as the forge returned it, its reasoning capped like any text. */
-export type ForgeTraceVerdict = Readonly<Omit<CreationVerdict, 'reasoning'>> & { readonly reasoning: ForgeTraceText };
+/**
+ * The verdict as the forge returned it, its reasoning capped like any text. A score JSON cannot write (an infinity,
+ * which a judge's reply such as `"confidence": 1e999` parses to) is null.
+ */
+export type ForgeTraceVerdict = {
+  readonly [K in keyof Omit<CreationVerdict, 'reasoning'>]: CreationVerdict[K] extends number
+    ? number | null
+    : CreationVerdict[K];
+} & { readonly reasoning: ForgeTraceText };
 
 /** The machine-readable mark of what in this trace a model wrote. */
 export interface ForgeTraceProvenance {
@@ -174,7 +184,7 @@ export interface ForgeTraceProvenance {
 /** Sizes of the large fields and the fields that were cut. */
 export interface ForgeTraceSizes {
   readonly traceBytes: number;            // UTF-8 length of this trace's JSON, after cuts
-  readonly codeBytes: number | null;      // the whole code's (or steps' JSON's) length before any cut
+  readonly codeBytes: number | null;      // the whole code's (or steps' JSON's) length before any cut; null with no request, or for steps read no further than 64 times their cap
   readonly cut: readonly string[];        // paths of the cut fields, such as 'request.implementation.code', 'tests[2].result.output'
   readonly testsOmitted: number;          // test cases past the cap on how many the trace keeps
 }
@@ -284,8 +294,9 @@ export const FORGE_TRACE_CAPS: Readonly<{
 } as const);
 
 /**
- * How long a forge waits, in milliseconds, for a host's onForgeTrace to settle. A hook running past it is left
- * running, and the forge goes on.
+ * How long a forge waits, in milliseconds, for the promise a host's onForgeTrace returns to settle. A hook running past
+ * it is left running, and the forge goes on. The bound starts when the hook returns: the hook's synchronous work runs
+ * on the forge's own call before that, to its end, and no timer can cut it short.
  *
  * @internal
  */
@@ -301,6 +312,13 @@ export const FORGE_TRACE_HOOK_BOUND_MS = 1_000;
  */
 const MAX_COPY_DEPTH = 256;
 
+/**
+ * How far a field's walk reads a value, as a multiple of the field's cap: the walk counts one unit for each value it
+ * visits and one for each UTF-16 unit of each string and key, and stops when the count passes 64 times the cap. A value
+ * it stops in is cut, with its whole size unknown.
+ */
+const MEASURE_FACTOR = 64;
+
 /** What the copy returns for `undefined`: an object leaves the key out, and an array holds `null` in its place. */
 const OMITTED: unique symbol = Symbol('omitted');
 
@@ -311,6 +329,378 @@ function unserializable(kind: ForgeTraceUnserializable['kind']): ForgeTraceUnser
 /** Sets `key` as an own, enumerable property, so a key named `__proto__` is kept as a key and changes no prototype. */
 function defineKey(target: Record<string, unknown>, key: string, value: unknown): void {
   Object.defineProperty(target, key, { value, enumerable: true, writable: true, configurable: true });
+}
+
+function isHighSurrogate(unit: number): boolean {
+  return unit >= 0xd800 && unit <= 0xdbff;
+}
+
+function isLowSurrogate(unit: number): boolean {
+  return unit >= 0xdc00 && unit <= 0xdfff;
+}
+
+/**
+ * One walk of a value: the JSON-safe copy and, when `textUnits` is above zero, the start of the copy's JSON text and
+ * that text's UTF-8 length, both written as the walk goes, so no whole copy or whole text is made of a value larger than
+ * its field keeps.
+ */
+interface Walk {
+  /** The most UTF-16 units of JSON text to keep; 0 writes none. */
+  readonly textUnits: number;
+  /** The most UTF-16 units of JSON text the copy is built for; past it, the copy is dropped. */
+  readonly copyUnits: number;
+  /** The units of reading the walk may spend: one a value visited, one a UTF-16 unit of a string or key. */
+  readonly budget: number;
+  readonly parts: string[];
+  keptUnits: number;
+  /** UTF-8 length of the JSON text written so far, kept or not. */
+  bytes: number;
+  spent: number;
+  /** Whether the copy is still built. */
+  building: boolean;
+  /** Whether a piece of the text was left out or cut, so `parts` holds a start of the text and not all of it. */
+  truncated: boolean;
+  /** Whether the walk spent its budget and stopped before the value's end. */
+  stopped: boolean;
+}
+
+function newWalk(textUnits: number, copyUnits: number, budget: number): Walk {
+  return {
+    textUnits,
+    copyUnits,
+    budget,
+    parts: [],
+    keptUnits: 0,
+    bytes: 0,
+    spent: 0,
+    building: true,
+    truncated: false,
+    stopped: false,
+  };
+}
+
+/** Keeps `piece` of the JSON text when there is room, and drops the copy once the kept text passes `copyUnits`. */
+function keepPiece(walk: Walk, piece: string): void {
+  walk.parts.push(piece);
+  walk.keptUnits += piece.length;
+  if (walk.keptUnits > walk.copyUnits) {
+    walk.building = false;
+  }
+}
+
+/** Writes a piece of punctuation, a literal, a number or a marker: ASCII text, a byte a unit. */
+function writeRaw(walk: Walk, piece: string): void {
+  if (walk.textUnits === 0 || walk.stopped) {
+    return;
+  }
+  walk.bytes += piece.length;
+  if (walk.keptUnits < walk.textUnits) {
+    keepPiece(walk, piece);
+  } else {
+    walk.truncated = true;
+  }
+}
+
+/** The UTF-8 length of the JSON escape of `text`, without its quotes, as `JSON.stringify` writes it. */
+function escapedBytes(text: string): number {
+  let bytes = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const unit = text.charCodeAt(index);
+    if (unit < 0x20) {
+      // \b, \t, \n, \f and \r take two bytes; every other control character a six-byte \u escape.
+      bytes += unit === 0x08 || unit === 0x09 || unit === 0x0a || unit === 0x0c || unit === 0x0d ? 2 : 6;
+    } else if (unit === 0x22 || unit === 0x5c) {
+      bytes += 2;
+    } else if (unit < 0x80) {
+      bytes += 1;
+    } else if (unit < 0x800) {
+      bytes += 2;
+    } else if (isHighSurrogate(unit) && index + 1 < text.length && isLowSurrogate(text.charCodeAt(index + 1))) {
+      bytes += 4;
+      index += 1;
+    } else if (isHighSurrogate(unit) || isLowSurrogate(unit)) {
+      // A lone surrogate is written as a \u escape.
+      bytes += 6;
+    } else {
+      bytes += 3;
+    }
+  }
+  return bytes;
+}
+
+/**
+ * Writes `text` as a JSON string: its UTF-8 length when the budget reaches its end, and as much of its JSON text as
+ * there is room for. Only the start kept is escaped, so a long string costs the room, not its length.
+ */
+function writeString(walk: Walk, text: string): void {
+  if (walk.textUnits === 0 || walk.stopped) {
+    return;
+  }
+  const room = walk.textUnits - walk.keptUnits;
+  if (room > 0) {
+    if (text.length <= room) {
+      keepPiece(walk, JSON.stringify(text));
+    } else {
+      // Every unit is at least one unit of JSON, so `room` units of the text fill the room, and the start kept (its
+      // closing quote dropped) passes it. The start never ends between the two halves of a pair, which JSON would write
+      // as two escapes the whole text does not have.
+      let end = room;
+      if (isHighSurrogate(text.charCodeAt(end - 1)) && isLowSurrogate(text.charCodeAt(end))) {
+        end += 1;
+      }
+      const start = JSON.stringify(text.slice(0, end));
+      keepPiece(walk, start.slice(0, -1));
+      walk.truncated = true;
+    }
+  } else {
+    walk.truncated = true;
+  }
+  if (walk.spent + text.length > walk.budget) {
+    walk.spent = walk.budget;
+    walk.stopped = true;
+    walk.truncated = true;
+    return;
+  }
+  walk.spent += text.length;
+  walk.bytes += 2 + escapedBytes(text);
+}
+
+/** Writes a marker and returns it. */
+function writeMarker(walk: Walk, kind: ForgeTraceUnserializable['kind']): ForgeTraceUnserializable {
+  const marker = unserializable(kind);
+  writeRaw(walk, JSON.stringify(marker));
+  return marker;
+}
+
+/**
+ * The value `JSON.stringify` writes in the place of `input` under `key`: what its `toJSON` returns, when it has one,
+ * else `input` itself; an `other` marker when reading or calling `toJSON` throws.
+ */
+function resolveJson(input: unknown, key: string): { value: unknown } | { thrown: true } {
+  if ((typeof input === 'object' && input !== null) || typeof input === 'function' || typeof input === 'bigint') {
+    try {
+      const toJSON = (input as { toJSON?: unknown }).toJSON;
+      if (typeof toJSON === 'function') {
+        return { value: toJSON.call(input, key) };
+      }
+    } catch {
+      return { thrown: true };
+    }
+  }
+  return { value: input };
+}
+
+/** Spends one unit for a value visited; false once the budget is spent, when the walk stops. */
+function spend(walk: Walk): boolean {
+  walk.spent += 1;
+  if (walk.spent > walk.budget) {
+    walk.stopped = true;
+    walk.truncated = true;
+  }
+  return !walk.stopped;
+}
+
+/**
+ * Walks one value: writes its JSON text and returns its copy, or OMITTED for a value JSON leaves out (`undefined`
+ * after `toJSON`), which writes nothing. Never throws. Once the walk has stopped it writes nothing more.
+ */
+function walkValue(walk: Walk, input: unknown, key: string, ancestors: Set<object>, depth: number): unknown {
+  if (!spend(walk)) {
+    return OMITTED;
+  }
+  const resolved = resolveJson(input, key);
+  return 'thrown' in resolved ? writeMarker(walk, 'other') : walkResolved(walk, resolved.value, ancestors, depth);
+}
+
+/** Walks a value whose `toJSON` has been called, as `JSON.stringify` calls it: once. */
+function walkResolved(walk: Walk, value: unknown, ancestors: Set<object>, depth: number): unknown {
+  switch (typeof value) {
+    case 'string':
+      writeString(walk, value);
+      return value;
+    case 'boolean':
+      writeRaw(walk, value ? 'true' : 'false');
+      return value;
+    case 'number':
+      if (Number.isFinite(value)) {
+        writeRaw(walk, JSON.stringify(value));
+        return value;
+      }
+      writeRaw(walk, 'null');
+      return null;
+    case 'undefined':
+      return OMITTED;
+    case 'bigint':
+      return writeMarker(walk, 'bigint');
+    case 'symbol':
+      return writeMarker(walk, 'symbol');
+    case 'function':
+      return writeMarker(walk, 'function');
+  }
+  if (value === null) {
+    writeRaw(walk, 'null');
+    return null;
+  }
+  return walkObject(walk, value as object, ancestors, depth);
+}
+
+/**
+ * Walks an object or an array. Every read that can throw (a getter, a `Proxy` trap, a revoked `Proxy`) is made
+ * before the opening bracket is written or is caught where it is made, so a throw leaves no part of the text written.
+ */
+function walkObject(walk: Walk, source: object, ancestors: Set<object>, depth: number): unknown {
+  let keys: string[] | null = null;
+  let length = 0;
+  try {
+    if (source instanceof Number) {
+      const number = Number(source);
+      const finite = Number.isFinite(number);
+      writeRaw(walk, finite ? JSON.stringify(number) : 'null');
+      return finite ? number : null;
+    }
+    if (source instanceof String) {
+      const text = String(source);
+      writeString(walk, text);
+      return text;
+    }
+    if (source instanceof Boolean) {
+      const flag = Boolean.prototype.valueOf.call(source);
+      writeRaw(walk, flag ? 'true' : 'false');
+      return flag;
+    }
+    if (source instanceof BigInt) {
+      return writeMarker(walk, 'bigint');
+    }
+    if (ancestors.has(source)) {
+      return writeMarker(walk, 'cycle');
+    }
+    if (depth >= MAX_COPY_DEPTH) {
+      return writeMarker(walk, 'other');
+    }
+    if (Array.isArray(source)) {
+      length = source.length;
+    } else {
+      keys = jsonKeyOrder(Object.keys(source));
+    }
+  } catch {
+    return writeMarker(walk, 'other');
+  }
+  ancestors.add(source);
+  try {
+    return keys === null
+      ? walkArray(walk, source as readonly unknown[], length, ancestors, depth)
+      : walkKeys(walk, source, keys, ancestors, depth);
+  } finally {
+    ancestors.delete(source);
+  }
+}
+
+function walkArray(
+  walk: Walk,
+  list: readonly unknown[],
+  length: number,
+  ancestors: Set<object>,
+  depth: number,
+): unknown[] {
+  const out: unknown[] = [];
+  writeRaw(walk, '[');
+  for (let index = 0; index < length && !walk.stopped; index += 1) {
+    if (index > 0) {
+      writeRaw(walk, ',');
+    }
+    let copy: unknown;
+    try {
+      copy = walkValue(walk, list[index], String(index), ancestors, depth + 1);
+    } catch {
+      copy = writeMarker(walk, 'other');
+    }
+    if (copy === OMITTED && !walk.stopped) {
+      writeRaw(walk, 'null');
+    }
+    if (walk.building) {
+      out.push(copy === OMITTED ? null : copy);
+    }
+  }
+  writeRaw(walk, ']');
+  return out;
+}
+
+function walkKeys(
+  walk: Walk,
+  source: object,
+  keys: readonly string[],
+  ancestors: Set<object>,
+  depth: number,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  writeRaw(walk, '{');
+  let written = 0;
+  for (const key of keys) {
+    // A value is counted before it is read, so a walk that has spent its budget runs no further getter.
+    if (!spend(walk)) {
+      break;
+    }
+    let item: unknown;
+    let unreadable = false;
+    try {
+      item = (source as Record<string, unknown>)[key];
+    } catch {
+      unreadable = true;
+    }
+    // The key is written only once its value is known to be written: JSON leaves out a key whose value is undefined.
+    const resolved = unreadable ? null : resolveJson(item, key);
+    if (resolved !== null && 'value' in resolved && resolved.value === undefined) {
+      continue;
+    }
+    if (written > 0) {
+      writeRaw(walk, ',');
+    }
+    writeString(walk, key);
+    writeRaw(walk, ':');
+    written += 1;
+    let copy: unknown;
+    if (resolved === null || 'thrown' in resolved) {
+      copy = writeMarker(walk, 'other');
+    } else {
+      copy = walkResolved(walk, resolved.value, ancestors, depth + 1);
+    }
+    if (walk.building && copy !== OMITTED) {
+      defineKey(out, key, copy);
+    }
+  }
+  writeRaw(walk, '}');
+  return out;
+}
+
+/**
+ * Keys in the order `JSON.stringify` writes a plain object's: array-index keys in ascending order, then the rest as
+ * given. `Object.keys` gives that order for an ordinary object; a `Proxy` can give another.
+ */
+function jsonKeyOrder(keys: string[]): string[] {
+  const indexes: string[] = [];
+  const others: string[] = [];
+  for (const key of keys) {
+    if (isArrayIndex(key)) {
+      indexes.push(key);
+    } else {
+      others.push(key);
+    }
+  }
+  if (indexes.length === 0) {
+    return others;
+  }
+  indexes.sort((a, b) => Number(a) - Number(b));
+  return [...indexes, ...others];
+}
+
+function isArrayIndex(key: string): boolean {
+  if (key === '0') {
+    return true;
+  }
+  if (!/^[1-9][0-9]{0,9}$/.test(key)) {
+    return false;
+  }
+  return Number(key) < 4_294_967_295;
 }
 
 /**
@@ -326,116 +716,35 @@ function defineKey(target: Record<string, unknown>, key: string, value: unknown)
  * @internal
  */
 export function jsonSafeCopy(value: unknown): unknown {
-  const copy = copyValue(value, '', new Set<object>(), 0);
+  const walk = newWalk(0, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
+  const copy = walkValue(walk, value, '', new Set<object>(), 0);
   return copy === OMITTED ? undefined : copy;
 }
 
-function copyValue(input: unknown, key: string, ancestors: Set<object>, depth: number): unknown {
-  let value = input;
-  if ((typeof value === 'object' && value !== null) || typeof value === 'function' || typeof value === 'bigint') {
-    try {
-      const toJSON = (value as { toJSON?: unknown }).toJSON;
-      if (typeof toJSON === 'function') {
-        value = toJSON.call(value, key);
-      }
-    } catch {
-      return unserializable('other');
-    }
-  }
-  switch (typeof value) {
-    case 'string':
-    case 'boolean':
-      return value;
-    case 'number':
-      return Number.isFinite(value) ? value : null;
-    case 'undefined':
-      return OMITTED;
-    case 'bigint':
-      return unserializable('bigint');
-    case 'symbol':
-      return unserializable('symbol');
-    case 'function':
-      return unserializable('function');
-  }
-  if (value === null) {
-    return null;
-  }
-  const source = value as object;
+/** What a field's walk gives: the copy, the start of its JSON text, whether that start is the whole text, and its size. */
+interface FieldWalk {
+  /** The copy, built while its JSON text is within the cap; OMITTED for a value JSON has no text for. */
+  readonly copy: unknown;
+  readonly text: string;
+  readonly whole: boolean;
+  /** The UTF-8 length of the whole JSON text; null when the walk stopped before the value's end. */
+  readonly bytes: number | null;
+}
+
+/**
+ * Walks a field's value under its cap: keeps the copy while its JSON text is within the cap, keeps `2 * capBytes + 3`
+ * UTF-16 units of the text (more than any cut of it can keep), and reads no further than 64 times the cap.
+ */
+function walkField(value: unknown, capBytes: number): FieldWalk {
+  const walk = newWalk(2 * capBytes + 3, capBytes, MEASURE_FACTOR * capBytes);
   try {
-    if (source instanceof Number) {
-      const number = Number(source);
-      return Number.isFinite(number) ? number : null;
-    }
-    if (source instanceof String) {
-      return String(source);
-    }
-    if (source instanceof Boolean) {
-      return Boolean.prototype.valueOf.call(source);
-    }
-    if (source instanceof BigInt) {
-      return unserializable('bigint');
-    }
-    if (ancestors.has(source)) {
-      return unserializable('cycle');
-    }
-    if (depth >= MAX_COPY_DEPTH) {
-      return unserializable('other');
-    }
-    ancestors.add(source);
-    try {
-      return Array.isArray(source)
-        ? copyArray(source, ancestors, depth)
-        : copyObject(source, ancestors, depth);
-    } finally {
-      ancestors.delete(source);
-    }
+    const copy = walkValue(walk, value, '', new Set<object>(), 0);
+    return { copy, text: walk.parts.join(''), whole: !walk.truncated, bytes: walk.stopped ? null : walk.bytes };
   } catch {
-    return unserializable('other');
-  }
-}
-
-function copyArray(list: readonly unknown[], ancestors: Set<object>, depth: number): unknown[] {
-  const length = list.length;
-  const out: unknown[] = [];
-  for (let index = 0; index < length; index += 1) {
-    let item: unknown;
-    try {
-      item = list[index];
-    } catch {
-      out.push(unserializable('other'));
-      continue;
-    }
-    const copy = copyValue(item, String(index), ancestors, depth + 1);
-    out.push(copy === OMITTED ? null : copy);
-  }
-  return out;
-}
-
-function copyObject(source: object, ancestors: Set<object>, depth: number): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const key of Object.keys(source)) {
-    let item: unknown;
-    try {
-      item = (source as Record<string, unknown>)[key];
-    } catch {
-      defineKey(out, key, unserializable('other'));
-      continue;
-    }
-    const copy = copyValue(item, key, ancestors, depth + 1);
-    if (copy !== OMITTED) {
-      defineKey(out, key, copy);
-    }
-  }
-  return out;
-}
-
-/** The JSON text of a value's copy; `'undefined'` for `undefined`, which has none. Never throws. */
-function jsonText(value: unknown): string {
-  try {
-    const json = JSON.stringify(jsonSafeCopy(value));
-    return json === undefined ? 'undefined' : json;
-  } catch {
-    return JSON.stringify(unserializable('other'));
+    // The walk guards every read; this is an engine's own failure, such as running out of memory.
+    const marker = unserializable('other');
+    const text = JSON.stringify(marker);
+    return { copy: marker, text, whole: true, bytes: text.length };
   }
 }
 
@@ -445,14 +754,6 @@ function jsonText(value: unknown): string {
 
 function jsonBytes(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value));
-}
-
-function isHighSurrogate(unit: number): boolean {
-  return unit >= 0xd800 && unit <= 0xdbff;
-}
-
-function isLowSurrogate(unit: number): boolean {
-  return unit >= 0xdc00 && unit <= 0xdfff;
 }
 
 /** `end`, moved back to the start of the character it falls inside, so `text.slice(0, end)` ends on a whole character. */
@@ -474,7 +775,8 @@ function stringFits(text: string, capBytes: number): boolean {
 /**
  * The longest start of `text` that ends on a whole character and for which `fits` holds, or the empty start when
  * none does. A binary search over the first `2 * capBytes + 2` UTF-16 units: every unit is at least one byte of JSON,
- * so a start past that cannot fit, and a text of any length costs the same search.
+ * so a start past that cannot fit, and a text of any length costs the same search. A text that is itself the start of
+ * a longer one, of at least `2 * capBytes + 3` units, gives the same start as the longer one.
  */
 function longestFittingStart(text: string, capBytes: number, fits: (start: string) => boolean): string {
   let low = 0;
@@ -490,17 +792,16 @@ function longestFittingStart(text: string, capBytes: number, fits: (start: strin
   return text.slice(0, wholeCharacterEnd(text, low));
 }
 
-/** A cut of `text` whose own JSON fits `capBytes`: the text's whole UTF-8 length and the longest start that fits. */
-function cutOf(text: string, capBytes: number): ForgeTraceCut {
-  const bytes = Buffer.byteLength(text);
+/** A cut of a text whose own JSON fits `capBytes`, from the text or a start of it: its whole UTF-8 length and the head. */
+function cutOf(text: string, bytes: number | null, capBytes: number): ForgeTraceCut {
   const head = longestFittingStart(text, capBytes, (start) => jsonBytes({ $trace: 'cut', bytes, head: start }) <= capBytes);
   return { $trace: 'cut', bytes, head };
 }
 
 /**
  * A text field: kept whole when its JSON fits `capBytes`, else a ForgeTraceCut; a non-string is written as its JSON
- * text first (through {@link jsonSafeCopy}; `undefined`, which has none, as `'undefined'`). Pushes `path` onto `cut`
- * when it cuts. Never throws.
+ * text first (as {@link jsonSafeCopy} writes it; `undefined`, which has none, as `'undefined'`), from a walk that reads
+ * no further than 64 times the cap. Pushes `path` onto `cut` when it cuts. Never throws.
  *
  * @param text - The field's text, or a value to write as its JSON text.
  * @param capBytes - The field's cap: the most bytes its JSON may take, the marker's own JSON when it is cut.
@@ -510,19 +811,29 @@ function cutOf(text: string, capBytes: number): ForgeTraceCut {
  * @internal
  */
 export function traceText(text: unknown, capBytes: number, path: string, cut: string[]): ForgeTraceText {
-  const whole = typeof text === 'string' ? text : jsonText(text);
-  if (stringFits(whole, capBytes)) {
+  const json = typeof text === 'string' ? null : fieldText(text, capBytes);
+  const whole = json === null ? (text as string) : json.text;
+  if ((json === null || json.whole) && stringFits(whole, capBytes)) {
     return whole;
   }
-  const marker = cutOf(whole, capBytes);
+  const marker = cutOf(whole, json === null ? Buffer.byteLength(whole) : json.bytes, capBytes);
   cut.push(path);
   return marker;
 }
 
+/** A non-string's JSON text from a bounded walk; `'undefined'` for a value JSON has no text for. */
+function fieldText(value: unknown, capBytes: number): { text: string; whole: boolean; bytes: number | null } {
+  const walked = walkField(value, capBytes);
+  return walked.copy === OMITTED
+    ? { text: 'undefined', whole: true, bytes: 9 }
+    : { text: walked.text, whole: walked.whole, bytes: walked.bytes };
+}
+
 /**
  * A value field: the JSON-safe copy ({@link jsonSafeCopy}) when its JSON fits `capBytes`, else a ForgeTraceCut of
- * that JSON text; `undefined` for `undefined`. Pushes `path` onto `cut` when it cuts. Never throws: a value whose JSON
- * cannot be written at all becomes an `other` marker.
+ * that JSON text; `undefined` for `undefined`. The value is walked once, no further than 64 times the cap, and no copy
+ * or text is made of more than the field keeps: a value the walk stops in is cut with `bytes` null. Pushes `path` onto
+ * `cut` when it cuts. Never throws.
  *
  * @param value - The field's value.
  * @param capBytes - The field's cap: the most bytes its JSON may take, the marker's own JSON when it is cut.
@@ -532,24 +843,28 @@ export function traceText(text: unknown, capBytes: number, path: string, cut: st
  * @internal
  */
 export function traceValue(value: unknown, capBytes: number, path: string, cut: string[]): ForgeTraceValue | undefined {
+  return fieldValue(value, capBytes, path, cut).value;
+}
+
+/** {@link traceValue}, with the UTF-8 length of the value's whole JSON text (null when the walk stopped first). */
+function fieldValue(
+  value: unknown,
+  capBytes: number,
+  path: string,
+  cut: string[],
+): { value: ForgeTraceValue | undefined; bytes: number | null } {
   if (value === undefined) {
-    return undefined;
+    return { value: undefined, bytes: 0 };
   }
-  try {
-    const copy = jsonSafeCopy(value);
-    const json = JSON.stringify(copy);
-    if (json === undefined) {
-      return undefined;
-    }
-    if (json.length <= capBytes && Buffer.byteLength(json) <= capBytes) {
-      return copy;
-    }
-    const marker = cutOf(json, capBytes);
-    cut.push(path);
-    return marker;
-  } catch {
-    return unserializable('other');
+  const walked = walkField(value, capBytes);
+  if (walked.copy === OMITTED) {
+    return { value: undefined, bytes: 0 };
   }
+  if (walked.whole && walked.bytes !== null && walked.text.length <= capBytes && walked.bytes <= capBytes) {
+    return { value: walked.copy, bytes: walked.bytes };
+  }
+  cut.push(path);
+  return { value: cutOf(walked.text, walked.bytes, capBytes), bytes: walked.bytes };
 }
 
 /**
@@ -565,8 +880,9 @@ export function traceValue(value: unknown, capBytes: number, path: string, cut: 
  * @internal
  */
 export function traceString(text: string, capBytes: number, path: string, cut: string[]): string {
-  const whole = typeof text === 'string' ? text : jsonText(text);
-  if (stringFits(whole, capBytes)) {
+  const json = typeof text === 'string' ? null : fieldText(text, capBytes);
+  const whole = json === null ? text : json.text;
+  if ((json === null || json.whole) && stringFits(whole, capBytes)) {
     return whole;
   }
   const start = longestFittingStart(whole, capBytes, (candidate) => jsonBytes(candidate) <= capBytes);
@@ -839,25 +1155,31 @@ function requestTestCases(reads: ArgumentReads | null): unknown[] | null {
   return testCases.every(isObject) ? testCases : null;
 }
 
-function buildRequest(reads: ArgumentReads, cut: string[]): ForgeTraceRequest {
+/**
+ * The request, and `codeBytes`: the UTF-8 length of the whole code, or of the steps' JSON text as the walk of the steps
+ * measured it, null when that walk stopped before their end. The steps are walked once, for both.
+ */
+function buildRequest(reads: ArgumentReads, cut: string[]): { request: ForgeTraceRequest; codeBytes: number | null } {
   const request: Record<string, unknown> = {
     name: traceText(reads.name, FORGE_TRACE_CAPS.name, 'request.name', cut),
     description: traceText(reads.description, FORGE_TRACE_CAPS.description, 'request.description', cut),
     inputSchema: traceValue(reads.inputSchema, FORGE_TRACE_CAPS.schema, 'request.inputSchema', cut),
   };
   setField(request, 'outputSchema', traceValue(reads.outputSchema, FORGE_TRACE_CAPS.schema, 'request.outputSchema', cut));
-  request.implementation =
-    reads.mode === 'sandbox'
-      ? {
-          mode: 'sandbox',
-          code: traceText(reads.code, FORGE_TRACE_CAPS.code, 'request.implementation.code', cut),
-          allowlist: buildAllowlist(reads.allowlist as readonly unknown[], cut),
-        }
-      : {
-          mode: 'compose',
-          steps: traceValue(reads.steps, FORGE_TRACE_CAPS.code, 'request.implementation.steps', cut),
-        };
-  return request as unknown as ForgeTraceRequest;
+  let codeBytes: number | null;
+  if (reads.mode === 'sandbox') {
+    request.implementation = {
+      mode: 'sandbox',
+      code: traceText(reads.code, FORGE_TRACE_CAPS.code, 'request.implementation.code', cut),
+      allowlist: buildAllowlist(reads.allowlist as readonly unknown[], cut),
+    };
+    codeBytes = Buffer.byteLength(reads.code as string);
+  } else {
+    const steps = fieldValue(reads.steps, FORGE_TRACE_CAPS.code, 'request.implementation.steps', cut);
+    request.implementation = { mode: 'compose', steps: steps.value };
+    codeBytes = steps.bytes;
+  }
+  return { request: request as unknown as ForgeTraceRequest, codeBytes };
 }
 
 /** The first 64 allowlist entries, each capped; the list's own path is listed when it held more. */
@@ -868,19 +1190,6 @@ function buildAllowlist(allowlist: readonly unknown[], cut: string[]): ForgeTrac
   return entriesOf(allowlist, FORGE_TRACE_CAPS.allowlistEntries).map((entry, index) =>
     readText(entry, FORGE_TRACE_CAPS.allowlistEntry, `request.implementation.allowlist[${index}]`, cut),
   );
-}
-
-/** The UTF-8 length of the whole code, or of the steps' JSON, before any cut. */
-function codeBytesOf(reads: ArgumentReads): number {
-  if (reads.mode === 'sandbox') {
-    return Buffer.byteLength(reads.code as string);
-  }
-  try {
-    const json = JSON.stringify(reads.steps);
-    return json === undefined ? 0 : Buffer.byteLength(json);
-  } catch {
-    return Buffer.byteLength(jsonText(reads.steps));
-  }
 }
 
 /** The first 16 test cases in request order; entry i ran when `runs` holds a run at i. */
@@ -1098,11 +1407,14 @@ export function buildForgeTrace(input: ForgeTraceInput): ForgeTrace {
     reads !== null && typeof reads.name === 'string' ? traceText(reads.name, FORGE_TRACE_CAPS.name, 'toolName', cut) : null;
   const mode = reads !== null && (reads.mode === 'sandbox' || reads.mode === 'compose') ? reads.mode : null;
   const reason = reasonOf(stage, input.reason, cut);
-  const request = testCases === null || reads === null ? null : buildRequest(reads, cut);
+  const built = testCases === null || reads === null ? null : buildRequest(reads, cut);
+  const request = built === null ? null : built.request;
   const rawArguments =
     request === null ? traceValue(input.args, FORGE_TRACE_CAPS.rawArguments, 'rawArguments', cut) : undefined;
   const justificationRead = reads === null ? undefined : reads.justification;
-  const justification = readTextOrNull(justificationRead, FORGE_TRACE_CAPS.justification, 'justification', cut);
+  // An explicit null is a value the request carried, kept as its JSON text; only an absent key is no justification.
+  const justification =
+    justificationRead === undefined ? null : readText(justificationRead, FORGE_TRACE_CAPS.justification, 'justification', cut);
   const tests = testCases === null ? [] : buildTests(testCases, runs, cut);
   const executor = buildExecutor(input.executor, cut);
   const verdict = buildVerdict(input.verdict, cut);
@@ -1119,7 +1431,7 @@ export function buildForgeTrace(input: ForgeTraceInput): ForgeTrace {
   const duration = Math.round(finishedMs - startedMs);
   const sizes = {
     traceBytes: 0,
-    codeBytes: request === null || reads === null ? null : codeBytesOf(reads),
+    codeBytes: built === null ? null : built.codeBytes,
     cut,
     testsOmitted: request === null || testCases === null ? 0 : Math.max(0, testCases.length - FORGE_TRACE_CAPS.tests),
   };
@@ -1285,8 +1597,9 @@ async function awaitHook(trace: ForgeTrace, hook: ForgeTraceHook): Promise<void>
 }
 
 /**
- * Delivers a forge's trace: writes `emergent.forge_done`, then calls the hook, when one is set, and waits for it up
- * to {@link FORGE_TRACE_HOOK_BOUND_MS}. A hook that throws or rejects writes `emergent.forge_trace_hook_failed`; one
+ * Delivers a forge's trace: writes `emergent.forge_done`, then calls the hook, when one is set, and waits for the
+ * promise it returns up to {@link FORGE_TRACE_HOOK_BOUND_MS}. The hook's synchronous work runs before that wait, to its
+ * end. A hook that throws or rejects writes `emergent.forge_trace_hook_failed`; one
  * running at the bound writes `emergent.forge_trace_hook_slow` and is left running. Never throws.
  *
  * @param trace - The forge's trace.

@@ -372,8 +372,10 @@ export interface EmergentCapabilityEngineDeps {
    * Called once for every forge, after its outcome is final, with its trace.
    * Never called for loads or re-registrations.
    *
-   * The forge waits for the handler up to one second and then returns; a
-   * handler running at that bound is left running. A handler that throws or
+   * The forge waits for the promise the handler returns up to one second and
+   * then returns; a handler running at that bound is left running. The bound
+   * starts when the handler returns: its synchronous work runs on the forge's
+   * own call, to its end, and no timer cuts it short. A handler that throws or
    * rejects never changes the forge's result.
    */
   onForgeTrace?: (trace: ForgeTrace) => void | Promise<void>;

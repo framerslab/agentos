@@ -813,8 +813,9 @@ export interface AgentOSConfig {
   /**
    * Receives every forge's trace when `emergent` is on: once a forge, after its outcome is final, whatever the
    * outcome. On the full runtime it is the one carrier of a trace, since the runtime's stream carries no tool result.
-   * Awaited up to 1,000 ms; a throw or rejection is caught and never changes the forge's result. The model reads no
-   * trace, and AgentOS stores none.
+   * The promise it returns is awaited up to 1,000 ms; its synchronous work runs to its end before that bound starts,
+   * and no timer cuts it short. A throw or rejection is caught and never changes the forge's result. The model reads
+   * no trace, and AgentOS stores none.
    */
   onForgeTrace?: (trace: ForgeTrace) => void | Promise<void>;
 

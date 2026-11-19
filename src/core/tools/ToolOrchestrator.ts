@@ -212,7 +212,8 @@ export class ToolOrchestrator implements IToolOrchestrator {
       /**
        * Called once for every forge, after its outcome is final, with its trace: the forges the engine runs and the
        * calls to this orchestrator's own forge_tool that the orchestrator or the executor ends before the tool runs.
-       * Awaited up to 1,000 ms; a throw or rejection is caught and never changes the forge's result.
+       * The promise it returns is awaited up to 1,000 ms; its synchronous work runs to its end before that bound
+       * starts, and no timer cuts it short. A throw or rejection is caught and never changes the forge's result.
        */
       onForgeTrace?: (trace: ForgeTrace) => void | Promise<void>;
       /**
