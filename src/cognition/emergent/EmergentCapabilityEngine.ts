@@ -879,7 +879,7 @@ export class EmergentCapabilityEngine {
           return {
             success: false,
             error:
-              `effects_need_ceiling:${effects.join(', ')} need a ceiling that grants them (emergentConfig.capabilities); ` +
+              `effects_need_ceiling: ${effects.join(', ')} need a ceiling that grants them (emergentConfig.capabilities); ` +
               'without one this host grants fetch, fs.read and crypto to code-forged tools',
           };
         }
