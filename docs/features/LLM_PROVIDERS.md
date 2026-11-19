@@ -886,7 +886,23 @@ When neither route carries the schema (such a schema on Claude Opus 5.5, Sonnet
 on the forced-tool route turns thinking on, which a forced tool choice cannot
 ride beside, the provider puts the schema into the system prompt itself as one
 block after the caller's ("Answer with JSON only, matching this schema: ...")
-and warns once per model and reason. The schema tool is never sent clamped to
+and warns once per model and reason. The format also refuses a schema whose
+compiled grammar is too large, a limit no count of the schema predicts (HTTP
+400, "The compiled grammar is too large, which would cause performance issues.
+Simplify your tool schemas or reduce the number of strict tools."): a schema
+with many nested objects, arrays and enums can be refused inside the 16
+union-typed and 24 optional properties. The provider then sends the same
+request once more on the prompt route, with no `output_config.format` (a
+passthrough one included) and no schema tool, and the rest unchanged; a system
+prompt that states the schema already (generateObject's) gets no second copy.
+The re-send is part of the call's `maxAttempts`: a call whose refused request
+used every attempt (`maxAttempts: 1`) ends with the refusal. It remembers the
+refusal for the process, keyed by the model on the wire and a hash of the
+schema with any strict tools sent beside it, so later requests with that schema
+on that model take the prompt route at once, and it
+writes one `llm.schema_format_refused` line (the provider, the model, the
+schema's name and the reason `grammar_too_large`; nothing of the prompt or the
+key). Any other 400 reaches the caller as before. The schema tool is never sent clamped to
 `auto`, and thinking moves only the forced-tool route: a request on the format
 route keeps the format with thinking on. A request that enables citations
 leaves the format, which the API refuses beside citations, for the forced tool,
@@ -918,7 +934,7 @@ The Tool Choice column is what the provider does with the `toolChoice` option
 | OpenAI | `json_schema` with `strict: true` when the schema fits OpenAI's strict rules, otherwise JSON-object mode. Strict mode takes no optional property, so every property is required and each optional one accepts `null`. Before validation the reply readers drop a `null` only where the caller's schema takes the field's absence and refuses `null`; a `.nullable()` field keeps it | Sent as `tool_choice` |
 | Anthropic | The native JSON output format (`output_config.format`) on every model that has it and whose schema fits its limits; a non-strict forced tool call whose input is the schema for a schema the format cannot carry on a model that accepts a forced choice, and for every schema on Claude Opus 4 and Sonnet 4; the provider's own schema block in the system prompt when neither carries the schema, and on the forced-tool route when the request turns thinking on, a passthrough `tools` drops the schema tool, or a passthrough `tool_choice` of `auto`, `none` or another tool's name lets the model skip it (the format route keeps the format with thinking on) | `'required'` is sent as `any` and a named function as `tool`; `'none'` is sent as `auto`. A model that rejects a forced choice gets `auto` |
 | Gemini | `responseSchema` with JSON output | Not sent; the API default applies |
-| OpenRouter | Strict `json_schema` when the schema fits, otherwise JSON-object mode. On a Claude model (`anthropic/...`), whose strict schema OpenRouter sends on to Anthropic's JSON output format, a strict schema over Anthropic's limits (16 union-typed parameters, each nullable property among them, and 24 optional ones) is sent in JSON-object mode, since Anthropic refuses it with an HTTP 400. When OpenRouter finds no endpoint that serves the strict schema (HTTP 404, "No endpoints found"), the request is sent once more in JSON-object mode with the schema written into its system prompt, unless the system prompt states a schema already | Sent as `tool_choice`; the routed model decides |
+| OpenRouter | Strict `json_schema` when the schema fits, otherwise JSON-object mode. On a Claude model (`anthropic/...`), whose strict schema OpenRouter sends on to Anthropic's JSON output format, a strict schema over Anthropic's limits (16 union-typed parameters, each nullable property among them, and 24 optional ones) is sent in JSON-object mode, since Anthropic refuses it with an HTTP 400. When OpenRouter finds no endpoint that serves the strict schema (HTTP 404, "No endpoints found"), the request is sent once more in JSON-object mode with the schema written into its system prompt, unless the system prompt states a schema already. The same holds when a Claude model's endpoint refuses the strict schema as too large for Anthropic's grammar (HTTP 400, streamed or not, "Provider returned error" with Anthropic's "The compiled grammar is too large" in `metadata.raw`); that refusal is remembered for the process by model and schema, so later requests go in JSON-object mode at once, and it writes one `llm.schema_format_refused` line | Sent as `tool_choice`; the routed model decides |
 | Requesty | None | Sent as `tool_choice`; the routed model decides |
 | Groq, Together, Mistral, xAI, LiteLLM | None | Sent as `tool_choice`; the vendor decides which values it accepts |
 | Ollama | None | Not sent |

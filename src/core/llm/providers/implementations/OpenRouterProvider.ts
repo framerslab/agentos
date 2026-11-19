@@ -38,7 +38,8 @@ import { stripGeminiOnlyParams } from '../openrouter-only-params';
 import { baseUrlCredentials, redactUrlSecrets } from '../url-secrets.js';
 import { buildSchemaInstructionText, SCHEMA_INSTRUCTION_LEAD } from '../../../../api/runtime/structuredReply.js';
 import { moduleLogger } from '../../../logging/loggerFactory.js';
-import { listedErrorFields } from '../../../logging/events.js';
+import { listedErrorFields, safePath, safeWord } from '../../../logging/events.js';
+import { isSchemaGrammarTooLarge, rememberSchemaFormatRefusal, schemaFormatRefused } from '../schema-format-refusals.js';
 import { cheapestPricedChatModel } from './billing-probe-model.js';
 import { resolveAttemptCount, waitForRetry, type AttemptTally } from './retry-backoff.js';
 import { operationIdHeaderNamed, operationIdHeaders, resolveOperationIdHeader } from './operation-id.js';
@@ -794,6 +795,7 @@ export class OpenRouterProvider implements IProvider {
     };
     this.applyDefaultProviderPrefs(payload);
     this.applySchemaRoutingPrefs(payload, options);
+    this.applyRememberedSchemaRefusal(payload);
     this.applyAnthropicSlugCacheToPayload(modelId, payload, options);
 
     // The call's count bounds the schema request and its json_object retry together.
@@ -815,7 +817,7 @@ export class OpenRouterProvider implements IProvider {
       );
     } catch (error: unknown) {
       const remaining = attempts - tally.sent;
-      const degraded = remaining > 0 && this.degradeSchemaPayloadOnNoEndpoints(payload, error);
+      const degraded = this.degradeSchemaPayloadOnRefusal(payload, error, remaining > 0);
       if (!degraded) throw error;
       apiResponseData = await this.makeApiRequest<OpenRouterChatCompletionAPIResponse>(
         '/chat/completions',
@@ -871,43 +873,101 @@ export class OpenRouterProvider implements IProvider {
   }
 
   /**
-   * One-shot degrade for schema-enforced calls: when OpenRouter reports
-   * that no endpoint can serve the request (404 "No endpoints found …" —
-   * typically because no host for the model supports `response_format`
-   * with `require_parameters` routing), swap the payload down to loose
-   * `json_object` mode and drop the routing restriction so the call still
-   * completes. The schema leaves the payload, so the retried request states
-   * it in its system prompt, in generateObject's words
-   * (`buildSchemaInstructionText` over the payload's schema and name), after
-   * the leading system messages; a request whose system prompt states a
-   * schema already (generateObject's, a structured reply's) gets no second
-   * copy. Caller-side Zod validation remains the correctness backstop,
-   * exactly as before schema enforcement existed.
+   * One-shot degrade for schema-enforced calls, on either of two refusals of
+   * the strict `json_schema`:
    *
+   * - OpenRouter reports that no endpoint can serve the request (404 "No
+   *   endpoints found …", typically because no host for the model supports
+   *   `response_format` with `require_parameters` routing).
+   * - A Claude model's endpoint, which forwards the strict schema to
+   *   Anthropic's JSON output format, refuses it as too large for its
+   *   grammar (400 "The compiled grammar is too large …", in the message or
+   *   in the upstream body OpenRouter wraps as `metadata.raw`). That refusal
+   *   is remembered for the process by the model and the schema
+   *   (schema-format-refusals), so later requests go in JSON-object mode at
+   *   once ({@link applyRememberedSchemaRefusal}), and it writes one
+   *   `llm.schema_format_refused` line in place of `llm.format_fallback`.
+   *
+   * The payload is swapped down to loose `json_object` mode and the routing
+   * restriction dropped so the call still completes
+   * ({@link sendSchemaInJsonObjectMode}). Caller-side Zod validation remains
+   * the correctness backstop, exactly as before schema enforcement existed.
+   *
+   * @param resend Whether the call has an attempt left for the re-send. A
+   *   grammar refusal is remembered and logged either way.
    * @returns true when the payload was degraded and the caller should
-   *          retry once; false when the error is unrelated.
+   *          retry once; false when the error is unrelated or no attempt is
+   *          left.
    */
-  private degradeSchemaPayloadOnNoEndpoints(
+  private degradeSchemaPayloadOnRefusal(
     payload: Record<string, unknown>,
     error: unknown,
+    resend: boolean,
   ): boolean {
     const rf = payload.response_format as { type?: string; json_schema?: { name?: unknown; schema?: unknown } } | undefined;
     if (rf?.type !== 'json_schema') return false;
     if (!(error instanceof OpenRouterProviderError)) return false;
     const noEndpoints =
       error.httpStatus === 404 && /no endpoints/i.test(error.message);
-    if (!noEndpoints) return false;
+    const upstream = (error.details as { responseData?: unknown } | undefined)?.responseData;
+    const grammarTooLarge = isSchemaGrammarTooLarge(
+      error.httpStatus,
+      error.message,
+      typeof upstream === 'string' ? upstream : JSON.stringify(upstream ?? ''),
+    );
+    if (!noEndpoints && !grammarTooLarge) return false;
 
-    log.warn('llm.format_fallback', { provider: 'openrouter', reason: 'json_schema' });
+    if (grammarTooLarge) {
+      const model = typeof payload.model === 'string' ? payload.model : '';
+      if (model) rememberSchemaFormatRefusal('openrouter', model, rf.json_schema?.schema);
+      log.warn('llm.schema_format_refused', {
+        provider: 'openrouter',
+        model: safePath(model),
+        schema: safeWord(rf.json_schema?.name),
+        reason: 'grammar_too_large',
+      });
+    }
+    if (!resend) return false;
+    if (!grammarTooLarge) log.warn('llm.format_fallback', { provider: 'openrouter', reason: 'json_schema' });
+    this.sendSchemaInJsonObjectMode(payload);
+    return true;
+  }
+
+  /**
+   * Sends a request whose strict `json_schema` a Claude model refused earlier
+   * in the process as too large for Anthropic's grammar in JSON-object mode
+   * from the start ({@link degradeSchemaPayloadOnRefusal}).
+   *
+   * @returns true when the payload was moved to JSON-object mode.
+   */
+  private applyRememberedSchemaRefusal(payload: Record<string, unknown>): boolean {
+    const rf = payload.response_format as { type?: string; json_schema?: { schema?: unknown } } | undefined;
+    if (rf?.type !== 'json_schema' || typeof payload.model !== 'string') return false;
+    if (!schemaFormatRefused('openrouter', payload.model, rf.json_schema?.schema)) return false;
+    this.sendSchemaInJsonObjectMode(payload);
+    return true;
+  }
+
+  /**
+   * Moves a strict `json_schema` payload to loose `json_object` mode. The
+   * schema leaves the payload, so the request states it in its system prompt,
+   * in generateObject's words (`buildSchemaInstructionText` over the
+   * payload's schema and name), after the leading system messages; a request
+   * whose system prompt states a schema already (generateObject's, a
+   * structured reply's) gets no second copy. The `require_parameters`
+   * routing restriction goes with the schema.
+   */
+  private sendSchemaInJsonObjectMode(payload: Record<string, unknown>): void {
+    const rf = payload.response_format as { type?: string; json_schema?: { name?: unknown; schema?: unknown } } | undefined;
     payload.response_format = { type: 'json_object' };
-    const schema = rf.json_schema?.schema;
+    const schema = rf?.json_schema?.schema;
     const messages = payload.messages as Array<Partial<ChatMessage>> | undefined;
     if (schema && typeof schema === 'object' && Array.isArray(messages)) {
       const statesSchema = messages.some(
         (message) => message.role === 'system' && textOfContent(message.content).includes(SCHEMA_INSTRUCTION_LEAD),
       );
       if (!statesSchema) {
-        const name = typeof rf.json_schema?.name === 'string' ? rf.json_schema.name : undefined;
+        const name = typeof rf?.json_schema?.name === 'string' ? rf.json_schema.name : undefined;
         let at = 0;
         while (at < messages.length && messages[at].role === 'system') at += 1;
         payload.messages = [
@@ -922,7 +982,6 @@ export class OpenRouterProvider implements IProvider {
       delete provider.require_parameters;
       if (Object.keys(provider).length === 0) delete payload.provider;
     }
-    return true;
   }
 
   public async *generateCompletionStream(
@@ -976,6 +1035,8 @@ export class OpenRouterProvider implements IProvider {
     };
     this.applyDefaultProviderPrefs(payload);
     this.applySchemaRoutingPrefs(payload, options);
+    // A schema a Claude model refused earlier in the process goes in JSON-object mode at once; the chunks say so.
+    const rememberedRefusal = this.applyRememberedSchemaRefusal(payload);
     this.applyAnthropicSlugCacheToPayload(modelId, payload, options);
 
     const abortSignal = options.abortSignal;
@@ -1000,7 +1061,7 @@ export class OpenRouterProvider implements IProvider {
     let stream: NodeJS.ReadableStream;
     // True once the request goes again without its schema payload (the
     // json_object retry below); the answer's chunks then say so.
-    let schemaLeftPayload = false;
+    let schemaLeftPayload = rememberedRefusal;
     try {
       // The call's count bounds the schema request and its json_object retry together.
       const attempts = resolveAttemptCount(options.maxAttempts, OpenRouterProvider.MAX_REQUEST_ATTEMPTS);
@@ -1020,7 +1081,7 @@ export class OpenRouterProvider implements IProvider {
         );
       } catch (error: unknown) {
         const remaining = attempts - tally.sent;
-        const degraded = !abortSignal?.aborted && remaining > 0 && this.degradeSchemaPayloadOnNoEndpoints(payload, error);
+        const degraded = !abortSignal?.aborted && this.degradeSchemaPayloadOnRefusal(payload, error, remaining > 0);
         if (!degraded) throw error;
         schemaLeftPayload = true;
         stream = await this.makeApiRequest<NodeJS.ReadableStream>(
