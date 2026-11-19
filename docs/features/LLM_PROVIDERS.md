@@ -580,8 +580,10 @@ the nearest one it does
 ([Reasoning Tokens](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens)).
 Other models get no `reasoning` field from `effort`; on Anthropic models
 OpenRouter would turn it into a thinking budget sized from `max_tokens`. A
-`reasoning` object passed through `customModelParams` replaces the one
-`effort` sets, for any model.
+`reasoning` object or a `reasoning_effort` passed through `customModelParams`
+takes the place of the one `effort` sets, for any model (OpenRouter refuses
+`reasoning_effort` beside a different `reasoning.effort`), and a
+`customModelParams.model` is the model that decides.
 
 ### Requesty
 
