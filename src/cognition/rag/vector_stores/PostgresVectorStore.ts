@@ -1464,11 +1464,14 @@ export class PostgresVectorStore implements IVectorStore {
     return `(m.date < ${date} OR m.date IS NULL OR (m.date = ${date} AND ${lower}))`;
   }
 
-  /** The id and metadata of each row of a source, ordered by id, with no vector and no text. */
+  /**
+   * The id and metadata of each row of a source, ordered by id, with no vector and no text. The condition is a
+   * containment the table's GIN index on `metadata_json` serves, so the listing reads the source's rows and no others.
+   */
   async listSourcePassages(collectionName: string, sourceId: string): Promise<SourcePassageRow[]> {
     await this._ensureInit();
     const result = await this.pool.query(
-      `SELECT id, metadata_json FROM ${this._t(collectionName)} WHERE metadata_json->>'sourceId' = $1 ORDER BY id`,
+      `SELECT id, metadata_json FROM ${this._t(collectionName)} WHERE metadata_json @> jsonb_build_object('sourceId', $1::text) ORDER BY id`,
       [sourceId],
     );
     return result.rows.map((row: { id: unknown; metadata_json: Record<string, MetadataValue> | null }) => ({

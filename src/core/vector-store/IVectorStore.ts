@@ -610,7 +610,9 @@ export interface IVectorStore {
    * Optional: runs `work` holding the store's lock on one source of a collection, in one transaction, and answers what
    * `work` answers. A second holder of the same lock waits until the first's transaction ends; on a view of a caller's
    * transaction the lock is held until that transaction ends. `work` receives a store whose calls run in that
-   * transaction: make them one at a time, awaiting each, and keep the store no longer than `work` runs.
+   * transaction: make them one at a time, awaiting each, and keep the store no longer than `work` runs. The lock is
+   * not re-entrant: `work` must not take it again, through this store or a LibraryIndex over it (`removeSource`,
+   * `setSourceScope` and `applySourcePlan` take it), or it waits on itself.
    */
   withSourceLock?<T>(collectionName: string, sourceId: string, work: (store: IVectorStore) => Promise<T>): Promise<T>;
 

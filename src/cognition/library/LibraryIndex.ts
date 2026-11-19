@@ -364,7 +364,9 @@ export interface LibrarySourcePlan {
 
 /**
  * What `applySourcePlan` throws, writing nothing, when the source's stored rows (an id, an access group, a folder, a
- * title, a place, a text) changed after the plan was made. Plan the source again.
+ * title, a place, a text) changed after the plan was made. It throws as well when the store patches fewer rows than
+ * the plan keeps, which a writer that does not take the source's lock can cause; then nothing is deleted or added,
+ * and a store with transactions (PostgresVectorStore) undoes the patches too. Plan the source again.
  */
 export class LibraryPlanStale extends Error {
   constructor(sourceId: string) {
@@ -373,12 +375,16 @@ export class LibraryPlanStale extends Error {
   }
 }
 
-/** A value as JSON with every object's keys in order, so two equal metadata records read the same. */
+/**
+ * A value as JSON with every object's keys in order, so two equal metadata records read the same. A key whose value
+ * is undefined is left out, as JSON.stringify leaves it out and as a store that keeps JSON never holds it.
+ */
 function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
   if (value !== null && typeof value === 'object') {
     const record = value as Record<string, unknown>;
-    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(',')}}`;
+    const keys = Object.keys(record).filter((key) => record[key] !== undefined).sort();
+    return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(',')}}`;
   }
   return JSON.stringify(value) ?? 'null';
 }
@@ -838,6 +844,8 @@ export class LibraryIndex {
       byInput.set(inputHash, [...(byInput.get(inputHash) ?? []), row]);
     }
     const kept = new Set<string>();
+    // Every id a new row may not take: the source's stored rows' and the plan's own.
+    const taken = new Set(stored.map((row) => row.id));
     const patches: PassagePatch[] = [];
     const rows: Array<{ id: string; text: string; metadata: Record<string, MetadataValue>; at: number }> = [];
     const toEmbed: string[] = [];
@@ -860,7 +868,10 @@ export class LibraryIndex {
       const candidates = (byInput.get(inputHash) ?? []).filter((row) => !kept.has(row.id));
       const match = candidates.find((row) => row.metadata.textHash === textHash) ?? candidates[0];
       if (!match) {
-        rows.push({ id: `${source.sourceId}#${newId()}`, text: passage.text, metadata, at: toEmbed.length });
+        const id = `${source.sourceId}#${newId()}`;
+        if (taken.has(id)) throw new Error(`LibraryIndex.planSource: newId gave the id ${id} twice.`);
+        taken.add(id);
+        rows.push({ id, text: passage.text, metadata, at: toEmbed.length });
         toEmbed.push(input);
         return;
       }
@@ -916,19 +927,28 @@ export class LibraryIndex {
         throwOnReportedFailure(await store.upsert(this.collection, documents.slice(from, from + this.batchSize)), `write the passages of ${plan.sourceId}`);
       }
     };
-    if (plan.digest === null || !this.store.withSourceLock) {
+    if (plan.digest === null) {
       await this.removeSource(plan.sourceId);
       await write(this.store);
       return plan.counts;
+    }
+    // A plan made by content leaves out the rows it keeps; a store that can only replace the source whole would lose them.
+    if (!this.plansByContent() || !this.store.withSourceLock) {
+      throw new Error('LibraryIndex.applySourcePlan: the plan was made by content, and this store cannot plan by content; plan the source with this index.');
     }
     const digest = plan.digest;
     await this.store.withSourceLock(this.collection, plan.sourceId, async (store) => {
       if (!store.listSourcePassages || !store.patchPassages) throw new Error('LibraryIndex: the store cannot plan by content.');
       if (digestOf(await store.listSourcePassages(this.collection, plan.sourceId)) !== digest) throw new LibraryPlanStale(plan.sourceId);
+      // The patches go first, so a kept row found gone stops the plan before it deletes or adds a row.
+      if (plan.patches.length > 0) {
+        const { updatedCount } = await store.patchPassages(this.collection, [...plan.patches]);
+        // A row the plan keeps is gone: a writer that does not take the source's lock removed it.
+        if (updatedCount !== plan.patches.length) throw new LibraryPlanStale(plan.sourceId);
+      }
       if (plan.remove.length > 0) {
         throwOnReportedFailure(await store.delete(this.collection, [...plan.remove]), `delete the passages of ${plan.sourceId}`);
       }
-      if (plan.patches.length > 0) await store.patchPassages(this.collection, [...plan.patches]);
       await write(store);
     });
     return plan.counts;
@@ -1011,9 +1031,13 @@ export class LibraryIndex {
    * on PineconeVectorStore, 0 on QdrantVectorStore). Throws when the store reports the delete as failed.
    */
   async removeSource(sourceId: string): Promise<number> {
-    const result = await this.store.delete(this.collection, undefined, { filter: { sourceId } });
-    throwOnReportedFailure(result, `delete the passages of ${sourceId}`);
-    return result.deletedCount;
+    const remove = async (store: IVectorStore): Promise<number> => {
+      const result = await store.delete(this.collection, undefined, { filter: { sourceId } });
+      throwOnReportedFailure(result, `delete the passages of ${sourceId}`);
+      return result.deletedCount;
+    };
+    // Under the source's lock where the store has one, so a plan that is writing the source finishes first.
+    return this.store.withSourceLock ? this.store.withSourceLock(this.collection, sourceId, remove) : remove(this.store);
   }
 
   /**
@@ -1040,8 +1064,13 @@ export class LibraryIndex {
     if (change.folderId !== undefined) patch.folderId = change.folderId;
     if (change.tags !== undefined) patch.tags = change.tags;
     if (change.title !== undefined) patch.title = change.title;
-    const result = await this.store.updateMetadata(this.collection, { sourceId }, patch);
-    return result.updatedCount;
+    const update = async (store: IVectorStore): Promise<number> => {
+      if (typeof store.updateMetadata !== 'function') throw new Error('LibraryIndex: the store has no updateMetadata.');
+      return (await store.updateMetadata(this.collection, { sourceId }, patch)).updatedCount;
+    };
+    // Under the source's lock where the store has one, so a plan writing the source's older metadata cannot follow
+    // this change and undo it.
+    return this.store.withSourceLock ? this.store.withSourceLock(this.collection, sourceId, update) : update(this.store);
   }
 
   /**
