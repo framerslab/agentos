@@ -128,7 +128,8 @@ interface CollectionMeta {
 /** A row of the lexical search's statement, as pg reads it. */
 interface LexicalRow {
   id: string;
-  embedding: string | null;
+  /** Present only when the search asked for vectors. */
+  embedding?: string | null;
   metadata_json: Record<string, MetadataValue> | null;
   text_content: string | null;
   score: number;
@@ -706,7 +707,7 @@ export class PostgresVectorStore implements IVectorStore {
       : '<=>'; // cosine (default)
 
     // Build query with optional JSONB metadata filtering.
-    let sql = `SELECT id, embedding::text, metadata_json, text_content,
+    let sql = `SELECT id${this._vectorColumn(options?.includeEmbedding)}, metadata_json, text_content,
                (embedding ${op} $1::vector) AS distance
                FROM ${table}`;
     const params: unknown[] = [vecStr];
@@ -779,8 +780,9 @@ export class PostgresVectorStore implements IVectorStore {
     await this._ensureInit();
     const table = this._t(collectionName);
 
+    // A fetch by id never returns a vector, so the statement reads none.
     const sql = `
-      SELECT id, embedding::text, metadata_json, text_content
+      SELECT id, metadata_json, text_content
       FROM ${table}
       WHERE id = ANY($1::text[])
     `;
@@ -811,7 +813,7 @@ export class PostgresVectorStore implements IVectorStore {
     const limit = Math.max(1, options?.limit ?? 100);
 
     const result = await this.pool.query(
-      `SELECT id, embedding::text, metadata_json, text_content
+      `SELECT id${this._vectorColumn(options?.includeEmbedding)}, metadata_json, text_content
        FROM ${table}
        ORDER BY updated_at ASC NULLS FIRST, created_at ASC
        LIMIT $1`,
@@ -932,7 +934,7 @@ export class PostgresVectorStore implements IVectorStore {
         ORDER BY rrf_score DESC
         LIMIT $${topKParam}
       )
-      SELECT f.id, f.rrf_score, t.embedding::text, t.metadata_json, t.text_content
+      SELECT f.id, f.rrf_score${this._vectorColumn(options?.includeEmbedding, 't.')}, t.metadata_json, t.text_content
       FROM fused f
       JOIN ${table} t ON t.id = f.id
       ORDER BY f.rrf_score DESC
@@ -1003,7 +1005,7 @@ export class PostgresVectorStore implements IVectorStore {
     // The one table in the statement makes the filter's bare metadata_json unambiguous: to_tsquery yields a
     // single column, named q.
     const sql = `
-      SELECT t.id, t.embedding::text, t.metadata_json, t.text_content, ts_rank(t.tsv, q) AS score
+      SELECT t.id${this._vectorColumn(options?.includeEmbedding, 't.')}, t.metadata_json, t.text_content, ts_rank(t.tsv, q) AS score
       FROM ${table} t, to_tsquery('${this.textConfig}'::regconfig, $1) AS q
       WHERE t.tsv @@ q
       ${clause ? `AND ${clause}` : ''}
@@ -1689,6 +1691,15 @@ export class PostgresVectorStore implements IVectorStore {
       }
       return result;
     });
+  }
+
+  /**
+   * The vector column of a search's select list: `, <alias>embedding::text` when the caller asked for vectors, and
+   * nothing otherwise. A vector of 1,536 dimensions is about 18 KB of text, so a search that returns none reads none;
+   * the ranking still uses the stored vectors.
+   */
+  private _vectorColumn(includeEmbedding: boolean | undefined, alias = ''): string {
+    return includeEmbedding ? `, ${alias}embedding::text` : '';
   }
 
   /**

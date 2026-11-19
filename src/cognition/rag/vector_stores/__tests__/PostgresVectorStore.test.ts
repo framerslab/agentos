@@ -1011,7 +1011,7 @@ describe('PostgresVectorStore', () => {
         `SET LOCAL hnsw.iterative_scan = 'strict_order'`,
         'SET LOCAL hnsw.ef_search = 100',
         'SET LOCAL hnsw.max_scan_tuples = 20000',
-        expect.stringContaining('SELECT id, embedding::text'),
+        expect.stringContaining('SELECT id, metadata_json, text_content'),
         'COMMIT',
       ]);
       expect(mockClient.release).toHaveBeenCalled();
@@ -1045,6 +1045,71 @@ describe('PostgresVectorStore', () => {
       });
       const result = await store.query('chunks', [0, 0], { topK: 3, filter: { tenantId: 'org1' } });
       expect(result.documents.map((doc) => doc.id)).toEqual(['a', 'b', 'c']);
+    });
+  });
+
+  // =========================================================================
+  // A statement reads a row's vector only when the caller asks for it
+  // =========================================================================
+
+  describe('vectors read only when asked for', () => {
+    const base = { id: 'pg', type: 'postgres' as const, connectionString: 'postgres://test', manageSchema: false };
+    /** One row as pg answers it, with every column any of the statements below can name. */
+    const row = {
+      id: 'r1', embedding: '[0.5,0.25]', metadata_json: { sourceId: 's1' }, text_content: 'budget review',
+      distance: 0.1, rrf_score: '0.03', score: 0.2,
+    };
+
+    it('leaves the vector out of a hybrid search of 18 rows that does not ask for it', async () => {
+      const store = new PostgresVectorStore(base);
+      queryResultQueue.push({ rows: [row], rowCount: 1 });
+      const without = await store.hybridSearch('chunks', [0.5, 0.25], 'budget review', { topK: 18, includeTextContent: true });
+      expect(queryCalls).toHaveLength(1);
+      expect(queryCalls[0].sql).toContain('WITH dense AS');
+      expect(queryCalls[0].sql).not.toContain('embedding::text');
+      expect(queryCalls[0].params?.at(-1)).toBe(18);
+
+      queryResultQueue.push({ rows: [row], rowCount: 1 });
+      const withVector = await store.hybridSearch('chunks', [0.5, 0.25], 'budget review', { topK: 18, includeTextContent: true, includeEmbedding: true });
+      expect(queryCalls[1].sql).toContain('t.embedding::text');
+      expect(withVector.documents[0].embedding).toEqual([0.5, 0.25]);
+      expect(without.documents[0].embedding).toEqual([]);
+      const answer = (doc: { id: string; similarityScore: number; metadata?: unknown; textContent?: string }) => ({
+        id: doc.id, similarityScore: doc.similarityScore, metadata: doc.metadata, textContent: doc.textContent,
+      });
+      expect(answer(withVector.documents[0])).toEqual(answer(without.documents[0]));
+      expect(answer(without.documents[0])).toEqual({ id: 'r1', similarityScore: 0.03, metadata: { sourceId: 's1' }, textContent: 'budget review' });
+    });
+
+    it('leaves the vector out of a dense search and a lexical search that do not ask for it', async () => {
+      const store = new PostgresVectorStore(base);
+      queryResultQueue.push({ rows: [row], rowCount: 1 }, { rows: [row], rowCount: 1 });
+      await store.query('chunks', [0.5, 0.25], { topK: 18 });
+      await store.lexicalSearch('chunks', 'budget', { topK: 18 });
+      expect(queryCalls).toHaveLength(2);
+      for (const call of queryCalls) expect(call.sql).not.toContain('embedding::text');
+
+      queryResultQueue.push({ rows: [row], rowCount: 1 }, { rows: [row], rowCount: 1 });
+      const dense = await store.query('chunks', [0.5, 0.25], { topK: 18, includeEmbedding: true });
+      const lexical = await store.lexicalSearch('chunks', 'budget', { topK: 18, includeEmbedding: true });
+      expect(queryCalls[2].sql).toContain('embedding::text');
+      expect(queryCalls[3].sql).toContain('t.embedding::text');
+      expect(dense.documents[0].embedding).toEqual([0.5, 0.25]);
+      expect(lexical.documents[0].embedding).toEqual([0.5, 0.25]);
+    });
+
+    it('reads no vector for a fetch by id, which never returns one, and reads it for a metadata scan only when asked', async () => {
+      const store = new PostgresVectorStore(base);
+      queryResultQueue.push({ rows: [row], rowCount: 1 }, { rows: [row], rowCount: 1 }, { rows: [row], rowCount: 1 });
+      const fetched = await store.fetchByIds('chunks', ['r1']);
+      const scanned = await store.scanByMetadata('chunks', { filter: { sourceId: 's1' } });
+      const scannedWith = await store.scanByMetadata('chunks', { filter: { sourceId: 's1' }, includeEmbedding: true });
+      expect(queryCalls[0].sql).not.toContain('embedding');
+      expect(queryCalls[1].sql).not.toContain('embedding::text');
+      expect(queryCalls[2].sql).toContain('embedding::text');
+      expect(fetched[0]).toEqual({ id: 'r1', similarityScore: 0, embedding: [], metadata: { sourceId: 's1' }, textContent: 'budget review' });
+      expect(scanned.documents[0].embedding).toEqual([]);
+      expect(scannedWith.documents[0].embedding).toEqual([0.5, 0.25]);
     });
   });
 });
