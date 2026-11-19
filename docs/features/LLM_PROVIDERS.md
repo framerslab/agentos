@@ -788,11 +788,15 @@ the prefix names, and `onFallback`, the `llm.fallback_fired` line (its
 (`openrouter`, `anthropic/claude-sonnet-4.5`). An Anthropic entry the
 credential layer sends to OpenRouter (`{ provider: 'anthropic', model:
 'claude-sonnet-4-5' }` with no Anthropic key or base URL and
-`OPENROUTER_API_KEY` set) is named the same way, `openrouter` and
-`anthropic/claude-sonnet-4-5`, in both `generateText()` and `streamText()`:
+`OPENROUTER_API_KEY` set) is sent under the slug OpenRouter's model list
+gives it, the version dotted and any `-YYYYMMDD` release date dropped
+(`claude-sonnet-5-5` as `anthropic/claude-sonnet-5.5`,
+`claude-haiku-4-5-20251001` as `anthropic/claude-haiku-4.5`), and is named
+that way, `openrouter` and `anthropic/claude-sonnet-4.5`, in both
+`generateText()` and `streamText()`:
 in `onFallback`, the `llm.fallback_fired`, `llm.fallback_succeeded` and
 `llm.fallback_failed_after_output` lines and the hops; its breaker read is
-OpenRouter's, its capability check judges `anthropic/claude-sonnet-4-5`, and
+OpenRouter's, its capability check judges `anthropic/claude-sonnet-4.5`, and
 an `llm.fallback_skipped` line names the provider and model
 (`fallbackProvider`, `fallbackModel`) the entry would have been sent as. An
 excluded model (`routerParams.excludedModelIds`: a bare id, a

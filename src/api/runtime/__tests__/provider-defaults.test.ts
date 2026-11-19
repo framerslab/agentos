@@ -327,16 +327,34 @@ describe('resolveProvider: an Anthropic call with no Anthropic key, sent to Open
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
   }
 
+  it("sends each model under the slug OpenRouter's model list gives it", () => {
+    // https://openrouter.ai/api/v1/models, read 2026-11-19: the Claude models
+    // are listed with the version dotted and no release date.
+    withOnlyOpenRouterKey();
+    vi.stubEnv('OPENROUTER_BASE_URL', '');
+    const sentAs: Record<string, string> = {
+      'claude-sonnet-5-5': 'anthropic/claude-sonnet-5.5',
+      'claude-haiku-5-5': 'anthropic/claude-haiku-5.5',
+      'claude-haiku-4-5-20251001': 'anthropic/claude-haiku-4.5',
+      'claude-opus-4-1': 'anthropic/claude-opus-4.1',
+      'claude-opus-5': 'anthropic/claude-opus-5',
+      'claude-sonnet-4.5': 'anthropic/claude-sonnet-4.5',
+    };
+    for (const [modelId, slug] of Object.entries(sentAs)) {
+      expect(resolveProvider('anthropic', modelId).modelId).toBe(slug);
+    }
+  });
+
   it('carries the OpenRouter base URL the environment sets, as a direct OpenRouter call does', () => {
     withOnlyOpenRouterKey();
     vi.stubEnv('OPENROUTER_BASE_URL', ' http://127.0.0.1:9/api/v1 ');
 
     const remapped = resolveProvider('anthropic', 'claude-sonnet-4-5');
-    const direct = resolveProvider('openrouter', 'anthropic/claude-sonnet-4-5');
+    const direct = resolveProvider('openrouter', 'anthropic/claude-sonnet-4.5');
 
     expect(remapped).toEqual({
       providerId: 'openrouter',
-      modelId: 'anthropic/claude-sonnet-4-5',
+      modelId: 'anthropic/claude-sonnet-4.5',
       apiKey: 'sk-or-test',
       baseUrl: 'http://127.0.0.1:9/api/v1',
       poolId: 'openrouter:OPENROUTER_API_KEY',
@@ -351,7 +369,7 @@ describe('resolveProvider: an Anthropic call with no Anthropic key, sent to Open
       const remapped = resolveProvider('anthropic', 'claude-haiku-4-5-20251001');
       expect(remapped).toEqual({
         providerId: 'openrouter',
-        modelId: 'anthropic/claude-haiku-4-5',
+        modelId: 'anthropic/claude-haiku-4.5',
         apiKey: 'sk-or-test',
         poolId: 'openrouter:OPENROUTER_API_KEY',
       });
@@ -364,11 +382,11 @@ describe('resolveProvider: an Anthropic call with no Anthropic key, sent to Open
     setDefaultProvider({ provider: 'openrouter', baseUrl: 'http://127.0.0.1:9/gateway/v1' });
 
     const remapped = resolveProvider('anthropic', 'claude-sonnet-4-5');
-    const direct = resolveProvider('openrouter', 'anthropic/claude-sonnet-4-5');
+    const direct = resolveProvider('openrouter', 'anthropic/claude-sonnet-4.5');
 
     expect(remapped).toEqual({
       providerId: 'openrouter',
-      modelId: 'anthropic/claude-sonnet-4-5',
+      modelId: 'anthropic/claude-sonnet-4.5',
       apiKey: 'sk-or-test',
       baseUrl: 'http://127.0.0.1:9/gateway/v1',
       poolId: 'openrouter:OPENROUTER_API_KEY',
@@ -382,11 +400,11 @@ describe('resolveProvider: an Anthropic call with no Anthropic key, sent to Open
     setDefaultProvider({ provider: 'openrouter', apiKey: 'sk-or-default', baseUrl: 'http://127.0.0.1:9/gateway/v1' });
 
     const remapped = resolveProvider('anthropic', 'claude-sonnet-4-5');
-    const direct = resolveProvider('openrouter', 'anthropic/claude-sonnet-4-5');
+    const direct = resolveProvider('openrouter', 'anthropic/claude-sonnet-4.5');
 
     expect(remapped).toEqual({
       providerId: 'openrouter',
-      modelId: 'anthropic/claude-sonnet-4-5',
+      modelId: 'anthropic/claude-sonnet-4.5',
       apiKey: 'sk-or-default',
       baseUrl: 'http://127.0.0.1:9/gateway/v1',
     });

@@ -340,6 +340,21 @@ export function resolveProviderRoute(
   return { providerId: resolved.providerId, modelId: resolved.modelId };
 }
 
+/**
+ * An Anthropic model id as OpenRouter lists it, after the `anthropic/` vendor
+ * prefix: without the `-YYYYMMDD` release date Anthropic's dated ids carry,
+ * and with the version dotted. OpenRouter's model list
+ * (https://openrouter.ai/api/v1/models, read 2026-11-19) names the Claude
+ * models `anthropic/claude-sonnet-5.5`, `anthropic/claude-haiku-5.5`,
+ * `anthropic/claude-haiku-4.5`, `anthropic/claude-opus-4.1` and
+ * `anthropic/claude-opus-5`, so `claude-sonnet-5-5` is sent as
+ * `claude-sonnet-5.5` and `claude-haiku-4-5-20251001` as `claude-haiku-4.5`.
+ * An id with no minor version (`claude-opus-5`) or already dotted is kept.
+ */
+function openRouterAnthropicSlug(modelId: string): string {
+  return modelId.replace(/-\d{8}$/, '').replace(/-(\d+)-(\d)(?=-|$)/, '-$1.$2');
+}
+
 function resolveProviderCredentials(
   providerId: string,
   modelId: string,
@@ -382,10 +397,8 @@ function resolveProviderCredentials(
   if (providerId === 'anthropic' && !apiKey && !baseUrl && !overrides?.strict) {
     const orKey = process.env['OPENROUTER_API_KEY'];
     if (orKey) {
-      // Anthropic's native API takes dated model IDs (e.g. "claude-haiku-4-5-20251001").
-      // OpenRouter exposes Anthropic models under dateless slugs (e.g. "anthropic/claude-haiku-4-5").
-      // Strip a trailing -YYYYMMDD release-date suffix when remapping so the OR call resolves.
-      const orModelId = modelId.replace(/-\d{8}$/, '');
+      // Sent under the slug OpenRouter lists for the model (see openRouterAnthropicSlug).
+      const orModelId = openRouterAnthropicSlug(modelId);
       // A lookup that sends no request sends none to OpenRouter.
       if (!overrides?.quiet) {
         console.warn(

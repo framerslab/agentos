@@ -11,6 +11,9 @@
  *   the `provider:model` id;
  * - an exclusion written `anthropic/<model>` names Anthropic's model whether
  *   the leg goes to Anthropic or to OpenRouter;
+ * - an Anthropic entry sent to OpenRouter goes under the slug OpenRouter's
+ *   model list gives it (`claude-sonnet-5-5` as `anthropic/claude-sonnet-5.5`),
+ *   and is matched by that slug as well as by Anthropic's id;
  * - a dated Anthropic entry sent to OpenRouter under its dateless slug is
  *   matched by the dateless id, as the same entry sent to Anthropic is.
  *
@@ -199,11 +202,18 @@ const SKIPPED: Array<{ name: string; entry: Entry; exclusions: string[]; sentAs:
     sentAs: ['openrouter', 'openai/gpt-4o-mini'],
   },
   {
-    // An entry with no model is sent as the provider's default text model.
+    // An entry with no model is sent as the provider's default text model,
+    // under the slug OpenRouter's model list gives it.
     name: 'a rerouted Anthropic entry, by an anthropic/ exclusion',
     entry: { provider: 'anthropic' },
     exclusions: ['anthropic/claude-sonnet-5-5'],
-    sentAs: ['openrouter', 'anthropic/claude-sonnet-5-5'],
+    sentAs: ['openrouter', 'anthropic/claude-sonnet-5.5'],
+  },
+  {
+    name: "a rerouted Anthropic entry, by OpenRouter's slug for it",
+    entry: { provider: 'anthropic' },
+    exclusions: ['anthropic/claude-sonnet-5.5', 'openrouter:anthropic/claude-sonnet-5.5', 'claude-sonnet-5.5'],
+    sentAs: ['openrouter', 'anthropic/claude-sonnet-5.5'],
   },
   {
     name: 'an Anthropic entry sent to Anthropic, by an anthropic/ exclusion',
@@ -215,8 +225,8 @@ const SKIPPED: Array<{ name: string; entry: Entry; exclusions: string[]; sentAs:
   {
     name: 'a dated Anthropic entry sent to OpenRouter dateless, by the dateless id',
     entry: { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
-    exclusions: ['claude-haiku-4-5', 'anthropic:claude-haiku-4-5'],
-    sentAs: ['openrouter', 'anthropic/claude-haiku-4-5'],
+    exclusions: ['claude-haiku-4-5', 'anthropic:claude-haiku-4-5', 'anthropic/claude-haiku-4.5'],
+    sentAs: ['openrouter', 'anthropic/claude-haiku-4.5'],
   },
   {
     name: 'a dated Anthropic entry sent to Anthropic, by the dateless id',

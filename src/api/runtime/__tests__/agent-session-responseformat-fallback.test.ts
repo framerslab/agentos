@@ -318,7 +318,8 @@ describe('AgentSession.send responseSchema when the model router moves the send'
 
     expect((result as { object?: unknown }).object).toEqual({ title: 'x' });
     const call = hoisted.generateCompletion.mock.calls[0] as unknown[];
-    expect(call[0]).toBe('anthropic/claude-sonnet-4-6');
+    // Sent under the slug OpenRouter lists for the model.
+    expect(call[0]).toBe('anthropic/claude-sonnet-4.6');
     // OpenRouter forwards a json_schema payload; an Anthropic marker would be
     // dropped while still keeping the schema out of the prompt.
     expect(payloadOf(call)).toMatchObject({ type: 'json_schema', json_schema: { name: 'titled', strict: true } });
@@ -350,7 +351,7 @@ describe('AgentSession.send responseSchema when the model router moves the send'
     const calls = hoisted.generateCompletion.mock.calls as unknown[][];
     expect(calls).toHaveLength(2);
     for (const call of calls) {
-      expect(call[0]).toBe('anthropic/claude-opus-4-8');
+      expect(call[0]).toBe('anthropic/claude-opus-4.8');
       expect(payloadOf(call)).toMatchObject({ type: 'json_schema', json_schema: { name: 'titled', strict: true } });
       expect((payloadOf(call) as Record<string, unknown>)._agentosUseToolForStructuredOutput).toBeUndefined();
       expect(systemOf(call)).not.toContain(SCHEMA_LINE);
