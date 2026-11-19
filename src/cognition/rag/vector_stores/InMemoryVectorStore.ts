@@ -74,6 +74,8 @@ export class InMemoryVectorStore implements IVectorStore {
   private readonly providerId: string;
   /** The tail of each source's lock queue, by collection and source id. */
   private readonly sourceLocks = new Map<string, Promise<void>>();
+  /** The tail of each tenant's lock queue, by collection and tenant id. */
+  private readonly tenantLocks = new Map<string, Promise<void>>();
 
   /**
    * Constructs an InMemoryVectorStore instance.
@@ -461,24 +463,46 @@ export class InMemoryVectorStore implements IVectorStore {
 
   /**
    * Runs `work` after every earlier holder of the same source's lock has finished, and holds the lock until `work`
-   * settles. The store has no transactions: `work` receives the store itself.
+   * settles. With `options.tenantId` it first takes that tenant's lock as `withTenantLock` does: this store has no
+   * shared mode, so the holders of one tenant's lock run one at a time. The store has no transactions: `work`
+   * receives the store itself.
    */
-  public async withSourceLock<T>(collectionName: string, sourceId: string, work: (store: IVectorStore) => Promise<T>): Promise<T> {
+  public async withSourceLock<T>(
+    collectionName: string,
+    sourceId: string,
+    work: (store: IVectorStore) => Promise<T>,
+    options?: { tenantId?: string },
+  ): Promise<T> {
     this.getCollection(collectionName);
-    const key = `${collectionName}:${sourceId}`;
-    const before = this.sourceLocks.get(key) ?? Promise.resolve();
+    const source = (): Promise<T> => InMemoryVectorStore.hold(this.sourceLocks, `${collectionName}:${sourceId}`, () => work(this));
+    const tenantId = options?.tenantId;
+    return tenantId === undefined ? source() : InMemoryVectorStore.hold(this.tenantLocks, `${collectionName}:${tenantId}`, source);
+  }
+
+  /**
+   * Runs `work` after every earlier holder of the same tenant's lock has finished, `withSourceLock` holders given that
+   * tenant among them, and holds the lock until `work` settles. `work` receives the store itself.
+   */
+  public async withTenantLock<T>(collectionName: string, tenantId: string, work: (store: IVectorStore) => Promise<T>): Promise<T> {
+    this.getCollection(collectionName);
+    return InMemoryVectorStore.hold(this.tenantLocks, `${collectionName}:${tenantId}`, () => work(this));
+  }
+
+  /** Runs `work` once every earlier holder of `key` in `locks` has finished, holding `key` until `work` settles. */
+  private static async hold<T>(locks: Map<string, Promise<void>>, key: string, work: () => Promise<T>): Promise<T> {
+    const before = locks.get(key) ?? Promise.resolve();
     let release: () => void = () => {};
     const held = new Promise<void>((resolve) => {
       release = resolve;
     });
     const tail = before.then(() => held);
-    this.sourceLocks.set(key, tail);
+    locks.set(key, tail);
     await before;
     try {
-      return await work(this);
+      return await work();
     } finally {
       release();
-      if (this.sourceLocks.get(key) === tail) this.sourceLocks.delete(key);
+      if (locks.get(key) === tail) locks.delete(key);
     }
   }
 

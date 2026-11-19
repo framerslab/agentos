@@ -1526,30 +1526,63 @@ export class PostgresVectorStore implements IVectorStore {
   }
 
   /**
-   * Runs `work` in one transaction holding `pg_advisory_xact_lock` on the collection's table and the source id. On a
-   * view of a caller's transaction the transaction is the caller's, and the lock is held until it ends. `work`
-   * receives a view whose statements run in that transaction.
+   * Runs `work` in one transaction holding `pg_advisory_xact_lock` on the collection's table and the source id. With
+   * `options.tenantId` it first takes `pg_advisory_xact_lock_shared` on the table and the tenant, which
+   * `withTenantLock` takes exclusively. On a view of a caller's transaction the transaction is the caller's, and the
+   * locks are held until it ends. `work` receives a view whose statements run in that transaction.
    */
-  async withSourceLock<T>(collectionName: string, sourceId: string, work: (store: IVectorStore) => Promise<T>): Promise<T> {
+  async withSourceLock<T>(
+    collectionName: string,
+    sourceId: string,
+    work: (store: IVectorStore) => Promise<T>,
+    options?: { tenantId?: string },
+  ): Promise<T> {
     await this._ensureInit();
     // A table name holds no colon, so the key names one source of one table. Postgres text holds no NUL.
     const key = `${this._t(collectionName)}:${sourceId}`;
+    const tenantId = options?.tenantId;
     return this._transaction(async (sql) => {
-      await sql.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [key]);
-      const view = new PostgresVectorStore({ ...this.config, manageSchema: false });
-      view.ownAdapter = this.ownAdapter;
-      view.pool = sql;
-      view.boundSql = sql;
-      view.isInitialized = true;
-      try {
-        return await work(view);
-      } finally {
-        view.borrowedEnded = true;
-        view.boundSql = null;
-        view.pool = null;
-        view.isInitialized = false;
+      if (tenantId !== undefined) {
+        await sql.query('SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))', [this._tenantLockKey(collectionName, tenantId)]);
       }
+      await sql.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [key]);
+      return this._lentView(sql, work);
     });
+  }
+
+  /**
+   * Runs `work` in one transaction holding `pg_advisory_xact_lock` on the collection's table and the tenant id, the
+   * lock `withSourceLock` takes in shared mode when given that tenant. `work` receives a view whose statements run in
+   * that transaction.
+   */
+  async withTenantLock<T>(collectionName: string, tenantId: string, work: (store: IVectorStore) => Promise<T>): Promise<T> {
+    await this._ensureInit();
+    return this._transaction(async (sql) => {
+      await sql.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [this._tenantLockKey(collectionName, tenantId)]);
+      return this._lentView(sql, work);
+    });
+  }
+
+  /** The key of a tenant's lock: it begins with a word, where a source's key begins with the quoted table name. */
+  private _tenantLockKey(collectionName: string, tenantId: string): string {
+    return `tenant ${this._t(collectionName)}:${tenantId}`;
+  }
+
+  /** Runs `work` on a view whose statements run on `sql`, ending the view when `work` settles. */
+  private async _lentView<T>(sql: VectorSqlExecutor, work: (store: IVectorStore) => Promise<T>): Promise<T> {
+    const view = new PostgresVectorStore({ ...this.config, manageSchema: false });
+    view.ownAdapter = this.ownAdapter;
+    view.pool = sql;
+    view.boundSql = sql;
+    view.isInitialized = true;
+    try {
+      return await work(view);
+    } finally {
+      view.borrowedEnded = true;
+      view.boundSql = null;
+      view.pool = null;
+      view.isInitialized = false;
+    }
   }
 
   /**

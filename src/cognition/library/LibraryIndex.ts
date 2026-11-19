@@ -963,7 +963,7 @@ export class LibraryIndex {
         throwOnReportedFailure(await store.delete(this.collection, [...plan.remove]), `delete the passages of ${plan.sourceId}`);
       }
       await write(store);
-    });
+    }, { tenantId: plan.tenantId });
     return plan.counts;
   }
 
@@ -1044,8 +1044,9 @@ export class LibraryIndex {
         throwOnReportedFailure(await store.upsert(this.collection, documents.slice(from, from + this.batchSize)), `write the passages of ${source.sourceId}`);
       }
     };
-    // Under the source's lock where the store has one, so a plan applied while the passages were embedded is replaced.
-    if (this.store.withSourceLock) await this.store.withSourceLock(this.collection, source.sourceId, replace);
+    // Under the source's lock where the store has one, so a plan applied while the passages were embedded is replaced,
+    // and the tenant's in shared mode, so a removal of the tenant waits for the write.
+    if (this.store.withSourceLock) await this.store.withSourceLock(this.collection, source.sourceId, replace, { tenantId: source.tenantId });
     else await replace(this.store);
     return { passages: source.passages.length };
   }
@@ -1070,12 +1071,17 @@ export class LibraryIndex {
 
   /**
    * Removes every passage of one tenant and answers the store's `deletedCount`, as `removeSource` does. Throws when
-   * the store reports the delete as failed.
+   * the store reports the delete as failed. On a store with `withTenantLock` the delete holds the tenant's lock, so it
+   * waits for every `applySourcePlan` and `indexSource` of the tenant that is writing, and none writes until it ends.
+   * A plan or an index of the tenant that starts after it writes as asked: stop a tenant's writes before removing it.
    */
   async removeTenant(tenantId: string): Promise<number> {
-    const result = await this.store.delete(this.collection, undefined, { filter: { tenantId } });
-    throwOnReportedFailure(result, `delete the passages of tenant ${tenantId}`);
-    return result.deletedCount;
+    const remove = async (store: IVectorStore): Promise<number> => {
+      const result = await store.delete(this.collection, undefined, { filter: { tenantId } });
+      throwOnReportedFailure(result, `delete the passages of tenant ${tenantId}`);
+      return result.deletedCount;
+    };
+    return this.store.withTenantLock ? this.store.withTenantLock(this.collection, tenantId, remove) : remove(this.store);
   }
 
   /** Changes who may see a source, its folder, its tags or its title; `folderId: null` takes it out of its folder. */
