@@ -260,6 +260,20 @@ describe('LibraryIndex indexes a source by content', () => {
     await expect(library.planSource(two, { embedding: MODEL, inputs: texts(two), newId: () => suffix })).rejects.toThrow('twice');
   });
 
+  it("refuses a newId holding a #, so a new row never takes the id of another source's row", async () => {
+    // The source "document:d1#part" holds the row "document:d1#part#0". A plan of "document:d1" whose newId gives
+    // "part#0" would make that same id, and its write would replace the other source's row.
+    const part = documentSource({ sourceId: 'document:d1#part', passages: passages(1) });
+    const partPlan = await library.planSource(part, { embedding: MODEL, inputs: texts(part), newId: () => '0' });
+    await library.applySourcePlan(partPlan, await embed([...partPlan.toEmbed]));
+    const before = await store.listSourcePassages('library', 'document:d1#part');
+    expect(before.map((row) => row.id)).toEqual(['document:d1#part#0']);
+
+    const one = documentSource({ passages: passages(1, () => 'An unrelated passage.') });
+    await expect(library.planSource(one, { embedding: MODEL, inputs: texts(one), newId: () => 'part#0' })).rejects.toThrow('which holds a #');
+    expect(await store.listSourcePassages('library', 'document:d1#part')).toEqual(before);
+  });
+
   it('refuses to apply a plan that reuses stored rows through an index whose store cannot plan by content', async () => {
     await index(documentSource());
     const edited = documentSource({ passages: passages(40, (n) => (n === 3 ? 'Passage 3 changed.' : undefined)) });
