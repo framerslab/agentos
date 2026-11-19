@@ -185,23 +185,37 @@ describe.skipIf(!URL)('LibraryIndex by content over PostgresVectorStore on Postg
     const held = new Promise<void>((resolve) => {
       release = resolve;
     });
+    let holding: () => void = () => {};
+    const holds = new Promise<void>((resolve) => {
+      holding = resolve;
+    });
     const first = store.withSourceLock('library', 'document:d1', async () => {
       order.push('first holds');
+      holding();
       await held;
       order.push('first ends');
     });
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    const second = store.withSourceLock('library', 'document:d1', async () => {
-      order.push('second holds');
-    });
-    const other = store.withSourceLock('library', 'document:d2', async () => {
-      order.push('another source');
-    });
-    await other;
-    await new Promise((resolve) => setTimeout(resolve, 200));
-    expect(order).toEqual(['first holds', 'another source']);
-    release();
-    await Promise.all([first, second]);
+    let second: Promise<void> = Promise.resolve();
+    try {
+      await holds;
+      second = store.withSourceLock('library', 'document:d1', async () => {
+        order.push('second holds');
+      });
+      const other = store.withSourceLock('library', 'document:d2', async () => {
+        order.push('another source');
+      });
+      await other;
+      // The second holder is waiting once Postgres lists an advisory lock it has asked for and not been granted.
+      for (let tries = 0; tries < 100; tries += 1) {
+        const waiting = await pool.query<{ n: string }>("SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted");
+        if (Number(waiting.rows[0].n) > 0) break;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(order).toEqual(['first holds', 'another source']);
+    } finally {
+      release();
+      await Promise.allSettled([first, second]);
+    }
     expect(order).toEqual(['first holds', 'another source', 'first ends', 'second holds']);
   });
 
@@ -298,5 +312,11 @@ describe.skipIf(!URL)('LibraryIndex by content over PostgresVectorStore on Postg
       expect(row.groups).toEqual(['acct:ann']);
       expect(row.title).toBe('Plan, second draft');
     }
+  });
+
+  it('reads vectors with the filter compared as JSON values, so a numeric tenant id never answers a text one', async () => {
+    await store.upsert('library', [{ id: 'typed#1', embedding: [1, 0, 0, 0], textContent: 'A row.', metadata: { sourceId: 'typed', tenantId: 7 } }]);
+    expect(await store.fetchVectors('library', ['typed#1'], { tenantId: '7' })).toEqual([]);
+    expect((await store.fetchVectors('library', ['typed#1'], { tenantId: 7 })).map((row) => row.id)).toEqual(['typed#1']);
   });
 });

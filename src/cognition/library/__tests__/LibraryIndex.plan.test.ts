@@ -293,6 +293,37 @@ describe('LibraryIndex indexes a source by content', () => {
     expect(await stored()).toHaveLength(0);
   });
 
+  it('replaces a source with indexSource under the source lock, so a plan applied while it embeds leaves no second set of rows', async () => {
+    let open: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    let asked: () => void = () => {};
+    const embedding = new Promise<void>((resolve) => {
+      asked = resolve;
+    });
+    const slow = new LibraryIndex({
+      store,
+      collection: 'library',
+      dimensions: 4,
+      embed: async (batch: string[]) => {
+        asked();
+        await gate;
+        return batch.map(vectorOf);
+      },
+    });
+    const source = documentSource();
+    const plan = await library.planSource(source, { embedding: MODEL, inputs: texts(source) });
+    const replacing = slow.indexSource(source);
+    await embedding;
+    // While indexSource waits on its embedder, a plan made from the empty source is applied.
+    await library.applySourcePlan(plan, await embed([...plan.toEmbed]));
+    open();
+    await replacing;
+    const ids = (await stored()).map((row) => row.id).sort();
+    expect(ids).toEqual(source.passages.map((_, n) => `document:d1#${n}`).sort());
+  });
+
   it('throws LibraryPlanStale when the store patches fewer rows than the plan reuses', async () => {
     await index(documentSource());
     const short = Object.assign(Object.create(store) as InMemoryVectorStore, { patchPassages: async () => ({ updatedCount: 0 }) });
