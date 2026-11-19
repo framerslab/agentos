@@ -21,6 +21,7 @@ import type { CapabilityDiscoveryResult } from '../../cognition/discovery/types'
 import type { EmergentConfig, EmergentTool } from '../../cognition/emergent/types.js';
 import type { EmergentCapabilityEngine } from '../../cognition/emergent/EmergentCapabilityEngine.js';
 import type { SelfImprovementToolDeps } from '../../cognition/emergent/EmergentCapabilityEngine.js';
+import type { ForgeTrace } from '../../cognition/emergent/ForgeTrace.js';
 
 /**
  * Represents the information about a tool that is suitable for an LLM
@@ -83,6 +84,14 @@ export interface IToolOrchestrator {
        * Only used when `config.selfImprovement.enabled` is `true`.
        */
       selfImprovementDeps?: SelfImprovementToolDeps;
+      /**
+       * Called once for every forge, after its outcome is final, with its trace: the forges the engine runs and the
+       * calls to this orchestrator's own forge_tool that the orchestrator or the executor ends before the tool runs.
+       * Awaited up to 1,000 ms; a throw or rejection is caught and never changes the forge's result.
+       */
+      onForgeTrace?: (trace: ForgeTrace) => void | Promise<void>;
+      /** The provider the judge's `generateText` calls, written into each trace's provenance; absent means unknown. */
+      judgeProviderId?: string;
     }
   ): Promise<void>;
 

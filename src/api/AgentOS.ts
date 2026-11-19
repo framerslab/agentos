@@ -141,6 +141,7 @@ import {
   type StructuredReplySpec,
 } from './runtime/structuredReply';
 import type { EmergentConfig } from '../cognition/emergent/types.js';
+import type { ForgeTrace } from '../cognition/emergent/ForgeTrace.js';
 // SelfImprovementToolDeps reserved for emergent capability integration
 import { GuardrailAction } from '../safety/guardrails/IGuardrailService';
 import {
@@ -810,6 +811,14 @@ export interface AgentOSConfig {
   emergentConfig?: Partial<EmergentConfig>;
 
   /**
+   * Receives every forge's trace when `emergent` is on: once a forge, after its outcome is final, whatever the
+   * outcome. On the full runtime it is the one carrier of a trace, since the runtime's stream carries no tool result.
+   * Awaited up to 1,000 ms; a throw or rejection is caught and never changes the forge's result. The model reads no
+   * trace, and AgentOS stores none.
+   */
+  onForgeTrace?: (trace: ForgeTrace) => void | Promise<void>;
+
+  /**
    * Optional observability config for tracing, metrics, and log correlation.
    * Default: disabled (opt-in).
    */
@@ -1329,6 +1338,9 @@ export class AgentOS implements IAgentOS {
                     getToolOrchestrator: () => this.toolOrchestrator,
                   })
                 : undefined,
+            onForgeTrace: this.config.onForgeTrace,
+            // The judge's calls go through the default provider (generateText above).
+            judgeProviderId: this.modelProviderManager.getDefaultProvider()?.providerId,
           }
         : undefined;
       const initialConfigTools = adaptTools(this.config.tools);
