@@ -993,13 +993,19 @@ export interface EmergentConfig {
   /**
    * Whether sandbox source code should be persisted at rest.
    *
-   * When `false`, sandbox tools still run in memory for the active process, but
-   * durable storage only receives redacted metadata instead of raw source code.
+   * When `false`, sandbox tools run in memory for the active process, and a
+   * fresh forge's row receives redacted metadata instead of raw source code.
    * This reduces the blast radius of runtime-forged code while preserving audit
-   * visibility and non-source tool metadata.
+   * visibility and non-source tool metadata. A rewrite of a row that already
+   * holds a source, stored by a host or while this option was on, keeps that
+   * source: turning the option off removes nothing, and a host deletes stored
+   * source itself.
    *
    * Persisting raw sandbox source should be an explicit opt-in for trusted
    * environments that need restart-time rehydration of sandbox tools.
+   *
+   * A forge's trace is apart from this option: a host that stores a trace
+   * stores the forged code it holds.
    *
    * @default false
    */
