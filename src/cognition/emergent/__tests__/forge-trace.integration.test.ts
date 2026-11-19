@@ -2211,6 +2211,7 @@ function eventFields(line: Record<string, unknown>): Record<string, unknown> {
 
 /** The stage codes a forge can end at, in the order of the stage table. */
 const FORGE_STAGE_CODES = [
+  'guardrail_refused',
   'schema_check',
   'refused_before_approval',
   'shape_check',
@@ -2218,6 +2219,7 @@ const FORGE_STAGE_CODES = [
   'orchestrator_refused',
   'permission_check_failed',
   'human_denied',
+  'approval_timed_out',
   'approval_failed',
   'self_change_refused',
   'name_refused',
@@ -2234,6 +2236,7 @@ const FORGE_STAGE_CODES = [
   'executor_unavailable',
   'test_responses_refused',
   'judge_rejected',
+  'test_output_unserializable',
   'compose_refused_after_judge',
   'step_cycle',
   'removed_while_forging',
