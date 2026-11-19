@@ -280,9 +280,9 @@ export class ElevenLabsTextToSpeechProvider implements TextToSpeechProvider {
    *   to control ElevenLabs-specific voice settings (stability, similarityBoost,
    *   style, useSpeakerBoost).
    * @returns A promise resolving to the MP3 audio buffer and metadata.
-   * @throws {Error} When the ElevenLabs API returns a non-2xx status code.
-   *   Common causes: invalid API key (401), voice not found (404),
-   *   character limit exceeded (400), or rate limit (429).
+   * @throws {ElevenLabsApiError} When the ElevenLabs API returns a non-2xx status code, with the status and the
+   *   body. Common causes: invalid API key (401), voice not found (404), character limit exceeded (400), or rate
+   *   limit (429). A key that answers with a spent quota hands over to the next key of the pool, each key once.
    *
    * @example
    * ```ts
@@ -336,7 +336,7 @@ export class ElevenLabsTextToSpeechProvider implements TextToSpeechProvider {
       },
     });
 
-    const doFetch = (key: string) =>
+    const response = await this.fetchWithKeyFailover('synthesis', (key) =>
       this.fetchImpl(`${baseUrl}/text-to-speech/${voiceId}`, {
         method: 'POST',
         headers: {
@@ -345,25 +345,8 @@ export class ElevenLabsTextToSpeechProvider implements TextToSpeechProvider {
           Accept: 'audio/mpeg',
         },
         body: requestBody,
-      });
-
-    const key = this.keyPool.next();
-    let response = await doFetch(key);
-
-    if (!response.ok && this.keyPool.size > 1) {
-      const errBody = await response.text().catch(() => '');
-      if (isQuotaError(response.status, errBody)) {
-        this.keyPool.markExhausted(key);
-        response = await doFetch(this.keyPool.next());
-      } else {
-        throw new Error(`ElevenLabs synthesis failed (${response.status}): ${errBody}`);
-      }
-    }
-
-    if (!response.ok) {
-      const message = await response.text();
-      throw new Error(`ElevenLabs synthesis failed (${response.status}): ${message}`);
-    }
+      })
+    );
 
     const audioBuffer = Buffer.from(await response.arrayBuffer());
     return {
@@ -388,7 +371,8 @@ export class ElevenLabsTextToSpeechProvider implements TextToSpeechProvider {
    * merged. The character alignments come back when the answer has them.
    *
    * The key and the base URL are the ones {@link synthesize} uses: the `xi-api-key` header from the provider's key
-   * pool, where a key that answers with a spent quota hands over to the next, and `config.baseUrl`.
+   * pool, where a key that answers with a spent quota hands over to the next key, each key once, and
+   * `config.baseUrl`.
    *
    * ElevenLabs' reference gives two limits the method leaves to the API: at most 10 unique voice ids per request,
    * and, for reliable generation, at most 2,000 characters of text across all lines; longer requests can end early
@@ -401,7 +385,8 @@ export class ElevenLabsTextToSpeechProvider implements TextToSpeechProvider {
    *   is not a whole number from 0 to 4294967295.
    * @throws {ElevenLabsApiError} When ElevenLabs answers with an error status (401 for a bad key, 422 for a request
    *   it refuses, 429 for a spent quota), with the status and the body.
-   * @throws {Error} When a successful answer has no `audio_base64` or no well-formed `voice_segments`.
+   * @throws {Error} When a successful answer has no `audio_base64`, one that decodes to no bytes, or no well-formed
+   *   `voice_segments`.
    *
    * @example
    * ```ts
@@ -425,14 +410,19 @@ export class ElevenLabsTextToSpeechProvider implements TextToSpeechProvider {
     if (!Array.isArray(lines as unknown) || lines.length === 0) {
       throw new RangeError('ElevenLabs dialogue needs at least one line');
     }
-    lines.forEach((line, index) => {
+    // An indexed loop, since forEach and map skip the unfilled slots of a sparse array. The inputs are copied
+    // here, so the request and the usage count read the same lines whatever the caller does to its array later.
+    const inputs: Array<{ text: string; voice_id: string }> = [];
+    for (let index = 0; index < lines.length; index++) {
+      const line = lines[index] as ElevenLabsDialogueLine | undefined;
       if (typeof line?.text !== 'string' || line.text.trim() === '') {
         throw new RangeError(`ElevenLabs dialogue line ${index} has no text`);
       }
       if (typeof line.voiceId !== 'string' || line.voiceId.trim() === '') {
         throw new RangeError(`ElevenLabs dialogue line ${index} has no voice id`);
       }
-    });
+      inputs.push({ text: line.text, voice_id: line.voiceId });
+    }
     const { seed } = options;
     if (seed !== undefined && !(Number.isInteger(seed) && seed >= 0 && seed <= DIALOGUE_MAX_SEED)) {
       throw new RangeError(
@@ -445,12 +435,12 @@ export class ElevenLabsTextToSpeechProvider implements TextToSpeechProvider {
     const baseUrl = this.config.baseUrl ?? DEFAULT_BASE_URL;
     const url = `${baseUrl}/text-to-dialogue/with-timestamps?output_format=${encodeURIComponent(outputFormat)}`;
     const requestBody = JSON.stringify({
-      inputs: lines.map((line) => ({ text: line.text, voice_id: line.voiceId })),
+      inputs,
       model_id: model,
       ...(seed === undefined ? {} : { seed }),
     });
 
-    const doFetch = (key: string) =>
+    const response = await this.fetchWithKeyFailover('dialogue', (key) =>
       this.fetchImpl(url, {
         method: 'POST',
         headers: {
@@ -459,24 +449,8 @@ export class ElevenLabsTextToSpeechProvider implements TextToSpeechProvider {
           Accept: 'application/json',
         },
         body: requestBody,
-      });
-
-    const key = this.keyPool.next();
-    let response = await doFetch(key);
-
-    if (!response.ok && this.keyPool.size > 1) {
-      const errBody = await response.text().catch(() => '');
-      if (!isQuotaError(response.status, errBody)) {
-        throw new ElevenLabsApiError('dialogue', response.status, errBody);
-      }
-      this.keyPool.markExhausted(key);
-      response = await doFetch(this.keyPool.next());
-    }
-
-    if (!response.ok) {
-      const errBody = await response.text().catch(() => '');
-      throw new ElevenLabsApiError('dialogue', response.status, errBody);
-    }
+      })
+    );
 
     let payload: unknown;
     try {
@@ -484,8 +458,13 @@ export class ElevenLabsTextToSpeechProvider implements TextToSpeechProvider {
     } catch {
       throw new Error('ElevenLabs dialogue answer is not JSON');
     }
-    if (!isRecord(payload) || typeof payload.audio_base64 !== 'string' || payload.audio_base64 === '') {
+    if (!isRecord(payload) || typeof payload.audio_base64 !== 'string') {
       throw new Error('ElevenLabs dialogue answer has no audio_base64');
+    }
+    // Node's base64 decoder skips characters outside the alphabet, so a value of only those decodes to no bytes.
+    const audioBuffer = Buffer.from(payload.audio_base64, 'base64');
+    if (audioBuffer.length === 0) {
+      throw new Error('ElevenLabs dialogue answer has an audio_base64 that decodes to no bytes');
     }
 
     const segments = readDialogueSegments(payload.voice_segments);
@@ -493,12 +472,12 @@ export class ElevenLabsTextToSpeechProvider implements TextToSpeechProvider {
     const normalizedAlignment = readCharacterAlignment(payload.normalized_alignment);
 
     return {
-      audioBuffer: Buffer.from(payload.audio_base64, 'base64'),
+      audioBuffer,
       mimeType: dialogueMimeType(outputFormat),
       cost: 0, // Cost tracking is handled at a higher layer
       providerName: this.displayName,
       usage: {
-        characters: lines.reduce((total, line) => total + line.text.length, 0),
+        characters: inputs.reduce((total, input) => total + input.text.length, 0),
         modelUsed: model,
       },
       outputFormat,
@@ -506,6 +485,41 @@ export class ElevenLabsTextToSpeechProvider implements TextToSpeechProvider {
       ...(alignment ? { alignment } : {}),
       ...(normalizedAlignment ? { normalizedAlignment } : {}),
     };
+  }
+
+  /**
+   * Sends a request with a key from the pool. A key that answers with a spent quota is marked exhausted and the
+   * request goes again with the next key the pool hands out, each key once. Any other error answer, or a spent quota
+   * with no untried key left, throws.
+   *
+   * @param operation - What the request is for, named in the error message.
+   * @param send - Sends the request with the given key.
+   * @returns The first successful answer.
+   * @throws {ElevenLabsApiError} With the status and body of the last error answer.
+   */
+  private async fetchWithKeyFailover(
+    operation: string,
+    send: (key: string) => Promise<Response>
+  ): Promise<Response> {
+    const tried = new Set<string>();
+    let key = this.keyPool.next();
+    for (;;) {
+      tried.add(key);
+      const response = await send(key);
+      if (response.ok) {
+        return response;
+      }
+      const errBody = await response.text().catch(() => '');
+      if (this.keyPool.size > 1 && isQuotaError(response.status, errBody)) {
+        this.keyPool.markExhausted(key);
+        const nextKey = this.keyPool.next();
+        if (nextKey !== '' && !tried.has(nextKey)) {
+          key = nextKey;
+          continue;
+        }
+      }
+      throw new ElevenLabsApiError(operation, response.status, errBody);
+    }
   }
 
   /**

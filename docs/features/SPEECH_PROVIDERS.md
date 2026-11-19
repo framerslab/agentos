@@ -190,7 +190,7 @@ dialogue.segments;    // [{ lineIndex: 0, voiceId: 'voice-a', startSeconds: 0, e
 dialogue.alignment;   // each character's start and end seconds, or undefined
 ```
 
-`synthesizeDialogue(lines, options)` voices several speakers in one request through ElevenLabs' [Text to Dialogue with timestamps](https://elevenlabs.io/docs/api-reference/text-to-dialogue/convert-with-timestamps) and returns where each line sits in the audio. It sends `POST {baseUrl}/text-to-dialogue/with-timestamps?output_format=<format>` with the body `{ inputs: [{ text, voice_id }], model_id, seed }`; `seed` is left out when the call gives none. The key and the base URL are the ones `synthesize()` uses, and a key that answers with a spent quota hands over to the next key of the pool.
+`synthesizeDialogue(lines, options)` voices several speakers in one request through ElevenLabs' [Text to Dialogue with timestamps](https://elevenlabs.io/docs/api-reference/text-to-dialogue/convert-with-timestamps) and returns where each line sits in the audio. It sends `POST {baseUrl}/text-to-dialogue/with-timestamps?output_format=<format>` with the body `{ inputs: [{ text, voice_id }], model_id, seed }`; `seed` is left out when the call gives none. The key and the base URL are the ones `synthesize()` uses. A key that answers with a spent quota hands over to the next key of the pool, each key once, in both methods.
 
 | Option | Default | Sent as |
 |---|---|---|
@@ -205,7 +205,7 @@ The result:
 - `segments` has one entry per `voice_segments` entry, in the API's order. Each carries `lineIndex` (the input line it belongs to), `voiceId`, `startSeconds`, `endSeconds`, `characterStartIndex` and `characterEndIndex`. No segments are merged.
 - `alignment` and `normalizedAlignment` give the time of each character of the text as written and as normalized. Each is absent when the answer has none.
 
-Before any request, the method throws a `RangeError` for an empty dialogue, for a line without text or voice id, and for a seed outside 0 to 4294967295. An error answer throws an `ElevenLabsApiError` carrying `status` and `body`.
+Before any request, the method throws a `RangeError` for an empty dialogue, for a line without text or voice id, and for a seed outside 0 to 4294967295. An error answer throws an `ElevenLabsApiError` carrying `status` and `body`, and so does a spent quota on every key. A successful answer whose `audio_base64` decodes to no bytes, or whose `voice_segments` are missing or malformed, throws an `Error`.
 
 ElevenLabs' reference gives two limits that the method leaves to the API. A request takes at most 10 unique voice ids. For reliable generation, keep the text of all lines at or below 2,000 characters, since longer requests can end early or return a validation error. Split a longer dialogue into several requests.
 
