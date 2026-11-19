@@ -1174,15 +1174,21 @@ export class LibraryIndex {
       });
   }
 
-  /** A copy of a search's own vector, refused when it is empty, holds a value that is not finite, or has another size. */
+  /**
+   * A copy of a search's own vector, refused when it is empty, holds a value that is not finite (a missing place of a
+   * sparse array among them), or has another size.
+   */
   private heldVector(vector: readonly number[]): number[] {
-    if (!Array.isArray(vector) || vector.length === 0 || !vector.every((value) => typeof value === 'number' && Number.isFinite(value))) {
+    const copy: number[] = [];
+    // Every place by its index, so a missing place reads as undefined and is refused, where every() would skip it.
+    for (let at = 0; Array.isArray(vector) && at < vector.length; at += 1) copy.push(vector[at]);
+    if (copy.length === 0 || !copy.every((value) => typeof value === 'number' && Number.isFinite(value))) {
       throw new Error('LibraryIndex.search: the vector must hold one or more finite numbers.');
     }
     if (this.dimensions !== undefined && vector.length !== this.dimensions) {
       throw new Error(`LibraryIndex.search: the vector holds ${vector.length} numbers; the index's dimensions are ${this.dimensions}.`);
     }
-    return [...vector];
+    return copy;
   }
 
   /**
