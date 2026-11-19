@@ -73,9 +73,12 @@ import { EmergentJudge } from './EmergentJudge.js';
 import { EmergentToolRegistry } from './EmergentToolRegistry.js';
 import { InvalidToolNameError, forgedToolNameProblem } from './ToolName.js';
 import {
+  FORGE_TRACE_DELIVER,
   buildForgeTrace,
+  deliverForgeTrace,
   forgeContextRecords,
   newForgeCallRecord,
+  settleForgeTrace,
   thrownReason,
   type ForgeCallAuthor,
   type ForgeCallRecord,
@@ -365,6 +368,16 @@ export interface EmergentCapabilityEngineDeps {
   /** Optional callback used to activate a newly forged tool immediately. */
   onToolForged?: (tool: EmergentTool, executable: ITool) => Promise<void>;
 
+  /**
+   * Called once for every forge, after its outcome is final, with its trace.
+   * Never called for loads or re-registrations.
+   *
+   * The forge waits for the handler up to one second and then returns; a
+   * handler running at that bound is left running. A handler that throws or
+   * rejects never changes the forge's result.
+   */
+  onForgeTrace?: (trace: ForgeTrace) => void | Promise<void>;
+
   /** Optional callback used when a tool is promoted to a persisted tier. */
   onToolPromoted?: (tool: EmergentTool) => Promise<void>;
 
@@ -520,6 +533,7 @@ export class EmergentCapabilityEngine {
   private readonly judge: EmergentJudge;
   private readonly registry: EmergentToolRegistry;
   private readonly onToolForged?: (tool: EmergentTool, executable: ITool) => Promise<void>;
+  private readonly onForgeTrace?: (trace: ForgeTrace) => void | Promise<void>;
   private readonly onToolPromoted?: (tool: EmergentTool) => Promise<void>;
   private readonly onToolRemoved?: (tool: EmergentTool) => Promise<void>;
   private readonly onToolRestored?: (tool: ITool) => Promise<void>;
@@ -554,6 +568,7 @@ export class EmergentCapabilityEngine {
     this.judge = deps.judge;
     this.registry = deps.registry;
     this.onToolForged = deps.onToolForged;
+    this.onForgeTrace = deps.onForgeTrace;
     this.onToolPromoted = deps.onToolPromoted;
     this.onToolRemoved = deps.onToolRemoved;
     this.onToolRestored = deps.onToolRestored;
@@ -633,9 +648,10 @@ export class EmergentCapabilityEngine {
    * 6. If rejected: return failure with the judge's reasoning.
    *
    * Every result carries the forge's trace as its last key, `trace`: what was
-   * asked, what ran, what the judge said and where the forge ended. A forge
-   * that throws records its trace on the call's record and rethrows the same
-   * value.
+   * asked, what ran, what the judge said and where the forge ended. The same
+   * trace goes to `onForgeTrace`, once, before the forge returns. A forge that
+   * throws records its trace on the call's record, hands it to `onForgeTrace`
+   * and rethrows the same value.
    *
    * @param request - The forge request describing the desired tool.
    * @param context - The agent and session ids. `caller` is the forging
@@ -684,12 +700,12 @@ export class EmergentCapabilityEngine {
     try {
       result = await this.forgeSteps(request, context, call);
     } catch (error: unknown) {
-      // thrownReason never throws, so the caller gets back the value that was
-      // thrown, whatever it is.
-      this.recordForgeTrace(record, via, request, context, call, 'thrown', thrownReason(error));
+      // thrownReason never throws and the delivery never throws, so the caller
+      // gets back the value that was thrown, whatever it is.
+      await this.recordForgeTrace(record, via, request, context, call, 'thrown', thrownReason(error));
       throw error;
     }
-    const trace = this.recordForgeTrace(
+    const trace = await this.recordForgeTrace(
       record,
       via,
       request,
@@ -702,10 +718,24 @@ export class EmergentCapabilityEngine {
   }
 
   /**
-   * Builds the trace of a forge this engine ended and keeps it on the call's
-   * record. The record keeps the first trace set on it.
+   * Hands a forge's trace to the host's `onForgeTrace` and writes the forge's
+   * log line. Every layer that ends a forge (this engine, forge_tool, the
+   * wrapper, the orchestrator) delivers through this one method. Never throws.
+   *
+   * @param trace - The forge's trace.
+   * @internal
    */
-  private recordForgeTrace(
+  async [FORGE_TRACE_DELIVER](trace: ForgeTrace): Promise<void> {
+    return deliverForgeTrace(trace, this.onForgeTrace);
+  }
+
+  /**
+   * Builds the trace of a forge this engine ended, keeps it on the call's
+   * record and delivers it. The record keeps the first trace set on it and is
+   * delivered once: a record an outer layer already delivered is not
+   * delivered again.
+   */
+  private async recordForgeTrace(
     record: ForgeCallRecord,
     via: ForgeTrace['via'],
     request: ForgeToolRequest,
@@ -713,7 +743,7 @@ export class EmergentCapabilityEngine {
     call: ForgeCall,
     stage: KnownForgeTraceStage,
     reason: unknown,
-  ): ForgeTrace {
+  ): Promise<ForgeTrace> {
     const trace = buildForgeTrace({
       record,
       recordedBy: 'engine',
@@ -733,10 +763,7 @@ export class EmergentCapabilityEngine {
       judge: call.judge,
       toolId: call.toolId,
     });
-    if (record.trace === undefined) {
-      record.trace = trace;
-    }
-    return record.trace;
+    return settleForgeTrace(record, trace, (kept) => this[FORGE_TRACE_DELIVER](kept));
   }
 
   /**
