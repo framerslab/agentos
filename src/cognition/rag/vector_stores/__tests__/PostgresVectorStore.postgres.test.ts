@@ -1,14 +1,15 @@
 /**
  * @fileoverview PostgresVectorStore against a real Postgres with pgvector: the array-aware filter, deletion and
  * metadata changes by filter, the lexical leg, an iterative scan that fills a filtered top-K, for query() and
- * for the hybrid search's dense leg, the hybrid search's score as a number, and the indexes createCollection()
- * makes on a table with a long name. Gated on AGENTOS_TEST_POSTGRES_URL, as Brain.postgres.test.ts is.
+ * for the hybrid search's dense leg, the hybrid search's score as a number, a row's vector read only when a search
+ * asks for it, and the indexes createCollection() makes on a table with a long name. Gated on AGENTOS_TEST_POSTGRES_URL, as Brain.postgres.test.ts is.
  */
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import type { MetadataFilter, VectorDocument } from '../../IVectorStore.js';
+import type { MetadataFilter, QueryOptions, QueryResult, VectorDocument } from '../../IVectorStore.js';
 import { PostgresVectorStore } from '../PostgresVectorStore.js';
+import type { PgPoolLike } from '../PostgresVectorStore.js';
 
 const URL = process.env.AGENTOS_TEST_POSTGRES_URL;
 const PREFIX = `t${Date.now().toString(36)}_`;
@@ -132,6 +133,59 @@ describe.skipIf(!URL)('PostgresVectorStore on Postgres', () => {
     }
     const scores = hybrid.documents.map((doc) => doc.similarityScore);
     expect(scores).toEqual([...scores].sort((a, b) => b - a));
+  });
+
+  it("reads a row's vector only when a search asks for it, and answers the same rows either way", async () => {
+    // The store's statements, recorded on their way to the real pool.
+    const statements: string[] = [];
+    const recording: PgPoolLike = {
+      query: (sql, params) => {
+        statements.push(sql);
+        return pool.query(sql, params);
+      },
+      connect: async () => {
+        const client = await pool.connect();
+        return {
+          query: (sql: string, params?: unknown[]) => {
+            statements.push(sql);
+            return client.query(sql, params);
+          },
+          release: () => client.release(),
+        };
+      },
+    };
+    const recorded = new PostgresVectorStore({
+      id: 'pg-recorded', type: 'postgres', pool: recording, manageSchema: false, tablePrefix: PREFIX,
+      textSearchConfig: 'simple', similarityMetric: 'cosine',
+    });
+    const asked: QueryOptions = { topK: 18, includeMetadata: true, includeTextContent: true };
+    // Rows of equal score may come back in either order, so both answers are read in one order.
+    const answer = (result: QueryResult) => result.documents
+      .map((doc) => ({ id: doc.id, score: doc.similarityScore, metadata: doc.metadata, text: doc.textContent }))
+      .sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
+    const searches: Array<[string, (options: QueryOptions) => Promise<QueryResult>]> = [
+      ['hybridSearch', (options) => recorded.hybridSearch('chunks', arc(0), 'budget review', options)],
+      ['query', (options) => recorded.query('chunks', arc(0), options)],
+      ['lexicalSearch', (options) => recorded.lexicalSearch('chunks', 'budget', options)],
+    ];
+    for (const [name, search] of searches) {
+      statements.length = 0;
+      const without = await search(asked);
+      expect(statements.length, name).toBeGreaterThan(0);
+      expect(statements.filter((sql) => sql.includes('embedding::text')), name).toEqual([]);
+      expect(without.documents, name).toHaveLength(18);
+      expect(without.documents.every((doc) => doc.embedding.length === 0), name).toBe(true);
+
+      statements.length = 0;
+      const withVectors = await search({ ...asked, includeEmbedding: true });
+      expect(statements.some((sql) => sql.includes('embedding::text')), name).toBe(true);
+      expect(answer(withVectors), name).toEqual(answer(without));
+      for (const doc of withVectors.documents) {
+        const written = arc(Number(doc.id.slice(1)));
+        expect(doc.embedding, name).toHaveLength(DIM);
+        doc.embedding.forEach((value, axis) => expect(value).toBeCloseTo(written[axis], 5));
+      }
+    }
   });
 
   it('changes and deletes by filter', async () => {
