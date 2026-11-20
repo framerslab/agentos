@@ -33,7 +33,7 @@ import {
   ProviderEmbeddingResponse,
   AttemptOutcome,
 } from '../IProvider';
-import { responseModel } from '../responseModel';
+import { requestedModel, responseModel } from '../responseModel';
 import { stripParamsForOpenAI } from '../openrouter-only-params';
 import { resolveOpenAiCacheRetentionParams, resolvePromptCacheKey } from '../openai-cache-params';
 import { OpenAIProviderError } from '../errors/OpenAIProviderError';
@@ -1578,7 +1578,7 @@ export class OpenAIProvider implements IProvider {
       id: `openai-abort-${Date.now()}`,
       object: 'chat.completion.chunk',
       created: Math.floor(Date.now() / 1000),
-      modelId,
+      ...requestedModel(modelId),
       choices: [],
       error: { message, type: 'abort' },
       isFinal: true,
@@ -1630,7 +1630,7 @@ export class OpenAIProvider implements IProvider {
         id: `openai-truncated-${Date.now()}`,
         object: 'chat.completion.chunk',
         created: Math.floor(Date.now() / 1000),
-        modelId,
+        ...requestedModel(modelId),
         choices: [],
         error: { message: 'OpenAI chat stream ended before the refused answer finished', type: 'stream_truncated' },
         isFinal: true,
@@ -1688,7 +1688,8 @@ export class OpenAIProvider implements IProvider {
   ): AsyncGenerator<ModelCompletionResponse, void, undefined> {
     let responseId = `openai-resp-${Date.now()}`;
     let created = Math.floor(Date.now() / 1000);
-    let responseModel = modelId;
+    // The model an event named, kept once one names it: a later event that names none leaves it as it is.
+    let answeredModel: string | undefined;
     let emittedText = '';
     let emittedRefusal = '';
     // Whether a refusal delta came, an empty one included.
@@ -1706,13 +1707,14 @@ export class OpenAIProvider implements IProvider {
       if (!response) return;
       if (typeof response.id === 'string' && response.id) responseId = response.id;
       if (typeof response.created_at === 'number') created = response.created_at;
-      if (typeof response.model === 'string' && response.model) responseModel = response.model;
+      if (typeof response.model === 'string' && response.model) answeredModel = response.model;
     };
     const chunk = (fields: Partial<ModelCompletionResponse>): ModelCompletionResponse => ({
       id: responseId,
       object: 'chat.completion.chunk',
       created,
-      modelId: responseModel,
+      // The model an event named, or, while none has, the model the request named, marked as the request's.
+      ...responseModel(answeredModel, modelId),
       choices: [{ index: 0, message: { role: 'assistant', content: null }, finishReason: null }],
       ...fields,
     });

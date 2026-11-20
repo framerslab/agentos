@@ -80,6 +80,7 @@ import { MetapromptExecutor } from './MetapromptExecutor';
 import { feedbackTraceMessage, type NormalizedUserFeedback } from './userFeedback';
 import { resolveReasoningTraceLimits, type ReasoningTraceLimits } from './reasoningTraceLimits';
 import { settlesWithin, shutdownTimeoutOrDefault } from './shutdownBound';
+import { FORGE_TRACE_HOOK_BOUND_MS } from '../emergent/ForgeTrace.js';
 import { turnContentText } from './turnContent';
 import { moduleLogger } from '../../core/logging/loggerFactory';
 
@@ -308,18 +309,20 @@ function applicationNoteOf(turnInput: GMITurnInput): string | undefined {
 }
 
 /**
- * The model that asked for a tool call: the model the step's final chunk names, as answered; when it names none, or
- * its adapter marks the id it names as filled in from the request (`modelIdSource: 'requested'`), the model the step
- * asked for, as requested.
+ * The model that asked for a tool call: the model the step's final chunk names, as answered. When its adapter marks
+ * that id as the request's (`modelIdSource: 'requested'`), the id it names, as requested: the adapter writes the model
+ * its request named, which a request option such as `customModelParams.model` can set apart from the model the step
+ * asked for. When the chunk names no model, the model the step asked for, as requested.
  */
 function callerModelOf(
   providerId: string,
   requestedModelId: string,
   finalChunk: Pick<ModelCompletionResponse, 'modelId' | 'modelIdSource'> | undefined,
 ): NonNullable<ToolExecutionRequestDetails['callerModel']> {
-  return finalChunk?.modelId && finalChunk.modelIdSource !== 'requested'
-    ? { providerId, modelId: finalChunk.modelId, modelSource: 'answered' }
-    : { providerId, modelId: requestedModelId, modelSource: 'requested' };
+  if (!finalChunk?.modelId) return { providerId, modelId: requestedModelId, modelSource: 'requested' };
+  return finalChunk.modelIdSource === 'requested'
+    ? { providerId, modelId: finalChunk.modelId, modelSource: 'requested' }
+    : { providerId, modelId: finalChunk.modelId, modelSource: 'answered' };
 }
 
 /** The tool-call gate a turn names in `metadata.toolCallGate`; undefined when it names none. */
@@ -2717,9 +2720,9 @@ export class GMI implements IGMI {
             // The gate the turn asks before each call, beside the turn's sources: a team the call launches has its
             // seats' calls asked it too.
             ...(toolCallGate ? { callerTurn: { toolCallGate: withTurnSources(toolCallGate, lastRagSources ?? continuedTurnSources) } } : {}),
-            // The model that asked for the call: the step's provider, and the model its final chunk names, or the
-            // model the step asked for, labelled requested, when the chunk names none or its adapter marks the id as
-            // the request's. Tools read it; it is never sent to a model.
+            // The model that asked for the call: the step's provider, and the model its final chunk names, labelled
+            // requested when its adapter marks the id as the request's, or the model the step asked for, labelled
+            // requested, when the chunk names none. Tools read it; it is never sent to a model.
             callerModel: callerModelOf(modelTargetInfo.providerId, modelTargetInfo.modelId, stepFinalChunk),
           });
           try {
@@ -2761,13 +2764,19 @@ export class GMI implements IGMI {
             toolRoundFailure = { error };
             // A call the gate refused that the round never reached (a call before it failed under fail_closed, or the
             // turn stopped) is told to the orchestrator here, so a refused forge_tool call has its forge trace all the
-            // same. A call the round reached was told as it was reached.
+            // same. A call the round reached was told as it was reached. The skipped calls are told at once and waited
+            // for together, up to one hook bound for the round, so a stalled trace hook delays the failure by one bound
+            // in all; a delivery still running at the bound goes on in the background.
+            const skippedRefusals: Array<Promise<void>> = [];
             for (let callIndex = toolExecutionResults.length; callIndex < currentIterationToolCallRequests.length; callIndex += 1) {
               const refusal = refusals[callIndex] ?? null;
               const toolCallReq = currentIterationToolCallRequests[callIndex];
               if (refusal && toolCallReq !== callInFlight) {
-                await this.recordRefusedToolCall(requestDetailsFor(toolCallReq), refusal);
+                skippedRefusals.push(this.recordRefusedToolCall(requestDetailsFor(toolCallReq), refusal));
               }
+            }
+            if (skippedRefusals.length > 0) {
+              await settlesWithin(Promise.all(skippedRefusals), FORGE_TRACE_HOOK_BOUND_MS);
             }
             toolExecutionResults.push(...this.resultsForUnfinishedToolCalls(
               currentIterationToolCallRequests,

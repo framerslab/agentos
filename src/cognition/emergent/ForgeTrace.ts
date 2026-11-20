@@ -585,7 +585,11 @@ function walkObject(walk: Walk, source: object, ancestors: Set<object>, depth: n
       return writeMarker(walk, 'other');
     }
     if (Array.isArray(source)) {
-      length = source.length;
+      // Read and converted here, inside the guard, as `JSON.stringify` converts it (a whole number, 0 for NaN or less):
+      // a `Proxy` can give a length that is a symbol or an object whose conversion to a number throws, and the array
+      // is then an `other` marker in its place.
+      const converted = Number((source as { length: unknown }).length);
+      length = converted > 0 ? Math.floor(converted) : 0;
     } else {
       keys = jsonKeyOrder(Object.keys(source));
     }
