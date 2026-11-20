@@ -1195,6 +1195,9 @@ export function gmi(opts: GmiOptions): GmiHandle {
       if (ownsTally) sessionTallies.set(sessionId, createEmptyUsageAggregate(sessionId));
       const tally = sessionTallies.get(sessionId)!;
       const lock = new TurnLock();
+      // When this session entry opened: every handle of the open id is this one object, and the id's next opening
+      // after close() is a new entry with a time of its own.
+      const startedAt = Date.now();
       let closing: Promise<void> | undefined;
       // Every turn of the session runs under this signal; close() aborts it.
       const stopTurns = new AbortController();
@@ -1350,6 +1353,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
 
       const session = {
         id: sessionId,
+        startedAt,
+        elapsedMs: (): number => Math.max(0, Date.now() - startedAt),
         send: async (input: MessageContent, sendOpts?: SessionSendOptions<GmiTurnOptions['responseSchema']>) => {
           refuseGuards(sendOpts);
           const callerSignal = sendOpts?.abortSignal;
