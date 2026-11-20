@@ -3281,6 +3281,19 @@ async function turnThroughRuntime(
   return { chunks, thrown };
 }
 
+/** The message a turn's stream carries when its first call, missing_tool, failed under fail_closed. */
+const FAIL_CLOSED_ON_MISSING_TOOL = expect.stringContaining(
+  "Tool 'missing_tool' failed and execution policy is fail_closed.",
+);
+
+/** The messages of the error chunks a turn streamed that name a fail_closed stop. */
+function failClosedFailures(chunks: unknown[]): string[] {
+  return chunks
+    .filter((chunk) => (chunk as { type?: unknown }).type === AgentOSResponseChunkType.ERROR)
+    .map((chunk) => String((chunk as { message?: unknown }).message))
+    .filter((message) => message.includes('fail_closed'));
+}
+
 /** A call's answering-model record as a GMI writes it when the step's final chunk names no model. */
 const REQUESTED_CALLER_MODEL = { providerId: 'caller-provider', modelId: 'caller-model', modelSource: 'requested' };
 
@@ -3457,7 +3470,7 @@ describe('forge trace: review follow-ups', () => {
 
     // One step of two calls: a tool the runtime does not have, which fails and ends the round under fail_closed, then a
     // forge_tool call the guardrail refused, which the round never reaches.
-    await turnThroughRuntime(
+    const turn = await turnThroughRuntime(
       runtime,
       toolCallsStep([
         { id: 'call-missing', name: 'missing_tool', args: {} },
@@ -3465,6 +3478,9 @@ describe('forge trace: review follow-ups', () => {
       ]),
     );
     expect(runtimeModel.judgeCalls).toBe(0);
+    // The turn failed on the first call under fail_closed: the forge_tool call's trace came from the recovery of a
+    // round that stopped, not from a round that went on to it.
+    expect(failClosedFailures(turn.chunks)).toEqual([FAIL_CLOSED_ON_MISSING_TOOL]);
 
     expect(traces).toHaveLength(1);
     const trace = traces[0];
@@ -3475,7 +3491,48 @@ describe('forge trace: review follow-ups', () => {
     expect(trace.request).toMatchObject({ name: 'add_numbers', description: 'Add two numbers.' });
   });
 
-  it("a forge whose step's model its adapter filled in from the request is authored by the requested model", async () => {
+  it('under fail_closed, the forge calls a failed call skipped share one wait for a stalled hook', async () => {
+    // A hook that never settles: each delivery waits for it up to the bound.
+    const hookStarts: number[] = [];
+    const stalledHook = (): Promise<void> => {
+      hookStarts.push(performance.now());
+      return new Promise<void>(() => undefined);
+    };
+    runtimeModel.judgeReply = APPROVED_JSON;
+    runtime = await bootRuntime(stalledHook, {
+      guardrailService: noForgingGuard(),
+      turnPlanning: {
+        enabled: true,
+        defaultToolFailureMode: 'fail_closed',
+        discovery: { enabled: false, defaultToolSelectionMode: 'all' },
+      },
+    });
+    const os = runtime;
+
+    // A failed call, then three forge_tool calls the guardrail refused, which the round never reaches.
+    const { value: turn, ms } = await timed(() =>
+      turnThroughRuntime(
+        os,
+        toolCallsStep([
+          { id: 'call-missing', name: 'missing_tool', args: {} },
+          { id: 'call-forge-1', name: 'forge_tool', args: sandboxArgs() },
+          { id: 'call-forge-2', name: 'forge_tool', args: sandboxArgs() },
+          { id: 'call-forge-3', name: 'forge_tool', args: sandboxArgs() },
+        ]),
+      ),
+    );
+
+    expect(failClosedFailures(turn.chunks)).toEqual([FAIL_CLOSED_ON_MISSING_TOOL]);
+    expect(runtimeModel.judgeCalls).toBe(0);
+    expect(hookStarts).toHaveLength(3);
+    // Every skipped call's hook is called before the bound of the one before it ends: one wait for the round, where a
+    // wait a call would start each hook a bound after the last.
+    expect(Math.max(...hookStarts) - Math.min(...hookStarts)).toBeLessThan(HOOK_BOUND_MS);
+    // The failure reaches the caller after about one bound, where a wait a call would take three.
+    expect(ms).toBeLessThan(2.5 * HOOK_BOUND_MS);
+  }, 20_000);
+
+  it("a forge whose step's model its adapter marked as the request's is authored by that model, labelled requested", async () => {
     const { onForgeTrace, traces } = hookRecorder();
     runtimeModel.judgeReply = APPROVED_JSON;
     runtime = await bootRuntime(onForgeTrace);
@@ -3485,14 +3542,15 @@ describe('forge trace: review follow-ups', () => {
 
     expect(traces).toHaveLength(1);
     const author = traces[0].provenance.request as Record<string, unknown>;
+    // The adapter's id is the model its request named, which a request option can set apart from the model the step
+    // asked for: it is kept, labelled requested.
     expect(author).toMatchObject({
       kind: 'model',
       role: 'forging_agent',
       provider: 'openai',
-      model: expect.any(String),
+      model: 'filled-in-model',
       modelSource: 'requested',
     });
-    expect(author.model).not.toBe('filled-in-model');
   });
 
   it('the GMI labels the model it asked for requested when the step names no model', async () => {

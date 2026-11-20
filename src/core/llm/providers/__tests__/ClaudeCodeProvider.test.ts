@@ -309,5 +309,35 @@ describe('ClaudeCodeProvider', () => {
         error: { message: expect.stringContaining('stream blew up') },
       });
     });
+
+    it('marks the requested model on its text deltas and its error chunk, as on its final chunk', async () => {
+      bridgeMocks.stream.mockImplementationOnce(async function* () {
+        yield { type: 'text_delta', text: 'Hello' };
+        yield { type: 'text_delta', text: ' world' };
+      });
+      const chunks: any[] = [];
+      for await (const chunk of provider.generateCompletionStream('claude-opus-4-20250514', [{ role: 'user', content: 'Hello' }], {})) {
+        chunks.push(chunk);
+      }
+      expect(chunks.filter((chunk) => !chunk.isFinal)).not.toHaveLength(0);
+      for (const chunk of chunks) {
+        expect(chunk).toMatchObject({ modelId: 'claude-opus-4-20250514', modelIdSource: 'requested' });
+      }
+
+      bridgeMocks.stream.mockImplementationOnce(async function* () {
+        yield { type: 'error', error: 'stream blew up' };
+      });
+      const errorChunks: any[] = [];
+      for await (const chunk of provider.generateCompletionStream('claude-haiku-4-5-20251001', [{ role: 'user', content: 'Hello' }], {})) {
+        errorChunks.push(chunk);
+      }
+      expect(errorChunks).toHaveLength(1);
+      expect(errorChunks[0]).toMatchObject({
+        isFinal: true,
+        modelId: 'claude-haiku-4-5-20251001',
+        modelIdSource: 'requested',
+        error: { message: expect.stringContaining('stream blew up') },
+      });
+    });
   });
 });

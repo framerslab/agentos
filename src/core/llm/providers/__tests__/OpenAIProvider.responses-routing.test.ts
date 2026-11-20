@@ -768,6 +768,49 @@ describe('OpenAIProvider /v1/responses stream: the terminal output is authoritat
   });
 });
 
+describe('OpenAIProvider /v1/responses stream: the model each chunk names', () => {
+  /** `event` with its response's `model` left out. */
+  const withoutModel = (event: Json): Json => {
+    const response: Json = { ...(event.response as Json) };
+    delete response.model;
+    return { ...event, response };
+  };
+
+  it('marks the requested model as filled in from the request when no event names a model', async () => {
+    serve([
+      () =>
+        sseResponse(
+          sseText([withoutModel(created()), textDelta('Hel'), withoutModel(completed([messageItem('Hello')]))]),
+        ),
+    ]);
+    const provider = await initializedProvider();
+
+    const chunks = await collect(provider.generateCompletionStream('gpt-5.3-codex', USER, {}));
+
+    expect(soleFinal(chunks).choices[0].finishReason).toBe('stop');
+    for (const chunk of chunks) {
+      expect(chunk.modelId).toBe('gpt-5.3-codex');
+      expect(chunk.modelIdSource).toBe('requested');
+    }
+  });
+
+  it('keeps the model an earlier event named when the terminal event names none', async () => {
+    serve([
+      () =>
+        sseResponse(
+          sseText([created('gpt-5.3-codex-2026-11-01'), textDelta('Hel'), withoutModel(completed([messageItem('Hello')]))]),
+        ),
+    ]);
+    const provider = await initializedProvider();
+
+    const chunks = await collect(provider.generateCompletionStream('gpt-5.3-codex', USER, {}));
+
+    const final = soleFinal(chunks);
+    expect(final.modelId).toBe('gpt-5.3-codex-2026-11-01');
+    expect(final.modelIdSource).toBeUndefined();
+  });
+});
+
 describe('OpenAIProvider /v1/responses stream: a read that fails mid-body', () => {
   /** A body that delivers `text`, then fails its next read as a dropped connection does. */
   function bodyFailingAfter(text: string): ReadableStream<Uint8Array> {

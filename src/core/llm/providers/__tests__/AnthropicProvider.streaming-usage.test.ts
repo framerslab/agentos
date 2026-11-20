@@ -94,4 +94,34 @@ describe('AnthropicProvider — streaming output-token accounting', () => {
       expect(chunk.modelIdSource).toBe('requested');
     }
   });
+
+  it('names the model a customModelParams.model override sent, marked as filled in from the request', async () => {
+    const events = [
+      d({ type: 'message_start', message: { id: 'msg_z', type: 'message', role: 'assistant', model: 'claude-opus-4-20250514', content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 20, output_tokens: 1 } } }),
+      d({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }),
+      d({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hello' } }),
+      d({ type: 'content_block_stop', index: 0 }),
+      d({ type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 5 } }),
+      d({ type: 'message_stop' }),
+    ];
+    fetchMock.mockResolvedValueOnce(sseResponse(events));
+
+    const chunks: Array<{ modelId?: string; modelIdSource?: string; isFinal?: boolean }> = [];
+    for await (const chunk of provider.generateCompletionStream(
+      'claude-sonnet-4-20250514',
+      [{ role: 'user', content: 'hi' }],
+      { customModelParams: { model: 'claude-opus-4-20250514' } },
+    )) {
+      chunks.push(chunk as { modelId?: string; modelIdSource?: string; isFinal?: boolean });
+    }
+
+    // The request went out naming the override, so the override is the model the request named.
+    const sent = JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body)) as { model?: string };
+    expect(sent.model).toBe('claude-opus-4-20250514');
+    expect(chunks.some((chunk) => chunk.isFinal)).toBe(true);
+    for (const chunk of chunks) {
+      expect(chunk.modelId).toBe('claude-opus-4-20250514');
+      expect(chunk.modelIdSource).toBe('requested');
+    }
+  });
 });
