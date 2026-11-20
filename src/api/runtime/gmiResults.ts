@@ -25,6 +25,7 @@ import { normalizeStreamFinishReason, type StreamPart, type StreamTextResult } f
 import type { SessionTranscriptMessage } from '../sessionTranscript.js';
 import type { MemoryRecallCapture } from '../../cognition/memory/retrieval/recall/capture.js';
 import type { PromptHistoryOmission } from '../../core/llm/IPromptEngine.js';
+import type { TextGuardrailReport } from './textGuardrails.js';
 
 /** The error a turn ended with, as the GMI reported it. */
 export interface GmiTurnError {
@@ -101,6 +102,8 @@ export class GmiTurnFolder {
   private memoryRecall: MemoryRecallCapture | undefined;
   /** The history the turn's requests left out, from the GMI's output that ended the turn. */
   private historyOmitted: PromptHistoryOmission | undefined;
+  /** What the turn's input guards decided, when the turn carried `guards`: their report, and the reply that took the turn's place. */
+  private inputGuards: { report: TextGuardrailReport | undefined; replacement?: string } | undefined;
 
   push(chunk: GMIOutputChunk): void {
     switch (chunk.type) {
@@ -164,6 +167,19 @@ export class GmiTurnFolder {
     return this.historyOmitted;
   }
 
+  /**
+   * Records what the turn's input guards decided: their report, which the result carries, and, when they replaced the
+   * turn, the reply that takes its place with no model call.
+   */
+  guarded(report: TextGuardrailReport | undefined, replacement?: string): void {
+    this.inputGuards = { report, ...(replacement !== undefined ? { replacement } : {}) };
+  }
+
+  /** Whether the turn carried `guards`, and the report they made. */
+  guards(): { report: TextGuardrailReport | undefined } | undefined {
+    return this.inputGuards ? { report: this.inputGuards.report } : undefined;
+  }
+
   /** Marks the turn failed by a thrown error (the turn's generator itself threw). An ERROR chunk already seen wins. */
   fail(error: unknown): void {
     if (this.failure !== undefined) return;
@@ -208,13 +224,13 @@ export class GmiTurnFolder {
     return this.overrides.get(step.stepIndex) ?? step.text;
   }
 
-  /** The latest step that produced text, streamText's rule. */
+  /** The latest step that produced text, streamText's rule; the input guards' replacement for a turn they replaced. */
   text(): string {
     for (let i = this.steps.length - 1; i >= 0; i--) {
       const t = this.stepText(this.steps[i]);
       if (t) return t;
     }
-    return '';
+    return this.inputGuards?.replacement ?? '';
   }
 
   /**
@@ -325,6 +341,7 @@ export class GmiTurnFolder {
       ...(transcriptDelta ? { transcriptDelta } : {}),
       ...(this.memoryRecall ? { memoryRecall: this.memoryRecall } : {}),
       ...(this.historyOmitted ? { historyOmitted: this.historyOmitted } : {}),
+      ...(this.inputGuards ? { guardReport: this.inputGuards.report } : {}),
     };
   }
 }
@@ -362,6 +379,8 @@ export interface GmiStreamOptions {
    * turn's failure is recorded (`GmiTurnFolderOptions.onFailure`).
    */
   stoppedBy?: () => Error | undefined;
+  /** True when the turn carries `guards`: the result then has `guardReport`, which resolves when the turn ends. */
+  guarded?: boolean;
 }
 
 /**
@@ -425,6 +444,7 @@ export function streamFromGmiTurn(turn: AsyncIterable<GMIOutputChunk>, options: 
     providerMessageId: deferred<string | null>(),
     memoryRecall: deferred<MemoryRecallCapture | undefined>(),
     historyOmitted: deferred<PromptHistoryOmission | undefined>(),
+    guardReport: deferred<TextGuardrailReport | undefined>(),
   };
   // Provider and model resolve once the turn's model call is routed, as streamText's do.
   folder.onRoute(({ providerId, modelId }) => {
@@ -486,6 +506,7 @@ export function streamFromGmiTurn(turn: AsyncIterable<GMIOutputChunk>, options: 
       // The GMI's output reaches the folder when its generator returns, before the turn's chunks end.
       p.memoryRecall.resolve(folder.recall());
       p.historyOmitted.resolve(folder.omittedHistory());
+      p.guardReport.resolve(folder.guards()?.report);
       done = true;
       wake();
     }
@@ -529,5 +550,6 @@ export function streamFromGmiTurn(turn: AsyncIterable<GMIOutputChunk>, options: 
     providerMessageId: p.providerMessageId.promise,
     memoryRecall: p.memoryRecall.promise,
     historyOmitted: p.historyOmitted.promise,
+    ...(options.guarded ? { guardReport: p.guardReport.promise } : {}),
   };
 }

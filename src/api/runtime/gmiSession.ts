@@ -22,7 +22,7 @@ import {
   type ToolCallRequest,
   type ToolResultChunkPayload,
 } from '../../cognition/substrate/IGMI.js';
-import { addModelUsage, extractTextFromContent, type GenerateTextResult, type MessageContent, type TokenUsage } from '../generateText.js';
+import { addModelUsage, extractTextFromContent, type GenerateTextOptions, type GenerateTextResult, type MessageContent, type TokenUsage } from '../generateText.js';
 import { normalizeStreamFinishReason, type StreamTextResult } from '../streamText.js';
 import { ObjectGenerationError } from '../generateObject.js';
 import { dropNullsForOptionalFields, parseJsonWithDistinctKeys } from './structuredReply.js';
@@ -40,6 +40,7 @@ import type { AgencyLaunchFrame, ToolCallHook } from './agencyLaunch/types.js';
 import { GmiTurnFolder, streamFromGmiTurn } from './gmiResults.js';
 import { stepToTranscript, transcriptToConversation } from './gmiTranscript.js';
 import { observeWithoutWaiting } from './memoryObserveFailures.js';
+import { contentWithTurnText, judgeTurnInput } from './textGuardrails.js';
 
 /** A signal's reason as an error, as streamText reports a stop: the reason itself when it is an Error. */
 function abortReasonError(signal: AbortSignal): Error {
@@ -108,6 +109,14 @@ export interface GmiTurnOptions {
    * each tool call of the turn a frozen copy, and a launch from that call nests under it.
    */
   launchFrame?: AgencyLaunchFrame;
+  /**
+   * Guards whose input stage judges the turn's input once the turn holds the session's lock, before its GMI is built
+   * or any model call is made; `stages` must be `['input']` (the caller checks it, {@link judgeTurnInput} again). A
+   * stop rejects the turn with the `GuardrailStopError` and nothing is sent, kept or filed; a replacement is the
+   * turn's reply, with no model call and no history; a rewritten text is what the model, the history, the memory
+   * provider's recall and `observe` get. The report goes on the result as `guardReport`.
+   */
+  guards?: GenerateTextOptions['guards'];
   /**
    * Checks the reply of a turn that ended without error, before the session
    * keeps it. A throw keeps nothing of the turn (no history, no
@@ -323,7 +332,7 @@ async function afterGeneration(opts: AgentOptions, folder: GmiTurnFolder, step: 
  */
 export async function* runGmiTurn(
   deps: GmiSessionDeps,
-  input: MessageContent,
+  given: MessageContent,
   turn: GmiTurnOptions,
   folder: GmiTurnFolder,
   surface: GmiTurnSurface = 'generateText',
@@ -335,7 +344,9 @@ export async function* runGmiTurn(
   let releaseGmi: (() => Promise<void>) | undefined;
   // The turn's usage ledger writes, awaited before the turn ends.
   const ledgerWrites: Array<Promise<void>> = [];
-  const userMessage: SessionTranscriptMessage = { role: 'user', content: input };
+  // The input as the turn sends it: the caller's, or the text an input guard rewrote it to.
+  let input = given;
+  let userMessage: SessionTranscriptMessage = { role: 'user', content: input };
   // False until a step is kept with the turn's user message in front of it.
   let userMessageKept = false;
   let pending: { step: StepFinishedChunkPayload; calls: ToolCallRequest[]; results: ToolResultChunkPayload[] } | undefined;
@@ -364,6 +375,27 @@ export async function* runGmiTurn(
     // What the turn starts from, read together before any wait.
     const epochAtStart = deps.history?.epoch();
     const priorMessages = deps.history ? deps.history.messages() : [];
+
+    if (turn.guards) {
+      // The input stage, before the GMI is built and before any model call.
+      const judged = await judgeTurnInput(turn.guards, input);
+      folder.guarded(judged.report);
+      // A stop while the guards judged (the caller's signal, a session's close()) ends the turn before anything else.
+      turn.abortSignal?.throwIfAborted();
+      if (judged.kind === 'stopped') throw judged.error;
+      if (judged.kind === 'replaced') {
+        // No model call and no history: the replacement is the reply, and nothing of the turn is kept or observed.
+        folder.guarded(judged.report, judged.text);
+        ended = true;
+        turn.acceptReply?.();
+        yield { type: GMIOutputChunkType.TEXT_DELTA, content: judged.text, interactionId: `turn-${randomUUID()}`, timestamp: new Date() };
+        return recorded;
+      }
+      if (judged.text !== undefined) {
+        input = contentWithTurnText(input, judged.text);
+        userMessage = { role: 'user', content: input };
+      }
+    }
     const userText = typeof input === 'string' ? input : extractTextFromContent(input);
 
     const served = await deps.gmiFor();
@@ -678,10 +710,11 @@ export function streamGmiTurn(deps: GmiSessionDeps, input: MessageContent, turn:
   // A stream whose caller's signal has already aborted starts no turn, as streamText ends before anything is set up:
   // no lock, GMI, memory context, hook or budget check, and one error part that carries the signal's reason.
   const callerSignal = turn.callerSignal;
+  const guarded = turn.guards !== undefined;
   if (callerSignal?.aborted) {
     const reason = abortReasonError(callerSignal);
     const refused: AsyncIterable<GMIOutputChunk> = { [Symbol.asyncIterator]: () => ({ next: () => Promise.reject(reason) }) };
-    return streamFromGmiTurn(refused);
+    return streamFromGmiTurn(refused, { guarded });
   }
   // Whether the caller's signal had aborted when the turn's failure was recorded: then the stop ended the turn, and its
   // error part carries the signal's reason. A failure that came first (a provider's error, a budget's refusal) keeps
@@ -711,5 +744,5 @@ export function streamGmiTurn(deps: GmiSessionDeps, input: MessageContent, turn:
   // runGmiTurn pushes every chunk into `folder` (with the onAfterGeneration replacements); the stream reads that folder.
   // A turn the caller's signal stopped ends with the signal's reason in its error part, as streamText reports it,
   // whatever error the GMI made of the abort.
-  return streamFromGmiTurn(chunks, { folder, stop: () => stop.abort(), stoppedBy: () => stoppedBy });
+  return streamFromGmiTurn(chunks, { folder, stop: () => stop.abort(), stoppedBy: () => stoppedBy, guarded });
 }

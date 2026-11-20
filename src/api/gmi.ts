@@ -78,6 +78,7 @@ import {
 } from './runtime/agentCognitiveMemory.js';
 import { sendGmiTurn, streamGmiTurn, TurnLock, type GmiForTurn, type GmiSessionDeps, type GmiTurnContext, type GmiTurnOptions } from './runtime/gmiSession.js';
 import { resolveRecallOptions } from './runtime/recallOptions.js';
+import { assertTurnInputGuards, inputDecisionOf } from './runtime/textGuardrails.js';
 import { recallLog } from '../cognition/memory/retrieval/recall/log.js';
 import { endSessionGeneration, readSessionGeneration, sessionGenerationKey, type SessionGeneration } from './runtime/sessionGenerations.js';
 import { transcriptToConversation } from './runtime/gmiTranscript.js';
@@ -121,12 +122,12 @@ export type GmiHandle = Agent;
 const UNSUPPORTED_ON_GMI = ['voice', 'avatar', 'channels'] as const;
 /**
  * Per-call overrides generate() and stream() accept on the GMI path: the completion options, the route,
- * the step limit, the ledger, the call's stop, budget and usage account, and the tool-approval gate `agency()` passes
- * with every call to a member.
+ * the step limit, the ledger, the call's stop, budget and usage account, the tool-approval gate `agency()` passes
+ * with every call to a member, and `guards` with `stages: ['input']`.
  */
-const ALLOWED_CALL_OVERRIDES = new Set(['temperature', 'maxTokens', 'topP', 'responseFormat', 'model', 'provider', 'maxSteps', 'usageLedger', '__approvalGate', 'abortSignal', 'budget', 'accountIdOf']);
-/** Per-call overrides that pick the route, the step limit, the ledger, the stop, the budget, the usage account or the gate rather than a completion option. */
-const ROUTE_OVERRIDES = new Set(['model', 'provider', 'maxSteps', 'usageLedger', '__approvalGate', 'abortSignal', 'budget', 'accountIdOf']);
+const ALLOWED_CALL_OVERRIDES = new Set(['temperature', 'maxTokens', 'topP', 'responseFormat', 'model', 'provider', 'maxSteps', 'usageLedger', '__approvalGate', 'abortSignal', 'budget', 'accountIdOf', 'guards']);
+/** Per-call overrides that pick the route, the step limit, the ledger, the stop, the budget, the usage account, the gate or the input guards rather than a completion option. */
+const ROUTE_OVERRIDES = new Set(['model', 'provider', 'maxSteps', 'usageLedger', '__approvalGate', 'abortSignal', 'budget', 'accountIdOf', 'guards']);
 /** `agent()`'s step limit. */
 const DEFAULT_MAX_STEPS = 5;
 
@@ -1029,9 +1030,12 @@ export function gmi(opts: GmiOptions): GmiHandle {
   const unrecordedEnds = new Map<string, GenerationEnd>();
   const agentTally = createEmptyUsageAggregate();
 
-  /** A session's send or stream with `guards` throws as generate() and stream() do: nothing here would enforce them. */
+  /**
+   * A call's `guards` with a stage other than `'input'`, or with no `stages`, throws before any turn starts: the input
+   * stage is the only one the GMI path enforces.
+   */
   function refuseGuards(callOpts: { guards?: unknown } | undefined): void {
-    if (callOpts?.guards !== undefined) throw new Error("gmi(): the per-call option 'guards' is not supported on the GMI path.");
+    assertTurnInputGuards(callOpts?.guards);
   }
 
   /** The per-call overrides as completion options; throws naming an override the GMI path does not take. */
@@ -1040,6 +1044,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
     for (const [k, v] of Object.entries(extra ?? {})) {
       if (v === undefined) continue;
       if (!ALLOWED_CALL_OVERRIDES.has(k)) throw new Error(`gmi(): the per-call option '${k}' is not supported on the GMI path.`);
+      if (k === 'guards') refuseGuards(extra);
       if (!ROUTE_OVERRIDES.has(k)) out[k] = v;
     }
     return out;
@@ -1082,8 +1087,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
     };
   }
 
-  /** What a generate() or stream() call hands its turn: its stop, its budget (a new one from settings) or the agent's, its usage account and its gate. */
-  const callTurn = (extra?: Partial<GenerateTextOptions>): Pick<GmiTurnOptions, 'abortSignal' | 'callerSignal' | 'budget' | 'accountIdOf' | 'approvalGate'> => {
+  /** What a generate() or stream() call hands its turn: its stop, its budget (a new one from settings) or the agent's, its usage account, its gate and its input guards. */
+  const callTurn = (extra?: Partial<GenerateTextOptions>): Pick<GmiTurnOptions, 'abortSignal' | 'callerSignal' | 'budget' | 'accountIdOf' | 'approvalGate' | 'guards'> => {
     const budget = asSpendBudget(extra?.budget) ?? agentBudget;
     return {
       // The call's signal is its only stop, and the caller's own.
@@ -1091,6 +1096,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
       ...(budget ? { budget } : {}),
       ...(extra?.accountIdOf ? { accountIdOf: extra.accountIdOf } : {}),
       ...(extra?.__approvalGate ? { approvalGate: extra.__approvalGate } : {}),
+      ...(extra?.guards ? { guards: extra.guards } : {}),
     };
   };
 
@@ -1105,9 +1111,12 @@ export function gmi(opts: GmiOptions): GmiHandle {
       const result = await sendGmiTurn(oneShotDeps('agent.generate', extra), prompt, { options, ...callTurn(extra) });
       // A signal that aborted once the turn had ended rejects the call too, and no source is retrieved for it.
       callerSignal?.throwIfAborted();
-      // As agent().generate() does: the answer checked against the sources retrieved for the input.
-      if (opts.verifyCitations) {
-        const userText = typeof prompt === 'string' ? prompt : extractTextFromContent(prompt);
+      // As agent().generate() does: the answer checked against the sources retrieved for the input as it was sent (the
+      // text an input guard rewrote it to); a call whose input a guard replaced made no request, and is not checked.
+      const decision = inputDecisionOf(result.guardReport);
+      if (opts.verifyCitations && decision !== 'replaced') {
+        const sent = decision === 'sanitized' ? result.transcriptDelta?.find((message) => message.role === 'user')?.content : prompt;
+        const userText = typeof sent === 'string' ? sent : sent ? extractTextFromContent(sent as MessageContent) : '';
         result.grounding = await runCitationVerification(result.text, userText, opts.verifyCitations);
       }
       return result;
@@ -1367,6 +1376,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
             abortSignal: turnSignal(callerSignal),
             ...(callerSignal ? { callerSignal } : {}),
             budget: turnBudget(sendOpts?.budget),
+            ...(sendOpts?.guards ? { guards: sendOpts.guards } : {}),
             ...seatTurnOf(sendOpts),
           });
         },
@@ -1377,6 +1387,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
             abortSignal: turnSignal(streamOpts?.abortSignal),
             ...(streamOpts?.abortSignal ? { callerSignal: streamOpts.abortSignal } : {}),
             budget: turnBudget(streamOpts?.budget),
+            ...(streamOpts?.guards ? { guards: streamOpts.guards } : {}),
             ...seatTurnOf(streamOpts),
           });
         },
