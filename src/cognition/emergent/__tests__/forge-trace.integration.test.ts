@@ -3220,6 +3220,27 @@ function noForgingGuard(): IGuardrailService {
   };
 }
 
+/**
+ * An output guardrail that blocks a call to forge_tool judged alone: the GMI's tool-call gate judges each call of a step
+ * alone, so it refuses each forge_tool call there. The stream's chunk for a step that holds other calls too passes, so
+ * the turn is not replaced by the guardrail's reply and its own failure reaches the stream.
+ */
+function noLoneForgingGuard(): IGuardrailService {
+  return {
+    id: 'no-lone-forging',
+    config: { evaluateToolCalls: true },
+    async evaluateOutput({ chunk }: GuardrailOutputPayload) {
+      if (chunk.type !== AgentOSResponseChunkType.TOOL_CALL_REQUEST) {
+        return null;
+      }
+      const calls = (chunk as AgentOSToolCallRequestChunk).toolCalls;
+      return calls.length === 1 && calls[0].name === 'forge_tool'
+        ? { action: GuardrailAction.BLOCK, reason: 'No forging in this workspace.', reasonCode: 'NO_FORGING' }
+        : null;
+    },
+  };
+}
+
 /** The context of a direct call whose agentId and sessionId getters throw. */
 function throwingIdsContext(): ForgeContext {
   return {
@@ -3460,7 +3481,7 @@ describe('forge trace: review follow-ups', () => {
     const { onForgeTrace, traces } = hookRecorder();
     runtimeModel.judgeReply = APPROVED_JSON;
     runtime = await bootRuntime(onForgeTrace, {
-      guardrailService: noForgingGuard(),
+      guardrailService: noLoneForgingGuard(),
       turnPlanning: {
         enabled: true,
         defaultToolFailureMode: 'fail_closed',
@@ -3500,7 +3521,7 @@ describe('forge trace: review follow-ups', () => {
     };
     runtimeModel.judgeReply = APPROVED_JSON;
     runtime = await bootRuntime(stalledHook, {
-      guardrailService: noForgingGuard(),
+      guardrailService: noLoneForgingGuard(),
       turnPlanning: {
         enabled: true,
         defaultToolFailureMode: 'fail_closed',
