@@ -764,7 +764,7 @@ Each tool_call must include id (unique string), name (tool name), and a JSON bod
       id: responseId,
       object: 'chat.completion.chunk',
       created: Date.now(),
-      modelId,
+      ...requestedModel(modelId),
       choices: [{
         index: 0,
         message: { role: 'assistant', content: textSoFar },
@@ -876,7 +876,7 @@ Each tool_call must include id (unique string), name (tool name), and a JSON bod
       id: responseId,
       object: 'chat.completion.chunk',
       created: Date.now(),
-      modelId,
+      ...requestedModel(modelId),
       choices: [],
       usage,
       error: {

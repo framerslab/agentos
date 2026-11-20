@@ -757,6 +757,27 @@ describe('EmergentJudge', () => {
           '"self":{"$trace":"unserializable","kind":"cycle"}} success=true',
       );
     });
+
+    it('the prompt writes a nested array whose length is a symbol as an other marker, and the judge is asked', async () => {
+      generateText.mockResolvedValueOnce(approvedCreationResponse());
+      const symbolLength = new Proxy([] as unknown[], {
+        get(target, key, receiver) {
+          return key === 'length' ? Symbol('length') : Reflect.get(target, key, receiver);
+        },
+      });
+      const output = { list: [symbolLength, 1] };
+
+      const verdict = await judge.reviewCreation(
+        makeCandidate({ testResults: [{ input: { a: 1, b: 2 }, output, success: true }] }),
+      );
+
+      expect(verdict.approved).toBe(true);
+      expect(generateText).toHaveBeenCalledTimes(1);
+      const prompt = generateText.mock.calls[0][1] as string;
+      expect(prompt).toContain(
+        'Test 1: input={"a":1,"b":2} output={"list":[{"$trace":"unserializable","kind":"other"},1]} success=true',
+      );
+    });
   });
 
   // =========================================================================

@@ -279,5 +279,35 @@ describe('GeminiCLIProvider', () => {
         error: { message: expect.stringContaining('quota exploded') },
       });
     });
+
+    it('marks the requested model on its text deltas and its error chunk, as on its final chunk', async () => {
+      bridgeMocks.streamWithSystemPrompt.mockImplementationOnce(async function* () {
+        yield { type: 'text_delta', text: 'Hello' };
+        yield { type: 'text_delta', text: ' world' };
+      });
+      const chunks: any[] = [];
+      for await (const chunk of provider.generateCompletionStream('gemini-2.5-pro', [{ role: 'user', content: 'Hello' }], {})) {
+        chunks.push(chunk);
+      }
+      expect(chunks.filter((chunk) => !chunk.isFinal)).not.toHaveLength(0);
+      for (const chunk of chunks) {
+        expect(chunk).toMatchObject({ modelId: 'gemini-2.5-pro', modelIdSource: 'requested' });
+      }
+
+      bridgeMocks.streamWithSystemPrompt.mockImplementationOnce(async function* () {
+        yield { type: 'error', error: 'quota exploded' };
+      });
+      const errorChunks: any[] = [];
+      for await (const chunk of provider.generateCompletionStream('gemini-2.0-flash-lite', [{ role: 'user', content: 'Hello' }], {})) {
+        errorChunks.push(chunk);
+      }
+      expect(errorChunks).toHaveLength(1);
+      expect(errorChunks[0]).toMatchObject({
+        isFinal: true,
+        modelId: 'gemini-2.0-flash-lite',
+        modelIdSource: 'requested',
+        error: { message: expect.stringContaining('quota exploded') },
+      });
+    });
   });
 });

@@ -1472,10 +1472,13 @@ export class AnthropicProvider implements IProvider {
     payload: Record<string, unknown>,
     schemaToolName?: string,
   ): AsyncGenerator<ModelCompletionResponse, void, undefined> {
+    // The model the request names on the wire, which each chunk names: a passthrough `model`
+    // (customModelParams.model) replaces the given id in the payload.
+    const sentModelId = typeof payload.model === 'string' && payload.model ? payload.model : modelId;
     // Handle pre-aborted signals
     const abortSignal = options.abortSignal;
     if (abortSignal?.aborted) {
-      yield this.buildAbortChunk(modelId);
+      yield this.buildAbortChunk(sentModelId);
       return;
     }
 
@@ -1503,7 +1506,7 @@ export class AnthropicProvider implements IProvider {
         // An abort before the first event, while the draw waited on the probes or the connection was opening,
         // ends the stream with the abort chunk, as an abort before the request does.
         if (abortSignal?.aborted) {
-          yield this.buildAbortChunk(modelId);
+          yield this.buildAbortChunk(sentModelId);
           return;
         }
         if (error instanceof AnthropicProviderError) {
@@ -1557,7 +1560,7 @@ export class AnthropicProvider implements IProvider {
     // message_delta. Once the final chunk has reported the counts, the abort chunk reports nothing, so none counts twice.
     const abortChunk = (): ModelCompletionResponse =>
       this.buildAbortChunk(
-        modelId,
+        sentModelId,
         messageStarted && !finalUsageReported
           ? this.partialStreamUsage(modelId, {
               inputTokens,
@@ -1646,7 +1649,7 @@ export class AnthropicProvider implements IProvider {
                 id: responseId,
                 object: 'chat.completion.chunk',
                 created: Math.floor(Date.now() / 1000),
-                ...requestedModel(modelId),
+                ...requestedModel(sentModelId),
                 choices: [{
                   index: 0,
                   message: { role: 'assistant', content: textDelta },
@@ -1665,7 +1668,7 @@ export class AnthropicProvider implements IProvider {
                   id: responseId,
                   object: 'chat.completion.chunk',
                   created: Math.floor(Date.now() / 1000),
-                  ...requestedModel(modelId),
+                  ...requestedModel(sentModelId),
                   choices: [{
                     index: 0,
                     message: { role: 'assistant', content: null },
@@ -1794,7 +1797,7 @@ export class AnthropicProvider implements IProvider {
               id: responseId,
               object: 'chat.completion.chunk',
               created: Math.floor(Date.now() / 1000),
-              ...requestedModel(modelId),
+              ...requestedModel(sentModelId),
               choices: [{
                 index: 0,
                 message: {
@@ -1829,7 +1832,7 @@ export class AnthropicProvider implements IProvider {
               id: responseId,
               object: 'chat.completion.chunk',
               created: Math.floor(Date.now() / 1000),
-              ...requestedModel(modelId),
+              ...requestedModel(sentModelId),
               choices: [],
               error: {
                 message: event.error.message,
@@ -1864,7 +1867,7 @@ export class AnthropicProvider implements IProvider {
         id: responseId,
         object: 'chat.completion.chunk',
         created: Math.floor(Date.now() / 1000),
-        ...requestedModel(modelId),
+        ...requestedModel(sentModelId),
         choices: [],
         isFinal: true,
         error: { message, type: 'STREAM_PROCESSING_ERROR' },
