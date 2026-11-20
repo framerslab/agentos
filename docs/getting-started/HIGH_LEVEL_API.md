@@ -896,6 +896,12 @@ A tool an agent calls receives the session's user in `context.userContext.userId
 and `stream()`) and the subject its memory is keyed by in
 `context.userContext.memorySubject`; a direct `generateText()` call passes `system`.
 
+Beside `send()`, `stream()`, `messages()`, `reseed()`, `drainHistoryEvents()`,
+`clear()`, `usage()`, `recordExternalCost()` and `close()`, a session has `startedAt`, the epoch
+milliseconds of its opening, and `elapsedMs()`, the milliseconds since, on both
+runtimes. Every handle of an open session id has the same `startedAt`; the id's
+next opening after `close()` is a new session with a time of its own.
+
 ### Guards on an agent's calls
 
 `generate()`, `stream()` and a session's `send()` and `stream()` take `guards` per
@@ -927,9 +933,14 @@ const live = session.stream(message, { guards });
 - The `guardrails` ids in an `agent()` or `agency()` config are stored and not
   applied: a call is guarded by its `guards`. A panel agency's call cannot
   carry `guards`.
-- An agent with `runtime: 'gmi'` does not enforce `guards`: its `generate()`,
-  `stream()` and a session's `send()` and `stream()` throw when a call
-  carries them, before any turn starts.
+- An agent with `runtime: 'gmi'` enforces the input stage alone: `guards`
+  with `stages: ['input']` is judged on its `generate()`, `stream()` and a
+  session's `send()` and `stream()`, after the turn takes the session's lock
+  and before any model call. A turn whose input a guard rewrote runs on the
+  rewritten text, and the history keeps that text on a stream too; a replaced
+  turn adds nothing ([On the GMI runtime](../safety/GUARDRAILS_USAGE.md#on-the-gmi-runtime)).
+  `guards` with any other stage, or with no `stages`, throws before any turn
+  starts.
 
 ### Citation verification
 
