@@ -178,6 +178,7 @@ describe('any other stage stays refused on the GMI runtime', () => {
     ["['output']", ['output']],
     ["['toolCalls']", ['toolCalls']],
     ['[]', []],
+    ['a sparse array with no stage in it', new Array<string>(1)],
     ['no stages', undefined],
   ];
   it.each(refused)('guards with %s throw from every call before any turn', async (_label, stages) => {
@@ -194,6 +195,45 @@ describe('any other stage stays refused on the GMI runtime', () => {
       expect(s.seen).toEqual([]);
       expect(session.messages()).toEqual([]);
     } finally {
+      await a.close();
+    }
+  });
+});
+
+describe('a guarded turn whose signal aborts while it waits for the session', () => {
+  it('ends before its guards judge it, so its input reaches no guard and no model', async () => {
+    const k = key();
+    const s = script('openai', k, { replies: [reply.text('First.')] });
+    const a = agent(base(k));
+    // The first turn holds the session's lock while its guard judges, until the test lets it go.
+    let letFirstGo!: () => void;
+    const held = new Promise<void>((resolve) => {
+      letFirstGo = resolve;
+    });
+    try {
+      const session = a.session('queued');
+      const holds: IGuardrailService = {
+        id: 'hold',
+        evaluateInput: async () => {
+          await held;
+          return null;
+        },
+      };
+      const watches = vi.fn(async (_payload: unknown) => null);
+      const first = session.send('first', { guards: inputOnly(holds) });
+      const stop = new AbortController();
+      const second = session.send('second, cancelled', { guards: inputOnly({ id: 'watch', evaluateInput: watches }), abortSignal: stop.signal }).catch((e: unknown) => e);
+      stop.abort(new Error('the caller moved on'));
+      letFirstGo();
+      await expect(first).resolves.toMatchObject({ text: 'First.' });
+      expect(await second).toMatchObject({ message: 'the caller moved on' });
+      expect(watches).not.toHaveBeenCalled();
+      expect(s.seen).toHaveLength(1);
+      expect(JSON.stringify(s.seen)).not.toContain('cancelled');
+      expect(session.messages()[0]).toEqual({ role: 'user', content: 'first' });
+      expect(JSON.stringify(session.messages())).not.toContain('cancelled');
+    } finally {
+      letFirstGo();
       await a.close();
     }
   });

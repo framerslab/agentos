@@ -44,4 +44,21 @@ describe.each(runtimes)('a session on %s', (_label, runtime) => {
       await a.close();
     }
   });
+
+  it("keeps a reopened session's start when a handle of the closed one closes again, with history off", async () => {
+    const a = agent({ provider: 'openai', model: 'stub-model', apiKey: key(), fallbackProviders: [], history: false, ...runtime } as unknown as AgentOptions);
+    try {
+      const stale = a.session('timed');
+      await stale.close();
+      await sleep(5);
+      const reopened = a.session('timed');
+      // The closed opening's handle closes again: the open session is not its own, and keeps its start.
+      await stale.close();
+      await sleep(5);
+      const again = a.session('timed');
+      expect(again.startedAt).toBe(reopened.startedAt);
+    } finally {
+      await a.close();
+    }
+  });
 });
