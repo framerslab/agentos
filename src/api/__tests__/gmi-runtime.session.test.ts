@@ -51,7 +51,7 @@ afterEach(() => {
 });
 
 describe("agent({ runtime: 'gmi' }) sessions", () => {
-  it('a send or a stream that carries guards is refused before any turn: the GMI path does not enforce them', async () => {
+  it('a send or a stream whose guards name no stages is refused before any turn: the GMI path enforces the input stage alone', async () => {
     const k = key(); script('openai', k, { replies: [reply.text('Unguarded.')] });
     const a = agent({ ...base(k), instructions: 'Be brief.' });
     const s = a.session('guarded');
