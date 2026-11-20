@@ -163,7 +163,7 @@ describe('a replaced send on the GMI runtime', () => {
     script('openai', k, { replies: [] });
     const a = agent(base(k));
     try {
-      const result = await a.session('replaced').send('a refused prompt', { guards: inputOnly(replacesInput) } as never);
+      const result = await a.session('replaced').send('a refused prompt', { guards: inputOnly(replacesInput) });
       expect(result).toMatchObject({ text: REPLACEMENT, toolCalls: [], finishReason: 'stop', transcriptDelta: [] });
       expect(result.usage.totalTokens).toBe(0);
     } finally {
@@ -206,13 +206,13 @@ describe('a guard that throws on the GMI runtime', () => {
     const a = agent(base(k));
     try {
       const session = a.session('posture');
-      const closed = await session.send('hi', { guards: inputOnly(throwsInput()) } as never).catch((e: unknown) => e);
+      const closed = await session.send('hi', { guards: inputOnly(throwsInput()) }).catch((e: unknown) => e);
       expect(closed).toBeInstanceOf(GuardrailStopError);
       expect(closed).toMatchObject({ code: 'GUARDRAIL_UNAVAILABLE', stage: 'input' });
       expect(s.seen).toEqual([]);
       expect(session.messages()).toEqual([]);
 
-      const open = await session.send('hi', { guards: inputOnly(throwsInput({ failClosed: false })) } as never);
+      const open = await session.send('hi', { guards: inputOnly(throwsInput({ failClosed: false })) });
       expect(open.text).toBe('Ran.');
       expect(s.seen).toHaveLength(1);
     } finally {
@@ -249,13 +249,13 @@ describe('a souled agent with cognitive memory off on the GMI runtime', () => {
     const a = await souledAgent({ runtime: RUNTIME, provider: 'openai', model: 'stub-model', apiKey: k, fallbackProviders: [], retention: { traces: 'until-deletion' }, soul: dir } as never);
     try {
       const session = a.session('s-1', { userId: 'alice' });
-      await expect(session.send(`${ORIGINAL}, blocked`, { guards: inputOnly(blocksInput) } as never)).rejects.toBeInstanceOf(GuardrailStopError);
+      await expect(session.send(`${ORIGINAL}, blocked`, { guards: inputOnly(blocksInput) })).rejects.toBeInstanceOf(GuardrailStopError);
       expect(s.seen).toEqual([]);
       expect(session.messages()).toEqual([]);
-      await expect(session.send(`${ORIGINAL}, replaced`, { guards: inputOnly(replacesInput) } as never)).resolves.toMatchObject({ text: REPLACEMENT });
+      await expect(session.send(`${ORIGINAL}, replaced`, { guards: inputOnly(replacesInput) })).resolves.toMatchObject({ text: REPLACEMENT });
       expect(s.seen).toEqual([]);
 
-      await session.send(ORIGINAL, { guards: inputOnly(sanitisesInput) } as never);
+      await session.send(ORIGINAL, { guards: inputOnly(sanitisesInput) });
       await stored(a, SANITISED);
       // A later turn is filed too, so the absence below is read after the store took the writes that came before it.
       await session.send('Thanks.');

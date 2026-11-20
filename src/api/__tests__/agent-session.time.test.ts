@@ -10,13 +10,6 @@ let n = 0;
 const key = () => `k-session-time-${++n}`;
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-/** What this file reads of a session. */
-interface Timed {
-  readonly startedAt: number;
-  elapsedMs(): number;
-  close(): Promise<void>;
-}
-
 const runtimes: Array<[string, Record<string, unknown>]> = [
   ['the default runtime', {}],
   ["runtime: 'gmi'", { runtime: 'gmi' }],
@@ -27,9 +20,8 @@ describe.each(runtimes)('a session on %s', (_label, runtime) => {
     const a = agent({ provider: 'openai', model: 'stub-model', apiKey: key(), fallbackProviders: [], ...runtime } as unknown as AgentOptions);
     try {
       const before = Date.now();
-      const first = a.session('timed') as unknown as Timed;
+      const first = a.session('timed');
       const after = Date.now();
-      expect(typeof first.startedAt).toBe('number');
       expect(first.startedAt).toBeGreaterThanOrEqual(before);
       expect(first.startedAt).toBeLessThanOrEqual(after);
 
@@ -40,12 +32,12 @@ describe.each(runtimes)('a session on %s', (_label, runtime) => {
       expect(first.elapsedMs()).toBeGreaterThanOrEqual(20);
 
       // A second handle of the open id shares the session's start.
-      const second = a.session('timed') as unknown as Timed;
+      const second = a.session('timed');
       expect(second.startedAt).toBe(first.startedAt);
 
       // A session opened after close() is a new one, with a later start.
       await first.close();
-      const reopened = a.session('timed') as unknown as Timed;
+      const reopened = a.session('timed');
       expect(reopened.startedAt).toBeGreaterThan(first.startedAt);
       expect(reopened.elapsedMs()).toBeGreaterThanOrEqual(0);
     } finally {
