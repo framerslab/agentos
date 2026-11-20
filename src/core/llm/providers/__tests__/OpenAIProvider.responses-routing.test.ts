@@ -927,4 +927,34 @@ describe('OpenAIProvider stream cancellation', () => {
     expect(cancelled).toBe(true);
     expect(soleFinal(chunks).error).toEqual({ message: 'Stream aborted by caller', type: 'abort' });
   }, 5000);
+
+  it('names the model a /v1/chat/completions chunk named on the chunk a caller abort ends the stream with', async () => {
+    const firstChunk = `data: ${JSON.stringify({
+      id: 'c',
+      object: 'chat.completion.chunk',
+      created: 1,
+      model: 'gpt-4o-2024-08-06',
+      choices: [{ index: 0, delta: { role: 'assistant', content: 'Hel' }, finish_reason: null }],
+    })}\n\n`;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        // One chunk, then nothing: the next read waits on the network.
+        controller.enqueue(new TextEncoder().encode(firstChunk));
+      },
+    });
+    serve([() => streamingResponse(body)]);
+    const provider = await initializedProvider();
+    const controller = new AbortController();
+
+    const chunks: ModelCompletionResponse[] = [];
+    for await (const chunk of provider.generateCompletionStream('gpt-4o', USER, { abortSignal: controller.signal })) {
+      chunks.push(chunk);
+      if (chunk.responseTextDelta === 'Hel') setTimeout(() => controller.abort(), 10);
+    }
+
+    const final = soleFinal(chunks);
+    expect(final.error).toEqual({ message: 'Stream aborted by caller', type: 'abort' });
+    expect(final.modelId).toBe('gpt-4o-2024-08-06');
+    expect(final.modelIdSource).toBeUndefined();
+  }, 5000);
 });
