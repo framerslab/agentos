@@ -234,7 +234,7 @@ const reply = await session.send(message, {
 });
 ```
 
-- **When.** The turn's input, its text and its images, is judged once, after the turn takes the session's lock and before the session's GMI is built or any model call is made.
+- **When.** The turn's input, its text and its images, is judged once, after the turn takes the session's lock and before the session's GMI is built or any model call is made. A turn whose signal aborted, or whose session closed, while it waited for the lock ends there, and its input reaches no guard.
 - **A stop** rejects the call with `GuardrailStopError`; a stream yields it as its one `error` part. Nothing of the turn is sent to the model, added to the session's history, passed to a memory provider or filed in memory.
 - **A replacement** (a `BLOCK` with a non-empty `replacementText`) is the reply, with no model call and zero usage. The turn adds nothing to the history, and nothing of it is passed to a memory provider or filed in memory.
 - **A rewrite** (a `SANITIZE` that changed the text) runs the turn on the rewritten text: the model, the session's history, a memory provider's `getContext()` and `observe()`, cognitive memory and `verifyCitations` get that text, and the caller's text reaches none of them. A stream's rewritten turn is added to the history as a send's is.
