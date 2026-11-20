@@ -1263,6 +1263,21 @@ describe('forge trace: a bounded walk of each field', () => {
     expect(traceValue(value, 4096, 'tests[0].result.output', cut)).toEqual(expected);
     expect(cut).toEqual([]);
   });
+
+  it('a nested array whose length is a BigInt, or converts to one, is replaced in place by an other marker', () => {
+    const value = {
+      list: [lengthProxy(1n), lengthProxy({ valueOf: (): bigint => 2n }), 1],
+      after: 'kept',
+    };
+    const expected = { list: [OTHER, OTHER, 1], after: 'kept' };
+
+    expect(() => JSON.stringify(value)).toThrow(TypeError);
+    expect(jsonSafeCopy(value)).toEqual(expected);
+
+    const cut: string[] = [];
+    expect(traceValue(value, 4096, 'tests[0].result.output', cut)).toEqual(expected);
+    expect(cut).toEqual([]);
+  });
 });
 
 /** An empty array-shaped value whose `length` reads `length`. */

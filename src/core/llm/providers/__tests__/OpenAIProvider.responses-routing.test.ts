@@ -809,6 +809,32 @@ describe('OpenAIProvider /v1/responses stream: the model each chunk names', () =
     expect(final.modelId).toBe('gpt-5.3-codex-2026-11-01');
     expect(final.modelIdSource).toBeUndefined();
   });
+
+  it.each<[string, Json, string, 'requested' | undefined]>([
+    ['the model an earlier event named', created('gpt-5.3-codex-2026-11-01'), 'gpt-5.3-codex-2026-11-01', undefined],
+    ['the requested model, marked, when no event named one', withoutModel(created()), 'gpt-5.3-codex', 'requested'],
+  ])('names %s on the chunk a caller abort ends the stream with', async (_case, first, modelId, source) => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        // One event and a text delta, then nothing: the next read waits on the network.
+        controller.enqueue(new TextEncoder().encode(sseText([first, textDelta('Hel')])));
+      },
+    });
+    serve([() => streamingResponse(body)]);
+    const provider = await initializedProvider();
+    const controller = new AbortController();
+
+    const chunks: ModelCompletionResponse[] = [];
+    for await (const chunk of provider.generateCompletionStream('gpt-5.3-codex', USER, { abortSignal: controller.signal })) {
+      chunks.push(chunk);
+      if (chunk.responseTextDelta === 'Hel') setTimeout(() => controller.abort(), 10);
+    }
+
+    const final = soleFinal(chunks);
+    expect(final.error).toEqual({ message: 'Stream aborted by caller', type: 'abort' });
+    expect(final.modelId).toBe(modelId);
+    expect(final.modelIdSource).toBe(source);
+  }, 5000);
 });
 
 describe('OpenAIProvider /v1/responses stream: a read that fails mid-body', () => {
