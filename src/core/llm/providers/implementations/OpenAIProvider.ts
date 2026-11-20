@@ -33,7 +33,7 @@ import {
   ProviderEmbeddingResponse,
   AttemptOutcome,
 } from '../IProvider';
-import { requestedModel, responseModel } from '../responseModel';
+import { responseModel } from '../responseModel';
 import { stripParamsForOpenAI } from '../openrouter-only-params';
 import { resolveOpenAiCacheRetentionParams, resolvePromptCacheKey } from '../openai-cache-params';
 import { OpenAIProviderError } from '../errors/OpenAIProviderError';
@@ -1570,15 +1570,16 @@ export class OpenAIProvider implements IProvider {
   }
 
   /**
-   * The terminal chunk a stream yields when the caller's signal aborts it.
+   * The terminal chunk a stream yields when the caller's signal aborts it: it names the model an event of the stream
+   * named, or, when none has, the model the request named, marked as the request's.
    * @private
    */
-  private abortedStreamChunk(modelId: string, message: string): ModelCompletionResponse {
+  private abortedStreamChunk(modelId: string, message: string, answeredModel?: string): ModelCompletionResponse {
     return {
       id: `openai-abort-${Date.now()}`,
       object: 'chat.completion.chunk',
       created: Math.floor(Date.now() / 1000),
-      ...requestedModel(modelId),
+      ...responseModel(answeredModel, modelId),
       choices: [],
       error: { message, type: 'abort' },
       isFinal: true,
@@ -1601,6 +1602,8 @@ export class OpenAIProvider implements IProvider {
     const accumulatedRefusal: ChatStreamRefusal = { text: '', seen: false, answered: false };
     // Whether a chunk reported the answer's finish reason.
     let finished = false;
+    // The model a chunk named, kept once one names it, for the abort and cut-off chunks this stream ends with.
+    let answeredModel: string | undefined;
 
     for await (const data of this.parseSseStream(stream, abortSignal)) {
       if (abortSignal?.aborted) break;
@@ -1615,11 +1618,14 @@ export class OpenAIProvider implements IProvider {
         continue;
       }
       if (mapped.choices[0]?.finishReason) finished = true;
+      if (typeof mapped.modelId === 'string' && mapped.modelId !== '' && mapped.modelIdSource !== 'requested') {
+        answeredModel = mapped.modelId;
+      }
       yield mapped;
     }
 
     if (abortSignal?.aborted) {
-      yield this.abortedStreamChunk(modelId, 'Stream aborted by caller');
+      yield this.abortedStreamChunk(modelId, 'Stream aborted by caller', answeredModel);
       return;
     }
     // A refusal message whose answer never finished was cut off, an empty one
@@ -1630,7 +1636,7 @@ export class OpenAIProvider implements IProvider {
         id: `openai-truncated-${Date.now()}`,
         object: 'chat.completion.chunk',
         created: Math.floor(Date.now() / 1000),
-        ...requestedModel(modelId),
+        ...responseModel(answeredModel, modelId),
         choices: [],
         error: { message: 'OpenAI chat stream ended before the refused answer finished', type: 'stream_truncated' },
         isFinal: true,
@@ -1960,7 +1966,7 @@ export class OpenAIProvider implements IProvider {
     }
 
     if (abortSignal?.aborted) {
-      yield this.abortedStreamChunk(modelId, 'Stream aborted by caller');
+      yield this.abortedStreamChunk(modelId, 'Stream aborted by caller', answeredModel);
       return;
     }
     const endMessage = reading.failure

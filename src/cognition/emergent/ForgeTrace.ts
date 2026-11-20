@@ -586,9 +586,10 @@ function walkObject(walk: Walk, source: object, ancestors: Set<object>, depth: n
     }
     if (Array.isArray(source)) {
       // Read and converted here, inside the guard, as `JSON.stringify` converts it (a whole number, 0 for NaN or less):
-      // a `Proxy` can give a length that is a symbol or an object whose conversion to a number throws, and the array
-      // is then an `other` marker in its place.
-      const converted = Number((source as { length: unknown }).length);
+      // a `Proxy` can give a length that is a symbol, a BigInt, an object that converts to a BigInt or an object whose
+      // conversion to a number throws, and the array is then an `other` marker in its place. Unary plus converts as
+      // `JSON.stringify` does and throws on a BigInt, where `Number()` would read it as a number.
+      const converted = +((source as { length: unknown }).length as number);
       length = converted > 0 ? Math.floor(converted) : 0;
     } else {
       keys = jsonKeyOrder(Object.keys(source));
