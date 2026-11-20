@@ -246,7 +246,7 @@ describe('a souled agent with cognitive memory off on the GMI runtime', () => {
   it('files nothing of a blocked or replaced turn, and the sanitised text of a sanitised one', async () => {
     const k = key();
     const s = script('openai', k, { whole: true, replies: Array.from({ length: 10 }, () => reply.text('Noted.')) });
-    const a = await souledAgent({ ...base(k, { retention: { traces: 'until-deletion' } }), soul: dir } as never);
+    const a = await souledAgent({ runtime: RUNTIME, provider: 'openai', model: 'stub-model', apiKey: k, fallbackProviders: [], retention: { traces: 'until-deletion' }, soul: dir } as never);
     try {
       const session = a.session('s-1', { userId: 'alice' });
       await expect(session.send(`${ORIGINAL}, blocked`, { guards: inputOnly(blocksInput) } as never)).rejects.toBeInstanceOf(GuardrailStopError);
