@@ -1159,8 +1159,9 @@ export function agent(opts: AgentOptions): Agent {
   const sessionBuffers = new Map<string, SessionHistoryBuffer | null>();
   // The user each open session was opened with, `undefined` for none: one session is one user.
   const sessionUsers = new Map<string, string | undefined>();
-  // When each open session opened, in epoch milliseconds: every handle of an open id reads the same time.
-  const sessionStarts = new Map<string, number>();
+  // Each open session's opening and when it opened, in epoch milliseconds: every handle of an open id reads the same
+  // one, and a handle's close() ends only its own opening (with `history: false` every opening's buffer is null).
+  const sessionOpenings = new Map<string, { readonly startedAt: number }>();
   // The ids the agent's learning config adds to the built-in anonymous ids: none of them names a session's user.
   const agentAnonymousUserIds = typeof opts.learning === 'object' && opts.learning !== null ? opts.learning.anonymousUserIds : undefined;
   // In-memory usage tally per session and per agent. Populated synchronously
@@ -1412,15 +1413,16 @@ export function agent(opts: AgentOptions): Agent {
             : { ...SESSION_HISTORY_DEFAULTS, ...(opts.history ?? {}) };
         sessionBuffers.set(sessionId, historyCfg ? new SessionHistoryBuffer(historyCfg) : null);
         sessionUsers.set(sessionId, namedUser);
-        sessionStarts.set(sessionId, Date.now());
+        sessionOpenings.set(sessionId, { startedAt: Date.now() });
       }
       if (!sessionUsageTallies.has(sessionId)) {
         sessionUsageTallies.set(sessionId, createEmptyUsageAggregate(sessionId));
       }
       const historyBuffer = sessionBuffers.get(sessionId)!;
       const sessionUsageTally = sessionUsageTallies.get(sessionId)!;
-      // The open session's time, read once: the handle keeps it after its session is closed.
-      const startedAt = sessionStarts.get(sessionId) ?? Date.now();
+      // The opening this handle belongs to, read once: the handle keeps its time after its session is closed.
+      const opening = sessionOpenings.get(sessionId)!;
+      const startedAt = opening.startedAt;
       // The user this handle runs as, read once: the handle keeps it after its session is closed and the id is opened
       // again for another user, and after agent.close().
       const handleUser = sessionUsers.get(sessionId);
@@ -1747,10 +1749,10 @@ export function agent(opts: AgentOptions): Agent {
           // append; the next session(id) builds a new buffer. The usage tally
           // stays, as agent.close() keeps it, so agent.usage(id) still counts.
           historyBuffer?.reseed([]);
-          if (sessionBuffers.get(sessionId) === historyBuffer) {
+          if (sessionOpenings.get(sessionId) === opening) {
             sessionBuffers.delete(sessionId);
             sessionUsers.delete(sessionId);
-            sessionStarts.delete(sessionId);
+            sessionOpenings.delete(sessionId);
           }
         },
       };
@@ -1782,7 +1784,7 @@ export function agent(opts: AgentOptions): Agent {
     async close() {
       sessionBuffers.clear();
       sessionUsers.clear();
-      sessionStarts.clear();
+      sessionOpenings.clear();
     },
 
     /**

@@ -551,7 +551,8 @@ const GMI_GUARDS_REFUSAL = "gmi(): the per-call option 'guards' is not supported
 export function assertTurnInputGuards(guards: unknown): void {
   if (guards === undefined) return;
   const stages = typeof guards === 'object' && guards !== null ? (guards as { stages?: unknown }).stages : undefined;
-  if (!Array.isArray(stages) || stages.length === 0 || stages.some((stage) => stage !== 'input')) throw new Error(GMI_GUARDS_REFUSAL);
+  // A spread reads a sparse array's holes as undefined, which some() alone would skip.
+  if (!Array.isArray(stages) || stages.length === 0 || [...stages].some((stage) => stage !== 'input')) throw new Error(GMI_GUARDS_REFUSAL);
 }
 
 /**

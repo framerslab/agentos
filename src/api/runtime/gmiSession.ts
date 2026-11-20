@@ -377,6 +377,8 @@ export async function* runGmiTurn(
     const priorMessages = deps.history ? deps.history.messages() : [];
 
     if (turn.guards) {
+      // A turn stopped while it waited for the lock ends here: its input reaches no guard.
+      turn.abortSignal?.throwIfAborted();
       // The input stage, before the GMI is built and before any model call.
       const judged = await judgeTurnInput(turn.guards, input);
       folder.guarded(judged.report);
