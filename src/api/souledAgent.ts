@@ -117,6 +117,14 @@ function addPart(part: DeletionPart, other: DeletionPart | undefined): DeletionP
   return { part: part.part, reached: false, reason: [...new Set(reasons)].join('; ') };
 }
 
+/**
+ * Whether a deletion left nothing of its subject in the store: no write of theirs running at the deadline, and every
+ * part reached but the open sessions, which hold no row of the store.
+ */
+function storeHoldsNoMore(report: ForgetMemoryReport): boolean {
+  return report.pendingAtDeadline === 0 && report.parts.every((part) => part.part === 'sessions' || part.reached);
+}
+
 /** Characters a token is estimated at, as `estimateTokens` counts them. */
 const CHARS_PER_TOKEN = 4;
 
@@ -2522,7 +2530,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
         // The deletion ends when its last subject's does.
         report.completedAt = ofSession.completedAt;
       }
-      if (report.complete) for (const subject of forgottenSubjects) subjects.delete(conversationScopeKey(agentId, subject));
+      if (storeHoldsNoMore(report)) for (const subject of forgottenSubjects) subjects.delete(conversationScopeKey(agentId, subject));
       // Read once for the person and the linked sessions, the list being the agent's: after the waits above.
       await withRecipients([report]);
       return learned ? { report, learned } : { report };
@@ -2569,7 +2577,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     // A subject the store holds nothing more of no longer counts toward the retention requirement.
     reports.forEach((report, at) => {
       const subject = reapplied[at];
-      if (report.complete && subject) subjects.delete(conversationScopeKey(agentId, subject));
+      if (storeHoldsNoMore(report) && subject) subjects.delete(conversationScopeKey(agentId, subject));
     });
     // Read once for every subject deleted again, after all of them: most re-applications delete nobody.
     await withRecipients(reports);
