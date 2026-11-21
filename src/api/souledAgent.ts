@@ -872,6 +872,10 @@ export type SouledAgent = Agent & {
    * word, that trace is the correction: it is tagged `correction`, kept, and not deleted even when it is one of the
    * named traces. No newer statement replaces an older one by itself: this call is how one does.
    *
+   * A session turn of the person that was running when the call changed their memory does not file its reply, which
+   * can restate what the turn recalled before: the turn's `memoryWrite` names the reply `skipped`, `corrected`. What
+   * the person said in that turn is filed.
+   *
    * @returns How many traces and pages it deleted, and `recipients`, the list {@link SouledAgent.recipients} returns:
    *   the call sends them nothing, so telling each one is the host's. A correction adds `correctionTraceId`, the id
    *   of the correction's trace, a live trace; a deletion with no `text` has no such key.
@@ -1309,6 +1313,19 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   /** How many times each session id has been closed: an answer asked for before a close is kept for nothing. */
   const sessionCloses = new Map<string, number>();
   /**
+   * How many corrections and single deletions of each subject's memory this process has run, by the subject's key:
+   * counted when a call has passed its ownership check and before it changes anything, so each one that finished is
+   * in it, and so is one that failed partway, which may have deleted a named trace already. A call the agent rejected
+   * whole is not.
+   */
+  const correctionCounts = new Map<string, number>();
+  /**
+   * For each turn's decision, its subject's count in {@link correctionCounts} when the turn asked for the decision,
+   * which is before the turn recalls anything. A turn whose count has moved by the time its reply is written recalled
+   * memory that a correction or a single deletion has changed since.
+   */
+  const correctionsAtDecision = new WeakMap<Promise<TurnPolicy>, number>();
+  /**
    * What each turn decided, from its first hook to its reply's write, by the context the turn's hooks share: a turn
    * of the default runtime and a one-shot call have one of their own, and a GMI session one for its turns, which run
    * one at a time. Two turns of one session that overlap never read each other's decision.
@@ -1436,6 +1453,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   /**
    * The decision of the turn a hook call belongs to. A turn's recall opens it; the write of its reply closes it, so
    * the whole turn recalls and files under one answer, and a hook that failed is not asked a second time in the turn.
+   * A decision keeps, from when it is opened, how many corrections and single deletions its subject's memory had been
+   * through ({@link correctionsAtDecision}).
    */
   const turnPolicyOf = (
     context: MemoryHookContext,
@@ -1448,6 +1467,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     if (asked) return asked;
     const open = at === 'recall' ? undefined : turnDecisions.get(context);
     const decision = open ?? decide(context, subject, scopeId);
+    if (!open) correctionsAtDecision.set(decision, correctionCounts.get(scopeId) ?? 0);
     if (at === 'mind') mindDecisions.set(context, decision);
     if (at === 'assistant') turnDecisions.delete(context);
     else turnDecisions.set(context, decision);
@@ -1546,11 +1566,12 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   };
   /**
    * Files one side of a turn under its subject's key, when the account's policy keeps memory and the screen hook
-   * lets the text through, and answers what became of it. Each write that is not made says why in one
-   * `memory.write_refused` line, except under an `off` policy, the host's standing choice for the account, which is
-   * said once a session; the entry it answers names the same reason. It never rejects: a throw, from the write or from
-   * a read before it, answers a `failed` entry with the error's class name, and is counted and logged as a failure of
-   * the provider's `observe` (`memory.hook_failed`, sparsely).
+   * lets the text through, and answers what became of it. A reply is not filed either when a correction or a single
+   * deletion has changed its subject's memory since its turn's decision was opened (`corrected`). Each write that is
+   * not made says why in one `memory.write_refused` line, except under an `off` policy, the host's standing choice for
+   * the account, which is said once a session; the entry it answers names the same reason. It never rejects: a throw,
+   * from the write or from a read before it, answers a `failed` entry with the error's class name, and is counted and
+   * logged as a failure of the provider's `observe` (`memory.hook_failed`, sparsely).
    *
    * @param write - Stores the text the screen let through, and resolves with its trace.
    * @param undo - Deletes a trace `write` stored, for good: a write that landed after the subject was forgotten.
@@ -1570,7 +1591,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
         memoryLog.warn('memory.write_refused', { reason: 'forgotten' });
         return { role, outcome: 'skipped', reason: 'forgotten' };
       }
-      const policy = await turnPolicyOf(context, subject, scopeId, role);
+      const decision = turnPolicyOf(context, subject, scopeId, role);
+      const policy = await decision;
       if (policy === 'failed') {
         memoryLog.warn('memory.write_refused', { reason: 'policy_failed' });
         return { role, outcome: 'skipped', reason: 'policy_failed' };
@@ -1584,6 +1606,13 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
           memoryLog.warn('memory.write_refused', { reason });
         }
         return { role, outcome: 'skipped', reason };
+      }
+      // A reply written from memory that a correction or a single deletion has changed since the turn recalled it can
+      // restate what was deleted, under a new id no later call names: it is not filed, and goes to no hook. What the
+      // person said themselves is filed as usual.
+      if (role === 'assistant' && (correctionCounts.get(scopeId) ?? 0) !== (correctionsAtDecision.get(decision) ?? 0)) {
+        memoryLog.warn('memory.write_refused', { reason: 'corrected' });
+        return { role, outcome: 'skipped', reason: 'corrected' };
       }
       const filed = await screened(text, hookContextOf(context, subject), 'file');
       if (filed === SCREEN_FAILED) {
@@ -2753,6 +2782,12 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
         correction,
         // As a deletion's report lists them: the call never fails on the list.
         recipients: async () => (await recipientsForReport()).recipients,
+        // Counted on the person's chain once the named traces are known to be theirs: a reply of theirs written after
+        // this, from a turn that began before it, is not filed.
+        beforeChange: () => {
+          const key = conversationScopeKey(agentId, subject);
+          correctionCounts.set(key, (correctionCounts.get(key) ?? 0) + 1);
+        },
         onChain: (work) => onSubject(conversationScopeKey(agentId, subject), work),
       }),
     );
