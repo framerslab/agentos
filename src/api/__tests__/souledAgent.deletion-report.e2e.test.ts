@@ -1,0 +1,469 @@
+/**
+ * A souled agent's deletion report as the receipt a host keeps, end to end over the real agent, generateText, provider
+ * manager, Memory store and wiki; only the OpenAI provider class is stubbed (helpers/stubProviders.ts), at its module
+ * boundary.
+ *
+ * - The report holds when the deletion completed, the agent's id, the library's version, the deletion's four parts in
+ *   the order they run (the tombstone, the mind, the store, the open sessions), each reached with its count or missed
+ *   with its reason, and who receives a person's text; it holds no id, no hash of one and no text.
+ * - A linked session's deletion adds into the same four parts.
+ * - A deletion still runs when the routes the store recorded cannot be read: the report lists the routes it knows and
+ *   names the recorded ones as not reached.
+ * - An incomplete deletion writes one `memory.forget_incomplete` line naming the parts it missed; a complete one writes
+ *   none. A store, a page or older memory nobody attributed that the deletion left is the store part missed.
+ * - On a souled agent with a learning layer, `agent.learning.forgetUser` runs the same deletion as `agent.forgetUser`
+ *   and returns its report with the three fields the layer's report type requires.
+ */
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
+vi.mock('../../core/llm/providers/implementations/AnthropicProvider', async () => ({ AnthropicProvider: (await import('./helpers/stubProviders')).stubProviderClass('anthropic') }));
+/** The read of the routes a store recorded: it throws `fail` while a case sets one. */
+const recordedRoutes = vi.hoisted(() => ({ fail: undefined as Error | undefined }));
+vi.mock('../runtime/memoryRecipients', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../runtime/memoryRecipients')>();
+  return {
+    ...actual,
+    recordedRecipients: async (...args: Parameters<typeof actual.recordedRecipients>) => {
+      if (recordedRoutes.fail) throw recordedRoutes.fail;
+      return actual.recordedRecipients(...args);
+    },
+  };
+});
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import Database from 'better-sqlite3';
+import pino from 'pino';
+import { souledAgent, type SouledAgent, type SouledAgentOptions } from '../souledAgent';
+import { forgetUserMemory, type ForgetMemoryReport } from '../../cognition/memory/io/forgetUserMemory';
+import { reply, script, type ProviderScript } from './helpers/stubProviders';
+import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory';
+import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
+import { conversationScopeKey } from '../../cognition/memory/retrieval/store/conversationScopeKey';
+import { UserWikiStore } from '../../cognition/substrate/memory/wiki/UserWikiStore';
+
+/** The runtime the cases run on; a case that needs what only the GMI runtime has names it. */
+const RUNTIME = 'legacy' as const;
+
+/** The count of a part the deletion reached, and the reason of one it missed. */
+const deletedBy = (part: ForgetMemoryReport['parts'][number] | undefined): number | undefined => (part?.reached ? part.deleted : undefined);
+const reasonOf = (part: ForgetMemoryReport['parts'][number] | undefined): string | undefined => (part && !part.reached ? part.reason : undefined);
+
+let n = 0;
+let dir: string;
+const opened: SouledAgent[] = [];
+/** Every line the library logged in the case, parsed. */
+let events: Array<Record<string, unknown>>;
+beforeEach(() => {
+  globalLLMProviderHealth.reset();
+  recordedRoutes.fail = undefined;
+  dir = fs.mkdtempSync(path.join(os.tmpdir(), 'souled-deletion-report-e2e-'));
+  fs.writeFileSync(path.join(dir, 'SOUL.md'), '---\nname: Aria\nagentId: aria-1\n---\nYou are Aria.');
+  events = [];
+  setLogger(
+    pino(
+      { level: 'debug', base: undefined },
+      {
+        write(line: string) {
+          events.push(JSON.parse(line));
+        },
+      },
+    ),
+  );
+});
+afterEach(async () => {
+  vi.restoreAllMocks();
+  vi.unstubAllEnvs();
+  while (opened.length) await opened.pop()!.close().catch(() => undefined);
+  resetLoggerFactory();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+/** The logged lines of one event. */
+const lines = (event: string) => events.filter((line) => line.event === event);
+
+const storeFile = () => path.join(dir, 'memory', '.store', 'memory.sqlite');
+const keyOf = (subject: { kind: 'user' | 'session'; id: string }) => conversationScopeKey('aria-1', subject);
+const alice = { kind: 'user' as const, id: 'alice' };
+const bob = { kind: 'user' as const, id: 'bob' };
+
+let replyNo = 0;
+/** Replies to spare, each with words of its own: the store keeps one trace for a text a subject's memory already holds. */
+const spare = (): ProviderScript['replies'] => Array.from({ length: 60 }, () => reply.text(`Noted ${++replyNo}.`));
+
+/** A souled agent on the stubbed provider; `retention` and `tombstoneKey` are set so two people may share the store. */
+async function open(extra: Partial<SouledAgentOptions> = {}): Promise<SouledAgent> {
+  const apiKey = `k-souled-deletion-report-${++n}`;
+  script('openai', apiKey, { whole: true, replies: spare() });
+  const a = await souledAgent({
+    runtime: RUNTIME,
+    provider: 'openai',
+    model: 'stub-model',
+    apiKey,
+    fallbackProviders: [],
+    soul: dir,
+    retention: { traces: 'until-deletion' },
+    tombstoneKey: 'k-souled-deletion-report-tombstones',
+    ...extra,
+  } as unknown as SouledAgentOptions);
+  opened.push(a);
+  return a;
+}
+
+/** Rows of the store's SQLite file, read by a connection of the test's own. */
+function rows<T>(sql: string, params: unknown[] = []): T[] {
+  const db = new Database(storeFile(), { readonly: true, fileMustExist: true });
+  try {
+    return db.prepare(sql).all(...params) as T[];
+  } finally {
+    db.close();
+  }
+}
+const tracesOf = (key: string) =>
+  rows<{ id: string; content: string }>("SELECT id, content FROM memory_traces WHERE scope = 'conversation' AND scope_id = ?", [key]);
+const pagesOf = (key: string) => rows<{ page_id: string }>('SELECT page_id FROM memory_pages WHERE scope_id = ?', [key]);
+const registryOf = (key: string) => rows<{ scope_id: string }>('SELECT scope_id FROM memory_scopes WHERE scope_id = ?', [key]);
+
+/** One turn of a user or an anonymous session, and a wait until both of its traces are stored. */
+async function turn(a: SouledAgent, sessionId: string, userId: string | undefined, text: string): Promise<void> {
+  const key = keyOf(userId ? { kind: 'user', id: userId } : { kind: 'session', id: sessionId });
+  const before = tracesOf(key).length;
+  await a.session(sessionId, userId ? { userId } : undefined).send(text);
+  await vi.waitFor(() => expect(tracesOf(key).length).toBeGreaterThanOrEqual(before + 2), { timeout: 4_000 });
+}
+
+describe(`a deletion report a host can keep, on runtime ${RUNTIME}`, () => {
+  it('the report is a receipt with no id and no text', async () => {
+    const a = await open();
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await turn(a, 's2', 'bob', 'My canary is WREN-2.');
+
+    const report = await a.forgetUser!('alice');
+
+    expect(report.completedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    expect(Math.abs(Date.parse(report.completedAt) - Date.now())).toBeLessThan(60_000);
+    expect(report.agentId).toBe('aria-1');
+    expect(report.libraryVersion).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(report.parts.map((p) => p.part)).toEqual(['tombstone', 'mind', 'store', 'sessions']);
+    expect(report.parts[0]).toEqual({ part: 'tombstone', reached: true, deleted: 0 });
+    expect(report.parts[1]).toEqual({ part: 'mind', reached: true, deleted: 0 });
+    expect(report.parts[2]).toMatchObject({ part: 'store', reached: true });
+    expect(deletedBy(report.parts[2])).toBeGreaterThanOrEqual(2);
+    // The one session this handle holds open for her is cleared.
+    expect(report.parts[3]).toEqual({ part: 'sessions', reached: true, deleted: 1 });
+    expect(report.recipients).toEqual(await a.recipients!());
+    expect(report.recipients.length).toBeGreaterThan(0);
+    expect(report.complete).toBe(true);
+
+    // Neither the id, nor a hash of it, nor a word she said.
+    const json = JSON.stringify(report);
+    expect(json).not.toContain('alice');
+    expect(json).not.toContain('LARK-7');
+    expect(json).not.toMatch(/[0-9a-f]{32}/i);
+    expect(lines('memory.forget_incomplete')).toEqual([]);
+    expect(tracesOf(keyOf(bob)).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("a linked session's deletion adds into the same four parts", async () => {
+    const a = await open();
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await turn(a, 'v1', undefined, 'Is the room by the weir still free?');
+
+    const report = await a.forgetUser!('alice', { linkedSessions: ['v1'] });
+
+    expect(report.parts.map((p) => p.part)).toEqual(['tombstone', 'mind', 'store', 'sessions']);
+    expect(report.parts[2]).toMatchObject({ part: 'store', reached: true });
+    // Her two traces and the visitor's two.
+    expect(deletedBy(report.parts[2])).toBeGreaterThanOrEqual(4);
+    // Her session and the linked one, each cleared.
+    expect(report.parts[3]).toEqual({ part: 'sessions', reached: true, deleted: 2 });
+    expect(report.complete).toBe(true);
+    expect(tracesOf(keyOf({ kind: 'session', id: 'v1' }))).toEqual([]);
+  });
+
+  it('lists the routes it knows when the recorded ones cannot be read, and still deletes', async () => {
+    const a = await open();
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    const named = await a.recipients!();
+    recordedRoutes.fail = new Error('the store went away');
+
+    const report = await a.forgetUser!('alice');
+
+    expect(tracesOf(keyOf(alice))).toEqual([]);
+    expect(report.recipients).toEqual(named);
+    expect(report.stores).toContainEqual({ store: 'recipients recorded in the store', reached: false, reason: 'the store went away' });
+    // The list is not a store the deletion deletes from: the deletion is complete.
+    expect(report.parts.every((p) => p.reached)).toBe(true);
+    expect(report.complete).toBe(true);
+    expect(lines('memory.recipients_unread')).toHaveLength(1);
+    expect(lines('memory.forget_incomplete')).toEqual([]);
+  });
+
+  it("lists a route the person's text took while the deletion waited for their compile", async () => {
+    const envKey = `k-souled-deletion-report-env-${++n}`;
+    vi.stubEnv('ANTHROPIC_API_KEY', envKey);
+    const anthropic = script('anthropic', envKey, { whole: true, replies: spare() });
+    /** Set while a case holds the router's next pick; `asked` is called when a pick waits on it. */
+    let hold: Promise<void> | undefined;
+    let asked!: () => void;
+    const pickAsked = new Promise<void>((resolve) => {
+      asked = resolve;
+    });
+    const router = {
+      routerId: 'stub-router',
+      initialize: async () => undefined,
+      selectModel: async () => {
+        if (hold) {
+          asked();
+          await hold;
+        }
+        return { provider: {}, modelId: 'claude-routed', modelInfo: { providerId: 'anthropic' }, reasoning: 'stub', confidence: 1 };
+      },
+    };
+    const a = await open({ router } as unknown as Partial<SouledAgentOptions>);
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await turn(a, 's1', 'alice', 'I keep it in the attic.');
+    const compiled = { role: 'compile', provider: 'anthropic', model: 'claude-routed' };
+    expect(await a.recipients!()).not.toContainEqual(compiled);
+    const callsBeforeCompile = anthropic.seen.length;
+
+    // Her compile waits on the router's pick when the deletion starts; the deletion waits for her compile.
+    let release!: () => void;
+    hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const compiling = a.memory!.compileWiki({ scopes: [keyOf(alice)] }).catch(() => undefined);
+    await pickAsked;
+    const deleting = a.forgetUser!('alice');
+    setTimeout(release, 50);
+    const report = await deleting;
+    // The routed provider received her compile's prompt before the deletion ended.
+    expect(anthropic.seen.length).toBeGreaterThan(callsBeforeCompile);
+    await compiling;
+
+    expect(report.recipients).toContainEqual(compiled);
+    expect(report.recipients).toEqual(await a.recipients!());
+    expect(tracesOf(keyOf(alice))).toEqual([]);
+    expect(pagesOf(keyOf(alice))).toEqual([]);
+  });
+});
+
+describe(`an incomplete deletion says so in one line, on runtime ${RUNTIME}`, () => {
+  it('a write held past the deadline', async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const a = await open({
+      pendingWritesTimeoutMs: 0,
+      screen: async (text: string) => {
+        await held;
+        return text;
+      },
+    } as Partial<SouledAgentOptions>);
+    try {
+      await a.session('s1', { userId: 'alice' }).send('My canary is LARK-7.');
+      const report = await a.forgetUser!('alice');
+
+      expect(report.complete).toBe(false);
+      expect(report.pendingAtDeadline).toBeGreaterThanOrEqual(1);
+      const said = lines('memory.forget_incomplete');
+      expect(said).toHaveLength(1);
+      expect(said[0]).toMatchObject({
+        level: 40,
+        tombstone: 'reached',
+        mind: 'reached',
+        store: 'reached',
+        sessions: 'reached',
+        pendingAtDeadline: report.pendingAtDeadline,
+        pagesFailed: 0,
+      });
+      expect(JSON.stringify(said)).not.toContain('alice');
+    } finally {
+      release();
+    }
+    // The write that was held lands after the tombstone and is taken back.
+    await vi.waitFor(() => expect(lines('memory.write_refused').some((line) => line.reason === 'forgotten')).toBe(true), { timeout: 4_000 });
+    await a.close();
+    expect(tracesOf(keyOf(alice))).toEqual([]);
+  });
+
+  it('a store it could not reach names the store part as missed', async () => {
+    const a = await open();
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    vi.spyOn(a.memory!, 'rebuildVectorIndex').mockRejectedValueOnce(new Error('disk full'));
+
+    const report = await a.forgetUser!('alice');
+
+    expect(report.complete).toBe(false);
+    expect(report.parts[2]).toMatchObject({ part: 'store', reached: false });
+    expect(reasonOf(report.parts[2])).toContain('disk full');
+    expect(lines('memory.forget_incomplete')).toEqual([
+      expect.objectContaining({ tombstone: 'reached', mind: 'reached', store: 'missed', sessions: 'reached', pendingAtDeadline: 0, pagesFailed: 0 }),
+    ]);
+  });
+
+  it('a page it could not delete names the store part as missed, and the deletion made again finishes it', async () => {
+    const a = await open();
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await a.memory!.compileWiki();
+    expect(pagesOf(keyOf(alice))).toHaveLength(1);
+    vi.spyOn(UserWikiStore.prototype, 'deletePage').mockRejectedValueOnce(new Error('disk I/O error'));
+
+    const report = await a.forgetUser!('alice');
+
+    expect(report.complete).toBe(false);
+    expect(report.parts[2]).toEqual({ part: 'store', reached: false, reason: '1 page not deleted' });
+    expect(lines('memory.forget_incomplete')).toEqual([
+      expect.objectContaining({ tombstone: 'reached', mind: 'reached', store: 'missed', sessions: 'reached', pendingAtDeadline: 0, pagesFailed: 1 }),
+    ]);
+
+    events.length = 0;
+    const again = await a.forgetUser!('alice');
+    expect(again.complete).toBe(true);
+    expect(again.parts.every((p) => p.reached)).toBe(true);
+    expect(pagesOf(keyOf(alice))).toEqual([]);
+    expect(lines('memory.forget_incomplete')).toEqual([]);
+  });
+
+  it('older memory nobody attributed names the store part as missed', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const a = await open();
+    await a.memory!.remember('old shared words', { type: 'episodic', scope: 'persona', scopeId: 'aria-1' });
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+
+    const report = await a.forgetUser!('alice');
+
+    expect(tracesOf(keyOf(alice))).toEqual([]);
+    expect(report.complete).toBe(false);
+    expect(report.parts[2]).toEqual({ part: 'store', reached: false, reason: 'legacy memory under the agent scope: unattributed' });
+    expect(lines('memory.forget_incomplete')).toEqual([
+      expect.objectContaining({ tombstone: 'reached', mind: 'reached', store: 'missed', sessions: 'reached', pendingAtDeadline: 0, pagesFailed: 0 }),
+    ]);
+  });
+});
+
+describe("agent.learning.forgetUser on a souled agent, on runtime 'gmi'", () => {
+  it('deletes everything agent.forgetUser deletes, at once, and returns the report', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const a = await open({ runtime: 'gmi', learning: true } as Partial<SouledAgentOptions>);
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await turn(a, 's2', 'bob', 'My canary is WREN-2.');
+    await a.memory!.compileWiki();
+    expect(pagesOf(keyOf(alice))).toHaveLength(1);
+    const ofBob = tracesOf(keyOf(bob));
+
+    const report = await a.learning!.forgetUser!('alice');
+
+    // No row and no page under her key, before any open or applyTombstones().
+    expect(tracesOf(keyOf(alice))).toEqual([]);
+    expect(pagesOf(keyOf(alice))).toEqual([]);
+    expect(registryOf(keyOf(alice))).toEqual([]);
+    expect(rows("SELECT id FROM memory_traces WHERE content LIKE '%LARK-7%'")).toEqual([]);
+    expect(tracesOf(keyOf(bob))).toEqual(ofBob);
+
+    // The deletion report, with the three fields the layer's report type requires.
+    expect(report).toMatchObject({ userId: 'alice', namespace: '', plainFormLeft: 0 });
+    // The call's declared type is the layer's report: the deletion's fields are read through the deletion's own.
+    const receipt = report as unknown as ForgetMemoryReport;
+    expect(receipt.agentId).toBe('aria-1');
+    expect(receipt.parts.map((p) => p.part)).toEqual(['tombstone', 'mind', 'store', 'sessions']);
+    expect(receipt.parts[2]).toMatchObject({ part: 'store', reached: true });
+    expect(receipt.stores).toContainEqual(expect.objectContaining({ store: 'learning store', reached: true }));
+    // The layer's own count of what it deleted, table by table, as its own call returns it.
+    expect(report.stores.find((entry) => entry.store === 'learning store')).toMatchObject({
+      reached: true,
+      deleted: { ledger: expect.any(Number), traits: expect.any(Number) },
+    });
+    expect(receipt.stores).toContainEqual(expect.objectContaining({ store: 'conversation memory', reached: true }));
+    // A gmi() session keeps its messages: her open session is a part the deletion did not reach.
+    expect(receipt.parts[3]).toMatchObject({ part: 'sessions', reached: false });
+    expect(receipt.complete).toBe(false);
+
+    // agent.forgetUser's own report names nobody.
+    const plain = await a.forgetUser!('bob');
+    expect(plain).not.toHaveProperty('userId');
+    expect(plain).not.toHaveProperty('namespace');
+    expect(JSON.stringify(plain)).not.toContain('bob');
+    expect(tracesOf(keyOf(bob))).toEqual([]);
+  });
+});
+
+describe("a souled agent's deletion after close, on runtime 'gmi'", () => {
+  it('deletes nothing, on either call, and says the agent was closed', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const a = await open({ runtime: 'gmi', learning: true } as Partial<SouledAgentOptions>);
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await a.close();
+
+    await expect(a.learning!.forgetUser!('alice')).rejects.toThrow('souledAgent: the agent was closed');
+    await expect(a.forgetUser!('alice')).rejects.toThrow('souledAgent: the agent was closed');
+    // Her rows stand for the deletion made on the agent opened again.
+    expect(tracesOf(keyOf(alice)).length).toBeGreaterThanOrEqual(2);
+    expect(lines('memory.forget_done')).toEqual([]);
+  });
+});
+
+describe('the deletion core, called by a host of its own', () => {
+  it("a callback of the host's that rejects leaves the store part missed, and the report still comes back", async () => {
+    const a = await open();
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+
+    const report = await forgetUserMemory({
+      memory: a.memory!,
+      agentId: 'aria-1',
+      subject: alice,
+      wiki: {
+        storeFor: () => {
+          throw new Error('she has no pages');
+        },
+      } as never,
+      extraStores: async () => {
+        throw new Error('the host store went away');
+      },
+    });
+
+    expect(tracesOf(keyOf(alice))).toEqual([]);
+    expect(report.complete).toBe(false);
+    expect(report.stores).toContainEqual({ store: "the caller's own stores", reached: false, reason: 'the host store went away' });
+    expect(report.parts[2]).toMatchObject({ part: 'store', reached: false });
+    expect(reasonOf(report.parts[2])).toContain('the host store went away');
+    expect(lines('memory.forget_done')).toHaveLength(1);
+    expect(lines('memory.forget_incomplete')).toEqual([
+      expect.objectContaining({ tombstone: 'reached', mind: 'reached', store: 'missed', sessions: 'reached' }),
+    ]);
+  });
+});
+
+describe("a person deleted while her gmi() session stays open, on runtime 'gmi'", () => {
+  it('no longer counts as a person the store holds once the store part is reached', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    // No retention choice: the store may hold one person's memory.
+    const a = await open({ runtime: 'gmi', retention: undefined } as Partial<SouledAgentOptions>);
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+
+    const report = await a.forgetUser!('alice');
+
+    expect(report.parts[2]).toMatchObject({ part: 'store', reached: true });
+    expect(report.parts[3]).toMatchObject({ part: 'sessions', reached: false });
+    expect(report.complete).toBe(false);
+    expect(tracesOf(keyOf(alice))).toEqual([]);
+    // The store holds nothing of her: another person's session opens with no retention choice made.
+    expect(() => a.session('s2', { userId: 'bob' })).not.toThrow();
+  });
+});
+
+describe("open sessions that keep no history, on runtime 'gmi'", () => {
+  it('a session opened with history off holds nothing to empty: the sessions part is reached', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const a = await open({ runtime: 'gmi', history: false } as Partial<SouledAgentOptions>);
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+
+    const report = await a.forgetUser!('alice');
+
+    expect(tracesOf(keyOf(alice))).toEqual([]);
+    expect(report.parts[3]).toEqual({ part: 'sessions', reached: true, deleted: 0 });
+    expect(report.complete).toBe(true);
+    expect(lines('memory.forget_incomplete')).toEqual([]);
+  });
+});

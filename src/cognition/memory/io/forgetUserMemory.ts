@@ -2,17 +2,29 @@
  * @module memory/io/forgetUserMemory
  *
  * One subject's memory deleted from a store for good: the tombstone first, then the traces, the pages and the vector
- * index, then a report that names every store reached and every store not reached.
+ * index, then a report that names every store reached and every store not reached, and each of the deletion's four
+ * parts.
  */
 import { messageOf } from '../../../api/runtime/memoryObserveFailures.js';
+import type { MemoryRecipient } from '../../../api/runtime/memoryRecipients.js';
 import { errorFields } from '../../../core/logging/events.js';
+import { agentosVersion } from '../../learning/ledger/canonical.js';
 import { memoryLog } from '../log.js';
 import { CONVERSATION_SCOPE, conversationScopeKey, parseConversationScopeKey } from '../retrieval/store/conversationScopeKey.js';
 import type { ForgottenLedger, SuppressionSubject } from '../suppression/ForgottenLedger.js';
 import type { Memory } from './facade/Memory.js';
 import { LEGACY_SCOPE } from './legacyMemory.js';
 
-/** What a deletion did. It never holds the subject's id or any text of theirs. */
+/** What one part of a deletion did: reached, with what it deleted, or missed, with why. */
+export type PartOutcome = { reached: true; deleted: number } | { reached: false; reason: string };
+
+/** One of a deletion's four parts, as its report lists it. */
+type DeletionPart = ForgetMemoryReport['parts'][number];
+
+/**
+ * What a deletion did: the receipt a host keeps beside its own record of the request, which is what links the receipt
+ * to the person. It never holds the subject's id, a hash of the id or any text of theirs.
+ */
 export interface ForgetMemoryReport {
   /** The tombstone's form, and whether this call wrote it (false when the ledger already held it). */
   tombstone: { form: 'keyed' | 'unkeyed'; written: boolean };
@@ -25,12 +37,36 @@ export interface ForgetMemoryReport {
   /** How many of them were still running at the deadline. */
   pendingAtDeadline: number;
   /**
-   * False when anything was still pending at the deadline, a store the call deletes from failed (the full-text index,
-   * the vector index and the write-ahead log included), a page failed, or the store holds memory from before per-user scope that nobody
-   * attributed. The stores the call never reaches by design are named and do not count. The next open, or the next
+   * False when anything was still pending at the deadline, or a part of {@link parts} was not reached: a store the
+   * call deletes from failed (the full-text index, the vector index and the write-ahead log included), a page failed,
+   * the store holds memory from before per-user scope that nobody attributed, or open sessions kept what they hold of
+   * the subject. The stores the call never reaches by design are named and do not count. The next open, or the next
    * re-application of the tombstones, resumes an incomplete deletion.
    */
   complete: boolean;
+  /** When the deletion ended, as an ISO 8601 time in UTC. */
+  completedAt: string;
+  /** The agent whose store this is. */
+  agentId: string;
+  /** The version of `@framers/agentos` that ran the deletion; `'unknown'` where it has no file system to read it from. */
+  libraryVersion: string;
+  /**
+   * The deletion's four parts, always in this order, each reached with a count or missed with the reason:
+   *
+   * - `tombstone`: reached once the ledger holds the subject's tombstone; it deletes nothing itself, so its count is 0.
+   * - `mind`: the copies an agent's mind holds of the subject; reached with 0 where there is none.
+   * - `store`: the store's own pass. Reached, with the number of traces deleted, when every store the call deletes
+   *   from was reached (the caller's own included), every page was deleted and no memory from before per-user scope
+   *   is left unattributed; missed with each of those that failed.
+   * - `sessions`: what open sessions hold of the subject, as the caller's `sessions` option answered; reached with 0
+   *   when the caller passed none.
+   */
+  parts: Array<{ part: 'tombstone' | 'mind' | 'store' | 'sessions' } & PartOutcome>;
+  /**
+   * Who receives a person's text, as the caller listed them (`recipients()` on a souled agent). No deletion reaches
+   * them: telling each one is the host's.
+   */
+  recipients: MemoryRecipient[];
 }
 
 /** What a deletion and a retention sweep need of one subject's page store. */
@@ -64,10 +100,20 @@ export interface ForgetUserMemoryOptions {
   /**
    * Entries the caller adds to the report: stores it reached itself, and stores it knows are not reached. They do not
    * change `complete`. A function is called once the tombstone is written and the deletes are done, so what it
-   * deletes stays while the tombstone cannot be written.
+   * deletes stays while the tombstone cannot be written; one that throws or rejects is named as "the caller's own
+   * stores" not reached, and the report's `store` part is missed.
    */
-  extraStores?: ForgetMemoryReport['stores'] | (() => ForgetMemoryReport['stores']);
-  /** The caller's own stores failed: the report is incomplete. */
+  extraStores?: ForgetMemoryReport['stores'] | (() => ForgetMemoryReport['stores'] | Promise<ForgetMemoryReport['stores']>);
+  /**
+   * Empties what open sessions hold of the subject. It is called once the tombstone is written and the deletes are
+   * done, before `extraStores`, so the sessions keep what they hold while the tombstone cannot be written. Its answer
+   * is the report's `sessions` part: reached with the number of sessions emptied, or missed with why, which leaves the
+   * report incomplete. A call that throws is the part missed. Unset: the part is reached with 0.
+   */
+  sessions?: () => PartOutcome | Promise<PartOutcome>;
+  /** Who receives a person's text (`recipients()` of a souled agent), copied into the report. Unset: none is listed. */
+  recipients?: readonly MemoryRecipient[];
+  /** The caller's own stores failed: the report's `store` part is missed, and the report is incomplete. */
   alsoIncomplete?: boolean;
   /**
    * Whether the store holds memory from before per-user scope that nobody attributed, read when the deletes are
@@ -199,7 +245,8 @@ async function deleteWhatTheUserSaidElsewhere(input: {
  * page left keeps the traces it was found by, so the deletion made again finds it. A store that throws is named as
  * not reached and the next one still runs. No model call is made, and `Memory.forget()` (a soft delete) is never used.
  *
- * @returns The report. One `memory.forget_done` line is logged with its counts.
+ * @returns The report. One `memory.forget_done` line is logged with its counts; when the report is not complete, one
+ *   `memory.forget_incomplete` warn line follows it, with each part reached or missed.
  * @throws TypeError when the subject has another kind or no id, or an id no conversation key can be built from: a
  *   missing id never widens the deletion.
  * @throws Error when the store has no forgotten-user ledger.
@@ -227,9 +274,11 @@ export async function forgetUserMemory(options: ForgetUserMemoryOptions): Promis
       : await ledger.markForgotten(subject);
 
   const pages: ForgetMemoryReport['pages'] = { deleted: 0, failed: [] };
-  const deletes = async (): Promise<ForgetMemoryReport['stores']> => {
+  const deletes = async (): Promise<{ stores: ForgetMemoryReport['stores']; rows: number }> => {
     const stores: ForgetMemoryReport['stores'] = [];
     let traces = 0;
+    /** The traces deleted with a scope's registry row, after the vector index's count was taken. */
+    let withRegistryRows = 0;
 
     // Conversation memory: this agent's key of the subject, and the subject's key under each other agent of the store.
     const keys = [ownKey];
@@ -286,7 +335,9 @@ export async function forgetUserMemory(options: ForgetUserMemoryOptions): Promis
       // The scope's registry row goes once it holds no trace and no page: the delete made again removes it.
       if (!left && conversationFailure === undefined) {
         try {
-          conversation += (await memory.deleteScope(CONVERSATION_SCOPE, key)).deleted;
+          const more = (await memory.deleteScope(CONVERSATION_SCOPE, key)).deleted;
+          conversation += more;
+          withRegistryRows += more;
         } catch (error) {
           conversationFailure = messageOf(error);
         }
@@ -359,16 +410,33 @@ export async function forgetUserMemory(options: ForgetUserMemoryOptions): Promis
     } catch (error) {
       stores.push({ store: 'write-ahead log', reached: false, reason: messageOf(error) });
     }
-    return stores;
+    return { stores, rows: traces + withRegistryRows };
   };
 
   // A write stuck past the deadline holds the subject's turn: the deletes then run at once, and the guard takes that
   // write back when it lands.
-  const deleted = options.onChain && pendingAtDeadline === 0 ? await options.onChain(deletes) : await deletes();
-  const failed = deleted.some((entry) => !entry.reached);
+  const ran = options.onChain && pendingAtDeadline === 0 ? await options.onChain(deletes) : await deletes();
 
-  const extra = typeof options.extraStores === 'function' ? options.extraStores() : (options.extraStores ?? []);
-  const stores: ForgetMemoryReport['stores'] = [...deleted, ...NEVER_REACHED.map((entry) => ({ ...entry })), ...extra];
+  // What open sessions hold of the subject goes once the tombstone is written and the deletes are done.
+  let sessions: PartOutcome = { reached: true, deleted: 0 };
+  if (options.sessions) {
+    try {
+      const answer = await options.sessions();
+      sessions = answer.reached ? { reached: true, deleted: answer.deleted } : { reached: false, reason: answer.reason };
+    } catch (error) {
+      sessions = { reached: false, reason: messageOf(error) };
+    }
+  }
+  let extra: ForgetMemoryReport['stores'];
+  /** Why the caller's own callback failed, after the deletes ran: the report still comes back. */
+  let extraFailure: string | undefined;
+  try {
+    extra = typeof options.extraStores === 'function' ? await options.extraStores() : (options.extraStores ?? []);
+  } catch (error) {
+    extraFailure = messageOf(error);
+    extra = [{ store: "the caller's own stores", reached: false, reason: extraFailure }];
+  }
+  const stores: ForgetMemoryReport['stores'] = [...ran.stores, ...NEVER_REACHED.map((entry) => ({ ...entry })), ...extra];
   let legacy = false;
   if (options.legacyUnattributed) {
     try {
@@ -380,7 +448,24 @@ export async function forgetUserMemory(options: ForgetUserMemoryOptions): Promis
   }
   if (legacy) stores.push({ store: 'legacy memory under the agent scope', reached: false, reason: 'unattributed' });
 
-  const complete = pendingAtDeadline === 0 && pages.failed.length === 0 && !failed && options.alsoIncomplete !== true && !legacy;
+  // The store's own pass: each store the call deletes from that failed, the pages left, the caller's own stores that
+  // failed, and older memory nobody attributed. Any of them leaves the part missed.
+  const missed = ran.stores.flatMap((entry) => (entry.reached ? [] : [`${entry.store}: ${entry.reason}`]));
+  if (pages.failed.length > 0) missed.push(pages.failed.length === 1 ? '1 page not deleted' : `${pages.failed.length} pages not deleted`);
+  if (options.alsoIncomplete === true) missed.push("a store of the caller's own was not reached");
+  if (extraFailure !== undefined) missed.push(`the caller's own stores: ${extraFailure}`);
+  if (legacy) missed.push('legacy memory under the agent scope: unattributed');
+  // Reached by here: a tombstone that cannot be written throws before anything is deleted.
+  const tombstonePart: DeletionPart = { part: 'tombstone', reached: true, deleted: 0 };
+  // The copies an agent's mind holds: none here.
+  const mindPart: DeletionPart = { part: 'mind', reached: true, deleted: 0 };
+  const storePart: DeletionPart =
+    missed.length === 0 ? { part: 'store', reached: true, deleted: ran.rows } : { part: 'store', reached: false, reason: missed.join('; ') };
+  const sessionsPart: DeletionPart = { part: 'sessions', ...sessions };
+  const parts = [tombstonePart, mindPart, storePart, sessionsPart];
+
+  const complete = pendingAtDeadline === 0 && parts.every((part) => part.reached);
+  const completedAt = new Date().toISOString();
   memoryLog.info('memory.forget_done', {
     stores: stores.filter((entry) => entry.reached).length,
     unreached: stores.filter((entry) => !entry.reached).length,
@@ -390,15 +475,43 @@ export async function forgetUserMemory(options: ForgetUserMemoryOptions): Promis
     pendingAtDeadline,
     complete: complete ? 'yes' : 'no',
   });
-  return { tombstone, stores, pages, drained, pendingAtDeadline, complete };
+  if (!complete) {
+    const state = (part: DeletionPart) => (part.reached ? 'reached' : 'missed');
+    memoryLog.warn('memory.forget_incomplete', {
+      tombstone: state(tombstonePart),
+      mind: state(mindPart),
+      store: state(storePart),
+      sessions: state(sessionsPart),
+      pendingAtDeadline,
+      pagesFailed: pages.failed.length,
+    });
+  }
+  return {
+    tombstone,
+    stores,
+    pages,
+    drained,
+    pendingAtDeadline,
+    complete,
+    completedAt,
+    agentId,
+    libraryVersion: await agentosVersion(),
+    parts,
+    recipients: [...(options.recipients ?? [])],
+  };
 }
 
 export interface ReapplyTombstonesOptions
   extends Pick<ForgetUserMemoryOptions, 'memory' | 'ledger' | 'wiki' | 'agentId' | 'legacyUnattributed'> {
-  /** The per-subject parts of one deletion: the subject's drain and chain, and what the caller reached itself. */
+  /**
+   * The per-subject parts of one deletion: the subject's drain and chain, what the caller reached itself, what open
+   * sessions hold of the subject, and who receives a person's text.
+   */
   forSubject?: (
     subject: SuppressionSubject,
-  ) => Promise<Pick<ForgetUserMemoryOptions, 'drain' | 'onChain' | 'extraStores' | 'alsoIncomplete' | 'legacy'>>;
+  ) => Promise<
+    Pick<ForgetUserMemoryOptions, 'drain' | 'onChain' | 'extraStores' | 'alsoIncomplete' | 'legacy' | 'sessions' | 'recipients'>
+  >;
 }
 
 /**

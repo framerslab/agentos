@@ -44,7 +44,9 @@ import {
   reapplyTombstones,
   type ForgetMemoryReport,
   type ForgetUserMemoryOptions,
+  type PartOutcome,
 } from '../cognition/memory/io/forgetUserMemory.js';
+import type { ForgetReport } from '../cognition/learning/types.js';
 import { openForgottenCopy } from '../cognition/memory/suppression/forgottenCopy.js';
 import { shareForgottenLedger } from '../cognition/memory/suppression/learnerTombstones.js';
 import { shareSoulStore } from './runtime/soulStore.js';
@@ -94,6 +96,34 @@ import { assertBigintReadsAsNumbers, embeddingRouteOf } from './runtime/agentCog
 import { serializeTransactionsOn } from '../cognition/memory/retrieval/store/adapterTransactionLock.js';
 import { resolveModelOption, resolveProviderRoute } from './model.js';
 import type { AgentOSUsageLedgerOptions } from './runtime/usageLedger.js';
+
+/** One of a deletion's four parts, as its report lists it. */
+type DeletionPart = ForgetMemoryReport['parts'][number];
+
+/**
+ * What a souled agent adds to one subject's deletion report: the stores it reached or names itself, and whether one of
+ * its own failed.
+ */
+type ReportExtras = { stores: ForgetMemoryReport['stores']; incomplete: boolean };
+
+/**
+ * One part of a person's deletion with the same part of a linked session's added: reached with the sum of the two
+ * counts when both reached it, else missed with the reason of each that missed it.
+ */
+function addPart(part: DeletionPart, other: DeletionPart | undefined): DeletionPart {
+  if (!other) return part;
+  if (part.reached && other.reached) return { part: part.part, reached: true, deleted: part.deleted + other.deleted };
+  const reasons = [part, other].flatMap((each) => (each.reached ? [] : [each.reason]));
+  return { part: part.part, reached: false, reason: [...new Set(reasons)].join('; ') };
+}
+
+/**
+ * Whether a deletion left nothing of its subject in the store: no write of theirs running at the deadline, and every
+ * part reached but the open sessions, which hold no row of the store.
+ */
+function storeHoldsNoMore(report: ForgetMemoryReport): boolean {
+  return report.pendingAtDeadline === 0 && report.parts.every((part) => part.part === 'sessions' || part.reached);
+}
 
 /** Characters a token is estimated at, as `estimateTokens` counts them. */
 const CHARS_PER_TOKEN = 4;
@@ -760,12 +790,17 @@ export type SouledAgent = Agent & {
    * Deletes one person's memory from this agent's store for good and keeps it deleted: it waits for the person's
    * pending writes (up to `pendingWritesTimeoutMs`), records a tombstone, deletes their traces, document chunks,
    * compiled pages and registry row, writes the vector index again, and clears the history of the sessions this
-   * handle holds open for them. With a learning layer, the layer's own `forgetUser` runs first. `linkedSessions`
-   * names the anonymous sessions the host has tied to the person: each is deleted the same way.
+   * handle holds open for them; a `gmi()` session keeps its messages, and the report's `sessions` part says so. With
+   * a learning layer, the layer's own deletion runs first, and `agent.learning.forgetUser(userId)` runs this same
+   * deletion. `linkedSessions` names the anonymous sessions the host has tied to the person: each is deleted the same
+   * way, and its counts add into the report's parts.
    *
-   * @returns One report for the user and the linked sessions: each store with `reached` and a count or a reason,
-   *   the pages deleted and those that failed, `drained`, `pendingAtDeadline` and `complete`. It never holds the
-   *   user's id or any text.
+   * @returns One report for the user and the linked sessions, the receipt a host keeps beside its own record of the
+   *   request: each store with `reached` and a count or a reason, the pages deleted and those that failed, `drained`,
+   *   `pendingAtDeadline`, `complete`, `completedAt`, `agentId`, `libraryVersion`, the four `parts` in order
+   *   (`tombstone`, `mind`, `store`, `sessions`) and `recipients`. It never holds the user's id, a hash of the id or
+   *   any text. The person's deletion and each linked session's write one `memory.forget_incomplete` warn line when
+   *   incomplete, with each part reached or missed.
    * @throws TypeError when `userId`, or an entry of `linkedSessions`, is not a non-empty string, or holds a NUL or a
    *   lone surrogate, so no memory key can be built from it; nothing is deleted and no tombstone is written.
    */
@@ -1106,8 +1141,11 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   }
   /** The store's forgotten-user ledger: every write and read of a subject asks it. */
   const forgotten = memory.forgotten as ForgottenLedger;
+  /** Set once the store starts to close: a deletion is then refused before any part of it runs. */
+  let storeClosed = false;
   /** Closes the store, then the copy. */
   const closeStore = async (): Promise<void> => {
+    storeClosed = true;
     try {
       await memory.close();
     } finally {
@@ -2313,46 +2351,87 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     },
   });
   /**
-   * What a deletion of one subject reaches beside the store: the history of the sessions this handle holds open for
-   * the subject, which the default runtime keeps in this process. A gmi() session keeps its own messages.
+   * What a deletion of one subject does to the sessions this handle holds open for the subject, as an entry of the
+   * report's stores and as the deletion's `sessions` part. The default runtime keeps a session's history in this
+   * process: each is cleared and counted. A gmi() session keeps its own messages: the part is missed while one is open
+   * for the subject.
    */
-  const sessionHistoryOf = (key: string): ForgetMemoryReport['stores'][number] => {
+  const sessionHistoryOf = (key: string): { entry: ForgetMemoryReport['stores'][number]; part: PartOutcome } => {
+    const open = sessionsBySubject.get(key) ?? new Set<AgentSession>();
     if (rest.runtime === 'gmi') {
+      // With history off a gmi() session builds a GMI for each turn and keeps no messages between turns: none to empty.
+      if (rest.history === false) {
+        return { entry: { store: "a gmi() session's history", reached: true, deleted: 0 }, part: { reached: true, deleted: 0 } };
+      }
+      const reason = 'a gmi() session keeps its messages until the host closes it';
       return {
-        store: "a gmi() session's history",
-        reached: false,
-        reason: 'a gmi() session keeps its messages until the host closes it',
+        entry: { store: "a gmi() session's history", reached: false, reason },
+        part: open.size === 0 ? { reached: true, deleted: 0 } : { reached: false, reason },
       };
     }
     let cleared = 0;
-    for (const session of sessionsBySubject.get(key) ?? []) {
+    for (const session of open) {
       session.clear();
       cleared += 1;
     }
-    return { store: 'session history in this process', reached: true, deleted: cleared };
+    return {
+      entry: { store: 'session history in this process', reached: true, deleted: cleared },
+      part: { reached: true, deleted: cleared },
+    };
   };
   /**
    * The parts of one subject's deletion that are this agent's: the wait for the subject's pending writes, its chain,
-   * and what the agent reached beside the store.
+   * what the agent reached beside the store and the open sessions.
    */
   const deletionPartsOf = (
     subject: SuppressionSubject,
-    extra: { stores: ForgetMemoryReport['stores']; incomplete: boolean },
-  ): Pick<ForgetUserMemoryOptions, 'drain' | 'onChain' | 'extraStores' | 'alsoIncomplete'> => {
+    extra: ReportExtras,
+  ): Pick<ForgetUserMemoryOptions, 'drain' | 'onChain' | 'extraStores' | 'alsoIncomplete' | 'sessions'> => {
     const key = conversationScopeKey(agentId, subject);
+    // The sessions are dealt with once, when the deletion first asks: after the tombstone is written and the deletes
+    // are done, so a deletion that cannot write its tombstone leaves them as they are. The `sessions` part and the
+    // entry among the stores tell of that one pass.
+    let history: ReturnType<typeof sessionHistoryOf> | undefined;
+    const historyOf = () => (history ??= sessionHistoryOf(key));
     return {
       drain: () => drainSubject(key),
       onChain: (work) => onSubject(key, work),
-      // The history goes once the tombstone is written: a deletion that cannot write it deletes nothing.
-      extraStores: () => [...extra.stores, sessionHistoryOf(key)],
+      sessions: () => historyOf().part,
+      extraStores: () => [...extra.stores, historyOf().entry],
       alsoIncomplete: extra.incomplete,
     };
   };
+  /**
+   * Who receives a person's text, for a deletion's report: what `recipients()` lists. A deletion never fails on the
+   * list: when the routes the store recorded cannot be read, the report lists the routes the options name and those
+   * this process's calls took, names the recorded ones among its stores as not reached, and one
+   * `memory.recipients_unread` line is logged.
+   */
+  const recipientsForReport = async (): Promise<{ recipients: MemoryRecipient[]; stores: ForgetMemoryReport['stores'] }> => {
+    try {
+      return { recipients: await listRecipients(), stores: [] };
+    } catch (err) {
+      memoryLog.warn('memory.recipients_unread', errorFields(err));
+      return {
+        recipients: recipientsOf(routesOf(true), [...calledRoutes.values()]),
+        stores: [{ store: 'recipients recorded in the store', reached: false, reason: messageOf(err) }],
+      };
+    }
+  };
+  /**
+   * Puts who receives a person's text into deletion reports, read once for all of them after their deletions ran: each
+   * waited for its subject's writes and compiles, so a route one of those took meanwhile is listed.
+   */
+  const withRecipients = async (reports: readonly ForgetMemoryReport[]): Promise<void> => {
+    if (reports.length === 0) return;
+    const listed = await recipientsForReport();
+    for (const report of reports) {
+      report.recipients = [...listed.recipients];
+      report.stores.push(...listed.stores.map((entry) => ({ ...entry })));
+    }
+  };
   /** Deletes one subject's memory on its own chain, after its pending writes. */
-  const forgetSubject = async (
-    subject: SuppressionSubject,
-    extra: { stores: ForgetMemoryReport['stores']; incomplete: boolean },
-  ): Promise<ForgetMemoryReport> =>
+  const forgetSubject = async (subject: SuppressionSubject, extra: ReportExtras): Promise<ForgetMemoryReport> =>
     forgetUserMemory({
       memory,
       ledger: forgotten,
@@ -2363,29 +2442,53 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       legacy: await legacyDeletionOf(),
       legacyUnattributed,
     });
-  /** What the agent's learning layer deleted of a user, as entries of a deletion report; none when it runs no layer. */
-  const forgetLearner = async (userId: string): Promise<{ stores: ForgetMemoryReport['stores']; incomplete: boolean }> => {
-    const forget = built.learning?.forgetUser;
-    if (!forget) {
+  /**
+   * The learning layer's own `forgetUser`, kept before `agent.learning.forgetUser` is replaced below by a call that
+   * runs the agent's whole deletion: the deletion calls this one, never the replacement.
+   */
+  const layerForget = built.learning?.forgetUser?.bind(built.learning);
+  /** The learning layer's own entry behind each entry of a deletion report made from it, which sums its counts. */
+  const layerEntryOf = new WeakMap<object, ForgetReport['stores'][number]>();
+  /**
+   * What the agent's learning layer deleted of a user, as entries of a deletion report, beside the layer's own
+   * report; with no layer, one entry saying so.
+   */
+  const forgetLearner = async (
+    userId: string,
+  ): Promise<{ stores: ForgetMemoryReport['stores']; incomplete: boolean; learned?: ForgetReport }> => {
+    if (!layerForget) {
       return {
         stores: [{ store: 'learning store', reached: false, reason: 'this agent runs no learning layer' }],
         incomplete: false,
       };
     }
-    const learned = await forget.call(built.learning, userId);
-    const stores = learned.stores.map((entry): ForgetMemoryReport['stores'][number] =>
-      entry.reached
+    const learned = await layerForget(userId);
+    const stores = learned.stores.map((entry): ForgetMemoryReport['stores'][number] => {
+      const made: ForgetMemoryReport['stores'][number] = entry.reached
         ? {
             store: entry.store,
             reached: true,
             deleted: typeof entry.deleted === 'number' ? entry.deleted : Object.values(entry.deleted).reduce((sum, n) => sum + n, 0),
           }
-        : { store: entry.store, reached: false, reason: entry.reason },
-    );
-    return { stores, incomplete: learned.stores.some((entry) => entry.store === 'learning store' && !entry.reached) };
+        : { store: entry.store, reached: false, reason: entry.reason };
+      layerEntryOf.set(made, entry);
+      return made;
+    });
+    return { stores, incomplete: learned.stores.some((entry) => entry.store === 'learning store' && !entry.reached), learned };
   };
-  built.forgetUser = (userId, options) => {
+  /**
+   * One person's deletion with each linked session's, as one report, and the learning layer's own report of the same
+   * run when the agent runs a layer.
+   */
+  const deleteUser = (
+    userId: string,
+    options: { linkedSessions?: readonly string[] } | undefined,
+  ): Promise<{ report: ForgetMemoryReport; learned?: ForgetReport }> => {
     const linked: unknown = options?.linkedSessions ?? [];
+    // A closed store takes no delete: refused before the learning layer's part, so nothing is half deleted.
+    if (storeClosed) {
+      return Promise.reject(new Error('souledAgent: the agent was closed; open it again to delete a person from its store'));
+    }
     if (typeof userId !== 'string' || userId === '') {
       return Promise.reject(new TypeError('souledAgent: forgetUser needs a non-empty user id'));
     }
@@ -2403,11 +2506,17 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
         new TypeError('souledAgent: forgetUser needs a user id and linked session ids with no NUL and no lone surrogate'),
       );
     }
-    const run = async (): Promise<ForgetMemoryReport> => {
-      const ofUser = await forgetSubject({ kind: 'user', id: userId }, await forgetLearner(userId));
+    const run = async (): Promise<{ report: ForgetMemoryReport; learned?: ForgetReport }> => {
+      const { learned, ...ofLearner } = await forgetLearner(userId);
+      const ofUser = await forgetSubject({ kind: 'user', id: userId }, ofLearner);
       // A subject the store holds nothing more of no longer counts toward the retention requirement.
       const forgottenSubjects: SuppressionSubject[] = [{ kind: 'user', id: userId }, ...sessions.map((id) => ({ kind: 'session' as const, id }))];
-      const report: ForgetMemoryReport = { ...ofUser, stores: [...ofUser.stores], pages: { ...ofUser.pages, failed: [...ofUser.pages.failed] } };
+      const report: ForgetMemoryReport = {
+        ...ofUser,
+        stores: [...ofUser.stores],
+        pages: { ...ofUser.pages, failed: [...ofUser.pages.failed] },
+        parts: [...ofUser.parts],
+      };
       for (const sessionId of sessions) {
         const ofSession = await forgetSubject({ kind: 'session', id: sessionId }, { stores: [], incomplete: false });
         report.stores.push(...ofSession.stores.map((entry) => ({ ...entry, store: `${entry.store} (linked session)` })));
@@ -2416,13 +2525,33 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
         report.drained += ofSession.drained;
         report.pendingAtDeadline += ofSession.pendingAtDeadline;
         report.complete = report.complete && ofSession.complete;
+        // A linked session's counts add into the same four parts; a part either of them missed is not reached.
+        report.parts = report.parts.map((part, at) => addPart(part, ofSession.parts[at]));
+        // The deletion ends when its last subject's does.
+        report.completedAt = ofSession.completedAt;
       }
-      if (report.complete) for (const subject of forgottenSubjects) subjects.delete(conversationScopeKey(agentId, subject));
-      return report;
+      if (storeHoldsNoMore(report)) for (const subject of forgottenSubjects) subjects.delete(conversationScopeKey(agentId, subject));
+      // Read once for the person and the linked sessions, the list being the agent's: after the waits above.
+      await withRecipients([report]);
+      return learned ? { report, learned } : { report };
     };
     // close() waits for a deletion that is running, as it waits for a write.
     return awaitedOnClose(run());
   };
+  built.forgetUser = (userId, options) => deleteUser(userId, options).then(({ report }) => report);
+  // With a learning layer, agent.learning.forgetUser runs the same deletion and resolves to its report with the three
+  // fields the layer's report type requires, taken from the layer's own report of that run, and the layer's own entries
+  // with their counts table by table. agent.forgetUser's report stays free of the id.
+  if (built.learning && layerForget) {
+    built.learning.forgetUser = (userId) =>
+      deleteUser(userId, undefined).then(({ report, learned }) => ({
+        ...report,
+        stores: report.stores.map((entry) => layerEntryOf.get(entry) ?? entry),
+        userId: learned?.userId ?? userId,
+        namespace: learned?.namespace ?? '',
+        plainFormLeft: learned?.plainFormLeft ?? 0,
+      }));
+  }
   /**
    * Brings the ledger up to date from its copy and deletes again whatever the store holds of a forgotten subject. A
    * forgotten user's learner rows are deleted again by the learning layer first, when the agent runs one.
@@ -2438,8 +2567,9 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       legacyUnattributed,
       forSubject: async (subject) => {
         reapplied.push(subject);
+        const ofLearner = subject.kind === 'user' ? await forgetLearner(subject.id) : { stores: [], incomplete: false };
         return {
-          ...deletionPartsOf(subject, subject.kind === 'user' ? await forgetLearner(subject.id) : { stores: [], incomplete: false }),
+          ...deletionPartsOf(subject, ofLearner),
           legacy: await legacyDeletionOf(),
         };
       },
@@ -2447,8 +2577,10 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     // A subject the store holds nothing more of no longer counts toward the retention requirement.
     reports.forEach((report, at) => {
       const subject = reapplied[at];
-      if (report.complete && subject) subjects.delete(conversationScopeKey(agentId, subject));
+      if (storeHoldsNoMore(report) && subject) subjects.delete(conversationScopeKey(agentId, subject));
     });
+    // Read once for every subject deleted again, after all of them: most re-applications delete nobody.
+    await withRecipients(reports);
     // Read once the ledger is up to date from its copy: at the open, and again while it held none. Only a tombstone
     // found turns the flag on: a read that began before a deletion wrote can answer after it, with none.
     if (!forgotten.keyed && !ledgerHoldsTombstones && (await forgotten.size()) > 0) ledgerHoldsTombstones = true;

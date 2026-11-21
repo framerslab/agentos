@@ -530,23 +530,24 @@ describe('forgetUser', () => {
     } finally {
       db.close();
     }
-    const forgetLearner = vi.spyOn(a.learning!, 'forgetUser');
 
-    await a.applyTombstones!();
+    const reports = await a.applyTombstones!();
 
-    expect(forgetLearner).toHaveBeenCalledWith('alice');
+    // The one row led back to her: her deletion ran again, the learning layer's own with it.
+    expect(reports).toHaveLength(1);
+    expect(reports[0]!.stores).toContainEqual(expect.objectContaining({ store: 'learning store', reached: true }));
   });
 
   it('refuses an id no key can be built from before it deletes anything', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const { a } = await open({ runtime: 'gmi', learning: true });
-    const forgetLearner = vi.spyOn(a.learning!, 'forgetUser');
 
     await expect(a.forgetUser!('a\u0000b')).rejects.toThrow(TypeError);
     await expect(a.forgetUser!('alice', { linkedSessions: ['s\uD800'] })).rejects.toThrow(TypeError);
+    await expect(a.learning!.forgetUser!('a\u0000b')).rejects.toThrow(TypeError);
 
-    // Neither the learning layer nor the store was reached, and no tombstone was written.
-    expect(forgetLearner).not.toHaveBeenCalled();
+    // Neither the learning layer nor the store was reached, and no tombstone was written: the layer writes its
+    // tombstone to the store's ledger.
     expect(lines('memory.forget_done')).toEqual([]);
     expect(await a.memory!.isForgotten(alice)).toBe(false);
   });
