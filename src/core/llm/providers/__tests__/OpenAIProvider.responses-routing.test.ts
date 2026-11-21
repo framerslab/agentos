@@ -682,6 +682,37 @@ describe('OpenAIProvider routes to /v1/responses', () => {
     expect(posts()).toHaveLength(0);
   });
 
+  it('sends a GPT-5 call whose tools arrive in customModelParams to /v1/responses', async () => {
+    // customModelParams.tools becomes the body's `tools`, as customModelParams.model becomes its
+    // model, so function tools that arrive there make the call the tool call OpenAI refuses on chat
+    // ("To use function tools, use /v1/responses or set reasoning_effort to 'none'").
+    serve([
+      () => jsonResponse({ ...RESPONSE_META, model: 'gpt-5.6-sol', status: 'completed', output: [messageItem('ok')], usage: USAGE }),
+      () => sseResponse(sseText([created('gpt-5.6-sol'), textDelta('ok'), completed([messageItem('ok')])])),
+    ]);
+    const provider = await initializedProvider();
+
+    const result = await provider.generateCompletion('gpt-5.6-sol', USER, { customModelParams: { tools: pingTool } });
+    await collect(provider.generateCompletionStream('gpt-5.6-sol', USER, { customModelParams: { tools: pingTool } }));
+
+    const sent = posts();
+    expect(sent.map((p) => p.url)).toEqual([RESPONSES_URL, RESPONSES_URL]);
+    for (const { body } of sent) {
+      expect(body.tools).toEqual([
+        {
+          type: 'function',
+          name: 'ping',
+          description: 'Ping.',
+          parameters: { type: 'object', properties: { x: { type: 'string' } } },
+          strict: false,
+        },
+      ]);
+      expect(body).not.toHaveProperty('reasoning');
+      expect(body).not.toHaveProperty('reasoning_effort');
+    }
+    expect(result.choices[0].message.content).toBe('ok');
+  });
+
   it('routes streamed and non-streamed calls by one rule', async () => {
     // Every GPT-5 tool call goes to /v1/responses, with or without an effort: Chat Completions
     // refuses function tools for gpt-5.6-sol unless reasoning_effort is 'none' (HTTP 400, "To use
