@@ -1292,7 +1292,8 @@ describe('export and correction', () => {
     expect((JSON.parse(filed.metadata) as { corrects?: string[] }).corrects).toEqual([t1]);
     const registry = () =>
       rows<{ rebuild_sources: string | null }>(storeFile(), 'SELECT rebuild_sources FROM memory_scopes WHERE scope_id = ?', [keyOf(alice)]);
-    expect(JSON.parse(registry()[0].rebuild_sources!)).toEqual([t2]);
+    // The surviving trace of the deleted page, and the correction, which the next compile reads by id too.
+    expect(JSON.parse(registry()[0].rebuild_sources!)).toEqual([t2, result.correctionTraceId]);
 
     const calls = s.seen.length;
     await a.memory!.compileWiki();
