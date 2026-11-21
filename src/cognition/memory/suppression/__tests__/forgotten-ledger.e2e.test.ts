@@ -1596,4 +1596,34 @@ describe.skipIf(!POSTGRES_URL)('the forgotten-user ledger with the store on Post
     const third = await ForgottenLedger.open({ primary: await openPostgres(storeSchema), copy: await openPostgres(copySchema) });
     expect((await reader(third).readState()).mark).toBe(await stateOf(pairs[0].primary));
   });
+
+  it('keeps corrections and records deleted traces with the store and the copy on Postgres', async () => {
+    const pair: Pair = { primary: await openPostgres(), copy: await openPostgres() };
+    const ledger = await ForgottenLedger.open(pair);
+    // A time in milliseconds is past what a 32-bit column holds.
+    const at = 1_760_000_000_123;
+    await ledger.keepCorrection({ traceId: 'mt_fix', scopeId: 'conversation-key-of-a', text: 'My canary is WREN-9.', createdAt: at });
+    await ledger.keepCorrection({ traceId: 'mt_other', scopeId: 'conversation-key-of-b', text: 'I keep bees.', createdAt: at });
+
+    expect(await ledger.keptCorrections()).toEqual([
+      { traceId: 'mt_fix', scopeId: 'conversation-key-of-a', text: 'My canary is WREN-9.', createdAt: at },
+      { traceId: 'mt_other', scopeId: 'conversation-key-of-b', text: 'I keep bees.', createdAt: at },
+    ]);
+    expect(await ledger.correctionsOf('conversation-key-of-a')).toEqual([{ traceId: 'mt_fix' }]);
+    const tablesIn = async (adapter: StorageAdapter): Promise<string[]> =>
+      (await adapter.all<{ name: string }>('SELECT table_name AS name FROM information_schema.tables WHERE table_schema = current_schema()')).map(
+        (row) => row.name,
+      );
+    expect(await tablesIn(pair.copy)).toContain('memory_corrections');
+    expect(await tablesIn(pair.primary)).not.toContain('memory_corrections');
+
+    await ledger.markTracesDeleted(['mt_fix', 'mt_gone']);
+    for (const side of [pair.primary, pair.copy]) expect(await markersOf(side, 't1:')).toEqual(['t1:mt_fix', 't1:mt_gone']);
+    expect((await ledger.deletedTraceIds()).sort()).toEqual(['mt_fix', 'mt_gone']);
+    expect(await ledger.keptCorrections()).toEqual([{ traceId: 'mt_other', scopeId: 'conversation-key-of-b', text: 'I keep bees.', createdAt: at }]);
+    expect(await ledger.size()).toBe(0);
+
+    expect(await ledger.markForgotten(BOB, { dropCorrectionsOf: ['conversation-key-of-b'] })).toMatchObject({ written: true, correctionsDropped: 1 });
+    expect(await ledger.keptCorrections()).toEqual([]);
+  });
 });
