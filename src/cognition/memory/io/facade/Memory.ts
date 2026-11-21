@@ -684,8 +684,9 @@ export class Memory {
    * adapter across subsystems or when you need full control over adapter
    * resolution.
    *
-   * `leaveAdapterOpen` (internal) is for an adapter the caller keeps using: {@link close}, and a refused open of the
-   * forgotten-user ledger, leave it open.
+   * `leaveAdapterOpen` (internal) is for an adapter the caller keeps using: {@link close}, and a refused open, leave it
+   * open. `beforeLedger` (internal) runs once the Brain is open and before the forgotten-user ledger opens; a throw
+   * refuses the open before the ledger reads or writes anything.
    */
   static async createWithAdapter(
     adapter: import('@framers/sql-storage-adapter').StorageAdapter,
@@ -693,11 +694,13 @@ export class Memory {
       brainId?: string;
       /** @internal Leave the adapter open on close and on a refused open; the caller closes it. */
       leaveAdapterOpen?: boolean;
+      /** @internal A check of the opened Brain, before the ledger opens; a throw refuses the open. */
+      beforeLedger?: (brain: Brain) => Promise<void>;
     } = {},
   ): Promise<Memory> {
-    const { leaveAdapterOpen = false, ...config } = opts;
+    const { leaveAdapterOpen = false, beforeLedger, ...config } = opts;
     const brain = await Brain.openWithAdapter(adapter, { brainId: config.brainId });
-    return Memory._initialize(brain, { ...config, store: 'sqlite' }, leaveAdapterOpen);
+    return Memory._initialize(brain, { ...config, store: 'sqlite' }, leaveAdapterOpen, beforeLedger);
   }
 
   /**
@@ -706,12 +709,13 @@ export class Memory {
    * forgotten-user ledger over the Brain's adapter when the config asks for one.
    *
    * @throws {ForgottenLedgerError} When the ledger does not open; the Brain is closed first, unless
-   *   `leaveAdapterOpen` leaves its adapter to the caller.
+   *   `leaveAdapterOpen` leaves its adapter to the caller. Whatever `beforeLedger` throws, the same way.
    */
   private static async _initialize(
     brain: Brain,
     config: MemoryConfig,
     leaveAdapterOpen = false,
+    beforeLedger?: (brain: Brain) => Promise<void>,
   ): Promise<Memory> {
     const merged = {
       store: 'sqlite' as const,
@@ -734,17 +738,18 @@ export class Memory {
 
     // The ledger's table lives beside the traces, on the store's own adapter, which exists only now.
     let forgotten: ForgottenLedger | undefined;
-    if (config.forgotten instanceof ForgottenLedger) {
-      forgotten = config.forgotten;
-    } else if (config.forgotten) {
-      try {
+    try {
+      await beforeLedger?.(brain);
+      if (config.forgotten instanceof ForgottenLedger) {
+        forgotten = config.forgotten;
+      } else if (config.forgotten) {
         forgotten = await ForgottenLedger.open({ ...config.forgotten, primary: brain.adapter });
-      } catch (error) {
-        // A store whose ledger does not open is not served, and the refused open leaves no handle behind: closing the
-        // Brain closes its adapter, so an adapter the caller keeps is left to the caller.
-        if (!leaveAdapterOpen) await brain.close();
-        throw error;
       }
+    } catch (error) {
+      // A store whose ledger does not open is not served, and the refused open leaves no handle behind: closing the
+      // Brain closes its adapter, so an adapter the caller keeps is left to the caller.
+      if (!leaveAdapterOpen) await brain.close();
+      throw error;
     }
 
     return new Memory(brain, merged, forgotten, leaveAdapterOpen);

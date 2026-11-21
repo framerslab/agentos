@@ -663,8 +663,8 @@ export type SouledAgent = Agent & {
  *   in a store of its own, which none of them reaches; nothing is opened.
  * @throws TypeError when `soulStore` is not `{ adapter }`, or is set without `tombstoneCopy`; nothing is opened.
  * @throws Error when `soulStore` is set and a store file is at `memory/.store/memory.sqlite`, or its PostgreSQL adapter
- *   reads BIGINT as text; nothing is opened. Error when its database holds another agent's memory; what the open
- *   seeded there is taken back and the store is closed first. The host's adapter is left open on every refusal.
+ *   reads BIGINT as text; nothing is opened. Error when its database holds another agent's memory, before the
+ *   tombstone ledger opens; what the open seeded there is taken back. The host's adapter is left open on every refusal.
  */
 export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent> {
   const {
@@ -796,6 +796,13 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
           selfImprove: true,
           forgotten: forgottenOptions,
           leaveAdapterOpen: true,
+          // One agent a database: the tombstone ledger is database-wide. The Brain's open has seeded this agent's own
+          // brain_meta rows before this reads, so of two agents opened at once on an empty database the one that
+          // reads second finds the other's. It runs before the ledger opens, so a refused agent never touches the
+          // other agent's tombstones.
+          beforeLedger: async () => {
+            if (await holdsAnotherBrain(hostAdapter, agentId)) throw new Error(SOUL_STORE_HOLDS_ANOTHER_AGENT);
+          },
         })
       : await Memory.createSqlite(path.join(storeDir, 'memory.sqlite'), {
           graph: true,
@@ -809,7 +816,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     const emptyNewCopy = ownCopy !== undefined && !ownCopy.existed && (await holdsNoLedgerRow(ownCopy.adapter));
     await closeCopy();
     if (emptyNewCopy && copyPath !== undefined) await fs.rm(copyPath, { force: true }).catch(() => undefined);
-    // The host's database is left as this open found it, and its adapter open.
+    // The host's database is left as this open found it, and its adapter open: the brain_meta rows the Brain's open
+    // seeded for this agent are taken back, so the agent whose database it is opens again.
     if (hostAdapter) await dropSeededBrain(hostAdapter, agentId, openedAt).catch(() => undefined);
     throw err;
   }
@@ -834,14 +842,6 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   };
 
   if (hostAdapter) {
-    // One agent a database: the tombstone ledger is database-wide. Every open seeds its own brain_meta rows before
-    // this reads, so of two agents opened at once on an empty database the one that reads second finds the other's.
-    if (await closingOnThrow(() => holdsAnotherBrain(hostAdapter, agentId))) {
-      // The store is closed first, then what this open seeded is taken back: the agent whose database it is opens again.
-      await closeStore().catch(() => undefined);
-      await dropSeededBrain(hostAdapter, agentId, openedAt).catch(() => undefined);
-      throw new Error(SOUL_STORE_HOLDS_ANOTHER_AGENT);
-    }
     // A deleted row's bytes are overwritten in a SQLite file; the pragma builder answers nothing on PostgreSQL.
     await closingOnThrow(async () => {
       const secure = createStorageFeatures(hostAdapter).dialect.pragma('secure_delete', 'ON');
