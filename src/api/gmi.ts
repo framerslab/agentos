@@ -111,6 +111,7 @@ import type {
 } from '../cognition/learning/types.js';
 import type { ICognitiveMemoryManager } from '../cognition/memory/CognitiveMemoryManager.js';
 import { sharedForgottenLedgerOf } from '../cognition/memory/suppression/learnerTombstones.js';
+import { sharedSoulStoreOf } from './runtime/soulStore.js';
 import { normalizeHexacoTraits } from '../cognition/substrate/personas/hexaco.js';
 
 /** The options of {@link gmi}: the options of `agent()`. */
@@ -617,6 +618,9 @@ export function gmi(opts: GmiOptions): GmiHandle {
   // passes anything of the layer, and the agent runs as it did before the layer existed.
   // A souled agent hands the ledger of its memory store to the layer by the options object it was built from.
   const forgotten = sharedForgottenLedgerOf(opts);
+  // And its store, read once: each session turn's view of the soul's memory rules, and whether the end user's id goes
+  // to the model provider.
+  const soulStore = sharedSoulStoreOf(opts);
   const layer: LearningLayerHandle | undefined = cognition.learning
     ? createLearningLayer({
         ...(learningConfig ?? {}),
@@ -1254,40 +1258,51 @@ export function gmi(opts: GmiOptions): GmiHandle {
           .catch((error: unknown) => console.warn('[agentos] gmi(): could not clear the session GMI history:', error));
       };
 
-      const deps = (source: 'agent.session.send' | 'agent.session.stream', sendOpts?: unknown): GmiSessionDeps => ({
-        // Tools, the user context and the reasoning trace see the id the caller
-        // opened and the user id (that session id unless the caller named one).
-        sessionId,
-        opts,
-        userId,
-        // The turn's memory scope comes with its GMI (gmiFor), once the session has read it.
-        // Only a user id the caller passed reaches the provider's end-user field, and never an anonymous one.
-        providerUserId: seat ? sessionOptions?.userId : hookUser,
-        history,
-        lock,
-        // A seat session records under its ledger's own source when it names one (a temporary seat's is launch_agency).
-        ledger: mergeLedger(ledger, { sessionId, source: seat ? (ledger?.source ?? source) : source }),
-        // A seat session's turn takes no context from the memory provider and files nothing with it.
-        useMemoryProviderContext: !cognition.memory && !seat,
-        providerTokenBudget: resolvedRecall.providerTokenBudget,
-        observeMemoryProvider: !seat,
-        // Who the turn's memory hooks are told it serves.
-        memoryHook: memoryHookContextOf({ sessionId, namedUser: hookUser, agentId: agentStableId, call: 'session' }),
-        gmiFor: gmiFor(closing !== undefined),
-        onUsage: (u) => {
-          accumulateUsage(tally, u);
-          accumulateUsage(agentTally, u);
-          // A seat's record of its calls, which a send's result does not carry when its turn fails.
-          const toSeat = (sendOpts as SeatSendKeys | undefined)?.__onUsage;
-          if (typeof toSeat === 'function') {
-            try {
-              toSeat({ ...u });
-            } catch (error) {
-              console.warn("[agentos] gmi(): a seat's usage hand-off failed:", error);
+      // The user id the caller passed, which the provider's end-user field may carry; never an anonymous one.
+      const namedUser = seat ? sessionOptions?.userId : hookUser;
+      // A souled agent sends it only when its host opts in (sendUserIdToProvider), a seat's turn included.
+      const withheldUser = soulStore !== undefined && !soulStore.sendUserIdToProvider;
+      const deps = (source: 'agent.session.send' | 'agent.session.stream', sendOpts?: unknown): GmiSessionDeps => {
+        const memoryHook = memoryHookContextOf({ sessionId, namedUser: hookUser, agentId: agentStableId, call: 'session' });
+        // A souled agent's view of its memory rules for the turn, by the context its hooks share; a seat's turn has none.
+        const soulMemory = soulStore && !seat ? soulStore.forTurn(memoryHook) : undefined;
+        return {
+          // Tools, the user context and the reasoning trace see the id the caller
+          // opened and the user id (that session id unless the caller named one).
+          sessionId,
+          opts,
+          userId,
+          // The turn's memory scope comes with its GMI (gmiFor), once the session has read it.
+          providerUserId: withheldUser ? undefined : namedUser,
+          // A turn that withholds the id still names its user to the learning layer.
+          ...(withheldUser ? { namesUser: namedUser !== undefined } : {}),
+          ...(soulMemory ? { soulMemory } : {}),
+          history,
+          lock,
+          // A seat session records under its ledger's own source when it names one (a temporary seat's is launch_agency).
+          ledger: mergeLedger(ledger, { sessionId, source: seat ? (ledger?.source ?? source) : source }),
+          // A seat session's turn takes no context from the memory provider and files nothing with it.
+          useMemoryProviderContext: !cognition.memory && !seat,
+          providerTokenBudget: resolvedRecall.providerTokenBudget,
+          observeMemoryProvider: !seat,
+          // Who the turn's memory hooks are told it serves.
+          memoryHook,
+          gmiFor: gmiFor(closing !== undefined),
+          onUsage: (u) => {
+            accumulateUsage(tally, u);
+            accumulateUsage(agentTally, u);
+            // A seat's record of its calls, which a send's result does not carry when its turn fails.
+            const toSeat = (sendOpts as SeatSendKeys | undefined)?.__onUsage;
+            if (typeof toSeat === 'function') {
+              try {
+                toSeat({ ...u });
+              } catch (error) {
+                console.warn("[agentos] gmi(): a seat's usage hand-off failed:", error);
+              }
             }
-          }
-        },
-      });
+          },
+        };
+      };
 
       // A turn runs under the session's stop and the caller's own signal, when it
       // passes one: either ends the turn, and only close() ends the session.

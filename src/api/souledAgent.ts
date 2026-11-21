@@ -45,6 +45,8 @@ import {
 } from '../cognition/memory/io/forgetUserMemory.js';
 import { openForgottenCopy } from '../cognition/memory/suppression/forgottenCopy.js';
 import { shareForgottenLedger } from '../cognition/memory/suppression/learnerTombstones.js';
+import { shareSoulStore } from './runtime/soulStore.js';
+import { SOUL_TURN_NOTHING, type SoulTurnAnswer, type SoulTurnMemory } from '../cognition/substrate/soulTurnMemory.js';
 import { guardedWrite } from '../cognition/memory/suppression/guardedWrite.js';
 import { sweepRetention, type RetentionPeriod } from '../cognition/memory/io/retentionSweep.js';
 import { correctSubjectMemory, exportSubjectMemory, type UserMemoryExport } from '../cognition/memory/io/userMemoryExport.js';
@@ -125,7 +127,8 @@ const RECALL_LIMIT = 8;
  *   keeps it for a number of days, the account's pages are compiled only by the target `compile.minors` names, and
  *   not at all without one (`memory.compile_skipped`, `minor_no_compile`).
  * - `profiling: 'off'`: the person objects to profiling. The souled agent's own store keeps no mood or emotional
- *   context of anyone, so on its path the answer files, recalls and compiles as `longTerm` says.
+ *   context of anyone, so on its path the answer files, recalls and compiles as `longTerm` says. On `runtime: 'gmi'`
+ *   the person's turns are not scored for sentiment, whatever `longTerm` says; neither are a minor's.
  */
 export type MemoryPolicy =
   | { longTerm: 'off'; profiling?: 'off'; minor?: true }
@@ -689,6 +692,14 @@ export interface SouledAgentOptions extends AgentOptions {
    * people and sessions it holds memory of in its own process, and other processes serve the same database.
    */
   soulStore?: { adapter: StorageAdapter };
+  /**
+   * Whether a session turn on `runtime: 'gmi'` sends the end user's id to the model provider: the `userId` the session
+   * was opened with, in the provider's end-user field (OpenAI's `user` or `safety_identifier`), a seat's session
+   * included. Default `false`: no turn of the agent sends one. Set it only where the session's `userId` is an opaque or
+   * hashed id, never an email address: the provider receives it. Tools, the user context and the memory hooks get the
+   * user id either way. The default runtime sends no end-user id, with or without it.
+   */
+  sendUserIdToProvider?: boolean;
 }
 
 /**
@@ -832,6 +843,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     retention,
     legacyMemory,
     soulStore,
+    sendUserIdToProvider,
     ...rest
   } = opts;
   /** The ids the agent itself reads as naming nobody, beside the built-in ones. */
@@ -872,11 +884,25 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       "souledAgent: memoryPolicy, screen and sharedMemory act on the souled agent's own memory, and cognitive memory (runtime: 'gmi' with cognition memory on) keeps a store none of them reaches; turn cognitive memory off, or leave them out",
     );
   }
+  /**
+   * A plain agent, where the soul gives no workspace to keep a store in. On the GMI runtime it keeps the souled
+   * agent's rule for the end user's id: no session turn sends it to the model provider unless the host opts in.
+   */
+  const plainAgent = (options: AgentOptions, agentId: string | undefined): Agent => {
+    if (options.runtime === 'gmi') {
+      shareSoulStore(options, {
+        agentId: agentId ?? '',
+        sendUserIdToProvider: sendUserIdToProvider === true,
+        forTurn: () => undefined,
+      });
+    }
+    return agent(options);
+  };
   const loaded = loadSoulFromOption(rest.soul);
   if (!loaded) {
     // The soul failed to load, and loadSoulFromOption has warned: a plain agent without it, which loads it no
     // second time and so does not warn again.
-    return agent({ ...rest, soul: undefined });
+    return plainAgent({ ...rest, soul: undefined }, opts.name?.trim() || undefined);
   }
   if (!loaded.memoryDir) {
     // Inline soul: no workspace dir, so no wiki. A plain agent, and a line that says so.
@@ -885,7 +911,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
         'wired: no memory index, no read_memory_page tool and no compile on close. Pass the folder that holds ' +
         'SOUL.md to have them.',
     );
-    return agent(rest);
+    return plainAgent(rest, soulAgentIdOf(loaded.frontmatter, opts.name));
   }
   // NaN, a negative number or none is the default; Infinity is held to the longest timer when the wait starts.
   const waitMs =
@@ -1268,13 +1294,49 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     context: MemoryHookContext,
     subject: MemorySubject,
     scopeId: string,
-    at: 'recall' | 'user' | 'assistant',
+    at: 'recall' | 'mind' | 'user' | 'assistant',
   ): Promise<TurnPolicy> => {
     const open = at === 'recall' ? undefined : turnDecisions.get(context);
     const decision = open ?? decide(context, subject, scopeId);
     if (at === 'assistant') turnDecisions.delete(context);
     else turnDecisions.set(context, decision);
     return decision;
+  };
+  /**
+   * What a turn may do with the person it serves, from its decision. A policy that keeps memory recalls; it lets a
+   * recall drift what it reads, and the person's message be scored for sentiment, unless it marks them a minor or a
+   * person who objects to profiling. `off` recalls nothing, and the message is scored unless the answer holds one of
+   * those marks. A failed hook allows nothing.
+   */
+  const soulAnswerOf = (policy: TurnPolicy): SoulTurnAnswer => {
+    if (policy === 'failed') return { ...SOUL_TURN_NOTHING };
+    const profiled = policy.profiling !== 'off' && policy.minor !== true;
+    if (policy.longTerm === 'off') return { recall: false, reconsolidation: false, sentiment: profiled };
+    return { recall: true, reconsolidation: profiled, sentiment: profiled };
+  };
+  /**
+   * One session turn's view of the memory rules, for the GMI that serves it on `runtime: 'gmi'`: the subject's key, and
+   * the turn's decision, which its recall may have opened and its two writes share. A turn with no subject has none,
+   * and neither has a subject whose id no key can be built from, which one `memory.hook_failed` line says.
+   */
+  const soulTurnOf = (context: MemoryHookContext): SoulTurnMemory | undefined => {
+    const subject = turnSubjectOf(context);
+    if (!subject) return undefined;
+    let scopeId: string;
+    try {
+      scopeId = conversationScopeKey(agentId, subject);
+    } catch (err) {
+      memoryLog.warn('memory.hook_failed', { hook: 'soulMemory', ...errorFields(err) });
+      return undefined;
+    }
+    return {
+      scope: { scope: 'conversation', scopeId },
+      begin: async () => {
+        // A forgotten subject is allowed nothing, and the host's hook is not asked about them.
+        if (await forgotten.isForgotten(subject)) return { ...SOUL_TURN_NOTHING };
+        return soulAnswerOf(await turnPolicyOf(context, subject, scopeId, 'mind'));
+      },
+    };
   };
   /**
    * Whether the page tool serves a subject its own pages: always without a policy hook; under one, only when the
@@ -1749,6 +1811,11 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   const agentOptions: AgentOptions = { ...rest, ...(budget ? { budget } : {}), memoryProvider: provider, tools };
   // A learning layer gmi() builds from these options writes and reads the store's ledger.
   shareForgottenLedger(agentOptions, forgotten);
+  if (rest.runtime === 'gmi') {
+    // The GMI runtime reads the soul's store by the same options object, cognitive memory on or off: each session
+    // turn's view of the memory rules, and whether the end user's id goes to the model provider.
+    shareSoulStore(agentOptions, { agentId, sendUserIdToProvider: sendUserIdToProvider === true, forTurn: soulTurnOf });
+  }
   const built = (await closingOnThrow(() => agent(agentOptions))) as SouledAgent;
 
   // Every turn joins what close() waits for: its promise, or a stream's settled usage. The default runtime's own close
