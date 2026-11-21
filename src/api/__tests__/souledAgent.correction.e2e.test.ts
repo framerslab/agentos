@@ -10,8 +10,8 @@
  *   the store recorded cannot be read.
  * - A turn that recalled a memory which a correction or a single deletion took away while the turn's model call was
  *   open, or that began while the call was still deleting, does not file its reply (`skipped`, `corrected`): the reply
- *   can restate what was just deleted. The person's
- *   own message of that turn is filed, and so is the whole of the session's next turn.
+ *   can restate what was just deleted. The person's own message of that turn is filed, and so is the whole of the
+ *   session's next turn.
  * - Another person's running turn is filed whole, and so is a turn that overlapped a call the agent rejected. A call
  *   that fails after its ownership check keeps the running turn's reply out too, and is finished when made again.
  * - An id that is not one of the person's own traces rejects the call, with or without `text`, and changes nothing.

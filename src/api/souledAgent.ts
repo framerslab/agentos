@@ -1314,9 +1314,11 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   const sessionCloses = new Map<string, number>();
   /**
    * How many corrections and single deletions of each subject's memory this process has run, by the subject's key:
-   * counted when a call has passed its ownership check and before it changes anything, so each one that finished is
-   * in it, and so is one that failed partway, which may have deleted a named trace already. A call the agent rejected
-   * whole is not.
+   * counted twice a call, when it has passed its ownership check and before it changes anything, and again when its
+   * change has settled. So each one that finished is in it, and so is one that failed partway, which may have deleted
+   * a named trace already; a turn whose decision was opened while the call was changing the memory, and which may
+   * have recalled a trace the call then deleted, sees the count move too. A call the agent rejected whole is not
+   * counted.
    */
   const correctionCounts = new Map<string, number>();
   /**
@@ -2761,6 +2763,11 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       return Promise.reject(new TypeError('souledAgent: correctUserMemory needs a non-empty user id'));
     }
     const subject: SuppressionSubject = { kind: 'user', id: userId };
+    const countChange = () => {
+      const key = conversationScopeKey(agentId, subject);
+      correctionCounts.set(key, (correctionCounts.get(key) ?? 0) + 1);
+    };
+    let changing = false;
     // The change runs on the person's chain, after their writes and compiles; close() waits for it.
     return awaitedOnClose(
       correctSubjectMemory({
@@ -2771,13 +2778,19 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
         correction,
         // As a deletion's report lists them: the call never fails on the list.
         recipients: async () => (await recipientsForReport()).recipients,
-        // Counted on the person's chain once the named traces are known to be theirs: a reply of theirs written after
-        // this, from a turn that began before it, is not filed.
+        // Counted on the person's chain once the named traces are known to be theirs, and again when the change has
+        // settled, before the chain runs the person's next write: a reply of theirs written after this, from a turn
+        // that began before the change or while it ran, is not filed.
         beforeChange: () => {
-          const key = conversationScopeKey(agentId, subject);
-          correctionCounts.set(key, (correctionCounts.get(key) ?? 0) + 1);
+          changing = true;
+          countChange();
         },
-        onChain: (work) => onSubject(conversationScopeKey(agentId, subject), work),
+        onChain: (work) =>
+          onSubject(conversationScopeKey(agentId, subject), () =>
+            work().finally(() => {
+              if (changing) countChange();
+            }),
+          ),
       }),
     );
   };
