@@ -41,11 +41,23 @@ const OWN_ROUTE: MemoryRecipient[] = [
 let n = 0;
 let dir: string;
 const opened: SouledAgent[] = [];
+/** Every line the library logged in the case, parsed. */
+let events: Array<Record<string, unknown>>;
 beforeEach(() => {
   globalLLMProviderHealth.reset();
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'souled-export-e2e-'));
   fs.writeFileSync(path.join(dir, 'SOUL.md'), '---\nname: Aria\nagentId: aria-1\n---\nYou are Aria.');
-  setLogger(pino({ level: 'debug', base: undefined }, { write: () => undefined }));
+  events = [];
+  setLogger(
+    pino(
+      { level: 'debug', base: undefined },
+      {
+        write(line: string) {
+          events.push(JSON.parse(line));
+        },
+      },
+    ),
+  );
 });
 afterEach(async () => {
   vi.restoreAllMocks();
@@ -234,7 +246,14 @@ describe(`one person's export, on runtime ${RUNTIME}`, () => {
     // The reason never repeats what the store said.
     expect(doc.unread[0].reason).not.toContain('LARK-7');
     expect(doc.pages).toEqual([]);
+    expect(doc.held.pages).toEqual([]);
     expect(doc.traces.map((trace) => trace.text)).toContain('My canary is LARK-7.');
+    // One line tells the operator which store went unread, with the error's kind and no text.
+    const unread = events.filter((line) => line.event === 'memory.export_unread');
+    expect(unread).toHaveLength(1);
+    expect(unread[0]).toMatchObject({ store: 'compiled pages', type: expect.any(String), code: expect.any(String) });
+    expect(JSON.stringify(unread)).not.toContain('LARK-7');
+    expect(JSON.stringify(unread)).not.toContain('alice');
 
     await a.forgetUser!('bob');
     const gone = await exportOf(a, 'bob');
@@ -246,6 +265,32 @@ describe(`one person's export, on runtime ${RUNTIME}`, () => {
     expect(gone.held.pages).toEqual([]);
     expect(gone.unread).toEqual([]);
     expect(gone.recipients).toEqual(OWN_ROUTE);
+  });
+});
+
+describe(`a read that fails partway, on runtime ${RUNTIME}`, () => {
+  it('leaves its whole section out, not the part read before the failure', async () => {
+    const { a } = await open();
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await turn(a, 's1', 'alice', 'I keep it in the attic.');
+
+    const memory = a.memory!;
+    const readTrace = memory.readTrace.bind(memory);
+    let reads = 0;
+    vi.spyOn(memory, 'readTrace').mockImplementation(async (traceId: string) => {
+      reads += 1;
+      if (reads === 2) throw new Error('the store went away');
+      return readTrace(traceId);
+    });
+    const doc = await exportOf(a, 'alice');
+
+    expect(reads).toBe(2);
+    expect(doc.unread.map((entry) => entry.store)).toEqual(['conversation traces']);
+    expect(doc.traces).toEqual([]);
+    expect(doc.provided.messages).toEqual([]);
+    expect(doc.held.traces).toEqual([]);
+    expect(doc.held.graphLinks).toEqual([]);
+    expect(doc.profiling.moodStamps).toBe(0);
   });
 });
 
@@ -302,6 +347,51 @@ describe(`who receives a person's text, on runtime ${RUNTIME}`, () => {
     const listed = await recipientsOf(again);
     expect(listed[0]).toEqual({ role: 'model', provider: 'openai', model: 'stub-model' });
     expect(listed).toContainEqual(route);
+  });
+});
+
+describe(`where a route's text goes, on runtime ${RUNTIME}`, () => {
+  it("names the provider a hop's model prefix sends it to, not the hop's own provider", async () => {
+    const { a } = await open({ fallbackProviders: [{ provider: 'anthropic', model: 'openrouter:anthropic/claude-hop' }] });
+
+    const listed = await recipientsOf(a);
+
+    expect(listed).toContainEqual({ role: 'fallback-model', provider: 'openrouter', model: 'anthropic/claude-hop' });
+    expect(listed.filter((entry) => entry.provider === 'anthropic')).toEqual([]);
+  });
+
+  it('names OpenRouter for an Anthropic hop the credential layer sends there, and still after a restart with an Anthropic key', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', '');
+    vi.stubEnv('OPENROUTER_API_KEY', `k-souled-export-or-${++n}`);
+    const apiKey = `k-souled-export-${++n}`;
+    const hop = { provider: 'anthropic', model: 'claude-hop' };
+    const { a } = await open({ fallbackProviders: [hop] }, apiKey);
+    const rerouted: MemoryRecipient = { role: 'fallback-model', provider: 'openrouter', model: 'anthropic/claude-hop' };
+
+    expect(await recipientsOf(a)).toEqual([...OWN_ROUTE.slice(0, 1), rerouted, ...OWN_ROUTE.slice(1)]);
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await a.close();
+
+    vi.stubEnv('ANTHROPIC_API_KEY', `k-souled-export-anthropic-${++n}`);
+    const { a: again } = await open({ fallbackProviders: [hop] }, apiKey);
+    const listed = await recipientsOf(again);
+    // The hop goes to Anthropic now; the store still names where it went before.
+    expect(listed).toContainEqual({ role: 'fallback-model', provider: 'anthropic', model: 'claude-hop' });
+    expect(listed).toContainEqual(rerouted);
+  });
+
+  it("names a call's own model router, after a restart too", async () => {
+    const apiKey = `k-souled-export-${++n}`;
+    const { a } = await open({}, apiKey);
+    const router = { routerId: 'stub-router', initialize: async () => undefined, selectModel: async () => null };
+
+    await a.generate('Hello.', { router } as never);
+
+    const routed: MemoryRecipient = { role: 'model', provider: 'picked by the model router at each call' };
+    expect(await recipientsOf(a)).toEqual([...OWN_ROUTE, routed]);
+    await a.close();
+    const { a: again } = await open({}, apiKey);
+    expect(await recipientsOf(again)).toEqual([...OWN_ROUTE, routed]);
   });
 });
 
