@@ -837,6 +837,92 @@ describe.each(RUNTIMES)('a correction kept through a restore, on runtime %s', (r
     expect(holding('WREN-9')).toEqual([]);
     expect(saidOf(keyOf(alice))).toEqual([]);
     expect(keptIn()).toEqual([]);
+    // The registry row the late filing made again goes with it: the store names the person nowhere.
+    expect(rows('SELECT scope_id FROM memory_scopes WHERE scope_id = ?', [keyOf(alice)])).toEqual([]);
+  });
+
+  it('a compile that runs while a correction is being filed again leaves it named for the next compile', async () => {
+    const a = await open(runtime);
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await a.close();
+    const backup = backUpStore();
+    const b = await open(runtime);
+    const wrong = idOf(saidOf(keyOf(alice)), 'LARK-7')!;
+    const { correctionTraceId } = await b.correctUserMemory!('alice', { traceIds: [wrong], text: 'My canary is WREN-9.' });
+    await b.close();
+    restoreStore(backup);
+
+    // The open cannot file the correction again; applyTombstones() then files it with an embedder that is slow.
+    const remember = Memory.prototype.remember;
+    const { gate, release } = gated();
+    let slow = false;
+    let reached = false;
+    vi.spyOn(Memory.prototype, 'remember').mockImplementation(async function (this: Memory, ...args: Parameters<Memory['remember']>) {
+      if (args[1]?.createdAt !== undefined) {
+        if (!slow) throw new Error('the embedder is down');
+        reached = true;
+        await gate;
+      }
+      return remember.apply(this, args);
+    });
+    const c = await open(runtime);
+    slow = true;
+    try {
+      const reapplying = c.applyTombstones!();
+      await vi.waitFor(() => expect(reached).toBe(true), { timeout: 4_000 });
+      // A compile of the store runs meanwhile: it reads the note before the trace is there, and clears it.
+      await c.memory!.compileWiki();
+      release();
+      await reapplying;
+    } finally {
+      release();
+    }
+    expect(storedAs('My canary is WREN-9.').map((trace) => trace.id)).toEqual([correctionTraceId]);
+    const [registry] = rows<{ rebuild_sources: string | null }>('SELECT rebuild_sources FROM memory_scopes WHERE scope_id = ?', [keyOf(alice)]);
+    expect(JSON.parse(registry?.rebuild_sources ?? '[]') as string[]).toContain(correctionTraceId);
+  });
+
+  it('a tombstone read that fails after a correction filed again found its words under an earlier trace keeps that trace', async () => {
+    const a = await open(runtime);
+    await turn(a, 's1', 'alice', 'My canary is WREN-9.');
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    const said = saidOf(keyOf(alice));
+    const twin = idOf(said, 'WREN-9')!;
+    const wrong = idOf(said, 'LARK-7')!;
+    await a.close();
+    const before = backUpStore();
+    // The earlier trace is soft-deleted, so the correction's words are filed as a trace of their own.
+    const b = await open(runtime);
+    await b.memory!.forget(twin);
+    const { correctionTraceId } = await b.correctUserMemory!('alice', { traceIds: [wrong], text: 'My canary is WREN-9.' });
+    expect(correctionTraceId).not.toBe(twin);
+    await b.close();
+    restoreStore(before);
+
+    // The open cannot file the correction again; the restored store holds its words under the earlier trace.
+    const remember = Memory.prototype.remember;
+    const refused = vi.spyOn(Memory.prototype, 'remember').mockImplementation(function (this: Memory, ...args: Parameters<Memory['remember']>) {
+      if (args[1]?.createdAt !== undefined) return Promise.reject(new Error('the embedder is down'));
+      return remember.apply(this, args);
+    });
+    const c = await open(runtime);
+    refused.mockRestore();
+    expect(storedAs('My canary is WREN-9.').map((trace) => trace.id)).toEqual([twin]);
+
+    // applyTombstones() files it and is handed the earlier trace; the tombstones' read after the filing fails.
+    const ledger = c.memory!.forgotten!;
+    const isForgotten = ledger.isForgotten.bind(ledger);
+    let reads = 0;
+    vi.spyOn(ledger, 'isForgotten').mockImplementation(async (who) => {
+      reads += 1;
+      if (reads === 3) throw new Error('the copy is busy');
+      return isForgotten(who);
+    });
+    await c.applyTombstones!();
+    expect(reads).toBe(3);
+    // The trace that held the words before the filing stays, and the correction stays kept for the next try.
+    expect(storedAs('My canary is WREN-9.').map((trace) => trace.id)).toEqual([twin]);
+    expect(keptIn().map((row) => row.trace_id)).toEqual([correctionTraceId]);
   });
 
   it('a reply that restates a memory applyTombstones() deletes again during its turn is not filed', async () => {
