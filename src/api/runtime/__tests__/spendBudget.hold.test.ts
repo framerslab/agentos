@@ -200,6 +200,30 @@ describe('what a call sends, as its bound counts it', () => {
     expect(maxCostRequestOf(chatCall('openai', MODEL, { max_completion_tokens: null })).maxOutputTokens).toBeUndefined();
   });
 
+  it('counts a cap under 16 as 16 for a call OpenAIProvider sends to the Responses API, which takes no smaller cap', () => {
+    const tools = [{ type: 'function', function: { name: 'ping', parameters: { type: 'object', properties: {} } } }];
+    const call = (modelId: string, maxTokens: number | undefined, withTools: boolean, customModelParams?: Record<string, unknown>): HelperCall => ({
+      what: 'test.call',
+      route: { providerId: 'openai', modelId },
+      messages: MESSAGES,
+      maxTokens,
+      ...(withTools ? { tools } : {}),
+      ...(customModelParams ? { options: { customModelParams } } : {}),
+    });
+    // A GPT-5 or GPT-6 tool call and every call to a Responses-only model go to /v1/responses, where the provider
+    // sends a cap under 16 as 16: the bound counts what the request can spend.
+    expect(maxCostRequestOf(call('gpt-5.1', 8, true)).maxOutputTokens).toBe(16);
+    expect(maxCostRequestOf(call('gpt-6.2-sol', 1, true)).maxOutputTokens).toBe(16);
+    expect(maxCostRequestOf(call('gpt-5.3-codex', 8, false)).maxOutputTokens).toBe(16);
+    expect(maxCostRequestOf(call('gpt-5.1', undefined, true, { max_completion_tokens: 8 })).maxOutputTokens).toBe(16);
+    expect(maxCostRequestOf(call('gpt-5.1', 300, true)).maxOutputTokens).toBe(300);
+    // On the chat route the cap goes out as given.
+    expect(maxCostRequestOf(call('gpt-5.1', 8, false)).maxOutputTokens).toBe(8);
+    expect(maxCostRequestOf(call('gpt-4o', 8, true)).maxOutputTokens).toBe(8);
+    // A call with no cap has none to raise.
+    expect(maxCostRequestOf(call('gpt-5.1', undefined, true)).maxOutputTokens).toBeUndefined();
+  });
+
   it('counts a structured-output schema sent through customModelParams, with the tool-use prompt', () => {
     const schema = { type: 'json_schema', json_schema: { name: 'answer', schema: { type: 'object', description: 'd'.repeat(4_000) } } };
     const without = maxInputTokens(maxCostRequestOf(chatCall('openai', MODEL))) as number;

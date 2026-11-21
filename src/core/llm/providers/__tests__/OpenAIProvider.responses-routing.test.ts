@@ -3,8 +3,8 @@
  * stream mapping, through a real initialize() with only fetch stubbed.
  *
  * Streamed and non-streamed calls share one routing rule: Responses-only
- * models, GPT-6 tool calls, and GPT-5/GPT-6 tool calls that carry an effort
- * go to /v1/responses. The stream mapper turns Responses SSE events into the
+ * models and every GPT-5 or GPT-6 tool call, with or without an effort, go to
+ * /v1/responses. The stream mapper turns Responses SSE events into the
  * chat-chunk contract (text and tool-call deltas, exactly one final chunk),
  * sends whatever the deltas left out before that final chunk, and honours a
  * caller abort before the POST and during a pending read.
@@ -17,6 +17,7 @@ vi.stubGlobal('fetch', fetchMock);
 import { OpenAIProvider } from '../implementations/OpenAIProvider';
 import { OpenAIProviderError } from '../errors/OpenAIProviderError';
 import { StreamingReconstructor } from '../../streaming/StreamingReconstructor';
+import { maxCostRequestOf } from '../../../../api/runtime/spendBudget';
 import type { ChatMessage, ModelCompletionResponse } from '../IProvider';
 
 type Json = Record<string, any>;
@@ -439,17 +440,284 @@ describe('OpenAIProvider routes to /v1/responses', () => {
     expect(posts()).toHaveLength(0);
   });
 
+  it('sends a streamed gpt-5.6-sol tool call with no effort to /v1/responses', async () => {
+    // OpenAI refuses this call on /v1/chat/completions with HTTP 400: "Function tools with
+    // reasoning_effort are not supported for gpt-5.6-sol in /v1/chat/completions. To use
+    // function tools, use /v1/responses or set reasoning_effort to 'none'." The body it
+    // refused carried no reasoning_effort key: the model's own default effort is not none.
+    serve([() => sseResponse(sseText([created('gpt-5.6-sol'), textDelta('ok'), completed([messageItem('ok')])]))]);
+    const provider = await initializedProvider();
+    const messages: ChatMessage[] = [
+      {
+        role: 'system',
+        content: [
+          { type: 'text', text: 'You are a companion.' },
+          { type: 'text', text: 'Answer briefly.' },
+        ],
+      },
+      { role: 'user', content: 'hi' },
+    ];
+
+    const chunks = await collect(provider.generateCompletionStream('gpt-5.6-sol', messages, { tools: pingTool }));
+
+    const sent = posts();
+    expect(sent.map((p) => p.url)).toEqual([RESPONSES_URL]);
+    expect(sent[0].body.tools).toEqual([
+      {
+        type: 'function',
+        name: 'ping',
+        description: 'Ping.',
+        parameters: { type: 'object', properties: { x: { type: 'string' } } },
+        strict: false,
+      },
+    ]);
+    expect(sent[0].body.input).toEqual([
+      { role: 'system', content: 'You are a companion.\nAnswer briefly.' },
+      { role: 'user', content: 'hi' },
+    ]);
+    for (const key of ['reasoning', 'reasoning_effort', 'messages', 'stream_options']) {
+      expect(sent[0].body).not.toHaveProperty(key);
+    }
+    expect(chunks.map((c) => c.responseTextDelta).filter(Boolean).join('')).toBe('ok');
+    const final = soleFinal(chunks);
+    expect(final.error).toBeUndefined();
+    expect(final.choices[0].finishReason).toBe('stop');
+  });
+
+  it('refuses a GPT-5 tool call whose content /v1/responses cannot carry, without sending it', async () => {
+    serve([]);
+    const provider = await initializedProvider();
+    const withAudio: ChatMessage[] = [
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Transcribe this.' },
+          { type: 'input_audio', input_audio: { data: 'AAAA', format: 'wav' } },
+        ],
+      },
+    ];
+
+    await expect(provider.generateCompletion('gpt-5.6-sol', withAudio, { tools: pingTool })).rejects.toMatchObject({
+      code: 'RESPONSES_UNMAPPABLE_CONTENT',
+    });
+    await expect(
+      collect(provider.generateCompletionStream('gpt-5.5', withAudio, { tools: pingTool, effort: 'high' })),
+    ).rejects.toMatchObject({ code: 'RESPONSES_UNMAPPABLE_CONTENT' });
+    expect(posts()).toHaveLength(0);
+  });
+
+  it('carries the PDF file parts of a GPT-5 tool call to /v1/responses as input_file parts', async () => {
+    // Chat Completions takes a PDF as a `file` part ({ file: { filename, file_data } } or
+    // { file: { file_id } }); Responses takes the same file as an `input_file` part
+    // (https://developers.openai.com/api/docs/guides/pdf-files). gpt-5.1 runs at effort 'none'
+    // by default, so this call was served on chat before every GPT-5 tool call went to Responses.
+    serve([
+      () => jsonResponse({ ...RESPONSE_META, model: 'gpt-5.1', status: 'completed', output: [messageItem('ok')], usage: USAGE }),
+      () => sseResponse(sseText([created('gpt-5.1'), textDelta('ok'), completed([messageItem('ok')])])),
+    ]);
+    const provider = await initializedProvider();
+    const withPdf: ChatMessage[] = [
+      {
+        role: 'user',
+        content: [
+          { type: 'file', file: { filename: 'brief.pdf', file_data: 'data:application/pdf;base64,JVBERi0=' } },
+          { type: 'file', file: { file_id: 'file-abc123' } },
+          { type: 'text', text: 'Summarize these.' },
+        ],
+      },
+    ];
+
+    const result = await provider.generateCompletion('gpt-5.1', withPdf, { tools: pingTool });
+    await collect(provider.generateCompletionStream('gpt-5.1', withPdf, { tools: pingTool }));
+
+    const sent = posts();
+    expect(sent.map((p) => p.url)).toEqual([RESPONSES_URL, RESPONSES_URL]);
+    for (const { body } of sent) {
+      expect(body.input).toEqual([
+        {
+          role: 'user',
+          content: [
+            { type: 'input_file', filename: 'brief.pdf', file_data: 'data:application/pdf;base64,JVBERi0=' },
+            { type: 'input_file', file_id: 'file-abc123' },
+            { type: 'input_text', text: 'Summarize these.' },
+          ],
+        },
+      ]);
+    }
+    expect(result.choices[0].message.content).toBe('ok');
+  });
+
+  it('builds the Responses input from a customModelParams.messages override', async () => {
+    // On chat the override replaces the body's `messages`. Responses has no `messages` key and
+    // refuses one, so the override must become the `input` instead.
+    serve([
+      () => jsonResponse({ ...RESPONSE_META, model: 'gpt-5.1', status: 'completed', output: [messageItem('ok')], usage: USAGE }),
+    ]);
+    const provider = await initializedProvider();
+
+    await provider.generateCompletion('gpt-5.1', [{ role: 'user', content: 'original turn' }], {
+      tools: pingTool,
+      customModelParams: {
+        messages: [
+          { role: 'system', content: 'Be brief.' },
+          { role: 'user', content: 'override turn' },
+        ],
+      },
+    });
+
+    const sent = posts();
+    expect(sent.map((p) => p.url)).toEqual([RESPONSES_URL]);
+    expect(sent[0].body.input).toEqual([
+      { role: 'system', content: 'Be brief.' },
+      { role: 'user', content: 'override turn' },
+    ]);
+    expect(sent[0].body).not.toHaveProperty('messages');
+  });
+
+  it('leaves the chat-only keys of customModelParams off the /v1/responses body', async () => {
+    // On chat these overrides reach the body as written. The Responses body has no `stop`, no
+    // presence or frequency penalty and no `seed`, `n`, `logit_bias` or `logprobs`
+    // (https://developers.openai.com/api/reference/resources/responses/methods/create), and
+    // OpenAI refuses a body key it does not list. gpt-5.1 runs at effort 'none' by default, so
+    // this call was served on chat before every GPT-5 tool call went to Responses.
+    serve([
+      () => jsonResponse({ ...RESPONSE_META, model: 'gpt-5.1', status: 'completed', output: [messageItem('ok')], usage: USAGE }),
+      () => sseResponse(sseText([created('gpt-5.1'), textDelta('ok'), completed([messageItem('ok')])])),
+    ]);
+    const provider = await initializedProvider();
+    const customModelParams = {
+      stop: ['END'],
+      presence_penalty: 0.5,
+      frequency_penalty: 0.5,
+      seed: 7,
+      n: 2,
+      logit_bias: { '50256': -100 },
+      logprobs: true,
+      metadata: { run: 'r1' },
+    };
+
+    const result = await provider.generateCompletion('gpt-5.1', USER, { tools: pingTool, customModelParams });
+    await collect(provider.generateCompletionStream('gpt-5.1', USER, { tools: pingTool, customModelParams }));
+
+    const sent = posts();
+    expect(sent.map((p) => p.url)).toEqual([RESPONSES_URL, RESPONSES_URL]);
+    for (const { body } of sent) {
+      for (const key of ['stop', 'presence_penalty', 'frequency_penalty', 'seed', 'n', 'logit_bias', 'logprobs']) {
+        expect(body).not.toHaveProperty(key);
+      }
+      // A key Responses lists still passes through as written.
+      expect(body.metadata).toEqual({ run: 'r1' });
+      expect(body.tools.map((t: Json) => t.name)).toEqual(['ping']);
+    }
+    expect(result.choices[0].message.content).toBe('ok');
+  });
+
+  it('sends a chat output limit under 16 in customModelParams as max_output_tokens 16', async () => {
+    // Responses refuses a `max_output_tokens` under 16 with HTTP 400 ("Expected a value >= 16").
+    // The `maxTokens` option is raised to 16 already; a limit that arrives through
+    // customModelParams under a chat name or its own must be raised too.
+    const reply = () =>
+      jsonResponse({ ...RESPONSE_META, model: 'gpt-5.1', status: 'completed', output: [messageItem('ok')], usage: USAGE });
+    serve([reply, reply, reply, reply]);
+    const provider = await initializedProvider();
+
+    await provider.generateCompletion('gpt-5.1', USER, { tools: pingTool, customModelParams: { max_completion_tokens: 8 } });
+    await provider.generateCompletion('gpt-5.1', USER, { tools: pingTool, customModelParams: { max_tokens: 1 } });
+    await provider.generateCompletion('gpt-5.1', USER, { tools: pingTool, customModelParams: { max_output_tokens: 8 } });
+    await provider.generateCompletion('gpt-5.1', USER, { tools: pingTool, customModelParams: { max_completion_tokens: 4096 } });
+
+    const sent = posts();
+    expect(sent.map((p) => p.url)).toEqual([RESPONSES_URL, RESPONSES_URL, RESPONSES_URL, RESPONSES_URL]);
+    expect(sent.map((p) => p.body.max_output_tokens)).toEqual([16, 16, 16, 4096]);
+    for (const { body } of sent) {
+      expect(body).not.toHaveProperty('max_completion_tokens');
+      expect(body).not.toHaveProperty('max_tokens');
+    }
+  });
+
+  it('sends no larger output cap than the spend bound counts for the same call', async () => {
+    // A metered call reserves for the cap its bound counts (maxCostRequestOf). The provider raises a
+    // cap under 16 to 16 on /v1/responses, so the bound must count 16 too: before every GPT-5 tool
+    // call went to Responses, this gpt-5.1 call sent its cap of 8 on chat as given.
+    const reply = () =>
+      jsonResponse({ ...RESPONSE_META, model: 'gpt-5.1', status: 'completed', output: [messageItem('ok')], usage: USAGE });
+    const calls: Array<{ model: string; maxTokens?: number; customModelParams?: Record<string, unknown> }> = [
+      { model: 'gpt-5.1', maxTokens: 8 },
+      { model: 'gpt-5.1', customModelParams: { max_completion_tokens: 8 } },
+      { model: 'gpt-6.2-sol', maxTokens: 1 },
+    ];
+    serve(calls.map(() => reply));
+    const provider = await initializedProvider();
+
+    for (const { model, maxTokens, customModelParams } of calls) {
+      await provider.generateCompletion(model, USER, {
+        tools: pingTool,
+        ...(maxTokens !== undefined ? { maxTokens } : {}),
+        ...(customModelParams ? { customModelParams } : {}),
+      });
+    }
+
+    const sent = posts();
+    expect(sent.map((p) => p.url)).toEqual(calls.map(() => RESPONSES_URL));
+    calls.forEach(({ model, maxTokens, customModelParams }, i) => {
+      const bound = maxCostRequestOf({
+        route: { providerId: 'openai', modelId: model },
+        messages: USER,
+        tools: pingTool,
+        maxTokens,
+        ...(customModelParams ? { options: { customModelParams } } : {}),
+      });
+      expect(sent[i].body.max_output_tokens).toBe(16);
+      expect(bound.maxOutputTokens).toBe(16);
+    });
+  });
+
+  it('refuses a customModelParams.messages override that holds no message objects, without sending it', async () => {
+    serve([]);
+    const provider = await initializedProvider();
+
+    await expect(
+      provider.generateCompletion('gpt-5.1', USER, { tools: pingTool, customModelParams: { messages: [null] } }),
+    ).rejects.toMatchObject({ code: 'RESPONSES_UNMAPPABLE_CONTENT' });
+    expect(posts()).toHaveLength(0);
+  });
+
+  it('sends a GPT-5 call whose tools arrive in customModelParams to /v1/responses', async () => {
+    // customModelParams.tools becomes the body's `tools`, as customModelParams.model becomes its
+    // model, so function tools that arrive there make the call the tool call OpenAI refuses on chat
+    // ("To use function tools, use /v1/responses or set reasoning_effort to 'none'").
+    serve([
+      () => jsonResponse({ ...RESPONSE_META, model: 'gpt-5.6-sol', status: 'completed', output: [messageItem('ok')], usage: USAGE }),
+      () => sseResponse(sseText([created('gpt-5.6-sol'), textDelta('ok'), completed([messageItem('ok')])])),
+    ]);
+    const provider = await initializedProvider();
+
+    const result = await provider.generateCompletion('gpt-5.6-sol', USER, { customModelParams: { tools: pingTool } });
+    await collect(provider.generateCompletionStream('gpt-5.6-sol', USER, { customModelParams: { tools: pingTool } }));
+
+    const sent = posts();
+    expect(sent.map((p) => p.url)).toEqual([RESPONSES_URL, RESPONSES_URL]);
+    for (const { body } of sent) {
+      expect(body.tools).toEqual([
+        {
+          type: 'function',
+          name: 'ping',
+          description: 'Ping.',
+          parameters: { type: 'object', properties: { x: { type: 'string' } } },
+          strict: false,
+        },
+      ]);
+      expect(body).not.toHaveProperty('reasoning');
+      expect(body).not.toHaveProperty('reasoning_effort');
+    }
+    expect(result.choices[0].message.content).toBe('ok');
+  });
+
   it('routes streamed and non-streamed calls by one rule', async () => {
-    const chatStream = () =>
-      sseResponse(
-        `data: ${JSON.stringify({
-          id: 'c',
-          object: 'chat.completion.chunk',
-          created: 1,
-          model: 'gpt-5.6',
-          choices: [{ index: 0, delta: { content: 'ok' }, finish_reason: 'stop' }],
-        })}\n\ndata: [DONE]\n\n`,
-      );
+    // Every GPT-5 tool call goes to /v1/responses, with or without an effort: Chat Completions
+    // refuses function tools for gpt-5.6-sol unless reasoning_effort is 'none' (HTTP 400, "To use
+    // function tools, use /v1/responses or set reasoning_effort to 'none'"). Calls with no tools,
+    // and gpt-4o, stay on chat.
     const chatJson = () =>
       jsonResponse({
         id: 'c',
@@ -458,11 +726,16 @@ describe('OpenAIProvider routes to /v1/responses', () => {
         model: 'gpt-4o',
         choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
       });
+    const responsesJson = () =>
+      jsonResponse({ ...RESPONSE_META, model: 'gpt-5.6', status: 'completed', output: [messageItem('ok')], usage: USAGE });
+    const responsesStream = (model: string) => () =>
+      sseResponse(sseText([created(model), textDelta('ok'), completed([messageItem('ok')])]));
     serve([
+      responsesJson,
       chatJson,
+      responsesStream('gpt-5.5'),
+      responsesStream('gpt-5.6'),
       chatJson,
-      () => sseResponse(sseText([created('gpt-5.5'), textDelta('ok'), completed([messageItem('ok')])])),
-      chatStream,
       chatJson,
     ]);
     const provider = await initializedProvider();
@@ -472,14 +745,23 @@ describe('OpenAIProvider routes to /v1/responses', () => {
     await collect(provider.generateCompletionStream('gpt-5.5', USER, { tools: pingTool, effort: 'max' }));
     await collect(provider.generateCompletionStream('gpt-5.6', USER, { tools: pingTool }));
     await provider.generateCompletion('gpt-4o', USER, { tools: pingTool, effort: 'high' });
+    await provider.generateCompletion('gpt-5.6', USER, { effort: 'high' });
 
     const sent = posts();
-    expect(sent.map((p) => p.url)).toEqual([CHAT_URL, CHAT_URL, RESPONSES_URL, CHAT_URL, CHAT_URL]);
+    expect(sent.map((p) => p.url)).toEqual([RESPONSES_URL, CHAT_URL, RESPONSES_URL, RESPONSES_URL, CHAT_URL, CHAT_URL]);
+    // A GPT-5 tool call with no effort sends none: the model reasons at its own default.
+    for (const i of [0, 3]) {
+      expect(sent[i].body).not.toHaveProperty('reasoning');
+      expect(sent[i].body).not.toHaveProperty('reasoning_effort');
+      expect(sent[i].body.tools.map((t: Json) => t.name)).toEqual(['ping']);
+    }
     // No tools: gpt-6-sol keeps its effort on chat.
     expect(sent[1].body.reasoning_effort).toBe('high');
     // A streamed GPT-5 tool call with an effort keeps it on /v1/responses.
     expect(sent[2].body.reasoning).toEqual({ effort: 'xhigh' });
     expect(sent[2].body.stream).toBe(true);
+    // No tools: gpt-5.6 keeps its effort on chat.
+    expect(sent[5].body.reasoning_effort).toBe('high');
   });
 });
 

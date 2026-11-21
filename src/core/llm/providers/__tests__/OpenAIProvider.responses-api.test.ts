@@ -133,14 +133,26 @@ describe('shouldRouteToOpenAiResponsesApi', () => {
     }
   });
 
-  it('does NOT route without tools, without effort, or on non-gpt-5 reasoning/chat models', () => {
+  it('routes every GPT-5 tool call, with or without an effort, and no GPT-5 call without tools', () => {
+    // gpt-5.6-sol answers a function-tool call on /v1/chat/completions that carries no
+    // reasoning_effort with HTTP 400 ("To use function tools, use /v1/responses or set
+    // reasoning_effort to 'none'"): its default effort is not none.
+    for (const model of ['gpt-5.6-sol', 'gpt-5.6', 'gpt-5.5', 'gpt-5.4-mini', 'gpt-5-mini', 'gpt-5']) {
+      expect(shouldRouteToOpenAiResponsesApi(model, userMsgs, { tools: toolsOpt })).toBe(true);
+      expect(shouldRouteToOpenAiResponsesApi(model, cacheMarkedSystem, { tools: toolsOpt })).toBe(true);
+      expect(shouldRouteToOpenAiResponsesApi(model, userMsgs, { tools: toolsOpt, effort: 'low' })).toBe(true);
+      expect(shouldRouteToOpenAiResponsesApi(model, userMsgs, { effort: 'high' })).toBe(false);
+      expect(shouldRouteToOpenAiResponsesApi(model, userMsgs, { tools: [] })).toBe(false);
+    }
+  });
+
+  it('does NOT route without tools, or on non-gpt-5 reasoning/chat models', () => {
     expect(shouldRouteToOpenAiResponsesApi('gpt-5.5', userMsgs, { effort: 'xhigh' })).toBe(false); // no tools
-    expect(shouldRouteToOpenAiResponsesApi('gpt-5.5', userMsgs, { tools: toolsOpt })).toBe(false); // no effort
     expect(shouldRouteToOpenAiResponsesApi('o3', userMsgs, { tools: toolsOpt, effort: 'high' })).toBe(false); // o-series ok on chat
     expect(shouldRouteToOpenAiResponsesApi('gpt-4o', userMsgs, { tools: toolsOpt, effort: 'high' })).toBe(false); // legacy
   });
 
-  it('keeps a GPT-5 tool call off Responses when a part has no Responses form (audio, tool_result)', () => {
+  it('routes a GPT-5 tool call to Responses even when a part has no Responses form (audio, tool_result): the builder refuses it', () => {
     const audio: ChatMessage[] = [
       { role: 'user', content: [{ type: 'text', text: 'hi' }, { type: 'input_audio', input_audio: { data: 'AAAA', format: 'wav' } }] },
     ];
@@ -149,7 +161,10 @@ describe('shouldRouteToOpenAiResponsesApi', () => {
     ];
     for (const messages of [audio, toolResultBlock]) {
       expect(isResponsesMappableMessage(messages[0])).toBe(false);
-      expect(shouldRouteToOpenAiResponsesApi('gpt-5.5', messages, { tools: toolsOpt, effort: 'xhigh' })).toBe(false);
+      // Chat Completions refuses a GPT-5 function-tool call too, so the call is refused before
+      // sending (RESPONSES_UNMAPPABLE_CONTENT) instead of sent to a route that answers 400.
+      expect(shouldRouteToOpenAiResponsesApi('gpt-5.5', messages, { tools: toolsOpt, effort: 'xhigh' })).toBe(true);
+      expect(shouldRouteToOpenAiResponsesApi('gpt-5.6-sol', messages, { tools: toolsOpt })).toBe(true);
     }
   });
 
@@ -487,9 +502,24 @@ describe('OpenAIProvider.generateCompletion routing (endpoint selection)', () =>
     expect((body as Record<string, unknown>).input).toBeDefined();
   });
 
-  it('gpt-5.5 + tools + NO effort → stays on /chat/completions', async () => {
-    makeApiRequest.mockResolvedValue({ id: 'r', object: 'chat.completion', created: 1, model: 'gpt-5.5', choices: [{ index: 0, message: { role: 'assistant', content: 'x' }, finish_reason: 'stop' }] });
+  it('gpt-5.5 + tools + NO effort → POSTs /responses with no reasoning', async () => {
+    // Chat Completions refuses a GPT-5 function-tool call unless reasoning_effort is 'none';
+    // a call with no effort runs at the model's default (medium on gpt-5.5) and is answered 400.
+    makeApiRequest.mockResolvedValue({
+      id: 'r', model: 'gpt-5.5', status: 'completed',
+      output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'ok' }] }],
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+    });
     await provider.generateCompletion('gpt-5.5', userMsgs, { tools: toolsOpt } as ModelCompletionOptions);
+    const [endpoint, , , body] = makeApiRequest.mock.calls[0];
+    expect(endpoint).toBe('/responses');
+    expect(body as Record<string, unknown>).not.toHaveProperty('reasoning');
+    expect(body as Record<string, unknown>).not.toHaveProperty('reasoning_effort');
+  });
+
+  it('gpt-5.5 + effort + NO tools → stays on /chat/completions', async () => {
+    makeApiRequest.mockResolvedValue({ id: 'r', object: 'chat.completion', created: 1, model: 'gpt-5.5', choices: [{ index: 0, message: { role: 'assistant', content: 'x' }, finish_reason: 'stop' }] });
+    await provider.generateCompletion('gpt-5.5', userMsgs, { effort: 'high' } as ModelCompletionOptions);
     expect(makeApiRequest.mock.calls[0][0]).toBe('/chat/completions');
   });
 
