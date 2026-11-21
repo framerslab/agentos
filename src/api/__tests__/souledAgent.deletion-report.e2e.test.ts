@@ -14,8 +14,9 @@
  * - On a souled agent with a learning layer, `agent.learning.forgetUser` runs the same deletion as `agent.forgetUser`
  *   and returns its report with the three fields the layer's report type requires.
  * - On `runtime: 'gmi'` a deletion empties each session the handle holds open for the person and for each linked
- *   session: its messages, and what its GMI holds of the person (its history, its sentiment trend, its working-memory
- *   slots). Another person's session is left as it is, and an idle session is emptied whatever the deadline. A
+ *   session: its messages, and what its GMI holds of the person (its history, its reasoning trace, its sentiment trend,
+ *   its working-memory slots, its metaprompts' imprints; a metaprompt still running applies nothing). Another
+ *   person's session is left as it is, and an idle session is emptied whatever the deadline. A
  *   session whose turn is still running at the deadline leaves the `sessions` part missed; it is emptied once that
  *   turn ends, the turn's memory writes are refused, and the deletion made again reports the part reached. The
  *   default runtime clears each open session handle and counts it.
