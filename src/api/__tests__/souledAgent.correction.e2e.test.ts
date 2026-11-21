@@ -11,7 +11,8 @@
  * - A turn that recalled a memory which a correction or a single deletion took away while the turn's model call was
  *   open does not file its reply (`skipped`, `corrected`): the reply can restate what was just deleted. The person's
  *   own message of that turn is filed, and so is the whole of the session's next turn.
- * - Another person's running turn is filed whole, and so is a turn that overlapped a call the agent rejected.
+ * - Another person's running turn is filed whole, and so is a turn that overlapped a call the agent rejected. A call
+ *   that fails after its ownership check keeps the running turn's reply out too, and is finished when made again.
  * - An id that is not one of the person's own traces rejects the call, with or without `text`, and changes nothing.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -295,6 +296,36 @@ describe.each(RUNTIMES)('deleting or correcting one memory, on runtime %s', (run
       // The session's next turn began after the change: both of its sides are filed.
       const next = await writeOf(await session.send('Thank you.'));
       expect(next.entries.map((entry) => entry.outcome)).toEqual(['written', 'written']);
+    } finally {
+      release();
+    }
+  });
+
+  it('a deletion that fails partway keeps the reply of the running turn out too, and finishes when made again', async () => {
+    const { gate, release } = gated();
+    const a = await open(runtime, [reply.text('A canary, lovely.'), reply.hold([], gate, reply.text('Your canary is LARK-7.')), ...spare()]);
+    try {
+      await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+      const x = idOf(saidOf(keyOf(alice)), 'LARK-7')!;
+      const calls = served.seen.length;
+      const running = a.session('s2', { userId: 'alice' }).send('What is my canary called?');
+      await vi.waitFor(() => expect(served.seen).toHaveLength(calls + 1), { timeout: 4_000 });
+
+      // The store refuses the delete once: the call rejects, and x is still stored.
+      vi.spyOn(a.memory!, 'deleteTraces').mockRejectedValueOnce(new Error('the store is busy'));
+      await expect(correct(a, 'alice', [x])).rejects.toThrow('the store is busy');
+      expect(holding('LARK-7').map((row) => row.id)).toEqual([x]);
+
+      release();
+      const record = await writeOf(await running);
+      expect(record.entries).toEqual([
+        { role: 'user', outcome: 'written', traceId: idOf(saidOf(keyOf(alice)), 'What is my canary called?') },
+        { role: 'assistant', outcome: 'skipped', reason: 'corrected' },
+      ]);
+
+      // The same call made again deletes x, and no row holds what it said.
+      expect((await correct(a, 'alice', [x])).deleted).toBe(1);
+      expect(holding('LARK-7')).toEqual([]);
     } finally {
       release();
     }
