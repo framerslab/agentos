@@ -395,7 +395,7 @@ export interface CognitiveMemoryConfig {
   /**
    * Which of the Brain's rows the manager's store loads, reads and files (`MemoryStoreConfig.rows`). `'mind'`: the
    * rows a souled agent's mind filed alone (`MemoryTrace.filing`), and `encode()` files a `conversation` trace with a
-   * `filing` and refuses any other.
+   * `filing`, under the conversation key of the filing's subject, and refuses any other before its text is read.
    *
    * @default 'all'
    * @internal

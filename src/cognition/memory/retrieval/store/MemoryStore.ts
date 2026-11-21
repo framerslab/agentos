@@ -59,6 +59,7 @@ import { fillScopeIds } from './migrations/v2-to-v3.js';
 import { encodePlainScopeId, onBrainRefiled, refileBrainScopeIds, type RefiledTrace } from './scopeIdForm.js';
 import { copyKey } from '../graph/knowledge/memoryCopies.js';
 import { memoryLog } from '../../log.js';
+import { parseConversationScopeKey } from './conversationScopeKey.js';
 
 // ---------------------------------------------------------------------------
 // Embedding guard (CR4)
@@ -140,7 +141,9 @@ export interface MemoryStoreConfig {
    * The Brain rows this store loads, reads and files. `'all'`: every row. `'mind'`: only the rows a souled agent's
    * mind filed, whose metadata holds `filedBy: 'mind'` ({@link MemoryTrace.filing}): no load ({@link hydrateScope},
    * the whole-brain hydration, {@link loadTracesForRecall}) and no recall leg's read of the Brain takes another row,
-   * and {@link store} refuses a trace that is not a `conversation` trace with a filing. Such a store also leaves out
+   * and {@link store} refuses a trace that is not a `conversation` trace with a filing, filed under the conversation
+   * key of the filing's subject ({@link mindFilingRefusal}); no read of its vector index takes another writer's
+   * document. Such a store also leaves out
    * of its index a stored vector whose size is not its embedding model's (`embeddingDimension`, else the size the
    * embedding manager reports), with one `memory.vectors_unfit` line a load: the row stays in the Brain and is read by
    * its words, and its text is never embedded again.
@@ -437,6 +440,33 @@ function filingMetadataOf(trace: MemoryTrace): Record<string, unknown> {
 /** Whether a Brain row is one a souled agent's mind filed: its metadata holds `filedBy: 'mind'`. */
 function isMindRow(row: Pick<MemoryTraceRow, 'metadata'>): boolean {
   return parseTraceMetadata(row.metadata).filedBy === MIND_FILER;
+}
+
+/**
+ * Why a store of a souled agent's mind ({@link MemoryStoreConfig.rows} `'mind'`) refuses a trace, or undefined when it
+ * files it. It files a trace under scope `'conversation'` with a filing ({@link MemoryTrace.filing}) whose scope id is
+ * the conversation key of the filing's subject (`conversationScopeKey`), so nothing a person said is filed under a key
+ * another person's turn reads, or under one that is no person's.
+ *
+ * @internal
+ */
+export function mindFilingRefusal(scope: unknown, scopeId: unknown, filing: unknown): string | undefined {
+  if (scope !== 'conversation' || !isMindFiling(filing)) {
+    return (
+      "a souled agent's mind files a trace under scope 'conversation' with a filing " +
+      "(filedBy 'mind', a speaker and a subject) alone"
+    );
+  }
+  const subject = typeof scopeId === 'string' ? parseConversationScopeKey(scopeId)?.subject : undefined;
+  if (
+    !subject ||
+    subject.kind === 'operator' ||
+    subject.kind !== filing.subject.kind ||
+    subject.id !== filing.subject.id
+  ) {
+    return "a souled agent's mind files a trace under the conversation key of its filing's subject alone";
+  }
+  return undefined;
 }
 
 /**
@@ -1323,7 +1353,29 @@ export class MemoryStore {
   rowsCondition(metadataColumn: string): { sql: string; params: unknown[] } | undefined {
     const brain = this.brain;
     if (!this.mindRowsOnly || !brain) return undefined;
-    return { sql: `${brain.features.dialect.jsonExtract(metadataColumn, '$.filedBy')} = ?`, params: [MIND_FILER] };
+    // Only a row whose metadata text holds the key is read as JSON. A SQL read of JSON raises on metadata that is not
+    // JSON (`json_extract` on SQLite, the `::jsonb` cast on PostgreSQL), so one such row of another writer would fail
+    // the read of every row beside it. A key's own text holds the key in quotes; a string that holds it escapes them.
+    const filedBy = brain.features.dialect.jsonExtract(metadataColumn, '$.filedBy');
+    return {
+      sql: `(CASE WHEN ${metadataColumn} LIKE ? THEN ${filedBy} END) = ?`,
+      params: ['%"filedBy"%', MIND_FILER],
+    };
+  }
+
+  /**
+   * Whether this store reads a document of its vector index: with `rows: 'mind'`, one whose Brain row names the mind as
+   * its filer, or, with no row to read, whose trace or document holds a filing. A store of every row reads each one.
+   * An index another store on the Brain writes to holds that store's documents beside this one's.
+   */
+  private readsDocument(
+    row: Pick<MemoryTraceRow, 'metadata'> | undefined,
+    cached: MemoryTrace | undefined,
+    metadata: Record<string, unknown> | undefined,
+  ): boolean {
+    if (!this.mindRowsOnly) return true;
+    if (row) return isMindRow(row);
+    return isMindFiling(cached?.filing ?? filingOfDocument(metadata?.filingJson).filing);
   }
 
   /**
@@ -2150,14 +2202,10 @@ export class MemoryStore {
    */
   async store(trace: MemoryTrace): Promise<void> {
     this.beginOperation();
-    // A store of the mind's rows files the mind's conversation traces alone, so nothing a person said is filed in a
-    // scope another person's turn reads.
-    if (this.mindRowsOnly && (trace.scope !== 'conversation' || !isMindFiling(trace.filing))) {
-      throw new Error(
-        "MemoryStore.store: this store files a souled agent's conversation traces alone: a trace under scope " +
-          "'conversation' with a filing (filedBy 'mind', a speaker and a subject)",
-      );
-    }
+    // A store of the mind's rows files the mind's conversation traces alone, each under its subject's key, so nothing
+    // a person said is filed in a scope another person's turn reads.
+    const refused = this.mindRowsOnly ? mindFilingRefusal(trace.scope, trace.scopeId, trace.filing) : undefined;
+    if (refused) throw new Error(`MemoryStore.store: ${refused}`);
     const namespace = this.coordinationNamespace;
     const brain = this.brain;
     await withTraceOperation(
@@ -2532,6 +2580,8 @@ export class MemoryStore {
             if (!cached) staleDocuments.push(result.id);
             continue;
           }
+          // Nor is another writer's, to a store of the mind's rows: the document stays in the index it shares.
+          if (!this.readsDocument(row, cached, result.metadata as Record<string, unknown> | undefined)) continue;
 
           const trace: MemoryTrace =
             cached ??
@@ -2902,6 +2952,8 @@ export class MemoryStore {
             if (!cached) staleDocuments.push(doc.id);
             continue;
           }
+          // Nor is another writer's, to a store of the mind's rows: the document stays in the index it shares.
+          if (!this.readsDocument(row, cached, doc.metadata as Record<string, unknown> | undefined)) continue;
           if (cached) {
             // A document left behind in a collection its trace moved out of lists the trace under its own scope only.
             if (cached.isActive && !filedElsewhere(cached, scope, scopeId)) {

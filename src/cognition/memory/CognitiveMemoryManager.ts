@@ -38,7 +38,7 @@ import {
   type IContentFeatureDetector,
 } from './core/encoding/ContentFeatureDetector.js';
 import { computeCurrentStrength } from './core/decay/DecayModel.js';
-import { MemoryStore } from './retrieval/store/MemoryStore.js';
+import { MemoryStore, mindFilingRefusal } from './retrieval/store/MemoryStore.js';
 import {
   MEMORY_RECALL_CAPTURE_VERSION,
   candidatesFrom,
@@ -143,7 +143,8 @@ export interface ICognitiveMemoryManager {
       turnUserId?: string;
       /**
        * {@link MemoryTrace.filing}: set on a trace a souled agent's mind files for a turn. A manager configured with
-       * `rows: 'mind'` files a `conversation` trace that carries one, and rejects any other.
+       * `rows: 'mind'` files a `conversation` trace that carries one, under the conversation key of its subject
+       * (`scopeId`), and rejects any other before its text reaches the feature detector or the embedding model.
        *
        * @internal
        */
@@ -797,6 +798,13 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     options: EncodeOptions = {}
   ): Promise<MemoryTrace> {
     this.ensureInitialized();
+
+    // A manager of a souled agent's mind refuses here what its store would refuse, before the text reaches the feature
+    // detector, the mechanisms or the embedding model.
+    if (this.config.rows === 'mind') {
+      const refused = mindFilingRefusal(options.scope ?? 'user', options.scopeId ?? this.config.agentId, options.filing);
+      if (refused) throw new Error(`CognitiveMemoryManager.encode: ${refused}`);
+    }
 
     const now = Date.now();
     const encodingConfig = { ...DEFAULT_ENCODING_CONFIG, ...this.config.encoding };
