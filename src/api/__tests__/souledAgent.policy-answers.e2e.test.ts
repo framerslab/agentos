@@ -243,6 +243,8 @@ describe.each(RUNTIMES)('policy answers, on runtime %s', (runtime) => {
       ['an empty model', { provider: 'anthropic', model: '' }],
       ['nothing', null],
       ['a word', 'anthropic'],
+      // The prefix would take the compile, and the child's text, to the other provider on its key from the environment.
+      ['a model whose prefix names another provider', { provider: 'openai', model: 'anthropic:stub-minor' }],
     ])('refuses %s before anything opens', async (_case, minors) => {
       // Each target is one a host can build from configuration that is not there; none of them type-checks.
       const opening = open({ retention: { traces: { days: 30 } }, compile: { minors } as never });
