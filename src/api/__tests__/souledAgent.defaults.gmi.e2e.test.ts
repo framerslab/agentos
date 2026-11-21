@@ -8,6 +8,8 @@
  * - A session whose user id no memory key can be built from runs its turn, and one `memory.hook_failed` line names
  *   the soul's turn memory.
  * - An inline soul, and an optional soul that does not load, give a plain agent: it keeps the same rule for the id.
+ * - A team a session launches seats its sessions as the session's user and keeps the same rule for the id.
+ * - A turn whose tombstone read stalls ends at once when its session closes.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
@@ -20,6 +22,7 @@ import { buildSessionSeat } from '../runtime/agencyLaunch/sessionSeat';
 import { reply, script, type ProviderScript } from './helpers/stubProviders';
 import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
+import { ForgottenLedger } from '../../cognition/memory/suppression/ForgottenLedger';
 
 /** The runtime every case runs on. */
 const RUNTIME = 'gmi' as const;
@@ -204,6 +207,39 @@ describe.each(MEMORY)('a team a souled GMI session launches, %s', (_name, cognit
     expect(turnCalls(s)).toHaveLength(4);
     for (const call of turnCalls(s)) expect(call.options.userId).toBe('u-42');
     expect(told[0].userContext).toMatchObject({ userId: 'u-42' });
+  });
+});
+
+describe('a souled GMI turn whose tombstone read stalls, with cognitive memory on', () => {
+  it('ends at once when its session closes', async () => {
+    const { a } = await open(MEMORY[1][1]);
+    // Every tombstone read waits until the case ends.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const original = ForgottenLedger.prototype.isForgotten;
+    let reads = 0;
+    vi.spyOn(ForgottenLedger.prototype, 'isForgotten').mockImplementation(async function (this: ForgottenLedger, subject) {
+      reads += 1;
+      await gate;
+      return original.call(this, subject);
+    });
+    const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+    try {
+      const session = a.session('s1', { userId: 'u-42' });
+      const outcome = session.send('Who am I?').then(
+        () => 'answered',
+        () => 'stopped',
+      );
+      // The turn waits on its read, before its model call.
+      await vi.waitFor(() => expect(reads).toBeGreaterThan(0), { timeout: 10_000 });
+      await Promise.race([session.close(), sleep(3000)]);
+
+      expect(await Promise.race([outcome, sleep(2000).then(() => 'still waiting')])).not.toBe('still waiting');
+    } finally {
+      release();
+    }
   });
 });
 

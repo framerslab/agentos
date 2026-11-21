@@ -18,7 +18,9 @@
  *   session's next turn, and a later failure makes it ask again.
  * - On `runtime: 'gmi'` with sentiment on and cognitive memory off (`cognition: 'full'`, `memory: false`), a minor's
  *   turn and the turn of a person who objects to profiling are not scored for sentiment, and no turn sends the
- *   person's id to the provider. The host is asked once a turn, for the recall, the turn and both writes.
+ *   person's id to the provider. The host is asked once a turn, for the recall, the turn and both writes, a recall
+ *   that resumes after its timeout included. A person forgotten while the host answers is not scored, and a tombstone
+ *   ledger that does not answer holds no turn past the hooks' timeout.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
@@ -36,6 +38,7 @@ import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory'
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 import { clearDefaultProvider, setDefaultProvider } from '../runtime/global-default';
 import { SentimentTracker } from '../../cognition/substrate/SentimentTracker';
+import { ForgottenLedger } from '../../cognition/memory/suppression/ForgottenLedger';
 
 /** The runtimes every case runs on: the default runtime, and the GMI runtime with cognitive memory off. */
 const RUNTIMES = ['legacy', 'gmi'] as const;
@@ -477,7 +480,44 @@ describe.each(RUNTIMES)('policy answers, on runtime %s', (runtime) => {
   });
 });
 
+/** Calls to release after a case, so a read a case held never outlives it. */
+const releases: Array<() => void> = [];
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+/**
+ * Holds tombstone reads at the ledger: every read, or the first alone, waits until `release()`, then reads the ledger.
+ * `resumed` settles once the first read has answered; `calls()` counts the reads.
+ */
+function holdLedgerReads(which: 'all' | 'first'): { release: () => void; resumed: Promise<void>; calls: () => number } {
+  const original = ForgottenLedger.prototype.isForgotten;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let resumedNow!: () => void;
+  const resumed = new Promise<void>((resolve) => {
+    resumedNow = resolve;
+  });
+  let calls = 0;
+  vi.spyOn(ForgottenLedger.prototype, 'isForgotten').mockImplementation(async function (this: ForgottenLedger, subject) {
+    calls += 1;
+    if (which === 'first' && calls > 1) return original.call(this, subject);
+    const first = calls === 1;
+    await gate;
+    try {
+      return await original.call(this, subject);
+    } finally {
+      if (first) resumedNow();
+    }
+  });
+  releases.push(release);
+  return { release, resumed, calls: () => calls };
+}
+
 describe("the turn's answer on the GMI runtime, with sentiment on and cognitive memory off", () => {
+  afterEach(() => {
+    while (releases.length) releases.pop()!();
+  });
+
   /** A souled agent on `runtime: 'gmi'` with the full profile's sentiment and no cognitive memory. */
   async function open(extra: Partial<SouledAgentOptions> = {}): Promise<{ a: SouledAgent; s: ProviderScript }> {
     const apiKey = `k-souled-policy-answers-${++n}`;
@@ -570,5 +610,77 @@ describe("the turn's answer on the GMI runtime, with sentiment on and cognitive 
     opened.splice(opened.indexOf(a), 1);
     await a.close();
     expect(asked).toBe(1);
+  });
+
+  it('a recall that times out and resumes after the turn asked for its answer reads that answer: the host is asked once', async () => {
+    vi.spyOn(SentimentTracker.prototype, 'analyzeTurnSentiment').mockResolvedValue(undefined);
+    // The recall's tombstone read waits, so the recall times out and the GMI asks for the turn's answer first.
+    const recall = holdLedgerReads('first');
+    let asked = 0;
+    let askedAgain!: () => void;
+    const again = new Promise<void>((resolve) => {
+      askedAgain = resolve;
+    });
+    const { a } = await open({
+      memoryProviderOptions: { timeoutMs: 1000 },
+      memoryPolicy: async () => {
+        asked += 1;
+        if (asked > 1) {
+          askedAgain();
+          return { longTerm: 'compiled' };
+        }
+        // The turn's own ask: the recall goes on now, while this answer is open.
+        recall.release();
+        await Promise.race([again, sleep(300)]);
+        return { longTerm: 'compiled' };
+      },
+    });
+
+    const result = await a.session('s1', { userId: 'alice' }).send('Hello there.');
+    await recall.resumed;
+    await sleep(50);
+
+    expect(result.text).toBe('Noted 0.');
+    expect(asked).toBe(1);
+  });
+
+  it('a person forgotten while the host answers the turn is not scored', async () => {
+    const analyze = vi.spyOn(SentimentTracker.prototype, 'analyzeTurnSentiment').mockResolvedValue(undefined);
+    const recall = holdLedgerReads('first');
+    let asked = 0;
+    let forget: () => Promise<unknown> = async () => undefined;
+    const { a } = await open({
+      tombstoneKey: 'k-souled-policy-answers-tombstones',
+      memoryProviderOptions: { timeoutMs: 3000 },
+      memoryPolicy: async () => {
+        asked += 1;
+        if (asked === 1) {
+          recall.release();
+          // The person is forgotten while the host's answer for the turn is open.
+          await forget();
+        }
+        return { longTerm: 'compiled' };
+      },
+    });
+    forget = () => a.forgetUser!('alice');
+
+    await a.session('s1', { userId: 'alice' }).send('Hello there, I had a rough day.');
+
+    expect(lines('memory.hook_failed').filter((line) => line.hook === 'memoryPolicy')).toHaveLength(0);
+    expect(analyze).not.toHaveBeenCalled();
+  });
+
+  it("a tombstone ledger that does not answer holds no turn: the turn goes on, unscored, after the hooks' timeout", async () => {
+    const analyze = vi.spyOn(SentimentTracker.prototype, 'analyzeTurnSentiment').mockResolvedValue(undefined);
+    const stalled = holdLedgerReads('all');
+    const { a } = await open({ memoryProviderOptions: { timeoutMs: 200 }, memoryPolicy: () => ({ longTerm: 'compiled' }) });
+
+    const send = a.session('s1', { userId: 'alice' }).send('Hello there.');
+    const outcome = await Promise.race([send, sleep(5000).then(() => 'still waiting' as const)]);
+    stalled.release();
+
+    expect(outcome).toMatchObject({ text: 'Noted 0.' });
+    expect(analyze).not.toHaveBeenCalled();
+    expect(lines('memory.hook_failed').filter((line) => line.hook === 'soulMemory' && line.code === 'MEMORY_HOOK_TIMEOUT')).toHaveLength(1);
   });
 });
