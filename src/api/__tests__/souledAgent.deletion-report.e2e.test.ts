@@ -15,9 +15,10 @@
  *   and returns its report with the three fields the layer's report type requires.
  * - On `runtime: 'gmi'` a deletion empties each session the handle holds open for the person and for each linked
  *   session: its messages, and what its GMI holds of the person (its history, its sentiment trend, its working-memory
- *   slots). Another person's session is left as it is. A session whose turn is still running at the deadline leaves
- *   the `sessions` part missed; it is emptied once that turn ends, the turn's memory writes are refused, and the
- *   deletion made again reports the part reached. The default runtime clears each open session handle and counts it.
+ *   slots). Another person's session is left as it is, and an idle session is emptied whatever the deadline. A
+ *   session whose turn is still running at the deadline leaves the `sessions` part missed; it is emptied once that
+ *   turn ends, the turn's memory writes are refused, and the deletion made again reports the part reached. The
+ *   default runtime clears each open session handle and counts it.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
@@ -589,6 +590,20 @@ describe("a deletion and the open sessions, on runtime 'gmi' with sentiment on a
     expect(forgetPerson).toHaveBeenCalledTimes(3);
     expect(other.messages()).toEqual(ofBob);
     expect(tracesOf(keyOf(bob)).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('an idle open session is emptied when the deadline is 0', async () => {
+    const forgetPerson = vi.spyOn(GMI.prototype, 'forgetPerson');
+    const a = await openGmi({ pendingWritesTimeoutMs: 0 });
+    const session = a.session('s1', { userId: 'alice' });
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+
+    const report = await a.forgetUser!('alice');
+
+    // No turn of the session runs, so nothing is waited for: the session is emptied, not counted as running.
+    expect(report.parts[3]).toEqual({ part: 'sessions', reached: true, deleted: 1 });
+    expect(session.messages()).toEqual([]);
+    expect(forgetPerson).toHaveBeenCalledTimes(1);
   });
 
   it('a deletion during a running turn misses the sessions part, empties the session once the turn ends, and finishes when made again', async () => {
