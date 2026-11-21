@@ -22,6 +22,7 @@ import type { ChatMessage, ModelUsage, ThinkingBlock } from '../../core/llm/prov
 import type { HexacoTraitValues } from './personas/hexaco';
 import type { ILearnerSession } from '../learning/types.js';
 import type { AgencyLaunchFrame } from '../../api/runtime/agencyLaunch/types';
+import type { SoulTurnMemory } from './soulTurnMemory';
 
 /**
  * Defines the possible moods a GMI can be in, influencing its behavior and responses.
@@ -371,6 +372,14 @@ export interface GMITurnInput {
      * their own session id, which is no user's. A learning layer reads such a turn's user as `null`.
      */
     noTurnUser?: boolean;
+    /**
+     * A souled agent's view of its memory rules for this turn (`souledAgent()` on the GMI runtime): the GMI asks for the
+     * turn's answer once, before it scores the user's message for sentiment, and skips the analysis when the answer
+     * says so. A tool continuation keeps the answer of the turn it continues. Internal.
+     *
+     * @internal
+     */
+    soulMemory?: SoulTurnMemory;
     /**
      * The launched team this turn's GMI sits in (`launch_agency`): the launch, the seat's role and the team's level.
      * The GMI hands each tool call of the turn a frozen copy in `sessionData.agencyLaunch`, where a launch from that

@@ -83,6 +83,9 @@ import { settlesWithin, shutdownTimeoutOrDefault } from './shutdownBound';
 import { FORGE_TRACE_HOOK_BOUND_MS } from '../emergent/ForgeTrace.js';
 import { turnContentText } from './turnContent';
 import { moduleLogger } from '../../core/logging/loggerFactory';
+import { errorFields } from '../../core/logging/events.js';
+import { memoryLog } from '../memory/log.js';
+import { SOUL_TURN_NOTHING, type SoulTurnAnswer, type SoulTurnMemory } from './soulTurnMemory';
 
 const DEFAULT_MAX_CONVERSATION_HISTORY_TURNS = 20;
 const DEFAULT_SELF_REFLECTION_INTERVAL_TURNS = 5;
@@ -300,6 +303,14 @@ function memoryScopeOf(turnInput: GMITurnInput): TurnMemoryScope | undefined {
   return { ...(userId ? { userId } : {}), ...(sessionId ? { sessionId } : {}) };
 }
 
+/** The souled agent's view of its memory rules a turn carries in `metadata.soulMemory`; undefined when it carries none. */
+function soulMemoryOf(turnInput: GMITurnInput): SoulTurnMemory | undefined {
+  const soul: unknown = turnInput.metadata?.soulMemory;
+  return soul !== null && typeof soul === 'object' && typeof (soul as SoulTurnMemory).begin === 'function'
+    ? (soul as SoulTurnMemory)
+    : undefined;
+}
+
 /**
  * The host's note a turn carries in `metadata.applicationNote` (`AgentOSInput.applicationNote` for a user turn,
  * `GMIToolResultOptions.applicationNote` for a continuation), trimmed; undefined when it carries none or a blank one.
@@ -465,6 +476,14 @@ export class GMI implements IGMI {
    * a tool continuation keeps the scope of the turn it continues.
    */
   private turnMemoryScope: TurnMemoryScope | undefined;
+
+  /**
+   * A souled agent's view of its memory rules for the turn (`metadata.soulMemory`), and the answer it gave, asked once
+   * a turn before the user's message is scored for sentiment. Set when a user turn starts; a tool continuation keeps
+   * the view and the answer of the turn it continues.
+   */
+  private turnSoulMemory: SoulTurnMemory | undefined;
+  private turnSoulAnswer: SoulTurnAnswer | undefined;
 
   /**
    * The gate the turn's tool round asks before each call runs, when the turn
@@ -1410,6 +1429,8 @@ export class GMI implements IGMI {
         // the GMI's last turn was another conversation's: nothing it kept for that turn belongs to this one
         this.turnResolution = undefined;
         this.turnMemoryScope = undefined;
+        this.turnSoulMemory = undefined;
+        this.turnSoulAnswer = undefined;
         this.turnToolCallGate = undefined;
         this.turnModelSelection = {};
         this.turnLearning = undefined;
@@ -1594,6 +1615,20 @@ export class GMI implements IGMI {
     };
   }
 
+  /**
+   * The answer a souled agent's view gives for a turn, asked once; undefined for a turn that carries no view. A view
+   * whose ask throws or rejects allows nothing, and one `memory.hook_failed` line says so.
+   */
+  private async soulAnswerOf(soul: SoulTurnMemory | undefined): Promise<SoulTurnAnswer | undefined> {
+    if (!soul) return undefined;
+    try {
+      return await soul.begin(this.cognitiveMemory);
+    } catch (error) {
+      memoryLog.warn('memory.hook_failed', { hook: 'soulMemory', ...errorFields(error) });
+      return { ...SOUL_TURN_NOTHING };
+    }
+  }
+
   /** @inheritdoc */
 
   public async *processTurnStream(turnInput: GMITurnInput): AsyncGenerator<GMIOutputChunk, GMIOutput, undefined> {
@@ -1612,6 +1647,8 @@ export class GMI implements IGMI {
     if (turnInput.metadata?.isToolContinuation !== true) {
       this.turnResolution = undefined;
       this.turnMemoryScope = memoryScopeOf(turnInput);
+      this.turnSoulMemory = soulMemoryOf(turnInput);
+      this.turnSoulAnswer = undefined;
       this.turnLearning = undefined;
       this.turnToolCallGate = toolCallGateOf(turnInput);
       this.turnModelSelection = modelSelectionOf(turnInput);
@@ -1635,6 +1672,8 @@ export class GMI implements IGMI {
     const toolCallGate = toolCallGateOf(turnInput) ?? this.turnToolCallGate;
     // The launched team this turn's tool calls sit in, likewise: a continuation that names none sits in its turn's.
     const launchFrame = launchFrameOf(turnInput) ?? this.turnLaunchFrame;
+    // The souled agent's view of the turn, read before any wait: a newer turn of this GMI sets its own.
+    const turnSoul = this.turnSoulMemory;
     // The host's note every request of this call sends (each step of its tool loop and each hop), read from its own
     // input alone: a user turn's from AgentOSInput, a continuation's from the options its results came with. The GMI
     // keeps no note between calls, since one GMI serves every conversation of its session.
@@ -1791,8 +1830,15 @@ export class GMI implements IGMI {
           : null;
       const turnMessages: ChatMessage[] = [];
 
+      // A souled agent's answer for the turn, asked once before anything reads the person: a turn it allows no
+      // sentiment (a minor, a person who objects to profiling, a failed policy hook, a forgotten person) is not scored.
+      // A continuation keeps the answer of the turn it continues.
+      const continuesTurn = turnInput.metadata?.isToolContinuation === true;
+      const soulAnswer = continuesTurn ? this.turnSoulAnswer : await this.soulAnswerOf(turnSoul);
+      if (!continuesTurn && ownsState()) this.turnSoulAnswer = soulAnswer;
+
       // Analyze sentiment of user input only when sentiment tracking is enabled
-      if (this.activePersona.sentimentTracking?.enabled) {
+      if (this.activePersona.sentimentTracking?.enabled && soulAnswer?.sentiment !== false) {
         const lastMsg = this.conversationHistoryManager.history.length > 0
           ? this.conversationHistoryManager.history[this.conversationHistoryManager.history.length - 1]
           : null;

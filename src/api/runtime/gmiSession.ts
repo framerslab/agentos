@@ -41,6 +41,7 @@ import { GmiTurnFolder, streamFromGmiTurn } from './gmiResults.js';
 import { stepToTranscript, transcriptToConversation } from './gmiTranscript.js';
 import { observeWithoutWaiting } from './memoryObserveFailures.js';
 import { contentWithTurnText, judgeTurnInput } from './textGuardrails.js';
+import type { SoulTurnMemory } from '../../cognition/substrate/soulTurnMemory.js';
 
 /** A signal's reason as an error, as streamText reports a stop: the reason itself when it is an Error. */
 function abortReasonError(signal: AbortSignal): Error {
@@ -194,6 +195,17 @@ export interface GmiSessionDeps {
    * id. Unset, they send none, as agent() sends none.
    */
   providerUserId?: string;
+  /**
+   * Whether the turn names a user, as a learning layer reads it (`GMITurnInput.metadata.noTurnUser`). Unset, it names
+   * one exactly when {@link providerUserId} is set; a souled agent that withholds the id from the provider sets it.
+   */
+  namesUser?: boolean;
+  /**
+   * A souled agent's view of its memory rules for this turn (`GMITurnInput.metadata.soulMemory`): the key the
+   * person's memory is kept under and the turn's answer, which the GMI asks for once before it reads the person.
+   * Unset on every other agent and on a seat's turn.
+   */
+  soulMemory?: SoulTurnMemory;
   /** False when cognitive memory supplies the memory context, and on a seat session: `memoryProvider.getContext` is then skipped. */
   useMemoryProviderContext: boolean;
   /**
@@ -462,8 +474,9 @@ export async function* runGmiTurn(
       content: input as GMITurnInput['content'],
       metadata: {
         providerUserId: deps.providerUserId ?? null,
-        ...(deps.providerUserId === undefined ? { noTurnUser: true } : {}),
+        ...((deps.namesUser ?? deps.providerUserId !== undefined) ? {} : { noTurnUser: true }),
         ...(memoryScope ? { memoryScope } : {}),
+        ...(deps.soulMemory ? { soulMemory: deps.soulMemory } : {}),
         ...(turn.launchFrame ? { agencyLaunch: turn.launchFrame } : {}),
         options: {
           ...(turn.options ?? {}),
