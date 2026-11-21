@@ -611,7 +611,9 @@ export async function* runGmiTurn(
       const memoryProvider = deps.observeMemoryProvider === false ? undefined : deps.opts.memoryProvider;
       if (memoryProvider?.observe) {
         // The turn does not wait for its writes: their record is a promise the turn's result carries.
-        const sides = [observeTurn(memoryProvider, 'user', userText, deps.memoryHook)];
+        const user = observeTurn(memoryProvider, 'user', userText, deps.memoryHook);
+        // A message with no text (an image alone) is observed as before and has no entry of its own.
+        const sides = userText ? [user] : [];
         const reply = folder.text();
         if (reply) sides.push(observeTurn(memoryProvider, 'assistant', reply, deps.memoryHook));
         folder.wrote(memoryWriteRecordOf(sides));

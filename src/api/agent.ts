@@ -151,10 +151,11 @@ export interface AgentMemoryProvider {
    * turn's result. A failure is logged as a `memory.hook_failed` event on the
    * provider's first failure and then at its 10th, 100th, 1000th and so on.
    *
-   * A session turn's result carries what each call answered as `memoryWrite`
-   * ({@link MemoryWriteRecord}): the entry a call resolves with, a `failed`
-   * entry with the error's class name for a call that throws or rejects, and
-   * no entry for a call that resolves with nothing.
+   * A session turn's result carries what each call for a side with text
+   * answered as `memoryWrite` ({@link MemoryWriteRecord}): the entry a call
+   * resolves with, a `failed` entry with the error's class name for a call
+   * that throws or rejects, and no entry for a call that resolves with
+   * nothing.
    *
    * @param role - Whether the content came from the user or assistant.
    * @param text - Plain text content of the turn.
@@ -995,7 +996,10 @@ function observeValidatedExchange(
   const sides: Array<Promise<MemoryWriteEntry | undefined>> = [];
   for (const [role, text] of [['user', turn.userText], ['assistant', replyText]] as const) {
     if (role === 'assistant' && !text) continue;
-    sides.push(observeWithoutWaiting(provider, role, text, turn.context));
+    const side = observeWithoutWaiting(provider, role, text, turn.context);
+    // A message with no text (an image alone) is observed as before and has no entry: the record names the sides that
+    // had text.
+    if (text) sides.push(side);
   }
   return memoryWriteRecordOf(sides);
 }
