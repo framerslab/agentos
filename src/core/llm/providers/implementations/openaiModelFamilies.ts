@@ -3,8 +3,12 @@
  * @description Which OpenAI model ids are reasoning models and the context window each family has, moved here unchanged
  * from OpenAIProvider so a caller can read them without loading the provider: the long-context tier of the price table
  * (`openAiHasLongContextPricing` in openaiPricing.ts) is decided by them, and the spend budget and a host's spend guard
- * price a call with that table before it is made. OpenAIProvider imports and re-exports both.
+ * price a call with that table before it is made. OpenAIProvider imports and re-exports both. The rule for which calls
+ * OpenAIProvider sends to the Responses API, and the least output cap that API takes, live here for the same reason:
+ * the spend budget counts the cap such a call sends (`maxCostRequestOf` in spendBudget.ts).
  */
+
+import type { ModelCompletionOptions } from '../IProvider.js';
 
 /**
  * Whether `modelId` is an OpenAI reasoning model — the o1/o3/o4 series or the
@@ -65,4 +69,93 @@ export function openAiReasoningContextWindow(modelId: string): number {
   // gpt-5.4 and gpt-5.4-pro, bare or dated, are 1.05M; -mini and -nano are 400K.
   if (/^gpt-5\.4(-pro)?(-\d{4}-\d{2}-\d{2})?$/.test(id)) return 1050000;
   return 400000;
+}
+
+/**
+ * The smallest `max_output_tokens` the Responses API takes: the reference lists `minimum: 16`
+ * (https://developers.openai.com/api/reference/resources/responses/methods/create), and a call with 8 answered HTTP 400
+ * "Expected a value >= 16, but got 8 instead." on 2026-11-17. The Responses builder raises a smaller cap to it, and a
+ * call's spend bound counts the raised cap (`maxCostRequestOf` in spendBudget.ts).
+ */
+export const OPENAI_RESPONSES_MIN_OUTPUT_TOKENS = 16;
+
+/**
+ * Whether OpenAI serves `modelId` only through the Responses API. OpenAI lists
+ * the `-pro` tiers, the codex models, `gpt-5.6-cyber` and the deep-research
+ * models as Responses-only; on /v1/chat/completions they fail (gpt-5.3-codex
+ * answers 404). OpenAIProvider sends every call to these ids to /v1/responses
+ * (see {@link openAiRequiresResponsesApi}).
+ *
+ * Only OpenAI's own families (`gpt-`, the o-series, `codex-`) qualify. Groq,
+ * xAI, Together and Mistral delegate to OpenAIProvider with their own model ids,
+ * and an id such as `grok-4-pro` on one of those endpoints is served by its
+ * Chat Completions route.
+ *
+ * @param modelId Provider-side model identifier.
+ * @returns `true` when the model has no Chat Completions endpoint.
+ */
+export function isOpenAIResponsesOnlyModel(modelId: string): boolean {
+  return /^(gpt-|o\d|codex-)/i.test(modelId)
+    && /-pro(-\d{4}-\d{2}-\d{2})?$|codex|^gpt-5\.6-cyber|deep-research/i.test(modelId);
+}
+
+/**
+ * Whether the request carries function tools (present + non-empty). Used to
+ * decide whether OpenAIProvider's `openAiRejectsReasoningEffortWithTools` guard
+ * applies (reasoning_effort is only incompatible WITH tools) and whether a
+ * GPT-5 or GPT-6 call goes to the Responses API ({@link openAiRequiresResponsesApi}).
+ *
+ * @param tools The request's `tools` option.
+ * @returns `true` when the request carries at least one tool.
+ */
+export function requestHasFunctionTools(tools: unknown): boolean {
+  return Array.isArray(tools) ? tools.length > 0 : tools != null;
+}
+
+/**
+ * Whether a call to `modelId` can be served only by `/v1/responses`:
+ *
+ *   - any call to a Responses-only model ({@link isOpenAIResponsesOnlyModel});
+ *   - a GPT-6 call carrying function tools. Chat Completions does not serve
+ *     it: `gpt-6-astra` rejects tool calls there with or without a
+ *     `reasoning_effort` (probed 2026-09-10 and 2026-09-30), the `gpt-6.1-sol` model page lists
+ *     tool calling on Responses only, and the `gpt-6-sol` / `gpt-6-luna`
+ *     pages allow chat tool calls only with `reasoning_effort: 'none'`. A
+ *     2026-09-30 probe of a GPT-6 tool call with no `reasoning_effort` on
+ *     /v1/chat/completions returned HTTP 400.
+ *   - a GPT-5 call carrying function tools, with or without an effort. On
+ *     2026-11-18 OpenAI answered ten `gpt-5.6-sol` tool calls on
+ *     /v1/chat/completions whose bodies held no `reasoning_effort` key
+ *     (`max_completion_tokens`, `messages`, `model`, `stream`,
+ *     `stream_options`, `tools`) with HTTP 400 "Function tools with
+ *     reasoning_effort are not supported for gpt-5.6-sol in
+ *     /v1/chat/completions. To use function tools, use /v1/responses or set
+ *     reasoning_effort to 'none'.": the model applies its default effort
+ *     (`medium` on the GPT-5.6 and GPT-5.5 model pages,
+ *     https://developers.openai.com/api/docs/models/gpt-5.6-sol) when the call
+ *     names none (https://developers.openai.com/api/docs/models/gpt-5.5
+ *     says the same of `gpt-5.5`). Every GPT-5 model page
+ *     (`https://developers.openai.com/api/docs/models/{id}` for each GPT-5 id
+ *     at https://developers.openai.com/api/docs/models) lists `v1/responses`
+ *     as supported (read 2026-11-21), so the call goes there and keeps its
+ *     tools. Sending `reasoning_effort: 'none'` on chat instead is not done:
+ *     no probe shows every GPT-5 model accepts it.
+ *
+ * OpenAIProvider's `shouldRouteToOpenAiResponsesApi` applies this rule to streamed and
+ * non-streamed calls alike. A call this rule sends to Responses whose content
+ * Responses cannot carry is refused before anything is sent
+ * (`RESPONSES_UNMAPPABLE_CONTENT`), since Chat Completions would refuse it too.
+ *
+ * @param modelId Provider-side model identifier.
+ * @param options The request's tools.
+ * @returns `true` when the call has no Chat Completions route.
+ */
+export function openAiRequiresResponsesApi(
+  modelId: string,
+  options: Pick<ModelCompletionOptions, 'tools'>,
+): boolean {
+  return (
+    isOpenAIResponsesOnlyModel(modelId) ||
+    (/^gpt-(5|6)/i.test(modelId) && requestHasFunctionTools(options.tools))
+  );
 }

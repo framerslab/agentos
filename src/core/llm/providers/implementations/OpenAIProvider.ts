@@ -62,7 +62,14 @@ import {
   openAIModelPricing,
   openAiHasLongContextPricing,
 } from './openaiPricing.js';
-import { isOpenAIReasoningModel, openAiReasoningContextWindow } from './openaiModelFamilies.js';
+import {
+  OPENAI_RESPONSES_MIN_OUTPUT_TOKENS,
+  isOpenAIReasoningModel,
+  isOpenAIResponsesOnlyModel,
+  openAiReasoningContextWindow,
+  openAiRequiresResponsesApi,
+  requestHasFunctionTools,
+} from './openaiModelFamilies.js';
 import { retiredOpenAIModel, retiredOpenAIModelMessage } from './openaiRetirements.js';
 import { moduleLogger } from '../../../logging/loggerFactory.js';
 import { listedErrorFields } from '../../../logging/events.js';
@@ -73,14 +80,18 @@ const log = moduleLogger('llm', 'openai_provider');
 
 // The model-family predicates and the long-context tier live in openaiModelFamilies.ts and openaiPricing.ts, which
 // import nothing of this provider, so `@framers/agentos/safety/runtime` can price a call at its long-context rates
-// without loading the provider. Re-exported here so every import that reached them through this module keeps working.
+// without loading the provider. The rule for which calls go to the Responses API lives there too, so the spend budget
+// can count the output cap such a call sends. Re-exported here so every import that reached them through this module
+// keeps working.
 export {
   OPENAI_LONG_CONTEXT_INPUT_MULTIPLIER,
   OPENAI_LONG_CONTEXT_OUTPUT_MULTIPLIER,
   OPENAI_LONG_CONTEXT_THRESHOLD_TOKENS,
   isOpenAIReasoningModel,
+  isOpenAIResponsesOnlyModel,
   openAiHasLongContextPricing,
   openAiReasoningContextWindow,
+  openAiRequiresResponsesApi,
 };
 export {
   OPENAI_MODEL_SHUTDOWNS,
@@ -300,13 +311,6 @@ namespace OpenAIAPITypes {
 export const OPENAI_DEFAULT_BASE_URL = 'https://api.openai.com/v1';
 
 /**
- * The smallest `max_output_tokens` the Responses API takes: the reference lists `minimum: 16`
- * (https://developers.openai.com/api/reference/resources/responses/methods/create), and a call with 8 answered HTTP 400
- * "Expected a value >= 16, but got 8 instead." on 2026-11-17.
- */
-const OPENAI_RESPONSES_MIN_OUTPUT_TOKENS = 16;
-
-/**
  * Chat Completions body keys the Responses API has no parameter for, each with the reason its `llm.option_ignored`
  * line carries. The body the reference lists
  * (https://developers.openai.com/api/reference/resources/responses/methods/create, read 2026-11-21) holds none of
@@ -494,26 +498,6 @@ export function modelRequiresMaxCompletionTokens(modelId: string): boolean {
 }
 
 /**
- * Whether OpenAI serves `modelId` only through the Responses API. OpenAI lists
- * the `-pro` tiers, the codex models, `gpt-5.6-cyber` and the deep-research
- * models as Responses-only; on /v1/chat/completions they fail (gpt-5.3-codex
- * answers 404). OpenAIProvider sends every call to these ids to /v1/responses
- * (see {@link openAiRequiresResponsesApi}).
- *
- * Only OpenAI's own families (`gpt-`, the o-series, `codex-`) qualify. Groq,
- * xAI, Together and Mistral delegate to this class with their own model ids,
- * and an id such as `grok-4-pro` on one of those endpoints is served by its
- * Chat Completions route.
- *
- * @param modelId Provider-side model identifier.
- * @returns `true` when the model has no Chat Completions endpoint.
- */
-export function isOpenAIResponsesOnlyModel(modelId: string): boolean {
-  return /^(gpt-|o\d|codex-)/i.test(modelId)
-    && /-pro(-\d{4}-\d{2}-\d{2})?$|codex|^gpt-5\.6-cyber|deep-research/i.test(modelId);
-}
-
-/**
  * The model a billing probe sends its completion to when none is configured: the first GPT chat model the catalog
  * lists, else its first o-series model with a price, skipping the Responses-only models
  * ({@link isOpenAIResponsesOnlyModel}), which have no Chat Completions route, the completions-only `instruct` models,
@@ -525,54 +509,6 @@ export function isOpenAIResponsesOnlyModel(modelId: string): boolean {
 function probeModelFromCatalog(ids: readonly string[]): string | undefined {
   const callable = ids.filter((id) => !isOpenAIResponsesOnlyModel(id) && !/embedding|realtime|audio|tts|transcribe|image|search|instruct/.test(id));
   return callable.find((id) => /^gpt-/.test(id)) ?? callable.find((id) => /^o\d/.test(id) && openAIModelPricing(id) !== undefined);
-}
-
-/**
- * Whether a call to `modelId` can be served only by `/v1/responses`:
- *
- *   - any call to a Responses-only model ({@link isOpenAIResponsesOnlyModel});
- *   - a GPT-6 call carrying function tools. Chat Completions does not serve
- *     it: `gpt-6-astra` rejects tool calls there with or without a
- *     `reasoning_effort` (probed 2026-09-10 and 2026-09-30), the `gpt-6.1-sol` model page lists
- *     tool calling on Responses only, and the `gpt-6-sol` / `gpt-6-luna`
- *     pages allow chat tool calls only with `reasoning_effort: 'none'`. A
- *     2026-09-30 probe of a GPT-6 tool call with no `reasoning_effort` on
- *     /v1/chat/completions returned HTTP 400.
- *   - a GPT-5 call carrying function tools, with or without an effort. On
- *     2026-11-18 OpenAI answered ten `gpt-5.6-sol` tool calls on
- *     /v1/chat/completions whose bodies held no `reasoning_effort` key
- *     (`max_completion_tokens`, `messages`, `model`, `stream`,
- *     `stream_options`, `tools`) with HTTP 400 "Function tools with
- *     reasoning_effort are not supported for gpt-5.6-sol in
- *     /v1/chat/completions. To use function tools, use /v1/responses or set
- *     reasoning_effort to 'none'.": the model applies its default effort
- *     (`medium` on the GPT-5.6 and GPT-5.5 model pages,
- *     https://developers.openai.com/api/docs/models/gpt-5.6-sol) when the call
- *     names none (https://developers.openai.com/api/docs/models/gpt-5.5
- *     says the same of `gpt-5.5`). Every GPT-5 model page
- *     (`https://developers.openai.com/api/docs/models/{id}` for each GPT-5 id
- *     at https://developers.openai.com/api/docs/models) lists `v1/responses`
- *     as supported (read 2026-11-21), so the call goes there and keeps its
- *     tools. Sending `reasoning_effort: 'none'` on chat instead is not done:
- *     no probe shows every GPT-5 model accepts it.
- *
- * {@link shouldRouteToOpenAiResponsesApi} applies this rule to streamed and
- * non-streamed calls alike. A call this rule sends to Responses whose content
- * Responses cannot carry is refused before anything is sent
- * (`RESPONSES_UNMAPPABLE_CONTENT`), since Chat Completions would refuse it too.
- *
- * @param modelId Provider-side model identifier.
- * @param options The request's tools.
- * @returns `true` when the call has no Chat Completions route.
- */
-export function openAiRequiresResponsesApi(
-  modelId: string,
-  options: Pick<ModelCompletionOptions, 'tools'>,
-): boolean {
-  return (
-    isOpenAIResponsesOnlyModel(modelId) ||
-    (/^gpt-(5|6)/i.test(modelId) && requestHasFunctionTools(options.tools))
-  );
 }
 
 /**
@@ -672,15 +608,6 @@ export function openAiRejectsStop(modelId: string): boolean {
  */
 export function openAiRejectsReasoningEffortWithTools(modelId: string): boolean {
   return /^gpt-(5|6)/i.test(modelId);
-}
-
-/**
- * Whether the request carries function tools (present + non-empty). Used to
- * decide whether the {@link openAiRejectsReasoningEffortWithTools} guard
- * applies — reasoning_effort is only incompatible WITH tools.
- */
-function requestHasFunctionTools(tools: unknown): boolean {
-  return Array.isArray(tools) ? tools.length > 0 : tools != null;
 }
 
 /** Whether one content part is a plain text block the Responses mapper can carry. */
@@ -2391,7 +2318,9 @@ export class OpenAIProvider implements IProvider {
    *
    * @throws {OpenAIProviderError} `RESPONSES_UNMAPPABLE_CONTENT` when a
    *   message carries a part Responses cannot represent (audio, a file
-   *   outside a user turn, an Anthropic `tool_result` block). Only a call
+   *   outside a user turn, an Anthropic `tool_result` block), or when a
+   *   `customModelParams.messages` override holds an entry that is not a
+   *   message object. Only a call
    *   with no Chat Completions route (a Responses-only model, a GPT-5 or
    *   GPT-6 tool call) reaches here with such content; the error is not
    *   retryable, like the 400 or 404 Chat Completions would return for it.
@@ -2412,6 +2341,15 @@ export class OpenAIProvider implements IProvider {
     // override is what `input` is built from here.
     const passedMessages = passthrough?.messages;
     const overrideMessages = Array.isArray(passedMessages) ? (passedMessages as ChatMessage[]) : undefined;
+    // The override is the caller's own data: an entry that is no message object cannot be mapped, and is refused
+    // here as unmappable content instead of failing inside the mapper.
+    if (Array.isArray(passedMessages) && passedMessages.some((m: unknown) => m === null || typeof m !== 'object')) {
+      throw new OpenAIProviderError(
+        `OpenAI serves ${modelId} for this call only on /v1/responses, and its customModelParams.messages ` +
+          `holds an entry that is not a message object`,
+        'RESPONSES_UNMAPPABLE_CONTENT',
+      );
+    }
     const sourceMessages = overrideMessages ?? messages;
 
     const unmappable = sourceMessages.find((m) => !isResponsesMappableMessage(m));

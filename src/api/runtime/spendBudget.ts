@@ -16,6 +16,7 @@ import type { ISpendMeter, SpendDenyReason, SpendReserveResult } from '../../saf
 import { toMicro } from '../../safety/runtime/SpendReservations.js';
 import type { AttemptOutcome, ModelCompletionOptions, ModelCompletionResponse } from '../../core/llm/providers/IProvider.js';
 import { clampMaxOutputTokens } from '../../core/llm/providers/model-output-limits.js';
+import { OPENAI_RESPONSES_MIN_OUTPUT_TOKENS, openAiRequiresResponsesApi } from '../../core/llm/providers/implementations/openaiModelFamilies.js';
 import { generateUUID } from '../../core/utils/uuid.js';
 import { estimateMaxCallCostUSD, modelPricing, type MaxCostRequest, type ModelPriceTier } from './modelPricing.js';
 import { createContentSafeConsole } from '../../core/logging/contentSafeConsole.js';
@@ -880,7 +881,8 @@ function outputCapOf(providerId: string, maxTokens: number | undefined, body: Re
 /**
  * What a helper's provider call sends, for {@link estimateMaxCallCostUSD}: its messages and tools; its output cap
  * (`outputCapOf`: the call's `maxTokens` and the caps its `customModelParams` set, a Gemini `generationConfig` in place
- * of the call's own); a structured-output format, the call's own or one its fields carry, as one more tool definition
+ * of the call's own; a cap under 16 counts as 16 on a call OpenAIProvider sends to the Responses API, which takes no
+ * smaller one); a structured-output format, the call's own or one its fields carry, as one more tool definition
  * (its schema is billed as input, and a schema the provider forces as a tool brings the tool-use prompt); the text of
  * its other `customModelParams` fields, counted with the system prompt, since the provider sends them with the
  * request; and the flags its options set: prompt caching unless `cache` is `false` (never for an embedding), a
@@ -894,7 +896,15 @@ export function maxCostRequestOf(call: Pick<HelperCall, 'route' | 'messages' | '
   const options = call.options ?? {};
   const body = options.customModelParams ?? {};
   const providerId = call.route.providerId;
-  const cap = outputCapOf(providerId, call.maxTokens, body);
+  const sentCap = outputCapOf(providerId, call.maxTokens, body);
+  // OpenAIProvider sends the cap of a call it routes to the Responses API as 16 at least, the least `max_output_tokens`
+  // Responses takes, so a smaller cap counts as 16: the bound never holds less output than the request allows. The
+  // route is read from the model and the tools, as the provider reads it; where another provider sends such a model
+  // elsewhere, the larger bound still holds.
+  const cap =
+    sentCap !== undefined && call.embedding !== true && openAiRequiresResponsesApi(call.route.modelId, { tools: call.tools as ModelCompletionOptions['tools'] })
+      ? Math.max(sentCap, OPENAI_RESPONSES_MIN_OUTPUT_TOKENS)
+      : sentCap;
   const configs = GENERATION_CONFIG_PROVIDERS.has(providerId) ? GENERATION_CONFIG_FIELDS.map((field) => fieldsOf(body[field])) : [];
   // A count that is not a number is held as NaN, which the bound cannot price: the provider may read it as a number.
   const completions = [body.n, body.best_of, ...configs.map((config) => config?.candidateCount ?? config?.candidate_count)]
