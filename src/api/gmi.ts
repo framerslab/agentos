@@ -1486,6 +1486,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
             try {
               if (history.messages().length > 0) history.reseed([]);
               const built = await own.peek()?.catch(() => undefined);
+              // The last turn's prompt and recalled memory, which the GMI's hooks read, until a next turn sets its own.
+              built?.prepare({ prompt: undefined, memoryContext: undefined });
               await built?.gmi.forgetPerson?.();
             } finally {
               release();
