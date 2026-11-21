@@ -485,6 +485,9 @@ export class Memory {
   /** Whether {@link close} leaves the Brain's adapter open: one the host passed and keeps using (`leaveAdapterOpen`). */
   private readonly _leaveAdapterOpen: boolean;
 
+  /** True once {@link close} has run on a store whose adapter the caller keeps: the facade serves no call after it. */
+  private _closedOnKeptAdapter = false;
+
   // -------------------------------------------------------------------
   // Constructor (private — use Memory.create() instead)
   // -------------------------------------------------------------------
@@ -3192,13 +3195,28 @@ export class Memory {
    *
    * Flushes the SQLite WAL and releases the file lock. Must be called when
    * the agent shuts down. A store opened on an adapter the caller keeps
-   * (`leaveAdapterOpen`) finishes its work and leaves that adapter open.
+   * (`leaveAdapterOpen`) finishes its work and leaves that adapter open; the
+   * facade itself then refuses every call that waits for the store's start
+   * (`remember`, `recall`, the deletes, the compile and the rest), so a write
+   * that reaches it once it is closed is not stored, as on a store whose
+   * connection this class closes.
    */
   async close(): Promise<void> {
+    if (this._closedOnKeptAdapter) return;
     await this._initPromise;
     // A rewrite of the vector index reads the traces through the Brain: it finishes before the Brain closes.
     await this._vectorIndexWork;
-    if (this._leaveAdapterOpen) return;
+    if (this._leaveAdapterOpen) {
+      // The adapter stays open for the caller that passed it, so a closed connection cannot be what stops a late
+      // call here: the store's start is replaced by a refusal, which every such call waits for first.
+      this._closedOnKeptAdapter = true;
+      const closed = Promise.reject<void>(
+        new Error('Memory: this store is closed; its adapter stays open for the caller that passed it'),
+      );
+      void closed.catch(() => undefined);
+      this._initPromise = closed;
+      return;
+    }
     await this._brain.close();
   }
 
