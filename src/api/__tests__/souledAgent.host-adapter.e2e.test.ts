@@ -506,6 +506,10 @@ describe(`a souled agent's store on the host's adapter, on runtime ${RUNTIME}`, 
     await Promise.allSettled(remember.mock.results.map((result) => result.value as Promise<unknown>));
     expect(await tracesUnder(adapter, userKey('alice'))).toEqual([]);
     expect(JSON.stringify(await adapter.all('SELECT content FROM memory_traces WHERE brain_id = ?', ['aria-1']))).not.toContain('LARK-7');
+    // The closed store's other calls that add to it are refused the same way: a graph entity, a relation, a page.
+    await expect(a.memory!.addEntity({ label: 'late' })).rejects.toThrow(/closed/);
+    await expect(a.memory!.addRelation({ sourceId: 'late-a', targetId: 'late-b' })).rejects.toThrow(/closed/);
+    await expect(a.memory!.writePageRow(userKey('alice'), { pageId: 'late', content: 'Late.', contentHash: 'late' })).rejects.toThrow(/closed/);
     await answers(adapter);
     await answers(copy);
   });
