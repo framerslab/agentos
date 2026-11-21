@@ -14,6 +14,7 @@ import { CONVERSATION_SCOPE, conversationScopeKey, parseConversationScopeKey } f
 import type { ForgottenLedger, SuppressionSubject } from '../suppression/ForgottenLedger.js';
 import type { Memory } from './facade/Memory.js';
 import { LEGACY_SCOPE } from './legacyMemory.js';
+import { RETENTION_DAY_MS } from './retentionSweep.js';
 
 /** What one part of a deletion did: reached, with what it deleted, or missed, with why. */
 export type PartOutcome = { reached: true; deleted: number } | { reached: false; reason: string };
@@ -268,10 +269,21 @@ export async function forgetUserMemory(options: ForgetUserMemoryOptions): Promis
 
   const { drained, pendingAtDeadline } = (await options.drain?.()) ?? { drained: 0, pendingAtDeadline: 0 };
 
+  /**
+   * The tombstone, with the corrections the ledger's copy keeps under each of the subject's keys deleted in its own
+   * write to the copy: a tombstone the copy refuses deletes none of them, and nothing else.
+   */
+  const writeTombstone = async (): Promise<ForgetMemoryReport['tombstone']> => {
+    const keys = new Set([ownKey]);
+    for (const row of await ledger.keptCorrections()) {
+      const owner = parseConversationScopeKey(row.scopeId)?.subject;
+      if (owner !== undefined && owner.kind !== 'operator' && owner.kind === subject.kind && owner.id === subject.id) keys.add(row.scopeId);
+    }
+    const { form, written } = await ledger.markForgotten(subject, { dropCorrectionsOf: [...keys] });
+    return { form, written };
+  };
   const tombstone: ForgetMemoryReport['tombstone'] =
-    options.writeTombstone === false
-      ? { form: ledger.keyed ? 'keyed' : 'unkeyed', written: false }
-      : await ledger.markForgotten(subject);
+    options.writeTombstone === false ? { form: ledger.keyed ? 'keyed' : 'unkeyed', written: false } : await writeTombstone();
 
   const pages: ForgetMemoryReport['pages'] = { deleted: 0, failed: [] };
   const deletes = async (): Promise<{ stores: ForgetMemoryReport['stores']; rows: number }> => {
@@ -512,6 +524,176 @@ export interface ReapplyTombstonesOptions
   ) => Promise<
     Pick<ForgetUserMemoryOptions, 'drain' | 'onChain' | 'extraStores' | 'alsoIncomplete' | 'legacy' | 'sessions' | 'recipients'>
   >;
+  /**
+   * Runs the work on one conversation key in that subject's turn, after its writes and compiles: the deleted traces a
+   * restore brought back under the key, and the corrections filed again under it. Unset: at once.
+   */
+  onKey?: <T>(scopeId: string, work: () => Promise<T>) => Promise<T>;
+  /**
+   * How many days a key's traces are kept (none: until deletion). A kept correction stored longer ago than that is not
+   * filed again and goes from the ledger's copy. Unset: no period ends a kept correction.
+   */
+  retentionDaysOf?: (scopeId: string, kind: 'user' | 'session') => number | undefined;
+  /** The clock, in Unix ms. Default `Date.now`. */
+  now?: () => number;
+}
+
+/** What the re-application did with the traces the ledger records as deleted. */
+interface DeletedTracesReapplied {
+  /** The rows deleted again. */
+  traces: number;
+  /** The rows still stored because a page built from one, or the delete, failed: the next re-application tries again. */
+  missed: number;
+}
+
+/**
+ * Deletes again each trace the ledger records as deleted ({@link ForgottenLedger.markTracesDeleted}) that the store
+ * still holds, live or soft-deleted, as after a restore from a backup taken before a correction or a single deletion.
+ * Under a conversation key, each page built from one goes first and is named for the next compile to build again from
+ * the traces of it that are left, as in a correction; a key whose page cannot be deleted keeps its traces, so the next
+ * re-application finds the page by them.
+ */
+async function reapplyDeletedTraces(
+  options: Pick<ReapplyTombstonesOptions, 'memory' | 'wiki' | 'onKey'>,
+  ledger: ForgottenLedger,
+): Promise<DeletedTracesReapplied> {
+  const { memory } = options;
+  const done: DeletedTracesReapplied = { traces: 0, missed: 0 };
+  const marked = await ledger.deletedTraceIds();
+  if (marked.length === 0) return done;
+  const byKey = new Map<string, string[]>();
+  const elsewhere: string[] = [];
+  for (const row of await memory.storedTracesAmong(marked)) {
+    if (row.scope === CONVERSATION_SCOPE && row.scopeId !== '') byKey.set(row.scopeId, [...(byKey.get(row.scopeId) ?? []), row.id]);
+    else elsewhere.push(row.id);
+  }
+  const remove = async (ids: readonly string[]): Promise<void> => {
+    try {
+      done.traces += (await memory.deleteTraces(ids)).deleted;
+    } catch {
+      done.missed += ids.length;
+    }
+  };
+  for (const [key, ids] of byKey) {
+    const work = async (): Promise<void> => {
+      const gone = new Set(ids);
+      try {
+        const store = options.wiki.storeFor(key);
+        for (const page of await store.listPages()) {
+          if (!page.sources.some((id) => gone.has(id))) continue;
+          // Named before the page goes, so a page deleted is always rebuilt.
+          await memory.addRebuildSources(
+            key,
+            page.sources.filter((id) => !gone.has(id)),
+          );
+          await store.deletePage(page.id);
+        }
+      } catch {
+        done.missed += ids.length;
+        return;
+      }
+      await remove(ids);
+    };
+    await (options.onKey ? options.onKey(key, work) : work());
+  }
+  if (elsewhere.length > 0) await remove(elsewhere);
+  return done;
+}
+
+/** Whether a stored tags column holds a tag. */
+function holdsTag(tags: string, tag: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(tags);
+    return Array.isArray(parsed) && parsed.includes(tag);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Files again each correction the ledger's copy keeps ({@link ForgottenLedger.keepCorrection}) that the store lacks,
+ * as after a restore from a backup taken before the correction: under its id, key and time, tagged `correction`, as
+ * a trace of the soul's own memory, and named for the next compile to read by id. Where the store holds the same
+ * words under the key with another id, that trace is the correction and the kept row names it from then on; where it
+ * holds the kept trace without its `correction` tag, the tag is put back. A kept row whose subject is forgotten, whose
+ * trace the ledger records as deleted, or that is older than its key's retention period goes from the copy instead.
+ * Another agent's kept rows are left to that agent.
+ *
+ * @returns How many corrections were filed again.
+ */
+async function refileKeptCorrections(
+  options: Pick<ReapplyTombstonesOptions, 'memory' | 'agentId' | 'onKey' | 'retentionDaysOf' | 'now'>,
+  ledger: ForgottenLedger,
+): Promise<number> {
+  const { memory, agentId } = options;
+  const now = options.now ?? Date.now;
+  const kept = await ledger.keptCorrections();
+  if (kept.length === 0) return 0;
+  const byKey = new Map<string, typeof kept>();
+  const drop: string[] = [];
+  for (const row of kept) {
+    const owner = parseConversationScopeKey(row.scopeId);
+    if (owner === undefined || owner.subject.kind === 'operator') {
+      drop.push(row.traceId);
+      continue;
+    }
+    if (owner.agentId !== agentId) continue;
+    byKey.set(row.scopeId, [...(byKey.get(row.scopeId) ?? []), row]);
+  }
+  let refiled = 0;
+  for (const [key, rows] of byKey) {
+    const subject = parseConversationScopeKey(key)!.subject as SuppressionSubject;
+    const work = async (): Promise<void> => {
+      // Read again in the subject's turn: a correction or a deletion that ran before it changed what is kept.
+      const still = new Set((await ledger.correctionsOf(key)).map((row) => row.traceId));
+      const live = rows.filter((row) => still.has(row.traceId));
+      if (live.length === 0) return;
+      if (await ledger.isForgotten(subject)) {
+        drop.push(...live.map((row) => row.traceId));
+        return;
+      }
+      const marked = new Set(await ledger.deletedTraceIds(live.map((row) => row.traceId)));
+      const days = options.retentionDaysOf?.(key, subject.kind);
+      const present = new Map((await memory.storedTracesAmong(live.map((row) => row.traceId))).map((row) => [row.id, row]));
+      for (const row of live) {
+        if (marked.has(row.traceId) || (days !== undefined && row.createdAt < now() - days * RETENTION_DAY_MS)) {
+          drop.push(row.traceId);
+          continue;
+        }
+        const there = present.get(row.traceId);
+        if (there) {
+          // The store holds it; a restore from before the trace was marked a correction took the tag.
+          if (!there.deleted) {
+            const snapshot = await memory.readTrace(row.traceId);
+            if (snapshot && !holdsTag(snapshot.tags, 'correction')) await memory.markCorrection(row.traceId, []);
+          }
+          continue;
+        }
+        const trace = await memory.remember(row.text, {
+          type: 'episodic',
+          scope: CONVERSATION_SCOPE,
+          scopeId: key,
+          id: row.traceId,
+          createdAt: row.createdAt,
+          tags: ['correction'],
+          metadata: { subject: { kind: subject.kind, id: subject.id }, ...(subject.kind === 'user' ? { turnUserId: subject.id } : {}) },
+        });
+        // The next compile reads it by id: its time can be below the compile's watermark.
+        await memory.addRebuildSources(key, [trace.id]);
+        if (trace.id === row.traceId) {
+          refiled += 1;
+          continue;
+        }
+        // The store holds the same words under another id: that trace is the correction, and the kept row names it.
+        await memory.markCorrection(trace.id, []);
+        await ledger.keepCorrection({ traceId: trace.id, scopeId: key, text: row.text, createdAt: Number(trace.createdAt) });
+        drop.push(row.traceId);
+      }
+    };
+    await (options.onKey ? options.onKey(key, work) : work());
+  }
+  if (drop.length > 0) await ledger.dropCorrections(drop);
+  return refiled;
 }
 
 /**
@@ -520,11 +702,17 @@ export interface ReapplyTombstonesOptions
  * deletion that did not finish, and for what another process wrote after a tombstone. It deletes nothing of a subject
  * the ledger does not hold, and never touches memory from before per-user scope that nobody attributed.
  *
+ * Then each trace the ledger records as deleted by a correction or a single deletion, which the store holds again, is
+ * deleted again with each page built from it, and each correction the ledger's copy keeps, which the store lacks, is
+ * filed again under its id, key and time; a kept correction of a forgotten subject, of a trace recorded as deleted or
+ * past its key's retention period goes from the copy instead.
+ *
  * Then it runs what earlier deletes left owed in the store's files ({@link Memory.finishErasure}): a vector index
  * rewrite or a log checkpoint a deletion could not finish, which no held subject would lead it back to; a failure
  * there writes one `memory.erasure_unfinished` line and stays owed.
  *
- * One `memory.tombstone_reapplied` line is logged when a subject was re-applied or a tombstone came back from the copy.
+ * One `memory.tombstone_reapplied` line is logged when a subject was re-applied, a tombstone came back from the copy,
+ * a recorded trace was deleted again or could not be, or a correction was filed again.
  *
  * @returns One report a subject re-applied; none for a store that holds nothing of a forgotten subject.
  * @throws Error when the store has no forgotten-user ledger.
@@ -560,6 +748,9 @@ export async function reapplyTombstones(options: ReapplyTombstonesOptions): Prom
       );
     }
   }
+  // What a correction or a single deletion recorded: its deleted traces, and the correction's text.
+  const traces = await reapplyDeletedTraces(options, ledger);
+  const correctionsRefiled = await refileKeptCorrections(options, ledger);
   try {
     // A rewrite of the vector index or a checkpoint of the log that a deletion could not finish runs again, though
     // the store may hold nothing more of the subject to find it by.
@@ -567,8 +758,14 @@ export async function reapplyTombstones(options: ReapplyTombstonesOptions): Prom
   } catch (error) {
     memoryLog.warn('memory.erasure_unfinished', errorFields(error));
   }
-  if (reports.length > 0 || added.length > 0) {
-    memoryLog.info('memory.tombstone_reapplied', { subjects: reports.length, reconciled: added.length });
+  if (reports.length > 0 || added.length > 0 || traces.traces > 0 || traces.missed > 0 || correctionsRefiled > 0) {
+    memoryLog.info('memory.tombstone_reapplied', {
+      subjects: reports.length,
+      reconciled: added.length,
+      traces: traces.traces,
+      tracesMissed: traces.missed,
+      correctionsRefiled,
+    });
   }
   return reports;
 }

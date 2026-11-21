@@ -53,7 +53,7 @@ import { shareForgottenLedger } from '../cognition/memory/suppression/learnerTom
 import { createSoulMind, shareSoulStore } from './runtime/soulStore.js';
 import { SOUL_TURN_NOTHING, type SoulTurnAnswer, type SoulTurnMemory } from '../cognition/substrate/soulTurnMemory.js';
 import { guardedWrite } from '../cognition/memory/suppression/guardedWrite.js';
-import { sweepRetention, type RetentionPeriod } from '../cognition/memory/io/retentionSweep.js';
+import { retentionDaysOf, sweepRetention, type RetentionPeriod } from '../cognition/memory/io/retentionSweep.js';
 import { correctSubjectMemory, exportSubjectMemory, type UserMemoryExport } from '../cognition/memory/io/userMemoryExport.js';
 import {
   assertLegacyMemory,
@@ -2678,6 +2678,10 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
           legacy: await legacyDeletionOf(),
         };
       },
+      // A trace a correction deleted, and a correction filed again, are handled in the person's turn, after the
+      // writes and compiles of theirs that are running; once close() is waiting for those, at once.
+      onKey: (key, work) => (closing ? work() : onSubject(key, work)),
+      retentionDaysOf: (key, kind) => (retention === undefined ? undefined : retentionDaysOf(retention, kind, policyDays.get(key))),
     });
     // A subject the store holds nothing more of no longer counts toward the retention requirement.
     reports.forEach((report, at) => {
