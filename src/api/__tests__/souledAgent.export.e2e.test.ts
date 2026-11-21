@@ -305,6 +305,21 @@ describe(`who receives a person's text, on runtime ${RUNTIME}`, () => {
   });
 });
 
+describe(`a call's own fallback hops, on runtime ${RUNTIME}`, () => {
+  it("names each hop a call's own fallbackProviders name, and stores it once", async () => {
+    const { a } = await open();
+
+    await a.generate('Hello.', { fallbackProviders: [{ provider: 'anthropic', model: 'claude-hop' }] });
+    await a.generate('Hello again.', { fallbackProviders: [{ provider: 'anthropic', model: 'claude-hop' }] });
+
+    expect(await recipientsOf(a)).toEqual([...OWN_ROUTE, { role: 'fallback-model', provider: 'anthropic', model: 'claude-hop' }]);
+    await a.close();
+    expect(rows<{ key: string }>("SELECT key FROM brain_meta WHERE key LIKE 'recipient:%'")).toEqual([
+      { key: 'recipient:fallback-model:anthropic:claude-hop' },
+    ]);
+  });
+});
+
 describe("who receives a person's text, on the GMI runtime with cognitive memory on", () => {
   it('recipients() names the embedding provider', async () => {
     const { a } = await open({

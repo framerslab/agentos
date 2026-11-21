@@ -77,6 +77,7 @@ import { isAnonymousUserId } from './runtime/memorySubject.js';
 import { asSpendBudget } from './runtime/spendBudget.js';
 import { credentialsGoWith, modelNamesAnotherProvider } from './runtime/credentialOwner.js';
 import {
+  PROVIDER_FROM_THE_ROUTER,
   recipientKey,
   recipientsOf,
   recordedRecipients,
@@ -1935,14 +1936,20 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
 
   /**
    * Records the route a call takes that the options do not name: the call's own `provider` or `model` (the agent's for
-   * the one it leaves out), and on the default runtime each hop of its own `fallbackProviders`. Each route is stored
-   * once, as one `brain_meta` row of the store that holds no person, no text and no time, so `recipients()` names it
-   * after a restart; close() waits for the write. A write that fails leaves the route listed in this process, is tried
-   * again by the next call on the route, and one `memory.recipient_unrecorded` line says so.
+   * the one it leaves out), and on the default runtime its own model router and each hop of its own
+   * `fallbackProviders`. Each route is stored once, as one `brain_meta` row of the store that holds no person, no text
+   * and no time, so `recipients()` names it after a restart; close() waits for the write. A write that fails leaves
+   * the route listed in this process, is tried again by the next call on the route, and one
+   * `memory.recipient_unrecorded` line says so.
    */
   const noteCallRoute = (call: unknown): void => {
     if (call === null || typeof call !== 'object') return;
-    const { provider, model, fallbackProviders } = call as { provider?: unknown; model?: unknown; fallbackProviders?: unknown };
+    const { provider, model, router, fallbackProviders } = call as {
+      provider?: unknown;
+      model?: unknown;
+      router?: unknown;
+      fallbackProviders?: unknown;
+    };
     const routes: MemoryRecipient[] = [];
     const callProvider = typeof provider === 'string' && provider !== '' ? provider : undefined;
     const callModel = typeof model === 'string' && model !== '' ? model : undefined;
@@ -1956,7 +1963,10 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       const routeModel = callModel ?? rest.model;
       routes.push(routeRecipient('model', { provider: providerNamedBy(routeProvider, routeModel), model: routeModel }));
     }
-    // The GMI runtime refuses a call's own fallbackProviders before any model call.
+    // The GMI runtime refuses a call's own router and fallbackProviders before any model call.
+    if (rest.runtime !== 'gmi' && router !== undefined && router !== null) {
+      routes.push(routeRecipient('model', { provider: PROVIDER_FROM_THE_ROUTER }));
+    }
     if (rest.runtime !== 'gmi' && Array.isArray(fallbackProviders)) {
       for (const hop of fallbackProviders as unknown[]) {
         const entry = (hop !== null && typeof hop === 'object' ? hop : {}) as { provider?: unknown; model?: unknown };
