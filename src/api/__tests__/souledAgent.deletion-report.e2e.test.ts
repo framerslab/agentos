@@ -660,6 +660,33 @@ describe("a deletion and the open sessions, on runtime 'gmi' with sentiment on a
     expect(JSON.stringify([held, gmi.getReasoningTrace()])).not.toMatch(/LARK-7|attic/);
   });
 
+  it('keeps nothing of a metaprompt that fails once the person is forgotten', async () => {
+    const gmis = builtGmis();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // The provider's error quotes what the metaprompt sent it.
+    const refusal = new Error('The provider refused a request holding "My canary is LARK-7??"') as unknown as Record<string, unknown>;
+    const a = await openGmi({}, [reply.text('Noted first.'), reply.hold([], gate, [refusal]), ...spare()]);
+    const session = a.session('s1', { userId: 'alice' });
+    const calls = served.seen.length;
+    await session.send('My canary is LARK-7??');
+    const gmi = gmis[0];
+    // Her turn's confusion metaprompt waits for the model when the deletion comes.
+    await vi.waitFor(() => expect(served.seen.length).toBeGreaterThanOrEqual(calls + 2), { timeout: 4_000 });
+    try {
+      const report = await a.forgetUser!('alice');
+      expect(report.parts[3]).toEqual({ part: 'sessions', reached: true, deleted: 1 });
+    } finally {
+      release();
+    }
+    // The metaprompt ends: its failure is either discarded or traced.
+    const ended = (message: string) => message.startsWith('Discarded late results') || message.startsWith("Metaprompt 'gmi_confusion_clarification' failed");
+    await vi.waitFor(() => expect(gmi.getReasoningTrace().entries.some((entry) => ended(entry.message))).toBe(true), { timeout: 4_000 });
+    expect(JSON.stringify(gmi.getReasoningTrace())).not.toContain('LARK-7');
+  });
+
   it("drops the GMI's trace of her turns, a failed turn's error that quotes her words included", async () => {
     const gmis = builtGmis();
     const a = await openGmi({}, [reply.text('Noted first.'), new Error('The provider refused a request holding "My canary is LARK-7."'), ...spare()]);
