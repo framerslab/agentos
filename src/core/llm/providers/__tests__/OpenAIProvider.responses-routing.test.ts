@@ -439,17 +439,77 @@ describe('OpenAIProvider routes to /v1/responses', () => {
     expect(posts()).toHaveLength(0);
   });
 
+  it('sends a streamed gpt-5.6-sol tool call with no effort to /v1/responses', async () => {
+    // OpenAI refuses this call on /v1/chat/completions with HTTP 400: "Function tools with
+    // reasoning_effort are not supported for gpt-5.6-sol in /v1/chat/completions. To use
+    // function tools, use /v1/responses or set reasoning_effort to 'none'." The body it
+    // refused carried no reasoning_effort key: the model's own default effort is not none.
+    serve([() => sseResponse(sseText([created('gpt-5.6-sol'), textDelta('ok'), completed([messageItem('ok')])]))]);
+    const provider = await initializedProvider();
+    const messages: ChatMessage[] = [
+      {
+        role: 'system',
+        content: [
+          { type: 'text', text: 'You are a companion.' },
+          { type: 'text', text: 'Answer briefly.' },
+        ],
+      },
+      { role: 'user', content: 'hi' },
+    ];
+
+    const chunks = await collect(provider.generateCompletionStream('gpt-5.6-sol', messages, { tools: pingTool }));
+
+    const sent = posts();
+    expect(sent.map((p) => p.url)).toEqual([RESPONSES_URL]);
+    expect(sent[0].body.tools).toEqual([
+      {
+        type: 'function',
+        name: 'ping',
+        description: 'Ping.',
+        parameters: { type: 'object', properties: { x: { type: 'string' } } },
+        strict: false,
+      },
+    ]);
+    expect(sent[0].body.input).toEqual([
+      { role: 'system', content: 'You are a companion.\nAnswer briefly.' },
+      { role: 'user', content: 'hi' },
+    ]);
+    for (const key of ['reasoning', 'reasoning_effort', 'messages', 'stream_options']) {
+      expect(sent[0].body).not.toHaveProperty(key);
+    }
+    expect(chunks.map((c) => c.responseTextDelta).filter(Boolean).join('')).toBe('ok');
+    const final = soleFinal(chunks);
+    expect(final.error).toBeUndefined();
+    expect(final.choices[0].finishReason).toBe('stop');
+  });
+
+  it('refuses a GPT-5 tool call whose content /v1/responses cannot carry, without sending it', async () => {
+    serve([]);
+    const provider = await initializedProvider();
+    const withAudio: ChatMessage[] = [
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Transcribe this.' },
+          { type: 'input_audio', input_audio: { data: 'AAAA', format: 'wav' } },
+        ],
+      },
+    ];
+
+    await expect(provider.generateCompletion('gpt-5.6-sol', withAudio, { tools: pingTool })).rejects.toMatchObject({
+      code: 'RESPONSES_UNMAPPABLE_CONTENT',
+    });
+    await expect(
+      collect(provider.generateCompletionStream('gpt-5.5', withAudio, { tools: pingTool, effort: 'high' })),
+    ).rejects.toMatchObject({ code: 'RESPONSES_UNMAPPABLE_CONTENT' });
+    expect(posts()).toHaveLength(0);
+  });
+
   it('routes streamed and non-streamed calls by one rule', async () => {
-    const chatStream = () =>
-      sseResponse(
-        `data: ${JSON.stringify({
-          id: 'c',
-          object: 'chat.completion.chunk',
-          created: 1,
-          model: 'gpt-5.6',
-          choices: [{ index: 0, delta: { content: 'ok' }, finish_reason: 'stop' }],
-        })}\n\ndata: [DONE]\n\n`,
-      );
+    // Every GPT-5 tool call goes to /v1/responses, with or without an effort: Chat Completions
+    // refuses function tools for gpt-5.6-sol unless reasoning_effort is 'none' (HTTP 400, "To use
+    // function tools, use /v1/responses or set reasoning_effort to 'none'"). Calls with no tools,
+    // and gpt-4o, stay on chat.
     const chatJson = () =>
       jsonResponse({
         id: 'c',
@@ -458,11 +518,16 @@ describe('OpenAIProvider routes to /v1/responses', () => {
         model: 'gpt-4o',
         choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
       });
+    const responsesJson = () =>
+      jsonResponse({ ...RESPONSE_META, model: 'gpt-5.6', status: 'completed', output: [messageItem('ok')], usage: USAGE });
+    const responsesStream = (model: string) => () =>
+      sseResponse(sseText([created(model), textDelta('ok'), completed([messageItem('ok')])]));
     serve([
+      responsesJson,
       chatJson,
+      responsesStream('gpt-5.5'),
+      responsesStream('gpt-5.6'),
       chatJson,
-      () => sseResponse(sseText([created('gpt-5.5'), textDelta('ok'), completed([messageItem('ok')])])),
-      chatStream,
       chatJson,
     ]);
     const provider = await initializedProvider();
@@ -472,14 +537,23 @@ describe('OpenAIProvider routes to /v1/responses', () => {
     await collect(provider.generateCompletionStream('gpt-5.5', USER, { tools: pingTool, effort: 'max' }));
     await collect(provider.generateCompletionStream('gpt-5.6', USER, { tools: pingTool }));
     await provider.generateCompletion('gpt-4o', USER, { tools: pingTool, effort: 'high' });
+    await provider.generateCompletion('gpt-5.6', USER, { effort: 'high' });
 
     const sent = posts();
-    expect(sent.map((p) => p.url)).toEqual([CHAT_URL, CHAT_URL, RESPONSES_URL, CHAT_URL, CHAT_URL]);
+    expect(sent.map((p) => p.url)).toEqual([RESPONSES_URL, CHAT_URL, RESPONSES_URL, RESPONSES_URL, CHAT_URL, CHAT_URL]);
+    // A GPT-5 tool call with no effort sends none: the model reasons at its own default.
+    for (const i of [0, 3]) {
+      expect(sent[i].body).not.toHaveProperty('reasoning');
+      expect(sent[i].body).not.toHaveProperty('reasoning_effort');
+      expect(sent[i].body.tools.map((t: Json) => t.name)).toEqual(['ping']);
+    }
     // No tools: gpt-6-sol keeps its effort on chat.
     expect(sent[1].body.reasoning_effort).toBe('high');
     // A streamed GPT-5 tool call with an effort keeps it on /v1/responses.
     expect(sent[2].body.reasoning).toEqual({ effort: 'xhigh' });
     expect(sent[2].body.stream).toBe(true);
+    // No tools: gpt-5.6 keeps its effort on chat.
+    expect(sent[5].body.reasoning_effort).toBe('high');
   });
 });
 
