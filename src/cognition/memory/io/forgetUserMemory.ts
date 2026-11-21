@@ -706,11 +706,12 @@ async function refileKeptCorrections(
           await memory.addRebuildSources(key, [row.traceId]);
           // Checked against the tombstones again once it lands: a deletion of the person that stopped waiting for
           // this filing at its deadline does not find it, so a filing that lands after the tombstone is taken back.
+          let landed = false;
           const filed = await guardedWrite(
             ledger,
             subject,
-            () =>
-              memory.remember(row.text, {
+            async () => {
+              const stored = await memory.remember(row.text, {
                 type: 'episodic',
                 scope: CONVERSATION_SCOPE,
                 scopeId: key,
@@ -718,22 +719,31 @@ async function refileKeptCorrections(
                 createdAt: row.createdAt,
                 tags: ['correction'],
                 metadata: { subject: { kind: subject.kind, id: subject.id }, ...(subject.kind === 'user' ? { turnUserId: subject.id } : {}) },
-              }),
+              });
+              landed = true;
+              return stored;
+            },
             async (trace) => {
-              await memory.deleteTraces([trace.id]);
+              // Only a trace this filing made is taken back: words the key already held under another id stay, so a
+              // tombstone read that fails loses none of them.
+              if (trace.id === row.traceId) await memory.deleteTraces([trace.id]);
             },
           );
           if (filed.status === 'refused') {
-            // The person is forgotten: nothing of the filing stays, and the kept row goes.
+            // The person is forgotten: nothing of the filing stays, nor the registry row it made again after their
+            // deletion had run, and the kept row goes.
+            if (landed) await memory.deleteScope(CONVERSATION_SCOPE, key).catch(() => undefined);
             drop.push(row.traceId);
             continue;
           }
           const trace = filed.result;
+          // Named again once the trace is stored: a compile that ran while it was being filed read the first note
+          // before the trace was there, and cleared it.
+          await memory.addRebuildSources(key, [trace.id]);
           if (trace.id === row.traceId) {
             refiled += 1;
             continue;
           }
-          await memory.addRebuildSources(key, [trace.id]);
           // The store holds the same words under another id: that trace is the correction, and the kept row names it.
           // The id the correction had is recorded as deleted in the same write to the copy, which drops its kept row: a
           // later restore that brings that trace back deletes it again, so deleting the trace that now holds the words
