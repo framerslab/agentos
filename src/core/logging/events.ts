@@ -169,7 +169,7 @@ export const AGENTOS_EVENTS = {
   'soul.id_fallback': { reason: { enum: ['old_slug_learner'] } },
   // A session was opened with an anonymous id as its user id; the session is the memory subject.
   'memory.anonymous_user': { path: { enum: ['plain', 'gmi'] } },
-  // A host's memory hook threw, rejected or timed out; the turn went on without it. `soulMemory`: a souled agent on the GMI runtime built no view of its memory rules for a turn whose subject's id no memory key can be built from, or the GMI could not read a turn's answer from that view and allowed the turn nothing for the person: no recall, no sentiment score.
+  // A host's memory hook threw, rejected or timed out; the turn went on without it. `soulMemory`: on a souled agent's GMI runtime, a session turn whose subject's id no memory key can be built from, or a turn whose answer the GMI could not read from the soul's view; the turn went on, and its message was not scored for sentiment.
   'memory.hook_failed': { hook: { enum: ['getContext', 'observe', 'memoryPolicy', 'screen', 'soulMemory'] }, type: 'word', code: 'word' },
   // Cognitive memory's recall (src/cognition/memory/retrieval/recall). No memory text, query text or id is ever a field.
   'memory.recall.leg_absent': { leg: { enum: ['dense', 'exact_words', 'recency'] }, reason: { enum: ['no_store', 'no_embedder', 'no_index', 'no_scope_filter', 'no_scopes', 'query_error', 'disabled'] } },

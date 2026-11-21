@@ -18,7 +18,8 @@ export interface SoulStore {
   sendUserIdToProvider: boolean;
   /**
    * One session turn's view of the soul's memory rules, from the context its hooks are given; undefined for a turn
-   * that names no subject, and for a subject whose id no memory key can be built from.
+   * that names no subject. A subject whose id no memory key can be built from gets a view with no scope that allows
+   * nothing.
    */
   forTurn(context: MemoryHookContext): SoulTurnMemory | undefined;
 }

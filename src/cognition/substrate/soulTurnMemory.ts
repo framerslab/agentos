@@ -25,8 +25,11 @@ export const SOUL_TURN_NOTHING: Readonly<SoulTurnAnswer> = Object.freeze({ recal
 
 /** One turn's view of a souled agent's memory rules. */
 export interface SoulTurnMemory {
-  /** The scope the person's memory is kept under: their conversation key. */
-  scope: { scope: 'conversation'; scopeId: string };
+  /**
+   * The scope the person's memory is kept under: their conversation key. Absent for a subject whose id no memory key
+   * can be built from: such a turn files nothing and recalls nothing of the person, and its answer allows nothing.
+   */
+  scope?: { scope: 'conversation'; scopeId: string };
   /**
    * Decides the turn's policy, once a turn: the decision the turn's recall opened, else a new one, kept open for the
    * turn's writes. Called before the turn's sentiment analysis.

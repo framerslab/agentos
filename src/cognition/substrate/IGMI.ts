@@ -375,7 +375,8 @@ export interface GMITurnInput {
     /**
      * A souled agent's view of its memory rules for this turn (`souledAgent()` on the GMI runtime): the GMI asks for the
      * turn's answer once, before it scores the user's message for sentiment, and skips the analysis when the answer
-     * says so. A tool continuation keeps the answer of the turn it continues. Internal.
+     * says so, as it does for a subject whose id no memory key can be built from. A tool continuation keeps the answer
+     * of the turn it continues. Internal.
      *
      * @internal
      */

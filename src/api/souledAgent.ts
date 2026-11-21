@@ -804,7 +804,8 @@ export type SouledAgent = Agent & {
  *
  * With `runtime: 'gmi'` no session turn sends the end user's id to the model provider unless
  * {@link SouledAgentOptions.sendUserIdToProvider} is set, and a turn whose policy answer marks a minor or a person who
- * objects to profiling, whose policy hook failed, or whose subject is forgotten, is not scored for sentiment.
+ * objects to profiling, whose policy hook failed, whose subject is forgotten, or whose user id no memory key can be
+ * built from, is not scored for sentiment.
  *
  * `close()` first closes the agent (with `runtime: 'gmi'` that stops its session turns), then waits, within one
  * deadline (see {@link SouledAgentOptions.pendingWritesTimeoutMs}), for the turns still running (a `generate()`, a
@@ -1320,8 +1321,9 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   };
   /**
    * One session turn's view of the memory rules, for the GMI that serves it on `runtime: 'gmi'`: the subject's key, and
-   * the turn's decision, which its recall may have opened and its two writes share. A turn with no subject has none,
-   * and neither has a subject whose id no key can be built from, which one `memory.hook_failed` line says.
+   * the turn's decision, which its recall may have opened and its two writes share. A turn with no subject has none. A
+   * subject whose id no key can be built from has no key and no policy to ask: its view has no scope and allows
+   * nothing, so the turn is not scored for sentiment, and one `memory.hook_failed` line says so.
    */
   const soulTurnOf = (context: MemoryHookContext): SoulTurnMemory | undefined => {
     const subject = turnSubjectOf(context);
@@ -1331,7 +1333,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       scopeId = conversationScopeKey(agentId, subject);
     } catch (err) {
       memoryLog.warn('memory.hook_failed', { hook: 'soulMemory', ...errorFields(err) });
-      return undefined;
+      return { begin: async () => ({ ...SOUL_TURN_NOTHING }) };
     }
     return {
       scope: { scope: 'conversation', scopeId },
