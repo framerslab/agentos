@@ -1372,6 +1372,26 @@ describe('export and correction', () => {
     expect(doc.traces.find((trace) => trace.id === t2)!.tags).toContain('correction');
   });
 
+  it('marks a reused trace stored in the same millisecond as the correction', async () => {
+    // Only `Date` is faked, and it does not move: the turn and the correction share one millisecond.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(1_800_000_000_000);
+    const { a } = await open({ compile: false });
+    await turn(a, 's1', 'alice', 'I live in Porto.');
+    const t = saidOf(keyOf(alice)).find((trace) => trace.content === 'I live in Porto.')!.id;
+
+    const result = await a.correctUserMemory!('alice', { traceIds: [t], text: 'I live in Porto.' });
+    expect(result).toMatchObject({ correctionTraceId: t, deleted: 0 });
+    const [kept] = rows<{ deleted: number; tags: string; metadata: string }>(
+      storeFile(),
+      'SELECT deleted, tags, metadata FROM memory_traces WHERE id = ?',
+      [t],
+    );
+    expect(kept.deleted).toBe(0);
+    expect(JSON.parse(kept.tags) as string[]).toContain('correction');
+    expect((JSON.parse(kept.metadata) as { corrects?: string[] }).corrects).toEqual([t]);
+  });
+
   it('records every trace a reused correction replaced, and has the next compile read it', async () => {
     const { a } = await open({ compile: false });
     await turn(a, 's1', 'alice', 'My canary is LARK-7.');
