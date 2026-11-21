@@ -258,6 +258,8 @@ export function createGmiLaunchTool(o: GmiLaunchToolOptions): ITool<LaunchAgency
         ...(caller?.approvalGate ? { approvalGate: caller.approvalGate } : {}),
         ...(ctx.signal ? { signal: ctx.signal } : {}),
         ...(caller?.providerUserId !== undefined ? { providerUserId: caller.providerUserId } : {}),
+        // A launching turn that sends its provider no end-user id has its team send none either.
+        ...(caller?.withholdUserId ? { withholdUserId: true as const } : {}),
         namespace,
         ...(ctx.correlationId ? { turnId: ctx.correlationId } : {}),
         // The GMI's tool view: the turn's launch pool lasts as long as the GMI that runs the turn.
@@ -291,8 +293,10 @@ export function createGmiLaunchTool(o: GmiLaunchToolOptions): ITool<LaunchAgency
         role: seat.role,
         tools: [...seat.toolNames],
         ...(seat.dependsOn ? { dependsOn: [...seat.dependsOn] } : {}),
-        // The seat's session runs as the launching turn's user, when that turn named one.
+        // The seat's session runs as the launching turn's user, when that turn named one, and sends no end-user id to
+        // its provider when the launching turn sent none.
         ...(parent.providerUserId !== undefined ? { userId: parent.providerUserId } : {}),
+        ...(parent.withholdUserId ? { withholdUserId: true as const } : {}),
         frame,
         budget: launch.budget,
         toolHooks: launch.toolHooks,

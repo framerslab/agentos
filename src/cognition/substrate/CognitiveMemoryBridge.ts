@@ -149,6 +149,24 @@ export interface CognitiveMemoryEncodeOptions {
   learning?: CognitiveMemoryTurnLearning;
 }
 
+
+/**
+ * `text`, a memory block, with `tag` left out of each tag list its structured lines show (`| tags: a, b, c)`). A turn
+ * that sends the model no user id shows the user's id among no recalled trace's tags, a trace an earlier turn or an
+ * earlier release tagged with it included. A list that held `tag` alone goes with it; the stored traces are unchanged.
+ *
+ * @internal
+ */
+export function withoutShownTag(text: string, tag: string): string {
+  if (!tag || !text.includes(tag)) return text;
+  return text.replace(/ \| tags: ([^)\n]*)\)/g, (whole: string, list: string) => {
+    const tags = list.split(', ');
+    const kept = tags.filter((shown) => shown !== tag);
+    if (kept.length === tags.length) return whole;
+    return kept.length > 0 ? ` | tags: ${kept.join(', ')})` : ')';
+  });
+}
+
 /**
  * Bridges a GMI instance with the Cognitive Memory subsystem.
  *
@@ -181,6 +199,8 @@ export class CognitiveMemoryBridge {
     private readonly getPersonaId: () => string,
     private readonly getGmiId: () => string,
     private readonly addTraceEntry: (type: string, message: string, details?: Record<string, any>) => void,
+    /** True while the turn may send no request the user's id: its traces are not tagged with the user's id. */
+    private readonly withholdsUserId: () => boolean = () => false,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -221,8 +241,9 @@ export class CognitiveMemoryBridge {
   /**
    * Builds a de-duplicated set of tags for a memory trace.
    *
-   * Tags include the message role, active persona ID, current user ID, and
-   * the task domain. Falsy or whitespace-only values are filtered out. The
+   * Tags include the message role, active persona ID, current user ID (none on
+   * a turn that sends the model no user id), and the task domain. Falsy or
+   * whitespace-only values are filtered out. The
    * memory block reads the role tag 'assistant' on a trace with sourceType
    * 'agent_inference' as the agent's own earlier reply.
    *
@@ -234,7 +255,8 @@ export class CognitiveMemoryBridge {
     const tags = [
       role,
       this.getPersonaId(),
-      userCtx?.userId,
+      // The memory block shows a trace's tags to the model: a turn that sends it no user id tags nothing with one.
+      this.withholdsUserId() ? undefined : userCtx?.userId,
       (userCtx as any)?.domain,
     ].filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
     return Array.from(new Set(tags));
@@ -408,6 +430,8 @@ export class CognitiveMemoryBridge {
         this.getPadState(),
         { scopes },
       );
+      // Changed in place: the manager renders this context again for a model hop by the object it returned.
+      context.contextText = this.withUserTagHidden(context.contextText);
       if (context.contextText.trim()) {
         // Counts, the retrieval, the reranker and the absent legs; the ids only on the host's ask, the text never.
         // With the capture off, the counts come from the assembler's line report, one entry a trace.
@@ -434,6 +458,13 @@ export class CognitiveMemoryBridge {
       this.addTraceEntry('WARNING', 'Cognitive memory assembly failed.', { errorName: errorNameOf(error) });
       return null;
     }
+  }
+
+  /** A memory block as the turn may show it: with no tag that names the user, on a turn that sends the model no user id. */
+  private withUserTagHidden(text: string): string {
+    if (!this.withholdsUserId()) return text;
+    const userId = this.getUserContext()?.userId;
+    return typeof userId === 'string' && userId.trim() ? withoutShownTag(text, userId) : text;
   }
 
   /** The configured budget of the memory block: the manager's `recall.budget.totalTokens`, 1600 when unset. */
@@ -485,7 +516,7 @@ export class CognitiveMemoryBridge {
         if (!turn) return null;
         next = await this.cognitiveMemory.assembleForPrompt(turn.query, budget.effective, this.getPadState(), { scopes: turn.scopes });
       }
-      return stamped(next, true);
+      return stamped({ ...next, contextText: this.withUserTagHidden(next.contextText) }, true);
     } catch (error: unknown) {
       this.addTraceEntry('WARNING', 'Cognitive memory re-render for a model hop failed.', { errorName: errorNameOf(error) });
       return null;

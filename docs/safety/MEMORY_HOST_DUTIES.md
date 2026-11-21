@@ -35,7 +35,7 @@ Memory makes these calls out of your process, and no others:
 |---|---|---|---|
 | The compile | On `close()` and on `agent.memory.compileWiki()`, once per page of each person with new traces | The page's current text and that one person's new traces | The agent's own provider and model, or the one you name with `compile`; nobody, with `compile: false` |
 | Embedding | Only when you give the store an embedder: each trace when it is stored, each query at recall | The trace's text; the query's text | The embedding provider you configured |
-| The end user's id | With each model request of a GMI session opened with a `userId` | The id you passed | The model provider |
+| The end user's id | With each model request of a `gmi()` session opened with a `userId`, in the end-user field and as the name of the user's messages; on a souled agent, only with `sendUserIdToProvider: true` | The id you passed | The model provider |
 
 Memory text goes to the agent's provider or to the compile provider you named, and to no other recipient.
 
@@ -167,7 +167,7 @@ The library keeps no backups. Yours hold every deleted person's words until they
 
 ### Pass an opaque user id on every session
 
-Pass `{ userId }` to every `session()` your product opens: one id per person, unique across all your tenants, not per tenant. Make it opaque: a random or hashed id, never an email address or a phone number. The id is the memory scope, the tombstone's input and the end user's id sent to the provider.
+Pass `{ userId }` to every `session()` your product opens: one id per person, unique across all your tenants, not per tenant. Make it opaque: a random or hashed id, never an email address or a phone number. The id is the memory scope and the tombstone's input. A souled agent sends it to no model provider unless you set `sendUserIdToProvider: true`; a `gmi()` agent sends it as the end user's id with each request, and so does a souled agent that opts in, so the provider receives exactly what you pass.
 
 ### Anonymous sessions are people too
 
@@ -187,11 +187,11 @@ On PostgreSQL each tombstone write and each `applyTombstones()` takes a lock on 
 
 ### Children
 
-The library does not know a person's age. If children may use your product, settle age assurance and any consent a parent must give before memory is on for them. Answer `minor: true` from `memoryPolicy` for such accounts, beside `longTerm` and an optional shorter retention. "Until deletion" is not a setting for a child's account, and the library holds to that: on a store that keeps the account's memory until deletion, or with no `retention`, a child's account keeps no long-term memory whatever the answer says, and its turns recall your operator pages alone. On a store with a period in days, its turns are kept for that period, and its pages are compiled only on the provider and model you name in `compile.minors`, and not at all without it; with no key for that provider the compile does not run, and no other provider takes its place. Name a provider whose terms cover a child's data, and say it in your notice.
+The library does not know a person's age. If children may use your product, settle age assurance and any consent a parent must give before memory is on for them. Answer `minor: true` from `memoryPolicy` for such accounts, beside `longTerm` and an optional shorter retention. "Until deletion" is not a setting for a child's account, and the library holds to that: on a store that keeps the account's memory until deletion, or with no `retention`, a child's account keeps no long-term memory whatever the answer says, and its turns recall your operator pages alone. On a store with a period in days, its turns are kept for that period, and its pages are compiled only on the provider and model you name in `compile.minors`, and not at all without it; with no key for that provider the compile does not run, and no other provider takes its place. Name a provider whose terms cover a child's data, and say it in your notice. On `runtime: 'gmi'` a child's turns are not scored for sentiment.
 
 ### A person who objects to profiling
 
-Compiled pages are a profile of the person. Where a person objects to profiling and that right applies, answer `profiling: 'off'` for their account, and `longTerm: 'raw'` or `'off'` so that no page is compiled for them. The souled agent's own store keeps no mood or emotional context of anyone.
+Compiled pages are a profile of the person. Where a person objects to profiling and that right applies, answer `profiling: 'off'` for their account, and `longTerm: 'raw'` or `'off'` so that no page is compiled for them. The souled agent's own store keeps no mood or emotional context of anyone. On `runtime: 'gmi'` with sentiment tracking on (`cognition: 'full'`), their turns are not scored for sentiment, so no trend of theirs is kept.
 
 ### A restriction that must hold at once
 
@@ -226,6 +226,7 @@ A store that an earlier release of `souledAgent()` wrote holds traces under the 
 | `tombstoneCopy` | Where the second copy of the tombstones lives. | `memory/.store/forgotten.sqlite`; required with `soulStore` |
 | `soulStore` | Keeps the memory store in your own database, on a storage adapter you pass and close. | `memory/.store/memory.sqlite` |
 | `sharedMemory` | One user for every session that names none: one person's own machine, or an operator's notes. | Off. |
+| `sendUserIdToProvider` | Sends the session's `userId` to the model provider as the end user's id, on `runtime: 'gmi'`. Pass an opaque or hashed id when you set it. | Off: no provider receives the id. |
 | `legacyMemory` | Attributes memory from before per-user scope to one user, on one person's own machine. | Off. |
 | `soul: { path, optional: true }` | Lets an agent start when its soul fails to load. | Off: a failed load throws. |
 | `agent.forgetUser`, `agent.applyTombstones`, `agent.sweepRetention`, `agent.exportUserMemory`, `agent.correctUserMemory` | The calls your request handling, your schedule and your restore runbook use. | Present on a souled agent with a workspace folder. |

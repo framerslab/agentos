@@ -22,6 +22,7 @@ import type { ChatMessage, ModelUsage, ThinkingBlock } from '../../core/llm/prov
 import type { HexacoTraitValues } from './personas/hexaco';
 import type { ILearnerSession } from '../learning/types.js';
 import type { AgencyLaunchFrame } from '../../api/runtime/agencyLaunch/types';
+import type { SoulTurnMemory } from './soulTurnMemory';
 
 /**
  * Defines the possible moods a GMI can be in, influencing its behavior and responses.
@@ -359,6 +360,13 @@ export interface GMITurnInput {
      */
     providerUserId?: string | null;
     /**
+     * True when no request of the turn may carry the user's id: the user's message is recorded with no `name`, which
+     * would be its `userId` and which OpenAI's Chat Completions API receives with the message. A souled agent on the GMI
+     * runtime sets it unless its host opts in to sending the end user's id (`sendUserIdToProvider`), with
+     * `providerUserId: null`.
+     */
+    withholdUserId?: boolean;
+    /**
      * The ids the turn's cognitive memory files and recalls traces under, in
      * place of the turn's `userId` and `sessionId` (the session also stands in
      * for the conversation when no `conversationId` is given). Tools, the user
@@ -371,6 +379,15 @@ export interface GMITurnInput {
      * their own session id, which is no user's. A learning layer reads such a turn's user as `null`.
      */
     noTurnUser?: boolean;
+    /**
+     * A souled agent's view of its memory rules for this turn (`souledAgent()` on the GMI runtime): the GMI asks for the
+     * turn's answer once, before it scores the user's message for sentiment, and skips the analysis when the answer
+     * says so, as it does for a subject whose id no memory key can be built from. A tool continuation keeps the answer
+     * of the turn it continues. Internal.
+     *
+     * @internal
+     */
+    soulMemory?: SoulTurnMemory;
     /**
      * The launched team this turn's GMI sits in (`launch_agency`): the launch, the seat's role and the team's level.
      * The GMI hands each tool call of the turn a frozen copy in `sessionData.agencyLaunch`, where a launch from that

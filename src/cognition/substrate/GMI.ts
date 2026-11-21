@@ -67,7 +67,7 @@ import { IUtilityAI, SummarizationOptions } from '../nlp/ai_utilities/IUtilityAI
 import { IToolOrchestrator } from '../../core/tools/IToolOrchestrator';
 
 import { ToolExecutionRequestDetails } from '../../core/tools/ToolExecutor';
-import { ConversationMessage } from '../../core/conversation/ConversationMessage';
+import { ConversationMessage, MessageRole } from '../../core/conversation/ConversationMessage';
 import { GMIError, GMIErrorCode, createGMIErrorFromError } from '../../core/utils/errors.js';
 import type { ICognitiveMemoryManager } from '../memory/CognitiveMemoryManager.js';
 import type { AssembledMemoryContext } from '../memory/core/types.js';
@@ -83,6 +83,9 @@ import { settlesWithin, shutdownTimeoutOrDefault } from './shutdownBound';
 import { FORGE_TRACE_HOOK_BOUND_MS } from '../emergent/ForgeTrace.js';
 import { turnContentText } from './turnContent';
 import { moduleLogger } from '../../core/logging/loggerFactory';
+import { errorFields } from '../../core/logging/events.js';
+import { memoryLog } from '../memory/log.js';
+import { SOUL_TURN_NOTHING, type SoulTurnAnswer, type SoulTurnMemory } from './soulTurnMemory';
 
 const DEFAULT_MAX_CONVERSATION_HISTORY_TURNS = 20;
 const DEFAULT_SELF_REFLECTION_INTERVAL_TURNS = 5;
@@ -300,6 +303,14 @@ function memoryScopeOf(turnInput: GMITurnInput): TurnMemoryScope | undefined {
   return { ...(userId ? { userId } : {}), ...(sessionId ? { sessionId } : {}) };
 }
 
+/** The souled agent's view of its memory rules a turn carries in `metadata.soulMemory`; undefined when it carries none. */
+function soulMemoryOf(turnInput: GMITurnInput): SoulTurnMemory | undefined {
+  const soul: unknown = turnInput.metadata?.soulMemory;
+  return soul !== null && typeof soul === 'object' && typeof (soul as SoulTurnMemory).begin === 'function'
+    ? (soul as SoulTurnMemory)
+    : undefined;
+}
+
 /**
  * The host's note a turn carries in `metadata.applicationNote` (`AgentOSInput.applicationNote` for a user turn,
  * `GMIToolResultOptions.applicationNote` for a continuation), trimmed; undefined when it carries none or a blank one.
@@ -467,6 +478,20 @@ export class GMI implements IGMI {
   private turnMemoryScope: TurnMemoryScope | undefined;
 
   /**
+   * True while the turn may send no request the user's id (`metadata.withholdUserId`): the memory the turn files is
+   * not tagged with it, since the memory block shows a trace's tags to the model. Set when a user turn starts.
+   */
+  private turnWithholdsUserId = false;
+
+  /**
+   * A souled agent's view of its memory rules for the turn (`metadata.soulMemory`), and the answer it gave, asked once
+   * a turn before the user's message is scored for sentiment. Set when a user turn starts; a tool continuation keeps
+   * the view and the answer of the turn it continues.
+   */
+  private turnSoulMemory: SoulTurnMemory | undefined;
+  private turnSoulAnswer: SoulTurnAnswer | undefined;
+
+  /**
    * The gate the turn's tool round asks before each call runs, when the turn
    * named one (`metadata.toolCallGate`). Set when a user turn starts; a tool
    * continuation that names no gate asks this one.
@@ -594,6 +619,7 @@ export class GMI implements IGMI {
         () => this.getCurrentPrimaryPersonaId(),
         () => this.gmiId,
         (type, message, details) => this.addTraceEntry(type as ReasoningEntryType, message, details),
+        () => this.turnWithholdsUserId,
       );
     } else {
       this.memoryBridge = null;
@@ -1410,6 +1436,9 @@ export class GMI implements IGMI {
         // the GMI's last turn was another conversation's: nothing it kept for that turn belongs to this one
         this.turnResolution = undefined;
         this.turnMemoryScope = undefined;
+        this.turnWithholdsUserId = false;
+        this.turnSoulMemory = undefined;
+        this.turnSoulAnswer = undefined;
         this.turnToolCallGate = undefined;
         this.turnModelSelection = {};
         this.turnLearning = undefined;
@@ -1485,13 +1514,21 @@ export class GMI implements IGMI {
     historyAtTurnStart: readonly ChatMessage[];
     currentUserMessage: ChatMessage | undefined;
     turnMessages: readonly ChatMessage[];
+    withholdUserId?: boolean;
   }): { conversationHistory: ConversationMessage[]; userInput: string | null; currentTurnMessageCount: number } {
     const { durableHistory, historyAtTurnStart, currentUserMessage, turnMessages } = turn;
+    // A turn that may send no request the user's id sends no user message under a name, which would carry it.
+    const unnamed = (message: ConversationMessage): ConversationMessage => {
+      if (!turn.withholdUserId || message.role !== MessageRole.USER || message.name === undefined) return message;
+      const rest: ConversationMessage = { ...message };
+      delete rest.name;
+      return rest;
+    };
     const toConversationMessage = (message: ChatMessage): ConversationMessage =>
-      this.conversationHistoryManager.convertToConversationMessage(message);
+      unnamed(this.conversationHistoryManager.convertToConversationMessage(message));
 
     const historyBeforeTurn =
-      durableHistory ??
+      durableHistory?.map(unnamed) ??
       historyAtTurnStart
         .filter((message) => message !== currentUserMessage)
         .map(toConversationMessage);
@@ -1594,6 +1631,30 @@ export class GMI implements IGMI {
     };
   }
 
+  /**
+   * The answer a souled agent's view gives for a turn, asked once; undefined for a turn that carries no view. A view
+   * whose ask throws or rejects allows nothing, and one `memory.hook_failed` line says so. A turn stopped while it
+   * waits (a session's close(), the caller's signal, shutdown()) stops waiting at once and is allowed nothing.
+   */
+  private async soulAnswerOf(soul: SoulTurnMemory | undefined, stop: AbortSignal): Promise<SoulTurnAnswer | undefined> {
+    if (!soul) return undefined;
+    if (stop.aborted) return { ...SOUL_TURN_NOTHING };
+    // Set at once: a promise's executor runs when the promise is made.
+    let onStop!: () => void;
+    const stopped = new Promise<SoulTurnAnswer>((resolve) => {
+      onStop = () => resolve({ ...SOUL_TURN_NOTHING });
+      stop.addEventListener('abort', onStop, { once: true });
+    });
+    try {
+      return await Promise.race([soul.begin(this.cognitiveMemory, stop), stopped]);
+    } catch (error) {
+      memoryLog.warn('memory.hook_failed', { hook: 'soulMemory', ...errorFields(error) });
+      return { ...SOUL_TURN_NOTHING };
+    } finally {
+      stop.removeEventListener('abort', onStop);
+    }
+  }
+
   /** @inheritdoc */
 
   public async *processTurnStream(turnInput: GMITurnInput): AsyncGenerator<GMIOutputChunk, GMIOutput, undefined> {
@@ -1612,6 +1673,9 @@ export class GMI implements IGMI {
     if (turnInput.metadata?.isToolContinuation !== true) {
       this.turnResolution = undefined;
       this.turnMemoryScope = memoryScopeOf(turnInput);
+      this.turnWithholdsUserId = turnInput.metadata?.withholdUserId === true;
+      this.turnSoulMemory = soulMemoryOf(turnInput);
+      this.turnSoulAnswer = undefined;
       this.turnLearning = undefined;
       this.turnToolCallGate = toolCallGateOf(turnInput);
       this.turnModelSelection = modelSelectionOf(turnInput);
@@ -1635,6 +1699,12 @@ export class GMI implements IGMI {
     const toolCallGate = toolCallGateOf(turnInput) ?? this.turnToolCallGate;
     // The launched team this turn's tool calls sit in, likewise: a continuation that names none sits in its turn's.
     const launchFrame = launchFrameOf(turnInput) ?? this.turnLaunchFrame;
+    // The souled agent's view of the turn, read before any wait: a newer turn of this GMI sets its own.
+    const turnSoul = this.turnSoulMemory;
+    // Whether this call may send no request the user's id: its own input's word, or, on a continuation, the turn's.
+    const withholdsUserId =
+      turnInput.metadata?.withholdUserId === true ||
+      (turnInput.metadata?.isToolContinuation === true && this.turnWithholdsUserId);
     // The host's note every request of this call sends (each step of its tool loop and each hop), read from its own
     // input alone: a user turn's from AgentOSInput, a continuation's from the options its results came with. The GMI
     // keeps no note between calls, since one GMI serves every conversation of its session.
@@ -1791,8 +1861,19 @@ export class GMI implements IGMI {
           : null;
       const turnMessages: ChatMessage[] = [];
 
+      // A souled agent's answer for the turn, asked once before anything reads the person: a turn it allows no
+      // sentiment (a minor, a person who objects to profiling, a failed policy hook, a forgotten person) is not scored.
+      // A continuation keeps the answer of the turn it continues.
+      const continuesTurn = turnInput.metadata?.isToolContinuation === true;
+      const soulAnswer = continuesTurn ? this.turnSoulAnswer : await this.soulAnswerOf(turnSoul, stop.signal);
+      if (!continuesTurn && ownsState()) this.turnSoulAnswer = soulAnswer;
+      // A turn stopped while it waited for its answer starts nothing more: no learning, recall or prompt.
+      if (!continuesTurn && turnSoul && stop.signal.aborted) {
+        throw new GMIError('Turn aborted: it was stopped while it waited for its memory rules.', GMIErrorCode.LLM_PROVIDER_ERROR, { turnId });
+      }
+
       // Analyze sentiment of user input only when sentiment tracking is enabled
-      if (this.activePersona.sentimentTracking?.enabled) {
+      if (this.activePersona.sentimentTracking?.enabled && soulAnswer?.sentiment !== false) {
         const lastMsg = this.conversationHistoryManager.history.length > 0
           ? this.conversationHistoryManager.history[this.conversationHistoryManager.history.length - 1]
           : null;
@@ -2024,6 +2105,7 @@ export class GMI implements IGMI {
           historyAtTurnStart,
           currentUserMessage,
           turnMessages,
+          withholdUserId: withholdsUserId,
         });
 
         const promptComponents: PromptComponents = {
@@ -2091,9 +2173,11 @@ export class GMI implements IGMI {
         const personaOptions = (this.activePersona.defaultModelCompletionOptions ?? {}) as Record<string, unknown>;
         // The provider's end-user field: the host's choice when the turn names one
         // (null sends none), else the turn's user.
-        const providerUserId = turnInput.metadata && 'providerUserId' in turnInput.metadata
-          ? turnInput.metadata.providerUserId
-          : this.currentUserContext.userId;
+        const providerUserId = withholdsUserId
+          ? null
+          : turnInput.metadata && 'providerUserId' in turnInput.metadata
+            ? turnInput.metadata.providerUserId
+            : this.currentUserContext.userId;
         const llmOptions: ModelCompletionOptions = {
           ...pickCompletionOptions(personaOptions),
           ...pickCompletionOptions(turnOptions),
