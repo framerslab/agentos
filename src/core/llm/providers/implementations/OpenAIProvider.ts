@@ -530,10 +530,13 @@ function probeModelFromCatalog(ids: readonly string[]): string | undefined {
  *     reasoning_effort to 'none'.": the model applies its default effort
  *     (`medium` on the GPT-5.6 and GPT-5.5 model pages,
  *     https://developers.openai.com/api/docs/models/gpt-5.6-sol) when the call
- *     names none. Every GPT-5 model page lists `v1/responses` as supported
- *     (read 2026-11-21), so the call goes there and keeps its tools. Sending
- *     `reasoning_effort: 'none'` on chat instead is not done: no probe shows
- *     every GPT-5 model accepts it.
+ *     names none (https://developers.openai.com/api/docs/models/gpt-5.5
+ *     says the same of `gpt-5.5`). Every GPT-5 model page
+ *     (`https://developers.openai.com/api/docs/models/{id}` for each GPT-5 id
+ *     at https://developers.openai.com/api/docs/models) lists `v1/responses`
+ *     as supported (read 2026-11-21), so the call goes there and keeps its
+ *     tools. Sending `reasoning_effort: 'none'` on chat instead is not done:
+ *     no probe shows every GPT-5 model accepts it.
  *
  * {@link shouldRouteToOpenAiResponsesApi} applies this rule to streamed and
  * non-streamed calls alike. A call this rule sends to Responses whose content
@@ -731,13 +734,39 @@ function isImageUrlPart(
 }
 
 /**
+ * Whether one content part is a Chat Completions `file` part (a PDF, by
+ * `file_id` or by `file_data` with its `filename`), which `/v1/responses`
+ * takes as `input_file` with the same fields
+ * (https://developers.openai.com/api/docs/guides/pdf-files, read 2026-11-21).
+ */
+function isFilePart(
+  part: unknown,
+): part is { type: 'file'; file: { file_id?: string; file_data?: string; filename?: string } } {
+  if (part == null || typeof part !== 'object') return false;
+  const p = part as { type?: unknown; file?: unknown };
+  if (p.type !== 'file' || p.file == null || typeof p.file !== 'object') return false;
+  const file = p.file as { file_id?: unknown; file_data?: unknown };
+  return typeof file.file_id === 'string' || typeof file.file_data === 'string';
+}
+
+/** The `input_file` form of a Chat Completions `file` part: its `file_id`, `filename` and `file_data`, as given. */
+function toResponsesInputFile(part: { file: { file_id?: string; file_data?: string; filename?: string } }): Record<string, unknown> {
+  const out: Record<string, unknown> = { type: 'input_file' };
+  for (const key of ['file_id', 'filename', 'file_data'] as const) {
+    if (typeof part.file[key] === 'string') out[key] = part.file[key];
+  }
+  return out;
+}
+
+/**
  * Whether the `/v1/responses` builder can carry message `m` without losing
  * content. Text-only content ({@link isResponsesMappableContent}) maps on
  * every role. User and tool messages may also carry image parts: a user turn
  * sends them as `input_image`, and a tool result becomes a
  * `function_call_output` whose output is an `input_text` / `input_image`
- * array (the form OpenAI's function-calling reference gives for it). Any other
- * part, such as audio, a file or an Anthropic `tool_result` block, has no
+ * array (the form OpenAI's function-calling reference gives for it). A user
+ * turn may also carry PDF `file` parts, which travel as `input_file`. Any
+ * other part, such as audio or an Anthropic `tool_result` block, has no
  * mapping.
  *
  * @param m A request message.
@@ -748,16 +777,17 @@ export function isResponsesMappableMessage(m: ChatMessage): boolean {
   return (
     (m.role === 'user' || m.role === 'tool') &&
     Array.isArray(m.content) &&
-    m.content.every((part) => isTextPart(part) || isImageUrlPart(part))
+    m.content.every((part) => isTextPart(part) || isImageUrlPart(part) || (m.role === 'user' && isFilePart(part)))
   );
 }
 
 /**
  * The `/v1/responses` form of a user or tool message's content. Text-only
  * content stays the flattened string {@link flattenResponsesTextContent}
- * builds; content with images becomes `input_text` and `input_image` parts.
- * Every image carries a `detail`, `'auto'` (the API's default) when the source
- * part set none. Callers gate on {@link isResponsesMappableMessage} first.
+ * builds; content with images or files becomes `input_text`, `input_image`
+ * and `input_file` parts. Every image carries a `detail`, `'auto'` (the API's
+ * default) when the source part set none. Callers gate on
+ * {@link isResponsesMappableMessage} first.
  */
 function toResponsesInputContent(
   content: ChatMessage['content'],
@@ -765,11 +795,13 @@ function toResponsesInputContent(
   if (!Array.isArray(content) || isResponsesMappableContent(content)) {
     return flattenResponsesTextContent(content);
   }
-  return content.map((part) =>
-    isImageUrlPart(part)
-      ? { type: 'input_image', image_url: part.image_url.url, detail: part.image_url.detail ?? 'auto' }
-      : { type: 'input_text', text: isTextPart(part) ? part.text : '' },
-  );
+  return content.map((part) => {
+    if (isImageUrlPart(part)) {
+      return { type: 'input_image', image_url: part.image_url.url, detail: part.image_url.detail ?? 'auto' };
+    }
+    if (isFilePart(part)) return toResponsesInputFile(part);
+    return { type: 'input_text', text: isTextPart(part) ? part.text : '' };
+  });
 }
 
 /**
@@ -2314,9 +2346,13 @@ export class OpenAIProvider implements IProvider {
    *
    *   - System, assistant and text-only turns carry flattened text
    *     ({@link flattenResponsesTextContent}), so cache-marked `systemBlocks`
-   *     arrive joined instead of empty. A user turn with images carries
-   *     `input_text` / `input_image` parts, and a tool result with images
-   *     becomes a `function_call_output` whose output is that part array.
+   *     arrive joined instead of empty. A user turn with images or PDF files
+   *     carries `input_text` / `input_image` / `input_file` parts, and a tool
+   *     result with images becomes a `function_call_output` whose output is
+   *     that part array.
+   *   - A `customModelParams.messages` override, which replaces `messages`
+   *     on the chat path, is what `input` is built from; the body carries no
+   *     `messages` key.
    *   - `tools`, `reasoning` and `text.format` appear only when the call has
    *     function tools, an effort the model maps, or an OpenAI-shaped
    *     `responseFormat`. `stream: true` marks a streamed call; Responses has
@@ -2330,11 +2366,11 @@ export class OpenAIProvider implements IProvider {
    * Live-probed 2026-07-08; block-content path live-probed 2026-09-12.
    *
    * @throws {OpenAIProviderError} `RESPONSES_UNMAPPABLE_CONTENT` when a
-   *   message carries a part Responses cannot represent (audio, a file, an
-   *   Anthropic `tool_result` block). Only a call with no Chat Completions
-   *   route (a Responses-only model, a GPT-5 or GPT-6 tool call) reaches here
-   *   with such content; the error is not retryable, like the 400 or 404
-   *   Chat Completions would return for it.
+   *   message carries a part Responses cannot represent (audio, a file
+   *   outside a user turn, an Anthropic `tool_result` block). Only a call
+   *   with no Chat Completions route (a Responses-only model, a GPT-5 or
+   *   GPT-6 tool call) reaches here with such content; the error is not
+   *   retryable, like the 400 or 404 Chat Completions would return for it.
    * @private
    */
   private buildResponsesPayload(
@@ -2343,7 +2379,18 @@ export class OpenAIProvider implements IProvider {
     options: ModelCompletionOptions,
     stream: boolean = false,
   ): Record<string, unknown> {
-    const unmappable = messages.find((m) => !isResponsesMappableMessage(m));
+    // Strip OpenRouter routing controls, Gemini request fields and Anthropic's output_config; see openrouter-only-params.
+    // The /responses body rejects unknown top-level fields just like
+    // /chat/completions.
+    const passthrough = stripParamsForOpenAI(options.customModelParams);
+    // A `customModelParams.messages` override replaces the chat body's
+    // `messages`. Responses has no `messages` key and refuses one, so the
+    // override is what `input` is built from here.
+    const passedMessages = passthrough?.messages;
+    const overrideMessages = Array.isArray(passedMessages) ? (passedMessages as ChatMessage[]) : undefined;
+    const sourceMessages = overrideMessages ?? messages;
+
+    const unmappable = sourceMessages.find((m) => !isResponsesMappableMessage(m));
     if (unmappable) {
       const partTypes = Array.isArray(unmappable.content)
         ? Array.from(new Set(unmappable.content.map((part) => String((part as { type?: unknown })?.type))))
@@ -2356,7 +2403,7 @@ export class OpenAIProvider implements IProvider {
     }
 
     const input: Array<Record<string, unknown>> = [];
-    for (const m of messages) {
+    for (const m of sourceMessages) {
       if (m.role === 'tool') {
         // Tool result → function_call_output paired by call_id.
         input.push({ type: 'function_call_output', call_id: m.tool_call_id, output: toResponsesInputContent(m.content) });
@@ -2414,20 +2461,29 @@ export class OpenAIProvider implements IProvider {
     // presence/frequency penalties + stop are intentionally OMITTED — reasoning
     // models don't meaningfully use them and the orchestrator sets none;
     // temperature/top_p omitted (reasoning models reject them). See spec §D3.
+    // Responses takes no `stop`, no penalty and no message `name` (an input
+    // message is { content, role, phase, type }:
+    // https://developers.openai.com/api/reference/resources/responses/methods/create).
+    // A call that sets them is answered without them, and a debug line says so,
+    // as the chat path does when GPT-6 refuses `stop`.
+    if (options.stopSequences !== undefined) {
+      log.debug('llm.option_ignored', { provider: 'openai', reason: 'stop_sequences' });
+    }
+    if (options.presencePenalty !== undefined || options.frequencyPenalty !== undefined) {
+      log.debug('llm.option_ignored', { provider: 'openai', reason: 'penalties' });
+    }
+    if (sourceMessages.some((m) => m.role !== 'tool' && typeof m.name === 'string' && m.name.length > 0)) {
+      log.debug('llm.option_ignored', { provider: 'openai', reason: 'message_name' });
+    }
 
     // Typed prompt-cache / service-tier policy — same helper as the Chat
     // builder; customModelParams below keeps last-write precedence.
     this.applyCacheAndTierParams(payload, modelId, options);
 
-    {
-      // Strip OpenRouter routing controls, Gemini request fields and Anthropic's output_config; see openrouter-only-params.
-      // The /responses body rejects unknown top-level fields just like
-      // /chat/completions.
-      const passthrough = stripParamsForOpenAI(options.customModelParams);
-      if (passthrough) {
-        Object.assign(payload, passthrough);
-      }
+    if (passthrough) {
+      Object.assign(payload, passthrough);
     }
+    if (overrideMessages) delete payload.messages;
 
     // customModelParams is shared with the chat path, whose effort key is the
     // top-level `reasoning_effort`. Responses rejects that key and takes the
