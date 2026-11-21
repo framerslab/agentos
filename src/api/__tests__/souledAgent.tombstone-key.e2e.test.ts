@@ -213,6 +213,32 @@ describe.each(RUNTIMES)('the tombstone key, on runtime %s', (runtime) => {
     expect(lines('memory.tombstones_unkeyed')).toHaveLength(1);
   });
 
+  it('keeps a second person let in when a deletion writes while the tombstones are applied again', async () => {
+    const { a } = await open();
+    expect(a.session('s1', { userId: 'alice' }).id).toBe('s1');
+    const ledger = a.memory!.forgotten!;
+    const size = ledger.size.bind(ledger);
+    let reads = 0;
+    let inFlight!: () => void;
+    const reading = new Promise<void>((resolve) => (inFlight = resolve));
+    let answer!: () => void;
+    const answered = new Promise<void>((resolve) => (answer = resolve));
+    // The agent's read of the ledger once the tombstones are applied begins before the deletion writes and answers
+    // after it, with the count it saw: none.
+    vi.spyOn(ledger, 'size').mockImplementation(async () => {
+      if (++reads < 2) return size();
+      inFlight();
+      await answered;
+      return 0;
+    });
+    const applying = a.applyTombstones!();
+    await reading;
+    expect((await a.forgetUser!('carol')).tombstone).toEqual({ form: 'unkeyed', written: true });
+    answer();
+    await applying;
+    expect(a.session('s2', { userId: 'bob' }).id).toBe('s2');
+  });
+
   it('treats a tombstoneKey that holds no key as none', async () => {
     const { a } = await open({ tombstoneKey: null } as unknown as Partial<SouledAgentOptions>);
     expect(a.session('s1', { userId: 'alice' }).id).toBe('s1');
