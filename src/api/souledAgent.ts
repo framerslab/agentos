@@ -694,8 +694,9 @@ export interface SouledAgentOptions extends AgentOptions {
   soulStore?: { adapter: StorageAdapter };
   /**
    * Whether a session turn on `runtime: 'gmi'` sends the end user's id to the model provider: the `userId` the session
-   * was opened with, in the provider's end-user field (OpenAI's `user` or `safety_identifier`) and as the name the
-   * user's messages are sent under (which OpenAI's Chat Completions API receives), a seat's session included. Default
+   * was opened with, in the provider's end-user field (OpenAI's `user` or `safety_identifier`), as the name the user's
+   * messages are sent under (which OpenAI's Chat Completions API receives) and as a tag of the cognitive memory a turn
+   * files (which the memory block shows the model), a seat's session included. Default
    * `false`: no turn of the agent sends one, and a team a session launches seats its sessions as the session's user and
    * sends none either. Set it only where the session's `userId` is an opaque or hashed id, never an email address: the
    * provider receives it. Tools, the user context and the memory hooks get the user id either way. The default runtime
