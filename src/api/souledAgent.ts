@@ -2753,21 +2753,10 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     // send() resolved before the call is in the export. Once close() is waiting for those writes it reads at once.
     return awaitedOnClose(closing ? run() : onSubject(key, run));
   };
-  /** What a deletion of named traces resolves with; a correction adds the id of the trace it filed. */
-  type Corrected = { deleted: number; pagesDeleted: number; recipients: MemoryRecipient[] };
-  function correctUser(
-    userId: string,
-    correction: { traceIds: readonly string[]; text: string },
-  ): Promise<Corrected & { correctionTraceId: string }>;
-  function correctUser(userId: string, correction: { traceIds: readonly string[]; text?: undefined }): Promise<Corrected>;
-  function correctUser(
+  const correctUser = (
     userId: string,
     correction: { traceIds: readonly string[]; text?: string },
-  ): Promise<Corrected & { correctionTraceId?: string }>;
-  function correctUser(
-    userId: string,
-    correction: { traceIds: readonly string[]; text?: string },
-  ): Promise<Corrected & { correctionTraceId?: string }> {
+  ): Promise<{ deleted: number; pagesDeleted: number; correctionTraceId?: string; recipients: MemoryRecipient[] }> => {
     if (typeof userId !== 'string' || userId === '') {
       return Promise.reject(new TypeError('souledAgent: correctUserMemory needs a non-empty user id'));
     }
@@ -2791,8 +2780,10 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
         onChain: (work) => onSubject(conversationScopeKey(agentId, subject), work),
       }),
     );
-  }
-  built.correctUserMemory = correctUser;
+  };
+  // The one implementation answers each signature of the call: its result holds `correctionTraceId` exactly when the
+  // call passed `text`.
+  built.correctUserMemory = correctUser as NonNullable<SouledAgent['correctUserMemory']>;
 
   // On teardown: close the agent (with runtime: 'gmi' that stops its running session turns and shuts its sessions
   // down); wait, within one deadline, for the turns still running and then for the memory writes of its turns; fold
