@@ -29,7 +29,7 @@ import { canonicalJson } from '../../../learning/ledger/canonical.js';
 import { tombstoneHash } from '../../../learning/ledger/Ledger.js';
 import { SqlLearningStore } from '../../../learning/store/SqlLearningStore.js';
 import * as root from '../../../../index.js';
-import { ForgottenLedger, ForgottenLedgerError, type SuppressionSubject } from '../ForgottenLedger.js';
+import { ForgottenLedger, ForgottenLedgerError, type KeptCorrection, type SuppressionSubject } from '../ForgottenLedger.js';
 import { openForgottenCopy } from '../forgottenCopy.js';
 import { learnerTombstones, shareForgottenLedger, sharedForgottenLedgerOf, type NamespacedUser } from '../learnerTombstones.js';
 
@@ -1071,26 +1071,6 @@ describe("the ledger's state mark", () => {
   });
 });
 
-/** The calls the ledger has for deleted traces and kept corrections, reached through a typed view of a handle. */
-interface CorrectionKeeper {
-  markTracesDeleted(traceIds: readonly string[]): Promise<void>;
-  deletedTraceIds(among?: readonly string[]): Promise<string[]>;
-  keepCorrection(row: KeptCorrection): Promise<void>;
-  correctionsOf(scopeId: string): Promise<Array<{ traceId: string }>>;
-  keptCorrections(): Promise<KeptCorrection[]>;
-  dropCorrections(traceIds: readonly string[]): Promise<number>;
-  markForgotten(
-    subject: SuppressionSubject,
-    options?: { dropCorrectionsOf?: readonly string[] },
-  ): Promise<{ form: 'keyed' | 'unkeyed'; written: boolean; correctionsDropped?: number }>;
-}
-interface KeptCorrection {
-  traceId: string;
-  scopeId: string;
-  text: string;
-  createdAt: number;
-}
-const keeper = (ledger: ForgottenLedger): CorrectionKeeper => ledger as unknown as CorrectionKeeper;
 
 describe("the ledger's deleted traces and kept corrections", () => {
   const KEY_A = 'conversation-key-of-a';
@@ -1110,22 +1090,22 @@ describe("the ledger's deleted traces and kept corrections", () => {
     const ledger = await ForgottenLedger.open(pair);
     const mark = await stateOf(pair.primary);
 
-    await keeper(ledger).markTracesDeleted(['mt_one', 'mt_two', 'mt_one']);
+    await ledger.markTracesDeleted(['mt_one', 'mt_two', 'mt_one']);
 
     for (const side of [pair.primary, pair.copy]) {
       expect(await markersOf(side, 't1:')).toEqual(['t1:mt_one', 't1:mt_two']);
       expect((await rowsOf(side)).filter((row) => row.hash.startsWith('t1:')).map((row) => row.namespace)).toEqual(['', '']);
     }
-    expect((await keeper(ledger).deletedTraceIds()).sort()).toEqual(['mt_one', 'mt_two']);
-    expect(await keeper(ledger).deletedTraceIds(['mt_two', 'mt_other'])).toEqual(['mt_two']);
-    expect(await keeper(ledger).deletedTraceIds([])).toEqual([]);
+    expect((await ledger.deletedTraceIds()).sort()).toEqual(['mt_one', 'mt_two']);
+    expect(await ledger.deletedTraceIds(['mt_two', 'mt_other'])).toEqual(['mt_two']);
+    expect(await ledger.deletedTraceIds([])).toEqual([]);
     // A marker is no tombstone: nobody is forgotten, and the mark stays where the last tombstone left it.
     expect(await ledger.size()).toBe(0);
     expect(await ledger.countNotOf(ALICE)).toBe(0);
     expect(await ledger.isForgotten(ALICE)).toBe(false);
     expect([await stateOf(pair.primary), await stateOf(pair.copy)]).toEqual([mark, mark]);
     // A second mark of the same id writes nothing more.
-    await keeper(ledger).markTracesDeleted(['mt_one']);
+    await ledger.markTracesDeleted(['mt_one']);
     expect(await markersOf(pair.copy, 't1:')).toEqual(['t1:mt_one', 't1:mt_two']);
   });
 
@@ -1138,7 +1118,7 @@ describe("the ledger's deleted traces and kept corrections", () => {
     await closePair(pair);
     fs.copyFileSync(memoryFile, before);
     pair = await openPair(dir);
-    await keeper(await ForgottenLedger.open(pair)).markTracesDeleted(['mt_one']);
+    await (await ForgottenLedger.open(pair)).markTracesDeleted(['mt_one']);
     await closePair(pair);
     // The store goes back to a backup taken before the trace was deleted; the copy is no part of the backup.
     fs.copyFileSync(before, memoryFile);
@@ -1147,7 +1127,7 @@ describe("the ledger's deleted traces and kept corrections", () => {
     const ledger = await ForgottenLedger.open(pair);
     expect(await markersOf(pair.primary, 't1:')).toEqual([]);
     // The id is read from either side, so a restored store still knows it.
-    expect(await keeper(ledger).deletedTraceIds()).toEqual(['mt_one']);
+    expect(await ledger.deletedTraceIds()).toEqual(['mt_one']);
     // A marker that comes back is not a tombstone brought back.
     expect(await ledger.reconcile()).toEqual({ added: [] });
     expect(await markersOf(pair.primary, 't1:')).toEqual(['t1:mt_one']);
@@ -1164,22 +1144,22 @@ describe("the ledger's deleted traces and kept corrections", () => {
     expect(await tablesOf(pair.copy)).toContain('memory_corrections');
     expect(await tablesOf(pair.primary)).not.toContain('memory_corrections');
 
-    await keeper(ledger).keepCorrection(kept('mt_fix', KEY_A, 'My canary is WREN-9.', 1_760_000_000_123));
-    await keeper(ledger).keepCorrection(kept('mt_other', KEY_B, 'I live in Lisbon.'));
+    await ledger.keepCorrection(kept('mt_fix', KEY_A, 'My canary is WREN-9.', 1_760_000_000_123));
+    await ledger.keepCorrection(kept('mt_other', KEY_B, 'I live in Lisbon.'));
 
     expect(await keptRowsOf(pair.copy)).toEqual([
       { trace_id: 'mt_fix', scope_id: KEY_A, text: 'My canary is WREN-9.', created_at: 1_760_000_000_123 },
       { trace_id: 'mt_other', scope_id: KEY_B, text: 'I live in Lisbon.', created_at: 1_760_000_000_000 },
     ]);
-    expect(await keeper(ledger).correctionsOf(KEY_A)).toEqual([{ traceId: 'mt_fix' }]);
-    expect(await keeper(ledger).correctionsOf('a-key-with-none')).toEqual([]);
-    expect((await keeper(ledger).keptCorrections()).sort((a, b) => a.traceId.localeCompare(b.traceId))).toEqual([
+    expect(await ledger.correctionsOf(KEY_A)).toEqual([{ traceId: 'mt_fix' }]);
+    expect(await ledger.correctionsOf('a-key-with-none')).toEqual([]);
+    expect((await ledger.keptCorrections()).sort((a, b) => a.traceId.localeCompare(b.traceId))).toEqual([
       kept('mt_fix', KEY_A, 'My canary is WREN-9.', 1_760_000_000_123),
       kept('mt_other', KEY_B, 'I live in Lisbon.'),
     ]);
     // Kept again under the same id, the row holds what the second call gave.
-    await keeper(ledger).keepCorrection(kept('mt_fix', KEY_A, 'My canary is WREN-10.', 1_760_000_000_456));
-    expect(await keeper(ledger).correctionsOf(KEY_A)).toEqual([{ traceId: 'mt_fix' }]);
+    await ledger.keepCorrection(kept('mt_fix', KEY_A, 'My canary is WREN-10.', 1_760_000_000_456));
+    expect(await ledger.correctionsOf(KEY_A)).toEqual([{ traceId: 'mt_fix' }]);
     expect((await keptRowsOf(pair.copy))[0]).toEqual({ trace_id: 'mt_fix', scope_id: KEY_A, text: 'My canary is WREN-10.', created_at: 1_760_000_000_456 });
 
     // The text never reaches the ledger's own rows or the store.
@@ -1187,29 +1167,29 @@ describe("the ledger's deleted traces and kept corrections", () => {
     expect(await tablesOf(pair.primary)).not.toContain('memory_corrections');
     for (const side of [pair.primary, pair.copy]) expect(JSON.stringify(await everyRowOf(side))).not.toContain('WREN');
 
-    expect(await keeper(ledger).dropCorrections(['mt_fix', 'mt_unknown'])).toBe(1);
-    expect(await keeper(ledger).dropCorrections([])).toBe(0);
-    expect(await keeper(ledger).keptCorrections()).toEqual([kept('mt_other', KEY_B, 'I live in Lisbon.')]);
+    expect(await ledger.dropCorrections(['mt_fix', 'mt_unknown'])).toBe(1);
+    expect(await ledger.dropCorrections([])).toBe(0);
+    expect(await ledger.keptCorrections()).toEqual([kept('mt_other', KEY_B, 'I live in Lisbon.')]);
   });
 
   it('drops the kept correction of a trace in the write that marks the trace deleted', async () => {
     const pair = await openPair(folder());
     const ledger = await ForgottenLedger.open(pair);
-    await keeper(ledger).keepCorrection(kept('mt_fix', KEY_A, 'My canary is WREN-9.'));
-    await keeper(ledger).keepCorrection(kept('mt_stays', KEY_A, 'I live in Lisbon.'));
+    await ledger.keepCorrection(kept('mt_fix', KEY_A, 'My canary is WREN-9.'));
+    await ledger.keepCorrection(kept('mt_stays', KEY_A, 'I live in Lisbon.'));
     // The copy refuses the marker's row: its write ends with nothing changed, the kept row included.
     await pair.copy.exec(
       "CREATE TRIGGER refuse_marker BEFORE INSERT ON agentos_learning_forgotten WHEN NEW.hash = 't1:mt_fix' BEGIN SELECT RAISE(ABORT, 'refused'); END;",
     );
-    await expect(keeper(ledger).markTracesDeleted(['mt_fix'])).rejects.toThrow(/refused/);
+    await expect(ledger.markTracesDeleted(['mt_fix'])).rejects.toThrow(/refused/);
     expect((await keptRowsOf(pair.copy)).map((row) => row.trace_id)).toEqual(['mt_fix', 'mt_stays']);
     expect(await markersOf(pair.primary, 't1:')).toEqual([]);
 
     await pair.copy.exec('DROP TRIGGER refuse_marker');
-    await keeper(ledger).markTracesDeleted(['mt_fix']);
+    await ledger.markTracesDeleted(['mt_fix']);
 
     expect((await keptRowsOf(pair.copy)).map((row) => row.trace_id)).toEqual(['mt_stays']);
-    expect(await keeper(ledger).deletedTraceIds()).toEqual(['mt_fix']);
+    expect(await ledger.deletedTraceIds()).toEqual(['mt_fix']);
   });
 
   it('rejects a kept correction and a deleted-trace marker when the copy refuses the write', async () => {
@@ -1217,8 +1197,8 @@ describe("the ledger's deleted traces and kept corrections", () => {
     const ledger = await ForgottenLedger.open(pair);
     await pair.copy.close();
 
-    await expect(keeper(ledger).keepCorrection(kept('mt_fix', KEY_A, 'My canary is WREN-9.'))).rejects.toThrow();
-    await expect(keeper(ledger).markTracesDeleted(['mt_one'])).rejects.toThrow();
+    await expect(ledger.keepCorrection(kept('mt_fix', KEY_A, 'My canary is WREN-9.'))).rejects.toThrow();
+    await expect(ledger.markTracesDeleted(['mt_one'])).rejects.toThrow();
     // The copy is written first: the store holds no marker the copy refused.
     expect(await markersOf(pair.primary, 't1:')).toEqual([]);
   });
@@ -1226,20 +1206,20 @@ describe("the ledger's deleted traces and kept corrections", () => {
   it("drops the kept corrections of the keys a tombstone names in the tombstone's own write to the copy", async () => {
     const pair = await openPair(folder());
     const ledger = await ForgottenLedger.open(pair);
-    await keeper(ledger).keepCorrection(kept('mt_a1', KEY_A, 'My canary is WREN-9.'));
-    await keeper(ledger).keepCorrection(kept('mt_a2', KEY_A, 'I live in Lisbon.'));
-    await keeper(ledger).keepCorrection(kept('mt_b1', KEY_B, 'I keep bees.'));
+    await ledger.keepCorrection(kept('mt_a1', KEY_A, 'My canary is WREN-9.'));
+    await ledger.keepCorrection(kept('mt_a2', KEY_A, 'I live in Lisbon.'));
+    await ledger.keepCorrection(kept('mt_b1', KEY_B, 'I keep bees.'));
     const hash = await ForgottenLedger.hash('', ALICE);
     // A tombstone the copy refuses deletes nothing: the kept rows stay with it.
     await pair.copy.exec(
       `CREATE TRIGGER refuse_one BEFORE INSERT ON agentos_learning_forgotten WHEN NEW.hash = '${hash}' BEGIN SELECT RAISE(ABORT, 'refused'); END;`,
     );
-    await expect(keeper(ledger).markForgotten(ALICE, { dropCorrectionsOf: [KEY_A] })).rejects.toThrow(/refused/);
+    await expect(ledger.markForgotten(ALICE, { dropCorrectionsOf: [KEY_A] })).rejects.toThrow(/refused/);
     expect((await keptRowsOf(pair.copy)).map((row) => row.trace_id)).toEqual(['mt_a1', 'mt_a2', 'mt_b1']);
     expect(await ledger.isForgotten(ALICE)).toBe(false);
 
     await pair.copy.exec('DROP TRIGGER refuse_one');
-    expect(await keeper(ledger).markForgotten(ALICE, { dropCorrectionsOf: [KEY_A] })).toEqual({ form: 'unkeyed', written: true, correctionsDropped: 2 });
+    expect(await ledger.markForgotten(ALICE, { dropCorrectionsOf: [KEY_A] })).toEqual({ form: 'unkeyed', written: true, correctionsDropped: 2 });
 
     expect((await keptRowsOf(pair.copy)).map((row) => row.trace_id)).toEqual(['mt_b1']);
     expect(await ledger.isForgotten(ALICE)).toBe(true);
@@ -1247,7 +1227,7 @@ describe("the ledger's deleted traces and kept corrections", () => {
     expect(await ledger.markForgotten(BOB)).toEqual({ form: 'unkeyed', written: true });
     expect((await keptRowsOf(pair.copy)).map((row) => row.trace_id)).toEqual(['mt_b1']);
     // A tombstone both sides already hold still drops the rows of the keys named with it.
-    expect(await keeper(ledger).markForgotten(BOB, { dropCorrectionsOf: [KEY_B] })).toEqual({ form: 'unkeyed', written: false, correctionsDropped: 1 });
+    expect(await ledger.markForgotten(BOB, { dropCorrectionsOf: [KEY_B] })).toEqual({ form: 'unkeyed', written: false, correctionsDropped: 1 });
     expect(await keptRowsOf(pair.copy)).toEqual([]);
   });
 
@@ -1255,14 +1235,14 @@ describe("the ledger's deleted traces and kept corrections", () => {
     const primary = await sqliteAt(path.join(folder(), 'memory.sqlite'));
     const ledger = await ForgottenLedger.open({ primary });
 
-    await keeper(ledger).keepCorrection(kept('mt_fix', KEY_A, 'My canary is WREN-9.'));
-    await keeper(ledger).markTracesDeleted(['mt_one']);
+    await ledger.keepCorrection(kept('mt_fix', KEY_A, 'My canary is WREN-9.'));
+    await ledger.markTracesDeleted(['mt_one']);
 
-    expect(await keeper(ledger).keptCorrections()).toEqual([]);
-    expect(await keeper(ledger).correctionsOf(KEY_A)).toEqual([]);
-    expect(await keeper(ledger).dropCorrections(['mt_fix'])).toBe(0);
+    expect(await ledger.keptCorrections()).toEqual([]);
+    expect(await ledger.correctionsOf(KEY_A)).toEqual([]);
+    expect(await ledger.dropCorrections(['mt_fix'])).toBe(0);
     expect(await tablesOf(primary)).not.toContain('memory_corrections');
-    expect(await keeper(ledger).deletedTraceIds()).toEqual(['mt_one']);
+    expect(await ledger.deletedTraceIds()).toEqual(['mt_one']);
     expect(await ledger.size()).toBe(0);
   });
 });
