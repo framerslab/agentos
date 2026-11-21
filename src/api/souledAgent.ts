@@ -512,6 +512,8 @@ export type SouledAgent = Agent & {
    *
    * @returns How many traces and pages it deleted, and the id of the correction's trace, a live trace.
    * @throws TypeError when `userId`, the trace ids or the text is missing.
+   * @throws Error when the correction's trace was deleted before it was marked; no named trace is deleted, and the
+   *   same call made again files it anew.
    */
   correctUserMemory?(
     userId: string,

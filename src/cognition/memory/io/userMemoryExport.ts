@@ -219,7 +219,11 @@ export async function correctSubjectMemory(options: {
     // steps leave a trace filed by this call as it is); and it is not deleted with the others.
     const correctionTraceId = filed.result.id;
     await memory.addRebuildSources(key, [correctionTraceId]);
-    await memory.markCorrection(correctionTraceId, ids);
+    // A retention sweep that runs past the subject's chain at close() can delete it first: nothing named is deleted
+    // then, and the same call made again files the correction anew.
+    if (!(await memory.markCorrection(correctionTraceId, ids))) {
+      throw new Error('correctUserMemory: the correction is no longer stored; no named trace was deleted');
+    }
 
     const { deleted } = await memory.deleteTraces(ids.filter((id) => id !== correctionTraceId));
     try {
