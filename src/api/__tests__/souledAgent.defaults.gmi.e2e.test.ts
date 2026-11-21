@@ -7,6 +7,7 @@
  *   memory off and on, and a seat session sends none either. The turn's tools still read the session's user.
  * - A session whose user id no memory key can be built from runs its turn, and one `memory.hook_failed` line names
  *   the soul's turn memory.
+ * - An inline soul, and an optional soul that does not load, give a plain agent: it keeps the same rule for the id.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
@@ -166,5 +167,29 @@ describe("a session whose user id no memory key can be built from, on the souled
     expect(answer.text).toBe('Noted 0.');
     expect(turnCalls(s)).toHaveLength(2);
     expect(lines('memory.hook_failed').filter((line) => line.hook === 'soulMemory')).toHaveLength(1);
+  });
+});
+
+describe('a souled agent that falls back to a plain agent on the GMI runtime', () => {
+  const FALLBACKS: ReadonlyArray<[string, Partial<SouledAgentOptions>]> = [
+    ['an inline soul', { soul: { content: '---\nname: Aria\nagentId: aria-1\n---\nYou are Aria.' } } as Partial<SouledAgentOptions>],
+    ['an optional soul that does not load', { soul: { path: '/no/such/soul-defaults-gmi', optional: true } } as Partial<SouledAgentOptions>],
+  ];
+
+  it.each(FALLBACKS)('%s sends no end-user id unless the host opts in', async (_case, soul) => {
+    const { a, s, told } = await open(soul);
+    await a.session('s1', { userId: 'u-42' }).send('Who am I?');
+
+    expect(turnCalls(s)).toHaveLength(2);
+    for (const call of turnCalls(s)) expect(call.options.userId).toBeUndefined();
+    expect(told[0].userContext).toMatchObject({ userId: 'u-42' });
+  });
+
+  it.each(FALLBACKS)('%s sends the user id with sendUserIdToProvider', async (_case, soul) => {
+    const { a, s } = await open({ ...soul, sendUserIdToProvider: true } as never);
+    await a.session('s1', { userId: 'u-42' }).send('Who am I?');
+
+    expect(turnCalls(s)).toHaveLength(2);
+    for (const call of turnCalls(s)) expect(call.options.userId).toBe('u-42');
   });
 });
