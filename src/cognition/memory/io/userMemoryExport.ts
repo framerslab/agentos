@@ -83,8 +83,6 @@ export interface UserMemoryExport {
     pages: ExportedPage[];
     /** The subject's learned state, when the agent runs a learning layer. */
     learner?: LearnedStateDocument;
-    /** What a GMI memory store passed to the agent holds of the subject. */
-    legacyGmiStore?: Array<{ id: string; createdAt: string; text: string; tags: string[] }>;
     /** The corrections of the subject whose text the tombstones' second copy also keeps. */
     restoreCopies: Array<{ traceId: string }>;
   };
@@ -100,9 +98,26 @@ export interface UserMemoryExport {
    * emotional context other than a neutral one.
    */
   profiling: { sentiment: 'on' | 'off'; moodStamps: number };
-  /** Each store the export could not read, with the kind of error; never the error's text. */
-  unread: Array<{ store: string; reason: string }>;
+  /**
+   * Each store the export could not read, with the kind of error and never the error's text. The part of the export
+   * that store fills is left empty, not filled with what was read before the failure.
+   */
+  unread: Array<{ store: ExportStore; reason: string }>;
 }
+
+/** The stores an export reads, each named in {@link UserMemoryExport.unread} when its read fails. */
+export const EXPORT_STORES = [
+  'recipients',
+  'older traces',
+  'conversation traces',
+  'memory graph',
+  'archived originals',
+  'older compiled pages',
+  'compiled pages',
+  'learning store',
+] as const;
+/** One store an export reads. */
+export type ExportStore = (typeof EXPORT_STORES)[number];
 
 /** How many traces one read of the export asks for. */
 const EXPORT_BATCH = 500;
@@ -217,25 +232,39 @@ export async function exportSubjectMemory(options: {
     profiling: { sentiment: options.profilingOf?.(key) ?? 'off', moodStamps: 0 },
     unread: [],
   };
-  /** Runs one read; a read that fails is named in `unread` under `store`, and the export goes on. */
-  const reading = async (store: string, read: () => Promise<void>): Promise<void> => {
+  /**
+   * Runs one read of `store` and, once it has read everything, hands what it read to `keep`. A read that fails keeps
+   * nothing of that store, is named in `unread`, and writes one `memory.export_unread` line; the export goes on.
+   */
+  const reading = async <T>(store: ExportStore, read: () => Promise<T>, keep: (value: T) => void): Promise<void> => {
+    let value: T;
     try {
-      await read();
+      value = await read();
     } catch (error) {
+      const fields = errorFields(error);
       document.unread.push({ store, reason: readFailure(error) });
+      memoryLog.warn('memory.export_unread', { store, ...fields });
+      return;
     }
+    keep(value);
   };
   if (options.recipients) {
     const listed = options.recipients;
-    await reading('recipients', async () => {
-      document.recipients = [...(await listed())];
+    await reading('recipients', listed, (recipients) => {
+      document.recipients = [...recipients];
     });
   }
   if (memory.forgotten && (await memory.isForgotten(subject))) return document;
 
   const seen = new Set<string>();
-  /** Every live trace of one scope, oldest first, a page's chunks left out. */
-  const readScope = async (scope: string, scopeId: string): Promise<void> => {
+  /** What one read of traces found, kept in the export only once the read has finished. */
+  interface TraceSection {
+    traces: UserMemoryExport['traces'];
+    messages: UserMemoryExport['provided']['messages'];
+    held: HeldTrace[];
+  }
+  /** Every live trace of one scope, oldest first, a page's chunks left out, into `section`. */
+  const readScope = async (scope: string, scopeId: string, section: TraceSection): Promise<void> => {
     let since = 0;
     let limit = EXPORT_BATCH;
     for (;;) {
@@ -248,10 +277,9 @@ export async function exportSubjectMemory(options: {
         const said = metadata[SPEAKER_KEY];
         const speaker = said === 'user' || said === 'assistant' ? said : undefined;
         const createdAt = isoOf(trace.createdAt);
-        document.traces.push({ id: trace.id, createdAt, ...(speaker ? { speaker } : {}), text: trace.content, tags: [...trace.tags] });
-        if (speaker === 'user') document.provided.messages.push({ id: trace.id, createdAt, text: trace.content });
-        const emotionalContext = emotionalContextOf(trace);
-        document.held.traces.push({
+        section.traces.push({ id: trace.id, createdAt, ...(speaker ? { speaker } : {}), text: trace.content, tags: [...trace.tags] });
+        if (speaker === 'user') section.messages.push({ id: trace.id, createdAt, text: trace.content });
+        section.held.push({
           id: trace.id,
           createdAt,
           ...(speaker ? { speaker } : {}),
@@ -259,13 +287,12 @@ export async function exportSubjectMemory(options: {
           tags: [...trace.tags],
           entities: Array.isArray(trace.entities) ? trace.entities.filter((entity) => typeof entity === 'string') : [],
           filedBy: metadata[FILED_BY_KEY] === FILED_BY_MIND ? 'mind' : 'soul',
-          emotionalContext,
+          emotionalContext: emotionalContextOf(trace),
           encodingStrength: finiteOr0(trace.encodingStrength),
           stability: finiteOr0(trace.stability),
           retrievalCount: finiteOr0(trace.retrievalCount),
           lastAccessedAt: isoOf(trace.lastAccessedAt),
         });
-        if (isMoodStamp(emotionalContext)) document.profiling.moodStamps += 1;
       }
       if (batch.length < limit) break;
       // Re-read the last millisecond in case this batch cut it in two. If the window still ends in that same
@@ -279,13 +306,26 @@ export async function exportSubjectMemory(options: {
       }
     }
   };
+  /** Reads traces into a section of their own, and keeps the section in the export once the read has finished. */
+  const readTraces = (store: ExportStore, scopes: ReadonlyArray<readonly [string, string]>): Promise<void> =>
+    reading(
+      store,
+      async () => {
+        const section: TraceSection = { traces: [], messages: [], held: [] };
+        for (const [scope, scopeId] of scopes) await readScope(scope, scopeId, section);
+        return section;
+      },
+      (section) => {
+        document.traces.push(...section.traces);
+        document.provided.messages.push(...section.messages);
+        document.held.traces.push(...section.held);
+      },
+    );
   if (options.legacy?.forms.length) {
-    const forms = options.legacy.forms;
-    await reading('older traces', async () => {
-      for (const form of forms) await readScope(LEGACY_SCOPE, form);
-    });
+    await readTraces('older traces', options.legacy.forms.map((form) => [LEGACY_SCOPE, form] as const));
   }
-  await reading('conversation traces', () => readScope(CONVERSATION_SCOPE, key));
+  await readTraces('conversation traces', [[CONVERSATION_SCOPE, key]]);
+  document.profiling.moodStamps = document.held.traces.filter((trace) => isMoodStamp(trace.emotionalContext)).length;
   const heldIds = document.held.traces.map((trace) => trace.id);
 
   if (heldIds.length > 0) {
@@ -305,28 +345,34 @@ export async function exportSubjectMemory(options: {
           }
         }
       }
-      document.held.graphLinks = [...links.values()];
+      return [...links.values()];
+    }, (links) => {
+      document.held.graphLinks = links;
     });
   }
   const archive = options.archive;
   if (archive && heldIds.length > 0) {
     await reading('archived originals', async () => {
+      const originals: UserMemoryExport['held']['archivedOriginals'] = [];
       for (const id of heldIds) {
         const original = await archive.rehydrate(id, 'user_export');
-        if (original) document.held.archivedOriginals.push({ traceId: id, text: original.verbatimContent });
+        if (original) originals.push({ traceId: id, text: original.verbatimContent });
       }
+      return originals;
+    }, (originals) => {
+      document.held.archivedOriginals = originals;
     });
   }
 
   const pages: WikiPage[] = [];
   const legacyPages = options.legacy?.pages;
   if (legacyPages) {
-    await reading('older compiled pages', async () => {
-      pages.push(...(await legacyPages()));
+    await reading('older compiled pages', legacyPages, (read) => {
+      pages.push(...read);
     });
   }
-  await reading('compiled pages', async () => {
-    pages.push(...(await options.wiki.storeFor(key).listPages()));
+  await reading('compiled pages', () => options.wiki.storeFor(key).listPages(), (read) => {
+    pages.push(...read);
   });
   for (const page of pages) {
     document.pages.push({ id: page.id, summary: page.summary, updated: page.updated, sources: [...page.sources], body: page.body });
@@ -335,8 +381,8 @@ export async function exportSubjectMemory(options: {
 
   const learner = options.learner;
   if (learner) {
-    await reading('learning store', async () => {
-      document.held.learner = await learner();
+    await reading('learning store', learner, (state) => {
+      document.held.learner = state;
     });
   }
   return document;
