@@ -1868,6 +1868,7 @@ export class Memory {
       keepChunksIfUnchanged?: boolean;
     },
   ): Promise<{ chunkIds: string[] }> {
+    this._refuseOnceClosed();
     assertPageOwnerKey(scopeId);
     assertWikiPageId(page.pageId);
     await this._initPromise;
@@ -2663,6 +2664,7 @@ export class Memory {
   async addEntity(
     entity: Partial<KnowledgeEntity>,
   ): Promise<KnowledgeEntity> {
+    this._refuseOnceClosed();
     await this._initPromise;
 
     return this._knowledgeGraph.upsertEntity({
@@ -2694,6 +2696,7 @@ export class Memory {
   async addRelation(
     relation: Partial<KnowledgeRelation>,
   ): Promise<KnowledgeRelation> {
+    this._refuseOnceClosed();
     await this._initPromise;
 
     return this._knowledgeGraph.upsertRelation({
@@ -3204,11 +3207,12 @@ export class Memory {
    * Flushes the SQLite WAL and releases the file lock. Must be called when
    * the agent shuts down. A store opened on an adapter the caller keeps
    * (`leaveAdapterOpen`) finishes its work and leaves that adapter open; the
-   * facade itself then admits nothing new (`remember`, `ingest`, the imports
-   * and the wiki compile reject), so a write that reaches it once it is closed
-   * is not stored, as on a store whose connection this class closes. A write
-   * already running finishes, and the reads and deletes are still served, so
-   * such a write can be taken back when its subject was forgotten meanwhile.
+   * facade itself then admits nothing new (`remember`, `ingest`, the imports,
+   * the wiki compile, a page row, a graph entity and a relation reject), so a
+   * write that reaches it once it is closed is not stored, as on a store whose
+   * connection this class closes. A write already running finishes, and the
+   * reads, the deletes and `restoreTrace` are still served, so such a write
+   * can be taken back when its subject was forgotten meanwhile.
    */
   async close(): Promise<void> {
     await this._initPromise;
