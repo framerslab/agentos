@@ -20,7 +20,8 @@
  *   - `screen_failed`: the host's screen hook threw, timed out or answered something else.
  *   - `forgotten`: the person was forgotten, before the write or while it ran; nothing of it is left.
  *   - `no_subject`: the turn names nobody memory can be kept for, or an id no memory key can be built from.
- *   - `corrected`: a correction of the person's memory finished while the turn ran.
+ *   - `corrected`: a correction, or a deletion of named traces, changed the person's memory while the turn ran. The
+ *     turn's reply, which can restate what the turn recalled before, is not filed; what the person said is.
  * - `failed`: the write threw. `errorName` is the error's class name; its message, which can quote the text, is left
  *   out.
  */

@@ -2,7 +2,7 @@
  * @module memory/io/userMemoryExport
  *
  * One subject's memory as a document a host can hand to that person, and a correction of it: the wrong traces are
- * deleted for good and the corrected statement is filed in their place.
+ * deleted for good and the corrected statement is filed in their place, or nothing is, for a deletion of named traces.
  */
 import type { MemoryRecipient } from '../../../api/runtime/memoryRecipients.js';
 import type { LearnedStateDocument } from '../../learning/types.js';
@@ -406,53 +406,95 @@ export async function exportSubjectMemory(options: {
   return document;
 }
 
-/**
- * Corrects one subject's memory: each page compiled from a named trace is deleted and built again by the subject's
- * next compile, from the traces of it that are left and the correction; the corrected statement is filed as a trace
- * tagged `correction` (words the subject's key already holds are that trace, marked as the correction and kept, even
- * when it is a named one); the named traces are deleted for good; and the vector index and the store's write-ahead log
- * are written out ({@link Memory.finishErasure}). A deleted trace cannot come back in a later compile, which is why a
- * correction deletes instead of editing a page.
- *
- * The named traces go last, so a correction that failed partway is finished by the same call made again: it still
- * finds them. An index rewrite or a log checkpoint that fails does not fail the call; one
- * `memory.erasure_unfinished` line says so, and the next deletion, sweep or re-application of the tombstones runs it.
- *
- * Every named id must be one of the subject's own live traces (a page's chunk is not one): when any is another
- * subject's, unknown or already deleted, the call rejects with a count and nothing is changed.
- *
- * @returns How many traces and pages it deleted, and the id of the correction's trace.
- * @throws TypeError when the subject, the trace ids or the text is missing.
- * @throws Error when a named id is not one of the subject's live traces (one `memory.write_refused` line, reason
- *   `foreign_trace`), or when the subject is forgotten (reason `forgotten`): nothing is written for them again.
- */
-export async function correctSubjectMemory(options: {
+/** What {@link correctSubjectMemory} is handed beside the change itself. */
+export interface SubjectCorrectionOptions {
   memory: Memory;
   wiki: { storeFor(scopeId: string): SubjectPages };
   agentId: string;
   subject: SuppressionSubject;
-  correction: { traceIds: readonly string[]; text: string };
+  /**
+   * Who receives a person's text from the agent, for the result. Unset: none is named. It is read in the subject's
+   * turn before anything is changed, so a read that rejects rejects the call and changes nothing.
+   */
+  recipients?: () => Promise<MemoryRecipient[]>;
+  /**
+   * Called once, in the subject's turn, when every named id has passed the ownership check and before anything is
+   * changed. A souled agent counts the change there: the reply of a turn that recalled the subject's memory before
+   * it is not filed.
+   *
+   * @internal
+   */
+  beforeChange?: () => void;
   /** Runs the change in the subject's turn, after its writes and compiles. Unset: at once. */
   onChain?: <T>(work: () => Promise<T>) => Promise<T>;
-}): Promise<{ deleted: number; pagesDeleted: number; correctionTraceId: string }> {
+}
+
+/** What a deletion of named traces resolves with; a correction adds the id of the trace it filed. */
+export interface SubjectCorrectionResult {
+  /** How many of the named traces were deleted. */
+  deleted: number;
+  /** How many pages built from a named trace were deleted; the subject's next compile builds each again. */
+  pagesDeleted: number;
+  /** Who receives a person's text from the agent, as the call was handed the list. The call sends them nothing. */
+  recipients: MemoryRecipient[];
+}
+
+/**
+ * Corrects one subject's memory, or deletes named traces of it with no replacement.
+ *
+ * Each page compiled from a named trace is deleted and built again by the subject's next compile, from the traces of
+ * it that are left and the correction. With `text`, the corrected statement is filed as a trace tagged `correction`
+ * (words the subject's key already holds are that trace, marked as the correction and kept, even when it is a named
+ * one); with no `text`, nothing is filed. The named traces are then deleted for good, and the vector index and the
+ * store's write-ahead log are written out ({@link Memory.finishErasure}). A deleted trace cannot come back in a later
+ * compile, which is why a correction deletes instead of editing a page.
+ *
+ * The named traces go last, so a call that failed partway is finished by the same call made again: it still finds
+ * them. An index rewrite or a log checkpoint that fails does not fail the call; one `memory.erasure_unfinished` line
+ * says so, and the next deletion, sweep or re-application of the tombstones runs it.
+ *
+ * Every named id must be one of the subject's own live traces (a page's chunk is not one): when any is another
+ * subject's, unknown or already deleted, the call rejects with a count and nothing is changed.
+ *
+ * @returns How many traces and pages it deleted, who receives a person's text, and, for a correction, the id of the
+ *   correction's trace; a deletion with no `text` has no `correctionTraceId`.
+ * @throws TypeError when the subject or the trace ids are missing, or when `text` is given and is not a non-empty
+ *   string: a deletion leaves `text` out.
+ * @throws Error when a named id is not one of the subject's live traces (one `memory.write_refused` line, reason
+ *   `foreign_trace`), or when a correction's subject is forgotten (reason `forgotten`): nothing is written for them
+ *   again.
+ */
+export function correctSubjectMemory(
+  options: SubjectCorrectionOptions & { correction: { traceIds: readonly string[]; text: string } },
+): Promise<SubjectCorrectionResult & { correctionTraceId: string }>;
+export function correctSubjectMemory(
+  options: SubjectCorrectionOptions & { correction: { traceIds: readonly string[]; text?: undefined } },
+): Promise<SubjectCorrectionResult>;
+export function correctSubjectMemory(
+  options: SubjectCorrectionOptions & { correction: { traceIds: readonly string[]; text?: string } },
+): Promise<SubjectCorrectionResult & { correctionTraceId?: string }>;
+export async function correctSubjectMemory(
+  options: SubjectCorrectionOptions & { correction: { traceIds: readonly string[]; text?: string } },
+): Promise<SubjectCorrectionResult & { correctionTraceId?: string }> {
   const { memory, agentId } = options;
   const subject = checkedSubject(options.subject, 'correctSubjectMemory');
   const given = options.correction as { traceIds?: unknown; text?: unknown } | null | undefined;
   const named: unknown = given?.traceIds;
   const text: unknown = given?.text;
-  if (
-    !Array.isArray(named) ||
-    named.length === 0 ||
-    named.some((id) => typeof id !== 'string' || id === '') ||
-    typeof text !== 'string' ||
-    text === ''
-  ) {
-    throw new TypeError('correctUserMemory: name at least one trace id and the corrected text');
+  if (!Array.isArray(named) || named.length === 0 || named.some((id) => typeof id !== 'string' || id === '')) {
+    throw new TypeError('correctUserMemory: name at least one trace id');
   }
+  // No text deletes with no replacement. A text that is empty, or no string, is neither a correction nor that.
+  if (text !== undefined && (typeof text !== 'string' || text === '')) {
+    throw new TypeError(
+      'correctUserMemory: the corrected text is a non-empty string; leave it out to delete the traces with no replacement',
+    );
+  }
+  const replacement = text as string | undefined;
   const ids = [...new Set(named as string[])];
   const key = conversationScopeKey(agentId, subject);
 
-  const correct = async (): Promise<{ deleted: number; pagesDeleted: number; correctionTraceId: string }> => {
+  const correct = async (): Promise<SubjectCorrectionResult & { correctionTraceId?: string }> => {
     // The ownership check, before any change, read in the subject's turn so no write of theirs runs between it and
     // the delete.
     const own = new Set(await memory.liveTraceIdsOf(CONVERSATION_SCOPE, key, ids));
@@ -461,6 +503,9 @@ export async function correctSubjectMemory(options: {
       memoryLog.warn('memory.write_refused', { reason: 'foreign_trace' });
       throw new Error(`correctUserMemory: ${missing} of ${ids.length} trace ids are not this user's live traces`);
     }
+    // Who received the text, read before any change: a list that cannot be read leaves the memory as it was.
+    const recipients = options.recipients ? [...(await options.recipients())] : [];
+    options.beforeChange?.();
 
     // A page built from a named trace still says what the trace said: it goes whole, and the next compile builds it
     // again from the traces of it that are left, read by id, beside the correction. Those are named before the page
@@ -478,41 +523,44 @@ export async function correctSubjectMemory(options: {
       pagesDeleted += 1;
     }
 
-    const filed = await guardedWrite(
-      { isForgotten: (who) => (memory.forgotten ? memory.isForgotten(who) : Promise.resolve(false)) },
-      subject,
-      () =>
-        memory.remember(text, {
-          type: 'episodic',
-          scope: CONVERSATION_SCOPE,
-          scopeId: key,
-          tags: ['correction'],
-          metadata: {
-            subject: { kind: subject.kind, id: subject.id },
-            corrects: ids,
-            ...(subject.kind === 'user' ? { turnUserId: subject.id } : {}),
-          },
-        }),
-      async (trace) => {
-        await memory.deleteTraces([trace.id]);
-      },
-    );
-    if (filed.status === 'refused') {
-      memoryLog.warn('memory.write_refused', { reason: 'forgotten' });
-      throw new Error('correctUserMemory: the subject is forgotten; nothing is written for them again');
-    }
+    let correctionTraceId: string | undefined;
+    if (replacement !== undefined) {
+      const filed = await guardedWrite(
+        { isForgotten: (who) => (memory.forgotten ? memory.isForgotten(who) : Promise.resolve(false)) },
+        subject,
+        () =>
+          memory.remember(replacement, {
+            type: 'episodic',
+            scope: CONVERSATION_SCOPE,
+            scopeId: key,
+            tags: ['correction'],
+            metadata: {
+              subject: { kind: subject.kind, id: subject.id },
+              corrects: ids,
+              ...(subject.kind === 'user' ? { turnUserId: subject.id } : {}),
+            },
+          }),
+        async (trace) => {
+          await memory.deleteTraces([trace.id]);
+        },
+      );
+      if (filed.status === 'refused') {
+        memoryLog.warn('memory.write_refused', { reason: 'forgotten' });
+        throw new Error('correctUserMemory: the subject is forgotten; nothing is written for them again');
+      }
 
-    // The store keeps one trace for words the subject's key already holds: `remember` may have returned that trace,
-    // one of the named ones or an earlier correction. Whichever it is, it is the correction: the next compile reads it
-    // by id, beside the traces after its watermark; it is marked as one, with these ids among those it corrects (both
-    // steps leave a trace filed by this call as it is); and it is not deleted with the others.
-    const correctionTraceId = filed.result.id;
-    await memory.addRebuildSources(key, [correctionTraceId]);
-    // A retention sweep that runs past the subject's chain at close() can delete it first: this call deletes nothing
-    // named then. Made again, it files the correction anew when every named trace is still live; the sweep may have
-    // deleted the reused one, and the ownership check then rejects the call.
-    if (!(await memory.markCorrection(correctionTraceId, ids))) {
-      throw new Error('correctUserMemory: the correction is no longer stored; no named trace was deleted');
+      // The store keeps one trace for words the subject's key already holds: `remember` may have returned that
+      // trace, one of the named ones or an earlier correction. Whichever it is, it is the correction: the next compile
+      // reads it by id, beside the traces after its watermark; it is marked as one, with these ids among those it
+      // corrects (both steps leave a trace filed by this call as it is); and it is not deleted with the others.
+      correctionTraceId = filed.result.id;
+      await memory.addRebuildSources(key, [correctionTraceId]);
+      // A retention sweep that runs past the subject's chain at close() can delete it first: this call deletes nothing
+      // named then. Made again, it files the correction anew when every named trace is still live; the sweep may have
+      // deleted the reused one, and the ownership check then rejects the call.
+      if (!(await memory.markCorrection(correctionTraceId, ids))) {
+        throw new Error('correctUserMemory: the correction is no longer stored; no named trace was deleted');
+      }
     }
 
     const { deleted } = await memory.deleteTraces(ids.filter((id) => id !== correctionTraceId));
@@ -522,7 +570,7 @@ export async function correctSubjectMemory(options: {
     } catch (error) {
       memoryLog.warn('memory.erasure_unfinished', errorFields(error));
     }
-    return { deleted, pagesDeleted, correctionTraceId };
+    return { deleted, pagesDeleted, ...(correctionTraceId !== undefined ? { correctionTraceId } : {}), recipients };
   };
   return options.onChain ? options.onChain(correct) : correct();
 }
