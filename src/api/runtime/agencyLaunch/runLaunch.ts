@@ -251,7 +251,9 @@ async function resolveParent(host: LaunchHost, ctx: ToolExecutionContext): Promi
       ...(gate ? { approvalGate: gate } : {}),
       signal: ctx.signal ? AbortSignal.any([entry.signal, ctx.signal]) : entry.signal,
       ...(entry.providerUserId !== undefined ? { providerUserId: entry.providerUserId } : {}),
-      ...(entry.withholdUserId ? { withholdUserId: true as const } : {}),
+      // The tree's rule, or the launching seat's own: a seat whose agent sends no end-user id (a souled persistent
+      // member that does not opt in) has the team it launches send none either.
+      ...(entry.withholdUserId || ctx.callerTurn?.withholdUserId ? { withholdUserId: true as const } : {}),
       namespace: entry.namespace,
       ...(ctx.correlationId ? { turnId: ctx.correlationId } : {}),
       toolHooks: ctx.callerTurn?.toolHooks ?? entry.toolHooks,

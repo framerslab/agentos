@@ -35,6 +35,7 @@ export interface SoulTurnMemory {
    * turn's writes. Called before the turn's sentiment analysis.
    *
    * @param manager - The GMI's cognitive memory, or none when it runs without.
+   * @param stop - The turn's stop: once it has aborted, nothing more is asked or decided for the turn.
    */
-  begin(manager?: ICognitiveMemoryManager): Promise<SoulTurnAnswer>;
+  begin(manager?: ICognitiveMemoryManager, stop?: AbortSignal): Promise<SoulTurnAnswer>;
 }

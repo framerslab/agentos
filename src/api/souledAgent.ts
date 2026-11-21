@@ -1360,9 +1360,12 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     }
     return {
       scope: { scope: 'conversation', scopeId },
-      begin: async () => {
+      begin: async (_manager, stop) => {
         // A forgotten subject is allowed nothing, and the host's hook is not asked about them.
         if (!(await notForgottenWithin(subject))) return { ...SOUL_TURN_NOTHING };
+        // A turn stopped meanwhile asks the host nothing: an answer it started after its session closed would be kept
+        // for the session's next opening.
+        if (stop?.aborted) return { ...SOUL_TURN_NOTHING };
         const policy = await turnPolicyOf(context, subject, scopeId, 'mind');
         // Nor is a subject forgotten while the host answered.
         if (!(await notForgottenWithin(subject))) return { ...SOUL_TURN_NOTHING };

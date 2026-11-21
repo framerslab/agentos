@@ -67,7 +67,7 @@ import { IUtilityAI, SummarizationOptions } from '../nlp/ai_utilities/IUtilityAI
 import { IToolOrchestrator } from '../../core/tools/IToolOrchestrator';
 
 import { ToolExecutionRequestDetails } from '../../core/tools/ToolExecutor';
-import { ConversationMessage } from '../../core/conversation/ConversationMessage';
+import { ConversationMessage, MessageRole } from '../../core/conversation/ConversationMessage';
 import { GMIError, GMIErrorCode, createGMIErrorFromError } from '../../core/utils/errors.js';
 import type { ICognitiveMemoryManager } from '../memory/CognitiveMemoryManager.js';
 import type { AssembledMemoryContext } from '../memory/core/types.js';
@@ -1506,13 +1506,21 @@ export class GMI implements IGMI {
     historyAtTurnStart: readonly ChatMessage[];
     currentUserMessage: ChatMessage | undefined;
     turnMessages: readonly ChatMessage[];
+    withholdUserId?: boolean;
   }): { conversationHistory: ConversationMessage[]; userInput: string | null; currentTurnMessageCount: number } {
     const { durableHistory, historyAtTurnStart, currentUserMessage, turnMessages } = turn;
+    // A turn that may send no request the user's id sends no user message under a name, which would carry it.
+    const unnamed = (message: ConversationMessage): ConversationMessage => {
+      if (!turn.withholdUserId || message.role !== MessageRole.USER || message.name === undefined) return message;
+      const rest: ConversationMessage = { ...message };
+      delete rest.name;
+      return rest;
+    };
     const toConversationMessage = (message: ChatMessage): ConversationMessage =>
-      this.conversationHistoryManager.convertToConversationMessage(message);
+      unnamed(this.conversationHistoryManager.convertToConversationMessage(message));
 
     const historyBeforeTurn =
-      durableHistory ??
+      durableHistory?.map(unnamed) ??
       historyAtTurnStart
         .filter((message) => message !== currentUserMessage)
         .map(toConversationMessage);
@@ -1630,7 +1638,7 @@ export class GMI implements IGMI {
       stop.addEventListener('abort', onStop, { once: true });
     });
     try {
-      return await Promise.race([soul.begin(this.cognitiveMemory), stopped]);
+      return await Promise.race([soul.begin(this.cognitiveMemory, stop), stopped]);
     } catch (error) {
       memoryLog.warn('memory.hook_failed', { hook: 'soulMemory', ...errorFields(error) });
       return { ...SOUL_TURN_NOTHING };
@@ -1846,6 +1854,10 @@ export class GMI implements IGMI {
       const continuesTurn = turnInput.metadata?.isToolContinuation === true;
       const soulAnswer = continuesTurn ? this.turnSoulAnswer : await this.soulAnswerOf(turnSoul, stop.signal);
       if (!continuesTurn && ownsState()) this.turnSoulAnswer = soulAnswer;
+      // A turn stopped while it waited for its answer starts nothing more: no learning, recall or prompt.
+      if (!continuesTurn && turnSoul && stop.signal.aborted) {
+        throw new GMIError('Turn aborted: it was stopped while it waited for its memory rules.', GMIErrorCode.LLM_PROVIDER_ERROR, { turnId });
+      }
 
       // Analyze sentiment of user input only when sentiment tracking is enabled
       if (this.activePersona.sentimentTracking?.enabled && soulAnswer?.sentiment !== false) {
@@ -2080,6 +2092,7 @@ export class GMI implements IGMI {
           historyAtTurnStart,
           currentUserMessage,
           turnMessages,
+          withholdUserId: turnInput.metadata?.withholdUserId === true,
         });
 
         const promptComponents: PromptComponents = {
@@ -2147,9 +2160,11 @@ export class GMI implements IGMI {
         const personaOptions = (this.activePersona.defaultModelCompletionOptions ?? {}) as Record<string, unknown>;
         // The provider's end-user field: the host's choice when the turn names one
         // (null sends none), else the turn's user.
-        const providerUserId = turnInput.metadata && 'providerUserId' in turnInput.metadata
-          ? turnInput.metadata.providerUserId
-          : this.currentUserContext.userId;
+        const providerUserId = turnInput.metadata?.withholdUserId === true
+          ? null
+          : turnInput.metadata && 'providerUserId' in turnInput.metadata
+            ? turnInput.metadata.providerUserId
+            : this.currentUserContext.userId;
         const llmOptions: ModelCompletionOptions = {
           ...pickCompletionOptions(personaOptions),
           ...pickCompletionOptions(turnOptions),
