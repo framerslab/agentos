@@ -250,7 +250,16 @@ describe('a souled GMI seated as a persistent member of a plain gmi() team', () 
       agencies: { launch: true },
     } as unknown as SouledAgentOptions);
     opened.push(aria);
-    const root = gmi({ provider: 'openai', model: 'stub-model', apiKey: k, fallbackProviders: [], instructions: 'Coordinate.', agencies: { launch: true, maxDepth: 2, members: { aria } } });
+    // The root holds whoami too: a launch names for a seat only tools its launching agent has.
+    const root = gmi({
+      provider: 'openai',
+      model: 'stub-model',
+      apiKey: k,
+      fallbackProviders: [],
+      instructions: 'Coordinate.',
+      tools: [whoami().tool],
+      agencies: { launch: true, maxDepth: 2, members: { aria } },
+    } as unknown as Parameters<typeof gmi>[0]);
     try {
       const answer = await root.session('p1', { userId: 'u-42' }).send('Check it.');
 
