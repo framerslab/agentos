@@ -18,6 +18,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import pino from 'pino';
 import { souledAgent, type SouledAgent, type SouledAgentOptions } from '../souledAgent';
+import { gmi } from '../gmi';
 import { buildSessionSeat } from '../runtime/agencyLaunch/sessionSeat';
 import { reply, script, type ProviderScript } from './helpers/stubProviders';
 import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory';
@@ -129,12 +130,20 @@ type ModelCall = ProviderScript['seen'][number];
 const isMerge = (call: ModelCall) => JSON.stringify(call.messages).includes('You maintain a knowledge wiki page');
 /** The turns' model calls: every call but a wiki merge. */
 const turnCalls = (s: ProviderScript) => s.seen.filter((call) => !isMerge(call));
-/** Whether a model call carries `id` anywhere in its messages: a message's text, or the name a message is sent under. */
-const messagesHold = (call: ModelCall, id: string) => JSON.stringify(call.messages).includes(id);
+/**
+ * The messages of a model call that carry `id` anywhere, in their text or as the name they are sent under, each as its
+ * role and the words around the id: empty when none does.
+ */
+const holdersOf = (call: ModelCall, id: string) =>
+  call.messages
+    .map((message) => ({ role: (message as { role?: string }).role, json: JSON.stringify(message) }))
+    .filter(({ json }) => json.includes(id))
+    .map(({ role, json }) => ({ role, around: json.slice(Math.max(0, json.indexOf(id) - 160), json.indexOf(id) + 40) }));
 /** A model step that launches a one-seat team whose seat may call `whoami`. */
-const launchWhoami = reply.tools([
-  { id: 'l1', name: 'launch_agency', args: { goal: 'Check who asks.', seats: [{ role: 'lead', instructions: 'Ask who is asking.', tools: ['whoami'] }] } },
-]);
+const launchWhoami = (id = 'l1') =>
+  reply.tools([
+    { id, name: 'launch_agency', args: { goal: 'Check who asks.', seats: [{ role: 'lead', instructions: 'Ask who is asking.', tools: ['whoami'] }] } },
+  ]);
 
 describe.each(MEMORY)('the end user id a souled GMI sends, %s', (_name, cognition) => {
   it('a session turn and a seat send no end-user id unless the host opts in, and the tools still read the user', async () => {
@@ -150,7 +159,7 @@ describe.each(MEMORY)('the end user id a souled GMI sends, %s', (_name, cognitio
     for (const call of turnCalls(s)) {
       expect(call.options.userId).toBeUndefined();
       // Nor as the name a user message is sent under, which OpenAI's Chat Completions API receives.
-      expect(messagesHold(call, 'u-42')).toBe(false);
+      expect(holdersOf(call, 'u-42')).toEqual([]);
     }
     // The tool read the session's user and its memory subject; the turn names its user to a tool, with the rule that
     // no provider receives the id, so a team the tool launches seats its sessions as that user and sends no id either.
@@ -181,11 +190,11 @@ describe.each(MEMORY)('the end user id a souled GMI sends, %s', (_name, cognitio
 });
 
 describe.each(MEMORY)('a team a souled GMI session launches, %s', (_name, cognition) => {
-  /** The root's launch step, the seat's whoami step and its reply, then the root's reply. */
-  const LAUNCH = [launchWhoami, reply.tools([{ id: 'w1', name: 'whoami', args: {} }]), reply.text('Seat done.'), reply.text('All done.')];
+  /** The root's launch step, the seat's whoami step and its reply, then the root's reply: a fresh script each case. */
+  const launch = () => [launchWhoami(), reply.tools([{ id: 'w1', name: 'whoami', args: {} }]), reply.text('Seat done.'), reply.text('All done.')];
 
   it("seats its session as the launching turn's user, and no call of the team sends the user id", async () => {
-    const { a, s, told } = await open({ ...cognition, agencies: { launch: true } } as Partial<SouledAgentOptions>, LAUNCH);
+    const { a, s, told } = await open({ ...cognition, agencies: { launch: true } } as Partial<SouledAgentOptions>, launch());
     const answer = await a.session('s1', { userId: 'u-42' }).send('Check who asks.');
 
     expect(answer.text).toBe('All done.');
@@ -193,7 +202,7 @@ describe.each(MEMORY)('a team a souled GMI session launches, %s', (_name, cognit
     expect(turnCalls(s)).toHaveLength(4);
     for (const call of turnCalls(s)) {
       expect(call.options.userId).toBeUndefined();
-      expect(messagesHold(call, 'u-42')).toBe(false);
+      expect(holdersOf(call, 'u-42')).toEqual([]);
     }
     // The seat's tool reads the user the launching session serves, not the seat's own session id.
     expect(told).toHaveLength(1);
@@ -201,7 +210,7 @@ describe.each(MEMORY)('a team a souled GMI session launches, %s', (_name, cognit
   });
 
   it('with sendUserIdToProvider, the seat sends the user id as the launching turn does', async () => {
-    const { a, s, told } = await open({ ...cognition, agencies: { launch: true }, sendUserIdToProvider: true } as Partial<SouledAgentOptions>, LAUNCH);
+    const { a, s, told } = await open({ ...cognition, agencies: { launch: true }, sendUserIdToProvider: true } as Partial<SouledAgentOptions>, launch());
     await a.session('s1', { userId: 'u-42' }).send('Check who asks.');
 
     expect(turnCalls(s)).toHaveLength(4);
@@ -210,9 +219,66 @@ describe.each(MEMORY)('a team a souled GMI session launches, %s', (_name, cognit
   });
 });
 
+describe('a souled GMI seated as a persistent member of a plain gmi() team', () => {
+  it('keeps its rule for the id in a team its own seat launches', async () => {
+    const k = key();
+    const s = script('openai', k, {
+      whole: true,
+      replies: [
+        // The root's step: a team whose one seat is the souled member, allowed to launch.
+        reply.tools([{ id: 'l1', name: 'launch_agency', args: { goal: 'Check.', seats: [{ role: 'checker', agentKey: 'aria', tools: ['launch_agency'] }] } }]),
+        // The member's seat turn: a team of its own whose seat may call whoami.
+        launchWhoami('l2'),
+        reply.tools([{ id: 'w1', name: 'whoami', args: {} }]),
+        reply.text('Seat done.'),
+        reply.text('Checker done.'),
+        reply.text('All done.'),
+      ],
+    });
+    const { seen: told, tool } = whoami();
+    const aria = await souledAgent({
+      runtime: RUNTIME,
+      provider: 'openai',
+      model: 'stub-model',
+      apiKey: k,
+      fallbackProviders: [],
+      soul: soulDir(),
+      retention: { traces: 'until-deletion' },
+      tombstoneKey: 'k-souled-defaults-tombstones',
+      tools: [tool],
+      agencies: { launch: true },
+    } as unknown as SouledAgentOptions);
+    opened.push(aria);
+    const root = gmi({ provider: 'openai', model: 'stub-model', apiKey: k, fallbackProviders: [], instructions: 'Coordinate.', agencies: { launch: true, maxDepth: 2, members: { aria } } });
+    try {
+      const answer = await root.session('p1', { userId: 'u-42' }).send('Check it.');
+
+      expect(answer.text).toBe('All done.');
+      const calls = turnCalls(s);
+      // The root's launch, the member's launch, the nested seat's two steps, the member's reply and the root's.
+      expect(calls).toHaveLength(6);
+      // The root is a plain gmi(), which sends the id it was given.
+      expect(calls[0].options.userId).toBe('u-42');
+      // The souled member's seat sends none, and neither does the team it launched.
+      for (const call of calls.slice(1, 5)) {
+        expect(call.options.userId).toBeUndefined();
+        expect(holdersOf(call, 'u-42')).toEqual([]);
+      }
+      // The nested seat's tool still reads the user the root's session serves.
+      expect(told).toHaveLength(1);
+      expect(told[0].userContext).toMatchObject({ userId: 'u-42' });
+    } finally {
+      await root.close();
+    }
+  });
+});
+
 describe('a souled GMI turn whose tombstone read stalls, with cognitive memory on', () => {
   it('ends at once when its session closes', async () => {
-    const { a } = await open(MEMORY[1][1]);
+    // The memory hooks' timeout, which bounds each tombstone read of the turn, is far beyond the case's deadline: only
+    // the turn's stop can end the wait in time.
+    const beforeGeneration = vi.fn(async () => undefined);
+    const { a } = await open({ ...MEMORY[1][1], memoryProviderOptions: { timeoutMs: 30_000 }, onBeforeGeneration: beforeGeneration } as Partial<SouledAgentOptions>);
     // Every tombstone read waits until the case ends.
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
@@ -234,9 +300,13 @@ describe('a souled GMI turn whose tombstone read stalls, with cognitive memory o
       );
       // The turn waits on its read, before its model call.
       await vi.waitFor(() => expect(reads).toBeGreaterThan(0), { timeout: 10_000 });
-      await Promise.race([session.close(), sleep(3000)]);
+      const deadline = sleep(3000).then(() => 'still waiting');
+      const closed = session.close().then(() => 'closed');
 
-      expect(await Promise.race([outcome, sleep(2000).then(() => 'still waiting')])).not.toBe('still waiting');
+      expect(await Promise.race([closed, deadline])).toBe('closed');
+      expect(await Promise.race([outcome, deadline])).toBe('stopped');
+      // The stopped turn started nothing more: no model call was prepared.
+      expect(beforeGeneration).not.toHaveBeenCalled();
     } finally {
       release();
     }

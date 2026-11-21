@@ -559,7 +559,11 @@ describe("the turn's answer on the GMI runtime, with sentiment on and cognitive 
     expect(analyze).toHaveBeenCalledTimes(scored);
     const calls = s.seen.filter((call) => !isMerge(call));
     expect(calls).toHaveLength(1);
-    for (const call of calls) expect(call.options.userId).toBeUndefined();
+    for (const call of calls) {
+      expect(call.options.userId).toBeUndefined();
+      // Nor the name a user message is sent under.
+      expect(JSON.stringify(call.messages)).not.toContain('alice');
+    }
   });
 
   it('a session whose user id no memory key can be built from is not scored, and the hook is not asked', async () => {
