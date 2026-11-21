@@ -124,6 +124,11 @@ function isGmiStateKey(key: string): boolean {
 export interface MetapromptRun {
   isStale(): boolean;
   /**
+   * True once a deletion of the person the GMI serves discarded the unit ({@link MetapromptExecutor.discardRuns}): it
+   * then keeps nothing of its failure either, whose error can quote the conversation it was sent.
+   */
+  isDiscarded?(): boolean;
+  /**
    * The provider manager the unit's model calls go through, chosen when the unit was queued: the view the executor's
    * manager makes for queued work when it makes one (a gmi() agent's binds the spend budget of the turn that queued
    * the unit), else the executor's manager.
@@ -407,6 +412,7 @@ export class MetapromptExecutor {
     const discardsAtQueue = this.discards;
     const run: MetapromptRun = {
       isStale: () => overdue || this.closed || this.discards !== discardsAtQueue,
+      isDiscarded: () => this.discards !== discardsAtQueue,
       llmProviderManager: this.providersForQueuedWork(),
     };
     const unit = async (): Promise<void> => {
@@ -591,7 +597,9 @@ export class MetapromptExecutor {
       );
 
       results.forEach((result, idx) => {
-        if (result.status === 'rejected') {
+        if (result.status === 'rejected' && run?.isDiscarded?.()) {
+          this.config.addTraceEntry('WARNING', `Discarded late results of metaprompt '${metaPrompts[idx].id}'.`);
+        } else if (result.status === 'rejected') {
           // One line for the host as well, which may read no trace (gmi() exposes none): a provider's failure, or a spend
           // budget's refusal, whose default calls nothing.
           const reason: unknown = result.reason;
