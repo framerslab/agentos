@@ -38,8 +38,9 @@ type SkipReason = Extract<MemoryWriteEntry, { outcome: 'skipped' }>['reason'];
 
 /**
  * One turn's memory writes: an entry for each side that had text and whose write answered one, the user's message
- * first, then the reply. Empty when the turn was not filed (it ended in an error, was stopped, or an input guard
- * rewrote or replaced it) and when the memory provider's `observe` resolved with nothing.
+ * first, then the reply. Empty when the turn was not filed (it ended in an error, its `abortSignal` stopped it, an
+ * input guard replaced it, or on the default runtime a guard rewrote it) and when the memory provider's `observe`
+ * resolved with nothing.
  */
 export interface MemoryWriteRecord {
   entries: MemoryWriteEntry[];

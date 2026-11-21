@@ -1153,7 +1153,7 @@ const record = await result.memoryWrite;
 //   { role: 'assistant', outcome: 'written', traceId: '…' } ] }
 ```
 
-`entries` has one entry for each side of the turn that had text, the user's message first. A turn with an empty reply has the entry of the user's message alone.
+`entries` has one entry for each side of the turn that had text, the user's message first. A turn with an empty reply has the entry of the user's message alone, and a message with no text (an image alone) has no entry of its own.
 
 | `outcome` | With | Meaning |
 |---|---|---|
@@ -1165,7 +1165,7 @@ const record = await result.memoryWrite;
 
 **When it settles.** The turn does not wait for its writes. On `send()` the promise is on the result the turn resolves with and settles when the writes have; on `stream()` it settles after the stream has ended and the writes have. On a `souledAgent()` a person's writes run one after another with that person's compiles and deletions, so a record can settle after a compile that was running. The promise never rejects. On the default runtime a stream runs once it is read, so the record of a stream nobody reads does not settle.
 
-**A turn that is not filed.** A turn whose model call failed rejects and files neither side. A stream that ended in an error or that its caller stopped, and a turn whose input a guard rewrote or replaced, are not observed: the record has no entry.
+**A turn that is not filed.** A turn whose model call failed rejects and files neither side. A stream that ended in an error or that its `abortSignal` stopped, a turn whose input a guard replaced, and on the default runtime a turn whose input a guard rewrote, are not observed: the record has no entry. On `runtime: 'gmi'` a rewritten turn is observed with the rewritten text ([On the GMI runtime](../safety/GUARDRAILS_USAGE.md#on-the-gmi-runtime)), and its record has its entries.
 
 **A host's own provider.** The entry of a side is what the provider's `observe` resolved with. An `observe` that resolves with nothing leaves no entry, and one that throws or rejects gives a `failed` entry while the log keeps its `memory.hook_failed` line ([High-Level API](../getting-started/HIGH_LEVEL_API.md#schema-validation-and-retries)). A provider wrapped with `guardMemoryProvider()` answers `skipped` with `forgotten` for a forgotten person, and what the provider itself resolves with for anyone else.
 

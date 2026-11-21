@@ -1214,9 +1214,11 @@ export interface GenerateTextResult {
    * side was `written` (with the id of its trace), `skipped` (with the reason)
    * or `failed` (with the error's class name); it holds no text. The turn does
    * not wait for its writes: the promise settles when they have, and never
-   * rejects. Its record has no entry when an input guard rewrote or replaced
-   * the turn, which is then not filed. Unset on `generateText()`, on a
-   * one-shot `generate()`, and on an agent with no observing memory provider.
+   * rejects. Its record has no entry when an input guard replaced the turn,
+   * or rewrote it on the default runtime: such a turn is not filed. On
+   * `runtime: 'gmi'` a rewritten turn is filed with the rewritten text. Unset
+   * on `generateText()`, on a one-shot `generate()`, and on an agent with no
+   * observing memory provider.
    */
   memoryWrite?: Promise<import('./runtime/memoryWriteRecord.js').MemoryWriteRecord>;
   /**
