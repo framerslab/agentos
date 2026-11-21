@@ -275,6 +275,37 @@ describe.each(RUNTIMES)('policy answers, on runtime %s', (runtime) => {
       expect(s.seen.filter(isMerge)).toEqual([]);
     });
 
+    it("takes the agent's own key only to a provider the agent names, never to one the environment picks for it", async () => {
+      // The agent names a plain model and no provider: the environment picks OpenAI for it, and its key is set for that.
+      vi.stubEnv('OPENROUTER_API_KEY', '');
+      vi.stubEnv('OPENROUTER_BASE_URL', '');
+      const envKey = `k-souled-policy-answers-openai-env-${++n}`;
+      vi.stubEnv('OPENAI_API_KEY', envKey);
+      const agentKey = `k-souled-policy-answers-${++n}`;
+      const s = script('openai', agentKey, { whole: true, replies: Array.from({ length: 40 }, (_, i) => reply.text(`Noted ${i}.`)) });
+      const minors = script('openai', envKey, { whole: true, replies: Array.from({ length: 10 }, () => reply.text('Owl notes.')) });
+      const a = await souledAgent({
+        runtime,
+        model: 'stub-model',
+        apiKey: agentKey,
+        fallbackProviders: [],
+        soul: dir,
+        retention: { traces: { days: 30 } },
+        compile: { minors: { provider: 'openai', model: 'stub-minor' } },
+        memoryPolicy: () => ({ longTerm: 'compiled', minor: true }),
+      } as unknown as SouledAgentOptions);
+      opened.push(a);
+      await say(a, 's1', 'alice', 'My owl is named Wexford.');
+      await closed(a);
+
+      // Her page is compiled on OpenAI's key from the environment: the agent's own key went with no merge.
+      expect(s.seen.filter(isMerge)).toEqual([]);
+      const minorMerges = minors.seen.filter(isMerge);
+      expect(minorMerges).toHaveLength(1);
+      expect(minorMerges[0].modelId).toBe('stub-minor');
+      expect(JSON.stringify(minorMerges[0].messages)).toContain('Wexford');
+    });
+
     it("follows the person's latest answer at each merge, so a minor's answer given during a compile holds for its next merge", async () => {
       const minorsKey = `k-souled-policy-answers-minors-${++n}`;
       const minors = script('anthropic', minorsKey, { whole: true, replies: Array.from({ length: 10 }, () => reply.text('Child notes.')) });
@@ -307,15 +338,18 @@ describe.each(RUNTIMES)('policy answers, on runtime %s', (runtime) => {
       release();
       await compiling;
       await turn;
-      await closed(a);
 
-      // The merge sent before the answer went where it went; each later merge went to the target named for minors.
+      // Within that one compile, before close() compiles again: the merge sent before the answer went where it went,
+      // and each later merge went to the target named for minors.
       const agentMerges = s.seen.filter(isMerge).map((call) => JSON.stringify(call.messages));
       expect(agentMerges).toHaveLength(1);
       expect(agentMerges[0]).not.toMatch(/hunts at dusk|Pellam/);
-      const minorMerges = minors.seen.filter(isMerge).map((call) => JSON.stringify(call.messages)).join('\n');
-      expect(minorMerges).toContain('hunts at dusk');
-      expect(minorMerges).toContain('Pellam');
+      const minorMerges = minors.seen.filter(isMerge).map((call) => JSON.stringify(call.messages));
+      expect(minorMerges).toHaveLength(2);
+      expect(minorMerges.join('\n')).toContain('hunts at dusk');
+      expect(minorMerges.join('\n')).toContain('Pellam');
+      expect(lines('memory.compile_skipped')).toEqual([]);
+      await closed(a);
     });
 
     it('is not run without compile.minors, and says minor_no_compile', async () => {
