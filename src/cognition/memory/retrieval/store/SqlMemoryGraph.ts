@@ -789,3 +789,42 @@ export class SqlMemoryGraph implements IMemoryGraph {
     return hash.slice(0, 32);
   }
 }
+
+/** How many ids one statement of {@link memoryGraphEdgesAmong} names. */
+const EDGE_READ_BATCH = 400;
+
+/**
+ * The memory graph's edges both of whose ends are among `memoryIds`, read from the Brain's rows, so an edge another
+ * graph on the same Brain wrote is read too. An edge with one end outside the ids is left out. Ordered by source,
+ * then target.
+ *
+ * @param brain - The Brain the graph lives in.
+ * @param memoryIds - The trace ids whose edges among themselves are read.
+ */
+export async function memoryGraphEdgesAmong(brain: Brain, memoryIds: readonly string[]): Promise<MemoryEdge[]> {
+  const ids = [...new Set(memoryIds)];
+  const among = new Set(ids);
+  const edges: MemoryEdge[] = [];
+  for (let offset = 0; offset < ids.length; offset += EDGE_READ_BATCH) {
+    const chunk = ids.slice(offset, offset + EDGE_READ_BATCH);
+    const rows = await brain.all<EdgeRow>(
+      `SELECT id, source_id, target_id, type, weight, created_at
+         FROM knowledge_edges
+        WHERE brain_id = ? AND type IN (${MEMORY_EDGE_TYPES_SQL}) AND source_id IN (${chunk.map(() => '?').join(', ')})`,
+      [brain.brainId, ...chunk],
+    );
+    for (const row of rows) {
+      if (!among.has(row.target_id)) continue;
+      edges.push({
+        sourceId: row.source_id,
+        targetId: row.target_id,
+        type: row.type as MemoryEdgeType,
+        weight: Number(row.weight),
+        createdAt: Number(row.created_at),
+      });
+    }
+  }
+  return edges.sort((a, b) =>
+    a.sourceId === b.sourceId ? (a.targetId < b.targetId ? -1 : a.targetId > b.targetId ? 1 : 0) : a.sourceId < b.sourceId ? -1 : 1,
+  );
+}

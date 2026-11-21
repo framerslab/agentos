@@ -4,18 +4,59 @@
  * One subject's memory as a document a host can hand to that person, and a correction of it: the wrong traces are
  * deleted for good and the corrected statement is filed in their place.
  */
+import type { MemoryRecipient } from '../../../api/runtime/memoryRecipients.js';
+import type { LearnedStateDocument } from '../../learning/types.js';
 import type { WikiPage } from '../../substrate/memory/wiki/types.js';
 import { errorFields } from '../../../core/logging/events.js';
+import type { IMemoryArchive } from '../archive/IMemoryArchive.js';
+import type { MemoryTrace } from '../core/types.js';
 import { memoryLog } from '../log.js';
 import { CONVERSATION_SCOPE, conversationScopeKey } from '../retrieval/store/conversationScopeKey.js';
+import { memoryGraphEdgesAmong } from '../retrieval/store/SqlMemoryGraph.js';
 import { parseTraceMetadata } from '../retrieval/store/tracePersistence.js';
 import type { SuppressionSubject } from '../suppression/ForgottenLedger.js';
 import { guardedWrite } from '../suppression/guardedWrite.js';
+import { brainOf } from './facade/handedBrain.js';
 import type { Memory } from './facade/Memory.js';
 import type { SubjectPages } from './forgetUserMemory.js';
 import { LEGACY_SCOPE } from './legacyMemory.js';
+import type { RetentionPeriod } from './retentionSweep.js';
 
-/** One subject's memory: what they and the agent said, as the store holds it, and the pages compiled from it. */
+/** One compiled page as the export holds it. */
+export interface ExportedPage {
+  id: string;
+  summary: string;
+  updated: string;
+  sources: string[];
+  body: string;
+}
+
+/** One trace as the export holds what the store keeps of it. */
+export interface HeldTrace {
+  id: string;
+  /** When it was stored, ISO 8601. */
+  createdAt: string;
+  speaker?: 'user' | 'assistant';
+  text: string;
+  tags: string[];
+  /** The entities the store recorded for it. */
+  entities: string[];
+  /** Which side filed it: the mind of a souled agent's GMI (`'mind'`), or the soul's own memory (`'soul'`). */
+  filedBy: 'mind' | 'soul';
+  /** The emotional context stored with it; all zeros and a `neutral` mood where none was stamped. */
+  emotionalContext: { valence: number; arousal: number; dominance: number; intensity: number; gmiMood: string };
+  encodingStrength: number;
+  stability: number;
+  retrievalCount: number;
+  /** When it was last recalled, ISO 8601; its storing time when it never was. */
+  lastAccessedAt: string;
+}
+
+/**
+ * One subject's memory: what they and the agent said, as the store holds it, and the pages compiled from it; what the
+ * subject provided and what is held about them; who receives a person's text; how long it is kept; and whether the
+ * subject is profiled.
+ */
 export interface UserMemoryExport {
   /** When the export was made, ISO 8601. */
   exportedAt: string;
@@ -25,14 +66,69 @@ export interface UserMemoryExport {
   /** The subject's conversation traces, oldest first; a page's chunks are left out. */
   traces: Array<{ id: string; createdAt: string; speaker?: 'user' | 'assistant'; text: string; tags: string[] }>;
   /** The pages compiled from the subject's traces. */
-  pages: Array<{ id: string; summary: string; updated: string; sources: string[]; body: string }>;
+  pages: ExportedPage[];
+  /** What the subject provided: their own messages, oldest first, and none of the agent's replies. */
+  provided: { messages: Array<{ id: string; createdAt: string; text: string }> };
+  /** What is held about the subject. */
+  held: {
+    /** Each of the subject's traces, oldest first, with what the store keeps of it. */
+    traces: HeldTrace[];
+    /** The verbatim text an archive keeps of a held trace, where one does. */
+    archivedOriginals: Array<{ traceId: string; text: string }>;
+    /** Typed facts extracted from the subject's traces: none, as no souled agent extracts them. */
+    typedFacts: [];
+    /** The memory graph's links between two of the subject's own traces. */
+    graphLinks: Array<{ from: string; to: string; type: string; weight: number }>;
+    /** The pages compiled from the subject's traces, as {@link UserMemoryExport.pages}. */
+    pages: ExportedPage[];
+    /** The subject's learned state, when the agent runs a learning layer. */
+    learner?: LearnedStateDocument;
+    /** The corrections of the subject whose text the tombstones' second copy also keeps. */
+    restoreCopies: Array<{ traceId: string }>;
+  };
+  /** Who receives a person's text from the agent: agent-wide, the same list for every person. */
+  recipients: MemoryRecipient[];
+  /**
+   * How long the subject's traces are kept: the agent's period for the subject's kind (`'none'` with no retention
+   * set), and the shortest number of days the host's memory policy answered for the subject in this process.
+   */
+  retention: { period: RetentionPeriod | 'none'; policyDays?: number };
+  /**
+   * Whether the subject's messages are scored for sentiment (`'on'` or `'off'`), and how many held traces carry an
+   * emotional context other than a neutral one.
+   */
+  profiling: { sentiment: 'on' | 'off'; moodStamps: number };
+  /**
+   * Each store the export could not read, with the kind of error and never the error's text. The part of the export
+   * that store fills is left empty, not filled with what was read before the failure.
+   */
+  unread: Array<{ store: ExportStore; reason: string }>;
 }
+
+/** The stores an export reads, each named in {@link UserMemoryExport.unread} when its read fails. */
+export const EXPORT_STORES = [
+  'recipients',
+  'tombstone ledger',
+  'older traces',
+  'conversation traces',
+  'memory graph',
+  'archived originals',
+  'older compiled pages',
+  'compiled pages',
+  'learning store',
+] as const;
+/** One store an export reads. */
+export type ExportStore = (typeof EXPORT_STORES)[number];
 
 /** How many traces one read of the export asks for. */
 const EXPORT_BATCH = 500;
 
 /** The key of the trace metadata that records who spoke a trace. */
 const SPEAKER_KEY = 'speaker';
+
+/** The metadata key, and the value, that mark a trace the mind of a souled agent's GMI filed. */
+const FILED_BY_KEY = 'filedBy';
+const FILED_BY_MIND = 'mind';
 
 /** A subject checked: a kind of `user` or `session` and a non-empty id. */
 function checkedSubject(subject: SuppressionSubject, call: string): SuppressionSubject {
@@ -45,10 +141,52 @@ function checkedSubject(subject: SuppressionSubject, call: string): SuppressionS
   return { kind, id };
 }
 
+/** A finite number, else 0. */
+const finiteOr0 = (value: unknown): number => (typeof value === 'number' && Number.isFinite(value) ? value : 0);
+
+/** The emotional context of a trace, its four numbers and its mood, with what the row lacks filled as neutral. */
+function emotionalContextOf(trace: MemoryTrace): HeldTrace['emotionalContext'] {
+  const stored: unknown = trace.emotionalContext;
+  const given = (stored !== null && typeof stored === 'object' ? stored : {}) as Partial<
+    Record<keyof HeldTrace['emotionalContext'], unknown>
+  >;
+  return {
+    valence: finiteOr0(given.valence),
+    arousal: finiteOr0(given.arousal),
+    dominance: finiteOr0(given.dominance),
+    intensity: finiteOr0(given.intensity),
+    gmiMood: typeof given.gmiMood === 'string' && given.gmiMood !== '' ? given.gmiMood : 'neutral',
+  };
+}
+
+/** Whether an emotional context is other than a neutral one: a number not zero, or a mood other than neutral. */
+function isMoodStamp(context: HeldTrace['emotionalContext']): boolean {
+  return (
+    context.valence !== 0 ||
+    context.arousal !== 0 ||
+    context.dominance !== 0 ||
+    context.intensity !== 0 ||
+    context.gmiMood.toLowerCase() !== 'neutral'
+  );
+}
+
+/** A time in epoch milliseconds as ISO 8601. */
+const isoOf = (ms: unknown): string => new Date(Number(ms)).toISOString();
+
+/** Why a read failed, for {@link UserMemoryExport.unread}: the error's listed type and code, never its text. */
+function readFailure(error: unknown): string {
+  const { type, code } = errorFields(error);
+  return code === 'unknown' ? `the read failed (${type})` : `the read failed (${type}, ${code})`;
+}
+
 /**
  * One subject's memory as JSON: every live conversation trace filed under the subject's own key, oldest first, with
- * who spoke it, and every page compiled from them. It reads that key alone, by equality: the operator's pages, other
- * subjects' memory and a session's own message history are not in it. A forgotten subject's export is empty.
+ * who spoke it, and every page compiled from them; the subject's own messages (`provided`); what the store holds about
+ * them (`held`); who receives a person's text; how long it is kept; and whether the subject is profiled. It reads that
+ * key alone, by equality: the operator's pages, other subjects' memory and a session's own message history are not
+ * in it. A forgotten subject's export holds nothing of them, and its `profiling.sentiment` is `'off'`. A read that
+ * fails leaves its part empty and is named in `unread`, and the export still returns; a tombstone ledger that cannot
+ * be read leaves every part of the subject empty.
  *
  * @throws TypeError when the subject has another kind or no id, or an id no conversation key can be built from.
  */
@@ -62,6 +200,18 @@ export async function exportSubjectMemory(options: {
    * the written forms of the agent's plain scope id its traces sit under, and its compiled pages.
    */
   legacy?: { forms: readonly string[]; pages(): Promise<WikiPage[]> };
+  /** Who receives a person's text from the agent. Unset: none is named. A read that fails is named in `unread`. */
+  recipients?: () => Promise<MemoryRecipient[]>;
+  /** How long the subject's traces are kept. Unset: `{ period: 'none' }`. */
+  retention?: { period: RetentionPeriod | 'none'; policyDays?: number };
+  /** Whether the subject's messages are scored for sentiment, by the subject's key. Unset: `'off'`. */
+  profilingOf?: (scopeId: string) => 'on' | 'off';
+  /** The subject's learned state, when the agent runs a learning layer. A read that fails is named in `unread`. */
+  learner?: () => Promise<LearnedStateDocument>;
+  /** An archive of verbatim originals: each held trace's original is read from it for the export. */
+  archive?: Pick<IMemoryArchive, 'rehydrate'>;
+  /** A memory graph held in this process beside the store's: its links between the subject's traces are added. */
+  liveGraph?: { getEdges(memoryId: string): Array<{ sourceId: string; targetId: string; type: string; weight: number }> };
 }): Promise<UserMemoryExport> {
   const { memory, agentId } = options;
   const subject = checkedSubject(options.subject, 'exportSubjectMemory');
@@ -72,12 +222,66 @@ export async function exportSubjectMemory(options: {
     subject: { kind: subject.kind },
     traces: [],
     pages: [],
+    provided: { messages: [] },
+    held: { traces: [], archivedOriginals: [], typedFacts: [], graphLinks: [], pages: [], restoreCopies: [] },
+    recipients: [],
+    // What the host answered for this subject (policyDays, the sentiment its answer leaves) is added once the ledger
+    // says the subject is not forgotten.
+    retention: options.retention
+      ? { period: typeof options.retention.period === 'object' ? { ...options.retention.period } : options.retention.period }
+      : { period: 'none' },
+    profiling: { sentiment: 'off', moodStamps: 0 },
+    unread: [],
   };
-  if (memory.forgotten && (await memory.isForgotten(subject))) return document;
+  /**
+   * Runs one read of `store` and, once it has read everything, hands what it read to `keep`. A read that fails keeps
+   * nothing of that store, is named in `unread`, and writes one `memory.export_unread` line; the export goes on.
+   */
+  const unreadOf = (store: ExportStore, error: unknown): void => {
+    document.unread.push({ store, reason: readFailure(error) });
+    memoryLog.warn('memory.export_unread', { store, ...errorFields(error) });
+  };
+  const reading = async <T>(store: ExportStore, read: () => Promise<T>, keep: (value: T) => void): Promise<void> => {
+    let value: T;
+    try {
+      value = await read();
+    } catch (error) {
+      unreadOf(store, error);
+      return;
+    }
+    keep(value);
+  };
+  if (options.recipients) {
+    const listed = options.recipients;
+    await reading('recipients', listed, (recipients) => {
+      document.recipients = [...recipients];
+    });
+  }
+  if (memory.forgotten) {
+    // A ledger that cannot be read leaves the export holding nothing of the subject: it cannot tell whether the
+    // subject was forgotten.
+    let gone: boolean;
+    try {
+      gone = await memory.isForgotten(subject);
+    } catch (error) {
+      unreadOf('tombstone ledger', error);
+      return document;
+    }
+    // A forgotten subject's messages are filed and scored for nothing.
+    if (gone) return document;
+  }
+  if (options.retention?.policyDays !== undefined) document.retention.policyDays = options.retention.policyDays;
+  document.profiling.sentiment = options.profilingOf?.(key) ?? 'off';
 
   const seen = new Set<string>();
-  /** Every live trace of one scope, oldest first, a page's chunks left out. */
-  const readScope = async (scope: string, scopeId: string): Promise<void> => {
+  /** What one read of traces found, kept in the export only once the read has finished. */
+  interface TraceSection {
+    traces: UserMemoryExport['traces'];
+    messages: UserMemoryExport['provided']['messages'];
+    held: HeldTrace[];
+  }
+  /** Every live trace of one scope, oldest first, a page's chunks left out, into `section`. */
+  const readScope = async (scope: string, scopeId: string, section: TraceSection): Promise<void> => {
     let since = 0;
     let limit = EXPORT_BATCH;
     for (;;) {
@@ -86,13 +290,25 @@ export async function exportSubjectMemory(options: {
       for (const trace of fresh) {
         seen.add(trace.id);
         if (trace.tags.includes('wiki')) continue;
-        const speaker = parseTraceMetadata((await memory.readTrace(trace.id))?.metadata)[SPEAKER_KEY];
-        document.traces.push({
+        const metadata = parseTraceMetadata((await memory.readTrace(trace.id))?.metadata);
+        const said = metadata[SPEAKER_KEY];
+        const speaker = said === 'user' || said === 'assistant' ? said : undefined;
+        const createdAt = isoOf(trace.createdAt);
+        section.traces.push({ id: trace.id, createdAt, ...(speaker ? { speaker } : {}), text: trace.content, tags: [...trace.tags] });
+        if (speaker === 'user') section.messages.push({ id: trace.id, createdAt, text: trace.content });
+        section.held.push({
           id: trace.id,
-          createdAt: new Date(Number(trace.createdAt)).toISOString(),
-          ...(speaker === 'user' || speaker === 'assistant' ? { speaker } : {}),
+          createdAt,
+          ...(speaker ? { speaker } : {}),
           text: trace.content,
           tags: [...trace.tags],
+          entities: Array.isArray(trace.entities) ? trace.entities.filter((entity) => typeof entity === 'string') : [],
+          filedBy: metadata[FILED_BY_KEY] === FILED_BY_MIND ? 'mind' : 'soul',
+          emotionalContext: emotionalContextOf(trace),
+          encodingStrength: finiteOr0(trace.encodingStrength),
+          stability: finiteOr0(trace.stability),
+          retrievalCount: finiteOr0(trace.retrievalCount),
+          lastAccessedAt: isoOf(trace.lastAccessedAt),
         });
       }
       if (batch.length < limit) break;
@@ -107,12 +323,85 @@ export async function exportSubjectMemory(options: {
       }
     }
   };
-  for (const form of options.legacy?.forms ?? []) await readScope(LEGACY_SCOPE, form);
-  await readScope(CONVERSATION_SCOPE, key);
+  /** Reads traces into a section of their own, and keeps the section in the export once the read has finished. */
+  const readTraces = (store: ExportStore, scopes: ReadonlyArray<readonly [string, string]>): Promise<void> =>
+    reading(
+      store,
+      async () => {
+        const section: TraceSection = { traces: [], messages: [], held: [] };
+        for (const [scope, scopeId] of scopes) await readScope(scope, scopeId, section);
+        return section;
+      },
+      (section) => {
+        // One push a trace: a history of any length, never one call's arguments.
+        for (const trace of section.traces) document.traces.push(trace);
+        for (const message of section.messages) document.provided.messages.push(message);
+        for (const trace of section.held) document.held.traces.push(trace);
+      },
+    );
+  if (options.legacy?.forms.length) {
+    await readTraces('older traces', options.legacy.forms.map((form) => [LEGACY_SCOPE, form] as const));
+  }
+  await readTraces('conversation traces', [[CONVERSATION_SCOPE, key]]);
+  document.profiling.moodStamps = document.held.traces.filter((trace) => isMoodStamp(trace.emotionalContext)).length;
+  const heldIds = document.held.traces.map((trace) => trace.id);
 
-  const pages = [...(options.legacy ? await options.legacy.pages() : []), ...(await options.wiki.storeFor(key).listPages())];
+  if (heldIds.length > 0) {
+    await reading('memory graph', async () => {
+      const links = new Map<string, UserMemoryExport['held']['graphLinks'][number]>();
+      for (const edge of await memoryGraphEdgesAmong(brainOf(memory), heldIds)) {
+        links.set(`${edge.sourceId}\u0000${edge.targetId}`, { from: edge.sourceId, to: edge.targetId, type: edge.type, weight: edge.weight });
+      }
+      const live = options.liveGraph;
+      if (live) {
+        const held = new Set(heldIds);
+        for (const id of heldIds) {
+          for (const edge of live.getEdges(id)) {
+            if (edge.sourceId !== id || !held.has(edge.targetId)) continue;
+            const linkKey = `${edge.sourceId}\u0000${edge.targetId}`;
+            if (!links.has(linkKey)) links.set(linkKey, { from: edge.sourceId, to: edge.targetId, type: edge.type, weight: edge.weight });
+          }
+        }
+      }
+      return [...links.values()];
+    }, (links) => {
+      document.held.graphLinks = links;
+    });
+  }
+  const archive = options.archive;
+  if (archive && heldIds.length > 0) {
+    await reading('archived originals', async () => {
+      const originals: UserMemoryExport['held']['archivedOriginals'] = [];
+      for (const id of heldIds) {
+        const original = await archive.rehydrate(id, 'user_export');
+        if (original) originals.push({ traceId: id, text: original.verbatimContent });
+      }
+      return originals;
+    }, (originals) => {
+      document.held.archivedOriginals = originals;
+    });
+  }
+
+  const pages: WikiPage[] = [];
+  const legacyPages = options.legacy?.pages;
+  if (legacyPages) {
+    await reading('older compiled pages', legacyPages, (read) => {
+      pages.push(...read);
+    });
+  }
+  await reading('compiled pages', () => options.wiki.storeFor(key).listPages(), (read) => {
+    pages.push(...read);
+  });
   for (const page of pages) {
     document.pages.push({ id: page.id, summary: page.summary, updated: page.updated, sources: [...page.sources], body: page.body });
+  }
+  document.held.pages = document.pages.map((page) => ({ ...page, sources: [...page.sources] }));
+
+  const learner = options.learner;
+  if (learner) {
+    await reading('learning store', learner, (state) => {
+      document.held.learner = state;
+    });
   }
   return document;
 }

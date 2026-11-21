@@ -763,7 +763,22 @@ A row's scope id is its `metadata` cell's `scopeId`, else its `scope_id` cell, w
 
 ### One person's memory
 
-`await agent.exportUserMemory(userId)` on a `souledAgent()` returns that person's conversation traces (id, time, speaker, text, tags) and compiled pages (id, summary, updated, sources, body) as one JSON object. It reads the person's own scope alone: operator pages, other people's memory and a `gmi()` session's history are not in it. A person the store has forgotten gets an empty export. The export reads after the memory writes of the person's turns already sent, so a turn whose `send()` resolved before the call is in it.
+`await agent.exportUserMemory(userId)` on a `souledAgent()` returns that person's conversation traces (id, time, speaker, text, tags) and compiled pages (id, summary, updated, sources, body) as one JSON object. It reads the person's own scope alone: operator pages, other people's memory and a `gmi()` session's history are not in it. A person the store has forgotten gets an export that holds nothing of them: no `policyDays`, and `profiling.sentiment` `'off'`. The export reads after the memory writes of the person's turns already sent, so a turn whose `send()` resolved before the call is in it.
+
+The same object holds:
+
+| Field | What it holds |
+|---|---|
+| `provided.messages` | The person's own messages (id, time, text), oldest first; none of the agent's replies. |
+| `held.traces` | Each trace with its speaker, text, tags, entities, `filedBy` (`'soul'` for a trace the souled agent's own memory filed, `'mind'` for one its GMI filed), emotional context (valence, arousal, dominance, intensity, mood; zeros and `neutral` where none was stamped), `encodingStrength`, `stability`, `retrievalCount` and `lastAccessedAt`. |
+| `held.graphLinks` | The memory graph's links whose two ends are both the person's traces (`from`, `to`, `type`, `weight`). A link to another person's trace is left out. |
+| `held.pages` | The person's compiled pages, as `pages`. |
+| `held.learner` | The person's learned state, when the agent runs a learning layer. |
+| `held.archivedOriginals`, `held.typedFacts`, `held.restoreCopies` | The verbatim originals an archive keeps of the person's traces, the typed facts extracted from them (none: a souled agent extracts none), and the corrections whose text a second copy keeps. |
+| `recipients` | `agent.recipients()`: every outside recipient of a person's text, agent-wide. |
+| `retention` | The agent's period for the person's traces (`'none'` without `retention`), and `policyDays`, the shortest `retentionDays` your `memoryPolicy` answered for the person in this process. |
+| `profiling` | `sentiment`: whether the person's messages are scored for sentiment (on `runtime: 'gmi'` with sentiment on, as your policy's latest answer for the person leaves it); `moodStamps`: how many held traces carry an emotional context other than a neutral one. |
+| `unread` | Each store the export could not read (`store`, and `reason` with the error's kind and never its text). That store's part of the export is left empty, never half filled, one `memory.export_unread` line names the store, and the rest of the export is still returned. A tombstone ledger that cannot be read (`tombstone ledger`) leaves every part of the person empty, with no `policyDays` and `profiling.sentiment` `'off'`: the export cannot tell whether they were forgotten. |
 
 `await agent.correctUserMemory(userId, { traceIds, text })` deletes each page built from a named trace and has the next compile rebuild it from the traces that are left, files `text` as a trace tagged `correction` (when the person's memory already holds `text` word for word, that trace is the correction: it is tagged `correction` and kept, even when it is one of the named traces), deletes the named traces for good, and writes the vector index again and empties the store's write-ahead log, so neither file keeps the deleted words. The named traces go last: a correction that fails partway is finished by the same call made again. An index rewrite or a checkpoint that fails does not fail the call; one `memory.erasure_unfinished` line says so, and the next deletion, sweep or `applyTombstones()` runs it. It rejects, and changes nothing, when any id is not one of that person's live traces; the rejection gives a count and no id, and one `memory.write_refused` line (`reason: 'foreign_trace'`) says so.
 

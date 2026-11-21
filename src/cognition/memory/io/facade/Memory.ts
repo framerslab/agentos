@@ -92,6 +92,7 @@ import { assertWikiPageId } from '../../../substrate/memory/wiki/WikiPageId.js';
 import { refileBrainScopeIds, snapshotInEncodedForm, takeScopeIdFormLock } from '../../retrieval/store/scopeIdForm.js';
 import { SqlKnowledgeGraph } from '../../retrieval/store/SqlKnowledgeGraph.js';
 import { SqlMemoryGraph } from '../../retrieval/store/SqlMemoryGraph.js';
+import { registerHandedBrain } from './handedBrain.js';
 import { ChunkingEngine } from '../ingestion/ChunkingEngine.js';
 import { UrlLoader } from '../ingestion/UrlLoader.js';
 import { RetrievalFeedbackSignal } from '../../retrieval/feedback/RetrievalFeedbackSignal.js';
@@ -515,6 +516,9 @@ export class Memory {
     this._config = config;
     this._forgotten = forgotten;
     this._leaveAdapterOpen = leaveAdapterOpen;
+    // Code inside the library that reads or writes this store's rows beside the facade reaches the Brain through
+    // brainOf(); the facade keeps it private to everyone else.
+    registerHandedBrain(this, brain);
 
     // Store the optional embedding function for vector search.
     this._embed = config.embed ?? null;

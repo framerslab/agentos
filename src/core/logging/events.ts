@@ -135,6 +135,10 @@ export const AGENTOS_EVENTS = {
   'memory.erasure_unfinished': { type: 'word', code: 'word' },
   // A single person's install attributed the memory a store held from before per-user scope to its one user (the legacyMemory option): the legacy traces and the legacy compiled pages it counted. Written once, when the attribution is made.
   'memory.legacy_attributed': { traces: 'int', pages: 'int' },
+  // A souled agent could not record in its store the route a call took that its options do not name (a call's own provider or model): the route stays in recipients() for this process, and the next call on it tries again. Written once a failure, with the error's listed type and code.
+  'memory.recipient_unrecorded': { type: 'word', code: 'word' },
+  // An export of one person's memory could not read one of its stores: that store's part of the export is left empty and named in the export's unread list, and the export still returns. Written once a store a call, with the store and the error's listed type and code, never its text or the person's id.
+  'memory.export_unread': { store: { enum: ['recipients', 'tombstone ledger', 'older traces', 'conversation traces', 'memory graph', 'archived originals', 'older compiled pages', 'compiled pages', 'learning store'] }, type: 'word', code: 'word' },
   // A translation failed, answered with no text, ran past the transcript translator's own timeout, stopped at its output cap or stopped for another reason (a content filter); it throws TranslationProviderError, and status is 0 when no HTTP status came back.
   'language.translation_failed': { provider: { enum: ['openai', 'deepl'] }, reason: { enum: ['request_failed', 'empty_output', 'timeout', 'truncated', 'incomplete'] }, status: 'int', type: 'word', code: 'word' },
   // A configured detection provider id LanguageService does not build (whisper_stub, or an id it does not know).
