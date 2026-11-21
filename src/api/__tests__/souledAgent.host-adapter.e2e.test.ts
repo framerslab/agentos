@@ -463,7 +463,7 @@ describe(`a souled agent's store on the host's adapter, on runtime ${RUNTIME}`, 
     expect(fs.existsSync(copyAt('aria').path)).toBe(false);
 
     // One person's own store needs neither: every session of every process runs as that one user.
-    const { a } = await open('aria-1', { ...onHost, retention: undefined, tombstoneKey: undefined, sharedMemory: { as: 'owner' } });
+    const { a } = await open('aria-1', { ...onHost, retention: undefined, tombstoneKey: undefined, sharedMemory: { as: 'owner', reason: 'one-persons-machine' } });
     await turn(a, adapter, 's1', 'owner', 'My canary is LARK-7.');
     expect(JSON.stringify(await tracesUnder(adapter, userKey('owner')))).toContain('LARK-7');
   });
