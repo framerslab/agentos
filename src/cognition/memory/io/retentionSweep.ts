@@ -43,9 +43,27 @@ const daysOf = (period: RetentionPeriod | undefined): number | undefined =>
   period !== undefined && period !== 'until-deletion' ? period.days : undefined;
 
 /**
+ * How many days one scope's traces are kept: the agent's period for the scope's kind (a session's falls back to the
+ * users' period), shortened by an account's own policy where it gives fewer days; undefined when nothing ends them.
+ */
+export function retentionDaysOf(
+  retention: RetentionSweepOptions['retention'],
+  kind: 'user' | 'session',
+  ofAccount: number | undefined,
+): number | undefined {
+  const ofAgent = daysOf(kind === 'session' ? (retention.sessions ?? retention.traces) : retention.traces);
+  const shorter = typeof ofAccount === 'number' && Number.isFinite(ofAccount) && ofAccount > 0 ? ofAccount : undefined;
+  return ofAgent === undefined ? shorter : shorter === undefined ? ofAgent : Math.min(ofAgent, shorter);
+}
+
+/** One day in milliseconds. @internal */
+export const RETENTION_DAY_MS = DAY_MS;
+
+/**
  * Deletes for good what expired, one user or session scope at a time: each page compiled from an expired trace,
  * whole, then the scope's traces stored longer ago than its period (soft-deleted rows and the document chunks they
- * were filed from included). The pages go first: while a page is left, the expired traces it was built from are left
+ * were filed from included), with the text the tombstones' second copy keeps of an expired correction. The pages go
+ * first: while a page is left, the expired traces it was built from are left
  * too, so a sweep that stopped is finished by the next one. With `pages: 'rebuild'` the next compile builds such a
  * page again from the traces of it that are left. A page whose sources all survive is not touched, and a page's own
  * age is no second clock. A scope left with no trace and no page loses its registry row. The operator's pages and
@@ -69,10 +87,7 @@ export async function sweepRetention(options: RetentionSweepOptions): Promise<{ 
   const sweepOne = async (row: { kind: string; scopeId: string }): Promise<void> => {
     if (row.kind !== 'user' && row.kind !== 'session') return;
     const scopeId = row.scopeId;
-    const ofAgent = daysOf(row.kind === 'session' ? (retention.sessions ?? retention.traces) : retention.traces);
-    const ofAccount = options.daysFor?.(scopeId);
-    const shorter = typeof ofAccount === 'number' && Number.isFinite(ofAccount) && ofAccount > 0 ? ofAccount : undefined;
-    const days = ofAgent === undefined ? shorter : shorter === undefined ? ofAgent : Math.min(ofAgent, shorter);
+    const days = retentionDaysOf(retention, row.kind as 'user' | 'session', options.daysFor?.(scopeId));
     if (days === undefined) return;
     anyPeriod = true;
 
@@ -93,7 +108,11 @@ export async function sweepRetention(options: RetentionSweepOptions): Promise<{ 
         await store.deletePage(page.id);
         swept.pages += 1;
       }
-      if (expired.length > 0) swept.traces += (await memory.deleteTraces(expired, { documentChunks: 'delete' })).deleted;
+      if (expired.length > 0) {
+        swept.traces += (await memory.deleteTraces(expired, { documentChunks: 'delete' })).deleted;
+        // A correction that expired goes from the tombstones' second copy too, so no restore files it again.
+        await memory.forgotten?.dropCorrections(expired);
+      }
       // A scope that holds nothing more is no longer named by the registry.
       const left = await memory.tracesStoredBefore(CONVERSATION_SCOPE, scopeId, Number.MAX_SAFE_INTEGER);
       if (left.length === 0 && (await memory.listPageRows(scopeId)).length === 0) {
