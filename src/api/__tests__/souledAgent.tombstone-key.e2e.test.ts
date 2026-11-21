@@ -5,8 +5,10 @@
  *
  * - With no `tombstoneKey` and a ledger that holds no tombstone, the second person's or session's session is refused,
  *   and so is the open of a store that already holds two subjects' memory; the refused open leaves nothing open.
- * - With no `tombstoneKey` and a ledger that already holds an unkeyed tombstone (written by an earlier deletion, or by
- *   one this agent made), the second subject opens, and one `memory.tombstones_unkeyed` line an open says so.
+ * - With no `tombstoneKey` and a ledger that already holds an unkeyed tombstone (written by an earlier deletion, by
+ *   one this agent made, or past the agent through its memory or its learning layer), the second subject opens, and
+ *   one `memory.tombstones_unkeyed` line an open says so, once the subject is let in.
+ * - A `tombstoneKey` that holds no key (`null`) is no key.
  * - A person forgotten with no key stays forgotten once the store opens with a key, and a person forgotten under a
  *   key stays forgotten after the key is rotated.
  * - `sharedMemory` keeps one person's memory and never needs the key.
@@ -186,6 +188,38 @@ describe.each(RUNTIMES)('the tombstone key, on runtime %s', (runtime) => {
     const { a: again } = await open();
     expect(lines('memory.tombstones_unkeyed')).toHaveLength(1);
     expect(again.session('s3', { userId: 'erin' }).id).toBe('s3');
+    expect(lines('memory.tombstones_unkeyed')).toHaveLength(1);
+  });
+
+  it('lets a second person in once a tombstone is written past the agent, through its memory or its learning layer', async () => {
+    // The GMI runtime runs the learning layer, which writes to the store's ledger; the default runtime runs none.
+    const { a } = await open(runtime === 'gmi' ? ({ learning: true } as Partial<SouledAgentOptions>) : {});
+    expect(a.session('s1', { userId: 'alice' }).id).toBe('s1');
+    expect(() => a.session('s2', { userId: 'bob' })).toThrow(KEY_NEEDED);
+    if (runtime === 'gmi') await a.learning!.forgetUser!('carol');
+    else expect(await a.memory!.markForgotten({ kind: 'user', id: 'carol' })).toEqual({ form: 'unkeyed', written: true });
+    expect(a.session('s2', { userId: 'bob' }).id).toBe('s2');
+    expect(lines('memory.tombstones_unkeyed')).toHaveLength(1);
+  });
+
+  it('writes the line only once a second subject is let in, never for a session the runtime refuses', async () => {
+    const { a } = await open();
+    expect(a.session('s1', { userId: 'alice' }).id).toBe('s1');
+    expect((await a.forgetUser!('carol')).tombstone).toEqual({ form: 'unkeyed', written: true });
+    // Alice's open session asked for as another user is refused by the runtime: nobody new is let in.
+    expect(() => a.session('s1', { userId: 'bob' })).toThrow(/already runs as user/);
+    expect(lines('memory.tombstones_unkeyed')).toEqual([]);
+    expect(a.session('s2', { userId: 'bob' }).id).toBe('s2');
+    expect(lines('memory.tombstones_unkeyed')).toHaveLength(1);
+  });
+
+  it('treats a tombstoneKey that holds no key as none', async () => {
+    const { a } = await open({ tombstoneKey: null } as unknown as Partial<SouledAgentOptions>);
+    expect(a.session('s1', { userId: 'alice' }).id).toBe('s1');
+    expect(() => a.session('s2', { userId: 'bob' })).toThrow(KEY_NEEDED);
+    // Its deletions write unkeyed tombstones, which then let the second person in.
+    expect((await a.forgetUser!('carol')).tombstone).toEqual({ form: 'unkeyed', written: true });
+    expect(a.session('s2', { userId: 'bob' }).id).toBe('s2');
     expect(lines('memory.tombstones_unkeyed')).toHaveLength(1);
   });
 
