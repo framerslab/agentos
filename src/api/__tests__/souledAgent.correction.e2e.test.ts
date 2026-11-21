@@ -707,6 +707,8 @@ describe.each(RUNTIMES)('a correction kept through a restore, on runtime %s', (r
     expect(storedAs('My canary is WREN-9.')).toEqual([]);
     expect(keptIn().map((row) => row.trace_id)).toEqual([correctionTraceId]);
     expect(lines('memory.tombstone_reapplied')[0]).toMatchObject({ traces: 1, correctionsRefiled: 0, correctionsMissed: 1 });
+    // Meanwhile the copy is the one place that holds the correction's words: the export gives them.
+    expect((await c.exportUserMemory!('alice')).held.restoreCopies).toEqual([{ traceId: correctionTraceId, text: 'My canary is WREN-9.' }]);
     await c.close();
 
     refused.mockRestore();
@@ -774,5 +776,136 @@ describe.each(RUNTIMES)('a correction kept through a restore, on runtime %s', (r
     expect((await a.sweepRetention!()).traces).toBeGreaterThan(0);
     expect(holding('WREN-9')).toEqual([]);
     expect(keptIn()).toEqual([]);
+  });
+
+  it("a sweep made again drops an expired correction's kept text that a failed sweep left", async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const start = Date.now();
+    const a = await open(runtime, spare(), { retention: { traces: { days: 1 } } } as Partial<SouledAgentOptions>);
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    const x = idOf(saidOf(keyOf(alice)), 'LARK-7')!;
+    await a.correctUserMemory!('alice', { traceIds: [x], text: 'My canary is WREN-9.' });
+
+    // The copy refuses the sweep's drop once, after the expired traces were deleted from the store.
+    vi.spyOn(a.memory!.forgotten!, 'dropCorrections').mockRejectedValueOnce(new Error('the copy is busy'));
+    vi.setSystemTime(start + 2 * DAY);
+    await expect(a.sweepRetention!()).rejects.toThrow('the copy is busy');
+    expect(holding('WREN-9')).toEqual([]);
+
+    await a.sweepRetention!();
+    expect(keptIn()).toEqual([]);
+  });
+
+  it('a correction filed again while its person is being deleted does not stay', async () => {
+    const a = await open(runtime);
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await a.close();
+    const backup = backUpStore();
+    const b = await open(runtime);
+    const wrong = idOf(saidOf(keyOf(alice)), 'LARK-7')!;
+    await b.correctUserMemory!('alice', { traceIds: [wrong], text: 'My canary is WREN-9.' });
+    await b.close();
+    restoreStore(backup);
+
+    // The open cannot file the correction again; applyTombstones() then files it with an embedder that is slow.
+    const remember = Memory.prototype.remember;
+    const { gate, release } = gated();
+    let slow = false;
+    let reached = false;
+    vi.spyOn(Memory.prototype, 'remember').mockImplementation(async function (this: Memory, ...args: Parameters<Memory['remember']>) {
+      if (args[1]?.createdAt !== undefined) {
+        if (!slow) throw new Error('the embedder is down');
+        reached = true;
+        await gate;
+      }
+      return remember.apply(this, args);
+    });
+    const c = await open(runtime, spare(), { pendingWritesTimeoutMs: 50 } as Partial<SouledAgentOptions>);
+    expect(storedAs('My canary is WREN-9.')).toEqual([]);
+    slow = true;
+    try {
+      const reapplying = c.applyTombstones!();
+      await vi.waitFor(() => expect(reached).toBe(true), { timeout: 4_000 });
+
+      // The person is deleted while the filing waits: the deletion stops waiting for it at its deadline.
+      await c.forgetUser!('alice');
+      release();
+      await reapplying;
+    } finally {
+      release();
+    }
+    expect(holding('WREN-9')).toEqual([]);
+    expect(saidOf(keyOf(alice))).toEqual([]);
+    expect(keptIn()).toEqual([]);
+  });
+
+  it('a reply that restates a memory applyTombstones() deletes again during its turn is not filed', async () => {
+    const { gate, release } = gated();
+    const a = await open(runtime, [
+      reply.text('A canary, lovely.'),
+      reply.hold([], gate, reply.text('Your canary is LARK-7.')),
+      ...spare(),
+    ]);
+    try {
+      await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+      const x = idOf(saidOf(keyOf(alice)), 'LARK-7')!;
+      // A deletion of x fails after it recorded x as deleted: x is still stored.
+      vi.spyOn(a.memory!, 'deleteTraces').mockRejectedValueOnce(new Error('the store is busy'));
+      await expect(correct(a, 'alice', [x])).rejects.toThrow('the store is busy');
+      expect(holding('LARK-7').map((row) => row.id)).toEqual([x]);
+
+      // A turn that begins after that call recalls x, and its model call stays open.
+      const calls = served.seen.length;
+      const running = a.session('s2', { userId: 'alice' }).send('What is my canary called?');
+      await vi.waitFor(() => expect(served.seen).toHaveLength(calls + 1), { timeout: 4_000 });
+      expect(JSON.stringify(served.seen[calls].messages)).toContain('LARK-7');
+
+      // The tombstones' re-application deletes x while the model is still answering.
+      await a.applyTombstones!();
+      expect(holding('LARK-7')).toEqual([]);
+
+      release();
+      const result = await running;
+      expect(result.text).toBe('Your canary is LARK-7.');
+      const record = await writeOf(result);
+      expect(record.entries.map((entry) => [entry.role, entry.outcome])).toEqual([
+        ['user', 'written'],
+        ['assistant', 'skipped'],
+      ]);
+      expect(record.entries[1]).toMatchObject({ reason: 'corrected' });
+      expect(holding('LARK-7')).toEqual([]);
+    } finally {
+      release();
+    }
+  });
+
+  it.each([
+    ['a trace a restore left untagged', 'tagged again'],
+    ['a correction the store lacks', 'filed again'],
+  ] as const)('%s, whose note for the next compile failed at an open, is named at the next open', async (_name, path) => {
+    const quiet = { compile: false } as Partial<SouledAgentOptions>;
+    const a = await open(runtime, spare(), quiet);
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    if (path === 'tagged again') await turn(a, 's1', 'alice', 'My canary is WREN-9.');
+    const wrong = idOf(saidOf(keyOf(alice)), 'LARK-7')!;
+    await a.close();
+    const backup = backUpStore();
+    const b = await open(runtime, spare(), quiet);
+    const { correctionTraceId } = await b.correctUserMemory!('alice', { traceIds: [wrong], text: 'My canary is WREN-9.' });
+    await b.close();
+
+    restoreStore(backup);
+    // The store refuses the open's first note for the next compile.
+    const noted = vi.spyOn(Memory.prototype, 'addRebuildSources').mockRejectedValueOnce(new Error('the store is busy'));
+    const c = await open(runtime, spare(), quiet);
+    expect(noted).toHaveBeenCalled();
+    noted.mockRestore();
+    await c.close();
+
+    await open(runtime, spare(), quiet);
+    expect(storedAs('My canary is WREN-9.').map((trace) => trace.id)).toEqual([correctionTraceId]);
+    expect(storedAs('My canary is WREN-9.')[0].tags).toContain('correction');
+    const [registry] = rows<{ rebuild_sources: string | null }>('SELECT rebuild_sources FROM memory_scopes WHERE scope_id = ?', [keyOf(alice)]);
+    expect(JSON.parse(registry?.rebuild_sources ?? '[]') as string[]).toContain(correctionTraceId);
   });
 });

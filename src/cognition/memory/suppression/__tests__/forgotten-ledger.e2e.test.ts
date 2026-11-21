@@ -28,6 +28,7 @@ import { createLearningLayer, InMemoryLearningStore } from '../../../learning/in
 import { canonicalJson } from '../../../learning/ledger/canonical.js';
 import { tombstoneHash } from '../../../learning/ledger/Ledger.js';
 import { SqlLearningStore } from '../../../learning/store/SqlLearningStore.js';
+import { conversationScopeKey } from '../../retrieval/store/conversationScopeKey.js';
 import * as root from '../../../../index.js';
 import { ForgottenLedger, ForgottenLedgerError, type KeptCorrection, type SuppressionSubject } from '../ForgottenLedger.js';
 import { openForgottenCopy } from '../forgottenCopy.js';
@@ -1250,6 +1251,23 @@ describe("the ledger's deleted traces and kept corrections", () => {
     // A tombstone both sides already hold still drops the rows of the keys named with it.
     expect(await ledger.markForgotten(BOB, { dropCorrectionsOf: [KEY_B] })).toEqual({ form: 'unkeyed', written: false, correctionsDropped: 1 });
     expect(await keptRowsOf(pair.copy)).toEqual([]);
+  });
+
+  it('keeps no correction of a person the copy holds a tombstone of, and still keeps one of another person', async () => {
+    const pair = await openPair(folder());
+    const ledger = await ForgottenLedger.open(pair);
+    const ofAlice = conversationScopeKey('agent-a', ALICE);
+    const ofBob = conversationScopeKey('agent-a', BOB);
+    // The person is forgotten after their correction was filed and before its text reached the copy.
+    await ledger.markForgotten(ALICE);
+
+    await expect(ledger.markTracesDeleted(['mt_old'], { keep: kept('mt_fix', ofAlice, 'My canary is WREN-9.') })).rejects.toThrow(/forgotten/);
+    await expect(ledger.keepCorrection(kept('mt_fix', ofAlice, 'My canary is WREN-9.'))).rejects.toThrow(/forgotten/);
+    expect(await keptRowsOf(pair.copy)).toEqual([]);
+    expect(await ledger.deletedTraceIds()).toEqual([]);
+
+    await ledger.markTracesDeleted(['mt_old'], { keep: kept('mt_bob', ofBob, 'I keep bees.') });
+    expect((await keptRowsOf(pair.copy)).map((row) => row.trace_id)).toEqual(['mt_bob']);
   });
 
   it('keeps nothing, and still marks, on a ledger with no copy', async () => {
