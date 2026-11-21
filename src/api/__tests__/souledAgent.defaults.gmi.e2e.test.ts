@@ -87,9 +87,12 @@ function whoami() {
 
 /**
  * A souled agent on the stubbed OpenAI provider, on the runtime, in a soul folder of its own. Its script's first reply
- * calls `whoami` once, and every later one is text.
+ * calls `whoami` once, and every later one is text, unless the case passes replies of its own.
  */
-async function open(extra: Partial<SouledAgentOptions> = {}): Promise<{ a: SouledAgent; s: ProviderScript; told: Array<Record<string, any>> }> {
+async function open(
+  extra: Partial<SouledAgentOptions> = {},
+  replies: ProviderScript['replies'] = [reply.tools([{ id: 'c1', name: 'whoami', args: {} }]), ...Array.from({ length: 12 }, (_, i) => reply.text(`Noted ${i}.`))],
+): Promise<{ a: SouledAgent; s: ProviderScript; told: Array<Record<string, any>> }> {
   if ((extra as { cognition?: unknown }).cognition !== undefined) {
     // Cognitive memory embeds with the OpenAI key the environment holds: a script of its own records those calls.
     const embeddings = key();
@@ -99,7 +102,7 @@ async function open(extra: Partial<SouledAgentOptions> = {}): Promise<{ a: Soule
   const apiKey = key();
   const s = script('openai', apiKey, {
     whole: true,
-    replies: [reply.tools([{ id: 'c1', name: 'whoami', args: {} }]), ...Array.from({ length: 12 }, (_, i) => reply.text(`Noted ${i}.`))],
+    replies,
   });
   const { seen: told, tool } = whoami();
   const a = await souledAgent({
@@ -123,20 +126,34 @@ type ModelCall = ProviderScript['seen'][number];
 const isMerge = (call: ModelCall) => JSON.stringify(call.messages).includes('You maintain a knowledge wiki page');
 /** The turns' model calls: every call but a wiki merge. */
 const turnCalls = (s: ProviderScript) => s.seen.filter((call) => !isMerge(call));
+/** Whether a model call carries `id` anywhere in its messages: a message's text, or the name a message is sent under. */
+const messagesHold = (call: ModelCall, id: string) => JSON.stringify(call.messages).includes(id);
+/** A model step that launches a one-seat team whose seat may call `whoami`. */
+const launchWhoami = reply.tools([
+  { id: 'l1', name: 'launch_agency', args: { goal: 'Check who asks.', seats: [{ role: 'lead', instructions: 'Ask who is asking.', tools: ['whoami'] }] } },
+]);
 
 describe.each(MEMORY)('the end user id a souled GMI sends, %s', (_name, cognition) => {
   it('a session turn and a seat send no end-user id unless the host opts in, and the tools still read the user', async () => {
     const { a, s, told } = await open(cognition);
-    await a.session('s1', { userId: 'u-42' }).send('Who am I?');
+    const session = a.session('s1', { userId: 'u-42' });
+    await session.send('Who am I?');
+    // A second turn: its request carries the first turn's messages as history.
+    await session.send('And now?');
     await buildSessionSeat(a, { form: 'persistent', role: 'helper', userId: 'u-42' }).generate('Hello from the team.');
 
-    // The session's two calls (the tool step and the reply) and the seat's call.
-    expect(turnCalls(s)).toHaveLength(3);
-    for (const call of turnCalls(s)) expect(call.options.userId).toBeUndefined();
-    // The tool read the session's user and its memory subject, and is handed no id to pass to a provider.
+    // The session's first turn (the tool step and the reply), its second turn and the seat's call.
+    expect(turnCalls(s)).toHaveLength(4);
+    for (const call of turnCalls(s)) {
+      expect(call.options.userId).toBeUndefined();
+      // Nor as the name a user message is sent under, which OpenAI's Chat Completions API receives.
+      expect(messagesHold(call, 'u-42')).toBe(false);
+    }
+    // The tool read the session's user and its memory subject; the turn names its user to a tool, with the rule that
+    // no provider receives the id, so a team the tool launches seats its sessions as that user and sends no id either.
     expect(told).toHaveLength(1);
     expect(told[0].userContext).toMatchObject({ userId: 'u-42', memorySubject: { kind: 'user', id: 'u-42' } });
-    expect(told[0].callerTurn?.providerUserId).toBeUndefined();
+    expect(told[0].callerTurn).toMatchObject({ providerUserId: 'u-42', withholdUserId: true });
   });
 
   it('with sendUserIdToProvider, a session turn and a seat send the user id they were opened with', async () => {
@@ -148,6 +165,7 @@ describe.each(MEMORY)('the end user id a souled GMI sends, %s', (_name, cognitio
     for (const call of turnCalls(s)) expect(call.options.userId).toBe('u-42');
     expect(told[0].userContext).toMatchObject({ userId: 'u-42', memorySubject: { kind: 'user', id: 'u-42' } });
     expect(told[0].callerTurn?.providerUserId).toBe('u-42');
+    expect(told[0].callerTurn?.withholdUserId).toBeUndefined();
   });
 
   it('a session opened with no user id sends none, with the opt-in too', async () => {
@@ -156,6 +174,36 @@ describe.each(MEMORY)('the end user id a souled GMI sends, %s', (_name, cognitio
 
     expect(turnCalls(s)).toHaveLength(2);
     for (const call of turnCalls(s)) expect(call.options.userId).toBeUndefined();
+  });
+});
+
+describe.each(MEMORY)('a team a souled GMI session launches, %s', (_name, cognition) => {
+  /** The root's launch step, the seat's whoami step and its reply, then the root's reply. */
+  const LAUNCH = [launchWhoami, reply.tools([{ id: 'w1', name: 'whoami', args: {} }]), reply.text('Seat done.'), reply.text('All done.')];
+
+  it("seats its session as the launching turn's user, and no call of the team sends the user id", async () => {
+    const { a, s, told } = await open({ ...cognition, agencies: { launch: true } } as Partial<SouledAgentOptions>, LAUNCH);
+    const answer = await a.session('s1', { userId: 'u-42' }).send('Check who asks.');
+
+    expect(answer.text).toBe('All done.');
+    // The root's two steps and the seat's two.
+    expect(turnCalls(s)).toHaveLength(4);
+    for (const call of turnCalls(s)) {
+      expect(call.options.userId).toBeUndefined();
+      expect(messagesHold(call, 'u-42')).toBe(false);
+    }
+    // The seat's tool reads the user the launching session serves, not the seat's own session id.
+    expect(told).toHaveLength(1);
+    expect(told[0].userContext).toMatchObject({ userId: 'u-42' });
+  });
+
+  it('with sendUserIdToProvider, the seat sends the user id as the launching turn does', async () => {
+    const { a, s, told } = await open({ ...cognition, agencies: { launch: true }, sendUserIdToProvider: true } as Partial<SouledAgentOptions>, LAUNCH);
+    await a.session('s1', { userId: 'u-42' }).send('Check who asks.');
+
+    expect(turnCalls(s)).toHaveLength(4);
+    for (const call of turnCalls(s)) expect(call.options.userId).toBe('u-42');
+    expect(told[0].userContext).toMatchObject({ userId: 'u-42' });
   });
 });
 
