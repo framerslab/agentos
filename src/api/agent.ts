@@ -465,6 +465,10 @@ export interface AgentLearning {
    * Deletes every learned row and memory trace of a user in the agent's namespace that the layer reaches. With
    * `memory.store`, the agent's memory is opened for the call when no session holds it, so the deletion reaches the
    * store after `agent.close()` too.
+   *
+   * On a `souledAgent()` whose soul loaded from a workspace folder, the call runs the agent's whole deletion, as
+   * `agent.forgetUser(userId)` does, and resolves to that deletion's report with `userId`, `namespace` and
+   * `plainFormLeft` beside its fields.
    */
   forgetUser?(userId: string): Promise<ForgetReport>;
 }
