@@ -145,6 +145,13 @@ export interface MemoryRetention {
 const RETENTION_REQUIRED =
   "souledAgent: this store holds memory of more than one person or session; set retention: { traces: { days } } or { traces: 'until-deletion' }";
 
+/**
+ * What the open of a store more than one subject shares, and the open of a second subject's session, is refused with
+ * when no `tombstoneKey` is set and the ledger holds no tombstone yet.
+ */
+const TOMBSTONE_KEY_REQUIRED =
+  'souledAgent: this store would hold memory of more than one person or session; set tombstoneKey: without it, the tombstone a deletion leaves is an unkeyed SHA-256 hash of the id, which anyone who can read the ledger can match by hashing a guessed id';
+
 /** Whether a tombstone copy's ledger table holds no row; false when the table cannot be read. */
 async function holdsNoLedgerRow(copy: StorageAdapter): Promise<boolean> {
   try {
@@ -436,6 +443,11 @@ export interface SouledAgentOptions extends AgentOptions {
    * The secret that keys the tombstones (HMAC-SHA-256). Without it tombstones are unkeyed SHA-256 hashes, which can be
    * matched by hashing a guessed id. After a rotation the previous keys are still needed to check the old tombstones.
    * A store whose tombstones are keyed does not open without it.
+   *
+   * Required once the store holds, or would hold, the memory of a second user or session, while its ledger holds no
+   * tombstone: the open of such a store, and the second subject's session, are refused without it. A ledger that
+   * already holds unkeyed tombstones lets the second subject in, and one `memory.tombstones_unkeyed` line an open
+   * says so. One stable `userId`, or `sharedMemory`, is one subject and needs none.
    */
   tombstoneKey?: TombstoneKey | { current: TombstoneKey; previous?: ReadonlyArray<TombstoneKey> };
   /**
@@ -569,6 +581,9 @@ export type SouledAgent = Agent & {
  *   reasons; nothing is opened.
  * @throws Error when `sharedMemory` is set and the store already holds the memory of another user or session; the
  *   store is closed first.
+ * @throws Error when the store holds the memory of more than one user or session and `retention` is unset, or
+ *   `tombstoneKey` is unset and the ledger holds no tombstone; the store is closed first. A session that would be the
+ *   second subject throws the same from `agent.session()`.
  * @throws TypeError when `memoryPolicy`, `screen` or `sharedMemory` is set on an agent whose cognitive memory is on
  *   (`runtime: 'gmi'` with `cognition.memory`, the `full` profile, or the `memory` option): the GMI keeps that memory
  *   in a store of its own, which none of them reaches; nothing is opened.
@@ -716,9 +731,30 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
    * This agent's key of every subject this store holds memory of, and of every session this process opened: read
    * from the registry once the open has applied the tombstones, and kept current by the session wrapper and the
    * deletions. A subject the store holds under several agent ids counts once. Without `retention`, a second one is
-   * refused.
+   * refused; without `tombstoneKey`, too, unless the ledger already holds tombstones.
    */
   const subjects = new Set<string>();
+  /**
+   * Whether the ledger holds a tombstone: read once the open has applied the tombstones, and set by a deletion that
+   * wrote an unkeyed one. Read only without a `tombstoneKey`, where every tombstone the ledger holds is unkeyed (a
+   * ledger that holds a key's marker does not open without that key).
+   */
+  let ledgerHoldsTombstones = false;
+  /** Whether this open has written its `memory.tombstones_unkeyed` line. */
+  let unkeyedNoted = false;
+  /**
+   * The tombstone rule for `count` subjects, the one being opened included. With a key, or one subject, nothing. With
+   * no key and a ledger that holds no tombstone, a second subject is refused: its deletion would leave a tombstone
+   * anyone who reads the ledger can match by hashing a guessed id. With no key and a ledger that already holds such
+   * tombstones, the subject is let in, and one line an open says so.
+   */
+  const assertSubjectAllowed = (count: number): void => {
+    if (tombstoneKey !== undefined || count <= 1) return;
+    if (!ledgerHoldsTombstones) throw new Error(TOMBSTONE_KEY_REQUIRED);
+    if (unkeyedNoted) return;
+    unkeyedNoted = true;
+    memoryLog.warn('memory.tombstones_unkeyed', {});
+  };
   /** This agent's key of the user or session a stored key names; undefined for the operator's and for none. */
   const ownKeyOf = (scopeId: string): string | undefined => {
     const subject = parseConversationScopeKey(scopeId)?.subject;
@@ -1337,13 +1373,13 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
         throw new Error('souledAgent: sharedMemory runs every session as one user; this session named another');
       }
     }
-    if (retention === undefined) {
-      // A second subject needs a retention choice. A session opened with no id is a new session, and so a new
-      // subject, unless it names a user or runs as the one user of sharedMemory.
-      const asked = reopened ?? sessionKeyOf(id ?? '', sessionOptions?.userId);
-      const held = asked !== undefined && subjects.has(asked);
-      if (!held && subjects.size > 0) throw new Error(RETENTION_REQUIRED);
-    }
+    // A second subject needs a retention choice, and a tombstone key unless the ledger already holds unkeyed
+    // tombstones. A session opened with no id is a new session, and so a new subject, unless it names a user or runs
+    // as the one user of sharedMemory.
+    const asked = reopened ?? sessionKeyOf(id ?? '', sessionOptions?.userId);
+    const count = asked !== undefined && subjects.has(asked) ? subjects.size : subjects.size + 1;
+    if (retention === undefined && count > 1) throw new Error(RETENTION_REQUIRED);
+    assertSubjectAllowed(count);
     const session = openSession(id, sessionOptions);
     const subjectKey = reopened ?? sessionKeyOf(session.id, sessionOptions?.userId);
     if (subjectKey !== undefined) {
@@ -1461,8 +1497,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   const forgetSubject = async (
     subject: SuppressionSubject,
     extra: { stores: ForgetMemoryReport['stores']; incomplete: boolean },
-  ): Promise<ForgetMemoryReport> =>
-    forgetUserMemory({
+  ): Promise<ForgetMemoryReport> => {
+    const report = await forgetUserMemory({
       memory,
       ledger: forgotten,
       wiki: { storeFor: pagesOf },
@@ -1472,6 +1508,10 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       legacy: await legacyDeletionOf(),
       legacyUnattributed,
     });
+    // The ledger holds the deletion's tombstone, written now or before.
+    if (report.tombstone.form === 'unkeyed') ledgerHoldsTombstones = true;
+    return report;
+  };
   /** What the agent's learning layer deleted of a user, as entries of a deletion report; none when it runs no layer. */
   const forgetLearner = async (userId: string): Promise<{ stores: ForgetMemoryReport['stores']; incomplete: boolean }> => {
     const forget = built.learning?.forgetUser;
@@ -1558,6 +1598,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       const subject = reapplied[at];
       if (report.complete && subject) subjects.delete(conversationScopeKey(agentId, subject));
     });
+    // Read once the ledger is up to date from its copy: at the open, and again while it held none.
+    if (tombstoneKey === undefined && !ledgerHoldsTombstones) ledgerHoldsTombstones = (await forgotten.size()) > 0;
     return reports;
   };
   built.applyTombstones = () => awaitedOnClose(applyTombstones());
@@ -1693,6 +1735,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       if (key !== undefined) subjects.add(key);
     }
     if (retention === undefined && subjects.size > 1) throw new Error(RETENTION_REQUIRED);
+    assertSubjectAllowed(subjects.size);
     // On a single person's own machine the older memory is attributed to its one user, once the tombstones are
     // applied: a forgotten user, an attribution to another user, and a store that records anyone else refuse the open.
     if (legacyMemory !== undefined) {
@@ -1710,6 +1753,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     // An attributed owner already has memory even if no turn has registered their conversation scope yet.
     if (legacyOwnerKey !== undefined) subjects.add(legacyOwnerKey);
     if (retention === undefined && subjects.size > 1) throw new Error(RETENTION_REQUIRED);
+    assertSubjectAllowed(subjects.size);
   } catch (err) {
     await originalClose().catch(() => undefined);
     await closeStore().catch(() => undefined);
