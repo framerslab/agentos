@@ -142,6 +142,13 @@ export interface ICognitiveMemoryManager {
       /** {@link MemoryTrace.turnUserId}: set on a trace a turn with no learner files for a second user. */
       turnUserId?: string;
       /**
+       * {@link MemoryTrace.filing}: set on a trace a souled agent's mind files for a turn. A manager configured with
+       * `rows: 'mind'` files a `conversation` trace that carries one, and rejects any other.
+       *
+       * @internal
+       */
+      filing?: MemoryTrace['filing'];
+      /**
        * When encoding a subjective trace from `PerspectiveObserver`
        * (`@framers/agentos/memory/pipeline/observation/PerspectiveObserver`),
        * thread the source-event identifiers through so the resulting
@@ -503,6 +510,8 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
       moodProvider: config.moodProvider,
       enableGraphActivation: config.enableGraphActivation ?? false,
       ...(config.persistAccessState === false ? { persistAccessState: false } : {}),
+      ...(config.rows === 'mind' ? { rows: 'mind' as const } : {}),
+      ...(config.hydration === 'scopes' ? { hydration: 'scopes' as const } : {}),
     });
 
     // Attach Brain for durable write-through when configured.
@@ -841,6 +850,8 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
       isActive: true,
     };
     if (options.turnUserId) trace.turnUserId = options.turnUserId;
+    // A copy, so the caller's object never changes the stored trace; the store checks its shape.
+    if (options.filing) trace.filing = { ...options.filing, subject: { ...options.filing.subject } };
 
     // Stamp PerspectiveObserver provenance into MechanismMetadata when this
     // trace originated from a subjective rewrite of an objective event. The

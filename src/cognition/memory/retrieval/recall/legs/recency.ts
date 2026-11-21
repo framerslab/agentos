@@ -41,7 +41,7 @@ export async function recencyLeg(deps: { store: MemoryStore }, q: LegQuery): Pro
         .sort((a, b) => b.createdAt - a.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
       return answer({ traces: eligible.slice(0, q.limit), ineligible: unique.length - eligible.length });
     }
-    const filter = scopeAndFilterSql(q);
+    const filter = scopeAndFilterSql(q, deps.store);
     const gated = await readGatedPages(deps.store, q, async (offset, size) =>
       (
         await brain.all<{ id: string }>(

@@ -301,6 +301,19 @@ export interface MemoryTrace {
    * (`LearningLayer.forgetUser`) finds the trace by it. Absent on every other trace.
    */
   turnUserId?: string;
+  /**
+   * Who filed this trace, set on a trace a souled agent's mind files for a turn: `filedBy: 'mind'`, the side of the
+   * turn that said it (`speaker`) and the person or session whose memory it is (`subject`). A store with a Brain writes
+   * the three as top-level keys of the row's metadata (`filedBy`, `speaker`, `subject`) and reads them back when it
+   * loads the row. Absent on every other trace.
+   *
+   * @internal
+   */
+  filing?: {
+    filedBy: 'mind';
+    speaker: 'user' | 'assistant';
+    subject: { kind: 'user' | 'session'; id: string };
+  };
 
   // --- Content ---
   content: string;
