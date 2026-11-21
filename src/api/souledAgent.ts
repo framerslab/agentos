@@ -1133,8 +1133,11 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   }
   /** The store's forgotten-user ledger: every write and read of a subject asks it. */
   const forgotten = memory.forgotten as ForgottenLedger;
+  /** Set once the store starts to close: a deletion is then refused before any part of it runs. */
+  let storeClosed = false;
   /** Closes the store, then the copy. */
   const closeStore = async (): Promise<void> => {
+    storeClosed = true;
     try {
       await memory.close();
     } finally {
@@ -2474,6 +2477,10 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     options: { linkedSessions?: readonly string[] } | undefined,
   ): Promise<{ report: ForgetMemoryReport; learned?: ForgetReport }> => {
     const linked: unknown = options?.linkedSessions ?? [];
+    // A closed store takes no delete: refused before the learning layer's part, so nothing is half deleted.
+    if (storeClosed) {
+      return Promise.reject(new Error('souledAgent: the agent was closed; open it again to delete a person from its store'));
+    }
     if (typeof userId !== 'string' || userId === '') {
       return Promise.reject(new TypeError('souledAgent: forgetUser needs a non-empty user id'));
     }

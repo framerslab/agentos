@@ -100,7 +100,8 @@ export interface ForgetUserMemoryOptions {
   /**
    * Entries the caller adds to the report: stores it reached itself, and stores it knows are not reached. They do not
    * change `complete`. A function is called once the tombstone is written and the deletes are done, so what it
-   * deletes stays while the tombstone cannot be written.
+   * deletes stays while the tombstone cannot be written; one that throws or rejects is named as "the caller's own
+   * stores" not reached, and the report's `store` part is missed.
    */
   extraStores?: ForgetMemoryReport['stores'] | (() => ForgetMemoryReport['stores'] | Promise<ForgetMemoryReport['stores']>);
   /**
@@ -426,7 +427,15 @@ export async function forgetUserMemory(options: ForgetUserMemoryOptions): Promis
       sessions = { reached: false, reason: messageOf(error) };
     }
   }
-  const extra = typeof options.extraStores === 'function' ? await options.extraStores() : (options.extraStores ?? []);
+  let extra: ForgetMemoryReport['stores'];
+  /** Why the caller's own callback failed, after the deletes ran: the report still comes back. */
+  let extraFailure: string | undefined;
+  try {
+    extra = typeof options.extraStores === 'function' ? await options.extraStores() : (options.extraStores ?? []);
+  } catch (error) {
+    extraFailure = messageOf(error);
+    extra = [{ store: "the caller's own stores", reached: false, reason: extraFailure }];
+  }
   const stores: ForgetMemoryReport['stores'] = [...ran.stores, ...NEVER_REACHED.map((entry) => ({ ...entry })), ...extra];
   let legacy = false;
   if (options.legacyUnattributed) {
@@ -444,6 +453,7 @@ export async function forgetUserMemory(options: ForgetUserMemoryOptions): Promis
   const missed = ran.stores.flatMap((entry) => (entry.reached ? [] : [`${entry.store}: ${entry.reason}`]));
   if (pages.failed.length > 0) missed.push(pages.failed.length === 1 ? '1 page not deleted' : `${pages.failed.length} pages not deleted`);
   if (options.alsoIncomplete === true) missed.push("a store of the caller's own was not reached");
+  if (extraFailure !== undefined) missed.push(`the caller's own stores: ${extraFailure}`);
   if (legacy) missed.push('legacy memory under the agent scope: unattributed');
   // Reached by here: a tombstone that cannot be written throws before anything is deleted.
   const tombstonePart: DeletionPart = { part: 'tombstone', reached: true, deleted: 0 };
