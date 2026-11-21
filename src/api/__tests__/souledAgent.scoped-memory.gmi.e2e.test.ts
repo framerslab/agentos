@@ -52,7 +52,8 @@ import { sessionSeat } from '../runtime/agencyLaunch/sessionSeat';
 
 let n = 0;
 const key = () => `k-souled-scoped-${++n}`;
-// The cases here file the memory of several users and sessions in one store, which needs a retention choice.
+// The cases here file the memory of several users and sessions in one store, which needs a retention choice and a
+// key for its tombstones.
 const stubbed = (apiKey: string, extra: Partial<AgentOptions> = {}) =>
   ({
     provider: 'openai',
@@ -60,6 +61,7 @@ const stubbed = (apiKey: string, extra: Partial<AgentOptions> = {}) =>
     apiKey,
     fallbackProviders: [],
     retention: { traces: 'until-deletion' },
+    tombstoneKey: 'k-souled-scoped-tombstones',
     ...extra,
   }) as unknown as AgentOptions;
 
