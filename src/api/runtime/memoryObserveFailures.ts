@@ -1,19 +1,22 @@
 /**
  * @file memoryObserveFailures.ts
  * Calls `memoryProvider.observe` for one side of an answered turn without the
- * turn waiting for it, and logs a failure to record the turn.
+ * turn waiting for it, answers what became of the write, and logs a failure to
+ * record the turn.
  *
  * A turn is answered before its memory provider records it, so a store that
  * fails never changes the turn's result. The failure is a `memory.hook_failed`
  * event with the error's type and code, never its message, written on a
  * provider's first failure and then at its 10th, 100th, 1000th and so on, so a
- * broken store cannot flood the log.
+ * broken store cannot flood the log. The turn's write record carries it too, as
+ * a `failed` entry with the error's class name.
  *
  * @module api/runtime/memoryObserveFailures
  */
 import type { AgentMemoryProvider, MemoryHookContext } from '../agent.js';
 import { listedErrorFields } from '../../core/logging/events.js';
 import { memoryLog } from '../../cognition/memory/log.js';
+import { failedWriteEntry, writeEntryOf, type MemoryWriteEntry } from './memoryWriteRecord.js';
 
 /** How many times each provider's `observe` has failed, keyed by the provider object. */
 const failureCounts = new WeakMap<object, number>();
@@ -66,18 +69,28 @@ export function reportObserveFailure(provider: AgentMemoryProvider, error: unkno
  * @param role - Which side of the turn `text` is.
  * @param text - The turn's text for that side.
  * @param context - Which session, user and agent the turn serves.
+ * @returns What became of the write, once `observe` settles: the entry it resolved with, a `failed` entry when it
+ *   threw or rejected, undefined when it resolved with nothing. The promise never rejects.
  */
 export function observeWithoutWaiting(
   provider: AgentMemoryProvider,
   role: 'user' | 'assistant',
   text: string,
   context?: MemoryHookContext,
-): void {
+): Promise<MemoryWriteEntry | undefined> {
+  const failed = (error: unknown): MemoryWriteEntry => {
+    try {
+      reportObserveFailure(provider, error);
+    } catch {
+      // A logger that throws leaves the record to say the write failed.
+    }
+    return failedWriteEntry(role, error);
+  };
   try {
     // A call with no context passes two arguments, as before contexts existed.
     const observed = context === undefined ? provider.observe?.(role, text) : provider.observe?.(role, text, context);
-    void Promise.resolve(observed).catch((error: unknown) => reportObserveFailure(provider, error));
+    return Promise.resolve(observed).then((answer) => writeEntryOf(role, answer), failed);
   } catch (error) {
-    reportObserveFailure(provider, error);
+    return Promise.resolve(failed(error));
   }
 }

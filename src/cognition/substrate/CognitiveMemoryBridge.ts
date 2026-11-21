@@ -28,6 +28,7 @@ import type { GuardedMemoryWrite, TurnScopes } from '../learning/types.js';
 import { GMIMood, GMIInteractionType } from './IGMI';
 import type { UserContext, GMITurnInput } from './IGMI';
 import { turnContentText } from './turnContent';
+import { errorNameOf } from '../../api/runtime/memoryWriteRecord.js';
 
 /**
  * Identity of the turn a memory retrieval runs for. The bridge combines it
@@ -120,12 +121,6 @@ export function captureWithoutBlock(capture: MemoryRecallCapture, budget: Effect
       candidate.outcome === 'included' ? { ...candidate, outcome: 'left_out' as const, reason: 'render_failed' as const } : candidate,
     ),
   };
-}
-
-/** The name of an error's class, for a trace entry: a manager's or a store's message can quote the query or a memory. */
-function errorNameOf(error: unknown): string {
-  const name = (error as { name?: unknown } | null | undefined)?.name;
-  return typeof name === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(name) ? name : 'Error';
 }
 
 /**
