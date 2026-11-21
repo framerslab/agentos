@@ -891,9 +891,10 @@ export interface IGMI {
   /**
    * Drops what the GMI holds of the person its session serves, for a deletion of that person: the conversation
    * history as `clearHistory()` drops it, and whatever else the implementation keeps of the person between turns.
-   * `GMI` also drops the input and the retrieved sources of its last turn, the working-memory slots of its cognitive
-   * memory, its sentiment history and events, and the user context's `currentSentiment`. A runtime calls it between
-   * turns, and it rejects when a store it writes to fails.
+   * `GMI` also drops its reasoning trace, the input and the retrieved sources of its last turn, the working-memory
+   * slots of its cognitive memory, its sentiment history and events, the user context's `currentSentiment` and the
+   * memory imprints its metaprompts wrote, and no metaprompt queued or running applies its results. A runtime calls it
+   * between turns, and it rejects when a store it writes to fails.
    */
   forgetPerson?(): Promise<void>;
 
