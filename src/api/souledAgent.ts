@@ -49,7 +49,7 @@ import {
 import type { ForgetReport } from '../cognition/learning/types.js';
 import { openForgottenCopy } from '../cognition/memory/suppression/forgottenCopy.js';
 import { shareForgottenLedger } from '../cognition/memory/suppression/learnerTombstones.js';
-import { shareSoulStore } from './runtime/soulStore.js';
+import { createSoulMind, shareSoulStore } from './runtime/soulStore.js';
 import { SOUL_TURN_NOTHING, type SoulTurnAnswer, type SoulTurnMemory } from '../cognition/substrate/soulTurnMemory.js';
 import { guardedWrite } from '../cognition/memory/suppression/guardedWrite.js';
 import { sweepRetention, type RetentionPeriod } from '../cognition/memory/io/retentionSweep.js';
@@ -662,7 +662,8 @@ export interface SouledAgentOptions extends AgentOptions {
    * its turns, one deadline for both, before it compiles the wiki. Default {@link DEFAULT_PENDING_WRITES_TIMEOUT_MS}
    * (5 seconds); 0 waits for none, and `Infinity` (or any wait past the longest timer, about 24.8 days) waits for them
    * all. When the wait ends with turns or writes still pending, the compile takes what is stored and one `console.warn`
-   * line gives their number.
+   * line gives their number. A deletion (`forgetUser`) waits as long for the person's pending writes and then, with
+   * `runtime: 'gmi'`, as long again for a turn still running on a session it empties.
    */
   pendingWritesTimeoutMs?: number;
   /**
@@ -789,8 +790,11 @@ export type SouledAgent = Agent & {
   /**
    * Deletes one person's memory from this agent's store for good and keeps it deleted: it waits for the person's
    * pending writes (up to `pendingWritesTimeoutMs`), records a tombstone, deletes their traces, document chunks,
-   * compiled pages and registry row, writes the vector index again, and clears the history of the sessions this
-   * handle holds open for them; a `gmi()` session keeps its messages, and the report's `sessions` part says so. With
+   * compiled pages and registry row, writes the vector index again, and empties the sessions this handle holds open
+   * for them: on the default runtime each session's history is cleared; with `runtime: 'gmi'` each session's messages
+   * go at once and its GMI drops what it holds of the person (its history, its sentiment trend, its working-memory
+   * slots) once no turn of the session runs, which the call waits for up to `pendingWritesTimeoutMs`. A session still
+   * running a turn then leaves the report's `sessions` part missed, and is emptied when that turn ends. With
    * a learning layer, the layer's own deletion runs first, and `agent.learning.forgetUser(userId)` runs this same
    * deletion. `linkedSessions` names the anonymous sessions the host has tied to the person: each is deleted the same
    * way, and its counts add into the report's parts.
@@ -2351,33 +2355,44 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     },
   });
   /**
+   * The mind side of the agent on the GMI runtime, cognitive memory on or off: a deletion empties the open sessions
+   * of its subject through it. It waits for a session's running turn as long as close() waits for its turns and
+   * writes.
+   */
+  const soulMind = rest.runtime === 'gmi' ? createSoulMind({ managers: () => [], deadlineMs: waitMs }) : undefined;
+  /**
    * What a deletion of one subject does to the sessions this handle holds open for the subject, as an entry of the
    * report's stores and as the deletion's `sessions` part. The default runtime keeps a session's history in this
-   * process: each is cleared and counted. A gmi() session keeps its own messages: the part is missed while one is open
-   * for the subject.
+   * process: each is cleared and counted. On the GMI runtime each is emptied (its messages, and what its GMI holds of
+   * the subject) and counted; a session whose turn is still running at the deadline is emptied once that turn ends,
+   * and the part is missed meanwhile. A session opened with history off holds nothing between its turns and is not
+   * counted. It never rejects: an emptying that fails is the part missed, with the error's message.
    */
-  const sessionHistoryOf = (key: string): { entry: ForgetMemoryReport['stores'][number]; part: PartOutcome } => {
+  const sessionHistoryOf = async (key: string): Promise<{ entry: ForgetMemoryReport['stores'][number]; part: PartOutcome }> => {
     const open = sessionsBySubject.get(key) ?? new Set<AgentSession>();
-    if (rest.runtime === 'gmi') {
-      // With history off a gmi() session builds a GMI for each turn and keeps no messages between turns: none to empty.
-      if (rest.history === false) {
-        return { entry: { store: "a gmi() session's history", reached: true, deleted: 0 }, part: { reached: true, deleted: 0 } };
+    const store = 'session history in this process';
+    const both = (part: PartOutcome) => ({ entry: { store, ...part }, part });
+    if (soulMind) {
+      try {
+        const { evicted, running } = await soulMind.evictSessions([...open]);
+        if (running === 0) return both({ reached: true, deleted: evicted });
+        return both({
+          reached: false,
+          reason:
+            running === 1
+              ? '1 open session was still running a turn at the deadline'
+              : `${running} open sessions were still running a turn at the deadline`,
+        });
+      } catch (err) {
+        return both({ reached: false, reason: messageOf(err) });
       }
-      const reason = 'a gmi() session keeps its messages until the host closes it';
-      return {
-        entry: { store: "a gmi() session's history", reached: false, reason },
-        part: open.size === 0 ? { reached: true, deleted: 0 } : { reached: false, reason },
-      };
     }
     let cleared = 0;
     for (const session of open) {
       session.clear();
       cleared += 1;
     }
-    return {
-      entry: { store: 'session history in this process', reached: true, deleted: cleared },
-      part: { reached: true, deleted: cleared },
-    };
+    return both({ reached: true, deleted: cleared });
   };
   /**
    * The parts of one subject's deletion that are this agent's: the wait for the subject's pending writes, its chain,
@@ -2396,8 +2411,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     return {
       drain: () => drainSubject(key),
       onChain: (work) => onSubject(key, work),
-      sessions: () => historyOf().part,
-      extraStores: () => [...extra.stores, historyOf().entry],
+      sessions: async () => (await historyOf()).part,
+      extraStores: async () => [...extra.stores, (await historyOf()).entry],
       alsoIncomplete: extra.incomplete,
     };
   };
