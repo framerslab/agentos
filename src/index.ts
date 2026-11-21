@@ -332,6 +332,7 @@ export { GatewayProviderManager } from './api/runtime/gatewayProviderManager.js'
 export { agent } from './api/agent.js';
 export { souledAgent } from './api/souledAgent.js';
 export type { SouledAgentOptions, SouledAgent, MemoryPolicy, MemoryRetention } from './api/souledAgent.js';
+export type { MemoryRecipient } from './api/runtime/memoryRecipients.js';
 export type {
   Agent,
   AgentLearning,
