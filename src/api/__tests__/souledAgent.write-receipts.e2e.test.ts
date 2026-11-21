@@ -323,6 +323,19 @@ describe.each(RUNTIMES)('a receipt for each memory write, on runtime %s', (runti
     expect(record).toEqual({ entries: [{ role: 'user', outcome: 'written', traceId: idOf(stored, 'LARK-7') }] });
   });
 
+  it('a message with no text has no entry of its own', async () => {
+    const a = await open(runtime, {}, [reply.text('A picture, lovely.'), ...spare()]);
+
+    const result = await a.session('s1', { userId: 'alice' }).send([{ type: 'image_url', image_url: { url: 'data:image/png;base64,iVBORw0KGgo=' } }]);
+    expect(result.text).toBe('A picture, lovely.');
+    const record = await writeOf(result);
+
+    // The image alone is no text to file: the record names the reply, and no screen is said to have dropped anything.
+    const stored = tracesOf(keyOf(alice));
+    expect(stored).toHaveLength(1);
+    expect(record).toEqual({ entries: [{ role: 'assistant', outcome: 'written', traceId: idOf(stored, 'lovely') }] });
+  });
+
   it.each<[string, Partial<SouledAgentOptions>, SkipReason]>([
     ['an account that keeps no memory', { memoryPolicy: () => ({ longTerm: 'off' }) } as unknown as Partial<SouledAgentOptions>, 'policy_off'],
     [
