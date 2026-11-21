@@ -15,7 +15,9 @@
  * - A write the agent's rules refuse says why: the account's policy, a hook that failed, the screen, a forgotten
  *   person, a user id no memory key can be built from.
  * - A host's own provider: an `observe` that resolves with nothing gives a record with no entry, and one that rejects
- *   gives `failed` entries while the log keeps its sparse `memory.hook_failed` line.
+ *   gives `failed` entries while the log keeps its sparse `memory.hook_failed` line. A provider the host guards with
+ *   the forgotten-user ledger (`guardMemoryProvider`) answers `forgotten` for a forgotten person and passes its own
+ *   entry on for anyone else.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
@@ -24,13 +26,14 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import Database from 'better-sqlite3';
 import pino from 'pino';
-import { agent, type AgentMemoryProvider, type AgentOptions } from '../agent';
+import { agent, type AgentMemoryProvider, type AgentOptions, type MemoryHookContext } from '../agent';
 import { souledAgent, type SouledAgent, type SouledAgentOptions } from '../souledAgent';
 import { Memory } from '../../cognition/memory/io/facade/Memory';
 import { reply, script, type ProviderScript } from './helpers/stubProviders';
 import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 import { conversationScopeKey } from '../../cognition/memory/retrieval/store/conversationScopeKey';
+import { guardMemoryProvider } from '../../cognition/memory/suppression/guardMemoryProvider';
 import type { MemoryWriteEntry, MemoryWriteRecord } from '../runtime/memoryWriteRecord';
 
 /** The runtimes the cases run on: the default one, and the GMI runtime with cognitive memory off. */
@@ -412,5 +415,20 @@ describe.each(RUNTIMES)("a host's own memory provider, on runtime %s", (runtime)
     expect(JSON.stringify(record)).not.toMatch(/store down|hi there/);
     expect(observeFailures()).toHaveLength(1);
     expect(JSON.stringify(observeFailures())).not.toMatch(/store down|hi there/);
+  });
+});
+
+describe('a provider a host guards with the forgotten-user ledger', () => {
+  it("answers forgotten for a forgotten person, and passes its provider's entry on for anyone else", async () => {
+    const a = await open('legacy');
+    const provider: AgentMemoryProvider = { observe: async (role) => ({ role, outcome: 'written', traceId: 'trace-1' }) };
+    const guarded = guardMemoryProvider(provider, a.memory!.forgotten!);
+    await a.memory!.markForgotten(alice);
+
+    const forAlice: MemoryHookContext = { sessionId: 's', userId: 'alice', subject: alice, call: 'session' };
+    expect(await guarded.observe!('user', 'hello', forAlice)).toEqual({ role: 'user', outcome: 'skipped', reason: 'forgotten' });
+
+    const forBob: MemoryHookContext = { sessionId: 's', userId: 'bob', subject: { kind: 'user', id: 'bob' }, call: 'session' };
+    expect(await guarded.observe!('assistant', 'hello', forBob)).toEqual({ role: 'assistant', outcome: 'written', traceId: 'trace-1' });
   });
 });
