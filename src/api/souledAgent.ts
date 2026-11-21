@@ -802,6 +802,10 @@ export type SouledAgent = Agent & {
  * with their watermark where it was. A compile started in a process that served no turn of a subject has no policy
  * answer and no hook context for it: under a policy hook it is not compiled, and under a screen hook neither.
  *
+ * With `runtime: 'gmi'` no session turn sends the end user's id to the model provider unless
+ * {@link SouledAgentOptions.sendUserIdToProvider} is set, and a turn whose policy answer marks a minor or a person who
+ * objects to profiling, whose policy hook failed, or whose subject is forgotten, is not scored for sentiment.
+ *
  * `close()` first closes the agent (with `runtime: 'gmi'` that stops its session turns), then waits, within one
  * deadline (see {@link SouledAgentOptions.pendingWritesTimeoutMs}), for the turns still running (a `generate()`, a
  * `stream()`, a session's `send()` or `stream()`, on either runtime; a stream whose signal aborted before anything was
