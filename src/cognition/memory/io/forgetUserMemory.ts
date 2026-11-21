@@ -737,13 +737,12 @@ async function refileKeptCorrections(
             continue;
           }
           const trace = filed.result;
-          // Named again once the trace is stored: a compile that ran while it was being filed read the first note
-          // before the trace was there, and cleared it.
-          await memory.addRebuildSources(key, [trace.id]);
           if (trace.id === row.traceId) {
             refiled += 1;
             continue;
           }
+          // The store held the words under another id: that trace is the one the next compile reads.
+          await memory.addRebuildSources(key, [trace.id]);
           // The store holds the same words under another id: that trace is the correction, and the kept row names it.
           // The id the correction had is recorded as deleted in the same write to the copy, which drops its kept row: a
           // later restore that brings that trace back deletes it again, so deleting the trace that now holds the words
