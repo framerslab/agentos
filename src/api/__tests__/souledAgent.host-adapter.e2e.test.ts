@@ -119,7 +119,7 @@ async function postgresAdapter(schema: string, bigintAsText = false): Promise<St
 }
 
 /** A souled agent on the stubbed provider that may keep several people's memory. */
-async function open(agentId: string, extra: Record<string, unknown> = {}): Promise<{ a: SouledAgent; s: ProviderScript }> {
+async function open(agentId: string, extra: Partial<SouledAgentOptions> = {}): Promise<{ a: SouledAgent; s: ProviderScript }> {
   const apiKey = `k-souled-host-adapter-${++n}`;
   const s = script('openai', apiKey, { whole: true, replies: Array.from({ length: 40 }, (_, i) => reply.text(`Noted ${n}-${i}.`)) });
   const a = await souledAgent({
