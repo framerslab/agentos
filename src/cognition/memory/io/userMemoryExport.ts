@@ -120,7 +120,8 @@ export async function exportSubjectMemory(options: {
 /**
  * Corrects one subject's memory: each page compiled from a named trace is deleted and built again by the subject's
  * next compile, from the traces of it that are left and the correction; the corrected statement is filed as a trace
- * tagged `correction`; the named traces are deleted for good; and the vector index and the store's write-ahead log
+ * tagged `correction` (words the subject's key already holds are that trace, marked as the correction and kept, even
+ * when it is a named one); the named traces are deleted for good; and the vector index and the store's write-ahead log
  * are written out ({@link Memory.finishErasure}). A deleted trace cannot come back in a later compile, which is why a
  * correction deletes instead of editing a page.
  *
@@ -212,14 +213,22 @@ export async function correctSubjectMemory(options: {
       throw new Error('correctUserMemory: the subject is forgotten; nothing is written for them again');
     }
 
-    const { deleted } = await memory.deleteTraces(ids);
+    // The store keeps one trace for words the subject's key already holds: `remember` returned that trace, which may
+    // be one of the named ones. It is the correction: the next compile reads it by id, as it reads a correction filed
+    // after its watermark; it is marked as one; and it is not deleted with the others.
+    const correctionTraceId = filed.result.id;
+    const marked = filed.result.tags.includes('correction');
+    if (!marked || gone.has(correctionTraceId)) await memory.addRebuildSources(key, [correctionTraceId]);
+    if (!marked) await memory.annotateTrace(correctionTraceId, { tags: ['correction'], metadata: { corrects: ids } });
+
+    const { deleted } = await memory.deleteTraces(ids.filter((id) => id !== correctionTraceId));
     try {
       // A delete only marks a vector in the index, and the log still holds the pages written before the delete.
       await memory.finishErasure();
     } catch (error) {
       memoryLog.warn('memory.erasure_unfinished', errorFields(error));
     }
-    return { deleted, pagesDeleted, correctionTraceId: filed.result.id };
+    return { deleted, pagesDeleted, correctionTraceId };
   };
   return options.onChain ? options.onChain(correct) : correct();
 }

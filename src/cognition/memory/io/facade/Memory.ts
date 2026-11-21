@@ -1728,6 +1728,53 @@ export class Memory {
   }
 
   /**
+   * Adds tags and metadata keys to one live trace in place, its text, embedding and time left as they are; a key
+   * given replaces the trace's own of that name. The full-text index, which reads the tags, is brought up to them.
+   * A correction whose words a live trace of the person already holds marks that trace as the correction with it:
+   * {@link remember} returns the stored trace for words its key holds, and files no second one.
+   *
+   * @returns Whether a live trace was changed: `false` when no live trace has the id.
+   */
+  async annotateTrace(
+    traceId: string,
+    change: { tags?: readonly string[]; metadata?: Record<string, unknown> },
+  ): Promise<boolean> {
+    await this._initPromise;
+    const brainId = this._brain.brainId;
+    const row = await this._brain.get<{ tags: string | null; metadata: string | null }>(
+      'SELECT tags, metadata FROM memory_traces WHERE brain_id = ? AND id = ? AND deleted = 0',
+      [brainId, traceId],
+    );
+    if (!row) return false;
+    let tags: string[] = [];
+    try {
+      const parsed: unknown = JSON.parse(row.tags ?? '[]');
+      if (Array.isArray(parsed)) tags = parsed.filter((tag): tag is string => typeof tag === 'string');
+    } catch {
+      // Unreadable tags are replaced by the ones given.
+    }
+    const nextTags = [...new Set([...tags, ...(change.tags ?? [])])];
+    const nextMetadata = { ...parseTraceMetadata(row.metadata), ...(change.metadata ?? {}) };
+    const { changes } = await this._brain.run(
+      'UPDATE memory_traces SET tags = ?, metadata = ? WHERE brain_id = ? AND id = ? AND deleted = 0',
+      [JSON.stringify(nextTags), JSON.stringify(nextMetadata), brainId, traceId],
+    );
+    if (changes === 0) return false;
+    if (this._brain.features.dialect.name === 'postgres') {
+      // The index is the row's own `_tsv` column: re-index the changed row alone.
+      try {
+        const rebuild = this._brain.fullTextRebuild();
+        await this._brain.run(`${rebuild.sql} AND id = ?`, [...rebuild.params, traceId]);
+      } catch {
+        // Best-effort, as every full-text sync of the facade is; an open fills a column left null.
+      }
+    } else {
+      await this._rebuildFtsIndex();
+    }
+    return true;
+  }
+
+  /**
    * How many live traces one scope holds in this facade's Brain; with `includeDeleted`, the soft-deleted ones too,
    * which still hold their words until a delete for good ({@link deleteScope}) removes them.
    */
