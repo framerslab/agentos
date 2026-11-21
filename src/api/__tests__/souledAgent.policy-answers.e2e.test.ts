@@ -178,8 +178,9 @@ describe.each(RUNTIMES)('policy answers, on runtime %s', (runtime) => {
       await say(a, 's1', userId, 'My owl is named Wexford.');
       await closed(a);
 
-      // Nothing of the two turns was filed; the trace stored before them stands.
+      // Nothing of the two turns was filed or embedded; the trace stored before them stands.
       expect(textsUnder(key)).toEqual(['Alice opens at nine herself.']);
+      expect(s.embedded.join('\n')).not.toMatch(/open from nine|Wexford/);
       expect(policyFailures()).toEqual([]);
       expect(lines('memory.write_refused')).toHaveLength(1);
       expect(lines('memory.write_refused')[0]).toMatchObject({ reason: 'minor_no_retention' });
@@ -423,7 +424,7 @@ describe.each(RUNTIMES)('policy answers, on runtime %s', (runtime) => {
   describe("a person's newest answer", () => {
     it("replaces the answer another session of theirs keeps, from that session's next turn", async () => {
       let asked = 0;
-      const { a } = await open({
+      const { a, s } = await open({
         memoryPolicy: (context) => {
           asked += 1;
           return context.sessionId === 'sb' ? { longTerm: 'off' } : { longTerm: 'compiled' };
@@ -434,6 +435,8 @@ describe.each(RUNTIMES)('policy answers, on runtime %s', (runtime) => {
       // The host answers off for the same person in another session.
       await say(a, 'sb', 'alice', 'Keep nothing of me.');
       await say(a, 'sa', 'alice', 'My crab is named Pellam.');
+      // That turn recalled none of her own memory.
+      expect(recalledIn(lastCall(s))).not.toContain('My owl is named Wexford.');
       await closed(a);
 
       // Session sa follows the newest answer on its next turn, with no new ask.
