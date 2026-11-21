@@ -2682,6 +2682,11 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       // writes and compiles of theirs that are running; once close() is waiting for those, at once.
       onKey: (key, work) => (closing ? work() : onSubject(key, work)),
       retentionDaysOf: (key, kind) => (retention === undefined ? undefined : retentionDaysOf(retention, kind, policyDays.get(key))),
+      // A trace deleted again is counted as a correction's own deletion is: a running turn of the person that recalled
+      // it does not file a reply restating it.
+      changing: (key) => {
+        correctionCounts.set(key, (correctionCounts.get(key) ?? 0) + 1);
+      },
     });
     // A subject the store holds nothing more of no longer counts toward the retention requirement.
     reports.forEach((report, at) => {

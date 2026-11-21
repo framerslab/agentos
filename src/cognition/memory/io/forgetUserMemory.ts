@@ -12,6 +12,7 @@ import { agentosVersion } from '../../learning/ledger/canonical.js';
 import { memoryLog } from '../log.js';
 import { CONVERSATION_SCOPE, conversationScopeKey, parseConversationScopeKey } from '../retrieval/store/conversationScopeKey.js';
 import type { ForgottenLedger, SuppressionSubject } from '../suppression/ForgottenLedger.js';
+import { guardedWrite } from '../suppression/guardedWrite.js';
 import type { Memory } from './facade/Memory.js';
 import { LEGACY_SCOPE } from './legacyMemory.js';
 import { RETENTION_DAY_MS } from './retentionSweep.js';
@@ -542,6 +543,12 @@ export interface ReapplyTombstonesOptions
   retentionDaysOf?: (scopeId: string, kind: 'user' | 'session') => number | undefined;
   /** The clock, in Unix ms. Default `Date.now`. */
   now?: () => number;
+  /**
+   * Called with a conversation key just before the traces a restore brought back under it are deleted again, and once
+   * more when that has settled, as a correction's own deletion is announced: a running turn of that subject that
+   * recalled one of them does not file a reply restating it. Unset: nothing is called.
+   */
+  changing?: (scopeId: string) => void;
 }
 
 /** What the re-application did with the traces the ledger records as deleted. */
@@ -560,7 +567,7 @@ interface DeletedTracesReapplied {
  * re-application finds the page by them.
  */
 async function reapplyDeletedTraces(
-  options: Pick<ReapplyTombstonesOptions, 'memory' | 'wiki' | 'onKey'>,
+  options: Pick<ReapplyTombstonesOptions, 'memory' | 'wiki' | 'onKey' | 'changing'>,
   ledger: ForgottenLedger,
 ): Promise<DeletedTracesReapplied> {
   const { memory } = options;
@@ -583,22 +590,27 @@ async function reapplyDeletedTraces(
   for (const [key, ids] of byKey) {
     const work = async (): Promise<void> => {
       const gone = new Set(ids);
+      options.changing?.(key);
       try {
-        const store = options.wiki.storeFor(key);
-        for (const page of await store.listPages()) {
-          if (!page.sources.some((id) => gone.has(id))) continue;
-          // Named before the page goes, so a page deleted is always rebuilt.
-          await memory.addRebuildSources(
-            key,
-            page.sources.filter((id) => !gone.has(id)),
-          );
-          await store.deletePage(page.id);
+        try {
+          const store = options.wiki.storeFor(key);
+          for (const page of await store.listPages()) {
+            if (!page.sources.some((id) => gone.has(id))) continue;
+            // Named before the page goes, so a page deleted is always rebuilt.
+            await memory.addRebuildSources(
+              key,
+              page.sources.filter((id) => !gone.has(id)),
+            );
+            await store.deletePage(page.id);
+          }
+        } catch {
+          done.missed += ids.length;
+          return;
         }
-      } catch {
-        done.missed += ids.length;
-        return;
+        await remove(ids);
+      } finally {
+        options.changing?.(key);
       }
-      await remove(ids);
     };
     await (options.onKey ? options.onKey(key, work) : work());
   }
@@ -627,7 +639,9 @@ function holdsTag(tags: string, tag: string): boolean {
  * Another agent's kept rows are left to that agent.
  *
  * A kept row the store refuses to file again (a write or an embedding that fails) stays kept, is counted, and is tried
- * again at the next re-application: an open does not fail on it.
+ * again at the next re-application: an open does not fail on it. Each filing is read against the tombstones before and
+ * after it lands, as a turn's write is: one that lands after its person was forgotten is taken back, and its kept row
+ * goes.
  *
  * @returns How many corrections were filed again, and how many could not be.
  */
@@ -679,27 +693,47 @@ async function refileKeptCorrections(
             if (!there.deleted) {
               const snapshot = await memory.readTrace(row.traceId);
               if (snapshot && !holdsTag(snapshot.tags, 'correction')) {
-                await memory.markCorrection(row.traceId, []);
+                // Named before the tag goes back: a note that fails leaves the tag off, so the next re-application
+                // finds the trace again and tries both.
                 await memory.addRebuildSources(key, [row.traceId]);
+                await memory.markCorrection(row.traceId, []);
               }
             }
             continue;
           }
-          const trace = await memory.remember(row.text, {
-            type: 'episodic',
-            scope: CONVERSATION_SCOPE,
-            scopeId: key,
-            id: row.traceId,
-            createdAt: row.createdAt,
-            tags: ['correction'],
-            metadata: { subject: { kind: subject.kind, id: subject.id }, ...(subject.kind === 'user' ? { turnUserId: subject.id } : {}) },
-          });
-          // The next compile reads it by id: its time can be below the compile's watermark.
-          await memory.addRebuildSources(key, [trace.id]);
+          // The next compile reads it by id: its time can be below the compile's watermark. Named before the trace is
+          // filed, so a note that fails leaves the correction unfiled and the next re-application tries both again.
+          await memory.addRebuildSources(key, [row.traceId]);
+          // Checked against the tombstones again once it lands: a deletion of the person that stopped waiting for
+          // this filing at its deadline does not find it, so a filing that lands after the tombstone is taken back.
+          const filed = await guardedWrite(
+            ledger,
+            subject,
+            () =>
+              memory.remember(row.text, {
+                type: 'episodic',
+                scope: CONVERSATION_SCOPE,
+                scopeId: key,
+                id: row.traceId,
+                createdAt: row.createdAt,
+                tags: ['correction'],
+                metadata: { subject: { kind: subject.kind, id: subject.id }, ...(subject.kind === 'user' ? { turnUserId: subject.id } : {}) },
+              }),
+            async (trace) => {
+              await memory.deleteTraces([trace.id]);
+            },
+          );
+          if (filed.status === 'refused') {
+            // The person is forgotten: nothing of the filing stays, and the kept row goes.
+            drop.push(row.traceId);
+            continue;
+          }
+          const trace = filed.result;
           if (trace.id === row.traceId) {
             refiled += 1;
             continue;
           }
+          await memory.addRebuildSources(key, [trace.id]);
           // The store holds the same words under another id: that trace is the correction, and the kept row names it.
           // The id the correction had is recorded as deleted in the same write to the copy, which drops its kept row: a
           // later restore that brings that trace back deletes it again, so deleting the trace that now holds the words
