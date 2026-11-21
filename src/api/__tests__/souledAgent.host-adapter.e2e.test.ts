@@ -13,10 +13,12 @@
  *   nothing back from the database.
  * - A `tombstoneCopy` whose `adapter` key holds no adapter is refused even beside a `path`: the open would read it as
  *   an adapter's and run with no second copy.
- * - A store on the host's adapter needs `retention` and `tombstoneKey` unless `sharedMemory` makes it one person's: the
- *   agent counts the people it holds memory of in its own process, and other processes serve the same database.
+ * - A store on the host's adapter needs `retention` and a `tombstoneKey` that holds a key, with or without
+ *   `sharedMemory`: the agent counts the people it holds memory of in its own process, and other processes serve the
+ *   same database.
  * - `close()` leaves the host's adapters open, and a SQLite adapter deletes securely. A write that reaches the store
- *   once the agent is closed is not stored, though the adapter it would run on is still open.
+ *   once the agent is closed is not stored, though the adapter it would run on is still open; a write already
+ *   running at the close finishes, and is taken back when its person was forgotten meanwhile.
  * - A PostgreSQL adapter that reads BIGINT as text is refused before anything opens.
  * - Two agents opened at once on one empty database: at least one open is refused, and the database is left holding
  *   one agent's rows at most. On PostgreSQL, a retention sweep of one person, a deletion of another and a third's turn
@@ -446,9 +448,10 @@ describe(`a souled agent's store on the host's adapter, on runtime ${RUNTIME}`, 
     await answers(copy);
   });
 
-  it("needs retention and tombstoneKey on the host's adapter, unless sharedMemory makes the store one person's", async () => {
+  it("needs retention and tombstoneKey on the host's adapter, with or without sharedMemory", async () => {
     const adapter = await sqliteAdapter();
     const onHost = { soulStore: { adapter }, tombstoneCopy: copyAt('aria') };
+    const onePerson = { as: 'owner', reason: 'one-persons-machine' as const };
 
     // The agent counts the people it holds memory of in its own process. A store in the host's database is served by
     // several processes, and each would let its own first person in with no retention period and no tombstone key.
@@ -457,13 +460,18 @@ describe(`a souled agent's store on the host's adapter, on runtime ${RUNTIME}`, 
     await expect(open('aria-1', { ...onHost, tombstoneKey: undefined })).rejects.toThrow(TypeError);
     await expect(open('aria-1', { ...onHost, tombstoneKey: undefined })).rejects.toThrow(/soulStore[\s\S]*tombstoneKey/);
     await expect(open('aria-1', { ...onHost, retention: undefined, tombstoneKey: undefined })).rejects.toThrow(TypeError);
+    // A key that holds nothing is no key: the store would open with unkeyed tombstones.
+    await expect(open('aria-1', { ...onHost, tombstoneKey: null as never })).rejects.toThrow(/soulStore[\s\S]*tombstoneKey/);
+    // sharedMemory does not lift the rule: two processes that name different users would each open the empty store as
+    // one person's.
+    await expect(open('aria-1', { ...onHost, retention: undefined, tombstoneKey: undefined, sharedMemory: onePerson })).rejects.toThrow(TypeError);
     await answers(adapter);
     // Refused before anything opened: no table on the host's adapter, and no copy file.
     expect(await adapter.all("SELECT name FROM sqlite_master WHERE type = 'table'")).toEqual([]);
     expect(fs.existsSync(copyAt('aria').path)).toBe(false);
 
-    // One person's own store needs neither: every session of every process runs as that one user.
-    const { a } = await open('aria-1', { ...onHost, retention: undefined, tombstoneKey: undefined, sharedMemory: { as: 'owner', reason: 'one-persons-machine' } });
+    // With both, one person's own store opens on the host's adapter and files that person's turns.
+    const { a } = await open('aria-1', { ...onHost, sharedMemory: onePerson });
     await turn(a, adapter, 's1', 'owner', 'My canary is LARK-7.');
     expect(JSON.stringify(await tracesUnder(adapter, userKey('owner')))).toContain('LARK-7');
   });
@@ -499,6 +507,55 @@ describe(`a souled agent's store on the host's adapter, on runtime ${RUNTIME}`, 
     expect(await tracesUnder(adapter, userKey('alice'))).toEqual([]);
     expect(JSON.stringify(await adapter.all('SELECT content FROM memory_traces WHERE brain_id = ?', ['aria-1']))).not.toContain('LARK-7');
     await answers(adapter);
+    await answers(copy);
+  });
+
+  it('takes back a write that was already running when close() gave up waiting, once its person is forgotten meanwhile', async () => {
+    const host = await sqliteAdapter();
+    const copy = await sqliteAdapter('copy.sqlite');
+    // The host's adapter with one statement held: the registry row a trace's write files again once the trace itself
+    // is stored. Every other call reaches the adapter as it is.
+    let hold: Promise<void> | undefined;
+    let release!: () => void;
+    let reached!: () => void;
+    const stored = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const adapter = new Proxy(host, {
+      get(target, property) {
+        const value: unknown = Reflect.get(target, property, target);
+        if (typeof value !== 'function') return value;
+        const call = (value as (...args: unknown[]) => unknown).bind(target);
+        if (property !== 'run') return call;
+        return async (...args: unknown[]) => {
+          if (hold && String(args[0]).includes('INSERT INTO memory_scopes') && (await tracesUnder(target, userKey('alice'))).length > 0) {
+            const held = hold;
+            hold = undefined;
+            reached();
+            await held;
+          }
+          return call(...args);
+        };
+      },
+    });
+    const { a } = await open('aria-1', { soulStore: { adapter }, tombstoneCopy: { adapter: copy }, pendingWritesTimeoutMs: 50, compile: false });
+    hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await a.session('s1', { userId: 'alice' }).send('My canary is LARK-7.');
+    // The user's text is in the store, and its write has not finished.
+    await stored;
+    expect(JSON.stringify(await tracesUnder(host, userKey('alice')))).toContain('LARK-7');
+    // close() waits 50 ms for that write and goes on without it.
+    await closed(a);
+
+    // Alice is forgotten while the write is still running, as another process on the same database forgets her. The
+    // write finds her tombstone once it has finished, and takes its trace back through the closed store.
+    expect(await a.memory!.markForgotten({ kind: 'user', id: 'alice' })).toMatchObject({ written: true });
+    release();
+    await vi.waitFor(async () => expect(await tracesUnder(host, userKey('alice'))).toEqual([]), { timeout: 8_000 });
+    expect(JSON.stringify(await host.all('SELECT content FROM memory_traces WHERE brain_id = ?', ['aria-1']))).not.toContain('LARK-7');
+    await answers(host);
     await answers(copy);
   });
 });
