@@ -108,7 +108,7 @@ The soul's `hardLimits` close the assembled system prompt, after your own `syste
 
 ### A policy per account, and a screen
 
-`memoryPolicy` answers, for the account a turn serves: no long-term memory, raw traces with no compiled pages, or full memory, each with an optional shorter retention, and two marks: a child's account (`minor: true`) and a person who objects to profiling (`profiling: 'off'`). A session follows a later answer for the same account, given in the same process, from its next turn. `screen` sees each text before it is filed, embedded or compiled, and returns the text to use or `null` to drop it; `redactPii()` from `@framers/agentos-ext-pii-redaction` fits it. Both fail closed: when your function throws, times out or returns something else, the memory operation is refused and the turn goes on.
+`memoryPolicy` answers, for the account a turn serves: no long-term memory, raw traces with no compiled pages, or full memory, each with an optional shorter retention, and two marks: a child's account (`minor: true`) and a person who objects to profiling (`profiling: 'off'`). A session follows a later answer for the same account, given to the same agent object, from its next turn. `screen` sees each text before it is filed, embedded or compiled, and returns the text to use or `null` to drop it; `redactPii()` from `@framers/agentos-ext-pii-redaction` fits it. Both fail closed: when your function throws, times out or returns something else, the memory operation is refused and the turn goes on.
 
 ### One line per refusal
 
@@ -187,7 +187,7 @@ On PostgreSQL each tombstone write and each `applyTombstones()` takes a lock on 
 
 ### Children
 
-The library does not know a person's age. If children may use your product, settle age assurance and any consent a parent must give before memory is on for them. Answer `minor: true` from `memoryPolicy` for such accounts, beside `longTerm` and an optional shorter retention. "Until deletion" is not a setting for a child's account, and the library holds to that: on a store that keeps the account's memory until deletion, or with no `retention`, a child's account keeps no long-term memory whatever the answer says, and its turns recall your operator pages alone. On a store with a period in days, its turns are kept for that period, and its pages are compiled only on the provider and model you name in `compile.minors`, and not at all without it. Name a provider whose terms cover a child's data, and say it in your notice.
+The library does not know a person's age. If children may use your product, settle age assurance and any consent a parent must give before memory is on for them. Answer `minor: true` from `memoryPolicy` for such accounts, beside `longTerm` and an optional shorter retention. "Until deletion" is not a setting for a child's account, and the library holds to that: on a store that keeps the account's memory until deletion, or with no `retention`, a child's account keeps no long-term memory whatever the answer says, and its turns recall your operator pages alone. On a store with a period in days, its turns are kept for that period, and its pages are compiled only on the provider and model you name in `compile.minors`, and not at all without it; with no key for that provider the compile does not run, and no other provider takes its place. Name a provider whose terms cover a child's data, and say it in your notice.
 
 ### A person who objects to profiling
 
@@ -195,7 +195,7 @@ Compiled pages are a profile of the person. Where a person objects to profiling 
 
 ### A restriction that must hold at once
 
-A session keeps the answer it was given until a later answer for the same account, given to any session or call of the same process, replaces it from its next turn. Another process reads your answer at its own sessions' next ask. Where a restriction must hold at once in every process (an objection, an age you learn), close that person's open sessions in each process, or call `agent.forgetUser(userId)`, which deletes what is stored and keeps it deleted.
+A session keeps the answer it was given until a later answer for the same account, given to any session or call of the same agent object, replaces it from its next turn. Another agent object, in the same process or another, reads your answer at its own sessions' next ask. Where a restriction must hold at once in every one of them (an objection, an age you learn), close that person's open sessions in each, or call `agent.forgetUser(userId)`, which deletes what is stored and keeps it deleted. A compile already running reads your latest answer before each of its model calls.
 
 ### Health data
 
