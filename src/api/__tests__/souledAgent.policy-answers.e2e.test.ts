@@ -23,7 +23,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import Database from 'better-sqlite3';
 import pino from 'pino';
-import { souledAgent, type SouledAgent, type SouledAgentOptions } from '../souledAgent';
+import { souledAgent, type MemoryPolicy, type MemoryRetention, type SouledAgent, type SouledAgentOptions } from '../souledAgent';
 import { conversationScopeKey } from '../../cognition/memory/retrieval/store/conversationScopeKey';
 import { reply, script, type ProviderScript } from './helpers/stubProviders';
 import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory';
@@ -112,7 +112,7 @@ const recalledIn = (call: ModelCall): string[] => {
 
 describe.each(RUNTIMES)('policy answers, on runtime %s', (runtime) => {
   /** A souled agent on the stubbed OpenAI provider, on `runtime`, with a script of its own. */
-  async function open(extra: Record<string, unknown> = {}): Promise<{ a: SouledAgent; s: ProviderScript }> {
+  async function open(extra: Partial<SouledAgentOptions> = {}): Promise<{ a: SouledAgent; s: ProviderScript }> {
     const apiKey = `k-souled-policy-answers-${++n}`;
     const s = script('openai', apiKey, { whole: true, replies: Array.from({ length: 40 }, (_, i) => reply.text(`Noted ${i}.`)) });
     const a = await souledAgent({
@@ -141,7 +141,7 @@ describe.each(RUNTIMES)('policy answers, on runtime %s', (runtime) => {
   });
 
   describe('a minor on a store that keeps memory until deletion', () => {
-    it.each<[string, Record<string, unknown> | undefined, Record<string, unknown>, 'user' | 'session']>([
+    it.each<[string, MemoryRetention | undefined, MemoryPolicy, 'user' | 'session']>([
       ['a user, traces kept until deletion', { traces: 'until-deletion' }, { longTerm: 'compiled', minor: true }, 'user'],
       ['a user, with retentionDays on the answer', { traces: 'until-deletion' }, { longTerm: 'compiled', retentionDays: 7, minor: true }, 'user'],
       ['a user, on an agent with no retention', undefined, { longTerm: 'compiled', minor: true }, 'user'],
@@ -192,8 +192,7 @@ describe.each(RUNTIMES)('policy answers, on runtime %s', (runtime) => {
         retention: { traces: { days: 30 } },
         tombstoneKey: 'k-souled-policy-answers-tombstones',
         compile: { minors: { provider: 'anthropic', model: 'stub-minor', apiKey: minorsKey } },
-        memoryPolicy: (context: { userId?: string }) =>
-          context.userId === 'alice' ? { longTerm: 'compiled', minor: true } : { longTerm: 'compiled' },
+        memoryPolicy: (context) => (context.userId === 'alice' ? { longTerm: 'compiled', minor: true } : { longTerm: 'compiled' }),
       });
       await say(a, 's1', 'alice', 'My owl is named Wexford.');
       await say(a, 's2', 'bob', 'My crab is named Pellam.');
@@ -243,7 +242,8 @@ describe.each(RUNTIMES)('policy answers, on runtime %s', (runtime) => {
       ['nothing', null],
       ['a word', 'anthropic'],
     ])('refuses %s before anything opens', async (_case, minors) => {
-      const opening = open({ retention: { traces: { days: 30 } }, compile: { minors } });
+      // Each target is one a host can build from configuration that is not there; none of them type-checks.
+      const opening = open({ retention: { traces: { days: 30 } }, compile: { minors } as never });
       await expect(opening).rejects.toThrow(TypeError);
       await expect(opening).rejects.toThrow(/compile\.minors/);
       expect(fs.existsSync(path.join(dir, 'memory', '.store'))).toBe(false);
@@ -257,7 +257,8 @@ describe.each(RUNTIMES)('policy answers, on runtime %s', (runtime) => {
       ["minor: 'true'", { longTerm: 'raw', minor: 'true' }],
       ['profiling: true', { longTerm: 'off', profiling: true }],
     ])('an answer with %s fails closed', async (_case, answer) => {
-      const { a } = await open({ retention: { traces: { days: 30 } }, memoryPolicy: () => answer });
+      // Each answer is one a host's code can return at run time; none of them type-checks.
+      const { a } = await open({ retention: { traces: { days: 30 } }, memoryPolicy: () => answer as never });
       await say(a, 's1', 'alice', 'My owl is named Wexford.');
       await closed(a);
 
@@ -283,7 +284,7 @@ describe.each(RUNTIMES)('policy answers, on runtime %s', (runtime) => {
     it("replaces the answer another session of theirs keeps, from that session's next turn", async () => {
       let asked = 0;
       const { a } = await open({
-        memoryPolicy: (context: { sessionId: string }) => {
+        memoryPolicy: (context) => {
           asked += 1;
           return context.sessionId === 'sb' ? { longTerm: 'off' } : { longTerm: 'compiled' };
         },
@@ -307,7 +308,7 @@ describe.each(RUNTIMES)('policy answers, on runtime %s', (runtime) => {
     it('a newer answer that failed makes the other session ask again', async () => {
       let asked = 0;
       const { a } = await open({
-        memoryPolicy: (context: { sessionId: string }) => {
+        memoryPolicy: (context) => {
           asked += 1;
           if (context.sessionId === 'sb') throw new Error('the account service is down');
           return { longTerm: 'compiled' };
