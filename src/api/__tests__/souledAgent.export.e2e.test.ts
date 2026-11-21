@@ -424,3 +424,98 @@ describe("who receives a person's text, on the GMI runtime with cognitive memory
     ]);
   });
 });
+
+/** A model router whose every pick is `model` on `provider`. */
+const routerPicking = (provider: string, model: string) => ({
+  routerId: 'stub-router',
+  initialize: async () => undefined,
+  selectModel: async () => ({ provider: {}, modelId: model, modelInfo: { providerId: provider }, reasoning: 'stub', confidence: 1 }),
+});
+
+describe(`what a model router picks, on runtime ${RUNTIME}`, () => {
+  it("names the provider and model a call's own router sends the text to, after a restart too", async () => {
+    const envKey = `k-souled-export-env-${++n}`;
+    vi.stubEnv('ANTHROPIC_API_KEY', envKey);
+    const anthropic = script('anthropic', envKey, { whole: true, replies: [reply.text('Routed.')] });
+    const apiKey = `k-souled-export-${++n}`;
+    const { a } = await open({}, apiKey);
+
+    const r = await a.generate('Hello.', { router: routerPicking('anthropic', 'claude-routed') } as never);
+
+    expect(r.text).toBe('Routed.');
+    expect(anthropic.seen.map((call) => call.modelId)).toEqual(['claude-routed']);
+    const picked: MemoryRecipient = { role: 'model', provider: 'anthropic', model: 'claude-routed' };
+    expect(await recipientsOf(a)).toContainEqual(picked);
+    await a.close();
+    const { a: again } = await open({}, apiKey);
+    expect(await recipientsOf(again)).toContainEqual(picked);
+  });
+
+  it("names what the agent's own router picks for a turn and for the compile, and close() waits for the compile's", async () => {
+    const envKey = `k-souled-export-env-${++n}`;
+    vi.stubEnv('ANTHROPIC_API_KEY', envKey);
+    const anthropic = script('anthropic', envKey, { whole: true, replies: spare() });
+    const { a } = await open({ router: routerPicking('anthropic', 'claude-routed') as never });
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await turn(a, 's1', 'alice', 'I keep it in the attic.');
+    expect(await recipientsOf(a)).toContainEqual({ role: 'model', provider: 'anthropic', model: 'claude-routed' });
+
+    // The store is slow to write the compile's route: close() compiles, and must not close the store under the write.
+    const brain = brainBehind(a);
+    const setMeta = brain.setMeta.bind(brain);
+    vi.spyOn(brain, 'setMeta').mockImplementation(async (key: string, value: string) => {
+      if (key.startsWith('recipient:compile:')) await new Promise((resolve) => setTimeout(resolve, 2_000));
+      return setMeta(key, value);
+    });
+    const callsBeforeClose = anthropic.seen.length;
+    await a.close();
+
+    expect(anthropic.seen.length).toBeGreaterThan(callsBeforeClose);
+    expect(rows<{ key: string }>("SELECT key FROM brain_meta WHERE key LIKE 'recipient:%' ORDER BY key")).toEqual([
+      { key: 'recipient:compile:anthropic:claude-routed' },
+      { key: 'recipient:model:anthropic:claude-routed' },
+    ]);
+  });
+});
+
+describe(`a tombstone ledger the export cannot read, on runtime ${RUNTIME}`, () => {
+  it('is named in unread, and the export holds nothing of the person', async () => {
+    const { a } = await open();
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await a.memory!.compileWiki();
+    vi.spyOn(a.memory!, 'isForgotten').mockRejectedValue(new Error('the ledger went away while reading LARK-7'));
+
+    const doc = await exportOf(a, 'alice');
+
+    expect(doc.unread.map((entry) => entry.store)).toEqual(['tombstone ledger']);
+    expect(doc.unread[0].reason).not.toContain('LARK-7');
+    expect(doc.traces).toEqual([]);
+    expect(doc.pages).toEqual([]);
+    expect(doc.provided.messages).toEqual([]);
+    expect(doc.held.traces).toEqual([]);
+    expect(doc.held.pages).toEqual([]);
+    expect(doc.recipients).toEqual(OWN_ROUTE);
+    expect(JSON.stringify(doc)).not.toContain('LARK-7');
+    const unread = events.filter((line) => line.event === 'memory.export_unread');
+    expect(unread).toHaveLength(1);
+    expect(unread[0]).toMatchObject({ store: 'tombstone ledger' });
+  });
+});
+
+describe("the embedding provider, on the GMI runtime with cognitive memory on", () => {
+  it('is named as the embedding call resolves it: a prefixed model, and a provider named alone', async () => {
+    const { a } = await open({
+      runtime: 'gmi',
+      memory: { embedding: { provider: 'openai', model: 'openai:text-embedding-3-small' } },
+    } as Partial<SouledAgentOptions>);
+    expect((await recipientsOf(a)).filter((entry) => entry.role === 'embedding')).toEqual([
+      { role: 'embedding', provider: 'openai', model: 'text-embedding-3-small' },
+    ]);
+    await a.close();
+
+    const { a: second } = await open({ runtime: 'gmi', memory: { embedding: { provider: 'openai' } } } as Partial<SouledAgentOptions>);
+    expect((await recipientsOf(second)).filter((entry) => entry.role === 'embedding')).toEqual([
+      { role: 'embedding', provider: 'openai', model: 'text-embedding-3-small' },
+    ]);
+  });
+});
