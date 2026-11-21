@@ -13,7 +13,10 @@
  *   is the brain's, while a migration changes the tables every brain of the
  *   database shares, so another brain's open can make the same object at the
  *   same moment; a transaction that loses that race rolls back and runs again
- *   (`retryLostCreate`), and finds the object.
+ *   (`retryLostCreate`), and finds the object. Each run goes through the
+ *   adapter's lock (`withAdapterTransactionLock`), as the Brain's own
+ *   transactions do, so it waits for the ones the memory store opened earlier
+ *   on the same adapter object.
  * - SQLite: uses explicit `BEGIN IMMEDIATE` via `adapter.exec`. Single
  *   connection per file, so the connection-pool concern doesn't apply.
  *   IMMEDIATE acquires the reserved write lock immediately, eliminating the
@@ -23,6 +26,7 @@
  */
 
 import type { StorageAdapter, StorageFeatures } from '@framers/sql-storage-adapter';
+import { withAdapterTransactionLock } from '../adapterTransactionLock.js';
 import { retryLostCreate } from './lost-create.js';
 import type { Migration } from './types.js';
 
@@ -48,13 +52,15 @@ export class MigrationRunner {
 
     if (isPostgres) {
       return retryLostCreate(() =>
-        adapter.transaction(async (trx) => {
-          await trx.run(
-            `SELECT pg_advisory_xact_lock(hashtext($1))`,
-            [`agentos_brain:${brainId}`],
-          );
-          return MigrationRunner._runMigrations(trx, features, brainId, migrations);
-        }),
+        withAdapterTransactionLock(adapter, () =>
+          adapter.transaction(async (trx) => {
+            await trx.run(
+              `SELECT pg_advisory_xact_lock(hashtext($1))`,
+              [`agentos_brain:${brainId}`],
+            );
+            return MigrationRunner._runMigrations(trx, features, brainId, migrations);
+          }),
+        ),
       );
     }
 
