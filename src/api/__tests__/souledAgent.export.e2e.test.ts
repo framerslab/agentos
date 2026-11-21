@@ -553,7 +553,8 @@ describe('the embedding a GMI agent resolves at its first turn', () => {
     script('openai', embeddings, { replies: [] });
     vi.stubEnv('OPENAI_API_KEY', embeddings);
     const apiKey = `k-souled-export-${++n}`;
-    const options = { runtime: 'gmi', memory: { embedding: {} } } as Partial<SouledAgentOptions>;
+    // The stub embeds in 1536 values for either model; declared, so text-embedding-3-large builds on it too.
+    const options = { runtime: 'gmi', memory: { embedding: { dimension: 1536 } } } as Partial<SouledAgentOptions>;
     const large: MemoryRecipient = { role: 'embedding', provider: 'openai', model: 'text-embedding-3-large' };
     try {
       const { a } = await open(options, apiKey);
