@@ -34,6 +34,7 @@ import { listedErrorFields } from '../../../core/logging/events.js';
 import { canonicalJson, sha256Hex } from '../../learning/ledger/canonical.js';
 import { memoryLog } from '../log.js';
 import { withAdapterTransactionLock } from '../retrieval/store/adapterTransactionLock.js';
+import { parseConversationScopeKey } from '../retrieval/store/conversationScopeKey.js';
 import {
   IDENTITY_MARKER,
   STATE_MARKER,
@@ -814,6 +815,9 @@ export class ForgottenLedger {
    * @throws {ForgottenLedgerError} When a side no longer holds the ledger's identity, or holds the marker of a key the
    *   handle was not given; or what a side's write threw. Nothing is marked in the store unless the copy holds the
    *   marker.
+   * @throws Error when `keep` is filed under the key of a person the copy holds a tombstone of, read under the copy's
+   *   lock: a deletion of the person that wrote its tombstone first leaves none of their words in the copy, and
+   *   nothing is written.
    */
   async markTracesDeleted(traceIds: readonly string[], options: { keep?: KeptCorrection } = {}): Promise<void> {
     const ids = checkedTraceIds(traceIds, 'markTracesDeleted');
@@ -834,6 +838,7 @@ export class ForgottenLedger {
     await this.step(async () => {
       if (copy) {
         await locked(copy, async (trx) => {
+          if (keep) await this.refuseKeptOfForgotten(trx, keep);
           await write(trx);
           await deleteKept(trx, 'trace_id', ids);
           if (keep) await trx.run(KEEP_CORRECTION, [keep.traceId, keep.scopeId, keep.text, Math.trunc(keep.createdAt)]);
@@ -872,6 +877,7 @@ export class ForgottenLedger {
    *
    * @throws {TypeError} When a field is missing or of another type.
    * @throws {ForgottenLedgerError} When the copy no longer holds the ledger's identity; or what the copy's write threw.
+   * @throws Error when the row is filed under the key of a person the copy holds a tombstone of; nothing is kept.
    */
   async keepCorrection(row: KeptCorrection): Promise<void> {
     const { traceId, scopeId, text, createdAt } = checkedKept(row);
@@ -880,6 +886,7 @@ export class ForgottenLedger {
     await this.step(() =>
       locked(copy, async (trx) => {
         await this.checkHeld(sideOf(await ForgottenLedger.rowsOf(trx)));
+        await this.refuseKeptOfForgotten(trx, { traceId, scopeId, text, createdAt });
         await trx.run(KEEP_CORRECTION, [traceId, scopeId, text, Math.trunc(createdAt)]);
       }),
     );
@@ -892,11 +899,14 @@ export class ForgottenLedger {
     return rows.map((row) => ({ traceId: row.trace_id }));
   }
 
-  /** Every correction whose text the copy keeps; none with no copy. */
-  async keptCorrections(): Promise<KeptCorrection[]> {
+  /** Every correction whose text the copy keeps, or with `scopeId` those of one key; none with no copy. */
+  async keptCorrections(scopeId?: string): Promise<KeptCorrection[]> {
     if (!this.copy) return [];
     const rows = await this.copy.all<{ trace_id: string; scope_id: string; text: string; created_at: number | string }>(
-      'SELECT trace_id, scope_id, text, created_at FROM memory_corrections ORDER BY trace_id',
+      scopeId === undefined
+        ? 'SELECT trace_id, scope_id, text, created_at FROM memory_corrections ORDER BY trace_id'
+        : 'SELECT trace_id, scope_id, text, created_at FROM memory_corrections WHERE scope_id = ? ORDER BY trace_id',
+      scopeId === undefined ? [] : [scopeId],
     );
     return rows.map((row) => ({ traceId: row.trace_id, scopeId: row.scope_id, text: row.text, createdAt: Number(row.created_at) }));
   }
@@ -1007,6 +1017,22 @@ export class ForgottenLedger {
       if (subject.kind === 'user') forms.add(await sha256Hex(canonicalJson([namespace, subject.id])));
     }
     return [...forms];
+  }
+
+  /**
+   * Refuses a kept correction filed under the key of a person whose tombstone the copy holds, read in the copy's own
+   * transaction: a deletion writes its tombstone there first, with the person's kept rows deleted in the same write, so
+   * a correction that reaches the copy after it writes nothing of theirs back.
+   */
+  private async refuseKeptOfForgotten(trx: StorageAdapter, row: KeptCorrection): Promise<void> {
+    const owner = parseConversationScopeKey(row.scopeId)?.subject;
+    if (owner === undefined || owner.kind === 'operator' || typeof owner.id !== 'string' || owner.id === '') return;
+    const forms = await this.forms({ kind: owner.kind, id: owner.id });
+    const held = await trx.get<{ hash: string }>(
+      `SELECT hash FROM agentos_learning_forgotten WHERE hash IN (${forms.map(() => '?').join(', ')})`,
+      forms,
+    );
+    if (held != null) throw new Error("ForgottenLedger: the correction's person is forgotten; nothing of theirs is kept");
   }
 
   /** The hashes of the deleted-trace markers a side holds of the given ids. */
