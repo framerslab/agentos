@@ -307,6 +307,24 @@ export const OPENAI_DEFAULT_BASE_URL = 'https://api.openai.com/v1';
 const OPENAI_RESPONSES_MIN_OUTPUT_TOKENS = 16;
 
 /**
+ * Chat Completions body keys the Responses API has no parameter for, each with the reason its `llm.option_ignored`
+ * line carries. The body the reference lists
+ * (https://developers.openai.com/api/reference/resources/responses/methods/create, read 2026-11-21) holds none of
+ * them. `customModelParams` is shared with the chat path, so a caller's chat key can reach the Responses builder,
+ * which leaves these off the body: the call is answered without them instead of refused for a key Responses does not
+ * take.
+ */
+const RESPONSES_UNSUPPORTED_CHAT_PARAMS = [
+  ['stop', 'stop_sequences'],
+  ['presence_penalty', 'penalties'],
+  ['frequency_penalty', 'penalties'],
+  ['seed', 'chat_only_param'],
+  ['n', 'chat_only_param'],
+  ['logit_bias', 'chat_only_param'],
+  ['logprobs', 'chat_only_param'],
+] as const;
+
+/**
  * Configuration specific to the OpenAIProvider.
  */
 export interface OpenAIProviderConfig {
@@ -2360,6 +2378,12 @@ export class OpenAIProvider implements IProvider {
    *     event.
    *   - A chat-style `reasoning_effort` in `customModelParams` moves to
    *     `reasoning.effort`, because Responses rejects the top-level key.
+   *   - A chat output limit in `customModelParams` (`max_completion_tokens`,
+   *     `max_tokens`) goes as `max_output_tokens`, and a limit under 16 from
+   *     any source goes as 16, the least Responses takes.
+   *   - The chat keys Responses has no parameter for
+   *     ({@link RESPONSES_UNSUPPORTED_CHAT_PARAMS}) are left off the body when
+   *     `customModelParams` sets them, with an `llm.option_ignored` debug line.
    *   - `store` is the call's `store` option, and `false` when the call sets
    *     none, since Responses stores a response by default.
    *
@@ -2484,6 +2508,15 @@ export class OpenAIProvider implements IProvider {
       Object.assign(payload, passthrough);
     }
     if (overrideMessages) delete payload.messages;
+    // Chat keys Responses has no parameter for (`stop`, the penalties, `seed`,
+    // `n`, `logit_bias`, `logprobs`) come back with the merge above when
+    // customModelParams sets them. They are left off the body, each with the
+    // debug line a dropped option writes.
+    for (const [key, reason] of RESPONSES_UNSUPPORTED_CHAT_PARAMS) {
+      if (!(key in payload)) continue;
+      delete payload[key];
+      log.debug('llm.option_ignored', { provider: 'openai', reason });
+    }
 
     // customModelParams is shared with the chat path, whose effort key is the
     // top-level `reasoning_effort`. Responses rejects that key and takes the
@@ -2510,6 +2543,11 @@ export class OpenAIProvider implements IProvider {
       if (typeof limit === 'number' && passedOutputLimit === undefined) {
         payload.max_output_tokens = limit;
       }
+    }
+    // The least `max_output_tokens` Responses takes holds for a limit that
+    // customModelParams set too, under a chat name or its own.
+    if (typeof payload.max_output_tokens === 'number' && payload.max_output_tokens < OPENAI_RESPONSES_MIN_OUTPUT_TOKENS) {
+      payload.max_output_tokens = OPENAI_RESPONSES_MIN_OUTPUT_TOKENS;
     }
     // Chat-only stream settings have no Responses counterpart.
     delete payload.stream_options;
