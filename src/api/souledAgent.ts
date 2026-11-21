@@ -1315,7 +1315,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       if (context.call !== 'session' || !offSaid.has(context.sessionId)) {
         if (context.call === 'session') offSaid.add(context.sessionId);
         // A child's answer on a store that would keep their memory until deletion says so in its own reason.
-        const reason = policy.minor === true && !keepsMinorsMemory(subject) ? 'minor_no_retention' : 'policy_off';
+        const reason: 'minor_no_retention' | 'policy_off' =
+          policy.minor === true && !keepsMinorsMemory(subject) ? 'minor_no_retention' : 'policy_off';
         memoryLog.warn('memory.write_refused', { reason });
       }
       return;
