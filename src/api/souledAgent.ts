@@ -162,6 +162,10 @@ const SOUL_STORE_SHAPE = 'souledAgent: soulStore must be { adapter } with a Stor
 const SOUL_STORE_NEEDS_COPY =
   "souledAgent: soulStore needs tombstoneCopy ({ path } or { adapter }), the tombstones' second copy outside what a restore of the store replaces; the default copy is a file on one machine, and a store in the host's database usually serves several";
 
+/** What an open on the file store with a `tombstoneCopy` that is set and names no file and no adapter is refused with. */
+const TOMBSTONE_COPY_NAMES_NOTHING =
+  "souledAgent: tombstoneCopy names no copy; pass { path } with a non-empty file path or { adapter } with a StorageAdapter, or leave it out for the default file memory/.store/forgotten.sqlite in the store's own folder";
+
 /** What an open with `soulStore` and no `retention`, or no `tombstoneKey` that holds a key, is refused with. */
 const SOUL_STORE_NEEDS_RETENTION_AND_KEY =
   "souledAgent: soulStore needs retention and tombstoneKey: the agent counts the people and sessions it holds memory of in its own process, and a store in the host's database is usually served by several processes, each of which would let its own first one in without them";
@@ -575,7 +579,8 @@ export interface SouledAgentOptions extends AgentOptions {
   /**
    * Where the second copy of the tombstones lives, out of what a restore of the store replaces: a SQLite file path, or
    * an adapter (left open on close). Default: `memory/.store/forgotten.sqlite`. A store whose copy is missing or
-   * unreadable does not open.
+   * unreadable does not open, and an option that names neither a file by a non-empty path nor an adapter (`{}`,
+   * `{ path: undefined }`, `{ adapter: undefined }`) is refused before anything opens.
    */
   tombstoneCopy?: { path: string } | { adapter: StorageAdapter };
   /**
@@ -727,6 +732,8 @@ export type SouledAgent = Agent & {
  *   in a store of its own, which none of them reaches; nothing is opened.
  * @throws TypeError when `soulStore` is not `{ adapter }`, or is set without a `tombstoneCopy` that names a file or an
  *   adapter, or without `retention`, or without a `tombstoneKey` that holds a key; nothing is opened.
+ * @throws TypeError when `tombstoneCopy` is set and names neither a file by a non-empty path nor an adapter; nothing is
+ *   opened.
  * @throws Error when `soulStore` is set and a store file is at `memory/.store/memory.sqlite`, or its PostgreSQL adapter
  *   reads BIGINT as text, or its database holds another agent's memory; nothing is opened. Of two agents opened at
  *   once on an empty database, at least one is refused the same way before the tombstone ledger opens, and takes back
@@ -767,6 +774,11 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     // holds memory of. Another process on the same database counts its own, so each would let its first one in; with
     // sharedMemory, two processes that name different users would each open an empty store as one person's.
     if (retention === undefined || !key) throw new TypeError(SOUL_STORE_NEEDS_RETENTION_AND_KEY);
+  } else if (tombstoneCopy !== undefined && tombstoneCopy !== null && !namesTombstoneCopy(tombstoneCopy)) {
+    // A copy option built from configuration that is not there ({ path: process.env.X } with X unset) would put the
+    // second copy in the default file inside the store's own folder, which a restore of that folder replaces, in a
+    // file named by an empty path, or nowhere ({ adapter: undefined } opens the ledger with no copy).
+    throw new TypeError(TOMBSTONE_COPY_NAMES_NOTHING);
   }
   // The two hooks and sharedMemory act on this agent's own store. A GMI's cognitive memory files and recalls in a store
   // of its own, which none of them reaches: an account the policy turns off would still be remembered there, and
