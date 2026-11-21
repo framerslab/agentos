@@ -620,8 +620,9 @@ function holdsTag(tags: string, tag: string): boolean {
  * Files again each correction the ledger's copy keeps ({@link ForgottenLedger.keepCorrection}) that the store lacks,
  * as after a restore from a backup taken before the correction: under its id, key and time, tagged `correction`, as
  * a trace of the soul's own memory, and named for the next compile to read by id. Where the store holds the same
- * words under the key with another id, that trace is the correction and the kept row names it from then on; where it
- * holds the kept trace without its `correction` tag, the tag is put back. A kept row whose subject is forgotten, whose
+ * words under the key with another id, that trace is the correction and the kept row names it from then on, and the
+ * id the correction had is recorded as deleted; where it holds the kept trace without its `correction` tag, the tag
+ * is put back and the trace is named for the next compile. A kept row whose subject is forgotten, whose
  * trace the ledger records as deleted, or that is older than its key's retention period goes from the copy instead.
  * Another agent's kept rows are left to that agent.
  *
@@ -668,10 +669,14 @@ async function refileKeptCorrections(
         }
         const there = present.get(row.traceId);
         if (there) {
-          // The store holds it; a restore from before the trace was marked a correction took the tag.
+          // The store holds it; a restore from before the trace was marked a correction took the tag. As the correction
+          // did, it is named for the next compile to read by id: the restored watermark can be past it.
           if (!there.deleted) {
             const snapshot = await memory.readTrace(row.traceId);
-            if (snapshot && !holdsTag(snapshot.tags, 'correction')) await memory.markCorrection(row.traceId, []);
+            if (snapshot && !holdsTag(snapshot.tags, 'correction')) {
+              await memory.markCorrection(row.traceId, []);
+              await memory.addRebuildSources(key, [row.traceId]);
+            }
           }
           continue;
         }
@@ -691,9 +696,11 @@ async function refileKeptCorrections(
           continue;
         }
         // The store holds the same words under another id: that trace is the correction, and the kept row names it.
+        // The id the correction had is recorded as deleted, which drops its kept row: a later restore that brings that
+        // trace back deletes it again, so deleting the trace that now holds the words leaves no copy of them behind.
         await memory.markCorrection(trace.id, []);
         await ledger.keepCorrection({ traceId: trace.id, scopeId: key, text: row.text, createdAt: Number(trace.createdAt) });
-        drop.push(row.traceId);
+        await ledger.markTracesDeleted([row.traceId]);
       }
     };
     await (options.onKey ? options.onKey(key, work) : work());
