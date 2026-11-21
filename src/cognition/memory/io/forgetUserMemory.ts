@@ -275,7 +275,13 @@ export async function forgetUserMemory(options: ForgetUserMemoryOptions): Promis
    */
   const writeTombstone = async (): Promise<ForgetMemoryReport['tombstone']> => {
     const keys = new Set([ownKey]);
-    for (const row of await ledger.keptCorrections()) {
+    let kept: Awaited<ReturnType<ForgottenLedger['keptCorrections']>> = [];
+    try {
+      kept = await ledger.keptCorrections();
+    } catch {
+      // A copy that cannot be read refuses the tombstone below with the ledger's own error; the agent's own key is named.
+    }
+    for (const row of kept) {
       const owner = parseConversationScopeKey(row.scopeId)?.subject;
       if (owner !== undefined && owner.kind !== 'operator' && owner.kind === subject.kind && owner.id === subject.id) keys.add(row.scopeId);
     }
