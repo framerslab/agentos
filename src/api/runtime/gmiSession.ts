@@ -156,6 +156,8 @@ export interface GmiTurnContext {
   toolHooks?: readonly ToolCallHook[];
   /** The explicit user id the session named; undefined when it named none. */
   providerUserId?: string;
+  /** The turn sends no end-user id to its provider ({@link GmiSessionDeps.withholdUserId}). */
+  withholdUserId?: boolean;
   /** The turn's stop ({@link GmiTurnOptions.abortSignal}): every tool call of the turn carries it. */
   abortSignal?: AbortSignal;
 }
@@ -192,14 +194,16 @@ export interface GmiSessionDeps {
   /**
    * The end-user id the turn's model calls send to the provider (OpenAI's `user`
    * / `safety_identifier`): a user id the caller passed, never a session or call
-   * id. Unset, they send none, as agent() sends none.
+   * id. Unset, they send none, as agent() sends none; with {@link withholdUserId}
+   * they send none either, and tools still learn it.
    */
   providerUserId?: string;
   /**
-   * Whether the turn names a user, as a learning layer reads it (`GMITurnInput.metadata.noTurnUser`). Unset, it names
-   * one exactly when {@link providerUserId} is set; a souled agent that withholds the id from the provider sets it.
+   * True when no request of the turn carries {@link providerUserId}: neither the provider's end-user field nor the name
+   * a user message is sent under (`GMITurnInput.metadata.withholdUserId`). Tools still learn the user, with the rule. A
+   * souled agent sets it unless its host opts in, and so does the seat of a team such an agent's turn launched.
    */
-  namesUser?: boolean;
+  withholdUserId?: boolean;
   /**
    * A souled agent's view of its memory rules for this turn (`GMITurnInput.metadata.soulMemory`): the key the
    * person's memory is kept under and the turn's answer, which the GMI asks for once before it reads the person.
@@ -442,6 +446,7 @@ export async function* runGmiTurn(
       toolNames: turn.toolNames,
       toolHooks: turn.toolHooks,
       providerUserId: deps.providerUserId,
+      ...(deps.withholdUserId ? { withholdUserId: true } : {}),
       abortSignal: turn.abortSignal,
       // The bill a provider reports for a call this turn stopped (close() during
       // the call) arrives after the turn has ended: it is metered, counted and
@@ -473,8 +478,9 @@ export async function* runGmiTurn(
       type: typeof input === 'string' ? GMIInteractionType.TEXT : GMIInteractionType.MULTIMODAL_CONTENT,
       content: input as GMITurnInput['content'],
       metadata: {
-        providerUserId: deps.providerUserId ?? null,
-        ...((deps.namesUser ?? (deps.providerUserId !== undefined)) ? {} : { noTurnUser: true }),
+        providerUserId: deps.withholdUserId ? null : (deps.providerUserId ?? null),
+        ...(deps.withholdUserId ? { withholdUserId: true } : {}),
+        ...(deps.providerUserId === undefined ? { noTurnUser: true } : {}),
         ...(memoryScope ? { memoryScope } : {}),
         ...(deps.soulMemory ? { soulMemory: deps.soulMemory } : {}),
         ...(turn.launchFrame ? { agencyLaunch: turn.launchFrame } : {}),

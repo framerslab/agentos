@@ -360,6 +360,13 @@ export interface GMITurnInput {
      */
     providerUserId?: string | null;
     /**
+     * True when no request of the turn may carry the user's id: the user's message is recorded with no `name`, which
+     * would be its `userId` and which OpenAI's Chat Completions API receives with the message. A souled agent on the GMI
+     * runtime sets it unless its host opts in to sending the end user's id (`sendUserIdToProvider`), with
+     * `providerUserId: null`.
+     */
+    withholdUserId?: boolean;
+    /**
      * The ids the turn's cognitive memory files and recalls traces under, in
      * place of the turn's `userId` and `sessionId` (the session also stands in
      * for the conversation when no `conversationId` is given). Tools, the user

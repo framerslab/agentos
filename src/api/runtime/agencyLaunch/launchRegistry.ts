@@ -35,6 +35,8 @@ export interface LaunchEntry {
   signal: AbortSignal;
   /** The user id the tree's root turn named; unset when it named none. */
   providerUserId?: string;
+  /** The root turn's agent sends no end-user id to its provider: every seat of the tree runs as the user and sends none. */
+  withholdUserId?: true;
   /**
    * The tree's namespace: the root agent's learning namespace on gmi(), the root turn's organization on the full
    * runtime; '' for none.

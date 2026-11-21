@@ -25,6 +25,17 @@ import {
 const DEFAULT_MAX_CONVERSATION_HISTORY_TURNS = 20;
 
 /**
+ * The name a turn's user message is recorded under: the host's `metadata.userName`, else the turn's `userId`. None on a
+ * turn that may send no request the user's id (`metadata.withholdUserId`), since the name goes to the provider with
+ * the message.
+ */
+function userNameOf(turnInput: GMITurnInput): { name?: string } {
+  if (turnInput.metadata?.withholdUserId === true) return {};
+  const name = turnInput.metadata?.userName || turnInput.userId;
+  return name ? { name } : {};
+}
+
+/**
  * Encapsulates all conversation history state and operations for a GMI instance.
  *
  * Owns the mutable `ChatMessage[]` array and provides methods to append user/tool/system
@@ -83,14 +94,14 @@ export class ConversationHistoryManager {
         messageToAdd = {
           role: 'user',
           content: turnInput.content as string,
-          name: turnInput.metadata?.userName || turnInput.userId,
+          ...userNameOf(turnInput),
         };
         break;
       case GMIInteractionType.MULTIMODAL_CONTENT:
         messageToAdd = {
           role: 'user',
           content: turnInput.content as any,
-          name: turnInput.metadata?.userName || turnInput.userId,
+          ...userNameOf(turnInput),
         };
         break;
       case GMIInteractionType.TOOL_RESPONSE: {

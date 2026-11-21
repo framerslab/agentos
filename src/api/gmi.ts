@@ -268,6 +268,7 @@ function hookTools(
       ...(gate ? { approvalGate: gate } : {}),
       ...(turn.budget ? { budget: turn.budget } : {}),
       ...(turn.providerUserId !== undefined ? { providerUserId: turn.providerUserId } : {}),
+      ...(turn.withholdUserId ? { withholdUserId: true as const } : {}),
       ...(turn.toolNames ? { toolNames: turn.toolNames } : {}),
       toolHooks: hooks,
       dispatch: processToolCall,
@@ -379,8 +380,11 @@ interface GenerationEnd {
 
 /** The session options gmi() reads beside the public ones: `__seat`, set only by a seat (sessionSeat(), launch_agency). */
 interface SeatSessionOptions extends AgentSessionOptions {
-  /** The session's memory is scoped to itself and it has no learner. */
-  __seat?: { memoryScope: 'session'; learner: 'none' };
+  /**
+   * The session's memory is scoped to itself and it has no learner. `withholdUserId`: the turn that launched the seat
+   * sent its provider no end-user id, so the seat's turns send none either.
+   */
+  __seat?: { memoryScope: 'session'; learner: 'none'; withholdUserId?: true };
 }
 
 /** The keys a seat puts on its session's sends (sessionSeat.ts), beside the public ones. */
@@ -1260,8 +1264,9 @@ export function gmi(opts: GmiOptions): GmiHandle {
 
       // The user id the caller passed, which the provider's end-user field may carry; never an anonymous one.
       const namedUser = seat ? sessionOptions?.userId : hookUser;
-      // A souled agent sends it only when its host opts in (sendUserIdToProvider), a seat's turn included.
-      const withheldUser = soulStore !== undefined && !soulStore.sendUserIdToProvider;
+      // A souled agent sends it only when its host opts in (sendUserIdToProvider), a seat's turn included, and so does
+      // the seat of a team such an agent's turn launched.
+      const withheldUser = (soulStore !== undefined && !soulStore.sendUserIdToProvider) || seat?.withholdUserId === true;
       const deps = (source: 'agent.session.send' | 'agent.session.stream', sendOpts?: unknown): GmiSessionDeps => {
         const memoryHook = memoryHookContextOf({ sessionId, namedUser: hookUser, agentId: agentStableId, call: 'session' });
         // A souled agent's view of its memory rules for the turn, by the context its hooks share; a seat's turn has none.
@@ -1273,9 +1278,9 @@ export function gmi(opts: GmiOptions): GmiHandle {
           opts,
           userId,
           // The turn's memory scope comes with its GMI (gmiFor), once the session has read it.
-          providerUserId: withheldUser ? undefined : namedUser,
-          // A turn that withholds the id still names its user to the learning layer.
-          ...(withheldUser ? { namesUser: namedUser !== undefined } : {}),
+          // The named user: tools and a team the turn launches run as it; withheld, no request carries it.
+          providerUserId: namedUser,
+          ...(withheldUser ? { withholdUserId: true } : {}),
           ...(soulMemory ? { soulMemory } : {}),
           history,
           lock,
