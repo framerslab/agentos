@@ -482,6 +482,9 @@ export class Memory {
   /** The forgotten-user ledger the store was opened with, if any (config.forgotten). */
   private readonly _forgotten: ForgottenLedger | undefined;
 
+  /** Whether {@link close} leaves the Brain's adapter open: one the host passed and keeps using (`leaveAdapterOpen`). */
+  private readonly _leaveAdapterOpen: boolean;
+
   // -------------------------------------------------------------------
   // Constructor (private — use Memory.create() instead)
   // -------------------------------------------------------------------
@@ -494,10 +497,12 @@ export class Memory {
     brain: Brain,
     config: Required<Pick<MemoryConfig, 'store' | 'graph' | 'selfImprove' | 'decay'>> & MemoryConfig,
     forgotten?: ForgottenLedger,
+    leaveAdapterOpen = false,
   ) {
     this._brain = brain;
     this._config = config;
     this._forgotten = forgotten;
+    this._leaveAdapterOpen = leaveAdapterOpen;
 
     // Store the optional embedding function for vector search.
     this._embed = config.embed ?? null;
@@ -678,13 +683,21 @@ export class Memory {
    * Open a Memory with a pre-resolved StorageAdapter. Use when sharing an
    * adapter across subsystems or when you need full control over adapter
    * resolution.
+   *
+   * `leaveAdapterOpen` (internal) is for an adapter the caller keeps using: {@link close}, and a refused open of the
+   * forgotten-user ledger, leave it open.
    */
   static async createWithAdapter(
     adapter: import('@framers/sql-storage-adapter').StorageAdapter,
-    opts: Omit<MemoryConfig, 'store' | 'path'> & { brainId?: string } = {},
+    opts: Omit<MemoryConfig, 'store' | 'path'> & {
+      brainId?: string;
+      /** @internal Leave the adapter open on close and on a refused open; the caller closes it. */
+      leaveAdapterOpen?: boolean;
+    } = {},
   ): Promise<Memory> {
-    const brain = await Brain.openWithAdapter(adapter, { brainId: opts.brainId });
-    return Memory._initialize(brain, { ...opts, store: 'sqlite' });
+    const { leaveAdapterOpen = false, ...config } = opts;
+    const brain = await Brain.openWithAdapter(adapter, { brainId: config.brainId });
+    return Memory._initialize(brain, { ...config, store: 'sqlite' }, leaveAdapterOpen);
   }
 
   /**
@@ -692,11 +705,13 @@ export class Memory {
    * Wires the Memory facade around an already-opened Brain, and opens the
    * forgotten-user ledger over the Brain's adapter when the config asks for one.
    *
-   * @throws {ForgottenLedgerError} When the ledger does not open; the Brain is closed first.
+   * @throws {ForgottenLedgerError} When the ledger does not open; the Brain is closed first, unless
+   *   `leaveAdapterOpen` leaves its adapter to the caller.
    */
   private static async _initialize(
     brain: Brain,
     config: MemoryConfig,
+    leaveAdapterOpen = false,
   ): Promise<Memory> {
     const merged = {
       store: 'sqlite' as const,
@@ -725,13 +740,14 @@ export class Memory {
       try {
         forgotten = await ForgottenLedger.open({ ...config.forgotten, primary: brain.adapter });
       } catch (error) {
-        // A store whose ledger does not open is not served, and the refused open leaves no handle behind.
-        await brain.close();
+        // A store whose ledger does not open is not served, and the refused open leaves no handle behind: closing the
+        // Brain closes its adapter, so an adapter the caller keeps is left to the caller.
+        if (!leaveAdapterOpen) await brain.close();
         throw error;
       }
     }
 
-    return new Memory(brain, merged, forgotten);
+    return new Memory(brain, merged, forgotten, leaveAdapterOpen);
   }
 
   /**
@@ -3170,12 +3186,14 @@ export class Memory {
    * Close the Memory instance and release all resources.
    *
    * Flushes the SQLite WAL and releases the file lock. Must be called when
-   * the agent shuts down.
+   * the agent shuts down. A store opened on an adapter the caller keeps
+   * (`leaveAdapterOpen`) finishes its work and leaves that adapter open.
    */
   async close(): Promise<void> {
     await this._initPromise;
     // A rewrite of the vector index reads the traces through the Brain: it finishes before the Brain closes.
     await this._vectorIndexWork;
+    if (this._leaveAdapterOpen) return;
     await this._brain.close();
   }
 
