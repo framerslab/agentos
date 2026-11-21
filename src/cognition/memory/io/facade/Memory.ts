@@ -485,7 +485,10 @@ export class Memory {
   /** Whether {@link close} leaves the Brain's adapter open: one the host passed and keeps using (`leaveAdapterOpen`). */
   private readonly _leaveAdapterOpen: boolean;
 
-  /** True once {@link close} has run on a store whose adapter the caller keeps: the facade serves no call after it. */
+  /**
+   * True once {@link close} has run on a store whose adapter the caller keeps: the facade admits nothing new after it
+   * ({@link _refuseOnceClosed}).
+   */
   private _closedOnKeptAdapter = false;
 
   // -------------------------------------------------------------------
@@ -795,6 +798,7 @@ export class Memory {
    *   `conversationScopeKey` built; nothing is stored.
    */
   async remember(content: string, options?: RememberOptions): Promise<MemoryTrace> {
+    this._refuseOnceClosed();
     const type = options?.type ?? 'episodic';
     const scope = options?.scope ?? 'user';
     const scopeId = options?.scopeId ?? '';
@@ -2275,6 +2279,7 @@ export class Memory {
     reason?: 'consolidation' | 'session-end' | 'explicit';
     scopes?: readonly string[];
   }): Promise<CompileResult> {
+    this._refuseOnceClosed();
     await this._initPromise;
     const aggregate: CompileResult = { pagesWritten: [], tracesConsumed: 0, conflicts: [] };
     const wiki = this._wiki;
@@ -2525,6 +2530,7 @@ export class Memory {
    * @returns Summary of the ingestion run.
    */
   async ingest(source: string, options?: IngestOptions): Promise<IngestResult> {
+    this._refuseOnceClosed();
     await this._initPromise;
 
     const result: IngestResult = {
@@ -2922,6 +2928,7 @@ export class Memory {
    * @returns Summary of the import operation.
    */
   async importFrom(source: string, options?: ImportOptions): Promise<ImportResult> {
+    this._refuseOnceClosed();
     await this._initPromise;
 
     const format = await this._detectImportFormat(source, options);
@@ -2997,6 +3004,7 @@ export class Memory {
     format: 'json' | 'csv',
     options?: Pick<ImportOptions, 'dedup'>,
   ): Promise<ImportResult> {
+    this._refuseOnceClosed();
     await this._initPromise;
 
     let result: ImportResult;
@@ -3196,28 +3204,34 @@ export class Memory {
    * Flushes the SQLite WAL and releases the file lock. Must be called when
    * the agent shuts down. A store opened on an adapter the caller keeps
    * (`leaveAdapterOpen`) finishes its work and leaves that adapter open; the
-   * facade itself then refuses every call that waits for the store's start
-   * (`remember`, `recall`, the deletes, the compile and the rest), so a write
-   * that reaches it once it is closed is not stored, as on a store whose
-   * connection this class closes.
+   * facade itself then admits nothing new (`remember`, `ingest`, the imports
+   * and the wiki compile reject), so a write that reaches it once it is closed
+   * is not stored, as on a store whose connection this class closes. A write
+   * already running finishes, and the reads and deletes are still served, so
+   * such a write can be taken back when its subject was forgotten meanwhile.
    */
   async close(): Promise<void> {
-    if (this._closedOnKeptAdapter) return;
     await this._initPromise;
     // A rewrite of the vector index reads the traces through the Brain: it finishes before the Brain closes.
     await this._vectorIndexWork;
     if (this._leaveAdapterOpen) {
       // The adapter stays open for the caller that passed it, so a closed connection cannot be what stops a late
-      // call here: the store's start is replaced by a refusal, which every such call waits for first.
+      // write here: the facade itself admits nothing new from now on.
       this._closedOnKeptAdapter = true;
-      const closed = Promise.reject<void>(
-        new Error('Memory: this store is closed; its adapter stays open for the caller that passed it'),
-      );
-      void closed.catch(() => undefined);
-      this._initPromise = closed;
       return;
     }
     await this._brain.close();
+  }
+
+  /**
+   * Refuses a call that would add to the store once {@link close} has run on an adapter the caller keeps. The calls
+   * that read, delete and restore are not refused: a write admitted before the close finishes, and is taken back
+   * through them when its subject was forgotten while it ran.
+   */
+  private _refuseOnceClosed(): void {
+    if (this._closedOnKeptAdapter) {
+      throw new Error('Memory: this store is closed; its adapter stays open for the caller that passed it');
+    }
   }
 
   // =========================================================================
