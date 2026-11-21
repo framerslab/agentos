@@ -1141,6 +1141,38 @@ Two things stay outside both counts and the budget. The fixed line that opens th
 
 ---
 
+## Write Record
+
+A session turn's result says what became of the turn in memory, beside `memoryRecall` and `historyOmitted`. On an agent whose memory provider observes its turns (a [`souledAgent()`](../getting-started/HIGH_LEVEL_API.md#souledagent-soul-plus-a-memory-wiki), or an `agent()` whose `memoryProvider` has `observe`), `send()`'s result carries `memoryWrite` and so does `stream()`'s: a promise of the turn's write record, on the default runtime and on `runtime: 'gmi'`.
+
+```typescript
+const result = await session.send('My canary is LARK-7.');
+const record = await result.memoryWrite;
+// { entries: [
+//   { role: 'user', outcome: 'written', traceId: '…' },
+//   { role: 'assistant', outcome: 'written', traceId: '…' } ] }
+```
+
+`entries` has one entry for each side of the turn that had text, the user's message first. A turn with an empty reply has the entry of the user's message alone.
+
+| `outcome` | With | Meaning |
+|---|---|---|
+| `written` | `traceId` | The side was filed as that trace |
+| `skipped` | `reason` | The agent's rules filed nothing. On a `souledAgent()`: `policy_off`, `policy_failed` and `minor_no_retention` (the host's `memoryPolicy`), `screened` and `screen_failed` (the host's `screen`), `forgotten` (the person was forgotten before the write or while it ran, and nothing of it is left), `no_subject` (a user id no memory key can be built from) |
+| `failed` | `errorName` | The write threw or rejected: the error's class name |
+
+**What it holds.** Ids, outcomes, reasons and error class names, never the turn's text and never an error's message, which can quote the text.
+
+**When it settles.** The turn does not wait for its writes. On `send()` the promise is on the result the turn resolves with and settles when the writes have; on `stream()` it settles after the stream has ended and the writes have. On a `souledAgent()` a person's writes run one after another with that person's compiles and deletions, so a record can settle after a compile that was running. The promise never rejects. On the default runtime a stream runs once it is read, so the record of a stream nobody reads does not settle.
+
+**A turn that is not filed.** A turn whose model call failed rejects and files neither side. A stream that ended in an error or that its caller stopped, and a turn whose input a guard rewrote or replaced, are not observed: the record has no entry.
+
+**A host's own provider.** The entry of a side is what the provider's `observe` resolved with. An `observe` that resolves with nothing leaves no entry, and one that throws or rejects gives a `failed` entry while the log keeps its `memory.hook_failed` line ([High-Level API](../getting-started/HIGH_LEVEL_API.md#schema-validation-and-retries)).
+
+**Where it is unset.** On `generateText()` and `streamText()`, on a one-shot `generate()` or `stream()`, and on an agent with no observing memory provider. The cognitive memory of a `gmi()` or `agent({ runtime: 'gmi' })` files the turn inside the turn, awaits those writes and adds no entry: the record is the memory provider's. A seat's session of a team on that runtime calls no `observe` and carries no record.
+
+---
+
 ## Infinite Context Window
 
 With `infiniteContext.enabled` and a `maxContextTokens`, the manager keeps the conversation inside the model's window: `trackMessage()` records each message, and `compactIfNeeded(systemPromptTokens, memoryBudgetTokens)`, called before the prompt is assembled, summarizes the oldest messages once the system prompt, the memory budget and the conversation reach `compactionThreshold` of the window (0.75 by default). It returns the messages to send: one summary message in place of the summarized ones, then the rest as they were.
