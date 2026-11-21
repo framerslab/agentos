@@ -1255,7 +1255,9 @@ const fixed = await agent.correctUserMemory(userId, {
 - **`recipients`** in the result is the list `agent.recipients()` returns: who received a person's text outside your process. The call sends them nothing, so telling each one about the deletion or the correction is yours. A store whose recorded routes cannot be read does not stop the call: the list then holds the routes the options name and those this process's calls took, and one `memory.recipients_unread` line says so.
 - **A turn that was running.** A session turn of the person that recalled their memory before the call changed it can answer with what was just deleted. That turn's reply is not filed: its `memoryWrite` holds `{ role: 'assistant', outcome: 'skipped', reason: 'corrected' }`, one `memory.write_refused` line (`reason: 'corrected'`) is logged, and what the person said in the turn is filed as usual. The session's next turn files both sides again. The reply still reaches your caller, and the session keeps it in its own message history, which this call does not edit: clear or close a session of the person that should not carry the old statement forward.
 
-Runnable examples in the package source:
+### Runnable examples
+
+In the package source:
 
 - [`examples/high-level-api.mjs`](https://github.com/framerslab/agentos/blob/master/examples/high-level-api.mjs)
 - [`examples/generate-image.mjs`](https://github.com/framerslab/agentos/blob/master/examples/generate-image.mjs)
