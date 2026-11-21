@@ -1344,6 +1344,66 @@ describe('export and correction', () => {
     expect(correctionsOf(keyOf(alice)).map((trace) => trace.content)).toEqual(['My canary is WREN-9.']);
   });
 
+  it('keeps a correction whose words are those of a trace it replaces', async () => {
+    const { a } = await open({ compile: false });
+    await turn(a, 's1', 'alice', 'I live in Lisbon.');
+    await turn(a, 's1', 'alice', 'I live in Porto.');
+    const t1 = saidOf(keyOf(alice)).find((trace) => trace.content === 'I live in Lisbon.')!.id;
+    const t2 = saidOf(keyOf(alice)).find((trace) => trace.content === 'I live in Porto.')!.id;
+
+    // The store keeps one trace for words a person's memory already holds: the correction's words are t2's.
+    const result = await a.correctUserMemory!('alice', { traceIds: [t1, t2], text: 'I live in Porto.' });
+    expect(result.correctionTraceId).toBe(t2);
+    expect(result.deleted).toBe(1);
+    expect(rows(storeFile(), 'SELECT id FROM memory_traces WHERE id = ?', [t1])).toEqual([]);
+    const [kept] = rows<{ content: string; deleted: number; tags: string; metadata: string }>(
+      storeFile(),
+      'SELECT content, deleted, tags, metadata FROM memory_traces WHERE id = ?',
+      [result.correctionTraceId],
+    );
+    expect(kept).toMatchObject({ content: 'I live in Porto.', deleted: 0 });
+    expect(JSON.parse(kept.tags) as string[]).toContain('correction');
+    expect((JSON.parse(kept.metadata) as { corrects?: string[] }).corrects).toEqual([t1, t2]);
+
+    const doc = await a.exportUserMemory!('alice');
+    const texts = doc.traces.map((trace) => trace.text);
+    expect(texts).toContain('I live in Porto.');
+    expect(texts).not.toContain('I live in Lisbon.');
+    expect(doc.traces.find((trace) => trace.id === t2)!.tags).toContain('correction');
+  });
+
+  it('exports the turn just sent: the export waits for the writes the turn started', async () => {
+    const { a } = await open({ compile: false });
+    const memory = a.memory!;
+    const remember = memory.remember.bind(memory);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // The turn's two writes start when send() resolves and wait here until released.
+    vi.spyOn(memory, 'remember').mockImplementation(async (...args: Parameters<typeof remember>) => {
+      await held;
+      return remember(...args);
+    });
+    await a.session('s1', { userId: 'alice' }).send('My name is Ada.');
+
+    let settled = false;
+    const exported = a.exportUserMemory!('alice').finally(() => {
+      settled = true;
+    });
+    let waited = false;
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      waited = !settled;
+    } finally {
+      release();
+    }
+    const doc = await exported;
+    expect(waited).toBe(true);
+    expect(doc.traces.map((trace) => trace.text)).toContain('My name is Ada.');
+    expect(doc.traces.map((trace) => trace.speaker)).toEqual(['user', 'assistant']);
+  });
+
   it("leaves the corrected words in neither file of the store", async () => {
     const { a, t1 } = await correctable();
     await a.correctUserMemory!('alice', { traceIds: [t1], text: 'My canary is WREN-9.' });
