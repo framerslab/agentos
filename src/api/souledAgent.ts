@@ -1179,6 +1179,12 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
    */
   const turnDecisions = new WeakMap<MemoryHookContext, Promise<TurnPolicy>>();
   /**
+   * The decision a GMI turn read when it asked for its answer (`begin()` of the turn's soul memory), by the turn's
+   * context, for as long as the context lives: a recall that resumes after its timeout reads it, so the host is asked
+   * once a turn and the turn's writes keep the decision the turn began with.
+   */
+  const mindDecisions = new WeakMap<MemoryHookContext, Promise<TurnPolicy>>();
+  /**
    * The host's latest answer for each subject this process asked about, a failure among them: what the page tool and
    * the compile read, so an earlier answer one session keeps never outlasts a later one.
    */
@@ -1301,8 +1307,12 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     scopeId: string,
     at: 'recall' | 'mind' | 'user' | 'assistant',
   ): Promise<TurnPolicy> => {
+    // A recall that comes after its turn asked for its answer (one that timed out and resumed) reads that answer.
+    const asked = at === 'recall' ? mindDecisions.get(context) : undefined;
+    if (asked) return asked;
     const open = at === 'recall' ? undefined : turnDecisions.get(context);
     const decision = open ?? decide(context, subject, scopeId);
+    if (at === 'mind') mindDecisions.set(context, decision);
     if (at === 'assistant') turnDecisions.delete(context);
     else turnDecisions.set(context, decision);
     return decision;
@@ -1318,6 +1328,17 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     const profiled = policy.profiling !== 'off' && policy.minor !== true;
     if (policy.longTerm === 'off') return { recall: false, reconsolidation: false, sentiment: profiled };
     return { recall: true, reconsolidation: profiled, sentiment: profiled };
+  };
+  /**
+   * Whether the tombstone ledger says `subject` is not forgotten, read within the memory hooks' timeout: a read that
+   * has not answered by then counts as forgotten, with one `memory.hook_failed` line (`hook: 'soulMemory'`), so a
+   * stalled store never holds a turn before its model call.
+   */
+  const notForgottenWithin = async (subject: MemorySubject): Promise<boolean> => {
+    const read = await within(forgotten.isForgotten(subject), hookTimeoutMs);
+    if (read !== TIMED_OUT) return !read;
+    memoryLog.warn('memory.hook_failed', { hook: 'soulMemory', type: 'TimeoutError', code: 'MEMORY_HOOK_TIMEOUT' });
+    return false;
   };
   /**
    * One session turn's view of the memory rules, for the GMI that serves it on `runtime: 'gmi'`: the subject's key, and
@@ -1339,8 +1360,11 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       scope: { scope: 'conversation', scopeId },
       begin: async () => {
         // A forgotten subject is allowed nothing, and the host's hook is not asked about them.
-        if (await forgotten.isForgotten(subject)) return { ...SOUL_TURN_NOTHING };
-        return soulAnswerOf(await turnPolicyOf(context, subject, scopeId, 'mind'));
+        if (!(await notForgottenWithin(subject))) return { ...SOUL_TURN_NOTHING };
+        const policy = await turnPolicyOf(context, subject, scopeId, 'mind');
+        // Nor is a subject forgotten while the host answered.
+        if (!(await notForgottenWithin(subject))) return { ...SOUL_TURN_NOTHING };
+        return soulAnswerOf(policy);
       },
     };
   };

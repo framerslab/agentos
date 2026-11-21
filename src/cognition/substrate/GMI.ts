@@ -1617,15 +1617,25 @@ export class GMI implements IGMI {
 
   /**
    * The answer a souled agent's view gives for a turn, asked once; undefined for a turn that carries no view. A view
-   * whose ask throws or rejects allows nothing, and one `memory.hook_failed` line says so.
+   * whose ask throws or rejects allows nothing, and one `memory.hook_failed` line says so. A turn stopped while it
+   * waits (a session's close(), the caller's signal, shutdown()) stops waiting at once and is allowed nothing.
    */
-  private async soulAnswerOf(soul: SoulTurnMemory | undefined): Promise<SoulTurnAnswer | undefined> {
+  private async soulAnswerOf(soul: SoulTurnMemory | undefined, stop: AbortSignal): Promise<SoulTurnAnswer | undefined> {
     if (!soul) return undefined;
+    if (stop.aborted) return { ...SOUL_TURN_NOTHING };
+    // Set at once: a promise's executor runs when the promise is made.
+    let onStop!: () => void;
+    const stopped = new Promise<SoulTurnAnswer>((resolve) => {
+      onStop = () => resolve({ ...SOUL_TURN_NOTHING });
+      stop.addEventListener('abort', onStop, { once: true });
+    });
     try {
-      return await soul.begin(this.cognitiveMemory);
+      return await Promise.race([soul.begin(this.cognitiveMemory), stopped]);
     } catch (error) {
       memoryLog.warn('memory.hook_failed', { hook: 'soulMemory', ...errorFields(error) });
       return { ...SOUL_TURN_NOTHING };
+    } finally {
+      stop.removeEventListener('abort', onStop);
     }
   }
 
@@ -1834,7 +1844,7 @@ export class GMI implements IGMI {
       // sentiment (a minor, a person who objects to profiling, a failed policy hook, a forgotten person) is not scored.
       // A continuation keeps the answer of the turn it continues.
       const continuesTurn = turnInput.metadata?.isToolContinuation === true;
-      const soulAnswer = continuesTurn ? this.turnSoulAnswer : await this.soulAnswerOf(turnSoul);
+      const soulAnswer = continuesTurn ? this.turnSoulAnswer : await this.soulAnswerOf(turnSoul, stop.signal);
       if (!continuesTurn && ownsState()) this.turnSoulAnswer = soulAnswer;
 
       // Analyze sentiment of user input only when sentiment tracking is enabled
