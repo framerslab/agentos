@@ -9,6 +9,8 @@
  *   and a deletion of one person leaves the other's rows.
  * - An open with no `tombstoneCopy`, with a copy on the store's own adapter, on a database that holds another agent's
  *   memory, or beside a store file left in `memory/.store/` is refused, and the host's adapter stays open and usable.
+ *   Another agent's database is refused before anything is written to it; a refusal for any other reason takes
+ *   nothing back from the database.
  * - `close()` leaves the host's adapters open, and a SQLite adapter deletes securely.
  * - A PostgreSQL adapter that reads BIGINT as text is refused before anything opens.
  * - Two agents opened at once on one empty database: at least one open is refused, and the database is left holding
@@ -155,6 +157,34 @@ function countingTransactions(adapter: StorageAdapter): { adapter: StorageAdapte
   return { adapter: counted, count };
 }
 
+/**
+ * `adapter` with its statements recorded: the SQL of each read (`get`, `all`) and of everything else (`run`, `exec`,
+ * and `transaction`, recorded as `BEGIN`). Every call reaches the adapter as it is.
+ */
+function recordingStatements(adapter: StorageAdapter): { adapter: StorageAdapter; read: string[]; written: string[] } {
+  const read: string[] = [];
+  const written: string[] = [];
+  const recorded = new Proxy(adapter, {
+    get(target, property) {
+      const value: unknown = Reflect.get(target, property, target);
+      if (typeof value !== 'function') return value;
+      const call = (value as (...args: unknown[]) => unknown).bind(target);
+      const into =
+        property === 'get' || property === 'all'
+          ? read
+          : property === 'run' || property === 'exec' || property === 'transaction'
+            ? written
+            : undefined;
+      if (!into) return call;
+      return (...args: unknown[]) => {
+        into.push(property === 'transaction' ? 'BEGIN' : String(args[0]));
+        return call(...args);
+      };
+    },
+  });
+  return { adapter: recorded, read, written };
+}
+
 /** A souled agent on the stubbed provider that may keep several people's memory. */
 async function open(agentId: string, extra: Partial<SouledAgentOptions> = {}): Promise<{ a: SouledAgent; s: ProviderScript }> {
   const apiKey = `k-souled-host-adapter-${++n}`;
@@ -288,19 +318,29 @@ describe(`a souled agent's store on the host's adapter, on runtime ${RUNTIME}`, 
     expect(await brainsIn(adapter)).toEqual([]);
 
     // A copy on the store's own adapter is no second copy.
-    await expect(open('aria-1', { soulStore: { adapter }, tombstoneCopy: { adapter } })).rejects.toMatchObject({ code: 'COPY_UNAVAILABLE' });
-    await answers(adapter);
-    // The refused open left none of its rows behind.
-    expect(await brainsIn(adapter)).toEqual([]);
+    const own = await sqliteAdapter('own.sqlite');
+    await expect(open('aria-1', { soulStore: { adapter: own }, tombstoneCopy: { adapter: own } })).rejects.toMatchObject({ code: 'COPY_UNAVAILABLE' });
+    await answers(own);
+    // The database is still this agent's: the refused open took back nothing, so an open of the same agent that is
+    // live on it at that moment keeps the rows of its brain. The agent opens there once its copy is a second one.
+    expect(await brainsIn(own)).toEqual(['aria-1']);
+    const { a: retried } = await open('aria-1', { soulStore: { adapter: own }, tombstoneCopy: copyAt('own') });
+    await closed(retried);
 
     // A database that holds another agent's memory: the tombstone ledger is database-wide.
     const { a: other } = await open('juno-2', { soulStore: { adapter }, tombstoneCopy: copyAt('juno') });
     await other.session('j1', { userId: 'carol' }).send('My canary is TERN-4.');
     await closed(other);
     await answers(adapter);
-    await expect(open('aria-1', { soulStore: { adapter }, tombstoneCopy: copyAt('aria') })).rejects.toThrow(ANOTHER_AGENT);
+    const statements = recordingStatements(adapter);
+    await expect(open('aria-1', { soulStore: { adapter: statements.adapter }, tombstoneCopy: copyAt('aria') })).rejects.toThrow(ANOTHER_AGENT);
     await answers(adapter);
     expect(await brainsIn(adapter)).toEqual(['juno-2']);
+    // Refused before anything opened: the other agent's database was read and never written, no transaction was
+    // opened on it, and no copy file was made for the refused agent.
+    expect(statements.written).toEqual([]);
+    expect(statements.read.length).toBeGreaterThan(0);
+    expect(fs.existsSync(copyAt('aria').path)).toBe(false);
     // The agent whose database it is opens again.
     const { a: owner } = await open('juno-2', { soulStore: { adapter }, tombstoneCopy: copyAt('juno') });
     await closed(owner);
