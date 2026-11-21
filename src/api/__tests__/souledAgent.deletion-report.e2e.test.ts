@@ -34,6 +34,7 @@ import * as path from 'node:path';
 import Database from 'better-sqlite3';
 import pino from 'pino';
 import { souledAgent, type SouledAgent, type SouledAgentOptions } from '../souledAgent';
+import type { ForgetMemoryReport } from '../../cognition/memory/io/forgetUserMemory';
 import { reply, script, type ProviderScript } from './helpers/stubProviders';
 import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
@@ -43,19 +44,9 @@ import { UserWikiStore } from '../../cognition/substrate/memory/wiki/UserWikiSto
 /** The runtime the cases run on; a case that needs what only the GMI runtime has names it. */
 const RUNTIME = 'legacy' as const;
 
-/** The receipt's fields, read through `unknown` while the report's type does not declare them. */
-type Part = { part: string; reached: boolean; deleted?: number; reason?: string };
-type Receipt = {
-  completedAt: string;
-  agentId: string;
-  libraryVersion: string;
-  parts: Part[];
-  recipients: unknown[];
-  complete: boolean;
-  pendingAtDeadline: number;
-  stores: Array<{ store: string; reached: boolean }>;
-};
-const receiptOf = (report: unknown): Receipt => report as Receipt;
+/** The count of a part the deletion reached, and the reason of one it missed. */
+const deletedBy = (part: ForgetMemoryReport['parts'][number] | undefined): number | undefined => (part?.reached ? part.deleted : undefined);
+const reasonOf = (part: ForgetMemoryReport['parts'][number] | undefined): string | undefined => (part && !part.reached ? part.reason : undefined);
 
 let n = 0;
 let dir: string;
@@ -145,7 +136,7 @@ describe(`a deletion report a host can keep, on runtime ${RUNTIME}`, () => {
     await turn(a, 's1', 'alice', 'My canary is LARK-7.');
     await turn(a, 's2', 'bob', 'My canary is WREN-2.');
 
-    const report = receiptOf(await a.forgetUser!('alice'));
+    const report = await a.forgetUser!('alice');
 
     expect(report.completedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
     expect(Math.abs(Date.parse(report.completedAt) - Date.now())).toBeLessThan(60_000);
@@ -155,7 +146,7 @@ describe(`a deletion report a host can keep, on runtime ${RUNTIME}`, () => {
     expect(report.parts[0]).toEqual({ part: 'tombstone', reached: true, deleted: 0 });
     expect(report.parts[1]).toEqual({ part: 'mind', reached: true, deleted: 0 });
     expect(report.parts[2]).toMatchObject({ part: 'store', reached: true });
-    expect(report.parts[2]!.deleted).toBeGreaterThanOrEqual(2);
+    expect(deletedBy(report.parts[2])).toBeGreaterThanOrEqual(2);
     // The one session this handle holds open for her is cleared.
     expect(report.parts[3]).toEqual({ part: 'sessions', reached: true, deleted: 1 });
     expect(report.recipients).toEqual(await a.recipients!());
@@ -176,12 +167,12 @@ describe(`a deletion report a host can keep, on runtime ${RUNTIME}`, () => {
     await turn(a, 's1', 'alice', 'My canary is LARK-7.');
     await turn(a, 'v1', undefined, 'Is the room by the weir still free?');
 
-    const report = receiptOf(await a.forgetUser!('alice', { linkedSessions: ['v1'] }));
+    const report = await a.forgetUser!('alice', { linkedSessions: ['v1'] });
 
     expect(report.parts.map((p) => p.part)).toEqual(['tombstone', 'mind', 'store', 'sessions']);
     expect(report.parts[2]).toMatchObject({ part: 'store', reached: true });
     // Her two traces and the visitor's two.
-    expect(report.parts[2]!.deleted).toBeGreaterThanOrEqual(4);
+    expect(deletedBy(report.parts[2])).toBeGreaterThanOrEqual(4);
     // Her session and the linked one, each cleared.
     expect(report.parts[3]).toEqual({ part: 'sessions', reached: true, deleted: 2 });
     expect(report.complete).toBe(true);
@@ -194,7 +185,7 @@ describe(`a deletion report a host can keep, on runtime ${RUNTIME}`, () => {
     const named = await a.recipients!();
     recordedRoutes.fail = new Error('the store went away');
 
-    const report = receiptOf(await a.forgetUser!('alice'));
+    const report = await a.forgetUser!('alice');
 
     expect(tracesOf(keyOf(alice))).toEqual([]);
     expect(report.recipients).toEqual(named);
@@ -222,7 +213,7 @@ describe(`an incomplete deletion says so in one line, on runtime ${RUNTIME}`, ()
     } as Partial<SouledAgentOptions>);
     try {
       await a.session('s1', { userId: 'alice' }).send('My canary is LARK-7.');
-      const report = receiptOf(await a.forgetUser!('alice'));
+      const report = await a.forgetUser!('alice');
 
       expect(report.complete).toBe(false);
       expect(report.pendingAtDeadline).toBeGreaterThanOrEqual(1);
@@ -252,11 +243,11 @@ describe(`an incomplete deletion says so in one line, on runtime ${RUNTIME}`, ()
     await turn(a, 's1', 'alice', 'My canary is LARK-7.');
     vi.spyOn(a.memory!, 'rebuildVectorIndex').mockRejectedValueOnce(new Error('disk full'));
 
-    const report = receiptOf(await a.forgetUser!('alice'));
+    const report = await a.forgetUser!('alice');
 
     expect(report.complete).toBe(false);
     expect(report.parts[2]).toMatchObject({ part: 'store', reached: false });
-    expect(report.parts[2]!.reason).toContain('disk full');
+    expect(reasonOf(report.parts[2])).toContain('disk full');
     expect(lines('memory.forget_incomplete')).toEqual([
       expect.objectContaining({ tombstone: 'reached', mind: 'reached', store: 'missed', sessions: 'reached', pendingAtDeadline: 0, pagesFailed: 0 }),
     ]);
@@ -269,7 +260,7 @@ describe(`an incomplete deletion says so in one line, on runtime ${RUNTIME}`, ()
     expect(pagesOf(keyOf(alice))).toHaveLength(1);
     vi.spyOn(UserWikiStore.prototype, 'deletePage').mockRejectedValueOnce(new Error('disk I/O error'));
 
-    const report = receiptOf(await a.forgetUser!('alice'));
+    const report = await a.forgetUser!('alice');
 
     expect(report.complete).toBe(false);
     expect(report.parts[2]).toEqual({ part: 'store', reached: false, reason: '1 page not deleted' });
@@ -278,7 +269,7 @@ describe(`an incomplete deletion says so in one line, on runtime ${RUNTIME}`, ()
     ]);
 
     events.length = 0;
-    const again = receiptOf(await a.forgetUser!('alice'));
+    const again = await a.forgetUser!('alice');
     expect(again.complete).toBe(true);
     expect(again.parts.every((p) => p.reached)).toBe(true);
     expect(pagesOf(keyOf(alice))).toEqual([]);
@@ -291,7 +282,7 @@ describe(`an incomplete deletion says so in one line, on runtime ${RUNTIME}`, ()
     await a.memory!.remember('old shared words', { type: 'episodic', scope: 'persona', scopeId: 'aria-1' });
     await turn(a, 's1', 'alice', 'My canary is LARK-7.');
 
-    const report = receiptOf(await a.forgetUser!('alice'));
+    const report = await a.forgetUser!('alice');
 
     expect(tracesOf(keyOf(alice))).toEqual([]);
     expect(report.complete).toBe(false);
@@ -323,7 +314,8 @@ describe("agent.learning.forgetUser on a souled agent, on runtime 'gmi'", () => 
 
     // The deletion report, with the three fields the layer's report type requires.
     expect(report).toMatchObject({ userId: 'alice', namespace: '', plainFormLeft: 0 });
-    const receipt = receiptOf(report);
+    // The call's declared type is the layer's report: the deletion's fields are read through the deletion's own.
+    const receipt = report as unknown as ForgetMemoryReport;
     expect(receipt.agentId).toBe('aria-1');
     expect(receipt.parts.map((p) => p.part)).toEqual(['tombstone', 'mind', 'store', 'sessions']);
     expect(receipt.parts[2]).toMatchObject({ part: 'store', reached: true });
