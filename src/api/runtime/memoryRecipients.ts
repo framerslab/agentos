@@ -63,9 +63,13 @@ function recipient(role: MemoryRecipient['role'], route: NamedRoute): MemoryReci
   };
 }
 
+/** `text` URI-encoded, a lone surrogate (which `encodeURIComponent` throws on) taken as U+FFFD. */
+const encodedPart = (text: string): string =>
+  encodeURIComponent(text.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '\uFFFD'));
+
 /** The key a route is recorded under in `brain_meta`: its role, provider and model, each part URI-encoded. */
 export function recipientKey(entry: MemoryRecipient): string {
-  return `${RECIPIENT_KEY_PREFIX}${entry.role}:${encodeURIComponent(entry.provider)}:${encodeURIComponent(entry.model ?? '')}`;
+  return `${RECIPIENT_KEY_PREFIX}${entry.role}:${encodedPart(entry.provider)}:${encodedPart(entry.model ?? '')}`;
 }
 
 /** The start of every recorded route's key in `brain_meta`. */

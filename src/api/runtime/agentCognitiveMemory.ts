@@ -208,6 +208,19 @@ export function assertEmbeddingAvailable(memory: MemoryConfig, env: Env = proces
 }
 
 /**
+ * The provider and model cognitive memory's embedding calls go to, resolved as the memory resolves them when it is
+ * built: a model's own `provider:` prefix, and the provider default and environment when `memory.embedding` names no
+ * provider.
+ *
+ * @internal
+ * @throws {Error} As {@link assertEmbeddingAvailable} does.
+ */
+export function embeddingRouteOf(memory: MemoryConfig, env: Env = process.env): { provider: string; model: string } {
+  const target = resolveEmbeddingTarget(memory, env);
+  return { provider: target.providerId, model: target.modelId };
+}
+
+/**
  * The checks on `memory.embedding` that read no environment, for `gmi()` to run
  * when the agent is built: with a provider set, that it has embeddings, that the
  * model resolves on it, that a declared dimension is a positive integer, and that

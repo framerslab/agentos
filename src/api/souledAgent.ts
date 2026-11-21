@@ -29,6 +29,7 @@ import {
 } from './agent.js';
 import { generateText } from './generateText.js';
 import type { StreamTextResult } from './streamText.js';
+import type { IModelRouter } from '../core/llm/routing/IModelRouter.js';
 import { Memory, type AttachedWiki, type ScoredTrace } from '../cognition/memory/io/facade/Memory.js';
 import { brainOf } from '../cognition/memory/io/facade/handedBrain.js';
 import { createStorageFeatures, type StorageAdapter } from '@framers/sql-storage-adapter';
@@ -88,7 +89,7 @@ import {
   type RecipientRoutes,
 } from './runtime/memoryRecipients.js';
 import { resolveCognition, type CognitionInputs } from './runtime/gmiCognition.js';
-import { assertBigintReadsAsNumbers } from './runtime/agentCognitiveMemory.js';
+import { assertBigintReadsAsNumbers, embeddingRouteOf } from './runtime/agentCognitiveMemory.js';
 import { serializeTransactionsOn } from '../cognition/memory/retrieval/store/adapterTransactionLock.js';
 import { resolveModelOption, resolveProviderRoute } from './model.js';
 import type { AgentOSUsageLedgerOptions } from './runtime/usageLedger.js';
@@ -800,9 +801,10 @@ export type SouledAgent = Agent & {
   /**
    * Who receives a person's text from this agent, outside the process: its model's provider and model, a model
    * router's pick, each fallback hop (or the automatic fallback chain), the compile's target, the target for minors'
-   * compiles, the embedding provider of cognitive memory, and every route a call took that the options do not name
-   * (a `generate()` or `stream()` with its own `provider`, `model`, router or `fallbackProviders`, or a route the
-   * credential layer sent elsewhere), which the store records so it is still named after a restart. Each entry names
+   * compiles, the embedding provider and model of cognitive memory, and every route a call took that the options do
+   * not name (a `generate()` or `stream()` with its own `provider`, `model`, router or `fallbackProviders`, each provider
+   * and model a model router picked, or a route the credential layer sent elsewhere), which the store records so it is
+   * still named after a restart. An entry names a provider, not the endpoint a `baseUrl` sends it to. Each entry names
    * where the text goes: the provider a model's `provider:` prefix names, and OpenRouter for an Anthropic route with no
    * Anthropic key or base URL while `OPENROUTER_API_KEY` is set. The list is agent-wide, the same for every person.
    * The library sends these recipients nothing.
@@ -1867,7 +1869,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
             : {
                 fallbackProviders: rest.fallbackProviders,
                 onFallback: rest.onFallback,
-                router: rest.router,
+                router: rest.router ? recordingPicks(rest.router, role, () => call) : undefined,
                 hostPolicy: rest.hostPolicy,
                 routerParams: rest.routerParams,
                 policyTier: rest.policyTier,
@@ -1915,15 +1917,25 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     }
     return { provider, model };
   };
-  /** The embedding route of cognitive memory on the GMI runtime; undefined when cognitive memory is off. */
+  /**
+   * The embedding route of cognitive memory on the GMI runtime, as the memory resolves it when it is built (a model's
+   * `provider:` prefix, the provider's default model, the environment's pick when no provider is named); undefined
+   * when cognitive memory is off.
+   */
   const embeddingRoute = ((): NamedRoute | undefined => {
     if (rest.runtime !== 'gmi') return undefined;
+    let memoryConfig: ReturnType<typeof resolveCognition>['memory'];
     try {
-      const memoryConfig = resolveCognition(rest as CognitionInputs).memory;
-      if (!memoryConfig) return undefined;
-      return { provider: memoryConfig.embedding?.provider, model: memoryConfig.embedding?.model };
+      memoryConfig = resolveCognition(rest as CognitionInputs).memory;
     } catch {
       return undefined;
+    }
+    if (!memoryConfig) return undefined;
+    try {
+      return embeddingRouteOf(memoryConfig);
+    } catch {
+      // gmi() refuses to build such a memory; named as the options give it.
+      return { provider: memoryConfig.embedding?.provider, model: memoryConfig.embedding?.model };
     }
   })();
   /** The options' own fallback hops, each with its own key and base URL; undefined for the automatic chain. */
@@ -1950,6 +1962,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   const calledRoutes = new Map<string, MemoryRecipient>();
   /** The keys of the routes stored, or being stored, by this process. */
   const storedRoutes = new Set<string>();
+  /** The writes of routes still running: close() waits for them again after its compile, before the store closes. */
+  const routeWrites = new Set<Promise<unknown>>();
   /**
    * Records a route a call takes that the options do not name. Each is stored once, as one `brain_meta` row of the
    * store that holds no person, no text and no time, so `recipients()` names it after a restart; close() waits for the
@@ -1962,13 +1976,53 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     calledRoutes.set(routeKey, route);
     if (storedRoutes.has(routeKey)) return;
     storedRoutes.add(routeKey);
-    awaitedOnClose(
-      recordRecipient(brainOf(memory), route).catch((err: unknown) => {
+    const write = Promise.resolve()
+      .then(() => recordRecipient(brainOf(memory), route))
+      .catch((err: unknown) => {
         storedRoutes.delete(routeKey);
         memoryLog.warn('memory.recipient_unrecorded', errorFields(err));
-      }),
-    );
+      });
+    routeWrites.add(write);
+    void write.then(() => routeWrites.delete(write));
+    awaitedOnClose(write);
   };
+  /**
+   * `router` with each pick recorded in `role` before the call is sent: the provider and model it picks, where the
+   * credential layer sends them, the call's own key and base URL going with a pick of the call's own provider alone.
+   * A pick that names no provider keeps the call's. Every other member reads through to `router`, called on it.
+   */
+  const recordingPicks = (router: IModelRouter, role: MemoryRecipient['role'], own: () => CallRoute): IModelRouter => ({
+    get routerId() {
+      return router.routerId;
+    },
+    get policyTier() {
+      return router.policyTier;
+    },
+    initialize: (config, providerManager, promptEngine) => router.initialize(config, providerManager, promptEngine),
+    selectModel: async (params, availableModels) => {
+      const picked = await router.selectModel(params, availableModels);
+      if (picked && typeof picked.modelId === 'string') {
+        const call = own();
+        const provider = picked.modelInfo?.providerId ?? call.provider;
+        const ownProvider = provider === call.provider;
+        noteRoute(
+          routeRecipient(
+            role,
+            destinationOf(
+              {
+                provider,
+                model: picked.modelId,
+                ...(ownProvider ? { apiKey: call.apiKey, baseUrl: call.baseUrl } : {}),
+                ...(call.strict ? { strict: true } : {}),
+              },
+              true,
+            ),
+          ),
+        );
+      }
+      return picked;
+    },
+  });
 
   const chunker = new SemanticChunker();
   const priorTools = rest.tools;
@@ -2007,7 +2061,16 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     priorTools && !Array.isArray(priorTools) ? priorTools : augmentedTools
   ) as AgentOptions['tools'];
 
-  const agentOptions: AgentOptions = { ...rest, ...(budget ? { budget } : {}), memoryProvider: provider, tools };
+  /** The agent's own route, as its options give it. */
+  const agentRoute: CallRoute = { provider: rest.provider, model: rest.model, apiKey: rest.apiKey, baseUrl: rest.baseUrl };
+  const agentOptions: AgentOptions = {
+    ...rest,
+    ...(budget ? { budget } : {}),
+    // Each pick of the agent's model router is recorded where it sends the text, as a call's own route is.
+    ...(rest.router ? { router: recordingPicks(rest.router, 'model', () => agentRoute) } : {}),
+    memoryProvider: provider,
+    tools,
+  };
   // A learning layer gmi() builds from these options writes and reads the store's ledger.
   shareForgottenLedger(agentOptions, forgotten);
   if (rest.runtime === 'gmi') {
@@ -2021,9 +2084,9 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
    * Records where a call sends a person's text when the options do not name it: its own `provider` or `model` (the
    * agent's for the one it leaves out), or the agent's own route where the credential layer sends it elsewhere; on the
    * default runtime its own model router; and each fallback hop it may take, its own on the default runtime, else the
-   * options'. The route is recorded before the call starts.
+   * options'. The route is recorded before the call starts. Returns the call's own route.
    */
-  const noteCallRoute = (call: unknown): void => {
+  const noteCallRoute = (call: unknown): CallRoute => {
     const given = (call !== null && typeof call === 'object' ? call : {}) as {
       provider?: unknown;
       model?: unknown;
@@ -2047,20 +2110,13 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       { provider: rest.provider, model: rest.model },
       { provider: routeProvider, model: routeModel },
     );
-    noteRoute(
-      routeRecipient(
-        'model',
-        destinationOf(
-          {
-            provider: routeProvider,
-            model: routeModel,
-            apiKey: text(given.apiKey) ?? (agentCredentialsGo ? rest.apiKey : undefined),
-            baseUrl: text(given.baseUrl) ?? (agentCredentialsGo ? rest.baseUrl : undefined),
-          },
-          true,
-        ),
-      ),
-    );
+    const own: CallRoute = {
+      provider: routeProvider,
+      model: routeModel,
+      apiKey: text(given.apiKey) ?? (agentCredentialsGo ? rest.apiKey : undefined),
+      baseUrl: text(given.baseUrl) ?? (agentCredentialsGo ? rest.baseUrl : undefined),
+    };
+    noteRoute(routeRecipient('model', destinationOf(own, true)));
     // The GMI runtime refuses a call's own router and fallbackProviders before any model call.
     const ownLegs = rest.runtime !== 'gmi';
     if (ownLegs && given.router !== undefined && given.router !== null) {
@@ -2077,6 +2133,19 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
           })
         : optionHops;
     for (const hop of hops ?? []) noteRoute(routeRecipient('fallback-model', destinationOf(hop, true)));
+    return own;
+  };
+  /**
+   * A call's options with its own model router recording each pick it makes, on the default runtime; unchanged
+   * otherwise, and on the GMI runtime, which refuses a call's own router.
+   */
+  const withRecordedRouter = <E>(extra: E, own: CallRoute): E => {
+    if (rest.runtime === 'gmi' || extra === null || typeof extra !== 'object') return extra;
+    const router = (extra as { router?: unknown }).router;
+    if (router === null || typeof router !== 'object' || typeof (router as IModelRouter).selectModel !== 'function') {
+      return extra;
+    }
+    return { ...(extra as object), router: recordingPicks(router as IModelRouter, 'model', () => own) } as E;
   };
   /**
    * Who receives a person's text: where the options' routes go in this process now, then every route a call took
@@ -2090,13 +2159,13 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   // recorded before it starts.
   const generateTurn = built.generate.bind(built);
   built.generate = (prompt, extra) => {
-    noteCallRoute(extra);
-    return awaitedOnClose(generateTurn(prompt, extra));
+    const own = noteCallRoute(extra);
+    return awaitedOnClose(generateTurn(prompt, withRecordedRouter(extra, own)));
   };
   const streamTurn = built.stream.bind(built);
   built.stream = (prompt, extra) => {
-    noteCallRoute(extra);
-    return awaitStreamOnClose(streamTurn(prompt, extra), extra?.abortSignal);
+    const own = noteCallRoute(extra);
+    return awaitStreamOnClose(streamTurn(prompt, withRecordedRouter(extra, own)), extra?.abortSignal);
   };
   const openSession = built.session.bind(built);
   const trackedSessions = new WeakSet<AgentSession>();
@@ -2502,6 +2571,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
         );
       }
     } finally {
+      // A compile above can record a route it took: its write lands before the store closes.
+      await waitForWrites(routeWrites, waitMs);
       await closeStore();
     }
     if (closeFailed) throw closeError;
