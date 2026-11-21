@@ -77,7 +77,8 @@ export function registerSessionEvictor(session: AgentSession, evict: SessionEvic
 export interface SoulMind {
   /**
    * Empties what the given open sessions hold of their person: each session's messages at once, and its GMI's
-   * history, sentiment trend and working-memory slots once no turn of the session runs. The sessions are asked
+   * history, reasoning trace, sentiment trend, working-memory slots and metaprompt imprints once no turn of the
+   * session runs. The sessions are asked
    * together, so the wait for their running turns is one deadline in all.
    *
    * @param sessions - The sessions the agent's handle holds open for the person.

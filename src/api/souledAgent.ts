@@ -134,6 +134,15 @@ const CHARS_PER_TOKEN = 4;
  */
 export const DEFAULT_PENDING_WRITES_TIMEOUT_MS = 5_000;
 
+/** The learning layer's entry, among the stores its deletion does not reach, for a conversation's messages. */
+const CONVERSATION_HISTORY = "a conversation's own history";
+
+/**
+ * Why a souled agent's deletion does not reach a conversation's messages, in place of the learning layer's reason:
+ * the sessions the agent's handle holds open for the person are emptied (the report's `sessions` part).
+ */
+const HISTORY_HELD_ELSEWHERE = 'a session another agent object or another process holds open keeps its messages until the host closes it';
+
 /** The longest delay a timer takes (2^31 - 1 ms, about 24.8 days); a longer one fires at once. */
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
@@ -792,12 +801,12 @@ export type SouledAgent = Agent & {
    * pending writes (up to `pendingWritesTimeoutMs`), records a tombstone, deletes their traces, document chunks,
    * compiled pages and registry row, writes the vector index again, and empties the sessions this handle holds open
    * for them: on the default runtime each session's history is cleared; with `runtime: 'gmi'` each session's messages
-   * go at once and its GMI drops its history, its sentiment trend and its working-memory slots once no turn of the
-   * session runs, which the call waits for up to `pendingWritesTimeoutMs`. A session still running a turn then leaves
-   * the report's `sessions` part missed, and is emptied when that turn ends. With
-   * a learning layer, the layer's own deletion runs first, and `agent.learning.forgetUser(userId)` runs this same
-   * deletion. `linkedSessions` names the anonymous sessions the host has tied to the person: each is deleted the same
-   * way, and its counts add into the report's parts.
+   * go at once and its GMI drops its history, its reasoning trace, its sentiment trend, its working-memory slots and
+   * its metaprompts' imprints once no turn of the session runs, which the call waits for up to
+   * `pendingWritesTimeoutMs`. A session still running a turn then leaves the report's `sessions` part missed, and is
+   * emptied when that turn ends. With a learning layer, the layer's own deletion runs first, and
+   * `agent.learning.forgetUser(userId)` runs this same deletion. `linkedSessions` names the anonymous sessions the
+   * host has tied to the person: each is deleted the same way, and its counts add into the report's parts.
    *
    * @returns One report for the user and the linked sessions, the receipt a host keeps beside its own record of the
    *   request: each store with `reached` and a count or a reason, the pages deleted and those that failed, `drained`,
@@ -2364,10 +2373,10 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
    * What a deletion of one subject does to the sessions this handle holds open for the subject, as an entry of the
    * report's stores and as the deletion's `sessions` part. The default runtime keeps a session's history in this
    * process: each is cleared and counted. On the GMI runtime each is emptied (its messages, and its GMI's history,
-   * sentiment trend and working-memory slots) and counted; a session whose turn is still running at the deadline is
-   * emptied once that turn ends, and the part is missed meanwhile. A session opened with history off holds nothing
-   * between its turns and is not counted. It never rejects: an emptying that fails is the part missed, with the
-   * error's message.
+   * reasoning trace, sentiment trend, working-memory slots and metaprompt imprints) and counted; a session whose turn
+   * is still running at the deadline is emptied once that turn ends, and the part is missed meanwhile. A session
+   * opened with history off holds nothing between its turns and is not counted. It never rejects: an emptying that
+   * fails is the part missed, with the error's message.
    */
   const sessionHistoryOf = async (key: string): Promise<{ entry: ForgetMemoryReport['stores'][number]; part: PartOutcome }> => {
     const open = sessionsBySubject.get(key) ?? new Set<AgentSession>();
@@ -2479,7 +2488,11 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       };
     }
     const learned = await layerForget(userId);
-    const stores = learned.stores.map((entry): ForgetMemoryReport['stores'][number] => {
+    const stores = learned.stores.map((given): ForgetMemoryReport['stores'][number] => {
+      // The layer says a session keeps its messages; the sessions this handle holds open are emptied by the deletion's
+      // sessions part, so what is left out is a session held elsewhere.
+      const entry =
+        !given.reached && given.store === CONVERSATION_HISTORY ? { ...given, reason: HISTORY_HELD_ELSEWHERE } : given;
       const made: ForgetMemoryReport['stores'][number] = entry.reached
         ? {
             store: entry.store,
