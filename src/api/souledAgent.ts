@@ -694,10 +694,12 @@ export interface SouledAgentOptions extends AgentOptions {
   soulStore?: { adapter: StorageAdapter };
   /**
    * Whether a session turn on `runtime: 'gmi'` sends the end user's id to the model provider: the `userId` the session
-   * was opened with, in the provider's end-user field (OpenAI's `user` or `safety_identifier`), a seat's session
-   * included. Default `false`: no turn of the agent sends one. Set it only where the session's `userId` is an opaque or
-   * hashed id, never an email address: the provider receives it. Tools, the user context and the memory hooks get the
-   * user id either way. The default runtime sends no end-user id, with or without it.
+   * was opened with, in the provider's end-user field (OpenAI's `user` or `safety_identifier`) and as the name the
+   * user's messages are sent under (which OpenAI's Chat Completions API receives), a seat's session included. Default
+   * `false`: no turn of the agent sends one, and a team a session launches seats its sessions as the session's user and
+   * sends none either. Set it only where the session's `userId` is an opaque or hashed id, never an email address: the
+   * provider receives it. Tools, the user context and the memory hooks get the user id either way. The default runtime
+   * sends no end-user id, with or without it.
    */
   sendUserIdToProvider?: boolean;
 }
@@ -805,7 +807,7 @@ export type SouledAgent = Agent & {
  * With `runtime: 'gmi'` no session turn sends the end user's id to the model provider unless
  * {@link SouledAgentOptions.sendUserIdToProvider} is set, and a turn whose policy answer marks a minor or a person who
  * objects to profiling, whose policy hook failed, whose subject is forgotten, or whose user id no memory key can be
- * built from, is not scored for sentiment.
+ * built from, or whose tombstone read does not answer within the memory hooks' timeout, is not scored for sentiment.
  *
  * `close()` first closes the agent (with `runtime: 'gmi'` that stops its session turns), then waits, within one
  * deadline (see {@link SouledAgentOptions.pendingWritesTimeoutMs}), for the turns still running (a `generate()`, a

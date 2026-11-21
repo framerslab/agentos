@@ -35,7 +35,7 @@ Memory makes these calls out of your process, and no others:
 |---|---|---|---|
 | The compile | On `close()` and on `agent.memory.compileWiki()`, once per page of each person with new traces | The page's current text and that one person's new traces | The agent's own provider and model, or the one you name with `compile`; nobody, with `compile: false` |
 | Embedding | Only when you give the store an embedder: each trace when it is stored, each query at recall | The trace's text; the query's text | The embedding provider you configured |
-| The end user's id | With each model request of a `gmi()` session opened with a `userId`; on a souled agent, only with `sendUserIdToProvider: true` | The id you passed | The model provider |
+| The end user's id | With each model request of a `gmi()` session opened with a `userId`, in the end-user field and as the name of the user's messages; on a souled agent, only with `sendUserIdToProvider: true` | The id you passed | The model provider |
 
 Memory text goes to the agent's provider or to the compile provider you named, and to no other recipient.
 
