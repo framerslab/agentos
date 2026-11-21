@@ -888,6 +888,14 @@ export interface IGMI {
   replaceHistory?(messages: ConversationMessage[]): void;
   /** Empties the conversation history; `GMI` drops what it recorded about its turns, as for `replaceHistory`. */
   clearHistory?(): void;
+  /**
+   * Drops what the GMI holds of the person its session serves, for a deletion of that person: the conversation
+   * history as `clearHistory()` drops it, and whatever else the implementation keeps of the person between turns.
+   * `GMI` also drops the input and the retrieved sources of its last turn, the working-memory slots of its cognitive
+   * memory, its sentiment history and events, and the user context's `currentSentiment`. A runtime calls it between
+   * turns, and it rejects when a store it writes to fails.
+   */
+  forgetPerson?(): Promise<void>;
 
   /**
    * Sets the turn a tool continuation goes on with: the session, conversation and organization the continuation runs
