@@ -776,6 +776,11 @@ function toResponsesUserContent(
  * names no effort runs at the model's default. Responses keeps the tools and
  * the effort, and a `responseFormat` travels as `text.format`.
  *
+ * The tools are the call's `tools` and a `customModelParams.tools` override
+ * alike: the override becomes the body's `tools`, as `customModelParams.model`
+ * becomes its model, so function tools that arrive there make the call a tool
+ * call too.
+ *
  * The messages do not change the route. The Responses builder carries
  * Anthropic-style cache-marked system blocks (`systemBlocks` reach the
  * provider as an all-text content array) and images on user and tool turns
@@ -785,15 +790,16 @@ function toResponsesUserContent(
  *
  * @param modelId Provider-side model identifier.
  * @param _messages The request messages; they do not change the route.
- * @param options The request's tools, effort and response format.
+ * @param options The request's tools, effort, response format and `customModelParams`.
  * @returns `true` when the call goes to `/v1/responses`.
  */
 export function shouldRouteToOpenAiResponsesApi(
   modelId: string,
   _messages: ChatMessage[],
-  options: Pick<ModelCompletionOptions, 'tools' | 'effort' | 'responseFormat'>,
+  options: Pick<ModelCompletionOptions, 'tools' | 'effort' | 'responseFormat' | 'customModelParams'>,
 ): boolean {
-  return openAiRequiresResponsesApi(modelId, options);
+  const passedTools = options.customModelParams?.tools as ModelCompletionOptions['tools'];
+  return openAiRequiresResponsesApi(modelId, options) || openAiRequiresResponsesApi(modelId, { tools: passedTools });
 }
 
 /** Assistant text, refusal, function calls and item count read from a `/v1/responses` `output` array. */
