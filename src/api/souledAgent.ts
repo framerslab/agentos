@@ -157,7 +157,7 @@ const TOMBSTONE_KEY_REQUIRED =
 /** What a `soulStore` that is not `{ adapter }` with a storage adapter is refused with. */
 const SOUL_STORE_SHAPE = 'souledAgent: soulStore must be { adapter } with a StorageAdapter of @framers/sql-storage-adapter';
 
-/** What an open with `soulStore` and no `tombstoneCopy` is refused with. */
+/** What an open with `soulStore` and no `tombstoneCopy`, or one that names no file and no adapter, is refused with. */
 const SOUL_STORE_NEEDS_COPY =
   "souledAgent: soulStore needs tombstoneCopy ({ path } or { adapter }), the tombstones' second copy outside what a restore of the store replaces; the default copy is a file on one machine, and a store in the host's database usually serves several";
 
@@ -180,6 +180,13 @@ function assertSoulStore(soulStore: unknown): asserts soulStore is { adapter: St
   ) {
     throw new TypeError(SOUL_STORE_SHAPE);
   }
+}
+
+/** Whether `tombstoneCopy` names a file by a non-empty path, or holds an adapter. */
+function namesTombstoneCopy(tombstoneCopy: unknown): boolean {
+  if (tombstoneCopy === null || typeof tombstoneCopy !== 'object') return false;
+  const { path: file, adapter } = tombstoneCopy as { path?: unknown; adapter?: unknown };
+  return (typeof file === 'string' && file !== '') || (adapter !== null && typeof adapter === 'object');
 }
 
 /** Whether the database behind `adapter` holds a row of another brain than `brainId`, in a table every open makes. */
@@ -661,7 +668,8 @@ export type SouledAgent = Agent & {
  * @throws TypeError when `memoryPolicy`, `screen` or `sharedMemory` is set on an agent whose cognitive memory is on
  *   (`runtime: 'gmi'` with `cognition.memory`, the `full` profile, or the `memory` option): the GMI keeps that memory
  *   in a store of its own, which none of them reaches; nothing is opened.
- * @throws TypeError when `soulStore` is not `{ adapter }`, or is set without `tombstoneCopy`; nothing is opened.
+ * @throws TypeError when `soulStore` is not `{ adapter }`, or is set without a `tombstoneCopy` that names a file or an
+ *   adapter; nothing is opened.
  * @throws Error when `soulStore` is set and a store file is at `memory/.store/memory.sqlite`, or its PostgreSQL adapter
  *   reads BIGINT as text; nothing is opened. Error when its database holds another agent's memory, before the
  *   tombstone ledger opens; what the open seeded there is taken back. The host's adapter is left open on every refusal.
@@ -688,7 +696,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   if (legacyMemory !== undefined) assertLegacyMemory(legacyMemory, (id) => isAnonymousUserId(id, anonymousUserIds));
   if (soulStore !== undefined) {
     assertSoulStore(soulStore);
-    if (tombstoneCopy == null) throw new TypeError(SOUL_STORE_NEEDS_COPY);
+    // An option that names nothing would fall back to the default file, or to a ledger with no second copy.
+    if (!namesTombstoneCopy(tombstoneCopy)) throw new TypeError(SOUL_STORE_NEEDS_COPY);
   }
   // The two hooks and sharedMemory act on this agent's own store. A GMI's cognitive memory files and recalls in a store
   // of its own, which none of them reaches: an account the policy turns off would still be remembered there, and
