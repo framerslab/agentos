@@ -747,7 +747,8 @@ export type SouledAgent = Agent & {
   /**
    * One person's memory as JSON: their conversation traces (id, time, speaker, text, tags) and their compiled pages
    * (id, summary, updated, sources, body), read from their own scope alone. Operator pages, other people's memory and
-   * a gmi() session's history are not in it; a forgotten person's export is empty.
+   * a gmi() session's history are not in it; a forgotten person's export is empty. It reads after the memory writes
+   * of the person's turns already sent, so a turn whose `send()` resolved before the call is in it.
    *
    * @throws TypeError when `userId` is not a non-empty string.
    */
@@ -755,10 +756,14 @@ export type SouledAgent = Agent & {
   /**
    * Corrects one person's memory: deletes the named traces for good, files `text` as a trace tagged `correction`,
    * deletes each page built from a deleted trace and has the next compile build it again from the traces that are
-   * left. It rejects, and changes nothing, when any id is not one of that person's live traces.
+   * left. It rejects, and changes nothing, when any id is not one of that person's live traces. When the person's
+   * memory already holds `text` word for word, that trace is the correction: it is tagged `correction`, kept, and
+   * not deleted even when it is one of the named traces.
    *
-   * @returns How many traces and pages it deleted, and the id of the correction's trace.
+   * @returns How many traces and pages it deleted, and the id of the correction's trace, a live trace.
    * @throws TypeError when `userId`, the trace ids or the text is missing.
+   * @throws Error when the correction's trace was deleted before it was marked; the call deletes no named trace. The
+   *   same call made again files the correction anew when every named trace is still live; otherwise it rejects.
    */
   correctUserMemory?(
     userId: string,
@@ -2145,9 +2150,15 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       return Promise.reject(new TypeError('souledAgent: exportUserMemory needs a non-empty user id'));
     }
     const subject: SuppressionSubject = { kind: 'user', id: userId };
+    let key: string;
+    try {
+      key = conversationScopeKey(agentId, subject);
+    } catch (err) {
+      return Promise.reject(err);
+    }
     const run = async (): Promise<UserMemoryExport> => {
       // The owner of the older memory gets it in their export too.
-      const owns = legacyOwnerKey !== undefined && conversationScopeKey(agentId, subject) === legacyOwnerKey;
+      const owns = legacyOwnerKey !== undefined && key === legacyOwnerKey;
       return exportSubjectMemory({
         memory,
         wiki: { storeFor: pagesOf },
@@ -2156,7 +2167,9 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
         ...(owns ? { legacy: { forms: legacyForms, pages: legacyCompiledPages } } : {}),
       });
     };
-    return awaitedOnClose(run());
+    // The read runs on the person's chain, after the writes their turns started and their compiles: a turn whose
+    // send() resolved before the call is in the export. Once close() is waiting for those writes it reads at once.
+    return awaitedOnClose(closing ? run() : onSubject(key, run));
   };
   built.correctUserMemory = (userId, correction) => {
     if (typeof userId !== 'string' || userId === '') {

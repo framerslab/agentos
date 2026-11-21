@@ -1762,6 +1762,59 @@ export class Memory {
   }
 
   /**
+   * Marks one live trace as a correction in place, its text, embedding and time left as they are: the tag
+   * `correction`, and the ids it corrects added to its `corrects` metadata, each once. The read and the write share
+   * one transaction, so two marks of one trace keep both. The full-text index, which reads the tags, is brought up
+   * to a tag it adds. A correction whose words a live trace of the person already holds marks that trace with it:
+   * {@link remember} returns the stored trace for words its key holds, and files no second one.
+   *
+   * @returns Whether a live trace was changed: `false` when no live trace has the id.
+   */
+  async markCorrection(traceId: string, corrects: readonly string[]): Promise<boolean> {
+    await this._initPromise;
+    const brainId = this._brain.brainId;
+    const marked = await this._brain.transaction(async (trx) => {
+      const row = await trx.get<{ tags: string | null; metadata: string | null }>(
+        'SELECT tags, metadata FROM memory_traces WHERE brain_id = ? AND id = ? AND deleted = 0',
+        [brainId, traceId],
+      );
+      if (!row) return undefined;
+      let tags: string[] = [];
+      try {
+        const parsed: unknown = JSON.parse(row.tags ?? '[]');
+        if (Array.isArray(parsed)) tags = parsed.filter((tag): tag is string => typeof tag === 'string');
+      } catch {
+        // Unreadable tags are replaced by the correction's.
+      }
+      const tagAdded = !tags.includes('correction');
+      const metadata = parseTraceMetadata(row.metadata);
+      const earlier = Array.isArray(metadata.corrects)
+        ? metadata.corrects.filter((id): id is string => typeof id === 'string')
+        : [];
+      metadata.corrects = [...new Set([...earlier, ...corrects])];
+      const { changes } = await trx.run(
+        'UPDATE memory_traces SET tags = ?, metadata = ? WHERE brain_id = ? AND id = ? AND deleted = 0',
+        [JSON.stringify(tagAdded ? [...tags, 'correction'] : tags), JSON.stringify(metadata), brainId, traceId],
+      );
+      return changes > 0 ? { tagAdded } : undefined;
+    });
+    if (!marked) return false;
+    if (!marked.tagAdded) return true;
+    if (this._brain.features.dialect.name === 'postgres') {
+      // The index is the row's own `_tsv` column: re-index the changed row alone.
+      try {
+        const rebuild = this._brain.fullTextRebuild();
+        await this._brain.run(`${rebuild.sql} AND id = ?`, [...rebuild.params, traceId]);
+      } catch {
+        // Best-effort, as every full-text sync of the facade is; an open fills a column left null.
+      }
+    } else {
+      await this._rebuildFtsIndex();
+    }
+    return true;
+  }
+
+  /**
    * How many live traces one scope holds in this facade's Brain; with `includeDeleted`, the soft-deleted ones too,
    * which still hold their words until a delete for good ({@link deleteScope}) removes them.
    */
