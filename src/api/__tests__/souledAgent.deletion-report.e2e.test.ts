@@ -237,10 +237,10 @@ describe(`a deletion report a host can keep, on runtime ${RUNTIME}`, () => {
     const deleting = a.forgetUser!('alice');
     setTimeout(release, 50);
     const report = await deleting;
-    await compiling;
-
     // The routed provider received her compile's prompt before the deletion ended.
     expect(anthropic.seen.length).toBeGreaterThan(callsBeforeCompile);
+    await compiling;
+
     expect(report.recipients).toContainEqual(compiled);
     expect(report.recipients).toEqual(await a.recipients!());
     expect(tracesOf(keyOf(alice))).toEqual([]);
