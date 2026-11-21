@@ -774,7 +774,7 @@ The same object holds:
 | `held.graphLinks` | The memory graph's links whose two ends are both the person's traces (`from`, `to`, `type`, `weight`). A link to another person's trace is left out. |
 | `held.pages` | The person's compiled pages, as `pages`. |
 | `held.learner` | The person's learned state, when the agent runs a learning layer. |
-| `held.archivedOriginals`, `held.typedFacts`, `held.restoreCopies` | The verbatim originals an archive keeps of the person's traces, the typed facts extracted from them (none: a souled agent extracts none), and the corrections whose text a second copy keeps. |
+| `held.archivedOriginals`, `held.typedFacts`, `held.restoreCopies` | The verbatim originals an archive keeps of the person's traces, the typed facts extracted from them (none: a souled agent extracts none), and the corrections whose text a second copy keeps, each with its `text` when the store holds no trace of it (a restore took it and filing it again has not succeeded yet). |
 | `recipients` | `agent.recipients()`: every outside recipient of a person's text, agent-wide. |
 | `retention` | The agent's period for the person's traces (`'none'` without `retention`), and `policyDays`, the shortest `retentionDays` your `memoryPolicy` answered for the person in this process. |
 | `profiling` | `sentiment`: whether the person's messages are scored for sentiment (on `runtime: 'gmi'` with sentiment on, as your policy's latest answer for the person leaves it); `moodStamps`: how many held traces carry an emotional context other than a neutral one. |
