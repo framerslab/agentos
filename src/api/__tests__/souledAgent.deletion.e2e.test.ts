@@ -1372,6 +1372,34 @@ describe('export and correction', () => {
     expect(doc.traces.find((trace) => trace.id === t2)!.tags).toContain('correction');
   });
 
+  it('records every trace a reused correction replaced, and has the next compile read it', async () => {
+    const { a } = await open({ compile: false });
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await turn(a, 's1', 'alice', 'My canary is LARK-8.');
+    const t1 = saidOf(keyOf(alice)).find((trace) => trace.content === 'My canary is LARK-7.')!.id;
+    const t3 = saidOf(keyOf(alice)).find((trace) => trace.content === 'My canary is LARK-8.')!.id;
+
+    const first = await a.correctUserMemory!('alice', { traceIds: [t1], text: 'My canary is WREN-9.' });
+    // The second correction's words are the first's: the store returns the first correction's trace.
+    const second = await a.correctUserMemory!('alice', { traceIds: [t3], text: 'My canary is WREN-9.' });
+    expect(second.correctionTraceId).toBe(first.correctionTraceId);
+    expect(second.deleted).toBe(1);
+    expect(rows(storeFile(), 'SELECT id FROM memory_traces WHERE id IN (?, ?)', [t1, t3])).toEqual([]);
+    const [kept] = rows<{ tags: string; metadata: string }>(
+      storeFile(),
+      'SELECT tags, metadata FROM memory_traces WHERE id = ?',
+      [second.correctionTraceId],
+    );
+    expect((JSON.parse(kept.tags) as string[]).filter((tag) => tag === 'correction')).toHaveLength(1);
+    expect((JSON.parse(kept.metadata) as { corrects?: string[] }).corrects).toEqual([t1, t3]);
+    const [registry] = rows<{ rebuild_sources: string | null }>(
+      storeFile(),
+      'SELECT rebuild_sources FROM memory_scopes WHERE scope_id = ?',
+      [keyOf(alice)],
+    );
+    expect(JSON.parse(registry.rebuild_sources!) as string[]).toContain(second.correctionTraceId);
+  });
+
   it('exports the turn just sent: the export waits for the writes the turn started', async () => {
     const { a } = await open({ compile: false });
     const memory = a.memory!;
