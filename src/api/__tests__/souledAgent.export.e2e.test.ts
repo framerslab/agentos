@@ -20,6 +20,8 @@ import * as path from 'node:path';
 import Database from 'better-sqlite3';
 import pino from 'pino';
 import { souledAgent, type SouledAgent, type SouledAgentOptions } from '../souledAgent';
+import type { MemoryRecipient } from '../runtime/memoryRecipients';
+import type { UserMemoryExport } from '../../cognition/memory/io/userMemoryExport';
 import type { Brain } from '../../cognition/memory/retrieval/store/Brain';
 import { SqlMemoryGraph } from '../../cognition/memory/retrieval/store/SqlMemoryGraph';
 import { conversationScopeKey } from '../../cognition/memory/retrieval/store/conversationScopeKey';
@@ -30,53 +32,11 @@ import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegi
 /** The runtime the cases run on; a case that needs what only the GMI runtime has names it. */
 const RUNTIME = 'legacy' as const;
 
-/** One recipient of a person's text, as `recipients()` lists it. */
-interface Recipient {
-  role: string;
-  provider: string;
-  model?: string;
-}
-
 /** What `open()`'s options send a person's text to: the agent's own model, and the compile on its route. */
-const OWN_ROUTE: Recipient[] = [
+const OWN_ROUTE: MemoryRecipient[] = [
   { role: 'model', provider: 'openai', model: 'stub-model' },
   { role: 'compile', provider: 'openai', model: 'stub-model' },
 ];
-
-/** The export as these cases read it. */
-interface Exported {
-  exportedAt: string;
-  agentId: string;
-  subject: { kind: string };
-  traces: Array<{ id: string; createdAt: string; speaker?: string; text: string; tags: string[] }>;
-  pages: Array<{ id: string; summary: string; updated: string; sources: string[]; body: string }>;
-  provided: { messages: Array<{ id: string; createdAt: string; text: string }> };
-  held: {
-    traces: Array<{
-      id: string;
-      createdAt: string;
-      speaker?: string;
-      text: string;
-      tags: string[];
-      entities: string[];
-      filedBy: string;
-      emotionalContext: { valence: number; arousal: number; dominance: number; intensity: number; gmiMood: string };
-      encodingStrength: number;
-      stability: number;
-      retrievalCount: number;
-      lastAccessedAt: string;
-    }>;
-    archivedOriginals: unknown[];
-    typedFacts: unknown[];
-    graphLinks: Array<{ from: string; to: string; type: string; weight: number }>;
-    pages: unknown[];
-    restoreCopies: unknown[];
-  };
-  recipients: Recipient[];
-  retention: { period: unknown; policyDays?: number };
-  profiling: { sentiment: string; moodStamps: number };
-  unread: Array<{ store: string; reason: string }>;
-}
 
 let n = 0;
 let dir: string;
@@ -159,10 +119,8 @@ async function link(a: SouledAgent, from: { id: string; key: string }, to: { id:
   await graph.addEdge({ sourceId: from.id, targetId: to.id, type: 'SAME_TOPIC', weight, createdAt: Date.now() });
 }
 
-const exportOf = async (a: SouledAgent, userId: string): Promise<Exported> =>
-  (await a.exportUserMemory!(userId)) as unknown as Exported;
-const recipientsOf = (a: SouledAgent): Promise<Recipient[]> =>
-  (a as unknown as { recipients: () => Promise<Recipient[]> }).recipients();
+const exportOf = (a: SouledAgent, userId: string): Promise<UserMemoryExport> => a.exportUserMemory!(userId);
+const recipientsOf = (a: SouledAgent): Promise<MemoryRecipient[]> => a.recipients!();
 
 /** Writes one operator page under memory/. */
 function writeOperatorPage(text: string): void {
@@ -330,7 +288,7 @@ describe(`who receives a person's text, on runtime ${RUNTIME}`, () => {
     const r = await a.generate('What is the weather like?', { provider: 'anthropic', model: 'claude-x' });
     expect(r.text).toBe('From the other provider.');
     expect(anthropic.seen.map((call) => call.modelId)).toEqual(['claude-x']);
-    const route = { role: 'model', provider: 'anthropic', model: 'claude-x' };
+    const route: MemoryRecipient = { role: 'model', provider: 'anthropic', model: 'claude-x' };
     expect(await recipientsOf(a)).toContainEqual(route);
     await a.close();
 
