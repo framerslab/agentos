@@ -108,6 +108,7 @@ export interface UserMemoryExport {
 /** The stores an export reads, each named in {@link UserMemoryExport.unread} when its read fails. */
 export const EXPORT_STORES = [
   'recipients',
+  'tombstone ledger',
   'older traces',
   'conversation traces',
   'memory graph',
@@ -183,8 +184,9 @@ function readFailure(error: unknown): string {
  * who spoke it, and every page compiled from them; the subject's own messages (`provided`); what the store holds about
  * them (`held`); who receives a person's text; how long it is kept; and whether the subject is profiled. It reads that
  * key alone, by equality: the operator's pages, other subjects' memory and a session's own message history are not
- * in it. A forgotten subject's export is empty. A read that fails leaves its part empty and is named in `unread`, and
- * the export still returns.
+ * in it. A forgotten subject's export holds nothing of them, and its `profiling.sentiment` is `'off'`. A read that
+ * fails leaves its part empty and is named in `unread`, and the export still returns; a tombstone ledger that cannot
+ * be read leaves every part of the subject empty.
  *
  * @throws TypeError when the subject has another kind or no id, or an id no conversation key can be built from.
  */
@@ -236,14 +238,16 @@ export async function exportSubjectMemory(options: {
    * Runs one read of `store` and, once it has read everything, hands what it read to `keep`. A read that fails keeps
    * nothing of that store, is named in `unread`, and writes one `memory.export_unread` line; the export goes on.
    */
+  const unreadOf = (store: ExportStore, error: unknown): void => {
+    document.unread.push({ store, reason: readFailure(error) });
+    memoryLog.warn('memory.export_unread', { store, ...errorFields(error) });
+  };
   const reading = async <T>(store: ExportStore, read: () => Promise<T>, keep: (value: T) => void): Promise<void> => {
     let value: T;
     try {
       value = await read();
     } catch (error) {
-      const fields = errorFields(error);
-      document.unread.push({ store, reason: readFailure(error) });
-      memoryLog.warn('memory.export_unread', { store, ...fields });
+      unreadOf(store, error);
       return;
     }
     keep(value);
@@ -254,7 +258,22 @@ export async function exportSubjectMemory(options: {
       document.recipients = [...recipients];
     });
   }
-  if (memory.forgotten && (await memory.isForgotten(subject))) return document;
+  if (memory.forgotten) {
+    // A ledger that cannot be read leaves the export holding nothing of the subject: it cannot tell whether the
+    // subject was forgotten.
+    let gone: boolean;
+    try {
+      gone = await memory.isForgotten(subject);
+    } catch (error) {
+      unreadOf('tombstone ledger', error);
+      return document;
+    }
+    if (gone) {
+      // A forgotten subject's messages are filed and scored for nothing.
+      document.profiling.sentiment = 'off';
+      return document;
+    }
+  }
 
   const seen = new Set<string>();
   /** What one read of traces found, kept in the export only once the read has finished. */
@@ -316,9 +335,10 @@ export async function exportSubjectMemory(options: {
         return section;
       },
       (section) => {
-        document.traces.push(...section.traces);
-        document.provided.messages.push(...section.messages);
-        document.held.traces.push(...section.held);
+        // One push a trace: a history of any length, never one call's arguments.
+        for (const trace of section.traces) document.traces.push(trace);
+        for (const message of section.messages) document.provided.messages.push(message);
+        for (const trace of section.held) document.held.traces.push(trace);
       },
     );
   if (options.legacy?.forms.length) {
