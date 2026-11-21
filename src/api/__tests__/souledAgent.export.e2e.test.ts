@@ -14,6 +14,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
 vi.mock('../../core/llm/providers/implementations/AnthropicProvider', async () => ({ AnthropicProvider: (await import('./helpers/stubProviders')).stubProviderClass('anthropic') }));
+vi.mock('../../core/llm/providers/implementations/OpenRouterProvider', async () => ({ OpenRouterProvider: (await import('./helpers/stubProviders')).stubProviderClass('openrouter') }));
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -21,13 +23,15 @@ import Database from 'better-sqlite3';
 import pino from 'pino';
 import { souledAgent, type SouledAgent, type SouledAgentOptions } from '../souledAgent';
 import type { MemoryRecipient } from '../runtime/memoryRecipients';
-import type { UserMemoryExport } from '../../cognition/memory/io/userMemoryExport';
+import { exportSubjectMemory, type UserMemoryExport } from '../../cognition/memory/io/userMemoryExport';
+import { SqlStorageMemoryArchive } from '../../cognition/memory/archive/SqlStorageMemoryArchive';
 import type { Brain } from '../../cognition/memory/retrieval/store/Brain';
 import { SqlMemoryGraph } from '../../cognition/memory/retrieval/store/SqlMemoryGraph';
 import { conversationScopeKey } from '../../cognition/memory/retrieval/store/conversationScopeKey';
 import { reply, script, type ProviderScript } from './helpers/stubProviders';
 import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
+import { clearDefaultProvider, setDefaultProvider } from '../runtime/global-default';
 
 /** The runtime the cases run on; a case that needs what only the GMI runtime has names it. */
 const RUNTIME = 'legacy' as const;
@@ -480,9 +484,11 @@ describe(`what a model router picks, on runtime ${RUNTIME}`, () => {
 
 describe(`a tombstone ledger the export cannot read, on runtime ${RUNTIME}`, () => {
   it('is named in unread, and the export holds nothing of the person', async () => {
-    const { a } = await open();
+    const { a } = await open({ memoryPolicy: () => ({ longTerm: 'compiled', retentionDays: 7 }) });
     await turn(a, 's1', 'alice', 'My canary is LARK-7.');
     await a.memory!.compileWiki();
+    // What the host's policy answered for the person is in a readable export.
+    expect((await exportOf(a, 'alice')).retention).toEqual({ period: 'until-deletion', policyDays: 7 });
     vi.spyOn(a.memory!, 'isForgotten').mockRejectedValue(new Error('the ledger went away while reading LARK-7'));
 
     const doc = await exportOf(a, 'alice');
@@ -495,6 +501,9 @@ describe(`a tombstone ledger the export cannot read, on runtime ${RUNTIME}`, () 
     expect(doc.held.traces).toEqual([]);
     expect(doc.held.pages).toEqual([]);
     expect(doc.recipients).toEqual(OWN_ROUTE);
+    // Nothing the host answered for the person: the agent's period alone.
+    expect(doc.retention).toEqual({ period: 'until-deletion' });
+    expect(doc.profiling).toEqual({ sentiment: 'off', moodStamps: 0 });
     expect(JSON.stringify(doc)).not.toContain('LARK-7');
     const unread = events.filter((line) => line.event === 'memory.export_unread');
     expect(unread).toHaveLength(1);
@@ -517,5 +526,113 @@ describe("the embedding provider, on the GMI runtime with cognitive memory on", 
     expect((await recipientsOf(second)).filter((entry) => entry.role === 'embedding')).toEqual([
       { role: 'embedding', provider: 'openai', model: 'text-embedding-3-small' },
     ]);
+  });
+});
+
+describe(`a call that names its own provider under the agent's router, on runtime ${RUNTIME}`, () => {
+  it("names where the router's pick goes without the agent's key", async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', '');
+    const routedKey = `k-souled-export-or-${++n}`;
+    vi.stubEnv('OPENROUTER_API_KEY', routedKey);
+    const openrouter = script('openrouter', routedKey, { whole: true, replies: [reply.text('Via the gateway.')] });
+    // An Anthropic agent with a key of its own: a call on another provider takes none of it to the router's pick.
+    const { a } = await open({ provider: 'anthropic', model: 'claude-agent', router: routerPicking('anthropic', 'claude-routed') as never });
+
+    const r = await a.generate('Hello.', { provider: 'openai' });
+
+    expect(r.text).toBe('Via the gateway.');
+    expect(openrouter.seen).toHaveLength(1);
+    const listed = await recipientsOf(a);
+    expect(listed).toContainEqual({ role: 'model', provider: 'openrouter', model: openrouter.seen[0].modelId });
+  });
+});
+
+describe('the embedding a GMI agent resolves at its first turn', () => {
+  it('is named as it resolved then, after a restart too, when the default provider changed after the agent opened', async () => {
+    const embeddings = `k-souled-export-embed-${++n}`;
+    script('openai', embeddings, { replies: [] });
+    vi.stubEnv('OPENAI_API_KEY', embeddings);
+    const apiKey = `k-souled-export-${++n}`;
+    const options = { runtime: 'gmi', memory: { embedding: {} } } as Partial<SouledAgentOptions>;
+    const large: MemoryRecipient = { role: 'embedding', provider: 'openai', model: 'text-embedding-3-large' };
+    try {
+      const { a } = await open(options, apiKey);
+      expect((await recipientsOf(a)).filter((entry) => entry.role === 'embedding')).toEqual([
+        { role: 'embedding', provider: 'openai', model: 'text-embedding-3-small' },
+      ]);
+
+      setDefaultProvider({ provider: 'openai', model: 'text-embedding-3-large' });
+      await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+
+      expect(await recipientsOf(a)).toContainEqual(large);
+      await a.close();
+    } finally {
+      clearDefaultProvider();
+    }
+    const { a: again } = await open(options, apiKey);
+    expect(await recipientsOf(again)).toContainEqual(large);
+  });
+});
+
+describe('the export over an archive and a live memory graph', () => {
+  it("holds each held trace's archived original and a live graph's links between the person's own traces", async () => {
+    const { a } = await open();
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await turn(a, 's2', 'bob', 'My canary is WREN-2.');
+    const said = saidOf(keyOf(alice));
+    const [bobs] = saidOf(keyOf(bob));
+    // Originals planted through a real archive on the store's own database: one of the person's, one of another's.
+    const brain = brainBehind(a);
+    const archive = new SqlStorageMemoryArchive(brain.adapter, brain.features, brain.brainId);
+    await archive.initialize();
+    const original = 'My canary is LARK-7, the yellow one with a ring.';
+    for (const [traceId, text] of [
+      [said[0].id, original],
+      [bobs.id, 'WREN-2, the original words.'],
+    ] as const) {
+      await archive.store({
+        traceId,
+        agentId: 'aria-1',
+        verbatimContent: text,
+        contentHash: createHash('sha256').update(text, 'utf8').digest('hex'),
+        traceType: 'episodic',
+        emotionalContext: { valence: 0, arousal: 0, dominance: 0, intensity: 0, gmiMood: 'neutral' },
+        entities: [],
+        tags: [],
+        createdAt: Date.now(),
+        archivedAt: Date.now(),
+        archiveReason: 'temporal_gist',
+      });
+    }
+    const asked: Array<string | undefined> = [];
+
+    const doc = await exportSubjectMemory({
+      memory: a.memory!,
+      wiki: { storeFor: () => ({ listPages: async () => [] }) },
+      agentId: 'aria-1',
+      subject: alice,
+      archive: {
+        rehydrate: (traceId, context) => {
+          asked.push(context);
+          return archive.rehydrate(traceId, context);
+        },
+      },
+      liveGraph: {
+        getEdges: (memoryId) =>
+          memoryId === said[0].id
+            ? [
+                { sourceId: said[0].id, targetId: said[1].id, type: 'TEMPORAL_SEQUENCE', weight: 0.4 },
+                { sourceId: said[0].id, targetId: bobs.id, type: 'SAME_TOPIC', weight: 0.9 },
+              ]
+            : [],
+      },
+    });
+
+    expect(doc.held.archivedOriginals).toEqual([{ traceId: said[0].id, text: original }]);
+    // Each held trace is asked for once, as an export's read.
+    expect(asked).toEqual(said.map(() => 'user_export'));
+    expect(doc.held.graphLinks).toEqual([{ from: said[0].id, to: said[1].id, type: 'TEMPORAL_SEQUENCE', weight: 0.4 }]);
+    expect(JSON.stringify(doc)).not.toContain('WREN-2');
+    expect(JSON.stringify(doc)).not.toContain(bobs.id);
   });
 });
