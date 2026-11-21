@@ -45,6 +45,7 @@ import { reply, script, type ProviderScript } from './helpers/stubProviders';
 import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 import { conversationScopeKey } from '../../cognition/memory/retrieval/store/conversationScopeKey';
+import { Memory } from '../../cognition/memory/io/facade/Memory';
 
 /** The runtimes the cases run on: the default one, and the GMI runtime with cognitive memory off. */
 const RUNTIMES = ['legacy', 'gmi'] as const;
@@ -681,6 +682,50 @@ describe.each(RUNTIMES)('a correction kept through a restore, on runtime %s', (r
       expect(keptIn().map((row) => row.trace_id)).toEqual([filed.id]);
     },
   );
+
+  it('a correction that cannot be filed again at an open leaves the open serving, and is filed at the next one', async () => {
+    const a = await open(runtime);
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await a.close();
+    const backup = backUpStore();
+    const b = await open(runtime);
+    const wrong = idOf(saidOf(keyOf(alice)), 'LARK-7')!;
+    const { correctionTraceId } = await b.correctUserMemory!('alice', { traceIds: [wrong], text: 'My canary is WREN-9.' });
+    await b.close();
+    restoreStore(backup);
+
+    // The store refuses the correction's filing at the open, as when its embedder is down.
+    const remember = Memory.prototype.remember;
+    const refused = vi.spyOn(Memory.prototype, 'remember').mockImplementation(function (this: Memory, ...args: Parameters<Memory['remember']>) {
+      if (args[1]?.createdAt !== undefined) return Promise.reject(new Error('the embedder is down'));
+      return remember.apply(this, args);
+    });
+    events.length = 0;
+    const c = await open(runtime);
+    // The old text is gone; the correction is not filed yet, its text stays kept, and the line counts it.
+    expect(holding('LARK-7')).toEqual([]);
+    expect(storedAs('My canary is WREN-9.')).toEqual([]);
+    expect(keptIn().map((row) => row.trace_id)).toEqual([correctionTraceId]);
+    expect(lines('memory.tombstone_reapplied')[0]).toMatchObject({ traces: 1, correctionsRefiled: 0, correctionsMissed: 1 });
+    await c.close();
+
+    refused.mockRestore();
+    await open(runtime);
+    expect(storedAs('My canary is WREN-9.').map((trace) => trace.id)).toEqual([correctionTraceId]);
+  });
+
+  it("an export whose read of the kept corrections fails names the tombstone copy and fills the rest", async () => {
+    const a = await open(runtime);
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    const wrong = idOf(saidOf(keyOf(alice)), 'LARK-7')!;
+    await a.correctUserMemory!('alice', { traceIds: [wrong], text: 'My canary is WREN-9.' });
+    vi.spyOn(a.memory!.forgotten!, 'correctionsOf').mockRejectedValueOnce(new Error('the copy is busy'));
+
+    const doc = await a.exportUserMemory!('alice');
+    expect(doc.unread.map((entry) => entry.store)).toEqual(['tombstone copy']);
+    expect(doc.held.restoreCopies).toEqual([]);
+    expect(doc.traces.map((trace) => trace.text)).toContain('My canary is WREN-9.');
+  });
 
   it('a deletion with no text keeps nothing, and marks the trace deleted', async () => {
     const a = await open(runtime);

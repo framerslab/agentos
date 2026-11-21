@@ -1192,6 +1192,28 @@ describe("the ledger's deleted traces and kept corrections", () => {
     expect(await ledger.deletedTraceIds()).toEqual(['mt_fix']);
   });
 
+  it("keeps a correction and marks the traces it replaces in one write to the copy, or does neither", async () => {
+    const pair = await openPair(folder());
+    const ledger = await ForgottenLedger.open(pair);
+    await pair.copy.exec(
+      "CREATE TRIGGER refuse_marker BEFORE INSERT ON agentos_learning_forgotten WHEN NEW.hash = 't1:mt_old' BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+    );
+    const keep = kept('mt_fix', KEY_A, 'My canary is WREN-9.');
+    const marking = ledger as unknown as { markTracesDeleted(traceIds: readonly string[], options?: { keep?: KeptCorrection }): Promise<void> };
+    await expect(marking.markTracesDeleted(['mt_old'], { keep })).rejects.toThrow(/refused/);
+    // Neither part is left behind: no kept text without the marker of the trace it replaces.
+    expect(await keptRowsOf(pair.copy)).toEqual([]);
+    expect(await ledger.deletedTraceIds()).toEqual([]);
+
+    await pair.copy.exec('DROP TRIGGER refuse_marker');
+    await marking.markTracesDeleted(['mt_old'], { keep });
+    expect(await ledger.keptCorrections()).toEqual([keep]);
+    for (const side of [pair.primary, pair.copy]) expect(await markersOf(side, 't1:')).toEqual(['t1:mt_old']);
+    // With no trace to mark, the correction is kept alone.
+    await marking.markTracesDeleted([], { keep: kept('mt_same', KEY_A, 'I live in Porto.') });
+    expect((await ledger.correctionsOf(KEY_A)).map((row) => row.traceId)).toEqual(['mt_fix', 'mt_same']);
+  });
+
   it('rejects a kept correction and a deleted-trace marker when the copy refuses the write', async () => {
     const pair = await openPair(folder());
     const ledger = await ForgottenLedger.open(pair);
