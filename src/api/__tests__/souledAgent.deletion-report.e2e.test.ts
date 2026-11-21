@@ -13,6 +13,11 @@
  *   none. A store, a page or older memory nobody attributed that the deletion left is the store part missed.
  * - On a souled agent with a learning layer, `agent.learning.forgetUser` runs the same deletion as `agent.forgetUser`
  *   and returns its report with the three fields the layer's report type requires.
+ * - On `runtime: 'gmi'` a deletion empties each session the handle holds open for the person and for each linked
+ *   session: its messages, and what its GMI holds of the person (its history, its sentiment trend, its working-memory
+ *   slots). Another person's session is left as it is. A session whose turn is still running at the deadline leaves
+ *   the `sessions` part missed; it is emptied once that turn ends, the turn's memory writes are refused, and the
+ *   deletion made again reports the part reached. The default runtime clears each open session and counts it.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
@@ -41,6 +46,7 @@ import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory'
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 import { conversationScopeKey } from '../../cognition/memory/retrieval/store/conversationScopeKey';
 import { UserWikiStore } from '../../cognition/substrate/memory/wiki/UserWikiStore';
+import { GMI } from '../../cognition/substrate/GMI';
 
 /** The runtime the cases run on; a case that needs what only the GMI runtime has names it. */
 const RUNTIME = 'legacy' as const;
@@ -91,10 +97,16 @@ let replyNo = 0;
 /** Replies to spare, each with words of its own: the store keeps one trace for a text a subject's memory already holds. */
 const spare = (): ProviderScript['replies'] => Array.from({ length: 60 }, () => reply.text(`Noted ${++replyNo}.`));
 
-/** A souled agent on the stubbed provider; `retention` and `tombstoneKey` are set so two people may share the store. */
-async function open(extra: Partial<SouledAgentOptions> = {}): Promise<SouledAgent> {
+/** The script the provider of the agent opened last plays: every request it served is in `seen`. */
+let served: ProviderScript;
+
+/**
+ * A souled agent on the stubbed provider, which answers with `replies` in order; `retention` and `tombstoneKey` are
+ * set so two people may share the store.
+ */
+async function open(extra: Partial<SouledAgentOptions> = {}, replies: ProviderScript['replies'] = spare()): Promise<SouledAgent> {
   const apiKey = `k-souled-deletion-report-${++n}`;
-  script('openai', apiKey, { whole: true, replies: spare() });
+  served = script('openai', apiKey, { whole: true, replies });
   const a = await souledAgent({
     runtime: RUNTIME,
     provider: 'openai',
@@ -376,9 +388,9 @@ describe("agent.learning.forgetUser on a souled agent, on runtime 'gmi'", () => 
       deleted: { ledger: expect.any(Number), traits: expect.any(Number) },
     });
     expect(receipt.stores).toContainEqual(expect.objectContaining({ store: 'conversation memory', reached: true }));
-    // A gmi() session keeps its messages: her open session is a part the deletion did not reach.
-    expect(receipt.parts[3]).toMatchObject({ part: 'sessions', reached: false });
-    expect(receipt.complete).toBe(false);
+    // The session the handle holds open for her is emptied with the rest.
+    expect(receipt.parts[3]).toEqual({ part: 'sessions', reached: true, deleted: 1 });
+    expect(receipt.complete).toBe(true);
 
     // agent.forgetUser's own report names nobody.
     const plain = await a.forgetUser!('bob');
@@ -435,21 +447,37 @@ describe('the deletion core, called by a host of its own', () => {
   });
 });
 
-describe("a person deleted while her gmi() session stays open, on runtime 'gmi'", () => {
+describe("a person deleted while a turn of her gmi() session still runs, on runtime 'gmi'", () => {
   it('no longer counts as a person the store holds once the store part is reached', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     // No retention choice: the store may hold one person's memory.
-    const a = await open({ runtime: 'gmi', retention: undefined } as Partial<SouledAgentOptions>);
+    const a = await open({ runtime: 'gmi', retention: undefined, pendingWritesTimeoutMs: 50 } as Partial<SouledAgentOptions>, [
+      reply.text('Noted.'),
+      reply.hold([], gate, reply.text('Noted, held.')),
+      ...spare(),
+    ]);
     await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    // Her next turn waits for the model when the deletion comes.
+    const calls = served.seen.length;
+    const running = a.session('s1', { userId: 'alice' }).send('I keep it in the attic.');
+    await vi.waitFor(() => expect(served.seen.length).toBeGreaterThan(calls), { timeout: 4_000 });
+    try {
+      const report = await a.forgetUser!('alice');
 
-    const report = await a.forgetUser!('alice');
-
-    expect(report.parts[2]).toMatchObject({ part: 'store', reached: true });
-    expect(report.parts[3]).toMatchObject({ part: 'sessions', reached: false });
-    expect(report.complete).toBe(false);
-    expect(tracesOf(keyOf(alice))).toEqual([]);
-    // The store holds nothing of her: another person's session opens with no retention choice made.
-    expect(() => a.session('s2', { userId: 'bob' })).not.toThrow();
+      expect(report.parts[2]).toMatchObject({ part: 'store', reached: true });
+      expect(report.parts[3]).toMatchObject({ part: 'sessions', reached: false });
+      expect(report.complete).toBe(false);
+      expect(tracesOf(keyOf(alice))).toEqual([]);
+      // The store holds nothing of her: another person's session opens with no retention choice made.
+      expect(() => a.session('s2', { userId: 'bob' })).not.toThrow();
+    } finally {
+      release();
+    }
+    await running;
   });
 });
 
@@ -465,5 +493,201 @@ describe("open sessions that keep no history, on runtime 'gmi'", () => {
     expect(report.parts[3]).toEqual({ part: 'sessions', reached: true, deleted: 0 });
     expect(report.complete).toBe(true);
     expect(lines('memory.forget_incomplete')).toEqual([]);
+  });
+});
+
+/** The GMIs built in the case, in order: a session that keeps history builds one, with its first turn. */
+function builtGmis(): GMI[] {
+  const built: GMI[] = [];
+  const initialize = GMI.prototype.initialize;
+  vi.spyOn(GMI.prototype, 'initialize').mockImplementation(async function (this: GMI, ...args) {
+    built.push(this);
+    return initialize.apply(this, args);
+  });
+  return built;
+}
+
+/** How many times a GMI was asked to forget its person in the case, counted from here on. */
+function forgetPersonCalls(): () => number {
+  const proto = GMI.prototype as unknown as { forgetPerson?: () => Promise<void> };
+  const spy = typeof proto.forgetPerson === 'function' ? vi.spyOn(proto as { forgetPerson(): Promise<void> }, 'forgetPerson') : undefined;
+  return () => spy?.mock.calls.length ?? 0;
+}
+
+describe("a deletion and the open sessions, on runtime 'gmi' with sentiment on and cognitive memory off", () => {
+  beforeEach(() => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  });
+
+  /** A souled agent on `runtime: 'gmi'` with the full profile's sentiment and no cognitive memory. */
+  const openGmi = (extra: Partial<SouledAgentOptions> = {}, replies: ProviderScript['replies'] = spare()): Promise<SouledAgent> =>
+    open({ runtime: 'gmi', cognition: 'full', memory: false, ...extra } as unknown as Partial<SouledAgentOptions>, replies);
+
+  it('a deletion empties an idle open session', async () => {
+    const gmis = builtGmis();
+    const forgets = forgetPersonCalls();
+    const a = await openGmi();
+    const session = a.session('s1', { userId: 'alice' });
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await turn(a, 's1', 'alice', 'I keep it in the attic.');
+    expect(session.messages().length).toBeGreaterThanOrEqual(4);
+    expect(gmis).toHaveLength(1);
+    const gmi = gmis[0];
+    // Her session's GMI holds her turns, her sentiment trend with an excerpt of each message, and her last sentiment.
+    await vi.waitFor(
+      async () => {
+        const held = await gmi.getWorkingMemorySnapshot();
+        expect(held.gmi_sentiment_history?.trends?.length).toBeGreaterThan(0);
+        expect(held.currentUserContext?.currentSentiment).toBeDefined();
+        expect(JSON.stringify(held)).toContain('LARK-7');
+      },
+      { timeout: 4_000 },
+    );
+    expect(gmi.getConversationHistory().length).toBeGreaterThanOrEqual(4);
+
+    const report = await a.forgetUser!('alice');
+
+    expect(report.parts[3]).toEqual({ part: 'sessions', reached: true, deleted: 1 });
+    expect(report.complete).toBe(true);
+    expect(report.stores.map((entry) => entry.store)).not.toContain("a gmi() session's history");
+    expect(report.stores).toContainEqual({ store: 'session history in this process', reached: true, deleted: 1 });
+    expect(lines('memory.forget_incomplete')).toEqual([]);
+    expect(session.messages()).toEqual([]);
+    // The session's GMI was asked once, and holds nothing more of her.
+    expect(forgets()).toBe(1);
+    expect(gmi.getConversationHistory()).toEqual([]);
+    const held = await gmi.getWorkingMemorySnapshot();
+    expect(held).not.toHaveProperty('gmi_sentiment_history');
+    expect(held.currentUserContext).not.toHaveProperty('currentSentiment');
+    expect(JSON.stringify([held, gmi.getReasoningTrace()])).not.toContain('LARK-7');
+
+    // Her next turn on the session sends none of her earlier words.
+    const calls = served.seen.length;
+    await session.send('Is the shop open today?');
+    const sent = JSON.stringify(served.seen.slice(calls).map((call) => call.messages));
+    expect(served.seen.length).toBeGreaterThan(calls);
+    expect(sent).toContain('Is the shop open today?');
+    expect(sent).not.toContain('LARK-7');
+    expect(sent).not.toContain('attic');
+  });
+
+  it("empties each session open for the person and each linked session, and leaves another person's as it is", async () => {
+    const forgets = forgetPersonCalls();
+    const a = await openGmi();
+    const first = a.session('s1', { userId: 'alice' });
+    const second = a.session('s2', { userId: 'alice' });
+    const visitor = a.session('v1');
+    const other = a.session('s3', { userId: 'bob' });
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await turn(a, 's2', 'alice', 'I keep it in the attic.');
+    await turn(a, 'v1', undefined, 'Is the room by the weir still free?');
+    await turn(a, 's3', 'bob', 'My canary is WREN-2.');
+    const ofBob = other.messages();
+    expect(ofBob.length).toBeGreaterThanOrEqual(2);
+
+    const report = await a.forgetUser!('alice', { linkedSessions: ['v1'] });
+
+    // Her two sessions and the linked one.
+    expect(report.parts[3]).toEqual({ part: 'sessions', reached: true, deleted: 3 });
+    expect(report.complete).toBe(true);
+    expect(first.messages()).toEqual([]);
+    expect(second.messages()).toEqual([]);
+    expect(visitor.messages()).toEqual([]);
+    expect(forgets()).toBe(3);
+    expect(other.messages()).toEqual(ofBob);
+    expect(tracesOf(keyOf(bob)).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('a deletion during a running turn misses the sessions part, empties the session once the turn ends, and finishes when made again', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const a = await openGmi({ pendingWritesTimeoutMs: 50 }, [reply.text('Noted first.'), reply.hold([], gate, reply.text('Noted, held.')), ...spare()]);
+    const session = a.session('s1', { userId: 'alice' });
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    // Her next turn waits for the model when the deletion comes.
+    const calls = served.seen.length;
+    const running = session.send('I keep it in the attic.');
+    await vi.waitFor(() => expect(served.seen.length).toBeGreaterThan(calls), { timeout: 4_000 });
+    try {
+      const report = await a.forgetUser!('alice');
+
+      expect(report.parts[2]).toMatchObject({ part: 'store', reached: true });
+      expect(report.parts[3]).toEqual({ part: 'sessions', reached: false, reason: '1 open session was still running a turn at the deadline' });
+      expect(report.complete).toBe(false);
+      expect(lines('memory.forget_incomplete')).toEqual([
+        expect.objectContaining({ tombstone: 'reached', mind: 'reached', store: 'reached', sessions: 'missed' }),
+      ]);
+      // The messages are gone at once; the turn still running writes none into the session.
+      expect(session.messages()).toEqual([]);
+    } finally {
+      release();
+    }
+    expect((await running).text).toBe('Noted, held.');
+    expect(session.messages()).toEqual([]);
+    // Both memory writes of the turn that ran through the deletion are refused.
+    await vi.waitFor(() => expect(lines('memory.write_refused').filter((line) => line.reason === 'forgotten').length).toBeGreaterThanOrEqual(2), {
+      timeout: 4_000,
+    });
+    expect(tracesOf(keyOf(alice))).toEqual([]);
+
+    events.length = 0;
+    const again = await a.forgetUser!('alice');
+    expect(again.parts[3]).toEqual({ part: 'sessions', reached: true, deleted: 1 });
+    expect(again.complete).toBe(true);
+    expect(lines('memory.forget_incomplete')).toEqual([]);
+    expect(session.messages()).toEqual([]);
+    expect(tracesOf(keyOf(alice))).toEqual([]);
+  });
+});
+
+describe("a deletion and the open sessions, on runtime 'gmi' with cognitive memory on", () => {
+  it("empties the working-memory slots of the person's session", async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const gmis = builtGmis();
+    // The embedding provider reads its key from the environment.
+    const embeddings = `k-souled-deletion-report-embeddings-${++n}`;
+    script('openai', embeddings, { replies: [] });
+    vi.stubEnv('OPENAI_API_KEY', embeddings);
+    const a = await open({
+      runtime: 'gmi',
+      cognition: { memory: { embedding: { provider: 'openai' } }, mechanisms: false },
+    } as unknown as Partial<SouledAgentOptions>);
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    expect(gmis).toHaveLength(1);
+    // The session's view of cognitive memory holds a slot for each trace its turn filed.
+    const view = gmis[0].getCognitiveMemoryManager()!.getWorkingMemory();
+    expect(view.getSlotCount()).toBeGreaterThan(0);
+
+    const report = await a.forgetUser!('alice');
+
+    expect(report.parts[3]).toEqual({ part: 'sessions', reached: true, deleted: 1 });
+    expect(view.getSlotCount()).toBe(0);
+    expect(view.formatForPrompt()).toBe('');
+  });
+});
+
+describe(`a deletion and the open sessions, on runtime ${RUNTIME}`, () => {
+  it('clears each session open for the person and counts it', async () => {
+    const a = await open();
+    const first = a.session('s1', { userId: 'alice' });
+    const second = a.session('s2', { userId: 'alice' });
+    const other = a.session('s3', { userId: 'bob' });
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await turn(a, 's2', 'alice', 'I keep it in the attic.');
+    await turn(a, 's3', 'bob', 'My canary is WREN-2.');
+    const ofBob = other.messages();
+    expect(first.messages().length).toBeGreaterThanOrEqual(2);
+    expect(second.messages().length).toBeGreaterThanOrEqual(2);
+
+    const report = await a.forgetUser!('alice');
+
+    expect(report.parts[3]).toEqual({ part: 'sessions', reached: true, deleted: 2 });
+    expect(report.stores).toContainEqual({ store: 'session history in this process', reached: true, deleted: 2 });
+    expect(report.complete).toBe(true);
+    expect(first.messages()).toEqual([]);
+    expect(second.messages()).toEqual([]);
+    expect(other.messages()).toEqual(ofBob);
   });
 });

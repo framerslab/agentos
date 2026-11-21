@@ -496,7 +496,9 @@ describe('forgetUser', () => {
     await turn(again, 's2', 'bob', 'My canary is WREN-2.');
     const report = await again.forgetUser!('bob');
     expect(report.stores).toContainEqual(expect.objectContaining({ store: 'learning store', reached: true }));
-    expect(report.stores).toContainEqual(expect.objectContaining({ store: "a gmi() session's history", reached: false }));
+    // The session the handle holds open for him is emptied.
+    expect(report.stores).toContainEqual({ store: 'session history in this process', reached: true, deleted: 1 });
+    expect(report.parts[3]).toEqual({ part: 'sessions', reached: true, deleted: 1 });
     expect(tracesOf(keyOf(bob))).toEqual([]);
   });
 

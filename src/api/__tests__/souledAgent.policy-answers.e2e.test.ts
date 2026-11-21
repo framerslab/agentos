@@ -656,6 +656,8 @@ describe("the turn's answer on the GMI runtime, with sentiment on and cognitive 
     const { a } = await open({
       tombstoneKey: 'k-souled-policy-answers-tombstones',
       memoryProviderOptions: { timeoutMs: 3000 },
+      // The deletion waits this long for the turn it is called from, which holds the session until the hook answers.
+      pendingWritesTimeoutMs: 50,
       memoryPolicy: async () => {
         asked += 1;
         if (asked === 1) {
