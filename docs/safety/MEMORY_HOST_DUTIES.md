@@ -189,7 +189,7 @@ One session is one user. If you put several people into one conversation, pass o
 
 ### One process per store
 
-Run one process per `souledAgent()` store on SQLite. Where several processes share one store on PostgreSQL, a process learns of another's tombstone at its next open or at `agent.applyTombstones()`: call it on a schedule.
+Run one process per `souledAgent()` store on SQLite. Where several processes share one store on PostgreSQL, a process learns of another's tombstone at its next open or at `agent.applyTombstones()`: call it on a schedule. A correction or a deletion of named traces keeps out the reply of a turn running in the process that made the call, not in another: such a turn files its reply, which can restate what was deleted, so read the person's export after the call and delete what it filed.
 
 On PostgreSQL each tombstone write and each `applyTombstones()` takes a lock on the ledger table for one short transaction on each side, so two processes cannot lose each other's tombstones or lower the state mark. Give each part of your program that opens transactions its own adapter object, or run their transactions one at a time. This holds for a copy on PostgreSQL, or in a SQLite file opened with the native driver (`better-sqlite3`). Where that driver is not installed, `openForgottenCopy()` opens the file with sql.js, which reads the file once when it opens and writes all of it back after each write: two processes that share such a copy drop each other's tombstones from it. Give them a copy on PostgreSQL, or install `better-sqlite3`.
 
