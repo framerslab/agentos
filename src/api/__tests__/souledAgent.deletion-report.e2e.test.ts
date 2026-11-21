@@ -35,7 +35,7 @@ import * as path from 'node:path';
 import Database from 'better-sqlite3';
 import pino from 'pino';
 import { souledAgent, type SouledAgent, type SouledAgentOptions } from '../souledAgent';
-import type { ForgetMemoryReport } from '../../cognition/memory/io/forgetUserMemory';
+import { forgetUserMemory, type ForgetMemoryReport } from '../../cognition/memory/io/forgetUserMemory';
 import { reply, script, type ProviderScript } from './helpers/stubProviders';
 import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
@@ -202,7 +202,7 @@ describe(`a deletion report a host can keep, on runtime ${RUNTIME}`, () => {
   it("lists a route the person's text took while the deletion waited for their compile", async () => {
     const envKey = `k-souled-deletion-report-env-${++n}`;
     vi.stubEnv('ANTHROPIC_API_KEY', envKey);
-    script('anthropic', envKey, { whole: true, replies: spare() });
+    const anthropic = script('anthropic', envKey, { whole: true, replies: spare() });
     /** Set while a case holds the router's next pick; `asked` is called when a pick waits on it. */
     let hold: Promise<void> | undefined;
     let asked!: () => void;
@@ -225,6 +225,7 @@ describe(`a deletion report a host can keep, on runtime ${RUNTIME}`, () => {
     await turn(a, 's1', 'alice', 'I keep it in the attic.');
     const compiled = { role: 'compile', provider: 'anthropic', model: 'claude-routed' };
     expect(await a.recipients!()).not.toContainEqual(compiled);
+    const callsBeforeCompile = anthropic.seen.length;
 
     // Her compile waits on the router's pick when the deletion starts; the deletion waits for her compile.
     let release!: () => void;
@@ -238,6 +239,8 @@ describe(`a deletion report a host can keep, on runtime ${RUNTIME}`, () => {
     const report = await deleting;
     await compiling;
 
+    // The routed provider received her compile's prompt before the deletion ended.
+    expect(anthropic.seen.length).toBeGreaterThan(callsBeforeCompile);
     expect(report.recipients).toContainEqual(compiled);
     expect(report.recipients).toEqual(await a.recipients!());
     expect(tracesOf(keyOf(alice))).toEqual([]);
@@ -383,6 +386,52 @@ describe("agent.learning.forgetUser on a souled agent, on runtime 'gmi'", () => 
     expect(plain).not.toHaveProperty('namespace');
     expect(JSON.stringify(plain)).not.toContain('bob');
     expect(tracesOf(keyOf(bob))).toEqual([]);
+  });
+});
+
+describe("a souled agent's deletion after close, on runtime 'gmi'", () => {
+  it('deletes nothing, on either call, and says the agent was closed', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const a = await open({ runtime: 'gmi', learning: true } as Partial<SouledAgentOptions>);
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await a.close();
+
+    await expect(a.learning!.forgetUser!('alice')).rejects.toThrow('souledAgent: the agent was closed');
+    await expect(a.forgetUser!('alice')).rejects.toThrow('souledAgent: the agent was closed');
+    // Her rows stand for the deletion made on the agent opened again.
+    expect(tracesOf(keyOf(alice)).length).toBeGreaterThanOrEqual(2);
+    expect(lines('memory.forget_done')).toEqual([]);
+  });
+});
+
+describe('the deletion core, called by a host of its own', () => {
+  it("a callback of the host's that rejects leaves the store part missed, and the report still comes back", async () => {
+    const a = await open();
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+
+    const report = await forgetUserMemory({
+      memory: a.memory!,
+      agentId: 'aria-1',
+      subject: alice,
+      wiki: {
+        storeFor: () => {
+          throw new Error('she has no pages');
+        },
+      } as never,
+      extraStores: async () => {
+        throw new Error('the host store went away');
+      },
+    });
+
+    expect(tracesOf(keyOf(alice))).toEqual([]);
+    expect(report.complete).toBe(false);
+    expect(report.stores).toContainEqual({ store: "the caller's own stores", reached: false, reason: 'the host store went away' });
+    expect(report.parts[2]).toMatchObject({ part: 'store', reached: false });
+    expect(reasonOf(report.parts[2])).toContain('the host store went away');
+    expect(lines('memory.forget_done')).toHaveLength(1);
+    expect(lines('memory.forget_incomplete')).toEqual([
+      expect.objectContaining({ tombstone: 'reached', mind: 'reached', store: 'missed', sessions: 'reached' }),
+    ]);
   });
 });
 
