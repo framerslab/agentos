@@ -39,6 +39,8 @@ Memory makes these calls out of your process, and no others:
 
 Memory text goes to the agent's provider or to the compile provider you named, and to no other recipient.
 
+`await agent.recipients()` lists every outside recipient of a person's text from a souled agent: the agent's provider and model, a model router's pick when you set `router`, each `fallbackProviders` hop (one entry, `the automatic fallback chain`, when you set none), the compile's target (none with `compile: false`), `compile.minors`, the embedding provider of cognitive memory on `runtime: 'gmi'`, and every route a `generate()` or `stream()` call took with its own `provider` or `model`. The store records such a route as one row (`recipient:<role>:<provider>:<model>` in `brain_meta`, holding no person, no text and no time of use), so the list still names it after a restart. A provider the options leave to the environment reads `from the environment at each call`. The list is agent-wide: it names where the agent sends text, the same for every person, not which person's text went where. `exportUserMemory` carries it. The library sends these recipients nothing: telling them of a deletion or a correction is yours.
+
 ## What the library does for you
 
 Each of these is on by default.
@@ -96,7 +98,7 @@ The memory hooks fire once per turn, so one turn is filed once.
 
 ### Export and correction
 
-`await agent.exportUserMemory(userId)` returns one person's traces and pages as JSON, each page with its sources and dates. It reads the person's own scope alone. `await agent.correctUserMemory(userId, { traceIds, text })` deletes the wrong traces for good, files the corrected statement, and has the next compile rebuild the pages from what is left, so a later compile cannot bring the wrong statement back. A correction that failed partway is finished by the same call made again. It refuses, and changes nothing, when any trace named is not that person's.
+`await agent.exportUserMemory(userId)` returns one person's traces and pages as JSON, each page with its sources and dates. It reads the person's own scope alone. Beside them it holds what the person provided (`provided.messages`, their own messages and none of the agent's replies), what is held about them (`held`: each trace with its speaker, entities, filing side, emotional context, strength, stability, recall count and last recall; the memory graph's links between two of their own traces; their pages; their learned state when the agent runs a learning layer), who receives a person's text (`recipients`), the retention period (`retention`), whether their messages are scored for sentiment and how many traces carry a mood (`profiling`), and each store it could not read (`unread`, with the kind of error and never its text). `await agent.correctUserMemory(userId, { traceIds, text })` deletes the wrong traces for good, files the corrected statement, and has the next compile rebuild the pages from what is left, so a later compile cannot bring the wrong statement back. A correction that failed partway is finished by the same call made again. It refuses, and changes nothing, when any trace named is not that person's.
 
 ### Recalled text as data
 
@@ -120,7 +122,7 @@ The library gives you the calls. The duties below are the controller's.
 
 ### Say why you keep memory, and write it in your privacy notice
 
-Processing a person's conversation needs a lawful reason, and your notice must tell people what you do. For memory it names at least: the purposes; the recipients (the model provider the compile calls, and the embedding provider if you use one); any transfer to another country and what it rests on; the retention period you chose; that compiled pages are a profile of the person, and how to object where that right applies; that you keep a record of deletions so a deleted person is not filed again, and what that record holds; and what happens to backups after a deletion.
+Processing a person's conversation needs a lawful reason, and your notice must tell people what you do. For memory it names at least: the purposes; the recipients (the model provider the compile calls, and the embedding provider if you use one; `agent.recipients()` lists your agent's); any transfer to another country and what it rests on; the retention period you chose; that compiled pages are a profile of the person, and how to object where that right applies; that you keep a record of deletions so a deleted person is not filed again, and what that record holds; and what happens to backups after a deletion.
 
 ### Hold a contract with each provider memory reaches
 
@@ -143,7 +145,7 @@ Verifying that the person asking is the person the data is about, and answering 
 | A copy of their data | `agent.exportUserMemory(userId)` | Add what you hold outside memory. |
 | Their data in a portable form | `agent.exportUserMemory(userId)` | The export is JSON. |
 | A correction | `agent.correctUserMemory(userId, { traceIds, text })` | A page is written by a model and can state wrong things; check the person's export afterwards. |
-| Deletion | `agent.forgetUser(userId, { linkedSessions })`; read its report | Delete what the report says it did not reach, tell each provider and recipient, and deal with backups. |
+| Deletion | `agent.forgetUser(userId, { linkedSessions })`; read its report | Delete what the report says it did not reach, tell each provider and recipient (`agent.recipients()` lists them), and deal with backups. |
 
 The deletion does not reach: a conversation history your product keeps outside memory, a `gmi()` session's own history, the learning store of an agent that runs no learning layer, the cognitive memory of a souled agent on the GMI runtime that runs no learning layer ([the two memories of that agent](../SOUL_ENTRY_POINTS.md#with-cognitive-memory-on-the-agent-keeps-two-memories)), memory under the organization scope, documents you ingested outside the person's scope, a memory provider of your own, your logs, your analytics and your backups. Delete those on your own path. A memory provider of your own is asked about the tombstone before each write, and a write that passed that check just before the deletion can land after it: delete the provider's rows of the person once `forgetUser` has returned and the turns that were running have ended. A write still running at the deletion's deadline makes the report say `pendingAtDeadline` above 0 and `complete: false`; such a write that fails after its row is stored stays until `forgetUser` runs again or the tombstones are applied again (`agent.applyTombstones()`, which each open runs).
 
@@ -229,7 +231,7 @@ A store that an earlier release of `souledAgent()` wrote holds traces under the 
 | `sendUserIdToProvider` | Sends the session's `userId` to the model provider as the end user's id, on `runtime: 'gmi'`. Pass an opaque or hashed id when you set it. | Off: no provider receives the id. |
 | `legacyMemory` | Attributes memory from before per-user scope to one user, on one person's own machine. | Off. |
 | `soul: { path, optional: true }` | Lets an agent start when its soul fails to load. | Off: a failed load throws. |
-| `agent.forgetUser`, `agent.applyTombstones`, `agent.sweepRetention`, `agent.exportUserMemory`, `agent.correctUserMemory` | The calls your request handling, your schedule and your restore runbook use. | Present on a souled agent with a workspace folder. |
+| `agent.forgetUser`, `agent.applyTombstones`, `agent.sweepRetention`, `agent.exportUserMemory`, `agent.correctUserMemory`, `agent.recipients` | The calls your request handling, your schedule and your restore runbook use. | Present on a souled agent with a workspace folder. |
 
 A host that wires `attachMemoryWiki()` itself calls `forgetUserMemory()`, `reapplyTombstones()`, `sweepRetention()`, `exportSubjectMemory()` and `correctSubjectMemory()` with a `ForgottenLedger` of its own, and wraps a memory provider of its own with `guardMemoryProvider()`.
 
