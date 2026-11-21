@@ -672,7 +672,8 @@ export interface SouledAgentOptions extends AgentOptions {
    * (5 seconds); 0 waits for none, and `Infinity` (or any wait past the longest timer, about 24.8 days) waits for them
    * all. When the wait ends with turns or writes still pending, the compile takes what is stored and one `console.warn`
    * line gives their number. A deletion (`forgetUser`) waits as long for the person's pending writes and then, with
-   * `runtime: 'gmi'`, as long again for a turn still running on a session it empties.
+   * `runtime: 'gmi'`, as long again for a turn still running on a session it empties, unless the deletion was called
+   * from that turn's own hook or tool.
    */
   pendingWritesTimeoutMs?: number;
   /**

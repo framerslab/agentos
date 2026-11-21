@@ -56,7 +56,8 @@ export type SessionEviction = 'evicted' | 'running';
 
 /**
  * Empties one open session of what it holds of its person, waiting at most `deadlineMs` for a turn the session is
- * running. `'running'` when the turn outlasted the wait: the session is then emptied once that turn ends.
+ * running, and not at all when it is called from that turn's own hook or tool. `'running'` when the turn outlasted
+ * the wait: the session is then emptied once that turn ends.
  */
 export type SessionEvictor = (deadlineMs: number) => Promise<SessionEviction>;
 
