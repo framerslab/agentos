@@ -72,6 +72,7 @@ import {
   assertEmbeddingConfig,
   assertMemoryStore,
   createAgentCognitiveMemory,
+  embeddingBuiltFor,
   openAgentMemoryBrain,
   type AgentCognitiveMemory,
   type AgentMemoryBrain,
@@ -112,6 +113,7 @@ import type {
 import type { ICognitiveMemoryManager } from '../cognition/memory/CognitiveMemoryManager.js';
 import { sharedForgottenLedgerOf } from '../cognition/memory/suppression/learnerTombstones.js';
 import { sharedSoulStoreOf } from './runtime/soulStore.js';
+import { routeObserverOf } from './runtime/routeObserver.js';
 import { normalizeHexacoTraits } from '../cognition/substrate/personas/hexaco.js';
 
 /** The options of {@link gmi}: the options of `agent()`. */
@@ -625,6 +627,9 @@ export function gmi(opts: GmiOptions): GmiHandle {
   // And its store, read once: each session turn's view of the soul's memory rules, and whether the end user's id goes
   // to the model provider.
   const soulStore = sharedSoulStoreOf(opts);
+  // And who hears where the agent sends text: each model attempt as the gateway resolved it, and the embedding its
+  // cognitive memory was built with.
+  const routeObserver = routeObserverOf(opts);
   const layer: LearningLayerHandle | undefined = cognition.learning
     ? createLearningLayer({
         ...(learningConfig ?? {}),
@@ -757,7 +762,10 @@ export function gmi(opts: GmiOptions): GmiHandle {
       // With memory.store, the memory files into this generation's Brain; a store that does not open fails the build.
       const opened = brain ? await brain.get() : undefined;
       // Reads the environment for the embedding provider when memory.embedding names none.
-      return createAgentCognitiveMemory({ persona, memory: cognition.memory, mechanisms: cognition.mechanisms, ...(opened ? { brain: opened.brain } : {}) });
+      const builtMemory = await createAgentCognitiveMemory({ persona, memory: cognition.memory, mechanisms: cognition.mechanisms, ...(opened ? { brain: opened.brain } : {}) });
+      const embedder = embeddingBuiltFor(builtMemory);
+      if (embedder) routeObserver?.embedding(embedder);
+      return builtMemory;
     });
     return {
       get: build.get,
@@ -875,6 +883,12 @@ export function gmi(opts: GmiOptions): GmiHandle {
           // nothing and ends it with the stop, and the budget hears of no refusal for a call that would not be sent.
           const budget = turn.budget;
           const onLateUsage = turn.onLateUsage;
+          // The provider and model the attempt goes to, told as it is sent; an attempt of a stopped turn sends nothing.
+          const sending = (): void => {
+            if (!options.abortSignal?.aborted) {
+              routeObserver?.attempt({ providerId: resolution.providerId, modelId: resolution.modelId, hop: resolution.hop });
+            }
+          };
           if (budget && !options.abortSignal?.aborted) {
             // The options the gateway sends for this hop: a fallback hop's overrides raise maxTokens by its headroom
             // (fallbackHopOverrides in generateText.ts), so the estimate counts that cap. A structured request goes
@@ -899,7 +913,10 @@ export function gmi(opts: GmiOptions): GmiHandle {
               return heldAttempt(
                 budget,
                 call,
-                (held, onLate) => gateway.stream(resolution, messages, { ...options, ...held }, responseSchema, schemaName, schemaInPrompt, onLate),
+                (held, onLate) => {
+                  sending();
+                  return gateway.stream(resolution, messages, { ...options, ...held }, responseSchema, schemaName, schemaInPrompt, onLate);
+                },
                 onLateUsage,
               );
             }
@@ -909,6 +926,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
               return refusedAttempt(refusal);
             }
           }
+          sending();
           return gateway.stream(resolution, messages, options, responseSchema, schemaName, schemaInPrompt, onLateUsage);
         },
         schemaInstruction: gateway.schemaInstruction,

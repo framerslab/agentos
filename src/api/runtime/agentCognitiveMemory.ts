@@ -564,7 +564,7 @@ export async function createAgentCognitiveMemory(opts: AgentCognitiveMemoryOptio
   await manager.initialize(config);
 
   let closing: Promise<void> | undefined;
-  return {
+  const built: AgentCognitiveMemory = {
     manager,
     close: () =>
       (closing ??= (async () => {
@@ -579,4 +579,21 @@ export async function createAgentCognitiveMemory(opts: AgentCognitiveMemoryOptio
         }
       })()),
   };
+  if (embedding.label) builtEmbeddings.set(built, { ...embedding.label });
+  return built;
+}
+
+/** The provider and model each cognitive memory this module built embeds with; none for a caller's embedding manager. */
+const builtEmbeddings = new WeakMap<AgentCognitiveMemory, { provider: string; model: string }>();
+
+/**
+ * The provider and model a cognitive memory {@link createAgentCognitiveMemory} built embeds with: what its build
+ * resolved, whatever the default provider or the environment say after it. Undefined for one built on an embedding
+ * manager the caller passed, which names none.
+ *
+ * @internal
+ */
+export function embeddingBuiltFor(memory: AgentCognitiveMemory): { provider: string; model: string } | undefined {
+  const label = builtEmbeddings.get(memory);
+  return label ? { ...label } : undefined;
 }
