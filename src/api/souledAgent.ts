@@ -4,7 +4,8 @@
  *
  * Composes existing, tested pieces:
  * - {@link loadSoulFromOption} resolves the soul and its `memory/` dir.
- * - {@link Memory.createSqlite} opens the single backing store, in `memory/.store/`.
+ * - {@link Memory.createSqlite} opens the single backing store, in `memory/.store/`; with `soulStore`,
+ *   {@link Memory.createWithAdapter} opens it on the host's own adapter.
  * - {@link attachMemoryWiki} wires the wiki write-back loop + the
  *   `read_memory_page` tool + the boot index over the same facade.
  * - {@link agent} runs it; its `buildSystemPrompt` already injects the index of the operator's pages.
@@ -29,7 +30,7 @@ import {
 import { generateText } from './generateText.js';
 import type { StreamTextResult } from './streamText.js';
 import { Memory, type AttachedWiki, type ScoredTrace } from '../cognition/memory/io/facade/Memory.js';
-import type { StorageAdapter } from '@framers/sql-storage-adapter';
+import { createStorageFeatures, type StorageAdapter } from '@framers/sql-storage-adapter';
 import {
   ForgottenLedger,
   copyUnavailableError,
@@ -73,6 +74,7 @@ import { isAnonymousUserId } from './runtime/memorySubject.js';
 import { asSpendBudget } from './runtime/spendBudget.js';
 import { credentialsGoWith, modelNamesAnotherProvider } from './runtime/credentialOwner.js';
 import { resolveCognition, type CognitionInputs } from './runtime/gmiCognition.js';
+import { assertBigintReadsAsNumbers } from './runtime/agentCognitiveMemory.js';
 import { resolveModelOption } from './model.js';
 import type { AgentOSUsageLedgerOptions } from './runtime/usageLedger.js';
 
@@ -151,6 +153,65 @@ const RETENTION_REQUIRED =
  */
 const TOMBSTONE_KEY_REQUIRED =
   'souledAgent: this store would hold memory of more than one person or session; set tombstoneKey: without it, the tombstone a deletion leaves is an unkeyed SHA-256 hash of the id, which anyone who can read the ledger can match by hashing a guessed id';
+
+/** What a `soulStore` that is not `{ adapter }` with a storage adapter is refused with. */
+const SOUL_STORE_SHAPE = 'souledAgent: soulStore must be { adapter } with a StorageAdapter of @framers/sql-storage-adapter';
+
+/** What an open with `soulStore` and no `tombstoneCopy` is refused with. */
+const SOUL_STORE_NEEDS_COPY =
+  "souledAgent: soulStore needs tombstoneCopy ({ path } or { adapter }), the tombstones' second copy outside what a restore of the store replaces; the default copy is a file on one machine, and a store in the host's database usually serves several";
+
+/** What an open on a database that holds another agent's memory is refused with. */
+const SOUL_STORE_HOLDS_ANOTHER_AGENT =
+  "souledAgent: soulStore's database already holds another agent's memory; give each agent a database or PostgreSQL schema of its own: the tombstone ledger is database-wide, so two agents on one database would share each other's deletions";
+
+/** The tables a Brain keeps its rows in under its own `brain_id`; a row under another id is another agent's. */
+const BRAIN_TABLES = ['brain_meta', 'memory_traces', 'memory_scopes'] as const;
+
+/** Throws {@link SOUL_STORE_SHAPE} unless `soulStore` is `{ adapter }` with an adapter's calls. */
+function assertSoulStore(soulStore: unknown): asserts soulStore is { adapter: StorageAdapter } {
+  const adapter = soulStore !== null && typeof soulStore === 'object' ? (soulStore as { adapter?: unknown }).adapter : undefined;
+  const calls = ['get', 'all', 'run', 'exec', 'transaction'];
+  if (
+    adapter === null ||
+    typeof adapter !== 'object' ||
+    typeof (adapter as { kind?: unknown }).kind !== 'string' ||
+    calls.some((name) => typeof (adapter as Record<string, unknown>)[name] !== 'function')
+  ) {
+    throw new TypeError(SOUL_STORE_SHAPE);
+  }
+}
+
+/** Whether the database behind `adapter` holds a row of another brain than `brainId`, in a table every open makes. */
+async function holdsAnotherBrain(adapter: StorageAdapter, brainId: string): Promise<boolean> {
+  for (const table of BRAIN_TABLES) {
+    if ((await adapter.get(`SELECT 1 AS n FROM ${table} WHERE brain_id <> ? LIMIT 1`, [brainId])) != null) return true;
+  }
+  return false;
+}
+
+/**
+ * After a refused open on the host's database, deletes the `brain_meta` rows the open seeded for `brainId`, so the
+ * database holds the agents it held before and the agent whose database it is opens again. Only rows seeded at or
+ * after `since` (by this open: a brain that was there before keeps its own time) of a brain that holds no trace and no
+ * scope are deleted.
+ */
+async function dropSeededBrain(adapter: StorageAdapter, brainId: string, since: number): Promise<void> {
+  const seeded = await adapter.get<{ value: string }>("SELECT value FROM brain_meta WHERE brain_id = ? AND key = 'created_at'", [brainId]);
+  if (!seeded || !(Number(seeded.value) >= since)) return;
+  for (const table of ['memory_traces', 'memory_scopes']) {
+    if ((await adapter.get(`SELECT 1 AS n FROM ${table} WHERE brain_id = ? LIMIT 1`, [brainId])) != null) return;
+  }
+  await adapter.run('DELETE FROM brain_meta WHERE brain_id = ?', [brainId]);
+}
+
+/** Whether a file, a folder or a link is at `target`. */
+async function somethingAt(target: string): Promise<boolean> {
+  return fs.lstat(target).then(
+    () => true,
+    () => false,
+  );
+}
 
 /** Whether a tombstone copy's ledger table holds no row; false when the table cannot be read. */
 async function holdsNoLedgerRow(copy: StorageAdapter): Promise<boolean> {
@@ -465,6 +526,19 @@ export interface SouledAgentOptions extends AgentOptions {
    * never attributed.
    */
   legacyMemory?: { attributeTo: string; reason: LegacyMemoryReason };
+  /**
+   * Keeps the store in the host's own database: a `StorageAdapter` of `@framers/sql-storage-adapter`, SQLite or
+   * PostgreSQL, in place of the SQLite file `memory/.store/memory.sqlite`. Every call reaches the store there as it
+   * reaches the file. `close()` leaves the adapter open, and on SQLite the agent turns `secure_delete` on for it.
+   *
+   * Give the agent a database or PostgreSQL schema of its own: the tombstone ledger is database-wide, so the open is
+   * refused on a database that holds another agent's memory. Give it an adapter object of its own too: the agent runs
+   * its own transactions on a PostgreSQL adapter one after another, and a transaction the host runs on the same
+   * adapter is outside that order. A PostgreSQL adapter must read BIGINT as numbers (`typeParsers: { int8: 'number' }`).
+   * `tombstoneCopy` is required with it, and the open is refused while a store file is still at
+   * `memory/.store/memory.sqlite`: the memory it holds would be out of reach of every call on the new store.
+   */
+  soulStore?: { adapter: StorageAdapter };
 }
 
 /**
@@ -587,6 +661,10 @@ export type SouledAgent = Agent & {
  * @throws TypeError when `memoryPolicy`, `screen` or `sharedMemory` is set on an agent whose cognitive memory is on
  *   (`runtime: 'gmi'` with `cognition.memory`, the `full` profile, or the `memory` option): the GMI keeps that memory
  *   in a store of its own, which none of them reaches; nothing is opened.
+ * @throws TypeError when `soulStore` is not `{ adapter }`, or is set without `tombstoneCopy`; nothing is opened.
+ * @throws Error when `soulStore` is set and a store file is at `memory/.store/memory.sqlite`, or its PostgreSQL adapter
+ *   reads BIGINT as text; nothing is opened. Error when its database holds another agent's memory; what the open
+ *   seeded there is taken back and the store is closed first. The host's adapter is left open on every refusal.
  */
 export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent> {
   const {
@@ -599,6 +677,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     tombstoneCopy,
     retention,
     legacyMemory,
+    soulStore,
     ...rest
   } = opts;
   /** The ids the agent itself reads as naming nobody, beside the built-in ones. */
@@ -607,6 +686,10 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   if (sharedMemory !== undefined) assertSharedMemory(sharedMemory, anonymousUserIds);
   if (retention !== undefined) assertRetention(retention);
   if (legacyMemory !== undefined) assertLegacyMemory(legacyMemory, (id) => isAnonymousUserId(id, anonymousUserIds));
+  if (soulStore !== undefined) {
+    assertSoulStore(soulStore);
+    if (tombstoneCopy == null) throw new TypeError(SOUL_STORE_NEEDS_COPY);
+  }
   // The two hooks and sharedMemory act on this agent's own store. A GMI's cognitive memory files and recalls in a store
   // of its own, which none of them reaches: an account the policy turns off would still be remembered there, and
   // sessions sharedMemory runs as one user would not share it. They are refused together, before the soul is loaded:
@@ -653,9 +736,22 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
 
   // The operator's pages under memory/ are markdown files; what people said to the agent lives in the store.
   const storeDir = path.join(loaded.memoryDir, '.store');
-  await fs.mkdir(storeDir, { recursive: true });
-  // The store holds what people said: it stays out of version control. A .gitignore already there is left as it is.
-  createFileOutsideLinksSync(path.join(storeDir, '.gitignore'), '*\n');
+  /** The adapter of the host's database the store lives in (`soulStore`); undefined for the store's own file. */
+  const hostAdapter = soulStore?.adapter;
+  if (hostAdapter) {
+    // Checked before anything opens. A store file left beside the soul holds people the new store's calls never reach.
+    const leftover = path.join(storeDir, 'memory.sqlite');
+    if (await somethingAt(leftover)) {
+      throw new Error(
+        `souledAgent: soulStore is set and a store file is still at ${leftover}: the memory it holds would be out of reach of forgetUser, exportUserMemory, correctUserMemory and retention on the new store; move it into the host's database, or delete it, first`,
+      );
+    }
+    await assertBigintReadsAsNumbers(hostAdapter, "souledAgent: soulStore's PostgreSQL adapter");
+  } else {
+    await fs.mkdir(storeDir, { recursive: true });
+    // The store holds what people said: it stays out of version control. A .gitignore already there is left as it is.
+    createFileOutsideLinksSync(path.join(storeDir, '.gitignore'), '*\n');
+  }
   // The tombstones' second copy, outside the store's database, so a restore of the store does not replace it. A copy
   // the host passes as an adapter is the host's to close.
   const copyPath =
@@ -688,13 +784,24 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   const learningConfig = typeof rest.learning === 'object' && rest.learning !== null ? rest.learning : undefined;
   const namespaces =
     rest.runtime === 'gmi' && (rest.learning === true || learningConfig !== undefined) ? [learningConfig?.namespace ?? ''] : [];
+  /** When this open began: the rows it seeds in the host's database are dated from here on. */
+  const openedAt = Date.now();
   let memory: Memory;
   try {
-    memory = await Memory.createSqlite(path.join(storeDir, 'memory.sqlite'), {
-      graph: true,
-      selfImprove: true,
-      forgotten: { copy, ...(key ? { key } : {}), namespaces },
-    });
+    const forgottenOptions = { copy, ...(key ? { key } : {}), namespaces };
+    memory = hostAdapter
+      ? await Memory.createWithAdapter(hostAdapter, {
+          brainId: agentId,
+          graph: true,
+          selfImprove: true,
+          forgotten: forgottenOptions,
+          leaveAdapterOpen: true,
+        })
+      : await Memory.createSqlite(path.join(storeDir, 'memory.sqlite'), {
+          graph: true,
+          selfImprove: true,
+          forgotten: forgottenOptions,
+        });
   } catch (err) {
     // A store whose copy is missing or unreadable, or whose tombstones need a key not given, serves nothing. A copy
     // file this open made is removed with it while its ledger table holds no row, so the next open still finds the
@@ -702,6 +809,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     const emptyNewCopy = ownCopy !== undefined && !ownCopy.existed && (await holdsNoLedgerRow(ownCopy.adapter));
     await closeCopy();
     if (emptyNewCopy && copyPath !== undefined) await fs.rm(copyPath, { force: true }).catch(() => undefined);
+    // The host's database is left as this open found it, and its adapter open.
+    if (hostAdapter) await dropSeededBrain(hostAdapter, agentId, openedAt).catch(() => undefined);
     throw err;
   }
   /** The store's forgotten-user ledger: every write and read of a subject asks it. */
@@ -723,6 +832,22 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       throw err;
     }
   };
+
+  if (hostAdapter) {
+    // One agent a database: the tombstone ledger is database-wide. Every open seeds its own brain_meta rows before
+    // this reads, so of two agents opened at once on an empty database the one that reads second finds the other's.
+    if (await closingOnThrow(() => holdsAnotherBrain(hostAdapter, agentId))) {
+      // The store is closed first, then what this open seeded is taken back: the agent whose database it is opens again.
+      await closeStore().catch(() => undefined);
+      await dropSeededBrain(hostAdapter, agentId, openedAt).catch(() => undefined);
+      throw new Error(SOUL_STORE_HOLDS_ANOTHER_AGENT);
+    }
+    // A deleted row's bytes are overwritten in a SQLite file; the pragma builder answers nothing on PostgreSQL.
+    await closingOnThrow(async () => {
+      const secure = createStorageFeatures(hostAdapter).dialect.pragma('secure_delete', 'ON');
+      if (secure) await hostAdapter.exec(secure);
+    });
+  }
 
   /** The user every session that names none, and every one-shot call, runs as; undefined without `sharedMemory`. */
   const sharedUser = sharedMemory?.as;
