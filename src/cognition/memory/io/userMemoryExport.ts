@@ -225,13 +225,12 @@ export async function exportSubjectMemory(options: {
     provided: { messages: [] },
     held: { traces: [], archivedOriginals: [], typedFacts: [], graphLinks: [], pages: [], restoreCopies: [] },
     recipients: [],
+    // What the host answered for this subject (policyDays, the sentiment its answer leaves) is added once the ledger
+    // says the subject is not forgotten.
     retention: options.retention
-      ? {
-          period: typeof options.retention.period === 'object' ? { ...options.retention.period } : options.retention.period,
-          ...(options.retention.policyDays !== undefined ? { policyDays: options.retention.policyDays } : {}),
-        }
+      ? { period: typeof options.retention.period === 'object' ? { ...options.retention.period } : options.retention.period }
       : { period: 'none' },
-    profiling: { sentiment: options.profilingOf?.(key) ?? 'off', moodStamps: 0 },
+    profiling: { sentiment: 'off', moodStamps: 0 },
     unread: [],
   };
   /**
@@ -268,12 +267,11 @@ export async function exportSubjectMemory(options: {
       unreadOf('tombstone ledger', error);
       return document;
     }
-    if (gone) {
-      // A forgotten subject's messages are filed and scored for nothing.
-      document.profiling.sentiment = 'off';
-      return document;
-    }
+    // A forgotten subject's messages are filed and scored for nothing.
+    if (gone) return document;
   }
+  if (options.retention?.policyDays !== undefined) document.retention.policyDays = options.retention.policyDays;
+  document.profiling.sentiment = options.profilingOf?.(key) ?? 'off';
 
   const seen = new Set<string>();
   /** What one read of traces found, kept in the export only once the read has finished. */

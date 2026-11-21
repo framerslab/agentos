@@ -1918,11 +1918,11 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     return { provider, model };
   };
   /**
-   * The embedding route of cognitive memory on the GMI runtime, as the memory resolves it when it is built (a model's
-   * `provider:` prefix, the provider's default model, the environment's pick when no provider is named); undefined
-   * when cognitive memory is off.
+   * The embedding route of cognitive memory on the GMI runtime, resolved now as the memory resolves it when it is built
+   * (a model's `provider:` prefix, the provider's default model, the default provider's or the environment's pick when
+   * no provider is named); undefined when cognitive memory is off. {@link embeddingRoute} is the route at open.
    */
-  const embeddingRoute = ((): NamedRoute | undefined => {
+  const embeddingNow = (): NamedRoute | undefined => {
     if (rest.runtime !== 'gmi') return undefined;
     let memoryConfig: ReturnType<typeof resolveCognition>['memory'];
     try {
@@ -1937,7 +1937,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       // gmi() refuses to build such a memory; named as the options give it.
       return { provider: memoryConfig.embedding?.provider, model: memoryConfig.embedding?.model };
     }
-  })();
+  };
+  const embeddingRoute = embeddingNow();
   /** The options' own fallback hops, each with its own key and base URL; undefined for the automatic chain. */
   const optionHops: CallRoute[] | undefined = Array.isArray(rest.fallbackProviders)
     ? rest.fallbackProviders
@@ -1991,7 +1992,12 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
    * credential layer sends them, the call's own key and base URL going with a pick of the call's own provider alone.
    * A pick that names no provider keeps the call's. Every other member reads through to `router`, called on it.
    */
-  const recordingPicks = (router: IModelRouter, role: MemoryRecipient['role'], own: () => CallRoute): IModelRouter => ({
+  const recordingPicks = (
+    router: IModelRouter,
+    role: MemoryRecipient['role'],
+    own: () => CallRoute,
+    alsoWithoutOwnCredentials: () => boolean = () => false,
+  ): IModelRouter => ({
     get routerId() {
       return router.routerId;
     },
@@ -2005,20 +2011,12 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
         const call = own();
         const provider = picked.modelInfo?.providerId ?? call.provider;
         const ownProvider = provider === call.provider;
+        const pick: CallRoute = { provider, model: picked.modelId, ...(call.strict ? { strict: true } : {}) };
         noteRoute(
-          routeRecipient(
-            role,
-            destinationOf(
-              {
-                provider,
-                model: picked.modelId,
-                ...(ownProvider ? { apiKey: call.apiKey, baseUrl: call.baseUrl } : {}),
-                ...(call.strict ? { strict: true } : {}),
-              },
-              true,
-            ),
-          ),
+          routeRecipient(role, destinationOf(ownProvider ? { ...pick, apiKey: call.apiKey, baseUrl: call.baseUrl } : pick, true)),
         );
+        // A call that names another provider than `own` sends none of its key or base URL with this pick.
+        if (ownProvider && alsoWithoutOwnCredentials()) noteRoute(routeRecipient(role, destinationOf(pick, true)));
       }
       return picked;
     },
@@ -2063,11 +2061,18 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
 
   /** The agent's own route, as its options give it. */
   const agentRoute: CallRoute = { provider: rest.provider, model: rest.model, apiKey: rest.apiKey, baseUrl: rest.baseUrl };
+  /**
+   * The GMI runtime's calls running now that name their own provider: the agent's router serves them too, and a pick
+   * of the agent's provider takes none of the agent's key or base URL on such a call.
+   */
+  let gmiCallsOnOwnProvider = 0;
   const agentOptions: AgentOptions = {
     ...rest,
     ...(budget ? { budget } : {}),
     // Each pick of the agent's model router is recorded where it sends the text, as a call's own route is.
-    ...(rest.router ? { router: recordingPicks(rest.router, 'model', () => agentRoute) } : {}),
+    ...(rest.router
+      ? { router: recordingPicks(rest.router, 'model', () => agentRoute, () => gmiCallsOnOwnProvider > 0) }
+      : {}),
     memoryProvider: provider,
     tools,
   };
@@ -2133,6 +2138,12 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
           })
         : optionHops;
     for (const hop of hops ?? []) noteRoute(routeRecipient('fallback-model', destinationOf(hop, true)));
+    // The GMI runtime builds cognitive memory at its first use and resolves the embedding then: a default provider or
+    // an environment changed since the agent opened sends it elsewhere.
+    if (embeddingRoute) {
+      const embeddingAtCall = embeddingNow();
+      if (embeddingAtCall) noteRoute(routeRecipient('embedding', embeddingAtCall));
+    }
     return own;
   };
   /**
@@ -2140,12 +2151,34 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
    * otherwise, and on the GMI runtime, which refuses a call's own router.
    */
   const withRecordedRouter = <E>(extra: E, own: CallRoute): E => {
-    if (rest.runtime === 'gmi' || extra === null || typeof extra !== 'object') return extra;
-    const router = (extra as { router?: unknown }).router;
+    if (rest.runtime === 'gmi') return extra;
+    const given = extra !== null && typeof extra === 'object' ? (extra as Record<string, unknown>) : undefined;
+    // The router the call runs with: its own (`router: undefined` turns the agent's off), else the agent's.
+    const router = given && 'router' in given ? given.router : rest.router;
     if (router === null || typeof router !== 'object' || typeof (router as IModelRouter).selectModel !== 'function') {
       return extra;
     }
-    return { ...(extra as object), router: recordingPicks(router as IModelRouter, 'model', () => own) } as E;
+    return { ...(given ?? {}), router: recordingPicks(router as IModelRouter, 'model', () => own) } as unknown as E;
+  };
+  /**
+   * Runs a GMI call that names its own provider other than the agent's while it is counted, so a pick of the agent's
+   * router is recorded both with and without the agent's credentials.
+   */
+  const countingOwnProvider = <T>(own: CallRoute, run: () => T, settled: (result: T) => Promise<unknown>): T => {
+    if (rest.runtime !== 'gmi' || own.provider === rest.provider) return run();
+    gmiCallsOnOwnProvider += 1;
+    let result: T;
+    try {
+      result = run();
+    } catch (error) {
+      gmiCallsOnOwnProvider -= 1;
+      throw error;
+    }
+    const done = () => {
+      gmiCallsOnOwnProvider -= 1;
+    };
+    void settled(result).then(done, done);
+    return result;
   };
   /**
    * Who receives a person's text: where the options' routes go in this process now, then every route a call took
@@ -2160,12 +2193,21 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   const generateTurn = built.generate.bind(built);
   built.generate = (prompt, extra) => {
     const own = noteCallRoute(extra);
-    return awaitedOnClose(generateTurn(prompt, withRecordedRouter(extra, own)));
+    return awaitedOnClose(
+      countingOwnProvider(own, () => generateTurn(prompt, withRecordedRouter(extra, own)), (turn) => turn),
+    );
   };
   const streamTurn = built.stream.bind(built);
   built.stream = (prompt, extra) => {
     const own = noteCallRoute(extra);
-    return awaitStreamOnClose(streamTurn(prompt, withRecordedRouter(extra, own)), extra?.abortSignal);
+    return awaitStreamOnClose(
+      countingOwnProvider(
+        own,
+        () => streamTurn(prompt, withRecordedRouter(extra, own)),
+        (streamed) => Promise.allSettled([streamed.usage, streamed.text]),
+      ),
+      extra?.abortSignal,
+    );
   };
   const openSession = built.session.bind(built);
   const trackedSessions = new WeakSet<AgentSession>();
