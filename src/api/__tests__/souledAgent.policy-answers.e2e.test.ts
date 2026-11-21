@@ -16,6 +16,9 @@
  * - `profiling: 'off'` and `minor: true` are valid with exactly those values; any other value fails closed.
  * - A later answer for a person, given to any session, replaces the answer another session of theirs keeps from that
  *   session's next turn, and a later failure makes it ask again.
+ * - On `runtime: 'gmi'` with sentiment on and cognitive memory off (`cognition: 'full'`, `memory: false`), a minor's
+ *   turn and the turn of a person who objects to profiling are not scored for sentiment, and no turn sends the
+ *   person's id to the provider. The host is asked once a turn, for the recall, the turn and both writes.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
@@ -32,6 +35,7 @@ import { reply, script, type ProviderScript } from './helpers/stubProviders';
 import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 import { clearDefaultProvider, setDefaultProvider } from '../runtime/global-default';
+import { SentimentTracker } from '../../cognition/substrate/SentimentTracker';
 
 /** The runtimes every case runs on: the default runtime, and the GMI runtime with cognitive memory off. */
 const RUNTIMES = ['legacy', 'gmi'] as const;
@@ -470,5 +474,86 @@ describe.each(RUNTIMES)('policy answers, on runtime %s', (runtime) => {
       expect(texts).not.toContain('Keep nothing of me.');
       expect(texts).toHaveLength(4);
     });
+  });
+});
+
+describe("the turn's answer on the GMI runtime, with sentiment on and cognitive memory off", () => {
+  /** A souled agent on `runtime: 'gmi'` with the full profile's sentiment and no cognitive memory. */
+  async function open(extra: Partial<SouledAgentOptions> = {}): Promise<{ a: SouledAgent; s: ProviderScript }> {
+    const apiKey = `k-souled-policy-answers-${++n}`;
+    const s = script('openai', apiKey, { whole: true, replies: Array.from({ length: 12 }, (_, i) => reply.text(`Noted ${i}.`)) });
+    const a = await souledAgent({
+      runtime: 'gmi',
+      cognition: 'full',
+      memory: false,
+      provider: 'openai',
+      model: 'stub-model',
+      apiKey,
+      fallbackProviders: [],
+      soul: dir,
+      ...extra,
+    } as unknown as SouledAgentOptions);
+    opened.push(a);
+    return { a, s };
+  }
+
+  beforeEach(() => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  });
+
+  it.each<[string, MemoryPolicy, number]>([
+    ['an adult is scored once', { longTerm: 'compiled' }, 1],
+    ['a minor is not scored', { longTerm: 'compiled', minor: true }, 0],
+    ['a minor on a store kept for days is not scored', { longTerm: 'compiled', retentionDays: 7, minor: true }, 0],
+    ['a person who objects to profiling is not scored', { longTerm: 'compiled', profiling: 'off' }, 0],
+    ['a person who keeps no memory and objects to profiling is not scored', { longTerm: 'off', profiling: 'off' }, 0],
+    ['a person who keeps no memory is scored once', { longTerm: 'off' }, 1],
+  ])('%s, and the turn sends no end-user id', async (_case, answer, scored) => {
+    // The analysis is counted and answers nothing, so no model call or event comes of it.
+    const analyze = vi.spyOn(SentimentTracker.prototype, 'analyzeTurnSentiment').mockResolvedValue(undefined);
+    const { a, s } = await open({ ...(answer.minor && 'retentionDays' in answer ? { retention: { traces: { days: 30 } } } : {}), memoryPolicy: () => answer });
+
+    const result = await a.session('s1', { userId: 'alice' }).send('Hello there, I had a rough day.');
+
+    expect(result.text).toBe('Noted 0.');
+    expect(analyze).toHaveBeenCalledTimes(scored);
+    const calls = s.seen.filter((call) => !isMerge(call));
+    expect(calls).toHaveLength(1);
+    for (const call of calls) expect(call.options.userId).toBeUndefined();
+  });
+
+  it('a policy hook that fails leaves the turn unscored', async () => {
+    const analyze = vi.spyOn(SentimentTracker.prototype, 'analyzeTurnSentiment').mockResolvedValue(undefined);
+    const { a } = await open({
+      memoryPolicy: () => {
+        throw new Error('the account service is down');
+      },
+    });
+    await a.session('s1', { userId: 'alice' }).send('Hello there.');
+    expect(analyze).not.toHaveBeenCalled();
+  });
+
+  it.each<[string, () => MemoryPolicy]>([
+    ['answers', () => ({ longTerm: 'compiled' })],
+    [
+      'throws',
+      () => {
+        throw new Error('the account service is down');
+      },
+    ],
+  ])('the host is asked once a turn when its hook %s: the recall, the turn and both writes share the answer', async (_case, hook) => {
+    vi.spyOn(SentimentTracker.prototype, 'analyzeTurnSentiment').mockResolvedValue(undefined);
+    let asked = 0;
+    const { a } = await open({
+      memoryPolicy: () => {
+        asked += 1;
+        return hook();
+      },
+    });
+    await a.session('s1', { userId: 'alice' }).send('Hello there.');
+    // close() waits for the turn's two writes.
+    opened.splice(opened.indexOf(a), 1);
+    await a.close();
+    expect(asked).toBe(1);
   });
 });
