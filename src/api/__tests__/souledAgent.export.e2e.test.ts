@@ -624,6 +624,42 @@ describe('the embedding a GMI agent built, when the default provider changes aft
   });
 });
 
+describe('the embedding a GMI agent built, when the store fails to record it once', () => {
+  it('is recorded again at the next turn, and named after a restart', async () => {
+    const embeddings = `k-souled-export-embed-${++n}`;
+    script('openai', embeddings, { replies: [] });
+    vi.stubEnv('OPENAI_API_KEY', embeddings);
+    const apiKey = `k-souled-export-${++n}`;
+    const options = { runtime: 'gmi', memory: { embedding: { dimension: 1536 } } } as Partial<SouledAgentOptions>;
+    const large: MemoryRecipient = { role: 'embedding', provider: 'openai', model: 'text-embedding-3-large' };
+    try {
+      const { a } = await open(options, apiKey);
+      const brain = brainBehind(a);
+      const setMeta = brain.setMeta.bind(brain);
+      let refused = 0;
+      vi.spyOn(brain, 'setMeta').mockImplementation(async (key: string, value: string) => {
+        if (key.startsWith('recipient:embedding:') && refused === 0) {
+          refused += 1;
+          throw new Error('the store is busy');
+        }
+        return setMeta(key, value);
+      });
+      // The memory is built at the first turn on the default changed since the agent opened; its route's write fails.
+      setDefaultProvider({ provider: 'openai', model: 'text-embedding-3-large' });
+      await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+      await vi.waitFor(() => expect(events.some((line) => line.event === 'memory.recipient_unrecorded')).toBe(true));
+      expect(refused).toBe(1);
+
+      await turn(a, 's1', 'alice', 'I keep it in the attic.');
+      await a.close();
+    } finally {
+      clearDefaultProvider();
+    }
+    const { a: again } = await open(options, apiKey);
+    expect(await recipientsOf(again)).toContainEqual(large);
+  });
+});
+
 describe('the export over an archive and a live memory graph', () => {
   it("holds each held trace's archived original and a live graph's links between the person's own traces", async () => {
     const { a } = await open();
