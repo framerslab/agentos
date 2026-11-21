@@ -1393,7 +1393,6 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     if (retention === undefined && count > 1) throw new Error(RETENTION_REQUIRED);
     assertSubjectAllowed(count);
     const session = openSession(id, sessionOptions);
-    noteUnkeyed(count);
     const subjectKey = reopened ?? sessionKeyOf(session.id, sessionOptions?.userId);
     if (subjectKey !== undefined) {
       subjects.add(subjectKey);
@@ -1423,6 +1422,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       const streamSession = session.stream.bind(session);
       session.stream = (input, streamOpts) => awaitStreamOnClose(streamSession(input, streamOpts), streamOpts?.abortSignal);
     }
+    // Once the session is registered and wrapped: a logger that opens a session of its own finds this one in place.
+    noteUnkeyed(count);
     return session;
   };
 
@@ -1607,8 +1608,9 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       const subject = reapplied[at];
       if (report.complete && subject) subjects.delete(conversationScopeKey(agentId, subject));
     });
-    // Read once the ledger is up to date from its copy: at the open, and again while it held none.
-    if (!forgotten.keyed && !ledgerHoldsTombstones) ledgerHoldsTombstones = (await forgotten.size()) > 0;
+    // Read once the ledger is up to date from its copy: at the open, and again while it held none. Only a tombstone
+    // found turns the flag on: a read that began before a deletion wrote can answer after it, with none.
+    if (!forgotten.keyed && !ledgerHoldsTombstones && (await forgotten.size()) > 0) ledgerHoldsTombstones = true;
     return reports;
   };
   built.applyTombstones = () => awaitedOnClose(applyTombstones());
