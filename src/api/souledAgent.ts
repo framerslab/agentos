@@ -318,6 +318,13 @@ function assertCompileMinors(compile: unknown): void {
       "souledAgent: compile.minors needs { provider, model } as non-empty strings (apiKey and baseUrl strings when given): a minor's compile goes only to the target named for it",
     );
   }
+  // A `provider:` prefix the library knows wins over the named provider when the call resolves, so such a model
+  // would send a minor's compile to the provider of the prefix, on that provider's key from the environment.
+  if (modelNamesAnotherProvider(target.provider as string, target.model as string)) {
+    throw new TypeError(
+      "souledAgent: compile.minors.model names another provider than compile.minors.provider; name the model without that provider's prefix, or name that provider",
+    );
+  }
 }
 
 /**
@@ -586,7 +593,8 @@ export interface SouledAgentOptions extends AgentOptions {
    *
    * `minors` names where the compile of an account `memoryPolicy` answers `minor: true` for goes: that provider and
    * model alone, with no fallback and no router, as a named target above. `provider` and `model` are required and
-   * non-empty, or the agent does not open (`TypeError`). Without it, no page is compiled for a minor. An object that
+   * non-empty, and a `model` whose `provider:` prefix names another provider is refused, or the agent does not open
+   * (`TypeError`). Without it, no page is compiled for a minor. An object that
    * holds `minors` alone leaves every other account's compile on the agent's own provider, model and route.
    */
   compile?:
