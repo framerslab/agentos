@@ -14,7 +14,7 @@ import { memoryLog } from '../log.js';
 import { CONVERSATION_SCOPE, conversationScopeKey } from '../retrieval/store/conversationScopeKey.js';
 import { memoryGraphEdgesAmong } from '../retrieval/store/SqlMemoryGraph.js';
 import { parseTraceMetadata } from '../retrieval/store/tracePersistence.js';
-import type { SuppressionSubject } from '../suppression/ForgottenLedger.js';
+import type { KeptCorrection, SuppressionSubject } from '../suppression/ForgottenLedger.js';
 import { guardedWrite } from '../suppression/guardedWrite.js';
 import { brainOf } from './facade/handedBrain.js';
 import type { Memory } from './facade/Memory.js';
@@ -109,6 +109,7 @@ export interface UserMemoryExport {
 export const EXPORT_STORES = [
   'recipients',
   'tombstone ledger',
+  'tombstone copy',
   'older traces',
   'conversation traces',
   'memory graph',
@@ -406,7 +407,7 @@ export async function exportSubjectMemory(options: {
   // The corrections whose text the tombstones' second copy keeps, so a restore of the store does not lose them.
   const ledger = memory.forgotten;
   if (ledger) {
-    await reading('tombstone ledger', () => ledger.correctionsOf(key), (kept) => {
+    await reading('tombstone copy', () => ledger.correctionsOf(key), (kept) => {
       document.held.restoreCopies = kept.map((row) => ({ traceId: row.traceId }));
     });
   }
@@ -459,7 +460,8 @@ export interface SubjectCorrectionResult {
  * On a store with a forgotten-user ledger, the correction's text is kept in the ledger's second copy under the id of
  * its trace, and each named trace is recorded there as deleted, before any of them is deleted: every open and every
  * re-application of the tombstones deletes a recorded trace a restore brought back and files a kept correction a
- * restore took away. A write to the copy that fails rejects the call before any named trace is recorded or deleted.
+ * restore took away. A write to the copy that fails rejects the call before any named trace is recorded or deleted;
+ * the pages built from them may be deleted by then, and the next compile builds them again.
  *
  * The named traces go last, so a call that failed partway is finished by the same call made again: it still finds
  * them. An index rewrite or a log checkpoint that fails does not fail the call; one `memory.erasure_unfinished` line
@@ -547,6 +549,8 @@ export async function correctSubjectMemory(
     }
 
     let correctionTraceId: string | undefined;
+    /** The correction's text, for the tombstones' second copy. */
+    let kept: KeptCorrection | undefined;
     if (replacement !== undefined) {
       const filed = await guardedWrite(
         { isForgotten: (who) => (memory.forgotten ? memory.isForgotten(who) : Promise.resolve(false)) },
@@ -584,15 +588,15 @@ export async function correctSubjectMemory(
       if (!(await memory.markCorrection(correctionTraceId, ids))) {
         throw new Error('correctUserMemory: the correction is no longer stored; no named trace was deleted');
       }
-      // Its text goes to the tombstones' second copy, which a restore of the store does not replace, before any named
-      // trace is recorded or deleted: a restore from before this call has it filed again at the next open.
-      await ledger?.keepCorrection({ traceId: correctionTraceId, scopeId: key, text: replacement, createdAt: Number(filed.result.createdAt) });
+      kept = { traceId: correctionTraceId, scopeId: key, text: replacement, createdAt: Number(filed.result.createdAt) };
     }
 
-    // The traces that go are recorded as deleted in both copies of the ledger first: a restore from before this call
-    // has them deleted again at the next open, and a call that fails from here is finished by the same call made again.
+    // The traces that go are recorded as deleted in both copies of the ledger, and the correction's text is kept in the
+    // tombstones' second copy in the same write to it, before any named trace is deleted: a restore from before this
+    // call has them deleted again and the correction filed again at the next open, and a call that fails from here is
+    // finished by the same call made again.
     const going = ids.filter((id) => id !== correctionTraceId);
-    await ledger?.markTracesDeleted(going);
+    await ledger?.markTracesDeleted(going, kept ? { keep: kept } : {});
     const { deleted } = await memory.deleteTraces(going);
     try {
       // A delete only marks a vector in the index, and the log still holds the pages written before the delete.
