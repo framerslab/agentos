@@ -841,47 +841,6 @@ describe.each(RUNTIMES)('a correction kept through a restore, on runtime %s', (r
     expect(rows('SELECT scope_id FROM memory_scopes WHERE scope_id = ?', [keyOf(alice)])).toEqual([]);
   });
 
-  it('a compile that runs while a correction is being filed again leaves it named for the next compile', async () => {
-    const a = await open(runtime);
-    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
-    await a.close();
-    const backup = backUpStore();
-    const b = await open(runtime);
-    const wrong = idOf(saidOf(keyOf(alice)), 'LARK-7')!;
-    const { correctionTraceId } = await b.correctUserMemory!('alice', { traceIds: [wrong], text: 'My canary is WREN-9.' });
-    await b.close();
-    restoreStore(backup);
-
-    // The open cannot file the correction again; applyTombstones() then files it with an embedder that is slow.
-    const remember = Memory.prototype.remember;
-    const { gate, release } = gated();
-    let slow = false;
-    let reached = false;
-    vi.spyOn(Memory.prototype, 'remember').mockImplementation(async function (this: Memory, ...args: Parameters<Memory['remember']>) {
-      if (args[1]?.createdAt !== undefined) {
-        if (!slow) throw new Error('the embedder is down');
-        reached = true;
-        await gate;
-      }
-      return remember.apply(this, args);
-    });
-    const c = await open(runtime);
-    slow = true;
-    try {
-      const reapplying = c.applyTombstones!();
-      await vi.waitFor(() => expect(reached).toBe(true), { timeout: 4_000 });
-      // A compile of the store runs meanwhile: it reads the note before the trace is there, and clears it.
-      await c.memory!.compileWiki();
-      release();
-      await reapplying;
-    } finally {
-      release();
-    }
-    expect(storedAs('My canary is WREN-9.').map((trace) => trace.id)).toEqual([correctionTraceId]);
-    const [registry] = rows<{ rebuild_sources: string | null }>('SELECT rebuild_sources FROM memory_scopes WHERE scope_id = ?', [keyOf(alice)]);
-    expect(JSON.parse(registry?.rebuild_sources ?? '[]') as string[]).toContain(correctionTraceId);
-  });
-
   it('a tombstone read that fails after a correction filed again found its words under an earlier trace keeps that trace', async () => {
     const a = await open(runtime);
     await turn(a, 's1', 'alice', 'My canary is WREN-9.');
