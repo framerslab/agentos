@@ -626,16 +626,19 @@ function holdsTag(tags: string, tag: string): boolean {
  * trace the ledger records as deleted, or that is older than its key's retention period goes from the copy instead.
  * Another agent's kept rows are left to that agent.
  *
- * @returns How many corrections were filed again.
+ * A kept row the store refuses to file again (a write or an embedding that fails) stays kept, is counted, and is tried
+ * again at the next re-application: an open does not fail on it.
+ *
+ * @returns How many corrections were filed again, and how many could not be.
  */
 async function refileKeptCorrections(
   options: Pick<ReapplyTombstonesOptions, 'memory' | 'agentId' | 'onKey' | 'retentionDaysOf' | 'now'>,
   ledger: ForgottenLedger,
-): Promise<number> {
+): Promise<{ refiled: number; missed: number }> {
   const { memory, agentId } = options;
   const now = options.now ?? Date.now;
   const kept = await ledger.keptCorrections();
-  if (kept.length === 0) return 0;
+  if (kept.length === 0) return { refiled: 0, missed: 0 };
   const byKey = new Map<string, typeof kept>();
   const drop: string[] = [];
   for (const row of kept) {
@@ -648,6 +651,7 @@ async function refileKeptCorrections(
     byKey.set(row.scopeId, [...(byKey.get(row.scopeId) ?? []), row]);
   }
   let refiled = 0;
+  let missed = 0;
   for (const [key, rows] of byKey) {
     const subject = parseConversationScopeKey(key)!.subject as SuppressionSubject;
     const work = async (): Promise<void> => {
@@ -668,45 +672,52 @@ async function refileKeptCorrections(
           continue;
         }
         const there = present.get(row.traceId);
-        if (there) {
-          // The store holds it; a restore from before the trace was marked a correction took the tag. As the correction
-          // did, it is named for the next compile to read by id: the restored watermark can be past it.
-          if (!there.deleted) {
-            const snapshot = await memory.readTrace(row.traceId);
-            if (snapshot && !holdsTag(snapshot.tags, 'correction')) {
-              await memory.markCorrection(row.traceId, []);
-              await memory.addRebuildSources(key, [row.traceId]);
+        try {
+          if (there) {
+            // The store holds it; a restore from before the trace was marked a correction took the tag. As the
+            // correction did, it is named for the next compile to read by id: the restored watermark can be past it.
+            if (!there.deleted) {
+              const snapshot = await memory.readTrace(row.traceId);
+              if (snapshot && !holdsTag(snapshot.tags, 'correction')) {
+                await memory.markCorrection(row.traceId, []);
+                await memory.addRebuildSources(key, [row.traceId]);
+              }
             }
+            continue;
           }
-          continue;
+          const trace = await memory.remember(row.text, {
+            type: 'episodic',
+            scope: CONVERSATION_SCOPE,
+            scopeId: key,
+            id: row.traceId,
+            createdAt: row.createdAt,
+            tags: ['correction'],
+            metadata: { subject: { kind: subject.kind, id: subject.id }, ...(subject.kind === 'user' ? { turnUserId: subject.id } : {}) },
+          });
+          // The next compile reads it by id: its time can be below the compile's watermark.
+          await memory.addRebuildSources(key, [trace.id]);
+          if (trace.id === row.traceId) {
+            refiled += 1;
+            continue;
+          }
+          // The store holds the same words under another id: that trace is the correction, and the kept row names it.
+          // The id the correction had is recorded as deleted in the same write to the copy, which drops its kept row: a
+          // later restore that brings that trace back deletes it again, so deleting the trace that now holds the words
+          // leaves no copy of them behind.
+          await memory.markCorrection(trace.id, []);
+          await ledger.markTracesDeleted([row.traceId], {
+            keep: { traceId: trace.id, scopeId: key, text: row.text, createdAt: Number(trace.createdAt) },
+          });
+        } catch {
+          // Kept for the next re-application, which tries it again.
+          missed += 1;
         }
-        const trace = await memory.remember(row.text, {
-          type: 'episodic',
-          scope: CONVERSATION_SCOPE,
-          scopeId: key,
-          id: row.traceId,
-          createdAt: row.createdAt,
-          tags: ['correction'],
-          metadata: { subject: { kind: subject.kind, id: subject.id }, ...(subject.kind === 'user' ? { turnUserId: subject.id } : {}) },
-        });
-        // The next compile reads it by id: its time can be below the compile's watermark.
-        await memory.addRebuildSources(key, [trace.id]);
-        if (trace.id === row.traceId) {
-          refiled += 1;
-          continue;
-        }
-        // The store holds the same words under another id: that trace is the correction, and the kept row names it.
-        // The id the correction had is recorded as deleted, which drops its kept row: a later restore that brings that
-        // trace back deletes it again, so deleting the trace that now holds the words leaves no copy of them behind.
-        await memory.markCorrection(trace.id, []);
-        await ledger.keepCorrection({ traceId: trace.id, scopeId: key, text: row.text, createdAt: Number(trace.createdAt) });
-        await ledger.markTracesDeleted([row.traceId]);
       }
     };
     await (options.onKey ? options.onKey(key, work) : work());
   }
   if (drop.length > 0) await ledger.dropCorrections(drop);
-  return refiled;
+  return { refiled, missed };
 }
 
 /**
@@ -725,7 +736,7 @@ async function refileKeptCorrections(
  * there writes one `memory.erasure_unfinished` line and stays owed.
  *
  * One `memory.tombstone_reapplied` line is logged when a subject was re-applied, a tombstone came back from the copy,
- * a recorded trace was deleted again or could not be, or a correction was filed again.
+ * a recorded trace was deleted again or could not be, or a kept correction was filed again or could not be.
  *
  * @returns One report a subject re-applied; none for a store that holds nothing of a forgotten subject.
  * @throws Error when the store has no forgotten-user ledger.
@@ -763,7 +774,7 @@ export async function reapplyTombstones(options: ReapplyTombstonesOptions): Prom
   }
   // What a correction or a single deletion recorded: its deleted traces, and the correction's text.
   const traces = await reapplyDeletedTraces(options, ledger);
-  const correctionsRefiled = await refileKeptCorrections(options, ledger);
+  const corrections = await refileKeptCorrections(options, ledger);
   try {
     // A rewrite of the vector index or a checkpoint of the log that a deletion could not finish runs again, though
     // the store may hold nothing more of the subject to find it by.
@@ -771,13 +782,14 @@ export async function reapplyTombstones(options: ReapplyTombstonesOptions): Prom
   } catch (error) {
     memoryLog.warn('memory.erasure_unfinished', errorFields(error));
   }
-  if (reports.length > 0 || added.length > 0 || traces.traces > 0 || traces.missed > 0 || correctionsRefiled > 0) {
+  if (reports.length > 0 || added.length > 0 || traces.traces > 0 || traces.missed > 0 || corrections.refiled > 0 || corrections.missed > 0) {
     memoryLog.info('memory.tombstone_reapplied', {
       subjects: reports.length,
       reconciled: added.length,
       traces: traces.traces,
       tracesMissed: traces.missed,
-      correctionsRefiled,
+      correctionsRefiled: corrections.refiled,
+      correctionsMissed: corrections.missed,
     });
   }
   return reports;
