@@ -735,23 +735,35 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
    */
   const subjects = new Set<string>();
   /**
-   * Whether the ledger holds a tombstone: read once the open has applied the tombstones, and set by a deletion that
-   * wrote an unkeyed one. Read only without a `tombstoneKey`, where every tombstone the ledger holds is unkeyed (a
-   * ledger that holds a key's marker does not open without that key).
+   * Whether the ledger holds a tombstone: read once the open has applied the tombstones, and set by every unkeyed
+   * tombstone this ledger handle writes (the agent's deletions, its learning layer's, a call on `agent.memory`). Read
+   * only while the ledger keys nothing, where every tombstone it holds is unkeyed (a ledger that holds a key's marker
+   * does not open without that key).
    */
   let ledgerHoldsTombstones = false;
+  // The agent's deletions, its learning layer's and a call on agent.memory write through this handle: each unkeyed
+  // tombstone they write is seen here.
+  const markForgotten = forgotten.markForgotten.bind(forgotten);
+  forgotten.markForgotten = async (...args: Parameters<ForgottenLedger['markForgotten']>) => {
+    const written = await markForgotten(...args);
+    if (written.form === 'unkeyed') ledgerHoldsTombstones = true;
+    return written;
+  };
   /** Whether this open has written its `memory.tombstones_unkeyed` line. */
   let unkeyedNoted = false;
   /**
    * The tombstone rule for `count` subjects, the one being opened included. With a key, or one subject, nothing. With
    * no key and a ledger that holds no tombstone, a second subject is refused: its deletion would leave a tombstone
    * anyone who reads the ledger can match by hashing a guessed id. With no key and a ledger that already holds such
-   * tombstones, the subject is let in, and one line an open says so.
+   * tombstones, the subject is let in, and `noteUnkeyed` says so once it is.
    */
   const assertSubjectAllowed = (count: number): void => {
-    if (tombstoneKey !== undefined || count <= 1) return;
+    if (forgotten.keyed || count <= 1) return;
     if (!ledgerHoldsTombstones) throw new Error(TOMBSTONE_KEY_REQUIRED);
-    if (unkeyedNoted) return;
+  };
+  /** One `memory.tombstones_unkeyed` line an open, once `count` subjects are let in with no key. */
+  const noteUnkeyed = (count: number): void => {
+    if (forgotten.keyed || count <= 1 || unkeyedNoted) return;
     unkeyedNoted = true;
     memoryLog.warn('memory.tombstones_unkeyed', {});
   };
@@ -1381,6 +1393,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     if (retention === undefined && count > 1) throw new Error(RETENTION_REQUIRED);
     assertSubjectAllowed(count);
     const session = openSession(id, sessionOptions);
+    noteUnkeyed(count);
     const subjectKey = reopened ?? sessionKeyOf(session.id, sessionOptions?.userId);
     if (subjectKey !== undefined) {
       subjects.add(subjectKey);
@@ -1497,8 +1510,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   const forgetSubject = async (
     subject: SuppressionSubject,
     extra: { stores: ForgetMemoryReport['stores']; incomplete: boolean },
-  ): Promise<ForgetMemoryReport> => {
-    const report = await forgetUserMemory({
+  ): Promise<ForgetMemoryReport> =>
+    forgetUserMemory({
       memory,
       ledger: forgotten,
       wiki: { storeFor: pagesOf },
@@ -1508,10 +1521,6 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       legacy: await legacyDeletionOf(),
       legacyUnattributed,
     });
-    // The ledger holds the deletion's tombstone, written now or before.
-    if (report.tombstone.form === 'unkeyed') ledgerHoldsTombstones = true;
-    return report;
-  };
   /** What the agent's learning layer deleted of a user, as entries of a deletion report; none when it runs no layer. */
   const forgetLearner = async (userId: string): Promise<{ stores: ForgetMemoryReport['stores']; incomplete: boolean }> => {
     const forget = built.learning?.forgetUser;
@@ -1599,7 +1608,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       if (report.complete && subject) subjects.delete(conversationScopeKey(agentId, subject));
     });
     // Read once the ledger is up to date from its copy: at the open, and again while it held none.
-    if (tombstoneKey === undefined && !ledgerHoldsTombstones) ledgerHoldsTombstones = (await forgotten.size()) > 0;
+    if (!forgotten.keyed && !ledgerHoldsTombstones) ledgerHoldsTombstones = (await forgotten.size()) > 0;
     return reports;
   };
   built.applyTombstones = () => awaitedOnClose(applyTombstones());
@@ -1754,6 +1763,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     if (legacyOwnerKey !== undefined) subjects.add(legacyOwnerKey);
     if (retention === undefined && subjects.size > 1) throw new Error(RETENTION_REQUIRED);
     assertSubjectAllowed(subjects.size);
+    noteUnkeyed(subjects.size);
   } catch (err) {
     await originalClose().catch(() => undefined);
     await closeStore().catch(() => undefined);
