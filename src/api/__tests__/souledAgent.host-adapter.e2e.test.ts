@@ -13,7 +13,8 @@
  *   nothing back from the database.
  * - A `tombstoneCopy` whose `adapter` key holds no adapter is refused even beside a `path`: the open would read it as
  *   an adapter's and run with no second copy. On the file store too, a `tombstoneCopy` that is set and names no
- *   copy (`{}`, an empty or missing path, an `adapter` key holding none) is refused before anything opens.
+ *   copy (`null`, `{}`, an empty or missing path, an `adapter` key holding no adapter) is refused before anything
+ *   opens.
  * - A store on the host's adapter needs `retention` and a `tombstoneKey` that holds a key, with or without
  *   `sharedMemory`: the agent counts the people it holds memory of in its own process, and other processes serve the
  *   same database.
@@ -436,6 +437,9 @@ describe(`a souled agent's store on the host's adapter, on runtime ${RUNTIME}`, 
     // the store would open with no second copy of its tombstones, though a path was named.
     await expect(open('aria-1', { soulStore: { adapter }, tombstoneCopy: { path: beside, adapter: undefined } as never })).rejects.toThrow(TypeError);
     await expect(open('aria-1', { soulStore: { adapter }, tombstoneCopy: { path: beside, adapter: null } as never })).rejects.toThrow(/tombstoneCopy/);
+    // An object with none of an adapter's calls is no adapter: the store would make its tables before the ledger
+    // failed on the copy.
+    await expect(open('aria-1', { soulStore: { adapter }, tombstoneCopy: { adapter: {} } as never })).rejects.toThrow(/soulStore needs tombstoneCopy/);
     await answers(adapter);
     // Refused before anything opened: no table on the host's adapter, and no copy file.
     expect(await adapter.all("SELECT name FROM sqlite_master WHERE type = 'table'")).toEqual([]);
@@ -454,7 +458,9 @@ describe(`a souled agent's store on the host's adapter, on runtime ${RUNTIME}`, 
     // The open would keep the second copy in the default file inside the store's own folder, which a restore of that
     // folder replaces, in a file named by an empty path, or nowhere.
     const beside = copyAt('beside').path;
-    const namesNothing = [{}, { path: undefined }, { path: '' }, { adapter: undefined }, { path: beside, adapter: undefined }];
+    // An `adapter` key that holds an object with none of an adapter's calls names no adapter either: the store would
+    // open its database before the ledger failed on the copy.
+    const namesNothing = [null, {}, { path: undefined }, { path: '' }, { adapter: undefined }, { adapter: {} }, { path: beside, adapter: undefined }];
     for (const [i, tombstoneCopy] of namesNothing.entries()) {
       await expect(open(`nemo-${i}`, { tombstoneCopy: tombstoneCopy as never })).rejects.toThrow(/souledAgent: tombstoneCopy names no copy/);
       // Refused before anything opened: no store folder in the soul's folder.
