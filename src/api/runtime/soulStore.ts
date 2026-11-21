@@ -76,9 +76,9 @@ export function registerSessionEvictor(session: AgentSession, evict: SessionEvic
 /** What a souled agent's deletion calls on the mind's side, on `runtime: 'gmi'`. */
 export interface SoulMind {
   /**
-   * Empties what the given open sessions hold of their person: each session's messages at once, and what its GMI
-   * holds (its history, its sentiment trend, its working-memory slots) once no turn of the session runs. The sessions
-   * are asked together, so the wait for their running turns is one deadline in all.
+   * Empties what the given open sessions hold of their person: each session's messages at once, and its GMI's
+   * history, sentiment trend and working-memory slots once no turn of the session runs. The sessions are asked
+   * together, so the wait for their running turns is one deadline in all.
    *
    * @param sessions - The sessions the agent's handle holds open for the person.
    * @returns `evicted`: the sessions emptied. `running`: the sessions whose turn was still running at the deadline,

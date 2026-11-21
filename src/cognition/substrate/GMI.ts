@@ -1416,7 +1416,8 @@ export class GMI implements IGMI {
    * history with what the GMI recorded about its turns (as {@link GMI.clearHistory}), the input and the retrieved
    * sources it kept of its last turn, the working-memory slots of its cognitive memory, the sentiment tracker's
    * history and events (`gmi_sentiment_history` leaves working memory) and `currentSentiment` on the user context.
-   * The traces a store holds are not the GMI's to delete. A runtime calls it between turns: a turn that starts while
+   * The GMI's mood, its task context and what a metaprompt set on the user context (`skillLevel`) stay, and the
+   * traces a store holds are not the GMI's to delete. A runtime calls it between turns: a turn that starts while
    * it runs waits for it, and a turn already running goes on with what it has read. A GMI that is shut down, or was
    * never initialized, drops what it holds in this process and writes nothing to working memory.
    *

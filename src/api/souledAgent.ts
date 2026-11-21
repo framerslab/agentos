@@ -792,9 +792,9 @@ export type SouledAgent = Agent & {
    * pending writes (up to `pendingWritesTimeoutMs`), records a tombstone, deletes their traces, document chunks,
    * compiled pages and registry row, writes the vector index again, and empties the sessions this handle holds open
    * for them: on the default runtime each session's history is cleared; with `runtime: 'gmi'` each session's messages
-   * go at once and its GMI drops what it holds of the person (its history, its sentiment trend, its working-memory
-   * slots) once no turn of the session runs, which the call waits for up to `pendingWritesTimeoutMs`. A session still
-   * running a turn then leaves the report's `sessions` part missed, and is emptied when that turn ends. With
+   * go at once and its GMI drops its history, its sentiment trend and its working-memory slots once no turn of the
+   * session runs, which the call waits for up to `pendingWritesTimeoutMs`. A session still running a turn then leaves
+   * the report's `sessions` part missed, and is emptied when that turn ends. With
    * a learning layer, the layer's own deletion runs first, and `agent.learning.forgetUser(userId)` runs this same
    * deletion. `linkedSessions` names the anonymous sessions the host has tied to the person: each is deleted the same
    * way, and its counts add into the report's parts.
@@ -2363,10 +2363,11 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   /**
    * What a deletion of one subject does to the sessions this handle holds open for the subject, as an entry of the
    * report's stores and as the deletion's `sessions` part. The default runtime keeps a session's history in this
-   * process: each is cleared and counted. On the GMI runtime each is emptied (its messages, and what its GMI holds of
-   * the subject) and counted; a session whose turn is still running at the deadline is emptied once that turn ends,
-   * and the part is missed meanwhile. A session opened with history off holds nothing between its turns and is not
-   * counted. It never rejects: an emptying that fails is the part missed, with the error's message.
+   * process: each is cleared and counted. On the GMI runtime each is emptied (its messages, and its GMI's history,
+   * sentiment trend and working-memory slots) and counted; a session whose turn is still running at the deadline is
+   * emptied once that turn ends, and the part is missed meanwhile. A session opened with history off holds nothing
+   * between its turns and is not counted. It never rejects: an emptying that fails is the part missed, with the
+   * error's message.
    */
   const sessionHistoryOf = async (key: string): Promise<{ entry: ForgetMemoryReport['stores'][number]; part: PartOutcome }> => {
     const open = sessionsBySubject.get(key) ?? new Set<AgentSession>();
