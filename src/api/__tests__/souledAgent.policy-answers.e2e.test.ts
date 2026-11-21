@@ -522,6 +522,21 @@ describe("the turn's answer on the GMI runtime, with sentiment on and cognitive 
     for (const call of calls) expect(call.options.userId).toBeUndefined();
   });
 
+  it('a session whose user id no memory key can be built from is not scored, and the hook is not asked', async () => {
+    const analyze = vi.spyOn(SentimentTracker.prototype, 'analyzeTurnSentiment').mockResolvedValue(undefined);
+    let asked = 0;
+    const { a } = await open({
+      memoryPolicy: () => {
+        asked += 1;
+        return { longTerm: 'compiled' };
+      },
+    });
+    const result = await a.session('sx', { userId: 'm\uD800' }).send('Hello there.');
+    expect(result.text).toBe('Noted 0.');
+    expect(analyze).not.toHaveBeenCalled();
+    expect(asked).toBe(0);
+  });
+
   it('a policy hook that fails leaves the turn unscored', async () => {
     const analyze = vi.spyOn(SentimentTracker.prototype, 'analyzeTurnSentiment').mockResolvedValue(undefined);
     const { a } = await open({
