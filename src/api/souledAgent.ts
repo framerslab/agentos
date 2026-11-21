@@ -568,6 +568,17 @@ function isBudgetRefusal(error: unknown): boolean {
   return name === 'CostCapExceededError' || name === 'UnpricedModelError' || name === 'SpendMeterUnavailableError';
 }
 
+/**
+ * Thrown in place of a compile's next model call when the account's latest answer no longer lets it run: the
+ * scope's compile stops there, is logged as skipped for `reason`, and its traces wait with their watermark.
+ */
+class CompileStopped extends Error {
+  constructor(readonly reason: 'policy_raw' | 'minor_no_compile') {
+    super(`the compile stopped before its next model call: ${reason}`);
+    this.name = 'CompileStopped';
+  }
+}
+
 /** Options for {@link souledAgent}: those of {@link AgentOptions}, with `soul` required. */
 export interface SouledAgentOptions extends AgentOptions {
   soul: NonNullable<AgentOptions['soul']>;
@@ -592,9 +603,12 @@ export interface SouledAgentOptions extends AgentOptions {
    * `false`: no compile; raw traces only, and no per-user page is ever written.
    *
    * `minors` names where the compile of an account `memoryPolicy` answers `minor: true` for goes: that provider and
-   * model alone, with no fallback and no router, as a named target above. `provider` and `model` are required and
-   * non-empty, and a `model` whose `provider:` prefix names another provider is refused, or the agent does not open
-   * (`TypeError`). Without it, no page is compiled for a minor. An object that
+   * model alone, with no fallback and no router, as a named target above, and no other provider in its place: with no
+   * key for it, the compile fails rather than going to OpenRouter, and a `setDefaultProvider()` default that names no
+   * provider lends it nothing. The agent's own key and base URL go with it only when the agent names that provider, or
+   * a model of it. `provider` and `model` are required and non-empty, and a `model` whose `provider:` prefix names
+   * another provider is refused, or the agent does not open (`TypeError`). Without it, no page is compiled for a minor.
+   * Each merge of a compile is sent on the route the account's latest answer gives at that moment. An object that
    * holds `minors` alone leaves every other account's compile on the agent's own provider, model and route.
    */
   compile?:
@@ -608,13 +622,14 @@ export interface SouledAgentOptions extends AgentOptions {
     | false;
   /**
    * The host's policy for the account a turn serves. A session asks once and keeps the answer for its next turns,
-   * until a later answer for the same account, given to any session or call of this process, replaces it from the
+   * until a later answer for the same account, given to any session or call of this agent, replaces it from the
    * session's next turn; a later answer that failed makes the session ask again. A hook that throws, rejects, does not
    * answer within the memory hooks' timeout (`memoryProviderOptions.timeoutMs`) or answers anything but one of the
    * three policies, with `minor: true` and `profiling: 'off'` as the only marks it may add, fails closed: nothing is
    * filed for that turn, it recalls the operator's pages alone, and the next turn asks again. `retentionDays` on a
    * policy that keeps memory shortens the agent's `retention` period for that account, in the sweeps of the process
-   * that asked; it never lengthens it. Another process reads the host's answer at its own sessions' next ask.
+   * that asked; it never lengthens it. Another agent object, in this process or another, reads the host's answer at
+   * its own sessions' next ask.
    */
   memoryPolicy?: (context: MemoryHookContext) => MemoryPolicy | Promise<MemoryPolicy>;
   /**
@@ -1192,7 +1207,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   /**
    * What one turn's memory does, decided once a turn: the answer kept for its session, else the host's answer now. A
    * valid answer of a session turn is kept for the session; a failure is kept for nothing, so the next turn asks again.
-   * A later answer for the same subject, given to any turn of this process, replaces the one a session keeps from the
+   * A later answer for the same subject, given to any turn of this agent, replaces the one a session keeps from the
    * session's next turn: a valid one with no new ask, a failed one by asking again.
    */
   const decide = async (context: MemoryHookContext, subject: MemorySubject, scopeId: string): Promise<TurnPolicy> => {
@@ -1378,8 +1393,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
    * has no context to screen with, and is not compiled; otherwise each trace's text goes through the hook again: what
    * it returns is what is compiled, a trace it drops is left out, and a failure stops the scope's compile. The
    * account's latest answer is read again once the screen has answered, so an `off` answer given meanwhile stops the
-   * compile. A minor's scope is compiled by the target `compile.minors` names, handed back as the batch's model call,
-   * and not at all without one.
+   * compile. A minor's scope is compiled by the target `compile.minors` names, and not at all without one. The batch's
+   * model call it hands back reads the latest answer again before each merge.
    */
   const beforeScopeCompile: NonNullable<AttachedWiki['beforeScopeCompile']> = async (scopeId, traces) => {
     const turn = served.get(scopeId);
@@ -1404,11 +1419,25 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       if (memoryPolicy && served.get(scopeId)?.policy.longTerm !== 'compiled') return { skip: 'policy_raw' };
       if (dropped) memoryLog.warn('memory.write_refused', { reason: 'screened' });
     }
-    // The answer read last says whose model compiles: a minor's pages go to the target named for minors alone.
-    if (served.get(scopeId)?.policy.minor === true) {
-      return minorsLlm ? { traces: kept, llm: minorsLlm } : { skip: 'minor_no_compile' };
+    // A minor's pages go to the target named for minors alone, and nowhere without one.
+    if (served.get(scopeId)?.policy.minor === true && !minorsLlm) return { skip: 'minor_no_compile' };
+    // Each model call of the compile reads the latest answer again (compileCallOf).
+    return { traces: kept, llm: (prompt) => compileCallOf(scopeId, prompt) };
+  };
+  /**
+   * One model call of `scopeId`'s compile, on the route the account's latest answer gives when the call is sent: a
+   * minor's on the target `compile.minors` names, any other account's on the compile's own. An answer given while the
+   * compile runs holds from its next call; one that no longer compiles the account, or a minor's with no target named
+   * for minors, stops the compile before the call is sent ({@link CompileStopped}).
+   */
+  const compileCallOf = async (scopeId: string, prompt: string): Promise<string> => {
+    const latest = served.get(scopeId)?.policy;
+    if (memoryPolicy && latest?.longTerm !== 'compiled') throw new CompileStopped('policy_raw');
+    if (latest?.minor === true) {
+      if (!minorsLlm) throw new CompileStopped('minor_no_compile');
+      return minorsLlm(prompt);
     }
-    return { traces: kept };
+    return llm(prompt);
   };
 
   // The turns still running and the memory writes the observer has started, until each settles: close() waits for
@@ -1603,8 +1632,16 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       return undefined;
     }
   })();
-  /** The compile's model call on `named`, a target the host named, or on the agent's own route when it is undefined. */
-  const compileLlmOn = (named: { provider?: string; model?: string; apiKey?: string; baseUrl?: string } | undefined) => {
+  /**
+   * The compile's model call on `named`, a target the host named, or on the agent's own route when it is undefined.
+   * `strict`, for the target named for minors, sends to that provider alone: no Anthropic to OpenRouter reroute when
+   * it has no key, no `setDefaultProvider()` default that names no provider, and the agent's own key and base URL only
+   * when the agent names that provider, or a model of it.
+   */
+  const compileLlmOn = (
+    named: { provider?: string; model?: string; apiKey?: string; baseUrl?: string } | undefined,
+    strict = false,
+  ) => {
     // A target that names a model alone, whose `provider:` prefix names another provider than the agent's, does not
     // take the agent's provider. The agent's key and base URL go with the compile only when its call resolves to the
     // provider they were set for, whether the agent names it or only its model does.
@@ -1621,7 +1658,9 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       named?.model ?? (named?.provider === undefined || named.provider === agentProvider ? rest.model : undefined);
     const agentCredentialsGo =
       named === undefined ||
-      credentialsGoWith({ provider: rest.provider, model: rest.model }, { provider: compileProvider, model: compileModel });
+      (strict
+        ? agentProvider !== undefined && agentProvider === compileProvider
+        : credentialsGoWith({ provider: rest.provider, model: rest.model }, { provider: compileProvider, model: compileModel }));
     return async (prompt: string): Promise<string> =>
       (
         await generateText({
@@ -1644,12 +1683,13 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
           ...(budget ? { budget } : {}),
           ...(rest.accountIdOf ? { accountIdOf: rest.accountIdOf } : {}),
           usageLedger: { ...(ledger ?? {}), source: SOULED_AGENT_COMPILE_SOURCE },
+          ...(strict ? { __strictCredentials: true } : {}),
         })
       ).text;
   };
   const llm = compileLlmOn(target);
   /** The compile's model call for a minor's pages: the target `compile.minors` names, or none, and no page. */
-  const minorsLlm = minorsTarget === undefined ? undefined : compileLlmOn(minorsTarget);
+  const minorsLlm = minorsTarget === undefined ? undefined : compileLlmOn(minorsTarget, true);
 
   const chunker = new SemanticChunker();
   const priorTools = rest.tools;
@@ -1665,8 +1705,10 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     // keeps memory.
     subjectOf,
     ownPagesServed,
-    // A subject whose compile the budget refuses is skipped: its traces wait, and the other subjects compile.
-    compileSkipReasonOf: (error) => (isBudgetRefusal(error) ? 'budget' : undefined),
+    // A subject whose compile the budget refuses, or whose latest answer stopped it, is skipped: its traces wait, and
+    // the other subjects compile.
+    compileSkipReasonOf: (error) =>
+      isBudgetRefusal(error) ? 'budget' : error instanceof CompileStopped ? error.reason : undefined,
     ...(memoryPolicy || screen ? { beforeScopeCompile } : {}),
     // No compile at all: raw traces only, and no page is ever written.
     ...(compile === false ? { compile: false as const } : {}),

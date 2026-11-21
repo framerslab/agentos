@@ -151,10 +151,10 @@ export interface AttachedWiki {
    */
   runScope?<T>(scopeId: string, work: () => Promise<T>): Promise<T>;
   /**
-   * The reason to log for an error a scope's compile threw: `'budget'` for a spend budget's refusal. Undefined:
-   * the error is the call's, thrown once every scope has run.
+   * The reason to log for an error a scope's compile threw: `'budget'` for a spend budget's refusal, or the reason a
+   * host's model call stopped the compile for. Undefined: the error is the call's, thrown once every scope has run.
    */
-  compileSkipReasonOf?(error: unknown): 'budget' | undefined;
+  compileSkipReasonOf?(error: unknown): CompileSkipReason | undefined;
 }
 
 /**
