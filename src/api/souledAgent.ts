@@ -31,6 +31,7 @@ import { generateText } from './generateText.js';
 import type { StreamTextResult } from './streamText.js';
 import type { IModelRouter } from '../core/llm/routing/IModelRouter.js';
 import { Memory, type AttachedWiki, type ScoredTrace } from '../cognition/memory/io/facade/Memory.js';
+import type { MemoryTrace } from '../cognition/memory/core/types.js';
 import { brainOf } from '../cognition/memory/io/facade/handedBrain.js';
 import { createStorageFeatures, type StorageAdapter } from '@framers/sql-storage-adapter';
 import {
@@ -75,7 +76,8 @@ import { errorFields } from '../core/logging/events.js';
 import { formatMemoryAge } from '../cognition/memory/core/prompt/MemoryFormatters.js';
 import { parseTraceMetadata } from '../cognition/memory/retrieval/store/tracePersistence.js';
 import { DEFAULT_MEMORY_TOKEN_BUDGET, MEMORY_TIMEOUT_MS } from './runtime/memoryProviderHooks.js';
-import { messageOf } from './runtime/memoryObserveFailures.js';
+import { messageOf, reportObserveFailure } from './runtime/memoryObserveFailures.js';
+import { failedWriteEntry, type MemoryWriteEntry } from './runtime/memoryWriteRecord.js';
 import { isAnonymousUserId } from './runtime/memorySubject.js';
 import { asSpendBudget } from './runtime/spendBudget.js';
 import { credentialsGoWith, modelNamesAnotherProvider } from './runtime/credentialOwner.js';
@@ -1530,8 +1532,14 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   };
   /**
    * Files one side of a turn under its subject's key, when the account's policy keeps memory and the screen hook
-   * lets the text through. Each write that is not made says why in one `memory.write_refused` line, except under an
-   * `off` policy, the host's standing choice for the account, which is said once a session.
+   * lets the text through, and answers what became of it. Each write that is not made says why in one
+   * `memory.write_refused` line, except under an `off` policy, the host's standing choice for the account, which is
+   * said once a session; the entry it answers names the same reason. It never rejects: a throw, from the write or from
+   * a read before it, answers a `failed` entry with the error's class name, and is counted and logged as a failure of
+   * the provider's `observe` (`memory.hook_failed`, sparsely).
+   *
+   * @param write - Stores the text the screen let through, and resolves with its trace.
+   * @param undo - Deletes a trace `write` stored, for good: a write that landed after the subject was forgotten.
    */
   const fileTurn = async (
     role: Speaker,
@@ -1539,68 +1547,65 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     context: MemoryHookContext,
     subject: MemorySubject,
     scopeId: string,
-  ): Promise<void> => {
-    // A forgotten subject's text goes nowhere: not to the host's hooks, not to the store.
-    if (await forgotten.isForgotten(subject)) {
-      memoryLog.warn('memory.write_refused', { reason: 'forgotten' });
-      return;
-    }
-    const policy = await turnPolicyOf(context, subject, scopeId, role);
-    if (policy === 'failed') {
-      memoryLog.warn('memory.write_refused', { reason: 'policy_failed' });
-      return;
-    }
-    if (policy.longTerm === 'off') {
-      if (context.call !== 'session' || !offSaid.has(context.sessionId)) {
-        if (context.call === 'session') offSaid.add(context.sessionId);
+    write: (text: string) => Promise<MemoryTrace>,
+    undo: (trace: MemoryTrace) => Promise<void>,
+  ): Promise<MemoryWriteEntry> => {
+    try {
+      // A forgotten subject's text goes nowhere: not to the host's hooks, not to the store.
+      if (await forgotten.isForgotten(subject)) {
+        memoryLog.warn('memory.write_refused', { reason: 'forgotten' });
+        return { role, outcome: 'skipped', reason: 'forgotten' };
+      }
+      const policy = await turnPolicyOf(context, subject, scopeId, role);
+      if (policy === 'failed') {
+        memoryLog.warn('memory.write_refused', { reason: 'policy_failed' });
+        return { role, outcome: 'skipped', reason: 'policy_failed' };
+      }
+      if (policy.longTerm === 'off') {
         // A child's answer on a store that would keep their memory until deletion says so in its own reason.
         const reason: 'minor_no_retention' | 'policy_off' =
           policy.minor === true && !keepsMinorsMemory(subject) ? 'minor_no_retention' : 'policy_off';
-        memoryLog.warn('memory.write_refused', { reason });
+        if (context.call !== 'session' || !offSaid.has(context.sessionId)) {
+          if (context.call === 'session') offSaid.add(context.sessionId);
+          memoryLog.warn('memory.write_refused', { reason });
+        }
+        return { role, outcome: 'skipped', reason };
       }
-      return;
-    }
-    const filed = await screened(text, hookContextOf(context, subject), 'file');
-    if (filed === SCREEN_FAILED) {
-      memoryLog.warn('memory.write_refused', { reason: 'screen_failed' });
-      return;
-    }
-    if (filed === null || filed === '') {
-      memoryLog.warn('memory.write_refused', { reason: 'screened' });
-      return;
-    }
-    written.add(scopeId);
-    // The user's message and the reply alike go under the subject's key. Who spoke goes in the trace's metadata:
-    // outside its text and its tags, which full-text search reads. The tombstone is read again once the trace is
-    // stored: a trace that landed after the subject was forgotten is deleted again.
-    let landed = false;
-    const outcome = await guardedWrite(
-      forgotten,
-      subject,
-      async () => {
-        const trace = await memory.remember(filed, {
-          type: 'episodic',
-          scope: 'conversation',
-          scopeId,
-          metadata: {
-            [SPEAKER_METADATA_KEY]: role,
-            subject: { kind: subject.kind, id: subject.id },
-            ...(subject.kind === 'user' ? { turnUserId: subject.id } : {}),
-          },
-        });
-        landed = true;
-        return trace;
-      },
-      async (trace) => {
-        await memory.deleteTraces([trace.id]);
-      },
-    );
-    if (outcome.status !== 'refused') return;
-    memoryLog.warn('memory.write_refused', { reason: 'forgotten' });
-    if (landed) {
-      // The write landed after the subject's tombstone and is taken back. Its scope's registry row, which the write
-      // made again when the subject's deletion had already run, goes with whatever the scope still holds.
-      await memory.deleteScope('conversation', scopeId).catch(() => undefined);
+      const filed = await screened(text, hookContextOf(context, subject), 'file');
+      if (filed === SCREEN_FAILED) {
+        memoryLog.warn('memory.write_refused', { reason: 'screen_failed' });
+        return { role, outcome: 'skipped', reason: 'screen_failed' };
+      }
+      if (filed === null || filed === '') {
+        memoryLog.warn('memory.write_refused', { reason: 'screened' });
+        return { role, outcome: 'skipped', reason: 'screened' };
+      }
+      written.add(scopeId);
+      // The tombstone is read again once the trace is stored: a trace that landed after the subject was forgotten is
+      // deleted again.
+      let landed = false;
+      const outcome = await guardedWrite(
+        forgotten,
+        subject,
+        async () => {
+          const trace = await write(filed);
+          landed = true;
+          return trace;
+        },
+        undo,
+      );
+      if (outcome.status !== 'refused') return { role, outcome: 'written', traceId: outcome.result.id };
+      memoryLog.warn('memory.write_refused', { reason: 'forgotten' });
+      if (landed) {
+        // The write landed after the subject's tombstone and is taken back. Its scope's registry row, which the write
+        // made again when the subject's deletion had already run, goes with whatever the scope still holds.
+        await memory.deleteScope('conversation', scopeId).catch(() => undefined);
+      }
+      return { role, outcome: 'skipped', reason: 'forgotten' };
+    } catch (err) {
+      // The record names the error's class; the log counts the failure as the provider's and writes it sparsely.
+      reportObserveFailure(provider, err);
+      return failedWriteEntry(role, err);
     }
   };
   /**
@@ -1748,16 +1753,41 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       // Nothing is ever filed without the subject of its turn.
       if (!context) return Promise.reject(new TypeError('souledAgent: a memory write needs the hook context of its turn'));
       const subject = turnSubjectOf(context);
-      if (!subject) return Promise.resolve();
+      if (!subject) return Promise.resolve<MemoryWriteEntry>({ role, outcome: 'skipped', reason: 'no_subject' });
       let scopeId: string;
       try {
         scopeId = conversationScopeKey(agentId, subject);
       } catch (err) {
-        // An id no key can be built from rejects the write: the runtime logs the hook's failure and the turn goes on.
-        return Promise.reject(err);
+        // An id no key can be built from files nothing: the failure is logged as the hook's, and the turn goes on.
+        reportObserveFailure(provider, err);
+        return Promise.resolve<MemoryWriteEntry>({ role, outcome: 'skipped', reason: 'no_subject' });
       }
       // The whole write, its policy and its screening with it, runs on the subject's chain, and close() waits for it.
-      return onSubject(scopeId, () => fileTurn(role, text, context, subject, scopeId));
+      // The user's message and the reply alike go under the subject's key. Who spoke goes in the trace's metadata:
+      // outside its text and its tags, which full-text search reads.
+      return onSubject(scopeId, () =>
+        fileTurn(
+          role,
+          text,
+          context,
+          subject,
+          scopeId,
+          (filed) =>
+            memory.remember(filed, {
+              type: 'episodic',
+              scope: 'conversation',
+              scopeId,
+              metadata: {
+                [SPEAKER_METADATA_KEY]: role,
+                subject: { kind: subject.kind, id: subject.id },
+                ...(subject.kind === 'user' ? { turnUserId: subject.id } : {}),
+              },
+            }),
+          async (trace) => {
+            await memory.deleteTraces([trace.id]);
+          },
+        ),
+      );
     },
     getContext: async (text, options) => {
       // Two reads, each of one key, by equality: the turn's own subject, and the operator's pages. Nothing a caller
