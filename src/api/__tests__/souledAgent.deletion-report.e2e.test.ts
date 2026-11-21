@@ -507,13 +507,6 @@ function builtGmis(): GMI[] {
   return built;
 }
 
-/** How many times a GMI was asked to forget its person in the case, counted from here on. */
-function forgetPersonCalls(): () => number {
-  const proto = GMI.prototype as unknown as { forgetPerson?: () => Promise<void> };
-  const spy = typeof proto.forgetPerson === 'function' ? vi.spyOn(proto as { forgetPerson(): Promise<void> }, 'forgetPerson') : undefined;
-  return () => spy?.mock.calls.length ?? 0;
-}
-
 describe("a deletion and the open sessions, on runtime 'gmi' with sentiment on and cognitive memory off", () => {
   beforeEach(() => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
@@ -525,7 +518,7 @@ describe("a deletion and the open sessions, on runtime 'gmi' with sentiment on a
 
   it('a deletion empties an idle open session', async () => {
     const gmis = builtGmis();
-    const forgets = forgetPersonCalls();
+    const forgetPerson = vi.spyOn(GMI.prototype, 'forgetPerson');
     const a = await openGmi();
     const session = a.session('s1', { userId: 'alice' });
     await turn(a, 's1', 'alice', 'My canary is LARK-7.');
@@ -554,7 +547,7 @@ describe("a deletion and the open sessions, on runtime 'gmi' with sentiment on a
     expect(lines('memory.forget_incomplete')).toEqual([]);
     expect(session.messages()).toEqual([]);
     // The session's GMI was asked once, and holds nothing more of her.
-    expect(forgets()).toBe(1);
+    expect(forgetPerson).toHaveBeenCalledTimes(1);
     expect(gmi.getConversationHistory()).toEqual([]);
     const held = await gmi.getWorkingMemorySnapshot();
     expect(held).not.toHaveProperty('gmi_sentiment_history');
@@ -572,7 +565,7 @@ describe("a deletion and the open sessions, on runtime 'gmi' with sentiment on a
   });
 
   it("empties each session open for the person and each linked session, and leaves another person's as it is", async () => {
-    const forgets = forgetPersonCalls();
+    const forgetPerson = vi.spyOn(GMI.prototype, 'forgetPerson');
     const a = await openGmi();
     const first = a.session('s1', { userId: 'alice' });
     const second = a.session('s2', { userId: 'alice' });
@@ -593,7 +586,7 @@ describe("a deletion and the open sessions, on runtime 'gmi' with sentiment on a
     expect(first.messages()).toEqual([]);
     expect(second.messages()).toEqual([]);
     expect(visitor.messages()).toEqual([]);
-    expect(forgets()).toBe(3);
+    expect(forgetPerson).toHaveBeenCalledTimes(3);
     expect(other.messages()).toEqual(ofBob);
     expect(tracesOf(keyOf(bob)).length).toBeGreaterThanOrEqual(2);
   });
