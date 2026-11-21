@@ -547,6 +547,30 @@ describe(`a call that names its own provider under the agent's router, on runtim
   });
 });
 
+describe("a call that names its own provider under the agent's router, on the GMI runtime", () => {
+  it("names where the router's pick went, and not the agent's own provider, which received nothing", async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', '');
+    const routedKey = `k-souled-export-or-${++n}`;
+    vi.stubEnv('OPENROUTER_API_KEY', routedKey);
+    const openrouter = script('openrouter', routedKey, { whole: true, replies: [reply.text('Via the gateway.')] });
+    // An Anthropic agent with a key of its own: a call on another provider takes none of it to the router's pick.
+    const { a } = await open({
+      runtime: 'gmi',
+      provider: 'anthropic',
+      model: 'claude-agent',
+      router: routerPicking('anthropic', 'claude-routed') as never,
+    } as Partial<SouledAgentOptions>);
+
+    const r = await a.generate('Hello.', { provider: 'openai' });
+
+    expect(r.text).toBe('Via the gateway.');
+    expect(openrouter.seen).toHaveLength(1);
+    const listed = await recipientsOf(a);
+    expect(listed).toContainEqual({ role: 'model', provider: 'openrouter', model: openrouter.seen[0].modelId });
+    expect(listed).not.toContainEqual({ role: 'model', provider: 'anthropic', model: 'claude-routed' });
+  });
+});
+
 describe('the embedding a GMI agent resolves at its first turn', () => {
   it('is named as it resolved then, after a restart too, when the default provider changed after the agent opened', async () => {
     const embeddings = `k-souled-export-embed-${++n}`;
@@ -572,6 +596,31 @@ describe('the embedding a GMI agent resolves at its first turn', () => {
     }
     const { a: again } = await open(options, apiKey);
     expect(await recipientsOf(again)).toContainEqual(large);
+  });
+});
+
+describe('the embedding a GMI agent built, when the default provider changes after its first turn', () => {
+  it('names the embedding the memory was built with, and not the later default, which received nothing', async () => {
+    const embeddings = `k-souled-export-embed-${++n}`;
+    const embedder = script('openai', embeddings, { replies: [] });
+    vi.stubEnv('OPENAI_API_KEY', embeddings);
+    const apiKey = `k-souled-export-${++n}`;
+    const options = { runtime: 'gmi', memory: { embedding: { dimension: 1536 } } } as Partial<SouledAgentOptions>;
+    try {
+      const { a } = await open(options, apiKey);
+      await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+      // The memory was built at the first turn, and embedded the person's words there.
+      await vi.waitFor(() => expect(embedder.embedded.some((text) => text.includes('LARK-7'))).toBe(true), { timeout: 4_000 });
+
+      setDefaultProvider({ provider: 'openai', model: 'text-embedding-3-large' });
+      await turn(a, 's1', 'alice', 'I keep it in the attic.');
+
+      expect((await recipientsOf(a)).filter((entry) => entry.role === 'embedding')).toEqual([
+        { role: 'embedding', provider: 'openai', model: 'text-embedding-3-small' },
+      ]);
+    } finally {
+      clearDefaultProvider();
+    }
   });
 });
 
