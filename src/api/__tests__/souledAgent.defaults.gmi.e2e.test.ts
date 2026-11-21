@@ -140,7 +140,7 @@ describe.each(MEMORY)('the end user id a souled GMI sends, %s', (_name, cognitio
   });
 
   it('with sendUserIdToProvider, a session turn and a seat send the user id they were opened with', async () => {
-    const { a, s, told } = await open({ ...cognition, sendUserIdToProvider: true } as never);
+    const { a, s, told } = await open({ ...cognition, sendUserIdToProvider: true });
     await a.session('s1', { userId: 'u-42' }).send('Who am I?');
     await buildSessionSeat(a, { form: 'persistent', role: 'helper', userId: 'u-42' }).generate('Hello from the team.');
 
@@ -151,7 +151,7 @@ describe.each(MEMORY)('the end user id a souled GMI sends, %s', (_name, cognitio
   });
 
   it('a session opened with no user id sends none, with the opt-in too', async () => {
-    const { a, s } = await open({ ...cognition, sendUserIdToProvider: true } as never);
+    const { a, s } = await open({ ...cognition, sendUserIdToProvider: true });
     await a.session('s2').send('Who am I?');
 
     expect(turnCalls(s)).toHaveLength(2);
@@ -186,7 +186,7 @@ describe('a souled agent that falls back to a plain agent on the GMI runtime', (
   });
 
   it.each(FALLBACKS)('%s sends the user id with sendUserIdToProvider', async (_case, soul) => {
-    const { a, s } = await open({ ...soul, sendUserIdToProvider: true } as never);
+    const { a, s } = await open({ ...soul, sendUserIdToProvider: true });
     await a.session('s1', { userId: 'u-42' }).send('Who am I?');
 
     expect(turnCalls(s)).toHaveLength(2);
