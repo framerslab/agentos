@@ -115,8 +115,8 @@ export function recipientsOf(routes: RecipientRoutes, recorded: readonly MemoryR
   });
 }
 
-/** The recipient a call's route is, in `role`: the provider named or the environment's pick, and the model. */
-export function routeRecipient(role: 'model' | 'fallback-model', route: NamedRoute): MemoryRecipient {
+/** The recipient a route is, in `role`: the provider named or the environment's pick, and the model. */
+export function routeRecipient(role: MemoryRecipient['role'], route: NamedRoute): MemoryRecipient {
   return recipient(role, route);
 }
 

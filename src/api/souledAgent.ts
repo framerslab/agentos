@@ -90,7 +90,7 @@ import {
 import { resolveCognition, type CognitionInputs } from './runtime/gmiCognition.js';
 import { assertBigintReadsAsNumbers } from './runtime/agentCognitiveMemory.js';
 import { serializeTransactionsOn } from '../cognition/memory/retrieval/store/adapterTransactionLock.js';
-import { resolveModelOption } from './model.js';
+import { resolveModelOption, resolveProviderRoute } from './model.js';
 import type { AgentOSUsageLedgerOptions } from './runtime/usageLedger.js';
 
 /** Characters a token is estimated at, as `estimateTokens` counts them. */
@@ -392,6 +392,16 @@ function providerNamedBy(provider: string | undefined, model: string | undefined
   } catch {
     return undefined;
   }
+}
+
+/** A route a call is sent on: its provider and model as named, its own key and base URL, and whether it is strict. */
+interface CallRoute {
+  provider?: string;
+  model?: string;
+  apiKey?: string;
+  baseUrl?: string;
+  /** Sent to its provider alone: no Anthropic to OpenRouter reroute. */
+  strict?: boolean;
 }
 
 /** Whether a GMI built from `opts` runs cognitive memory; options that do not resolve are left for agent() to refuse. */
@@ -791,8 +801,11 @@ export type SouledAgent = Agent & {
    * Who receives a person's text from this agent, outside the process: its model's provider and model, a model
    * router's pick, each fallback hop (or the automatic fallback chain), the compile's target, the target for minors'
    * compiles, the embedding provider of cognitive memory, and every route a call took that the options do not name
-   * (a `generate()` or `stream()` with its own `provider` or `model`), which the store records so it is still named
-   * after a restart. The list is agent-wide, the same for every person. The library sends these recipients nothing.
+   * (a `generate()` or `stream()` with its own `provider`, `model`, router or `fallbackProviders`, or a route the
+   * credential layer sent elsewhere), which the store records so it is still named after a restart. Each entry names
+   * where the text goes: the provider a model's `provider:` prefix names, and OpenRouter for an Anthropic route with no
+   * Anthropic key or base URL while `OPENROUTER_API_KEY` is set. The list is agent-wide, the same for every person.
+   * The library sends these recipients nothing.
    *
    * @throws Error when the store cannot be read.
    */
@@ -1804,6 +1817,28 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     return { provider, model };
   };
   /**
+   * The provider, model, key and base URL a compile on `named` is sent with, or on the agent's own route when it is
+   * undefined. The agent's key and base URL go with it only when its call resolves to the provider they were set for,
+   * whether the agent names it or only its model does; with `strict`, only when the agent names that provider itself.
+   */
+  const compileSendOf = (
+    named: { provider?: string; model?: string; apiKey?: string; baseUrl?: string } | undefined,
+    strict: boolean,
+  ): CallRoute => {
+    const route = compileRouteOf(named);
+    const agentCredentialsGo =
+      named === undefined ||
+      (strict
+        ? agentNamedProvider !== undefined && agentNamedProvider === route.provider
+        : credentialsGoWith({ provider: rest.provider, model: rest.model }, route));
+    return {
+      ...route,
+      apiKey: named?.apiKey ?? (agentCredentialsGo ? rest.apiKey : undefined),
+      baseUrl: named?.baseUrl ?? (agentCredentialsGo ? rest.baseUrl : undefined),
+      strict,
+    };
+  };
+  /**
    * The compile's model call on `named`, a target the host named, or on the agent's own route when it is undefined.
    * `strict`, for the target named for minors, sends to that provider alone: no Anthropic to OpenRouter reroute when
    * it has no key, no `setDefaultProvider()` default that names no provider, and the agent's own key and base URL only
@@ -1813,23 +1848,20 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     named: { provider?: string; model?: string; apiKey?: string; baseUrl?: string } | undefined,
     strict = false,
   ) => {
-    // The agent's key and base URL go with the compile only when its call resolves to the provider they were set for,
-    // whether the agent names it or only its model does.
-    const { provider: compileProvider, model: compileModel } = compileRouteOf(named);
-    const agentCredentialsGo =
-      named === undefined ||
-      (strict
-        ? agentNamedProvider !== undefined && agentNamedProvider === compileProvider
-        : credentialsGoWith({ provider: rest.provider, model: rest.model }, { provider: compileProvider, model: compileModel }));
-    return async (prompt: string): Promise<string> =>
-      (
+    const call = compileSendOf(named, strict);
+    // Where the compile's text goes, as recipients() names it, recorded when the options do not name it (an Anthropic
+    // target the credential layer sends to OpenRouter).
+    const role = strict ? 'compile-minors' : 'compile';
+    return async (prompt: string): Promise<string> => {
+      noteRoute(routeRecipient(role, destinationOf(call, true)));
+      return (
         await generateText({
-          provider: compileProvider,
-          model: compileModel,
+          provider: call.provider,
+          model: call.model,
           prompt,
           maxTokens: rest.maxTokens ?? rest.controls?.maxTotalTokens,
-          apiKey: named?.apiKey ?? (agentCredentialsGo ? rest.apiKey : undefined),
-          baseUrl: named?.baseUrl ?? (agentCredentialsGo ? rest.baseUrl : undefined),
+          apiKey: call.apiKey,
+          baseUrl: call.baseUrl,
           ...(named
             ? { fallbackProviders: [] }
             : {
@@ -1846,16 +1878,43 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
           ...(strict ? { __strictCredentials: true } : {}),
         })
       ).text;
+    };
   };
   const llm = compileLlmOn(target);
   /** The compile's model call for a minor's pages: the target `compile.minors` names, or none, and no page. */
   const minorsLlm = minorsTarget === undefined ? undefined : compileLlmOn(minorsTarget, true);
 
-  /** A route as the recipients name it: the provider it names itself, else none (the environment's pick), and its model. */
-  const namedRouteOf = (route: { provider: string | undefined; model: string | undefined }): NamedRoute => ({
-    provider: providerNamedBy(route.provider, route.model),
-    model: route.model,
-  });
+  /**
+   * Where a route sends a person's text: the provider a known `provider:` prefix of its model names, over its own
+   * `provider`, as a call resolves it; with `inEnvironment`, also where the credential layer sends it in this process
+   * now (an Anthropic route with no key or base URL of its own while `OPENROUTER_API_KEY` is set goes to OpenRouter).
+   * A route that names no provider is the environment's pick at each call.
+   */
+  const destinationOf = (route: CallRoute, inEnvironment: boolean): NamedRoute => {
+    let provider = route.provider;
+    let model = route.model;
+    if (model !== undefined && (provider !== undefined || providerNamedBy(undefined, model) !== undefined)) {
+      try {
+        const resolved = resolveModelOption({ ...(provider !== undefined ? { provider } : {}), model }, 'text');
+        provider = resolved.providerId;
+        model = resolved.modelId;
+      } catch {
+        // A route that does not resolve is named as the options give it.
+      }
+    }
+    if (inEnvironment && provider !== undefined) {
+      try {
+        const sent = resolveProviderRoute(provider, model ?? '', { apiKey: route.apiKey, baseUrl: route.baseUrl, strict: route.strict });
+        if (sent.providerId !== provider) {
+          provider = sent.providerId;
+          model = model === undefined ? undefined : sent.modelId;
+        }
+      } catch {
+        // No credentials for it in this process: a call on it fails before it sends anything.
+      }
+    }
+    return { provider, model };
+  };
   /** The embedding route of cognitive memory on the GMI runtime; undefined when cognitive memory is off. */
   const embeddingRoute = ((): NamedRoute | undefined => {
     if (rest.runtime !== 'gmi') return undefined;
@@ -1867,25 +1926,49 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       return undefined;
     }
   })();
-  /** The routes the options send a person's text on: what `recipients()` lists before the routes calls recorded. */
-  const recipientRoutes: RecipientRoutes = {
-    model: { provider: agentNamedProvider, model: rest.model },
+  /** The options' own fallback hops, each with its own key and base URL; undefined for the automatic chain. */
+  const optionHops: CallRoute[] | undefined = Array.isArray(rest.fallbackProviders)
+    ? rest.fallbackProviders
+        .filter((hop) => hop !== null && typeof hop === 'object' && typeof hop.provider === 'string')
+        .map((hop) => ({ provider: hop.provider, model: hop.model, apiKey: hop.apiKey, baseUrl: hop.baseUrl }))
+    : undefined;
+  /**
+   * The routes the options send a person's text on: each as the options name it, or, with `inEnvironment`, where it
+   * goes in this process now.
+   */
+  const routesOf = (inEnvironment: boolean): RecipientRoutes => ({
+    model: destinationOf({ provider: rest.provider, model: rest.model, apiKey: rest.apiKey, baseUrl: rest.baseUrl }, inEnvironment),
     router: rest.router !== undefined,
-    fallbacks: Array.isArray(rest.fallbackProviders)
-      ? rest.fallbackProviders
-          .filter((hop) => hop !== null && typeof hop === 'object' && typeof hop.provider === 'string')
-          .map((hop) => ({ provider: hop.provider, model: hop.model }))
-      : undefined,
-    ...(compile === false ? {} : { compile: namedRouteOf(compileRouteOf(target)) }),
-    ...(minorsTarget !== undefined ? { compileMinors: namedRouteOf(compileRouteOf(minorsTarget)) } : {}),
+    fallbacks: optionHops?.map((hop) => destinationOf(hop, inEnvironment)),
+    ...(compile === false ? {} : { compile: destinationOf(compileSendOf(target, false), inEnvironment) }),
+    ...(minorsTarget !== undefined ? { compileMinors: destinationOf(compileSendOf(minorsTarget, true), inEnvironment) } : {}),
     ...(embeddingRoute ? { embedding: embeddingRoute } : {}),
-  };
-  /** The keys of what the options name: a call's route among them is not recorded. */
-  const namedKeys = new Set(recipientsOf(recipientRoutes).map(recipientKey));
+  });
+  /** The keys of what the options name: a route a call takes among them is not recorded. */
+  const namedKeys = new Set(recipientsOf(routesOf(false)).map(recipientKey));
   /** The routes calls of this process took that the options do not name, by key: listed whether or not they are stored. */
   const calledRoutes = new Map<string, MemoryRecipient>();
   /** The keys of the routes stored, or being stored, by this process. */
   const storedRoutes = new Set<string>();
+  /**
+   * Records a route a call takes that the options do not name. Each is stored once, as one `brain_meta` row of the
+   * store that holds no person, no text and no time, so `recipients()` names it after a restart; close() waits for the
+   * write. A write that fails leaves the route listed in this process, is tried again by the next call on the route,
+   * and one `memory.recipient_unrecorded` line says so.
+   */
+  const noteRoute = (route: MemoryRecipient): void => {
+    const routeKey = recipientKey(route);
+    if (namedKeys.has(routeKey)) return;
+    calledRoutes.set(routeKey, route);
+    if (storedRoutes.has(routeKey)) return;
+    storedRoutes.add(routeKey);
+    awaitedOnClose(
+      recordRecipient(brainOf(memory), route).catch((err: unknown) => {
+        storedRoutes.delete(routeKey);
+        memoryLog.warn('memory.recipient_unrecorded', errorFields(err));
+      }),
+    );
+  };
 
   const chunker = new SemanticChunker();
   const priorTools = rest.tools;
@@ -1935,67 +2018,72 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   const built = (await closingOnThrow(() => agent(agentOptions))) as SouledAgent;
 
   /**
-   * Records the route a call takes that the options do not name: the call's own `provider` or `model` (the agent's for
-   * the one it leaves out), and on the default runtime its own model router and each hop of its own
-   * `fallbackProviders`. Each route is stored once, as one `brain_meta` row of the store that holds no person, no text
-   * and no time, so `recipients()` names it after a restart; close() waits for the write. A write that fails leaves
-   * the route listed in this process, is tried again by the next call on the route, and one
-   * `memory.recipient_unrecorded` line says so.
+   * Records where a call sends a person's text when the options do not name it: its own `provider` or `model` (the
+   * agent's for the one it leaves out), or the agent's own route where the credential layer sends it elsewhere; on the
+   * default runtime its own model router; and each fallback hop it may take, its own on the default runtime, else the
+   * options'. The route is recorded before the call starts.
    */
   const noteCallRoute = (call: unknown): void => {
-    if (call === null || typeof call !== 'object') return;
-    const { provider, model, router, fallbackProviders } = call as {
+    const given = (call !== null && typeof call === 'object' ? call : {}) as {
       provider?: unknown;
       model?: unknown;
+      apiKey?: unknown;
+      baseUrl?: unknown;
       router?: unknown;
       fallbackProviders?: unknown;
     };
-    const routes: MemoryRecipient[] = [];
-    const callProvider = typeof provider === 'string' && provider !== '' ? provider : undefined;
-    const callModel = typeof model === 'string' && model !== '' ? model : undefined;
-    if (callProvider !== undefined || callModel !== undefined) {
-      // A call whose model's `provider:` prefix names another provider does not take the agent's.
-      const routeProvider =
-        callProvider ??
-        (callModel !== undefined && rest.provider !== undefined && modelNamesAnotherProvider(rest.provider, callModel)
-          ? undefined
-          : rest.provider);
-      const routeModel = callModel ?? rest.model;
-      routes.push(routeRecipient('model', { provider: providerNamedBy(routeProvider, routeModel), model: routeModel }));
-    }
+    const text = (value: unknown): string | undefined => (typeof value === 'string' && value !== '' ? value : undefined);
+    const callProvider = text(given.provider);
+    const callModel = text(given.model);
+    // A call whose model's `provider:` prefix names another provider does not take the agent's.
+    const routeProvider =
+      callProvider ??
+      (callModel !== undefined && rest.provider !== undefined && modelNamesAnotherProvider(rest.provider, callModel)
+        ? undefined
+        : rest.provider);
+    const routeModel = callModel ?? rest.model;
+    // The agent's key and base URL go with a call only to the provider they were set for.
+    const agentCredentialsGo = credentialsGoWith(
+      { provider: rest.provider, model: rest.model },
+      { provider: routeProvider, model: routeModel },
+    );
+    noteRoute(
+      routeRecipient(
+        'model',
+        destinationOf(
+          {
+            provider: routeProvider,
+            model: routeModel,
+            apiKey: text(given.apiKey) ?? (agentCredentialsGo ? rest.apiKey : undefined),
+            baseUrl: text(given.baseUrl) ?? (agentCredentialsGo ? rest.baseUrl : undefined),
+          },
+          true,
+        ),
+      ),
+    );
     // The GMI runtime refuses a call's own router and fallbackProviders before any model call.
-    if (rest.runtime !== 'gmi' && router !== undefined && router !== null) {
-      routes.push(routeRecipient('model', { provider: PROVIDER_FROM_THE_ROUTER }));
+    const ownLegs = rest.runtime !== 'gmi';
+    if (ownLegs && given.router !== undefined && given.router !== null) {
+      noteRoute(routeRecipient('model', { provider: PROVIDER_FROM_THE_ROUTER }));
     }
-    if (rest.runtime !== 'gmi' && Array.isArray(fallbackProviders)) {
-      for (const hop of fallbackProviders as unknown[]) {
-        const entry = (hop !== null && typeof hop === 'object' ? hop : {}) as { provider?: unknown; model?: unknown };
-        if (typeof entry.provider !== 'string' || entry.provider === '') continue;
-        routes.push(
-          routeRecipient('fallback-model', {
-            provider: entry.provider,
-            model: typeof entry.model === 'string' ? entry.model : undefined,
-          }),
-        );
-      }
-    }
-    for (const route of routes) {
-      const routeKey = recipientKey(route);
-      if (namedKeys.has(routeKey)) continue;
-      calledRoutes.set(routeKey, route);
-      if (storedRoutes.has(routeKey)) continue;
-      storedRoutes.add(routeKey);
-      awaitedOnClose(
-        recordRecipient(brainOf(memory), route).catch((err: unknown) => {
-          storedRoutes.delete(routeKey);
-          memoryLog.warn('memory.recipient_unrecorded', errorFields(err));
-        }),
-      );
-    }
+    const hops: CallRoute[] | undefined =
+      ownLegs && Array.isArray(given.fallbackProviders)
+        ? (given.fallbackProviders as unknown[]).flatMap((hop): CallRoute[] => {
+            const entry = (hop !== null && typeof hop === 'object' ? hop : {}) as Record<string, unknown>;
+            const provider = text(entry.provider);
+            return provider === undefined
+              ? []
+              : [{ provider, model: text(entry.model), apiKey: text(entry.apiKey), baseUrl: text(entry.baseUrl) }];
+          })
+        : optionHops;
+    for (const hop of hops ?? []) noteRoute(routeRecipient('fallback-model', destinationOf(hop, true)));
   };
-  /** Who receives a person's text: what the options name, then every route a call took, stored or of this process. */
+  /**
+   * Who receives a person's text: where the options' routes go in this process now, then every route a call took
+   * that the options do not name, stored or of this process.
+   */
   const listRecipients = async (): Promise<MemoryRecipient[]> =>
-    recipientsOf(recipientRoutes, [...(await recordedRecipients(brainOf(memory))), ...calledRoutes.values()]);
+    recipientsOf(routesOf(true), [...(await recordedRecipients(brainOf(memory))), ...calledRoutes.values()]);
 
   // Every turn joins what close() waits for: its promise, or a stream's settled usage. The default runtime's own close
   // does not wait for a running turn, and the GMI runtime's does not wait for a one-shot call. A call's own route is
