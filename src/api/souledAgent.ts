@@ -865,21 +865,35 @@ export type SouledAgent = Agent & {
    */
   recipients?(): Promise<MemoryRecipient[]>;
   /**
-   * Corrects one person's memory: deletes the named traces for good, files `text` as a trace tagged `correction`,
-   * deletes each page built from a deleted trace and has the next compile build it again from the traces that are
-   * left. It rejects, and changes nothing, when any id is not one of that person's live traces. When the person's
-   * memory already holds `text` word for word, that trace is the correction: it is tagged `correction`, kept, and
-   * not deleted even when it is one of the named traces.
+   * Deletes or corrects one person's memories. It deletes the named traces for good, deletes each page built from a
+   * deleted trace and has the next compile build it again from the traces that are left. With `text` it files `text`
+   * in their place, as a trace tagged `correction`; with no `text` it files nothing. It rejects, and changes nothing,
+   * when any id is not one of that person's live traces. When the person's memory already holds `text` word for
+   * word, that trace is the correction: it is tagged `correction`, kept, and not deleted even when it is one of the
+   * named traces. No newer statement replaces an older one by itself: this call is how one does.
    *
-   * @returns How many traces and pages it deleted, and the id of the correction's trace, a live trace.
-   * @throws TypeError when `userId`, the trace ids or the text is missing.
+   * @returns How many traces and pages it deleted, and `recipients`, the list {@link SouledAgent.recipients} returns:
+   *   the call sends them nothing, so telling each one is the host's. A correction adds `correctionTraceId`, the id
+   *   of the correction's trace, a live trace; a deletion with no `text` has no such key.
+   * @throws TypeError when `userId` or the trace ids are missing, or when `text` is given and is not a non-empty
+   *   string: a deletion leaves `text` out.
    * @throws Error when the correction's trace was deleted before it was marked; the call deletes no named trace. The
    *   same call made again files the correction anew when every named trace is still live; otherwise it rejects.
    */
-  correctUserMemory?(
-    userId: string,
-    correction: { traceIds: readonly string[]; text: string },
-  ): Promise<{ deleted: number; pagesDeleted: number; correctionTraceId: string }>;
+  correctUserMemory?: {
+    (
+      userId: string,
+      correction: { traceIds: readonly string[]; text: string },
+    ): Promise<{ deleted: number; pagesDeleted: number; correctionTraceId: string; recipients: MemoryRecipient[] }>;
+    (
+      userId: string,
+      correction: { traceIds: readonly string[]; text?: undefined },
+    ): Promise<{ deleted: number; pagesDeleted: number; recipients: MemoryRecipient[] }>;
+    (
+      userId: string,
+      correction: { traceIds: readonly string[]; text?: string },
+    ): Promise<{ deleted: number; pagesDeleted: number; correctionTraceId?: string; recipients: MemoryRecipient[] }>;
+  };
 };
 
 /**
@@ -2710,7 +2724,21 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     // send() resolved before the call is in the export. Once close() is waiting for those writes it reads at once.
     return awaitedOnClose(closing ? run() : onSubject(key, run));
   };
-  built.correctUserMemory = (userId, correction) => {
+  /** What a deletion of named traces resolves with; a correction adds the id of the trace it filed. */
+  type Corrected = { deleted: number; pagesDeleted: number; recipients: MemoryRecipient[] };
+  function correctUser(
+    userId: string,
+    correction: { traceIds: readonly string[]; text: string },
+  ): Promise<Corrected & { correctionTraceId: string }>;
+  function correctUser(userId: string, correction: { traceIds: readonly string[]; text?: undefined }): Promise<Corrected>;
+  function correctUser(
+    userId: string,
+    correction: { traceIds: readonly string[]; text?: string },
+  ): Promise<Corrected & { correctionTraceId?: string }>;
+  function correctUser(
+    userId: string,
+    correction: { traceIds: readonly string[]; text?: string },
+  ): Promise<Corrected & { correctionTraceId?: string }> {
     if (typeof userId !== 'string' || userId === '') {
       return Promise.reject(new TypeError('souledAgent: correctUserMemory needs a non-empty user id'));
     }
@@ -2723,10 +2751,13 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
         agentId,
         subject,
         correction,
+        // As a deletion's report lists them: the call never fails on the list.
+        recipients: async () => (await recipientsForReport()).recipients,
         onChain: (work) => onSubject(conversationScopeKey(agentId, subject), work),
       }),
     );
-  };
+  }
+  built.correctUserMemory = correctUser;
 
   // On teardown: close the agent (with runtime: 'gmi' that stops its running session turns and shuts its sessions
   // down); wait, within one deadline, for the turns still running and then for the memory writes of its turns; fold
