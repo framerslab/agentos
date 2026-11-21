@@ -605,9 +605,10 @@ export interface SouledAgentOptions extends AgentOptions {
    * `minors` names where the compile of an account `memoryPolicy` answers `minor: true` for goes: that provider and
    * model alone, with no fallback and no router, as a named target above, and no other provider in its place: with no
    * key for it, the compile fails rather than going to OpenRouter, and a `setDefaultProvider()` default that names no
-   * provider lends it nothing. The agent's own key and base URL go with it only when the agent names that provider, or
-   * a model of it. `provider` and `model` are required and non-empty, and a `model` whose `provider:` prefix names
-   * another provider is refused, or the agent does not open (`TypeError`). Without it, no page is compiled for a minor.
+   * provider lends it nothing. The agent's own key and base URL go with it only when the agent names that provider, as
+   * its `provider` or its model's prefix, never when the environment picks it. `provider` and `model` are required and
+   * non-empty, and a `model` whose `provider:` prefix names another provider is refused, or the agent does not open
+   * (`TypeError`). Without it, no page is compiled for a minor.
    * Each merge of a compile is sent on the route the account's latest answer gives at that moment. An object that
    * holds `minors` alone leaves every other account's compile on the agent's own provider, model and route.
    */
@@ -1633,10 +1634,27 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     }
   })();
   /**
+   * The provider the agent names itself: its `provider`, else the known provider its model's own `provider:` or
+   * `provider/` prefix names. Never one the environment or a default picks for a plain model.
+   */
+  const agentNamedProvider = (() => {
+    if (rest.provider !== undefined) return rest.provider;
+    if (rest.model === undefined) return undefined;
+    const prefix = /^([^:/]+)[:/]/.exec(rest.model)?.[1];
+    if (prefix === undefined) return undefined;
+    try {
+      // A prefix no provider owns falls through to detection, which picks some other provider: that one is not named.
+      const resolved = resolveModelOption({ model: rest.model }, 'text').providerId;
+      return resolved === prefix ? resolved : undefined;
+    } catch {
+      return undefined;
+    }
+  })();
+  /**
    * The compile's model call on `named`, a target the host named, or on the agent's own route when it is undefined.
    * `strict`, for the target named for minors, sends to that provider alone: no Anthropic to OpenRouter reroute when
    * it has no key, no `setDefaultProvider()` default that names no provider, and the agent's own key and base URL only
-   * when the agent names that provider, or a model of it.
+   * when the agent names that provider itself ({@link agentNamedProvider}).
    */
   const compileLlmOn = (
     named: { provider?: string; model?: string; apiKey?: string; baseUrl?: string } | undefined,
@@ -1659,7 +1677,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     const agentCredentialsGo =
       named === undefined ||
       (strict
-        ? agentProvider !== undefined && agentProvider === compileProvider
+        ? agentNamedProvider !== undefined && agentNamedProvider === compileProvider
         : credentialsGoWith({ provider: rest.provider, model: rest.model }, { provider: compileProvider, model: compileModel }));
     return async (prompt: string): Promise<string> =>
       (
