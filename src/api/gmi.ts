@@ -1478,8 +1478,9 @@ export function gmi(opts: GmiOptions): GmiHandle {
         // so a turn running now writes nothing more into them. Under the session's lock, once no turn runs, they go
         // again (a turn that was waiting for the lock ran meanwhile) and the session's GMI forgets the person. The wait
         // for the lock ends at the deadline: the session is then emptied when the lock comes, and a failure there has
-        // no report left to go in. A session that keeps no history builds a GMI for each turn and holds nothing
-        // between its turns: it registers none.
+        // no report left to go in. A deletion called from a hook or a tool of the session's own turn does not wait: that
+        // turn ends only once the call returns. A session that keeps no history builds a GMI for each turn and holds
+        // nothing between its turns: it registers none.
         registerSessionEvictor(session, async (deadlineMs): Promise<SessionEviction> => {
           history.reseed([]);
           const emptied = lock.acquire().then(async (release) => {
@@ -1493,7 +1494,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
               release();
             }
           });
-          if (await settlesWithin(emptied, deadlineMs)) return 'evicted';
+          if (!lock.heldByCaller() && (await settlesWithin(emptied, deadlineMs))) return 'evicted';
           void emptied.catch((error: unknown) => memoryLog.warn('memory.session_evict_failed', errorFields(error)));
           return 'running';
         });
