@@ -66,7 +66,10 @@ import {
 } from './scopeIdForm.js';
 import { parseTraceMetadata, scopeIdOfMetadata } from './tracePersistence.js';
 
-/** @internal The lock the Brain's transactions on a PostgreSQL adapter run through; the ledger's run through it too. */
+/**
+ * @internal The lock the Brain's transactions run through on a PostgreSQL adapter a souled agent keeps its store on;
+ * the ledger's and the migrations' run through it too.
+ */
 export { withAdapterTransactionLock };
 
 /**
@@ -1268,10 +1271,11 @@ export class Brain {
    * Execute a callback within a database transaction.
    *
    * The transaction is automatically committed on success or rolled back
-   * on error. On a PostgreSQL adapter it waits for the transactions this
-   * library opened earlier on the same adapter object to end, so no two of
-   * them run at once ({@link withAdapterTransactionLock}); a transaction
-   * opened inside another runs at once.
+   * on error. On a PostgreSQL adapter a souled agent keeps its store on
+   * (`soulStore`), it waits for the transactions this library opened earlier
+   * on the same adapter object to end, so no two of them run at once
+   * ({@link withAdapterTransactionLock}); a transaction opened inside another
+   * runs at once. On every other adapter it runs as the adapter runs it.
    *
    * @param fn - Async callback receiving a transactional adapter.
    * @returns Result of the callback.

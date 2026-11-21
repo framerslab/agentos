@@ -1,12 +1,14 @@
 /**
- * @fileoverview One lock per PostgreSQL adapter for the transactions a memory store opens on it.
+ * @fileoverview One lock per PostgreSQL adapter a souled agent keeps its store on, for the transactions the memory
+ * store opens on it.
  *
  * A souled agent runs each person's writes, compiles and deletions on a chain of their own, so a retention sweep of
  * one person, a deletion of another and a third's write can each open a transaction on the store's adapter at the
- * same moment. On an adapter the host shares among several parts of its program, two transactions at once are a
- * hazard `Brain.openWithAdapter`'s docs warn of. The lock runs the transactions this
- * library opens on one PostgreSQL adapter one after another; reads and writes outside a transaction stay concurrent,
- * and a transaction the host runs on the adapter itself sits outside the lock.
+ * same moment. The agent's store may be on an adapter object whose transactions share one client
+ * (`Brain.openWithAdapter`'s docs describe the hazard), so on the adapter a souled agent marks
+ * ({@link serializeTransactionsOn}) the transactions this library opens run one after another. Reads and writes
+ * outside a transaction stay concurrent, and a transaction the host runs on the adapter itself sits outside the lock.
+ * An adapter no souled agent marked is not locked: its transactions run as the adapter runs them.
  *
  * @module memory/retrieval/store/adapterTransactionLock
  * @internal
@@ -20,12 +22,15 @@ interface HeldLock {
   held: boolean;
 }
 
+/** The adapters whose transactions run one at a time: each a PostgreSQL adapter a souled agent keeps its store on. */
+const serialized = new WeakSet<StorageAdapter>();
+
 /** The end of the chain of transactions each adapter runs through the lock. */
 const tails = new WeakMap<StorageAdapter, Promise<void>>();
 
 /**
  * The locks the running work holds. A transaction opened inside one, on the same adapter, runs at once: waiting for
- * the lock its own caller holds would never end. Made on the first PostgreSQL transaction.
+ * the lock its own caller holds would never end. Made on the first locked transaction.
  */
 let holding: AsyncLocalStorage<readonly HeldLock[]> | undefined;
 
@@ -35,10 +40,22 @@ function isPostgres(adapter: StorageAdapter): boolean {
 }
 
 /**
- * Runs `work`, which opens a transaction on `adapter`, once every transaction this lock started earlier on the same
- * PostgreSQL adapter has ended; on any other adapter it runs at once. Work that already holds the adapter's lock (a
- * transaction opened inside another) runs at once too. The lock is released when `work` settles, whether it resolves
- * or rejects.
+ * Marks `adapter` as one whose transactions run one at a time through {@link withAdapterTransactionLock}, for as long
+ * as the adapter object lives. A souled agent marks the PostgreSQL adapter it keeps its store on, before the store
+ * opens. An adapter of any other kind is left unmarked: SQLite adapters order their own transactions.
+ *
+ * @param adapter - The adapter the store is about to open on.
+ * @internal
+ */
+export function serializeTransactionsOn(adapter: StorageAdapter): void {
+  if (isPostgres(adapter)) serialized.add(adapter);
+}
+
+/**
+ * Runs `work`, which opens a transaction on `adapter`. On an adapter {@link serializeTransactionsOn} marked, it runs
+ * once every transaction this lock started earlier on the same adapter has ended; on any other adapter it runs at
+ * once. Work that already holds the adapter's lock (a transaction opened inside another) runs at once too. The lock
+ * is released when `work` settles, whether it resolves or rejects.
  *
  * @param adapter - The adapter the transaction is opened on.
  * @param work - Opens the transaction and resolves with its result.
@@ -46,7 +63,7 @@ function isPostgres(adapter: StorageAdapter): boolean {
  * @internal
  */
 export function withAdapterTransactionLock<T>(adapter: StorageAdapter, work: () => Promise<T>): Promise<T> {
-  if (!isPostgres(adapter)) return work();
+  if (!serialized.has(adapter)) return work();
   holding ??= new AsyncLocalStorage<readonly HeldLock[]>();
   const store = holding;
   const held = store.getStore() ?? [];

@@ -15,8 +15,8 @@
  *   same moment; a transaction that loses that race rolls back and runs again
  *   (`retryLostCreate`), and finds the object. Each run goes through the
  *   adapter's lock (`withAdapterTransactionLock`), as the Brain's own
- *   transactions do, so it waits for the ones the memory store opened earlier
- *   on the same adapter object.
+ *   transactions do: on an adapter a souled agent keeps its store on, it
+ *   waits for the ones the memory store opened earlier on the same object.
  * - SQLite: uses explicit `BEGIN IMMEDIATE` via `adapter.exec`. Single
  *   connection per file, so the connection-pool concern doesn't apply.
  *   IMMEDIATE acquires the reserved write lock immediately, eliminating the

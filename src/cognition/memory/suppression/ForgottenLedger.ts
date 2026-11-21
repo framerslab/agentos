@@ -273,11 +273,11 @@ function nextMark(previous: string | undefined): string {
  * writer changes the side between the step's reads and its commit. Every statement of the step runs on `trx`. A
  * step never opens the other side's transaction. A lock that is not taken (another connection holds it past the
  * wait the driver allows) is a `LEDGER_UNAVAILABLE` refusal, and the transaction ends with nothing written. On a
- * PostgreSQL adapter the transaction goes through the adapter's lock (`withAdapterTransactionLock`), as the store's own
- * transactions do.
+ * PostgreSQL adapter a souled agent keeps its store on, the transaction goes through the adapter's lock
+ * (`withAdapterTransactionLock`), as the store's own transactions do.
  */
 function locked<T>(adapter: StorageAdapter, step: (trx: StorageAdapter) => Promise<T>): Promise<T> {
-  // On PostgreSQL the transaction waits for the ones the memory store opened earlier on the same adapter object.
+  // On a souled agent's PostgreSQL store adapter, the transaction waits for the ones opened earlier on the same object.
   return withAdapterTransactionLock(adapter, () =>
     adapter.transaction(async (trx) => {
       try {

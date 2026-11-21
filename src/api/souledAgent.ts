@@ -75,6 +75,7 @@ import { asSpendBudget } from './runtime/spendBudget.js';
 import { credentialsGoWith, modelNamesAnotherProvider } from './runtime/credentialOwner.js';
 import { resolveCognition, type CognitionInputs } from './runtime/gmiCognition.js';
 import { assertBigintReadsAsNumbers } from './runtime/agentCognitiveMemory.js';
+import { serializeTransactionsOn } from '../cognition/memory/retrieval/store/adapterTransactionLock.js';
 import { resolveModelOption } from './model.js';
 import type { AgentOSUsageLedgerOptions } from './runtime/usageLedger.js';
 
@@ -163,7 +164,7 @@ const SOUL_STORE_NEEDS_COPY =
 
 /** What an open on a database that holds another agent's memory is refused with. */
 const SOUL_STORE_HOLDS_ANOTHER_AGENT =
-  "souledAgent: soulStore's database already holds another agent's memory; give each agent a database or PostgreSQL schema of its own: the tombstone ledger is database-wide, so two agents on one database would share each other's deletions";
+  "souledAgent: soulStore's database already holds another agent's memory (rows under another brain id in brain_meta, memory_traces or memory_scopes); give each agent a database or PostgreSQL schema of its own: the tombstone ledger is database-wide, so two agents on one database would share each other's deletions";
 
 /** The tables a Brain keeps its rows in under its own `brain_id`; a row under another id is another agent's. */
 const BRAIN_TABLES = ['brain_meta', 'memory_traces', 'memory_scopes'] as const;
@@ -189,19 +190,34 @@ function namesTombstoneCopy(tombstoneCopy: unknown): boolean {
   return (typeof file === 'string' && file !== '') || (adapter !== null && typeof adapter === 'object');
 }
 
-/** Whether the database behind `adapter` holds a row of another brain than `brainId`, in a table every open makes. */
-async function holdsAnotherBrain(adapter: StorageAdapter, brainId: string): Promise<boolean> {
+/**
+ * Whether the database behind `adapter` holds a row of another brain than `brainId`, in a table every open makes.
+ *
+ * @param beforeOpen - The read before this agent's Brain has opened: a table that cannot be read then is one the
+ *   database does not have yet, or has in an older shape, and counts as holding no such row. The read after the open
+ *   decides, and its errors are thrown.
+ */
+async function holdsAnotherBrain(adapter: StorageAdapter, brainId: string, beforeOpen = false): Promise<boolean> {
   for (const table of BRAIN_TABLES) {
-    if ((await adapter.get(`SELECT 1 AS n FROM ${table} WHERE brain_id <> ? LIMIT 1`, [brainId])) != null) return true;
+    const row = adapter.get(`SELECT 1 AS n FROM ${table} WHERE brain_id <> ? LIMIT 1`, [brainId]);
+    if ((await (beforeOpen ? row.catch(() => null) : row)) != null) return true;
   }
   return false;
 }
 
+/** Whether `brain_meta` holds a row of `brainId`; false while the table cannot be read (the database has none yet). */
+async function brainIsSeeded(adapter: StorageAdapter, brainId: string): Promise<boolean> {
+  return adapter.get('SELECT 1 AS n FROM brain_meta WHERE brain_id = ? LIMIT 1', [brainId]).then(
+    (row) => row != null,
+    () => false,
+  );
+}
+
 /**
- * After a refused open on the host's database, deletes the `brain_meta` rows the open seeded for `brainId`, so the
- * database holds the agents it held before and the agent whose database it is opens again. Only rows seeded at or
- * after `since` (by this open: a brain that was there before keeps its own time) of a brain that holds no trace and no
- * scope are deleted.
+ * After an open refused because another agent seeded the database at the same moment, deletes the `brain_meta` rows
+ * this open seeded for `brainId`, so the agent that stays opens again. The caller calls it only for a brain the
+ * database did not hold before the open. Only rows seeded at or after `since` (a brain that was there before keeps its
+ * own time) of a brain that holds no trace and no scope are deleted.
  */
 async function dropSeededBrain(adapter: StorageAdapter, brainId: string, since: number): Promise<void> {
   const seeded = await adapter.get<{ value: string }>("SELECT value FROM brain_meta WHERE brain_id = ? AND key = 'created_at'", [brainId]);
@@ -539,9 +555,10 @@ export interface SouledAgentOptions extends AgentOptions {
    * reaches the file. `close()` leaves the adapter open, and on SQLite the agent turns `secure_delete` on for it.
    *
    * Give the agent a database or PostgreSQL schema of its own: the tombstone ledger is database-wide, so the open is
-   * refused on a database that holds another agent's memory. Give it an adapter object of its own too: the agent runs
-   * its own transactions on a PostgreSQL adapter one after another, and a transaction the host runs on the same
-   * adapter is outside that order. A PostgreSQL adapter must read BIGINT as numbers (`typeParsers: { int8: 'number' }`).
+   * refused on a database that holds another agent's memory, before anything is written there. Give it an adapter
+   * object of its own too: the agent runs its own transactions on a PostgreSQL adapter one after another, and a
+   * transaction the host runs on the same adapter is outside that order. A PostgreSQL adapter must read BIGINT as
+   * numbers (`typeParsers: { int8: 'number' }`).
    * `tombstoneCopy` is required with it, and the open is refused while a store file is still at
    * `memory/.store/memory.sqlite`: the memory it holds would be out of reach of every call on the new store.
    */
@@ -671,8 +688,9 @@ export type SouledAgent = Agent & {
  * @throws TypeError when `soulStore` is not `{ adapter }`, or is set without a `tombstoneCopy` that names a file or an
  *   adapter; nothing is opened.
  * @throws Error when `soulStore` is set and a store file is at `memory/.store/memory.sqlite`, or its PostgreSQL adapter
- *   reads BIGINT as text; nothing is opened. Error when its database holds another agent's memory, before the
- *   tombstone ledger opens; what the open seeded there is taken back. The host's adapter is left open on every refusal.
+ *   reads BIGINT as text, or its database holds another agent's memory; nothing is opened. Of two agents opened at
+ *   once on an empty database, at least one is refused the same way before the tombstone ledger opens, and takes back
+ *   the rows its open seeded. The host's adapter is left open on every refusal.
  */
 export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent> {
   const {
@@ -747,6 +765,10 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   const storeDir = path.join(loaded.memoryDir, '.store');
   /** The adapter of the host's database the store lives in (`soulStore`); undefined for the store's own file. */
   const hostAdapter = soulStore?.adapter;
+  /** Whether the host's database held rows of this agent's brain before this open; such rows are never taken back. */
+  let seededBefore = false;
+  /** Why the open was refused: `anotherAgent` when another agent seeded the database while this one opened. */
+  const refusal = { anotherAgent: false };
   if (hostAdapter) {
     // Checked before anything opens. A store file left beside the soul holds people the new store's calls never reach.
     const leftover = path.join(storeDir, 'memory.sqlite');
@@ -756,6 +778,12 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       );
     }
     await assertBigintReadsAsNumbers(hostAdapter, "souledAgent: soulStore's PostgreSQL adapter");
+    // One agent a database: the tombstone ledger is database-wide. Another agent's database is refused here, before
+    // this agent's Brain makes or migrates a table in it.
+    if (await holdsAnotherBrain(hostAdapter, agentId, true)) throw new Error(SOUL_STORE_HOLDS_ANOTHER_AGENT);
+    seededBefore = await brainIsSeeded(hostAdapter, agentId);
+    // The agent's transactions on a PostgreSQL adapter run one at a time from here on, the open's migrations included.
+    serializeTransactionsOn(hostAdapter);
   } else {
     await fs.mkdir(storeDir, { recursive: true });
     // The store holds what people said: it stays out of version control. A .gitignore already there is left as it is.
@@ -805,12 +833,15 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
           selfImprove: true,
           forgotten: forgottenOptions,
           leaveAdapterOpen: true,
-          // One agent a database: the tombstone ledger is database-wide. The Brain's open has seeded this agent's own
-          // brain_meta rows before this reads, so of two agents opened at once on an empty database the one that
-          // reads second finds the other's. It runs before the ledger opens, so a refused agent never touches the
-          // other agent's tombstones.
+          // The one-agent check again, for two agents opened at once on an empty database: each passed the check
+          // before the open. The Brain's open has seeded this agent's own brain_meta rows before this reads, so the
+          // one that reads second finds the other's. It runs before the ledger opens, so a refused agent never
+          // touches the other agent's tombstones.
           beforeLedger: async () => {
-            if (await holdsAnotherBrain(hostAdapter, agentId)) throw new Error(SOUL_STORE_HOLDS_ANOTHER_AGENT);
+            if (await holdsAnotherBrain(hostAdapter, agentId)) {
+              refusal.anotherAgent = true;
+              throw new Error(SOUL_STORE_HOLDS_ANOTHER_AGENT);
+            }
           },
         })
       : await Memory.createSqlite(path.join(storeDir, 'memory.sqlite'), {
@@ -825,9 +856,13 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     const emptyNewCopy = ownCopy !== undefined && !ownCopy.existed && (await holdsNoLedgerRow(ownCopy.adapter));
     await closeCopy();
     if (emptyNewCopy && copyPath !== undefined) await fs.rm(copyPath, { force: true }).catch(() => undefined);
-    // The host's database is left as this open found it, and its adapter open: the brain_meta rows the Brain's open
-    // seeded for this agent are taken back, so the agent whose database it is opens again.
-    if (hostAdapter) await dropSeededBrain(hostAdapter, agentId, openedAt).catch(() => undefined);
+    // The host's adapter is left open. An agent refused because another one seeded the database at the same moment
+    // takes back the brain_meta rows its own open seeded, so the agent that stays opens again. No other refusal takes
+    // rows back: they are this agent's own, in the database its host gave it, and an open of the same agent that is
+    // live there at this moment relies on them.
+    if (hostAdapter && refusal.anotherAgent && !seededBefore) {
+      await dropSeededBrain(hostAdapter, agentId, openedAt).catch(() => undefined);
+    }
     throw err;
   }
   /** The store's forgotten-user ledger: every write and read of a subject asks it. */
