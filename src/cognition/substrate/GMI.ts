@@ -478,6 +478,12 @@ export class GMI implements IGMI {
   private turnMemoryScope: TurnMemoryScope | undefined;
 
   /**
+   * True while the turn may send no request the user's id (`metadata.withholdUserId`): the memory the turn files is
+   * not tagged with it, since the memory block shows a trace's tags to the model. Set when a user turn starts.
+   */
+  private turnWithholdsUserId = false;
+
+  /**
    * A souled agent's view of its memory rules for the turn (`metadata.soulMemory`), and the answer it gave, asked once
    * a turn before the user's message is scored for sentiment. Set when a user turn starts; a tool continuation keeps
    * the view and the answer of the turn it continues.
@@ -613,6 +619,7 @@ export class GMI implements IGMI {
         () => this.getCurrentPrimaryPersonaId(),
         () => this.gmiId,
         (type, message, details) => this.addTraceEntry(type as ReasoningEntryType, message, details),
+        () => this.turnWithholdsUserId,
       );
     } else {
       this.memoryBridge = null;
@@ -1429,6 +1436,7 @@ export class GMI implements IGMI {
         // the GMI's last turn was another conversation's: nothing it kept for that turn belongs to this one
         this.turnResolution = undefined;
         this.turnMemoryScope = undefined;
+        this.turnWithholdsUserId = false;
         this.turnSoulMemory = undefined;
         this.turnSoulAnswer = undefined;
         this.turnToolCallGate = undefined;
@@ -1665,6 +1673,7 @@ export class GMI implements IGMI {
     if (turnInput.metadata?.isToolContinuation !== true) {
       this.turnResolution = undefined;
       this.turnMemoryScope = memoryScopeOf(turnInput);
+      this.turnWithholdsUserId = turnInput.metadata?.withholdUserId === true;
       this.turnSoulMemory = soulMemoryOf(turnInput);
       this.turnSoulAnswer = undefined;
       this.turnLearning = undefined;

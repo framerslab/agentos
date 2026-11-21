@@ -181,6 +181,8 @@ export class CognitiveMemoryBridge {
     private readonly getPersonaId: () => string,
     private readonly getGmiId: () => string,
     private readonly addTraceEntry: (type: string, message: string, details?: Record<string, any>) => void,
+    /** True while the turn may send no request the user's id: its traces are not tagged with the user's id. */
+    private readonly withholdsUserId: () => boolean = () => false,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -221,8 +223,9 @@ export class CognitiveMemoryBridge {
   /**
    * Builds a de-duplicated set of tags for a memory trace.
    *
-   * Tags include the message role, active persona ID, current user ID, and
-   * the task domain. Falsy or whitespace-only values are filtered out. The
+   * Tags include the message role, active persona ID, current user ID (none on
+   * a turn that sends the model no user id), and the task domain. Falsy or
+   * whitespace-only values are filtered out. The
    * memory block reads the role tag 'assistant' on a trace with sourceType
    * 'agent_inference' as the agent's own earlier reply.
    *
@@ -234,7 +237,8 @@ export class CognitiveMemoryBridge {
     const tags = [
       role,
       this.getPersonaId(),
-      userCtx?.userId,
+      // The memory block shows a trace's tags to the model: a turn that sends it no user id tags nothing with one.
+      this.withholdsUserId() ? undefined : userCtx?.userId,
       (userCtx as any)?.domain,
     ].filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
     return Array.from(new Set(tags));
