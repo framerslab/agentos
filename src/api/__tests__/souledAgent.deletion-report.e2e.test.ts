@@ -17,7 +17,7 @@
  *   session: its messages, and what its GMI holds of the person (its history, its sentiment trend, its working-memory
  *   slots). Another person's session is left as it is. A session whose turn is still running at the deadline leaves
  *   the `sessions` part missed; it is emptied once that turn ends, the turn's memory writes are refused, and the
- *   deletion made again reports the part reached. The default runtime clears each open session and counts it.
+ *   deletion made again reports the part reached. The default runtime clears each open session handle and counts it.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
@@ -662,14 +662,22 @@ describe("a deletion and the open sessions, on runtime 'gmi' with cognitive memo
 });
 
 describe(`a deletion and the open sessions, on runtime ${RUNTIME}`, () => {
-  it('clears each session open for the person and counts it', async () => {
+  it('clears each session handle open for the person and counts it', async () => {
     const a = await open();
+    // One handle a session: the default runtime hands out a new one at each session() call, and each is counted.
     const first = a.session('s1', { userId: 'alice' });
     const second = a.session('s2', { userId: 'alice' });
     const other = a.session('s3', { userId: 'bob' });
-    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
-    await turn(a, 's2', 'alice', 'I keep it in the attic.');
-    await turn(a, 's3', 'bob', 'My canary is WREN-2.');
+    await first.send('My canary is LARK-7.');
+    await second.send('I keep it in the attic.');
+    await other.send('My canary is WREN-2.');
+    await vi.waitFor(
+      () => {
+        expect(tracesOf(keyOf(alice)).length).toBeGreaterThanOrEqual(4);
+        expect(tracesOf(keyOf(bob)).length).toBeGreaterThanOrEqual(2);
+      },
+      { timeout: 4_000 },
+    );
     const ofBob = other.messages();
     expect(first.messages().length).toBeGreaterThanOrEqual(2);
     expect(second.messages().length).toBeGreaterThanOrEqual(2);
