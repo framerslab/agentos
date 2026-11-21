@@ -1167,7 +1167,7 @@ const record = await result.memoryWrite;
 
 **A turn that is not filed.** A turn whose model call failed rejects and files neither side. A stream that ended in an error or that its caller stopped, and a turn whose input a guard rewrote or replaced, are not observed: the record has no entry.
 
-**A host's own provider.** The entry of a side is what the provider's `observe` resolved with. An `observe` that resolves with nothing leaves no entry, and one that throws or rejects gives a `failed` entry while the log keeps its `memory.hook_failed` line ([High-Level API](../getting-started/HIGH_LEVEL_API.md#schema-validation-and-retries)).
+**A host's own provider.** The entry of a side is what the provider's `observe` resolved with. An `observe` that resolves with nothing leaves no entry, and one that throws or rejects gives a `failed` entry while the log keeps its `memory.hook_failed` line ([High-Level API](../getting-started/HIGH_LEVEL_API.md#schema-validation-and-retries)). A provider wrapped with `guardMemoryProvider()` answers `skipped` with `forgotten` for a forgotten person, and what the provider itself resolves with for anyone else.
 
 **Where it is unset.** On `generateText()` and `streamText()`, on a one-shot `generate()` or `stream()`, and on an agent with no observing memory provider. The cognitive memory of a `gmi()` or `agent({ runtime: 'gmi' })` files the turn inside the turn, awaits those writes and adds no entry: the record is the memory provider's. A seat's session of a team on that runtime calls no `observe` and carries no record.
 

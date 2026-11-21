@@ -9,8 +9,10 @@ import type { ForgottenLedger } from './ForgottenLedger.js';
 
 /**
  * A memory provider whose `observe` and `getContext` ask the ledger first: for a forgotten subject `observe` files
- * nothing (one `memory.write_refused` line) and `getContext` answers null. The provider's own store is its own: a
- * deletion names it as not reached.
+ * nothing (one `memory.write_refused` line) and answers a `skipped` entry with the reason `forgotten`, and
+ * `getContext` answers null. For anyone else `observe` resolves with what the provider's own resolves with, so a
+ * session turn's `memoryWrite` reads the same through the guard. The provider's own store is its own: a deletion names
+ * it as not reached.
  *
  * A call with no hook context names no subject and goes to the provider as it is.
  *
@@ -28,9 +30,9 @@ export function guardMemoryProvider(
     guarded.observe = async (role, text, context) => {
       if (context && (await ledger.isForgotten(context.subject))) {
         memoryLog.warn('memory.write_refused', { reason: 'forgotten' });
-        return;
+        return { role, outcome: 'skipped', reason: 'forgotten' };
       }
-      await observe(role, text, context);
+      return observe(role, text, context);
     };
   }
   const getContext = provider.getContext?.bind(provider);
