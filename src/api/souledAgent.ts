@@ -162,12 +162,9 @@ const SOUL_STORE_SHAPE = 'souledAgent: soulStore must be { adapter } with a Stor
 const SOUL_STORE_NEEDS_COPY =
   "souledAgent: soulStore needs tombstoneCopy ({ path } or { adapter }), the tombstones' second copy outside what a restore of the store replaces; the default copy is a file on one machine, and a store in the host's database usually serves several";
 
-/**
- * What an open with `soulStore` and no `retention`, or no `tombstoneKey`, is refused with, unless `sharedMemory` makes
- * the store one person's.
- */
+/** What an open with `soulStore` and no `retention`, or no `tombstoneKey` that holds a key, is refused with. */
 const SOUL_STORE_NEEDS_RETENTION_AND_KEY =
-  "souledAgent: soulStore needs retention and tombstoneKey, unless sharedMemory makes the store one person's: the agent counts the people and sessions it holds memory of in its own process, and a store in the host's database is usually served by several processes, each of which would let its own first one in without them";
+  "souledAgent: soulStore needs retention and tombstoneKey: the agent counts the people and sessions it holds memory of in its own process, and a store in the host's database is usually served by several processes, each of which would let its own first one in without them";
 
 /** What an open on a database that holds another agent's memory is refused with. */
 const SOUL_STORE_HOLDS_ANOTHER_AGENT =
@@ -602,9 +599,8 @@ export interface SouledAgentOptions extends AgentOptions {
    * numbers (`typeParsers: { int8: 'number' }`).
    * `tombstoneCopy` is required with it, and the open is refused while a store file is still at
    * `memory/.store/memory.sqlite`: the memory it holds would be out of reach of every call on the new store.
-   * `retention` and `tombstoneKey` are required with it too, unless `sharedMemory` makes the store one person's: the
-   * agent counts the people and sessions it holds memory of in its own process, and other processes serve the same
-   * database.
+   * `retention` and `tombstoneKey` are required with it too, with or without `sharedMemory`: the agent counts the
+   * people and sessions it holds memory of in its own process, and other processes serve the same database.
    */
   soulStore?: { adapter: StorageAdapter };
 }
@@ -730,7 +726,7 @@ export type SouledAgent = Agent & {
  *   (`runtime: 'gmi'` with `cognition.memory`, the `full` profile, or the `memory` option): the GMI keeps that memory
  *   in a store of its own, which none of them reaches; nothing is opened.
  * @throws TypeError when `soulStore` is not `{ adapter }`, or is set without a `tombstoneCopy` that names a file or an
- *   adapter, or without `retention` or `tombstoneKey` while `sharedMemory` is not set; nothing is opened.
+ *   adapter, or without `retention`, or without a `tombstoneKey` that holds a key; nothing is opened.
  * @throws Error when `soulStore` is set and a store file is at `memory/.store/memory.sqlite`, or its PostgreSQL adapter
  *   reads BIGINT as text, or its database holds another agent's memory; nothing is opened. Of two agents opened at
  *   once on an empty database, at least one is refused the same way before the tombstone ledger opens, and takes back
@@ -756,15 +752,21 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   if (sharedMemory !== undefined) assertSharedMemory(sharedMemory, anonymousUserIds);
   if (retention !== undefined) assertRetention(retention);
   if (legacyMemory !== undefined) assertLegacyMemory(legacyMemory, (id) => isAnonymousUserId(id, anonymousUserIds));
+  /** The key the tombstone ledger is handed: one key is the current key. A `tombstoneKey` that holds nothing is none. */
+  const key =
+    tombstoneKey === undefined
+      ? undefined
+      : typeof tombstoneKey === 'string' || tombstoneKey instanceof Uint8Array
+        ? { current: tombstoneKey }
+        : tombstoneKey;
   if (soulStore !== undefined) {
     assertSoulStore(soulStore);
     // An option that names nothing would fall back to the default file, or to a ledger with no second copy.
     if (!namesTombstoneCopy(tombstoneCopy)) throw new TypeError(SOUL_STORE_NEEDS_COPY);
     // The rule that a second person needs a retention period and a tombstone key counts the people this process
-    // holds memory of. Another process on the same database counts its own, so each would let its first one in.
-    if (sharedMemory === undefined && (retention === undefined || tombstoneKey === undefined)) {
-      throw new TypeError(SOUL_STORE_NEEDS_RETENTION_AND_KEY);
-    }
+    // holds memory of. Another process on the same database counts its own, so each would let its first one in; with
+    // sharedMemory, two processes that name different users would each open an empty store as one person's.
+    if (retention === undefined || !key) throw new TypeError(SOUL_STORE_NEEDS_RETENTION_AND_KEY);
   }
   // The two hooks and sharedMemory act on this agent's own store. A GMI's cognitive memory files and recalls in a store
   // of its own, which none of them reaches: an account the policy turns off would still be remembered there, and
@@ -860,12 +862,6 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   const closeCopy = async (): Promise<void> => {
     await ownCopy?.adapter.close().catch(() => undefined);
   };
-  const key =
-    tombstoneKey === undefined
-      ? undefined
-      : typeof tombstoneKey === 'string' || tombstoneKey instanceof Uint8Array
-        ? { current: tombstoneKey }
-        : tombstoneKey;
   // A learning layer gmi() builds writes tombstones under its namespace: the ledger reads it beside the store-wide one.
   const learningConfig = typeof rest.learning === 'object' && rest.learning !== null ? rest.learning : undefined;
   const namespaces =
