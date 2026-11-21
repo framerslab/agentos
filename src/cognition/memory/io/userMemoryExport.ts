@@ -120,7 +120,8 @@ export async function exportSubjectMemory(options: {
 /**
  * Corrects one subject's memory: each page compiled from a named trace is deleted and built again by the subject's
  * next compile, from the traces of it that are left and the correction; the corrected statement is filed as a trace
- * tagged `correction`; the named traces are deleted for good; and the vector index and the store's write-ahead log
+ * tagged `correction` (words the subject's key already holds are that trace, marked as the correction and kept, even
+ * when it is a named one); the named traces are deleted for good; and the vector index and the store's write-ahead log
  * are written out ({@link Memory.finishErasure}). A deleted trace cannot come back in a later compile, which is why a
  * correction deletes instead of editing a page.
  *
@@ -212,14 +213,27 @@ export async function correctSubjectMemory(options: {
       throw new Error('correctUserMemory: the subject is forgotten; nothing is written for them again');
     }
 
-    const { deleted } = await memory.deleteTraces(ids);
+    // The store keeps one trace for words the subject's key already holds: `remember` may have returned that trace,
+    // one of the named ones or an earlier correction. Whichever it is, it is the correction: the next compile reads it
+    // by id, beside the traces after its watermark; it is marked as one, with these ids among those it corrects (both
+    // steps leave a trace filed by this call as it is); and it is not deleted with the others.
+    const correctionTraceId = filed.result.id;
+    await memory.addRebuildSources(key, [correctionTraceId]);
+    // A retention sweep that runs past the subject's chain at close() can delete it first: this call deletes nothing
+    // named then. Made again, it files the correction anew when every named trace is still live; the sweep may have
+    // deleted the reused one, and the ownership check then rejects the call.
+    if (!(await memory.markCorrection(correctionTraceId, ids))) {
+      throw new Error('correctUserMemory: the correction is no longer stored; no named trace was deleted');
+    }
+
+    const { deleted } = await memory.deleteTraces(ids.filter((id) => id !== correctionTraceId));
     try {
       // A delete only marks a vector in the index, and the log still holds the pages written before the delete.
       await memory.finishErasure();
     } catch (error) {
       memoryLog.warn('memory.erasure_unfinished', errorFields(error));
     }
-    return { deleted, pagesDeleted, correctionTraceId: filed.result.id };
+    return { deleted, pagesDeleted, correctionTraceId };
   };
   return options.onChain ? options.onChain(correct) : correct();
 }

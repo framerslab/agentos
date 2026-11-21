@@ -1292,7 +1292,8 @@ describe('export and correction', () => {
     expect((JSON.parse(filed.metadata) as { corrects?: string[] }).corrects).toEqual([t1]);
     const registry = () =>
       rows<{ rebuild_sources: string | null }>(storeFile(), 'SELECT rebuild_sources FROM memory_scopes WHERE scope_id = ?', [keyOf(alice)]);
-    expect(JSON.parse(registry()[0].rebuild_sources!)).toEqual([t2]);
+    // The surviving trace of the deleted page, and the correction, which the next compile reads by id too.
+    expect(JSON.parse(registry()[0].rebuild_sources!)).toEqual([t2, result.correctionTraceId]);
 
     const calls = s.seen.length;
     await a.memory!.compileWiki();
@@ -1342,6 +1343,128 @@ describe('export and correction', () => {
     expect(pagesOf(keyOf(alice))).toEqual([]);
     expect(rows(storeFile(), 'SELECT id FROM memory_traces WHERE id = ?', [t1])).toEqual([]);
     expect(correctionsOf(keyOf(alice)).map((trace) => trace.content)).toEqual(['My canary is WREN-9.']);
+  });
+
+  it('keeps a correction whose words are those of a trace it replaces', async () => {
+    const { a } = await open({ compile: false });
+    await turn(a, 's1', 'alice', 'I live in Lisbon.');
+    await turn(a, 's1', 'alice', 'I live in Porto.');
+    const t1 = saidOf(keyOf(alice)).find((trace) => trace.content === 'I live in Lisbon.')!.id;
+    const t2 = saidOf(keyOf(alice)).find((trace) => trace.content === 'I live in Porto.')!.id;
+
+    // The store keeps one trace for words a person's memory already holds: the correction's words are t2's.
+    const result = await a.correctUserMemory!('alice', { traceIds: [t1, t2], text: 'I live in Porto.' });
+    expect(result.correctionTraceId).toBe(t2);
+    expect(result.deleted).toBe(1);
+    expect(rows(storeFile(), 'SELECT id FROM memory_traces WHERE id = ?', [t1])).toEqual([]);
+    const [kept] = rows<{ content: string; deleted: number; tags: string; metadata: string }>(
+      storeFile(),
+      'SELECT content, deleted, tags, metadata FROM memory_traces WHERE id = ?',
+      [result.correctionTraceId],
+    );
+    expect(kept).toMatchObject({ content: 'I live in Porto.', deleted: 0 });
+    expect(JSON.parse(kept.tags) as string[]).toContain('correction');
+    expect((JSON.parse(kept.metadata) as { corrects?: string[] }).corrects).toEqual([t1, t2]);
+
+    const doc = await a.exportUserMemory!('alice');
+    const texts = doc.traces.map((trace) => trace.text);
+    expect(texts).toContain('I live in Porto.');
+    expect(texts).not.toContain('I live in Lisbon.');
+    expect(doc.traces.find((trace) => trace.id === t2)!.tags).toContain('correction');
+  });
+
+  it('marks a reused trace stored in the same millisecond as the correction', async () => {
+    // The clock the store stamps traces by does not move: the turn and the correction share one millisecond.
+    vi.spyOn(Date, 'now').mockReturnValue(1_800_000_000_000);
+    const { a } = await open({ compile: false });
+    await turn(a, 's1', 'alice', 'I live in Porto.');
+    const t = saidOf(keyOf(alice)).find((trace) => trace.content === 'I live in Porto.')!.id;
+
+    const result = await a.correctUserMemory!('alice', { traceIds: [t], text: 'I live in Porto.' });
+    expect(result).toMatchObject({ correctionTraceId: t, deleted: 0 });
+    const [kept] = rows<{ deleted: number; tags: string; metadata: string }>(
+      storeFile(),
+      'SELECT deleted, tags, metadata FROM memory_traces WHERE id = ?',
+      [t],
+    );
+    expect(kept.deleted).toBe(0);
+    expect(JSON.parse(kept.tags) as string[]).toContain('correction');
+    expect((JSON.parse(kept.metadata) as { corrects?: string[] }).corrects).toEqual([t]);
+  });
+
+  it('deletes nothing when the correction is gone before it is marked, and finishes when made again', async () => {
+    const { a } = await open({ compile: false });
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    const t1 = saidOf(keyOf(alice)).find((trace) => trace.content === 'My canary is LARK-7.')!.id;
+    // As a retention sweep that runs past the person's chain at close() can delete it between the filing and the mark.
+    vi.spyOn(a.memory!, 'markCorrection').mockResolvedValueOnce(false);
+    const correction = { traceIds: [t1], text: 'My canary is WREN-9.' };
+    await expect(a.correctUserMemory!('alice', correction)).rejects.toThrow('the correction is no longer stored');
+    expect(rows(storeFile(), 'SELECT id FROM memory_traces WHERE id = ? AND deleted = 0', [t1])).toHaveLength(1);
+
+    const again = await a.correctUserMemory!('alice', correction);
+    expect(again.deleted).toBe(1);
+    expect(correctionsOf(keyOf(alice)).map((trace) => trace.id)).toEqual([again.correctionTraceId]);
+  });
+
+  it('records every trace a reused correction replaced, and has the next compile read it', async () => {
+    const { a } = await open({ compile: false });
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await turn(a, 's1', 'alice', 'My canary is LARK-8.');
+    const t1 = saidOf(keyOf(alice)).find((trace) => trace.content === 'My canary is LARK-7.')!.id;
+    const t3 = saidOf(keyOf(alice)).find((trace) => trace.content === 'My canary is LARK-8.')!.id;
+
+    const first = await a.correctUserMemory!('alice', { traceIds: [t1], text: 'My canary is WREN-9.' });
+    // The second correction's words are the first's: the store returns the first correction's trace.
+    const second = await a.correctUserMemory!('alice', { traceIds: [t3], text: 'My canary is WREN-9.' });
+    expect(second.correctionTraceId).toBe(first.correctionTraceId);
+    expect(second.deleted).toBe(1);
+    expect(rows(storeFile(), 'SELECT id FROM memory_traces WHERE id IN (?, ?)', [t1, t3])).toEqual([]);
+    const [kept] = rows<{ tags: string; metadata: string }>(
+      storeFile(),
+      'SELECT tags, metadata FROM memory_traces WHERE id = ?',
+      [second.correctionTraceId],
+    );
+    expect((JSON.parse(kept.tags) as string[]).filter((tag) => tag === 'correction')).toHaveLength(1);
+    expect((JSON.parse(kept.metadata) as { corrects?: string[] }).corrects).toEqual([t1, t3]);
+    const [registry] = rows<{ rebuild_sources: string | null }>(
+      storeFile(),
+      'SELECT rebuild_sources FROM memory_scopes WHERE scope_id = ?',
+      [keyOf(alice)],
+    );
+    expect(JSON.parse(registry.rebuild_sources!) as string[]).toContain(second.correctionTraceId);
+  });
+
+  it('exports the turn just sent: the export waits for the writes the turn started', async () => {
+    const { a } = await open({ compile: false });
+    const memory = a.memory!;
+    const remember = memory.remember.bind(memory);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // The turn's two writes start when send() resolves and wait here until released.
+    vi.spyOn(memory, 'remember').mockImplementation(async (...args: Parameters<typeof remember>) => {
+      await held;
+      return remember(...args);
+    });
+    await a.session('s1', { userId: 'alice' }).send('My name is Ada.');
+
+    let settled = false;
+    const exported = a.exportUserMemory!('alice').finally(() => {
+      settled = true;
+    });
+    let waited = false;
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      waited = !settled;
+    } finally {
+      release();
+    }
+    const doc = await exported;
+    expect(waited).toBe(true);
+    expect(doc.traces.map((trace) => trace.text)).toContain('My name is Ada.');
+    expect(doc.traces.map((trace) => trace.speaker)).toEqual(['user', 'assistant']);
   });
 
   it("leaves the corrected words in neither file of the store", async () => {
