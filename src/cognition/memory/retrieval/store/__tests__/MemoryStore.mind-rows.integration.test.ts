@@ -141,7 +141,12 @@ async function openFacade(store: Store = 'sqlite'): Promise<{ memory: Memory; br
 /** The manager a souled agent's mind runs on the facade's Brain: the mind's rows alone, loaded a key at a time. */
 async function mindManager(
   brain: Brain,
-  options: { retrieval?: 'dense' | 'hybrid'; rows?: 'all' | 'mind'; embedding?: ReturnType<typeof embedder> } = {},
+  options: {
+    retrieval?: 'dense' | 'hybrid';
+    rows?: 'all' | 'mind';
+    embedding?: ReturnType<typeof embedder>;
+    mechanisms?: Record<string, unknown>;
+  } = {},
 ): Promise<AgentCognitiveMemory> {
   const built = await createAgentCognitiveMemory({
     persona: {
@@ -155,6 +160,7 @@ async function mindManager(
     memory: options.retrieval ? { recall: { retrieval: options.retrieval } } : {},
     brain,
     embeddingManager: (options.embedding ?? embedder()).manager as never,
+    ...(options.mechanisms ? { mechanisms: options.mechanisms as never } : {}),
     rows: options.rows ?? 'mind',
     hydration: 'scopes',
   });
@@ -178,6 +184,22 @@ async function planter(brain: Brain, dim: number = DIM): Promise<MemoryStore> {
     embeddingManager: embedder(dim).manager as never,
     knowledgeGraph,
     collectionPrefix: 'plant',
+  });
+  store.setBrain(brain);
+  closers.push(() => store.dispose());
+  return store;
+}
+
+/** A store on `brain` that indexes into `vectorStore`, of every row or of the mind's rows alone. */
+async function storeOn(brain: Brain, vectorStore: InMemoryVectorStore, rows: 'all' | 'mind'): Promise<MemoryStore> {
+  const knowledgeGraph = new KnowledgeGraph();
+  await knowledgeGraph.initialize();
+  const store = new MemoryStore({
+    vectorStore,
+    embeddingManager: embedder().manager as never,
+    knowledgeGraph,
+    collectionPrefix: 'shared',
+    ...(rows === 'mind' ? { rows: 'mind' as const, hydration: 'scopes' as const } : {}),
   });
   store.setBrain(brain);
   closers.push(() => store.dispose());
@@ -358,6 +380,86 @@ describe('the rows a mind files', () => {
     expect(await rows()).toBe(2);
   });
 
+  it("a trace refused for its key is refused before its text leaves the manager", async () => {
+    const { brain } = await openFacade();
+    const rows = async () =>
+      Number((await brain.get<{ n: number | string }>('SELECT COUNT(*) AS n FROM memory_traces WHERE brain_id = ?', [brain.brainId]))?.n ?? 0);
+    // The mechanisms embed a trace's text at encode, before the store files it.
+    const embedding = embedder();
+    const { manager } = await mindManager(brain, { embedding, mechanisms: {} });
+    const said = 'Alice keeps bees.';
+    await expect(
+      manager.encode(said, MOOD, 'neutral', { scope: 'user', scopeId: 'alice', filing: filingOf('alice') }),
+    ).rejects.toThrow(/conversation/);
+    // A filing with no key would file under the agent's own id, a key of no person's.
+    await expect(manager.encode(said, MOOD, 'neutral', { scope: 'conversation', filing: filingOf('alice') })).rejects.toThrow(
+      /conversation/,
+    );
+    // Another person's key.
+    await expect(
+      manager.encode(said, MOOD, 'neutral', { scope: 'conversation', scopeId: keyOf('bob'), filing: filingOf('alice') }),
+    ).rejects.toThrow(/conversation/);
+    // The key of the same id as a session's.
+    await expect(
+      manager.encode(said, MOOD, 'neutral', {
+        scope: 'conversation',
+        scopeId: conversationScopeKey(AGENT, { kind: 'session', id: 'alice' }),
+        filing: filingOf('alice'),
+      }),
+    ).rejects.toThrow(/conversation/);
+    expect(embedding.sent).not.toContain(said);
+    expect(await rows()).toBe(0);
+    expect(manager.getStore().getTraceCount()).toBe(0);
+
+    // The store refuses them too, for a caller that files through it.
+    const store = manager.getStore();
+    await expect(store.store(mindTrace('no-key', said, AGENT, 'alice', Date.now()))).rejects.toThrow(/conversation/);
+    await expect(store.store(mindTrace('other-key', said, keyOf('bob'), 'alice', Date.now()))).rejects.toThrow(/conversation/);
+    expect(await rows()).toBe(0);
+
+    // Its own key files.
+    const filed = await manager.encode(said, MOOD, 'neutral', {
+      scope: 'conversation',
+      scopeId: keyOf('alice'),
+      filing: filingOf('alice'),
+      turnUserId: 'alice',
+    });
+    expect(filed.scopeId).toBe(keyOf('alice'));
+    expect(await rows()).toBe(1);
+  });
+
+  it("a store of the mind's rows reads no other writer's document in a vector index it shares", async () => {
+    const { brain } = await openFacade();
+    const A = keyOf('alice');
+    const shared = new InMemoryVectorStore();
+    await shared.initialize({
+      id: `shared-${Math.random().toString(36).slice(2)}`,
+      type: 'in_memory',
+      defaultEmbeddingDimension: DIM,
+      similarityMetric: 'cosine',
+    } as never);
+    const plain = await storeOn(brain, shared, 'all');
+    const mind = await storeOn(brain, shared, 'mind');
+    const now = Date.now() - 2000;
+    await plain.store({ ...mindTrace('plain-0', 'Alice keeps bees on the roof.', A, 'alice', now), filing: undefined });
+    await mind.store(mindTrace('mind-0', 'Alice keeps bees in the garden.', A, 'alice', now + 1));
+    expect((await metadataOf(brain, 'plain-0')).filedBy).toBeUndefined();
+
+    // A query by meaning: both documents are in the key's collection of the shared index.
+    const queried = await mind.query('bees', MOOD, { scopes: scopesOf(A) });
+    const queriedIds = [...queried.scored.map((trace) => trace.id), ...queried.partial.map((trace) => trace.traceId)];
+    expect(queriedIds).toContain('mind-0');
+    expect(queriedIds).not.toContain('plain-0');
+    expect(mind.getTrace('plain-0')).toBeUndefined();
+
+    // A listing of a key the store holds nothing of reads the index.
+    const fresh = await storeOn(brain, shared, 'mind');
+    expect((await fresh.getByScope('conversation', A)).map((trace) => trace.id)).toEqual(['mind-0']);
+    expect(fresh.getTrace('plain-0')).toBeUndefined();
+    // The other writer's document stays in the index.
+    expect((await plain.getByScope('conversation', A)).map((trace) => trace.id).sort()).toEqual(['mind-0', 'plain-0']);
+  });
+
   it('a stored vector of another size stays out of the index, and its text is not sent to the embedding model', async () => {
     const { brain } = await openFacade();
     const A = keyOf('alice');
@@ -410,6 +512,41 @@ describe('the rows a mind files', () => {
     expect(manager.getStore().listTraces({ scopeId: K2 }).map((trace) => trace.filing?.subject.id)).toEqual(
       [second, second, second],
     );
+  });
+});
+
+/** Another writer's row under the key whose metadata is not JSON: the mind's load and its read by words still run. */
+async function malformedNeighbour(store: Store): Promise<void> {
+  const { memory, brain } = await openFacade(store);
+  const A = keyOf('alice');
+  const soul = await memory.remember('Alice keeps bees on the roof.', { scope: 'conversation', scopeId: A });
+  const { manager } = await mindManager(brain);
+  const mind = await manager.encode('Alice keeps bees in the garden.', MOOD, 'neutral', {
+    scope: 'conversation',
+    scopeId: A,
+    filing: filingOf('alice'),
+    turnUserId: 'alice',
+  });
+  await brain.run('UPDATE memory_traces SET metadata = ? WHERE brain_id = ? AND id = ?', ['{not json', brain.brainId, soul.id]);
+
+  // A manager that holds none of the key's rows reads them by their words.
+  const hybrid = await mindManager(brain, { retrieval: 'hybrid' });
+  const recalled = idsOf(await hybrid.manager.retrieve('bees', MOOD, { scopes: scopesOf(A) }));
+  expect(recalled).toContain(mind.id);
+  expect(recalled).not.toContain(soul.id);
+  // The key's load.
+  const loading = await mindManager(brain);
+  await expect(loading.manager.getStore().hydrateScope('conversation', A)).resolves.toBe(1);
+  expect(loading.manager.getStore().getTrace(soul.id)).toBeUndefined();
+}
+
+describe("another writer's row whose metadata is not JSON", () => {
+  it("hides none of the mind's rows", async () => {
+    await malformedNeighbour('sqlite');
+  });
+
+  it.skipIf(!POSTGRES_URL)("hides none of the mind's rows, on PostgreSQL", async () => {
+    await malformedNeighbour('postgres');
   });
 });
 
