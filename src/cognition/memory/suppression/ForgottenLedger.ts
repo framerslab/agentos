@@ -175,6 +175,24 @@ function checkedTraceIds(traceIds: readonly string[], call: string): string[] {
   return [...new Set(traceIds)];
 }
 
+/** A kept correction, checked: a rejected call names the rule and never a value. */
+function checkedKept(row: KeptCorrection): KeptCorrection {
+  const { traceId, scopeId, text, createdAt } = (row ?? {}) as Partial<Record<keyof KeptCorrection, unknown>>;
+  if (
+    typeof traceId !== 'string' ||
+    traceId === '' ||
+    typeof scopeId !== 'string' ||
+    scopeId === '' ||
+    typeof text !== 'string' ||
+    text === '' ||
+    typeof createdAt !== 'number' ||
+    !Number.isFinite(createdAt)
+  ) {
+    throw new TypeError('ForgottenLedger: a kept correction needs a trace id, a key, a text and a time');
+  }
+  return { traceId, scopeId, text, createdAt };
+}
+
 /** Deletes the copy's kept rows whose `column` holds one of `values`, a batch a statement; how many went. */
 async function deleteKept(trx: StorageAdapter, column: 'trace_id' | 'scope_id', values: readonly string[]): Promise<number> {
   let dropped = 0;
@@ -661,16 +679,15 @@ export class ForgottenLedger {
   }
 
   /**
-   * Unites the two sides, and writes a tombstone or marker rows when they are given: the copy's transaction, then the
-   * store's, never one inside the other.
+   * Unites the two sides, and writes a tombstone when one is given: the copy's transaction, then the store's, never one
+   * inside the other. The deleted-trace markers are left to {@link markTracesDeleted} and {@link reconcile}.
    *
    * 1. The store's rows and state are read with plain reads.
    * 2. In the copy's transaction, under its lock, the copy is read; both sides must hold this handle's identity and no
    *    key marker it was not given. The rows of either side go to the copy, and the mark is decided: the higher of the
    *    two, advanced once when a side holds a tombstone the other lacks without holding the strictly higher mark (a
-   *    row written outside the ledger), and once more for the tombstone written. Marker rows written alone raise no
-   *    mark. `inCopy` then runs in the same transaction, so what it changes in the copy commits with the rows or not
-   *    at all.
+   *    row written outside the ledger), and once more for the tombstone written. `inCopy` then runs in the same
+   *    transaction, so what it changes in the copy commits with the rows or not at all.
    * 3. In the store's transaction, under its lock, the store is read again and gains the rows it lacks; its state is
    *    set to the higher of its own and the decided mark.
    *
@@ -679,15 +696,12 @@ export class ForgottenLedger {
   private async unite(write?: {
     tombstone?: LedgerRow;
     marker?: LedgerRow;
-    /** Marker rows written beside the tombstone, or alone. */
-    markers?: readonly LedgerRow[];
     /** A change to the copy's own tables, in the copy's transaction. */
     inCopy?: (trx: StorageAdapter) => Promise<void>;
   }): Promise<{ written: boolean; identity: string; mark: string }> {
     const copy = this.copy;
-    /** The rows a write adds, markers first: the key's marker, the other markers, then the tombstone. */
-    const added = (): LedgerRow[] =>
-      write ? [...(write.marker ? [write.marker] : []), ...(write.markers ?? []), ...(write.tombstone ? [write.tombstone] : [])] : [];
+    /** The rows a write adds, the key's marker first. */
+    const added = (): LedgerRow[] => (write ? [...(write.marker ? [write.marker] : []), ...(write.tombstone ? [write.tombstone] : [])] : []);
     if (!copy) {
       return locked(this.primary, async (trx) => {
         const held = sideOf(await ForgottenLedger.rowsOf(trx));
@@ -790,28 +804,43 @@ export class ForgottenLedger {
 
   /**
    * Records traces as deleted for good: one marker row `t1:<trace id>` each, with an empty namespace, written to the
-   * copy first and then to the store, after uniting the two sides' rows. A marker is no tombstone: `size()`,
-   * `countNotOf()` and the checks of a subject leave it out, and the state mark does not rise. The copy's kept
-   * corrections of those traces are deleted in the same write to the copy, so a correction deleted later is never
-   * filed again. A trace already marked keeps its row.
+   * copy first and then to the store, each side in a transaction of its own under its lock. A marker is no tombstone:
+   * `size()`, `countNotOf()` and the checks of a subject leave it out, and the state mark does not rise. The copy's
+   * kept corrections of those traces are deleted in the same write to the copy, so a correction deleted later is never
+   * filed again. With `keep`, the correction that replaces them is kept in that same write ({@link keepCorrection}):
+   * the copy holds both or neither. A trace already marked keeps its row.
    *
-   * @throws {TypeError} When a trace id is not a non-empty string.
-   * @throws {ForgottenLedgerError} As {@link markForgotten}; or what a side's write threw. Nothing is marked in the
-   *   store unless the copy holds the marker.
+   * @throws {TypeError} When a trace id is not a non-empty string, or `keep` is not a kept correction.
+   * @throws {ForgottenLedgerError} When a side no longer holds the ledger's identity, or holds the marker of a key the
+   *   handle was not given; or what a side's write threw. Nothing is marked in the store unless the copy holds the
+   *   marker.
    */
-  async markTracesDeleted(traceIds: readonly string[]): Promise<void> {
+  async markTracesDeleted(traceIds: readonly string[], options: { keep?: KeptCorrection } = {}): Promise<void> {
     const ids = checkedTraceIds(traceIds, 'markTracesDeleted');
-    if (ids.length === 0) return;
+    const keep = options?.keep === undefined ? undefined : checkedKept(options.keep);
+    if (ids.length === 0) {
+      if (keep) await this.keepCorrection(keep);
+      return;
+    }
     const at = new Date().toISOString();
     const markers = ids.map((id): LedgerRow => ({ hash: `${DELETED_TRACE_PREFIX}${id}`, namespace: '', forgotten_at: at }));
-    await this.step(() =>
-      this.unite({
-        markers,
-        inCopy: async (trx) => {
+    /** Writes the markers a side lacks, under its lock, once the side is checked. */
+    const write = async (trx: StorageAdapter): Promise<void> => {
+      await this.checkHeld(sideOf(await ForgottenLedger.rowsOf(trx)));
+      const held = await ForgottenLedger.deletedTraceIdsIn(trx, ids);
+      for (const row of markers) if (!held.has(row.hash)) await ForgottenLedger.insert(trx, row);
+    };
+    const copy = this.copy;
+    await this.step(async () => {
+      if (copy) {
+        await locked(copy, async (trx) => {
+          await write(trx);
           await deleteKept(trx, 'trace_id', ids);
-        },
-      }),
-    );
+          if (keep) await trx.run(KEEP_CORRECTION, [keep.traceId, keep.scopeId, keep.text, Math.trunc(keep.createdAt)]);
+        });
+      }
+      await locked(this.primary, write);
+    });
   }
 
   /**
@@ -831,13 +860,8 @@ export class ForgottenLedger {
       }
       return [...found];
     }
-    const hashes = checkedTraceIds(among, 'deletedTraceIds').map((id) => `${DELETED_TRACE_PREFIX}${id}`);
-    for (const side of sides) {
-      for (let at = 0; at < hashes.length; at += IN_BATCH) {
-        const slice = hashes.slice(at, at + IN_BATCH);
-        keep(await side.all<{ hash: string }>(`SELECT hash FROM agentos_learning_forgotten WHERE hash IN (${slice.map(() => '?').join(', ')})`, slice));
-      }
-    }
+    const ids = checkedTraceIds(among, 'deletedTraceIds');
+    for (const side of sides) keep([...(await ForgottenLedger.deletedTraceIdsIn(side, ids))].map((hash) => ({ hash })));
     return [...found];
   }
 
@@ -850,20 +874,7 @@ export class ForgottenLedger {
    * @throws {ForgottenLedgerError} When the copy no longer holds the ledger's identity; or what the copy's write threw.
    */
   async keepCorrection(row: KeptCorrection): Promise<void> {
-    const given = (row ?? {}) as Partial<Record<keyof KeptCorrection, unknown>>;
-    const { traceId, scopeId, text, createdAt } = given;
-    if (
-      typeof traceId !== 'string' ||
-      traceId === '' ||
-      typeof scopeId !== 'string' ||
-      scopeId === '' ||
-      typeof text !== 'string' ||
-      text === '' ||
-      typeof createdAt !== 'number' ||
-      !Number.isFinite(createdAt)
-    ) {
-      throw new TypeError('ForgottenLedger.keepCorrection: a kept correction needs a trace id, a key, a text and a time');
-    }
+    const { traceId, scopeId, text, createdAt } = checkedKept(row);
     const copy = this.copy;
     if (!copy) return;
     await this.step(() =>
@@ -921,7 +932,8 @@ export class ForgottenLedger {
   }
 
   /**
-   * Fills missing rows in both directions and leaves both sides at the higher state mark; it never lowers one. A
+   * Fills missing rows in both directions, the deleted-trace markers included, and leaves both sides at the higher state
+   * mark; it never lowers one. A
    * tombstone one side holds without holding the higher mark was written outside the ledger, and raises the mark
    * once. `added` lists the tombstones brought back into the primary since the last `reconcile()` on this handle, its
    * own and those of an open, a deletion or a state read on the way, markers and a deletion's own tombstone left out.
@@ -929,7 +941,10 @@ export class ForgottenLedger {
    */
   async reconcile(): Promise<{ added: string[] }> {
     return this.step(async () => {
-      if (this.copy) await this.unite();
+      if (this.copy) {
+        await this.unite();
+        await this.uniteDeletedTraces(this.copy);
+      }
       const added = [...this.broughtBack];
       this.broughtBack.clear();
       return { added };
@@ -994,15 +1009,62 @@ export class ForgottenLedger {
     return [...forms];
   }
 
+  /** The hashes of the deleted-trace markers a side holds of the given ids. */
+  private static async deletedTraceIdsIn(adapter: StorageAdapter, ids: readonly string[]): Promise<Set<string>> {
+    const hashes = ids.map((id) => `${DELETED_TRACE_PREFIX}${id}`);
+    const held = new Set<string>();
+    for (let at = 0; at < hashes.length; at += IN_BATCH) {
+      const slice = hashes.slice(at, at + IN_BATCH);
+      const rows = await adapter.all<{ hash: string }>(
+        `SELECT hash FROM agentos_learning_forgotten WHERE hash IN (${slice.map(() => '?').join(', ')})`,
+        slice,
+      );
+      for (const row of rows) held.add(row.hash);
+    }
+    return held;
+  }
+
+  /** A side's deleted-trace markers, by hash. */
+  private static async deletedTraceRowsOf(adapter: StorageAdapter): Promise<Map<string, LedgerRow>> {
+    const rows = await adapter.all<LedgerRow>(
+      `SELECT hash, namespace, forgotten_at FROM agentos_learning_forgotten WHERE hash LIKE '${DELETED_TRACE_PREFIX}%'`,
+    );
+    return new Map(rows.filter((row) => row.hash.startsWith(DELETED_TRACE_PREFIX)).map((row) => [row.hash, row]));
+  }
+
+  /**
+   * Copies the deleted-trace markers each side lacks from the other: the copy's transaction first, then the store's,
+   * each under its lock and holding the handle's identity.
+   */
+  private async uniteDeletedTraces(copy: StorageAdapter): Promise<void> {
+    const ofStore = await ForgottenLedger.deletedTraceRowsOf(this.primary);
+    const ofCopy = await locked(copy, async (trx) => {
+      await this.checkHeld(sideOf(await ForgottenLedger.rowsOf(trx)));
+      const held = await ForgottenLedger.deletedTraceRowsOf(trx);
+      for (const [hash, row] of ofStore) if (!held.has(hash)) await ForgottenLedger.insert(trx, row);
+      return held;
+    });
+    await locked(this.primary, async (trx) => {
+      await this.checkHeld(sideOf(await ForgottenLedger.rowsOf(trx)));
+      const held = await ForgottenLedger.deletedTraceRowsOf(trx);
+      for (const [hash, row] of ofCopy) if (!held.has(hash)) await ForgottenLedger.insert(trx, row);
+    });
+  }
+
   /** Writes one row; false when the table already held its hash. */
   private static async insert(adapter: StorageAdapter, row: LedgerRow): Promise<boolean> {
     const result = await adapter.run(INSERT_ROW, [row.hash, row.namespace, row.forgotten_at]);
     return result.changes > 0;
   }
 
-  /** Every row of a ledger, markers included. */
+  /**
+   * Every row of a ledger, markers included, the deleted-trace markers aside: they grow with every correction, and no
+   * step but the ones that write or copy them ({@link markTracesDeleted}, {@link reconcile}) reads them.
+   */
   private static async rowsOf(adapter: StorageAdapter): Promise<LedgerRow[]> {
-    const rows = await adapter.all<LedgerRow>('SELECT hash, namespace, forgotten_at FROM agentos_learning_forgotten');
+    const rows = await adapter.all<LedgerRow>(
+      `SELECT hash, namespace, forgotten_at FROM agentos_learning_forgotten WHERE hash NOT LIKE '${DELETED_TRACE_PREFIX}%'`,
+    );
     // A copied keyed tombstone must never precede the marker that requires its key on the next open.
     return rows.sort((a, b) => Number(isMarker(b.hash)) - Number(isMarker(a.hash)));
   }
