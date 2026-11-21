@@ -493,7 +493,10 @@ export async function forgetUserMemory(options: ForgetUserMemoryOptions): Promis
 
 export interface ReapplyTombstonesOptions
   extends Pick<ForgetUserMemoryOptions, 'memory' | 'ledger' | 'wiki' | 'agentId' | 'legacyUnattributed'> {
-  /** The per-subject parts of one deletion: the subject's drain and chain, and what the caller reached itself. */
+  /**
+   * The per-subject parts of one deletion: the subject's drain and chain, what the caller reached itself, what open
+   * sessions hold of the subject, and who receives a person's text.
+   */
   forSubject?: (
     subject: SuppressionSubject,
   ) => Promise<

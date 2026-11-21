@@ -791,7 +791,8 @@ export type SouledAgent = Agent & {
    *   request: each store with `reached` and a count or a reason, the pages deleted and those that failed, `drained`,
    *   `pendingAtDeadline`, `complete`, `completedAt`, `agentId`, `libraryVersion`, the four `parts` in order
    *   (`tombstone`, `mind`, `store`, `sessions`) and `recipients`. It never holds the user's id, a hash of the id or
-   *   any text. While `complete` is false, one `memory.forget_incomplete` warn line says which parts were missed.
+   *   any text. The person's deletion and each linked session's write one `memory.forget_incomplete` warn line when
+   *   incomplete, with each part reached or missed.
    * @throws TypeError when `userId`, or an entry of `linkedSessions`, is not a non-empty string, or holds a NUL or a
    *   lone surrogate, so no memory key can be built from it; nothing is deleted and no tombstone is written.
    */
