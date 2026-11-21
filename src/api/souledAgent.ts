@@ -183,11 +183,19 @@ function assertSoulStore(soulStore: unknown): asserts soulStore is { adapter: St
   }
 }
 
-/** Whether `tombstoneCopy` names a file by a non-empty path, or holds an adapter. */
+/**
+ * Whether `tombstoneCopy` names a second copy, read as the open reads it: an option that has an `adapter` key is an
+ * adapter's, whatever else it holds, so it names one only when that key holds an adapter; any other option names a
+ * file by a non-empty path.
+ */
 function namesTombstoneCopy(tombstoneCopy: unknown): boolean {
   if (tombstoneCopy === null || typeof tombstoneCopy !== 'object') return false;
-  const { path: file, adapter } = tombstoneCopy as { path?: unknown; adapter?: unknown };
-  return (typeof file === 'string' && file !== '') || (adapter !== null && typeof adapter === 'object');
+  if ('adapter' in tombstoneCopy) {
+    const { adapter } = tombstoneCopy as { adapter?: unknown };
+    return adapter !== null && typeof adapter === 'object';
+  }
+  const file = (tombstoneCopy as { path?: unknown }).path;
+  return typeof file === 'string' && file !== '';
 }
 
 /**
