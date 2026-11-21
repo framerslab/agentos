@@ -68,6 +68,8 @@ const CORRECTIONS_DDL = `CREATE TABLE IF NOT EXISTS memory_corrections (
   text TEXT NOT NULL,
   created_at BIGINT NOT NULL
 );`;
+/** The kept corrections of one key are read by the key: at an export, a person's deletion and every sweep. */
+const CORRECTIONS_BY_KEY_DDL = 'CREATE INDEX IF NOT EXISTS memory_corrections_scope ON memory_corrections (scope_id);';
 const KEEP_CORRECTION =
   'INSERT INTO memory_corrections (trace_id, scope_id, text, created_at) VALUES (?, ?, ?, ?) ' +
   'ON CONFLICT (trace_id) DO UPDATE SET scope_id = excluded.scope_id, text = excluded.text, created_at = excluded.created_at';
@@ -535,6 +537,7 @@ export class ForgottenLedger {
       // The kept corrections' table, in the copy alone, once the open has checked the pair.
       try {
         await copy.exec(CORRECTIONS_DDL);
+        await copy.exec(CORRECTIONS_BY_KEY_DDL);
       } catch {
         throw copyUnavailableError();
       }
