@@ -177,31 +177,31 @@ const SOUL_STORE_HOLDS_ANOTHER_AGENT =
 /** The tables a Brain keeps its rows in under its own `brain_id`; a row under another id is another agent's. */
 const BRAIN_TABLES = ['brain_meta', 'memory_traces', 'memory_scopes'] as const;
 
+/** Whether `value` has the calls of a `StorageAdapter` the store and the ledger make, and a `kind`. */
+function isStorageAdapter(value: unknown): value is StorageAdapter {
+  const calls = ['get', 'all', 'run', 'exec', 'transaction'];
+  return (
+    value !== null &&
+    typeof value === 'object' &&
+    typeof (value as { kind?: unknown }).kind === 'string' &&
+    calls.every((name) => typeof (value as Record<string, unknown>)[name] === 'function')
+  );
+}
+
 /** Throws {@link SOUL_STORE_SHAPE} unless `soulStore` is `{ adapter }` with an adapter's calls. */
 function assertSoulStore(soulStore: unknown): asserts soulStore is { adapter: StorageAdapter } {
   const adapter = soulStore !== null && typeof soulStore === 'object' ? (soulStore as { adapter?: unknown }).adapter : undefined;
-  const calls = ['get', 'all', 'run', 'exec', 'transaction'];
-  if (
-    adapter === null ||
-    typeof adapter !== 'object' ||
-    typeof (adapter as { kind?: unknown }).kind !== 'string' ||
-    calls.some((name) => typeof (adapter as Record<string, unknown>)[name] !== 'function')
-  ) {
-    throw new TypeError(SOUL_STORE_SHAPE);
-  }
+  if (!isStorageAdapter(adapter)) throw new TypeError(SOUL_STORE_SHAPE);
 }
 
 /**
  * Whether `tombstoneCopy` names a second copy, read as the open reads it: an option that has an `adapter` key is an
- * adapter's, whatever else it holds, so it names one only when that key holds an adapter; any other option names a
- * file by a non-empty path.
+ * adapter's, whatever else it holds, so it names one only when that key holds an object with an adapter's calls; any
+ * other option names a file by a non-empty path.
  */
 function namesTombstoneCopy(tombstoneCopy: unknown): boolean {
   if (tombstoneCopy === null || typeof tombstoneCopy !== 'object') return false;
-  if ('adapter' in tombstoneCopy) {
-    const { adapter } = tombstoneCopy as { adapter?: unknown };
-    return adapter !== null && typeof adapter === 'object';
-  }
+  if ('adapter' in tombstoneCopy) return isStorageAdapter((tombstoneCopy as { adapter?: unknown }).adapter);
   const file = (tombstoneCopy as { path?: unknown }).path;
   return typeof file === 'string' && file !== '';
 }
@@ -579,8 +579,8 @@ export interface SouledAgentOptions extends AgentOptions {
   /**
    * Where the second copy of the tombstones lives, out of what a restore of the store replaces: a SQLite file path, or
    * an adapter (left open on close). Default: `memory/.store/forgotten.sqlite`. A store whose copy is missing or
-   * unreadable does not open, and an option that names neither a file by a non-empty path nor an adapter (`{}`,
-   * `{ path: undefined }`, `{ adapter: undefined }`) is refused before anything opens.
+   * unreadable does not open, and an option that names neither a file by a non-empty path nor an adapter (`null`,
+   * `{}`, `{ path: undefined }`, `{ adapter: undefined }`) is refused before anything opens.
    */
   tombstoneCopy?: { path: string } | { adapter: StorageAdapter };
   /**
@@ -774,10 +774,11 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     // holds memory of. Another process on the same database counts its own, so each would let its first one in; with
     // sharedMemory, two processes that name different users would each open an empty store as one person's.
     if (retention === undefined || !key) throw new TypeError(SOUL_STORE_NEEDS_RETENTION_AND_KEY);
-  } else if (tombstoneCopy !== undefined && tombstoneCopy !== null && !namesTombstoneCopy(tombstoneCopy)) {
-    // A copy option built from configuration that is not there ({ path: process.env.X } with X unset) would put the
-    // second copy in the default file inside the store's own folder, which a restore of that folder replaces, in a
-    // file named by an empty path, or nowhere ({ adapter: undefined } opens the ledger with no copy).
+  } else if (tombstoneCopy !== undefined && !namesTombstoneCopy(tombstoneCopy)) {
+    // A copy option built from configuration that is not there ({ path: process.env.X } with X unset, or null) would
+    // put the second copy in the default file inside the store's own folder, which a restore of that folder replaces,
+    // in a file named by an empty path, or nowhere ({ adapter: undefined } opens the ledger with no copy). Only an
+    // option left out keeps the default file.
     throw new TypeError(TOMBSTONE_COPY_NAMES_NOTHING);
   }
   // The two hooks and sharedMemory act on this agent's own store. A GMI's cognitive memory files and recalls in a store
