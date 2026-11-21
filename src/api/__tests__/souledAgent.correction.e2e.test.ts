@@ -9,7 +9,8 @@
  * - A deletion and a correction both name who received a person's text (`recipients`), and still run when the routes
  *   the store recorded cannot be read.
  * - A turn that recalled a memory which a correction or a single deletion took away while the turn's model call was
- *   open does not file its reply (`skipped`, `corrected`): the reply can restate what was just deleted. The person's
+ *   open, or that began while the call was still deleting, does not file its reply (`skipped`, `corrected`): the reply
+ *   can restate what was just deleted. The person's
  *   own message of that turn is filed, and so is the whole of the session's next turn.
  * - Another person's running turn is filed whole, and so is a turn that overlapped a call the agent rejected. A call
  *   that fails after its ownership check keeps the running turn's reply out too, and is finished when made again.
@@ -296,6 +297,48 @@ describe.each(RUNTIMES)('deleting or correcting one memory, on runtime %s', (run
       // The session's next turn began after the change: both of its sides are filed.
       const next = await writeOf(await session.send('Thank you.'));
       expect(next.entries.map((entry) => entry.outcome)).toEqual(['written', 'written']);
+    } finally {
+      release();
+    }
+  });
+
+  it('a turn that recalls a memory while a deletion of it is under way does not file its reply', async () => {
+    const { gate, release } = gated();
+    const a = await open(runtime, [reply.text('A canary, lovely.'), reply.text('Your canary is LARK-7.'), ...spare()]);
+    try {
+      await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+      const x = idOf(saidOf(keyOf(alice)), 'LARK-7')!;
+
+      // The call has passed its ownership check and waits at its delete of x.
+      const entered = gated();
+      const original = a.memory!.deleteTraces.bind(a.memory!);
+      vi.spyOn(a.memory!, 'deleteTraces').mockImplementation(async (...args) => {
+        if (args[0].includes(x)) {
+          entered.release();
+          await gate;
+        }
+        return original(...args);
+      });
+      const deleting = correct(a, 'alice', [x]);
+      await entered.gate;
+
+      // A turn of a new session starts now, recalls x, which is still stored, and the model restates it.
+      const calls = served.seen.length;
+      const running = a.session('s2', { userId: 'alice' }).send('What is my canary called?');
+      await vi.waitFor(() => expect(served.seen).toHaveLength(calls + 1), { timeout: 4_000 });
+      expect(JSON.stringify(served.seen[calls].messages)).toContain('LARK-7');
+
+      // The delete finishes; the turn's writes, queued behind it, come after.
+      release();
+      expect((await deleting).deleted).toBe(1);
+      const result = await running;
+      expect(result.text).toBe('Your canary is LARK-7.');
+      const record = await writeOf(result);
+      expect(record.entries).toEqual([
+        { role: 'user', outcome: 'written', traceId: idOf(saidOf(keyOf(alice)), 'What is my canary called?') },
+        { role: 'assistant', outcome: 'skipped', reason: 'corrected' },
+      ]);
+      expect(holding('LARK-7')).toEqual([]);
     } finally {
       release();
     }
