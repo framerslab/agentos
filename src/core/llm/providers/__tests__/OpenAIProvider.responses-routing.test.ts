@@ -573,6 +573,67 @@ describe('OpenAIProvider routes to /v1/responses', () => {
     expect(sent[0].body).not.toHaveProperty('messages');
   });
 
+  it('leaves the chat-only keys of customModelParams off the /v1/responses body', async () => {
+    // On chat these overrides reach the body as written. The Responses body has no `stop`, no
+    // presence or frequency penalty and no `seed`, `n`, `logit_bias` or `logprobs`
+    // (https://developers.openai.com/api/reference/resources/responses/methods/create), and
+    // OpenAI refuses a body key it does not list. gpt-5.1 runs at effort 'none' by default, so
+    // this call was served on chat before every GPT-5 tool call went to Responses.
+    serve([
+      () => jsonResponse({ ...RESPONSE_META, model: 'gpt-5.1', status: 'completed', output: [messageItem('ok')], usage: USAGE }),
+      () => sseResponse(sseText([created('gpt-5.1'), textDelta('ok'), completed([messageItem('ok')])])),
+    ]);
+    const provider = await initializedProvider();
+    const customModelParams = {
+      stop: ['END'],
+      presence_penalty: 0.5,
+      frequency_penalty: 0.5,
+      seed: 7,
+      n: 2,
+      logit_bias: { '50256': -100 },
+      logprobs: true,
+      metadata: { run: 'r1' },
+    };
+
+    const result = await provider.generateCompletion('gpt-5.1', USER, { tools: pingTool, customModelParams });
+    await collect(provider.generateCompletionStream('gpt-5.1', USER, { tools: pingTool, customModelParams }));
+
+    const sent = posts();
+    expect(sent.map((p) => p.url)).toEqual([RESPONSES_URL, RESPONSES_URL]);
+    for (const { body } of sent) {
+      for (const key of ['stop', 'presence_penalty', 'frequency_penalty', 'seed', 'n', 'logit_bias', 'logprobs']) {
+        expect(body).not.toHaveProperty(key);
+      }
+      // A key Responses lists still passes through as written.
+      expect(body.metadata).toEqual({ run: 'r1' });
+      expect(body.tools.map((t: Json) => t.name)).toEqual(['ping']);
+    }
+    expect(result.choices[0].message.content).toBe('ok');
+  });
+
+  it('sends a chat output limit under 16 in customModelParams as max_output_tokens 16', async () => {
+    // Responses refuses a `max_output_tokens` under 16 with HTTP 400 ("Expected a value >= 16").
+    // The `maxTokens` option is raised to 16 already; a limit that arrives through
+    // customModelParams under a chat name or its own must be raised too.
+    const reply = () =>
+      jsonResponse({ ...RESPONSE_META, model: 'gpt-5.1', status: 'completed', output: [messageItem('ok')], usage: USAGE });
+    serve([reply, reply, reply, reply]);
+    const provider = await initializedProvider();
+
+    await provider.generateCompletion('gpt-5.1', USER, { tools: pingTool, customModelParams: { max_completion_tokens: 8 } });
+    await provider.generateCompletion('gpt-5.1', USER, { tools: pingTool, customModelParams: { max_tokens: 1 } });
+    await provider.generateCompletion('gpt-5.1', USER, { tools: pingTool, customModelParams: { max_output_tokens: 8 } });
+    await provider.generateCompletion('gpt-5.1', USER, { tools: pingTool, customModelParams: { max_completion_tokens: 4096 } });
+
+    const sent = posts();
+    expect(sent.map((p) => p.url)).toEqual([RESPONSES_URL, RESPONSES_URL, RESPONSES_URL, RESPONSES_URL]);
+    expect(sent.map((p) => p.body.max_output_tokens)).toEqual([16, 16, 16, 4096]);
+    for (const { body } of sent) {
+      expect(body).not.toHaveProperty('max_completion_tokens');
+      expect(body).not.toHaveProperty('max_tokens');
+    }
+  });
+
   it('routes streamed and non-streamed calls by one rule', async () => {
     // Every GPT-5 tool call goes to /v1/responses, with or without an effort: Chat Completions
     // refuses function tools for gpt-5.6-sol unless reasoning_effort is 'none' (HTTP 400, "To use
