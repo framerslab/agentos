@@ -1701,6 +1701,10 @@ export class GMI implements IGMI {
     const launchFrame = launchFrameOf(turnInput) ?? this.turnLaunchFrame;
     // The souled agent's view of the turn, read before any wait: a newer turn of this GMI sets its own.
     const turnSoul = this.turnSoulMemory;
+    // Whether this call may send no request the user's id: its own input's word, or, on a continuation, the turn's.
+    const withholdsUserId =
+      turnInput.metadata?.withholdUserId === true ||
+      (turnInput.metadata?.isToolContinuation === true && this.turnWithholdsUserId);
     // The host's note every request of this call sends (each step of its tool loop and each hop), read from its own
     // input alone: a user turn's from AgentOSInput, a continuation's from the options its results came with. The GMI
     // keeps no note between calls, since one GMI serves every conversation of its session.
@@ -2101,7 +2105,7 @@ export class GMI implements IGMI {
           historyAtTurnStart,
           currentUserMessage,
           turnMessages,
-          withholdUserId: turnInput.metadata?.withholdUserId === true,
+          withholdUserId: withholdsUserId,
         });
 
         const promptComponents: PromptComponents = {
@@ -2169,7 +2173,7 @@ export class GMI implements IGMI {
         const personaOptions = (this.activePersona.defaultModelCompletionOptions ?? {}) as Record<string, unknown>;
         // The provider's end-user field: the host's choice when the turn names one
         // (null sends none), else the turn's user.
-        const providerUserId = turnInput.metadata?.withholdUserId === true
+        const providerUserId = withholdsUserId
           ? null
           : turnInput.metadata && 'providerUserId' in turnInput.metadata
             ? turnInput.metadata.providerUserId
