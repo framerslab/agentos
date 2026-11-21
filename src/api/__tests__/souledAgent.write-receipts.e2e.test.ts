@@ -31,22 +31,17 @@ import { reply, script, type ProviderScript } from './helpers/stubProviders';
 import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 import { conversationScopeKey } from '../../cognition/memory/retrieval/store/conversationScopeKey';
+import type { MemoryWriteEntry, MemoryWriteRecord } from '../runtime/memoryWriteRecord';
 
 /** The runtimes the cases run on: the default one, and the GMI runtime with cognitive memory off. */
 const RUNTIMES = ['legacy', 'gmi'] as const;
 type Runtime = (typeof RUNTIMES)[number];
 
-/** One side's entry of a turn's write record, and the record. */
-interface WriteEntry {
-  role: 'user' | 'assistant';
-  outcome: 'written' | 'skipped' | 'failed';
-  traceId?: string;
-  reason?: string;
-  errorName?: string;
-}
-interface WriteRecord {
-  entries: WriteEntry[];
-}
+/** An entry's outcome, without the side it is the entry of. */
+type WithoutRole<Entry> = Entry extends unknown ? Omit<Entry, 'role'> : never;
+type Outcome = WithoutRole<MemoryWriteEntry>;
+/** Why a side was not filed. */
+type SkipReason = Extract<MemoryWriteEntry, { outcome: 'skipped' }>['reason'];
 
 let n = 0;
 let dir: string;
@@ -125,10 +120,9 @@ function tracesOf(key: string): Array<{ id: string; content: string }> {
 const idOf = (stored: Array<{ id: string; content: string }>, words: string): string | undefined => stored.find((row) => row.content.includes(words))?.id;
 
 /** The promise of a turn's write record, as the turn's result carries it. */
-function writeOf(result: unknown): Promise<WriteRecord> {
-  const write = (result as { memoryWrite?: Promise<WriteRecord> }).memoryWrite;
-  expect(write).toBeInstanceOf(Promise);
-  return write!;
+function writeOf(result: { memoryWrite?: Promise<MemoryWriteRecord> }): Promise<MemoryWriteRecord> {
+  expect(result.memoryWrite).toBeInstanceOf(Promise);
+  return result.memoryWrite!;
 }
 
 /** Whether `work` settles within `ms`. */
@@ -161,7 +155,10 @@ function gated(): { gate: Promise<void>; release: () => void } {
   return { gate, release };
 }
 
-const both = (entry: Omit<WriteEntry, 'role'>): WriteRecord => ({ entries: [{ role: 'user', ...entry }, { role: 'assistant', ...entry }] });
+/** The record of a turn whose two sides had the same outcome. */
+const both = (outcome: Outcome): MemoryWriteRecord => ({
+  entries: (['user', 'assistant'] as const).map((role) => ({ role, ...outcome }) as MemoryWriteEntry),
+});
 
 describe.each(RUNTIMES)('a receipt for each memory write, on runtime %s', (runtime) => {
   it("a turn's result names the traces it filed", async () => {
@@ -178,11 +175,11 @@ describe.each(RUNTIMES)('a receipt for each memory write, on runtime %s', (runti
         { role: 'assistant', outcome: 'written', traceId: idOf(stored, 'lovely') },
       ],
     });
-    expect(record.entries[0].traceId).not.toBe(record.entries[1].traceId);
+    expect(new Set(record.entries.map((entry) => (entry.outcome === 'written' ? entry.traceId : undefined))).size).toBe(2);
     // Ids and outcomes, never text.
     expect(JSON.stringify(record)).not.toMatch(/LARK-7|lovely/);
     // A one-shot call is no session turn: its result carries no record.
-    expect(((await a.generate('Hello.')) as unknown as { memoryWrite?: unknown }).memoryWrite).toBeUndefined();
+    expect((await a.generate('Hello.')).memoryWrite).toBeUndefined();
   });
 
   it('a turn the screen drops says so for each side', async () => {
@@ -323,7 +320,7 @@ describe.each(RUNTIMES)('a receipt for each memory write, on runtime %s', (runti
     expect(record).toEqual({ entries: [{ role: 'user', outcome: 'written', traceId: idOf(stored, 'LARK-7') }] });
   });
 
-  it.each<[string, Partial<SouledAgentOptions>, string]>([
+  it.each<[string, Partial<SouledAgentOptions>, SkipReason]>([
     ['an account that keeps no memory', { memoryPolicy: () => ({ longTerm: 'off' }) } as unknown as Partial<SouledAgentOptions>, 'policy_off'],
     [
       'a policy hook that fails',
