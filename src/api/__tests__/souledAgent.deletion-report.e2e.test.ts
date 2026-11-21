@@ -736,6 +736,47 @@ describe("a deletion and the open sessions, on runtime 'gmi' with sentiment on a
     expect(session.messages()).toEqual([]);
     expect(tracesOf(keyOf(alice))).toEqual([]);
   });
+
+  it("a deletion called from a hook of the person's own turn does not wait for that turn, and empties the session once it ends", async () => {
+    const gmis = builtGmis();
+    let asked = 0;
+    let report: ForgetMemoryReport | undefined;
+    let forget: () => Promise<ForgetMemoryReport> = () => Promise.reject(new Error('not set'));
+    const a = await openGmi({
+      // Far past the hook's timeout: a deletion that waited for the turn it is called from would outlast the hook.
+      pendingWritesTimeoutMs: 30_000,
+      memoryProviderOptions: { timeoutMs: 3_000 },
+      memoryPolicy: async () => {
+        asked += 1;
+        if (asked === 1) report = await forget();
+        return { longTerm: 'compiled' };
+      },
+    } as unknown as Partial<SouledAgentOptions>);
+    forget = () => a.forgetUser!('alice');
+    const session = a.session('s1', { userId: 'alice' });
+
+    // Her turn's hook forgets her while the turn holds the session.
+    const startedAt = Date.now();
+    await session.send('My canary is LARK-7.');
+
+    expect(Date.now() - startedAt).toBeLessThan(3_000);
+    expect(lines('memory.hook_failed')).toEqual([]);
+    expect(report?.parts[2]).toMatchObject({ part: 'store', reached: true });
+    expect(report?.parts[3]).toEqual({ part: 'sessions', reached: false, reason: '1 open session was still running a turn at the deadline' });
+    expect(report?.complete).toBe(false);
+    // Once that turn ended, the session and its GMI hold nothing of her.
+    await vi.waitFor(
+      () => {
+        expect(session.messages()).toEqual([]);
+        expect(gmis[0].getConversationHistory()).toEqual([]);
+      },
+      { timeout: 4_000 },
+    );
+    const again = await a.forgetUser!('alice');
+    expect(again.parts[3]).toEqual({ part: 'sessions', reached: true, deleted: 1 });
+    expect(again.complete).toBe(true);
+    await vi.waitFor(() => expect(tracesOf(keyOf(alice))).toEqual([]), { timeout: 4_000 });
+  });
 });
 
 describe("a deletion and the open sessions, on runtime 'gmi' with cognitive memory on", () => {
