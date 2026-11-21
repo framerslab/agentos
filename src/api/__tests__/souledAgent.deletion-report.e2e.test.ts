@@ -16,6 +16,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
+vi.mock('../../core/llm/providers/implementations/AnthropicProvider', async () => ({ AnthropicProvider: (await import('./helpers/stubProviders')).stubProviderClass('anthropic') }));
 /** The read of the routes a store recorded: it throws `fail` while a case sets one. */
 const recordedRoutes = vi.hoisted(() => ({ fail: undefined as Error | undefined }));
 vi.mock('../runtime/memoryRecipients', async (importOriginal) => {
@@ -72,6 +73,7 @@ beforeEach(() => {
 });
 afterEach(async () => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   while (opened.length) await opened.pop()!.close().catch(() => undefined);
   resetLoggerFactory();
   fs.rmSync(dir, { recursive: true, force: true });
@@ -195,6 +197,51 @@ describe(`a deletion report a host can keep, on runtime ${RUNTIME}`, () => {
     expect(report.complete).toBe(true);
     expect(lines('memory.recipients_unread')).toHaveLength(1);
     expect(lines('memory.forget_incomplete')).toEqual([]);
+  });
+
+  it("lists a route the person's text took while the deletion waited for their compile", async () => {
+    const envKey = `k-souled-deletion-report-env-${++n}`;
+    vi.stubEnv('ANTHROPIC_API_KEY', envKey);
+    script('anthropic', envKey, { whole: true, replies: spare() });
+    /** Set while a case holds the router's next pick; `asked` is called when a pick waits on it. */
+    let hold: Promise<void> | undefined;
+    let asked!: () => void;
+    const pickAsked = new Promise<void>((resolve) => {
+      asked = resolve;
+    });
+    const router = {
+      routerId: 'stub-router',
+      initialize: async () => undefined,
+      selectModel: async () => {
+        if (hold) {
+          asked();
+          await hold;
+        }
+        return { provider: {}, modelId: 'claude-routed', modelInfo: { providerId: 'anthropic' }, reasoning: 'stub', confidence: 1 };
+      },
+    };
+    const a = await open({ router } as unknown as Partial<SouledAgentOptions>);
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await turn(a, 's1', 'alice', 'I keep it in the attic.');
+    const compiled = { role: 'compile', provider: 'anthropic', model: 'claude-routed' };
+    expect(await a.recipients!()).not.toContainEqual(compiled);
+
+    // Her compile waits on the router's pick when the deletion starts; the deletion waits for her compile.
+    let release!: () => void;
+    hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const compiling = a.memory!.compileWiki({ scopes: [keyOf(alice)] }).catch(() => undefined);
+    await pickAsked;
+    const deleting = a.forgetUser!('alice');
+    setTimeout(release, 50);
+    const report = await deleting;
+    await compiling;
+
+    expect(report.recipients).toContainEqual(compiled);
+    expect(report.recipients).toEqual(await a.recipients!());
+    expect(tracesOf(keyOf(alice))).toEqual([]);
+    expect(pagesOf(keyOf(alice))).toEqual([]);
   });
 });
 
@@ -320,6 +367,11 @@ describe("agent.learning.forgetUser on a souled agent, on runtime 'gmi'", () => 
     expect(receipt.parts.map((p) => p.part)).toEqual(['tombstone', 'mind', 'store', 'sessions']);
     expect(receipt.parts[2]).toMatchObject({ part: 'store', reached: true });
     expect(receipt.stores).toContainEqual(expect.objectContaining({ store: 'learning store', reached: true }));
+    // The layer's own count of what it deleted, table by table, as its own call returns it.
+    expect(report.stores.find((entry) => entry.store === 'learning store')).toMatchObject({
+      reached: true,
+      deleted: { ledger: expect.any(Number), traits: expect.any(Number) },
+    });
     expect(receipt.stores).toContainEqual(expect.objectContaining({ store: 'conversation memory', reached: true }));
     // A gmi() session keeps its messages: her open session is a part the deletion did not reach.
     expect(receipt.parts[3]).toMatchObject({ part: 'sessions', reached: false });
@@ -331,5 +383,20 @@ describe("agent.learning.forgetUser on a souled agent, on runtime 'gmi'", () => 
     expect(plain).not.toHaveProperty('namespace');
     expect(JSON.stringify(plain)).not.toContain('bob');
     expect(tracesOf(keyOf(bob))).toEqual([]);
+  });
+});
+
+describe("open sessions that keep no history, on runtime 'gmi'", () => {
+  it('a session opened with history off holds nothing to empty: the sessions part is reached', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const a = await open({ runtime: 'gmi', history: false } as Partial<SouledAgentOptions>);
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+
+    const report = await a.forgetUser!('alice');
+
+    expect(tracesOf(keyOf(alice))).toEqual([]);
+    expect(report.parts[3]).toEqual({ part: 'sessions', reached: true, deleted: 0 });
+    expect(report.complete).toBe(true);
+    expect(lines('memory.forget_incomplete')).toEqual([]);
   });
 });
