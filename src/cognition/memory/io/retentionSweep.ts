@@ -92,7 +92,8 @@ export async function sweepRetention(options: RetentionSweepOptions): Promise<{ 
     anyPeriod = true;
 
     const sweepScope = async (): Promise<void> => {
-      const expired = await memory.tracesStoredBefore(CONVERSATION_SCOPE, scopeId, now() - days * DAY_MS);
+      const cutoff = now() - days * DAY_MS;
+      const expired = await memory.tracesStoredBefore(CONVERSATION_SCOPE, scopeId, cutoff);
       const store = options.wiki.storeFor(scopeId);
       const gone = new Set(expired);
       // The pages first: a page is found by the expired traces it was built from, so they stay until it is gone.
@@ -108,10 +109,15 @@ export async function sweepRetention(options: RetentionSweepOptions): Promise<{ 
         await store.deletePage(page.id);
         swept.pages += 1;
       }
-      if (expired.length > 0) {
-        swept.traces += (await memory.deleteTraces(expired, { documentChunks: 'delete' })).deleted;
-        // A correction that expired goes from the tombstones' second copy too, so no restore files it again.
-        await memory.forgotten?.dropCorrections(expired);
+      if (expired.length > 0) swept.traces += (await memory.deleteTraces(expired, { documentChunks: 'delete' })).deleted;
+      // A correction that expired goes from the tombstones' second copy too, so no restore files it again: by the
+      // traces deleted now, and by its own time, so a sweep made again after a drop that failed still finds it once
+      // the store no longer holds the trace.
+      const ledger = memory.forgotten;
+      if (ledger) {
+        const stale = new Set(expired);
+        for (const row of await ledger.keptCorrections(scopeId)) if (row.createdAt < cutoff) stale.add(row.traceId);
+        if (stale.size > 0) await ledger.dropCorrections([...stale]);
       }
       // A scope that holds nothing more is no longer named by the registry.
       const left = await memory.tracesStoredBefore(CONVERSATION_SCOPE, scopeId, Number.MAX_SAFE_INTEGER);
