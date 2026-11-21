@@ -435,6 +435,24 @@ describe('the deletion core, called by a host of its own', () => {
   });
 });
 
+describe("a person deleted while her gmi() session stays open, on runtime 'gmi'", () => {
+  it('no longer counts as a person the store holds once the store part is reached', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    // No retention choice: the store may hold one person's memory.
+    const a = await open({ runtime: 'gmi', retention: undefined } as Partial<SouledAgentOptions>);
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+
+    const report = await a.forgetUser!('alice');
+
+    expect(report.parts[2]).toMatchObject({ part: 'store', reached: true });
+    expect(report.parts[3]).toMatchObject({ part: 'sessions', reached: false });
+    expect(report.complete).toBe(false);
+    expect(tracesOf(keyOf(alice))).toEqual([]);
+    // The store holds nothing of her: another person's session opens with no retention choice made.
+    expect(() => a.session('s2', { userId: 'bob' })).not.toThrow();
+  });
+});
+
 describe("open sessions that keep no history, on runtime 'gmi'", () => {
   it('a session opened with history off holds nothing to empty: the sessions part is reached', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
