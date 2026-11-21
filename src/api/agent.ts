@@ -468,7 +468,8 @@ export interface AgentLearning {
    *
    * On a `souledAgent()` whose soul loaded from a workspace folder, the call runs the agent's whole deletion, as
    * `agent.forgetUser(userId)` does, and resolves to that deletion's report with `userId`, `namespace` and
-   * `plainFormLeft` beside its fields.
+   * `plainFormLeft` beside its fields, and the layer's own entries with their counts table by table. Once that agent
+   * is closed, the call rejects and deletes nothing, as `agent.forgetUser` does: open the agent again.
    */
   forgetUser?(userId: string): Promise<ForgetReport>;
 }
