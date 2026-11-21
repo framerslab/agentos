@@ -156,16 +156,9 @@ function gated(): { gate: Promise<void>; release: () => void } {
   return { gate, release };
 }
 
-/** What a correction, or a deletion of one memory, resolves with. */
-interface Corrected {
-  deleted: number;
-  pagesDeleted: number;
-  correctionTraceId?: string;
-  recipients: MemoryRecipient[];
-}
 /** Corrects the named traces with `text`, or deletes them with no replacement when there is none. */
-const correct = (a: SouledAgent, userId: string, traceIds: readonly string[], text?: string): Promise<Corrected> =>
-  a.correctUserMemory!(userId, (text === undefined ? { traceIds } : { traceIds, text }) as never) as unknown as Promise<Corrected>;
+const correct = (a: SouledAgent, userId: string, traceIds: readonly string[], text?: string) =>
+  a.correctUserMemory!(userId, text === undefined ? { traceIds } : { traceIds, text });
 
 describe.each(RUNTIMES)('deleting or correcting one memory, on runtime %s', (runtime) => {
   it('one of two memories is deleted, and nothing is filed', async () => {
@@ -185,10 +178,12 @@ describe.each(RUNTIMES)('deleting or correcting one memory, on runtime %s', (run
     expect(before).toHaveLength(4);
     const first = idOf(before, 'LARK-7')!;
 
-    const result = await correct(a, 'alice', [first]);
+    const result = await a.correctUserMemory!('alice', { traceIds: [first] });
 
     // The trace and the page built from it are gone; nothing takes their place, and the result names no correction.
-    expect(result).toEqual({ deleted: 1, pagesDeleted: 1, recipients: await a.recipients!() });
+    const listed: MemoryRecipient[] = result.recipients;
+    expect(listed).toEqual(await a.recipients!());
+    expect(result).toEqual({ deleted: 1, pagesDeleted: 1, recipients: listed });
     expect(Object.keys(result).sort()).toEqual(['deleted', 'pagesDeleted', 'recipients']);
     expect(result.recipients.length).toBeGreaterThan(0);
     const after = saidOf(keyOf(alice));
@@ -225,14 +220,16 @@ describe.each(RUNTIMES)('deleting or correcting one memory, on runtime %s', (run
     await turn(a, 's1', 'alice', 'My canary is LARK-7.');
     const wrong = idOf(saidOf(keyOf(alice)), 'LARK-7')!;
 
-    const result = await correct(a, 'alice', [wrong], 'My canary is WREN-9.');
+    const result = await a.correctUserMemory!('alice', { traceIds: [wrong], text: 'My canary is WREN-9.' });
 
     expect(result.deleted).toBe(1);
     expect(result.recipients.length).toBeGreaterThan(0);
     expect(result.recipients).toEqual(await a.recipients!());
     const said = saidOf(keyOf(alice));
-    expect(result.correctionTraceId).toBe(idOf(said, 'WREN-9'));
-    expect(JSON.parse(said.find((row) => row.id === result.correctionTraceId)!.tags) as string[]).toContain('correction');
+    // A correction's result always names its trace.
+    const filed: string = result.correctionTraceId;
+    expect(filed).toBe(idOf(said, 'WREN-9'));
+    expect(JSON.parse(said.find((row) => row.id === filed)!.tags) as string[]).toContain('correction');
     expect(holding('LARK-7')).toEqual([]);
   });
 
