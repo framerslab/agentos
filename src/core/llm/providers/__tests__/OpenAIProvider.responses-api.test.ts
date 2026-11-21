@@ -502,9 +502,24 @@ describe('OpenAIProvider.generateCompletion routing (endpoint selection)', () =>
     expect((body as Record<string, unknown>).input).toBeDefined();
   });
 
-  it('gpt-5.5 + tools + NO effort → stays on /chat/completions', async () => {
-    makeApiRequest.mockResolvedValue({ id: 'r', object: 'chat.completion', created: 1, model: 'gpt-5.5', choices: [{ index: 0, message: { role: 'assistant', content: 'x' }, finish_reason: 'stop' }] });
+  it('gpt-5.5 + tools + NO effort → POSTs /responses with no reasoning', async () => {
+    // Chat Completions refuses a GPT-5 function-tool call unless reasoning_effort is 'none';
+    // a call with no effort runs at the model's default (medium on gpt-5.5) and is answered 400.
+    makeApiRequest.mockResolvedValue({
+      id: 'r', model: 'gpt-5.5', status: 'completed',
+      output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'ok' }] }],
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+    });
     await provider.generateCompletion('gpt-5.5', userMsgs, { tools: toolsOpt } as ModelCompletionOptions);
+    const [endpoint, , , body] = makeApiRequest.mock.calls[0];
+    expect(endpoint).toBe('/responses');
+    expect(body as Record<string, unknown>).not.toHaveProperty('reasoning');
+    expect(body as Record<string, unknown>).not.toHaveProperty('reasoning_effort');
+  });
+
+  it('gpt-5.5 + effort + NO tools → stays on /chat/completions', async () => {
+    makeApiRequest.mockResolvedValue({ id: 'r', object: 'chat.completion', created: 1, model: 'gpt-5.5', choices: [{ index: 0, message: { role: 'assistant', content: 'x' }, finish_reason: 'stop' }] });
+    await provider.generateCompletion('gpt-5.5', userMsgs, { effort: 'high' } as ModelCompletionOptions);
     expect(makeApiRequest.mock.calls[0][0]).toBe('/chat/completions');
   });
 
