@@ -157,7 +157,7 @@ async function mindManager(
     embeddingManager: (options.embedding ?? embedder()).manager as never,
     rows: options.rows ?? 'mind',
     hydration: 'scopes',
-  } as never);
+  });
   closers.push(() => built.close());
   return built;
 }
@@ -186,7 +186,7 @@ async function planter(brain: Brain, dim: number = DIM): Promise<MemoryStore> {
 
 /** A trace of what `subjectId` said, filed by the mind under `scopeId` at `createdAt`. */
 function mindTrace(id: string, content: string, scopeId: string, subjectId: string, createdAt: number): MemoryTrace {
-  const trace = {
+  return {
     id,
     type: 'episodic',
     scope: 'conversation',
@@ -209,7 +209,6 @@ function mindTrace(id: string, content: string, scopeId: string, subjectId: stri
     turnUserId: subjectId,
     filing: filingOf(subjectId),
   };
-  return trace as unknown as MemoryTrace;
 }
 
 const idsOf = (result: CognitiveRetrievalResult): string[] => [
@@ -233,8 +232,6 @@ const markerOf = (metadata: Record<string, unknown>) => ({
   turnUserId: metadata.turnUserId,
 });
 
-const filingOn = (trace: unknown): unknown => (trace as { filing?: unknown } | undefined)?.filing;
-
 describe('the rows a mind files', () => {
   it('a mind-filed row says who filed it, who spoke and whose it is', async () => {
     const { brain } = await openFacade();
@@ -247,9 +244,9 @@ describe('the rows a mind files', () => {
       scopeId: A,
       filing,
       turnUserId: 'alice',
-    } as never);
+    });
     const marked = { ...filing, turnUserId: 'alice' };
-    expect(filingOn(trace)).toEqual(filing);
+    expect(trace.filing).toEqual(filing);
     expect(markerOf(await metadataOf(brain, trace.id))).toEqual(marked);
 
     // An access write: the recall records the access in the row.
@@ -265,12 +262,12 @@ describe('the rows a mind files', () => {
     await manager.getStore().persistTraceMetadata(trace.id);
     expect(await manager.getStore().refileScope('conversation', A, moved)).toBe(1);
     expect(markerOf(await metadataOf(brain, trace.id))).toEqual(marked);
-    expect(filingOn(manager.getStore().getTrace(trace.id))).toEqual(filing);
+    expect(manager.getStore().getTrace(trace.id)?.filing).toEqual(filing);
 
     // A trace loaded again carries its filing.
     const fresh = await mindManager(brain);
     expect(await fresh.manager.getStore().hydrateScope('conversation', moved)).toBe(1);
-    expect(filingOn(fresh.manager.getStore().getTrace(trace.id))).toEqual(filing);
+    expect(fresh.manager.getStore().getTrace(trace.id)?.filing).toEqual(filing);
     expect(fresh.manager.getStore().getTrace(trace.id)?.turnUserId).toBe('alice');
   });
 
@@ -289,7 +286,7 @@ describe('the rows a mind files', () => {
         scopeId: A,
         filing: filingOf('alice'),
         turnUserId: 'alice',
-      } as never);
+      });
       await manager.getStore().hydrateScope('conversation', A);
       expect(manager.getStore().getTrace(soul.id)).toBeUndefined();
 
@@ -347,7 +344,7 @@ describe('the rows a mind files', () => {
       Number((await brain.get<{ n: number | string }>('SELECT COUNT(*) AS n FROM memory_traces WHERE brain_id = ?', [brain.brainId]))?.n ?? 0);
     const { manager } = await mindManager(brain);
     await expect(
-      manager.encode('Alice keeps bees.', MOOD, 'neutral', { scope: 'user', scopeId: 'alice', filing: filingOf('alice') } as never),
+      manager.encode('Alice keeps bees.', MOOD, 'neutral', { scope: 'user', scopeId: 'alice', filing: filingOf('alice') }),
     ).rejects.toThrow(/conversation/);
     await expect(manager.encode('Alice keeps bees.', MOOD, 'neutral', { scope: 'conversation', scopeId: A })).rejects.toThrow(
       /conversation/,
@@ -402,7 +399,7 @@ describe('the rows a mind files', () => {
     // The recall's read by words loaded what it found; the key's load brings the rest.
     const loadedByRecall = manager.getStore().listTraces({ scopeId: K1 }).length;
     expect(await manager.getStore().hydrateScope('conversation', K1)).toBe(3 - loadedByRecall);
-    expect(manager.getStore().listTraces({ scopeId: K1 }).map((trace) => filingOn(trace))).toEqual(
+    expect(manager.getStore().listTraces({ scopeId: K1 }).map((trace) => trace.filing)).toEqual(
       [0, 1, 2].map(() => filingOf(first)),
     );
 
@@ -410,7 +407,7 @@ describe('the rows a mind files', () => {
     const secondIds = idsOf(await manager.retrieve('ferry', MOOD, { scopes: scopesOf(K2) }));
     expect(secondIds.length).toBeGreaterThan(0);
     expect(secondIds.every((id) => id.startsWith('second-'))).toBe(true);
-    expect(manager.getStore().listTraces({ scopeId: K2 }).map((trace) => (filingOn(trace) as { subject: { id: string } }).subject.id)).toEqual(
+    expect(manager.getStore().listTraces({ scopeId: K2 }).map((trace) => trace.filing?.subject.id)).toEqual(
       [second, second, second],
     );
   });
@@ -428,7 +425,7 @@ describe('the rows a mind files, on PostgreSQL', () => {
       scopeId: A,
       filing,
       turnUserId: 'alice',
-    } as never);
+    });
     expect(markerOf(await metadataOf(brain, mind.id))).toEqual({ ...filing, turnUserId: 'alice' });
 
     const fresh = await mindManager(brain, { retrieval: 'hybrid' });
