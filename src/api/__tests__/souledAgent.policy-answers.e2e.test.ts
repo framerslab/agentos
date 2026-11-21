@@ -83,12 +83,14 @@ function rows<T>(sql: string, params: unknown[] = []): T[] {
     db.close();
   }
 }
-/** The texts of the live conversation traces the store holds under one key, oldest first. */
+/** The texts of the live conversation traces the store holds under one key, oldest first; a page's chunks are not. */
 const textsUnder = (key: string) =>
-  rows<{ content: string }>(
-    "SELECT content FROM memory_traces WHERE scope = 'conversation' AND scope_id = ? AND deleted = 0 ORDER BY created_at, id",
+  rows<{ content: string; tags: string }>(
+    "SELECT content, tags FROM memory_traces WHERE scope = 'conversation' AND scope_id = ? AND deleted = 0 ORDER BY created_at, id",
     [key],
-  ).map((row) => row.content);
+  )
+    .filter((row) => !(JSON.parse(row.tags) as string[]).includes('wiki'))
+    .map((row) => row.content);
 /** The page rows the store holds under one key. */
 const pagesUnder = (key: string) => rows<{ page_id: string }>('SELECT page_id FROM memory_pages WHERE scope_id = ?', [key]);
 
