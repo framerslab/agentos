@@ -116,11 +116,21 @@ const RECALL_LIMIT = 8;
  * - `{ longTerm: 'off' }`: nothing is filed for the account, and its turns recall the operator's pages alone.
  * - `{ longTerm: 'raw' }`: its turns are filed and recalled as traces, and no page is compiled for it.
  * - `{ longTerm: 'compiled' }`: its turns are filed, recalled and compiled into its pages. The default.
+ *
+ * Each form may add two marks, with exactly these values:
+ *
+ * - `minor: true`: the account is a child's. On a store that keeps the account's memory until deletion (its period in
+ *   `retention`, or no `retention` at all), the answer keeps no long-term memory, as `longTerm: 'off'` does, whatever
+ *   `retentionDays` it holds, and one `memory.write_refused` line a session says `minor_no_retention`. On a store that
+ *   keeps it for a number of days, the account's pages are compiled only by the target `compile.minors` names, and
+ *   not at all without one (`memory.compile_skipped`, `minor_no_compile`).
+ * - `profiling: 'off'`: the person objects to profiling. The souled agent's own store keeps no mood or emotional
+ *   context of anyone, so on its path the answer files, recalls and compiles as `longTerm` says.
  */
 export type MemoryPolicy =
-  | { longTerm: 'off' }
-  | { longTerm: 'raw'; retentionDays?: number }
-  | { longTerm: 'compiled'; retentionDays?: number };
+  | { longTerm: 'off'; profiling?: 'off'; minor?: true }
+  | { longTerm: 'raw'; retentionDays?: number; profiling?: 'off'; minor?: true }
+  | { longTerm: 'compiled'; retentionDays?: number; profiling?: 'off'; minor?: true };
 
 /**
  * How long a souled agent's store keeps what people said.
@@ -288,6 +298,29 @@ async function holdsNoLedgerRow(copy: StorageAdapter): Promise<boolean> {
 }
 
 /**
+ * Throws unless `compile.minors`, when the key is there with a value, names a provider and a model as non-empty
+ * strings, with an `apiKey` and a `baseUrl` that are strings when given. A target with no provider or no model would
+ * resolve to the agent's or the environment's provider, which the host never named for minors.
+ *
+ * @throws TypeError naming `compile.minors` and what it must hold.
+ */
+function assertCompileMinors(compile: unknown): void {
+  if (compile === null || typeof compile !== 'object') return;
+  const minors = (compile as { minors?: unknown }).minors;
+  if (minors === undefined) return;
+  const target = (
+    minors !== null && typeof minors === 'object' && !Array.isArray(minors) ? minors : {}
+  ) as Record<string, unknown>;
+  const named = (value: unknown) => typeof value === 'string' && value !== '';
+  const optional = (value: unknown) => value === undefined || typeof value === 'string';
+  if (!named(target.provider) || !named(target.model) || !optional(target.apiKey) || !optional(target.baseUrl)) {
+    throw new TypeError(
+      "souledAgent: compile.minors needs { provider, model } as non-empty strings (apiKey and baseUrl strings when given): a minor's compile goes only to the target named for it",
+    );
+  }
+}
+
+/**
  * Throws unless `retention` names a period for traces (and, when given, for sessions) that is `'until-deletion'` or a
  * positive number of days, and a page rule that is one of the two.
  *
@@ -346,13 +379,21 @@ async function within<T>(work: Promise<T>, ms: number): Promise<T | typeof TIMED
 }
 
 /**
- * True for an object that holds `longTerm`, one of the three words a policy takes, and nothing else but, on a policy
- * that keeps memory, `retentionDays` as a positive number.
+ * True for an object that holds `longTerm`, one of the three words a policy takes, and nothing else but `profiling`
+ * as `'off'`, `minor` as `true` and, on a policy that keeps memory, `retentionDays` as a positive number.
  */
 function isMemoryPolicy(value: unknown): value is MemoryPolicy {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
-  const { longTerm, retentionDays, ...others } = value as { longTerm?: unknown; retentionDays?: unknown };
+  const { longTerm, retentionDays, profiling, minor, ...others } = value as {
+    longTerm?: unknown;
+    retentionDays?: unknown;
+    profiling?: unknown;
+    minor?: unknown;
+  };
   if (Object.keys(others).length > 0) return false;
+  // A mark is given with its one value or not at all: a key present with any other value is not an answer.
+  if (Object.prototype.hasOwnProperty.call(value, 'profiling') && profiling !== 'off') return false;
+  if (Object.prototype.hasOwnProperty.call(value, 'minor') && minor !== true) return false;
   if (longTerm === 'off') return !Object.prototype.hasOwnProperty.call(value, 'retentionDays');
   if (longTerm !== 'raw' && longTerm !== 'compiled') return false;
   if (!Object.prototype.hasOwnProperty.call(value, 'retentionDays')) return true;
@@ -542,14 +583,30 @@ export interface SouledAgentOptions extends AgentOptions {
    * ledger. An object names another provider or model (a local model included): the compile's text then goes to that
    * provider alone, with no fallback and no router, and the agent's own key is sent only to the agent's own provider.
    * `false`: no compile; raw traces only, and no per-user page is ever written.
+   *
+   * `minors` names where the compile of an account `memoryPolicy` answers `minor: true` for goes: that provider and
+   * model alone, with no fallback and no router, as a named target above. `provider` and `model` are required and
+   * non-empty, or the agent does not open (`TypeError`). Without it, no page is compiled for a minor. An object that
+   * holds `minors` alone leaves every other account's compile on the agent's own provider, model and route.
    */
-  compile?: { provider?: string; model?: string; apiKey?: string; baseUrl?: string } | false;
+  compile?:
+    | {
+        provider?: string;
+        model?: string;
+        apiKey?: string;
+        baseUrl?: string;
+        minors?: { provider: string; model: string; apiKey?: string; baseUrl?: string };
+      }
+    | false;
   /**
-   * The host's policy for the account a turn serves; asked once a session and kept for it. A hook that throws,
-   * rejects, does not answer within the memory hooks' timeout (`memoryProviderOptions.timeoutMs`) or answers anything
-   * but one of the three policies fails closed: nothing is filed for that turn, it recalls the operator's pages alone,
-   * and the next turn asks again. `retentionDays` on a policy that keeps memory shortens the agent's `retention`
-   * period for that account, in the sweeps of the process that asked; it never lengthens it.
+   * The host's policy for the account a turn serves. A session asks once and keeps the answer for its next turns,
+   * until a later answer for the same account, given to any session or call of this process, replaces it from the
+   * session's next turn; a later answer that failed makes the session ask again. A hook that throws, rejects, does not
+   * answer within the memory hooks' timeout (`memoryProviderOptions.timeoutMs`) or answers anything but one of the
+   * three policies, with `minor: true` and `profiling: 'off'` as the only marks it may add, fails closed: nothing is
+   * filed for that turn, it recalls the operator's pages alone, and the next turn asks again. `retentionDays` on a
+   * policy that keeps memory shortens the agent's `retention` period for that account, in the sweeps of the process
+   * that asked; it never lengthens it. Another process reads the host's answer at its own sessions' next ask.
    */
   memoryPolicy?: (context: MemoryHookContext) => MemoryPolicy | Promise<MemoryPolicy>;
   /**
@@ -758,6 +815,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     typeof rest.learning === 'object' && rest.learning !== null ? rest.learning.anonymousUserIds : undefined;
   if (sharedMemory !== undefined) assertSharedMemory(sharedMemory, anonymousUserIds);
   if (retention !== undefined) assertRetention(retention);
+  assertCompileMinors(compile);
   if (legacyMemory !== undefined) assertLegacyMemory(legacyMemory, (id) => isAnonymousUserId(id, anonymousUserIds));
   /** The key the tombstone ledger is handed: one key is the current key. A `tombstoneKey` that holds nothing is none. */
   const key =
@@ -1052,10 +1110,11 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     ...(subject.kind === 'user' ? { userId: subject.id } : {}),
   });
   /**
-   * The policy the host answered for each subject of a session, by session id then by the subject's key, kept until
-   * the session closes: a session id opened again for another user never reads the answer given for the first.
+   * The policy the host answered for each subject of a session, by session id then by the subject's key, with the
+   * place of the ask that gave it, kept until the session closes: a session id opened again for another user never
+   * reads the answer given for the first, and a later answer for the subject replaces it.
    */
-  const sessionPolicies = new Map<string, Map<string, MemoryPolicy>>();
+  const sessionPolicies = new Map<string, Map<string, { policy: MemoryPolicy; ask: number }>>();
   /** How many times each session id has been closed: an answer asked for before a close is kept for nothing. */
   const sessionCloses = new Map<string, number>();
   /**
@@ -1106,19 +1165,50 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     }
   };
   /**
+   * Whether a child's memory may be kept for `subject` at all: only where the store keeps that subject's memory for a
+   * number of days. The period is `retention.sessions ?? retention.traces` for a session and `retention.traces` for a
+   * user; an agent with no `retention` keeps memory until deletion.
+   */
+  const keepsMinorsMemory = (subject: MemorySubject): boolean => {
+    const period = subject.kind === 'session' ? (retention?.sessions ?? retention?.traces) : retention?.traces;
+    return period !== undefined && period !== 'until-deletion';
+  };
+  /**
+   * The host's answer as the agent applies it: `minor: true` where the store would keep the child's memory until
+   * deletion keeps no long-term memory, whatever `retentionDays` the answer holds.
+   */
+  const applied = (policy: TurnPolicy, subject: MemorySubject): TurnPolicy =>
+    policy !== 'failed' && policy.minor === true && policy.longTerm !== 'off' && !keepsMinorsMemory(subject)
+      ? { longTerm: 'off', minor: true, ...(policy.profiling === 'off' ? { profiling: 'off' as const } : {}) }
+      : policy;
+  /**
    * What one turn's memory does, decided once a turn: the answer kept for its session, else the host's answer now. A
    * valid answer of a session turn is kept for the session; a failure is kept for nothing, so the next turn asks again.
+   * A later answer for the same subject, given to any turn of this process, replaces the one a session keeps from the
+   * session's next turn: a valid one with no new ask, a failed one by asking again.
    */
   const decide = async (context: MemoryHookContext, subject: MemorySubject, scopeId: string): Promise<TurnPolicy> => {
     const hookContext = hookContextOf(context, subject);
     const session = context.call === 'session' ? context.sessionId : undefined;
     const closesBefore = session !== undefined ? (sessionCloses.get(session) ?? 0) : 0;
-    const kept = session !== undefined ? sessionPolicies.get(session)?.get(scopeId) : undefined;
-    const ask = kept === undefined ? ++asks : 0;
-    const policy = kept ?? (await askPolicy(hookContext));
+    const ofSession = session !== undefined ? sessionPolicies.get(session) : undefined;
+    const kept = ofSession?.get(scopeId);
+    if (ofSession && kept) {
+      const newestAsk = answeredAsk.get(scopeId) ?? 0;
+      if (newestAsk <= kept.ask) return kept.policy;
+      const newest = latestAnswers.get(scopeId);
+      if (newest !== undefined && newest !== 'failed') {
+        // The newest answer was applied, and its period and its compile recorded, by the turn that asked for it.
+        ofSession.set(scopeId, { policy: newest, ask: newestAsk });
+        return newest;
+      }
+      ofSession.delete(scopeId);
+    }
+    const ask = ++asks;
+    const policy = applied(await askPolicy(hookContext), subject);
     // The subject's answer is the one asked for last, whenever the host gives it: an answer to an earlier ask that
     // comes after a later one's decides this turn alone.
-    const latest = kept === undefined && ask > (answeredAsk.get(scopeId) ?? 0);
+    const latest = ask > (answeredAsk.get(scopeId) ?? 0);
     if (latest) {
       answeredAsk.set(scopeId, ask);
       latestAnswers.set(scopeId, policy);
@@ -1134,9 +1224,9 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     // Kept only where a hook reads it later: the session's answer for its next turns, the scope's for its compile. An
     // answer that came after its session closed is not kept for the session's next opening.
     if (memoryPolicy && session !== undefined && (sessionCloses.get(session) ?? 0) === closesBefore) {
-      const ofSession = sessionPolicies.get(session) ?? new Map<string, MemoryPolicy>();
-      ofSession.set(scopeId, policy);
-      sessionPolicies.set(session, ofSession);
+      const answers = sessionPolicies.get(session) ?? new Map<string, { policy: MemoryPolicy; ask: number }>();
+      answers.set(scopeId, { policy, ask });
+      sessionPolicies.set(session, answers);
     }
     // The compile reads the host's latest answer for the subject: an `off` answer takes back an earlier permission,
     // and neither an answer a session keeps from before nor one to an earlier ask is a new one.
@@ -1224,7 +1314,9 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     if (policy.longTerm === 'off') {
       if (context.call !== 'session' || !offSaid.has(context.sessionId)) {
         if (context.call === 'session') offSaid.add(context.sessionId);
-        memoryLog.warn('memory.write_refused', { reason: 'policy_off' });
+        // A child's answer on a store that would keep their memory until deletion says so in its own reason.
+        const reason = policy.minor === true && !keepsMinorsMemory(subject) ? 'minor_no_retention' : 'policy_off';
+        memoryLog.warn('memory.write_refused', { reason });
       }
       return;
     }
@@ -1277,27 +1369,36 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
    * has no context to screen with, and is not compiled; otherwise each trace's text goes through the hook again: what
    * it returns is what is compiled, a trace it drops is left out, and a failure stops the scope's compile. The
    * account's latest answer is read again once the screen has answered, so an `off` answer given meanwhile stops the
-   * compile.
+   * compile. A minor's scope is compiled by the target `compile.minors` names, handed back as the batch's model call,
+   * and not at all without one.
    */
   const beforeScopeCompile: NonNullable<AttachedWiki['beforeScopeCompile']> = async (scopeId, traces) => {
     const turn = served.get(scopeId);
     if (memoryPolicy && turn?.policy.longTerm !== 'compiled') return { skip: 'policy_raw' };
-    if (!screen) return { traces };
-    if (!turn) return { skip: 'screen_failed' };
-    const kept: typeof traces = [];
-    let dropped = false;
-    for (const trace of traces) {
-      const text = await screened(trace.content, turn.context, 'compile');
-      if (text === SCREEN_FAILED) return { skip: 'screen_failed' };
-      if (text === null || text === '') {
-        dropped = true;
-        continue;
+    // Checked before the screen, so a minor's text goes to no hook for a compile that cannot run.
+    if (turn?.policy.minor === true && !minorsLlm) return { skip: 'minor_no_compile' };
+    let kept: typeof traces = traces;
+    if (screen) {
+      if (!turn) return { skip: 'screen_failed' };
+      kept = [];
+      let dropped = false;
+      for (const trace of traces) {
+        const text = await screened(trace.content, turn.context, 'compile');
+        if (text === SCREEN_FAILED) return { skip: 'screen_failed' };
+        if (text === null || text === '') {
+          dropped = true;
+          continue;
+        }
+        kept.push(text === trace.content ? trace : { ...trace, content: text });
       }
-      kept.push(text === trace.content ? trace : { ...trace, content: text });
+      // The host may have answered again while the screen ran: the compile goes on only under the latest answer.
+      if (memoryPolicy && served.get(scopeId)?.policy.longTerm !== 'compiled') return { skip: 'policy_raw' };
+      if (dropped) memoryLog.warn('memory.write_refused', { reason: 'screened' });
     }
-    // The host may have answered again while the screen ran: the compile goes on only under the latest answer.
-    if (memoryPolicy && served.get(scopeId)?.policy.longTerm !== 'compiled') return { skip: 'policy_raw' };
-    if (dropped) memoryLog.warn('memory.write_refused', { reason: 'screened' });
+    // The answer read last says whose model compiles: a minor's pages go to the target named for minors alone.
+    if (served.get(scopeId)?.policy.minor === true) {
+      return minorsLlm ? { traces: kept, llm: minorsLlm } : { skip: 'minor_no_compile' };
+    }
     return { traces: kept };
   };
 
@@ -1475,19 +1576,15 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   // refusal skips that subject's compile, and its watermark stays where it was), and its usage ledger. A compile
   // target the host named takes them instead: that provider and model alone, with no fallback and no router, so a
   // compile's text goes nowhere else; the agent's own key and base URL go with it only to the agent's own provider.
-  const target = typeof compile === 'object' && compile !== null ? compile : undefined;
-  // A target that names a model alone, whose `provider:` prefix names another provider than the agent's, does not take
-  // the agent's provider. The agent's key and base URL go with the compile only when its call resolves to the
-  // provider they were set for, whether the agent names it or only its model does.
-  const compileProvider =
-    target === undefined
-      ? rest.provider
-      : (target.provider ??
-        (rest.provider !== undefined && target.model !== undefined && modelNamesAnotherProvider(rest.provider, target.model)
-          ? undefined
-          : rest.provider));
-  // A target that names a provider alone runs on that provider's default model, unless it is the agent's own provider:
-  // the agent's model belongs to the agent's provider.
+  // `compile.minors` is such a target, for the accounts the host answers `minor: true` for alone.
+  const compileOptions = typeof compile === 'object' && compile !== null ? compile : undefined;
+  const { minors: minorsTarget, ...namedTarget } = compileOptions ?? ({} as NonNullable<typeof compileOptions>);
+  // An object that holds `minors` alone names no target for the other accounts: their compile keeps the agent's route.
+  const target =
+    compileOptions !== undefined && (Object.keys(namedTarget).length > 0 || minorsTarget === undefined)
+      ? namedTarget
+      : undefined;
+  // The provider the agent's own model belongs to, when only its model names it.
   const agentProvider = (() => {
     if (rest.provider !== undefined) return rest.provider;
     if (rest.model === undefined) return undefined;
@@ -1497,35 +1594,53 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       return undefined;
     }
   })();
-  const compileModel =
-    target?.model ?? (target?.provider === undefined || target.provider === agentProvider ? rest.model : undefined);
-  const agentCredentialsGo =
-    target === undefined ||
-    credentialsGoWith({ provider: rest.provider, model: rest.model }, { provider: compileProvider, model: compileModel });
-  const llm = async (prompt: string): Promise<string> =>
-    (
-      await generateText({
-        provider: compileProvider,
-        model: compileModel,
-        prompt,
-        maxTokens: rest.maxTokens ?? rest.controls?.maxTotalTokens,
-        apiKey: target?.apiKey ?? (agentCredentialsGo ? rest.apiKey : undefined),
-        baseUrl: target?.baseUrl ?? (agentCredentialsGo ? rest.baseUrl : undefined),
-        ...(target
-          ? { fallbackProviders: [] }
-          : {
-              fallbackProviders: rest.fallbackProviders,
-              onFallback: rest.onFallback,
-              router: rest.router,
-              hostPolicy: rest.hostPolicy,
-              routerParams: rest.routerParams,
-              policyTier: rest.policyTier,
-            }),
-        ...(budget ? { budget } : {}),
-        ...(rest.accountIdOf ? { accountIdOf: rest.accountIdOf } : {}),
-        usageLedger: { ...(ledger ?? {}), source: SOULED_AGENT_COMPILE_SOURCE },
-      })
-    ).text;
+  /** The compile's model call on `named`, a target the host named, or on the agent's own route when it is undefined. */
+  const compileLlmOn = (named: { provider?: string; model?: string; apiKey?: string; baseUrl?: string } | undefined) => {
+    // A target that names a model alone, whose `provider:` prefix names another provider than the agent's, does not
+    // take the agent's provider. The agent's key and base URL go with the compile only when its call resolves to the
+    // provider they were set for, whether the agent names it or only its model does.
+    const compileProvider =
+      named === undefined
+        ? rest.provider
+        : (named.provider ??
+          (rest.provider !== undefined && named.model !== undefined && modelNamesAnotherProvider(rest.provider, named.model)
+            ? undefined
+            : rest.provider));
+    // A target that names a provider alone runs on that provider's default model, unless it is the agent's own
+    // provider: the agent's model belongs to the agent's provider.
+    const compileModel =
+      named?.model ?? (named?.provider === undefined || named.provider === agentProvider ? rest.model : undefined);
+    const agentCredentialsGo =
+      named === undefined ||
+      credentialsGoWith({ provider: rest.provider, model: rest.model }, { provider: compileProvider, model: compileModel });
+    return async (prompt: string): Promise<string> =>
+      (
+        await generateText({
+          provider: compileProvider,
+          model: compileModel,
+          prompt,
+          maxTokens: rest.maxTokens ?? rest.controls?.maxTotalTokens,
+          apiKey: named?.apiKey ?? (agentCredentialsGo ? rest.apiKey : undefined),
+          baseUrl: named?.baseUrl ?? (agentCredentialsGo ? rest.baseUrl : undefined),
+          ...(named
+            ? { fallbackProviders: [] }
+            : {
+                fallbackProviders: rest.fallbackProviders,
+                onFallback: rest.onFallback,
+                router: rest.router,
+                hostPolicy: rest.hostPolicy,
+                routerParams: rest.routerParams,
+                policyTier: rest.policyTier,
+              }),
+          ...(budget ? { budget } : {}),
+          ...(rest.accountIdOf ? { accountIdOf: rest.accountIdOf } : {}),
+          usageLedger: { ...(ledger ?? {}), source: SOULED_AGENT_COMPILE_SOURCE },
+        })
+      ).text;
+  };
+  const llm = compileLlmOn(target);
+  /** The compile's model call for a minor's pages: the target `compile.minors` names, or none, and no page. */
+  const minorsLlm = minorsTarget === undefined ? undefined : compileLlmOn(minorsTarget);
 
   const chunker = new SemanticChunker();
   const priorTools = rest.tools;
