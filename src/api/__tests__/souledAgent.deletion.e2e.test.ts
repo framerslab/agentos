@@ -1292,7 +1292,8 @@ describe('export and correction', () => {
     expect((JSON.parse(filed.metadata) as { corrects?: string[] }).corrects).toEqual([t1]);
     const registry = () =>
       rows<{ rebuild_sources: string | null }>(storeFile(), 'SELECT rebuild_sources FROM memory_scopes WHERE scope_id = ?', [keyOf(alice)]);
-    expect(JSON.parse(registry()[0].rebuild_sources!)).toEqual([t2]);
+    // The surviving trace of the deleted page, and the correction, which the next compile reads by id too.
+    expect(JSON.parse(registry()[0].rebuild_sources!)).toEqual([t2, result.correctionTraceId]);
 
     const calls = s.seen.length;
     await a.memory!.compileWiki();
@@ -1373,9 +1374,8 @@ describe('export and correction', () => {
   });
 
   it('marks a reused trace stored in the same millisecond as the correction', async () => {
-    // Only `Date` is faked, and it does not move: the turn and the correction share one millisecond.
-    vi.useFakeTimers({ toFake: ['Date'] });
-    vi.setSystemTime(1_800_000_000_000);
+    // The clock the store stamps traces by does not move: the turn and the correction share one millisecond.
+    vi.spyOn(Date, 'now').mockReturnValue(1_800_000_000_000);
     const { a } = await open({ compile: false });
     await turn(a, 's1', 'alice', 'I live in Porto.');
     const t = saidOf(keyOf(alice)).find((trace) => trace.content === 'I live in Porto.')!.id;
