@@ -17,6 +17,7 @@ vi.stubGlobal('fetch', fetchMock);
 import { OpenAIProvider } from '../implementations/OpenAIProvider';
 import { OpenAIProviderError } from '../errors/OpenAIProviderError';
 import { StreamingReconstructor } from '../../streaming/StreamingReconstructor';
+import { maxCostRequestOf } from '../../../../api/runtime/spendBudget';
 import type { ChatMessage, ModelCompletionResponse } from '../IProvider';
 
 type Json = Record<string, any>;
@@ -632,6 +633,53 @@ describe('OpenAIProvider routes to /v1/responses', () => {
       expect(body).not.toHaveProperty('max_completion_tokens');
       expect(body).not.toHaveProperty('max_tokens');
     }
+  });
+
+  it('sends no larger output cap than the spend bound counts for the same call', async () => {
+    // A metered call reserves for the cap its bound counts (maxCostRequestOf). The provider raises a
+    // cap under 16 to 16 on /v1/responses, so the bound must count 16 too: before every GPT-5 tool
+    // call went to Responses, this gpt-5.1 call sent its cap of 8 on chat as given.
+    const reply = () =>
+      jsonResponse({ ...RESPONSE_META, model: 'gpt-5.1', status: 'completed', output: [messageItem('ok')], usage: USAGE });
+    const calls: Array<{ model: string; maxTokens?: number; customModelParams?: Record<string, unknown> }> = [
+      { model: 'gpt-5.1', maxTokens: 8 },
+      { model: 'gpt-5.1', customModelParams: { max_completion_tokens: 8 } },
+      { model: 'gpt-6.2-sol', maxTokens: 1 },
+    ];
+    serve(calls.map(() => reply));
+    const provider = await initializedProvider();
+
+    for (const { model, maxTokens, customModelParams } of calls) {
+      await provider.generateCompletion(model, USER, {
+        tools: pingTool,
+        ...(maxTokens !== undefined ? { maxTokens } : {}),
+        ...(customModelParams ? { customModelParams } : {}),
+      });
+    }
+
+    const sent = posts();
+    expect(sent.map((p) => p.url)).toEqual(calls.map(() => RESPONSES_URL));
+    calls.forEach(({ model, maxTokens, customModelParams }, i) => {
+      const bound = maxCostRequestOf({
+        route: { providerId: 'openai', modelId: model },
+        messages: USER,
+        tools: pingTool,
+        maxTokens,
+        ...(customModelParams ? { options: { customModelParams } } : {}),
+      });
+      expect(sent[i].body.max_output_tokens).toBe(16);
+      expect(bound.maxOutputTokens).toBe(16);
+    });
+  });
+
+  it('refuses a customModelParams.messages override that holds no message objects, without sending it', async () => {
+    serve([]);
+    const provider = await initializedProvider();
+
+    await expect(
+      provider.generateCompletion('gpt-5.1', USER, { tools: pingTool, customModelParams: { messages: [null] } }),
+    ).rejects.toMatchObject({ code: 'RESPONSES_UNMAPPABLE_CONTENT' });
+    expect(posts()).toHaveLength(0);
   });
 
   it('routes streamed and non-streamed calls by one rule', async () => {
