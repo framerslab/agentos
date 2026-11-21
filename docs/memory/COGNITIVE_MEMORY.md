@@ -1158,7 +1158,7 @@ const record = await result.memoryWrite;
 | `outcome` | With | Meaning |
 |---|---|---|
 | `written` | `traceId` | The side was filed as that trace |
-| `skipped` | `reason` | The agent's rules filed nothing. On a `souledAgent()`: `policy_off`, `policy_failed` and `minor_no_retention` (the host's `memoryPolicy`), `screened` and `screen_failed` (the host's `screen`), `forgotten` (the person was forgotten before the write or while it ran, and nothing of it is left), `no_subject` (a user id no memory key can be built from) |
+| `skipped` | `reason` | The agent's rules filed nothing. On a `souledAgent()`: `policy_off`, `policy_failed` and `minor_no_retention` (the host's `memoryPolicy`), `screened` and `screen_failed` (the host's `screen`), `forgotten` (the person was forgotten before the write or while it ran, and nothing of it is left), `no_subject` (a user id no memory key can be built from), `corrected` (the reply of a turn that was running when `correctUserMemory` changed the person's memory; what the person said in that turn is filed: [Delete or correct one memory](../getting-started/HIGH_LEVEL_API.md#delete-or-correct-one-memory)) |
 | `failed` | `errorName` | The write threw or rejected: the error's class name |
 
 **What it holds.** Ids, outcomes, reasons and error class names, never the turn's text and never an error's message, which can quote the text.

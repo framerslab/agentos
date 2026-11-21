@@ -435,7 +435,7 @@ export interface SubjectCorrectionResult {
   deleted: number;
   /** How many pages built from a named trace were deleted; the subject's next compile builds each again. */
   pagesDeleted: number;
-  /** Who receives a person's text from the agent: the list the call was handed, which the call sends nothing. */
+  /** Who receives a person's text from the agent, as the call was handed the list. The call sends them nothing. */
   recipients: MemoryRecipient[];
 }
 
