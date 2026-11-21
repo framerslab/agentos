@@ -189,6 +189,8 @@ export async function correctSubjectMemory(options: {
       pagesDeleted += 1;
     }
 
+    // A trace stored before this point is one the store already held for these words.
+    const filingStartedAt = Date.now();
     const filed = await guardedWrite(
       { isForgotten: (who) => (memory.forgotten ? memory.isForgotten(who) : Promise.resolve(false)) },
       subject,
@@ -214,12 +216,14 @@ export async function correctSubjectMemory(options: {
     }
 
     // The store keeps one trace for words the subject's key already holds: `remember` returned that trace, which may
-    // be one of the named ones. It is the correction: the next compile reads it by id, as it reads a correction filed
-    // after its watermark; it is marked as one; and it is not deleted with the others.
+    // be one of the named ones or an earlier correction. It is the correction: the next compile reads it by id, as it
+    // reads a correction filed after its watermark; it is marked as one, with these ids among those it corrects; and
+    // it is not deleted with the others.
     const correctionTraceId = filed.result.id;
-    const marked = filed.result.tags.includes('correction');
-    if (!marked || gone.has(correctionTraceId)) await memory.addRebuildSources(key, [correctionTraceId]);
-    if (!marked) await memory.annotateTrace(correctionTraceId, { tags: ['correction'], metadata: { corrects: ids } });
+    if (Number(filed.result.createdAt) < filingStartedAt) {
+      await memory.addRebuildSources(key, [correctionTraceId]);
+      await memory.markCorrection(correctionTraceId, ids);
+    }
 
     const { deleted } = await memory.deleteTraces(ids.filter((id) => id !== correctionTraceId));
     try {
