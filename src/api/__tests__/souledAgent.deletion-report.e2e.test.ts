@@ -7,13 +7,27 @@
  *   the order they run (the tombstone, the mind, the store, the open sessions), each reached with its count or missed
  *   with its reason, and who receives a person's text; it holds no id, no hash of one and no text.
  * - A linked session's deletion adds into the same four parts.
+ * - A deletion still runs when the routes the store recorded cannot be read: the report lists the routes it knows and
+ *   names the recorded ones as not reached.
  * - An incomplete deletion writes one `memory.forget_incomplete` line naming the parts it missed; a complete one writes
- *   none.
+ *   none. A store, a page or older memory nobody attributed that the deletion left is the store part missed.
  * - On a souled agent with a learning layer, `agent.learning.forgetUser` runs the same deletion as `agent.forgetUser`
  *   and returns its report with the three fields the layer's report type requires.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
+/** The read of the routes a store recorded: it throws `fail` while a case sets one. */
+const recordedRoutes = vi.hoisted(() => ({ fail: undefined as Error | undefined }));
+vi.mock('../runtime/memoryRecipients', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../runtime/memoryRecipients')>();
+  return {
+    ...actual,
+    recordedRecipients: async (...args: Parameters<typeof actual.recordedRecipients>) => {
+      if (recordedRoutes.fail) throw recordedRoutes.fail;
+      return actual.recordedRecipients(...args);
+    },
+  };
+});
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -24,6 +38,7 @@ import { reply, script, type ProviderScript } from './helpers/stubProviders';
 import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 import { conversationScopeKey } from '../../cognition/memory/retrieval/store/conversationScopeKey';
+import { UserWikiStore } from '../../cognition/substrate/memory/wiki/UserWikiStore';
 
 /** The runtime the cases run on; a case that needs what only the GMI runtime has names it. */
 const RUNTIME = 'legacy' as const;
@@ -49,6 +64,7 @@ const opened: SouledAgent[] = [];
 let events: Array<Record<string, unknown>>;
 beforeEach(() => {
   globalLLMProviderHealth.reset();
+  recordedRoutes.fail = undefined;
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'souled-deletion-report-e2e-'));
   fs.writeFileSync(path.join(dir, 'SOUL.md'), '---\nname: Aria\nagentId: aria-1\n---\nYou are Aria.');
   events = [];
@@ -171,6 +187,24 @@ describe(`a deletion report a host can keep, on runtime ${RUNTIME}`, () => {
     expect(report.complete).toBe(true);
     expect(tracesOf(keyOf({ kind: 'session', id: 'v1' }))).toEqual([]);
   });
+
+  it('lists the routes it knows when the recorded ones cannot be read, and still deletes', async () => {
+    const a = await open();
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    const named = await a.recipients!();
+    recordedRoutes.fail = new Error('the store went away');
+
+    const report = receiptOf(await a.forgetUser!('alice'));
+
+    expect(tracesOf(keyOf(alice))).toEqual([]);
+    expect(report.recipients).toEqual(named);
+    expect(report.stores).toContainEqual({ store: 'recipients recorded in the store', reached: false, reason: 'the store went away' });
+    // The list is not a store the deletion deletes from: the deletion is complete.
+    expect(report.parts.every((p) => p.reached)).toBe(true);
+    expect(report.complete).toBe(true);
+    expect(lines('memory.recipients_unread')).toHaveLength(1);
+    expect(lines('memory.forget_incomplete')).toEqual([]);
+  });
 });
 
 describe(`an incomplete deletion says so in one line, on runtime ${RUNTIME}`, () => {
@@ -223,6 +257,45 @@ describe(`an incomplete deletion says so in one line, on runtime ${RUNTIME}`, ()
     expect(report.complete).toBe(false);
     expect(report.parts[2]).toMatchObject({ part: 'store', reached: false });
     expect(report.parts[2]!.reason).toContain('disk full');
+    expect(lines('memory.forget_incomplete')).toEqual([
+      expect.objectContaining({ tombstone: 'reached', mind: 'reached', store: 'missed', sessions: 'reached', pendingAtDeadline: 0, pagesFailed: 0 }),
+    ]);
+  });
+
+  it('a page it could not delete names the store part as missed, and the deletion made again finishes it', async () => {
+    const a = await open();
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await a.memory!.compileWiki();
+    expect(pagesOf(keyOf(alice))).toHaveLength(1);
+    vi.spyOn(UserWikiStore.prototype, 'deletePage').mockRejectedValueOnce(new Error('disk I/O error'));
+
+    const report = receiptOf(await a.forgetUser!('alice'));
+
+    expect(report.complete).toBe(false);
+    expect(report.parts[2]).toEqual({ part: 'store', reached: false, reason: '1 page not deleted' });
+    expect(lines('memory.forget_incomplete')).toEqual([
+      expect.objectContaining({ tombstone: 'reached', mind: 'reached', store: 'missed', sessions: 'reached', pendingAtDeadline: 0, pagesFailed: 1 }),
+    ]);
+
+    events.length = 0;
+    const again = receiptOf(await a.forgetUser!('alice'));
+    expect(again.complete).toBe(true);
+    expect(again.parts.every((p) => p.reached)).toBe(true);
+    expect(pagesOf(keyOf(alice))).toEqual([]);
+    expect(lines('memory.forget_incomplete')).toEqual([]);
+  });
+
+  it('older memory nobody attributed names the store part as missed', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const a = await open();
+    await a.memory!.remember('old shared words', { type: 'episodic', scope: 'persona', scopeId: 'aria-1' });
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+
+    const report = receiptOf(await a.forgetUser!('alice'));
+
+    expect(tracesOf(keyOf(alice))).toEqual([]);
+    expect(report.complete).toBe(false);
+    expect(report.parts[2]).toEqual({ part: 'store', reached: false, reason: 'legacy memory under the agent scope: unattributed' });
     expect(lines('memory.forget_incomplete')).toEqual([
       expect.objectContaining({ tombstone: 'reached', mind: 'reached', store: 'missed', sessions: 'reached', pendingAtDeadline: 0, pagesFailed: 0 }),
     ]);

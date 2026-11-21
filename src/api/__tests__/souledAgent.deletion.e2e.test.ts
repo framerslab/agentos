@@ -530,23 +530,26 @@ describe('forgetUser', () => {
     } finally {
       db.close();
     }
-    const forgetLearner = vi.spyOn(a.learning!, 'forgetUser');
+    const traitRows = () =>
+      rows<{ user_id: string }>(storeFile(), 'SELECT user_id FROM agentos_learning_traits WHERE user_id = ?', ['alice']);
+    expect(traitRows()).toHaveLength(1);
 
     await a.applyTombstones!();
 
-    expect(forgetLearner).toHaveBeenCalledWith('alice');
+    // The learning layer's own deletion ran again for her and deleted the row the restore put back.
+    expect(traitRows()).toEqual([]);
   });
 
   it('refuses an id no key can be built from before it deletes anything', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const { a } = await open({ runtime: 'gmi', learning: true });
-    const forgetLearner = vi.spyOn(a.learning!, 'forgetUser');
 
     await expect(a.forgetUser!('a\u0000b')).rejects.toThrow(TypeError);
     await expect(a.forgetUser!('alice', { linkedSessions: ['s\uD800'] })).rejects.toThrow(TypeError);
+    await expect(a.learning!.forgetUser!('a\u0000b')).rejects.toThrow(TypeError);
 
-    // Neither the learning layer nor the store was reached, and no tombstone was written.
-    expect(forgetLearner).not.toHaveBeenCalled();
+    // Neither the learning layer nor the store was reached, and no tombstone was written: the layer writes its
+    // tombstone to the store's ledger.
     expect(lines('memory.forget_done')).toEqual([]);
     expect(await a.memory!.isForgotten(alice)).toBe(false);
   });
