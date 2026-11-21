@@ -103,7 +103,8 @@ export class WikiCompiler {
    * watermark compiles the same traces again.
    *
    * The pages are read and written through `input.store`, the store of the scope the traces are of, else through
-   * the store the compiler was built with.
+   * the store the compiler was built with. Each merge calls `input.llm` when the input names one, else the
+   * compiler's own `llm`.
    *
    * @throws TypeError when neither the input nor the compiler's options name a page store.
    */
@@ -111,10 +112,13 @@ export class WikiCompiler {
     traces: TraceLike[];
     reason: 'consolidation' | 'session-end' | 'explicit';
     store?: WikiCompilerStorePort;
+    /** The model call that merges this compile's records, in place of the compiler's own. */
+    llm?: (prompt: string) => Promise<string>;
   }): Promise<CompileResult> {
     const result: CompileResult = { pagesWritten: [], tracesConsumed: 0, conflicts: [] };
     const store = input.store ?? this.opts.store;
     if (!store) throw new TypeError('WikiCompiler.compile: no page store was given');
+    const llm = input.llm ?? this.opts.llm;
 
     // Never consume the wiki's own indexed chunks — avoids a feedback loop.
     const traces = input.traces.filter((t) => !t.tags.includes('wiki'));
@@ -141,7 +145,7 @@ export class WikiCompiler {
         result.conflicts.push({ pageId: String(a.pageId), note: err.message });
         continue;
       }
-      const mergedBody = (await this.opts.llm(MERGE_PROMPT(current?.body ?? '', records))).trim();
+      const mergedBody = (await llm(MERGE_PROMPT(current?.body ?? '', records))).trim();
 
       const type: WikiPageType = current?.type ?? inferType(a.pageId);
       const newSources = [...new Set([...(current?.sources ?? []), ...a.traceIds])];

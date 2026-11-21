@@ -68,7 +68,8 @@ export interface AttachMemoryWikiOptions {
   ownPagesServed?: (scopeKey: string) => boolean | Promise<boolean>;
   /**
    * Asked once a batch of a scope's traces, before the compiler: the traces to compile (a host can screen their
-   * text), or why this scope's compile does not run. A skipped scope keeps its watermark and is logged.
+   * text) and, optionally, the model call that compiles them in place of `llm`, or why this scope's compile does not
+   * run. A skipped scope keeps its watermark and is logged.
    */
   beforeScopeCompile?: AttachedWiki['beforeScopeCompile'];
   /**

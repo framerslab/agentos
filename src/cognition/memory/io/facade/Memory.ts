@@ -117,7 +117,7 @@ import {
 // ---------------------------------------------------------------------------
 
 /** Why a scope's wiki compile did not run in a call, as its `memory.compile_skipped` line says it. */
-export type CompileSkipReason = 'budget' | 'policy_raw' | 'screen_failed' | 'forgotten';
+export type CompileSkipReason = 'budget' | 'policy_raw' | 'screen_failed' | 'forgotten' | 'minor_no_compile';
 
 /** What {@link Memory.attachWiki} takes: a page store per conversation scope, a compiler, and two optional hooks. */
 export interface AttachedWiki {
@@ -129,26 +129,32 @@ export interface AttachedWiki {
       reason: 'consolidation' | 'session-end' | 'explicit';
       /** The store of the scope the traces are of: the compile reads and writes its pages there. */
       store: WikiCompilerStorePort;
+      /** The model call that compiles this batch, in place of the compiler's own; unset, the compiler's own. */
+      llm?: (prompt: string) => Promise<string>;
     }): Promise<CompileResult>;
   };
   /**
-   * Asked once a batch of a scope's traces, before the compiler: the traces to compile, or why this scope's
-   * compile does not run. A skipped scope keeps its watermark.
+   * Asked once a batch of a scope's traces, before the compiler: the traces to compile, and the model call that
+   * compiles them when it is not the compiler's own, or why this scope's compile does not run. A skipped scope keeps
+   * its watermark.
    */
   beforeScopeCompile?(
     scopeId: string,
     traces: MemoryTrace[],
-  ): Promise<{ traces: MemoryTrace[] } | { skip: 'policy_raw' | 'screen_failed' | 'forgotten' }>;
+  ): Promise<
+    | { traces: MemoryTrace[]; llm?: (prompt: string) => Promise<string> }
+    | { skip: 'policy_raw' | 'screen_failed' | 'forgotten' | 'minor_no_compile' }
+  >;
   /**
    * Runs one scope's compile: a host that orders each subject's writes, compiles and deletion one after another
    * passes it, and runs `work` in the subject's turn. Unset: the compile runs at once.
    */
   runScope?<T>(scopeId: string, work: () => Promise<T>): Promise<T>;
   /**
-   * The reason to log for an error a scope's compile threw: `'budget'` for a spend budget's refusal. Undefined:
-   * the error is the call's, thrown once every scope has run.
+   * The reason to log for an error a scope's compile threw: `'budget'` for a spend budget's refusal, or the reason a
+   * host's model call stopped the compile for. Undefined: the error is the call's, thrown once every scope has run.
    */
-  compileSkipReasonOf?(error: unknown): 'budget' | undefined;
+  compileSkipReasonOf?(error: unknown): CompileSkipReason | undefined;
 }
 
 /**
@@ -2460,12 +2466,14 @@ export class Memory {
         );
       }
       if (traces.length > 0) {
+        let llm: ((prompt: string) => Promise<string>) | undefined;
         if (wiki.beforeScopeCompile) {
           const answer = await wiki.beforeScopeCompile(scopeId, traces);
           if ('skip' in answer) return answer.skip;
           traces = answer.traces;
+          llm = answer.llm;
         }
-        const result = await wiki.compiler.compile({ traces, reason, store });
+        const result = await wiki.compiler.compile({ traces, reason, store, ...(llm ? { llm } : {}) });
         aggregate.pagesWritten.push(...result.pagesWritten);
         aggregate.tracesConsumed += result.tracesConsumed;
         aggregate.conflicts.push(...result.conflicts);

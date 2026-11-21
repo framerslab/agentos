@@ -108,7 +108,7 @@ The soul's `hardLimits` close the assembled system prompt, after your own `syste
 
 ### A policy per account, and a screen
 
-`memoryPolicy` answers, for the account a turn serves: no long-term memory, raw traces with no compiled pages, or full memory, each with an optional shorter retention. `screen` sees each text before it is filed, embedded or compiled, and returns the text to use or `null` to drop it; `redactPii()` from `@framers/agentos-ext-pii-redaction` fits it. Both fail closed: when your function throws, times out or returns something else, the memory operation is refused and the turn goes on.
+`memoryPolicy` answers, for the account a turn serves: no long-term memory, raw traces with no compiled pages, or full memory, each with an optional shorter retention, and two marks: a child's account (`minor: true`) and a person who objects to profiling (`profiling: 'off'`). A session follows a later answer for the same account, given to the same agent object, from its next turn. `screen` sees each text before it is filed, embedded or compiled, and returns the text to use or `null` to drop it; `redactPii()` from `@framers/agentos-ext-pii-redaction` fits it. Both fail closed: when your function throws, times out or returns something else, the memory operation is refused and the turn goes on.
 
 ### One line per refusal
 
@@ -187,7 +187,15 @@ On PostgreSQL each tombstone write and each `applyTombstones()` takes a lock on 
 
 ### Children
 
-The library does not know a person's age. If children may use your product, settle age assurance and any consent a parent must give before memory is on for them. Use `memoryPolicy` for such accounts: no long-term memory, raw traces only, or a short retention. "Until deletion" is not a setting for a child's account.
+The library does not know a person's age. If children may use your product, settle age assurance and any consent a parent must give before memory is on for them. Answer `minor: true` from `memoryPolicy` for such accounts, beside `longTerm` and an optional shorter retention. "Until deletion" is not a setting for a child's account, and the library holds to that: on a store that keeps the account's memory until deletion, or with no `retention`, a child's account keeps no long-term memory whatever the answer says, and its turns recall your operator pages alone. On a store with a period in days, its turns are kept for that period, and its pages are compiled only on the provider and model you name in `compile.minors`, and not at all without it; with no key for that provider the compile does not run, and no other provider takes its place. Name a provider whose terms cover a child's data, and say it in your notice.
+
+### A person who objects to profiling
+
+Compiled pages are a profile of the person. Where a person objects to profiling and that right applies, answer `profiling: 'off'` for their account, and `longTerm: 'raw'` or `'off'` so that no page is compiled for them. The souled agent's own store keeps no mood or emotional context of anyone.
+
+### A restriction that must hold at once
+
+A session keeps the answer it was given until a later answer for the same account, given to any session or call of the same agent object, replaces it from its next turn. Another agent object, in the same process or another, reads your answer at its own sessions' next ask. Where a restriction must hold at once in every one of them (an objection, an age you learn), close that person's open sessions in each, or call `agent.forgetUser(userId)`, which deletes what is stored and keeps it deleted. A compile already running reads your latest answer before each of its model calls.
 
 ### Health data
 
@@ -211,9 +219,9 @@ A store that an earlier release of `souledAgent()` wrote holds traces under the 
 | `agentId` in the soul's front matter | The one stable id of the persona and of the memory scope. | Set it. Without it the slug of the soul's name is used. |
 | `session(id, { userId })` | The user the session serves. | None: the session is its own subject. |
 | `retention` | How long traces are kept; what happens to a page when a source expires. | Required once a second person or session shares the store, and always with `soulStore`. |
-| `memoryPolicy` | Per account: no long-term memory, raw traces only, or full memory; a shorter retention. | Full memory under `retention`. |
+| `memoryPolicy` | Per account: no long-term memory, raw traces only, or full memory; a shorter retention; a child's account (`minor: true`); an objection to profiling (`profiling: 'off'`). | Full memory under `retention`. |
 | `screen` | Screens or redacts text before it is filed, embedded or compiled. | None. |
-| `compile` | The provider and model the compile runs on, or `false` for no compile. | The agent's own provider and model. |
+| `compile` | The provider and model the compile runs on, or `false` for no compile; `minors`, the provider and model a child's pages are compiled on. | The agent's own provider and model; no page for a child. |
 | `tombstoneKey` | A secret; tombstones become keyed hashes. | Plain hashes. Required once a second person or session shares the store, unless the ledger already holds plain hashes; always required with `soulStore`. |
 | `tombstoneCopy` | Where the second copy of the tombstones lives. | `memory/.store/forgotten.sqlite`; required with `soulStore` |
 | `soulStore` | Keeps the memory store in your own database, on a storage adapter you pass and close. | `memory/.store/memory.sqlite` |
