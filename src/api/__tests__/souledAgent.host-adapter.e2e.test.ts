@@ -280,7 +280,12 @@ describe(`a souled agent's store on the host's adapter, on runtime ${RUNTIME}`, 
     // No tombstone copy: the default copy is a file on one machine, and a store on an adapter usually serves several.
     await expect(open('aria-1', { soulStore: { adapter } })).rejects.toThrow(TypeError);
     await expect(open('aria-1', { soulStore: { adapter } })).rejects.toThrow(/tombstoneCopy/);
+    // A copy option that names neither a file nor an adapter is no copy either: the store never opens with none.
+    await expect(open('aria-1', { soulStore: { adapter }, tombstoneCopy: {} as never })).rejects.toThrow(TypeError);
+    await expect(open('aria-1', { soulStore: { adapter }, tombstoneCopy: { adapter: undefined } as never })).rejects.toThrow(TypeError);
+    await expect(open('aria-1', { soulStore: { adapter }, tombstoneCopy: { path: '' } })).rejects.toThrow(TypeError);
     await answers(adapter);
+    expect(await brainsIn(adapter)).toEqual([]);
 
     // A copy on the store's own adapter is no second copy.
     await expect(open('aria-1', { soulStore: { adapter }, tombstoneCopy: { adapter } })).rejects.toMatchObject({ code: 'COPY_UNAVAILABLE' });
