@@ -1392,6 +1392,21 @@ describe('export and correction', () => {
     expect((JSON.parse(kept.metadata) as { corrects?: string[] }).corrects).toEqual([t]);
   });
 
+  it('deletes nothing when the correction is gone before it is marked, and finishes when made again', async () => {
+    const { a } = await open({ compile: false });
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    const t1 = saidOf(keyOf(alice)).find((trace) => trace.content === 'My canary is LARK-7.')!.id;
+    // As a retention sweep that runs past the person's chain at close() can delete it between the filing and the mark.
+    vi.spyOn(a.memory!, 'markCorrection').mockResolvedValueOnce(false);
+    const correction = { traceIds: [t1], text: 'My canary is WREN-9.' };
+    await expect(a.correctUserMemory!('alice', correction)).rejects.toThrow('the correction is no longer stored');
+    expect(rows(storeFile(), 'SELECT id FROM memory_traces WHERE id = ? AND deleted = 0', [t1])).toHaveLength(1);
+
+    const again = await a.correctUserMemory!('alice', correction);
+    expect(again.deleted).toBe(1);
+    expect(correctionsOf(keyOf(alice)).map((trace) => trace.id)).toEqual([again.correctionTraceId]);
+  });
+
   it('records every trace a reused correction replaced, and has the next compile read it', async () => {
     const { a } = await open({ compile: false });
     await turn(a, 's1', 'alice', 'My canary is LARK-7.');
