@@ -52,6 +52,7 @@ import { retryLostCreate } from './migrations/lost-create.js';
 import { registerUnregisteredConversationScopes, reopenCompiledScopes } from './conversationScopes.js';
 import { CONVERSATION_SCOPE_TABLES, LEGACY_OWNER_TABLE, PORTABLE_TABLES, PORTABLE_TABLE_PRIMARY_KEYS } from './portable-tables.js';
 import { redactPostgresPassword } from './postgresPasswordRedaction.js';
+import { withAdapterTransactionLock } from './adapterTransactionLock.js';
 import { keyTraceCopies } from './SqlKnowledgeGraph.js';
 import {
   brainHoldsScopeIdFormRecord,
@@ -64,6 +65,12 @@ import {
   writeScopeIdFormRecord,
 } from './scopeIdForm.js';
 import { parseTraceMetadata, scopeIdOfMetadata } from './tracePersistence.js';
+
+/**
+ * @internal The lock the Brain's transactions run through on a PostgreSQL adapter a souled agent keeps its store on;
+ * the ledger's and the migrations' run through it too.
+ */
+export { withAdapterTransactionLock };
 
 /**
  * How many times `exportToSqlite` and `importFromSqlite` copy a brain whose scope-id form record changes while they
@@ -1264,13 +1271,17 @@ export class Brain {
    * Execute a callback within a database transaction.
    *
    * The transaction is automatically committed on success or rolled back
-   * on error.
+   * on error. On a PostgreSQL adapter a souled agent keeps its store on
+   * (`soulStore`), it waits for the transactions this library opened earlier
+   * on the same adapter object to end, so no two of them run at once
+   * ({@link withAdapterTransactionLock}); a transaction opened inside another
+   * runs at once. On every other adapter it runs as the adapter runs it.
    *
    * @param fn - Async callback receiving a transactional adapter.
    * @returns Result of the callback.
    */
   async transaction<T>(fn: (trx: StorageAdapter) => Promise<T>): Promise<T> {
-    return this._adapter.transaction(fn);
+    return withAdapterTransactionLock(this._adapter, () => this._adapter.transaction(fn));
   }
 
   /**
@@ -1683,10 +1694,12 @@ export class Brain {
   /** {@link readConsistently}, which an export of this brain reads through. */
   private async _readSnapshot<T>(read: (source: StorageAdapter) => Promise<T>): Promise<T> {
     if (this._features.dialect.name === 'postgres') {
-      return this._adapter.transaction(async (trx) => {
-        await trx.exec('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY');
-        return read(trx);
-      });
+      return withAdapterTransactionLock(this._adapter, () =>
+        this._adapter.transaction(async (trx) => {
+          await trx.exec('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY');
+          return read(trx);
+        }),
+      );
     }
     if (this._adapter.kind !== 'better-sqlite3') {
       return read(this._adapter);
@@ -1842,7 +1855,9 @@ export class Brain {
       // names.
       for (let pass = 1; ; pass += 1) {
         try {
-          tablesImported = await this._adapter.transaction((trx) => this._importSource(trx, source, strategy));
+          tablesImported = await withAdapterTransactionLock(this._adapter, () =>
+            this._adapter.transaction((trx) => this._importSource(trx, source, strategy)),
+          );
           break;
         } catch (error) {
           if (!(error instanceof ScopeIdFormChangedWhileCopied) || pass >= SCOPE_ID_FORM_PASSES) throw error;
@@ -2089,7 +2104,7 @@ export class Brain {
     if (opts.db) {
       await write(opts.db);
     } else {
-      await target._adapter.transaction(write);
+      await withAdapterTransactionLock(target._adapter, () => target._adapter.transaction(write));
     }
   }
 

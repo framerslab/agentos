@@ -24,6 +24,7 @@
  * With `memory.store` the manager files into a Brain there and keeps an archive over the Brain's adapter; the caller
  * opens the Brain ({@link openAgentMemoryBrain}) and closes it once the manager has closed.
  */
+import type { StorageAdapter } from '@framers/sql-storage-adapter';
 import { CognitiveMemoryManager } from '../../cognition/memory/CognitiveMemoryManager.js';
 import { assertRecallConfig } from '../../cognition/memory/retrieval/recall/budget.js';
 import type { CognitiveMemoryConfig, CognitiveMemoryPersonaConfig, HexacoTraits, ManagerRecallConfig, PADState } from '../../cognition/memory/core/config.js';
@@ -265,6 +266,25 @@ export function assertMemoryStore(store: unknown, learningOn: boolean, agentKey:
   }
 }
 
+/**
+ * Refuses a PostgreSQL adapter that reads BIGINT as text, before a Brain opens on it: the Brain's integer columns are
+ * BIGINT there, and read as text a trace's retrieval count and times load as strings and an access appends to the
+ * count. Runs one statement, on a PostgreSQL adapter alone; any other adapter is let through.
+ *
+ * @param adapter - The adapter a Brain is about to open on.
+ * @param what - Who holds the adapter, the start of the refusal's message (`its PostgreSQL adapter`).
+ * @throws {Error} `<what> reads BIGINT as text; ...`, naming `typeParsers: { int8: 'number' }`.
+ */
+export async function assertBigintReadsAsNumbers(adapter: StorageAdapter, what: string): Promise<void> {
+  if (!String(adapter.kind).includes('postgres')) return;
+  const probe = await adapter.get<{ n: unknown }>('SELECT CAST(1 AS BIGINT) AS n');
+  if (typeof probe?.n !== 'number') {
+    throw new Error(
+      `${what} reads BIGINT as text; open the adapter with typeParsers: { int8: 'number' }, as Brain.openPostgres opens its own, so a trace's counts and times load as numbers`,
+    );
+  }
+}
+
 /** The Brain behind `memory.store`, and how to let go of it. */
 export interface AgentMemoryBrain {
   brain: Brain;
@@ -289,14 +309,7 @@ export async function openAgentMemoryBrain(store: NonNullable<MemoryConfig['stor
       const brain = await Brain.openSqlite(store.path, { brainId: agentKey });
       return { brain, close: () => brain.close() };
     }
-    if (String(store.adapter.kind).includes('postgres')) {
-      const probe = await store.adapter.get<{ n: unknown }>('SELECT CAST(1 AS BIGINT) AS n');
-      if (typeof probe?.n !== 'number') {
-        throw new Error(
-          "its PostgreSQL adapter reads BIGINT as text; open the adapter with typeParsers: { int8: 'number' }, as Brain.openPostgres opens its own, so a trace's counts and times load as numbers",
-        );
-      }
-    }
+    await assertBigintReadsAsNumbers(store.adapter, 'its PostgreSQL adapter');
     const brain = await Brain.openWithAdapter(store.adapter, { brainId: store.brainId?.trim() || agentKey });
     return { brain, close: async () => undefined };
   } catch (error) {

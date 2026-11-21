@@ -1107,7 +1107,7 @@ agent({ provider: 'openai', soul: { content: SOUL_MARKDOWN_STRING } });
 
 ### `souledAgent()`: soul plus a `memory/` wiki
 
-`agent({ soul })` loads identity but leaves long-term memory to you. `souledAgent()` is the async factory that wires the whole loop in one call: it loads the soul, opens one `Memory` store under the workspace's `memory/.store/`, indexes the operator's pages under `memory/`, and keeps what each subject says (the session's `userId`, else the session) in that store, apart from every other subject's. [Which Call to Use](../SOUL_ENTRY_POINTS.md) sets it beside `gmi({ soul })` and `agent({ soul })`: what each stores about a user, and which call exports, corrects and deletes it (`exportUserMemory`, `correctUserMemory`, `forgetUser`, `sweepRetention`).
+`agent({ soul })` loads identity but leaves long-term memory to you. `souledAgent()` is the async factory that wires the whole loop in one call: it loads the soul, opens one `Memory` store under the workspace's `memory/.store/` (or in your own database, with `soulStore`), indexes the operator's pages under `memory/`, and keeps what each subject says (the session's `userId`, else the session) in that store, apart from every other subject's. [Which Call to Use](../SOUL_ENTRY_POINTS.md) sets it beside `gmi({ soul })` and `agent({ soul })`: what each stores about a user, and which call exports, corrects and deletes it (`exportUserMemory`, `correctUserMemory`, `forgetUser`, `sweepRetention`).
 
 ```ts
 import { souledAgent } from '@framers/agentos';
@@ -1147,7 +1147,26 @@ Options for deletion:
 - **`tombstoneCopy`** is where the second copy of the tombstones lives: `{ path }` for a SQLite file, or `{ adapter }` for a database of your own (left open on `close()`). By default it is `memory/.store/forgotten.sqlite`. Keep it out of what a restore replaces: a store whose copy is missing or unreadable does not open.
 - **`legacyMemory: { attributeTo, reason: 'one-persons-machine' }`** attributes the memory a store holds from before per-user scope to the one user of a single person's own machine, who then recalls, reads, exports and deletes it; the store refuses it when it records anyone else. An attributed owner counts toward the `retention` and `tombstoneKey` requirements before their first turn and on later opens without the option. [The `memory/` wiki](../SOUL_FILES.md#the-memory-wiki) has the rules.
 
-A host that wires memory onto its own adapter must give each agent its own ledger database or PostgreSQL schema and an independent copy. The ledger is database-wide: different brain ids do not isolate tombstones.
+Where the store lives:
+
+- **`soulStore: { adapter }`** keeps the store in your own database: a [`StorageAdapter`](https://github.com/framerslab/sql-storage-adapter) of `@framers/sql-storage-adapter`, SQLite or PostgreSQL, in place of `memory/.store/memory.sqlite`. The store's tables go in that database under the soul's `agentId`, and every call above reaches them as it reaches the file. It takes `tombstoneCopy` with it: without one the agent throws a `TypeError` before anything opens, since the default copy is a file on one machine and a store in your database usually serves several. A `tombstoneCopy` whose `adapter` key holds no adapter is refused the same way, even beside a `path`. It takes `retention` and a `tombstoneKey` that holds a key with it too, with or without `sharedMemory`: the agent counts the people and sessions it holds memory of in its own process, and each process that serves the same database would let its own first one in without them. Before anything opens, the open is refused while a store file is still at `memory/.store/memory.sqlite` (move its memory into your database, or delete it, first: the new store's calls never reach it), a PostgreSQL adapter that reads BIGINT as text is refused (open it with `typeParsers: { int8: 'number' }`), and a database that already holds another agent's memory is refused, with nothing written to it. Two agents opened at the same moment on an empty database both pass that check, so each checks again once its tables are made and before the tombstone ledger is read: at least one is refused, and takes back the rows its open made. A refusal for any other reason leaves the agent's own rows in the database you gave it. Every refusal leaves your adapter open, and so does `close()`. On a SQLite adapter the agent turns `secure_delete` on. On PostgreSQL the agent runs its own transactions on the adapter one after another, so a sweep, a deletion and a turn's write never hold two at once; a transaction your code runs on the same adapter object is outside that order.
+
+```ts
+import { createDatabase } from '@framers/sql-storage-adapter';
+
+const db = await createDatabase({ postgres: { connectionString: process.env.ARIA_MEMORY_URL, typeParsers: { int8: 'number' } } });
+const aria = await souledAgent({
+  provider: 'anthropic',
+  model: 'claude-sonnet-5-5',
+  soul: '~/.agentos/agents/aria',
+  soulStore: { adapter: db },
+  tombstoneCopy: { path: '/var/lib/aria/forgotten.sqlite' },
+  retention: { traces: { days: 90 } },
+  tombstoneKey: process.env.ARIA_TOMBSTONE_KEY,
+});
+```
+
+Give each agent a database or PostgreSQL schema of its own, an adapter object of its own, and an independent copy. The ledger is database-wide: different brain ids do not isolate tombstones, so the open refuses a database that holds another agent's memory. A host that wires memory onto its own adapter without `souledAgent()` keeps to the same rule.
 
 Deleting a person:
 
@@ -1156,7 +1175,7 @@ Deleting a person:
 
 A person's own memory: **`await agent.exportUserMemory(userId)`** returns their traces and pages as JSON, and **`await agent.correctUserMemory(userId, { traceIds, text })`** replaces wrong traces with a correction the next compile keeps; [One person's memory](../MEMORY_OPERATIONS.md#one-persons-memory) has the rules.
 
-One `Memory` facade backs both the live memory and the wiki. The operator's pages are markdown files and the source of truth for themselves: their index entries in the store are rebuilt from them. Per-user traces and pages live in the store alone. `souledAgent()` accepts every `agent()` option and returns the same `Agent`, plus `agent.memory` (the store) when the soul resolves to a workspace directory. An inline soul (`{ content }`) has no workspace, so it falls back to a plain `agent()` and says so in one warning line. Closing the agent also closes the store. What applies on each way of loading a soul is tabled in [Soul Files](../SOUL_FILES.md#what-applies-on-each-path).
+One `Memory` facade backs both the live memory and the wiki. The operator's pages are markdown files and the source of truth for themselves: their index entries in the store are rebuilt from them. Per-user traces and pages live in the store alone. `souledAgent()` accepts every `agent()` option and returns the same `Agent`, plus `agent.memory` (the store) when the soul resolves to a workspace directory. An inline soul (`{ content }`) has no workspace, so it falls back to a plain `agent()` and says so in one warning line. Closing the agent also closes the store; an adapter you passed as `soulStore` or `tombstoneCopy` stays open, and a write that reaches the closed store through it is not stored. What applies on each way of loading a soul is tabled in [Soul Files](../SOUL_FILES.md#what-applies-on-each-path).
 
 Before you serve other people with memory on, read [Your Duties as the Controller](../safety/MEMORY_HOST_DUTIES.md).
 

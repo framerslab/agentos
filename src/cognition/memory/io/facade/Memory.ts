@@ -482,6 +482,15 @@ export class Memory {
   /** The forgotten-user ledger the store was opened with, if any (config.forgotten). */
   private readonly _forgotten: ForgottenLedger | undefined;
 
+  /** Whether {@link close} leaves the Brain's adapter open: one the host passed and keeps using (`leaveAdapterOpen`). */
+  private readonly _leaveAdapterOpen: boolean;
+
+  /**
+   * True once {@link close} has run on a store whose adapter the caller keeps: the facade admits nothing new after it
+   * ({@link _refuseOnceClosed}).
+   */
+  private _closedOnKeptAdapter = false;
+
   // -------------------------------------------------------------------
   // Constructor (private — use Memory.create() instead)
   // -------------------------------------------------------------------
@@ -494,10 +503,12 @@ export class Memory {
     brain: Brain,
     config: Required<Pick<MemoryConfig, 'store' | 'graph' | 'selfImprove' | 'decay'>> & MemoryConfig,
     forgotten?: ForgottenLedger,
+    leaveAdapterOpen = false,
   ) {
     this._brain = brain;
     this._config = config;
     this._forgotten = forgotten;
+    this._leaveAdapterOpen = leaveAdapterOpen;
 
     // Store the optional embedding function for vector search.
     this._embed = config.embed ?? null;
@@ -678,13 +689,24 @@ export class Memory {
    * Open a Memory with a pre-resolved StorageAdapter. Use when sharing an
    * adapter across subsystems or when you need full control over adapter
    * resolution.
+   *
+   * `leaveAdapterOpen` (internal) is for an adapter the caller keeps using: {@link close}, and a refused open, leave it
+   * open. `beforeLedger` (internal) runs once the Brain is open and before the forgotten-user ledger opens; a throw
+   * refuses the open before the ledger reads or writes anything.
    */
   static async createWithAdapter(
     adapter: import('@framers/sql-storage-adapter').StorageAdapter,
-    opts: Omit<MemoryConfig, 'store' | 'path'> & { brainId?: string } = {},
+    opts: Omit<MemoryConfig, 'store' | 'path'> & {
+      brainId?: string;
+      /** @internal Leave the adapter open on close and on a refused open; the caller closes it. */
+      leaveAdapterOpen?: boolean;
+      /** @internal A check of the opened Brain, before the ledger opens; a throw refuses the open. */
+      beforeLedger?: (brain: Brain) => Promise<void>;
+    } = {},
   ): Promise<Memory> {
-    const brain = await Brain.openWithAdapter(adapter, { brainId: opts.brainId });
-    return Memory._initialize(brain, { ...opts, store: 'sqlite' });
+    const { leaveAdapterOpen = false, beforeLedger, ...config } = opts;
+    const brain = await Brain.openWithAdapter(adapter, { brainId: config.brainId });
+    return Memory._initialize(brain, { ...config, store: 'sqlite' }, leaveAdapterOpen, beforeLedger);
   }
 
   /**
@@ -692,11 +714,14 @@ export class Memory {
    * Wires the Memory facade around an already-opened Brain, and opens the
    * forgotten-user ledger over the Brain's adapter when the config asks for one.
    *
-   * @throws {ForgottenLedgerError} When the ledger does not open; the Brain is closed first.
+   * @throws {ForgottenLedgerError} When the ledger does not open; the Brain is closed first, unless
+   *   `leaveAdapterOpen` leaves its adapter to the caller. Whatever `beforeLedger` throws, the same way.
    */
   private static async _initialize(
     brain: Brain,
     config: MemoryConfig,
+    leaveAdapterOpen = false,
+    beforeLedger?: (brain: Brain) => Promise<void>,
   ): Promise<Memory> {
     const merged = {
       store: 'sqlite' as const,
@@ -719,19 +744,21 @@ export class Memory {
 
     // The ledger's table lives beside the traces, on the store's own adapter, which exists only now.
     let forgotten: ForgottenLedger | undefined;
-    if (config.forgotten instanceof ForgottenLedger) {
-      forgotten = config.forgotten;
-    } else if (config.forgotten) {
-      try {
+    try {
+      await beforeLedger?.(brain);
+      if (config.forgotten instanceof ForgottenLedger) {
+        forgotten = config.forgotten;
+      } else if (config.forgotten) {
         forgotten = await ForgottenLedger.open({ ...config.forgotten, primary: brain.adapter });
-      } catch (error) {
-        // A store whose ledger does not open is not served, and the refused open leaves no handle behind.
-        await brain.close();
-        throw error;
       }
+    } catch (error) {
+      // A store whose ledger does not open is not served, and the refused open leaves no handle behind: closing the
+      // Brain closes its adapter, so an adapter the caller keeps is left to the caller.
+      if (!leaveAdapterOpen) await brain.close();
+      throw error;
     }
 
-    return new Memory(brain, merged, forgotten);
+    return new Memory(brain, merged, forgotten, leaveAdapterOpen);
   }
 
   /**
@@ -771,6 +798,7 @@ export class Memory {
    *   `conversationScopeKey` built; nothing is stored.
    */
   async remember(content: string, options?: RememberOptions): Promise<MemoryTrace> {
+    this._refuseOnceClosed();
     const type = options?.type ?? 'episodic';
     const scope = options?.scope ?? 'user';
     const scopeId = options?.scopeId ?? '';
@@ -1840,6 +1868,7 @@ export class Memory {
       keepChunksIfUnchanged?: boolean;
     },
   ): Promise<{ chunkIds: string[] }> {
+    this._refuseOnceClosed();
     assertPageOwnerKey(scopeId);
     assertWikiPageId(page.pageId);
     await this._initPromise;
@@ -2251,6 +2280,7 @@ export class Memory {
     reason?: 'consolidation' | 'session-end' | 'explicit';
     scopes?: readonly string[];
   }): Promise<CompileResult> {
+    this._refuseOnceClosed();
     await this._initPromise;
     const aggregate: CompileResult = { pagesWritten: [], tracesConsumed: 0, conflicts: [] };
     const wiki = this._wiki;
@@ -2501,6 +2531,7 @@ export class Memory {
    * @returns Summary of the ingestion run.
    */
   async ingest(source: string, options?: IngestOptions): Promise<IngestResult> {
+    this._refuseOnceClosed();
     await this._initPromise;
 
     const result: IngestResult = {
@@ -2633,6 +2664,7 @@ export class Memory {
   async addEntity(
     entity: Partial<KnowledgeEntity>,
   ): Promise<KnowledgeEntity> {
+    this._refuseOnceClosed();
     await this._initPromise;
 
     return this._knowledgeGraph.upsertEntity({
@@ -2664,6 +2696,7 @@ export class Memory {
   async addRelation(
     relation: Partial<KnowledgeRelation>,
   ): Promise<KnowledgeRelation> {
+    this._refuseOnceClosed();
     await this._initPromise;
 
     return this._knowledgeGraph.upsertRelation({
@@ -2898,6 +2931,7 @@ export class Memory {
    * @returns Summary of the import operation.
    */
   async importFrom(source: string, options?: ImportOptions): Promise<ImportResult> {
+    this._refuseOnceClosed();
     await this._initPromise;
 
     const format = await this._detectImportFormat(source, options);
@@ -2973,6 +3007,7 @@ export class Memory {
     format: 'json' | 'csv',
     options?: Pick<ImportOptions, 'dedup'>,
   ): Promise<ImportResult> {
+    this._refuseOnceClosed();
     await this._initPromise;
 
     let result: ImportResult;
@@ -3170,13 +3205,37 @@ export class Memory {
    * Close the Memory instance and release all resources.
    *
    * Flushes the SQLite WAL and releases the file lock. Must be called when
-   * the agent shuts down.
+   * the agent shuts down. A store opened on an adapter the caller keeps
+   * (`leaveAdapterOpen`) finishes its work and leaves that adapter open; the
+   * facade itself then admits nothing new (`remember`, `ingest`, the imports,
+   * the wiki compile, a page row, a graph entity and a relation reject), so a
+   * write that reaches it once it is closed is not stored, as on a store whose
+   * connection this class closes. A write already running finishes, and the
+   * reads, the deletes and `restoreTrace` are still served, so such a write
+   * can be taken back when its subject was forgotten meanwhile.
    */
   async close(): Promise<void> {
     await this._initPromise;
     // A rewrite of the vector index reads the traces through the Brain: it finishes before the Brain closes.
     await this._vectorIndexWork;
+    if (this._leaveAdapterOpen) {
+      // The adapter stays open for the caller that passed it, so a closed connection cannot be what stops a late
+      // write here: the facade itself admits nothing new from now on.
+      this._closedOnKeptAdapter = true;
+      return;
+    }
     await this._brain.close();
+  }
+
+  /**
+   * Refuses a call that would add to the store once {@link close} has run on an adapter the caller keeps. The calls
+   * that read, delete and restore are not refused: a write admitted before the close finishes, and is taken back
+   * through them when its subject was forgotten while it ran.
+   */
+  private _refuseOnceClosed(): void {
+    if (this._closedOnKeptAdapter) {
+      throw new Error('Memory: this store is closed; its adapter stays open for the caller that passed it');
+    }
   }
 
   // =========================================================================
