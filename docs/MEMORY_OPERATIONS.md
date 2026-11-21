@@ -784,7 +784,7 @@ The same object holds:
 
 The call resolves with `deleted` (the traces), `pagesDeleted`, `recipients` (the list `agent.recipients()` returns, read before anything is changed; the call sends those recipients nothing) and, for a correction, `correctionTraceId`, the id of the correction's trace. A deletion with no `text` has no `correctionTraceId`.
 
-A session turn of the person that was running when the call changed their memory does not file its reply, which can restate what the turn recalled before the change: the turn's `memoryWrite` names the reply `skipped` with `reason: 'corrected'`, and one `memory.write_refused` line (`reason: 'corrected'`) says so. What the person said in that turn is filed. The agent counts the call once every named id has passed the ownership check, so a call that then fails partway keeps such a reply out too, and a call it rejected whole does not.
+A session turn of the person that was running when the call changed their memory does not file its reply, which can restate what the turn recalled before the change: the turn's `memoryWrite` names the reply `skipped` with `reason: 'corrected'`, and one `memory.write_refused` line (`reason: 'corrected'`) says so. What the person said in that turn is filed. The agent counts the call once every named id has passed the ownership check and again when its change has settled, so a turn that began while the call was deleting keeps its reply out, a call that then fails partway keeps such a reply out too, and a call it rejected whole does not.
 
 ```ts
 const doc = await agent.exportUserMemory('user-42');
