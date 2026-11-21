@@ -3,8 +3,8 @@
  * stream mapping, through a real initialize() with only fetch stubbed.
  *
  * Streamed and non-streamed calls share one routing rule: Responses-only
- * models, GPT-6 tool calls, and GPT-5/GPT-6 tool calls that carry an effort
- * go to /v1/responses. The stream mapper turns Responses SSE events into the
+ * models and every GPT-5 or GPT-6 tool call, with or without an effort, go to
+ * /v1/responses. The stream mapper turns Responses SSE events into the
  * chat-chunk contract (text and tool-call deltas, exactly one final chunk),
  * sends whatever the deltas left out before that final chunk, and honours a
  * caller abort before the POST and during a pending read.

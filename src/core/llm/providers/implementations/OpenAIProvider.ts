@@ -49,7 +49,7 @@ import {
 } from '../../../providers/keyProbe.js';
 import { toOpenAiResponseFormat, toOpenAiResponsesTextFormat } from './openai-response-format-guard';
 import { clampMaxOutputTokens } from '../model-output-limits.js';
-import { mapEffortToOpenAiReasoningEffort, mapEffortToOpenAiReasoningEffortForModel, mapEffortToOpenAiResponsesEffort } from '../model-effort.js';
+import { mapEffortToOpenAiReasoningEffortForModel, mapEffortToOpenAiResponsesEffort } from '../model-effort.js';
 import { computeRetryBackoffMs, waitForRetry } from './retry-backoff.js';
 import { operationIdHeaderNamed, operationIdHeaders, resolveOperationIdHeader, setOperationIdHeaders } from './operation-id.js';
 import { redactUrlSecrets } from '../url-secrets.js';
@@ -520,9 +520,25 @@ function probeModelFromCatalog(ids: readonly string[]): string | undefined {
  *     pages allow chat tool calls only with `reasoning_effort: 'none'`. A
  *     2026-09-30 probe of a GPT-6 tool call with no `reasoning_effort` on
  *     /v1/chat/completions returned HTTP 400.
+ *   - a GPT-5 call carrying function tools, with or without an effort. On
+ *     2026-11-18 OpenAI answered ten `gpt-5.6-sol` tool calls on
+ *     /v1/chat/completions whose bodies held no `reasoning_effort` key
+ *     (`max_completion_tokens`, `messages`, `model`, `stream`,
+ *     `stream_options`, `tools`) with HTTP 400 "Function tools with
+ *     reasoning_effort are not supported for gpt-5.6-sol in
+ *     /v1/chat/completions. To use function tools, use /v1/responses or set
+ *     reasoning_effort to 'none'.": the model applies its default effort
+ *     (`medium` on the GPT-5.6 and GPT-5.5 model pages,
+ *     https://developers.openai.com/api/docs/models/gpt-5.6-sol) when the call
+ *     names none. Every GPT-5 model page lists `v1/responses` as supported
+ *     (read 2026-11-21), so the call goes there and keeps its tools. Sending
+ *     `reasoning_effort: 'none'` on chat instead is not done: no probe shows
+ *     every GPT-5 model accepts it.
  *
  * {@link shouldRouteToOpenAiResponsesApi} applies this rule to streamed and
- * non-streamed calls alike.
+ * non-streamed calls alike. A call this rule sends to Responses whose content
+ * Responses cannot carry is refused before anything is sent
+ * (`RESPONSES_UNMAPPABLE_CONTENT`), since Chat Completions would refuse it too.
  *
  * @param modelId Provider-side model identifier.
  * @param options The request's tools.
@@ -534,7 +550,7 @@ export function openAiRequiresResponsesApi(
 ): boolean {
   return (
     isOpenAIResponsesOnlyModel(modelId) ||
-    (/^gpt-6/i.test(modelId) && requestHasFunctionTools(options.tools))
+    (/^gpt-(5|6)/i.test(modelId) && requestHasFunctionTools(options.tools))
   );
 }
 
@@ -618,13 +634,18 @@ export function openAiRejectsStop(modelId: string): boolean {
  * `reasoning_effort` also returns 400, so every GPT-6 tool call goes to
  * `/v1/responses` ({@link openAiRequiresResponsesApi}).
  *
- * {@link shouldRouteToOpenAiResponsesApi} sends a GPT-5 tool call that
- * carries an effort to `/v1/responses`, which keeps both the effort and the
- * tools. A call whose message content Responses cannot carry stays on
- * chat/completions, where the chat builder drops `reasoning_effort` so the
- * call succeeds at the model's default depth. The o-series (o1/o3/o4) accepts
- * `reasoning_effort` with tools on chat/completions, so it stays outside this
- * predicate; widen it if a future o-series model enforces the same rule.
+ * Dropping `reasoning_effort` does not make such a call succeed: the model
+ * applies its default effort when the call names none, and on 2026-11-18
+ * `gpt-5.6-sol` (default `medium`) answered tool calls on chat/completions
+ * that held no `reasoning_effort` key with the same HTTP 400. So every GPT-5
+ * and GPT-6 tool call goes to `/v1/responses`, with or without an effort
+ * ({@link openAiRequiresResponsesApi}), and a call whose message content
+ * Responses cannot carry is refused before sending
+ * (`RESPONSES_UNMAPPABLE_CONTENT`). The chat builder still leaves the effort
+ * out of a tool call to these families, for a subclass that builds a chat
+ * body itself. The o-series (o1/o3/o4) accepts `reasoning_effort` with tools
+ * on chat/completions, so it stays outside this predicate; widen it if a
+ * future o-series model enforces the same rule.
  *
  * @param modelId Provider-side model identifier (e.g. `'gpt-5.5'`, `'gpt-6-astra'`).
  */
@@ -664,10 +685,11 @@ function isTextPart(part: unknown): part is { type: 'text'; text: string } {
  * non-text part) because the mapper still cannot represent it — flattening
  * those would silently discard the payload.
  *
- * This is the SINGLE source of truth shared by
- * {@link shouldRouteToOpenAiResponsesApi} (which refuses to route what the
- * mapper cannot carry) and the mapper itself, so the two cannot drift into the
- * state that caused the silent-empty-system-prompt hazard this guard replaced.
+ * This is the SINGLE source of truth shared by the Responses builder's
+ * refusal (`RESPONSES_UNMAPPABLE_CONTENT`, through
+ * {@link isResponsesMappableMessage}) and the mapper itself, so the two cannot
+ * drift into the state that caused the silent-empty-system-prompt hazard this
+ * guard replaced.
  */
 export function isResponsesMappableContent(content: ChatMessage['content']): boolean {
   if (content == null || typeof content === 'string') return true;
@@ -768,41 +790,33 @@ function toResponsesUserContent(
 
 /**
  * Whether a call goes to `/v1/responses` instead of `/v1/chat/completions`.
- * Streamed and non-streamed calls follow this one rule.
+ * Streamed and non-streamed calls follow this one rule: every call
+ * {@link openAiRequiresResponsesApi} names, which is any call to a
+ * Responses-only model and any GPT-5 or GPT-6 call carrying function tools,
+ * with or without an effort. Chat Completions refuses function tools for these
+ * families unless `reasoning_effort` is `'none'` ("Function tools with
+ * reasoning_effort are not supported ... use /v1/responses"), and a call that
+ * names no effort runs at the model's default. Responses keeps the tools and
+ * the effort, and a `responseFormat` travels as `text.format`.
  *
- *   - Every call {@link openAiRequiresResponsesApi} names: Responses-only
- *     models and GPT-6 tool calls.
- *   - A GPT-5 or GPT-6 call that carries function tools and an effort, when
- *     every message maps ({@link isResponsesMappableMessage}). Chat
- *     Completions rejects `reasoning_effort` alongside function tools for
- *     these families ("Function tools with reasoning_effort are not supported
- *     ... Please use /v1/responses instead"); Responses keeps both, and a
- *     `responseFormat` travels as `text.format`.
- *
- * Content gating goes through {@link isResponsesMappableMessage}, which
- * accepts Anthropic-style cache-marked system blocks (`systemBlocks` reach the
- * provider as an all-text content array) and flattens them without loss. A
- * GPT-5 tool call whose content does not map stays on chat/completions, where
- * the chat builder drops the effort (see
- * {@link openAiRejectsReasoningEffortWithTools}).
+ * The messages do not change the route. The Responses builder carries
+ * Anthropic-style cache-marked system blocks (`systemBlocks` reach the
+ * provider as an all-text content array) and images on user and tool turns
+ * ({@link isResponsesMappableMessage}); a message it cannot carry, such as
+ * audio, fails the call with `RESPONSES_UNMAPPABLE_CONTENT` before anything is
+ * sent, since Chat Completions would refuse the tool call as well.
  *
  * @param modelId Provider-side model identifier.
- * @param messages The request messages.
+ * @param _messages The request messages; they do not change the route.
  * @param options The request's tools, effort and response format.
  * @returns `true` when the call goes to `/v1/responses`.
  */
 export function shouldRouteToOpenAiResponsesApi(
   modelId: string,
-  messages: ChatMessage[],
+  _messages: ChatMessage[],
   options: Pick<ModelCompletionOptions, 'tools' | 'effort' | 'responseFormat'>,
 ): boolean {
-  if (openAiRequiresResponsesApi(modelId, options)) return true;
-  return (
-    openAiRejectsReasoningEffortWithTools(modelId) &&
-    requestHasFunctionTools(options.tools) &&
-    mapEffortToOpenAiReasoningEffort(options.effort) !== undefined &&
-    messages.every(isResponsesMappableMessage)
-  );
+  return openAiRequiresResponsesApi(modelId, options);
 }
 
 /** Assistant text, refusal, function calls and item count read from a `/v1/responses` `output` array. */
@@ -1443,9 +1457,8 @@ export class OpenAIProvider implements IProvider {
     this.refuseRetiredModel(modelId);
     const apiKey = await this.getApiKey(options.apiKeyOverride, options.abortSignal);
 
-    // Responses-only models, GPT-6 tool calls and GPT-5/6 tool calls that
-    // carry an effort go to /v1/responses; every other call takes the chat
-    // path. generateCompletionStream applies the same rule. On both paths the
+    // Responses-only models and GPT-5/6 tool calls go to /v1/responses;
+    // every other call takes the chat path. generateCompletionStream applies the same rule. On both paths the
     // caller's signal aborts the request in flight and stops its retries.
     if (shouldRouteToOpenAiResponsesApi(modelId, messages, options)) {
       const responsesBody = this.buildResponsesPayload(modelId, messages, options);
@@ -2159,10 +2172,11 @@ export class OpenAIProvider implements IProvider {
       // them at their xhigh ceiling. customModelParams (below) can still
       // override.
       // GPT-5 and GPT-6 reject `reasoning_effort` with function tools on
-      // chat/completions. shouldRouteToOpenAiResponsesApi sends those calls to
-      // /v1/responses; one that still arrives here (its content cannot go to
-      // Responses) drops the effort, so the model reasons at its default
-      // depth and the tool call succeeds.
+      // chat/completions. shouldRouteToOpenAiResponsesApi sends every such
+      // tool call to /v1/responses; a subclass that builds a chat body for
+      // one itself gets no effort here. Leaving the effort out does not make
+      // OpenAI accept the call (the model applies its default effort); only
+      // Responses or an explicit `none` does.
       const reasoningEffort = mapEffortToOpenAiReasoningEffortForModel(options.effort, modelId);
       const dropEffortForTools =
         requestHasFunctionTools(options.tools) &&
@@ -2296,8 +2310,7 @@ export class OpenAIProvider implements IProvider {
   /**
    * Build a `/v1/responses` request body for a call
    * {@link shouldRouteToOpenAiResponsesApi} sends there: a Responses-only
-   * model, a GPT-6 tool call, or a GPT-5/GPT-6 tool call that carries an
-   * effort.
+   * model, or a GPT-5 or GPT-6 tool call with or without an effort.
    *
    *   - System, assistant and text-only turns carry flattened text
    *     ({@link flattenResponsesTextContent}), so cache-marked `systemBlocks`
@@ -2319,8 +2332,9 @@ export class OpenAIProvider implements IProvider {
    * @throws {OpenAIProviderError} `RESPONSES_UNMAPPABLE_CONTENT` when a
    *   message carries a part Responses cannot represent (audio, a file, an
    *   Anthropic `tool_result` block). Only a call with no Chat Completions
-   *   route reaches here with such content; the error is not retryable, like
-   *   the 400 or 404 Chat Completions would return for it.
+   *   route (a Responses-only model, a GPT-5 or GPT-6 tool call) reaches here
+   *   with such content; the error is not retryable, like the 400 or 404
+   *   Chat Completions would return for it.
    * @private
    */
   private buildResponsesPayload(
