@@ -225,8 +225,9 @@ describe('a souled GMI seated as a persistent member of a plain gmi() team', () 
     const s = script('openai', k, {
       whole: true,
       replies: [
-        // The root's step: a team whose one seat is the souled member, allowed to launch.
-        reply.tools([{ id: 'l1', name: 'launch_agency', args: { goal: 'Check.', seats: [{ role: 'checker', agentKey: 'aria', tools: ['launch_agency'] }] } }]),
+        // The root's step: a team whose one seat is the souled member, allowed to launch, and to name whoami for its
+        // own team's seat (a nested team's tools stay within its launching seat's).
+        reply.tools([{ id: 'l1', name: 'launch_agency', args: { goal: 'Check.', seats: [{ role: 'checker', agentKey: 'aria', tools: ['launch_agency', 'whoami'] }] } }]),
         // The member's seat turn: a team of its own whose seat may call whoami.
         launchWhoami('l2'),
         reply.tools([{ id: 'w1', name: 'whoami', args: {} }]),
