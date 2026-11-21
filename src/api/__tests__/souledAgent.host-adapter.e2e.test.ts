@@ -12,8 +12,9 @@
  * - `close()` leaves the host's adapters open, and a SQLite adapter deletes securely.
  * - A PostgreSQL adapter that reads BIGINT as text is refused before anything opens.
  * - Two agents opened at once on one empty database: at least one open is refused, and the database is left holding
- *   one agent's rows at most. On PostgreSQL, a retention sweep of one person and a deletion of another run at once on
- *   one adapter, and each leaves the rows it should.
+ *   one agent's rows at most. On PostgreSQL, a retention sweep of one person, a deletion of another and a third's turn
+ *   run at once on one adapter: each leaves the rows it should, and the agent's transactions on the adapter run one
+ *   at a time.
  */
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
@@ -116,6 +117,42 @@ async function postgresAdapter(schema: string, bigintAsText = false): Promise<St
   await adapter.open();
   adapters.push(adapter);
   return adapter;
+}
+
+/** What {@link countingTransactions} saw: the transactions opened on the adapter, and the most that were open at once. */
+interface TransactionCount {
+  started: number;
+  mostAtOnce: number;
+}
+/**
+ * `adapter` with its transactions counted. Each transaction opened through the returned handle is held for a moment
+ * before its statements run, so two opened together overlap, and the count keeps the most that were open at once.
+ * Every other call reaches the adapter as it is.
+ */
+function countingTransactions(adapter: StorageAdapter): { adapter: StorageAdapter; count: TransactionCount } {
+  const count: TransactionCount = { started: 0, mostAtOnce: 0 };
+  let open = 0;
+  const transaction = async <T>(fn: (trx: StorageAdapter) => Promise<T>): Promise<T> => {
+    count.started += 1;
+    open += 1;
+    count.mostAtOnce = Math.max(count.mostAtOnce, open);
+    try {
+      return await adapter.transaction(async (trx) => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        return fn(trx);
+      });
+    } finally {
+      open -= 1;
+    }
+  };
+  const counted = new Proxy(adapter, {
+    get(target, property) {
+      if (property === 'transaction') return transaction;
+      const value: unknown = Reflect.get(target, property, target);
+      return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+    },
+  });
+  return { adapter: counted, count };
 }
 
 /** A souled agent on the stubbed provider that may keep several people's memory. */
@@ -355,8 +392,8 @@ describe.skipIf(!POSTGRES_URL)(`a souled agent's store on a PostgreSQL adapter, 
     await refusesOneOfTwoAtOnce(await postgresAdapter(schema), await postgresAdapter(schema));
   });
 
-  it('runs a retention sweep of one person and a deletion of another at once, and each leaves the rows it should', async () => {
-    const adapter = await postgresAdapter(newSchema());
+  it('runs a sweep of one person, a deletion of another and a turn of a third at once, one transaction at a time, and each leaves the rows it should', async () => {
+    const { adapter, count } = countingTransactions(await postgresAdapter(newSchema()));
     const { a } = await open('aria-1', { soulStore: { adapter }, tombstoneCopy: copyAt('aria'), retention: { traces: { days: 1 } } });
     await turn(a, adapter, 's1', 'alice', 'My canary is LARK-7.');
     await turn(a, adapter, 's2', 'bob', 'My canary is WREN-2.');
@@ -371,14 +408,34 @@ describe.skipIf(!POSTGRES_URL)(`a souled agent's store on a PostgreSQL adapter, 
       );
     }
 
-    const [swept, report] = await Promise.all([a.sweepRetention!(), a.forgetUser!('bob')]);
+    count.started = 0;
+    count.mostAtOnce = 0;
+    const [swept, report] = await Promise.all([
+      a.sweepRetention!(),
+      a.forgetUser!('bob'),
+      turn(a, adapter, 's3', 'carol', 'My canary is TERN-4.'),
+    ]);
     expect(swept.traces).toBeGreaterThanOrEqual(3);
     expect(report.complete).toBe(true);
     expect(await tracesUnder(adapter, userKey('bob'))).toEqual([]);
     const alice = JSON.stringify(await tracesUnder(adapter, userKey('alice')));
     expect(alice).toContain('LARK-7');
     expect(alice).not.toContain('HERON');
+    expect(JSON.stringify(await tracesUnder(adapter, userKey('carol')))).toContain('TERN-4');
     await closed(a);
     await answers(adapter);
+    // The sweep, the deletion, the turn and the close each opened transactions on the adapter, and no two were open
+    // at once: the agent runs its own one after another.
+    expect(count.started).toBeGreaterThanOrEqual(3);
+    expect(count.mostAtOnce).toBe(1);
+
+    // The count sees an overlap where there is one: two transactions the host opens itself on the same adapter object
+    // are outside the agent's order.
+    count.mostAtOnce = 0;
+    await Promise.all([
+      adapter.transaction((trx) => trx.get('SELECT 1 AS n')),
+      adapter.transaction((trx) => trx.get('SELECT 1 AS n')),
+    ]);
+    expect(count.mostAtOnce).toBe(2);
   });
 });
