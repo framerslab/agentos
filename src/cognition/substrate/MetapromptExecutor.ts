@@ -124,6 +124,11 @@ function isGmiStateKey(key: string): boolean {
 export interface MetapromptRun {
   isStale(): boolean;
   /**
+   * True once a deletion of the person the GMI serves discarded the unit ({@link MetapromptExecutor.discardRuns}): it
+   * then keeps nothing of its failure either, whose error can quote the conversation it was sent.
+   */
+  isDiscarded?(): boolean;
+  /**
    * The provider manager the unit's model calls go through, chosen when the unit was queued: the view the executor's
    * manager makes for queued work when it makes one (a gmi() agent's binds the spend budget of the turn that queued
    * the unit), else the executor's manager.
@@ -164,6 +169,12 @@ export class MetapromptExecutor {
 
   /** Set by {@link MetapromptExecutor.close}: no further work starts, and late results are discarded. */
   private closed = false;
+
+  /** Counted by {@link MetapromptExecutor.discardRuns}: a unit queued before the count moved is stale. */
+  private discards = 0;
+
+  /** The working-memory keys a memory imprint was written to, which {@link MetapromptExecutor.forgetImprints} deletes. */
+  private readonly imprintKeys = new Set<string>();
 
   /** User turns counted so far, to tell whether a queued event batch still belongs to the latest turn. */
   private countedTurns = 0;
@@ -363,6 +374,29 @@ export class MetapromptExecutor {
   }
 
   /**
+   * Makes every unit of work queued or running now stale, for a deletion of the person the GMI serves: none applies
+   * its results, and one that has not started makes no model call. Work queued afterwards runs as usual.
+   */
+  public discardRuns(): void {
+    this.discards += 1;
+  }
+
+  /**
+   * Deletes from working memory each key a memory imprint was written to, once the writes to it that had started have
+   * ended: what the metaprompts recorded of the person a GMI serves. Call {@link MetapromptExecutor.discardRuns}
+   * first, so no unit writes an imprint again.
+   *
+   * @throws What working memory throws when a delete fails; the keys not deleted are deleted by the next call.
+   */
+  public async forgetImprints(): Promise<void> {
+    await Promise.all(this.writeTails.values());
+    for (const key of [...this.imprintKeys]) {
+      await this.config.workingMemory.delete(key);
+      this.imprintKeys.delete(key);
+    }
+  }
+
+  /**
    * Chains one unit of metaprompt work onto the queue, so it starts only after
    * all earlier work has settled. A failure is logged to the console and the
    * reasoning trace, and the queue moves on to the next unit.
@@ -375,9 +409,14 @@ export class MetapromptExecutor {
     this.inFlight += 1;
     let overdue = false;
     // The provider manager is chosen now, while the turn that queues the unit is in progress, not when the unit runs.
-    const run: MetapromptRun = { isStale: () => overdue || this.closed, llmProviderManager: this.providersForQueuedWork() };
+    const discardsAtQueue = this.discards;
+    const run: MetapromptRun = {
+      isStale: () => overdue || this.closed || this.discards !== discardsAtQueue,
+      isDiscarded: () => this.discards !== discardsAtQueue,
+      llmProviderManager: this.providersForQueuedWork(),
+    };
     const unit = async (): Promise<void> => {
-      if (this.closed) return;
+      if (run.isStale()) return;
       // A provider call that never settles would hold the queue forever;
       // past the deadline the queue moves on, and the unit's late results
       // are discarded (run.isStale()).
@@ -558,7 +597,9 @@ export class MetapromptExecutor {
       );
 
       results.forEach((result, idx) => {
-        if (result.status === 'rejected') {
+        if (result.status === 'rejected' && run?.isDiscarded?.()) {
+          this.config.addTraceEntry('WARNING', `Discarded late results of metaprompt '${metaPrompts[idx].id}'.`);
+        } else if (result.status === 'rejected') {
           // One line for the host as well, which may read no trace (gmi() exposes none): a provider's failure, or a spend
           // budget's refusal, whose default calls nothing.
           const reason: unknown = result.reason;
@@ -967,9 +1008,11 @@ export class MetapromptExecutor {
           continue;
         }
         if (imprint.key) {
-          const stored = await this.writeInOrder(run, imprint.key, () =>
-            this.config.workingMemory.set(imprint.key, imprint.value),
-          );
+          const stored = await this.writeInOrder(run, imprint.key, () => {
+            // Recorded before the write starts, so a forget that waits for the write deletes what it wrote.
+            this.imprintKeys.add(imprint.key);
+            return this.config.workingMemory.set(imprint.key, imprint.value);
+          });
           if (!stored) {
             this.config.addTraceEntry('WARNING', `Discarded late results of metaprompt '${metapromptId}'.`);
             break;

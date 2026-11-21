@@ -10,6 +10,7 @@
  * that served it: a usage ledger row and a usage event for the process-wide
  * observer, as `generateText` and `streamText` meter a call.
  */
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import type { ZodType } from 'zod';
 import {
@@ -57,6 +58,16 @@ async function* withReturn<T, R>(source: AsyncGenerator<T, R, undefined>, keep: 
   keep(yield* source);
 }
 
+/** One turn driven in an async context: its lock, whether it holds the lock now, and the turn it runs inside. */
+interface TurnScope {
+  lock: TurnLock;
+  holding: boolean;
+  outer: TurnScope | undefined;
+}
+
+/** The turns whose code runs in the current async context: a hook or a tool of a turn reads its own. */
+const turnScopes = new AsyncLocalStorage<TurnScope>();
+
 /** Serialises turns: `acquire()` resolves with a release function once every earlier holder released. */
 export class TurnLock {
   private tail: Promise<void> = Promise.resolve();
@@ -70,6 +81,22 @@ export class TurnLock {
     this.tail = previous.then(() => held);
     return previous.then(() => release);
   }
+
+  /**
+   * Whether the code calling it runs inside a turn that holds this lock now (a hook or a tool of that turn, or a turn
+   * that turn started): a wait for the lock from there waits for a turn that is waiting for the caller.
+   */
+  heldByCaller(): boolean {
+    for (let scope = turnScopes.getStore(); scope; scope = scope.outer) {
+      if (scope.lock === this && scope.holding) return true;
+    }
+    return false;
+  }
+}
+
+/** Runs `drive`, the code that drives one turn on `lock`, so the turn's own code can tell that it holds the lock. */
+function drivingTurnOn<T>(lock: TurnLock, drive: () => T): T {
+  return turnScopes.run({ lock, holding: false, outer: turnScopes.getStore() }, drive);
 }
 
 /** What one turn asks for beyond its input. */
@@ -354,6 +381,10 @@ export async function* runGmiTurn(
   surface: GmiTurnSurface = 'generateText',
 ): AsyncGenerator<GMIOutputChunk, SessionTranscriptMessage[], undefined> {
   const release = await deps.lock.acquire();
+  // The turn's driver marked its context (drivingTurnOn): from here to the release, the turn holds the lock.
+  const scope = turnScopes.getStore();
+  const holds = scope?.lock === deps.lock ? scope : undefined;
+  if (holds) holds.holding = true;
   const recorded: SessionTranscriptMessage[] = [];
   let writer: SessionTurnWriter | undefined;
   let ended = false;
@@ -596,6 +627,7 @@ export async function* runGmiTurn(
     } finally {
       // Whatever the lines above threw, the next turn gets the lock.
       if (releaseGmi) void releaseGmi().catch(() => undefined);
+      if (holds) holds.holding = false;
       release();
     }
   }
@@ -702,13 +734,12 @@ export async function sendGmiTurn(
   const run = runGmiTurn(deps, input, checked, folder);
   let recorded: SessionTranscriptMessage[] = [];
   try {
-    for (;;) {
-      const next = await run.next();
-      if (next.done) {
-        recorded = next.value;
-        break;
+    recorded = await drivingTurnOn(deps.lock, async () => {
+      for (;;) {
+        const next = await run.next();
+        if (next.done) return next.value;
       }
-    }
+    });
   } catch (error) {
     if (stopped && callerSignal) throw callerSignal.reason;
     throw error;
@@ -765,5 +796,6 @@ export function streamGmiTurn(deps: GmiSessionDeps, input: MessageContent, turn:
   // runGmiTurn pushes every chunk into `folder` (with the onAfterGeneration replacements); the stream reads that folder.
   // A turn the caller's signal stopped ends with the signal's reason in its error part, as streamText reports it,
   // whatever error the GMI made of the abort.
-  return streamFromGmiTurn(chunks, { folder, stop: () => stop.abort(), stoppedBy: () => stoppedBy, guarded });
+  // The stream reads the turn from here on, so the turn's own code runs in this context.
+  return drivingTurnOn(deps.lock, () => streamFromGmiTurn(chunks, { folder, stop: () => stop.abort(), stoppedBy: () => stoppedBy, guarded }));
 }

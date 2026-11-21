@@ -1412,6 +1412,46 @@ export class GMI implements IGMI {
   }
 
   /**
+   * Drops what the GMI holds of the person its session serves, for a deletion of that person: the conversation
+   * history with what the GMI recorded about its turns (as {@link GMI.clearHistory}), its reasoning trace, the input
+   * and the retrieved sources it kept of its last turn, the working-memory slots of its cognitive memory, the
+   * sentiment tracker's history and events (`gmi_sentiment_history` leaves working memory), `currentSentiment` on the
+   * user context, and the memory imprints its metaprompts wrote to working memory. A metaprompt queued or running
+   * applies nothing of its results. The GMI's mood, its task context and what a metaprompt set on the user context
+   * (`skillLevel`) stay, and the traces a store holds are not the GMI's to delete. A runtime calls it between turns:
+   * a turn that starts while it runs waits for it, and a turn already running goes on with what it has read. A GMI
+   * that is shut down, or was never initialized, drops what it holds in this process and writes nothing to working
+   * memory.
+   *
+   * @throws What working memory throws when a delete or a write fails; the history, the trace, the last turn's input
+   *   and sources and the slots are dropped by then, and no metaprompt applies its results.
+   */
+  public forgetPerson(): Promise<void> {
+    // Before anything else, so a metaprompt that answers meanwhile applies nothing.
+    this.metapromptExecutor?.discardRuns();
+    this.clearHistory();
+    // What the trace kept of those turns: an entry's message can quote the person (a provider's error does).
+    this.reasoningTrace.entries.length = 0;
+    this.lastTurnInput = undefined;
+    this.turnRagSources = undefined;
+    this.cognitiveMemory?.getWorkingMemory().clearSlots();
+    // After the scrub clearHistory() started, so the tracker's delete is the last write of the two.
+    const forgetting = this.historyForgetting.then(async () => {
+      if (!this.isInitialized) return;
+      await this.sentimentTracker.clearHistory();
+      if ('currentSentiment' in this.currentUserContext) {
+        const { currentSentiment: _dropped, ...context } = this.currentUserContext;
+        this.currentUserContext = context;
+        await this.workingMemory.set('currentUserContext', this.currentUserContext);
+      }
+      await this.metapromptExecutor.forgetImprints();
+    });
+    // A turn that starts meanwhile waits for it, as it waits for a cleared history's scrub.
+    this.historyForgetting = forgetting.catch(() => undefined);
+    return forgetting;
+  }
+
+  /**
    * Sets the turn a tool continuation goes on with: the ids its continuation runs under and the sources its tool
    * calls and reply are judged with. A blank session or conversation id leaves the GMI's as it is; a blank
    * organization means the turn has none, and clears the GMI's. `ragSources` replaces the sources the GMI keeps for

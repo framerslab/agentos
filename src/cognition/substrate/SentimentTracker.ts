@@ -190,6 +190,27 @@ export class SentimentTracker {
   }
 
   /**
+   * Drops everything the tracker keeps of its session's person: the stored sentiment history (`gmi_sentiment_history`
+   * is deleted from working memory), the events raised from it and the event types waiting to be read. An analysis
+   * still in flight whose history write lands afterwards takes it back to nothing once the GMI no longer holds its
+   * turn, as {@link SentimentTracker.analyzeTurnSentiment} takes back any dropped write.
+   *
+   * @throws What working memory throws when the delete fails; the events are dropped by then.
+   */
+  public async clearHistory(): Promise<void> {
+    this._eventHistory = [];
+    this._pendingGMIEvents.clear();
+    // What a write that lands late is taken back to: no history.
+    this.standing = { history: undefined };
+    try {
+      await this.workingMemory.delete('gmi_sentiment_history');
+    } finally {
+      // Counted as a forget: a write that read the store before this ended is scrubbed again once it lands.
+      this.forgets += 1;
+    }
+  }
+
+  /**
    * Analyzes the sentiment of user input and updates persistent sentiment history.
    *
    * This method:

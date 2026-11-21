@@ -117,6 +117,14 @@ export class CognitiveWorkingMemory implements IWorkingMemory {
     return this.backing.clear();
   }
 
+  /**
+   * Empties the slot list and leaves the backing store as it is: what a session drops of a person whose memory was
+   * deleted. No slot goes through `onEvict`, so nothing is encoded on its way out.
+   */
+  clearSlots(): void {
+    this.slots.clear();
+  }
+
   async size(): Promise<number> {
     return this.backing.size();
   }
