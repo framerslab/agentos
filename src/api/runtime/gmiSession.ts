@@ -41,6 +41,7 @@ import type { AgencyLaunchFrame, ToolCallHook } from './agencyLaunch/types.js';
 import { GmiTurnFolder, streamFromGmiTurn } from './gmiResults.js';
 import { stepToTranscript, transcriptToConversation } from './gmiTranscript.js';
 import { observeWithoutWaiting } from './memoryObserveFailures.js';
+import { memoryWriteRecordOf, type MemoryWriteEntry } from './memoryWriteRecord.js';
 import { contentWithTurnText, judgeTurnInput } from './textGuardrails.js';
 import type { SoulTurnMemory } from '../../cognition/substrate/soulTurnMemory.js';
 
@@ -267,9 +268,19 @@ export interface GmiSessionDeps {
  * `this`; and it is never the turn's error: the turn has been answered and
  * stored, and a memory store that fails to record it does not undo that. The
  * failure is logged sparsely (`observeWithoutWaiting`).
+ *
+ * @returns What became of the side's write, once the provider answers; the promise never rejects.
  */
-function observeTurn(provider: AgentMemoryProvider, role: 'user' | 'assistant', text: string, context: MemoryHookContext): void {
-  observeWithoutWaiting(provider, role, text, context);
+function observeTurn(provider: AgentMemoryProvider, role: 'user' | 'assistant', text: string, context: MemoryHookContext): Promise<MemoryWriteEntry | undefined> {
+  return observeWithoutWaiting(provider, role, text, context);
+}
+
+/**
+ * Whether a turn's result carries `memoryWrite`: a session turn (not a one-shot call, not a seat's) of an agent whose
+ * memory provider observes its turns.
+ */
+function carriesWriteRecord(deps: GmiSessionDeps): boolean {
+  return deps.memoryHook.call === 'session' && deps.observeMemoryProvider !== false && Boolean(deps.opts.memoryProvider?.observe);
 }
 
 /**
@@ -599,9 +610,11 @@ export async function* runGmiTurn(
       writer?.commit();
       const memoryProvider = deps.observeMemoryProvider === false ? undefined : deps.opts.memoryProvider;
       if (memoryProvider?.observe) {
-        observeTurn(memoryProvider, 'user', userText, deps.memoryHook);
+        // The turn does not wait for its writes: their record is a promise the turn's result carries.
+        const sides = [observeTurn(memoryProvider, 'user', userText, deps.memoryHook)];
         const reply = folder.text();
-        if (reply) observeTurn(memoryProvider, 'assistant', reply, deps.memoryHook);
+        if (reply) sides.push(observeTurn(memoryProvider, 'assistant', reply, deps.memoryHook));
+        folder.wrote(memoryWriteRecordOf(sides));
       }
     }
     return recorded;
@@ -747,6 +760,8 @@ export async function sendGmiTurn(
   const error = folder.toError();
   if (error) throw stopped && callerSignal ? callerSignal.reason : error;
   const result = folder.toGenerateTextResult(recorded);
+  // A session turn's write record, which settles when its memory writes do.
+  if (carriesWriteRecord(deps)) result.memoryWrite = folder.written();
   if (!schema) return result;
   return { ...result, object };
 }
@@ -763,10 +778,11 @@ export function streamGmiTurn(deps: GmiSessionDeps, input: MessageContent, turn:
   // no lock, GMI, memory context, hook or budget check, and one error part that carries the signal's reason.
   const callerSignal = turn.callerSignal;
   const guarded = turn.guards !== undefined;
+  const observed = carriesWriteRecord(deps);
   if (callerSignal?.aborted) {
     const reason = abortReasonError(callerSignal);
     const refused: AsyncIterable<GMIOutputChunk> = { [Symbol.asyncIterator]: () => ({ next: () => Promise.reject(reason) }) };
-    return streamFromGmiTurn(refused, { guarded });
+    return streamFromGmiTurn(refused, { guarded, observed });
   }
   // Whether the caller's signal had aborted when the turn's failure was recorded: then the stop ended the turn, and its
   // error part carries the signal's reason. A failure that came first (a provider's error, a budget's refusal) keeps
@@ -797,5 +813,5 @@ export function streamGmiTurn(deps: GmiSessionDeps, input: MessageContent, turn:
   // A turn the caller's signal stopped ends with the signal's reason in its error part, as streamText reports it,
   // whatever error the GMI made of the abort.
   // The stream reads the turn from here on, so the turn's own code runs in this context.
-  return drivingTurnOn(deps.lock, () => streamFromGmiTurn(chunks, { folder, stop: () => stop.abort(), stoppedBy: () => stoppedBy, guarded }));
+  return drivingTurnOn(deps.lock, () => streamFromGmiTurn(chunks, { folder, stop: () => stop.abort(), stoppedBy: () => stoppedBy, guarded, observed }));
 }

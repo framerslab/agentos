@@ -73,6 +73,7 @@ import { memoryHookContextOf, namedSessionUser } from './runtime/memorySubject.j
 import { resolveRecallOptions } from './runtime/recallOptions.js';
 import { recallLog } from '../cognition/memory/retrieval/recall/log.js';
 import { observeWithoutWaiting } from './runtime/memoryObserveFailures.js';
+import { emptyMemoryWriteRecord, memoryWriteRecordOf, type MemoryWriteEntry, type MemoryWriteRecord } from './runtime/memoryWriteRecord.js';
 import type { MemoryRecallItem } from './runtime/memoryDataBlock.js';
 import { warnSoulBesideSystemBlocks, warnSoulLoadFailed } from './runtime/soulLoadWarning.js';
 import { asSpendBudget, type SpendBudget, type SpendBudgetOptions } from './runtime/spendBudget.js';
@@ -150,15 +151,23 @@ export interface AgentMemoryProvider {
    * turn's result. A failure is logged as a `memory.hook_failed` event on the
    * provider's first failure and then at its 10th, 100th, 1000th and so on.
    *
+   * A session turn's result carries what each call answered as `memoryWrite`
+   * ({@link MemoryWriteRecord}): the entry a call resolves with, a `failed`
+   * entry with the error's class name for a call that throws or rejects, and
+   * no entry for a call that resolves with nothing.
+   *
    * @param role - Whether the content came from the user or assistant.
    * @param text - Plain text content of the turn.
    * @param context - Which session, user and agent the turn serves.
+   * @returns Nothing, or what became of the write: `written` with the id of
+   *   the stored trace, `skipped` with the reason, or `failed` with an error's
+   *   class name. Never the text.
    */
   observe?: (
     role: 'user' | 'assistant',
     text: string,
     context?: MemoryHookContext,
-  ) => Promise<void>;
+  ) => Promise<void | MemoryWriteEntry>;
 }
 
 /**
@@ -972,17 +981,31 @@ function verificationQuery(userText: string, tookInput: boolean, sent: (() => st
  * Observe a validated exchange without waiting for the provider. A failure to
  * record it never rejects the exchange, and is logged sparsely
  * (`observeWithoutWaiting`).
+ *
+ * @returns The exchange's write record, which settles once the provider has
+ *   answered for each side and never rejects; undefined when the provider
+ *   observes nothing.
  */
 function observeValidatedExchange(
   provider: AgentMemoryProvider | undefined,
   turn: MemoryTurn,
   replyText: string,
-): void {
-  if (!provider?.observe) return;
+): Promise<MemoryWriteRecord> | undefined {
+  if (!provider?.observe) return undefined;
+  const sides: Array<Promise<MemoryWriteEntry | undefined>> = [];
   for (const [role, text] of [['user', turn.userText], ['assistant', replyText]] as const) {
     if (role === 'assistant' && !text) continue;
-    observeWithoutWaiting(provider, role, text, turn.context);
+    sides.push(observeWithoutWaiting(provider, role, text, turn.context));
   }
+  return memoryWriteRecordOf(sides);
+}
+
+/**
+ * The write record of a turn that was answered and not observed (an input guard rewrote or replaced it): no entry.
+ * Undefined when the provider observes nothing, as {@link observeValidatedExchange} answers.
+ */
+function unobservedExchange(provider: AgentMemoryProvider | undefined): Promise<MemoryWriteRecord> | undefined {
+  return provider?.observe ? Promise.resolve(emptyMemoryWriteRecord()) : undefined;
 }
 
 /** The caller a call's tools run for, from the turn's memory context. */
@@ -998,19 +1021,35 @@ function callerUserOf(context: MemoryHookContext): NonNullable<GenerateTextOptio
 /**
  * Observes a stream's exchange once its text has settled, unless the stream ended in an error. The `text` of the
  * returned result settles after the observation has started, so a caller that awaits it finds the turn handed over.
+ *
+ * @param receipt - True for a session's stream: the returned result then carries `memoryWrite`, which settles after
+ *   the stream has ended and its writes have, with no entry for a stream that was not observed, and never rejects.
  */
 function observeStreamWhenDone(
   result: StreamTextResult,
   provider: AgentMemoryProvider | undefined,
   turn: MemoryTurn,
+  receipt = false,
 ): StreamTextResult {
   if (!provider?.observe) return result;
-  const text = Promise.all([result.text, result.finishReason, result.guardReport]).then(([replyText, finishReason, report]) => {
-    if (finishReason !== 'error' && !guardTookInput(report)) observeValidatedExchange(provider, turn, replyText);
-    return replyText;
+  let settleWrite!: (record: MemoryWriteRecord | Promise<MemoryWriteRecord>) => void;
+  const memoryWrite = new Promise<MemoryWriteRecord>((resolve) => {
+    settleWrite = resolve;
   });
+  const text = Promise.all([result.text, result.finishReason, result.guardReport]).then(
+    ([replyText, finishReason, report]) => {
+      const observed = finishReason !== 'error' && !guardTookInput(report) ? observeValidatedExchange(provider, turn, replyText) : undefined;
+      settleWrite(observed ?? emptyMemoryWriteRecord());
+      return replyText;
+    },
+    (error: unknown) => {
+      // A stream whose text never settled was not observed.
+      settleWrite(emptyMemoryWriteRecord());
+      throw error;
+    },
+  );
   void text.catch(() => undefined);
-  return { ...result, text };
+  return { ...result, text, ...(receipt ? { memoryWrite } : {}) };
 }
 
 /** Generate a reply with optional JSON validation and bounded repair turns. */
@@ -1021,7 +1060,7 @@ async function generateWithValidation(
   extract: boolean,
   onResult: (result: GenerateTextResult) => void,
   memory: { provider?: AgentMemoryProvider; turn: MemoryTurn; options?: MemoryProviderHookOptions },
-): Promise<{ result: GenerateTextResult; object: unknown; retried: boolean; tookInput: boolean }> {
+): Promise<{ result: GenerateTextResult; object: unknown; retried: boolean; tookInput: boolean; memoryWrite?: Promise<MemoryWriteRecord> }> {
   if (schema && (!Number.isInteger(maxRetries) || maxRetries < 0)) {
     throw new RangeError('maxValidationRetries must be a non-negative integer');
   }
@@ -1037,8 +1076,8 @@ async function generateWithValidation(
     if (!schema) {
       // The call's one observation: the user's text, and the reply the caller receives. A turn whose input a guard
       // rewrote or replaced is not observed.
-      if (!tookInput) observeValidatedExchange(memory.provider, memory.turn, result.text);
-      return { result, object: undefined, retried: false, tookInput };
+      const memoryWrite = tookInput ? unobservedExchange(memory.provider) : observeValidatedExchange(memory.provider, memory.turn, result.text);
+      return { result, object: undefined, retried: false, tookInput, memoryWrite };
     }
     // A refusal from the model is its answer, not JSON to repair: the call ends on it, its message kept.
     if (result.refusal !== undefined) {
@@ -1051,8 +1090,8 @@ async function generateWithValidation(
       // A strict json_schema payload makes every optional property nullable: a `null` there means absent.
       const safe = schema.safeParse(dropNullsForOptionalFields(parsed, schema));
       if (safe.success) {
-        if (!tookInput) observeValidatedExchange(memory.provider, memory.turn, result.text);
-        return { result, object: safe.data, retried: attempt > 0, tookInput };
+        const memoryWrite = tookInput ? unobservedExchange(memory.provider) : observeValidatedExchange(memory.provider, memory.turn, result.text);
+        return { result, object: safe.data, retried: attempt > 0, tookInput, memoryWrite };
       }
       failure = new ObjectGenerationError('Response failed Zod validation', result.text, safe.error);
     } catch (err) {
@@ -1574,7 +1613,7 @@ export function agent(opts: AgentOptions): Agent {
           let firstAttempt: GenerateTextResult | undefined;
           // Verification after the call retrieves with the turn as it was sent.
           const sentTurn = opts.verifyCitations ? keepSentTurn(generationOptions) : undefined;
-          const { result, object, retried, tookInput } = await generateWithValidation(
+          const { result, object, retried, tookInput, memoryWrite } = await generateWithValidation(
             (sentTurn?.options ?? generationOptions) as GenerateTextOptions,
             sendOpts?.responseSchema,
             sendOpts?.maxValidationRetries ?? 0,
@@ -1586,6 +1625,8 @@ export function agent(opts: AgentOptions): Agent {
             },
             { provider: opts.memoryProvider, turn, options: memoryProviderOptions },
           );
+          // The turn's write record, which settles when its memory writes do: the turn does not wait for them.
+          if (memoryWrite) result.memoryWrite = memoryWrite;
           if (retried) {
             // the user turn as the first attempt sent it: a guard may have rewritten it, or replaced the turn outright
             const sent = firstAttempt?.transcriptDelta?.find((m) => (m as { role?: string }).role === 'user');
@@ -1652,7 +1693,7 @@ export function agent(opts: AgentOptions): Agent {
             memoryProviderOptions,
           );
 
-          const result = observeStreamWhenDone(streamText(wrappedOpts as GenerateTextOptions), opts.memoryProvider, turn);
+          const result = observeStreamWhenDone(streamText(wrappedOpts as GenerateTextOptions), opts.memoryProvider, turn, true);
           if (opts.verifyCitations) {
             const verification = opts.verifyCitations;
             result.grounding = Promise.all([result.text, result.guardReport]).then(
