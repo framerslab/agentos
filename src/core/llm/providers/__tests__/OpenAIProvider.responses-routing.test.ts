@@ -505,6 +505,74 @@ describe('OpenAIProvider routes to /v1/responses', () => {
     expect(posts()).toHaveLength(0);
   });
 
+  it('carries the PDF file parts of a GPT-5 tool call to /v1/responses as input_file parts', async () => {
+    // Chat Completions takes a PDF as a `file` part ({ file: { filename, file_data } } or
+    // { file: { file_id } }); Responses takes the same file as an `input_file` part
+    // (https://developers.openai.com/api/docs/guides/pdf-files). gpt-5.1 runs at effort 'none'
+    // by default, so this call was served on chat before every GPT-5 tool call went to Responses.
+    serve([
+      () => jsonResponse({ ...RESPONSE_META, model: 'gpt-5.1', status: 'completed', output: [messageItem('ok')], usage: USAGE }),
+      () => sseResponse(sseText([created('gpt-5.1'), textDelta('ok'), completed([messageItem('ok')])])),
+    ]);
+    const provider = await initializedProvider();
+    const withPdf: ChatMessage[] = [
+      {
+        role: 'user',
+        content: [
+          { type: 'file', file: { filename: 'brief.pdf', file_data: 'data:application/pdf;base64,JVBERi0=' } },
+          { type: 'file', file: { file_id: 'file-abc123' } },
+          { type: 'text', text: 'Summarize these.' },
+        ],
+      },
+    ];
+
+    const result = await provider.generateCompletion('gpt-5.1', withPdf, { tools: pingTool });
+    await collect(provider.generateCompletionStream('gpt-5.1', withPdf, { tools: pingTool }));
+
+    const sent = posts();
+    expect(sent.map((p) => p.url)).toEqual([RESPONSES_URL, RESPONSES_URL]);
+    for (const { body } of sent) {
+      expect(body.input).toEqual([
+        {
+          role: 'user',
+          content: [
+            { type: 'input_file', filename: 'brief.pdf', file_data: 'data:application/pdf;base64,JVBERi0=' },
+            { type: 'input_file', file_id: 'file-abc123' },
+            { type: 'input_text', text: 'Summarize these.' },
+          ],
+        },
+      ]);
+    }
+    expect(result.choices[0].message.content).toBe('ok');
+  });
+
+  it('builds the Responses input from a customModelParams.messages override', async () => {
+    // On chat the override replaces the body's `messages`. Responses has no `messages` key and
+    // refuses one, so the override must become the `input` instead.
+    serve([
+      () => jsonResponse({ ...RESPONSE_META, model: 'gpt-5.1', status: 'completed', output: [messageItem('ok')], usage: USAGE }),
+    ]);
+    const provider = await initializedProvider();
+
+    await provider.generateCompletion('gpt-5.1', [{ role: 'user', content: 'original turn' }], {
+      tools: pingTool,
+      customModelParams: {
+        messages: [
+          { role: 'system', content: 'Be brief.' },
+          { role: 'user', content: 'override turn' },
+        ],
+      },
+    });
+
+    const sent = posts();
+    expect(sent.map((p) => p.url)).toEqual([RESPONSES_URL]);
+    expect(sent[0].body.input).toEqual([
+      { role: 'system', content: 'Be brief.' },
+      { role: 'user', content: 'override turn' },
+    ]);
+    expect(sent[0].body).not.toHaveProperty('messages');
+  });
+
   it('routes streamed and non-streamed calls by one rule', async () => {
     // Every GPT-5 tool call goes to /v1/responses, with or without an effort: Chat Completions
     // refuses function tools for gpt-5.6-sol unless reasoning_effort is 'none' (HTTP 400, "To use

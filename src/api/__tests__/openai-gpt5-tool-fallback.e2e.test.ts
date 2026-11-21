@@ -158,6 +158,7 @@ describe('a streamed tool call that falls back to gpt-5.6-sol', () => {
     expect(responses).toHaveLength(1);
     expect(responses[0].body.model).toBe('gpt-5.6-sol');
     expect(responses[0].body.tools.map((t: Json) => t.name)).toEqual(['ping']);
+    expect(responses[0].body).not.toHaveProperty('reasoning');
     expect(responses[0].body).not.toHaveProperty('reasoning_effort');
   });
 });
