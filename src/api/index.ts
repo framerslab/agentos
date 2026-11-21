@@ -123,6 +123,7 @@ export {
 export { souledAgent } from './souledAgent.js';
 export type { SouledAgentOptions, SouledAgent, MemoryPolicy, MemoryRetention } from './souledAgent.js';
 export type { MemoryRecipient } from './runtime/memoryRecipients.js';
+export type { MemoryWriteEntry, MemoryWriteRecord } from './runtime/memoryWriteRecord.js';
 export { exportAgent } from './exportAgent.js';
 
 // --- Model routing ---

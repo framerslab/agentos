@@ -1207,6 +1207,21 @@ export interface GenerateTextResult {
    */
   historyOmitted?: import('../core/llm/IPromptEngine.js').PromptHistoryOmission;
   /**
+   * On a session's `send()` of an agent whose memory provider observes its
+   * turns (a `souledAgent()`, or an `agent()` with a `memoryProvider` that has
+   * `observe`): the record of the turn's memory writes, one entry for each
+   * side that had text, the user's message first. Each entry says whether the
+   * side was `written` (with the id of its trace), `skipped` (with the reason)
+   * or `failed` (with the error's class name); it holds no text. The turn does
+   * not wait for its writes: the promise settles when they have, and never
+   * rejects. Its record has no entry when an input guard replaced the turn,
+   * or rewrote it on the default runtime: such a turn is not filed. On
+   * `runtime: 'gmi'` a rewritten turn is filed with the rewritten text. Unset
+   * on `generateText()`, on a one-shot `generate()`, and on an agent with no
+   * observing memory provider.
+   */
+  memoryWrite?: Promise<import('./runtime/memoryWriteRecord.js').MemoryWriteRecord>;
+  /**
    * Per-hop provider fallback trail. `fired` is true when any non-primary
    * provider produced — or was tried for — the result, so callers can flag a
    * degraded run even when the final attempt recovered on the primary.
