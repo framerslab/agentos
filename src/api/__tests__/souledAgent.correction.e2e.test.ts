@@ -588,6 +588,61 @@ describe.each(RUNTIMES)('a correction kept through a restore, on runtime %s', (r
     expect(lines('memory.tombstone_reapplied')[0]).toMatchObject({ traces: 1, correctionsRefiled: 0 });
   });
 
+  it('a trace a restore left without its correction tag is tagged again and named for the next compile', async () => {
+    const quiet = { compile: false } as Partial<SouledAgentOptions>;
+    const a = await open(runtime, spare(), quiet);
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await turn(a, 's1', 'alice', 'My canary is WREN-9.');
+    const wrong = idOf(saidOf(keyOf(alice)), 'LARK-7')!;
+    const [held] = storedAs('My canary is WREN-9.');
+    await a.close();
+    const backup = backUpStore();
+    const b = await open(runtime, spare(), quiet);
+    expect((await b.correctUserMemory!('alice', { traceIds: [wrong], text: 'My canary is WREN-9.' })).correctionTraceId).toBe(held.id);
+    await b.close();
+
+    restoreStore(backup);
+    await open(runtime, spare(), quiet);
+    expect(storedAs('My canary is WREN-9.')[0].tags).toContain('correction');
+    // The restored watermark can be past the trace: the next compile reads it by id, as after the correction itself.
+    const [registry] = rows<{ rebuild_sources: string | null }>('SELECT rebuild_sources FROM memory_scopes WHERE scope_id = ?', [keyOf(alice)]);
+    expect(JSON.parse(registry?.rebuild_sources ?? '[]') as string[]).toContain(held.id);
+  });
+
+  it('a correction filed again onto an earlier trace of its words keeps its own id recorded as deleted', async () => {
+    const a = await open(runtime);
+    await turn(a, 's1', 'alice', 'My canary is WREN-9.');
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    const said = saidOf(keyOf(alice));
+    const twin = idOf(said, 'WREN-9')!;
+    const wrong = idOf(said, 'LARK-7')!;
+    await a.close();
+    const before = backUpStore();
+
+    // The earlier trace is soft-deleted, so the correction's words are filed as a trace of their own.
+    const b = await open(runtime);
+    await b.memory!.forget(twin);
+    const { correctionTraceId } = await b.correctUserMemory!('alice', { traceIds: [wrong], text: 'My canary is WREN-9.' });
+    expect(correctionTraceId).not.toBe(twin);
+    await b.close();
+    const after = backUpStore();
+
+    // A restore from before the correction: the store holds the words under the twin, which is the correction from then on.
+    restoreStore(before);
+    const c = await open(runtime);
+    expect(storedAs('My canary is WREN-9.').map((trace) => trace.id)).toEqual([twin]);
+    expect(keptIn().map((row) => row.trace_id)).toEqual([twin]);
+    expect(markedIn(copyFile())).toContain(correctionTraceId);
+
+    // That memory is deleted, and the backup that holds the correction's own trace is put back: neither comes back.
+    expect((await correct(c, 'alice', [twin])).deleted).toBe(1);
+    await c.close();
+    restoreStore(after);
+    await open(runtime);
+    expect(holding('WREN-9')).toEqual([]);
+    expect(holding('LARK-7')).toEqual([]);
+  });
+
   it.each(['the same call made again', 'applyTombstones()'] as const)(
     'a correction that failed partway is finished by %s',
     async (finish) => {
