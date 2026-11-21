@@ -10,7 +10,9 @@
  *   says `minor_no_retention`.
  * - A minor on a store that keeps memory for a number of days is compiled only by the target `compile.minors` names;
  *   without one, nothing of theirs is compiled and `memory.compile_skipped` says `minor_no_compile`. `compile.minors`
- *   names a provider and a model, or the agent does not open.
+ *   names a provider and a model, or the agent does not open. That target takes no other provider's place when it has
+ *   no key, and the agent's own key goes to it only when the agent names that provider. Each merge of a compile follows
+ *   the person's latest answer.
  * - `profiling: 'off'` and `minor: true` are valid with exactly those values; any other value fails closed.
  * - A later answer for a person, given to any session, replaces the answer another session of theirs keeps from that
  *   session's next turn, and a later failure makes it ask again.
@@ -18,6 +20,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
 vi.mock('../../core/llm/providers/implementations/AnthropicProvider', async () => ({ AnthropicProvider: (await import('./helpers/stubProviders')).stubProviderClass('anthropic') }));
+vi.mock('../../core/llm/providers/implementations/OpenRouterProvider', async () => ({ OpenRouterProvider: (await import('./helpers/stubProviders')).stubProviderClass('openrouter') }));
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -28,6 +31,7 @@ import { conversationScopeKey } from '../../cognition/memory/retrieval/store/con
 import { reply, script, type ProviderScript } from './helpers/stubProviders';
 import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
+import { clearDefaultProvider, setDefaultProvider } from '../runtime/global-default';
 
 /** The runtimes every case runs on: the default runtime, and the GMI runtime with cognitive memory off. */
 const RUNTIMES = ['legacy', 'gmi'] as const;
@@ -62,6 +66,8 @@ beforeEach(() => {
 afterEach(async () => {
   while (opened.length) await opened.pop()!.close().catch(() => undefined);
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
+  clearDefaultProvider();
   resetLoggerFactory();
   fs.rmSync(dir, { recursive: true, force: true });
 });
@@ -214,6 +220,102 @@ describe.each(RUNTIMES)('policy answers, on runtime %s', (runtime) => {
       expect(agentMerges[0]).toContain('Pellam');
       expect(agentMerges[0]).not.toContain('Wexford');
       expect(pagesUnder(userKey('bob'))).toHaveLength(1);
+    });
+
+    it("is never sent to OpenRouter in place of the provider named for minors when that provider has no key", async () => {
+      const routerKey = `k-souled-policy-answers-router-${++n}`;
+      const router = script('openrouter', routerKey, { whole: true, replies: Array.from({ length: 10 }, () => reply.text('Owl notes.')) });
+      vi.stubEnv('ANTHROPIC_API_KEY', '');
+      vi.stubEnv('ANTHROPIC_BASE_URL', '');
+      vi.stubEnv('OPENROUTER_BASE_URL', '');
+      vi.stubEnv('OPENROUTER_API_KEY', routerKey);
+      const { a, s } = await open({
+        retention: { traces: { days: 30 } },
+        compile: { minors: { provider: 'anthropic', model: 'stub-minor' } },
+        memoryPolicy: () => ({ longTerm: 'compiled', minor: true }),
+      });
+      await say(a, 's1', 'alice', 'My owl is named Wexford.');
+      await closed(a);
+
+      // Her turn is filed; with no key for the provider named for minors, her page is compiled nowhere.
+      expect(textsUnder(userKey('alice'))).toContain('My owl is named Wexford.');
+      expect(router.seen).toEqual([]);
+      expect(s.seen.filter(isMerge)).toEqual([]);
+      expect(pagesUnder(userKey('alice'))).toEqual([]);
+    });
+
+    it("takes the agent's own key only to a provider the agent names", async () => {
+      // The agent names no provider: the host's default names OpenAI, and the agent's key is set for that.
+      const agentKey = `k-souled-policy-answers-${++n}`;
+      const s = script('openai', agentKey, { whole: true, replies: Array.from({ length: 40 }, (_, i) => reply.text(`Noted ${i}.`)) });
+      // Started only if the agent's key reaches Anthropic.
+      const sentAgentKey = script('anthropic', agentKey, { whole: true, replies: Array.from({ length: 10 }, () => reply.text('Owl notes.')) });
+      const minorsKey = `k-souled-policy-answers-minors-env-${++n}`;
+      const minors = script('anthropic', minorsKey, { whole: true, replies: Array.from({ length: 10 }, () => reply.text('Owl notes.')) });
+      vi.stubEnv('ANTHROPIC_API_KEY', minorsKey);
+      setDefaultProvider({ provider: 'openai', model: 'stub-model' });
+      const a = await souledAgent({
+        runtime,
+        apiKey: agentKey,
+        fallbackProviders: [],
+        soul: dir,
+        retention: { traces: { days: 30 } },
+        compile: { minors: { provider: 'anthropic', model: 'stub-minor' } },
+        memoryPolicy: () => ({ longTerm: 'compiled', minor: true }),
+      } as unknown as SouledAgentOptions);
+      opened.push(a);
+      await say(a, 's1', 'alice', 'My owl is named Wexford.');
+      await closed(a);
+
+      // Her page is compiled on Anthropic's own key from the environment, never on the key set for OpenAI.
+      expect(sentAgentKey.seen).toEqual([]);
+      const minorMerges = minors.seen.filter(isMerge);
+      expect(minorMerges).toHaveLength(1);
+      expect(JSON.stringify(minorMerges[0].messages)).toContain('Wexford');
+      expect(s.seen.filter(isMerge)).toEqual([]);
+    });
+
+    it("follows the person's latest answer at each merge, so a minor's answer given during a compile holds for its next merge", async () => {
+      const minorsKey = `k-souled-policy-answers-minors-${++n}`;
+      const minors = script('anthropic', minorsKey, { whole: true, replies: Array.from({ length: 10 }, () => reply.text('Child notes.')) });
+      let asked = 0;
+      const { a, s } = await open({
+        retention: { traces: { days: 30 } },
+        compile: { minors: { provider: 'anthropic', model: 'stub-minor', apiKey: minorsKey } },
+        memoryPolicy: (context) => {
+          asked += 1;
+          return context.sessionId === 'sb' ? { longTerm: 'compiled', minor: true } : { longTerm: 'compiled' };
+        },
+      });
+      const key = userKey('alice');
+      await say(a, 'sa', 'alice', 'My owl is named Wexford.');
+      await vi.waitFor(async () => expect(await a.memory!.countScope('conversation', key)).toBe(2), { timeout: 4_000 });
+      // Two more traces of hers, each of its own entity: the compile merges three pages, one after another.
+      await a.memory!.remember('Owl Wexford hunts at dusk.', { type: 'episodic', scope: 'conversation', scopeId: key, entities: ['Owl'] });
+      await a.memory!.remember('Crab Pellam lives in a tank.', { type: 'episodic', scope: 'conversation', scopeId: key, entities: ['Crab'] });
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      // The compile's first merge, on the agent's own route, is held open.
+      s.replies.unshift(reply.hold([], gate, reply.text('Adult notes.')));
+      const compiling = a.memory!.compileWiki({ reason: 'explicit', scopes: [key] });
+      await vi.waitFor(() => expect(s.seen.filter(isMerge)).toHaveLength(1), { timeout: 4_000 });
+      // Meanwhile the host answers minor for her, in another session.
+      const turn = say(a, 'sb', 'alice', 'I am twelve.');
+      await vi.waitFor(() => expect(asked).toBe(2), { timeout: 4_000 });
+      release();
+      await compiling;
+      await turn;
+      await closed(a);
+
+      // The merge sent before the answer went where it went; each later merge went to the target named for minors.
+      const agentMerges = s.seen.filter(isMerge).map((call) => JSON.stringify(call.messages));
+      expect(agentMerges).toHaveLength(1);
+      expect(agentMerges[0]).not.toMatch(/hunts at dusk|Pellam/);
+      const minorMerges = minors.seen.filter(isMerge).map((call) => JSON.stringify(call.messages)).join('\n');
+      expect(minorMerges).toContain('hunts at dusk');
+      expect(minorMerges).toContain('Pellam');
     });
 
     it('is not run without compile.minors, and says minor_no_compile', async () => {
