@@ -52,6 +52,9 @@ import { GMI } from '../../cognition/substrate/GMI';
 /** The runtime the cases run on; a case that needs what only the GMI runtime has names it. */
 const RUNTIME = 'legacy' as const;
 
+/** Why a learning layer's deletion does not reach a conversation's own history, on a souled agent. */
+const HELD_ELSEWHERE = 'a session another agent object or another process holds open keeps its messages until the host closes it';
+
 /** The count of a part the deletion reached, and the reason of one it missed. */
 const deletedBy = (part: ForgetMemoryReport['parts'][number] | undefined): number | undefined => (part?.reached ? part.deleted : undefined);
 const reasonOf = (part: ForgetMemoryReport['parts'][number] | undefined): string | undefined => (part && !part.reached ? part.reason : undefined);
@@ -392,9 +395,13 @@ describe("agent.learning.forgetUser on a souled agent, on runtime 'gmi'", () => 
     // The session the handle holds open for her is emptied with the rest.
     expect(receipt.parts[3]).toEqual({ part: 'sessions', reached: true, deleted: 1 });
     expect(receipt.complete).toBe(true);
+    // What the layer does not reach names a session held elsewhere, never the sessions the handle emptied.
+    expect(receipt.stores).toContainEqual({ store: "a conversation's own history", reached: false, reason: HELD_ELSEWHERE });
+    expect(JSON.stringify(receipt.stores)).not.toContain("gmi() session's history");
 
     // agent.forgetUser's own report names nobody.
     const plain = await a.forgetUser!('bob');
+    expect(JSON.stringify(plain.stores)).not.toContain("gmi() session's history");
     expect(plain).not.toHaveProperty('userId');
     expect(plain).not.toHaveProperty('namespace');
     expect(JSON.stringify(plain)).not.toContain('bob');
@@ -606,11 +613,75 @@ describe("a deletion and the open sessions, on runtime 'gmi' with sentiment on a
     expect(forgetPerson).toHaveBeenCalledTimes(1);
   });
 
+  it('drops what a metaprompt imprinted of the person, and a metaprompt still running when she is forgotten applies nothing', async () => {
+    const gmis = builtGmis();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // A metaprompt's answer: one memory imprint, under a working-memory key of its own.
+    const imprint = (key: string, value: string) =>
+      reply.text(JSON.stringify({ adjustmentRationale: 'The user asked twice.', newMemoryImprints: [{ key, value, description: 'what the user said' }] }));
+    const a = await openGmi({}, [
+      reply.text('Noted first.'),
+      imprint('canary_note', 'Her canary is LARK-7.'),
+      reply.text('Noted second.'),
+      reply.hold([], gate, imprint('attic_note', 'She keeps it in the attic.')),
+      ...spare(),
+    ]);
+    const session = a.session('s1', { userId: 'alice' });
+    // A doubled question mark reads as confusion: the GMI's confusion metaprompt runs once the turn has ended.
+    await session.send('My canary is LARK-7??');
+    const gmi = gmis[0];
+    await vi.waitFor(async () => expect(await gmi.getWorkingMemorySnapshot()).toHaveProperty('canary_note', 'Her canary is LARK-7.'), {
+      timeout: 4_000,
+    });
+    const calls = served.seen.length;
+    await session.send('I keep it in the attic??');
+    // Her second turn's metaprompt waits for the model when the deletion comes.
+    await vi.waitFor(() => expect(served.seen.length).toBeGreaterThanOrEqual(calls + 2), { timeout: 4_000 });
+    try {
+      const report = await a.forgetUser!('alice');
+
+      expect(report.parts[3]).toEqual({ part: 'sessions', reached: true, deleted: 1 });
+      expect(report.complete).toBe(true);
+      expect(await gmi.getWorkingMemorySnapshot()).not.toHaveProperty('canary_note');
+    } finally {
+      release();
+    }
+    // The metaprompt that was waiting ends, and its results are discarded.
+    await vi.waitFor(
+      () => expect(gmi.getReasoningTrace().entries.some((entry) => entry.message.startsWith('Discarded late results'))).toBe(true),
+      { timeout: 4_000 },
+    );
+    const held = await gmi.getWorkingMemorySnapshot();
+    expect(held).not.toHaveProperty('attic_note');
+    expect(JSON.stringify([held, gmi.getReasoningTrace()])).not.toMatch(/LARK-7|attic/);
+  });
+
+  it("drops the GMI's trace of her turns, a failed turn's error that quotes her words included", async () => {
+    const gmis = builtGmis();
+    const a = await openGmi({}, [reply.text('Noted first.'), new Error('The provider refused a request holding "My canary is LARK-7."'), ...spare()]);
+    const session = a.session('s1', { userId: 'alice' });
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await session.send('Where should it sleep tonight').catch(() => undefined);
+    const gmi = gmis[0];
+    // The failed turn's error is in the trace, in the entry's message, with her words.
+    expect(gmi.getReasoningTrace().entries.some((entry) => entry.message.includes('LARK-7'))).toBe(true);
+
+    const report = await a.forgetUser!('alice');
+
+    expect(report.parts[3]).toEqual({ part: 'sessions', reached: true, deleted: 1 });
+    expect(JSON.stringify(gmi.getReasoningTrace())).not.toContain('LARK-7');
+  });
+
   it('a deletion during a running turn misses the sessions part, empties the session once the turn ends, and finishes when made again', async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
       release = resolve;
     });
+    const gmis = builtGmis();
+    const forgetPerson = vi.spyOn(GMI.prototype, 'forgetPerson');
     const a = await openGmi({ pendingWritesTimeoutMs: 50 }, [reply.text('Noted first.'), reply.hold([], gate, reply.text('Noted, held.')), ...spare()]);
     const session = a.session('s1', { userId: 'alice' });
     await turn(a, 's1', 'alice', 'My canary is LARK-7.');
@@ -639,6 +710,22 @@ describe("a deletion and the open sessions, on runtime 'gmi' with sentiment on a
       timeout: 4_000,
     });
     expect(tracesOf(keyOf(alice))).toEqual([]);
+    // Once that turn ended, the session's GMI was emptied too, before any second call.
+    await vi.waitFor(
+      async () => {
+        expect(forgetPerson).toHaveBeenCalledTimes(1);
+        expect(gmis[0].getConversationHistory()).toEqual([]);
+        expect(await gmis[0].getWorkingMemorySnapshot()).not.toHaveProperty('gmi_sentiment_history');
+      },
+      { timeout: 4_000 },
+    );
+    // Her next turn sends none of her earlier words, the running turn's included.
+    const before = served.seen.length;
+    await session.send('Is the shop open today?');
+    const sent = JSON.stringify(served.seen.slice(before).map((call) => call.messages));
+    expect(sent).toContain('Is the shop open today?');
+    expect(sent).not.toContain('LARK-7');
+    expect(sent).not.toContain('attic');
 
     events.length = 0;
     const again = await a.forgetUser!('alice');
