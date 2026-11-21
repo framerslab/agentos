@@ -112,7 +112,10 @@ import type {
 } from '../cognition/learning/types.js';
 import type { ICognitiveMemoryManager } from '../cognition/memory/CognitiveMemoryManager.js';
 import { sharedForgottenLedgerOf } from '../cognition/memory/suppression/learnerTombstones.js';
-import { sharedSoulStoreOf } from './runtime/soulStore.js';
+import { registerSessionEvictor, sharedSoulStoreOf, type SessionEviction } from './runtime/soulStore.js';
+import { memoryLog } from '../cognition/memory/log.js';
+import { errorFields } from '../core/logging/events.js';
+import { settlesWithin } from '../cognition/substrate/shutdownBound.js';
 import { routeObserverOf } from './runtime/routeObserver.js';
 import { normalizeHexacoTraits } from '../cognition/substrate/personas/hexaco.js';
 
@@ -1470,6 +1473,29 @@ export function gmi(opts: GmiOptions): GmiHandle {
           if (ended.status === 'rejected') throw ended.reason;
         },
       } as unknown as AgentSession;
+      if (soulStore && history) {
+        // A souled agent's deletion of the session's person empties the session through this. The messages go at once,
+        // so a turn running now writes nothing more into them. Under the session's lock, once no turn runs, they go
+        // again (a turn that was waiting for the lock ran meanwhile) and the session's GMI forgets the person. The wait
+        // for the lock ends at the deadline: the session is then emptied when the lock comes, and a failure there has
+        // no report left to go in. A session that keeps no history builds a GMI for each turn and holds nothing
+        // between its turns: it registers none.
+        registerSessionEvictor(session, async (deadlineMs): Promise<SessionEviction> => {
+          history.reseed([]);
+          const emptied = lock.acquire().then(async (release) => {
+            try {
+              if (history.messages().length > 0) history.reseed([]);
+              const built = await own.peek()?.catch(() => undefined);
+              await built?.gmi.forgetPerson?.();
+            } finally {
+              release();
+            }
+          });
+          if (await settlesWithin(emptied, deadlineMs)) return 'evicted';
+          void emptied.catch((error: unknown) => memoryLog.warn('memory.session_evict_failed', errorFields(error)));
+          return 'running';
+        });
+      }
       const entry: SessionEntry = { session, userId, shutdown };
       sessions.set(sessionId, entry);
       return session;
