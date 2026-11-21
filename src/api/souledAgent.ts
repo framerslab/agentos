@@ -191,22 +191,48 @@ function namesTombstoneCopy(tombstoneCopy: unknown): boolean {
 }
 
 /**
+ * Whether the database behind `adapter` has `table` in the place a Brain opened on the adapter makes its own: on
+ * PostgreSQL the connection's current schema. Before the Brain has made its tables there, the bare name of a table can
+ * resolve to a same-named table of a later schema on the search path (a schema of the agent's own ahead of a `public`
+ * another brain uses), which is not this database's. False when the catalog cannot be read.
+ */
+async function hasTableOfItsOwn(adapter: StorageAdapter, table: string): Promise<boolean> {
+  try {
+    if (String(adapter.kind).includes('postgres')) {
+      const row = await adapter.get<{ found: boolean }>(
+        'SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = ?) AS found',
+        [table],
+      );
+      return row?.found === true;
+    }
+    return (await adapter.get("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", [table])) != null;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Whether the database behind `adapter` holds a row of another brain than `brainId`, in a table every open makes.
  *
- * @param beforeOpen - The read before this agent's Brain has opened: a table that cannot be read then is one the
- *   database does not have yet, or has in an older shape, and counts as holding no such row. The read after the open
- *   decides, and its errors are thrown.
+ * @param beforeOpen - The read before this agent's Brain has opened: a table the database does not have yet in the
+ *   Brain's own place ({@link hasTableOfItsOwn}), or has in an older shape that cannot be read, counts as holding no
+ *   such row. The read after the open decides, and its errors are thrown.
  */
 async function holdsAnotherBrain(adapter: StorageAdapter, brainId: string, beforeOpen = false): Promise<boolean> {
   for (const table of BRAIN_TABLES) {
+    if (beforeOpen && !(await hasTableOfItsOwn(adapter, table))) continue;
     const row = adapter.get(`SELECT 1 AS n FROM ${table} WHERE brain_id <> ? LIMIT 1`, [brainId]);
     if ((await (beforeOpen ? row.catch(() => null) : row)) != null) return true;
   }
   return false;
 }
 
-/** Whether `brain_meta` holds a row of `brainId`; false while the table cannot be read (the database has none yet). */
+/**
+ * Whether `brain_meta` holds a row of `brainId`, read before the Brain opens; false while the database has no such
+ * table of its own ({@link hasTableOfItsOwn}) or it cannot be read.
+ */
 async function brainIsSeeded(adapter: StorageAdapter, brainId: string): Promise<boolean> {
+  if (!(await hasTableOfItsOwn(adapter, 'brain_meta'))) return false;
   return adapter.get('SELECT 1 AS n FROM brain_meta WHERE brain_id = ? LIMIT 1', [brainId]).then(
     (row) => row != null,
     () => false,
