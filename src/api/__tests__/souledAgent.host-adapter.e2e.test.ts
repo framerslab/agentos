@@ -12,7 +12,8 @@
  *   Another agent's database is refused before anything is written to it; a refusal for any other reason takes
  *   nothing back from the database.
  * - A `tombstoneCopy` whose `adapter` key holds no adapter is refused even beside a `path`: the open would read it as
- *   an adapter's and run with no second copy.
+ *   an adapter's and run with no second copy. On the file store too, a `tombstoneCopy` that is set and names no
+ *   copy (`{}`, an empty or missing path, an `adapter` key holding none) is refused before anything opens.
  * - A store on the host's adapter needs `retention` and a `tombstoneKey` that holds a key, with or without
  *   `sharedMemory`: the agent counts the people it holds memory of in its own process, and other processes serve the
  *   same database.
@@ -446,6 +447,28 @@ describe(`a souled agent's store on the host's adapter, on runtime ${RUNTIME}`, 
     await closed(a);
     expect(fs.existsSync(beside)).toBe(false);
     await answers(copy);
+  });
+
+  it('refuses, on the file store too, a tombstoneCopy that names no copy, before anything opens', async () => {
+    // A copy option built from configuration that is not there ({ path: process.env.X } with X unset) names no copy.
+    // The open would keep the second copy in the default file inside the store's own folder, which a restore of that
+    // folder replaces, in a file named by an empty path, or nowhere.
+    const beside = copyAt('beside').path;
+    const namesNothing = [{}, { path: undefined }, { path: '' }, { adapter: undefined }, { path: beside, adapter: undefined }];
+    for (const [i, tombstoneCopy] of namesNothing.entries()) {
+      await expect(open(`nemo-${i}`, { tombstoneCopy: tombstoneCopy as never })).rejects.toThrow(/souledAgent: tombstoneCopy names no copy/);
+      // Refused before anything opened: no store folder in the soul's folder.
+      expect(fs.existsSync(path.join(dir, `nemo-${i}`, 'memory', '.store'))).toBe(false);
+    }
+    expect(fs.existsSync(beside)).toBe(false);
+
+    // A copy that names a file opens there, and an agent that leaves the option out keeps the default file.
+    const { a: named } = await open('nemo-file', { tombstoneCopy: copyAt('nemo-file') });
+    await closed(named);
+    expect(fs.existsSync(copyAt('nemo-file').path)).toBe(true);
+    const { a: byDefault } = await open('nemo-default');
+    await closed(byDefault);
+    expect(fs.existsSync(path.join(dir, 'nemo-default', 'memory', '.store', 'forgotten.sqlite'))).toBe(true);
   });
 
   it("needs retention and tombstoneKey on the host's adapter, with or without sharedMemory", async () => {
