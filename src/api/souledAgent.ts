@@ -2065,13 +2065,21 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     memoryProvider: provider,
     tools,
   };
+  /**
+   * The embedding the GMI runtime's cognitive memory was built with, as its build told it; noted again at each call, so
+   * a write of it that failed is tried again without resolving the default provider again.
+   */
+  let builtEmbedding: MemoryRecipient | undefined;
   if (rest.runtime === 'gmi') {
     // Where the GMI runtime sends text, as it sends it: each model attempt where its gateway resolved it, and the
     // embedding its cognitive memory was built with (a default provider changed after the agent opened included).
     shareRouteObserver(agentOptions, {
       attempt: ({ providerId, modelId, hop }) =>
         noteRoute(routeRecipient(hop === 0 ? 'model' : 'fallback-model', { provider: providerId, model: modelId })),
-      embedding: (route) => noteRoute(routeRecipient('embedding', route)),
+      embedding: (route) => {
+        builtEmbedding = routeRecipient('embedding', route);
+        noteRoute(builtEmbedding);
+      },
     });
   }
   // A learning layer gmi() builds from these options writes and reads the store's ledger.
@@ -2136,6 +2144,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
           })
         : optionHops;
     for (const hop of hops ?? []) noteRoute(routeRecipient('fallback-model', destinationOf(hop, true)));
+    if (builtEmbedding) noteRoute(builtEmbedding);
     return own;
   };
   /**
