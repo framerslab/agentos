@@ -364,6 +364,14 @@ export interface RememberOptions {
   id?: string;
 
   /**
+   * When the trace was stored, in Unix ms: a correction that a restore of the store took away is filed again from the
+   * tombstones' second copy under the id and the time it first had. Unset: the time of the call.
+   *
+   * @internal
+   */
+  createdAt?: number;
+
+  /**
    * Extra keys for the trace's stored metadata, merged under the keys the facade sets itself (`scopeId`,
    * `content_hash`, `entities`, `decay`), which win. The rolling-summary sink records `contributorIds` here, and a
    * memory write on a turn with no learner records `turnUserId` (`MemoryTrace.turnUserId`).

@@ -837,7 +837,14 @@ export class Memory {
     // A conversation trace is stamped after the last compile read of this facade, and counted as not yet stored until
     // its row is in: a compile reads below it meanwhile, so no watermark moves past a trace a compile has not read.
     const fence = conversation ? coordinationOf(this._brain.coordinationToken) : undefined;
-    const now = fence ? Math.max(Date.now(), fence.compileReadAt + 1) : Date.now();
+    // A trace filed again keeps the time it first had; the caller names it for the next compile to read by id.
+    const given = options?.createdAt;
+    const now =
+      typeof given === 'number' && Number.isFinite(given)
+        ? Math.trunc(given)
+        : fence
+          ? Math.max(Date.now(), fence.compileReadAt + 1)
+          : Date.now();
     if (fence && now > fence.lastConversationStamp) fence.lastConversationStamp = now;
     const tags = options?.tags ?? [];
     const entities = options?.entities ?? [];
@@ -1385,6 +1392,39 @@ export class Memory {
         [this._brain.brainId, scope, scopeId, ...slice],
       );
       for (const row of rows) if (!isPageChunkTags(row.tags)) found.push(row.id);
+    }
+    return found;
+  }
+
+  /**
+   * The rows this facade's Brain holds of the given ids, live or soft-deleted, each with its scope, its scope id,
+   * whether it is soft-deleted and whether it is a wiki page's chunk; an id with no row is left out. A correction made
+   * again owns by it a trace it named that a delete left soft-deleted under the person's key, and the tombstones'
+   * re-application finds by it the deleted traces a restore brought back. 400 ids a statement.
+   *
+   * @internal
+   */
+  async storedTracesAmong(
+    traceIds: readonly string[],
+  ): Promise<Array<{ id: string; scope: string; scopeId: string; deleted: boolean; chunk: boolean }>> {
+    await this._initPromise;
+    const ids = [...new Set(traceIds)];
+    const found: Array<{ id: string; scope: string; scopeId: string; deleted: boolean; chunk: boolean }> = [];
+    for (let offset = 0; offset < ids.length; offset += 400) {
+      const slice = ids.slice(offset, offset + 400);
+      const rows = await this._brain.all<{ id: string; scope: string; scope_id: string | null; deleted: number | boolean | string; tags: string }>(
+        `SELECT id, scope, scope_id, deleted, tags FROM memory_traces WHERE brain_id = ? AND id IN (${slice.map(() => '?').join(', ')})`,
+        [this._brain.brainId, ...slice],
+      );
+      for (const row of rows) {
+        found.push({
+          id: row.id,
+          scope: row.scope,
+          scopeId: row.scope_id ?? '',
+          deleted: Number(row.deleted) !== 0,
+          chunk: isPageChunkTags(row.tags),
+        });
+      }
     }
     return found;
   }

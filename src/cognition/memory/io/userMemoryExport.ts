@@ -14,7 +14,7 @@ import { memoryLog } from '../log.js';
 import { CONVERSATION_SCOPE, conversationScopeKey } from '../retrieval/store/conversationScopeKey.js';
 import { memoryGraphEdgesAmong } from '../retrieval/store/SqlMemoryGraph.js';
 import { parseTraceMetadata } from '../retrieval/store/tracePersistence.js';
-import type { SuppressionSubject } from '../suppression/ForgottenLedger.js';
+import type { KeptCorrection, SuppressionSubject } from '../suppression/ForgottenLedger.js';
 import { guardedWrite } from '../suppression/guardedWrite.js';
 import { brainOf } from './facade/handedBrain.js';
 import type { Memory } from './facade/Memory.js';
@@ -83,8 +83,12 @@ export interface UserMemoryExport {
     pages: ExportedPage[];
     /** The subject's learned state, when the agent runs a learning layer. */
     learner?: LearnedStateDocument;
-    /** The corrections of the subject whose text the tombstones' second copy also keeps. */
-    restoreCopies: Array<{ traceId: string }>;
+    /**
+     * The corrections of the subject whose text the tombstones' second copy also keeps. `text` is given for one the
+     * export holds no trace of: a restore of the store took it, and filing it again has not succeeded yet, so the copy
+     * is the one place that holds those words.
+     */
+    restoreCopies: Array<{ traceId: string; text?: string }>;
   };
   /** Who receives a person's text from the agent: agent-wide, the same list for every person. */
   recipients: MemoryRecipient[];
@@ -109,6 +113,7 @@ export interface UserMemoryExport {
 export const EXPORT_STORES = [
   'recipients',
   'tombstone ledger',
+  'tombstone copy',
   'older traces',
   'conversation traces',
   'memory graph',
@@ -403,6 +408,28 @@ export async function exportSubjectMemory(options: {
       document.held.learner = state;
     });
   }
+  // The corrections whose text the tombstones' second copy keeps, so a restore of the store does not lose them.
+  const ledger = memory.forgotten;
+  if (ledger) {
+    await reading(
+      'tombstone copy',
+      async () => {
+        const kept = await ledger.correctionsOf(key);
+        // A correction the export holds no trace of is held in the copy alone: its words are given here.
+        const exported = new Set(document.traces.map((trace) => trace.id));
+        const alone = kept.some((row) => !exported.has(row.traceId))
+          ? new Map((await ledger.keptCorrections(key)).map((row) => [row.traceId, row.text]))
+          : new Map<string, string>();
+        return kept.map((row) => {
+          const text = exported.has(row.traceId) ? undefined : alone.get(row.traceId);
+          return text === undefined ? { traceId: row.traceId } : { traceId: row.traceId, text };
+        });
+      },
+      (copies) => {
+        document.held.restoreCopies = copies;
+      },
+    );
+  }
   return document;
 }
 
@@ -449,12 +476,19 @@ export interface SubjectCorrectionResult {
  * store's write-ahead log are written out ({@link Memory.finishErasure}). A deleted trace cannot come back in a later
  * compile, which is why a correction deletes instead of editing a page.
  *
+ * On a store with a forgotten-user ledger, the correction's text is kept in the ledger's second copy under the id of
+ * its trace, and each named trace is recorded there as deleted, before any of them is deleted: every open and every
+ * re-application of the tombstones deletes a recorded trace a restore brought back and files a kept correction a
+ * restore took away. A write to the copy that fails rejects the call before any named trace is recorded or deleted;
+ * the pages built from them may be deleted by then, and the next compile builds them again.
+ *
  * The named traces go last, so a call that failed partway is finished by the same call made again: it still finds
  * them. An index rewrite or a log checkpoint that fails does not fail the call; one `memory.erasure_unfinished` line
  * says so, and the next deletion, sweep or re-application of the tombstones runs it.
  *
- * Every named id must be one of the subject's own live traces (a page's chunk is not one): when any is another
- * subject's, unknown or already deleted, the call rejects with a count and nothing is changed.
+ * Every named id must be one of the subject's own traces (a page's chunk is not one): live, or recorded as deleted by
+ * an earlier call that failed partway while its row still sits under the subject's key. When any is another
+ * subject's, unknown or already deleted for good, the call rejects with a count and nothing is changed.
  *
  * @returns How many traces and pages it deleted, who receives a person's text, and, for a correction, the id of the
  *   correction's trace; a deletion with no `text` has no `correctionTraceId`.
@@ -498,6 +532,16 @@ export async function correctSubjectMemory(
     // The ownership check, before any change, read in the subject's turn so no write of theirs runs between it and
     // the delete.
     const own = new Set(await memory.liveTraceIdsOf(CONVERSATION_SCOPE, key, ids));
+    const ledger = memory.forgotten;
+    const notLive = ids.filter((id) => !own.has(id));
+    if (ledger && notLive.length > 0) {
+      // A call that failed partway recorded these ids as deleted; a delete that soft-deleted a row and then failed left
+      // it under the subject's key. The call made again owns such a row, whatever its deleted flag, and finishes it.
+      const recorded = new Set(await ledger.deletedTraceIds(notLive));
+      for (const row of await memory.storedTracesAmong(notLive.filter((id) => recorded.has(id)))) {
+        if (row.scope === CONVERSATION_SCOPE && row.scopeId === key && !row.chunk) own.add(row.id);
+      }
+    }
     const missing = ids.filter((id) => !own.has(id)).length;
     if (missing > 0) {
       memoryLog.warn('memory.write_refused', { reason: 'foreign_trace' });
@@ -524,6 +568,8 @@ export async function correctSubjectMemory(
     }
 
     let correctionTraceId: string | undefined;
+    /** The correction's text, for the tombstones' second copy. */
+    let kept: KeptCorrection | undefined;
     if (replacement !== undefined) {
       const filed = await guardedWrite(
         { isForgotten: (who) => (memory.forgotten ? memory.isForgotten(who) : Promise.resolve(false)) },
@@ -561,9 +607,16 @@ export async function correctSubjectMemory(
       if (!(await memory.markCorrection(correctionTraceId, ids))) {
         throw new Error('correctUserMemory: the correction is no longer stored; no named trace was deleted');
       }
+      kept = { traceId: correctionTraceId, scopeId: key, text: replacement, createdAt: Number(filed.result.createdAt) };
     }
 
-    const { deleted } = await memory.deleteTraces(ids.filter((id) => id !== correctionTraceId));
+    // The traces that go are recorded as deleted in both copies of the ledger, and the correction's text is kept in the
+    // tombstones' second copy in the same write to it, before any named trace is deleted: a restore from before this
+    // call has them deleted again and the correction filed again at the next open, and a call that fails from here is
+    // finished by the same call made again.
+    const going = ids.filter((id) => id !== correctionTraceId);
+    await ledger?.markTracesDeleted(going, kept ? { keep: kept } : {});
+    const { deleted } = await memory.deleteTraces(going);
     try {
       // A delete only marks a vector in the index, and the log still holds the pages written before the delete.
       await memory.finishErasure();
