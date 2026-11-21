@@ -27,6 +27,7 @@ import type { StorageAdapter } from '@framers/sql-storage-adapter';
 import { listedErrorFields } from '../../../core/logging/events.js';
 import { canonicalJson, sha256Hex } from '../../learning/ledger/canonical.js';
 import { memoryLog } from '../log.js';
+import { withAdapterTransactionLock } from '../retrieval/store/adapterTransactionLock.js';
 import {
   IDENTITY_MARKER,
   STATE_MARKER,
@@ -271,17 +272,22 @@ function nextMark(previous: string | undefined): string {
  * Runs one side's step in a transaction of its own whose first statement takes the table's write lock, so no other
  * writer changes the side between the step's reads and its commit. Every statement of the step runs on `trx`. A
  * step never opens the other side's transaction. A lock that is not taken (another connection holds it past the
- * wait the driver allows) is a `LEDGER_UNAVAILABLE` refusal, and the transaction ends with nothing written.
+ * wait the driver allows) is a `LEDGER_UNAVAILABLE` refusal, and the transaction ends with nothing written. On a
+ * PostgreSQL adapter the transaction goes through the adapter's lock (`withAdapterTransactionLock`), as the store's own
+ * transactions do.
  */
 function locked<T>(adapter: StorageAdapter, step: (trx: StorageAdapter) => Promise<T>): Promise<T> {
-  return adapter.transaction(async (trx) => {
-    try {
-      await trx.run(adapter.kind.includes('postgres') ? LOCK_POSTGRES : LOCK_SQLITE);
-    } catch {
-      throw lockNotTaken();
-    }
-    return step(trx);
-  });
+  // On PostgreSQL the transaction waits for the ones the memory store opened earlier on the same adapter object.
+  return withAdapterTransactionLock(adapter, () =>
+    adapter.transaction(async (trx) => {
+      try {
+        await trx.run(adapter.kind.includes('postgres') ? LOCK_POSTGRES : LOCK_SQLITE);
+      } catch {
+        throw lockNotTaken();
+      }
+      return step(trx);
+    }),
+  );
 }
 
 /** Whether two native SQLite connections name the same file, including links to it. */
