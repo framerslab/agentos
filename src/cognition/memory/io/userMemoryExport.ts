@@ -83,8 +83,12 @@ export interface UserMemoryExport {
     pages: ExportedPage[];
     /** The subject's learned state, when the agent runs a learning layer. */
     learner?: LearnedStateDocument;
-    /** The corrections of the subject whose text the tombstones' second copy also keeps. */
-    restoreCopies: Array<{ traceId: string }>;
+    /**
+     * The corrections of the subject whose text the tombstones' second copy also keeps. `text` is given for one the
+     * export holds no trace of: a restore of the store took it, and filing it again has not succeeded yet, so the copy
+     * is the one place that holds those words.
+     */
+    restoreCopies: Array<{ traceId: string; text?: string }>;
   };
   /** Who receives a person's text from the agent: agent-wide, the same list for every person. */
   recipients: MemoryRecipient[];
@@ -407,9 +411,24 @@ export async function exportSubjectMemory(options: {
   // The corrections whose text the tombstones' second copy keeps, so a restore of the store does not lose them.
   const ledger = memory.forgotten;
   if (ledger) {
-    await reading('tombstone copy', () => ledger.correctionsOf(key), (kept) => {
-      document.held.restoreCopies = kept.map((row) => ({ traceId: row.traceId }));
-    });
+    await reading(
+      'tombstone copy',
+      async () => {
+        const kept = await ledger.correctionsOf(key);
+        // A correction the export holds no trace of is held in the copy alone: its words are given here.
+        const exported = new Set(document.traces.map((trace) => trace.id));
+        const alone = kept.some((row) => !exported.has(row.traceId))
+          ? new Map((await ledger.keptCorrections(key)).map((row) => [row.traceId, row.text]))
+          : new Map<string, string>();
+        return kept.map((row) => {
+          const text = exported.has(row.traceId) ? undefined : alone.get(row.traceId);
+          return text === undefined ? { traceId: row.traceId } : { traceId: row.traceId, text };
+        });
+      },
+      (copies) => {
+        document.held.restoreCopies = copies;
+      },
+    );
   }
   return document;
 }
