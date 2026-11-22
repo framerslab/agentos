@@ -592,6 +592,8 @@ describe('the memory defaults of a souled agent on the GMI runtime', () => {
       ['a memory config with no embedding', { memory: { recall: { retrieval: 'hybrid' } } }],
       ['an embedding that names a model alone', { memory: { embedding: { model: 'text-embedding-3-small' } } }],
       ['an embedding provider that is blank', { memory: { embedding: { provider: '  ' } } }],
+      // The model's prefix would send the text to OpenAI, a provider the host did not name as the provider.
+      ['an embedding model whose prefix names another provider', { memory: { embedding: { provider: 'gemini', model: 'openai:text-embedding-3-small' } } }],
       ["cognition: 'full'", { cognition: 'full' }],
       ['a cognition config with memory on', { cognition: { memory: true, mechanisms: false } }],
     ])('%s does not open, with a key in the environment too, and nothing is opened', async (_case, extra) => {

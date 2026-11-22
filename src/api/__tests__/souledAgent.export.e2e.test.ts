@@ -571,6 +571,39 @@ describe("a call that names its own provider under the agent's router, on the GM
   });
 });
 
+describe(`a route the store fails to record once, on runtime ${RUNTIME}`, () => {
+  it('is listed in the process, recorded by the next call on the route, and named after a restart', async () => {
+    const envKey = `k-souled-export-env-${++n}`;
+    vi.stubEnv('ANTHROPIC_API_KEY', envKey);
+    script('anthropic', envKey, { whole: true, replies: [reply.text('First.'), reply.text('Second.')] });
+    const apiKey = `k-souled-export-${++n}`;
+    const route: MemoryRecipient = { role: 'model', provider: 'anthropic', model: 'claude-x' };
+    const { a } = await open({}, apiKey);
+    const brain = brainBehind(a);
+    const setMeta = brain.setMeta.bind(brain);
+    let refused = 0;
+    vi.spyOn(brain, 'setMeta').mockImplementation(async (key: string, value: string) => {
+      if (key.startsWith('recipient:model:') && refused === 0) {
+        refused += 1;
+        throw new Error('the store is busy');
+      }
+      return setMeta(key, value);
+    });
+
+    await a.generate('What is the weather like?', { provider: 'anthropic', model: 'claude-x' });
+    await vi.waitFor(() => expect(events.some((line) => line.event === 'memory.recipient_unrecorded')).toBe(true));
+    expect(refused).toBe(1);
+    expect(await recipientsOf(a)).toContainEqual(route);
+
+    await a.generate('And tomorrow?', { provider: 'anthropic', model: 'claude-x' });
+    await a.close();
+    expect(rows<{ key: string }>("SELECT key FROM brain_meta WHERE key LIKE 'recipient:%'")).toHaveLength(1);
+
+    const { a: again } = await open({}, apiKey);
+    expect(await recipientsOf(again)).toContainEqual(route);
+  });
+});
+
 describe('the embedding a souled GMI agent names', () => {
   it('is the one listed before and after its first turn and after a restart: a default provider set meanwhile moves nothing', async () => {
     const embeddings = `k-souled-export-embed-${++n}`;
