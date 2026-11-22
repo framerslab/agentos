@@ -1442,6 +1442,34 @@ export class Memory {
   }
 
   /**
+   * Deletes the document chunks the given traces were filed from, with their text, the pictures of those chunks and
+   * each document left with no chunk, as {@link deleteTraces} does with `documentChunks: 'delete'`. A souled agent's
+   * deletion calls it before its mind deletes the traces' rows: a chunk is found by the row it was filed into, and a
+   * row deleted for good lets go of its chunk.
+   *
+   * @internal
+   */
+  async deleteDocumentChunksOf(traceIds: readonly string[]): Promise<void> {
+    await this._initPromise;
+    const ids = [...new Set(traceIds)];
+    if (ids.length === 0) return;
+    await this._deleteDocumentChunksOf(ids);
+  }
+
+  /**
+   * Records that rows of this facade's Brain were deleted for good by another writer in this process (a souled
+   * agent's mind, whose manager deletes the rows itself), as each of this facade's own deletes is recorded: the
+   * write-ahead log is owed a checkpoint, the full-text index on SQLite a rebuild, and the vector index a rewrite, which
+   * a person's deletion runs and {@link finishErasure} runs again where one failed.
+   *
+   * @internal
+   */
+  markErasureOwed(): void {
+    this._erasureOwed.deletes += 1;
+    if (this._hnswSidecar) this._erasureOwed.vectorIndex = true;
+  }
+
+  /**
    * Deletes the document chunks the given traces were filed from, with their text: first the pictures of those
    * chunks, as the foreign key of `document_images` on `document_chunks` requires, then the chunks, 400 ids a
    * statement. A document left with no chunk is deleted with the pictures filed under it; a document that still has
