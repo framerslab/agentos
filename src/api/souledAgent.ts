@@ -737,7 +737,8 @@ export interface SouledAgentOptions extends AgentOptions {
    * session's next turn; a later answer that failed makes the session ask again. A hook that throws, rejects, does not
    * answer within the memory hooks' timeout (`memoryProviderOptions.timeoutMs`) or answers anything but one of the
    * three policies, with `minor: true` and `profiling: 'off'` as the only marks it may add, fails closed: nothing is
-   * filed for that turn, it recalls the operator's pages alone, and the next turn asks again. `retentionDays` on a
+   * filed for that turn, it recalls the operator's pages alone (one that does not answer in time holds the turn's recall
+   * for the same timeout, so that turn recalls nothing), and the next turn asks again. `retentionDays` on a
    * policy that keeps memory shortens the agent's `retention` period for that account, in the sweeps of the process
    * that asked; it never lengthens it. Another agent object, in this process or another, reads the host's answer at
    * its own sessions' next ask.
