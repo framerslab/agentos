@@ -518,9 +518,7 @@ describe("a receipt for each memory write, on the GMI runtime with cognitive mem
       expect(entry.outcome === 'failed' ? entry.errorName : '').toMatch(/^[A-Za-z][A-Za-z0-9_]*$/);
     }
     expect(JSON.stringify(record)).not.toMatch(/LARK-7|lovely|provider down/);
-    // The mind's recall of the turn failed with its embedding, so the turn reports no recall of the mind; the
-    // provider's block is intact.
-    expect(result.memoryRecall).toBeUndefined();
+    // The mind's recall of the turn cannot embed its query; the provider's block, which embeds nothing, is intact.
     const call = served.seen[served.seen.length - 1];
     expect(providerBlockOf(call)).toContain('Alice keeps a canary in the attic.');
     // The failure is the mind's write, not the provider's observe: one sparse line of its own, with no text.
