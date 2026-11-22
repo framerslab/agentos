@@ -480,8 +480,6 @@ describe("a receipt for each memory write, on the GMI runtime with cognitive mem
     // The block writes `^` in place of each run of whitespace in a text: read back as one space.
     return block ? (block.content as unknown as string).replace(/\^/g, ' ') : '';
   };
-  /** Whether a model call carries the mind's memory block (the assembler's preamble). */
-  const carriesMindBlock = (call: ProviderScript['seen'][number]): boolean => JSON.stringify(call.messages).includes('## How To Use Your Memories');
 
   it("a turn's result names the two traces the mind filed", async () => {
     const a = await open('gmi', COGNITIVE, [reply.text('A canary, lovely.'), ...spare()]);
@@ -520,9 +518,10 @@ describe("a receipt for each memory write, on the GMI runtime with cognitive mem
       expect(entry.outcome === 'failed' ? entry.errorName : '').toMatch(/^[A-Za-z][A-Za-z0-9_]*$/);
     }
     expect(JSON.stringify(record)).not.toMatch(/LARK-7|lovely|provider down/);
-    // The mind's recall of the turn failed with its embedding: no block of the mind; the provider's block is intact.
+    // The mind's recall of the turn failed with its embedding, so the turn reports no recall of the mind; the
+    // provider's block is intact.
+    expect(result.memoryRecall).toBeUndefined();
     const call = served.seen[served.seen.length - 1];
-    expect(carriesMindBlock(call)).toBe(false);
     expect(providerBlockOf(call)).toContain('Alice keeps a canary in the attic.');
     // The failure is the mind's write, not the provider's observe: one sparse line of its own, with no text.
     expect(observeFailures()).toEqual([]);

@@ -449,7 +449,9 @@ describe('one memory for a souled agent on the GMI runtime', () => {
     expect(small.embedded).not.toContain('A canary, lovely.');
     await writeOf(await session.send('I drink tea.'));
     expect(lines('memory.vectors_unfit')).toHaveLength(1);
-    const rows = await rowsUnder(storeBrain(again), keyOf('alice'));
+    // The rows the mind filed: two of the first agent, four of this one. Her key also holds the page the first agent's
+    // close compiled, which the mind did not file.
+    const rows = (await rowsUnder(storeBrain(again), keyOf('alice'))).filter((row) => metaOf(row).filedBy === 'mind');
     expect(rows).toHaveLength(6);
   });
 
