@@ -11,7 +11,10 @@
  * - An open session of the person is emptied: an idle one's working-memory slots and messages go, and its next turn
  *   recalls nothing; a turn running at the deletion files nothing, and its reply still reaches its caller.
  * - A mind whose delete fails leaves the person's rows, names the mind's part as missed, writes one
- *   `memory.forget_incomplete` line, and `applyTombstones()` finishes the deletion.
+ *   `memory.forget_incomplete` line, and `applyTombstones()` finishes the deletion. A mind that fails part way, after
+ *   deleting some rows, leaves none of their words in the full-text index and no graph node of theirs. A store's graph
+ *   that fails to delete the copy of what the person said on another person's session keeps the trace with it, so the
+ *   deletion made again finds the copy.
  * - With no cognitive memory built yet, the deletion builds none and sends nothing to the embedding provider, and an
  *   archived original of the person's still goes.
  */
@@ -33,6 +36,10 @@ import type { IMemoryArchive } from '../../cognition/memory/archive/IMemoryArchi
 import { InMemoryVectorStore } from '../../cognition/rag/vector_stores/InMemoryVectorStore';
 import { KnowledgeGraph } from '../../cognition/memory/retrieval/graph/knowledge/KnowledgeGraph';
 import type { MemoryTrace } from '../../cognition/memory/core/types';
+import type { IKnowledgeGraph } from '../../cognition/memory/retrieval/graph/knowledge/IKnowledgeGraph';
+import { copyKey } from '../../cognition/memory/retrieval/graph/knowledge/memoryCopies';
+import { SqlKnowledgeGraph } from '../../cognition/memory/retrieval/store/SqlKnowledgeGraph';
+import { deleteTraceRows } from '../../cognition/memory/retrieval/store/tracePersistence';
 import { conversationScopeKey } from '../../cognition/memory/retrieval/store/conversationScopeKey';
 import { GMI } from '../../cognition/substrate/GMI';
 import { reply, script, type ProviderScript } from './helpers/stubProviders';
@@ -293,11 +300,14 @@ function wordVector(text: string, dim: number): number[] {
   const norm = Math.hypot(...vector) || 1;
   return vector.map((value) => value / norm);
 }
-/** A store on the agent's Brain that files rows as the mind would have filed them. */
-async function planter(brain: Brain): Promise<MemoryStore> {
+/**
+ * A store on the agent's Brain that files rows as the mind would have filed them; with `graph`, a host's own memory on
+ * the store, which records a copy of each row it files in that graph.
+ */
+async function planter(brain: Brain, graph?: IKnowledgeGraph): Promise<MemoryStore> {
   const vectorStore = new InMemoryVectorStore();
   await vectorStore.initialize({ id: `plant-${Math.random().toString(36).slice(2)}`, type: 'in_memory', defaultEmbeddingDimension: 1536, similarityMetric: 'cosine' } as never);
-  const knowledgeGraph = new KnowledgeGraph();
+  const knowledgeGraph = graph ?? new KnowledgeGraph();
   await knowledgeGraph.initialize();
   const store = new MemoryStore({
     vectorStore,
@@ -520,6 +530,82 @@ describe("forgetUser when the mind's delete fails", () => {
     expect(await rowsUnder(brain, keyOf('alice'))).toEqual([]);
     expect(heldBy(managers()[0], hers)).toEqual({ cached: [], nodes: [], words: false });
     expect(vectorsAmong(managers()[0], hers)).toEqual([]);
+    expect((await rowsUnder(brain, keyOf('bob'))).map((row) => row.id)).toEqual(his);
+  });
+});
+
+describe("forgetUser when the mind's delete fails part way", () => {
+  it('leaves no word of the rows it deleted in the full-text index and no graph node of theirs', async () => {
+    const a = await open({}, [reply.text('A canary, lovely.'), ...spare()]);
+    const brain = storeBrain(a);
+    await writeOf(await a.session('s1', { userId: 'alice' }).send('My canary is named LARK-7.'));
+    const told = await a.memory!.remember('Alice keeps a ferret named QUILL-9.', { type: 'episodic', scope: 'conversation', scopeId: keyOf('alice') });
+    const hers = await rowsUnder(brain, keyOf('alice'));
+    const herIds = hers.map((row) => row.id);
+    const lark = hers.find((row) => row.content.includes('LARK-7'))!.id;
+    expect(await graphNodesAmong(brain, [told.id])).toEqual([told.id]);
+    for (const word of ['lark', 'quill']) expect(await fullTextHits(brain, word)).toBeGreaterThan(0);
+    // The mind's store deletes rows 400 at a time: it deletes a first batch, two of her rows, and fails on the next.
+    vi.spyOn(CognitiveMemoryManager.prototype, 'deleteScope').mockImplementationOnce(async () => {
+      await deleteTraceRows(brain, brain.brainId, [lark, told.id]);
+      throw new Error('the mind stopped part way');
+    });
+
+    const report = await a.forgetUser!('alice');
+
+    expect(report.complete).toBe(false);
+    expect(report.parts[1]).toEqual({ part: 'mind', reached: false, reason: 'the mind stopped part way' });
+    // The two rows gone leave no node in the store's graph and no word in its full-text index.
+    expect.soft(await graphNodesAmong(brain, [lark, told.id])).toEqual([]);
+    for (const word of ['lark', 'quill']) expect.soft(await fullTextHits(brain, word)).toBe(0);
+
+    const [again, ...more] = await a.applyTombstones!();
+
+    expect(more).toEqual([]);
+    expect(again.complete).toBe(true);
+    expect(await rowsUnder(brain, keyOf('alice'))).toEqual([]);
+    expect(await graphNodesAmong(brain, herIds)).toEqual([]);
+  });
+});
+
+describe("forgetUser when the store's graph fails on what the person said on another person's session", () => {
+  it('keeps that trace until its graph copy is gone, so the deletion made again deletes the copy', async () => {
+    const a = await open({}, [reply.text('A canary, lovely.'), reply.text('A finch, lovely.'), ...spare()]);
+    const brain = storeBrain(a);
+    await writeOf(await a.session('s1', { userId: 'alice' }).send('My canary is named LARK-7.'));
+    await writeOf(await a.session('s2', { userId: 'bob' }).send('My finch is named WREN-2.'));
+    const his = (await rowsUnder(brain, keyOf('bob'))).map((row) => row.id);
+    // What she said on his session, filed by a host's own memory on the store, whose graph is the store's own: the
+    // graph keeps a copy of it, with her words.
+    const plant = await planter(brain, new SqlKnowledgeGraph(brain));
+    const said = { ...mindTrace('alice-on-bob', 'Alice says her ferret is named QUILL-9.', 'bob', Date.now() - 60_000), turnUserId: 'alice' } as MemoryTrace & { filing?: unknown };
+    delete said.filing;
+    await plant.store(said);
+    const copyOfHers = () => brain.all<{ id: string }>('SELECT id FROM knowledge_nodes WHERE brain_id = ? AND id = ?', [brain.brainId, copyKey('alice-on-bob')]);
+    expect(await copyOfHers()).toHaveLength(1);
+    // The store's graph fails once to delete that copy.
+    const deleteMemories = SqlKnowledgeGraph.prototype.deleteMemories;
+    let failed = false;
+    vi.spyOn(SqlKnowledgeGraph.prototype, 'deleteMemories').mockImplementation(async function (this: SqlKnowledgeGraph, filter) {
+      if (!failed && filter.traceIds?.includes('alice-on-bob')) {
+        failed = true;
+        throw new Error('the graph is busy');
+      }
+      return deleteMemories.call(this, filter);
+    });
+
+    const report = await a.forgetUser!('alice');
+
+    expect(failed).toBe(true);
+    expect(report.complete).toBe(false);
+    // Her words stay where the deletion made again finds them: the trace, with its copy.
+    expect((await rowsUnder(brain, keyOf('bob'))).map((row) => row.id)).toContain('alice-on-bob');
+
+    const [again, ...more] = await a.applyTombstones!();
+
+    expect(more).toEqual([]);
+    expect(again.complete).toBe(true);
+    expect(await copyOfHers()).toEqual([]);
     expect((await rowsUnder(brain, keyOf('bob'))).map((row) => row.id)).toEqual(his);
   });
 });
