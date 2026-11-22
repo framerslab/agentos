@@ -175,7 +175,7 @@ describe('what reconsolidation and temporal gist leave alone', () => {
     const before = [first, second].map((trace) => emotionsOf(stored(trace.id)));
     const stabilityBefore = stored(first.id).stability;
 
-    const result = await manager.retrieve('canary', NEUTRAL, { scopes: SCOPE, skipReconsolidation: true } as never);
+    const result = await manager.retrieve('canary', NEUTRAL, { scopes: SCOPE, skipReconsolidation: true });
 
     expect(result.retrieved).toHaveLength(2);
     expect([first, second].map((trace) => emotionsOf(stored(trace.id)))).toEqual(before);
