@@ -740,8 +740,9 @@ export class CognitiveMemoryBridge {
    * what is kept: the writer it is handed stores the text the gate passes, with the emotional stamp the gate names (a
    * neutral state, or the mind's mood when the filing was started), under the view's key and marked as the mind's; a
    * trace that landed after the person was forgotten is deleted through `undo`. The observer hears the kept text once
-   * the entry says it was written, and nothing otherwise. A view with no key files nothing (`no_subject`). A failed or
-   * skipped side is traced with its error's class name or its reason, never its words.
+   * the entry says it was written, and nothing otherwise; the entry does not wait for it. A view with no key files
+   * nothing (`no_subject`). A failed or skipped side is traced with its error's class name or its reason, never its
+   * words.
    *
    * @param content - The side's text.
    * @param options - Its type, source and role; the role `'user'` files as the person's message, any other as the
@@ -793,11 +794,8 @@ export class CognitiveMemoryBridge {
         // The view's answer as the record keeps it: the side's own role, and nothing else the view put on it.
         const entry = writeEntryOf(role, answer) ?? failedWriteEntry(role, new TypeError('the soul gave no write entry'));
         if (entry.outcome === 'written' && kept) {
-          try {
-            await this.cognitiveMemory.observe?.(options.role, kept.text, kept.pad);
-          } catch (error: unknown) {
-            this.addTraceEntry('WARNING', 'Cognitive memory observation failed.', { role, errorName: errorNameOf(error) });
-          }
+          // Started here and not awaited: the record settles on the gate's answer, never on the observer's model call.
+          void this.observeKept(options.role, kept.text, kept.pad, role).catch(() => undefined);
         } else if (entry.outcome !== 'written') {
           this.traceSoulEntry(entry);
         }
@@ -809,6 +807,18 @@ export class CognitiveMemoryBridge {
         return entry;
       },
     );
+  }
+
+  /**
+   * Feeds the observer the text a souled agent's gate kept. It is called at once and never rejects: a failure is one
+   * reasoning-trace warning with the error's class name.
+   */
+  private async observeKept(observedRole: CognitiveMemoryEncodeOptions['role'], text: string, pad: PADState, role: 'user' | 'assistant'): Promise<void> {
+    try {
+      await this.cognitiveMemory.observe?.(observedRole, text, pad);
+    } catch (error: unknown) {
+      this.addTraceEntry('WARNING', 'Cognitive memory observation failed.', { role, errorName: errorNameOf(error) });
+    }
   }
 
   /** A reasoning-trace entry for a side the soul's gate did not file: its reason, or its error's class name. */
