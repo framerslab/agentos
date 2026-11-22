@@ -14,7 +14,7 @@
  *   turns one on, and a `gmi()` on its own keeps every mechanism. A mechanism turned on that has nothing to run it on
  *   a souled agent is said in one `memory.mechanism_inactive` line at open.
  * - A turn is stored with a neutral emotional state whatever the mood of the mind; `emotionalStamp: 'mood'` stores
- *   the mood.
+ *   the mood. A person's export counts as mood stamps the turns stored with a mood, and none stored neutral.
  * - Cognitive memory with no embedding provider named, and consolidation turned on, do not open, and nothing is
  *   opened; a named provider is sent the turn's text.
  */
@@ -563,6 +563,26 @@ describe('the memory defaults of a souled agent on the GMI runtime', () => {
         expect(emotions.valence as number).toBeLessThan(0);
         expect(emotions.arousal as number).toBeCloseTo(0.8, 5);
       }
+    });
+
+    it("a person's export counts no mood stamp for turns stored neutral, and each turn stored with the mood", async () => {
+      embeddingScript();
+      const neutral = await openIn(frustratedSoul(), { memory: EMBEDDING });
+      const first = await neutral.session('s1', { userId: 'u-42' }).send('My canary is named LARK-7.');
+      await first.memoryWrite;
+
+      const plain = await neutral.exportUserMemory!('u-42');
+      expect(plain.held.traces.map((trace) => trace.filedBy)).toEqual(['mind', 'mind']);
+      for (const trace of plain.held.traces) expect(trace.emotionalContext.gmiMood).toBe('neutral');
+      expect(plain.profiling.moodStamps).toBe(0);
+
+      const moody = await openIn(frustratedSoul(), { memory: EMBEDDING, emotionalStamp: 'mood' });
+      const second = await moody.session('s1', { userId: 'u-42' }).send('My canary is named LARK-7.');
+      await second.memoryWrite;
+
+      const stamped = await moody.exportUserMemory!('u-42');
+      expect(stamped.held.traces.map((trace) => trace.emotionalContext.gmiMood)).toEqual(['frustrated', 'frustrated']);
+      expect(stamped.profiling.moodStamps).toBe(2);
     });
   });
 
