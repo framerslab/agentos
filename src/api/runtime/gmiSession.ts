@@ -277,7 +277,8 @@ export interface GmiSessionDeps {
    * through the turn's view of the soul ({@link soulMemory}), so the turn calls no `memoryProvider.observe`; the
    * turn's write record is the one the GMI's output carries, or `no_subject` for each side with text when the turn has
    * no view. The filings wait until the session keeps the turn, so a turn it does not keep (a reply it refuses, a stop
-   * after the turn's last request, a failure) files neither side, as such a turn is not observed. The turn's tools are
+   * after the turn's last request, a failure) files neither side, as such a turn is not observed, and the reply is filed
+   * as the session keeps it (an `onAfterGeneration` hook's replacement), as an observed reply is. The turn's tools are
    * still told its memory subject, which {@link observeMemoryProvider} `false` would take from them.
    */
   mindFilesTurn?: boolean;
@@ -332,31 +333,57 @@ function noSubjectRecord(userText: string, reply: string): Promise<MemoryWriteRe
 const notKeptEntry = (role: 'user' | 'assistant'): MemoryWriteEntry => ({ role, outcome: 'failed', errorName: 'AbortError' });
 
 /**
+ * The entry of a reply the session keeps empty (an `onAfterGeneration` hook replaced it with ''): nothing of it is
+ * filed. The turn's record leaves it out ({@link withoutReplyEntry}), as it has no entry for an empty reply.
+ */
+const emptiedReplyEntry: MemoryWriteEntry = { role: 'assistant', outcome: 'skipped', reason: 'screened' };
+
+/** The session's verdict on a turn the soul's mind files: not kept, or kept with its reply as the GMI wrote it and as the session keeps it. */
+type FilingVerdict = { kept: false } | { kept: true; gmiReply: string; reply: string };
+
+/**
  * A souled turn's view as its GMI gets it on a turn the soul's mind files ({@link GmiSessionDeps.mindFilesTurn}):
  * `view`, with its filings held until the session says whether it keeps the turn. The GMI starts the turn's filings
  * as it ends the turn, which is before the session has checked the reply (a structured send whose answer does not
  * parse is refused then) and before a stop that came after the turn's last request ends it. A turn the session keeps
  * files through `view`, the filings reaching it in the order the GMI started them; a turn it does not keep files
- * neither side, and `view` is never asked ({@link notKeptEntry}).
+ * neither side, and `view` is never asked ({@link notKeptEntry}). The turn's reply is filed as the session keeps it:
+ * the GMI hands its memory the reply as it wrote it, and an `onAfterGeneration` hook may have replaced it since; a
+ * reply the session keeps empty files nothing ({@link emptiedReplyEntry}).
  *
  * @param view - The turn's view of the soul, as the souled agent built it.
  * @returns The view to hand the GMI, and `keep`, which the turn calls once with the session's verdict; later calls
  *   change nothing.
  */
-function filingOnceKept(view: SoulTurnMemory): { view: SoulTurnMemory; keep: (kept: boolean) => void } {
-  let keep!: (kept: boolean) => void;
-  const verdict = new Promise<boolean>((resolve) => {
+function filingOnceKept(view: SoulTurnMemory): { view: SoulTurnMemory; keep: (verdict: FilingVerdict) => void } {
+  let keep!: (verdict: FilingVerdict) => void;
+  const verdict = new Promise<FilingVerdict>((resolve) => {
     keep = resolve;
   });
+  // The turn's reply is the first side the GMI files as the agent's with the text it wrote: an imprint is another.
+  let replyFiled = false;
   return {
     view: {
       ...(view.scope ? { scope: view.scope } : {}),
       begin: (manager, stop) => view.begin(manager, stop),
-      file: async (role, content, write, undo) =>
-        (await verdict) ? view.file(role, content, write, undo) : notKeptEntry(role),
+      file: async (role, content, write, undo) => {
+        const said = await verdict;
+        if (!said.kept) return notKeptEntry(role);
+        if (role === 'assistant' && !replyFiled && content === said.gmiReply) {
+          replyFiled = true;
+          return said.reply ? view.file(role, said.reply, write, undo) : emptiedReplyEntry;
+        }
+        return view.file(role, content, write, undo);
+      },
     },
     keep,
   };
+}
+
+/** The write record of a kept turn whose reply the session keeps empty: no entry for the reply, as an empty reply has none. */
+async function withoutReplyEntry(record: Promise<MemoryWriteRecord>): Promise<MemoryWriteRecord> {
+  const written = await record;
+  return { ...written, entries: written.entries.filter((entry) => entry.role !== 'assistant') };
 }
 
 /**
@@ -476,8 +503,8 @@ export async function* runGmiTurn(
   let writer: SessionTurnWriter | undefined;
   let ended = false;
   let releaseGmi: (() => Promise<void>) | undefined;
-  // On a turn the soul's mind files: tells the filings its GMI started whether the session kept the turn.
-  let keepFilings: ((kept: boolean) => void) | undefined;
+  // On a turn the soul's mind files: tells the filings its GMI started whether the session kept the turn, and its reply.
+  let keepFilings: ((verdict: FilingVerdict) => void) | undefined;
   // The turn's usage ledger writes, awaited before the turn ends.
   const ledgerWrites: Array<Promise<void>> = [];
   // The input as the turn sends it: the caller's, or the text an input guard rewrote it to.
@@ -697,10 +724,13 @@ export async function* runGmiTurn(
       writer?.commit();
       const memoryProvider = deps.observeMemoryProvider === false || deps.mindFilesTurn ? undefined : deps.opts.memoryProvider;
       if (deps.mindFilesTurn) {
-        // The session keeps the turn: the filings the soul's mind started as its GMI ended it go on from here, and the
-        // turn does not wait for them either.
-        keepFilings?.(true);
-        folder.wrote(folder.mindWrite() ?? (deps.soulMemory ? Promise.resolve(emptyMemoryWriteRecord()) : noSubjectRecord(userText, folder.text())));
+        // The session keeps the turn: the filings the soul's mind started as its GMI ended it go on from here, with the
+        // reply as the session keeps it, and the turn does not wait for them either.
+        const reply = folder.text();
+        keepFilings?.({ kept: true, gmiReply: folder.gmiReply(), reply });
+        const mindWrite = folder.mindWrite();
+        if (mindWrite) folder.wrote(reply ? mindWrite : withoutReplyEntry(mindWrite));
+        else folder.wrote(deps.soulMemory ? Promise.resolve(emptyMemoryWriteRecord()) : noSubjectRecord(userText, reply));
       } else if (memoryProvider?.observe) {
         // The turn does not wait for its writes: their record is a promise the turn's result carries.
         const user = observeTurn(memoryProvider, 'user', userText, deps.memoryHook);
@@ -720,7 +750,7 @@ export async function* runGmiTurn(
     throw error;
   } finally {
     // A turn that did not reach the line that keeps it files nothing of itself.
-    keepFilings?.(false);
+    keepFilings?.({ kept: false });
     try {
       // A turn its consumer stopped reading keeps the steps that finished, marked partial.
       if (!ended) {
