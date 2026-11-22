@@ -432,6 +432,15 @@ export interface CognitiveRetrievalOptions {
   /** If true, skip emotional congruence bias (useful for factual lookups). */
   neutralMood?: boolean;
   /**
+   * If true, the traces this call reads are not reconsolidated: their emotional context stays as stored and no drift
+   * record is written, whatever the `reconsolidation` mechanism is set to. The access is still counted, and strength
+   * and stability update as on any recall. A souled agent sets it for a person who objects to profiling and for a
+   * minor.
+   *
+   * @default false
+   */
+  skipReconsolidation?: boolean;
+  /**
    * Optional visibility ceiling for prospective alerts. Items registered with a
    * `tierRank` greater than this are withheld from the assembled "Reminders"
    * section. Used only for prospective gating in `assembleForPrompt`;
