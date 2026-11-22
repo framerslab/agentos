@@ -9,7 +9,7 @@
  *   turns' memory writes before it compiles.
  * - The compile's model calls are held to the agent's spend budget and written to its usage ledger.
  * - Recalled traces carry their speaker and their date.
- * - A soul with no workspace folder, and a soul beside systemBlocks, are named in one warning line.
+ * - A soul with no workspace folder is named in one log line, and a soul beside systemBlocks in one warning line.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
@@ -492,12 +492,14 @@ describe("souledAgent()'s close() wait", () => {
 });
 
 describe('a soul the agent cannot use in full', () => {
-  it('warns once when souledAgent() is given an inline soul, which has no workspace folder', async () => {
+  it('logs one line when souledAgent() is given an inline soul, which has no workspace folder', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const logged: Array<Record<string, unknown>> = [];
+    setLogger(pino({ level: 'debug', base: undefined }, { write(line: string) { logged.push(JSON.parse(line)); } }));
     await souledAgent({ provider: 'openai', model: 'gpt-4o', soul: { content: '# Aria' } } as never);
-    const lines = linesOf(warn).filter((line) => /workspace folder/.test(line));
-    expect(lines).toHaveLength(1);
-    expect(lines[0]).toMatch(/wiki memory/);
+    expect(logged.filter((line) => line.event === 'soul.inline_no_wiki')).toHaveLength(1);
+    // Through the host's logger, not the console.
+    expect(linesOf(warn).filter((line) => /workspace folder/.test(line))).toEqual([]);
   });
 
   it('warns once when a soul is given beside systemBlocks, for agent(), the GMI path and souledAgent()', async () => {
