@@ -265,9 +265,10 @@ describe("an account's policy on the mind's path", () => {
     expect(asked).toBe(1);
     expect(mindBlockOf(lastCall())).toBe('');
     expect(providerBlockOf(lastCall())).not.toContain('LARK-7');
-    // A hook that throws leaves the turn the operator's pages; one that does not answer in time takes the turn's recall
-    // window with it.
+    // A hook that throws leaves the turn the operator's pages; one that does not answer in time holds the provider's
+    // recall for the same timeout, so the turn is sent with no recall at all.
     if (name === 'throws') expect(providerBlockOf(lastCall())).toContain('Zorblat opens at nine.');
+    else expect(providerBlockOf(lastCall())).toBe('');
     expect(embeddedWith('Zorblat')).toBe(false);
     expect((await rowsUnder(brain, keyOf('alice'))).filter((row) => metaOf(row).filedBy === 'mind')).toEqual([]);
 
@@ -432,6 +433,32 @@ describe("an input guard and the mind's recall", () => {
     const rows = await rowsUnder(storeBrain(a), keyOf('alice'));
     expect(rows.map((row) => row.content)).toEqual([SANITISED, 'Noted, thanks.']);
     expect(writtenIds(record)).toEqual(rows.map((row) => row.id));
+  });
+
+  it("a turn that sends an image: the recall query holds the sanitised text and none of the image's data", async () => {
+    const IMAGE = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAE';
+    const { gate, release } = gated();
+    const a = await open({ screen: (text: string) => text }, [reply.hold([], gate, reply.text('A fine picture.')), ...spare()]);
+    try {
+      const sending = a.session('s1', { userId: 'alice' }).send(
+        [
+          { type: 'text', text: ORIGINAL },
+          { type: 'image_url', image_url: { url: IMAGE } },
+        ],
+        { guards: { services: [sanitisesInput], context, stages: ['input'] } } as never,
+      );
+      // The model call is open: the turn's recall has run, and nothing of it is filed yet.
+      await vi.waitFor(() => expect(served.seen).toHaveLength(1), { timeout: 4_000 });
+      const query = embeddings.embedded.slice();
+      expect(query.some((text) => text.includes(SANITISED))).toBe(true);
+      expect(query.some((text) => /base64|image_url|555 0100/.test(text))).toBe(false);
+      release();
+      await writeOf(await sending);
+      // Neither the recall nor the filing sent the image's data to be embedded.
+      expect(embeddings.embedded.some((text) => text.includes('iVBORw0KGgo'))).toBe(false);
+    } finally {
+      release();
+    }
   });
 });
 
