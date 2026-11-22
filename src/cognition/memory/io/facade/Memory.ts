@@ -84,6 +84,7 @@ import {
 import { fillScopeIds } from '../../retrieval/store/migrations/v2-to-v3.js';
 import { ForgottenLedger, type SuppressionSubject } from '../../suppression/ForgottenLedger.js';
 import { CONVERSATION_SCOPE, parseConversationScopeKey } from '../../retrieval/store/conversationScopeKey.js';
+import { notFiledByMindCondition } from '../../retrieval/store/mindFiled.js';
 import { isMissingTableError } from '../../retrieval/store/missingTable.js';
 import { ensureScopeRow, registerUnregisteredConversationScopes } from '../../retrieval/store/conversationScopes.js';
 import { memoryLog } from '../../log.js';
@@ -927,7 +928,8 @@ export class Memory {
    * `before` is never returned, however near its vector.
    *
    * @param query   - Natural-language search query.
-   * @param options - Optional filters (limit, type, scope, scopeId, minStrength, after, before).
+   * @param options - Optional filters (limit, type, scope, scopeId, filedBy, minStrength, after, before). With
+   *   `filedBy: 'soul'`, no trace a souled agent's mind filed is returned on either half.
    * @returns Ranked array of {@link ScoredTrace} results.
    * A call with no scope and no scope id reads the whole brain, every subject's conversation traces among them: the
    * host's own read of its store. No turn, tool or prompt of a souled agent makes one; pass the scope and a key to read
@@ -938,6 +940,10 @@ export class Memory {
    */
   async recall(query: string, options?: RecallOptions): Promise<ScoredTrace[]> {
     assertConversationKeyGiven('recall', options?.scope, options?.scopeId);
+    const filedBy: unknown = options?.filedBy;
+    if (filedBy !== undefined && filedBy !== 'soul') {
+      throw new TypeError("Memory.recall: filedBy reads the soul's side ('soul'), or is left unset to read every trace");
+    }
     await this._initPromise;
 
     const ftsQuery = buildNaturalLanguageFtsQuery(query);
@@ -982,6 +988,12 @@ export class Memory {
     if (options?.before != null) {
       conditions.push('t.created_at < ?');
       params.push(options.before);
+    }
+    if (filedBy === 'soul') {
+      // The soul's side: every trace but the ones a souled agent's mind filed, on each path below.
+      const notMind = notFiledByMindCondition(this._brain.features.dialect, 't.metadata');
+      conditions.push(notMind.sql);
+      params.push(...notMind.params);
     }
 
     const filters = conditions.join(' AND ');
@@ -1036,9 +1048,9 @@ export class Memory {
           }
         }
 
-        // The vector index holds every trace of this brain, whatever its type,
-        // scope, scope id, strength or age, so the candidates of both halves
-        // pass the recall's filters, this brain's id first, before they rank.
+        // The vector index holds the facade's own traces of this brain, whatever
+        // their type, scope, scope id, strength or age, so the candidates of both
+        // halves pass the recall's filters, this brain's id first, before they rank.
         const candidateIds = [...new Set([...hnswCandidates.map(c => c.id), ...ftsRows.map(r => r.id)])];
         const candidateRows = await this._brain.all<FtsJoinRow>(
           `SELECT t.*, 0.0 as rank FROM memory_traces t
@@ -3455,9 +3467,11 @@ export class Memory {
     const sidecar = this._hnswSidecar;
     if (sidecar) {
       await this._onVectorIndex(async () => {
+        // A trace whose metadata names a souled agent's mind as its filer keeps its vector out of this index.
+        const own = this._ownVectorCondition();
         const stored = await this._brain.get<{ embedding: Buffer | null }>(
-          'SELECT embedding FROM memory_traces WHERE brain_id = ? AND id = ?',
-          [this._brain.brainId, row.id],
+          `SELECT embedding FROM memory_traces WHERE brain_id = ? AND id = ? AND ${own.sql}`,
+          [this._brain.brainId, row.id, ...own.params],
         );
         if (stored?.embedding && stored.embedding.length > 0) {
           const { blobCodec } = this._brain.features;
@@ -3818,9 +3832,10 @@ export class Memory {
    * after the last write, is read and added, and the files are saved.
    */
   private async _checkLoadedVectorIndex(sidecar: import('../../retrieval/store/HnswSidecar.js').HnswSidecar): Promise<void> {
+    const own = this._ownVectorCondition();
     const rows = await this._brain.all<{ id: string }>(
-      'SELECT id FROM memory_traces WHERE brain_id = ? AND deleted = 0 AND embedding IS NOT NULL',
-      [this._brain.brainId],
+      `SELECT id FROM memory_traces WHERE brain_id = ? AND deleted = 0 AND embedding IS NOT NULL AND ${own.sql}`,
+      [this._brain.brainId, ...own.params],
     );
     const live = new Set(rows.map((row) => row.id));
     const indexed = sidecar.ids();
@@ -3850,14 +3865,26 @@ export class Memory {
   /**
    * This brain's live traces that carry an embedding, decoded for the HNSW
    * sidecar. A database can hold several brains; the sidecar is this brain's,
-   * so it is built from this brain's vectors only.
+   * so it is built from this brain's vectors only, and from the facade's own:
+   * no trace a souled agent's mind filed.
    */
   private async _ownEmbeddedTraces(): Promise<{ id: string; embedding: number[] }[]> {
+    const own = this._ownVectorCondition();
     const rows = await this._brain.all<{ id: string; embedding: Uint8Array | string | null }>(
-      'SELECT id, embedding FROM memory_traces WHERE brain_id = ? AND deleted = 0 AND embedding IS NOT NULL',
-      [this._brain.brainId],
+      `SELECT id, embedding FROM memory_traces WHERE brain_id = ? AND deleted = 0 AND embedding IS NOT NULL AND ${own.sql}`,
+      [this._brain.brainId, ...own.params],
     );
     return this._decodedEmbeddings(rows);
+  }
+
+  /**
+   * The condition a trace row meets to have its vector in the facade's vector index: its metadata does not name a
+   * souled agent's mind as its filer. The mind's manager on this Brain keeps its rows' vectors in an index of its own,
+   * of the size its embedding model makes, so a rewrite of this index writes none of them into a file this facade
+   * owns, and an open adds none of them to the index it loads.
+   */
+  private _ownVectorCondition(): { sql: string; params: unknown[] } {
+    return notFiledByMindCondition(this._brain.features.dialect, 'metadata');
   }
 
   /** Embedding rows decoded into vectors; an empty embedding is left out. */

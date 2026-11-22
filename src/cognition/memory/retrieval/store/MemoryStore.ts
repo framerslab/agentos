@@ -60,6 +60,7 @@ import { encodePlainScopeId, onBrainRefiled, refileBrainScopeIds, type RefiledTr
 import { copyKey } from '../graph/knowledge/memoryCopies.js';
 import { memoryLog } from '../../log.js';
 import { parseConversationScopeKey } from './conversationScopeKey.js';
+import { MIND_FILER, filedByMindCondition } from './mindFiled.js';
 
 // ---------------------------------------------------------------------------
 // Embedding guard (CR4)
@@ -162,9 +163,6 @@ export interface MemoryStoreConfig {
    */
   hydration?: 'brain' | 'scopes';
 }
-
-/** The value of a row's `filedBy` metadata key on a row a souled agent's mind filed ({@link MemoryTrace.filing}). */
-const MIND_FILER = 'mind';
 
 /** The reinforcement interval a trace loads with when none was persisted: one hour. */
 const DEFAULT_REINFORCEMENT_INTERVAL_MS = 3_600_000;
@@ -1353,14 +1351,9 @@ export class MemoryStore {
   rowsCondition(metadataColumn: string): { sql: string; params: unknown[] } | undefined {
     const brain = this.brain;
     if (!this.mindRowsOnly || !brain) return undefined;
-    // Only a row whose metadata text holds the key is read as JSON. A SQL read of JSON raises on metadata that is not
-    // JSON (`json_extract` on SQLite, the `::jsonb` cast on PostgreSQL), so one such row of another writer would fail
-    // the read of every row beside it. A key's own text holds the key in quotes; a string that holds it escapes them.
-    const filedBy = brain.features.dialect.jsonExtract(metadataColumn, '$.filedBy');
-    return {
-      sql: `(CASE WHEN ${metadataColumn} LIKE ? THEN ${filedBy} END) = ?`,
-      params: ['%"filedBy"%', MIND_FILER],
-    };
+    // Only a row whose metadata text holds the key is read as JSON, so another writer's row whose metadata is not JSON
+    // fails no read of the rows beside it.
+    return filedByMindCondition(brain.features.dialect, metadataColumn);
   }
 
   /**
