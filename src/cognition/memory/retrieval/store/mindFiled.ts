@@ -13,7 +13,7 @@ import type { StorageFeatures } from '@framers/sql-storage-adapter';
 export const MIND_FILER = 'mind';
 
 /** The dialect calls the conditions are written with, so they run on SQLite and PostgreSQL. */
-type Dialect = Pick<StorageFeatures['dialect'], 'jsonExtract' | 'ifnull'>;
+type Dialect = Pick<StorageFeatures['dialect'], 'name' | 'jsonExtract' | 'ifnull'>;
 
 /** A condition of a `WHERE` clause with the bindings of its placeholders, in order. */
 export interface SqlCondition {
@@ -25,11 +25,15 @@ export interface SqlCondition {
  * The filer a row's metadata names in its top-level `filedBy` key, as SQL; NULL for a row that names none. Only a row
  * whose metadata text holds the key is read as JSON: a SQL read of JSON raises on metadata that is not JSON
  * (`json_extract` on SQLite, the `::jsonb` cast on PostgreSQL), so one such row of another writer would fail the read
- * of every row beside it. A key's own text holds the key in quotes; a string that holds it escapes them.
+ * of every row beside it. A key's own text holds the key in quotes; a string that holds it escapes them. On SQLite the
+ * text must also be JSON (`json_valid`), so a row whose text holds the key and is not JSON, such as metadata cut short
+ * after the key's name, names no filer either. PostgreSQL before version 16 has no such check, so there that row still
+ * fails the read.
  */
 function filerOf(dialect: Dialect, metadataColumn: string): SqlCondition {
+  const isJson = dialect.name === 'sqlite' ? ` AND json_valid(${metadataColumn})` : '';
   return {
-    sql: `(CASE WHEN ${metadataColumn} LIKE ? THEN ${dialect.jsonExtract(metadataColumn, '$.filedBy')} END)`,
+    sql: `(CASE WHEN ${metadataColumn} LIKE ?${isJson} THEN ${dialect.jsonExtract(metadataColumn, '$.filedBy')} END)`,
     params: ['%"filedBy"%'],
   };
 }
@@ -47,7 +51,7 @@ export function filedByMindCondition(dialect: Dialect, metadataColumn: string): 
 /**
  * The condition that a row's metadata does not name a souled agent's mind as its filer: a row whose metadata names no
  * filer or another one, a row with no metadata, and a row whose metadata is text that is not JSON and does not hold the
- * key. The exact complement of {@link filedByMindCondition}.
+ * key (on SQLite, any text that is not JSON). The exact complement of {@link filedByMindCondition}.
  *
  * @param metadataColumn - The metadata column as the read names it (`metadata`, `t.metadata`).
  */
