@@ -14,7 +14,8 @@
  *   of the mind's index, and a load counts them in one line.
  * - Two sessions of one person sending at once file four rows, each turn's record naming its own two.
  * - A turn that fails, or that `session.close()` or the caller's signal stops, files neither side, and the next turn
- *   files as usual; an id no memory key can be built from files nothing.
+ *   files as usual; so does a structured send whose answer does not parse, which the session refuses once its GMI has
+ *   ended the turn. An id no memory key can be built from files nothing.
  * - `close()` waits for the mind's writes before the mind's memory shuts down, and the soul's store is closed once.
  * - A memory that does not build fails the turn, and the next turn builds it again.
  *
@@ -26,8 +27,10 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import pino from 'pino';
+import { z } from 'zod';
 import { createPostgresAdapter, resolveStorageAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
 import { souledAgent, type SouledAgent, type SouledAgentOptions } from '../souledAgent';
+import { ObjectGenerationError } from '../generateObject';
 import { brainOf } from '../../cognition/memory/io/facade/handedBrain';
 import type { Brain } from '../../cognition/memory/retrieval/store/Brain';
 import { MemoryStore } from '../../cognition/memory/retrieval/store/MemoryStore';
@@ -535,6 +538,23 @@ describe('one memory for a souled agent on the GMI runtime', () => {
     expect(rows.map((row) => row.content)).toEqual(['I drink tea.', 'Tea, noted.']);
     expect(rows.map((row) => metaOf(row).filedBy)).toEqual(['mind', 'mind']);
     expect(writtenIds(record)).toEqual(rows.map((row) => row.id));
+  });
+
+  it('a structured send whose answer does not parse files neither side, and the next turn files as usual', async () => {
+    const a = await open({}, [reply.text('Lyon'), reply.text('Tea, noted.'), ...spare()]);
+    const session = a.session('s1', { userId: 'alice' });
+    // Not JSON: the session refuses the reply after its GMI has ended the turn, and keeps nothing of the exchange.
+    await expect(session.send('Where does my canary LARK-7 live?', { responseSchema: z.object({ city: z.string() }) })).rejects.toBeInstanceOf(ObjectGenerationError);
+    expect(session.messages()).toEqual([]);
+
+    const record = await writeOf(await session.send('I drink tea.'));
+    // Her writes run one after another: once this turn's two have landed, a filing of the refused turn would have.
+    const rows = await rowsUnder(storeBrain(a), keyOf('alice'));
+    expect(rows.map((row) => row.content)).toEqual(['I drink tea.', 'Tea, noted.']);
+    expect(rows.map((row) => metaOf(row).filedBy)).toEqual(['mind', 'mind']);
+    expect(writtenIds(record)).toEqual(rows.map((row) => row.id));
+    // The refused reply was never sent to the embedding provider for a filing.
+    expect(embeddings.embedded).not.toContain('Lyon');
   });
 
   it('a turn with an empty reply files the user\'s message alone', async () => {

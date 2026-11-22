@@ -480,6 +480,16 @@ describe("a receipt for each memory write, on the GMI runtime with cognitive mem
     // The block writes `^` in place of each run of whitespace in a text: read back as one space.
     return block ? (block.content as unknown as string).replace(/\^/g, ' ') : '';
   };
+  /** The mind's memory block of one model call: the text part that carries the assembler's preamble; '' when absent. */
+  const mindBlockOf = (call: ProviderScript['seen'][number]): string => {
+    const parts = call.messages.flatMap((message) => {
+      const content = message.content as unknown;
+      if (typeof content === 'string') return [content];
+      if (!Array.isArray(content)) return [];
+      return content.flatMap((part) => (part && typeof part === 'object' && typeof (part as { text?: unknown }).text === 'string' ? [(part as { text: string }).text] : []));
+    });
+    return parts.find((part) => part.includes('## How To Use Your Memories')) ?? '';
+  };
 
   it("a turn's result names the two traces the mind filed", async () => {
     const a = await open('gmi', COGNITIVE, [reply.text('A canary, lovely.'), ...spare()]);
@@ -527,6 +537,33 @@ describe("a receipt for each memory write, on the GMI runtime with cognitive mem
     expect(mindFailures).toHaveLength(1);
     expect(JSON.stringify(mindFailures)).not.toMatch(/LARK-7|lovely/);
     expect(tracesOf(keyOf(alice)).map((row) => row.content)).toEqual(['Alice keeps a canary in the attic.']);
+  });
+
+  it('a turn whose recall cannot embed its words reads nothing the mind filed, and keeps its provider block', async () => {
+    const a = await open('gmi', COGNITIVE, [reply.text('Pico, noted.'), reply.text('Pico it is.'), reply.text('I cannot say.'), ...spare()]);
+    // What she told the soul's provider before, and what the mind filed for her in an earlier session.
+    await a.memory!.remember('Alice keeps her parrot in the attic.', { type: 'episodic', scope: 'conversation', scopeId: keyOf(alice) });
+    await writeOf(await a.session('s0', { userId: 'alice' }).send('My parrot is named Pico.'));
+    // A later session's turn reads both: the mind's block holds what the mind filed, the provider's block the rest.
+    await writeOf(await a.session('s1', { userId: 'alice' }).send('What is my parrot named?'));
+    const served1 = served.seen[served.seen.length - 1];
+    expect(mindBlockOf(served1)).toContain('Pico');
+    expect(providerBlockOf(served1)).toContain('Alice keeps her parrot in the attic.');
+
+    // The embedding provider goes down: the mind's recall cannot embed the next turn's words.
+    embeddings.failEmbedding = () => true;
+    const result = await a.session('s2', { userId: 'alice' }).send('What is my parrot named again?');
+
+    // The turn is answered, with nothing the mind filed in its request; the provider's block, which embeds nothing, is intact.
+    expect(result.text).toBe('I cannot say.');
+    const call = served.seen[served.seen.length - 1];
+    expect(mindBlockOf(call)).not.toContain('Pico');
+    expect(JSON.stringify(call.messages)).not.toContain('Pico');
+    expect(providerBlockOf(call)).toContain('Alice keeps her parrot in the attic.');
+    expect((await writeOf(result)).entries.map((entry) => [entry.role, entry.outcome])).toEqual([
+      ['user', 'failed'],
+      ['assistant', 'failed'],
+    ]);
   });
 
   it('the turn never waits for a compile that holds her chain', async () => {
