@@ -2054,7 +2054,10 @@ export class GMI implements IGMI {
           }
         }
 
-        if (isUserInitiatedTurn && currentTurnText) {
+        // On a souled agent's mind the turn recalls only when its rules' answer allows it: an answer that keeps no
+        // memory, a failed policy hook and a forgotten person read nothing, and no recall query is embedded.
+        const soulAllowsRecall = !this.memoryBridge?.usesSoul(turnSoul) || soulAnswer?.recall === true;
+        if (isUserInitiatedTurn && currentTurnText && soulAllowsRecall) {
           // Recall is limited to this turn's user, session and conversation scopes; with a learning layer's scope ids, to
           // the turn's own.
           // On a souled agent's mind, to the person's key that the turn's view of the soul names.
