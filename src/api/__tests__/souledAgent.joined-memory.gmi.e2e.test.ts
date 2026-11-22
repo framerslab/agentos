@@ -153,12 +153,21 @@ async function closed(a: SouledAgent): Promise<void> {
 }
 
 type Row = { id: string; scope: string; scope_id: string; content: string; metadata: string; emotions: string; strength: number; tags: string };
-/** Every live trace of the agent's store. */
-const rowsOf = (brain: Brain): Promise<Row[]> =>
-  brain.all<Row>(
-    'SELECT id, scope, scope_id, content, metadata, emotions, strength, tags FROM memory_traces WHERE brain_id = ? AND deleted = 0 ORDER BY created_at, id',
+/**
+ * Every live trace of the agent's store, oldest first. The two sides of one turn can be stored in the same millisecond,
+ * and the person's message is filed before the reply: within a millisecond a row the mind filed for the person comes
+ * before one it filed for the agent, and other rows keep their id order.
+ */
+async function rowsOf(brain: Brain): Promise<Row[]> {
+  const rows = await brain.all<Row & { created_at: number | string }>(
+    'SELECT id, scope, scope_id, content, metadata, emotions, strength, tags, created_at FROM memory_traces WHERE brain_id = ? AND deleted = 0 ORDER BY created_at, id',
     [brain.brainId],
   );
+  const speakerRank = (row: Row): number => (metaOf(row).speaker === 'user' ? 0 : 1);
+  return rows
+    .sort((a, b) => Number(a.created_at) - Number(b.created_at) || speakerRank(a) - speakerRank(b))
+    .map(({ created_at: _createdAt, ...row }) => row);
+}
 /** The live traces under one key. */
 const rowsUnder = async (brain: Brain, key: string): Promise<Row[]> => (await rowsOf(brain)).filter((row) => row.scope === 'conversation' && row.scope_id === key);
 /** A row's metadata, read as the store wrote it. */
@@ -203,6 +212,8 @@ const providerBlockOf = (call: ModelCall): string => {
 };
 /** The last model call the agent's provider served. */
 const lastCall = (): ModelCall => served.seen[served.seen.length - 1];
+/** The model calls that merged a person's traces into their wiki page. */
+const merges = (): ModelCall[] => served.seen.filter((call) => JSON.stringify(call.messages).includes('You maintain a knowledge wiki page'));
 
 /** A gate a held reply waits on, and its opener. */
 function gated(): { gate: Promise<void>; release: () => void } {
@@ -564,6 +575,86 @@ describe('one memory for a souled agent on the GMI runtime', () => {
     expect(rows.map((row) => row.content)).toEqual(['My canary is named LARK-7.']);
     expect(metaOf(rows[0]).filedBy).toBe('mind');
     expect(record).toEqual({ entries: [{ role: 'user', outcome: 'written', traceId: rows[0].id }] });
+  });
+
+  it('a reply an onAfterGeneration hook rewrites is filed as the session keeps it', async () => {
+    const a = await open(
+      { onAfterGeneration: async (step: { text: string }) => ({ ...step, text: step.text.replace('LARK-7', 'your bird') }) },
+      [reply.text('Your canary LARK-7, lovely.'), ...spare()],
+    );
+
+    const result = await a.session('s1', { userId: 'alice' }).send('My canary is named LARK-7.');
+
+    expect(result.text).toBe('Your canary your bird, lovely.');
+    const record = await writeOf(result);
+    const rows = await rowsUnder(storeBrain(a), keyOf('alice'));
+    expect(rows.map((row) => row.content)).toEqual(['My canary is named LARK-7.', 'Your canary your bird, lovely.']);
+    expect(writtenIds(record)).toEqual(rows.map((row) => row.id));
+    // The model's own words, which the hook took out, were never sent to be embedded for a filing.
+    expect(embeddings.embedded).not.toContain('Your canary LARK-7, lovely.');
+  });
+
+  it("a reply an onAfterGeneration hook empties files the user's message alone", async () => {
+    const a = await open({ onAfterGeneration: async (step: { text: string }) => ({ ...step, text: '' }) }, [reply.text('A canary, lovely.'), ...spare()]);
+
+    const record = await writeOf(await a.session('s1', { userId: 'alice' }).send('My canary is named LARK-7.'));
+
+    const rows = await rowsUnder(storeBrain(a), keyOf('alice'));
+    expect(rows.map((row) => row.content)).toEqual(['My canary is named LARK-7.']);
+    expect(record).toEqual({ entries: [{ role: 'user', outcome: 'written', traceId: rows[0].id }] });
+    expect(embeddings.embedded).not.toContain('A canary, lovely.');
+  });
+
+  it("a registry row that cannot be written again once the trace is stored leaves the side written, and is the mind's failure", async () => {
+    const a = await open({}, [reply.text('A canary, lovely.'), ...spare()]);
+    const brain = storeBrain(a);
+    const key = keyOf('alice');
+    const run = brain.run.bind(brain);
+    let registryWrites = 0;
+    // The second write of her key's registry row, the one after her message's trace is stored, fails once.
+    vi.spyOn(brain, 'run').mockImplementation(((sql: string, params?: unknown[]) => {
+      if (sql.includes('INSERT INTO memory_scopes') && Array.isArray(params) && params.includes(key) && ++registryWrites === 2) {
+        return Promise.reject(new Error('registry write failed'));
+      }
+      return run(sql, params as never);
+    }) as typeof brain.run);
+
+    const record = await writeOf(await a.session('s1', { userId: 'alice' }).send('My canary is named LARK-7.'));
+
+    const rows = await rowsUnder(brain, key);
+    expect(rows.map((row) => row.content)).toEqual(['My canary is named LARK-7.', 'A canary, lovely.']);
+    expect(record).toEqual({
+      entries: [
+        { role: 'user', outcome: 'written', traceId: rows[0].id },
+        { role: 'assistant', outcome: 'written', traceId: rows[1].id },
+      ],
+    });
+    const failures = lines('memory.hook_failed').filter((line) => line.hook === 'soulMemory');
+    expect(failures).toHaveLength(1);
+    expect(JSON.stringify(failures)).not.toMatch(/LARK-7|registry write failed/);
+  });
+
+  it("a turn filed at a time its key's last compile read past is compiled by the next compile", async () => {
+    const a = await open();
+    const key = keyOf('alice');
+    const session = a.session('s1', { userId: 'alice' });
+    await writeOf(await session.send('My canary is named LARK-7.'));
+    await a.memory!.compileWiki({ scopes: [key] });
+    const compiledAt = (await a.memory!.listScopes()).find((row) => row.scopeId === key)?.compiledAt;
+    expect(typeof compiledAt).toBe('number');
+
+    // The clock is set back to the watermark: the next turn's two rows are stamped at a time the compile read past.
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(compiledAt as number);
+    try {
+      await writeOf(await session.send('My canary sings at dawn.'));
+    } finally {
+      clock.mockRestore();
+    }
+    const before = merges().length;
+    await a.memory!.compileWiki({ scopes: [key] });
+
+    expect(merges()).toHaveLength(before + 1);
+    expect(JSON.stringify(merges().at(-1)!.messages)).toContain('sings at dawn');
   });
 
   it('a session whose user id no memory key can be built from files nothing', async () => {
