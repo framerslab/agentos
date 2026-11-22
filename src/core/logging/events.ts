@@ -149,6 +149,8 @@ export const AGENTOS_EVENTS = {
   'memory.vectors_unfit': { rows: 'int' },
   // A gmi() agent with cognitive memory on was given a memoryProvider with getContext: cognitive memory supplies the turn's memory context, so getContext is not called (observe still runs). Not written for a souled agent, whose provider recalls beside its mind. Written once, when the agent is built.
   'memory.provider_context_skipped': {},
+  // A souled agent on the GMI runtime with cognitive memory on was built with a mechanism turned on (enabled: true) that nothing runs on it: temporal gist and persona drift run only inside a consolidation cycle, which a souled agent refuses, and involuntary recall only where the prompt assembler is handed the mechanisms engine and every trace, which the agent's memory manager does not do. The setting has no effect. Written once for each such mechanism, as the agent is built.
+  'memory.mechanism_inactive': { mechanism: { enum: ['temporalGist', 'involuntaryRecall', 'personaDrift'] } },
   // A translation failed, answered with no text, ran past the transcript translator's own timeout, stopped at its output cap or stopped for another reason (a content filter); it throws TranslationProviderError, and status is 0 when no HTTP status came back.
   'language.translation_failed': { provider: { enum: ['openai', 'deepl'] }, reason: { enum: ['request_failed', 'empty_output', 'timeout', 'truncated', 'incomplete'] }, status: 'int', type: 'word', code: 'word' },
   // A configured detection provider id LanguageService does not build (whisper_stub, or an id it does not know).

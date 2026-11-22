@@ -96,7 +96,8 @@ export interface MemoryConfig {
    * Configuration for periodic background consolidation of episodic → semantic memory.
    * On the GMI path (`agent({ runtime: 'gmi' })`), `enabled: true` starts the memory
    * manager's hourly consolidation cycle and `interval` is not applied (docs/GMI.md,
-   * "GMIs from agent()").
+   * "GMIs from agent()"). `souledAgent()` refuses `enabled: true` on that path: a cycle can
+   * merge two people's traces, and a souled agent files each person's memory under a key of their own.
    */
   consolidation?: {
     /** Whether automatic consolidation is enabled. */
@@ -111,7 +112,8 @@ export interface MemoryConfig {
    * OPENAI_API_KEY, GEMINI_API_KEY or OLLAMA_BASE_URL is set, with that provider's
    * default embedding model. Anthropic, Groq, Together AI, xAI, MiniMax and the Claude Code and
    * Gemini CLIs have no embedding models in agentos. `dimension` is required for a model whose
-   * dimension agentos does not know.
+   * dimension agentos does not know. `souledAgent()` takes no default on that path: it does not
+   * open unless `provider` is named.
    */
   embedding?: { provider: string; model?: string; dimension?: number };
   /**
