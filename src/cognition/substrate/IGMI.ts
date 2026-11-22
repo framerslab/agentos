@@ -644,6 +644,15 @@ export interface GMIOutput {
     historyOmitted?: import('../../core/llm/IPromptEngine.js').PromptHistoryOmission;
     /** On a structured turn: the parsed value and its check (see `api/runtime/structuredReply`). */
     structuredOutput?: import('../../api/runtime/structuredReply.js').StructuredReplyOutput;
+    /**
+     * On a turn of a souled agent's mind that carried the agent's view of its memory rules (`metadata.soulMemory`): the
+     * record of the turn's memory writes, one entry for each side that had text. The turn does not wait for it: it
+     * settles once the view has answered for both sides, and never rejects. Unset on any other turn, and on a turn
+     * that failed or stopped before it was filed.
+     *
+     * @internal
+     */
+    memoryWrite?: Promise<import('../../api/runtime/memoryWriteRecord.js').MemoryWriteRecord>;
 }
 
 

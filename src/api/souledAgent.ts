@@ -1502,7 +1502,13 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
    * One session turn's view of the memory rules, for the GMI that serves it on `runtime: 'gmi'`: the subject's key, and
    * the turn's decision, which its recall may have opened and its two writes share. A turn with no subject has none. A
    * subject whose id no key can be built from has no key and no policy to ask: its view has no scope and allows
-   * nothing, so the turn is not scored for sentiment, and one `memory.hook_failed` line says so.
+   * nothing, so the turn is not scored for sentiment, and one `memory.hook_failed` line says so; it files nothing
+   * (`no_subject`).
+   *
+   * Its `file` runs one side of the turn through the same gate as the provider's writes ({@link fileTurn}), on the
+   * subject's chain, so close() waits for it and no compile, deletion or sweep of the subject runs beside it. The
+   * mind's writer is handed the text the screen kept, a neutral stamp, and the filing that marks the row as the mind's
+   * with its speaker and its subject, the subject whose key the view names.
    */
   const soulTurnOf = (context: MemoryHookContext): SoulTurnMemory | undefined => {
     const subject = turnSubjectOf(context);
@@ -1512,10 +1518,32 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       scopeId = conversationScopeKey(agentId, subject);
     } catch (err) {
       memoryLog.warn('memory.hook_failed', { hook: 'soulMemory', ...errorFields(err) });
-      return { begin: async () => ({ ...SOUL_TURN_NOTHING }) };
+      return {
+        begin: async () => ({ ...SOUL_TURN_NOTHING }),
+        file: async (role) => ({ role, outcome: 'skipped', reason: 'no_subject' }),
+      };
     }
+    const filedFor = { kind: subject.kind, id: subject.id };
     return {
       scope: { scope: 'conversation', scopeId },
+      file: (role, content, write, undo) =>
+        onSubject(scopeId, () =>
+          fileTurn(
+            role,
+            content,
+            context,
+            subject,
+            scopeId,
+            (text) =>
+              write({
+                text,
+                stamp: 'neutral',
+                filing: { filedBy: 'mind', speaker: role, subject: { ...filedFor } },
+                ...(subject.kind === 'user' ? { turnUserId: subject.id } : {}),
+              }),
+            undo,
+          ),
+        ),
       begin: async (_manager, stop) => {
         // A forgotten subject is allowed nothing, and the host's hook is not asked about them.
         if (!(await notForgottenWithin(subject))) return { ...SOUL_TURN_NOTHING };
