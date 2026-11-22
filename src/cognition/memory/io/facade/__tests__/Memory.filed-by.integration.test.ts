@@ -258,10 +258,10 @@ const sidecarOf = (memory: Memory): HnswSidecar => (memory as unknown as { _hnsw
 /** A page store with no page, for a deletion. */
 const noPages = { storeFor: () => ({ listPages: async () => [], deletePage: async () => undefined }) };
 
-/** The ids a recall under `scopeId` answers, sorted; `filedBy` is passed as given. */
-async function recalled(memory: Memory, query: string, scopeId: string, filedBy?: unknown): Promise<string[]> {
+/** The ids a recall under `scopeId` answers, sorted. */
+async function recalled(memory: Memory, query: string, scopeId: string, filedBy?: 'soul'): Promise<string[]> {
   const options = { scope: 'conversation', scopeId, ...(filedBy === undefined ? {} : { filedBy }) };
-  return (await memory.recall(query, options as never)).map((scored) => scored.trace.id).sort();
+  return (await memory.recall(query, options)).map((scored) => scored.trace.id).sort();
 }
 
 /**
@@ -300,8 +300,9 @@ describe("a recall for the soul's side", () => {
     expect(query).toHaveBeenCalled();
     expect(await recalled(memory, 'bees', A)).toEqual([...soul, mind].sort());
 
-    // A side the option does not name is refused, never read as no filter.
-    await expect(recalled(memory, 'bees', A, 'mind')).rejects.toThrow(TypeError);
+    // A side the option does not name, as a caller without the types passes it, is refused, never read as no filter.
+    const mindSide = { scope: 'conversation', scopeId: A, filedBy: 'mind' } as unknown as Parameters<Memory['recall']>[1];
+    await expect(memory.recall('bees', mindSide)).rejects.toThrow(TypeError);
   });
 
   it.skipIf(!POSTGRES_URL)("leaves the mind's rows out, on PostgreSQL", async () => {
