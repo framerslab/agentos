@@ -276,10 +276,18 @@ async function bothSidesUnderOneKey(store: Store): Promise<{ facade: Facade; sou
   const other = await memory.remember('Alice sells the bees honey at the market.', { scope: 'conversation', scopeId: A });
   // Another writer's metadata that is not JSON: the soul's side reads its row, and the read does not fail on it.
   await brain.run('UPDATE memory_traces SET metadata = ? WHERE brain_id = ? AND id = ?', ['{not json', brain.brainId, other.id]);
+  const soulIds = [soul.id, other.id];
+  if (store === 'sqlite') {
+    // Metadata cut short after the key's name, so its text holds the key and is not JSON: on SQLite the row reads as
+    // naming no filer, and neither a recall nor a write of the vector index fails on it.
+    const cut = await memory.remember('Alice wraps the bees for winter.', { scope: 'conversation', scopeId: A });
+    await brain.run('UPDATE memory_traces SET metadata = ? WHERE brain_id = ? AND id = ?', ['{"filedBy":', brain.brainId, cut.id]);
+    soulIds.push(cut.id);
+  }
   const built = await mindManager(brain);
   const mind = await fileAsMind(built, 'alice', 'Alice keeps bees in the garden.');
   expect((await metadataOf(brain, mind)).filedBy).toBe('mind');
-  return { facade, soul: [soul.id, other.id].sort(), mind, A };
+  return { facade, soul: soulIds.sort(), mind, A };
 }
 
 describe("a recall for the soul's side", () => {
@@ -296,6 +304,8 @@ describe("a recall for the soul's side", () => {
     // The hybrid path: the vector index's candidates are fused with the full-text ones.
     await memory.rebuildVectorIndex();
     expect(sidecarOf(memory).isActive).toBe(true);
+    // The index holds every soul-filed vector, the one whose metadata is cut short among them, and not the mind's.
+    expect(sidecarOf(memory).ids().sort()).toEqual(soul);
     expect(await recalled(memory, 'bees', A, 'soul')).toEqual(soul);
     expect(query).toHaveBeenCalled();
     expect(await recalled(memory, 'bees', A)).toEqual([...soul, mind].sort());
