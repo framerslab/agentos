@@ -7,6 +7,7 @@
  */
 import { messageOf } from '../../../api/runtime/memoryObserveFailures.js';
 import type { MemoryRecipient } from '../../../api/runtime/memoryRecipients.js';
+import type { SoulMind } from '../../../api/runtime/soulStore.js';
 import { errorFields } from '../../../core/logging/events.js';
 import { agentosVersion } from '../../learning/ledger/canonical.js';
 import { memoryLog } from '../log.js';
@@ -56,7 +57,9 @@ export interface ForgetMemoryReport {
    * The deletion's four parts, always in this order, each reached with a count or missed with the reason:
    *
    * - `tombstone`: reached once the ledger holds the subject's tombstone; it deletes nothing itself, so its count is 0.
-   * - `mind`: the copies an agent's mind holds of the subject; reached with 0 where there is none.
+   * - `mind`: what an agent's mind held of the subject, deleted through it (`mind`): reached with the number of rows it
+   *   deleted, 0 where it holds none or none of its memory is open in this process, and missed with the reason when
+   *   its delete failed, which leaves the keys it failed on as they were for the deletion made again.
    * - `store`: the store's own pass. Reached, with the number of traces deleted, when every store the call deletes
    *   from was reached (the caller's own included), every page was deleted and no memory from before per-user scope
    *   is left unattributed; missed with each of those that failed.
@@ -115,6 +118,17 @@ export interface ForgetUserMemoryOptions {
   sessions?: () => PartOutcome | Promise<PartOutcome>;
   /** Who receives a person's text (`recipients()` of a souled agent), copied into the report. Unset: none is listed. */
   recipients?: readonly MemoryRecipient[];
+  /**
+   * The mind of a souled agent on `runtime: 'gmi'` with cognitive memory on, which files into this store: each of the
+   * subject's conversation keys, and each trace that names the user under another scope, is deleted through it first,
+   * after the document chunks its rows were filed from, and then by the store's own pass, which reaches what the store
+   * keeps of each row by its id and what the key still holds. A key the mind fails to delete is left as it was, its
+   * traces, pages and registry row, so the deletion made again finds it; the report's `mind` part is then missed.
+   * The report's stores name it as `cognitive memory`. Unset: the part is reached with 0.
+   *
+   * @internal
+   */
+  mind?: Pick<SoulMind, 'deleteKey' | 'deleteTraces'>;
   /** The caller's own stores failed: the report's `store` part is missed, and the report is incomplete. */
   alsoIncomplete?: boolean;
   /**
@@ -167,10 +181,47 @@ export async function deleteScopeWithDocuments(memory: Memory, scope: string, sc
   return deleted + (await memory.deleteScope(scope, scopeId)).deleted;
 }
 
+/** What a deletion's mind part did: the rows the mind deleted, and the first failure of its deletes. */
+interface MindTally {
+  deleted: number;
+  failure?: string;
+}
+
+/**
+ * Deletes named traces for good: with a mind, the document chunks their rows were filed from first (a row the mind
+ * deletes lets go of its chunk), then the mind's delete, which takes the rows with what the mind keeps of each; then
+ * the store's own delete, which reaches what the store keeps of each trace by its id (its memory-graph node, its
+ * knowledge-graph copy, its vector) and any row the mind left. A mind whose delete fails leaves the traces as they
+ * were, for the deletion made again, and its failure is counted.
+ *
+ * @returns How many rows the store's own delete took.
+ */
+async function deleteTracesThroughMind(
+  memory: Memory,
+  mind: ForgetUserMemoryOptions['mind'],
+  ids: readonly string[],
+  tally: MindTally,
+): Promise<number> {
+  if (ids.length === 0) return 0;
+  if (mind) {
+    await memory.deleteDocumentChunksOf(ids);
+    try {
+      const { deleted } = await mind.deleteTraces(ids);
+      tally.deleted += deleted;
+      if (deleted > 0) memory.markErasureOwed();
+    } catch (error) {
+      tally.failure ??= messageOf(error);
+      return 0;
+    }
+  }
+  return (await memory.deleteTraces(ids, { documentChunks: 'delete' })).deleted;
+}
+
 /**
  * Deletes for good what a user said under scopes that are not theirs (the traces whose metadata names them as
  * `turnUserId`), with the document chunks those traces were filed from, and each page of another user's or session's
- * conversation compiled from such a trace.
+ * conversation compiled from such a trace. With a mind, each batch is deleted through it first
+ * ({@link deleteTracesThroughMind}). A trace under a key of the user's that the mind failed to delete (`kept`) is left.
  *
  * Under each such conversation scope the pages go first, each whole, after the scope's registry row names the page's
  * other sources for the next compile to build the page again from. While a page is left, the scope's traces of the
@@ -183,11 +234,16 @@ async function deleteWhatTheUserSaidElsewhere(input: {
   wiki: { storeFor(scopeId: string): SubjectPages };
   userId: string;
   ownKeys: readonly string[];
+  kept: ReadonlySet<string>;
   pages: ForgetMemoryReport['pages'];
   tally: { deleted: number };
+  mind: ForgetUserMemoryOptions['mind'];
+  mindTally: MindTally;
 }): Promise<void> {
-  const { memory, wiki, pages, tally } = input;
-  const named = await memory.tracesNamingUser(input.userId);
+  const { memory, wiki, pages, tally, mind, mindTally } = input;
+  const named = (await memory.tracesNamingUser(input.userId)).filter(
+    (trace) => !(trace.scope === CONVERSATION_SCOPE && input.kept.has(trace.scopeId)),
+  );
   const namedIds = new Set(named.map((trace) => trace.id));
   const byScope = new Map<string, string[]>();
   const elsewhere: string[] = [];
@@ -221,10 +277,10 @@ async function deleteWhatTheUserSaidElsewhere(input: {
     return left;
   };
 
-  tally.deleted += (await memory.deleteTraces(elsewhere, { documentChunks: 'delete' })).deleted;
+  tally.deleted += await deleteTracesThroughMind(memory, mind, elsewhere, mindTally);
   for (const [scopeId, ids] of byScope) {
     if (await deletePagesBuiltFrom(scopeId)) continue;
-    tally.deleted += (await memory.deleteTraces(ids, { documentChunks: 'delete' })).deleted;
+    tally.deleted += await deleteTracesThroughMind(memory, mind, ids, mindTally);
     // A compile of the scope that read them before they went writes its page when it ends: that page goes too. A
     // compile that starts after the delete no longer finds them.
     await memory.waitForScopeChanges(scopeId);
@@ -238,7 +294,8 @@ async function deleteWhatTheUserSaidElsewhere(input: {
  * In order: the subject's pending writes and compiles are waited for (`drain`); the tombstone is written to the
  * ledger's copy and then to the store, and from then on every new write of the subject is refused; the subject's
  * conversation traces are deleted under this agent's key and under every other agent's key of the subject, the
- * soft-deleted rows, the graph copies, the full-text entries and the document chunks with them; for a user, the
+ * soft-deleted rows, the graph copies, the full-text entries and the document chunks with them, through the agent's
+ * mind first when the caller passes one (`mind`), which takes what the mind keeps of each; for a user, the
  * traces that name the user under other scopes, after each page of another user or session compiled from one of
  * them, which the next compile builds again from that subject's own traces; each compiled page of the subject with
  * its chunks; the scope's registry row; for the user older memory is attributed to (`legacy`), that memory and the
@@ -293,6 +350,9 @@ export async function forgetUserMemory(options: ForgetUserMemoryOptions): Promis
     options.writeTombstone === false ? { form: ledger.keyed ? 'keyed' : 'unkeyed', written: false } : await writeTombstone();
 
   const pages: ForgetMemoryReport['pages'] = { deleted: 0, failed: [] };
+  const mind = options.mind;
+  /** What the mind deleted, and why its delete failed, when it did. */
+  const mindTally: MindTally = { deleted: 0 };
   const deletes = async (): Promise<{ stores: ForgetMemoryReport['stores']; rows: number }> => {
     const stores: ForgetMemoryReport['stores'] = [];
     let traces = 0;
@@ -301,6 +361,8 @@ export async function forgetUserMemory(options: ForgetUserMemoryOptions): Promis
 
     // Conversation memory: this agent's key of the subject, and the subject's key under each other agent of the store.
     const keys = [ownKey];
+    /** The keys the mind failed to delete: the store's pass leaves their traces, pages and registry row as they are. */
+    const kept = new Set<string>();
     let conversation = 0;
     let conversationFailure: string | undefined;
     try {
@@ -309,7 +371,27 @@ export async function forgetUserMemory(options: ForgetUserMemoryOptions): Promis
         if (!other || other.kind === 'operator') continue;
         if (other.kind === subject.kind && other.id === subject.id && !keys.includes(row.scopeId)) keys.push(row.scopeId);
       }
-      for (const key of keys) conversation += await deleteScopeWithDocuments(memory, CONVERSATION_SCOPE, key);
+      for (const key of keys) {
+        if (!mind) {
+          conversation += await deleteScopeWithDocuments(memory, CONVERSATION_SCOPE, key);
+          continue;
+        }
+        // The key's rows, read before the mind deletes them: the document chunks they were filed from go first, while
+        // the rows still name them, and the store's own pass then reaches what it keeps of each row by its id.
+        const ids = await memory.tracesStoredBefore(CONVERSATION_SCOPE, key, Number.MAX_SAFE_INTEGER);
+        await memory.deleteDocumentChunksOf(ids);
+        try {
+          const { deleted } = await mind.deleteKey(key);
+          mindTally.deleted += deleted;
+          if (deleted > 0) memory.markErasureOwed();
+        } catch (error) {
+          mindTally.failure ??= messageOf(error);
+          kept.add(key);
+          continue;
+        }
+        conversation += (await memory.deleteTraces(ids, { documentChunks: 'delete' })).deleted;
+        conversation += (await memory.deleteScope(CONVERSATION_SCOPE, key)).deleted;
+      }
     } catch (error) {
       conversationFailure = messageOf(error);
     }
@@ -323,7 +405,17 @@ export async function forgetUserMemory(options: ForgetUserMemoryOptions): Promis
       // Counted as they go, so the traces deleted before a failure still count for the vector index.
       const tally = { deleted: 0 };
       try {
-        await deleteWhatTheUserSaidElsewhere({ memory, wiki: options.wiki, userId: subject.id, ownKeys: keys, pages, tally });
+        await deleteWhatTheUserSaidElsewhere({
+          memory,
+          wiki: options.wiki,
+          userId: subject.id,
+          ownKeys: keys,
+          kept,
+          pages,
+          tally,
+          mind,
+          mindTally,
+        });
         naming = { store, reached: true, deleted: tally.deleted };
       } catch (error) {
         naming = { store, reached: false, reason: messageOf(error) };
@@ -331,8 +423,10 @@ export async function forgetUserMemory(options: ForgetUserMemoryOptions): Promis
       traces += tally.deleted;
     }
 
-    // Pages, one by one, so each page that fails is named. A page is deleted whole, with its chunks.
+    // Pages, one by one, so each page that fails is named. A page is deleted whole, with its chunks. A key the mind
+    // failed to delete keeps its pages with its traces.
     for (const key of keys) {
+      if (kept.has(key)) continue;
       let pageIds: string[];
       try {
         pageIds = (await memory.listPageRows(key)).map((row) => row.pageId);
@@ -476,8 +570,19 @@ export async function forgetUserMemory(options: ForgetUserMemoryOptions): Promis
   if (legacy) missed.push('legacy memory under the agent scope: unattributed');
   // Reached by here: a tombstone that cannot be written throws before anything is deleted.
   const tombstonePart: DeletionPart = { part: 'tombstone', reached: true, deleted: 0 };
-  // The copies an agent's mind holds: none here.
-  const mindPart: DeletionPart = { part: 'mind', reached: true, deleted: 0 };
+  // What an agent's mind held: none without one.
+  const mindPart: DeletionPart =
+    mindTally.failure === undefined
+      ? { part: 'mind', reached: true, deleted: mindTally.deleted }
+      : { part: 'mind', reached: false, reason: mindTally.failure };
+  // The mind is named among the stores first, as its part comes before the store's own.
+  if (mind) {
+    stores.unshift(
+      mindPart.reached
+        ? { store: 'cognitive memory', reached: true, deleted: mindPart.deleted }
+        : { store: 'cognitive memory', reached: false, reason: mindPart.reason },
+    );
+  }
   const storePart: DeletionPart =
     missed.length === 0 ? { part: 'store', reached: true, deleted: ran.rows } : { part: 'store', reached: false, reason: missed.join('; ') };
   const sessionsPart: DeletionPart = { part: 'sessions', ...sessions };
@@ -524,12 +629,12 @@ export interface ReapplyTombstonesOptions
   extends Pick<ForgetUserMemoryOptions, 'memory' | 'ledger' | 'wiki' | 'agentId' | 'legacyUnattributed'> {
   /**
    * The per-subject parts of one deletion: the subject's drain and chain, what the caller reached itself, what open
-   * sessions hold of the subject, and who receives a person's text.
+   * sessions hold of the subject, who receives a person's text, and the mind the deletion runs through.
    */
   forSubject?: (
     subject: SuppressionSubject,
   ) => Promise<
-    Pick<ForgetUserMemoryOptions, 'drain' | 'onChain' | 'extraStores' | 'alsoIncomplete' | 'legacy' | 'sessions' | 'recipients'>
+    Pick<ForgetUserMemoryOptions, 'drain' | 'onChain' | 'extraStores' | 'alsoIncomplete' | 'legacy' | 'sessions' | 'recipients' | 'mind'>
   >;
   /**
    * Runs the work on one conversation key in that subject's turn, after its writes and compiles: the deleted traces a
