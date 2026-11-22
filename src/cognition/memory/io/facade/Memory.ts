@@ -3853,8 +3853,9 @@ export class Memory {
         ...this._decodedEmbeddings(
           await this._brain.all<{ id: string; embedding: Uint8Array | string | null }>(
             `SELECT id, embedding FROM memory_traces
-              WHERE brain_id = ? AND deleted = 0 AND embedding IS NOT NULL AND id IN (${slice.map(() => '?').join(', ')})`,
-            [this._brain.brainId, ...slice],
+              WHERE brain_id = ? AND deleted = 0 AND embedding IS NOT NULL AND ${own.sql}
+                AND id IN (${slice.map(() => '?').join(', ')})`,
+            [this._brain.brainId, ...own.params, ...slice],
           ),
         ),
       );
