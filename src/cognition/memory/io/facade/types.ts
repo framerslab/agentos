@@ -441,6 +441,17 @@ export interface RecallOptions {
   scopeId?: string;
 
   /**
+   * The side of a souled agent's memory to read. `'soul'` leaves out every trace the agent's mind filed, whose stored
+   * metadata names the mind as its filer (`filedBy: 'mind'`), and reads every other trace: the ones the soul's own calls
+   * filed, and every trace of a store no mind files to. It binds the full-text half and the vector half of the recall
+   * alike. Unset: every trace is read, whichever side filed it; a trace the mind filed is found by its words alone, since
+   * the facade's vector index holds the facade's own vectors.
+   *
+   * @throws TypeError from `recall` for any other value.
+   */
+  filedBy?: 'soul';
+
+  /**
    * Minimum retrieval strength (Ebbinghaus current strength) to include.
    * Traces below this value are considered too weak/forgotten.
    * @default 0
