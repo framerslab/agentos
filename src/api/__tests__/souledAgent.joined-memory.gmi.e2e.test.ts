@@ -181,10 +181,11 @@ function textPartsOf(message: ModelCall['messages'][number]): string[] {
 }
 /** The mind's memory block of one model call: the text part that carries the assembler's preamble; '' when absent. */
 const mindBlockOf = (call: ModelCall): string => call.messages.flatMap(textPartsOf).find((part) => part.includes(MIND_BLOCK)) ?? '';
-/** The soul's provider block of one model call: the user-role message that opens with `<memory_recall>`; '' when absent. */
+/** The soul's provider block of one model call, its texts' spaces restored: the user-role message that opens with `<memory_recall>`; '' when absent. */
 const providerBlockOf = (call: ModelCall): string => {
   const block = call.messages.find((m) => m.role === 'user' && typeof m.content === 'string' && m.content.startsWith('<memory_recall>'));
-  return block ? (block.content as unknown as string) : '';
+  // The block writes `^` in place of each run of whitespace in a text: read back as one space.
+  return block ? (block.content as unknown as string).replace(/\^/g, ' ') : '';
 };
 /** The last model call the agent's provider served. */
 const lastCall = (): ModelCall => served.seen[served.seen.length - 1];
