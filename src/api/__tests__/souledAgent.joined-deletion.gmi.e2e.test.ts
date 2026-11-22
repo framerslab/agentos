@@ -268,6 +268,19 @@ function heldBy(manager: CognitiveMemoryManager, ids: readonly string[]): { cach
     words: cache.some((trace) => wanted.has(trace.id) && trace.content !== ''),
   };
 }
+/**
+ * The ids among `ids` that hold a vector in a manager's vector index, in any of its collections: the in-process index
+ * the GMI's cognitive memory builds, read through its own collections, since it offers no read by id.
+ */
+function vectorsAmong(manager: CognitiveMemoryManager, ids: readonly string[]): string[] {
+  const index = manager.getConfig().vectorStore as unknown as { collections: Map<string, { documents: Map<string, unknown> }> };
+  const wanted = new Set(ids);
+  const found = new Set<string>();
+  for (const collection of index.collections.values()) {
+    for (const id of collection.documents.keys()) if (wanted.has(id)) found.add(id);
+  }
+  return [...found].sort();
+}
 
 /** A bag-of-words vector, as the stubbed provider embeds: texts that share a word point the same way. */
 function wordVector(text: string, dim: number): number[] {
@@ -383,6 +396,9 @@ describe.each(STORES)('forgetUser on a souled agent on the GMI runtime with lear
     expect(herMindIds).toHaveLength(2);
     expect(herIds).toContain(told.id);
     expect(heldBy(manager, herMindIds)).toEqual({ cached: [...herMindIds].sort(), nodes: [...herMindIds].sort(), words: true });
+    expect(vectorsAmong(manager, herMindIds)).not.toEqual([]);
+    const hisVectors = vectorsAmong(manager, hisIds);
+    expect(hisVectors).not.toEqual([]);
     expect(await manager.getStore().getByScope('conversation', keyOf('alice'))).not.toEqual([]);
     expect(await archivedAmong(brain, herIds)).toEqual([herMindIds[0]]);
     expect(await graphNodesAmong(brain, [told.id])).toEqual([told.id]);
@@ -397,11 +413,13 @@ describe.each(STORES)('forgetUser on a souled agent on the GMI runtime with lear
     for (const word of ['lark', 'quill']) expect(await fullTextHits(brain, word)).toBe(0);
     // Nothing of hers in the mind: no live trace in its cache, no words in what it keeps, no graph node, no vector.
     expect(heldBy(manager, herIds)).toEqual({ cached: [], nodes: [], words: false });
+    expect(vectorsAmong(manager, herIds)).toEqual([]);
     expect(await manager.getStore().getByScope('conversation', keyOf('alice'))).toEqual([]);
-    // Every row of his stands, with his original and his graph nodes.
+    // Every row of his stands, with his original, his graph nodes and his vectors.
     expect((await rowsUnder(brain, keyOf('bob'))).map((row) => row.id)).toEqual(hisIds);
     expect(await archivedAmong(brain, hisIds)).toEqual([hisIds[0]]);
     expect(heldBy(manager, hisIds).nodes).toEqual([...hisIds].sort());
+    expect(vectorsAmong(manager, hisIds)).toEqual(hisVectors);
     expect(await fullTextHits(brain, 'wren')).toBeGreaterThan(0);
     // The receipt: complete, and the mind's part counts each row of hers it deleted.
     expect(report.complete).toBe(true);
@@ -501,6 +519,7 @@ describe("forgetUser when the mind's delete fails", () => {
     expect(again.parts[1]).toEqual({ part: 'mind', reached: true, deleted: hers.length });
     expect(await rowsUnder(brain, keyOf('alice'))).toEqual([]);
     expect(heldBy(managers()[0], hers)).toEqual({ cached: [], nodes: [], words: false });
+    expect(vectorsAmong(managers()[0], hers)).toEqual([]);
     expect((await rowsUnder(brain, keyOf('bob'))).map((row) => row.id)).toEqual(his);
   });
 });
