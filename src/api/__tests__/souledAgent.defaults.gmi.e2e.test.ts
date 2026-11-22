@@ -10,6 +10,13 @@
  * - An inline soul, and an optional soul that does not load, give a plain agent: it keeps the same rule for the id.
  * - A team a session launches seats its sessions as the session's user and keeps the same rule for the id.
  * - A turn whose tombstone read stalls ends at once when its session closes.
+ * - With cognitive memory on, the mind runs reconsolidation, involuntary recall and temporal gist only where the host
+ *   turns one on, and a `gmi()` on its own keeps every mechanism. A mechanism turned on that has nothing to run it on
+ *   a souled agent is said in one `memory.mechanism_inactive` line at open.
+ * - A turn is stored with a neutral emotional state whatever the mood of the mind; `emotionalStamp: 'mood'` stores
+ *   the mood.
+ * - Cognitive memory with no embedding provider named, and consolidation turned on, do not open, and nothing is
+ *   opened; a named provider is sent the turn's text.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
@@ -24,6 +31,9 @@ import { reply, script, type ProviderScript } from './helpers/stubProviders';
 import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 import { ForgottenLedger } from '../../cognition/memory/suppression/ForgottenLedger';
+import { CognitiveMemoryManager } from '../../cognition/memory/CognitiveMemoryManager';
+import { brainOf } from '../../cognition/memory/io/facade/handedBrain';
+import { conversationScopeKey } from '../../cognition/memory/retrieval/store/conversationScopeKey';
 
 /** The runtime every case runs on. */
 const RUNTIME = 'gmi' as const;
@@ -355,5 +365,268 @@ describe('a souled agent that falls back to a plain agent on the GMI runtime', (
 
     expect(turnCalls(s)).toHaveLength(2);
     for (const call of turnCalls(s)) expect(call.options.userId).toBe('u-42');
+  });
+});
+
+describe('the memory defaults of a souled agent on the GMI runtime', () => {
+  /** Cognitive memory on, embedding through the provider it names. */
+  const EMBEDDING = { embedding: { provider: 'openai' } };
+  /** Plain text replies to spare, each with words of its own. */
+  const texts = (): ProviderScript['replies'] => Array.from({ length: 12 }, (_, i) => reply.text(`Noted ${i}.`));
+
+  /** The embedding provider's script, reached by the OpenAI key the environment holds: every text sent to be embedded. */
+  function embeddingScript(): ProviderScript {
+    const embeddingKey = key();
+    const embeddings = script('openai', embeddingKey, { replies: [] });
+    vi.stubEnv('OPENAI_API_KEY', embeddingKey);
+    return embeddings;
+  }
+
+  /** `souledAgent()` on the runtime over the soul folder `dir`, on a provider script of its own. */
+  function openIn(dir: string, extra: Record<string, unknown>): Promise<SouledAgent> {
+    const apiKey = key();
+    script('openai', apiKey, { whole: true, replies: texts() });
+    return souledAgent({
+      runtime: RUNTIME,
+      provider: 'openai',
+      model: 'stub-model',
+      apiKey,
+      fallbackProviders: [],
+      soul: dir,
+      retention: { traces: 'until-deletion' },
+      tombstoneKey: 'k-souled-defaults-tombstones',
+      ...extra,
+    } as unknown as SouledAgentOptions).then((a) => {
+      opened.push(a);
+      return a;
+    });
+  }
+
+  /** What `souledAgent()` threw for `extra` over `dir`; undefined when it opened. */
+  const refusalOf = (dir: string, extra: Record<string, unknown>): Promise<unknown> =>
+    openIn(dir, extra).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+
+  /** The mechanisms config each cognitive memory manager built in the case was initialised with, in build order. */
+  function mechanismsBuilt(): () => unknown[] {
+    const built = vi.spyOn(CognitiveMemoryManager.prototype, 'initialize');
+    return () => built.mock.calls.map(([config]) => (config as { cognitiveMechanisms?: unknown }).cognitiveMechanisms);
+  }
+
+  /** The emotional state of each live trace stored under one user's key, oldest first. */
+  async function emotionsOf(a: SouledAgent, userId: string): Promise<Array<Record<string, unknown>>> {
+    const brain = brainOf(a.memory!);
+    const rows = await brain.all<{ emotions: string }>(
+      "SELECT emotions FROM memory_traces WHERE brain_id = ? AND deleted = 0 AND scope = 'conversation' AND scope_id = ? ORDER BY created_at, id",
+      [brain.brainId, conversationScopeKey('aria-1', { kind: 'user', id: userId })],
+    );
+    return rows.map((row) => JSON.parse(row.emotions) as Record<string, unknown>);
+  }
+
+  it.each<[string, Record<string, unknown>, Record<string, unknown>]>([
+    [
+      'with nothing set, reconsolidation, involuntary recall and temporal gist are off and the other mechanisms are as given',
+      { memory: EMBEDDING },
+      { reconsolidation: { enabled: false }, involuntaryRecall: { enabled: false }, temporalGist: { enabled: false } },
+    ],
+    [
+      "a host's enabled: true turns one on, and its other settings are kept",
+      {
+        cognition: {
+          memory: EMBEDDING,
+          mechanisms: {
+            reconsolidation: { enabled: true, driftRate: 0.2 },
+            temporalGist: { ageThresholdDays: 7 },
+            retrievalInducedForgetting: { suppressionFactor: 0.3 },
+            emotionRegulation: { enabled: false },
+          },
+        },
+      },
+      {
+        reconsolidation: { enabled: true, driftRate: 0.2 },
+        involuntaryRecall: { enabled: false },
+        temporalGist: { ageThresholdDays: 7, enabled: false },
+        retrievalInducedForgetting: { suppressionFactor: 0.3 },
+        emotionRegulation: { enabled: false },
+      },
+    ],
+    [
+      "the agent's cognitiveMechanisms option is read the same way",
+      { memory: EMBEDDING, cognitiveMechanisms: { involuntaryRecall: { enabled: true, probability: 0.5 } } },
+      { reconsolidation: { enabled: false }, involuntaryRecall: { enabled: true, probability: 0.5 }, temporalGist: { enabled: false } },
+    ],
+  ])('the mechanisms of the mind: %s', async (_case, extra, expected) => {
+    embeddingScript();
+    const built = mechanismsBuilt();
+    const a = await openIn(soulDir(), extra);
+
+    await a.session('s1', { userId: 'u-42' }).send('Hello there.');
+
+    expect(built().length).toBeGreaterThan(0);
+    for (const mechanisms of built()) expect(mechanisms).toEqual(expected);
+  });
+
+  it('the mechanisms of the mind: with the mechanisms off, none is turned on', async () => {
+    embeddingScript();
+    const built = mechanismsBuilt();
+    const a = await openIn(soulDir(), { cognition: { memory: EMBEDDING, mechanisms: false } });
+
+    await a.session('s1', { userId: 'u-42' }).send('Hello there.');
+
+    expect(built().length).toBeGreaterThan(0);
+    for (const mechanisms of built()) expect(mechanisms).toBeUndefined();
+  });
+
+  it('a gmi() on its own keeps every mechanism', async () => {
+    embeddingScript();
+    const built = mechanismsBuilt();
+    const apiKey = key();
+    script('openai', apiKey, { whole: true, replies: texts() });
+    const plain = gmi({ provider: 'openai', model: 'stub-model', apiKey, fallbackProviders: [], instructions: 'Help.', memory: EMBEDDING } as unknown as Parameters<typeof gmi>[0]);
+    try {
+      await plain.session('p1', { userId: 'u-42' }).send('Hello there.');
+
+      // An empty config: each mechanism at its default, which is on.
+      expect(built().length).toBeGreaterThan(0);
+      for (const mechanisms of built()) expect(mechanisms).toEqual({});
+    } finally {
+      await plain.close();
+    }
+  });
+
+  it('a mechanism turned on that nothing runs on a souled agent is said once each at open', async () => {
+    embeddingScript();
+    await openIn(soulDir(), {
+      cognition: {
+        memory: EMBEDDING,
+        mechanisms: {
+          temporalGist: { enabled: true },
+          involuntaryRecall: { enabled: true },
+          personaDrift: { enabled: true },
+          // Reconsolidation runs when it is turned on, so nothing is said of it.
+          reconsolidation: { enabled: true },
+        },
+      },
+    });
+
+    expect(
+      lines('memory.mechanism_inactive')
+        .map((line) => line.mechanism)
+        .sort(),
+    ).toEqual(['involuntaryRecall', 'personaDrift', 'temporalGist']);
+  });
+
+  it('nothing is said of a mechanism the host did not turn on', async () => {
+    embeddingScript();
+    await openIn(soulDir(), { cognition: { memory: EMBEDDING, mechanisms: { temporalGist: { ageThresholdDays: 7 }, personaDrift: { enabled: false } } } });
+
+    expect(lines('memory.mechanism_inactive')).toEqual([]);
+  });
+
+  describe('the emotional state a turn is stored with', () => {
+    /** A soul whose mind starts frustrated. */
+    function frustratedSoul(): string {
+      const dir = soulDir();
+      fs.writeFileSync(path.join(dir, 'SOUL.md'), '---\nname: Aria\nagentId: aria-1\ndefaultMood: frustrated\n---\nYou are Aria.');
+      return dir;
+    }
+
+    it.each<[string, Record<string, unknown>]>([
+      ['with nothing set', {}],
+      ["with emotionalStamp: 'neutral'", { emotionalStamp: 'neutral' }],
+    ])('is neutral whatever the mood of the mind, %s', async (_case, stamp) => {
+      embeddingScript();
+      const a = await openIn(frustratedSoul(), { memory: EMBEDDING, ...stamp });
+
+      const result = await a.session('s1', { userId: 'u-42' }).send('My canary is named LARK-7.');
+      await result.memoryWrite;
+
+      // A neutral state as the store keeps it: no valence or dominance, the middle of the arousal scale, no intensity.
+      const stored = await emotionsOf(a, 'u-42');
+      expect(stored).toHaveLength(2);
+      for (const emotions of stored) expect(emotions).toMatchObject({ valence: 0, arousal: 0.5, dominance: 0, intensity: 0, gmiMood: 'neutral' });
+    });
+
+    it("is the mood of the mind with emotionalStamp: 'mood'", async () => {
+      embeddingScript();
+      const a = await openIn(frustratedSoul(), { memory: EMBEDDING, emotionalStamp: 'mood' });
+
+      const result = await a.session('s1', { userId: 'u-42' }).send('My canary is named LARK-7.');
+      await result.memoryWrite;
+
+      const stored = await emotionsOf(a, 'u-42');
+      expect(stored).toHaveLength(2);
+      for (const emotions of stored) {
+        expect(emotions).toMatchObject({ gmiMood: 'frustrated', dominance: 0.2 });
+        expect(emotions.valence as number).toBeLessThan(0);
+        expect(emotions.arousal as number).toBeCloseTo(0.8, 5);
+      }
+    });
+  });
+
+  describe('the embedding provider of cognitive memory', () => {
+    it.each<[string, Record<string, unknown>]>([
+      ['memory: true', { memory: true }],
+      ['a memory config with no embedding', { memory: { recall: { retrieval: 'hybrid' } } }],
+      ['an embedding that names a model alone', { memory: { embedding: { model: 'text-embedding-3-small' } } }],
+      ['an embedding provider that is blank', { memory: { embedding: { provider: '  ' } } }],
+      ["cognition: 'full'", { cognition: 'full' }],
+      ['a cognition config with memory on', { cognition: { memory: true, mechanisms: false } }],
+    ])('%s does not open, with a key in the environment too, and nothing is opened', async (_case, extra) => {
+      // A key in the environment is what picks the provider for a gmi() on its own: it picks nothing here.
+      const embeddings = embeddingScript();
+      const dir = soulDir();
+
+      const error = await refusalOf(dir, extra);
+
+      expect(error).toBeInstanceOf(TypeError);
+      expect((error as Error).message).toMatch(/memory\.embedding/);
+      expect(fs.existsSync(path.join(dir, 'memory', '.store'))).toBe(false);
+      expect(embeddings.embedCalls).toBe(0);
+    });
+
+    it("a named provider is sent the turn's text", async () => {
+      const embeddings = embeddingScript();
+      const a = await openIn(soulDir(), { memory: EMBEDDING });
+
+      const result = await a.session('s1', { userId: 'u-42' }).send('My canary is named LARK-7.');
+      await result.memoryWrite;
+
+      expect(embeddings.embedded.some((text) => text.includes('LARK-7'))).toBe(true);
+    });
+
+    it.each<[string, Record<string, unknown>]>([
+      ['cognitive memory off', {}],
+      ["cognition: 'full' with memory off", { cognition: 'full', memory: false }],
+    ])('%s opens with no embedding provider named', async (_case, extra) => {
+      const a = await openIn(soulDir(), extra);
+
+      expect(a.memory).toBeDefined();
+    });
+  });
+
+  describe('consolidation', () => {
+    it('turned on does not open, says why, and nothing is opened', async () => {
+      embeddingScript();
+      const dir = soulDir();
+
+      const error = await refusalOf(dir, { memory: { ...EMBEDDING, consolidation: { enabled: true } } });
+
+      expect(error).toBeInstanceOf(TypeError);
+      expect((error as Error).message).toMatch(/memory\.consolidation/);
+      // Why: a cycle can merge two people's traces, and each person is filed under a key of their own.
+      expect((error as Error).message).toMatch(/merge/);
+      expect((error as Error).message).toMatch(/key/);
+      expect(fs.existsSync(path.join(dir, 'memory', '.store'))).toBe(false);
+    });
+
+    it('left off, or set off, opens', async () => {
+      embeddingScript();
+      const a = await openIn(soulDir(), { memory: { ...EMBEDDING, consolidation: { enabled: false } } });
+
+      expect(a.memory).toBeDefined();
+    });
   });
 });
