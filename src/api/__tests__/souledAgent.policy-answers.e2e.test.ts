@@ -21,6 +21,10 @@
  *   person's id to the provider. The host is asked once a turn, for the recall, the turn and both writes, a recall
  *   that resumes after its timeout included. A person forgotten while the host answers is not scored, and a tombstone
  *   ledger that does not answer holds no turn past the hooks' timeout.
+ * - On `runtime: 'gmi'` with cognitive memory on, a minor on a store kept for days and a person who objects to
+ *   profiling are stored with a neutral emotional state under `emotionalStamp: 'mood'` too, are not scored, and what
+ *   a recall of theirs reads keeps its emotional context with reconsolidation on, while the access is counted; a
+ *   minor is compiled no page. Another person on the same agent is stored with the mood, and what they recall drifts.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
@@ -39,6 +43,10 @@ import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegi
 import { clearDefaultProvider, setDefaultProvider } from '../runtime/global-default';
 import { SentimentTracker } from '../../cognition/substrate/SentimentTracker';
 import { ForgottenLedger } from '../../cognition/memory/suppression/ForgottenLedger';
+import { CognitiveMemoryManager } from '../../cognition/memory/CognitiveMemoryManager';
+import { GMI } from '../../cognition/substrate/GMI';
+import type { MemoryTrace } from '../../cognition/memory/core/types';
+import type { MemoryWriteRecord } from '../runtime/memoryWriteRecord';
 
 /** The runtimes every case runs on: the default runtime, and the GMI runtime with cognitive memory off. */
 const RUNTIMES = ['legacy', 'gmi'] as const;
@@ -686,5 +694,167 @@ describe("the turn's answer on the GMI runtime, with sentiment on and cognitive 
     expect(outcome).toMatchObject({ text: 'Noted 0.' });
     expect(analyze).not.toHaveBeenCalled();
     expect(lines('memory.hook_failed').filter((line) => line.hook === 'soulMemory' && line.code === 'MEMORY_HOOK_TIMEOUT')).toHaveLength(1);
+  });
+});
+
+describe('a minor and a person who objects to profiling, on the GMI runtime with cognitive memory on', () => {
+  /** Reconsolidation turned on and set to move what a recall reads all the way to the current mood. */
+  const DRIFTS = { reconsolidation: { enabled: true, driftRate: 1, maxDriftPerTrace: 10 } };
+  /** A neutral emotional state as the store keeps it: no valence or dominance, the middle of the arousal scale. */
+  const NEUTRAL = { valence: 0, arousal: 0.5, dominance: 0, intensity: 0, gmiMood: 'neutral' };
+
+  /**
+   * A souled agent on `runtime: 'gmi'` whose mind starts frustrated, with `emotionalStamp: 'mood'`, embedding through
+   * the OpenAI key the environment holds.
+   */
+  async function open(extra: Record<string, unknown>): Promise<{ a: SouledAgent; s: ProviderScript }> {
+    fs.writeFileSync(path.join(dir, 'SOUL.md'), '---\nname: Aria\nagentId: aria-1\ndefaultMood: frustrated\n---\nYou are Aria.');
+    const embeddingKey = `k-souled-policy-answers-embed-${++n}`;
+    script('openai', embeddingKey, { replies: [] });
+    vi.stubEnv('OPENAI_API_KEY', embeddingKey);
+    const apiKey = `k-souled-policy-answers-${++n}`;
+    const s = script('openai', apiKey, { whole: true, replies: Array.from({ length: 40 }, (_, i) => reply.text(`Noted ${i}.`)) });
+    const a = await souledAgent({
+      runtime: 'gmi',
+      provider: 'openai',
+      model: 'stub-model',
+      apiKey,
+      fallbackProviders: [],
+      soul: dir,
+      tombstoneKey: 'k-souled-policy-answers-tombstones',
+      emotionalStamp: 'mood',
+      ...extra,
+    } as unknown as SouledAgentOptions);
+    opened.push(a);
+    return { a, s };
+  }
+
+  /** The cognitive memory managers built in the case, in build order. */
+  function managersBuilt(): () => CognitiveMemoryManager[] {
+    const built = vi.spyOn(CognitiveMemoryManager.prototype, 'initialize');
+    return () => built.mock.contexts as unknown as CognitiveMemoryManager[];
+  }
+  /** The GMIs built in the case, in build order. */
+  function gmisBuilt(): GMI[] {
+    const built: GMI[] = [];
+    const initialize = GMI.prototype.initialize;
+    vi.spyOn(GMI.prototype, 'initialize').mockImplementation(async function (this: GMI, ...args) {
+      built.push(this);
+      return initialize.apply(this, args);
+    });
+    return built;
+  }
+
+  /** One turn, once its two sides are filed: the ids of the traces it wrote. */
+  async function turn(a: SouledAgent, session: string, userId: string, text: string): Promise<string[]> {
+    const result = (await a.session(session, { userId }).send(text)) as { memoryWrite?: Promise<MemoryWriteRecord> };
+    const record = await result.memoryWrite!;
+    return record.entries.flatMap((entry) => (entry.outcome === 'written' ? [entry.traceId] : []));
+  }
+  /** The traces of `ids` as the mind's manager holds them. */
+  const held = (managers: () => CognitiveMemoryManager[], ids: string[]): MemoryTrace[] =>
+    ids.flatMap((id) => {
+      const trace = managers()
+        .map((manager) => manager.getStore().getTrace(id))
+        .find((found) => found !== undefined);
+      return trace ? [trace] : [];
+    });
+  /** The drift record reconsolidation leaves on a trace it moved; undefined on a trace it never moved. */
+  const driftsOf = (trace: MemoryTrace): unknown =>
+    (trace.structuredData as { mechanismMetadata?: { driftHistory?: unknown } } | undefined)?.mechanismMetadata?.driftHistory;
+  /** The emotional state of every live turn trace the store holds under one key (a page's chunks are not), read once the agent is closed. */
+  const emotionsUnder = (key: string) =>
+    rows<{ emotions: string; tags: string }>(
+      "SELECT emotions, tags FROM memory_traces WHERE scope = 'conversation' AND scope_id = ? AND deleted = 0 ORDER BY created_at, id",
+      [key],
+    )
+      .filter((row) => !(JSON.parse(row.tags) as string[]).includes('wiki'))
+      .map((row) => JSON.parse(row.emotions) as Record<string, unknown>);
+
+  beforeEach(() => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+  });
+
+  it('a minor on a store kept for days is stored neutral, is not scored, does not drift, and is compiled no page', async () => {
+    const analyze = vi.spyOn(SentimentTracker.prototype, 'analyzeTurnSentiment').mockResolvedValue(undefined);
+    const managers = managersBuilt();
+    const { a, s } = await open({
+      retention: { traces: { days: 30 } },
+      cognition: { memory: { embedding: { provider: 'openai' } }, mechanisms: DRIFTS, sentiment: true, metaprompts: false },
+      memoryPolicy: () => ({ longTerm: 'compiled', minor: true }),
+    });
+
+    const first = await turn(a, 's1', 'kid', 'My canary is named LARK-7.');
+    await turn(a, 's1', 'kid', 'What is my canary named? Is it LARK-7?');
+
+    expect(first).toHaveLength(2);
+    expect(analyze).not.toHaveBeenCalled();
+    // The second turn recalled the first turn's traces: the access is counted, and nothing of them moved.
+    const recalled = held(managers, first);
+    expect(recalled).toHaveLength(2);
+    expect(recalled.some((trace) => trace.accessCount > 0)).toBe(true);
+    for (const trace of recalled) {
+      expect(trace.emotionalContext).toMatchObject(NEUTRAL);
+      expect(driftsOf(trace)).toBeUndefined();
+    }
+
+    opened.splice(opened.indexOf(a), 1);
+    await a.close();
+    const stored = emotionsUnder(userKey('kid'));
+    expect(stored).toHaveLength(4);
+    for (const emotions of stored) expect(emotions).toMatchObject(NEUTRAL);
+    // No page: no target is named for minors.
+    expect(pagesUnder(userKey('kid'))).toEqual([]);
+    expect(s.seen.filter(isMerge)).toEqual([]);
+    expect(lines('memory.compile_skipped').filter((line) => line.reason === 'minor_no_compile').length).toBeGreaterThan(0);
+  });
+
+  it("a person who objects to profiling, under emotionalStamp: 'mood' and cognition: 'full', is stored neutral, is not scored, and does not drift; another person is", async () => {
+    const analyze = vi.spyOn(SentimentTracker.prototype, 'analyzeTurnSentiment');
+    const managers = managersBuilt();
+    const gmis = gmisBuilt();
+    const { a } = await open({
+      retention: { traces: 'until-deletion' },
+      cognition: 'full',
+      memory: { embedding: { provider: 'openai' } },
+      cognitiveMechanisms: DRIFTS,
+      memoryPolicy: (context: { userId: string }) => (context.userId === 'alice' ? { longTerm: 'compiled', profiling: 'off' } : { longTerm: 'compiled' }),
+    });
+
+    const hers = await turn(a, 'sA', 'alice', 'My canary is named LARK-7 and I had a rough day.');
+    await turn(a, 'sA', 'alice', 'What is my canary named? Is it LARK-7?');
+
+    expect(hers).toHaveLength(2);
+    // No sentiment run for her, and her session keeps no trend.
+    expect(analyze).not.toHaveBeenCalled();
+    expect(gmis).toHaveLength(1);
+    expect(await gmis[0].getWorkingMemorySnapshot()).not.toHaveProperty('gmi_sentiment_history');
+    // Her second turn recalled her first: the access is counted, and the emotional context of what it read is as stored.
+    const recalled = held(managers, hers);
+    expect(recalled).toHaveLength(2);
+    expect(recalled.some((trace) => trace.accessCount > 0)).toBe(true);
+    for (const trace of recalled) {
+      expect(trace.emotionalContext).toMatchObject(NEUTRAL);
+      expect(driftsOf(trace)).toBeUndefined();
+    }
+
+    // Another person on the same agent, who does not object: stored with the mood, scored, and what a recall reads drifts.
+    const his = await turn(a, 'sB', 'bob', 'My parrot is named KITE-9.');
+    await turn(a, 'sB', 'bob', 'What is my parrot named? Is it KITE-9?');
+
+    expect(analyze).toHaveBeenCalled();
+    const read = held(managers, his);
+    expect(read).toHaveLength(2);
+    expect(read.some((trace) => Array.isArray(driftsOf(trace)) && (driftsOf(trace) as unknown[]).length > 0)).toBe(true);
+
+    opened.splice(opened.indexOf(a), 1);
+    await a.close();
+    const stored = emotionsUnder(userKey('alice'));
+    expect(stored).toHaveLength(4);
+    for (const emotions of stored) expect(emotions).toMatchObject(NEUTRAL);
+    const bobs = emotionsUnder(userKey('bob'));
+    expect(bobs).toHaveLength(4);
+    for (const emotions of bobs) expect(emotions).toMatchObject({ gmiMood: 'frustrated' });
   });
 });
