@@ -32,6 +32,7 @@ import { createAgentCognitiveMemory, type AgentCognitiveMemory } from '../../../
 import type { MemoryTrace } from '../../memory/core/types.js';
 import type { MemoryWriteEntry, MemoryWriteRecord } from '../../../api/runtime/memoryWriteRecord.js';
 import { CognitiveMemoryBridge } from '../CognitiveMemoryBridge';
+import type { SoulFiling, SoulTurnMemory } from '../soulTurnMemory';
 import { GMI } from '../GMI';
 import { GMIInteractionType, GMIMood, type GMITurnInput } from '../IGMI';
 import { createScriptedGmi, runTurn, scriptedProvider, textReply, textTurn } from './helpers/scriptedGmi';
@@ -141,8 +142,6 @@ function bridgeOver(manager: AgentCognitiveMemory['manager'], mood: GMIMood = GM
   return { bridge, entries };
 }
 
-type Writer = (filing: unknown) => Promise<MemoryTrace>;
-type Undo = (trace: MemoryTrace) => Promise<void>;
 
 /**
  * A view of the soul's rules for user `id`: its `file` hands the writer `transform(content)` with the given stamp and
@@ -159,10 +158,10 @@ function seamFor(
   } = {},
 ) {
   const calls: Array<{ role: string; content: string; done: Promise<MemoryWriteEntry> }> = [];
-  const seam = {
-    scope: { scope: 'conversation' as const, scopeId: keyOf(id) },
+  const seam: SoulTurnMemory & { scope: NonNullable<SoulTurnMemory['scope']> } = {
+    scope: { scope: 'conversation', scopeId: keyOf(id) },
     begin: async () => ({ recall: true, reconsolidation: true, sentiment: true }),
-    file: (role: 'user' | 'assistant', content: string, write: Writer, _undo: Undo): Promise<MemoryWriteEntry> => {
+    file: (role, content, write: (filing: SoulFiling) => Promise<MemoryTrace>): Promise<MemoryWriteEntry> => {
       const done = (async (): Promise<MemoryWriteEntry> => {
         if (options.hold) await options.hold;
         if (options.skip === role) return { role, outcome: 'skipped', reason: 'screened' };
@@ -182,13 +181,13 @@ function seamFor(
 }
 
 /** The bridge's turn sync, with the view as its fourth argument. */
-const syncWith = (bridge: CognitiveMemoryBridge, turnInput: GMITurnInput, reply: string, soul: unknown): Promise<unknown> =>
-  (bridge.syncForTurn as (...args: unknown[]) => Promise<unknown>).call(bridge, turnInput, reply, undefined, soul);
+const syncWith = (bridge: CognitiveMemoryBridge, turnInput: GMITurnInput, replyText: string, soul: SoulTurnMemory) =>
+  bridge.syncForTurn(turnInput, replyText, undefined, soul);
 
 /** The record a sync resolved with, read through its `write`. */
-function writeOf(synced: unknown): Promise<MemoryWriteRecord> {
+function writeOf(synced: { write: Promise<MemoryWriteRecord> } | undefined): Promise<MemoryWriteRecord> {
   expect(synced).toMatchObject({ write: expect.any(Promise) });
-  return (synced as { write: Promise<MemoryWriteRecord> }).write;
+  return synced!.write;
 }
 
 const userTurn = (text: string): GMITurnInput => ({
@@ -217,11 +216,11 @@ describe('a turn through the soul of its agent', () => {
     const { manager } = await managerOn(brain);
     const { bridge } = bridgeOver(manager);
     const { seam } = seamFor('alice');
-    expect(bridge.buildRetrievalScopes({ sessionId: 's-1', conversationId: 'c-1', organizationId: 'o-1', soul: seam } as never)).toEqual([seam.scope]);
+    expect(bridge.buildRetrievalScopes({ sessionId: 's-1', conversationId: 'c-1', organizationId: 'o-1', soul: seam })).toEqual([seam.scope]);
     const learning = {
-      scopes: { learner: 'bound', mode: 'on', userScopeId: 'alice', personaScopeId: `alice::${AGENT}`, namespace: '' },
+      scopes: { learner: 'bound' as const, mode: 'on' as const, userScopeId: 'alice', personaScopeId: `alice::${AGENT}`, namespace: '' },
     };
-    expect(bridge.buildRetrievalScopes({ sessionId: 's-1', learning, soul: seam } as never)).toEqual([seam.scope]);
+    expect(bridge.buildRetrievalScopes({ sessionId: 's-1', learning, soul: seam })).toEqual([seam.scope]);
   });
 
   it('a turn files through the seam', async () => {
@@ -229,7 +228,7 @@ describe('a turn through the soul of its agent', () => {
     const { manager, sent } = await managerOn(brain);
     const { bridge } = bridgeOver(manager);
     const { seam, calls } = seamFor('alice', { transform: (text) => text.toUpperCase() });
-    await bridge.encode('hello', { ...encodeUser, soul: seam } as never);
+    await bridge.encode('hello', { ...encodeUser, soul: seam });
     expect(calls.map((call) => [call.role, call.content])).toEqual([['user', 'hello']]);
 
     const rows = await rowsOf(brain);
@@ -286,13 +285,13 @@ describe('a turn through the soul of its agent', () => {
     const { bridge } = bridgeOver(manager, GMIMood.FRUSTRATED);
     const encode = vi.spyOn(manager, 'encode');
 
-    await bridge.encode('My tea went cold.', { ...encodeUser, soul: seamFor('alice', { stamp: 'neutral' }).seam } as never);
+    await bridge.encode('My tea went cold.', { ...encodeUser, soul: seamFor('alice', { stamp: 'neutral' }).seam });
     expect(encode).toHaveBeenCalledTimes(1);
     expect(encode.mock.calls[0][1]).toEqual(NEUTRAL_PAD);
     expect(encode.mock.calls[0][2]).toBe(GMIMood.NEUTRAL);
     expect(encode.mock.calls[0][3]).toMatchObject({ scope: 'conversation', scopeId: keyOf('alice'), turnUserId: 'alice' });
 
-    await bridge.encode('The kettle broke too.', { ...encodeUser, soul: seamFor('alice', { stamp: 'mood' }).seam } as never);
+    await bridge.encode('The kettle broke too.', { ...encodeUser, soul: seamFor('alice', { stamp: 'mood' }).seam });
     expect(encode).toHaveBeenCalledTimes(2);
     expect(encode.mock.calls[1][1]).toEqual(FRUSTRATED_PAD);
     expect(encode.mock.calls[1][2]).toBe(GMIMood.FRUSTRATED);
@@ -314,9 +313,9 @@ describe('a turn through the soul of its agent', () => {
     const { manager } = await managerOn(brain, 'all');
     const { bridge } = bridgeOver(manager);
     const { seam, calls } = seamFor('alice', { transform: (text) => text.toUpperCase() });
-    expect(bridge.buildRetrievalScopes({ sessionId: 's-1', soul: seam } as never)).toContainEqual({ scope: 'user', scopeId: 'alice' });
+    expect(bridge.buildRetrievalScopes({ sessionId: 's-1', soul: seam })).toContainEqual({ scope: 'user', scopeId: 'alice' });
 
-    await bridge.encode('hello', { ...encodeUser, soul: seam } as never);
+    await bridge.encode('hello', { ...encodeUser, soul: seam });
     expect(calls).toEqual([]);
     const rows = await rowsOf(brain);
     expect(rows).toHaveLength(1);
@@ -347,8 +346,9 @@ describe("a GMI on the mind's manager", () => {
     const { gmi } = await createScriptedGmi({ provider, config: { cognitiveMemory: manager } });
     const { seam, calls } = seamFor('alice');
 
-    const { output } = await runTurn(gmi, textTurn('t1', 'I like green tea.', { soulMemory: seam } as never));
-    const record = await (output as unknown as { memoryWrite: Promise<MemoryWriteRecord> }).memoryWrite;
+    const { output } = await runTurn(gmi, textTurn('t1', 'I like green tea.', { soulMemory: seam }));
+    expect(output.memoryWrite).toBeInstanceOf(Promise);
+    const record = await output.memoryWrite!;
     expect(record.entries.map((entry) => [entry.role, entry.outcome])).toEqual([
       ['user', 'written'],
       ['assistant', 'written'],
@@ -395,7 +395,7 @@ describe("a souled agent's view of a turn", () => {
     opened.push(a);
 
     // The view the agent hands its turn.
-    const seams: unknown[] = [];
+    const seams: SoulTurnMemory[] = [];
     const runTurnStream = GMI.prototype.processTurnStream;
     vi.spyOn(GMI.prototype, 'processTurnStream').mockImplementation(function (this: GMI, turnInput: GMITurnInput) {
       if (turnInput.metadata?.soulMemory) seams.push(turnInput.metadata.soulMemory);
@@ -403,7 +403,7 @@ describe("a souled agent's view of a turn", () => {
     });
     await a.session('s1', { userId: 'alice' }).send('My cat is Tom.');
     expect(seams).toHaveLength(1);
-    const seam = seams[0] as { scope?: { scope: string; scopeId: string } };
+    const seam = seams[0];
     expect(seam.scope).toEqual({ scope: 'conversation', scopeId: keyOf('alice') });
 
     // The mind's manager on the agent's own store.
