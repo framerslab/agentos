@@ -274,13 +274,16 @@ async function bothSidesUnderOneKey(store: Store): Promise<{ facade: Facade; sou
   const A = keyOf('alice');
   const soul = await memory.remember('Alice keeps bees on the roof.', { scope: 'conversation', scopeId: A });
   const other = await memory.remember('Alice sells the bees honey at the market.', { scope: 'conversation', scopeId: A });
+  // Metadata cut short after the key's name, so its text holds the key and is not JSON: on SQLite the row reads as
+  // naming no filer, and neither a recall nor a write of the vector index fails on it. Remembered before any row's
+  // metadata is broken, since remember's own read of the scope's metadata needs JSON.
+  const cut = store === 'sqlite'
+    ? await memory.remember('Alice wraps the bees for winter.', { scope: 'conversation', scopeId: A })
+    : undefined;
   // Another writer's metadata that is not JSON: the soul's side reads its row, and the read does not fail on it.
   await brain.run('UPDATE memory_traces SET metadata = ? WHERE brain_id = ? AND id = ?', ['{not json', brain.brainId, other.id]);
   const soulIds = [soul.id, other.id];
-  if (store === 'sqlite') {
-    // Metadata cut short after the key's name, so its text holds the key and is not JSON: on SQLite the row reads as
-    // naming no filer, and neither a recall nor a write of the vector index fails on it.
-    const cut = await memory.remember('Alice wraps the bees for winter.', { scope: 'conversation', scopeId: A });
+  if (cut) {
     await brain.run('UPDATE memory_traces SET metadata = ? WHERE brain_id = ? AND id = ?', ['{"filedBy":', brain.brainId, cut.id]);
     soulIds.push(cut.id);
   }
