@@ -160,6 +160,17 @@ const rowsOf = (brain: Brain): Promise<Row[]> =>
 const rowsUnder = async (brain: Brain, key: string): Promise<Row[]> => (await rowsOf(brain)).filter((row) => row.scope === 'conversation' && row.scope_id === key);
 /** A row's metadata, read as the store wrote it. */
 const metaOf = (row: Row): Record<string, unknown> => JSON.parse(row.metadata || '{}') as Record<string, unknown>;
+/**
+ * A row without the record of its reads: the store's own recall writes each read of a row it returns on that row (its
+ * strength, and the decay state in its metadata), and nothing else of it.
+ */
+function apartFromReads(row: Row): Omit<Row, 'strength' | 'metadata'> & { metadata: Record<string, unknown> } {
+  const { strength: _strength, metadata: _metadata, ...rest } = row;
+  const { decay: _decay, ...metadata } = metaOf(row);
+  return { ...rest, metadata };
+}
+/** How many reads a row's own record holds. */
+const readsOf = (row: Row): number => (metaOf(row).decay as { accessCount?: number } | undefined)?.accessCount ?? 0;
 const storeBrain = (a: SouledAgent): Brain => brainOf(a.memory!);
 
 /** The promise of a turn's write record, as the turn's result carries it. */
@@ -377,15 +388,19 @@ describe('one memory for a souled agent on the GMI runtime', () => {
     const a = await open({}, [reply.text('Quill, noted.'), ...spare()]);
     const brain = storeBrain(a);
     const planted = await a.memory!.remember('Alice keeps a ferret named Quill.', { type: 'episodic', scope: 'conversation', scopeId: keyOf('alice') });
-    const rowBefore = (await rowsOf(brain)).find((row) => row.id === planted.id);
+    const rowBefore = (await rowsOf(brain)).find((row) => row.id === planted.id)!;
 
     await writeOf(await a.session('s1', { userId: 'alice' }).send('Tell me about my ferret Quill.'));
 
     expect(providerBlockOf(lastCall())).toContain('Alice keeps a ferret named Quill.');
     expect(mindBlockOf(lastCall())).not.toContain('Alice keeps a ferret named Quill.');
     expect(managers().at(-1)!.getStore().listTraces().map((trace) => trace.id)).not.toContain(planted.id);
-    const rowAfter = (await rowsOf(brain)).find((row) => row.id === planted.id);
-    expect(rowAfter).toEqual(rowBefore);
+    const rowAfter = (await rowsOf(brain)).find((row) => row.id === planted.id)!;
+    // The row is as it was planted, with no mark of the mind: all the turn wrote on it is the provider's one read.
+    expect(apartFromReads(rowAfter)).toEqual(apartFromReads(rowBefore));
+    expect(metaOf(rowAfter)).not.toHaveProperty('filedBy');
+    expect(readsOf(rowBefore)).toBe(0);
+    expect(readsOf(rowAfter)).toBe(1);
   });
 
   it("a person's first turn loads their rows alone", async () => {
@@ -425,7 +440,10 @@ describe('one memory for a souled agent on the GMI runtime', () => {
 
     expect(providerBlockOf(lastCall())).toContain('Zorblat opens at nine.');
     expect(result.memoryWrite).toBeUndefined();
-    expect(await rowsOf(brain)).toEqual(before);
+    // No row is added, and none is rewritten: the call leaves its read of the page on the page's row, and no more.
+    const after = await rowsOf(brain);
+    expect(after.map(apartFromReads)).toEqual(before.map(apartFromReads));
+    expect(after.map((row) => metaOf(row).filedBy)).toEqual(before.map(() => undefined));
   });
 
   it('an embedding model of another vector size serves the next agent, and the old rows stay out of its index', async () => {
