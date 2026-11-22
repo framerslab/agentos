@@ -1568,6 +1568,23 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     mindLoads.set(session, loaded);
   };
   /**
+   * Names a trace the soul's mind stored under `scopeId` for the key's next compile, when the trace's time is at or
+   * before the key's compile watermark (`compiled_at`): a clock set back stamps a trace at a time a compile has read
+   * past, and an incremental compile reads only the traces newer than its watermark. The facade's own writes stamp a
+   * trace after the last compile read for the same reason; the mind's are stamped by the clock.
+   */
+  const namedForNextCompile = async (scopeId: string, traceId: string): Promise<void> => {
+    const row = await soulBrain.get<{ compiled_at: number | string | null; created_at: number | string }>(
+      `SELECT s.compiled_at AS compiled_at, t.created_at AS created_at
+         FROM memory_scopes s
+         JOIN memory_traces t ON t.brain_id = s.brain_id AND t.scope = s.scope AND t.scope_id = s.scope_id
+        WHERE s.brain_id = ? AND s.scope = ? AND s.scope_id = ? AND t.id = ?`,
+      [soulBrain.brainId, 'conversation', scopeId, traceId],
+    );
+    if (!row || row.compiled_at === null || row.compiled_at === undefined) return;
+    if (Number(row.created_at) <= Number(row.compiled_at)) await memory.addRebuildSources(scopeId, [traceId]);
+  };
+  /**
    * One session turn's view of the memory rules, for the GMI that serves it on `runtime: 'gmi'`: the subject's key, and
    * the turn's decision, which its recall may have opened and its two writes share. A turn with no subject has none. A
    * subject whose id no key can be built from has no key and no policy to ask: its view has no scope and allows
@@ -1578,8 +1595,10 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
    * subject's chain, so close() waits for it and no compile, deletion or sweep of the subject runs beside it. The
    * mind's writer is handed the text the screen kept, a neutral stamp, and the filing that marks the row as the mind's
    * with its speaker and its subject, the subject whose key the view names; the key's registry row is written before
-   * the trace and again after it, and `agent.close()` waits for the filing before the mind's manager shuts down. A
-   * throw in the write is counted as the mind's own failure. Its `begin()` loads the subject's rows into the mind as the
+   * the trace and again after it, a trace stamped at or before the key's compile watermark is named for its next compile
+   * ({@link namedForNextCompile}), and `agent.close()` waits for the filing before the mind's manager shuts down. A
+   * throw in the write is counted as the mind's own failure; one once the trace is stored is counted the same way and
+   * leaves the side written. Its `begin()` loads the subject's rows into the mind as the
    * first turn of a session opening that recalls begins ({@link loadForSession}).
    */
   const soulTurnOf = (context: MemoryHookContext): SoulTurnMemory | undefined => {
@@ -1617,7 +1636,14 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
                   filing: { filedBy: 'mind', speaker: role, subject: { ...filedFor } },
                   ...(subject.kind === 'user' ? { turnUserId: subject.id } : {}),
                 });
-                await ensureScopeRow(soulBrain, soulBrain.brainId, scopeId, Date.now());
+                // The trace is stored: what follows keeps it within reach, and a failure of it is counted as the mind's
+                // and never undoes the write, so the tombstone is still read again once the trace is stored.
+                try {
+                  await ensureScopeRow(soulBrain, soulBrain.brainId, scopeId, Date.now());
+                  await namedForNextCompile(scopeId, trace.id);
+                } catch (err) {
+                  reportMindWriteFailure(mindFailures, err);
+                }
                 return trace;
               },
               undo,
