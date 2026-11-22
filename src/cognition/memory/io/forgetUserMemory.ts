@@ -121,9 +121,10 @@ export interface ForgetUserMemoryOptions {
   /**
    * The mind of a souled agent on `runtime: 'gmi'` with cognitive memory on, which files into this store: each of the
    * subject's conversation keys, and each trace that names the user under another scope, is deleted through it first,
-   * after the document chunks its rows were filed from, and then by the store's own pass, which reaches what the store
-   * keeps of each row by its id and what the key still holds. A key the mind fails to delete is left as it was, its
-   * traces, pages and registry row, so the deletion made again finds it; the report's `mind` part is then missed.
+   * after the document chunks its rows were filed from and each trace's knowledge-graph copy and memory-graph node, and
+   * then by the store's own pass, which reaches each row's vector and what the key still holds. A key the mind fails to
+   * delete keeps what the mind did not delete of it, its traces, pages and registry row, so the deletion made again
+   * finds it; the report's `mind` part is then missed.
    * The report's stores name it as `cognitive memory`. Unset: the part is reached with 0.
    *
    * @internal
@@ -181,6 +182,16 @@ export async function deleteScopeWithDocuments(memory: Memory, scope: string, sc
   return deleted + (await memory.deleteScope(scope, scopeId)).deleted;
 }
 
+/**
+ * What the store finds of each trace through its row alone, deleted before a mind deletes the rows: the document chunks
+ * the traces were filed from, with their text, and each trace's knowledge-graph copy, with its text, and memory-graph
+ * node. Once a row is gone, nothing finds them by the trace again.
+ */
+async function deleteWhatRowsName(memory: Memory, ids: readonly string[]): Promise<void> {
+  await memory.deleteDocumentChunksOf(ids);
+  await memory.deleteGraphRecordsOf(ids);
+}
+
 /** What a deletion's mind part did: the rows the mind deleted, and the first failure of its deletes. */
 interface MindTally {
   deleted: number;
@@ -188,13 +199,14 @@ interface MindTally {
 }
 
 /**
- * Deletes named traces for good: with a mind, the document chunks their rows were filed from first (a row the mind
- * deletes lets go of its chunk), then the mind's delete, which takes the rows with what the mind keeps of each; then
- * the store's own delete, which reaches what the store keeps of each trace by its id (its memory-graph node, its
- * knowledge-graph copy, its vector) and any row the mind left. A mind whose delete fails leaves the traces as they
- * were, for the deletion made again, and its failure is counted.
+ * Deletes named traces for good: with a mind, first what the store finds by each row (the document chunks the rows
+ * were filed from, and each trace's knowledge-graph copy and memory-graph node), while the rows still name them; then
+ * the mind's delete, which takes the rows with what the mind keeps of each; then the store's own delete, which reaches
+ * the trace's vector and any row the mind left. A mind whose delete fails leaves the traces it did not delete, for the
+ * deletion made again, and its failure is counted.
  *
  * @returns How many rows the store's own delete took.
+ * @throws When the store's graph cannot delete the copies: before the mind is asked, so every row stays.
  */
 async function deleteTracesThroughMind(
   memory: Memory,
@@ -204,13 +216,15 @@ async function deleteTracesThroughMind(
 ): Promise<number> {
   if (ids.length === 0) return 0;
   if (mind) {
-    await memory.deleteDocumentChunksOf(ids);
+    await deleteWhatRowsName(memory, ids);
     try {
       const { deleted } = await mind.deleteTraces(ids);
       tally.deleted += deleted;
       if (deleted > 0) memory.markErasureOwed();
     } catch (error) {
       tally.failure ??= messageOf(error);
+      // A delete that failed part way may have deleted rows: their words leave the indexes with this deletion's rebuild.
+      memory.markErasureOwed();
       return 0;
     }
   }
@@ -376,16 +390,20 @@ export async function forgetUserMemory(options: ForgetUserMemoryOptions): Promis
           conversation += await deleteScopeWithDocuments(memory, CONVERSATION_SCOPE, key);
           continue;
         }
-        // The key's rows, read before the mind deletes them: the document chunks they were filed from go first, while
-        // the rows still name them, and the store's own pass then reaches what it keeps of each row by its id.
+        // The key's rows, read before the mind deletes them: the document chunks they were filed from and their graph
+        // records go first, while the rows still name them, and the store's own pass then reaches what it keeps of
+        // each row by its id.
         const ids = await memory.tracesStoredBefore(CONVERSATION_SCOPE, key, Number.MAX_SAFE_INTEGER);
-        await memory.deleteDocumentChunksOf(ids);
+        await deleteWhatRowsName(memory, ids);
         try {
           const { deleted } = await mind.deleteKey(key);
           mindTally.deleted += deleted;
           if (deleted > 0) memory.markErasureOwed();
         } catch (error) {
           mindTally.failure ??= messageOf(error);
+          // A delete that failed part way may have deleted rows: their words leave the indexes with this deletion's
+          // rebuild.
+          memory.markErasureOwed();
           kept.add(key);
           continue;
         }

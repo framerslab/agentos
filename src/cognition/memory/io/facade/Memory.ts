@@ -1457,10 +1457,36 @@ export class Memory {
   }
 
   /**
+   * Deletes what this facade's graphs keep of the given traces by their ids, and leaves the traces' rows: each trace's
+   * knowledge-graph copy, with its text, and its memory-graph node with the node's edges, as {@link deleteTraces} does
+   * around a trace's row. A souled agent's deletion calls it before its mind deletes the traces' rows: once a row is
+   * gone, nothing finds the trace's copy or node by its id again.
+   *
+   * @throws When the knowledge graph cannot delete the copies: no row has been deleted, so the deletion made again finds
+   *   the traces.
+   * @internal
+   */
+  async deleteGraphRecordsOf(traceIds: readonly string[]): Promise<void> {
+    await this._initPromise;
+    const ids = [...new Set(traceIds)];
+    if (ids.length === 0) return;
+    await this._knowledgeGraph.deleteMemories({ traceIds: ids });
+    for (const id of ids) {
+      try {
+        await this._memoryGraph.removeNode(id);
+      } catch {
+        // As in deleteTraces: a node whose delete fails stays, holding no words of the trace, and its delete is tried
+        // again there.
+      }
+    }
+  }
+
+  /**
    * Records that rows of this facade's Brain were deleted for good by another writer in this process (a souled
-   * agent's mind, whose manager deletes the rows itself), as each of this facade's own deletes is recorded: the
-   * write-ahead log is owed a checkpoint, the full-text index on SQLite a rebuild, and the vector index a rewrite, which
-   * a person's deletion runs and {@link finishErasure} runs again where one failed.
+   * agent's mind, whose manager deletes the rows itself), or may have been by one that failed part way, as each of
+   * this facade's own deletes is recorded: the write-ahead log is owed a checkpoint, the full-text index on SQLite a
+   * rebuild, and the vector index a rewrite, which a person's deletion runs and {@link finishErasure} runs again where
+   * one failed.
    *
    * @internal
    */
