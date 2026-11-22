@@ -113,7 +113,7 @@ export interface MemoryConfig {
    * default embedding model. Anthropic, Groq, Together AI, xAI, MiniMax and the Claude Code and
    * Gemini CLIs have no embedding models in agentos. `dimension` is required for a model whose
    * dimension agentos does not know. `souledAgent()` takes no default on that path: it does not
-   * open unless `provider` is named.
+   * open unless `provider` is named, nor with a `model` whose `provider:` prefix names another provider.
    */
   embedding?: { provider: string; model?: string; dimension?: number };
   /**

@@ -100,7 +100,7 @@ import { shareRouteObserver } from './runtime/routeObserver.js';
 import { assertBigintReadsAsNumbers, embeddingRouteOf } from './runtime/agentCognitiveMemory.js';
 import { serializeTransactionsOn } from '../cognition/memory/retrieval/store/adapterTransactionLock.js';
 import { soulLog } from '../cognition/substrate/personas/soulLog.js';
-import { resolveModelOption, resolveProviderRoute } from './model.js';
+import { resolveModelOption, resolveProviderRoute, routedProviderOf } from './model.js';
 import type { AgentOSUsageLedgerOptions } from './runtime/usageLedger.js';
 
 /** One of a deletion's four parts, as its report lists it. */
@@ -474,6 +474,9 @@ function cognitiveMemoryOf(opts: CognitionInputs): boolean {
  * - `memory.embedding.provider` must be a non-blank string. A memory that names none picks its provider from the
  *   default provider or the environment when it is built, so a person's words would go to a recipient the host never
  *   named.
+ * - `memory.embedding.model` must not carry another provider's prefix (`'openai:text-embedding-3-small'` under
+ *   `provider: 'gemini'`): a known `provider:` prefix wins over `provider` when the model is resolved, so the words
+ *   would go to the prefix's provider. A prefix that repeats the provider is accepted.
  * - `memory.consolidation.enabled` must not be `true`: a consolidation cycle can merge two people's traces into one,
  *   and a souled agent files each person's memory under a key of their own.
  *
@@ -486,6 +489,13 @@ function assertSoulMindMemory(memory: Exclude<ResolvedCognition['memory'], false
   if (typeof provider !== 'string' || provider.trim() === '') {
     throw new TypeError(
       "souledAgent: cognitive memory on runtime: 'gmi' needs memory.embedding.provider, the provider that embeds what people say (memory: { embedding: { provider: 'openai' } }, or a local one such as 'ollama'); a souled agent picks none from the default provider or the environment, so a person's words go only where you named",
+    );
+  }
+  const model: unknown = memory.embedding?.model;
+  const routed = routedProviderOf({ provider, model: typeof model === 'string' ? model : undefined });
+  if (routed !== provider) {
+    throw new TypeError(
+      `souledAgent: memory.embedding.model names the provider '${String(routed)}' by its prefix, and memory.embedding.provider is '${provider}'; a souled agent embeds what people say only with the provider memory.embedding.provider names, so drop the prefix or name that provider`,
     );
   }
   if (memory.consolidation?.enabled === true) {
@@ -871,7 +881,9 @@ export interface SouledAgentOptions extends AgentOptions {
    *   change that mood, so a stored mood can follow how a conversation went. An account whose `memoryPolicy` answer
    *   holds `minor: true` or `profiling: 'off'` is stored neutral under this setting too.
    *
-   * The default runtime's store keeps no emotional state of anyone, with or without it.
+   * The default runtime's store keeps no emotional state of anyone, with or without it. A plain agent (an inline
+   * soul, or an optional soul that did not load) has no store, and its GMI stamps its own mood on what its cognitive
+   * memory keeps, as `gmi()` does, with or without it.
    *
    * @default 'neutral'
    */
@@ -1032,15 +1044,17 @@ export type SouledAgent = Agent & {
  * objects to profiling, whose policy hook failed, whose subject is forgotten, or whose user id no memory key can be
  * built from, or whose tombstone read does not answer within the memory hooks' timeout, is not scored for sentiment.
  *
- * With `runtime: 'gmi'` and cognitive memory on, the agent's mind runs on these defaults. `memory.embedding.provider`
- * is named by the host: none is picked from the default provider or the environment. Consolidation stays off.
- * Reconsolidation, involuntary recall and temporal gist run only where the host's mechanisms config turns one on
- * (`enabled: true`), and every other mechanism as the config gives it; a `temporalGist`, `involuntaryRecall` or
- * `personaDrift` turned on writes one `memory.mechanism_inactive` line as the agent is built, since nothing runs it
- * on such an agent. Each side of a turn is stored with a neutral emotional state unless
- * {@link SouledAgentOptions.emotionalStamp} is `'mood'`. A minor's turns, and those of a person who objects to
- * profiling, are stored neutral either way, and what they recall keeps its emotional context with reconsolidation on,
- * while the access is counted.
+ * With `runtime: 'gmi'` and cognitive memory on, `memory.embedding.provider` is named by the host: none is picked from
+ * the default provider or the environment, and a model whose `provider:` prefix names another provider is refused.
+ * Consolidation stays off. A `temporalGist`, `involuntaryRecall` or `personaDrift` turned on writes one
+ * `memory.mechanism_inactive` line as the agent is built, since nothing runs it on such an agent. Where the soul gives
+ * a store, the agent's mind runs on these defaults too: reconsolidation, involuntary recall and temporal gist run only
+ * where the host's mechanisms config turns one on (`enabled: true`), and every other mechanism as the config gives it.
+ * Each side of a turn is stored with a neutral emotional state unless {@link SouledAgentOptions.emotionalStamp} is
+ * `'mood'`. A minor's turns, and those of a person who objects to profiling, are stored neutral either way, and what
+ * they recall keeps its emotional context with reconsolidation on, while the access is counted. An inline soul, and an
+ * optional soul that did not load, give a plain agent with no store: its GMI keeps a cognitive memory of its own, as
+ * `gmi()` does, with the mechanisms as the host's config gives them and each trace stamped with the GMI's mood.
  *
  * `close()` first closes the agent (with `runtime: 'gmi'` that stops its session turns), then waits, within one
  * deadline (see {@link SouledAgentOptions.pendingWritesTimeoutMs}), for the turns still running (a `generate()`, a
@@ -1060,9 +1074,9 @@ export type SouledAgent = Agent & {
  *   `tombstoneKey` is unset and the ledger holds no tombstone; the store is closed first. A session that would be the
  *   second subject throws the same from `agent.session()`.
  * @throws TypeError when cognitive memory is on (`runtime: 'gmi'` with `cognition.memory`, the `full` profile, or the
- *   `memory` option) and `memory.embedding.provider` names no provider, or `memory.consolidation.enabled` is `true`
- *   (a consolidation cycle can merge two people's traces, and each person's memory is filed under a key of their own);
- *   nothing is opened.
+ *   `memory` option) and `memory.embedding.provider` names no provider, `memory.embedding.model` carries another
+ *   provider's `provider:` prefix, or `memory.consolidation.enabled` is `true` (a consolidation cycle can merge two
+ *   people's traces, and each person's memory is filed under a key of their own); nothing is opened.
  * @throws TypeError when `memoryPolicy`, `screen` or `sharedMemory` is set on an agent whose cognitive memory is on
  *   (`runtime: 'gmi'` with `cognition.memory`, the `full` profile, or the `memory` option) and the soul gives no store:
  *   an inline `{ content }` soul, which has no workspace folder, or an optional soul that did not load. The plain agent
