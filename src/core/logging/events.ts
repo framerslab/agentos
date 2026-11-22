@@ -181,6 +181,8 @@ export const AGENTOS_EVENTS = {
   'soul.field_ignored': { field: { enum: ['voice', 'avatar'] } },
   // A gmi() agent's learners stay under the slug of its name: the learning store holds learner rows under it and none under the soul's id.
   'soul.id_fallback': { reason: { enum: ['old_slug_learner'] } },
+  // souledAgent() was given an inline { content } soul, which has no workspace folder: it built a plain agent with no wiki memory, no memory index, no read_memory_page tool and no compile on close.
+  'soul.inline_no_wiki': {},
   // A session was opened with an anonymous id as its user id; the session is the memory subject.
   'memory.anonymous_user': { path: { enum: ['plain', 'gmi'] } },
   // A host's memory hook threw, rejected or timed out; the turn went on without it. `soulMemory`: on a souled agent's GMI runtime, a session turn whose subject's id no memory key can be built from, whose tombstone read did not answer within the memory hooks' timeout, whose answer the GMI could not read from the soul's view (the load of the person's rows failed among them), or a write of the soul's mind that threw, the key's registry row or compile mark it writes once its trace is stored among them (on its 1st failure, then its 10th, 100th and so on, as an observe failure is written); the turn went on, its message was not scored for sentiment when its answer was not read, a write that threw before its trace was stored is a failed entry of the turn's write record, and one that threw after is a written one.
