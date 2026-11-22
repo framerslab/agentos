@@ -673,6 +673,17 @@ export class GMI implements IGMI {
         this.workingMemory.set('currentTaskContext', this.currentTaskContext);
       },
       onMemoryImprint: async (content, tags) => {
+        // On a souled agent's mind an imprint is derived from the person's turns: it is filed through the last turn's
+        // view of the soul, as the agent's own words, through the same gate as the turn. The person's write chain can
+        // be held by a compile, so the metaprompt does not wait for it. With no view, the bridge files nothing.
+        const soul = this.turnSoulMemory;
+        const bridge = this.memoryBridge;
+        if (bridge && bridge.usesSoul(soul)) {
+          void bridge
+            .encode(content, { type: 'semantic', sourceType: 'agent_inference', role: 'assistant', tags, soul })
+            .catch(() => undefined);
+          return;
+        }
         // With a learning layer's scope ids, an imprint is filed with the last prepared turn's; before any, nowhere.
         const learning = this.memoryLearningOfLastTurn();
         if (learning === null) {
@@ -2046,9 +2057,11 @@ export class GMI implements IGMI {
         if (isUserInitiatedTurn && currentTurnText) {
           // Recall is limited to this turn's user, session and conversation scopes; with a learning layer's scope ids, to
           // the turn's own.
+          // On a souled agent's mind, to the person's key that the turn's view of the soul names.
           assembledMemoryContext = await this.memoryBridge?.assembleContext(currentTurnText, {
             ...this.memoryTurnScope(turnInput),
             ...(turnLearning.memory ? { learning: turnLearning.memory } : {}),
+            ...(turnSoul ? { soul: turnSoul } : {}),
           }) ?? null;
           const capture = assembledMemoryContext?.capture;
           if (capture) {
@@ -2940,13 +2953,16 @@ export class GMI implements IGMI {
       }
 
       // The exchange is filed under the turn's memory scope session, when it named one, and, with a learning layer's
-      // scope ids, under the turn's own through its guard.
+      // scope ids, under the turn's own through its guard. On a souled agent's mind it is filed through the turn's view
+      // of the soul, and the turn does not wait for it: the output carries the record of the write.
       const memorySessionId = this.turnMemoryScope?.sessionId;
-      await this.memoryBridge?.syncForTurn(
+      const synced = await this.memoryBridge?.syncForTurn(
         memorySessionId ? { ...turnInput, sessionId: memorySessionId } : turnInput,
         aggregatedResponseText,
         turnLearning.memory,
+        turnSoul,
       );
+      const memoryWrite = synced?.write;
 
       await this.performPostTurnIngestion(
         this.stringifyTurnContent(turnInput.content) ?? '',
@@ -2979,6 +2995,7 @@ export class GMI implements IGMI {
         ...(turnMemoryRecall ? { memoryRecall: turnMemoryRecall } : {}),
         ...(turnHistoryOmitted ? { historyOmitted: turnHistoryOmitted } : {}),
         ...(structuredResult ? { structuredOutput: structuredResult } : {}),
+        ...(memoryWrite ? { memoryWrite } : {}),
       };
       return finalTurnOutput; // Return the aggregated output
 
