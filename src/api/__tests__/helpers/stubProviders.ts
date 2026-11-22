@@ -42,6 +42,8 @@ export interface ProviderScript {
    * down does. Unset, every request is embedded.
    */
   failEmbedding?: (text: string) => boolean;
+  /** How many values each embedding holds, as an embedding model of another size answers. Default 1536. */
+  dimension?: number;
   /** How many requests ended because the caller aborted them: held ones (see `reply.hold`) and ones aborted before they started. */
   aborts: number;
   /**
@@ -302,7 +304,7 @@ export function stubProviderClass(providerId: string) {
       if (fail && texts.some(fail)) throw new Error('embedding provider down');
       return {
         object: 'list',
-        data: texts.map((t, index) => ({ object: 'embedding', embedding: hashEmbed(t), index })),
+        data: texts.map((t, index) => ({ object: 'embedding', embedding: hashEmbed(t, this.script!.dimension), index })),
         model: modelId,
         usage: { prompt_tokens: 0, total_tokens: 0 },
       };
