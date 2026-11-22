@@ -41,7 +41,7 @@ import type { AgencyLaunchFrame, ToolCallHook } from './agencyLaunch/types.js';
 import { GmiTurnFolder, streamFromGmiTurn } from './gmiResults.js';
 import { stepToTranscript, transcriptToConversation } from './gmiTranscript.js';
 import { observeWithoutWaiting } from './memoryObserveFailures.js';
-import { memoryWriteRecordOf, type MemoryWriteEntry } from './memoryWriteRecord.js';
+import { emptyMemoryWriteRecord, memoryWriteRecordOf, type MemoryWriteEntry, type MemoryWriteRecord } from './memoryWriteRecord.js';
 import { contentWithTurnText, judgeTurnInput } from './textGuardrails.js';
 import type { SoulTurnMemory } from '../../cognition/substrate/soulTurnMemory.js';
 
@@ -49,6 +49,30 @@ import type { SoulTurnMemory } from '../../cognition/substrate/soulTurnMemory.js
 function abortReasonError(signal: AbortSignal): Error {
   const reason: unknown = signal.reason;
   return reason instanceof Error ? reason : new Error(String(reason));
+}
+
+/**
+ * `work`'s value, or a rejection with the signal's reason once `signal` aborts first: a turn that its session's
+ * `close()` or its caller's signal stops while its memory provider recalls ends then, and the recall, which never
+ * rejects, finishes on its own.
+ */
+function untilStopped<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return work;
+  if (signal.aborted) return Promise.reject(abortReasonError(signal));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(abortReasonError(signal));
+    signal.addEventListener('abort', onAbort, { once: true });
+    work.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
 }
 
 /**
@@ -248,6 +272,14 @@ export interface GmiSessionDeps {
   providerTokenBudget?: number;
   /** False on a seat session: the turn calls no `memoryProvider.observe`, which would file a team turn's text in the agent's long-term store. Default true. */
   observeMemoryProvider?: boolean;
+  /**
+   * True on a session turn of a souled agent whose cognitive memory is the soul's mind: the GMI files the turn, once,
+   * through the turn's view of the soul ({@link soulMemory}), so the turn calls no `memoryProvider.observe`; the
+   * turn's write record is the one the GMI's output carries, or `no_subject` for each side with text when the turn has
+   * no view. The turn's tools are still told its memory subject, which {@link observeMemoryProvider} `false` would take
+   * from them.
+   */
+  mindFilesTurn?: boolean;
   /** Who the turn's memory hooks are told it serves. */
   memoryHook: MemoryHookContext;
   /** The session store, or null when the turn keeps no history. */
@@ -280,7 +312,16 @@ function observeTurn(provider: AgentMemoryProvider, role: 'user' | 'assistant', 
  * memory provider observes its turns.
  */
 function carriesWriteRecord(deps: GmiSessionDeps): boolean {
-  return deps.memoryHook.call === 'session' && deps.observeMemoryProvider !== false && Boolean(deps.opts.memoryProvider?.observe);
+  if (deps.memoryHook.call !== 'session') return false;
+  return deps.mindFilesTurn === true || (deps.observeMemoryProvider !== false && Boolean(deps.opts.memoryProvider?.observe));
+}
+
+/** The record of a turn the soul's mind could file under no key: `no_subject` for each side that had text. */
+function noSubjectRecord(userText: string, reply: string): Promise<MemoryWriteRecord> {
+  const sides: MemoryWriteEntry[] = [];
+  if (userText) sides.push({ role: 'user', outcome: 'skipped', reason: 'no_subject' });
+  if (reply) sides.push({ role: 'assistant', outcome: 'skipped', reason: 'no_subject' });
+  return Promise.resolve({ entries: sides });
 }
 
 /**
@@ -463,13 +504,17 @@ export async function* runGmiTurn(
     const gmi = served.gmi;
     const memoryScope = served.memoryScope ?? deps.memoryScope;
     gmi.replaceHistory?.(transcriptToConversation(priorMessages));
-    // One recall for the turn, within its timeout; a failure or a timeout is a memory.hook_failed line.
+    // One recall for the turn, within its timeout; a failure or a timeout is a memory.hook_failed line. A stop of the
+    // turn meanwhile ends it there.
     const recallProvider = deps.opts.memoryProvider;
     const recalled = deps.useMemoryProviderContext && recallProvider
-      ? await recallForTurn(recallProvider, { userText, context: deps.memoryHook }, {
-          ...deps.opts.memoryProviderOptions,
-          ...(deps.providerTokenBudget !== undefined ? { tokenBudget: deps.providerTokenBudget } : {}),
-        })
+      ? await untilStopped(
+          recallForTurn(recallProvider, { userText, context: deps.memoryHook }, {
+            ...deps.opts.memoryProviderOptions,
+            ...(deps.providerTokenBudget !== undefined ? { tokenBudget: deps.providerTokenBudget } : {}),
+          }),
+          turn.abortSignal,
+        )
       : null;
     const items = memoryItemsOf(recalled);
     const memoryContext = items.length > 0 ? renderMemoryRecallBlock(items) : undefined;
@@ -608,8 +653,11 @@ export async function* runGmiTurn(
         throw refusal;
       }
       writer?.commit();
-      const memoryProvider = deps.observeMemoryProvider === false ? undefined : deps.opts.memoryProvider;
-      if (memoryProvider?.observe) {
+      const memoryProvider = deps.observeMemoryProvider === false || deps.mindFilesTurn ? undefined : deps.opts.memoryProvider;
+      if (deps.mindFilesTurn) {
+        // The soul's mind filed the turn as its GMI ended it, and the turn does not wait for the write either.
+        folder.wrote(folder.mindWrite() ?? (deps.soulMemory ? Promise.resolve(emptyMemoryWriteRecord()) : noSubjectRecord(userText, folder.text())));
+      } else if (memoryProvider?.observe) {
         // The turn does not wait for its writes: their record is a promise the turn's result carries.
         const user = observeTurn(memoryProvider, 'user', userText, deps.memoryHook);
         // A message with no text (an image alone) is observed as before and has no entry of its own.

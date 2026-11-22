@@ -76,7 +76,10 @@ import { errorFields } from '../core/logging/events.js';
 import { formatMemoryAge } from '../cognition/memory/core/prompt/MemoryFormatters.js';
 import { parseTraceMetadata } from '../cognition/memory/retrieval/store/tracePersistence.js';
 import { DEFAULT_MEMORY_TOKEN_BUDGET, MEMORY_TIMEOUT_MS } from './runtime/memoryProviderHooks.js';
-import { messageOf, reportObserveFailure } from './runtime/memoryObserveFailures.js';
+import { messageOf, reportMindWriteFailure, reportObserveFailure } from './runtime/memoryObserveFailures.js';
+import { ensureScopeRow } from '../cognition/memory/retrieval/store/conversationScopes.js';
+import type { ICognitiveMemoryManager } from '../cognition/memory/CognitiveMemoryManager.js';
+import type { CognitiveMechanismsConfig } from '../cognition/memory/mechanisms/types.js';
 import { failedWriteEntry, type MemoryWriteEntry } from './runtime/memoryWriteRecord.js';
 import { isAnonymousUserId } from './runtime/memorySubject.js';
 import { asSpendBudget } from './runtime/spendBudget.js';
@@ -453,6 +456,18 @@ function cognitiveMemoryOf(opts: CognitionInputs): boolean {
     return Boolean(resolveCognition(opts).memory);
   } catch {
     return false;
+  }
+}
+
+/**
+ * The mechanisms the soul's mind runs: those a GMI built from `opts` resolves to, as the host gave them. Undefined for
+ * options that do not resolve, which agent() refuses before any mind is built.
+ */
+function soulMechanismsOf(opts: CognitionInputs): CognitiveMechanismsConfig | undefined {
+  try {
+    return resolveCognition(opts).mechanisms;
+  } catch {
+    return undefined;
   }
 }
 
@@ -1032,10 +1047,15 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
    */
   const plainAgent = (options: AgentOptions, agentId: string | undefined): Agent => {
     if (options.runtime === 'gmi') {
+      // No store: its cognitive memory, when on, stays its GMI's own.
       shareSoulStore(options, {
         agentId: agentId ?? '',
         sendUserIdToProvider: sendUserIdToProvider === true,
         forTurn: () => undefined,
+        mechanisms: undefined,
+        memoryBuilt: () => undefined,
+        memoryClosed: () => undefined,
+        drainWrites: async () => undefined,
       });
     }
     return agent(options);
@@ -1310,6 +1330,12 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
    * reads the answer given for the first, and a later answer for the subject replaces it.
    */
   const sessionPolicies = new Map<string, Map<string, { policy: MemoryPolicy; ask: number }>>();
+  /**
+   * On the GMI runtime with cognitive memory on, the keys whose rows the soul's mind has loaded for each open session,
+   * by session id: a person's rows are loaded as the first turn of each session opening begins, and kept until the
+   * session closes. A load that failed is not kept, so the next turn loads again.
+   */
+  const mindLoads = new Map<string, Set<string>>();
   /** How many times each session id has been closed: an answer asked for before a close is kept for nothing. */
   const sessionCloses = new Map<string, number>();
   /**
@@ -1510,6 +1536,49 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
    * mind's writer is handed the text the screen kept, a neutral stamp, and the filing that marks the row as the mind's
    * with its speaker and its subject, the subject whose key the view names.
    */
+  /**
+   * Whether the agent's cognitive memory is the soul's mind: on the GMI runtime with cognitive memory on, the mind
+   * files each session turn in this store and recalls the rows it filed, and the provider recalls the rest.
+   */
+  const mindRecalls = rest.runtime === 'gmi' && cognitiveMemoryOf(rest as CognitionInputs);
+  /** The store's own Brain, which the soul's mind files into and reads on the GMI runtime with cognitive memory on. */
+  const soulBrain = brainOf(memory);
+  /** The managers of the soul's mind open in this process: the ones `gmi()` built on {@link soulBrain}, until it shuts each down. */
+  const mindManagers = new Set<ICognitiveMemoryManager>();
+  /** When `close()` began: the turns and the writes it waits for, the mind's among them, share one deadline from here. */
+  let closeStartedAt: number | undefined;
+  /** What is left of `close()`'s one deadline; all of it before the close begins. */
+  const closeWaitLeft = (): number => (closeStartedAt === undefined ? waitMs : Math.max(0, closeStartedAt + waitMs - Date.now()));
+  /** What the failures of the soul's mind to store a side of a turn are counted by, for their sparse log line. */
+  const mindFailures = {};
+  /** The filings of the soul's mind that have started and not settled: `agent.close()` waits for them. */
+  const mindFilings = new Set<Promise<unknown>>();
+  /** Holds one filing of the soul's mind in {@link mindFilings} until it settles; returns it unchanged. */
+  const mindFiling = <T>(run: Promise<T>): Promise<T> => {
+    mindFilings.add(run);
+    const settle = () => {
+      mindFilings.delete(run);
+    };
+    void run.then(settle, settle);
+    return run;
+  };
+  /**
+   * Loads the rows the soul's mind filed under `scopeId` into its manager, on the first turn of a session opening that
+   * recalls: the key's newest rows, which the store already holding some of skips. Any other manager reads its own
+   * store and is not asked. A load that rejects is the caller's, and is not kept, so the session's next turn loads again;
+   * one that the session's close outran is not kept either.
+   */
+  const loadForSession = async (manager: ICognitiveMemoryManager, context: MemoryHookContext, scopeId: string): Promise<void> => {
+    if (manager.getConfig?.()?.rows !== 'mind' || context.call !== 'session') return;
+    const session = context.sessionId;
+    if (mindLoads.get(session)?.has(scopeId)) return;
+    const closesBefore = sessionCloses.get(session) ?? 0;
+    await manager.getStore().hydrateScope('conversation', scopeId);
+    if ((sessionCloses.get(session) ?? 0) !== closesBefore) return;
+    const loaded = mindLoads.get(session) ?? new Set<string>();
+    loaded.add(scopeId);
+    mindLoads.set(session, loaded);
+  };
   const soulTurnOf = (context: MemoryHookContext): SoulTurnMemory | undefined => {
     const subject = turnSubjectOf(context);
     if (!subject) return undefined;
@@ -1527,24 +1596,33 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     return {
       scope: { scope: 'conversation', scopeId },
       file: (role, content, write, undo) =>
-        onSubject(scopeId, () =>
-          fileTurn(
-            role,
-            content,
-            context,
-            subject,
-            scopeId,
-            (text) =>
-              write({
-                text,
-                stamp: 'neutral',
-                filing: { filedBy: 'mind', speaker: role, subject: { ...filedFor } },
-                ...(subject.kind === 'user' ? { turnUserId: subject.id } : {}),
-              }),
-            undo,
+        mindFiling(
+          onSubject(scopeId, () =>
+            fileTurn(
+              role,
+              content,
+              context,
+              subject,
+              scopeId,
+              async (text) => {
+                // The key's registry row, before the trace and again after it, as the store's own writes keep it: a
+                // deletion of the key that ran meanwhile took the row away.
+                await ensureScopeRow(soulBrain, soulBrain.brainId, scopeId, Date.now());
+                const trace = await write({
+                  text,
+                  stamp: 'neutral',
+                  filing: { filedBy: 'mind', speaker: role, subject: { ...filedFor } },
+                  ...(subject.kind === 'user' ? { turnUserId: subject.id } : {}),
+                });
+                await ensureScopeRow(soulBrain, soulBrain.brainId, scopeId, Date.now());
+                return trace;
+              },
+              undo,
+              (err) => reportMindWriteFailure(mindFailures, err),
+            ),
           ),
         ),
-      begin: async (_manager, stop) => {
+      begin: async (manager, stop) => {
         // A forgotten subject is allowed nothing, and the host's hook is not asked about them.
         if (!(await notForgottenWithin(subject))) return { ...SOUL_TURN_NOTHING };
         // A turn stopped meanwhile asks the host nothing: an answer it started after its session closed would be kept
@@ -1553,7 +1631,11 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
         const policy = await turnPolicyOf(context, subject, scopeId, 'mind');
         // Nor is a subject forgotten while the host answered.
         if (!(await notForgottenWithin(subject))) return { ...SOUL_TURN_NOTHING };
-        return soulAnswerOf(policy);
+        const answer = soulAnswerOf(policy);
+        // A turn that recalls loads the person's rows into the mind first, once a session opening. A load that throws is
+        // the answer's failure: the turn recalls nothing of the mind and files as usual.
+        if (answer.recall && manager) await loadForSession(manager, context, scopeId);
+        return answer;
       },
     };
   };
@@ -1605,6 +1687,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
    *
    * @param write - Stores the text the screen let through, and resolves with its trace.
    * @param undo - Deletes a trace `write` stored, for good: a write that landed after the subject was forgotten.
+   * @param reportFailure - Counts and logs a throw: the provider's `observe` failure, unless the writer says whose it is
+   *   (the soul's mind reports its own).
    */
   const fileTurn = async (
     role: Speaker,
@@ -1614,6 +1698,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     scopeId: string,
     write: (text: string) => Promise<MemoryTrace>,
     undo: (trace: MemoryTrace) => Promise<void>,
+    reportFailure: (error: unknown) => void = (error) => reportObserveFailure(provider, error),
   ): Promise<MemoryWriteEntry> => {
     try {
       // A forgotten subject's text goes nowhere: not to the host's hooks, not to the store.
@@ -1676,8 +1761,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       }
       return { role, outcome: 'skipped', reason: 'forgotten' };
     } catch (err) {
-      // The record names the error's class; the log counts the failure as the provider's and writes it sparsely.
-      reportObserveFailure(provider, err);
+      // The record names the error's class; the log counts the failure as its writer's and writes it sparsely.
+      reportFailure(err);
       return failedWriteEntry(role, err);
     }
   };
@@ -1882,7 +1967,10 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
         if (scopeId !== undefined) {
           const policy = await turnPolicyOf(context, subject, scopeId, 'recall');
           if (policy !== 'failed' && policy.longTerm !== 'off') {
-            own = await memory.recall(text, { scope: 'conversation', scopeId, limit: RECALL_LIMIT });
+            // On a session turn the soul's mind recalls what it filed itself: the provider reads the rest of the key.
+            // A one-shot call, which the mind does not serve, reads the key whole.
+            const side = mindRecalls && context.call === 'session' ? { filedBy: 'soul' as const } : {};
+            own = await memory.recall(text, { scope: 'conversation', scopeId, limit: RECALL_LIMIT, ...side });
             // The older memory attributed to this user is theirs too: a third read, of each form of the agent's plain
             // scope, merged with the other two under the same budget. No other subject reads it.
             if (legacyOwnerKey !== undefined && scopeId === legacyOwnerKey) {
@@ -2241,8 +2329,24 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   shareForgottenLedger(agentOptions, forgotten);
   if (rest.runtime === 'gmi') {
     // The GMI runtime reads the soul's store by the same options object, cognitive memory on or off: each session
-    // turn's view of the memory rules, and whether the end user's id goes to the model provider.
-    shareSoulStore(agentOptions, { agentId, sendUserIdToProvider: sendUserIdToProvider === true, forTurn: soulTurnOf });
+    // turn's view of the memory rules, whether the end user's id goes to the model provider, and the Brain its
+    // cognitive memory files into, with the managers it builds there and the writes close() waits for.
+    shareSoulStore(agentOptions, {
+      agentId,
+      sendUserIdToProvider: sendUserIdToProvider === true,
+      forTurn: soulTurnOf,
+      brain: soulBrain,
+      mechanisms: soulMechanismsOf(rest as CognitionInputs),
+      memoryBuilt: (manager) => {
+        mindManagers.add(manager);
+      },
+      memoryClosed: (manager) => {
+        mindManagers.delete(manager);
+      },
+      drainWrites: async () => {
+        await waitForWrites(mindFilings, closeWaitLeft());
+      },
+    });
   }
   const built = (await closingOnThrow(() => agent(agentOptions))) as SouledAgent;
 
@@ -2403,6 +2507,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       if (closeSession) {
         (session as { close: (...args: unknown[]) => Promise<unknown> }).close = (...args: unknown[]) => {
           sessionPolicies.delete(session.id);
+          // Its next opening loads its person's rows into the mind again, with any another process filed meanwhile.
+          mindLoads.delete(session.id);
           offSaid.delete(session.id);
           sessionCloses.set(session.id, (sessionCloses.get(session.id) ?? 0) + 1);
           for (const [key, held] of sessionsBySubject) {
@@ -2472,7 +2578,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
    * of its subject through it. It waits for a session's running turn as long as close() waits for its turns and
    * writes.
    */
-  const soulMind = rest.runtime === 'gmi' ? createSoulMind({ managers: () => [], deadlineMs: waitMs }) : undefined;
+  const soulMind = rest.runtime === 'gmi' ? createSoulMind({ managers: () => mindManagers, deadlineMs: waitMs }) : undefined;
   /**
    * What a deletion of one subject does to the sessions this handle holds open for the subject, as an entry of the
    * report's stores and as the deletion's `sessions` part. The default runtime keeps a session's history in this
@@ -2844,6 +2950,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   built.close = async () => {
     let closeFailed = false;
     let closeError: unknown;
+    // One deadline for the close, counted from here: the agent's own close waits within it for the mind's writes.
+    closeStartedAt ??= Date.now();
     try {
       await originalClose();
     } catch (err) {
@@ -2851,7 +2959,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       closeError = err;
     }
     try {
-      const stillPending = await waitForWrites(pending, waitMs);
+      const stillPending = await waitForWrites(pending, closeWaitLeft());
       if (stillPending > 0) {
         console.warn(
           `[agentos] souledAgent: close() waited ${waitMs} ms for its turns still running and the memory writes of ` +

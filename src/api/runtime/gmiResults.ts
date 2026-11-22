@@ -107,6 +107,8 @@ export class GmiTurnFolder {
   private inputGuards: { report: TextGuardrailReport | undefined; replacement?: string } | undefined;
   /** The record of the turn's memory writes, once the turn handed its two sides to the memory provider. */
   private memoryWrite: Promise<MemoryWriteRecord> | undefined;
+  /** The record of the writes a souled agent's mind started as its GMI ended the turn, from the GMI's output. */
+  private mindMemoryWrite: Promise<MemoryWriteRecord> | undefined;
 
   push(chunk: GMIOutputChunk): void {
     switch (chunk.type) {
@@ -158,6 +160,15 @@ export class GmiTurnFolder {
   finish(output: GMIOutput | undefined): void {
     this.memoryRecall = output?.memoryRecall;
     this.historyOmitted = output?.historyOmitted ? { ...output.historyOmitted } : undefined;
+    this.mindMemoryWrite = output?.memoryWrite;
+  }
+
+  /**
+   * The record of the writes a souled agent's mind started as its GMI ended the turn (`GMIOutput.memoryWrite`);
+   * undefined when the GMI's output carried none.
+   */
+  mindWrite(): Promise<MemoryWriteRecord> | undefined {
+    return this.mindMemoryWrite;
   }
 
   /** The recall capture of the GMI's output that ended the turn; undefined before the turn ended, or when it carried none. */

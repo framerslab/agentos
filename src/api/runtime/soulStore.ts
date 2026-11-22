@@ -11,6 +11,8 @@
  */
 import type { AgentSession, MemoryHookContext } from '../agent.js';
 import type { ICognitiveMemoryManager } from '../../cognition/memory/CognitiveMemoryManager.js';
+import type { CognitiveMechanismsConfig } from '../../cognition/memory/mechanisms/types.js';
+import type { Brain } from '../../cognition/memory/retrieval/store/Brain.js';
 import type { SoulTurnMemory } from '../../cognition/substrate/soulTurnMemory.js';
 
 /** A souled agent's store, as `gmi()` reads it. */
@@ -25,6 +27,24 @@ export interface SoulStore {
    * nothing.
    */
   forTurn(context: MemoryHookContext): SoulTurnMemory | undefined;
+  /**
+   * The soul's own store, where the agent's cognitive memory files and reads: the Brain of the agent's `Memory`.
+   * Absent on the plain agent an inline soul or a soul that did not load builds, which keeps no store; its cognitive
+   * memory stays its GMI's own.
+   */
+  brain?: Brain;
+  /** The mechanisms the agent's cognitive memory runs on that store, in place of the ones its options resolve to. */
+  mechanisms: CognitiveMechanismsConfig | undefined;
+  /** Told of each cognitive memory manager `gmi()` built on {@link brain}, once it is built. */
+  memoryBuilt(manager: ICognitiveMemoryManager): void;
+  /** Told of each such manager once `gmi()` has shut it down. */
+  memoryClosed(manager: ICognitiveMemoryManager): void;
+  /**
+   * Waits for the filings the agent's finished turns started and the mind has not stored yet, within what is left of
+   * the agent's close deadline (`pendingWritesTimeoutMs`); `agent.close()` calls it before the manager shuts down, so
+   * no write still running reaches a manager that is shut. Never rejects.
+   */
+  drainWrites(): Promise<void>;
 }
 
 /** The stores handed over by options object, each held for as long as its options object is. */

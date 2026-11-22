@@ -627,9 +627,16 @@ export function gmi(opts: GmiOptions): GmiHandle {
   // passes anything of the layer, and the agent runs as it did before the layer existed.
   // A souled agent hands the ledger of its memory store to the layer by the options object it was built from.
   const forgotten = sharedForgottenLedgerOf(opts);
-  // And its store, read once: each session turn's view of the soul's memory rules, and whether the end user's id goes
-  // to the model provider.
+  // And its store, read once: each session turn's view of the soul's memory rules, whether the end user's id goes to
+  // the model provider, and the Brain its cognitive memory files into.
   const soulStore = sharedSoulStoreOf(opts);
+  /**
+   * The soul's store, when this agent's cognitive memory is the soul's mind: a souled agent's own Brain, with cognitive
+   * memory on. Its manager files and reads there the rows it marks as the mind's, under each person's key, and loads a
+   * person's rows as their session's first turn begins; the soul's store is the soul's to close. Undefined for every
+   * other agent, which keeps its cognitive memory as before.
+   */
+  const soulBrain = cognitiveMemoryOn ? soulStore?.brain : undefined;
   // And who hears where the agent sends text: each model attempt as the gateway resolved it, and the embedding its
   // cognitive memory was built with.
   const routeObserver = routeObserverOf(opts);
@@ -680,9 +687,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
   const authoredTraits = normalizeHexacoTraits(opts.personality ?? soul?.frontmatter.hexaco);
   const hasTraits = Object.keys(authoredTraits).length > 0;
   if (cognition.memory) assertEmbeddingConfig(cognition.memory);
-  if (cognition.memory && opts.memoryProvider?.getContext) {
-    console.warn('[agentos] gmi(): cognitive memory supplies the memory context; memoryProvider.getContext is skipped (observe still runs).');
-  }
+  // The soul's mind recalls beside its provider, so only another agent's provider context is skipped.
+  if (cognition.memory && opts.memoryProvider?.getContext && !soulBrain) memoryLog.warn('memory.provider_context_skipped', {});
   const ledger = mergeLedger((opts.observability?.usageLedger as AgentOSUsageLedgerOptions | undefined) ?? opts.usageLedger);
   // `agencies`: every bound is checked here, `launch` on or off.
   const launchLimits = opts.agencies ? resolveLaunchLimits(opts.agencies) : undefined;
@@ -762,9 +768,25 @@ export function gmi(opts: GmiOptions): GmiHandle {
       if (!cognition.memory) return undefined;
       if (closed) throw new Error('gmi(): the agent was closed; agent.session() opens a new session.');
       const { persona } = await shared.get();
+      // Reads the environment for the embedding provider when memory.embedding names none.
+      if (soulBrain) {
+        // The soul's mind: on the soul's own Brain, the mind's rows alone, each person's loaded as their session's first
+        // turn begins, under the mechanisms the soul gives it. A passed memory.store holds none of it.
+        const builtMemory = await createAgentCognitiveMemory({
+          persona,
+          memory: cognition.memory,
+          mechanisms: soulStore!.mechanisms,
+          brain: soulBrain,
+          rows: 'mind',
+          hydration: 'scopes',
+        });
+        const embedder = embeddingBuiltFor(builtMemory);
+        if (embedder) routeObserver?.embedding(embedder);
+        soulStore!.memoryBuilt(builtMemory.manager);
+        return builtMemory;
+      }
       // With memory.store, the memory files into this generation's Brain; a store that does not open fails the build.
       const opened = brain ? await brain.get() : undefined;
-      // Reads the environment for the embedding provider when memory.embedding names none.
       const builtMemory = await createAgentCognitiveMemory({ persona, memory: cognition.memory, mechanisms: cognition.mechanisms, ...(opened ? { brain: opened.brain } : {}) });
       const embedder = embeddingBuiltFor(builtMemory);
       if (embedder) routeObserver?.embedding(embedder);
@@ -785,8 +807,9 @@ export function gmi(opts: GmiOptions): GmiHandle {
    * With `memory.store`, hands the layer the memory the agent's sessions file into, built for the call when no session
    * has built it, so `forgetUser` reaches the store whether or not a session is open. A memory that does not build
    * fails the call, before the tombstone: a deletion that could not reach the store's traces is never reported done.
+   * The soul's mind is never handed to the layer: the souled agent's own deletion reaches the soul's store.
    */
-  const memoryForForget = memoryStore
+  const memoryForForget = memoryStore && !soulBrain
     ? async (): Promise<void> => {
         const built = await memory.get();
         if (built && layer) await adoptLearningMemory(layer, built.manager);
@@ -1190,7 +1213,9 @@ export function gmi(opts: GmiOptions): GmiHandle {
       // new id.
       // A seat session's memory scope is its own, new at each opening: it recalls nothing of the user it runs as.
       const namespace = learningConfig?.namespace ?? '';
-      const generationKey = memoryStore && !seat ? sessionGenerationKey(sessionId, namespace) : undefined;
+      // The soul's mind files under the person's key, so an id opened again files and recalls under it too: no
+      // generation is read for it.
+      const generationKey = memoryStore && !seat && !soulBrain ? sessionGenerationKey(sessionId, namespace) : undefined;
       // An end of this id that an earlier session's close() asked for and the store has not recorded: recorded first.
       const endBefore = generationKey ? unrecordedEnds.get(generationKey) : undefined;
       const generation = generationKey
@@ -1235,11 +1260,12 @@ export function gmi(opts: GmiOptions): GmiHandle {
 
       // The session's learner session, when learning is on: one for this agent.session() entry, built with its
       // first turn and ended by close(). A session that keeps no history builds a GMI per turn, and each gets it.
-      // It is told the session's memory scope id and its memory, which the build of its first turn builds anyway.
+      // It is told the session's memory scope id and its memory, which the build of its first turn builds anyway; the
+      // soul's mind is not the layer's to hydrate or delete from, so it is told none.
       const learner = retryingOnce<ILearnerSession | undefined>(async () => {
         const { persona } = await shared.get();
         const memoryScopeId = await memoryScopeIdOf();
-        const manager = (await sessionMemory.get())?.manager;
+        const manager = soulBrain ? undefined : (await sessionMemory.get())?.manager;
         return learnerSessionFor(memoryScopeId, persona.id, sessionOptions?.userId, { noLearner: seat?.learner === 'none', ...(manager ? { manager } : {}) });
       });
       const buildSessionGmi = async (gmiId: string): Promise<BuiltGmi> => {
@@ -1307,10 +1333,12 @@ export function gmi(opts: GmiOptions): GmiHandle {
           lock,
           // A seat session records under its ledger's own source when it names one (a temporary seat's is launch_agency).
           ledger: mergeLedger(ledger, { sessionId, source: seat ? (ledger?.source ?? source) : source }),
-          // A seat session's turn takes no context from the memory provider and files nothing with it.
-          useMemoryProviderContext: !cognition.memory && !seat,
+          // A seat session's turn takes no context from the memory provider and files nothing with it. The soul's
+          // provider recalls beside the soul's mind, and the mind files the turn, once: the provider does not.
+          useMemoryProviderContext: (!cognition.memory || soulBrain !== undefined) && !seat,
           providerTokenBudget: resolvedRecall.providerTokenBudget,
           observeMemoryProvider: !seat,
+          ...(soulBrain && !seat ? { mindFilesTurn: true } : {}),
           // Who the turn's memory hooks are told it serves.
           memoryHook,
           gmiFor: gmiFor(closing !== undefined),
@@ -1541,11 +1569,15 @@ export function gmi(opts: GmiOptions): GmiHandle {
       // holds before they close; one that fails keeps its own error.
       await Promise.allSettled([...runningHostCalls]);
       const mem = await closingMemory.close()?.catch(() => undefined);
+      // The soul's mind stores the turns its sessions finished before it shuts down, within the soul's close deadline:
+      // a write still running would otherwise fail on a manager that is shut.
+      if (mem && soulBrain) await soulStore!.drainWrites();
       try {
         await mem?.close();
       } finally {
         // The layer reaches the closed memory no more: a deletion asks the memory open now.
-        if (mem && layer) releaseLearningMemory(layer, mem.manager);
+        if (mem && layer && !soulBrain) releaseLearningMemory(layer, mem.manager);
+        if (mem && soulBrain) soulStore!.memoryClosed(mem.manager);
       }
       if (closingBrain && closingBrain !== storeBrain) {
         // The learning store ran on this Brain: its next use opens it on the next generation's.
