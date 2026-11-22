@@ -2,7 +2,8 @@
  * @fileoverview What `souledAgent()` hands the `gmi()` it builds: the soul's store, read by the options object the
  * agent was built from, as the tombstone ledger is handed to the learning layer (`shareForgottenLedger`). And what
  * `gmi()` hands back for a deletion: each open session's evictor, by the session object, which the agent's mind side
- * ({@link SoulMind}) calls to empty the sessions of a person it deletes.
+ * ({@link SoulMind}) calls to empty the sessions of a person it deletes; the mind side also deletes a person's rows
+ * through the cognitive memory managers `gmi()` built on the soul's store.
  *
  * Internal: exported from neither the package root nor the API index, and no host-facing option.
  *
@@ -10,6 +11,7 @@
  * @internal
  */
 import type { AgentSession, MemoryHookContext } from '../agent.js';
+import type { IMemoryArchive } from '../../cognition/memory/archive/IMemoryArchive.js';
 import type { ICognitiveMemoryManager } from '../../cognition/memory/CognitiveMemoryManager.js';
 import type { CognitiveMechanismsConfig } from '../../cognition/memory/mechanisms/types.js';
 import type { Brain } from '../../cognition/memory/retrieval/store/Brain.js';
@@ -97,6 +99,27 @@ export function registerSessionEvictor(session: AgentSession, evict: SessionEvic
 /** What a souled agent's deletion calls on the mind's side, on `runtime: 'gmi'`. */
 export interface SoulMind {
   /**
+   * Deletes for good every trace of one conversation key with what the mind keeps of each: each live manager's
+   * `deleteScope('conversation', scopeId)`, which takes the key's rows whichever side filed them, with each trace's
+   * cached copy, vector, memory-graph node and archived original. With no manager live, nothing of the key is cached
+   * in this process: the rows are left to the store's own pass, and each trace's archived original is dropped by its
+   * id. No manager is built for a deletion: its build needs the embedding provider.
+   *
+   * @param scopeId - The conversation key.
+   * @returns `deleted`: the rows the managers deleted; 0 with none live.
+   * @throws The first error a manager's delete failed with, once every manager was asked; the rows a failed manager
+   *   found stay for a call made again.
+   */
+  deleteKey(scopeId: string): Promise<{ deleted: number }>;
+  /**
+   * The same as {@link deleteKey}, for named traces: each live manager's `deleteTraces(traceIds)`, and with none live
+   * each trace's archived original.
+   *
+   * @returns `deleted`: the rows the managers deleted; 0 with none live.
+   * @throws The first error a manager's delete failed with, once every manager was asked.
+   */
+  deleteTraces(traceIds: readonly string[]): Promise<{ deleted: number }>;
+  /**
    * Empties what the given open sessions hold of their person: each session's messages at once, and its GMI's
    * history, reasoning trace, sentiment trend, working-memory slots and metaprompt imprints once no turn of the
    * session runs. The sessions are asked
@@ -114,15 +137,64 @@ export interface SoulMind {
 /**
  * The mind side of a souled agent on `runtime: 'gmi'`, cognitive memory on or off.
  *
- * @param input.managers - The cognitive memory managers the agent's sessions share in this process; `evictSessions`
- *   reads none of them.
+ * @param input.managers - The cognitive memory managers the agent's sessions share in this process, read at each
+ *   delete; `evictSessions` reads none of them.
+ * @param input.archive - Where the mind keeps the originals of its traces in the soul's store, its tables made at the
+ *   open, with how to list one key's trace ids there: what the deletes reach with no manager live. Unset (cognitive
+ *   memory off): nothing is dropped there.
  * @param input.deadlineMs - How long a deletion waits for the running turn of a session it empties; a negative
  *   number or `NaN` is 0, and a wait past the longest timer is held to it.
  * @internal
  */
-export function createSoulMind(input: { managers(): Iterable<ICognitiveMemoryManager>; deadlineMs: number }): SoulMind {
+export function createSoulMind(input: {
+  managers(): Iterable<ICognitiveMemoryManager>;
+  archive?: { originals: IMemoryArchive; traceIdsOf(scopeId: string): Promise<readonly string[]> };
+  deadlineMs: number;
+}): SoulMind {
   const deadlineMs = input.deadlineMs >= 0 ? Math.min(input.deadlineMs, LONGEST_TIMER_MS) : 0;
+  /**
+   * Runs one delete on every live manager, one after another, and sums the rows they deleted; with none live, drops
+   * the originals of the traces `orphans()` names instead. A manager that cannot delete is a failure: every manager is
+   * still asked, and the first failure is thrown.
+   */
+  const onEveryManager = async (
+    remove: (manager: ICognitiveMemoryManager) => Promise<{ deleted: number }> | undefined,
+    orphans: () => Promise<readonly string[]>,
+  ): Promise<{ deleted: number }> => {
+    const live = [...input.managers()];
+    if (live.length === 0) {
+      const archive = input.archive;
+      if (archive) for (const traceId of await orphans()) await archive.originals.drop(traceId);
+      return { deleted: 0 };
+    }
+    let deleted = 0;
+    let failed: { error: unknown } | undefined;
+    for (const manager of live) {
+      try {
+        const done = remove(manager);
+        if (!done) throw new Error("the mind's memory cannot delete a person's traces");
+        deleted += (await done).deleted;
+      } catch (error) {
+        failed ??= { error };
+      }
+    }
+    if (failed) throw failed.error;
+    return { deleted };
+  };
   return {
+    deleteKey: (scopeId) =>
+      onEveryManager(
+        (manager) => manager.deleteScope?.('conversation', scopeId),
+        async () => (input.archive ? input.archive.traceIdsOf(scopeId) : []),
+      ),
+    deleteTraces: async (traceIds) => {
+      const ids = [...new Set(traceIds)];
+      if (ids.length === 0) return { deleted: 0 };
+      return onEveryManager(
+        (manager) => manager.deleteTraces?.(ids),
+        async () => ids,
+      );
+    },
     async evictSessions(sessions) {
       const asked: Array<Promise<SessionEviction>> = [];
       for (const session of sessions) {
