@@ -1525,18 +1525,6 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     return false;
   };
   /**
-   * One session turn's view of the memory rules, for the GMI that serves it on `runtime: 'gmi'`: the subject's key, and
-   * the turn's decision, which its recall may have opened and its two writes share. A turn with no subject has none. A
-   * subject whose id no key can be built from has no key and no policy to ask: its view has no scope and allows
-   * nothing, so the turn is not scored for sentiment, and one `memory.hook_failed` line says so; it files nothing
-   * (`no_subject`).
-   *
-   * Its `file` runs one side of the turn through the same gate as the provider's writes ({@link fileTurn}), on the
-   * subject's chain, so close() waits for it and no compile, deletion or sweep of the subject runs beside it. The
-   * mind's writer is handed the text the screen kept, a neutral stamp, and the filing that marks the row as the mind's
-   * with its speaker and its subject, the subject whose key the view names.
-   */
-  /**
    * Whether the agent's cognitive memory is the soul's mind: on the GMI runtime with cognitive memory on, the mind
    * files each session turn in this store and recalls the rows it filed, and the provider recalls the rest.
    */
@@ -1579,6 +1567,21 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     loaded.add(scopeId);
     mindLoads.set(session, loaded);
   };
+  /**
+   * One session turn's view of the memory rules, for the GMI that serves it on `runtime: 'gmi'`: the subject's key, and
+   * the turn's decision, which its recall may have opened and its two writes share. A turn with no subject has none. A
+   * subject whose id no key can be built from has no key and no policy to ask: its view has no scope and allows
+   * nothing, so the turn is not scored for sentiment, and one `memory.hook_failed` line says so; it files nothing
+   * (`no_subject`).
+   *
+   * Its `file` runs one side of the turn through the same gate as the provider's writes ({@link fileTurn}), on the
+   * subject's chain, so close() waits for it and no compile, deletion or sweep of the subject runs beside it. The
+   * mind's writer is handed the text the screen kept, a neutral stamp, and the filing that marks the row as the mind's
+   * with its speaker and its subject, the subject whose key the view names; the key's registry row is written before
+   * the trace and again after it, and `agent.close()` waits for the filing before the mind's manager shuts down. A
+   * throw in the write is counted as the mind's own failure. Its `begin()` loads the subject's rows into the mind as the
+   * first turn of a session opening that recalls begins ({@link loadForSession}).
+   */
   const soulTurnOf = (context: MemoryHookContext): SoulTurnMemory | undefined => {
     const subject = turnSubjectOf(context);
     if (!subject) return undefined;
