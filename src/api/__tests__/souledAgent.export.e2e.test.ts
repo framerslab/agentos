@@ -571,92 +571,66 @@ describe("a call that names its own provider under the agent's router, on the GM
   });
 });
 
-describe('the embedding a GMI agent resolves at its first turn', () => {
-  it('is named as it resolved then, after a restart too, when the default provider changed after the agent opened', async () => {
-    const embeddings = `k-souled-export-embed-${++n}`;
-    script('openai', embeddings, { replies: [] });
-    vi.stubEnv('OPENAI_API_KEY', embeddings);
+describe(`a route the store fails to record once, on runtime ${RUNTIME}`, () => {
+  it('is listed in the process, recorded by the next call on the route, and named after a restart', async () => {
+    const envKey = `k-souled-export-env-${++n}`;
+    vi.stubEnv('ANTHROPIC_API_KEY', envKey);
+    script('anthropic', envKey, { whole: true, replies: [reply.text('First.'), reply.text('Second.')] });
     const apiKey = `k-souled-export-${++n}`;
-    // The stub embeds in 1536 values for either model; declared, so text-embedding-3-large builds on it too.
-    const options = { runtime: 'gmi', memory: { embedding: { dimension: 1536 } } } as Partial<SouledAgentOptions>;
-    const large: MemoryRecipient = { role: 'embedding', provider: 'openai', model: 'text-embedding-3-large' };
-    try {
-      const { a } = await open(options, apiKey);
-      expect((await recipientsOf(a)).filter((entry) => entry.role === 'embedding')).toEqual([
-        { role: 'embedding', provider: 'openai', model: 'text-embedding-3-small' },
-      ]);
+    const route: MemoryRecipient = { role: 'model', provider: 'anthropic', model: 'claude-x' };
+    const { a } = await open({}, apiKey);
+    const brain = brainBehind(a);
+    const setMeta = brain.setMeta.bind(brain);
+    let refused = 0;
+    vi.spyOn(brain, 'setMeta').mockImplementation(async (key: string, value: string) => {
+      if (key.startsWith('recipient:model:') && refused === 0) {
+        refused += 1;
+        throw new Error('the store is busy');
+      }
+      return setMeta(key, value);
+    });
 
-      setDefaultProvider({ provider: 'openai', model: 'text-embedding-3-large' });
-      await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await a.generate('What is the weather like?', { provider: 'anthropic', model: 'claude-x' });
+    await vi.waitFor(() => expect(events.some((line) => line.event === 'memory.recipient_unrecorded')).toBe(true));
+    expect(refused).toBe(1);
+    expect(await recipientsOf(a)).toContainEqual(route);
 
-      expect(await recipientsOf(a)).toContainEqual(large);
-      await a.close();
-    } finally {
-      clearDefaultProvider();
-    }
-    const { a: again } = await open(options, apiKey);
-    expect(await recipientsOf(again)).toContainEqual(large);
+    await a.generate('And tomorrow?', { provider: 'anthropic', model: 'claude-x' });
+    await a.close();
+    expect(rows<{ key: string }>("SELECT key FROM brain_meta WHERE key LIKE 'recipient:%'")).toHaveLength(1);
+
+    const { a: again } = await open({}, apiKey);
+    expect(await recipientsOf(again)).toContainEqual(route);
   });
 });
 
-describe('the embedding a GMI agent built, when the default provider changes after its first turn', () => {
-  it('names the embedding the memory was built with, and not the later default, which received nothing', async () => {
+describe('the embedding a souled GMI agent names', () => {
+  it('is the one listed before and after its first turn and after a restart: a default provider set meanwhile moves nothing', async () => {
     const embeddings = `k-souled-export-embed-${++n}`;
     const embedder = script('openai', embeddings, { replies: [] });
     vi.stubEnv('OPENAI_API_KEY', embeddings);
     const apiKey = `k-souled-export-${++n}`;
-    const options = { runtime: 'gmi', memory: { embedding: { dimension: 1536 } } } as Partial<SouledAgentOptions>;
+    const options = { runtime: 'gmi', memory: { embedding: { provider: 'openai' } } } as Partial<SouledAgentOptions>;
+    const named: MemoryRecipient = { role: 'embedding', provider: 'openai', model: 'text-embedding-3-small' };
+    const embeddingOf = async (a: SouledAgent) => (await recipientsOf(a)).filter((entry) => entry.role === 'embedding');
     try {
       const { a } = await open(options, apiKey);
+      expect(await embeddingOf(a)).toEqual([named]);
+
+      setDefaultProvider({ provider: 'openai', model: 'text-embedding-3-large' });
       await turn(a, 's1', 'alice', 'My canary is LARK-7.');
       // The memory was built at the first turn, and embedded the person's words there.
       await vi.waitFor(() => expect(embedder.embedded.some((text) => text.includes('LARK-7'))).toBe(true), { timeout: 4_000 });
-
-      setDefaultProvider({ provider: 'openai', model: 'text-embedding-3-large' });
       await turn(a, 's1', 'alice', 'I keep it in the attic.');
 
-      expect((await recipientsOf(a)).filter((entry) => entry.role === 'embedding')).toEqual([
-        { role: 'embedding', provider: 'openai', model: 'text-embedding-3-small' },
-      ]);
-    } finally {
-      clearDefaultProvider();
-    }
-  });
-});
-
-describe('the embedding a GMI agent built, when the store fails to record it once', () => {
-  it('is recorded again at the next turn, and named after a restart', async () => {
-    const embeddings = `k-souled-export-embed-${++n}`;
-    script('openai', embeddings, { replies: [] });
-    vi.stubEnv('OPENAI_API_KEY', embeddings);
-    const apiKey = `k-souled-export-${++n}`;
-    const options = { runtime: 'gmi', memory: { embedding: { dimension: 1536 } } } as Partial<SouledAgentOptions>;
-    const large: MemoryRecipient = { role: 'embedding', provider: 'openai', model: 'text-embedding-3-large' };
-    try {
-      const { a } = await open(options, apiKey);
-      const brain = brainBehind(a);
-      const setMeta = brain.setMeta.bind(brain);
-      let refused = 0;
-      vi.spyOn(brain, 'setMeta').mockImplementation(async (key: string, value: string) => {
-        if (key.startsWith('recipient:embedding:') && refused === 0) {
-          refused += 1;
-          throw new Error('the store is busy');
-        }
-        return setMeta(key, value);
-      });
-      // The memory is built at the first turn on the default changed since the agent opened; its route's write fails.
-      setDefaultProvider({ provider: 'openai', model: 'text-embedding-3-large' });
-      await turn(a, 's1', 'alice', 'My canary is LARK-7.');
-      await vi.waitFor(() => expect(events.some((line) => line.event === 'memory.recipient_unrecorded')).toBe(true));
-      expect(refused).toBe(1);
-
-      await turn(a, 's1', 'alice', 'I keep it in the attic.');
+      // The later default received nothing, and is not listed.
+      expect(await embeddingOf(a)).toEqual([named]);
       await a.close();
     } finally {
       clearDefaultProvider();
     }
     const { a: again } = await open(options, apiKey);
-    expect(await recipientsOf(again)).toContainEqual(large);
+    expect(await embeddingOf(again)).toEqual([named]);
   });
 });
 

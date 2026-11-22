@@ -2674,18 +2674,22 @@ export class MemoryStore {
   /**
    * Record that a memory was accessed (retrieved).
    * Updates decay parameters via spaced repetition.
+   *
+   * @param options - `reconsolidate: false` leaves the trace's emotional context as it is: the access is counted and
+   *   its strength and stability update, and the reconsolidation mechanism is not run for it.
    */
-  async recordAccess(traceId: string): Promise<RetrievalUpdateResult | null> {
+  async recordAccess(traceId: string, options?: { reconsolidate?: boolean }): Promise<RetrievalUpdateResult | null> {
     this.beginOperation();
     const namespace = this.coordinationNamespace;
     const brain = this.brain;
+    const reconsolidate = options?.reconsolidate !== false;
     return withTraceOperation(
       namespace,
       traceId,
       'normal',
       async ({ blockedByDelete, isDeletePending }) => {
         if (blockedByDelete) return null;
-        return this.recordAccessWithTraceLock(traceId, isDeletePending, brain);
+        return this.recordAccessWithTraceLock(traceId, isDeletePending, brain, reconsolidate);
       },
     );
   }
@@ -2694,6 +2698,7 @@ export class MemoryStore {
     traceId: string,
     isDeletePending: () => boolean,
     brain: import('./Brain.js').Brain | null,
+    reconsolidate: boolean,
   ): Promise<RetrievalUpdateResult | null> {
     const trace = this.traceCache.get(traceId);
     if (this.tombstonedTraceIds.has(traceId) || !trace?.isActive) return null;
@@ -2712,8 +2717,8 @@ export class MemoryStore {
     trace.nextReinforcementAt = update.nextReinforcementAt;
     trace.updatedAt = now;
 
-    // Cognitive mechanisms: reconsolidation drift on access
-    if (this.mechanismsEngine && this.config.moodProvider) {
+    // Cognitive mechanisms: reconsolidation drift on access, unless the caller's recall skips it
+    if (reconsolidate && this.mechanismsEngine && this.config.moodProvider) {
       const mood = this.config.moodProvider();
       this.mechanismsEngine.onAccess(trace, mood);
     }

@@ -2060,11 +2060,13 @@ export class GMI implements IGMI {
         if (isUserInitiatedTurn && currentTurnText && soulAllowsRecall) {
           // Recall is limited to this turn's user, session and conversation scopes; with a learning layer's scope ids, to
           // the turn's own.
-          // On a souled agent's mind, to the person's key that the turn's view of the soul names.
+          // On a souled agent's mind, to the person's key that the turn's view of the soul names, and with no drift of
+          // what it reads unless the view's answer allows it.
           assembledMemoryContext = await this.memoryBridge?.assembleContext(currentTurnText, {
             ...this.memoryTurnScope(turnInput),
             ...(turnLearning.memory ? { learning: turnLearning.memory } : {}),
             ...(turnSoul ? { soul: turnSoul } : {}),
+            ...(soulAnswer ? { soulAnswer } : {}),
           }) ?? null;
           const capture = assembledMemoryContext?.capture;
           if (capture) {

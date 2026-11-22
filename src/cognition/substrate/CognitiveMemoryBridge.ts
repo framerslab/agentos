@@ -28,7 +28,7 @@ import type { GuardedMemoryWrite, TurnScopes } from '../learning/types.js';
 import { GMIMood, GMIInteractionType } from './IGMI';
 import type { UserContext, GMITurnInput } from './IGMI';
 import { turnContentText } from './turnContent';
-import type { SoulFiling, SoulTurnMemory } from './soulTurnMemory';
+import type { SoulFiling, SoulTurnAnswer, SoulTurnMemory } from './soulTurnMemory';
 import {
   errorNameOf,
   failedWriteEntry,
@@ -63,6 +63,15 @@ export interface CognitiveMemoryTurnScope {
    * @internal
    */
   soul?: SoulTurnMemory;
+  /**
+   * The answer that view gave for the turn (`soul.begin()`). On the manager of a souled agent's mind, a turn's recall
+   * drifts the emotional context of what it reads (reconsolidation) only when the answer allows it: an answer that
+   * holds `reconsolidation: false`, the one a minor's turn and the turn of a person who objects to profiling get, and
+   * a turn with no answer, read with `skipReconsolidation`. On any other manager it is not read.
+   *
+   * @internal
+   */
+  soulAnswer?: SoulTurnAnswer;
 }
 
 /**
@@ -201,8 +210,14 @@ export function withoutShownTag(text: string, tag: string): string {
  * needing direct mutation access.
  */
 export class CognitiveMemoryBridge {
-  /** The query and scopes each context {@link assembleContext} returned was assembled for, so a hop can ask again. */
-  private readonly turns = new WeakMap<AssembledMemoryContext, { query: string; scopes: Array<{ scope: MemoryScope; scopeId: string }> }>();
+  /**
+   * The query, the scopes and whether reconsolidation was skipped for each context {@link assembleContext} returned,
+   * so a hop can ask again as the turn asked.
+   */
+  private readonly turns = new WeakMap<
+    AssembledMemoryContext,
+    { query: string; scopes: Array<{ scope: MemoryScope; scopeId: string }>; skipReconsolidation: boolean }
+  >();
 
   /**
    * Creates a new CognitiveMemoryBridge.
@@ -456,6 +471,10 @@ export class CognitiveMemoryBridge {
    * shared by several sessions never surfaces another user's or another
    * session's traces in this turn's prompt.
    *
+   * On the manager of a souled agent's mind the recall skips reconsolidation unless the turn's answer
+   * (`turn.soulAnswer`) allows it: what the turn of a minor, or of a person who objects to profiling, reads keeps its
+   * emotional context, and the access is still counted.
+   *
    * @param query - The user's current input text to use as a retrieval query.
    * @param turn - Session, conversation and organization of the current turn.
    * @returns The assembled memory context, or null if cognitive memory is unavailable
@@ -475,12 +494,14 @@ export class CognitiveMemoryBridge {
       if (scopes.length === 0) {
         return null;
       }
+      // On a souled agent's mind, what the recall reads drifts only where the turn's answer says it may.
+      const skipReconsolidation = this.isMindManager() && turn?.soulAnswer?.reconsolidation !== true;
       // The manager's recall.budget.totalTokens, 1600 when unset: the whole block, its preamble included.
       const context = await this.cognitiveMemory.assembleForPrompt(
         query,
         recallBudgetTokens(this.recallConfig()),
         this.getPadState(),
-        { scopes },
+        { scopes, ...(skipReconsolidation ? { skipReconsolidation: true } : {}) },
       );
       // Changed in place: the manager renders this context again for a model hop by the object it returned.
       context.contextText = this.withUserTagHidden(context.contextText);
@@ -503,7 +524,7 @@ export class CognitiveMemoryBridge {
           ...(this.recallConfig()?.traceIds === true ? { includedMemoryIds: context.includedMemoryIds } : {}),
         });
       }
-      this.turns.set(context, { query, scopes });
+      this.turns.set(context, { query, scopes, skipReconsolidation });
       return context;
     } catch (error: unknown) {
       // The error's class name only: a manager's, a vector store's or a full-text error can quote the turn's words.
@@ -566,7 +587,10 @@ export class CognitiveMemoryBridge {
       } else {
         const turn = this.turns.get(context);
         if (!turn) return null;
-        next = await this.cognitiveMemory.assembleForPrompt(turn.query, budget.effective, this.getPadState(), { scopes: turn.scopes });
+        next = await this.cognitiveMemory.assembleForPrompt(turn.query, budget.effective, this.getPadState(), {
+          scopes: turn.scopes,
+          ...(turn.skipReconsolidation ? { skipReconsolidation: true } : {}),
+        });
       }
       return stamped({ ...next, contextText: this.withUserTagHidden(next.contextText) }, true);
     } catch (error: unknown) {

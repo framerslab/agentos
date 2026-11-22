@@ -14,6 +14,7 @@
 import type { MemoryTrace } from '../../core/types.js';
 import type { PADState } from '../../core/config.js';
 import type { ResolvedReconsolidationConfig, MechanismMetadata } from '../types.js';
+import { CORRECTION_TAG } from '../types.js';
 
 // ---------------------------------------------------------------------------
 // Metadata helpers
@@ -42,6 +43,7 @@ function getMeta(trace: MemoryTrace): MechanismMetadata {
  * Blends the trace's PAD values toward the current mood by `driftRate`.
  * Respects importance immunity and cumulative drift caps.
  * Records a DriftEvent in trace metadata for auditability.
+ * A trace tagged `correction` (a person's own correction of what is remembered of them) never drifts.
  *
  * @param trace       The memory trace being accessed (mutated in place).
  * @param currentMood Current GMI mood at retrieval time.
@@ -53,6 +55,9 @@ export function applyReconsolidation(
   config: ResolvedReconsolidationConfig,
 ): void {
   if (!config.enabled) return;
+
+  // A correction is kept as the person gave it.
+  if (trace.tags.includes(CORRECTION_TAG)) return;
 
   // Importance immunity — use encodingStrength as importance proxy
   if (trace.encodingStrength >= config.immuneAboveImportance) return;

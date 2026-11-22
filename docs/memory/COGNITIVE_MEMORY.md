@@ -1560,6 +1560,8 @@ Modulation runs once via `applyPersonalityModulation()`. Trait-to-parameter scal
 - **Dead-trace protection:** RIF skips traces with `encodingStrength < 0.1`.
 - **Inactive skip:** all consolidation mechanisms skip `isActive === false` traces.
 - **Disabled bypass:** every mechanism returns immediately when `config.enabled === false`.
+- **Corrections kept:** reconsolidation and temporal gist skip a trace tagged `correction`, the tag a person's own correction of their memory is stored under, so it keeps its emotional context and its text.
+- **A recall that skips reconsolidation:** `retrieve()` and `assembleForPrompt()` called with `skipReconsolidation: true` pass `{ reconsolidate: false }` to `recordAccess()`: the access is counted, strength and stability update, and `engine.onAccess()` is not called for the traces that recall reads.
 
 ### Rehydration
 

@@ -1098,9 +1098,11 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
       }
     }
 
-    // Record access for retrieved memories (spaced repetition)
+    // Record access for retrieved memories (spaced repetition). A recall that skips reconsolidation still counts
+    // the access, and leaves the emotional context of what it read.
+    const accessOptions = options.skipReconsolidation === true ? { reconsolidate: false } : undefined;
     for (const trace of scored.filter((t) => !suppliedIds.has(t.id)).slice(0, 5)) {
-      await this.store.recordAccess(trace.id);
+      await this.store.recordAccess(trace.id, accessOptions);
       await workingMemory.focus(trace.id, trace.retrievalScore);
     }
 
