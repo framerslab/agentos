@@ -18,7 +18,7 @@ import { listedErrorFields } from '../../core/logging/events.js';
 import { memoryLog } from '../../cognition/memory/log.js';
 import { failedWriteEntry, writeEntryOf, type MemoryWriteEntry } from './memoryWriteRecord.js';
 
-/** How many times each provider's `observe` has failed, keyed by the provider object. */
+/** How many times each provider's `observe`, or each souled agent's mind, has failed, keyed by the object counted. */
 const failureCounts = new WeakMap<object, number>();
 
 /** True for the failure counts that are logged: 1, then each power of ten. */
@@ -53,11 +53,28 @@ export function messageOf(error: unknown): string {
  * @param error - What it threw or rejected with.
  */
 export function reportObserveFailure(provider: AgentMemoryProvider, error: unknown): void {
-  const count = (failureCounts.get(provider) ?? 0) + 1;
-  failureCounts.set(provider, count);
+  reportSparsely(provider, 'observe', error);
+}
+
+/**
+ * Count one failure of a souled agent's mind to store a side of a turn, and write a `memory.hook_failed` event with
+ * the hook `soulMemory` on the mind's first failure and its 10th, 100th, 1000th and so on, as
+ * {@link reportObserveFailure} writes a provider's.
+ *
+ * @param mind - What the failures are counted by: one object for the agent's mind.
+ * @param error - What the write threw or rejected with.
+ */
+export function reportMindWriteFailure(mind: object, error: unknown): void {
+  reportSparsely(mind, 'soulMemory', error);
+}
+
+/** Counts one failure of `counted` and writes its `memory.hook_failed` line at the 1st, 10th, 100th failure and so on. */
+function reportSparsely(counted: object, hook: 'observe' | 'soulMemory', error: unknown): void {
+  const count = (failureCounts.get(counted) ?? 0) + 1;
+  failureCounts.set(counted, count);
   if (!isLoggedFailure(count)) return;
   // The error's type and code alone: its message can hold what the turn said, and reading them never throws.
-  memoryLog.warn('memory.hook_failed', { hook: 'observe', ...listedErrorFields(error) });
+  memoryLog.warn('memory.hook_failed', { hook, ...listedErrorFields(error) });
 }
 
 /**

@@ -107,6 +107,10 @@ export class GmiTurnFolder {
   private inputGuards: { report: TextGuardrailReport | undefined; replacement?: string } | undefined;
   /** The record of the turn's memory writes, once the turn handed its two sides to the memory provider. */
   private memoryWrite: Promise<MemoryWriteRecord> | undefined;
+  /** The record of the writes a souled agent's mind started as its GMI ended the turn, from the GMI's output. */
+  private mindMemoryWrite: Promise<MemoryWriteRecord> | undefined;
+  /** The reply as the GMI wrote it, which its memory files: its output's text, before any hook replaced a step's. */
+  private gmiReplyText = '';
 
   push(chunk: GMIOutputChunk): void {
     switch (chunk.type) {
@@ -158,6 +162,25 @@ export class GmiTurnFolder {
   finish(output: GMIOutput | undefined): void {
     this.memoryRecall = output?.memoryRecall;
     this.historyOmitted = output?.historyOmitted ? { ...output.historyOmitted } : undefined;
+    this.mindMemoryWrite = output?.memoryWrite;
+    this.gmiReplyText = output?.responseText ?? '';
+  }
+
+  /**
+   * The record of the writes a souled agent's mind started as its GMI ended the turn (`GMIOutput.memoryWrite`);
+   * undefined when the GMI's output carried none.
+   */
+  mindWrite(): Promise<MemoryWriteRecord> | undefined {
+    return this.mindMemoryWrite;
+  }
+
+  /**
+   * The reply as the GMI's output wrote it (`GMIOutput.responseText`), the text its memory was handed to file; '' before
+   * the turn ended or when it had none. {@link text} is the reply as the session keeps it, an `onAfterGeneration`
+   * hook's replacement included.
+   */
+  gmiReply(): string {
+    return this.gmiReplyText;
   }
 
   /** The recall capture of the GMI's output that ended the turn; undefined before the turn ended, or when it carried none. */

@@ -12,6 +12,8 @@ import { agent, type AgentOptions } from '../agent';
 import { reply, script } from './helpers/stubProviders';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 import { CognitiveMemoryManager } from '../../cognition/memory/CognitiveMemoryManager';
+import pino from 'pino';
+import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory';
 
 let n = 0;
 const key = () => `k-memory-${++n}`;
@@ -23,6 +25,7 @@ beforeEach(() => globalLLMProviderHealth.reset());
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
+  resetLoggerFactory();
 });
 
 describe("agent({ runtime: 'gmi' }) cognitive memory", () => {
@@ -47,13 +50,15 @@ describe("agent({ runtime: 'gmi' }) cognitive memory", () => {
     const s = script('openai', k, { replies: [reply.text('Done.')] });
     script('openai', emb, { replies: [] });
     vi.stubEnv('OPENAI_API_KEY', emb);
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const events: Array<Record<string, unknown>> = [];
+    setLogger(pino({ level: 'debug', base: undefined }, { write: (line: string) => void events.push(JSON.parse(line)) }));
     const getContext = vi.fn(async () => ({ contextText: 'FROM PROVIDER' }));
     const observe = vi.fn(async () => undefined);
     await agent({ runtime: 'gmi', provider: 'openai', model: 'stub-model', apiKey: k, fallbackProviders: [], cognition: 'full', memoryProvider: { getContext, observe } }).session('s').send('hi');
     expect(getContext).not.toHaveBeenCalled();
     expect(JSON.stringify(s.seen[0].messages)).not.toContain('FROM PROVIDER');
-    expect(warn.mock.calls.some(([message]) => String(message).includes('memoryProvider.getContext is skipped'))).toBe(true);
+    // One line through the logger, when the agent is built.
+    expect(events.filter((line) => line.event === 'memory.provider_context_skipped')).toHaveLength(1);
     await vi.waitFor(() => expect(observe).toHaveBeenCalledTimes(2));
   });
 

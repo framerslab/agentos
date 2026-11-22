@@ -50,7 +50,9 @@ export interface SoulTurnMemory {
   scope?: { scope: 'conversation'; scopeId: string };
   /**
    * Decides the turn's policy, once a turn: the decision the turn's recall opened, else a new one, kept open for the
-   * turn's writes. Called before the turn's sentiment analysis.
+   * turn's writes. Called before the turn's sentiment analysis. On the manager of a souled agent's mind, a turn the
+   * answer lets recall first loads the person's rows into it, once a session opening; a load that fails rejects, and
+   * the GMI then reads the answer as allowing nothing.
    *
    * @param manager - The GMI's cognitive memory, or none when it runs without.
    * @param stop - The turn's stop: once it has aborted, nothing more is asked or decided for the turn.
