@@ -9,6 +9,7 @@ import type { LearnedStateDocument } from '../../learning/types.js';
 import type { WikiPage } from '../../substrate/memory/wiki/types.js';
 import { errorFields } from '../../../core/logging/events.js';
 import type { IMemoryArchive } from '../archive/IMemoryArchive.js';
+import { buildEmotionalContext } from '../core/encoding/EncodingModel.js';
 import type { MemoryTrace } from '../core/types.js';
 import { memoryLog } from '../log.js';
 import { CONVERSATION_SCOPE, conversationScopeKey } from '../retrieval/store/conversationScopeKey.js';
@@ -43,7 +44,11 @@ export interface HeldTrace {
   entities: string[];
   /** Which side filed it: the mind of a souled agent's GMI (`'mind'`), or the soul's own memory (`'soul'`). */
   filedBy: 'mind' | 'soul';
-  /** The emotional context stored with it; all zeros and a `neutral` mood where none was stamped. */
+  /**
+   * The emotional context stored with it: all zeros and a `neutral` mood where none was stored, and a neutral state
+   * (no valence, dominance or intensity, an arousal of 0.5, the middle of its scale, and the mood `neutral`) where the
+   * mind of a souled agent stored the trace neutral.
+   */
   emotionalContext: { valence: number; arousal: number; dominance: number; intensity: number; gmiMood: string };
   encodingStrength: number;
   stability: number;
@@ -99,7 +104,8 @@ export interface UserMemoryExport {
   retention: { period: RetentionPeriod | 'none'; policyDays?: number };
   /**
    * Whether the subject's messages are scored for sentiment (`'on'` or `'off'`), and how many held traces carry an
-   * emotional context other than a neutral one.
+   * emotional context other than a neutral one: a trace stored with no emotional context, or with a neutral state, is
+   * not counted.
    */
   profiling: { sentiment: 'on' | 'off'; moodStamps: number };
   /**
@@ -164,11 +170,23 @@ function emotionalContextOf(trace: MemoryTrace): HeldTrace['emotionalContext'] {
   };
 }
 
-/** Whether an emotional context is other than a neutral one: a number not zero, or a mood other than neutral. */
+/**
+ * The arousal a neutral state is stored with. A trace keeps its arousal on a scale from 0 to 1, so a state with no
+ * arousal either way is stored at the middle of it.
+ */
+const NEUTRAL_STORED_AROUSAL = buildEmotionalContext({ valence: 0, arousal: 0, dominance: 0 }, 'neutral').arousal;
+
+/**
+ * Whether an emotional context is other than a neutral one. Neutral is no valence, no dominance, no intensity and the
+ * mood `neutral`, with an arousal of 0 (a trace stored with no emotional context) or of the middle of its scale (a
+ * trace stored with a neutral state, as the mind of a souled agent stores each turn unless the host opts in to its
+ * mood).
+ */
 function isMoodStamp(context: HeldTrace['emotionalContext']): boolean {
+  const neutralArousal = context.arousal === 0 || context.arousal === NEUTRAL_STORED_AROUSAL;
   return (
     context.valence !== 0 ||
-    context.arousal !== 0 ||
+    !neutralArousal ||
     context.dominance !== 0 ||
     context.intensity !== 0 ||
     context.gmiMood.toLowerCase() !== 'neutral'
