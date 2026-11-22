@@ -13,7 +13,9 @@
  * - The view names the emotional stamp of what is filed: neutral, or the mind's mood.
  * - On the mind's manager, a filing with no view files nothing and says so in the reasoning trace; on any other manager
  *   the view is not used and the bridge files as before.
- * - The observer hears what was kept, never what was not.
+ * - The observer hears what was kept, never what was not, and the record does not wait for it.
+ * - A view with no key files and recalls nothing; on the mind's manager neither does a turn with no view, and a turn
+ *   whose rules allow no recall reads nothing of the person.
  * - A metaprompt's imprint is filed through the last turn's view, as the assistant's; with no view it is not filed.
  * - A souled agent's view runs each filing through its gate: the screen's text is what is stored, and a person
  *   forgotten since files nothing.
@@ -336,6 +338,55 @@ describe('a turn through the soul of its agent', () => {
     ]);
     expect(observe.mock.calls.map((call) => [call[0], call[1]])).toEqual([['user', 'HELLO']]);
   });
+
+  it('the record does not wait for the observer', async () => {
+    const brain = await openBrain();
+    const { manager } = await managerOn(brain);
+    const { bridge } = bridgeOver(manager);
+    // An observer that never answers.
+    const observe = vi.spyOn(manager, 'observe').mockReturnValue(new Promise<null>(() => undefined));
+    const { seam } = seamFor('alice');
+    const write = writeOf(await syncWith(bridge, userTurn('I keep bees.'), 'Bees are wonderful.', seam));
+    const settled = await Promise.race([write, new Promise<'pending'>((resolve) => setTimeout(() => resolve('pending'), 1_000))]);
+    expect(settled).toEqual({
+      entries: [
+        { role: 'user', outcome: 'written', traceId: expect.any(String) },
+        { role: 'assistant', outcome: 'written', traceId: expect.any(String) },
+      ],
+    });
+    expect(observe.mock.calls.map((call) => [call[0], call[1]])).toEqual([
+      ['user', 'I keep bees.'],
+      ['assistant', 'Bees are wonderful.'],
+    ]);
+  });
+
+  it('a view with no key files and recalls nothing, and neither does a turn with no view', async () => {
+    const brain = await openBrain();
+    const { manager, sent } = await managerOn(brain);
+    const { bridge } = bridgeOver(manager);
+    const encode = vi.spyOn(manager, 'encode');
+    // The view of a person whose id no key can be built from: no scope, and nothing allowed.
+    const keyless: SoulTurnMemory = {
+      begin: async () => ({ recall: false, reconsolidation: false, sentiment: false }),
+      file: async (role) => ({ role, outcome: 'skipped', reason: 'no_subject' }),
+    };
+    const embedded = sent.length;
+
+    expect(bridge.buildRetrievalScopes({ sessionId: 's-1', conversationId: 'c-1', organizationId: 'o-1', soul: keyless })).toEqual([]);
+    expect(bridge.buildRetrievalScopes({ sessionId: 's-1', conversationId: 'c-1', organizationId: 'o-1' })).toEqual([]);
+    expect(await bridge.assembleContext('Where do I live?', { sessionId: 's-1', soul: keyless })).toBeNull();
+    expect(await bridge.assembleContext('Where do I live?', { sessionId: 's-1' })).toBeNull();
+
+    const record = await writeOf(await syncWith(bridge, userTurn('I live in Oslo.'), 'Oslo is lovely.', keyless));
+    expect(record.entries).toEqual([
+      { role: 'user', outcome: 'skipped', reason: 'no_subject' },
+      { role: 'assistant', outcome: 'skipped', reason: 'no_subject' },
+    ]);
+    expect(encode).not.toHaveBeenCalled();
+    expect(await rowsOf(brain)).toEqual([]);
+    // No recall query and no filing reached the embedding model.
+    expect(sent.length).toBe(embedded);
+  });
 });
 
 describe("a GMI on the mind's manager", () => {
@@ -371,6 +422,36 @@ describe("a GMI on the mind's manager", () => {
     await new Promise((resolve) => setTimeout(resolve, 25));
     expect(calls).toHaveLength(3);
     expect((await rowsOf(brain)).some((row) => row.content === 'The user drinks it hot.')).toBe(false);
+  });
+
+  it("a turn whose rules allow no recall reads nothing of the person", async () => {
+    const brain = await openBrain();
+    const { manager, sent } = await managerOn(brain);
+    const { provider } = scriptedProvider([textReply('Tea it is.'), textReply('I cannot say.'), textReply('Green tea.')]);
+    const { gmi } = await createScriptedGmi({ provider, config: { cognitiveMemory: manager } });
+    const { seam } = seamFor('alice');
+    const first = await runTurn(gmi, textTurn('t1', 'I like green tea.', { soulMemory: seam }));
+    await first.output.memoryWrite;
+
+    // The same person under an answer that keeps no memory: the turn recalls nothing and files nothing.
+    const off: SoulTurnMemory = {
+      scope: seam.scope,
+      begin: async () => ({ recall: false, reconsolidation: false, sentiment: false }),
+      file: async (role) => ({ role, outcome: 'skipped', reason: 'policy_off' }),
+    };
+    const denied = await runTurn(gmi, textTurn('t2', 'Which tea do I like?', { soulMemory: off }));
+    expect(denied.output.memoryRecall).toBeUndefined();
+    // No recall query reached the embedding model.
+    expect(sent.some((text) => text.includes('Which tea do I like?'))).toBe(false);
+    expect((await denied.output.memoryWrite!).entries).toEqual([
+      { role: 'user', outcome: 'skipped', reason: 'policy_off' },
+      { role: 'assistant', outcome: 'skipped', reason: 'policy_off' },
+    ]);
+
+    // Under an answer that allows recall, the same kind of turn reads the person's key.
+    const allows: SoulTurnMemory = { ...off, begin: async () => ({ recall: true, reconsolidation: true, sentiment: false }) };
+    await runTurn(gmi, textTurn('t3', 'What tea do I drink?', { soulMemory: allows }));
+    expect(sent.some((text) => text.includes('What tea do I drink?'))).toBe(true);
   });
 });
 
