@@ -336,7 +336,8 @@ describe("an account's policy on the mind's path", () => {
     expect(analyze).toHaveBeenCalledTimes(1);
     const rows = (await rowsUnder(brain, keyOf('alice'))).filter((row) => writtenIds(record).includes(row.id));
     expect(rows.map((row) => row.content)).toEqual(['My canary eats seeds, which made me so happy.', 'Seeds, noted.']);
-    for (const row of rows) expect(JSON.parse(row.emotions)).toMatchObject({ valence: 0, arousal: 0, dominance: 0 });
+    // A neutral state as the store keeps it: no valence or dominance, the middle of the arousal scale, no intensity.
+    for (const row of rows) expect(JSON.parse(row.emotions)).toMatchObject({ valence: 0, arousal: 0.5, dominance: 0, intensity: 0 });
   });
 });
 
@@ -482,14 +483,16 @@ describe("each refusal on the mind's path says why", () => {
   it('a write that lands after the person was forgotten is taken back', async () => {
     const a = await open({ memoryPolicy: () => ({ longTerm: 'compiled' }) }, [reply.text('A canary, lovely.'), ...spare()]);
     const brain = storeBrain(a);
-    const encode = CognitiveMemoryManager.prototype.encode;
+    // Every encode of the manager, a session's view of it included, stores through this one method.
+    const proto = CognitiveMemoryManager.prototype as unknown as Record<string, (...given: unknown[]) => Promise<unknown>>;
+    const encodeInto = proto.encodeInto;
     const { gate, release } = gated();
     let held = 0;
     // The mind's first write is held once it has passed the gate's first reading of the tombstone.
-    vi.spyOn(CognitiveMemoryManager.prototype, 'encode').mockImplementation((async function (this: CognitiveMemoryManager, ...args: unknown[]) {
+    vi.spyOn(proto, 'encodeInto').mockImplementation(async function (this: unknown, ...args: unknown[]) {
       if (++held === 1) await gate;
-      return (encode as (...given: unknown[]) => Promise<unknown>).apply(this, args);
-    }) as never);
+      return encodeInto.apply(this, args);
+    });
     try {
       const result = await a.session('s1', { userId: 'alice' }).send('My canary is named LARK-7.');
       const write = writeOf(result);
