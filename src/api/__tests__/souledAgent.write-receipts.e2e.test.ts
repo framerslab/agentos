@@ -474,10 +474,11 @@ describe("a receipt for each memory write, on the GMI runtime with cognitive mem
   }
   /** The ids a record says were written, in its order. */
   const writtenIds = (record: MemoryWriteRecord): string[] => record.entries.flatMap((entry) => (entry.outcome === 'written' ? [entry.traceId] : []));
-  /** The soul's provider block of one model call: the user-role message that opens with `<memory_recall>`; '' when absent. */
+  /** The soul's provider block of one model call, its texts' spaces restored: the user-role message that opens with `<memory_recall>`; '' when absent. */
   const providerBlockOf = (call: ProviderScript['seen'][number]): string => {
     const block = call.messages.find((m) => m.role === 'user' && typeof m.content === 'string' && m.content.startsWith('<memory_recall>'));
-    return block ? (block.content as unknown as string) : '';
+    // The block writes `^` in place of each run of whitespace in a text: read back as one space.
+    return block ? (block.content as unknown as string).replace(/\^/g, ' ') : '';
   };
   /** Whether a model call carries the mind's memory block (the assembler's preamble). */
   const carriesMindBlock = (call: ProviderScript['seen'][number]): boolean => JSON.stringify(call.messages).includes('## How To Use Your Memories');
