@@ -317,7 +317,7 @@ describe("the facade's vector index", () => {
     const facade = await openFacade('sqlite', { ledger: true });
     const { memory, brain } = facade;
     const { indexFile, mapFile } = indexFilesOf(facade);
-    await memory.remember('Alice keeps bees.', { scope: 'conversation', scopeId: keyOf('alice') });
+    const alice = await memory.remember('Alice keeps bees.', { scope: 'conversation', scopeId: keyOf('alice') });
     const bobSoul = await memory.remember('Bob plays the cello.', { scope: 'conversation', scopeId: keyOf('bob') });
     const built = await mindManager(brain);
     const bobMind = [
@@ -325,6 +325,15 @@ describe("the facade's vector index", () => {
       await fileAsMind(built, 'bob', 'Bob rows on the river.'),
     ];
     for (const id of bobMind) expect(await holdsVector(brain, id)).toBe(true);
+
+    // Index files already in the store's folder that name Bob's mind-filed traces beside the facade's own.
+    await sidecarOf(memory).rewrite([
+      { id: alice.id, embedding: wordVector('Alice keeps bees.') },
+      { id: bobSoul.id, embedding: wordVector('Bob plays the cello.') },
+      { id: bobMind[0], embedding: wordVector('Bob plays chess on Sundays.') },
+      { id: bobMind[1], embedding: wordVector('Bob rows on the river.') },
+    ]);
+    expect(idsIn(mapFile)).toEqual([alice.id, bobSoul.id, ...bobMind].sort());
 
     const report = await forgetUserMemory({ memory, agentId: AGENT, subject: { kind: 'user', id: 'alice' }, wiki: noPages });
 
