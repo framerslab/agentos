@@ -58,6 +58,8 @@ import {
 import { fillScopeIds } from './migrations/v2-to-v3.js';
 import { encodePlainScopeId, onBrainRefiled, refileBrainScopeIds, type RefiledTrace } from './scopeIdForm.js';
 import { copyKey } from '../graph/knowledge/memoryCopies.js';
+import { memoryLog } from '../../log.js';
+import { parseConversationScopeKey } from './conversationScopeKey.js';
 
 // ---------------------------------------------------------------------------
 // Embedding guard (CR4)
@@ -135,7 +137,34 @@ export interface MemoryStoreConfig {
    * the interval 0 through `getByScope()` or one hour through `query()`.
    */
   persistAccessState?: boolean;
+  /**
+   * The Brain rows this store loads, reads and files. `'all'`: every row. `'mind'`: only the rows a souled agent's
+   * mind filed, whose metadata holds `filedBy: 'mind'` ({@link MemoryTrace.filing}): no load ({@link hydrateScope},
+   * the whole-brain hydration, {@link loadTracesForRecall}) and no recall leg's read of the Brain takes another row,
+   * and {@link store} refuses a trace that is not a `conversation` trace with a filing, filed under the conversation
+   * key of the filing's subject ({@link mindFilingRefusal}); no read of its vector index takes another writer's
+   * document. Such a store also leaves out
+   * of its index a stored vector whose size is not its embedding model's (`embeddingDimension`, else the size the
+   * embedding manager reports), with one `memory.vectors_unfit` line a load: the row stays in the Brain and is read by
+   * its words, and its text is never embedded again.
+   *
+   * @default 'all'
+   * @internal
+   */
+  rows?: 'all' | 'mind';
+  /**
+   * When the store loads its Brain's rows into its cache and index. `'brain'`: the brain's newest 1,000 rows at the
+   * first read, and a scope's when a caller loads it ({@link hydrateScope}). `'scopes'`: a scope's alone, when a caller
+   * loads it, and the rows a recall leg reads by their words or their age.
+   *
+   * @default 'brain'
+   * @internal
+   */
+  hydration?: 'brain' | 'scopes';
 }
+
+/** The value of a row's `filedBy` metadata key on a row a souled agent's mind filed ({@link MemoryTrace.filing}). */
+const MIND_FILER = 'mind';
 
 /** The reinforcement interval a trace loads with when none was persisted: one hour. */
 const DEFAULT_REINFORCEMENT_INTERVAL_MS = 3_600_000;
@@ -235,6 +264,8 @@ function traceToMetadata(trace: MemoryTrace, accessState: boolean): Record<strin
     entities: trace.entities.join(','),
     // With no Brain the index is the trace's only record, so `deleteScope` with `turnUserId` reads the user here.
     ...(trace.turnUserId ? { turnUserId: trace.turnUserId } : {}),
+    // A mind-filed trace's filing, as a JSON string for the reason the policy is one; read back with the trace.
+    ...(isMindFiling(trace.filing) ? { filingJson: JSON.stringify(filingMetadataOf(trace)) } : {}),
   };
 }
 
@@ -373,6 +404,69 @@ function safeParseJson<T>(raw: string): T | undefined {
 /** Whether a parsed JSON value is an object whose keys a merge can keep. */
 function isJsonObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** Whether a value is a filing of the shape {@link MemoryTrace.filing} names. */
+function isMindFiling(value: unknown): value is NonNullable<MemoryTrace['filing']> {
+  if (!isJsonObject(value)) return false;
+  const { filedBy, speaker, subject } = value;
+  return (
+    filedBy === MIND_FILER &&
+    (speaker === 'user' || speaker === 'assistant') &&
+    isJsonObject(subject) &&
+    (subject.kind === 'user' || subject.kind === 'session') &&
+    typeof subject.id === 'string' &&
+    subject.id !== ''
+  );
+}
+
+/**
+ * The filing a Brain row's metadata names in its top-level `filedBy`, `speaker` and `subject` keys; undefined for a
+ * row that names none, or names one of another shape.
+ */
+function filingInMetadata(meta: Record<string, unknown>): MemoryTrace['filing'] {
+  const candidate = { filedBy: meta.filedBy, speaker: meta.speaker, subject: meta.subject };
+  if (!isMindFiling(candidate)) return undefined;
+  return { filedBy: candidate.filedBy, speaker: candidate.speaker, subject: { kind: candidate.subject.kind, id: candidate.subject.id } };
+}
+
+/** The top-level metadata keys a Brain row of a trace with a filing holds; none for a trace without one. */
+function filingMetadataOf(trace: MemoryTrace): Record<string, unknown> {
+  const filing = trace.filing;
+  if (!isMindFiling(filing)) return {};
+  return { filedBy: filing.filedBy, speaker: filing.speaker, subject: { kind: filing.subject.kind, id: filing.subject.id } };
+}
+
+/** Whether a Brain row is one a souled agent's mind filed: its metadata holds `filedBy: 'mind'`. */
+function isMindRow(row: Pick<MemoryTraceRow, 'metadata'>): boolean {
+  return parseTraceMetadata(row.metadata).filedBy === MIND_FILER;
+}
+
+/**
+ * Why a store of a souled agent's mind ({@link MemoryStoreConfig.rows} `'mind'`) refuses a trace, or undefined when it
+ * files it. It files a trace under scope `'conversation'` with a filing ({@link MemoryTrace.filing}) whose scope id is
+ * the conversation key of the filing's subject (`conversationScopeKey`), so nothing a person said is filed under a key
+ * another person's turn reads, or under one that is no person's.
+ *
+ * @internal
+ */
+export function mindFilingRefusal(scope: unknown, scopeId: unknown, filing: unknown): string | undefined {
+  if (scope !== 'conversation' || !isMindFiling(filing)) {
+    return (
+      "a souled agent's mind files a trace under scope 'conversation' with a filing " +
+      "(filedBy 'mind', a speaker and a subject) alone"
+    );
+  }
+  const subject = typeof scopeId === 'string' ? parseConversationScopeKey(scopeId)?.subject : undefined;
+  if (
+    !subject ||
+    subject.kind === 'operator' ||
+    subject.kind !== filing.subject.kind ||
+    subject.id !== filing.subject.id
+  ) {
+    return "a souled agent's mind files a trace under the conversation key of its filing's subject alone";
+  }
+  return undefined;
 }
 
 /**
@@ -539,7 +633,16 @@ function metadataToTracePartial(metadata: Record<string, any>, accessState: bool
     entities:
       typeof metadata.entities === 'string' ? metadata.entities.split(',').filter(Boolean) : [],
     ...(typeof metadata.turnUserId === 'string' && metadata.turnUserId ? { turnUserId: metadata.turnUserId } : {}),
+    ...filingOfDocument(metadata.filingJson),
   };
+}
+
+/** The filing a vector document's `filingJson` holds, as a part of a trace; none when it holds none. */
+function filingOfDocument(filingJson: unknown): Pick<MemoryTrace, 'filing'> {
+  if (typeof filingJson !== 'string') return {};
+  const parsed = safeParseJson<unknown>(filingJson);
+  const filing = isJsonObject(parsed) ? filingInMetadata(parsed) : undefined;
+  return filing ? { filing } : {};
 }
 
 /** A row of the Brain's durable `memory_traces` table. */
@@ -1233,6 +1336,64 @@ export class MemoryStore {
     return this.config.persistAccessState !== false;
   }
 
+  /** Whether this store loads, reads and files the rows a souled agent's mind filed alone ({@link MemoryStoreConfig.rows}). */
+  private get mindRowsOnly(): boolean {
+    return this.config.rows === 'mind';
+  }
+
+  /**
+   * The condition a read of this store's Brain rows adds, with its bindings: with `rows: 'mind'`, that the row's
+   * metadata names the mind as its filer (`filedBy: 'mind'`), written with the dialect's JSON read so it runs on SQLite
+   * and PostgreSQL; none for a store of every row or with no Brain. A recall leg that reads the Brain adds it to its
+   * query.
+   *
+   * @param metadataColumn - The metadata column as the read names it (`metadata`, `mt.metadata`).
+   * @internal
+   */
+  rowsCondition(metadataColumn: string): { sql: string; params: unknown[] } | undefined {
+    const brain = this.brain;
+    if (!this.mindRowsOnly || !brain) return undefined;
+    // Only a row whose metadata text holds the key is read as JSON. A SQL read of JSON raises on metadata that is not
+    // JSON (`json_extract` on SQLite, the `::jsonb` cast on PostgreSQL), so one such row of another writer would fail
+    // the read of every row beside it. A key's own text holds the key in quotes; a string that holds it escapes them.
+    const filedBy = brain.features.dialect.jsonExtract(metadataColumn, '$.filedBy');
+    return {
+      sql: `(CASE WHEN ${metadataColumn} LIKE ? THEN ${filedBy} END) = ?`,
+      params: ['%"filedBy"%', MIND_FILER],
+    };
+  }
+
+  /**
+   * Whether this store reads a document of its vector index: with `rows: 'mind'`, one whose Brain row names the mind as
+   * its filer, or, with no row to read, whose trace or document holds a filing. A store of every row reads each one.
+   * An index another store on the Brain writes to holds that store's documents beside this one's.
+   */
+  private readsDocument(
+    row: Pick<MemoryTraceRow, 'metadata'> | undefined,
+    cached: MemoryTrace | undefined,
+    metadata: Record<string, unknown> | undefined,
+  ): boolean {
+    if (!this.mindRowsOnly) return true;
+    if (row) return isMindRow(row);
+    return isMindFiling(cached?.filing ?? filingOfDocument(metadata?.filingJson).filing);
+  }
+
+  /**
+   * The size a stored vector has to have to load into this store's index: with `rows: 'mind'`, the configured
+   * `embeddingDimension`, else the embedding model's as its manager reports it or one probe embedding measures it; none
+   * for a store of every row, or while the size cannot be told, and every vector loads then.
+   */
+  private async loadableVectorSize(): Promise<number | undefined> {
+    if (!this.mindRowsOnly) return undefined;
+    const configured = this.config.embeddingDimension;
+    if (isVectorSize(configured)) return configured;
+    this.measuredVectorSize ??= this.measureVectorSize();
+    const measuring = this.measuredVectorSize;
+    const measured = await measuring;
+    if (measured === undefined && this.measuredVectorSize === measuring) this.measuredVectorSize = undefined;
+    return measured;
+  }
+
   /**
    * Attach a Brain for durable write-through persistence.
    * Once attached, all store/softDelete/recordAccess operations also
@@ -1400,6 +1561,13 @@ export class MemoryStore {
     source: boolean,
   ): Promise<boolean> {
     this.brainAttachmentLocked = true;
+    // A store of the mind's rows never takes another writer's trace into its cache: a revival of one clears the
+    // tombstone a sibling's delete left here, and files nothing.
+    if (!source && this.mindRowsOnly && !isMindFiling(trace.filing)) {
+      this.tombstonedTraceIds.delete(trace.id);
+      this.authoritativeTombstoneIds.delete(trace.id);
+      return true;
+    }
     if (source) {
       const cached = this.traceCache.get(trace.id);
       if (cached) cached.isActive = true;
@@ -1684,9 +1852,12 @@ export class MemoryStore {
     if (!durable.ok) return { traces, unread: ids.length };
     const uncached: MemoryTraceRow[] = [];
     let unread = 0;
+    const mindOnly = this.mindRowsOnly;
     for (const id of ids) {
       const row = durable.rows.get(id);
       if (!row || Number(row.deleted ?? 0) !== 0) continue;
+      // A store of the mind's rows reads no other row.
+      if (mindOnly && !isMindRow(row)) continue;
       const cached = served(id);
       if (cached) {
         if (rowFiledElsewhere(row, cached.scope, cached.scopeId)) continue;
@@ -1706,6 +1877,7 @@ export class MemoryStore {
             const current = await brain.get<MemoryTraceRow>(LIVE_TRACE_ROW_SQL, [brain.brainId, id]);
             const trace = served(id);
             if (!current || !trace || rowFiledElsewhere(current, trace.scope, trace.scopeId)) return;
+            if (mindOnly && !isMindRow(current)) return;
             if (!this.rowChangedSince(trace, current)) {
               traces.set(id, trace);
               return;
@@ -1763,7 +1935,7 @@ export class MemoryStore {
           if (now.deletes !== epochs.deletes || now.refiles !== epochs.refiles) {
             current = await brain.get<MemoryTraceRow>(LIVE_TRACE_ROW_SQL, [brain.brainId, row.id]);
           }
-          if (current) traces.set(row.id, this.rowToTrace(current));
+          if (current && (!mindOnly || isMindRow(current))) traces.set(row.id, this.rowToTrace(current));
         });
       } catch {
         unread += 1;
@@ -1804,7 +1976,8 @@ export class MemoryStore {
    * best-effort: a SQL/schema error must never break the query path.
    */
   private ensureHydratedFromBrain(): Promise<void> {
-    if (!this.brain) return Promise.resolve();
+    // `hydration: 'scopes'`: a scope loads when a caller asks for it, and the brain's newest rows never do.
+    if (!this.brain || this.config.hydration === 'scopes') return Promise.resolve();
     // Single-flight, not a boolean latch. The old flag was set before the
     // first await, so a second query arriving while the first was still
     // loading rows skipped this guard, searched a still-empty index, and
@@ -1833,14 +2006,15 @@ export class MemoryStore {
       // A process-level facade cache (so hydration runs once, not per request)
       // is the follow-up optimisation; the cap keeps the un-cached path safe.
       // `scope_id` too: a row whose metadata names no scope id loads under the column's (`rowToTrace`).
+      const filed = this.rowsCondition('metadata');
       const rows = await brain.all<MemoryTraceRow>(
         `SELECT id, type, scope, content, embedding, strength, created_at,
                 last_accessed, retrieval_count, tags, emotions, metadata, scope_id
            FROM memory_traces
-          WHERE brain_id = ? AND deleted = 0
+          WHERE brain_id = ? AND deleted = 0${filed ? ` AND ${filed.sql}` : ''}
           ${hydrationOrder(brain)}
           LIMIT ?`,
-        [brain.brainId, MemoryStore.HYDRATION_LIMIT],
+        [brain.brainId, ...(filed?.params ?? []), MemoryStore.HYDRATION_LIMIT],
       );
       await this.hydrateRows(rows, brain, namespace, epochs);
     } catch {
@@ -1863,6 +2037,10 @@ export class MemoryStore {
     epochs: HydrationEpochs,
   ): Promise<number> {
     let loaded = 0;
+    // A store of the mind's rows loads a vector of its embedding model's size alone; the others are counted.
+    // No wait for any other store, so a load of every row runs as it did.
+    const vectorSize = rows.length > 0 && this.mindRowsOnly ? await this.loadableVectorSize() : undefined;
+    let unfit = 0;
     for (const bulkRow of rows) {
       const traceId = bulkRow.id;
       await withTraceOperation(
@@ -1894,11 +2072,17 @@ export class MemoryStore {
             if (!fresh) return;
             row = fresh;
           }
+          if (this.mindRowsOnly && !isMindRow(row)) return;
 
           const embedding = blobToEmbedding(row.embedding);
           // Legacy rows persisted without embeddings become recallable once
           // they are mentioned and stored again.
           if (embedding == null || !isUsableEmbedding(embedding)) return;
+          // A vector another embedding model made: its row is read by its words, and its text is not embedded again.
+          if (vectorSize !== undefined && embedding.length !== vectorSize) {
+            unfit += 1;
+            return;
+          }
           const trace = this.rowToTrace(row);
           const collection = collectionName(
             this.config.collectionPrefix,
@@ -1945,6 +2129,7 @@ export class MemoryStore {
         },
       );
     }
+    if (unfit > 0) memoryLog.warn('memory.vectors_unfit', { rows: unfit });
     return loaded;
   }
 
@@ -2000,6 +2185,8 @@ export class MemoryStore {
       ...(typeof meta.turnUserId === 'string' && meta.turnUserId ? { turnUserId: meta.turnUserId } : {}),
       ...(isTrustPolicy(meta.policy) ? { policy: meta.policy } : {}),
     } as MemoryTrace;
+    const filing = filingInMetadata(meta);
+    if (filing) trace.filing = filing;
     syncedDecayStates.set(trace, decay);
     this.rowSeen.set(trace, seenRowOf(rowFieldsOf(row), rowStatementOf(row)));
     return trace;
@@ -2015,6 +2202,10 @@ export class MemoryStore {
    */
   async store(trace: MemoryTrace): Promise<void> {
     this.beginOperation();
+    // A store of the mind's rows files the mind's conversation traces alone, each under its subject's key, so nothing
+    // a person said is filed in a scope another person's turn reads.
+    const refused = this.mindRowsOnly ? mindFilingRefusal(trace.scope, trace.scopeId, trace.filing) : undefined;
+    if (refused) throw new Error(`MemoryStore.store: ${refused}`);
     const namespace = this.coordinationNamespace;
     const brain = this.brain;
     await withTraceOperation(
@@ -2132,6 +2323,8 @@ export class MemoryStore {
           turnUserId: trace.turnUserId,
           // The trust policy, so a store that loads the row (a hydration, a recall leg's by-id read) still gates it.
           policy: trace.policy,
+          // Who filed it, who spoke and whose it is, on a trace a souled agent's mind filed.
+          ...filingMetadataOf(trace),
         };
         const insertParams = [
           brain.brainId,
@@ -2387,6 +2580,8 @@ export class MemoryStore {
             if (!cached) staleDocuments.push(result.id);
             continue;
           }
+          // Nor is another writer's, to a store of the mind's rows: the document stays in the index it shares.
+          if (!this.readsDocument(row, cached, result.metadata as Record<string, unknown> | undefined)) continue;
 
           const trace: MemoryTrace =
             cached ??
@@ -2757,6 +2952,8 @@ export class MemoryStore {
             if (!cached) staleDocuments.push(doc.id);
             continue;
           }
+          // Nor is another writer's, to a store of the mind's rows: the document stays in the index it shares.
+          if (!this.readsDocument(row, cached, doc.metadata as Record<string, unknown> | undefined)) continue;
           if (cached) {
             // A document left behind in a collection its trace moved out of lists the trace under its own scope only.
             if (cached.isActive && !filedElsewhere(cached, scope, scopeId)) {
@@ -2821,14 +3018,15 @@ export class MemoryStore {
   ): Promise<number> {
     const namespace = this.coordinationNamespace;
     const epochs = hydrationEpochs(namespace);
+    const filed = this.rowsCondition('metadata');
     const rows = await brain.all<MemoryTraceRow>(
       `SELECT id, type, scope, content, embedding, strength, created_at,
               last_accessed, retrieval_count, tags, emotions, metadata, scope_id
          FROM memory_traces
-        WHERE brain_id = ? AND scope = ? AND scope_id = ? AND deleted = 0
+        WHERE brain_id = ? AND scope = ? AND scope_id = ? AND deleted = 0${filed ? ` AND ${filed.sql}` : ''}
         ${hydrationOrder(brain)}
         LIMIT ?`,
-      [brain.brainId, scope, scopeId, limit],
+      [brain.brainId, scope, scopeId, ...(filed?.params ?? []), limit],
     );
     return this.hydrateRows(rows, brain, namespace, epochs);
   }

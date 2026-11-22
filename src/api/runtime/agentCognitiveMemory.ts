@@ -353,6 +353,22 @@ export interface AgentCognitiveMemoryOptions {
    * memory's `close()`.
    */
   brain?: Brain;
+  /**
+   * Which of the Brain's rows the manager loads, reads and files (`CognitiveMemoryConfig.rows`): `'mind'` for a souled
+   * agent's mind, which files its conversation traces with a filing and reads those alone.
+   *
+   * @default 'all'
+   * @internal
+   */
+  rows?: 'all' | 'mind';
+  /**
+   * When the manager loads the Brain's rows (`CognitiveMemoryConfig.hydration`): `'scopes'` loads a scope when a caller
+   * asks for it, and never the brain's newest rows at the first read.
+   *
+   * @default 'brain'
+   * @internal
+   */
+  hydration?: 'brain' | 'scopes';
 }
 
 export interface AgentCognitiveMemory {
@@ -556,6 +572,8 @@ export async function createAgentCognitiveMemory(opts: AgentCognitiveMemoryOptio
     ...(opts.mechanisms ? { cognitiveMechanisms: opts.mechanisms } : {}),
     consolidation: { enabled: consolidationEnabled },
     ...(opts.brain ? { brain: opts.brain, archive } : {}),
+    ...(opts.rows === 'mind' ? { rows: 'mind' as const } : {}),
+    ...(opts.hydration === 'scopes' ? { hydration: 'scopes' as const } : {}),
     ...(opts.memory.persistAccessState === false ? { persistAccessState: false } : {}),
     // The block's budget and the capture (memory.recall), checked again by the manager's initialize().
     ...recallFor(opts, embedding.label),

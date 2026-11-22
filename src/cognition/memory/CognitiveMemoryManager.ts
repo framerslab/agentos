@@ -38,7 +38,7 @@ import {
   type IContentFeatureDetector,
 } from './core/encoding/ContentFeatureDetector.js';
 import { computeCurrentStrength } from './core/decay/DecayModel.js';
-import { MemoryStore } from './retrieval/store/MemoryStore.js';
+import { MemoryStore, mindFilingRefusal } from './retrieval/store/MemoryStore.js';
 import {
   MEMORY_RECALL_CAPTURE_VERSION,
   candidatesFrom,
@@ -141,6 +141,14 @@ export interface ICognitiveMemoryManager {
       entities?: string[];
       /** {@link MemoryTrace.turnUserId}: set on a trace a turn with no learner files for a second user. */
       turnUserId?: string;
+      /**
+       * {@link MemoryTrace.filing}: set on a trace a souled agent's mind files for a turn. A manager configured with
+       * `rows: 'mind'` files a `conversation` trace that carries one, under the conversation key of its subject
+       * (`scopeId`), and rejects any other before its text reaches the feature detector or the embedding model.
+       *
+       * @internal
+       */
+      filing?: MemoryTrace['filing'];
       /**
        * When encoding a subjective trace from `PerspectiveObserver`
        * (`@framers/agentos/memory/pipeline/observation/PerspectiveObserver`),
@@ -503,6 +511,8 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
       moodProvider: config.moodProvider,
       enableGraphActivation: config.enableGraphActivation ?? false,
       ...(config.persistAccessState === false ? { persistAccessState: false } : {}),
+      ...(config.rows === 'mind' ? { rows: 'mind' as const } : {}),
+      ...(config.hydration === 'scopes' ? { hydration: 'scopes' as const } : {}),
     });
 
     // Attach Brain for durable write-through when configured.
@@ -789,6 +799,13 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
   ): Promise<MemoryTrace> {
     this.ensureInitialized();
 
+    // A manager of a souled agent's mind refuses here what its store would refuse, before the text reaches the feature
+    // detector, the mechanisms or the embedding model.
+    if (this.config.rows === 'mind') {
+      const refused = mindFilingRefusal(options.scope ?? 'user', options.scopeId ?? this.config.agentId, options.filing);
+      if (refused) throw new Error(`CognitiveMemoryManager.encode: ${refused}`);
+    }
+
     const now = Date.now();
     const encodingConfig = { ...DEFAULT_ENCODING_CONFIG, ...this.config.encoding };
 
@@ -841,6 +858,8 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
       isActive: true,
     };
     if (options.turnUserId) trace.turnUserId = options.turnUserId;
+    // A copy, so the caller's object never changes the stored trace; the store checks its shape.
+    if (options.filing) trace.filing = { ...options.filing, subject: { ...options.filing.subject } };
 
     // Stamp PerspectiveObserver provenance into MechanismMetadata when this
     // trace originated from a subjective rewrite of an objective event. The

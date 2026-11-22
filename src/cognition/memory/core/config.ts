@@ -393,6 +393,26 @@ export interface CognitiveMemoryConfig {
   brain?: import('../retrieval/store/Brain.js').Brain;
 
   /**
+   * Which of the Brain's rows the manager's store loads, reads and files (`MemoryStoreConfig.rows`). `'mind'`: the
+   * rows a souled agent's mind filed alone (`MemoryTrace.filing`), and `encode()` files a `conversation` trace with a
+   * `filing`, under the conversation key of the filing's subject, and refuses any other before its text is read.
+   *
+   * @default 'all'
+   * @internal
+   */
+  rows?: 'all' | 'mind';
+
+  /**
+   * When the manager's store loads the Brain's rows into its index (`MemoryStoreConfig.hydration`). `'scopes'`: a
+   * scope at a time, when a caller loads it (`MemoryStore.hydrateScope`), never the brain's newest rows at the first
+   * read.
+   *
+   * @default 'brain'
+   * @internal
+   */
+  hydration?: 'brain' | 'scopes';
+
+  /**
    * Keeps each trace's stability, access count, reinforcement interval and
    * next reinforcement time across a restart: written to the Brain (with no
    * Brain, to the vector store's metadata) at every access and read back at

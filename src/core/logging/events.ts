@@ -145,6 +145,8 @@ export const AGENTOS_EVENTS = {
   'memory.recipient_unrecorded': { type: 'word', code: 'word' },
   // An export of one person's memory could not read one of its stores: that store's part of the export is left empty and named in the export's unread list, and the export still returns. Written once a store a call, with the store and the error's listed type and code, never its text or the person's id.
   'memory.export_unread': { store: { enum: ['recipients', 'tombstone ledger', 'tombstone copy', 'older traces', 'conversation traces', 'memory graph', 'archived originals', 'older compiled pages', 'compiled pages', 'learning store'] }, type: 'word', code: 'word' },
+  // A store of a souled agent's mind left out of its index rows whose stored vector is not the size of its embedding model's, as after the host moved memory.embedding to a model of another size: the rows stay in the store, are recalled by their words (recall.retrieval 'hybrid') and never by meaning, and their text is not embedded again. Never an id or any text. Written once a load that left any out, with their count.
+  'memory.vectors_unfit': { rows: 'int' },
   // A translation failed, answered with no text, ran past the transcript translator's own timeout, stopped at its output cap or stopped for another reason (a content filter); it throws TranslationProviderError, and status is 0 when no HTTP status came back.
   'language.translation_failed': { provider: { enum: ['openai', 'deepl'] }, reason: { enum: ['request_failed', 'empty_output', 'timeout', 'truncated', 'incomplete'] }, status: 'int', type: 'word', code: 'word' },
   // A configured detection provider id LanguageService does not build (whisper_stub, or an id it does not know).
