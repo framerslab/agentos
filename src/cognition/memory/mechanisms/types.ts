@@ -11,6 +11,12 @@
 import type { PADState } from '../core/config.js';
 import type { MemorySourceType } from '../core/types.js';
 
+/**
+ * The tag of a correction: the trace a person's own correction of what is remembered of them is stored as.
+ * Reconsolidation and temporal gist leave a trace that carries it as it is.
+ */
+export const CORRECTION_TAG = 'correction';
+
 // ---------------------------------------------------------------------------
 // Per-mechanism configs
 // ---------------------------------------------------------------------------
