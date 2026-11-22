@@ -336,6 +336,8 @@ describe('the rows a mind files', () => {
     const { manager } = await mindManager(brain);
     await manager.retrieve('ferry', MOOD, { scopes: scopesOf(A) });
     expect(manager.getStore().listTraces().filter((trace) => trace.scopeId === B)).toEqual([]);
+    // Nor does the manager's vector index: a listing of B's key, which the store holds nothing of, reads the index.
+    expect(await manager.getStore().getByScope('conversation', B)).toEqual([]);
     expect(await manager.getStore().hydrateScope('conversation', A)).toBe(10);
     expect(manager.getStore().getTraceCount()).toBe(10);
     expect(idsOf(await manager.retrieve('ferry', MOOD, { scopes: scopesOf(A) })).every((id) => id.startsWith('alice-'))).toBe(true);
