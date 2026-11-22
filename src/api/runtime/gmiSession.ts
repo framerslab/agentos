@@ -41,7 +41,7 @@ import type { AgencyLaunchFrame, ToolCallHook } from './agencyLaunch/types.js';
 import { GmiTurnFolder, streamFromGmiTurn } from './gmiResults.js';
 import { stepToTranscript, transcriptToConversation } from './gmiTranscript.js';
 import { observeWithoutWaiting } from './memoryObserveFailures.js';
-import { emptyMemoryWriteRecord, memoryWriteRecordOf, type MemoryWriteEntry, type MemoryWriteRecord } from './memoryWriteRecord.js';
+import { emptyMemoryWriteRecord, failedWriteEntry, memoryWriteRecordOf, type MemoryWriteEntry, type MemoryWriteRecord } from './memoryWriteRecord.js';
 import { contentWithTurnText, judgeTurnInput } from './textGuardrails.js';
 import type { SoulTurnMemory } from '../../cognition/substrate/soulTurnMemory.js';
 
@@ -276,8 +276,9 @@ export interface GmiSessionDeps {
    * True on a session turn of a souled agent whose cognitive memory is the soul's mind: the GMI files the turn, once,
    * through the turn's view of the soul ({@link soulMemory}), so the turn calls no `memoryProvider.observe`; the
    * turn's write record is the one the GMI's output carries, or `no_subject` for each side with text when the turn has
-   * no view. The turn's tools are still told its memory subject, which {@link observeMemoryProvider} `false` would take
-   * from them.
+   * no view. The filings wait until the session keeps the turn, so a turn it does not keep (a reply it refuses, a stop
+   * after the turn's last request, a failure) files neither side, as such a turn is not observed. The turn's tools are
+   * still told its memory subject, which {@link observeMemoryProvider} `false` would take from them.
    */
   mindFilesTurn?: boolean;
   /** Who the turn's memory hooks are told it serves. */
@@ -322,6 +323,43 @@ function noSubjectRecord(userText: string, reply: string): Promise<MemoryWriteRe
   if (userText) sides.push({ role: 'user', outcome: 'skipped', reason: 'no_subject' });
   if (reply) sides.push({ role: 'assistant', outcome: 'skipped', reason: 'no_subject' });
   return Promise.resolve({ entries: sides });
+}
+
+/** Why a side of a turn its session did not keep was not filed: the class name its entry carries. */
+class TurnNotKeptError extends Error {
+  constructor() {
+    super('the session did not keep the turn');
+    this.name = 'TurnNotKeptError';
+  }
+}
+
+/**
+ * A souled turn's view as its GMI gets it on a turn the soul's mind files ({@link GmiSessionDeps.mindFilesTurn}):
+ * `view`, with its filings held until the session says whether it keeps the turn. The GMI starts the turn's filings
+ * as it ends the turn, which is before the session has checked the reply (a structured send whose answer does not
+ * parse is refused then) and before a stop that came after the turn's last request ends it. A turn the session keeps
+ * files through `view`, the filings reaching it in the order the GMI started them; a turn it does not keep files
+ * neither side, and `view` is never asked: each side's entry is `failed` with the class name `TurnNotKeptError`, which
+ * no result carries, since such a turn has no write record.
+ *
+ * @param view - The turn's view of the soul, as the souled agent built it.
+ * @returns The view to hand the GMI, and `keep`, which the turn calls once with the session's verdict; later calls
+ *   change nothing.
+ */
+function filingOnceKept(view: SoulTurnMemory): { view: SoulTurnMemory; keep: (kept: boolean) => void } {
+  let keep!: (kept: boolean) => void;
+  const verdict = new Promise<boolean>((resolve) => {
+    keep = resolve;
+  });
+  return {
+    view: {
+      ...(view.scope ? { scope: view.scope } : {}),
+      begin: (manager, stop) => view.begin(manager, stop),
+      file: async (role, content, write, undo) =>
+        (await verdict) ? view.file(role, content, write, undo) : failedWriteEntry(role, new TurnNotKeptError()),
+    },
+    keep,
+  };
 }
 
 /**
@@ -441,6 +479,8 @@ export async function* runGmiTurn(
   let writer: SessionTurnWriter | undefined;
   let ended = false;
   let releaseGmi: (() => Promise<void>) | undefined;
+  // On a turn the soul's mind files: tells the filings its GMI started whether the session kept the turn.
+  let keepFilings: ((kept: boolean) => void) | undefined;
   // The turn's usage ledger writes, awaited before the turn ends.
   const ledgerWrites: Array<Promise<void>> = [];
   // The input as the turn sends it: the caller's, or the text an input guard rewrote it to.
@@ -556,6 +596,11 @@ export async function* runGmiTurn(
     });
     writer = deps.history?.beginTurn(turn.blockLabel, epochAtStart);
 
+    // The mind's filings of the turn wait for the session to keep it: a reply the session refuses, and a turn stopped
+    // after its last request, file neither side.
+    const heldSoul = deps.mindFilesTurn && deps.soulMemory ? filingOnceKept(deps.soulMemory) : undefined;
+    keepFilings = heldSoul?.keep;
+    const turnSoul = heldSoul?.view ?? deps.soulMemory;
     const turnInput: GMITurnInput = {
       interactionId: `turn-${randomUUID()}`,
       userId: deps.userId,
@@ -569,7 +614,7 @@ export async function* runGmiTurn(
         ...(deps.withholdUserId ? { withholdUserId: true } : {}),
         ...(deps.providerUserId === undefined ? { noTurnUser: true } : {}),
         ...(memoryScope ? { memoryScope } : {}),
-        ...(deps.soulMemory ? { soulMemory: deps.soulMemory } : {}),
+        ...(turnSoul ? { soulMemory: turnSoul } : {}),
         ...(turn.launchFrame ? { agencyLaunch: turn.launchFrame } : {}),
         options: {
           ...(turn.options ?? {}),
@@ -655,7 +700,9 @@ export async function* runGmiTurn(
       writer?.commit();
       const memoryProvider = deps.observeMemoryProvider === false || deps.mindFilesTurn ? undefined : deps.opts.memoryProvider;
       if (deps.mindFilesTurn) {
-        // The soul's mind filed the turn as its GMI ended it, and the turn does not wait for the write either.
+        // The session keeps the turn: the filings the soul's mind started as its GMI ended it go on from here, and the
+        // turn does not wait for them either.
+        keepFilings?.(true);
         folder.wrote(folder.mindWrite() ?? (deps.soulMemory ? Promise.resolve(emptyMemoryWriteRecord()) : noSubjectRecord(userText, folder.text())));
       } else if (memoryProvider?.observe) {
         // The turn does not wait for its writes: their record is a promise the turn's result carries.
@@ -675,6 +722,8 @@ export async function* runGmiTurn(
     writer?.abort({ partial: true });
     throw error;
   } finally {
+    // A turn that did not reach the line that keeps it files nothing of itself.
+    keepFilings?.(false);
     try {
       // A turn its consumer stopped reading keeps the steps that finished, marked partial.
       if (!ended) {
