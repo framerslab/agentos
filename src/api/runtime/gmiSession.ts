@@ -41,7 +41,7 @@ import type { AgencyLaunchFrame, ToolCallHook } from './agencyLaunch/types.js';
 import { GmiTurnFolder, streamFromGmiTurn } from './gmiResults.js';
 import { stepToTranscript, transcriptToConversation } from './gmiTranscript.js';
 import { observeWithoutWaiting } from './memoryObserveFailures.js';
-import { emptyMemoryWriteRecord, failedWriteEntry, memoryWriteRecordOf, type MemoryWriteEntry, type MemoryWriteRecord } from './memoryWriteRecord.js';
+import { emptyMemoryWriteRecord, memoryWriteRecordOf, type MemoryWriteEntry, type MemoryWriteRecord } from './memoryWriteRecord.js';
 import { contentWithTurnText, judgeTurnInput } from './textGuardrails.js';
 import type { SoulTurnMemory } from '../../cognition/substrate/soulTurnMemory.js';
 
@@ -325,13 +325,11 @@ function noSubjectRecord(userText: string, reply: string): Promise<MemoryWriteRe
   return Promise.resolve({ entries: sides });
 }
 
-/** Why a side of a turn its session did not keep was not filed: the class name its entry carries. */
-class TurnNotKeptError extends Error {
-  constructor() {
-    super('the session did not keep the turn');
-    this.name = 'TurnNotKeptError';
-  }
-}
+/**
+ * The entry of a side of a turn its session did not keep: its filing was stopped before it reached the soul's gate,
+ * so it is `failed` under the name of an abort. No result carries it: such a turn has no write record.
+ */
+const notKeptEntry = (role: 'user' | 'assistant'): MemoryWriteEntry => ({ role, outcome: 'failed', errorName: 'AbortError' });
 
 /**
  * A souled turn's view as its GMI gets it on a turn the soul's mind files ({@link GmiSessionDeps.mindFilesTurn}):
@@ -339,8 +337,7 @@ class TurnNotKeptError extends Error {
  * as it ends the turn, which is before the session has checked the reply (a structured send whose answer does not
  * parse is refused then) and before a stop that came after the turn's last request ends it. A turn the session keeps
  * files through `view`, the filings reaching it in the order the GMI started them; a turn it does not keep files
- * neither side, and `view` is never asked: each side's entry is `failed` with the class name `TurnNotKeptError`, which
- * no result carries, since such a turn has no write record.
+ * neither side, and `view` is never asked ({@link notKeptEntry}).
  *
  * @param view - The turn's view of the soul, as the souled agent built it.
  * @returns The view to hand the GMI, and `keep`, which the turn calls once with the session's verdict; later calls
@@ -356,7 +353,7 @@ function filingOnceKept(view: SoulTurnMemory): { view: SoulTurnMemory; keep: (ke
       ...(view.scope ? { scope: view.scope } : {}),
       begin: (manager, stop) => view.begin(manager, stop),
       file: async (role, content, write, undo) =>
-        (await verdict) ? view.file(role, content, write, undo) : failedWriteEntry(role, new TurnNotKeptError()),
+        (await verdict) ? view.file(role, content, write, undo) : notKeptEntry(role),
     },
     keep,
   };
