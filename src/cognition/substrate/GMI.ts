@@ -1901,10 +1901,10 @@ export class GMI implements IGMI {
           this.turnInputs.delete(oldest);
         }
       }
+      // The turn as text, for the recall and retrieval queries: an image part is `[image]`, so no image data or URL is
+      // sent to be embedded.
       const currentTurnText = currentUserMessage?.content
-        ? (typeof currentUserMessage.content === 'string'
-            ? currentUserMessage.content
-            : JSON.stringify(currentUserMessage.content))
+        ? turnContentText(currentUserMessage.content as GMITurnInput['content'])
         : '';
       const durableHistoryForPrompt =
         Array.isArray(turnInput.metadata?.conversationHistoryForPrompt) && turnInput.metadata?.conversationHistoryForPrompt.length > 0
