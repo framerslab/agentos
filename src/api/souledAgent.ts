@@ -99,6 +99,7 @@ import { resolveCognition, type CognitionInputs } from './runtime/gmiCognition.j
 import { shareRouteObserver } from './runtime/routeObserver.js';
 import { assertBigintReadsAsNumbers, embeddingRouteOf } from './runtime/agentCognitiveMemory.js';
 import { serializeTransactionsOn } from '../cognition/memory/retrieval/store/adapterTransactionLock.js';
+import { soulLog } from '../cognition/substrate/personas/soulLog.js';
 import { resolveModelOption, resolveProviderRoute } from './model.js';
 import type { AgentOSUsageLedgerOptions } from './runtime/usageLedger.js';
 
@@ -508,6 +509,12 @@ function isMemoryPolicy(value: unknown): value is MemoryPolicy {
   return typeof retentionDays === 'number' && Number.isFinite(retentionDays) && retentionDays > 0;
 }
 
+/**
+ * The refusal of `memoryPolicy`, `screen` or `sharedMemory` beside cognitive memory on a soul that gives no store: an
+ * inline soul, or an optional soul that did not load.
+ */
+const SOULLESS_HOOKS_WITH_COGNITIVE_MEMORY =
+  "souledAgent: memoryPolicy, screen and sharedMemory act on the soul's own store, and this soul gives none (an inline { content } soul has no workspace folder, and an optional soul that did not load has none either), so the plain agent built in its place keeps its GMI's cognitive memory (runtime: 'gmi' with cognition memory on) in a store none of them reaches; pass the folder that holds SOUL.md, turn cognitive memory off, or leave them out";
 /** What `sharedMemory` must be, as the rejection of an option that is not says it. */
 const SHARED_MEMORY_SHAPE =
   "souledAgent: sharedMemory needs { as: <a user id>, reason: 'one-persons-machine' | 'operators-notes' }";
@@ -921,7 +928,7 @@ export type SouledAgent = Agent & {
  * When the soul resolves to a workspace directory, the wiki is wired end to end
  * (store + write-back + `read_memory_page` tool + prelude `index.md`). For inline
  * souls (`{ content }`) there is no workspace, so this falls back to a plain
- * {@link agent} and says so in one `console.warn` line.
+ * {@link agent} and says so in one `soul.inline_no_wiki` log line.
  *
  * Memory is kept per subject. A session turn is filed under the key of its subject, the user the session named or
  * else the session itself, the user's message and the reply alike, and it recalls that subject's memory and the
@@ -977,8 +984,10 @@ export type SouledAgent = Agent & {
  *   `tombstoneKey` is unset and the ledger holds no tombstone; the store is closed first. A session that would be the
  *   second subject throws the same from `agent.session()`.
  * @throws TypeError when `memoryPolicy`, `screen` or `sharedMemory` is set on an agent whose cognitive memory is on
- *   (`runtime: 'gmi'` with `cognition.memory`, the `full` profile, or the `memory` option): the GMI keeps that memory
- *   in a store of its own, which none of them reaches; nothing is opened.
+ *   (`runtime: 'gmi'` with `cognition.memory`, the `full` profile, or the `memory` option) and the soul gives no store:
+ *   an inline `{ content }` soul, which has no workspace folder, or an optional soul that did not load. The plain agent
+ *   built in its place keeps its GMI's cognitive memory in a store of its own, which none of them reaches; nothing is
+ *   opened.
  * @throws TypeError when `soulStore` is not `{ adapter }`, or is set without a `tombstoneCopy` that names a file or an
  *   adapter, or without `retention`, or without a `tombstoneKey` that holds a key; nothing is opened.
  * @throws TypeError when `tombstoneCopy` is set and names neither a file by a non-empty path nor an adapter; nothing is
@@ -1032,15 +1041,17 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     // option left out keeps the default file.
     throw new TypeError(TOMBSTONE_COPY_NAMES_NOTHING);
   }
-  // The two hooks and sharedMemory act on this agent's own store. A GMI's cognitive memory files and recalls in a store
-  // of its own, which none of them reaches: an account the policy turns off would still be remembered there, and
-  // sessions sharedMemory runs as one user would not share it. They are refused together, before the soul is loaded:
-  // an inline soul, or an optional one that does not load, builds a plain agent that keeps cognitive memory too.
-  if ((memoryPolicy || screen || sharedMemory !== undefined) && rest.runtime === 'gmi' && cognitiveMemoryOf(rest as CognitionInputs)) {
-    throw new TypeError(
-      "souledAgent: memoryPolicy, screen and sharedMemory act on the souled agent's own memory, and cognitive memory (runtime: 'gmi' with cognition memory on) keeps a store none of them reaches; turn cognitive memory off, or leave them out",
-    );
-  }
+  /**
+   * Refuses the two hooks and sharedMemory where the soul gives no store and the plain agent built in its place keeps
+   * cognitive memory: its GMI files and recalls in a store of its own, which none of them reaches, so an account the
+   * policy turns off would still be remembered there, and sessions sharedMemory runs as one user would not share it.
+   * Called before the plain agent is built, so nothing has been opened.
+   */
+  const refuseHooksWithoutStore = (): void => {
+    if ((memoryPolicy || screen || sharedMemory !== undefined) && rest.runtime === 'gmi' && cognitiveMemoryOf(rest as CognitionInputs)) {
+      throw new TypeError(SOULLESS_HOOKS_WITH_COGNITIVE_MEMORY);
+    }
+  };
   /**
    * A plain agent, where the soul gives no workspace to keep a store in. On the GMI runtime it keeps the souled
    * agent's rule for the end user's id: no session turn sends it to the model provider unless the host opts in.
@@ -1064,15 +1075,14 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   if (!loaded) {
     // The soul failed to load, and loadSoulFromOption has warned: a plain agent without it, which loads it no
     // second time and so does not warn again.
+    refuseHooksWithoutStore();
     return plainAgent({ ...rest, soul: undefined }, opts.name?.trim() || undefined);
   }
   if (!loaded.memoryDir) {
-    // Inline soul: no workspace dir, so no wiki. A plain agent, and a line that says so.
-    console.warn(
-      '[agentos] souledAgent: the soul has no workspace folder (an inline { content } soul), so no wiki memory is ' +
-        'wired: no memory index, no read_memory_page tool and no compile on close. Pass the folder that holds ' +
-        'SOUL.md to have them.',
-    );
+    // Inline soul: no workspace dir, so no wiki. A plain agent, and a line that says so: no memory index, no
+    // read_memory_page tool and no compile on close.
+    refuseHooksWithoutStore();
+    soulLog.warn('soul.inline_no_wiki', {});
     return plainAgent(rest, soulAgentIdOf(loaded.frontmatter, opts.name));
   }
   // NaN, a negative number or none is the default; Infinity is held to the longest timer when the wait starts.
