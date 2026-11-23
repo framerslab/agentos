@@ -195,6 +195,11 @@ function legacyGmiSpeaker(tags: string): Speaker | undefined {
 }
 
 type LegacyGmiUnattributed = { scope: string; scopes: number; traces: number; reason: string };
+/**
+ * How many source rows a move deletes from a passed GMI store at once, once their copies are filed: each delete on a
+ * SQLite store rebuilds the store's full-text index, so a row at a time would rebuild it once a row.
+ */
+const LEGACY_MOVE_BATCH = 200;
 type LegacyGmiMove = { userId: string; moved: number; kept: number; failed?: string };
 type LegacyGmiPerson = { subject: { kind: 'user'; id: string }; scopeId: string; traces: number };
 
@@ -3281,6 +3286,21 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     onSubject(scopeId, async () => {
       const userId = subject.id;
       const result: LegacyGmiMove = { userId, moved: 0, kept: 0 };
+      /** Source rows whose copies are filed, deleted together. */
+      let moving: string[] = [];
+      /** Source rows the passed store had marked deleted and the soul's store holds no live copy of. */
+      let stale: string[] = [];
+      const flush = async (): Promise<void> => {
+        const filed = moving;
+        const marked = stale;
+        moving = [];
+        stale = [];
+        if (filed.length > 0) result.moved += (await legacy.deleteTraces(filed, { withoutEmbeddings: true })).deleted;
+        if (marked.length > 0) await legacy.deleteTraces(marked, { withoutEmbeddings: true });
+      };
+      /** Why the account's policy keeps this person's rows out of the soul's store; asked once, before the first filing. */
+      let refusal: 'policy_failed' | 'policy_off' | 'minor_no_retention' | undefined;
+      let asked = false;
       try {
         if (await forgotten.isForgotten(subject)) return { forgotten: traces };
         const rows = await readLegacyGmiRows(legacy, userId, true);
@@ -3299,11 +3319,32 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
           const copied = prior && prior.scope === 'conversation' && prior.scope_id === scopeId &&
             Number(prior.deleted) === 0 && Number(prior.created_at) === createdAt &&
             parseTraceMetadata(prior.metadata).copiedFrom === 'gmi-store';
-          // Hard deletion can stop after marking the source row. Retry it only with its live destination copy.
-          if (Number(row.deleted) !== 0 && !copied) continue;
+          // A row the passed store marked deleted is never filed. With its live copy it is a move's delete that stopped
+          // after the mark, finished below; with none (the store's own delete, or a copy that has since expired) it
+          // goes for good.
+          if (Number(row.deleted) !== 0 && !copied) {
+            stale.push(row.id);
+            if (moving.length + stale.length >= LEGACY_MOVE_BATCH) await flush();
+            continue;
+          }
           if (prior && !copied) throw new Error('souledAgent: a legacy trace id is already in use');
           if (!copied) {
             if (await forgotten.isForgotten(subject)) break;
+            if (!asked) {
+              asked = true;
+              // The account's policy holds for what a move files, as for a turn: an account kept from memory, a child's
+              // on a store that would keep it until deletion, and a failed answer leave the rows where they are.
+              const policy = applied(await askPolicy(context), subject);
+              if (policy === 'failed') refusal = 'policy_failed';
+              else if (policy.longTerm === 'off') {
+                refusal = policy.minor === true && !keepsMinorsMemory(subject) ? 'minor_no_retention' : 'policy_off';
+              }
+              if (refusal) memoryLog.warn('memory.write_refused', { reason: refusal });
+            }
+            if (refusal) {
+              result.kept += 1;
+              continue;
+            }
             const text = await screened(row.content, context, 'file');
             if (text === SCREEN_FAILED || text === null || (screen && text === '')) {
               result.kept += 1;
@@ -3332,10 +3373,15 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
             if (filed.status === 'refused') break;
           }
           await namedForNextCompile(scopeId, row.id);
-          result.moved += (await legacy.deleteTraces([row.id], { withoutEmbeddings: true })).deleted;
+          moving.push(row.id);
+          if (moving.length + stale.length >= LEGACY_MOVE_BATCH) await flush();
         }
+        await flush();
       } catch (error) {
         result.failed = errorNameOf(error);
+        // The rows filed before the failure lose their source rows now, so a failure at one row never leaves the
+        // copies before it in both stores; a delete that fails again is finished by the next run.
+        await flush().catch(() => undefined);
       }
       return result;
     });
