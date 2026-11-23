@@ -15,6 +15,9 @@ import { reply, script, type ProviderScript } from './helpers/stubProviders';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({
   OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai'),
 }));
+vi.mock('../../core/llm/providers/implementations/AnthropicProvider', async () => ({
+  AnthropicProvider: (await import('./helpers/stubProviders')).stubProviderClass('anthropic'),
+}));
 
 const RUNTIME = 'gmi' as const;
 const AGENT = 'recall-detail';
@@ -58,7 +61,7 @@ function route() {
   return { provider: 'openai' as const, model: 'stub-model', apiKey, fallbackProviders: [] };
 }
 
-async function open(recall?: MemoryRecallConfig, store: Pick<SouledAgentOptions, 'soulStore' | 'tombstoneCopy'> = {}) {
+async function open(recall?: MemoryRecallConfig, store: Partial<SouledAgentOptions> = {}) {
   const agent = await souledAgent({
     ...route(),
     runtime: RUNTIME,
@@ -93,8 +96,8 @@ async function fileMemories(agent: SouledAgent) {
   return { provider, page };
 }
 
-function blocksOfLastCall() {
-  const parts = served.seen.at(-1)!.messages.flatMap(({ content }) =>
+function blocksOfLastCall(of: ProviderScript = served) {
+  const parts = of.seen.at(-1)!.messages.flatMap(({ content }) =>
     typeof content === 'string' ? [content] : Array.isArray(content) ? content.flatMap((part) => ('text' in part ? [part.text] : [])) : [],
   );
   const provider = parts.find((part) => part?.startsWith('<memory_recall>')) ?? '';
@@ -138,8 +141,10 @@ async function expectRecallDetail(store?: Pick<SouledAgentOptions, 'soulStore' |
     ]),
   );
   expect(modelItems).toHaveLength(2);
-  expect(blocks.provider).not.toContain(provider.id);
-  expect(blocks.provider).not.toContain(page.id);
+  for (const id of [...includedIds, provider.id, page.id]) {
+    expect(blocks.provider).not.toContain(id);
+    expect(blocks.mind).not.toContain(id);
+  }
   for (const item of modelItems) {
     expect(item).not.toHaveProperty('id');
     expect(item.when).toMatch(/\d{4}-\d{2}-\d{2}/);
@@ -226,6 +231,54 @@ describe('recall detail on a souled agent', () => {
     expect(result.memoryShown).toBeUndefined();
     expectNoMemoryText(parts);
     expectNoMemoryText(await result.memoryRecall);
+  });
+
+  it('lists what the serving fallback hop was sent when a hook leaves the provider block out there', async () => {
+    const fallbackKey = `k-recall-detail-fallback-${++serial}`;
+    const fallback = script('anthropic', fallbackKey, { whole: true, replies: [reply.text(REPLY)] });
+    vi.stubEnv('ANTHROPIC_API_KEY', fallbackKey);
+    const agent = await open({ capture: DETAIL }, {
+      fallbackProviders: [{ provider: 'anthropic', model: 'claude-x' }],
+      onBeforeGeneration: async (context) =>
+        context.provider === 'anthropic'
+          ? { ...context, messages: context.messages.filter(({ content }) => !(typeof content === 'string' && content.startsWith('<memory_recall>'))) }
+          : undefined,
+    });
+    // The reader's first hop fails before any output; the fallback serves the turn.
+    served.replies.splice(1, 1, Object.assign(new Error('overloaded'), { httpStatus: 529 }));
+    await fileMemories(agent);
+    const result = await agent.session('reader', { userId: USER }).send(QUESTION);
+
+    expect(result.provider).toBe('anthropic');
+    expect(blocksOfLastCall(served).provider).toContain(PROVIDER.replace(/ /g, '^'));
+    const sent = blocksOfLastCall(fallback);
+    expect(sent.provider).toBe('');
+    expect(sent.mind).toContain(MIND_USER);
+    const includedIds = result.memoryRecall?.candidates.filter(({ outcome }) => outcome === 'included').map(({ id }) => id) ?? [];
+    expect(includedIds.length).toBeGreaterThan(0);
+    expect(result.memoryShown?.map(({ source, id }) => ({ source, id }))).toEqual(includedIds.map((id) => ({ source: 'memory', id })));
+    for (const item of result.memoryShown ?? []) expect(sent.mind).toContain(item.text);
+  });
+
+  it('keeps what both blocks showed in the stream result when the reply breaks after it starts', async () => {
+    const agent = await open({ capture: DETAIL });
+    served.replies.splice(1, 1, reply.breakAfterFirstDelta('I re'));
+    await fileMemories(agent);
+    const stream = agent.session('reader', { userId: USER }).stream(QUESTION);
+    const parts = [];
+    for await (const part of stream.fullStream) parts.push(part);
+
+    expect(parts.at(-1)?.type).toBe('error');
+    expect(await stream.text).toBe('I re');
+    const blocks = blocksOfLastCall();
+    expect(blocks.mind).toContain(MIND_USER);
+    expect(blocks.provider).toContain(PROVIDER.replace(/ /g, '^'));
+    const includedIds = (await stream.memoryRecall)?.candidates.filter(({ outcome }) => outcome === 'included').map(({ id }) => id) ?? [];
+    expect(includedIds.length).toBeGreaterThan(0);
+    const shown = await stream.memoryShown;
+    expect(shown?.filter(({ source }) => source === 'memory').map(({ id }) => id)).toEqual(includedIds);
+    expect(shown?.filter(({ source }) => source === 'provider').map(({ text }) => text).sort()).toEqual([PAGE, PROVIDER].sort());
+    expectNoMemoryText(parts);
   });
 
   it('leaves recall detail absent when the turn sends no memory block', async () => {
