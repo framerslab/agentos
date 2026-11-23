@@ -145,7 +145,12 @@ describe('GMI cognitive memory when a turn stops', () => {
     try {
       const first = await Promise.race([embedding.started.then(() => 'embedding'), turn]);
       expect(first).toBe('embedding');
-      const closing = session.close();
+      // While the reply's embedding is held, neither the close nor the turn ends.
+      const ended: string[] = [];
+      const closing = session.close().finally(() => { ended.push('close'); });
+      void turn.then(() => { ended.push('turn'); });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(ended).toEqual([]);
       embedding.release();
 
       await closing;
