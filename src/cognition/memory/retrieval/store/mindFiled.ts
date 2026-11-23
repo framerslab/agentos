@@ -27,8 +27,9 @@ export interface SqlCondition {
  * (`json_extract` on SQLite, the `::jsonb` cast on PostgreSQL), so one such row of another writer would fail the read
  * of every row beside it. A key's own text holds the key in quotes; a string that holds it escapes them. On SQLite the
  * text must also be JSON (`json_valid`), so a row whose text holds the key and is not JSON, such as metadata cut short
- * after the key's name, names no filer either. PostgreSQL before version 16 has no such check, so there that row still
- * fails the read.
+ * after the key's name, names no filer either. On PostgreSQL no such check is made (versions before 16 have none to
+ * make), so there that row still fails the read: the library writes metadata as JSON, and such a row is another
+ * writer's.
  */
 function filerOf(dialect: Dialect, metadataColumn: string): SqlCondition {
   const isJson = dialect.name === 'sqlite' ? ` AND json_valid(${metadataColumn})` : '';

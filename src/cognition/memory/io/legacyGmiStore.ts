@@ -104,7 +104,8 @@ export async function legacyGmiTraceIdsOf(store: LegacyGmiStore, userId: string)
   // A turn with no learner files a second user's rows under its session's scopes, whose ids start with the namespace's
   // session form: `<namespace>//` encoded, or `/` with no namespace. A row of the same user id under another
   // namespace's session is another person's. Only a row whose metadata text holds the key is read as JSON, so one row
-  // of another writer that is not JSON never fails the read.
+  // of another writer that is not JSON does not fail the read; on PostgreSQL a row whose text holds the key and is not
+  // JSON still does (see `filerOf` in mindFiled.ts).
   const sessionForm = namespace ? `${encodeScopeIdPart(namespace)}//` : '/';
   const { dialect } = brain.features;
   const isJson = dialect.name === 'sqlite' ? ' AND json_valid(metadata)' : '';

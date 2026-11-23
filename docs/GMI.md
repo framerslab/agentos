@@ -215,7 +215,7 @@ A soul file's front matter is applied through the loader's one mapping, so the "
   shares the store is someone else), so a restore of the passed store alone is undone at the next open even when
   `learning.store` keeps the learning tables elsewhere. It deletes those traces with the ones the learning layer
   names, then empties that store's write-ahead log: a log another connection holds leaves the store not reached and
-  the report `complete: false`. `exportUserMemory()` lists the person's traces there in `held.legacyGmiStore`, and their own messages among them in `provided.messages`; and
+  the report `complete: false`, and `forgetUser()` made again empties it once that connection has let go. `exportUserMemory()` lists the person's traces there in `held.legacyGmiStore`, and their own messages among them in `provided.messages`; and
   `correctUserMemory()` can delete a trace id from that list. The retention sweep skips the passed store. Once rows
   are copied into the soul's store, they are covered by `retention`.
 

@@ -769,11 +769,12 @@ The same object holds:
 
 | Field | What it holds |
 |---|---|
-| `provided.messages` | The person's own messages (id, time, text), oldest first; none of the agent's replies. |
+| `provided.messages` | The person's own messages (id, time, text), oldest first; none of the agent's replies, and no message a host filed under the person's key for another user (`turnUserId`), which `traces` and `held.traces` list. |
 | `held.traces` | Each trace with its speaker, text, tags, entities, `filedBy` (`'soul'` for a trace the souled agent's own memory filed, `'mind'` for one its GMI filed), emotional context (valence, arousal, dominance, intensity, mood: zeros and `neutral` where none was stored, and for a trace the GMI stored neutral, which is every one unless you set `emotionalStamp: 'mood'`, zeros and `neutral` with an arousal of 0.5, the middle of its 0 to 1 scale), `encodingStrength`, `stability`, `retrievalCount` and `lastAccessedAt`. |
 | `held.graphLinks` | The memory graph's links whose two ends are both the person's traces (`from`, `to`, `type`, `weight`). A link to another person's trace is left out. |
 | `held.pages` | The person's compiled pages, as `pages`. |
 | `held.learner` | The person's learned state, when the agent runs a learning layer. |
+| `held.legacyGmiStore` | With a passed GMI `memory.store` attached on `runtime: 'gmi'`: the person's live traces there (id, time, speaker where the trace's tags name one, text), the rows a deletion removes. Their own messages among them are in `provided.messages` too. |
 | `held.archivedOriginals`, `held.typedFacts`, `held.restoreCopies` | The verbatim originals an archive keeps of the person's traces, the typed facts extracted from them (none: a souled agent extracts none), and the corrections whose text a second copy keeps, each with its `text` when the store holds no trace of it (a restore took it and filing it again has not succeeded yet). |
 | `recipients` | `agent.recipients()`: every outside recipient of a person's text, agent-wide. |
 | `retention` | The agent's period for the person's traces (`'none'` without `retention`), and `policyDays`, the shortest `retentionDays` your `memoryPolicy` answered for the person in this process. |
