@@ -796,8 +796,7 @@ export class GraphRuntime {
           return;
         }
 
-        yield { type: 'node_end', nodeId, output: result.output, durationMs, telemetry: result.metadata };
-
+        const nodeEnd: GraphEvent = { type: 'node_end', nodeId, output: result.output, durationMs, telemetry: result.metadata };
         completedNodes.push(nodeId);
 
         const expansionRequests = [...(result.expansionRequests ?? [])];
@@ -815,7 +814,12 @@ export class GraphRuntime {
           });
         }
 
-        if (this.config.expansionHandler && expansionRequests.length > 0) {
+        const expansionHandler = this.config.expansionHandler;
+        const expands = expansionHandler && expansionRequests.length > 0;
+        const deferNodeEnd = !expands && savesAfter(node, activeGraph);
+        if (!expands && !deferNodeEnd) yield nodeEnd;
+
+        if (expands) {
           let checkpointIdBefore: string | undefined;
 
           for (const request of expansionRequests) {
@@ -838,11 +842,12 @@ export class GraphRuntime {
                 [],
               );
               state = this.attachCheckpointMetadata(state, checkpointIdBefore);
+              yield nodeEnd;
               yield { type: 'checkpoint_saved', checkpointId: checkpointIdBefore, nodeId };
               yield { type: 'mission:checkpoint_saved', checkpointId: checkpointIdBefore, nodeId };
             }
 
-            const outcome = await this.config.expansionHandler.handle({
+            const outcome = await expansionHandler.handle({
               graph: activeGraph,
               runId,
               nodeId,
@@ -882,20 +887,10 @@ export class GraphRuntime {
           }
         }
 
-        for (const target of targets) {
-          if (target !== END) {
-            const edgeType = outEdges.find(e => e.target === target)?.type ?? 'static';
-            yield { type: 'edge_transition', sourceId: nodeId, targetId: target, edgeType };
-          }
-        }
-
-        // ── Checkpoint AFTER ──────────────────────────────────────────────────
-        if (
-          node.checkpoint === 'after' ||
-          node.checkpoint === 'both' ||
-          activeGraph.checkpointPolicy === 'every_node'
-        ) {
-          const checkpointId = await this.saveCheckpoint(
+        // Persist the selected edges before a host can stop at node_end or edge_transition.
+        let checkpointIdAfter: string | undefined;
+        if (savesAfter(node, activeGraph)) {
+          checkpointIdAfter = await this.saveCheckpoint(
             activeGraph,
             runId,
             nodeId,
@@ -905,8 +900,18 @@ export class GraphRuntime {
             skippedNodes,
             this.resolvePendingEdgeIds(outEdges, targets),
           );
-          state = this.attachCheckpointMetadata(state, checkpointId);
-          yield { type: 'checkpoint_saved', checkpointId, nodeId };
+          state = this.attachCheckpointMetadata(state, checkpointIdAfter);
+        }
+
+        if (deferNodeEnd) yield nodeEnd;
+        for (const target of targets) {
+          if (target !== END) {
+            const edgeType = outEdges.find(e => e.target === target)?.type ?? 'static';
+            yield { type: 'edge_transition', sourceId: nodeId, targetId: target, edgeType };
+          }
+        }
+        if (checkpointIdAfter) {
+          yield { type: 'checkpoint_saved', checkpointId: checkpointIdAfter, nodeId };
         }
       }
     }
@@ -1183,7 +1188,7 @@ export class GraphRuntime {
           return;
         }
 
-        yield { type: 'node_end', nodeId, output: result.output, durationMs, telemetry: result.metadata };
+        const nodeEnd: GraphEvent = { type: 'node_end', nodeId, output: result.output, durationMs, telemetry: result.metadata };
         completedNodes.push(nodeId);
 
         const expansionRequests = [...(result.expansionRequests ?? [])];
@@ -1201,7 +1206,12 @@ export class GraphRuntime {
           });
         }
 
-        if (this.config.expansionHandler && expansionRequests.length > 0) {
+        const expansionHandler = this.config.expansionHandler;
+        const expands = expansionHandler && expansionRequests.length > 0;
+        const deferNodeEnd = !expands && savesAfter(node, activeGraph);
+        if (!expands && !deferNodeEnd) yield nodeEnd;
+
+        if (expands) {
           let checkpointIdBefore: string | undefined;
 
           for (const request of expansionRequests) {
@@ -1224,11 +1234,12 @@ export class GraphRuntime {
                 [],
               );
               state = this.attachCheckpointMetadata(state, checkpointIdBefore);
+              yield nodeEnd;
               yield { type: 'checkpoint_saved', checkpointId: checkpointIdBefore, nodeId };
               yield { type: 'mission:checkpoint_saved', checkpointId: checkpointIdBefore, nodeId };
             }
 
-            const outcome = await this.config.expansionHandler.handle({
+            const outcome = await expansionHandler.handle({
               graph: activeGraph,
               runId,
               nodeId,
@@ -1264,19 +1275,10 @@ export class GraphRuntime {
           }
         }
 
-        for (const target of targets) {
-          if (target !== END) {
-            const edgeType = outEdges.find(e => e.target === target)?.type ?? 'static';
-            yield { type: 'edge_transition', sourceId: nodeId, targetId: target, edgeType };
-          }
-        }
-
-        // As in stream(): the checkpoint after a node set to 'after' or 'both',
-        // or after every node under 'every_node'. Without it a resumed run that
-        // stops before the next node finishes resumes again from the older
-        // checkpoint and runs this node again, whatever its effect class.
+        // As in stream(), persist the selected edges before announcing completion.
+        let checkpointIdAfter: string | undefined;
         if (savesAfter(node, activeGraph)) {
-          const checkpointId = await this.saveCheckpoint(
+          checkpointIdAfter = await this.saveCheckpoint(
             activeGraph,
             runId,
             nodeId,
@@ -1286,8 +1288,18 @@ export class GraphRuntime {
             skippedNodes,
             this.resolvePendingEdgeIds(outEdges, targets),
           );
-          state = this.attachCheckpointMetadata(state, checkpointId);
-          yield { type: 'checkpoint_saved', checkpointId, nodeId };
+          state = this.attachCheckpointMetadata(state, checkpointIdAfter);
+        }
+
+        if (deferNodeEnd) yield nodeEnd;
+        for (const target of targets) {
+          if (target !== END) {
+            const edgeType = outEdges.find(e => e.target === target)?.type ?? 'static';
+            yield { type: 'edge_transition', sourceId: nodeId, targetId: target, edgeType };
+          }
+        }
+        if (checkpointIdAfter) {
+          yield { type: 'checkpoint_saved', checkpointId: checkpointIdAfter, nodeId };
         }
       }
     }
