@@ -120,20 +120,21 @@ export async function legacyGmiTraceIdsOf(store: LegacyGmiStore, userId: string)
 
 /**
  * The person's live rows in the passed store, oldest first: every row {@link legacyGmiTraceIdsOf} names that is not
- * marked deleted, the rows a deletion removes. An export lists them.
+ * marked deleted, the rows a deletion removes. An export lists them. Each comes with its metadata as stored, which
+ * names the user a turn filed it for when that is not the session's own learner (`turnUserId`).
  */
 export async function readLegacyGmiRowsOf(
   store: LegacyGmiStore,
   userId: string,
-): Promise<Array<{ id: string; type: string; content: string; created_at: number; tags: string }>> {
-  type Row = { id: string; type: string; content: string; created_at: number; tags: string };
+): Promise<Array<{ id: string; type: string; content: string; created_at: number; tags: string; metadata: string | null }>> {
+  type Row = { id: string; type: string; content: string; created_at: number; tags: string; metadata: string | null };
   const ids = await legacyGmiTraceIdsOf(store, userId);
   const rows: Row[] = [];
   for (let offset = 0; offset < ids.length; offset += 400) {
     const slice = ids.slice(offset, offset + 400);
     rows.push(
       ...(await store.brain.all<Row>(
-        `SELECT id, type, content, created_at, tags FROM memory_traces
+        `SELECT id, type, content, created_at, tags, metadata FROM memory_traces
           WHERE brain_id = ? AND deleted = 0 AND id IN (${slice.map(() => '?').join(', ')})`,
         [store.brain.brainId, ...slice],
       )),

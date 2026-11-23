@@ -46,8 +46,10 @@ export interface ForgetMemoryReport {
    * {@link parts} was not reached: a store the
    * call deletes from failed (the full-text index, the vector index and the write-ahead log included), a page failed,
    * the store holds memory from before per-user scope that nobody attributed, or open sessions kept what they hold of
-   * the subject. The stores the call never reaches by design are named and do not count. The next open, or the next
-   * re-application of the tombstones, resumes an incomplete deletion.
+   * the subject. The stores the call never reaches by design are named and do not count. The same call made again
+   * resumes an incomplete deletion. So does the next open, or the next re-application of the tombstones, for what the
+   * store still holds of the subject; they reach a passed GMI store's part only where that store's own learning tables,
+   * or a trace's `turnUserId`, name the person.
    */
   complete: boolean;
   /** When the deletion ended, as an ISO 8601 time in UTC. */

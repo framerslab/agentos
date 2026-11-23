@@ -400,6 +400,8 @@ export async function exportSubjectMemory(options: {
   if (legacyGmiStore && subject.kind === 'user') {
     await reading(LEGACY_GMI_STORE, async () => {
       const held: NonNullable<UserMemoryExport['held']['legacyGmiStore']> = [];
+      /** The rows a turn filed for another user on a session of the subject's: held of the conversation, said by them. */
+      const saidByOthers = new Set<string>();
       for (const row of await readLegacyGmiRowsOf(legacyGmiStore, subject.id)) {
         let tags: unknown;
         try {
@@ -411,15 +413,23 @@ export async function exportSubjectMemory(options: {
         const role = Array.isArray(tags) ? tags[0] : undefined;
         const speaker = role === 'user' || role === 'role:user' ? 'user' : role === 'assistant' || role === 'role:assistant' ? 'assistant' : undefined;
         held.push({ id: row.id, text: row.content, createdAt: isoOf(row.created_at), ...(speaker ? { speaker } : {}) });
+        // A driver can hand a JSON column back parsed.
+        const stored: unknown = row.metadata;
+        let metadata: Record<string, unknown> = {};
+        if (typeof stored === 'string') metadata = parseTraceMetadata(stored);
+        else if (stored !== null && typeof stored === 'object') metadata = stored as Record<string, unknown>;
+        const saidBy = metadata[TURN_USER_KEY];
+        if (typeof saidBy === 'string' && saidBy !== '' && saidBy !== subject.id) saidByOthers.add(row.id);
       }
-      return held;
-    }, (rows) => {
+      return { held, saidByOthers };
+    }, ({ held: rows, saidByOthers }) => {
       document.held.legacyGmiStore = rows;
       // The person's own messages there are what they provided too, each once: a row an interrupted move left in both
-      // stores is already listed from the soul's.
+      // stores is already listed from the soul's, and a message another user sent on a session of theirs is that
+      // user's own.
       const listed = new Set(document.provided.messages.map((message) => message.id));
       const theirs = rows
-        .filter((row) => row.speaker === 'user' && !listed.has(row.id))
+        .filter((row) => row.speaker === 'user' && !listed.has(row.id) && !saidByOthers.has(row.id))
         .map(({ id, createdAt, text }) => ({ id, createdAt, text }));
       if (theirs.length > 0) {
         document.provided.messages = [...document.provided.messages, ...theirs].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
