@@ -2965,6 +2965,45 @@ describe('GraphRuntime: the checkpoints a resumed run saves', () => {
     return { runtime, model };
   }
 
+  it.each([
+    { method: 'stream', stopAt: 'node_end:send' },
+    { method: 'stream', stopAt: 'edge_transition:send->publish' },
+    { method: 'streamResume', stopAt: 'node_end:send' },
+    { method: 'streamResume', stopAt: 'edge_transition:send->publish' },
+  ])('saves the send checkpoint before $method yields $stopAt', async ({ method, stopAt }) => {
+    const store = new InMemoryCheckpointStore();
+    const tools = steadyTools('Sent.');
+    const { runtime } = runtimeWithTools(store, tools);
+    const resuming = method === 'streamResume';
+    const nodes = resuming ? [approveNode(), sendNode(), publishNode()] : [sendNode(), publishNode()];
+    const graph = makeLinearGraph('g-stop-at-send', nodes, { checkpointPolicy: 'every_node' });
+    const stream = runtime.stream(graph, {});
+    const events = resuming
+      ? runtime.streamResume(graph, runIdOf(await readUntil(stream, 'interrupt')))
+      : stream;
+
+    const seen: GraphEvent[] = [];
+    for await (const event of events) {
+      seen.push(event);
+      if (trace([event])[0] === stopAt) break;
+    }
+
+    expect(trace(seen).at(-1)).toBe(stopAt);
+    const runId = runIdOf(seen);
+    expect(await store.latest(runId)).toMatchObject({
+      nodeId: 'send',
+      state: { artifacts: { send: 'Sent.' } },
+    });
+    expect(trace(await readAll(runtime.streamResume(graph, runId)))).toEqual([
+      'run_start',
+      'node_start:publish',
+      'node_end:publish',
+      'checkpoint_saved:publish',
+      'run_end',
+    ]);
+    expect(tools.calls).toEqual(['send_announcement']);
+  });
+
   it('saves after each node it runs under every_node, so a second resume does not send again', async () => {
     const store = new InMemoryCheckpointStore();
     const tools = steadyTools('Sent.');
