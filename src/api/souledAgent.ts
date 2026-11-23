@@ -3309,6 +3309,9 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
               if (policy === 'failed') refusal = 'policy_failed';
               else if (policy.longTerm === 'off') {
                 refusal = policy.minor === true && !keepsMinorsMemory(subject) ? 'minor_no_retention' : 'policy_off';
+              } else if (policy.retentionDays !== undefined) {
+                // A shorter period the answer gives holds for the moved rows in this process's sweeps, as a turn's does.
+                policyDays.set(scopeId, Math.min(policyDays.get(scopeId) ?? Number.POSITIVE_INFINITY, policy.retentionDays));
               }
               if (refusal) memoryLog.warn('memory.write_refused', { reason: refusal });
             }
