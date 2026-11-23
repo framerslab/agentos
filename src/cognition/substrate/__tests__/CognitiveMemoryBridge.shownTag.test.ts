@@ -42,6 +42,15 @@ describe('withoutShownTag', () => {
     expect(withoutShownTag(line('Hi.', 'user, u-42'), 'u.42')).toBe(line('Hi.', 'user, u-42'));
   });
 
+  it('leaves out an id that holds the list separator or a parenthesis, wherever it stands in the list', () => {
+    expect(withoutShownTag(line('Hi.', 'user, smith, j'), 'smith, j')).toBe(line('Hi.', 'user'));
+    expect(withoutShownTag(line('Hi.', 'smith, j, user, aria-1'), 'smith, j')).toBe(line('Hi.', 'user, aria-1'));
+    expect(withoutShownTag(line('Hi.', 'user, u-42), x, aria-1'), 'u-42), x')).toBe(line('Hi.', 'user, aria-1'));
+    expect(withoutShownTag(line('Hi (twice).', '(a)'), '(a)')).toBe('- [episodic] Hi (twice). (just now, 2026-11-21 | moderate confidence | relevance: 0.22)');
+    // A block whose last line runs on after the list keeps what follows it.
+    expect(withoutShownTag(`${line('Hi.', 'user, u-42')}</memory>`, 'u-42')).toBe(`${line('Hi.', 'user')}</memory>`);
+  });
+
   it('returns a block that holds no such tag as it was', () => {
     const block = line('Hi.', 'user, aria-1');
     expect(withoutShownTag(block, 'u-42')).toBe(block);

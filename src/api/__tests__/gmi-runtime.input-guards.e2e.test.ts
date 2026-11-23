@@ -308,3 +308,38 @@ describe('a souled agent with cognitive memory off on the GMI runtime', () => {
     }
   });
 });
+
+describe('an input guard that never answers, on the GMI runtime', () => {
+  const stalls: IGuardrailService = { id: 'stall', evaluateInput: () => new Promise(() => undefined) };
+
+  it("the caller's signal ends the turn, and the session's next turn runs", async () => {
+    const k = key();
+    const s = script('openai', k, { replies: [reply.text('Answered.')] });
+    const a = agent(base(k));
+    const session = a.session(SESSION);
+    const stop = new AbortController();
+
+    const stalled = session.send(ORIGINAL, { guards: inputOnly(stalls), abortSignal: stop.signal } as never);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    stop.abort(new Error('the caller gave up'));
+
+    await expect(stalled).rejects.toThrow('the caller gave up');
+    await expect(session.send('Hello again.')).resolves.toMatchObject({ text: 'Answered.' });
+    expect(s.seen).toHaveLength(1);
+    expect(JSON.stringify(s.seen[0].messages)).not.toContain('555 0100');
+  });
+
+  it("the session's close() ends the turn and resolves", async () => {
+    const k = key();
+    script('openai', k, { replies: [reply.text('Unused.')] });
+    const a = agent(base(k));
+    const session = a.session(SESSION);
+
+    const stalled = session.send(ORIGINAL, { guards: inputOnly(stalls) } as never);
+    const settled = stalled.then(() => 'resolved', () => 'rejected');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    await session.close();
+    expect(await settled).toBe('rejected');
+  });
+});

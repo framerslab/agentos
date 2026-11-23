@@ -605,6 +605,45 @@ describe('one memory for a souled agent on the GMI runtime', () => {
     expect(embeddings.embedded).not.toContain('A canary, lovely.');
   });
 
+  it('a reply an onAfterGeneration hook gives a turn whose model wrote nothing is filed as the session keeps it', async () => {
+    const a = await open(
+      { onAfterGeneration: async (step: { text: string }) => ({ ...step, text: step.text || 'Your canary is noted.' }) },
+      [reply.text(''), ...spare()],
+    );
+
+    const result = await a.session('s1', { userId: 'alice' }).send('My canary is named LARK-7.');
+
+    expect(result.text).toBe('Your canary is noted.');
+    const record = await writeOf(result);
+    const rows = await rowsUnder(storeBrain(a), keyOf('alice'));
+    expect(rows.map((row) => row.content)).toEqual(['My canary is named LARK-7.', 'Your canary is noted.']);
+    expect(record.entries.map((entry) => entry.role)).toEqual(['user', 'assistant']);
+    expect(writtenIds(record)).toEqual(rows.map((row) => row.id));
+  });
+
+  it("a turn its session's close() stops while an onAfterGeneration hook runs files neither side", async () => {
+    let session: { close(): Promise<void> } | undefined;
+    let closing: Promise<void> | undefined;
+    const a = await open(
+      {
+        onAfterGeneration: async (step: { text: string }) => {
+          closing = session!.close();
+          return step;
+        },
+      },
+      [reply.text('A canary, lovely.'), ...spare()],
+    );
+    const s = a.session('s1', { userId: 'alice' });
+    session = s;
+
+    await expect(s.send('My canary is named LARK-7.')).rejects.toThrow();
+    await closing;
+    // Long enough for a filing the turn had let through to land.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    expect(await rowsUnder(storeBrain(a), keyOf('alice'))).toEqual([]);
+  });
+
   it("a registry row that cannot be written again once the trace is stored leaves the side written, and is the mind's failure", async () => {
     const a = await open({}, [reply.text('A canary, lovely.'), ...spare()]);
     const brain = storeBrain(a);

@@ -647,4 +647,70 @@ describe('a passed store on a souled GMI', () => {
     await joined.copyLegacyGmiMemory!({ dryRun: false });
     expect((await legacyRows(ALICE)).map(({ id }) => id)).not.toContain('swept-old');
   });
+
+  it('exports and corrects the person’s passed rows outside their user scope, the rows a deletion reaches', async () => {
+    await seed();
+    const ladder = 'The orchard ladder is teal.';
+    const note = await plantPersonaNote(await legacyCanaryId());
+    const joined = await open();
+
+    const exported = await joined.exportUserMemory!(ALICE);
+    expect(exported.held.legacyGmiStore).toContainEqual(expect.objectContaining({ id: note, text: ladder }));
+    expect(JSON.stringify(await joined.exportUserMemory!(BOB))).not.toContain(ladder);
+    await expect(joined.correctUserMemory!(BOB, { traceIds: [note] })).rejects.toThrow();
+
+    expect(await joined.correctUserMemory!(ALICE, { traceIds: [note] })).toMatchObject({ deleted: 1 });
+    expect((await legacyRows()).filter(({ deleted }) => deleted === 0).map(({ id }) => id)).not.toContain(note);
+    expect(JSON.stringify(await joined.exportUserMemory!(ALICE))).not.toContain(ladder);
+  });
+
+  it('reaches no row of a person of the same id in another namespace that shares the passed store', async () => {
+    await seed();
+    const ours = 'Alice asked about the pear trees.';
+    const theirs = 'Another Alice asked about the plum trees.';
+    const secondUser = (id: string, scopeId: string, text: string): Array<[string, unknown[]]> => [
+      [
+        `INSERT INTO memory_traces (brain_id, id, type, scope, scope_id, content, created_at, tags, metadata)
+         VALUES (?, ?, 'episodic', 'user', ?, ?, ?, ?, ?)`,
+        [AGENT_ID, id, scopeId, text, 1_700_000_000_002, JSON.stringify(['user']), JSON.stringify({ turnUserId: ALICE })],
+      ],
+    ];
+    // What she said as a second user on a visitor's session of her namespace, and what a person of the same id said on
+    // a session of another namespace the store also serves.
+    await onLegacyFile([
+      ...secondUser('alice-visiting', taggedScopeId('visit-1', learning.namespace), ours),
+      ...secondUser('other-alice-visiting', taggedScopeId('visit-1', 'orchard/elsewhere'), theirs),
+    ]);
+    const joined = await open();
+
+    const exported = JSON.stringify((await joined.exportUserMemory!(ALICE)).held.legacyGmiStore);
+    expect(exported).toContain(ours);
+    expect(exported).not.toContain(theirs);
+    await expect(joined.correctUserMemory!(ALICE, { traceIds: ['other-alice-visiting'] })).rejects.toThrow();
+
+    expect((await joined.forgetUser!(ALICE)).complete).toBe(true);
+    const live = (await legacyRows()).filter(({ deleted }) => deleted === 0).map(({ id }) => id);
+    expect(live).not.toContain('alice-visiting');
+    expect(live).toContain('other-alice-visiting');
+  });
+
+  it('holds a shorter period an account’s answer gives to the rows a move files, in the sweeps of the process', async () => {
+    await seed();
+    const old = 'The orchard gate was painted last spring.';
+    await plantTrace('alice-old', 'user', userScope(ALICE), old, Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const joined = await open(undefined, learning, { memoryPolicy: () => ({ longTerm: 'compiled', retentionDays: 7 }) });
+    const soul = brainOf(joined.memory!);
+    const key = conversationScopeKey(AGENT_ID, { kind: 'user', id: ALICE });
+
+    expect((await joined.copyLegacyGmiMemory!({ dryRun: false })).people).toContainEqual(expect.objectContaining({ userId: ALICE, kept: 0 }));
+    const moved = () => soul.all<{ id: string }>('SELECT id FROM memory_traces WHERE brain_id = ? AND scope_id = ? AND deleted = 0', [soul.brainId, key]);
+    expect((await moved()).map(({ id }) => id)).toContain('alice-old');
+
+    await joined.sweepRetention!();
+
+    // The store keeps memory until deletion; her account's answer keeps it seven days, and the moved row is thirty old.
+    const left = (await moved()).map(({ id }) => id);
+    expect(left).not.toContain('alice-old');
+    expect(left.length).toBeGreaterThan(0);
+  });
 });
