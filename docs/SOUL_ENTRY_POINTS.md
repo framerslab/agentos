@@ -151,7 +151,7 @@ A store written under either runtime opens under the other. To go back, set `run
 
 ### From 0.19: one memory for a souled agent on the GMI runtime
 
-A workspace-backed `souledAgent({ runtime: 'gmi' })` gives each user one durable memory. The wiki and cognitive recall read the same store. Export, correction, retention and deletion reach the turns the mind files there. The default runtime stays `'legacy'`.
+A workspace-backed `souledAgent({ runtime: 'gmi' })` gives each user one durable memory. The wiki and cognitive recall read the same store. Export, correction, retention and deletion reach the turns the mind files there. 0.20 keeps `'legacy'` as the default runtime.
 
 - **Configure cognitive memory.** Name the provider that receives text in `memory.embedding.provider`. Enabling cognitive memory without it, or setting `memory.consolidation.enabled: true`, throws at open. `session.close()` ends the conversation in process. An anonymous session reopened with the same id keeps the same stored memory, subject to retention and forgetting. Use a fresh session id for a different anonymous visitor.
 - **Migrate `memory.store` with `copyLegacyGmiMemory`.** Turns stop reading and writing traces in `memory.store`. Keep it attached while moving its data. Preview the move with `agent.copyLegacyGmiMemory()`, pass known user ids in `users` to identify more rows, then pass `dryRun: false` to file eligible traces in the soul's store and remove their source rows. Check the report for traces left behind.

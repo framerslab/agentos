@@ -389,7 +389,7 @@ The loader reads the soul's files (SOUL.md, STYLE.md, IDENTITY.md, AGENTS.md, ME
 
 ## What Applies on Each Path
 
-What a soul gives an agent depends on how it is loaded. `souledAgent()` runs on the GMI runtime with the `light` profile, so with cognitive memory off, unless `runtime` or `memory` says otherwise. [Which Call to Use](./SOUL_ENTRY_POINTS.md) says which path to pick, and for each one what it stores about a user and which call exports, corrects and deletes it.
+What a soul gives an agent depends on how it is loaded. `souledAgent()` runs on the GMI runtime with the `light` profile, so with cognitive memory off, unless `runtime`, `memory` or `cognition` says otherwise. [Which Call to Use](./SOUL_ENTRY_POINTS.md) says which path to pick, and for each one what it stores about a user and which call exports, corrects and deletes it.
 
 | Path | Soul prose and style in the prompt | Index of the operator's pages in the prompt | Front matter applied (traits, mood, hard limits, `agentId`) | Recall each turn (a data block in a user-role message) | `read_memory_page` tool | Wiki compiled |
 |---|---|---|---|---|---|---|

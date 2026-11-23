@@ -1149,7 +1149,7 @@ const aria = await souledAgent({
 });
 ```
 
-`souledAgent()` runs on the GMI runtime with the `light` profile unless `runtime` names another: every session is a GMI, cognitive memory is off unless `memory` is set, no message is scored for sentiment, and no embedding model is needed. Where this section says `runtime: 'gmi'`, it describes that default. `runtime: 'legacy'` selects the legacy runtime, which `agent()` runs by default. The GMI runtime throws at open for a `channels`, `voice` or `avatar` option, and `souledAgent()` throws there for `responseSchema`, which that runtime does not read: pass the schema to a session's `send()`. [Upgrading](../SOUL_ENTRY_POINTS.md#upgrading) lists what an agent that set no `runtime` meets.
+`souledAgent()` runs on the GMI runtime unless `runtime` names another, with the `light` profile unless `cognition` names another: every session is a GMI, cognitive memory is off unless `memory`, `cognition.memory` or `cognition: 'full'` turns it on, no message is scored for sentiment, and no embedding model is needed. Where this section says `runtime: 'gmi'`, it describes that default. `runtime: 'legacy'` selects the legacy runtime, which `agent()` runs by default. The GMI runtime throws at open for a `channels`, `voice` or `avatar` option, and `souledAgent()` throws there for `responseSchema`, which that runtime does not read: pass the schema to a session's `send()`. [Upgrading](../SOUL_ENTRY_POINTS.md#upgrading) lists what an agent that set no `runtime` meets.
 
 What it wires:
 
