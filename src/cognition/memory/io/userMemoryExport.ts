@@ -671,7 +671,14 @@ export async function correctSubjectMemory(
       if (deleted > 0) memory.markErasureOwed();
     }
     // The store's own delete reaches each trace's vector, and any row the mind left.
-    deleted += (await memory.deleteTraces(going)).deleted;
+    try {
+      deleted += (await memory.deleteTraces(going)).deleted;
+    } catch (error) {
+      // Once the mind has taken every named row, the store owes them its indexes alone, which the rewrite below makes;
+      // a call made again would find no row to own. With a row left, the call made again finishes it.
+      if (!mind || (await memory.storedTracesAmong(going)).length > 0) throw error;
+      memory.markErasureOwed();
+    }
     // A slot of an open session holds a trace's id and no words: it goes once the traces are gone.
     if (mind) await mind.evictTraces(going, options.sessions?.() ?? []);
     try {

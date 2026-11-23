@@ -142,7 +142,16 @@ export async function sweepRetention(options: RetentionSweepOptions): Promise<{ 
           throw error;
         }
       }
-      if (expired.length > 0) swept.traces += (await memory.deleteTraces(expired, { documentChunks: 'delete' })).deleted;
+      if (expired.length > 0) {
+        try {
+          swept.traces += (await memory.deleteTraces(expired, { documentChunks: 'delete' })).deleted;
+        } catch (error) {
+          // Once the mind has taken every expired row, the store owes them its indexes alone, which this sweep's rewrite
+          // makes, and the next sweep would find none of them by their age. With a row left, the next sweep finds it.
+          if (!mind || (await memory.storedTracesAmong(expired)).length > 0) throw error;
+          memory.markErasureOwed();
+        }
+      }
       // A slot of an open session holds a trace's id and no words: it goes once the traces are gone.
       if (expired.length > 0 && mind) await mind.evictTraces(expired, options.sessionsOf?.(scopeId) ?? []);
       // A correction that expired goes from the tombstones' second copy too, so no restore files it again: by the
