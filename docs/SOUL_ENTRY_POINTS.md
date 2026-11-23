@@ -1,188 +1,96 @@
 ---
-title: "A Character That Remembers Each User: Which Call to Use"
-description: "Which AgentOS call gives an agent character long-term memory of each user: souledAgent(), gmi({ soul }) or agent({ soul }). What each one stores, where, under which key and for how long, who receives the text, and which call exports, corrects and deletes one user's memory."
+title: "Choose an agent for character and per-user memory"
+description: "Choose souledAgent(), gmi() or agent() for a character. See what each stores by user id, how to export or delete memory, and how to upgrade an existing store."
 ---
 
-# A Character That Remembers Each User: Which Call to Use
+# Choose an agent for character and per-user memory
 
-Three calls build an agent from a soul. A soul is a folder of Markdown files that holds a character's identity: who it is, how it speaks and what it never does ([Soul Files](./SOUL_FILES.md)). A GMI (Generalized Mind Instance) is the engine that serves a session with the agent's persona, a working memory, a mood and a reasoning trace, and, when memory is on, cognitive memory ([GMIs](./GMI.md)). The three calls differ in what the agent remembers about each user, and in which calls reach that memory.
+Use `souledAgent()` for a character that remembers each user across visits and lets you export, correct and delete memory by user id. A **soul** is a character's identity, style and limits written in Markdown. A **GMI** (Generalized Mind Instance) is the runtime that serves a session with the agent's persona, working memory, mood and reasoning trace.
 
-| You are building | Call | What it gives |
-|---|---|---|
-| A character that remembers each user: a game character, a companion, a tutor, a support agent | `await souledAgent({ soul })` | Long-term memory kept under each user id in a store beside the soul; notes compiled from each user's own conversation; one call each to delete, export and correct a user's memory; a retention period; the wiki pages you write for every user |
-| The character as a mind | `gmi({ soul })`, or `agent({ runtime: 'gmi', soul })` | The agent's persona on a GMI and, with `memory` set, cognitive memory scoped by user id. With the learning layer on, a user's memory is deleted through it; no call exports or corrects it |
-| The character's identity, with nothing kept | `agent({ soul })` | The soul's prose, style, traits and hard limits in the system prompt. Long-term memory only from a `memoryProvider` you pass |
+| What you need | Call |
+|---|---|
+| A character with durable memory and readable notes for each user | `await souledAgent({ soul })` |
+| The same character and notes, with cognitive recall from the same store | `await souledAgent({ soul, runtime: 'gmi', memory: { embedding: { provider } } })` |
+| A character with a mind whose memory you manage yourself | `gmi({ soul })` or `agent({ runtime: 'gmi', soul })` |
+| A character's voice and limits for the conversation | `agent({ soul })` |
 
-`souledAgent()` gives this memory when `soul` names a folder; an inline soul, or an optional one that does not load, gives a plain agent with no store and none of the per-user calls ([`souledAgent.ts` L604-L612](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/api/souledAgent.ts#L604-L612)). It runs on either engine: `runtime: 'legacy'`, the default ([`agent.ts` L400-L405](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/api/agent.ts#L400-L405)), or `runtime: 'gmi'`.
+## Remember each player by user id
 
-## `souledAgent()`: a character that remembers each user
-
-A game character that remembers each player by the player's id:
+Give a game character a workspace folder and pass the same player id on each visit. The default runtime is `'legacy'`. To add cognitive recall to this example, set `runtime: 'gmi'` and name the embedding provider in `memory.embedding.provider`.
 
 ```ts
 import { souledAgent } from '@framers/agentos';
 
 const innkeeper = await souledAgent({
-  provider: 'anthropic',
-  soul: '~/.agentos/agents/innkeeper', // the folder that holds SOUL.md
-  retention: { traces: { days: 90 } }, // required once a second player shares the store
-  tombstoneKey: process.env.INNKEEPER_TOMBSTONE_KEY!, // required with it: a deleted player's tombstone is then a keyed hash
+  soul: './characters/innkeeper',
+  retention: { traces: { days: 90 } },
+  tombstoneKey: process.env.INNKEEPER_TOMBSTONE_KEY!,
 });
-
-// One session a visit, opened with the player's id.
 const visit = innkeeper.session('visit-118', { userId: 'player-7f3a' });
-const reply = await visit.send('Is the room I asked about still free?');
-console.log(reply.text);
-
-// The per-user calls are typed optional: they are absent when the soul does not load from a folder.
-if (!innkeeper.exportUserMemory || !innkeeper.forgetUser) throw new Error('the soul did not load from its folder');
-
-// The player's own memory: a copy of what the store holds, then its deletion.
-// The copy waits for the writes of the turns already sent, so it holds the turn just sent.
-const copy = await innkeeper.exportUserMemory('player-7f3a');
-const report = await innkeeper.forgetUser('player-7f3a');
-console.log(copy.traces.length, report.complete);
-
+await visit.send('Save the room above the stable for my next visit.');
 await innkeeper.close();
 ```
 
-What the agent keeps of a user, on the default runtime:
+A workspace-backed agent opens `memory/.store/memory.sqlite` by path inside the soul's folder. Run one process per SQLite store. With `soulStore: { adapter }`, the agent uses your SQLite database or PostgreSQL schema. Give each agent its own database or schema, a separate `tombstoneCopy`, a retention policy and a tombstone key. You own encryption at rest for the main store, its backups and the second copy. The default SQLite file is plaintext.
 
-| | `souledAgent()` |
-|---|---|
-| What is stored | Each message a user sends and each reply, as one trace with who spoke and when; a text the user's memory already holds word for word is not filed again ([`souledAgent.ts` L970-L986](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/api/souledAgent.ts#L970-L986)). A one-shot `generate()` or `stream()` names no user and files nothing, unless `sharedMemory` runs it as its one user ([L759-L767](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/api/souledAgent.ts#L759-L767)) |
-| Where | `memory/.store/memory.sqlite` in the soul's folder, a SQLite file `souledAgent()` opens by path ([L640](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/api/souledAgent.ts#L640), [L678-L682](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/api/souledAgent.ts#L678-L682)). The second copy of the tombstones is `forgotten.sqlite` beside it, or the file or adapter `tombstoneCopy` names ([L646-L649](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/api/souledAgent.ts#L646-L649)). With `soulStore: { adapter }`, your own database, SQLite or PostgreSQL, under the soul's `agentId`, with `tombstoneCopy`, `retention` and `tombstoneKey` required ([L755-L770](https://github.com/framerslab/agentos/blob/452afce99e33293536ffeb665ef5c161b1f79fab/src/api/souledAgent.ts#L755-L770), [L767-L851](https://github.com/framerslab/agentos/blob/1950161471c6f83666dc683296bb48e675d3bc57/src/api/souledAgent.ts#L767-L851)) |
-| Under which key | `conversationScopeKey(agentId, subject)` ([`conversationScopeKey.ts` L39-L70](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/cognition/memory/retrieval/store/conversationScopeKey.ts#L39-L70)). The subject is the user a session names with `userId`, else the session itself: `c1:u:<n>:<agentId>:<m>:<userId>;` for a user and `c1:s:<n>:<agentId>:<m>:<sessionId>;` for a session that names none, where `<n>` and `<m>` are the lengths of the two ids. An anonymous id (`anonymous`, `guest` and the like) names no user. With `sharedMemory: { as }`, every session that names no user is filed as the user `as`. Keys are matched by equality |
-| For how long | Until `agent.sweepRetention()` or `close()`, which runs it, deletes what is older than the period `retention` sets, a number of days or `'until-deletion'`; recall reads a trace until then, so a long-running process calls `sweepRetention()` on a schedule. A sweep that fails on `close()` writes one `memory.close_sweep_failed` log line and leaves the expired traces for the next sweep. With no `retention`, until `forgetUser` deletes them; a session that named no user is deleted only when its id is in `linkedSessions` ([L1496-L1534](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/api/souledAgent.ts#L1496-L1534)). Without `retention`, or without `tombstoneKey` while the tombstone ledger holds no tombstone, a store that holds a second user or session refuses to open, and a session for a second one is refused ([L1340-L1346](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/api/souledAgent.ts#L1340-L1346), [L1695](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/api/souledAgent.ts#L1695)) |
-| Data derived from it | The user's pages, compiled by a model from that user's traces alone, and the chunks of those pages that recall searches; a full-text index entry and a memory-graph node for each trace; the user's row of the scope registry, with the time of the last compile; after a deletion, one tombstone, a hash of the id |
-| Who receives text | The model provider, each turn: the conversation, with what recall reads for the turn, up to eight matches from the user's own memory (and up to eight from each form of the memory from before per-user scope, for the user `legacyMemory` names) and up to eight from the operator's pages (the Markdown pages you write under `memory/`), kept to the turn's memory token budget, 2,000 tokens by default ([L1132-L1195](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/api/souledAgent.ts#L1132-L1195), [`memoryProviderHooks.ts` L27](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/api/runtime/memoryProviderHooks.ts#L27)). The compile: the agent's own provider and model on its route, fallback providers included; with `compile` set to a provider or model, that one alone; nobody with `compile: false` ([L1203-L1253](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/api/souledAgent.ts#L1203-L1253)). No embedding provider: the store is opened with no embedder, so recall is full-text search ([L678-L682](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/api/souledAgent.ts#L678-L682)). No user id is sent to the model provider ([`agent.ts` L643-L659](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/api/agent.ts#L643-L659)) |
-| Export | `agent.exportUserMemory(userId)`: the user's traces and pages as JSON, read after the writes of the turns already sent ([L1576-L1593](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/api/souledAgent.ts#L1576-L1593)) |
-| Correct | `agent.correctUserMemory(userId, { traceIds, text })` ([L1594-L1610](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/api/souledAgent.ts#L1594-L1610)); with no `text`, the named traces are deleted and nothing is filed in their place ([L887-L900](https://github.com/framerslab/agentos/blob/1e7ad01a05a35591a6e1810b0fc47f196adb398a/src/api/souledAgent.ts#L887-L900)) |
-| Restrict | `memoryPolicy` answers for the account a turn serves: `{ longTerm: 'off' }` files nothing and recalls the operator's pages alone, and `{ longTerm: 'raw' }` files and recalls and compiles no page. `screen` is given each text before it is filed and again before it is compiled |
-| Delete | `agent.forgetUser(userId, { linkedSessions })`, with a report of each store it reached ([L1496-L1534](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/api/souledAgent.ts#L1496-L1534)); `agent.sweepRetention()` for what `retention` no longer keeps ([L1565-L1575](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/api/souledAgent.ts#L1565-L1575)) |
+There is no file-to-`soulStore` import call. The file's brain id comes from its path. Opening a database copied from that file under the adapter's agent id fails the ownership check. The open also refuses a workspace with a store file left behind. An inline soul or an optional soul that fails to load yields a plain agent without the workspace or its per-user calls.
 
-`souledAgent()` opens the store's file itself unless `soulStore` names a storage adapter of yours; on the file, run one process per store. On your adapter, give the agent a database or PostgreSQL schema of its own: the open refuses a database that already holds another agent's memory ([L781-L783](https://github.com/framerslab/agentos/blob/1950161471c6f83666dc683296bb48e675d3bc57/src/api/souledAgent.ts#L781-L783)), and `close()` leaves the adapter open. A host that wires the same parts itself, over `Memory.createWithAdapter()` or `Memory.createPostgres()` with `attachMemoryWiki()`, calls `forgetUserMemory()`, `reapplyTombstones()`, `sweepRetention()`, `exportSubjectMemory()` and `correctSubjectMemory()` itself.
+### What each workspace-backed agent keeps
 
-Each option and call is described in [`souledAgent()`](./getting-started/HIGH_LEVEL_API.md) and [One person's memory](./MEMORY_OPERATIONS.md#one-persons-memory). Before you serve other people with memory on, read [Your Duties as the Controller](./safety/MEMORY_HOST_DUTIES.md).
-
-## `souledAgent({ runtime: 'gmi' })`: the same memory on a GMI
-
-`runtime: 'gmi'` serves the agent's sessions with GMIs. Everything in the table above holds, with four differences:
-
-- The soul's mood and reasoning-trace limits apply, through the agent's persona ([What Applies on Each Path](./SOUL_FILES.md#what-applies-on-each-path)).
-- No session turn sends the end user's id to the model provider, a seat's included, unless you set `sendUserIdToProvider: true` ([`gmi.ts` L1264-L1284](https://github.com/framerslab/agentos/blob/d7f772b55e1d83863d322f66b25d63656f438659/src/api/gmi.ts#L1264-L1284)): neither in the end-user field, nor as a tag of the cognitive memory it files, which the memory block shows the model, nor as the name the user's messages are sent under ([`ConversationHistoryManager.ts` L27-L36](https://github.com/framerslab/agentos/blob/d7f772b55e1d83863d322f66b25d63656f438659/src/cognition/substrate/ConversationHistoryManager.ts#L27-L36)). A team a session launches seats its sessions as the session's user and sends none either ([`gmiLaunchTool.ts` L296-L299](https://github.com/framerslab/agentos/blob/d7f772b55e1d83863d322f66b25d63656f438659/src/api/runtime/agencyLaunch/gmiLaunchTool.ts#L296-L299)). With it, the `userId` passed to `session()` goes with each model request as the end user's id on the adapters that send one: OpenAI's (`user`, or `safety_identifier` on the Responses API) and the adapters built on it, OpenRouter's and Requesty's (`user`); the Anthropic and Gemini adapters send none ([`OpenAIProvider.ts` L2390](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/core/llm/providers/implementations/OpenAIProvider.ts#L2390), [`OpenRouterProvider.ts` L778](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/core/llm/providers/implementations/OpenRouterProvider.ts#L778)). Set it only where that id is opaque or hashed, never an email address. Tools, the user context and the memory hooks get the id either way.
-- With sentiment tracking on (`cognition: 'full'`), a turn is scored only where the person's policy answer allows it: a turn whose `memoryPolicy` answer marks the person `minor: true` or `profiling: 'off'`, whose policy hook failed, whose person was forgotten, whose tombstone read did not answer within the memory hooks' timeout, or whose user id no memory key can be built from is not scored, and no trend of theirs is kept ([`souledAgent.ts` L1320-L1370](https://github.com/framerslab/agentos/blob/d7f772b55e1d83863d322f66b25d63656f438659/src/api/souledAgent.ts#L1320-L1370), [`GMI.ts` L1843-L1851](https://github.com/framerslab/agentos/blob/d7f772b55e1d83863d322f66b25d63656f438659/src/cognition/substrate/GMI.ts#L1843-L1851)).
-- `forgetUser` empties each session the handle holds open for the user, and waits for a turn still running on one, up to `pendingWritesTimeoutMs` (never for the turn whose hook or tool made the call): the session's messages go at once, and its GMI drops its history, its reasoning trace, its sentiment trend, its working-memory slots and the memory imprints its metaprompts wrote once no turn of the session runs, and a metaprompt still running applies nothing. A session still running a turn at the deadline leaves the report's `sessions` part `reached: false` and `complete` `false`; it is emptied when the turn ends, and `forgetUser` made again reports the part reached. A session opened with `history: false` keeps nothing between its turns ([`souledAgent.ts` L2357-L2396](https://github.com/framerslab/agentos/blob/08456ec7fdeae91f1f5eabf8d051b55de8f3c5f4/src/api/souledAgent.ts#L2357-L2396), [`gmi.ts` L1476-L1498](https://github.com/framerslab/agentos/blob/08456ec7fdeae91f1f5eabf8d051b55de8f3c5f4/src/api/gmi.ts#L1476-L1498), [`GMI.ts` L1414-L1444](https://github.com/framerslab/agentos/blob/08456ec7fdeae91f1f5eabf8d051b55de8f3c5f4/src/cognition/substrate/GMI.ts#L1414-L1444)).
-
-Cognitive memory is off on this runtime until you set `memory`, choose `cognition: 'full'` or set `cognition.memory`. While it is off, recall, the pages, the compile and every per-user call work on the soul's store alone.
-
-### With cognitive memory on, the agent keeps two memories
-
-A souled agent on the GMI runtime with cognitive memory on files each turn twice, in two stores that share no key:
-
-| | The soul's store | The GMI's cognitive memory |
+| Question | Default runtime, or GMI with cognitive memory off | A souled agent on the GMI runtime with cognitive memory on |
 |---|---|---|
-| What a turn files | The user's message and the reply, under the subject's key, through the memory provider `souledAgent()` gives the agent ([`souledAgent.ts` L1117](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/api/souledAgent.ts#L1117), [L1290](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/api/souledAgent.ts#L1290)) | The user's message under the session's `userId` and the reply under the session's own scope id; with `learning` on, both under the scope ids the learning layer gives the turn ([Where a turn's memory is filed and read](./GMI.md#where-a-turns-memory-is-filed-and-read)) |
-| Where | `memory/.store/memory.sqlite`, or your database with `soulStore` | Process memory, which ends with the process or `agent.close()`; with `memory.store`, a SQLite file or your storage adapter |
-| What a session turn recalls | Nothing: the GMI skips this store's recall, and one warning at construction says so ([`gmi.ts` L666-L668](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/api/gmi.ts#L666-L668)) | The turn's memory block |
-| `read_memory_page` | Reads the asker's pages and the operator's | Not read |
-| The wiki compile | Reads each user's traces | Not read |
-| `agent.exportUserMemory(userId)` | Returns the user's traces and pages | Not read |
-| `agent.correctUserMemory(userId, ...)` | Deletes the named traces and, with `text`, files the correction | Reached: a named trace goes with what the cognitive memory keeps of it (its copy cached in this process, its vector, its memory-graph node and its archived original), deleted through the agent's mind first, and leaves the working memory of the user's open sessions; the correction is a trace of the soul's store ([Delete or correct one memory](./getting-started/HIGH_LEVEL_API.md#delete-or-correct-one-memory)) |
-| `agent.sweepRetention()` | Deletes what `retention` no longer keeps | Swept by the same period: an expired trace goes with what the cognitive memory keeps of it, deleted through the agent's mind first, and leaves the working memory of the user's open sessions ([Retention](./safety/MEMORY_HOST_DUTIES.md#retention)) |
-| `agent.forgetUser(userId)` | Deletes the user's traces, chunks, pages and registry row, and writes the tombstone | Reached, with `learning` on or off: the user's traces go with what the cognitive memory keeps of each (its copy cached in this process, its vector, its memory-graph node and its archived original), deleted through the agent's mind first, and the report's `mind` part counts the traces the mind deleted ([One deletion call, and its report](./safety/MEMORY_HOST_DUTIES.md#one-deletion-call-and-its-report)). With `learning` on, the learning layer's own `forgetUser` runs first, and `agent.learning.forgetUser(userId)` runs this same deletion; with `learning` off, the report's `learning store` entry reads `reached: false` with the reason `this agent runs no learning layer` ([`souledAgent.ts` L1476-L1483](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/api/souledAgent.ts#L1476-L1483)) |
-| A forgotten user's later turns | Refused, with one `memory.write_refused` log line (`reason: 'forgotten'`) | With `learning` on, refused: each filing reads the user's tombstone, which the learning layer's `forgetUser` wrote. With `learning` off, filed: the filing reads no tombstone ([`CognitiveMemoryBridge.ts` L57-L59](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/cognition/substrate/CognitiveMemoryBridge.ts#L57-L59)) |
-| `memoryPolicy`, `screen`, `sharedMemory` | Act on it | Do not reach it, so `souledAgent()` refuses all three at its open with a `TypeError` ([`souledAgent.ts` L595-L603](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/api/souledAgent.ts#L595-L603)) |
+| What is stored, and where? | The soul's store files each speaker's text and time as a conversation trace. | The same store holds each accepted side of a session turn once, marked `filedBy: 'mind'`. The turn result's `memoryWrite` reports each side's outcome. |
+| Under which key? | `conversationScopeKey(agentId, subject)` uses the session's named user or, for an anonymous session, its session id. `sharedMemory: { as }` assigns unnamed calls to one user. | The mind uses the same key. Its recall reads marked rows. The soul's provider reads the remaining rows for that user and the operator's pages. |
+| For how long? | `retention.traces` sets days or `'until-deletion'`. Anonymous sessions can have their own period. Schedule `sweepRetention()` on a server that stays open. Closing the agent also sweeps. | The same sweep reaches mind-filed traces. Closing a session leaves its stored memory under its existing key. |
+| What is derived? | Per-user wiki pages and their chunks, a search index and graph records. The deletion ledger records tombstones, deleted trace ids and live corrections. | Cognitive recall adds vectors, trace strengths, access records and graph links. Stored emotional context defaults to neutral. Each user's traces feed that user's wiki compile. |
+| Who receives text? | The chat model receives the conversation and recalled text. The compile model receives the user's screened traces when compilation runs. `compile: false` disables it. | The named embedding provider also receives recall queries and text accepted for embedding. `agent.recipients()` lists configured and recorded routes. Session requests withhold the end-user id unless you set `sendUserIdToProvider: true` on a GMI path whose provider accepts it. |
+| How do I export or correct it? | `exportUserMemory(userId)` returns traces and pages. `correctUserMemory(userId, { traceIds, text })` replaces the selected memories. Omit `text` to delete them. | The same calls include mind-filed rows. Inspect the export's `unread` entries for stores that could not be read. |
+| How do I restrict or delete it? | Return `{ longTerm: 'off' }` from `memoryPolicy` to stop personal filing, recall and compilation. Stored traces remain. `forgetUser(userId, { linkedSessions })` erases the user's memory and the anonymous sessions you identify. Check `complete`. | The same policy also stops mechanisms working on that person's memory. The same deletion reaches the live mind and clears this handle's sessions for the user. The host handles other processes, recipients and backups. |
 
-A one-shot `generate()` or `stream()` on a GMI agent runs the light profile with no cognitive memory and reads the memory provider ([`gmi.ts` L1048-L1062](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/api/gmi.ts#L1048-L1062)), so on a souled agent it recalls the operator's pages from the soul's store.
+A one-shot call without a user reads operator pages and files nothing unless you set `sharedMemory`. A seat session runs without cognitive memory. For the difference between screening text for storage and blocking a turn before its first provider call, see [input guards](./safety/GUARDRAILS_USAGE.md).
 
-With cognitive memory off, on either runtime, the soul's store is the agent's only long-term memory, and each per-user call reaches all of it. Issue [#845](https://github.com/framerslab/agentos/issues/845) tracks one memory for a souled agent on the GMI runtime.
-
-## `gmi({ soul })`: the character as a mind
-
-`gmi({ soul })` and `agent({ runtime: 'gmi', soul })` build the same agent ([GMIs from agent()](./GMI.md#gmis-from-agent)). The soul becomes the agent's persona: its id, name, role, HEXACO traits, mood, reasoning-trace limits and hard limits. The agent has no wiki compile, no `read_memory_page` tool and none of `souledAgent()`'s per-user calls.
+## Give a tutor a mind with cognitive recall
 
 ```ts
-import { agent } from '@framers/agentos';
+import { gmi } from '@framers/agentos';
 
-const tutor = agent({
-  runtime: 'gmi',
-  provider: 'openai',
-  soul: '~/.agentos/agents/tutor',
-  memory: { embedding: { provider: 'openai', model: 'text-embedding-3-small' } },
+const tutor = gmi({
+  soul: './characters/tutor',
+  memory: { embedding: { provider: 'ollama' } },
 });
-
-const lesson = tutor.session('lesson-1', { userId: 'student-7f3a' });
-const reply = await lesson.send('Where did we stop last time?');
-console.log(reply.text);
-
+await tutor.session('lesson-1', { userId: 'student-42' }).send('Help me practise fractions.');
 await tutor.close();
 ```
 
-What the agent keeps of a user:
-
-| | `gmi({ soul })` with `memory` set |
-|---|---|
-| What is stored | Each user message and each reply, encoded as a memory trace with the emotional context of its turn ([What a GMI adds over a plain agent](./GMI.md#what-a-gmi-adds-over-a-plain-agent)) |
-| Where | Process memory: an in-memory vector store and knowledge graph. With `memory.store`, a SQLite file or your storage adapter; that option needs `learning` and a key that names the store, `learning.agentKey` or the soul's id ([`gmi.ts` L594-L598](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/api/gmi.ts#L594-L598)) |
-| Under which key | The user's messages under the session's `userId`, the replies under the session's own scope id; a session opened with no `userId` files both under its scope id. With `learning` on, under the scope ids the learning layer gives the turn ([Where a turn's memory is filed and read](./GMI.md#where-a-turns-memory-is-filed-and-read)) |
-| For how long | Process memory: until the process ends or `agent.close()`. `memory.store`: no retention period and no sweep; a user's traces stay until `agent.learning.forgetUser(userId)` |
-| Data derived from it | An embedding vector and a copy in the knowledge graph for each trace; what the eight mechanisms write, such as the gist an old trace is reduced to ([The eight mechanisms](./GMI.md#the-eight-mechanisms)); with `learning` on, the user's trait row and its ledger |
-| Who receives text | The model provider, each turn: the conversation with the turn's memory block. The embedding provider: each trace as it is filed and each turn's query. `memory.embedding` names that provider; without it the agent takes the global default provider, else the first of OpenAI, Gemini and Ollama whose key or URL is in the environment ([`agentCognitiveMemory.ts` L129-L144](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/api/runtime/agentCognitiveMemory.ts#L129-L144)). A `userId` passed to `session()` goes with each request as the end user's id on the adapters that send one, as above ([`gmi.ts` L1253](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/api/gmi.ts#L1253)) |
-| Export | With `learning` on, `agent.learning.exportLearnedState(userId)` returns the user's learned state: the trait state, lessons, skills, ledger rows and outcomes ([`LearningLayer.ts` L831-L861](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/cognition/learning/LearningLayer.ts#L831-L861)). No call returns a user's memory traces |
-| Correct | No call corrects one user's memory |
-| Restrict | Cognitive memory is on or off for the whole agent (`memory`, `cognition`); no option turns it off for one user. `agent.learning.freeze({ userId })` and `agent.learning.suspend({ userId })` act on the user's learned state ([Modes and the process switches](./GMI.md#modes-and-the-process-switches)) |
-| Delete | With `learning` on, `agent.learning.forgetUser(userId)` deletes the user's traces in the agent's memory, then the user's learning-store rows, and its report names each store it did not reach: a knowledge graph with no delete call keeps its copies, and while a store fails the learning-store rows stay for the next call ([`LearningLayer.ts` L925-L1062](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/cognition/learning/LearningLayer.ts#L925-L1062)). With `learning` off the agent has no deletion call ([`gmi.ts` L1490-L1495](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/api/gmi.ts#L1490-L1495)) |
-
-With `memory` unset on the default `'light'` profile the agent runs no cognitive memory and stores nothing about a user beyond each session's message history, which lives in process memory.
-
-## `agent({ soul })`: identity alone
+## Give a support agent a character
 
 ```ts
 import { agent } from '@framers/agentos';
 
-const aria = agent({ provider: 'anthropic', soul: '~/.agentos/agents/aria' });
-const reply = await aria.session('customer-42').send('I need help with my invoice.');
-console.log(reply.text);
+const support = agent({ soul: './characters/support' });
+await support.session('ticket-42').send('Where can I find my invoice?');
+await support.close();
 ```
 
-The soul's prose opens the system prompt, its style and the index of the operator's pages follow, the `hexaco` scores render as the trait paragraph, and the hard limits close the prompt. The agent files no trace and sends no user id to the model provider; a session's message history lives in process memory. Long-term memory comes only from a `memoryProvider` you pass, and what that provider stores, where and for how long is the provider's own. The library holds nothing of a user to export, correct or delete.
+| Question | `gmi({ soul })` with cognitive memory | `agent({ soul })` on the default runtime |
+|---|---|---|
+| What, where and for how long? | User messages, replies, vectors and graph data live in process. A passed `memory.store` persists traces in SQLite or on your adapter. It requires a learning configuration and a stable brain key. It has no retention sweep. | The session holds message history in process. If you pass a `memoryProvider`, you choose its storage, keys, retention and derived data. |
+| Under which key? | With a named user and no learner, user messages use the user scope and replies use the session scope. An unnamed session uses its session scope. A learner supplies its own scoped ids. | The session id keys conversation history. The provider receives the session context. |
+| Who receives text? | The chat model receives the conversation and recalled memories. The embedding provider receives queries and trace text. A model adapter that supports the end-user field can receive the session's user id. | The model receives the character prompt and conversation, including any context your provider supplies. |
+| How do I manage personal data? | With learning on, `learning.forgetUser(userId)` reaches the learner's memory and learning rows. `exportLearnedState` exports learning data only. The host supplies trace export, correction, per-user restrictions and retention. | The host supplies export, correction, restrictions and deletion for any data it keeps. |
 
 ## Replacing an outdated fact
 
-`souledAgent()` files a new statement as a new trace and leaves the older one in place ([`Memory.ts` L773-L872](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/cognition/memory/io/facade/Memory.ts#L773-L872)). A user who said "I live in Lisbon" in March and "I moved to Porto" in June has both statements in memory, and recall can return either. Two calls change that:
-
-- `agent.correctUserMemory(userId, { traceIds, text })` deletes the named traces for good (with no `text`, that is all it does: the older statement is deleted and nothing is filed in its place), files `text` as a trace tagged `correction` (a `text` the user's memory already holds word for word is that trace, tagged `correction` and kept, even when it is one of the named traces), and deletes each page built from a deleted trace, which the next compile of the user's pages builds again from the traces that are left: `agent.memory.compileWiki()` at once, or the `close()` of a process in which the user had a turn; on an agent opened with `compile: false`, no compile runs, and with `memoryPolicy` or `screen` set, a compile waits for a turn of the user in that process, one the policy answered `compiled` ([L1000-L1024](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/api/souledAgent.ts#L1000-L1024)) ([`userMemoryExport.ts` L139-L224](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/cognition/memory/io/userMemoryExport.ts#L139-L224)).
-- `agent.forgetUser(userId)` deletes what the store holds of the user; its report reads `complete: false` when one of the deletion's four parts was missed (a store or a page that failed, or a GMI session of the user still running a turn at the deadline) or a write was still running at its deadline. `complete` covers only the stores the call reaches: read each entry's `reached`, which names a store it did not reach, such as a conversation history your product keeps outside memory.
+A newer statement can be recalled alongside an older one. Pass the older trace id and the replacement text to `correctUserMemory`. This removes the old trace and any pages built from it. The next compile rebuilds those pages from the remaining traces.
 
 ## Letting a user read and fix what the agent remembers
 
-A user's notes are pages compiled from that user's own traces and kept as rows of the store. The agent reads them through `read_memory_page`, whose listing names the asker's pages and the operator's. Your product shows them from the export, and sends a fix through the traces a page was built from, which the page lists as `sources`:
+Show the user the `pages` from their `exportUserMemory` result. Each page's `sources` identifies the traces behind it. Send the user's edits through those trace ids. The agent reads its operator pages and the asker's own pages through `read_memory_page`.
 
 ```ts
-if (!agent.exportUserMemory || !agent.correctUserMemory) throw new Error('the soul did not load from its folder');
-const memory = await agent.exportUserMemory(userId);
-
-// Each page with the statements it was compiled from.
-const notes = memory.pages.map((page) => ({
-  page,
-  statements: memory.traces.filter((trace) => page.sources.includes(trace.id)),
-}));
-
-// The user marks the statements that are wrong and writes the right one.
-await agent.correctUserMemory(userId, {
-  traceIds: wrongTraceIds,
-  text: 'I moved from Lisbon to Porto in June.',
-});
+const memory = await innkeeper.exportUserMemory!(playerId);
+const statements = memory.traces.filter(trace => memory.pages[0]?.sources.includes(trace.id));
+await innkeeper.correctUserMemory!(playerId, { traceIds: [selectedTraceId], text: correctedText });
 ```
 
-No call edits a page. A page is compiled from traces, and a compile that folds new traces into it writes it again, so a correction changes the traces: it deletes the wrong ones, files the right statement, and the next compile builds the page from what is left (`agent.memory.compileWiki()`, or the close of a process in which the user had a turn). A page is written by a model, so read the user's export again after that compile. A trace from before per-user scope, which the export of the user `legacyMemory` names holds, is not one `correctUserMemory` accepts: it rejects the call.
-
-## Reference
-
-- [Soul Files](./SOUL_FILES.md): the workspace, the `memory/` wiki, and [what applies on each path](./SOUL_FILES.md#what-applies-on-each-path)
-- [GMIs](./GMI.md): [GMIs from agent()](./GMI.md#gmis-from-agent), cognitive memory and [the learning layer](./GMI.md#learning)
-- [High-Level API](./getting-started/HIGH_LEVEL_API.md): `souledAgent()`, its options and its calls
-- [Your Duties as the Controller](./safety/MEMORY_HOST_DUTIES.md): what the library does with per-user memory and what your product does itself
-- [Cognitive Memory](./memory/COGNITIVE_MEMORY.md): encoding, decay, recall and the memory block
-- [Memory Operations](./MEMORY_OPERATIONS.md): [one person's export and correction](./MEMORY_OPERATIONS.md#one-persons-memory)
+See [the high-level API](./getting-started/HIGH_LEVEL_API.md) for signatures and [host duties](./safety/MEMORY_HOST_DUTIES.md) for deletion receipts, restores and recipients.
