@@ -2408,7 +2408,7 @@ export class Memory {
           WHERE brain_id = ? AND deleted = 0 AND scope = ? AND scope_id = ? AND id IN (${slice.map(() => '?').join(', ')})`,
         [this._brain.brainId, CONVERSATION_SCOPE, scopeId, ...slice],
       );
-      for (const row of rows) if (!isPageChunkTags(row.tags)) traces.push(this._buildTrace(row));
+      for (const row of rows) if (!isPageChunkTags(row.tags)) traces.push(this._buildCompileTrace(row));
     }
     return traces;
   }
@@ -2570,7 +2570,7 @@ export class Memory {
               range.sinceMs,
               range.limit,
             ]);
-    return rows.map((row) => this._buildTrace(row));
+    return rows.map((row) => this._buildCompileTrace(row));
   }
 
   /**
@@ -3413,17 +3413,23 @@ export class Memory {
   // Private helpers
   // =========================================================================
 
+  /** Builds the compiler's trace with the stored speaker when the row names one. */
+  private _buildCompileTrace(row: TraceRow): MemoryTrace & { speaker?: 'user' | 'assistant' } {
+    const metadata = parseTraceMetadata(row.metadata);
+    const trace = this._buildTrace(row, metadata);
+    const speaker = metadata.speaker;
+    return speaker === 'user' || speaker === 'assistant' ? { ...trace, speaker } : trace;
+  }
+
   /**
    * Convert a raw `memory_traces` row into a `MemoryTrace` object.
    */
-  private _buildTrace(row: TraceRow): MemoryTrace {
+  private _buildTrace(row: TraceRow, metadata = parseTraceMetadata(row.metadata)): MemoryTrace {
     let tags: string[] = [];
     try { tags = JSON.parse(row.tags); } catch { /* empty */ }
 
     let emotions = {};
     try { emotions = JSON.parse(row.emotions); } catch { /* empty */ }
-
-    const metadata = parseTraceMetadata(row.metadata);
 
     const entities = Array.isArray(metadata.entities) ? metadata.entities as string[] : [];
     const scopeId = typeof metadata.scopeId === 'string' ? metadata.scopeId : '';
