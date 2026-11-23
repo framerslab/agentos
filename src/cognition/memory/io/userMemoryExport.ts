@@ -751,7 +751,9 @@ export async function correctSubjectMemory(
     } catch (error) {
       memoryLog.warn('memory.erasure_unfinished', errorFields(error));
     }
-    const legacyIds = removed.filter((id) => ownLegacy.has(id));
+    // Every named id's row there goes, the correction's own included: a correction whose text is a moved copy's keeps
+    // that copy as the correction, and the source row it was copied from goes all the same.
+    const legacyIds = ids.filter((id) => ownLegacy.has(id));
     if (legacy && legacyIds.length > 0) {
       // A copy of a trace the soul's store held is counted once, with the soul's.
       const legacyOnly = legacyIds.filter((id) => !own.has(id));
