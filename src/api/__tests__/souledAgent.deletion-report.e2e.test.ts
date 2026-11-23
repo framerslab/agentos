@@ -5,7 +5,8 @@
  *
  * - The report holds when the deletion completed, the agent's id, the library's version, the deletion's four parts in
  *   the order they run (the tombstone, the mind, the store, the open sessions), each reached with its count or missed
- *   with its reason, and who receives a person's text; it holds no id, no hash of one and no text.
+ *   with its reason, and who receives a person's text; it holds no id, no hash of one and no text. A souled agent on
+ *   `runtime: 'gmi'` with cognitive memory off, whose memory provider files each turn, gives the same receipt.
  * - A linked session's deletion adds into the same four parts.
  * - A deletion still runs when the routes the store recorded cannot be read: the report lists the routes it knows and
  *   names the recorded ones as not reached.
@@ -262,6 +263,47 @@ describe(`a deletion report a host can keep, on runtime ${RUNTIME}`, () => {
     expect(report.recipients).toEqual(await a.recipients!());
     expect(tracesOf(keyOf(alice))).toEqual([]);
     expect(pagesOf(keyOf(alice))).toEqual([]);
+  });
+});
+
+describe("a deletion report a host can keep, on runtime 'gmi' with cognitive memory off", () => {
+  it('the report is the same receipt as on the default runtime: its time, version, four parts and recipients, with no id and no text', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const a = await open({ runtime: 'gmi' } as Partial<SouledAgentOptions>);
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await turn(a, 's2', 'bob', 'My canary is WREN-2.');
+    await a.memory!.compileWiki();
+    expect(pagesOf(keyOf(alice))).toHaveLength(1);
+
+    const report = await a.forgetUser!('alice');
+
+    expect(report.completedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    expect(Math.abs(Date.parse(report.completedAt) - Date.now())).toBeLessThan(60_000);
+    expect(report.agentId).toBe('aria-1');
+    expect(report.libraryVersion).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(report.parts.map((p) => p.part)).toEqual(['tombstone', 'mind', 'store', 'sessions']);
+    expect(report.parts[0]).toEqual({ part: 'tombstone', reached: true, deleted: 0 });
+    // With cognitive memory off the mind holds nothing of her.
+    expect(report.parts[1]).toEqual({ part: 'mind', reached: true, deleted: 0 });
+    expect(report.parts[2]).toMatchObject({ part: 'store', reached: true });
+    // Her two traces and the chunks of her page, all filed by the provider.
+    expect(deletedBy(report.parts[2])).toBeGreaterThanOrEqual(2);
+    // The one session this handle holds open for her is emptied.
+    expect(report.parts[3]).toEqual({ part: 'sessions', reached: true, deleted: 1 });
+    expect(report.stores).toContainEqual({ store: 'session history in this process', reached: true, deleted: 1 });
+    expect(report.recipients).toEqual(await a.recipients!());
+    expect(report.recipients).toContainEqual({ role: 'model', provider: 'openai', model: 'stub-model' });
+    expect(report.complete).toBe(true);
+
+    // Neither the id, nor a hash of it, nor a word she said.
+    const json = JSON.stringify(report);
+    expect(json).not.toContain('alice');
+    expect(json).not.toContain('LARK-7');
+    expect(json).not.toMatch(/[0-9a-f]{32}/i);
+    expect(lines('memory.forget_incomplete')).toEqual([]);
+    expect(tracesOf(keyOf(alice))).toEqual([]);
+    expect(pagesOf(keyOf(alice))).toEqual([]);
+    expect(tracesOf(keyOf(bob)).length).toBeGreaterThanOrEqual(2);
   });
 });
 

@@ -274,6 +274,79 @@ describe(`one person's export, on runtime ${RUNTIME}`, () => {
   });
 });
 
+describe("one person's export, on runtime 'gmi' with cognitive memory off", () => {
+  it('has the same shape as on the default runtime: what the person provided, what is held, recipients, retention and profiling', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { a } = await open({ runtime: 'gmi' } as Partial<SouledAgentOptions>);
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await turn(a, 's1', 'alice', 'I keep it in the attic.');
+    await turn(a, 's2', 'bob', 'My canary is WREN-2.');
+    await a.memory!.compileWiki();
+    const said = saidOf(keyOf(alice));
+    expect(said).toHaveLength(4);
+    const [bobs] = saidOf(keyOf(bob));
+    await link(a, { id: said[0].id, key: keyOf(alice) }, { id: said[2].id, key: keyOf(alice) }, 0.8);
+    await link(a, { id: said[1].id, key: keyOf(alice) }, { id: bobs.id, key: keyOf(bob) }, 0.5);
+
+    const doc = await exportOf(a, 'alice');
+
+    expect(Object.keys(doc).sort()).toEqual(
+      ['agentId', 'exportedAt', 'held', 'pages', 'profiling', 'provided', 'recipients', 'retention', 'subject', 'traces', 'unread'].sort(),
+    );
+    expect(new Date(doc.exportedAt).toISOString()).toBe(doc.exportedAt);
+    expect(doc.agentId).toBe('aria-1');
+    expect(doc.subject).toEqual({ kind: 'user' });
+    expect(doc.traces.map((trace) => trace.id).sort()).toEqual(said.map((trace) => trace.id).sort());
+    expect(doc.traces.map((trace) => trace.speaker)).toEqual(['user', 'assistant', 'user', 'assistant']);
+    expect(doc.pages).toHaveLength(1);
+
+    // What the person provided: their own two messages, and nothing the agent said.
+    expect(doc.provided.messages.map((message) => message.text)).toEqual(['My canary is LARK-7.', 'I keep it in the attic.']);
+    expect(doc.provided.messages.map((message) => message.id)).toEqual(
+      doc.traces.filter((trace) => trace.speaker === 'user').map((trace) => trace.id),
+    );
+    for (const message of doc.provided.messages) {
+      expect(Object.keys(message).sort()).toEqual(['createdAt', 'id', 'text']);
+      expect(new Date(message.createdAt).toISOString()).toBe(message.createdAt);
+    }
+
+    // What is held about them: every trace with its fields, filed by the soul's provider, since no mind runs.
+    expect(doc.held.traces.map((trace) => trace.id)).toEqual(doc.traces.map((trace) => trace.id));
+    expect(doc.held.traces.map((trace) => trace.text)).toEqual(doc.traces.map((trace) => trace.text));
+    for (const trace of doc.held.traces) {
+      expect(['user', 'assistant']).toContain(trace.speaker);
+      expect(trace.tags).not.toContain('wiki');
+      expect(Array.isArray(trace.entities)).toBe(true);
+      expect(trace.filedBy).toBe('soul');
+      for (const field of ['valence', 'arousal', 'dominance', 'intensity'] as const) {
+        expect(Number.isFinite(trace.emotionalContext[field])).toBe(true);
+      }
+      expect(typeof trace.emotionalContext.gmiMood).toBe('string');
+      expect(Number.isFinite(trace.encodingStrength)).toBe(true);
+      expect(Number.isFinite(trace.stability)).toBe(true);
+      expect(Number.isInteger(trace.retrievalCount)).toBe(true);
+      expect(new Date(trace.lastAccessedAt).toISOString()).toBe(trace.lastAccessedAt);
+      expect(new Date(trace.createdAt).toISOString()).toBe(trace.createdAt);
+    }
+    expect(doc.held.typedFacts).toEqual([]);
+    expect(doc.held.archivedOriginals).toEqual([]);
+    expect(doc.held.restoreCopies).toEqual([]);
+    expect(doc.held.pages).toEqual(doc.pages);
+    // The link between two of the person's traces; the one to another person's trace is left out.
+    expect(doc.held.graphLinks).toEqual([{ from: said[0].id, to: said[2].id, type: 'SAME_TOPIC', weight: 0.8 }]);
+
+    expect(doc.recipients).toEqual(await recipientsOf(a));
+    expect(doc.recipients).toEqual(OWN_ROUTE);
+    expect(doc.retention).toEqual({ period: 'until-deletion' });
+    // The GMI runtime's default profile scores no sentiment, and every trace is filed with a neutral emotional context.
+    expect(doc.profiling).toEqual({ sentiment: 'off', moodStamps: 0 });
+    expect(doc.unread).toEqual([]);
+    const text = JSON.stringify(doc);
+    expect(text).not.toContain('WREN-2');
+    expect(text).not.toContain('alice');
+  });
+});
+
 describe(`a read that fails partway, on runtime ${RUNTIME}`, () => {
   it('leaves its whole section out, not the part read before the failure', async () => {
     const { a } = await open();

@@ -535,9 +535,10 @@ describe('forgetUser', () => {
 
     const reports = await a.applyTombstones!();
 
-    // The one row led back to her: her deletion ran again, the learning layer's own with it.
+    // The one row led back to her: her deletion ran again, the learning layer's own with it, and the row is gone.
     expect(reports).toHaveLength(1);
     expect(reports[0]!.stores).toContainEqual(expect.objectContaining({ store: 'learning store', reached: true }));
+    expect(rows(storeFile(), "SELECT user_id FROM agentos_learning_traits WHERE user_id = 'alice'")).toEqual([]);
   });
 
   it('refuses an id no key can be built from before it deletes anything', async () => {
