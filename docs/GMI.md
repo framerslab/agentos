@@ -175,7 +175,7 @@ gets up to `controls.maxValidationRetries ?? 1` repair attempts. Each repair
 sends the completed transcript and validation feedback with tools disabled.
 The transcript travels as the repair's history, so one over the history's share
 of the context window loses its oldest messages first, as a session's history
-does (**Sessions**, below), where the legacy runtime sends all of it.
+does (**Sessions**, above), where the legacy runtime sends all of it.
 If validation still fails, `generate()` throws `ObjectGenerationError` with
 the last reply. A model refusal throws immediately. The result is the accepted
 attempt's: its `usage` and `toolCalls` are that attempt's own, while `usage()`,
