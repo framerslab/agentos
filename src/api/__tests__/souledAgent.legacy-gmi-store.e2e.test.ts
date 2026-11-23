@@ -656,6 +656,12 @@ describe('a passed store on a souled GMI', () => {
 
     const exported = await joined.exportUserMemory!(ALICE);
     expect(exported.held.legacyGmiStore).toContainEqual(expect.objectContaining({ id: note, text: ladder }));
+    // Her own messages there are what she provided, each once and oldest first, beside what the soul's store holds.
+    const provided = exported.provided.messages;
+    expect(provided.map(({ text }) => text)).toEqual(expect.arrayContaining([CANARY, ladder]));
+    expect(new Set(provided.map(({ id }) => id)).size).toBe(provided.length);
+    expect([...provided.map(({ createdAt }) => createdAt)].sort()).toEqual(provided.map(({ createdAt }) => createdAt));
+    expect(provided.map(({ text }) => text)).not.toContain(OTHER);
     expect(JSON.stringify(await joined.exportUserMemory!(BOB))).not.toContain(ladder);
     await expect(joined.correctUserMemory!(BOB, { traceIds: [note] })).rejects.toThrow();
 
