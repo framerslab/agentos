@@ -49,6 +49,12 @@ export interface SoulTurnMemory {
    */
   scope?: { scope: 'conversation'; scopeId: string };
   /**
+   * The session that runs the turn decides the reply: the reply side is filed whatever the GMI wrote, even nothing,
+   * and the view files the reply the session keeps (an `onAfterGeneration` hook may give one to an empty model reply)
+   * or nothing when the session keeps it empty.
+   */
+  keptReply?: true;
+  /**
    * Decides the turn's policy, once a turn: the decision the turn's recall opened, else a new one, kept open for the
    * turn's writes. Called before the turn's sentiment analysis. On the manager of a souled agent's mind, a turn the
    * answer lets recall first loads the person's rows into it, once a session opening; a load that fails rejects, and

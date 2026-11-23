@@ -369,6 +369,7 @@ function filingOnceKept(view: SoulTurnMemory): { view: SoulTurnMemory; keep: (ve
   return {
     view: {
       ...(view.scope ? { scope: view.scope } : {}),
+      keptReply: true,
       begin: (manager, stop) => view.begin(manager, stop),
       file: async (role, content, write, undo) => {
         const said = await verdict;
@@ -546,8 +547,9 @@ export async function* runGmiTurn(
     if (turn.guards) {
       // A turn stopped while it waited for the lock ends here: its input reaches no guard.
       turn.abortSignal?.throwIfAborted();
-      // The input stage, before the GMI is built and before any model call.
-      const judged = await judgeTurnInput(turn.guards, input);
+      // The input stage, before the GMI is built and before any model call. A stop of the turn meanwhile ends it there,
+      // so a guard that never answers holds neither the session's lock nor its close().
+      const judged = await untilStopped(judgeTurnInput(turn.guards, input), turn.abortSignal);
       folder.guarded(judged.report);
       // A stop while the guards judged (the caller's signal, a session's close()) ends the turn before anything else.
       turn.abortSignal?.throwIfAborted();
@@ -734,10 +736,13 @@ export async function* runGmiTurn(
     }
     flush();
     ended = true;
-    // The caller's signal aborted after the turn's last request (while a hook ran): the turn ends with its reason, as
-    // generateText's check after each step's hook ends a call, and keeps its finished steps marked partial, as a turn
-    // stopped during a request does.
-    if (!folder.error()) turn.callerSignal?.throwIfAborted();
+    // The caller's signal, or the session's close(), aborted after the turn's last request (while a hook ran): the turn
+    // ends with its reason, as generateText's check after each step's hook ends a call, keeps its finished steps marked
+    // partial, as a turn stopped during a request does, and files nothing.
+    if (!folder.error()) {
+      turn.callerSignal?.throwIfAborted();
+      turn.abortSignal?.throwIfAborted();
+    }
     if (folder.error()) {
       writer?.abort({ partial: true });
     } else {

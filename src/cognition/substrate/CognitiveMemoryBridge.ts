@@ -192,12 +192,33 @@ export interface CognitiveMemoryEncodeOptions {
  */
 export function withoutShownTag(text: string, tag: string): string {
   if (!tag || !text.includes(tag)) return text;
-  return text.replace(/ \| tags: ([^)\n]*)\)/g, (whole: string, list: string) => {
-    const tags = list.split(', ');
-    const kept = tags.filter((shown) => shown !== tag);
-    if (kept.length === tags.length) return whole;
-    return kept.length > 0 ? ` | tags: ${kept.join(', ')})` : ')';
+  // A list runs from a line's last ` | tags: ` to the last `)` of the line, so an id that holds `, ` or `)` is matched
+  // whole.
+  return text.replace(/ \| tags: ((?:(?! \| tags: )[^\n])*)\)/g, (whole: string, list: string) => {
+    const kept = withoutListItem(list, tag);
+    if (kept === list) return whole;
+    return kept ? ` | tags: ${kept})` : ')';
   });
+}
+
+/** `list`, a tag list joined with `, `, with each item equal to `tag` left out; `tag` may itself hold `, `. */
+function withoutListItem(list: string, tag: string): string {
+  const separator = ', ';
+  let kept = list;
+  for (;;) {
+    if (kept === tag) return '';
+    if (kept.startsWith(tag + separator)) {
+      kept = kept.slice(tag.length + separator.length);
+      continue;
+    }
+    if (kept.endsWith(separator + tag)) {
+      kept = kept.slice(0, kept.length - separator.length - tag.length);
+      continue;
+    }
+    const at = kept.indexOf(separator + tag + separator);
+    if (at < 0) return kept;
+    kept = kept.slice(0, at) + kept.slice(at + separator.length + tag.length);
+  }
 }
 
 /**
@@ -730,7 +751,9 @@ export class CognitiveMemoryBridge {
       if (filesInput) {
         sides.push(this.fileThroughSoul(inputText, { type: 'episodic', sourceType: 'user_statement', role: 'user' }, soul));
       }
-      if (responseText.trim()) {
+      // A view whose session decides the reply files the reply the session keeps, which a hook may give a turn whose
+      // model wrote nothing.
+      if (responseText.trim() || soul.keptReply === true) {
         sides.push(this.fileThroughSoul(responseText, { type: 'semantic', sourceType: 'agent_inference', role: 'assistant' }, soul));
       }
       return { write: memoryWriteRecordOf(sides) };
