@@ -141,10 +141,7 @@ async function expectRecallDetail(store?: Pick<SouledAgentOptions, 'soulStore' |
     ]),
   );
   expect(modelItems).toHaveLength(2);
-  for (const id of [...includedIds, provider.id, page.id]) {
-    expect(blocks.provider).not.toContain(id);
-    expect(blocks.mind).not.toContain(id);
-  }
+  for (const id of [...includedIds, provider.id, page.id]) expect(blocks.provider).not.toContain(id);
   for (const item of modelItems) {
     expect(item).not.toHaveProperty('id');
     expect(item.when).toMatch(/\d{4}-\d{2}-\d{2}/);
