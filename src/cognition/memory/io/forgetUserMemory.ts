@@ -800,7 +800,8 @@ function holdsTag(tags: string, tag: string): boolean {
  * id the correction had is recorded as deleted; where it holds the kept trace without its `correction` tag, the tag
  * is put back and the trace is named for the next compile. A kept row whose subject is forgotten, whose
  * trace the ledger records as deleted, or that is older than its key's retention period goes from the copy instead.
- * Another agent's kept rows are left to that agent.
+ * Another agent's kept rows are left to that agent. A kept row whose id the store holds under another key is left
+ * kept and counted as not filed: the trace under that id is someone else's, and is neither tagged nor named.
  *
  * A kept row the store refuses to file again (a write or an embedding that fails) stays kept, is counted, and is tried
  * again at the next re-application: an open does not fail on it. Each filing is read against the tombstones before and
@@ -851,6 +852,12 @@ async function refileKeptCorrections(
         }
         const there = present.get(row.traceId);
         try {
+          if (there && (there.scope !== CONVERSATION_SCOPE || there.scopeId !== key)) {
+            // The id is held under another key: that trace is not this person's correction. It is left as it is, and
+            // the kept row stays kept and is counted, since no trace of that id can be filed beside it.
+            missed += 1;
+            continue;
+          }
           if (there) {
             // The store holds it; a restore from before the trace was marked a correction took the tag. As the
             // correction did, it is named for the next compile to read by id: the restored watermark can be past it.

@@ -147,6 +147,9 @@ const EXPORT_BATCH = 500;
 /** The key of the trace metadata that records who spoke a trace. */
 const SPEAKER_KEY = 'speaker';
 
+/** The key of the trace metadata that names the user a trace was filed for, when a writer recorded one. */
+const TURN_USER_KEY = 'turnUserId';
+
 /** The metadata key, and the value, that mark a trace the mind of a souled agent's GMI filed. */
 const FILED_BY_KEY = 'filedBy';
 const FILED_BY_MIND = 'mind';
@@ -338,7 +341,11 @@ export async function exportSubjectMemory(options: {
         const speaker = said === 'user' || said === 'assistant' ? said : undefined;
         const createdAt = isoOf(trace.createdAt);
         section.traces.push({ id: trace.id, createdAt, ...(speaker ? { speaker } : {}), text: trace.content, tags: [...trace.tags] });
-        if (speaker === 'user') section.messages.push({ id: trace.id, createdAt, text: trace.content });
+        // What the subject provided is what they said themselves: a message a host filed under their key for another
+        // user (`turnUserId`) is held about the conversation, and is that user's own.
+        const saidBy = metadata[TURN_USER_KEY];
+        const theirs = typeof saidBy !== 'string' || saidBy === '' || (subject.kind === 'user' && saidBy === subject.id);
+        if (speaker === 'user' && theirs) section.messages.push({ id: trace.id, createdAt, text: trace.content });
         section.held.push({
           id: trace.id,
           createdAt,

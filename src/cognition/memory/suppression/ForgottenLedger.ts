@@ -814,7 +814,8 @@ export class ForgottenLedger {
    * filed again. With `keep`, the correction that replaces them is kept in that same write ({@link keepCorrection}):
    * the copy holds both or neither. A trace already marked keeps its row.
    *
-   * @throws {TypeError} When a trace id is not a non-empty string, or `keep` is not a kept correction.
+   * @throws {TypeError} When a trace id is not a non-empty string, `keep` is not a kept correction, or `keep` names a
+   *   trace the same call marks deleted: nothing is written.
    * @throws {ForgottenLedgerError} When a side no longer holds the ledger's identity, or holds the marker of a key the
    *   handle was not given; or what a side's write threw. Nothing is marked in the store unless the copy holds the
    *   marker.
@@ -825,6 +826,9 @@ export class ForgottenLedger {
   async markTracesDeleted(traceIds: readonly string[], options: { keep?: KeptCorrection } = {}): Promise<void> {
     const ids = checkedTraceIds(traceIds, 'markTracesDeleted');
     const keep = options?.keep === undefined ? undefined : checkedKept(options.keep);
+    if (keep && ids.includes(keep.traceId)) {
+      throw new TypeError('ForgottenLedger.markTracesDeleted: the correction kept cannot be one of the traces marked deleted');
+    }
     if (ids.length === 0) {
       if (keep) await this.keepCorrection(keep);
       return;
