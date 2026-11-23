@@ -74,7 +74,7 @@ async function seed(store: Store = { path: legacyFile }, learningOption: Learnin
 async function open(
   store: Store = { path: legacyFile },
   learningOption: Learning = learning,
-  screen?: SouledAgentOptions['screen'],
+  more: Partial<SouledAgentOptions> = {},
 ): Promise<SouledAgent> {
   agent = await souledAgent({
     ...options(store, learningOption),
@@ -83,7 +83,7 @@ async function open(
     compile: false,
     retention: { traces: 'until-deletion' },
     tombstoneKey: 'orchard-test-tombstones',
-    ...(screen ? { screen } : {}),
+    ...more,
   });
   return agent;
 }
@@ -390,10 +390,12 @@ describe('a passed store on a souled GMI', () => {
     await close();
     const dropped = 'The screen drops this note.';
     const failed = 'The screen fails on this note.';
-    const joined = await open(undefined, learning, async (text) => {
-      if (text === dropped) return null;
-      if (text === failed) throw new Error('screen unavailable');
-      return text;
+    const joined = await open(undefined, learning, {
+      screen: async (text) => {
+        if (text === dropped) return null;
+        if (text === failed) throw new Error('screen unavailable');
+        return text;
+      },
     });
     const oldDate = 1_700_000_000_001;
     const newDate = oldDate + 86_400_000;
@@ -418,11 +420,12 @@ describe('a passed store on a souled GMI', () => {
     const interrupted = await move();
     expect(interrupted).toMatchObject({
       dryRun: false,
-      people: [{ userId: ALICE, moved: 0, kept: 0, failed: expect.any(String) }],
+      people: [{ userId: ALICE, moved: 0, kept: 2, failed: expect.any(String) }],
       forgotten: 1,
     });
-    expect((await traceSnapshot(soul)).map(({ id }) => id)).toEqual(['dated-old']);
-    expect((await legacyRows(ALICE)).map(({ id }) => id)).toContain('dated-old');
+    // The source rows go in one batch once their copies are filed: the batch's failed delete leaves every one.
+    expect((await traceSnapshot(soul)).map(({ id }) => id)).toEqual(source.map(({ id }) => id));
+    expect((await legacyRows(ALICE)).map(({ id }) => id)).toEqual(expect.arrayContaining(source.map(({ id }) => id)));
     await withLegacyBrain(async (brain) => {
       await brain.exec('DROP TRIGGER interrupt_legacy_delete');
     });
@@ -587,7 +590,61 @@ describe('a passed store on a souled GMI', () => {
     await withLegacyBrain(async (brain) => {
       await brain.exec('DROP TRIGGER hold_legacy_delete');
     });
-    await joined.correctUserMemory!(ALICE, { traceIds: ['moving-marked'] });
+    // The correction's text is the copy's: the copy stays as the correction, and the passed store's row goes.
+    const reused = await joined.correctUserMemory!(ALICE, { traceIds: ['moving-marked'], text: moving });
+    expect(reused).toMatchObject({ correctionTraceId: 'moving-marked' });
     expect((await legacyRows(ALICE)).map(({ id }) => id)).not.toContain('moving-marked');
+  });
+
+  it('leaves in the passed store the rows of an account kept from memory and of a child on a store kept until deletion', async () => {
+    await seed();
+    const child = 'young-reader';
+    await plantTrace('child-note', 'user', userScope(child), OTHER);
+    const joined = await open(undefined, learning, {
+      memoryPolicy: ({ userId }) =>
+        userId === BOB ? { longTerm: 'off' } : userId === child ? { longTerm: 'compiled', minor: true } : { longTerm: 'compiled' },
+    });
+    const soul = brainOf(joined.memory!);
+    const aliceRows = await legacyRows(ALICE);
+    const bobRows = await legacyRows(BOB);
+    events.length = 0;
+    const report = await joined.copyLegacyGmiMemory!({ dryRun: false, users: [child] });
+    expect(report.people).toEqual(expect.arrayContaining([
+      { userId: ALICE, moved: aliceRows.length, kept: 0 },
+      { userId: BOB, moved: 0, kept: bobRows.length },
+      { userId: child, moved: 0, kept: 1 },
+    ]));
+    expect(await legacyRows(BOB)).toEqual(bobRows);
+    expect((await legacyRows(child)).map(({ id }) => id)).toEqual(['child-note']);
+    for (const id of [BOB, child]) {
+      const key = conversationScopeKey(AGENT_ID, { kind: 'user', id });
+      expect(await soul.all('SELECT id FROM memory_traces WHERE brain_id = ? AND scope_id = ?', [soul.brainId, key])).toEqual([]);
+    }
+    expect(events.filter(({ event }) => event === 'memory.write_refused').map(({ reason }) => reason).sort())
+      .toEqual(['minor_no_retention', 'policy_off']);
+  });
+
+  it('removes a source row a move marked deleted once the soul’s copy of it has expired', async () => {
+    await seed();
+    const expired = 'The orchard well was capped long ago.';
+    await plantTrace('swept-old', 'user', userScope(ALICE), expired, 1_700_000_000_001);
+    await withLegacyBrain(async (brain) => {
+      await brain.exec(`CREATE TRIGGER hold_legacy_delete BEFORE DELETE ON memory_traces
+        WHEN OLD.id = 'swept-old' BEGIN SELECT RAISE(ABORT, 'held legacy delete'); END`);
+    });
+    const joined = await open(undefined, learning, { retention: { traces: { days: 30 } } });
+    const soul = brainOf(joined.memory!);
+    expect((await joined.copyLegacyGmiMemory!({ dryRun: false })).people)
+      .toContainEqual(expect.objectContaining({ userId: ALICE, moved: 0, failed: expect.any(String) }));
+    expect((await legacyRows(ALICE)).find(({ id }) => id === 'swept-old')).toMatchObject({ deleted: 1 });
+    await withLegacyBrain(async (brain) => {
+      await brain.exec('DROP TRIGGER hold_legacy_delete');
+    });
+    await joined.sweepRetention!();
+    expect(await soul.get('SELECT id FROM memory_traces WHERE brain_id = ? AND id = ? AND deleted = 0', [soul.brainId, 'swept-old']))
+      .toBeUndefined();
+
+    await joined.copyLegacyGmiMemory!({ dryRun: false });
+    expect((await legacyRows(ALICE)).map(({ id }) => id)).not.toContain('swept-old');
   });
 });
