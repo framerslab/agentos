@@ -2981,6 +2981,10 @@ export class GMI implements IGMI {
         break main_processing_loop; // Break if no tool calls
       }
 
+      // The last step can yield to a hook that stops the turn. A souled agent's view already gates its own filing.
+      if (stop.signal.aborted && this.memoryBridge && !this.memoryBridge.usesSoul(turnSoul)) {
+        throw new GMIError('Turn aborted before filing in cognitive memory.', GMIErrorCode.LLM_PROVIDER_ERROR, { turnId });
+      }
       // The exchange is filed under the turn's memory scope session, when it named one, and, with a learning layer's
       // scope ids, under the turn's own through its guard. On a souled agent's mind it is filed through the turn's view
       // of the soul, and the turn does not wait for it: the output carries the record of the write.
