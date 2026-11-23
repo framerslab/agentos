@@ -232,6 +232,25 @@ describe(`one person's export, on runtime ${RUNTIME}`, () => {
     expect(text).not.toContain('alice');
   });
 
+  it("a message a host filed under the person's key for another user is not among what the person provided", async () => {
+    const { a } = await open();
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    // What bob said on alice's conversation, filed by the host under her key and naming him.
+    const bobs = await a.memory!.remember('Bob says his canary is WREN-2.', {
+      type: 'episodic',
+      scope: 'conversation',
+      scopeId: keyOf(alice),
+      metadata: { speaker: 'user', turnUserId: 'bob' },
+    });
+
+    const doc = await exportOf(a, 'alice');
+
+    // It is part of her conversation, and held as such; it is not hers to have provided.
+    expect(doc.traces.map((trace) => trace.id)).toContain(bobs.id);
+    expect(doc.held.traces.map((trace) => trace.id)).toContain(bobs.id);
+    expect(doc.provided.messages.map((message) => message.text)).toEqual(['My canary is LARK-7.']);
+  });
+
   it("a forgotten person's export is empty, and a read that fails is named", async () => {
     const { a } = await open();
     await turn(a, 's1', 'alice', 'My canary is LARK-7.');

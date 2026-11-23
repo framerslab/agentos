@@ -621,6 +621,42 @@ describe.each(RUNTIMES)('a correction kept through a restore, on runtime %s', (r
     expect(JSON.parse(registry?.rebuild_sources ?? '[]') as string[]).toContain(held.id);
   });
 
+  it("a kept correction whose id another person's trace holds is not tagged onto that trace, and stays kept", async () => {
+    const quiet = { compile: false } as Partial<SouledAgentOptions>;
+    const a = await open(runtime, spare(), quiet);
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await turn(a, 's2', 'bob', 'My finch is ROOK-3.');
+    const wrong = idOf(saidOf(keyOf(alice)), 'LARK-7')!;
+    const { correctionTraceId } = await a.correctUserMemory!('alice', { traceIds: [wrong], text: 'My canary is WREN-9.' });
+    await a.close();
+    // The store comes back holding the correction's id under bob's key, as a trace with no correction tag: an id a
+    // host filed twice.
+    const db = new Database(storeFile());
+    try {
+      db.prepare("UPDATE memory_traces SET scope_id = ?, metadata = json_set(metadata, '$.scopeId', ?), tags = '[]' WHERE id = ?").run(
+        keyOf(bob),
+        keyOf(bob),
+        correctionTraceId,
+      );
+    } finally {
+      db.close();
+    }
+
+    events.length = 0;
+    await open(runtime, spare(), quiet);
+
+    // Bob's trace is left as it is, and alice's next compile is not told to read it.
+    const [held] = rows<{ scope_id: string; tags: string }>('SELECT scope_id, tags FROM memory_traces WHERE id = ?', [correctionTraceId]);
+    expect(held.scope_id).toBe(keyOf(bob));
+    expect(JSON.parse(held.tags) as string[]).not.toContain('correction');
+    const [registry] = rows<{ rebuild_sources: string | null }>('SELECT rebuild_sources FROM memory_scopes WHERE scope_id = ?', [keyOf(alice)]);
+    expect(JSON.parse(registry?.rebuild_sources ?? '[]') as string[]).not.toContain(correctionTraceId);
+    // The correction's text stays in the copy, and the open says one could not be filed.
+    expect(keptIn().map((row) => row.trace_id)).toEqual([correctionTraceId]);
+    expect(lines('memory.tombstone_reapplied')).toHaveLength(1);
+    expect(lines('memory.tombstone_reapplied')[0]).toMatchObject({ correctionsRefiled: 0, correctionsMissed: 1 });
+  });
+
   it('a correction filed again onto an earlier trace of its words keeps its own id recorded as deleted', async () => {
     const a = await open(runtime);
     await turn(a, 's1', 'alice', 'My canary is WREN-9.');

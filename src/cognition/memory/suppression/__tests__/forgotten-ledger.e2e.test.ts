@@ -1214,6 +1214,22 @@ describe("the ledger's deleted traces and kept corrections", () => {
     expect((await ledger.correctionsOf(KEY_A)).map((row) => row.traceId)).toEqual(['mt_fix', 'mt_same']);
   });
 
+  it('refuses a correction kept under the id of a trace the same call marks deleted, and writes neither', async () => {
+    const pair = await openPair(folder());
+    const ledger = await ForgottenLedger.open(pair);
+
+    await expect(
+      ledger.markTracesDeleted(['mt_one', 'mt_two'], { keep: kept('mt_two', KEY_A, 'My canary is WREN-9.') }),
+    ).rejects.toThrow(TypeError);
+
+    expect(await ledger.deletedTraceIds()).toEqual([]);
+    expect(await keptRowsOf(pair.copy)).toEqual([]);
+    // A correction kept under another id is written with the markers, as before.
+    await ledger.markTracesDeleted(['mt_one'], { keep: kept('mt_two', KEY_A, 'My canary is WREN-9.') });
+    expect(await ledger.deletedTraceIds()).toEqual(['mt_one']);
+    expect((await keptRowsOf(pair.copy)).map((row) => row.trace_id)).toEqual(['mt_two']);
+  });
+
   it('rejects a kept correction and a deleted-trace marker when the copy refuses the write', async () => {
     const pair = await openPair(folder());
     const ledger = await ForgottenLedger.open(pair);
