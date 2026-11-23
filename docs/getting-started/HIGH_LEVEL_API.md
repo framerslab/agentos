@@ -974,6 +974,8 @@ const streamedVerdicts = await streamed.grounding;
 
 On the default runtime, `agent({ responseSchema })` validates `generate()`'s
 final text with the supplied Zod schema and returns the value in `result.parsed`.
+`souledAgent()` takes it on `runtime: 'legacy'` alone and throws at open for it
+on the GMI runtime, its default.
 It can extract JSON from a code fence. `controls.maxValidationRetries` defaults
 to 1, so an invalid reply gets one more attempt. Set it to 0 to throw
 `ObjectGenerationError` on the first invalid reply. A [refusal](#a-refusal-from-the-model)
@@ -1147,7 +1149,7 @@ const aria = await souledAgent({
 });
 ```
 
-`souledAgent()` runs on the GMI runtime with the `light` profile unless `runtime` names another: every session is a GMI, cognitive memory is off unless `memory` is set, no message is scored for sentiment, and no embedding model is needed. Where this section says `runtime: 'gmi'`, it describes that default. `runtime: 'legacy'` selects the legacy runtime, which `agent()` runs by default. The GMI runtime throws at open for a `channels`, `voice` or `avatar` option. [Upgrading](../SOUL_ENTRY_POINTS.md#upgrading) lists what an agent that set no `runtime` meets.
+`souledAgent()` runs on the GMI runtime with the `light` profile unless `runtime` names another: every session is a GMI, cognitive memory is off unless `memory` is set, no message is scored for sentiment, and no embedding model is needed. Where this section says `runtime: 'gmi'`, it describes that default. `runtime: 'legacy'` selects the legacy runtime, which `agent()` runs by default. The GMI runtime throws at open for a `channels`, `voice` or `avatar` option, and `souledAgent()` throws there for `responseSchema`, which that runtime does not read: pass the schema to a session's `send()`. [Upgrading](../SOUL_ENTRY_POINTS.md#upgrading) lists what an agent that set no `runtime` meets.
 
 What it wires:
 
