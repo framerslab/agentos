@@ -6,6 +6,8 @@
  */
 import { memoryLog } from '../log.js';
 import { CONVERSATION_SCOPE } from '../retrieval/store/conversationScopeKey.js';
+import type { AgentSession } from '../../../api/agent.js';
+import type { SoulMind } from '../../../api/runtime/soulStore.js';
 import type { Memory } from './facade/Memory.js';
 import type { SubjectPages } from './forgetUserMemory.js';
 
@@ -34,6 +36,18 @@ export interface RetentionSweepOptions {
   onChain?: <T>(scopeId: string, work: () => Promise<T>) => Promise<T>;
   /** The clock, in Unix ms. Default `Date.now`. */
   now?: () => number;
+  /**
+   * The mind of a souled agent on `runtime: 'gmi'` with cognitive memory on, which files into this store: each
+   * scope's expired traces are deleted through it before the store's own delete, with what it keeps of each (its cached
+   * copy, vector, memory-graph node and archived original), and dropped from the subject's open sessions
+   * (`sessionsOf`) once they are gone. A delete of the mind that fails leaves the scope's traces for the next sweep and
+   * is the sweep's first failure.
+   *
+   * @internal
+   */
+  mind?: Pick<SoulMind, 'deleteTraces' | 'evictTraces'>;
+  /** The sessions open for one scope's subject, whose working memory `mind` drops the expired traces from. Unset: none. */
+  sessionsOf?: (scopeId: string) => Iterable<AgentSession>;
 }
 
 const DAY_MS = 86_400_000;
@@ -62,7 +76,9 @@ export const RETENTION_DAY_MS = DAY_MS;
 /**
  * Deletes for good what expired, one user or session scope at a time: each page compiled from an expired trace,
  * whole, then the scope's traces stored longer ago than its period (soft-deleted rows and the document chunks they
- * were filed from included), with the text the tombstones' second copy keeps of an expired correction. The pages go
+ * were filed from included), with the text the tombstones' second copy keeps of an expired correction. With a souled
+ * agent's mind (`mind`), the traces go through it first, with what it keeps of each, and leave the working memory of
+ * the subject's open sessions. The pages go
  * first: while a page is left, the expired traces it was built from are left
  * too, so a sweep that stopped is finished by the next one. With `pages: 'rebuild'` the next compile builds such a
  * page again from the traces of it that are left. A page whose sources all survive is not touched, and a page's own
@@ -109,7 +125,27 @@ export async function sweepRetention(options: RetentionSweepOptions): Promise<{ 
         await store.deletePage(page.id);
         swept.pages += 1;
       }
+      const mind = options.mind;
+      if (expired.length > 0 && mind) {
+        // What the store finds of each trace by its row alone goes while the rows still name it: the document chunks
+        // the traces were filed from, with their text, and each trace's knowledge-graph copy and memory-graph node.
+        // Then the mind takes the rows, with what it keeps of each. A delete of the mind that fails leaves the rows it
+        // did not take for the next sweep, which finds them by their age.
+        await memory.deleteDocumentChunksOf(expired);
+        await memory.deleteGraphRecordsOf(expired);
+        try {
+          const { deleted } = await mind.deleteTraces(expired);
+          swept.traces += deleted;
+          if (deleted > 0) memory.markErasureOwed();
+        } catch (error) {
+          // A delete that failed part way may have deleted rows: their words leave the indexes with this sweep's rewrite.
+          memory.markErasureOwed();
+          throw error;
+        }
+      }
       if (expired.length > 0) swept.traces += (await memory.deleteTraces(expired, { documentChunks: 'delete' })).deleted;
+      // A slot of an open session holds a trace's id and no words: it goes once the traces are gone.
+      if (expired.length > 0 && mind) await mind.evictTraces(expired, options.sessionsOf?.(scopeId) ?? []);
       // A correction that expired goes from the tombstones' second copy too, so no restore files it again: by the
       // traces deleted now, and by its own time, so a sweep made again after a drop that failed still finds it once
       // the store no longer holds the trace.

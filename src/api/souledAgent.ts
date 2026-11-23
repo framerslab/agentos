@@ -3008,6 +3008,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       changing: (key) => {
         correctionCounts.set(key, (correctionCounts.get(key) ?? 0) + 1);
       },
+      // With cognitive memory on, through the mind first, which takes each trace with what it keeps of it.
+      ...(soulMind && mindRecalls ? { mind: soulMind } : {}),
     });
     // A subject the store holds nothing more of no longer counts toward the retention requirement.
     reports.forEach((report, at) => {
@@ -3031,6 +3033,9 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       retention,
       daysFor: (scopeId) => policyDays.get(scopeId),
       onChain: (scopeId, work) => (closing ? work() : onSubject(scopeId, work)),
+      // With cognitive memory on, the expired traces go through the mind first, with what it keeps of each, and leave
+      // the working memory of their person's open sessions.
+      ...(soulMind && mindRecalls ? { mind: soulMind, sessionsOf: (scopeId: string) => sessionsBySubject.get(scopeId) ?? [] } : {}),
     });
   };
   built.sweepRetention = () => awaitedOnClose(sweep());
@@ -3121,6 +3126,11 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
               if (changing) countChange();
             }),
           ),
+        // With cognitive memory on, the named traces go through the mind first, with what it keeps of each, and leave
+        // the working memory of the person's open sessions.
+        ...(soulMind && mindRecalls
+          ? { mind: soulMind, sessions: () => sessionsBySubject.get(conversationScopeKey(agentId, subject)) ?? [] }
+          : {}),
       }),
     );
   };

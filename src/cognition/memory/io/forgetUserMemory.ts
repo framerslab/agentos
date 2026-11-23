@@ -667,6 +667,13 @@ export interface ReapplyTombstonesOptions
   /** The clock, in Unix ms. Default `Date.now`. */
   now?: () => number;
   /**
+   * The mind of a souled agent on `runtime: 'gmi'` with cognitive memory on: each trace the ledger records as deleted
+   * that the store holds again is deleted through it before the store's own delete, with what the mind keeps of it.
+   *
+   * @internal
+   */
+  mind?: Pick<SoulMind, 'deleteTraces'>;
+  /**
    * Called with a conversation key just before the traces a restore brought back under it are deleted again, and once
    * more when that has settled, as a correction's own deletion is announced: a running turn of that subject that
    * recalled one of them does not file a reply restating it. Unset: nothing is called.
@@ -684,16 +691,17 @@ interface DeletedTracesReapplied {
 
 /**
  * Deletes again each trace the ledger records as deleted ({@link ForgottenLedger.markTracesDeleted}) that the store
- * still holds, live or soft-deleted, as after a restore from a backup taken before a correction or a single deletion.
+ * still holds, live or soft-deleted, as after a restore from a backup taken before a correction or a single deletion,
+ * through a souled agent's mind first when there is one (`mind`).
  * Under a conversation key, each page built from one goes first and is named for the next compile to build again from
  * the traces of it that are left, as in a correction; a key whose page cannot be deleted keeps its traces, so the next
  * re-application finds the page by them.
  */
 async function reapplyDeletedTraces(
-  options: Pick<ReapplyTombstonesOptions, 'memory' | 'wiki' | 'onKey' | 'changing'>,
+  options: Pick<ReapplyTombstonesOptions, 'memory' | 'wiki' | 'onKey' | 'changing' | 'mind'>,
   ledger: ForgottenLedger,
 ): Promise<DeletedTracesReapplied> {
-  const { memory } = options;
+  const { memory, mind } = options;
   const done: DeletedTracesReapplied = { traces: 0, missed: 0 };
   const marked = await ledger.deletedTraceIds();
   if (marked.length === 0) return done;
@@ -705,6 +713,19 @@ async function reapplyDeletedTraces(
   }
   const remove = async (ids: readonly string[]): Promise<void> => {
     try {
+      if (mind) {
+        // As in a correction: the graph records while the rows still name them, then the mind takes the rows with what
+        // it keeps of each, then the store's own delete.
+        await memory.deleteGraphRecordsOf(ids);
+        try {
+          const { deleted } = await mind.deleteTraces(ids);
+          done.traces += deleted;
+          if (deleted > 0) memory.markErasureOwed();
+        } catch (error) {
+          memory.markErasureOwed();
+          throw error;
+        }
+      }
       done.traces += (await memory.deleteTraces(ids)).deleted;
     } catch {
       done.missed += ids.length;
