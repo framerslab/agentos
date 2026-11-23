@@ -2,8 +2,9 @@
  * What the host's memory policy answers for a minor and for a person who objects to profiling, and which answer a
  * session follows, end to end over the real souledAgent(), agent, generateText, provider manager, Memory store and
  * wiki compiler; only the OpenAI and Anthropic provider classes are stubbed (helpers/stubProviders.ts), at their
- * module boundary. Every case runs on the legacy runtime, on `runtime: 'gmi'` with cognitive memory off, and with no
- * `runtime` set, which is souledAgent()'s default.
+ * module boundary. Every case of the policy answers suite runs on the legacy runtime, on `runtime: 'gmi'` with
+ * cognitive memory off, and with no `runtime` set, which is souledAgent()'s default; the suites after it name
+ * `runtime: 'gmi'`.
  *
  * - `minor: true` on a store that keeps the person's memory until deletion, or on an agent with no `retention`, keeps
  *   no long-term memory for them, whatever `retentionDays` the answer holds: nothing of their turns is filed, they
@@ -50,8 +51,8 @@ import type { MemoryTrace } from '../../cognition/memory/core/types';
 import type { MemoryWriteRecord } from '../runtime/memoryWriteRecord';
 
 /**
- * The runtimes every case runs on, each as its name and the `runtime` option that selects it: the legacy runtime, the
- * GMI runtime with cognitive memory off, and no `runtime` at all.
+ * The runtimes every case of the policy answers suite runs on, each as its name and the `runtime` option that selects
+ * it: the legacy runtime, the GMI runtime with cognitive memory off, and no `runtime` at all.
  */
 const RUNTIMES = [
   ['legacy', 'legacy'],

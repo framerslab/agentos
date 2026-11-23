@@ -15,8 +15,9 @@
  * - `close()` stops a session turn still running: the turn rejects, and nothing of it is compiled.
  * - An inline soul, and an optional soul that does not load, give a plain agent on the GMI runtime too.
  * - `runtime: 'legacy'` still runs the legacy path: no GMI mark, one whole model call a turn, the three options
- *   accepted, `generate()` validated against a `responseSchema`, no end-user id with or without `sendUserIdToProvider`, a running turn let finish by `close()`, and a
- *   plain legacy agent for an inline soul.
+ *   accepted, `generate()` validated against a `responseSchema`, no end-user id with or without
+ *   `sendUserIdToProvider`, a running turn let finish by `close()`, and a plain legacy agent for an inline soul.
+ * - A store written under either runtime opens under the other, each recalling what the other filed.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
@@ -133,6 +134,15 @@ const turnCalls = (s: ProviderScript) => s.seen.filter((call) => !isMerge(call))
 /** The messages of a model call that carry `id` anywhere, in their text or as the name they are sent under. */
 const holdersOf = (call: ModelCall, id: string) =>
   call.messages.map((message) => JSON.stringify(message)).filter((json) => json.includes(id));
+/** The texts a model call's `<memory_recall>` block holds, the datamark taken out; none when it has no block. */
+const recalledIn = (call: ModelCall): string[] => {
+  const OPEN = '<memory_recall>';
+  const CLOSE = '</memory_recall>';
+  const message = call.messages.find((m) => m.role === 'user' && typeof m.content === 'string' && m.content.startsWith(OPEN));
+  if (!message) return [];
+  const { items } = JSON.parse((message.content as unknown as string).slice(OPEN.length, -CLOSE.length)) as { items: Array<{ text: string }> };
+  return items.map((item) => item.text.replaceAll('^', ' '));
+};
 /** Whether a handle is a `gmi()` agent's: the mark `gmi()` puts on the handle it returns. */
 const gmiMarkOf = (a: unknown) => (a as { __gmiHandle?: unknown }).__gmiHandle;
 /** A model step that calls `whoami` once. */
@@ -345,5 +355,32 @@ describe("a souled agent on runtime: 'legacy'", () => {
     expect(gmiMarkOf(a)).toBeUndefined();
     expect((await a.session('s1').send('Hi.')).text).toBe('Hello.');
     expect(turnCalls(s).map((call) => call.streamed)).toEqual([false]);
+  });
+});
+
+describe('a store written under one runtime', () => {
+  it("opens under the other with the person's memory, so going back needs no data move", async () => {
+    const dir = soulDir();
+    const fact = 'My canary Tirwhistle sings at dawn.';
+    const asked = 'Tell me about Tirwhistle.';
+
+    const legacy = await open({ runtime: 'legacy', soul: dir }, [reply.text('Lovely.'), ...spare()]);
+    await legacy.a.session('s1', { userId: 'u-42' }).send(fact);
+    await vi.waitFor(async () => expect((await legacy.a.exportUserMemory!('u-42')).traces).toHaveLength(2), { timeout: 4_000 });
+    await legacy.a.close();
+
+    // The default recalls what the legacy runtime filed, and files the next turn beside it.
+    const gmi = await open({ soul: dir }, [reply.text('It sings at dawn.'), ...spare()]);
+    expect(gmiMarkOf(gmi.a)).toBe(true);
+    await gmi.a.session('s2', { userId: 'u-42' }).send(asked);
+    expect(recalledIn(turnCalls(gmi.s)[0])).toContain(fact);
+    await vi.waitFor(async () => expect((await gmi.a.exportUserMemory!('u-42')).traces).toHaveLength(4), { timeout: 4_000 });
+    await gmi.a.close();
+
+    // And back: the legacy runtime recalls what the default filed.
+    const back = await open({ runtime: 'legacy', soul: dir }, [reply.text('At dawn.'), ...spare()]);
+    expect(gmiMarkOf(back.a)).toBeUndefined();
+    await back.a.session('s3', { userId: 'u-42' }).send('When does Tirwhistle sing?');
+    expect(recalledIn(turnCalls(back.s)[0])).toEqual(expect.arrayContaining([fact, asked]));
   });
 });
