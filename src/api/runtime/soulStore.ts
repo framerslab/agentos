@@ -102,7 +102,8 @@ export function registerSessionEvictor(session: AgentSession, evict: SessionEvic
 /**
  * Drops named traces from what one open session holds of them between its turns: the working-memory slots of its
  * GMI's cognitive memory. It does not wait for a turn the session is running: a slot holds a trace's id and no words,
- * and the trace's row and cached copy are gone by then, so a turn recalls it no more.
+ * and the trace's row and cached copy are gone by then, so a turn recalls it no more. A turn that ranked one of them
+ * before the delete can focus it again as its recall ends, so the slots go again once that turn has ended.
  */
 export type SessionTraceDropper = (traceIds: ReadonlySet<string>) => Promise<void>;
 
@@ -156,9 +157,10 @@ export interface SoulMind {
    */
   evictSessions(sessions: Iterable<AgentSession>): Promise<{ evicted: number; running: number }>;
   /**
-   * Drops named traces from the given open sessions, after a correction or a retention sweep deleted them for good:
-   * each session's working-memory slots of them go at once, whether or not a turn of the session runs, and every
-   * other slot stays. A session with no dropper keeps nothing between its turns and is skipped.
+   * Drops named traces from the given open sessions, after a correction, a retention sweep or a re-application of the
+   * tombstones deleted them for good: each session's working-memory slots of them go at once, whether or not a turn of
+   * the session runs, and again once a running turn has ended, since its recall can focus a trace it ranked before the
+   * delete; every other slot stays. A session with no dropper keeps nothing between its turns and is skipped.
    *
    * @param traceIds - The traces deleted.
    * @param sessions - The sessions the agent's handle holds open for the person whose traces they were.

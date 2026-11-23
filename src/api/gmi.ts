@@ -1527,10 +1527,26 @@ export function gmi(opts: GmiOptions): GmiHandle {
           return 'running';
         });
         // A correction or a retention sweep of the person's traces drops them from the session's working memory, at
-        // once: a slot holds a trace's id and no words, and the trace's row is gone, so no turn recalls it again.
+        // once: a slot holds a trace's id and no words, and the trace's row is gone, so no turn recalls it again. A
+        // turn running now may have ranked one of them before the delete and focus it as its recall ends: they go
+        // again under the session's lock, once no turn runs. That second drop is not waited for, so a correction
+        // called from a hook or a tool of the session's own turn does not wait for the turn that waits for it.
         registerSessionTraceDropper(session, async (traceIds) => {
-          const built = await own.peek()?.catch(() => undefined);
-          built?.gmi.getCognitiveMemoryManager?.()?.getWorkingMemory().dropTraces(traceIds);
+          const drop = async (): Promise<void> => {
+            const built = await own.peek()?.catch(() => undefined);
+            built?.gmi.getCognitiveMemoryManager?.()?.getWorkingMemory().dropTraces(traceIds);
+          };
+          await drop();
+          void lock
+            .acquire()
+            .then(async (release) => {
+              try {
+                await drop();
+              } finally {
+                release();
+              }
+            })
+            .catch((error: unknown) => memoryLog.warn('memory.session_evict_failed', errorFields(error)));
         });
       }
       const entry: SessionEntry = { session, userId, shutdown };
