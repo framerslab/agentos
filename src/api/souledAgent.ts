@@ -1040,95 +1040,66 @@ export type SouledAgent = Agent & {
 };
 
 /**
- * Create an agent whose long-term memory is its soul-file `memory/` wiki.
+ * Create an agent with a soul and a per-person memory store. The default runtime is `'legacy'`.
  *
- * When the soul resolves to a workspace directory, the wiki is wired end to end
- * (store + write-back + `read_memory_page` tool + prelude `index.md`). For inline
- * souls (`{ content }`) there is no workspace, so this falls back to a plain
- * {@link agent} and says so in one `soul.inline_no_wiki` log line.
+ * A workspace soul supplies its operator pages under `memory/`, the `read_memory_page` tool and a wiki compiled
+ * from each subject's stored traces. The subject is the named user or the anonymous session id. Recall combines
+ * that subject's memory with the operator's pages. A one-shot call without a subject reads only operator pages
+ * and files nothing. An inline soul or an optional soul that fails to load falls back to a plain {@link agent}.
  *
- * Memory is kept per subject. A session turn is filed under the key of its subject, the user the session named or
- * else the session itself, the user's message and the reply alike, and it recalls that subject's memory and the
- * operator's pages, and nobody else's. A one-shot `generate()` or `stream()` names no user: nothing is filed for it,
- * it recalls the operator's pages alone, and one `memory.one_shot_unfiled` line an agent says so. With
- * {@link SouledAgentOptions.sharedMemory} every session that names no user, and every one-shot call, runs as one
- * user. Traces an earlier version filed under the agent's plain id stay in the store, are read by no turn, and are
- * counted in one `memory.legacy_traces` line at open. The store's folder, `memory/.store/`, gets a `.gitignore` holding
- * `*` when it has none; a file git tracked before stays tracked until the host removes it from the index.
+ * On a workspace-backed agent with `runtime: 'gmi'` and cognitive memory enabled, the GMI and wiki use the same
+ * durable store. The GMI files each accepted side of a session turn under the subject's key and recalls the traces
+ * it filed. The soul's memory provider recalls earlier and provider-filed traces and wiki pages. With cognitive
+ * memory off, the provider handles both filing and recall. Team seat sessions run with cognitive memory off.
  *
- * Each stored turn records who spoke it in the trace's metadata ({@link SPEAKER_METADATA_KEY}), outside its text and
- * its tags, so recall never matches a trace by its speaker; each recalled trace is sent as one record, with its
- * speaker and its date, in a data block. The wiki compile's model calls go on the agent's route with its fallback
- * settings, are checked against and charged to its spend budget, and are written to its usage ledger under the source
- * {@link SOULED_AGENT_COMPILE_SOURCE}.
+ * The workspace's three memory hooks apply on both runtimes, including with GMI cognitive memory enabled.
  *
- * The wiki is compiled once a subject, from that subject's traces alone, into pages that are rows of the store and
- * never files under `memory/`; each subject has its own watermark. `close()` compiles the subjects its turns wrote
- * to, and `agent.memory.compileWiki()` every subject with new traces. A subject whose compile the spend budget
- * refuses is skipped with one `memory.compile_skipped` line: its traces wait for the next compile, and the other
- * subjects compile.
+ * - {@link SouledAgentOptions.memoryPolicy} chooses `off`, `raw` or `compiled` for the subject. `off` keeps no new
+ *   long-term memory and recalls only operator pages. `raw` allows filing and recall without compiling new pages.
+ *   `compiled` also allows wiki compilation, subject to {@link SouledAgentOptions.compile}. The latest policy
+ *   answer for the subject on this agent takes effect on an open session's next turn.
+ * - {@link SouledAgentOptions.screen} can redact or drop text before filing and embedding and before compilation.
+ *   A failed or timed-out policy or screening hook fails closed for the affected work.
+ * - {@link SouledAgentOptions.sharedMemory} assigns anonymous sessions and one-shot calls to the one named user
+ *   on a personal machine or for an operator's notes.
  *
- * Three options say what is kept and where it goes. {@link SouledAgentOptions.compile} names the provider or model
- * the compile's calls go to, or turns the compile off (`false`: raw traces only, one `memory.compile_skipped` line at
- * open). {@link SouledAgentOptions.memoryPolicy} is asked once a session for the account the turn serves: `off` files
- * nothing and recalls the operator's pages alone, `raw` files and recalls and compiles no page, `compiled` is the
- * default. {@link SouledAgentOptions.screen} is given each text before it is filed and again before it is compiled.
- * Both hooks fail closed: a hook that throws, times out or answers anything else files nothing for that write
- * (`memory.write_refused`), and a compile it fails for does not run (`memory.compile_skipped`), its traces waiting
- * with their watermark where it was. A compile started in a process that served no turn of a subject has no policy
- * answer and no hook context for it: under a policy hook it is not compiled, and under a screen hook neither.
+ * {@link SouledAgentOptions.soulStore} uses a host-owned SQLite or PostgreSQL adapter in place of the workspace's
+ * SQLite store. Supply `retention`, `tombstoneKey` and a separate `tombstoneCopy`. The host owns the adapter's
+ * lifetime. GMI cognitive memory uses the embedding provider you name. Its traces in the workspace-backed store
+ * carry a neutral emotional stamp by default. {@link SouledAgentOptions.emotionalStamp} can opt into storing the
+ * agent's mood, with neutral stamps still used for minors and subjects whose policy sets `profiling: 'off'`. GMI
+ * session requests omit the end-user id by default. Use {@link SouledAgentOptions.sendUserIdToProvider} to opt in
+ * with an opaque id.
  *
- * With `runtime: 'gmi'` no session turn sends the end user's id to the model provider unless
- * {@link SouledAgentOptions.sendUserIdToProvider} is set, and a turn whose policy answer marks a minor or a person who
- * objects to profiling, whose policy hook failed, whose subject is forgotten, or whose user id no memory key can be
- * built from, or whose tombstone read does not answer within the memory hooks' timeout, is not scored for sentiment.
+ * On a workspace-backed session, the `memoryWrite` promise on a `send()` or stream result reports each text
+ * side's write outcome without delaying the reply or carrying its text. {@link SouledAgent.recipients} lists
+ * the configured and recorded routes that receive text. Export, deletion, correction and retention operate on the
+ * unified store. With cognitive memory enabled and a passed GMI `memory.store` attached,
+ * {@link SouledAgent.copyLegacyGmiMemory} previews a move by default. Pass `dryRun: false` to move eligible traces to
+ * the soul's store and remove their source rows.
  *
- * With `runtime: 'gmi'` and cognitive memory on, `memory.embedding.provider` is named by the host: none is picked from
- * the default provider or the environment, and a model whose `provider:` prefix names another provider is refused.
- * Consolidation stays off. Each explicitly enabled mechanism whose hook cannot act writes one
- * `memory.mechanism_inactive` line as the agent is built. A seat session has no cognitive memory. Where the soul gives
- * a store, the agent's mind runs on these defaults too: reconsolidation, involuntary recall and temporal gist run only
- * where the host's mechanisms config turns one on (`enabled: true`), and every other mechanism as the config gives it.
- * Each side of a turn is stored with a neutral emotional state unless {@link SouledAgentOptions.emotionalStamp} is
- * `'mood'`. A minor's turns, and those of a person who objects to profiling, are stored neutral either way, and what
- * they recall keeps its emotional context with reconsolidation on, while the access is counted. An inline soul, and an
- * optional soul that did not load, give a plain agent with no store: its GMI keeps a cognitive memory of its own, as
- * `gmi()` does, with the mechanisms as the host's config gives them and each trace stamped with the GMI's mood.
- *
- * `close()` first closes the agent (with `runtime: 'gmi'` that stops its session turns), then waits, within one
- * deadline (see {@link SouledAgentOptions.pendingWritesTimeoutMs}), for the turns still running (a `generate()`, a
- * `stream()`, a session's `send()` or `stream()`, on either runtime; a stream whose signal aborted before anything was
- * read from it is not waited for, and on the default runtime a stream nobody reads and nobody aborts keeps the wait
- * until the deadline) and for the memory writes of its turns, then compiles the wiki, then closes the store. A turn or a write
- * still pending when the deadline passes is left out of the compile, and a write that reaches the store after it is
- * closed is not stored.
+ * Closing the agent gives in-flight turns and writes one deadline, set by
+ * {@link SouledAgentOptions.pendingWritesTimeoutMs}. It then sweeps expired memory, compiles from stored traces
+ * for the subjects whose turns wrote memory, where the policy allows it, and closes its own store handles. Call
+ * `agent.memory.compileWiki()` to compile without closing the agent. Closing a GMI session ends that session in
+ * process and preserves its durable memory under the same key, subject to retention and forgetting.
  *
  * @param opts - Agent options with a required `soul`.
- * @returns A fully-wired {@link Agent}.
- * @throws TypeError when `sharedMemory` is not `{ as, reason }` with a user id that names someone and one of the two
- *   reasons; nothing is opened.
- * @throws Error when `sharedMemory` is set and the store already holds the memory of another user or session; the
- *   store is closed first.
- * @throws Error when the store holds the memory of more than one user or session and `retention` is unset, or
- *   `tombstoneKey` is unset and the ledger holds no tombstone; the store is closed first. A session that would be the
- *   second subject throws the same from `agent.session()`.
- * @throws TypeError when cognitive memory is on (`runtime: 'gmi'` with `cognition.memory`, the `full` profile, or the
- *   `memory` option) and `memory.embedding.provider` names no provider, `memory.embedding.model` carries another
- *   provider's `provider:` prefix, or `memory.consolidation.enabled` is `true` (a consolidation cycle can merge two
- *   people's traces, and each person's memory is filed under a key of their own); nothing is opened.
- * @throws TypeError when `memoryPolicy`, `screen` or `sharedMemory` is set on an agent whose cognitive memory is on
- *   (`runtime: 'gmi'` with `cognition.memory`, the `full` profile, or the `memory` option) and the soul gives no store:
- *   an inline `{ content }` soul, which has no workspace folder, or an optional soul that did not load. The plain agent
- *   built in its place keeps its GMI's cognitive memory in a store of its own, which none of them reaches; nothing is
- *   opened.
- * @throws TypeError when `soulStore` is not `{ adapter }`, or is set without a `tombstoneCopy` that names a file or an
- *   adapter, or without `retention`, or without a `tombstoneKey` that holds a key; nothing is opened.
- * @throws TypeError when `tombstoneCopy` is set and names neither a file by a non-empty path nor an adapter; nothing is
- *   opened.
- * @throws Error when `soulStore` is set and a store file is at `memory/.store/memory.sqlite`, or its PostgreSQL adapter
- *   reads BIGINT as text, or its database holds another agent's memory; nothing is opened. Of two agents opened at
- *   once on an empty database, at least one is refused the same way before the tombstone ledger opens, and takes back
- *   the rows its open seeded. The host's adapter is left open on every refusal.
+ * @returns The {@link SouledAgent}. Its memory store and memory operations are available with a workspace soul.
+ * @throws SoulLoadError when a required soul fails to load.
+ * @throws TypeError for invalid `sharedMemory`, `retention` or `compile.minors` settings.
+ * @throws TypeError when GMI cognitive memory is enabled and `memory.embedding.provider` is missing or blank,
+ *   a known model prefix routes to a different provider, or `memory.consolidation.enabled` is `true`.
+ * @throws TypeError when `memoryPolicy`, `screen` or `sharedMemory` is supplied with GMI cognitive memory enabled
+ *   and the soul provides no workspace store.
+ * @throws TypeError for an invalid `tombstoneCopy` or `soulStore`, or when `soulStore` lacks an explicit copy,
+ *   retention or tombstone key.
+ * @throws ForgottenLedgerError when the tombstone ledger cannot open, for example if its copy is unavailable or
+ *   its existing keyed tombstones require a key.
+ * @throws Error when a workspace soul lacks a usable agent id, `sharedMemory` conflicts with an existing subject,
+ *   or the store holds multiple subjects without retention or without a tombstone key on a ledger with no tombstones.
+ * @throws Error when `soulStore` conflicts with an existing workspace store file, its PostgreSQL adapter fails to
+ *   return BIGINT values as numbers, or its database holds another agent's memory.
  */
 export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent> {
   const {
