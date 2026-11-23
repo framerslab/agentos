@@ -30,7 +30,13 @@ import {
 import { generateText } from './generateText.js';
 import type { StreamTextResult } from './streamText.js';
 import type { IModelRouter } from '../core/llm/routing/IModelRouter.js';
-import { listNamedMemoryUsers, Memory, type AttachedWiki, type ScoredTrace } from '../cognition/memory/io/facade/Memory.js';
+import {
+  listNamedMemoryUsers,
+  Memory,
+  readStoredTraceRefs,
+  type AttachedWiki,
+  type ScoredTrace,
+} from '../cognition/memory/io/facade/Memory.js';
 import type { MemoryTrace } from '../cognition/memory/core/types.js';
 import { brainOf } from '../cognition/memory/io/facade/handedBrain.js';
 import { SqlStorageMemoryArchive } from '../cognition/memory/archive/SqlStorageMemoryArchive.js';
@@ -98,7 +104,14 @@ import {
   type RecipientRoutes,
 } from './runtime/memoryRecipients.js';
 import { resolveCognition, type CognitionInputs, type ResolvedCognition } from './runtime/gmiCognition.js';
-import { countLegacyGmiScopes, LEGACY_GMI_STORE, readLegacyGmiRows, type LegacyGmiStore } from '../cognition/memory/io/legacyGmiStore.js';
+import {
+  checkpointLegacyGmiStore,
+  countLegacyGmiScopes,
+  LEGACY_GMI_STORE,
+  legacyGmiTraceIdsOf,
+  readLegacyGmiRows,
+  type LegacyGmiStore,
+} from '../cognition/memory/io/legacyGmiStore.js';
 import { shareRouteObserver } from './runtime/routeObserver.js';
 import { assertBigintReadsAsNumbers, embeddingRouteOf, openAgentMemoryBrain } from './runtime/agentCognitiveMemory.js';
 import { serializeTransactionsOn } from '../cognition/memory/retrieval/store/adapterTransactionLock.js';
@@ -2909,16 +2922,41 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       };
     }
     const legacy = legacyGmi.store;
+    /**
+     * The person's rows in the passed store, recorded as deleted before any delete: a restore of that store alone is
+     * undone at the next open, even when the learning tables that name the person live in another store.
+     */
+    let legacyIds: string[] = [];
+    /** The layer's deletion did not finish: neither the passed store nor the learning store, its index, is done. */
+    const layerUnfinished = (legacyReason: string, learningReason: string) => ({
+      stores: [
+        { store: LEGACY_GMI_STORE, reached: false as const, reason: legacyReason },
+        { store: 'learning store', reached: false as const, reason: learningReason },
+      ],
+      incomplete: true,
+    });
+    if (legacy) {
+      try {
+        legacyIds = await legacyGmiTraceIdsOf(legacy, userId);
+        await forgotten.markTracesDeleted(legacyIds);
+      } catch (error) {
+        const { type } = errorFields(error);
+        return layerUnfinished(
+          `the ids of its traces could not be recorded before the deletion (${type}), so the learning layer's deletion did not run`,
+          "the learning layer's deletion did not run, since the passed GMI store's trace ids could not be recorded first",
+        );
+      }
+    }
     let learned: ForgetReport;
     try {
       learned = await layerForget(userId);
     } catch (error) {
       if (!legacy) throw error;
       const { type } = errorFields(error);
-      return {
-        stores: [{ store: LEGACY_GMI_STORE, reached: false, reason: `the store's deletion failed (${type})` }],
-        incomplete: true,
-      };
+      return layerUnfinished(
+        `the learning layer's deletion, which reaches it, failed (${type})`,
+        `the learning layer's deletion failed (${type}), so the user's rows stay for a second call`,
+      );
     }
     const legacyManager = legacy ? `memory manager of brain ${legacy.brain.brainId}` : undefined;
     const stores = learned.stores.map((given): ForgetMemoryReport['stores'][number] => {
@@ -2944,6 +2982,25 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     });
     if (legacy && !stores.some(({ store }) => store === LEGACY_GMI_STORE)) {
       stores.push({ store: LEGACY_GMI_STORE, reached: false, reason: 'the deletion did not reach its memory manager' });
+    }
+    const at = legacy ? stores.findIndex((entry) => entry.store === LEGACY_GMI_STORE && entry.reached) : -1;
+    const reachedLegacy = at >= 0 ? stores[at] : undefined;
+    if (legacy && reachedLegacy?.reached) {
+      try {
+        // The person's rows the layer's index did not name (persona and session notes an earlier GMI's own learning
+        // tables index, when the learning store is now another), then the log, so neither file keeps the deleted text.
+        const left = (await readStoredTraceRefs(legacy.brain, legacyIds)).map(({ id }) => id);
+        if (left.length > 0) reachedLegacy.deleted += (await legacy.deleteTraces(left)).deleted;
+        if ((await checkpointLegacyGmiStore(legacy)) === 'busy') {
+          stores[at] = {
+            store: LEGACY_GMI_STORE,
+            reached: false,
+            reason: "another connection held the store's write-ahead log, which keeps the deleted text until a later checkpoint",
+          };
+        }
+      } catch (error) {
+        stores[at] = { store: LEGACY_GMI_STORE, reached: false, reason: `the store's deletion failed (${errorFields(error).type})` };
+      }
     }
     const incomplete = stores.some((entry) => (entry.store === 'learning store' || entry.store === LEGACY_GMI_STORE) && !entry.reached);
     return { stores, incomplete, learned };
@@ -3401,7 +3458,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       legacyGmi.store = { brain, namespace: learningConfig?.namespace ?? '', deleteTraces: passed.deleteTraces };
       built.copyLegacyGmiMemory = legacyGmiCopyOf(legacyGmi.store);
       const count = await brain.get<{ traces: number | string }>(
-        'SELECT COUNT(*) AS traces FROM memory_traces WHERE brain_id = ?',
+        'SELECT COUNT(*) AS traces FROM memory_traces WHERE brain_id = ? AND deleted = 0',
         [brain.brainId],
       );
       memoryLog.info('memory.legacy_gmi_store', { traces: Number(count?.traces ?? 0), call: 'copyLegacyGmiMemory' });

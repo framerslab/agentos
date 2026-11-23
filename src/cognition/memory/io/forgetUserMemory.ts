@@ -965,7 +965,8 @@ export async function reapplyTombstones(options: ReapplyTombstonesOptions): Prom
         for (const id of await listNamedMemoryUsers(legacyGmiStore.brain, legacyGmiStore.namespace)) {
           if (!soulUsers.has(id)) held.push({ kind: 'user', id });
         }
-      } catch {
+      } catch (error) {
+        memoryLog.warn('memory.erasure_unfinished', errorFields(error));
         legacyFailures += 1;
       }
     }
@@ -1008,7 +1009,8 @@ export async function reapplyTombstones(options: ReapplyTombstonesOptions): Prom
       const marked = await ledger.deletedTraceIds();
       held = (await readStoredTraceRefs(legacyGmiStore.brain, marked)).map(({ id }) => id);
       if (held.length > 0) traces.traces += (await legacyGmiStore.deleteTraces(held)).deleted;
-    } catch {
+    } catch (error) {
+      memoryLog.warn('memory.erasure_unfinished', errorFields(error));
       traces.missed += held.length;
       legacyFailures += 1;
     }
