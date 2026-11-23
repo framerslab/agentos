@@ -26,6 +26,7 @@ function wav24kMono(samples = 24_000): Buffer {
 
 function audioResponse(wav = wav24kMono()) {
   return {
+    status: 'completed',
     steps: [
       { type: 'model_output', content: [{ type: 'text', text: 'metadata' }] },
       { type: 'model_output', content: [{ type: 'audio', data: wav.toString('base64') }] },
@@ -97,8 +98,8 @@ describe('GeminiBatchTTS', () => {
   });
 
   it('estimates audio tokens from PCM duration when usage is absent', async () => {
-    const { steps } = audioResponse(wav24kMono(48_000));
-    const tts = new GeminiBatchTTS({ apiKey: 'k', fetchImpl: fakeFetch({ steps }) });
+    const { status, steps } = audioResponse(wav24kMono(48_000));
+    const tts = new GeminiBatchTTS({ apiKey: 'k', fetchImpl: fakeFetch({ status, steps }) });
 
     await expect(tts.synthesize('Keep going.')).resolves.toMatchObject({
       durationMs: 2000,
@@ -145,8 +146,10 @@ describe('GeminiBatchTTS', () => {
   it.each([
     { status: 429, payload: { error: { status: 'RESOURCE_EXHAUSTED' } }, kind: 'quota' },
     { status: 400, payload: { error: { message: 'Unknown voice: InvalidName' } }, kind: 'unknown_voice' },
-    { status: 200, payload: { steps: [{ content: [{ type: 'text', text: 'Blocked' }] }] }, kind: 'safety' },
+    { status: 200, payload: { status: 'completed', steps: [{ content: [{ type: 'text', text: 'Blocked' }] }] }, kind: 'safety' },
     { status: 400, payload: { error: { message: 'Invalid input' } }, kind: 'bad_request' },
+    { status: 200, payload: { ...audioResponse(), status: 'incomplete' }, kind: 'server' },
+    { status: 200, payload: { status: 'failed' }, kind: 'server' },
     { status: 503, payload: { error: { message: 'Unavailable' } }, kind: 'server' },
     { status: 200, payload: audioResponse(Buffer.from('not a wave')), kind: 'server' },
     { status: 200, payload: audioResponse(wav24kMono().subarray(0, 60)), kind: 'server' },
