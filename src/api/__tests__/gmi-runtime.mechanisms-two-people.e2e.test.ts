@@ -1,7 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { CognitiveMemoryManager } from '../../cognition/memory/CognitiveMemoryManager';
 import { CognitiveMechanismsEngine } from '../../cognition/memory/mechanisms/CognitiveMechanismsEngine';
 import { gmi, type GmiHandle } from '../gmi';
-import { agentId, blocksOf, embedding, engines, memoryFixture, testMechanisms, type MemoryFixture } from './helpers/twoPeopleMemory';
+import {
+  agentId,
+  blocksOf,
+  embedding,
+  engines,
+  mechanisms,
+  memoryFixture,
+  personA,
+  personB,
+  rowsOf,
+  testMechanisms,
+  type MemoryFixture,
+} from './helpers/twoPeopleMemory';
 
 import { reply } from './helpers/stubProviders';
 
@@ -36,6 +49,40 @@ describe.each(engines)('standalone cognitive memory on %s', (engine) => {
       learning: { agentKey: agentId, mode: 'off' },
     });
     return opened;
+  });
+
+  it('with consolidation on, a cycle reads no session’s rows, and the two mechanisms nothing runs are the ones reported', async () => {
+    const forSession = vi.spyOn(CognitiveMemoryManager.prototype, 'forSession');
+    const consolidated = vi.spyOn(CognitiveMechanismsEngine.prototype, 'onConsolidation');
+    const agent = gmi({
+      ...fixture.route,
+      runtime: RUNTIME,
+      cognition: {
+        memory: { embedding, store: { adapter: fixture.adapter }, consolidation: { enabled: true } },
+        mechanisms: { ...mechanisms, personaDrift: { enabled: true } },
+      },
+      learning: { agentKey: agentId, mode: 'off' },
+    });
+    opened = agent;
+    fixture.served.replies.push(reply.text('Cobalt noted.'), reply.text('Amber noted.'));
+    await agent.session('session-b', { userId: personB }).send('My orchard lantern is cobalttrail.');
+    await agent.session('session-a', { userId: personA }).send('My orchard lantern is amberroute.');
+    const kept = async () => (await rowsOf(fixture.adapter)).map(({ id, content, deleted }) => ({ id, content, deleted }));
+    const before = await kept();
+    expect(before.map(({ content }) => content)).toEqual(
+      expect.arrayContaining(['My orchard lantern is cobalttrail.', 'My orchard lantern is amberroute.']),
+    );
+
+    const manager = forSession.mock.contexts[0] as CognitiveMemoryManager;
+    await manager.runConsolidation();
+
+    // The cycle ran the consolidation mechanisms, over a batch that holds no row a session filed.
+    expect(consolidated).toHaveBeenCalled();
+    const filed = new Set(before.map(({ id }) => id));
+    expect(consolidated.mock.calls.flatMap(([batch]) => batch.map(({ id }) => id)).filter((id) => filed.has(id))).toEqual([]);
+    expect(await kept()).toEqual(before);
+    const inactive = fixture.events.filter(({ event }) => event === 'memory.mechanism_inactive').map(({ mechanism }) => mechanism);
+    expect(inactive).toEqual(['involuntaryRecall', 'schemaEncoding']);
   });
 });
 
