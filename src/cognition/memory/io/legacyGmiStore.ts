@@ -2,6 +2,7 @@
 import { learnerScopeIds, learnerUserScopeId, sessionScopeIds, taggedScopeId } from '../../learning/scopes.js';
 import type { Brain } from '../retrieval/store/Brain.js';
 import { isMissingTableError } from '../retrieval/store/missingTable.js';
+import { encodeScopeIdPart } from '../retrieval/store/scopeIdForm.js';
 
 /** The label used in a deletion report or an export's unread entries. */
 export const LEGACY_GMI_STORE = 'legacy GMI store';
@@ -46,9 +47,11 @@ function listOf(value: unknown): string[] {
 /**
  * The ids of every row the passed store holds of the named learner, whatever its deleted flag: under the learner's
  * user scope and every persona scope of it, under the scopes of the learner's own sessions that the store's own
- * learning tables index, and the rows a turn filed for them as a second user (`turnUserId`). A deletion records them
- * before it deletes, so a restore of that store alone is undone at the next open even when the learning tables that
- * name the person live in another store, and it deletes those the learning layer's index did not reach.
+ * learning tables index, and the rows a turn of their namespace filed for them as a second user (`turnUserId`, under
+ * a session's scope of that namespace: a person of the same id in another namespace is someone else). A deletion
+ * records them before it deletes, so a restore of that store alone is undone at the next open even when the learning
+ * tables that name the person live in another store, and it deletes those the learning layer's index did not reach.
+ * An export lists the live ones and a correction may name any of them ({@link readLegacyGmiRowsOf}).
  */
 export async function legacyGmiTraceIdsOf(store: LegacyGmiStore, userId: string): Promise<string[]> {
   const { brain, namespace } = store;
@@ -98,17 +101,44 @@ export async function legacyGmiTraceIdsOf(store: LegacyGmiStore, userId: string)
     [brain.brainId, `${prefix.replace(/[!%_]/g, (character) => `!${character}`)}%`],
   );
   for (const row of personaRows) if (row.scope_id?.startsWith(prefix)) ids.add(row.id);
-  // Only a row whose metadata text holds the key is read as JSON, so one row of another writer that is not JSON never
-  // fails the read.
+  // A turn with no learner files a second user's rows under its session's scopes, whose ids start with the namespace's
+  // session form: `<namespace>//` encoded, or `/` with no namespace. A row of the same user id under another
+  // namespace's session is another person's. Only a row whose metadata text holds the key is read as JSON, so one row
+  // of another writer that is not JSON never fails the read.
+  const sessionForm = namespace ? `${encodeScopeIdPart(namespace)}//` : '/';
   const { dialect } = brain.features;
   const isJson = dialect.name === 'sqlite' ? ' AND json_valid(metadata)' : '';
-  const named = await brain.all<{ id: string }>(
-    `SELECT id FROM memory_traces WHERE brain_id = ?
+  const named = await brain.all<{ id: string; scope_id: string | null }>(
+    `SELECT id, scope_id FROM memory_traces WHERE brain_id = ? AND scope_id LIKE ? ESCAPE '!'
       AND (CASE WHEN metadata LIKE ?${isJson} THEN ${dialect.jsonExtract('metadata', '$.turnUserId')} END) = ?`,
-    [brain.brainId, '%"turnUserId"%', userId],
+    [brain.brainId, `${sessionForm.replace(/[!%_]/g, (character) => `!${character}`)}%`, '%"turnUserId"%', userId],
   );
-  for (const row of named) ids.add(row.id);
+  for (const row of named) if (row.scope_id?.startsWith(sessionForm)) ids.add(row.id);
   return [...ids];
+}
+
+/**
+ * The person's live rows in the passed store, oldest first: every row {@link legacyGmiTraceIdsOf} names that is not
+ * marked deleted, the rows a deletion removes. An export lists them.
+ */
+export async function readLegacyGmiRowsOf(
+  store: LegacyGmiStore,
+  userId: string,
+): Promise<Array<{ id: string; type: string; content: string; created_at: number; tags: string }>> {
+  type Row = { id: string; type: string; content: string; created_at: number; tags: string };
+  const ids = await legacyGmiTraceIdsOf(store, userId);
+  const rows: Row[] = [];
+  for (let offset = 0; offset < ids.length; offset += 400) {
+    const slice = ids.slice(offset, offset + 400);
+    rows.push(
+      ...(await store.brain.all<Row>(
+        `SELECT id, type, content, created_at, tags FROM memory_traces
+          WHERE brain_id = ? AND deleted = 0 AND id IN (${slice.map(() => '?').join(', ')})`,
+        [store.brain.brainId, ...slice],
+      )),
+    );
+  }
+  return rows.sort((a, b) => Number(a.created_at) - Number(b.created_at) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 }
 
 /**

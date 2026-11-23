@@ -5,7 +5,6 @@
  * deleted for good and the corrected statement is filed in their place, or nothing is, for a deletion of named traces.
  */
 import type { MemoryRecipient } from '../../../api/runtime/memoryRecipients.js';
-import { learnerUserScopeId } from '../../learning/scopes.js';
 import type { LearnedStateDocument } from '../../learning/types.js';
 import type { WikiPage } from '../../substrate/memory/wiki/types.js';
 import { errorFields } from '../../../core/logging/events.js';
@@ -23,7 +22,7 @@ import { guardedWrite } from '../suppression/guardedWrite.js';
 import { brainOf } from './facade/handedBrain.js';
 import { readStoredTraceRefs, type Memory } from './facade/Memory.js';
 import type { SubjectPages } from './forgetUserMemory.js';
-import { LEGACY_GMI_STORE, readLegacyGmiRows, type LegacyGmiStore } from './legacyGmiStore.js';
+import { LEGACY_GMI_STORE, legacyGmiTraceIdsOf, readLegacyGmiRowsOf, type LegacyGmiStore } from './legacyGmiStore.js';
 import { LEGACY_SCOPE } from './legacyMemory.js';
 import type { RetentionPeriod } from './retentionSweep.js';
 
@@ -92,7 +91,11 @@ export interface UserMemoryExport {
     pages: ExportedPage[];
     /** The subject's learned state, when the agent runs a learning layer. */
     learner?: LearnedStateDocument;
-    /** Live traces under the learner's user scope in a passed GMI store, oldest first. */
+    /**
+     * Live traces of the subject in a passed GMI store, oldest first: those under their user and persona scopes, under
+     * the scopes of their sessions that store's learning tables index, and a turn's rows filed for them as a second
+     * user. A deletion removes the same rows.
+     */
     legacyGmiStore?: Array<{ id: string; createdAt: string; speaker?: 'user' | 'assistant'; text: string }>;
     /**
      * The corrections of the subject whose text the tombstones' second copy also keeps. `text` is given for one the
@@ -390,7 +393,7 @@ export async function exportSubjectMemory(options: {
   if (legacyGmiStore && subject.kind === 'user') {
     await reading(LEGACY_GMI_STORE, async () => {
       const held: NonNullable<UserMemoryExport['held']['legacyGmiStore']> = [];
-      for (const row of await readLegacyGmiRows(legacyGmiStore, subject.id)) {
+      for (const row of await readLegacyGmiRowsOf(legacyGmiStore, subject.id)) {
         let tags: unknown;
         try {
           tags = JSON.parse(row.tags);
@@ -627,17 +630,20 @@ export async function correctSubjectMemory(
     const ownLegacy = new Set<string>();
     const outsideSoul = ids.filter((id) => !own.has(id));
     if (legacy && subject.kind === 'user') {
-      const scopeId = learnerUserScopeId({ namespace: legacy.namespace, userId: subject.id });
       let rows: Awaited<ReturnType<typeof readStoredTraceRefs>> = [];
+      /** The subject's rows there, whatever their deleted flag: those the export lists and a deletion removes. */
+      let theirs = new Set<string>();
       try {
         rows = await readStoredTraceRefs(legacy.brain, ids);
+        theirs = new Set(await legacyGmiTraceIdsOf(legacy, subject.id));
       } catch (error) {
         // A passed store that cannot be read leaves a call that names the soul's traces alone to the soul's store: the
         // ledger's marks delete any copy there at the next open.
         if (outsideSoul.length > 0) throw error;
+        rows = [];
       }
       for (const row of rows) {
-        if (row.scope !== 'user' || row.scopeId !== scopeId || row.chunk) continue;
+        if (!theirs.has(row.id) || row.chunk) continue;
         // A move that filed a trace and stopped before its source row was deleted leaves the id in both stores: that
         // row, marked or not, is the same trace and goes with the soul's.
         if (own.has(row.id) || !row.deleted || recorded.has(row.id)) ownLegacy.add(row.id);
