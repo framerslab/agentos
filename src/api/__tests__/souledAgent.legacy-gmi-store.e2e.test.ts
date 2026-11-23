@@ -502,4 +502,92 @@ describe('a passed store on a souled GMI', () => {
       await own.close();
     }
   });
+
+  it('finishes an interrupted move after the agent is opened again, and never files over a trace that holds the id', async () => {
+    await seed();
+    const carol = 'carol';
+    const carolKey = conversationScopeKey(AGENT_ID, { kind: 'user', id: carol });
+    const oldDate = 1_700_000_000_001;
+    await plantTrace('reopen-old', 'user', userScope(ALICE), CANARY, oldDate);
+    await plantTrace('carol-first', 'user', userScope(carol), OTHER, oldDate);
+    await plantTrace('carol-clash', 'user', userScope(carol), CANARY, oldDate + 1);
+    await withLegacyBrain(async (brain) => {
+      await brain.exec(`CREATE TRIGGER interrupt_legacy_delete BEFORE DELETE ON memory_traces
+        WHEN OLD.id = 'reopen-old' BEGIN SELECT RAISE(ABORT, 'interrupted legacy delete'); END`);
+    });
+    const first = await open();
+    const held = 'A note of the soul store under the same id.';
+    await first.memory!.remember(held, { id: 'carol-clash', scope: 'conversation', scopeId: carolKey });
+    const aliceRows = (await legacyRows(ALICE)).map(({ id }) => id).sort();
+
+    const interrupted = await first.copyLegacyGmiMemory!({ dryRun: false, users: [carol] });
+    expect(interrupted.people).toContainEqual({ userId: ALICE, moved: 0, kept: 0, failed: expect.any(String) });
+    expect(interrupted.people).toContainEqual({ userId: carol, moved: 1, kept: 0, failed: expect.any(String) });
+    await close();
+    await withLegacyBrain(async (brain) => {
+      await brain.exec('DROP TRIGGER interrupt_legacy_delete');
+    });
+
+    const reopened = await open();
+    const soul = brainOf(reopened.memory!);
+    const resumed = await reopened.copyLegacyGmiMemory!({ dryRun: false, users: [carol] });
+    expect(resumed.people).toContainEqual({ userId: ALICE, moved: aliceRows.length, kept: 0 });
+    expect(resumed.people).toContainEqual({ userId: carol, moved: 0, kept: 0, failed: expect.any(String) });
+    const aliceKey = conversationScopeKey(AGENT_ID, { kind: 'user', id: ALICE });
+    const moved = await soul.all<{ id: string }>(
+      'SELECT id FROM memory_traces WHERE brain_id = ? AND scope_id = ? ORDER BY id',
+      [soul.brainId, aliceKey],
+    );
+    expect(moved.map(({ id }) => id)).toEqual(aliceRows);
+    expect(await legacyRows(ALICE)).toEqual([]);
+    expect(await soul.get('SELECT content, deleted FROM memory_traces WHERE brain_id = ? AND id = ?', [soul.brainId, 'carol-clash']))
+      .toEqual({ content: held, deleted: 0 });
+    expect((await legacyRows(carol)).map(({ id, content, deleted }) => ({ id, content, deleted })))
+      .toEqual([{ id: 'carol-clash', content: CANARY, deleted: 0 }]);
+  });
+
+  it('deletes the passed store’s copy too when a trace an interrupted move left in both stores is corrected', async () => {
+    await seed();
+    const moving = 'The orchard gate code is 4417.';
+    const oldDate = 1_700_000_000_001;
+    await plantTrace('moving-live', 'user', userScope(ALICE), moving, oldDate);
+    // The source row stays live: neither its mark nor its delete lands.
+    await withLegacyBrain(async (brain) => {
+      await brain.exec(`CREATE TRIGGER hold_legacy_mark BEFORE UPDATE ON memory_traces
+        WHEN OLD.id = 'moving-live' BEGIN SELECT RAISE(ABORT, 'held legacy mark'); END`);
+      await brain.exec(`CREATE TRIGGER hold_legacy_delete BEFORE DELETE ON memory_traces
+        WHEN OLD.id = 'moving-live' BEGIN SELECT RAISE(ABORT, 'held legacy delete'); END`);
+    });
+    const joined = await open();
+    const soul = brainOf(joined.memory!);
+    const stopped = await joined.copyLegacyGmiMemory!({ dryRun: false });
+    expect(stopped.people).toContainEqual({ userId: ALICE, moved: 0, kept: 0, failed: expect.any(String) });
+    expect(await soul.get('SELECT deleted FROM memory_traces WHERE brain_id = ? AND id = ?', [soul.brainId, 'moving-live']))
+      .toEqual({ deleted: 0 });
+    expect((await legacyRows(ALICE)).find(({ id }) => id === 'moving-live')).toMatchObject({ deleted: 0 });
+    await withLegacyBrain(async (brain) => {
+      await brain.exec('DROP TRIGGER hold_legacy_mark');
+      await brain.exec('DROP TRIGGER hold_legacy_delete');
+    });
+
+    const corrected = await joined.correctUserMemory!(ALICE, { traceIds: ['moving-live'] });
+    expect(corrected).toMatchObject({ deleted: 1 });
+    expect((await legacyRows(ALICE)).map(({ id }) => id)).not.toContain('moving-live');
+    expect(JSON.stringify(await joined.exportUserMemory!(ALICE))).not.toContain(moving);
+
+    // A move whose source row was marked and not deleted leaves its words in the passed store as well.
+    await plantTrace('moving-marked', 'user', userScope(ALICE), moving, oldDate);
+    await withLegacyBrain(async (brain) => {
+      await brain.exec(`CREATE TRIGGER hold_legacy_delete BEFORE DELETE ON memory_traces
+        WHEN OLD.id = 'moving-marked' BEGIN SELECT RAISE(ABORT, 'held legacy delete'); END`);
+    });
+    expect((await joined.copyLegacyGmiMemory!({ dryRun: false })).people)
+      .toContainEqual({ userId: ALICE, moved: 0, kept: 0, failed: expect.any(String) });
+    expect((await legacyRows(ALICE)).find(({ id }) => id === 'moving-marked')).toMatchObject({ deleted: 1 });
+    await withLegacyBrain(async (brain) => {
+      await brain.exec('DROP TRIGGER hold_legacy_delete');
+    });
+    await joined.correctUserMemory!(ALICE, { traceIds: ['moving-marked'] });
+    expect((await legacyRows(ALICE)).map(({ id }) => id)).not.toContain('moving-marked');
+  });
 });
