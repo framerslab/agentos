@@ -7,6 +7,7 @@ import { createPostgresAdapter } from '@framers/sql-storage-adapter';
 import type { MemoryRecallConfig } from '../../cognition/memory/core/config';
 import { conversationScopeKey } from '../../cognition/memory/retrieval/store/conversationScopeKey';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
+import type { Message } from '../generateText';
 import { gmi } from '../gmi';
 import type { MemoryRecallBlock } from '../runtime/memoryDataBlock';
 import { souledAgent, type SouledAgent, type SouledAgentOptions } from '../souledAgent';
@@ -113,6 +114,17 @@ function rememberForReader(agent: SouledAgent, text: string) {
 
 function readProviderBlock(content: string): MemoryRecallBlock {
   return JSON.parse(content.slice('<memory_recall>'.length, -'</memory_recall>'.length));
+}
+
+function editMindRecall(message: Message, edit: (text: string) => string): Message {
+  const apply = (text: string) => text.includes('## How To Use Your Memories') ? edit(text) : text;
+  const { content } = message;
+  if (typeof content === 'string') return { ...message, content: apply(content) };
+  if (!Array.isArray(content)) return message;
+  return {
+    ...message,
+    content: content.map((part) => part.type === 'text' ? { ...part, text: apply(part.text) } : part),
+  };
 }
 
 function blocksOfLastCall(of: ProviderScript = served) {
@@ -259,8 +271,9 @@ describe.each(RUNTIMES)('with %s', (_name, runtime) => {
       const keptText = OTHER_PROVIDER.replace(/ /g, '^');
       let beforeHook: MemoryRecallBlock['items'] | undefined;
       const agent = await open({ capture: DETAIL }, {
-        onBeforeGeneration: async ({ messages }) => ({
-          messages: messages.map((message) => {
+        onBeforeGeneration: async (context) => ({
+          ...context,
+          messages: context.messages.map((message) => {
             const { content } = message;
             if (typeof content !== 'string' || !content.startsWith('<memory_recall>')) return message;
             const block = readProviderBlock(content);
@@ -284,12 +297,11 @@ describe.each(RUNTIMES)('with %s', (_name, runtime) => {
 
     it('lists the mind memory left unchanged when the hook removes another', async () => {
       const agent = await open({ capture: DETAIL }, {
-        onBeforeGeneration: async ({ messages }) => ({
-          messages: messages.map((message) => {
-            const { content } = message;
-            if (typeof content !== 'string' || !content.includes('## How To Use Your Memories')) return message;
-            return { ...message, content: content.split('\n').filter((line) => !line.includes(MIND_ASSISTANT)).join('\n') };
-          }),
+        onBeforeGeneration: async (context) => ({
+          ...context,
+          messages: context.messages.map((message) => editMindRecall(message, (text) =>
+            text.split('\n').filter((line) => !line.includes(MIND_ASSISTANT)).join('\n'),
+          )),
         }),
       });
       // The recall metadata records the mind's original render, before the hook removes the reply.
@@ -317,21 +329,18 @@ describe.each(RUNTIMES)('with %s', (_name, runtime) => {
       const changedProvider = 'My^canary^practices^scales^after^lunch.';
       const input = PROVIDER.replace(/ /g, '^');
       const agent = await open({ capture: DETAIL }, {
-        onBeforeGeneration: async ({ messages }) => ({
-          messages: messages.map((message) => {
+        onBeforeGeneration: async (context) => ({
+          ...context,
+          messages: context.messages.map((message) => {
             const { content } = message;
-            if (typeof content !== 'string') return message;
-            if (content.startsWith('<memory_recall>')) {
+            if (typeof content === 'string' && content.startsWith('<memory_recall>')) {
               const block = readProviderBlock(content);
               block.items = block.items.flatMap((item) =>
                 item.text === input ? [{ ...item, text: changedProvider }] : [item, item],
               );
               return { ...message, content: `<memory_recall>${JSON.stringify(block)}</memory_recall>` };
             }
-            if (content.includes('## How To Use Your Memories')) {
-              return { ...message, content: content.replace(MIND_USER, changedMind) };
-            }
-            return message;
+            return editMindRecall(message, (text) => text.replace(MIND_USER, changedMind));
           }),
         }),
       });
