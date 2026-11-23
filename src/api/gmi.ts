@@ -33,6 +33,7 @@ import { StatisticalUtilityAI } from '../cognition/nlp/ai_utilities/StatisticalU
 import { PromptEngine } from '../core/llm/PromptEngine.js';
 import type { PromptEngineConfig } from '../core/llm/IPromptEngine.js';
 import type { ChatMessage } from '../core/llm/providers/IProvider.js';
+import type { IEmbeddingManager } from '../core/embeddings/IEmbeddingManager.js';
 import { ToolPermissionManager } from '../core/tools/permissions/ToolPermissionManager.js';
 import { ToolExecutor } from '../core/tools/ToolExecutor.js';
 import { ToolOrchestrator } from '../core/tools/ToolOrchestrator.js';
@@ -153,12 +154,14 @@ const GMI_PROMPT_ENGINE_CONFIG: PromptEngineConfig = {
  * rejection builds again, so one transient failure does not fail every later
  * call.
  */
-function retryingOnce<T>(build: () => Promise<T>): { get(): Promise<T>; peek(): Promise<T> | undefined } {
+function retryingOnce<T, Args extends unknown[] = []>(
+  build: (...args: Args) => Promise<T>,
+): { get(...args: Args): Promise<T>; peek(): Promise<T> | undefined } {
   let pending: Promise<T> | undefined;
   return {
-    get() {
+    get(...args) {
       if (!pending) {
-        const attempt = build();
+        const attempt = build(...args);
         pending = attempt;
         attempt.catch(() => {
           if (pending === attempt) pending = undefined;
@@ -169,6 +172,17 @@ function retryingOnce<T>(build: () => Promise<T>): { get(): Promise<T>; peek(): 
     peek: () => pending,
   };
 }
+
+/** The deletion manager needs a vector-store dimension even when it only removes stored material. */
+const LEGACY_DELETION_EMBEDDER: IEmbeddingManager = {
+  initialize: async () => undefined,
+  generateEmbeddings: async () => {
+    throw new Error('The legacy deletion manager only removes traces.');
+  },
+  getEmbeddingModelInfo: async () => undefined,
+  getEmbeddingDimension: async () => 1,
+  checkHealth: async () => ({ isHealthy: false }),
+};
 
 /**
  * `messages` with `text` first in the system prompt: before the first system
@@ -777,7 +791,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
    */
   const buildMemory = (brain: typeof storeBrain, use: 'sessions' | 'legacy' = 'sessions') => {
     let closed = false;
-    const build = retryingOnce<AgentCognitiveMemory | undefined>(async () => {
+    const build = retryingOnce<AgentCognitiveMemory | undefined, [withoutEmbeddings?: true]>(async (withoutEmbeddings) => {
       if (!cognition.memory) return undefined;
       if (closed) throw new Error('gmi(): the agent was closed; agent.session() opens a new session.');
       const { persona } = await shared.get();
@@ -789,6 +803,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
           memory: cognition.memory,
           brain: opened.brain,
           hydration: 'scopes',
+          ...(withoutEmbeddings ? { embeddingManager: LEGACY_DELETION_EMBEDDER } : {}),
         });
       }
       // Reads the environment for the embedding provider when memory.embedding names none.
@@ -837,8 +852,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
     const legacyMemory = buildMemory(passedBrain, 'legacy');
     legacyStore.attach({
       open: passedBrain.get,
-      async deleteTraces(ids) {
-        const built = await legacyMemory.get();
+      async deleteTraces(ids, options) {
+        const built = await legacyMemory.get(options?.withoutEmbeddings);
         return built!.manager.deleteTraces(ids);
       },
       async close() {

@@ -626,15 +626,24 @@ export async function correctSubjectMemory(
     const legacy = options.legacyGmiStore;
     const ownLegacy = new Set<string>();
     const outsideSoul = ids.filter((id) => !own.has(id));
-    if (legacy && subject.kind === 'user' && outsideSoul.length > 0) {
+    if (legacy && subject.kind === 'user') {
       const scopeId = learnerUserScopeId({ namespace: legacy.namespace, userId: subject.id });
-      for (const row of await readStoredTraceRefs(legacy.brain, outsideSoul)) {
-        if (row.scope === 'user' && row.scopeId === scopeId && !row.chunk && (!row.deleted || recorded.has(row.id))) {
-          ownLegacy.add(row.id);
-        }
+      let rows: Awaited<ReturnType<typeof readStoredTraceRefs>> = [];
+      try {
+        rows = await readStoredTraceRefs(legacy.brain, ids);
+      } catch (error) {
+        // A passed store that cannot be read leaves a call that names the soul's traces alone to the soul's store: the
+        // ledger's marks delete any copy there at the next open.
+        if (outsideSoul.length > 0) throw error;
+      }
+      for (const row of rows) {
+        if (row.scope !== 'user' || row.scopeId !== scopeId || row.chunk) continue;
+        // A move that filed a trace and stopped before its source row was deleted leaves the id in both stores: that
+        // row, marked or not, is the same trace and goes with the soul's.
+        if (own.has(row.id) || !row.deleted || recorded.has(row.id)) ownLegacy.add(row.id);
       }
     }
-    const missing = outsideSoul.length - ownLegacy.size;
+    const missing = outsideSoul.filter((id) => !ownLegacy.has(id)).length;
     if (missing > 0) {
       memoryLog.warn('memory.write_refused', { reason: 'foreign_trace' });
       throw new Error(`correctUserMemory: ${missing} of ${ids.length} trace ids are not this user's live traces`);
@@ -742,9 +751,15 @@ export async function correctSubjectMemory(
     } catch (error) {
       memoryLog.warn('memory.erasure_unfinished', errorFields(error));
     }
-    const legacyIds = removed.filter((id) => ownLegacy.has(id));
+    // Every named id's row there goes, the correction's own included: a correction whose text is a moved copy's keeps
+    // that copy as the correction, and the source row it was copied from goes all the same.
+    const legacyIds = ids.filter((id) => ownLegacy.has(id));
     if (legacy && legacyIds.length > 0) {
-      deleted += (await legacy.deleteTraces(legacyIds)).deleted;
+      // A copy of a trace the soul's store held is counted once, with the soul's.
+      const legacyOnly = legacyIds.filter((id) => !own.has(id));
+      const copies = legacyIds.filter((id) => own.has(id));
+      if (legacyOnly.length > 0) deleted += (await legacy.deleteTraces(legacyOnly)).deleted;
+      if (copies.length > 0) await legacy.deleteTraces(copies);
     }
     return { deleted, pagesDeleted, ...(correctionTraceId !== undefined ? { correctionTraceId } : {}), recipients };
   };
