@@ -56,6 +56,7 @@ import { brainOf } from '../../cognition/memory/io/facade/handedBrain';
 import { CognitiveMemoryManager } from '../../cognition/memory/CognitiveMemoryManager';
 import type { IMemoryArchive } from '../../cognition/memory/archive/IMemoryArchive';
 import { GMI } from '../../cognition/substrate/GMI';
+import { MemoryStore } from '../../cognition/memory/retrieval/store/MemoryStore';
 
 /** The runtimes the cases run on: the default one, and the GMI runtime with cognitive memory off. */
 const RUNTIMES = ['legacy', 'gmi'] as const;
@@ -1159,11 +1160,13 @@ describe('correcting a memory the mind filed, on the GMI runtime with cognitive 
     "a correction whose delete in the mind failed after the store soft-deleted the row is finished by %s",
     async (finish) => {
       const managers = managersBuilt();
+      const gmis = builtGmis();
       const a = await openMind([reply.text('A canary, lovely.'), reply.text('Your canary is WREN-9.'), ...spare()]);
       await turn(a, 's1', 'alice', 'My canary is LARK-7.');
       const x = idOf(saidOf(keyOf(alice)), 'LARK-7')!;
       const manager = managers()[0];
       expect(heldBy(manager, [x]).cached).toEqual([x]);
+      expect(slotsOf(gmis[0])).toContain(x);
 
       // The store's first delete of a trace row fails once.
       const brain = brainOf(a.memory!);
@@ -1191,10 +1194,12 @@ describe('correcting a memory the mind filed, on the GMI runtime with cognitive 
         expect(await a.applyTombstones!()).toEqual([]);
         expect(lines('memory.tombstone_reapplied')[0]).toMatchObject({ traces: 1, tracesMissed: 0 });
       }
-      // No row, no copy in the mind, and neither the export nor a new session's recall holds the old text.
+      // No row, no copy in the mind, no slot in the open session, and neither the export nor a new session's recall
+      // holds the old text.
       expect(rows('SELECT id FROM memory_traces WHERE id = ?', [x])).toEqual([]);
       expect(holding('LARK-7')).toEqual([]);
       expect(heldBy(manager, [x])).toEqual({ cached: [], nodes: [], words: false });
+      expect(slotsOf(gmis[0])).not.toContain(x);
       expect(JSON.stringify(await a.exportUserMemory!('alice'))).not.toContain('LARK-7');
       const calls = served.seen.length;
       await turn(a, 's2', 'alice', 'What is my canary called?');
@@ -1202,4 +1207,73 @@ describe('correcting a memory the mind filed, on the GMI runtime with cognitive 
       expect(storedAs('My canary is WREN-9.').map((trace) => trace.id)).toEqual([filed.id]);
     },
   );
+
+  it("a correction whose own delete in the store fails after the mind took the rows finishes, and leaves the old text nowhere", async () => {
+    const managers = managersBuilt();
+    const gmis = builtGmis();
+    const a = await openMind([reply.text('A canary, lovely.'), ...spare()]);
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    const x = idOf(saidOf(keyOf(alice)), 'LARK-7')!;
+    const manager = managers()[0];
+    expect(slotsOf(gmis[0])).toContain(x);
+
+    // The store's own delete of the named trace fails once; the mind has deleted its row by then.
+    const storeDelete = a.memory!.deleteTraces.bind(a.memory!);
+    let rowLeft: boolean | undefined;
+    vi.spyOn(a.memory!, 'deleteTraces').mockImplementation(async (...args: Parameters<Memory['deleteTraces']>) => {
+      if (rowLeft === undefined && args[0].includes(x)) {
+        rowLeft = rows('SELECT id FROM memory_traces WHERE id = ?', [x]).length > 0;
+        throw new Error('the store is busy');
+      }
+      return storeDelete(...args);
+    });
+
+    // A call made again could not own a trace whose row is gone: this one finishes.
+    const result = await a.correctUserMemory!('alice', { traceIds: [x], text: 'My canary is WREN-9.' });
+    expect(rowLeft).toBe(false);
+    expect(result).toMatchObject({ deleted: 1, correctionTraceId: expect.any(String) });
+    expect(holding('LARK-7')).toEqual([]);
+    expect(heldBy(manager, [x])).toEqual({ cached: [], nodes: [], words: false });
+    expect(slotsOf(gmis[0])).not.toContain(x);
+    expect(JSON.stringify(await a.exportUserMemory!('alice'))).not.toContain('LARK-7');
+  });
+
+  it("a correction made while a turn of the person's open session is recalling the trace leaves no slot of it once the turn ends", async () => {
+    const gmis = builtGmis();
+    const a = await openMind([reply.text('A canary, lovely.'), reply.text('Your canary is WREN-9.'), ...spare()]);
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    const x = idOf(saidOf(keyOf(alice)), 'LARK-7')!;
+
+    // The mind's recall of the next turn has ranked x and waits before it marks the access and focuses the trace.
+    const { gate, release } = gated();
+    let reached = false;
+    const recordAccess = MemoryStore.prototype.recordAccess;
+    vi.spyOn(MemoryStore.prototype, 'recordAccess').mockImplementation(async function (
+      this: MemoryStore,
+      ...args: Parameters<MemoryStore['recordAccess']>
+    ) {
+      if (!reached && args[0] === x) {
+        reached = true;
+        await gate;
+      }
+      return recordAccess.apply(this, args);
+    });
+    try {
+      const session = a.session('s2', { userId: 'alice' });
+      const running = session.send('What is my canary called?');
+      await vi.waitFor(() => expect(reached).toBe(true), { timeout: 4_000 });
+      const own = gmis[gmis.length - 1];
+
+      // x is corrected while that recall waits; then the recall goes on and the turn ends.
+      expect((await correct(a, 'alice', [x], 'My canary is WREN-9.')).deleted).toBe(1);
+      release();
+      await running;
+
+      // Its slot, which the recall put back, goes once no turn runs.
+      await vi.waitFor(() => expect(slotsOf(own)).not.toContain(x), { timeout: 4_000 });
+      expect(holding('LARK-7')).toEqual([]);
+    } finally {
+      release();
+    }
+  });
 });
