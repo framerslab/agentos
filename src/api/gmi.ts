@@ -112,7 +112,7 @@ import type {
 } from '../cognition/learning/types.js';
 import type { ICognitiveMemoryManager } from '../cognition/memory/CognitiveMemoryManager.js';
 import { sharedForgottenLedgerOf } from '../cognition/memory/suppression/learnerTombstones.js';
-import { registerSessionEvictor, sharedSoulStoreOf, type SessionEviction } from './runtime/soulStore.js';
+import { registerSessionEvictor, registerSessionTraceDropper, sharedSoulStoreOf, type SessionEviction } from './runtime/soulStore.js';
 import { memoryLog } from '../cognition/memory/log.js';
 import { errorFields } from '../core/logging/events.js';
 import { settlesWithin } from '../cognition/substrate/shutdownBound.js';
@@ -1525,6 +1525,12 @@ export function gmi(opts: GmiOptions): GmiHandle {
           if (!lock.heldByCaller() && (await settlesWithin(emptied, deadlineMs))) return 'evicted';
           void emptied.catch((error: unknown) => memoryLog.warn('memory.session_evict_failed', errorFields(error)));
           return 'running';
+        });
+        // A correction or a retention sweep of the person's traces drops them from the session's working memory, at
+        // once: a slot holds a trace's id and no words, and the trace's row is gone, so no turn recalls it again.
+        registerSessionTraceDropper(session, async (traceIds) => {
+          const built = await own.peek()?.catch(() => undefined);
+          built?.gmi.getCognitiveMemoryManager?.()?.getWorkingMemory().dropTraces(traceIds);
         });
       }
       const entry: SessionEntry = { session, userId, shutdown };

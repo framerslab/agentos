@@ -2,8 +2,9 @@
  * @fileoverview What `souledAgent()` hands the `gmi()` it builds: the soul's store, read by the options object the
  * agent was built from, as the tombstone ledger is handed to the learning layer (`shareForgottenLedger`). And what
  * `gmi()` hands back for a deletion: each open session's evictor, by the session object, which the agent's mind side
- * ({@link SoulMind}) calls to empty the sessions of a person it deletes; the mind side also deletes a person's rows
- * through the cognitive memory managers `gmi()` built on the soul's store.
+ * ({@link SoulMind}) calls to empty the sessions of a person it deletes, and each open session's trace dropper, which it
+ * calls to drop traces a correction or a retention sweep deleted; the mind side also deletes a person's rows through
+ * the cognitive memory managers `gmi()` built on the soul's store.
  *
  * Internal: exported from neither the package root nor the API index, and no host-facing option.
  *
@@ -11,6 +12,8 @@
  * @internal
  */
 import type { AgentSession, MemoryHookContext } from '../agent.js';
+import { memoryLog } from '../../cognition/memory/log.js';
+import { errorFields } from '../../core/logging/events.js';
 import type { IMemoryArchive } from '../../cognition/memory/archive/IMemoryArchive.js';
 import type { ICognitiveMemoryManager } from '../../cognition/memory/CognitiveMemoryManager.js';
 import type { CognitiveMechanismsConfig } from '../../cognition/memory/mechanisms/types.js';
@@ -96,6 +99,26 @@ export function registerSessionEvictor(session: AgentSession, evict: SessionEvic
   sessionEvictors.set(session, evict);
 }
 
+/**
+ * Drops named traces from what one open session holds of them between its turns: the working-memory slots of its
+ * GMI's cognitive memory. It does not wait for a turn the session is running: a slot holds a trace's id and no words,
+ * and the trace's row and cached copy are gone by then, so a turn recalls it no more.
+ */
+export type SessionTraceDropper = (traceIds: ReadonlySet<string>) => Promise<void>;
+
+/** The trace dropper of each open session that holds something between its turns, held for as long as the session object is. */
+const sessionTraceDroppers = new WeakMap<AgentSession, SessionTraceDropper>();
+
+/**
+ * Registers how a correction or a retention sweep drops named traces from one open session, by the session object
+ * `agent.session()` hands out. `gmi()` calls it beside {@link registerSessionEvictor}.
+ *
+ * @internal
+ */
+export function registerSessionTraceDropper(session: AgentSession, drop: SessionTraceDropper): void {
+  sessionTraceDroppers.set(session, drop);
+}
+
 /** What a souled agent's deletion calls on the mind's side, on `runtime: 'gmi'`. */
 export interface SoulMind {
   /**
@@ -132,6 +155,17 @@ export interface SoulMind {
    * @throws The first error a session's emptying failed with, once every session was asked.
    */
   evictSessions(sessions: Iterable<AgentSession>): Promise<{ evicted: number; running: number }>;
+  /**
+   * Drops named traces from the given open sessions, after a correction or a retention sweep deleted them for good:
+   * each session's working-memory slots of them go at once, whether or not a turn of the session runs, and every
+   * other slot stays. A session with no dropper keeps nothing between its turns and is skipped.
+   *
+   * @param traceIds - The traces deleted.
+   * @param sessions - The sessions the agent's handle holds open for the person whose traces they were.
+   * @returns Once every session was asked. Never rejects: a session whose drop failed writes one
+   *   `memory.session_evict_failed` line.
+   */
+  evictTraces(traceIds: readonly string[], sessions: Iterable<AgentSession>): Promise<void>;
 }
 
 /**
@@ -143,7 +177,7 @@ export interface SoulMind {
  *   open, with how to list one key's trace ids there: what the deletes reach with no manager live. Unset (cognitive
  *   memory off): nothing is dropped there.
  * @param input.deadlineMs - How long a deletion waits for the running turn of a session it empties; a negative
- *   number or `NaN` is 0, and a wait past the longest timer is held to it.
+ *   number or `NaN` is 0, and a wait past the longest timer is held to it. `evictTraces` waits for no turn.
  * @internal
  */
 export function createSoulMind(input: {
@@ -211,6 +245,18 @@ export function createSoulMind(input: {
       }
       if (failed) throw failed.error;
       return { evicted, running };
+    },
+    async evictTraces(traceIds, sessions) {
+      const ids = new Set(traceIds);
+      if (ids.size === 0) return;
+      const asked: Array<Promise<void>> = [];
+      for (const session of sessions) {
+        const drop = sessionTraceDroppers.get(session);
+        if (drop) asked.push(Promise.resolve().then(() => drop(ids)));
+      }
+      for (const outcome of await Promise.allSettled(asked)) {
+        if (outcome.status === 'rejected') memoryLog.warn('memory.session_evict_failed', errorFields(outcome.reason));
+      }
     },
   };
 }
