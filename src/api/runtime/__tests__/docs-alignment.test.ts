@@ -381,7 +381,7 @@ describe('AgentOS docs alignment', () => {
     }
   });
 
-  it('publishes the host-duties page, linked from the index, with no claim of compliance and no pasted legal citation', () => {
+  it('publishes the host-duties page, linked from the index, without claiming compliance', () => {
     // The page says what the library does with per-user memory and what a host must do itself.
     expect(exists('../../../../docs/safety/MEMORY_HOST_DUTIES.md'), 'docs/safety/MEMORY_HOST_DUTIES.md exists').toBe(true);
     const page = read('../../../../docs/safety/MEMORY_HOST_DUTIES.md');
@@ -394,9 +394,8 @@ describe('AgentOS docs alignment', () => {
     expect(publicationManifest.some((entry) => (entry.sourcePath ?? '').endsWith('MEMORY_HOST_DUTIES.md'))).toBe(true);
     expect(read('../../../../docs/README.md')).toContain('./safety/MEMORY_HOST_DUTIES.md');
 
-    // It describes behaviour and duties. It never calls a product compliant, and it links to no law's text.
+    // Describe the host’s duties without claiming the product meets them.
     expect(page).not.toMatch(/\bcomplian(t|ce)\b/i);
-    expect(page).not.toMatch(/eur-lex|legislation\.gov|leginfo|ecfr\.gov|app\.leg\.wa\.gov/i);
     // Every option and call is named as the code names it, never as a placeholder in angle brackets.
     expect(page).not.toMatch(
       /<(deleteUser|exportUser|correct|reapplyTombstones|retention|memoryPolicy|compileProvider|tombstoneKey|redactionHook|sharedMemory|runWithoutSoul)>/,

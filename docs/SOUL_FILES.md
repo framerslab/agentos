@@ -434,6 +434,17 @@ The `hexaco:` block in SOUL.md frontmatter maps directly to AgentOS's existing
 [HEXACO personality model](./memory/HEXACO_PERSONALITY.md). The scores land in
 `personaDefinition.personalityTraits`. On the full runtime they are the GMI's traits, and their trait paragraph is part of its system prompt:
 
+| Trait key | Score | Low directive | High directive | Higher scores give more weight to |
+|---|---|---|---|---|
+| `honesty` (Honesty-Humility) | 0–1 | Phrase things diplomatically | Speak plainly and acknowledge limits | Ethical content |
+| `emotionality` | 0–1 | Stay composed and practical | Acknowledge feelings and express concern | Emotional content |
+| `extraversion` | 0–1 | Listen and reflect | Take initiative and offer suggestions | Social content |
+| `agreeableness` | 0–1 | Challenge assumptions | Seek cooperation and validate perspectives | Cooperation |
+| `conscientiousness` | 0–1 | Improvise and emphasize the big picture | Structure the response and follow through on details | Procedures |
+| `openness` | 0–1 | Use established approaches | Explore unfamiliar ideas and connections | Novelty |
+
+A score below 0.35 enters the low prompt band and one above 0.65 enters the high band. A moderate score adds no directive for that trait. The last column describes cognitive memory encoding when the manager uses those traits. [Prompt bands](https://github.com/framerslab/agentos/blob/74fa36da25d49fdd47f99ec158a014eacebe8386/src/cognition/substrate/personas/personalityPrompt.ts) · [Encoding weights](https://github.com/framerslab/agentos/blob/74fa36da25d49fdd47f99ec158a014eacebe8386/src/cognition/memory/core/encoding/EncodingModel.ts)
+
 - [`AdaptPersonalityTool`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts): with `emergentConfig.selfImprovement.enabled`, changes a trait for the session's GMI within a per-session budget
 - [`PersonalityMutationStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/PersonalityMutationStore.ts): records those changes when a storage adapter is configured
 - [`PersonaOverlayManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/persona_overlays/PersonaOverlayManager.ts): patches traits and mood when a workflow agency's persona evolution rules fire

@@ -95,6 +95,10 @@ await innkeeper.correctUserMemory!(playerId, { traceIds: [selectedTraceId], text
 
 See [the high-level API](./getting-started/HIGH_LEVEL_API.md) for signatures and [host duties](./safety/MEMORY_HOST_DUTIES.md) for deletion receipts, restores and recipients.
 
+## Before you serve users
+
+Keep sentiment off for an EU workplace or education institution until your counsel clears its use. Design your product’s AI disclosure for the first interaction. For children, set `minor: true`, choose a retention period in days and handle parent requests with the same export and deletion calls. For a California companion chatbot, implement a crisis protocol of your own. Read the [host duties and official sources](./safety/MEMORY_HOST_DUTIES.md#eu-ai-act), including the [video game exclusion](./safety/MEMORY_HOST_DUTIES.md#california-companion-chatbots-and-game-characters).
+
 ## Upgrading
 
 A workspace-backed `souledAgent({ runtime: 'gmi' })` gives each user one durable memory. The wiki and cognitive recall read the same store. Export, correction, retention and deletion reach the turns the mind files there. The default runtime stays `'legacy'`.

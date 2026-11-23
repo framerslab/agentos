@@ -5,7 +5,7 @@ description: What @framers/agentos does with per-user memory, what your product 
 
 # Your Duties as the Controller
 
-A soul gives an agent an identity. Per-user memory gives it a record of what each person said. The library files, recalls, compiles, exports and deletes that record. It does not decide why your product keeps it, who may see it, or how long. Those are the duties of the party that runs the product, which privacy law calls the controller. This page says which part is the library's and which part is yours.
+You choose why your product keeps each user’s memory, who may read it and when to delete it. The library supplies the storage and the calls described here.
 
 This page describes the library's behaviour. It is not legal advice. Whether a law applies to your product, and what it asks of you, is a question for your counsel.
 
@@ -136,23 +136,29 @@ The library gives you the calls. The duties below are the controller's.
 
 ### Say why you keep memory, and write it in your privacy notice
 
-Processing a person's conversation needs a lawful reason, and your notice must tell people what you do. For memory it names at least: the purposes; the recipients (the model provider the compile calls, and the embedding provider if you use one; `agent.recipients()` lists your agent's); any transfer to another country and what it rests on; the retention period you chose; that compiled pages are a profile of the person, and how to object where that right applies; that you keep a record of deletions so a deleted person is not filed again, and what that record holds; and what happens to backups after a deletion.
+Where the GDPR applies, identify your lawful basis and tell users why you process their data, who receives it and how long you keep it. [Articles 6 and 13](https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:02016R0679-20160504)
+
+Use `agent.recipients()` when describing your routes. Explain how your product uses compiled pages, records deletions and handles restores.
 
 ### Hold a contract with each provider memory reaches
 
-Each provider in the table above processes personal data on your behalf. Hold the contract your law requires with each, and a transfer mechanism for a provider in another country. Set `compile` when the compile should run on another provider or a local model, or not at all. Your notice can only name calls you know about: the table above is the whole list.
+When a provider processes personal data on your behalf under the GDPR, govern the processing by a binding contract or other applicable legal act and assess any transfer outside the EEA. [Articles 28 and 44](https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:02016R0679-20160504)
+
+Use `compile` to select a separate recipient or local model, or `compile: false` to disable compilation.
 
 ### Assess the risk first
 
-A companion, a tutor for young people or a health coach that remembers what people tell it is the kind of product to assess before memory is turned on. Where your law requires a written impact assessment for such processing, do it first.
+Under GDPR Article 35, assess the impact before you start processing that is likely to pose a high risk to people's rights and freedoms. [Article 35](https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:02016R0679-20160504)
 
 ### Have a breach procedure
 
-Recalled text reaching a person it does not belong to is a disclosure of personal data. Know before it happens whom you must tell, and by when. If you ran an earlier release of `souledAgent()` with more than one person on one agent, that release recalled from one shared scope: assess whether one person's words reached another.
+For a breach under the GDPR, assess whether you must notify the supervisory authority and the people affected. [Articles 33 and 34](https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:02016R0679-20160504)
+
+Include unintended recall across users in your incident procedure. Check what was disclosed if an older installation served multiple users from one shared scope.
 
 ### Answer people's requests
 
-Verifying that the person asking is the person the data is about, and answering in time, is yours. The library gives one call per request.
+Authenticate the requester and track the response deadline in your product.
 
 | Request | What to call | What else is yours |
 |---|---|---|
@@ -168,7 +174,9 @@ Two questions the library cannot settle and your counsel should: how to answer a
 
 ### Choose how long memory is kept
 
-Keep personal data no longer than your purpose needs. Pick the period from the purpose, set `retention`, write the period in your notice and keep to it. `'until-deletion'` is a choice you make by name, never a default for a shared store.
+Under the GDPR, keep identifiable personal data only as long as needed for its purpose, subject to the exceptions in Article 5(1)(e). [Article 5(1)(e)](https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:02016R0679-20160504)
+
+Set `retention` to your chosen period and schedule the sweep.
 
 ### Backups and restores
 
@@ -181,7 +189,7 @@ The library keeps no backups. Yours hold every deleted person's words until they
 - If you restore a separate learning store and the person's rows are absent from both memory stores, call `agent.forgetUser(userId)` again for each person deleted since the backup was taken.
 - Put `await agent.applyTombstones()` in your restore runbook. An open through `souledAgent()` runs it for you; a restore that bypasses the library's open does not get that for free.
 - Keep the tombstone key in your secret store, with the previous keys after a rotation. A keyed store does not open without them.
-- A host that holds the health data of people in Washington state should check with counsel its reading of that state's rule for deletions delayed by backups; the common reading is that such a delay may not run past six months, which means rotating or scrubbing those backups within six months.
+- If Washington's consumer health data law covers your service, a delay to restore archived or backup systems cannot exceed six months from authentication of the deletion request. [RCW 19.373.040(1)(c)(iii)](https://app.leg.wa.gov/RCW/default.aspx?cite=19.373.040)
 
 ### Pass an opaque user id on every session
 
@@ -205,9 +213,17 @@ On PostgreSQL each tombstone write and each `applyTombstones()` takes a lock on 
 
 ### Children
 
+If the US children's privacy rule applies to your service, give a verified parent access to their child's personal information and a way to request its deletion. [16 CFR § 312.6](https://www.ecfr.gov/current/title-16/chapter-I/subchapter-C/part-312)
+
+Use `exportUserMemory` and `forgetUser` for a verified parent’s request. Include data held outside the agent.
+
+Under that rule, maintain a written retention policy that states why you collect children's information, why you need to keep it and when you will delete it. [16 CFR § 312.10](https://www.ecfr.gov/current/title-16/chapter-I/subchapter-C/part-312)
+
 The library does not know a person's age. If children may use your product, settle age assurance and any consent a parent must give before memory is on for them. Answer `minor: true` from `memoryPolicy` for such accounts, beside `longTerm` and an optional shorter retention. "Until deletion" is not a setting for a child's account, and the library holds to that: on a store that keeps the account's memory until deletion, or with no `retention`, a child's account keeps no long-term memory whatever the answer says, and its turns recall your operator pages alone. On a store with a period in days, its turns are kept for that period, and its pages are compiled only on the provider and model you name in `compile.minors`, and not at all without it; with no key for that provider the compile does not run, and no other provider takes its place. Name a provider whose terms cover a child's data, and say it in your notice. On `runtime: 'gmi'` a child's turns are not scored for sentiment; with cognitive memory on there, they are stored with a neutral emotional state whatever `emotionalStamp` says, and what they recall keeps its emotional context with reconsolidation on.
 
 ### A person who objects to profiling
+
+When you uphold an objection to profiling under GDPR Article 21, stop the processing covered by the objection. [Article 21](https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:02016R0679-20160504)
 
 Compiled pages are a profile of the person. Where a person objects to profiling and that right applies, answer `profiling: 'off'` for their account, and `longTerm: 'raw'` or `'off'` so that no page is compiled for them. On the default runtime, and on `runtime: 'gmi'` with cognitive memory off, the store keeps no mood or emotional context of anyone. On `runtime: 'gmi'` with sentiment tracking on (`cognition: 'full'`), their turns are not scored for sentiment, so no trend of theirs is kept. With cognitive memory on there, their turns are stored with a neutral emotional state under `emotionalStamp: 'mood'` too, and with reconsolidation on, what their turns recall keeps its emotional context. The answer holds from the session's next turn: a trace stored with a mood before it keeps that mood. `agent.exportUserMemory(userId)` gives each trace's emotional context, and `agent.correctUserMemory(userId, { traceIds })` deletes the traces you name.
 
@@ -215,21 +231,43 @@ Compiled pages are a profile of the person. Where a person objects to profiling 
 
 On `runtime: 'gmi'` the agent's GMI holds a mood of its own. With sentiment tracking on (`cognition: 'full'`, or `sentiment: true` in a `cognition` config), it also scores each message a person sends from the message's words and keeps the session's trend of those scores, and its metaprompts can change its mood in answer. Sentiment tracking is off unless you turn it on. Treat turning it on as profiling of the people the agent talks to: say so in your notice, and answer `profiling: 'off'` for a person who objects.
 
-A mood, a sentiment score and a sentiment event exist to set the tone of a reply. Never make one of them the sole basis of a decision about a person that has legal effects for them or affects them in a similarly significant way. Article 22 of the GDPR gives a person the right not to be subject to a decision based solely on automated processing, profiling included, that has such effects. The regulations under California's CCPA set requirements for a business that uses automated decisionmaking technology to make a significant decision about a consumer, which they define as one that grants or denies financial or lending services, housing, education, employment or healthcare. Meeting those rules is yours: the library makes no decision about anyone.
+Mood follows the agent’s state and sentiment scores the message text. Neither reads keystroke timing, typing patterns or audio features. Never use a mood, sentiment score or sentiment event as the sole basis for a decision with legal or similarly significant effects on a person.
+
+GDPR Article 22 addresses solely automated decisions that have legal or similarly significant effects on a person. [Article 22](https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:02016R0679-20160504)
+
+California's regulations define automated decisionmaking technology by whether computation on personal information replaces or substantially replaces human decisionmaking. [11 CCR § 7001(e)](https://cppa.ca.gov/regulations/pdf/ccpa_statute_eff_20260101.pdf)
 
 By default the library keeps no history of how a person felt. A session's sentiment trend lives in that session's working memory, in process, and is never written to the memory store. A stored trace carries a neutral emotional state unless you set `emotionalStamp: 'mood'`, and then it carries the agent's mood, which under sentiment tracking can follow the mood of the conversation. An inline soul, and an optional soul that did not load, give a plain agent with no store, whose GMI keeps a cognitive memory of its own and stores its mood with each trace whatever `emotionalStamp` says: give such an agent cognitive memory only where that is what you want. If you keep a person's sentiment trend or mood history yourself (`emotionalStamp: 'mood'` with sentiment tracking on, a log of your own, or a GMI you build with a working memory that outlives the process), you hold a record of a person's emotional state over time, and such a record can be data about their health. Have a basis of your own for it before you keep it: under the GDPR, one of the conditions of Article 9(2); in California, treat it as sensitive personal information.
 
 ### A restriction that must hold at once
 
+When you grant a restriction under GDPR Article 18, limit further processing as the article requires. [Article 18](https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:02016R0679-20160504)
+
+Return `{ longTerm: 'off' }` to stop personal recall, filing and compilation while preserving stored traces. Apply the restriction to your own processing too.
+
 A session keeps the answer it was given until a later answer for the same account, given to any session or call of the same agent object, replaces it from its next turn. Another agent object, in the same process or another, reads your answer at its own sessions' next ask. Where a restriction must hold at once in every one of them (an objection, an age you learn), close that person's open sessions in each, or call `agent.forgetUser(userId)`, which deletes what is stored and keeps it deleted. A compile already running reads your latest answer before each of its model calls.
 
 ### Health data
 
-A fitness coach, a sleep tracker or a companion people confide in holds health data, whether or not that was the plan. A compiled page that infers a condition is health data even when the words that fed it were not. Settle consent before memory is on, treat pages as health data in your notice and your retention, and use `memoryPolicy` (raw traces only) and `screen` (redaction) where they fit. Whether a health privacy law covers your product is a question for your counsel.
+Review the health information users may disclose and the inferences a wiki page can make. Decide with counsel what you may keep. Use raw traces or turn memory off where appropriate, and use `screen` to redact stored text.
 
-### Tell people they are talking to an AI
+### EU AI Act
 
-Give that notice in your product, at the first interaction. A hard limit in the soul such as "Say you are an AI whenever asked" backs the notice and does not replace it.
+Keep sentiment off in EU workplaces and education institutions unless your counsel clears the use. The full cognition preset enables sentiment.
+
+Under EU AI Act Article 5(1)(f), the prohibition on inferring a person's emotions in workplaces and education institutions has exceptions for medical or safety reasons. [Article 5(1)(f)](https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:02024R1689-20260727)
+
+If you provide an agent that interacts directly with people, design it to disclose that it is an AI unless that is obvious in context to a reasonably well-informed, observant person. [Article 50(1)](https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:02024R1689-20260727)
+
+The EU AI Act's open-source exception leaves Articles 5 and 50 in force for systems within their scope. [Article 2(12)](https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:02024R1689-20260727)
+
+### California companion chatbots and game characters
+
+If you operate a companion chatbot covered by California Business and Professions Code section 22602(b), maintain a protocol for preventing suicide or self-harm content, refer users expressing suicidal ideation, suicide or self-harm to crisis services and publish the protocol details on your website. [BPC § 22602(b)](https://leginfo.legislature.ca.gov/faces/codes_displayText.xhtml?lawCode=BPC&division=8.&title=&part=&chapter=22.6.&article=)
+
+Implement your own crisis protocol. The sentiment score measures language tone and has no crisis or self-harm detection function. For a game character, check every condition of the statutory exclusion:
+
+> A bot that is a feature of a video game and is limited to replies related to the video game that cannot discuss topics related to mental health, self-harm, sexually explicit conduct, or maintain a dialogue on other topics unrelated to the video game. [BPC § 22601(b)(2)(B)](https://leginfo.legislature.ca.gov/faces/codes_displayText.xhtml?lawCode=BPC&division=8.&title=&part=&chapter=22.6.&article=)
 
 ### Memory from before per-user scope
 
