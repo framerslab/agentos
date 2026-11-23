@@ -972,10 +972,10 @@ const streamedVerdicts = await streamed.grounding;
 
 ### Schema validation and retries
 
-On the default runtime, `agent({ responseSchema })` validates `generate()`'s
-final text with the supplied Zod schema and returns the value in `result.parsed`.
-`souledAgent()` takes it on `runtime: 'legacy'` alone and throws at open for it
-on the GMI runtime, its default.
+On both runtimes, `agent({ responseSchema })` validates `generate()`'s final
+text with the supplied Zod schema and returns the value in `result.parsed`.
+`gmi()` and `souledAgent()` accept the same option. `stream()` delivers text
+without applying the agent's schema.
 It can extract JSON from a code fence. `controls.maxValidationRetries` defaults
 to 1, so an invalid reply gets one more attempt. Set it to 0 to throw
 `ObjectGenerationError` on the first invalid reply. A [refusal](#a-refusal-from-the-model)
@@ -987,7 +987,8 @@ and names it in its construction warning, so pass an agent's schema as
 Repair attempts retain the completed transcript, including native tool calls
 and their results, and run without tools so they cannot repeat an action.
 
-For a session, pass the schema to `send()` and read `result.object`:
+For a session, pass the schema to `send()` and read `result.object`. That schema
+takes precedence over the agent's for the call.
 
 ```ts
 import { z } from 'zod';
@@ -998,12 +999,12 @@ const result = await session.send('Count the records.', {
 });
 ```
 
-Session sends default to zero extra attempts. Each retry includes the failed
+On the legacy runtime, session sends default to zero extra attempts. Each retry includes the failed
 reply and validation feedback. Only the original user input and final valid
 reply enter session history; an exhausted send adds nothing. Usage totals count
 every completed attempt. Retry counts must be non-negative integers. Schema
-sends omit configured tools and their chain-of-thought instruction, as before.
-These retry options apply to the default runtime.
+sends omit configured tools and their chain-of-thought instruction. On the GMI
+runtime, schema sends reject an invalid reply without a repair turn.
 
 For schema calls, `memoryProvider.observe` records the original user input once
 and only the accepted answer, after caller hooks and validation. Failed attempts

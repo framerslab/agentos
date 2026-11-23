@@ -141,7 +141,7 @@ The video game exclusion reads as follows.
 - **Check replies against the soul's front matter.** The GMI's persona applies the soul's traits, mood, reasoning-trace limits and hard limits. The legacy runtime renders the traits and the hard limits and has no renderer for the mood and the trace limits, so replies can differ.
 - **Expect a log line for a front-matter `voice` or `avatar`.** The GMI runtime leaves each out, as the legacy runtime does, and says so in one `soul.field_ignored` line for each.
 - **Remove the `channels`, `voice` and `avatar` options, or set `runtime: 'legacy'`.** The GMI runtime throws at open when one is set, naming the option.
-- **Pass a schema to a session's `send()`, or set `runtime: 'legacy'`.** The GMI runtime does not validate `generate()` against the agent's `responseSchema`, so `souledAgent()` throws at open when one is set, before anything opens. A session's `send()` takes `responseSchema` and returns the value in `result.object`.
+- **Read `result.parsed` from `generate()` with an agent-level `responseSchema`.** Both runtimes validate the reply and use `controls.maxValidationRetries` to bound repair attempts. A schema passed to a session's `send()` takes precedence for that call and returns its value in `result.object`.
 - **Let a turn finish before `close()`.** `close()` stops the session turns still running. The legacy runtime lets them finish within the close's wait.
 - **Keep your keys as they are.** The default needs no embedding model, and no session request sends the end user's id to the model provider unless you set `sendUserIdToProvider: true`.
 

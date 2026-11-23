@@ -26,7 +26,10 @@ import {
 import { addModelUsage, extractTextFromContent, type GenerateTextOptions, type GenerateTextResult, type MessageContent, type TokenUsage } from '../generateText.js';
 import { normalizeStreamFinishReason, type StreamTextResult } from '../streamText.js';
 import { ObjectGenerationError } from '../generateObject.js';
-import { dropNullsForOptionalFields, parseJsonWithDistinctKeys } from './structuredReply.js';
+import { lowerZodToJsonSchema } from '../../orchestration/compiler/SchemaLowering.js';
+import { buildSchemaInstructionText, dropNullsForOptionalFields, parseJsonWithDistinctKeys } from './structuredReply.js';
+import { validateAgentReply, validationRepairPrompt } from './agentResponseValidation.js';
+import { responseFormatCarriesSchema } from './responseFormatForProvider.js';
 import { fireLlmUsageObserver, type LlmUsageAccountResolver, type LlmUsageAccountSource, type LlmUsageEvent } from '../observers.js';
 import type { SessionHistoryBuffer, SessionTurnWriter } from '../sessionHistory.js';
 import type { SessionTranscriptMessage } from '../sessionTranscript.js';
@@ -42,7 +45,7 @@ import { GmiTurnFolder, streamFromGmiTurn } from './gmiResults.js';
 import { stepToTranscript, transcriptToConversation } from './gmiTranscript.js';
 import { observeWithoutWaiting } from './memoryObserveFailures.js';
 import { emptyMemoryWriteRecord, memoryWriteRecordOf, type MemoryShownItem, type MemoryWriteEntry, type MemoryWriteRecord } from './memoryWriteRecord.js';
-import { contentWithTurnText, judgeTurnInput } from './textGuardrails.js';
+import { contentWithTurnText, inputDecisionOf, judgeTurnInput } from './textGuardrails.js';
 import type { SoulTurnMemory } from '../../cognition/substrate/soulTurnMemory.js';
 
 /** A signal's reason as an error, as streamText reports a stop: the reason itself when it is an Error. */
@@ -129,6 +132,13 @@ function drivingTurnOn<T>(lock: TurnLock, drive: () => T): T {
   return turnScopes.run({ lock, holding: false, outer: turnScopes.getStore() }, drive);
 }
 
+/** The transcript and memory recall shared by one generate() call and its repair attempts. */
+interface GmiGenerateValidation {
+  history: SessionTranscriptMessage[];
+  recall?: ReturnType<typeof recallForTurn>;
+  userText?: string;
+}
+
 /** What one turn asks for beyond its input. */
 export interface GmiTurnOptions {
   /** Completion options for this turn (`metadata.options`): temperature, maxTokens, toolChoice, cacheDiagnostics, … */
@@ -136,6 +146,10 @@ export interface GmiTurnOptions {
   /** Structured output: the gateway lowers it for each hop and suppresses tools. */
   responseSchema?: ZodType;
   schemaName?: string;
+  /** The prompt instruction for an agent-level schema, whose JSON is extracted after generation. */
+  schemaInstruction?: string;
+  /** Call-local state for agent-level validation, with no session history writes. */
+  validation?: GmiGenerateValidation;
   /** Label of the turn's block in the session store. */
   blockLabel?: string;
   /** Stops the turn: the model call in progress is aborted, and the turn ends with the abort error. */
@@ -179,9 +193,10 @@ export interface GmiTurnOptions {
    * Checks the reply of a turn that ended without error, before the session
    * keeps it. A throw keeps nothing of the turn (no history, no
    * `memoryProvider.observe`) and is the turn's error: a structured send whose
-   * answer does not parse adds nothing, as `agent()`'s send adds nothing.
+   * answer does not parse adds nothing, as `agent()`'s send adds nothing. False also skips recording the turn and
+   * leaves the reply available to generate() for repair.
    */
-  acceptReply?: () => void;
+  acceptReply?: (folder: GmiTurnFolder) => boolean | void;
 }
 
 /** What the GMI's hooks need to know about the turn about to run. */
@@ -199,6 +214,8 @@ export interface GmiTurnContext {
   onModelCall?: (route: { providerId: string; modelId: string }) => void;
   /** True for a structured send: its model calls go without tools. */
   structured?: boolean;
+  /** The prompt instruction for the agent's response schema. */
+  schemaInstruction?: string;
   /**
    * Receives the usage a provider reports for one of the turn's model calls
    * after the turn stopped it (the completion gateway's `onLateUsage`); it
@@ -564,7 +581,8 @@ export async function* runGmiTurn(
   try {
     // What the turn starts from, read together before any wait.
     const epochAtStart = deps.history?.epoch();
-    const priorMessages = deps.history ? deps.history.messages() : [];
+    const validation = turn.validation;
+    const priorMessages = validation?.history ?? deps.history?.messages() ?? [];
 
     if (turn.guards) {
       // A turn stopped while it waited for the lock ends here: its input reaches no guard.
@@ -580,7 +598,7 @@ export async function* runGmiTurn(
         // No model call and no history: the replacement is the reply, and nothing of the turn is kept or observed.
         folder.guarded(judged.report, judged.text);
         ended = true;
-        turn.acceptReply?.();
+        turn.acceptReply?.(folder);
         yield { type: GMIOutputChunkType.TEXT_DELTA, content: judged.text, interactionId: `turn-${randomUUID()}`, timestamp: new Date() };
         return recorded;
       }
@@ -590,6 +608,7 @@ export async function* runGmiTurn(
       }
     }
     const userText = typeof input === 'string' ? input : extractTextFromContent(input);
+    if (validation) validation.userText ??= userText;
 
     const served = await deps.gmiFor();
     releaseGmi = served.release;
@@ -599,15 +618,14 @@ export async function* runGmiTurn(
     // One recall for the turn, within its timeout; a failure or a timeout is a memory.hook_failed line. A stop of the
     // turn meanwhile ends it there.
     const recallProvider = deps.opts.memoryProvider;
-    const recalled = deps.useMemoryProviderContext && recallProvider
-      ? await untilStopped(
-          recallForTurn(recallProvider, { userText, context: deps.memoryHook }, {
-            ...deps.opts.memoryProviderOptions,
-            ...(deps.providerTokenBudget !== undefined ? { tokenBudget: deps.providerTokenBudget } : {}),
-          }),
-          turn.abortSignal,
-        )
-      : null;
+    let recalled: Awaited<ReturnType<typeof recallForTurn>> = null;
+    if (deps.useMemoryProviderContext && recallProvider) {
+      const recall = () => recallForTurn(recallProvider, { userText, context: deps.memoryHook }, {
+        ...deps.opts.memoryProviderOptions,
+        ...(deps.providerTokenBudget !== undefined ? { tokenBudget: deps.providerTokenBudget } : {}),
+      });
+      recalled = await untilStopped(validation ? (validation.recall ??= recall()) : recall(), turn.abortSignal);
+    }
     const items = memoryItemsOf(recalled);
     const memoryContext = items.length > 0 ? renderMemoryRecallBlock(items) : undefined;
     // Whether the provider's block reached the model: the step in progress takes its newest call's answer, so a
@@ -627,6 +645,7 @@ export async function* runGmiTurn(
         : {}),
       onModelCall: ({ providerId, modelId }) => folder.route(providerId, modelId),
       structured: turn.responseSchema !== undefined,
+      schemaInstruction: turn.schemaInstruction,
       budget: turn.budget,
       approvalGate: turn.approvalGate,
       toolNames: turn.toolNames,
@@ -769,7 +788,10 @@ export async function* runGmiTurn(
       writer?.abort({ partial: true });
     } else {
       try {
-        turn.acceptReply?.();
+        if (turn.acceptReply?.(folder) === false) {
+          writer?.abort();
+          return recorded;
+        }
       } catch (refusal) {
         // A refused reply leaves nothing of the turn behind.
         writer?.abort();
@@ -787,9 +809,10 @@ export async function* runGmiTurn(
         else folder.wrote(deps.soulMemory ? Promise.resolve(emptyMemoryWriteRecord()) : noSubjectRecord(userText, reply));
       } else if (memoryProvider?.observe) {
         // The turn does not wait for its writes: their record is a promise the turn's result carries.
-        const user = observeTurn(memoryProvider, 'user', userText, deps.memoryHook);
+        const originalText = validation?.userText ?? userText;
+        const user = observeTurn(memoryProvider, 'user', originalText, deps.memoryHook);
         // A message with no text (an image alone) is observed as before and has no entry of its own.
-        const sides = userText ? [user] : [];
+        const sides = originalText ? [user] : [];
         const reply = folder.text();
         if (reply) sides.push(observeTurn(memoryProvider, 'assistant', reply, deps.memoryHook));
         folder.wrote(memoryWriteRecordOf(sides));
@@ -944,6 +967,57 @@ export async function sendGmiTurn(
   if (carriesWriteRecord(deps)) result.memoryWrite = folder.written();
   if (!schema) return result;
   return { ...result, object };
+}
+
+/** Run a one-shot GMI generation, repairing an invalid schema reply from its completed transcript. */
+export async function generateGmiTurn(
+  deps: GmiSessionDeps,
+  input: MessageContent,
+  turn: GmiTurnOptions,
+  schema: ZodType | undefined,
+  maxRetries: number,
+): Promise<{ result: GenerateTextResult; first: GenerateTextResult }> {
+  if (!schema) {
+    const result = await sendGmiTurn(deps, input, turn);
+    return { result, first: result };
+  }
+  if (!Number.isInteger(maxRetries) || maxRetries < 0) {
+    throw new RangeError('maxValidationRetries must be a non-negative integer');
+  }
+  const format = turn.options?.responseFormat as Record<string, unknown> | undefined;
+  const schemaInstruction = responseFormatCarriesSchema(format)
+    ? undefined
+    : buildSchemaInstructionText(lowerZodToJsonSchema(schema), 'response');
+  const validation: GmiGenerateValidation = { history: [] };
+  let first: GenerateTextResult | undefined;
+  for (let attempt = 0; ; attempt++) {
+    let checked: ReturnType<typeof validateAgentReply> | undefined;
+    const result = await sendGmiTurn(deps, input, {
+      ...turn,
+      schemaInstruction,
+      validation,
+      // The transcript carries completed tool calls and their results. A repair cannot run another tool.
+      ...(attempt > 0 ? { toolNames: new Set<string>() } : {}),
+      acceptReply: (folder) => {
+        checked = validateAgentReply({ text: folder.replyText(), refusal: folder.refusal() }, schema, true);
+        return checked.ok;
+      },
+    });
+    first ??= result;
+    const reply = checked ?? validateAgentReply(result, schema, true);
+    if (reply.ok) {
+      result.parsed = reply.value;
+      return { result, first };
+    }
+    if (result.refusal !== undefined || attempt >= maxRetries || inputDecisionOf(result.guardReport) === 'replaced') {
+      throw reply.error;
+    }
+    validation.history.push(...(result.transcriptDelta ?? [
+      { role: 'user', content: input },
+      { role: 'assistant', content: result.text },
+    ]));
+    input = validationRepairPrompt(reply.error);
+  }
 }
 
 /**

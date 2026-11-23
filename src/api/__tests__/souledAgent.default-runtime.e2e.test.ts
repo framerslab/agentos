@@ -7,8 +7,7 @@
  *   streams its model call, as a GMI does.
  * - That default runs the light profile: no embedding is asked for, the soul's memory provider files the turn, and no
  *   message is scored for sentiment.
- * - A `channels`, `voice` or `avatar` option throws, naming the option. A `responseSchema`, which the GMI runtime does
- *   not read, throws before anything opens.
+ * - A `channels`, `voice` or `avatar` option throws, naming the option. A `responseSchema` validates `generate()`.
  * - A session opened with a user id sends no end-user id to the model provider, and the turn's tools still read the
  *   user; `sendUserIdToProvider` sends it.
  * - A front-matter `voice` or `avatar` is left out, with one `soul.field_ignored` line each.
@@ -82,10 +81,6 @@ function soulDir(frontmatter = ''): string {
   fs.writeFileSync(path.join(dir, 'SOUL.md'), `---\nname: Aria\nagentId: aria-1\n${frontmatter}---\nYou are Aria.`);
   return dir;
 }
-
-/** The store folders (`.store`) anywhere under `dir`: an agent that opened its soul's store made one. */
-const storeFoldersIn = (dir: string): string[] =>
-  fs.readdirSync(dir, { recursive: true, encoding: 'utf8' }).filter((entry) => path.basename(entry) === '.store');
 
 /** A tool that records the context each of its calls is given. */
 function whoami() {
@@ -194,23 +189,17 @@ describe('a souled agent with no runtime set', () => {
     ).rejects.toThrow(`gmi(): '${option}' is not available on the GMI path; remove it or use runtime: 'legacy'.`);
   });
 
-  it('throws for a responseSchema, which the GMI runtime does not read, before anything opens', async () => {
-    const k = key();
-    script('openai', k, { whole: true, replies: spare() });
-    const dir = soulDir();
-    const opening = souledAgent({
-      provider: 'openai',
-      model: 'stub-model',
-      apiKey: k,
-      fallbackProviders: [],
-      soul: dir,
-      responseSchema: z.object({ count: z.number() }),
-    } as unknown as SouledAgentOptions);
+  it('validates generate() and repairs an invalid reply without offering tools again', async () => {
+    const { a, s } = await open(
+      { responseSchema: z.object({ count: z.number() }) },
+      [reply.text('three'), reply.text('{"count": 3}'), ...spare()],
+    );
 
-    await expect(opening).rejects.toBeInstanceOf(TypeError);
-    await expect(opening).rejects.toThrow(/responseSchema.*runtime: 'legacy'/);
-    // Refused before the soul loads: no store folder was made in the soul's workspace.
-    expect(storeFoldersIn(dir)).toEqual([]);
+    expect((await a.generate('How many?')).parsed).toEqual({ count: 3 });
+    const calls = turnCalls(s);
+    expect(calls).toHaveLength(2);
+    expect(calls[0].options.tools).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'function' })]));
+    expect(calls[1].options.tools).toBeUndefined();
   });
 
   it("sends no end-user id for a session opened with a user id, and the turn's tools still read the user", async () => {
@@ -359,7 +348,7 @@ describe("a souled agent on runtime: 'legacy'", () => {
     expect(turnCalls(s)[0].streamed).toBe(false);
   });
 
-  it("validates generate() against the agent's responseSchema, which the GMI runtime refuses", async () => {
+  it("validates generate() against the agent's responseSchema", async () => {
     const { a } = await open({ runtime: 'legacy', responseSchema: z.object({ count: z.number() }) }, [reply.text('{"count": 3}'), ...spare()]);
 
     expect((await a.generate('How many?')).parsed).toEqual({ count: 3 });

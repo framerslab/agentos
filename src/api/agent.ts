@@ -27,12 +27,12 @@ import {
   type ToolCallHookInfo,
 } from './generateText.js';
 import { buildResponseFormatForProvider } from './runtime/responseFormatForProvider.js';
-import { buildSchemaInstructionText, dropNullsForOptionalFields, extractJson, parseJsonWithDistinctKeys } from './runtime/structuredReply.js';
+import { buildSchemaInstructionText } from './runtime/structuredReply.js';
+import { validateAgentReply, validationRepairPrompt } from './runtime/agentResponseValidation.js';
 import { createLogger } from '../core/logging/loggerFactory.js';
 import { resolveModelOption } from './model.js';
 import { credentialsGoWith, modelNamesAnotherProvider } from './runtime/credentialOwner.js';
 import { lowerZodToJsonSchema } from '../orchestration/compiler/SchemaLowering.js';
-import { ObjectGenerationError } from './generateObject.js';
 import { streamText, type StreamTextResult } from './streamText.js';
 import { inputDecisionOf, type TextGuardrailReport } from './runtime/textGuardrails.js';
 import { GuardrailAction } from '../safety/guardrails/IGuardrailService.js';
@@ -1083,31 +1083,13 @@ async function generateWithValidation(
       const memoryWrite = tookInput ? unobservedExchange(memory.provider) : observeValidatedExchange(memory.provider, memory.turn, result.text);
       return { result, object: undefined, retried: false, tookInput, memoryWrite };
     }
-    // A refusal from the model is its answer, not JSON to repair: the call ends on it, its message kept.
-    if (result.refusal !== undefined) {
-      throw new ObjectGenerationError('The model refused the request instead of writing the reply', result.text, undefined, result.refusal);
+    const validation = validateAgentReply(result, schema, extract);
+    if (validation.ok) {
+      const memoryWrite = tookInput ? unobservedExchange(memory.provider) : observeValidatedExchange(memory.provider, memory.turn, result.text);
+      return { result, object: validation.value, retried: attempt > 0, tookInput, memoryWrite };
     }
-
-    let failure: ObjectGenerationError;
-    try {
-      const parsed = extract ? extractJson(result.text) : parseJsonWithDistinctKeys(result.text);
-      // A strict json_schema payload makes every optional property nullable: a `null` there means absent.
-      const safe = schema.safeParse(dropNullsForOptionalFields(parsed, schema));
-      if (safe.success) {
-        const memoryWrite = tookInput ? unobservedExchange(memory.provider) : observeValidatedExchange(memory.provider, memory.turn, result.text);
-        return { result, object: safe.data, retried: attempt > 0, tookInput, memoryWrite };
-      }
-      failure = new ObjectGenerationError('Response failed Zod validation', result.text, safe.error);
-    } catch (err) {
-      failure = new ObjectGenerationError(
-        `Response is not valid JSON (${err instanceof Error ? err.message : String(err)})`,
-        result.text,
-      );
-    }
-    // A turn a guard replaced made no request and its reply is the guard's fixed text: a retry would ask the model
-    // with the user's turn left out, so the call fails as its last attempt would.
-    if (attempt >= maxRetries || guardReplacedInput(result.guardReport)) throw failure;
-    const feedback = failure.validationErrors?.message ?? failure.message;
+    // The model's refusal ends the call. A guard replacement made no request, so a repair would lack the user's turn.
+    if (result.refusal !== undefined || attempt >= maxRetries || guardReplacedInput(result.guardReport)) throw validation.error;
     const priorMessages = request.messages ?? [];
     const repairMessages: Message[] = result.transcriptDelta
       ? [
@@ -1128,7 +1110,7 @@ async function generateWithValidation(
       _transcriptIncludeTrailingCallerMessages: 0,
       messages: [
         ...repairMessages,
-        { role: 'user', content: `Your reply did not match the schema: ${feedback}. Reply again with JSON that matches it.` },
+        { role: 'user', content: validationRepairPrompt(validation.error) },
       ],
     };
   }
