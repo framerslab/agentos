@@ -406,18 +406,18 @@ The exceptions:
 - A named tool map (an object, not an array) is passed through as given, without `read_memory_page`.
 - An inline soul (`{ content }`) has no workspace folder: `souledAgent()` builds a plain `agent()` with no wiki memory, no `read_memory_page` tool and no compile, and says so in one `soul.inline_no_wiki` log line.
 - One-shot `generate()` and `stream()` on a GMI run the light profile, so they use the memory provider's recall, the wiki store's on a souled agent, even when sessions run with cognitive memory on. On a souled agent a one-shot call names no user: nothing is filed for it and it recalls the operator's pages alone, unless `sharedMemory` runs it as one user.
-- A seat of a launched team uses neither memory hook (no recall from the provider, nothing stored with it) and is refused the memory tools, `read_memory_page` among them.
+- A seat session on a souled agent runs without cognitive memory. A seat of a launched team uses neither memory hook (no recall from the provider, nothing stored with it) and is refused the memory tools, `read_memory_page` among them.
 - `souledAgent()`'s `memoryPolicy`, `screen` and `sharedMemory` act on the wiki's store, which a souled agent with cognitive memory on files into and recalls from on both paths, so they hold on both. They stay refused, with a `TypeError` and nothing opened, where `souledAgent()` builds a plain `agent()` with `runtime: 'gmi'` and cognitive memory on: an inline soul, and an optional soul that did not load. That agent's GMI files and recalls in a store of its own that none of them reaches.
 - A souled agent's memory is kept apart per subject on every path this page tables: recall, the page tool, the compile and the store's own reads take one subject's key and match it by equality. The agent's export (`exportAgentConfig`) carries its configuration and no trace and no page.
 - A `memoryProvider`'s recall is sent as a `<memory_recall>` block of JSON in a user-role message before the turn's own, each text datamarked, with one static line of the system prompt that says it is data. It is never a system message, so the hard limits stay the last system text. The framing lowers the chance that a stored sentence is followed as an instruction; it does not remove it. Cognitive memory's own block is rendered by the GMI and is not this block.
 - `agent.session(id, { userId })` scopes what the hooks and the tools are told on both runtimes: the user id, else the session id (an anonymous id such as `system`, `anonymous` or `guest`, or one `learning.anonymousUserIds` lists, counts as none). One session is one user; for a conversation several people share, pass one id for the group. On a souled agent that subject is the key the turn's memory is filed and recalled under, so two users, or two sessions that name none, never read each other's.
 - Hard limits are a block of prompt text every path renders last, after `systemBlocks` too, with one exception: the plan of a call with `planning` on is a system message after the limits. A memory provider's recall (the wiki's recall on a souled agent) is a data block in a user-role message, never a system message. It tells the model; it is not a check that enforces the limits.
 - A `personality` or `name` option set in code wins over the soul's `hexaco` and `name`. The id is the exception: the soul's `agentId` wins over the agent's `name`, since the id keys the agent's memory and must not move when the agent is renamed.
-- `gmi()` accepts guardrails, RAG and approval settings without applying them, and says so in one warning line at construction.
+- `gmi()` warns about deferred construction options. A call can enforce [input guards](./safety/GUARDRAILS_USAGE.md#on-the-gmi-runtime) with `stages: ['input']`.
 - A soul that fails to load throws `SoulLoadError` when the agent is built, unless it is given as `{ path, optional: true }` or `{ content, optional: true }`.
 - On the full runtime, the trait paragraph from the `hexaco:` scores reaches the prompt with or without a learning layer; with one, the layer prepares it each turn ([GMI.md](./GMI.md#learning)).
 
-A product that serves other people with a souled agent is the controller of what memory holds: [Your Duties as the Controller](./safety/MEMORY_HOST_DUTIES.md) says what the library does and what is yours.
+For retention, restore procedures and the stores a deletion reaches, see [Your Duties as the Controller](./safety/MEMORY_HOST_DUTIES.md).
 
 ## Loading Order at Agent Boot
 
@@ -433,6 +433,17 @@ A product that serves other people with a souled agent is the controller of what
 The `hexaco:` block in SOUL.md frontmatter maps directly to AgentOS's existing
 [HEXACO personality model](./memory/HEXACO_PERSONALITY.md). The scores land in
 `personaDefinition.personalityTraits`. On the full runtime they are the GMI's traits, and their trait paragraph is part of its system prompt:
+
+| Trait key | Score | Low directive | High directive | Higher scores give more weight to |
+|---|---|---|---|---|
+| `honesty` (Honesty-Humility) | 0–1 | Phrase things diplomatically | Speak plainly and acknowledge limits | Ethical content |
+| `emotionality` | 0–1 | Stay composed and practical | Acknowledge feelings and express concern | Emotional content |
+| `extraversion` | 0–1 | Listen and reflect | Take initiative and offer suggestions | Social content |
+| `agreeableness` | 0–1 | Challenge assumptions | Seek cooperation and validate perspectives | Cooperation |
+| `conscientiousness` | 0–1 | Improvise and emphasize the big picture | Structure the response and follow through on details | Procedures |
+| `openness` | 0–1 | Use established approaches | Explore unfamiliar ideas and connections | Novelty |
+
+A score below 0.35 enters the low prompt band and one above 0.65 enters the high band. A moderate score adds no directive for that trait. The last column describes cognitive memory encoding when the manager uses those traits. [Prompt bands](https://github.com/framerslab/agentos/blob/74fa36da25d49fdd47f99ec158a014eacebe8386/src/cognition/substrate/personas/personalityPrompt.ts) · [Encoding weights](https://github.com/framerslab/agentos/blob/74fa36da25d49fdd47f99ec158a014eacebe8386/src/cognition/memory/core/encoding/EncodingModel.ts)
 
 - [`AdaptPersonalityTool`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts): with `emergentConfig.selfImprovement.enabled`, changes a trait for the session's GMI within a per-session budget
 - [`PersonalityMutationStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/PersonalityMutationStore.ts): records those changes when a storage adapter is configured
