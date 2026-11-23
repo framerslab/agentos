@@ -42,6 +42,8 @@ export interface ProviderScript {
    * down does. Unset, every request is embedded.
    */
   failEmbedding?: (text: string) => boolean;
+  /** Runs before an embedding request is answered, so a test can hold it open. */
+  beforeEmbedding?: (texts: string[]) => Promise<void> | void;
   /** How many values each embedding holds, as an embedding model of another size answers. Default 1536. */
   dimension?: number;
   /** How many requests ended because the caller aborted them: held ones (see `reply.hold`) and ones aborted before they started. */
@@ -300,6 +302,8 @@ export function stubProviderClass(providerId: string) {
       if (providerId === 'anthropic') throw Object.assign(new Error('embeddings not supported'), { code: 'EMBEDDINGS_NOT_SUPPORTED' });
       this.script!.embedCalls += 1;
       this.script!.embedded.push(...texts);
+      const beforeEmbedding = this.script!.beforeEmbedding;
+      if (beforeEmbedding) await beforeEmbedding(texts);
       const fail = this.script!.failEmbedding;
       if (fail && texts.some(fail)) throw new Error('embedding provider down');
       return {
