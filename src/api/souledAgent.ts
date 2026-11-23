@@ -1468,7 +1468,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   /**
    * The decision a GMI turn read when it asked for its answer (`begin()` of the turn's soul memory), by the turn's
    * context, for as long as the context lives: a recall that resumes after its timeout reads it, so the host is asked
-   * once a turn and the turn's writes keep the decision the turn began with.
+   * once a turn and the turn's writes keep the decision the turn began with. A metaprompt's imprint, filed once the
+   * turn's reply has closed the turn's decision, reads it too.
    */
   const mindDecisions = new WeakMap<MemoryHookContext, Promise<TurnPolicy>>();
   /**
@@ -1588,7 +1589,9 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
    * The decision of the turn a hook call belongs to. A turn's recall opens it; the write of its reply closes it, so
    * the whole turn recalls and files under one answer, and a hook that failed is not asked a second time in the turn.
    * A decision keeps, from when it is opened, how many corrections and single deletions its subject's memory had been
-   * through ({@link correctionsAtDecision}).
+   * through ({@link correctionsAtDecision}). What a GMI turn files as the agent's once its reply has closed its
+   * decision, a metaprompt's imprint, reads the decision the turn began with: the host is asked nothing for a turn
+   * that has ended.
    */
   const turnPolicyOf = (
     context: MemoryHookContext,
@@ -1600,6 +1603,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     const asked = at === 'recall' ? mindDecisions.get(context) : undefined;
     if (asked) return asked;
     const open = at === 'recall' ? undefined : turnDecisions.get(context);
+    const ended = at === 'assistant' && !open ? mindDecisions.get(context) : undefined;
+    if (ended) return ended;
     const decision = open ?? decide(context, subject, scopeId);
     if (!open) correctionsAtDecision.set(decision, correctionCounts.get(scopeId) ?? 0);
     if (at === 'mind') mindDecisions.set(context, decision);
@@ -1858,12 +1863,14 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
         memoryLog.warn('memory.write_refused', { reason: 'forgotten' });
         return { role, outcome: 'skipped', reason: 'forgotten' };
       }
+      // A metaprompt's imprint can be filed after its turn's reply closed the turn's decision. It is held to that
+      // decision, read with no new ask of the host, and to the account's newest answer: one given since that keeps no
+      // memory, or a failed one, stops it.
+      const afterItsTurn = role === 'assistant' && !turnDecisions.has(context) && mindDecisions.has(context);
       const decision = turnPolicyOf(context, subject, scopeId, role);
-      // An imprint can finish after the turn's reply closed its decision. It still derives from that turn.
-      const turnDecision = role === 'assistant' ? mindDecisions.get(context) ?? decision : decision;
-      const answered = await decision;
-      const originating = turnDecision === decision ? answered : await turnDecision;
-      const policy = originating === 'failed' || originating.longTerm === 'off' ? originating : answered;
+      const decided = await decision;
+      const newest = afterItsTurn ? latestAnswers.get(scopeId) : undefined;
+      const policy = newest !== undefined && decided !== 'failed' && decided.longTerm !== 'off' ? newest : decided;
       if (policy === 'failed') {
         memoryLog.warn('memory.write_refused', { reason: 'policy_failed' });
         return { role, outcome: 'skipped', reason: 'policy_failed' };
@@ -1881,7 +1888,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       // A reply written from memory that a correction or a single deletion has changed since the turn recalled it can
       // restate what was deleted, under a new id no later call names: it is not filed, and goes to no hook. What the
       // person said themselves is filed as usual.
-      if (role === 'assistant' && (correctionCounts.get(scopeId) ?? 0) !== (correctionsAtDecision.get(turnDecision) ?? 0)) {
+      if (role === 'assistant' && (correctionCounts.get(scopeId) ?? 0) !== (correctionsAtDecision.get(decision) ?? 0)) {
         memoryLog.warn('memory.write_refused', { reason: 'corrected' });
         return { role, outcome: 'skipped', reason: 'corrected' };
       }
