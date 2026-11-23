@@ -3048,6 +3048,8 @@ export class GMI implements IGMI {
         error: lastErrorForOutput,
         usage: aggregatedUsage, // Could be partial
         ...(turnMemoryRecall ? { memoryRecall: turnMemoryRecall } : {}),
+        // What the hop last tried was sent, as its recall record above reports it.
+        ...(turnMemoryShown ? { memoryShown: turnMemoryShown } : {}),
         ...(turnHistoryOmitted ? { historyOmitted: turnHistoryOmitted } : {}),
       };
     } finally {

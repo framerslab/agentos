@@ -924,12 +924,6 @@ export function gmi(opts: GmiOptions): GmiHandle {
           const sending = (): void => {
             if (!options.abortSignal?.aborted) {
               routeObserver?.attempt({ providerId: resolution.providerId, modelId: resolution.modelId, hop: resolution.hop });
-              const block = turn.memoryContext;
-              if (turn.onProviderMemoryShown && block && messages.some(({ content }) =>
-                content === block || (Array.isArray(content) && content.some((part) => 'text' in part && part.text === block)),
-              )) {
-                turn.onProviderMemoryShown();
-              }
             }
           };
           if (budget && !options.abortSignal?.aborted) {
@@ -1047,6 +1041,17 @@ export function gmi(opts: GmiOptions): GmiHandle {
           } catch (hookError) {
             console.warn('[agentos] onBeforeGeneration hook error:', hookError);
           }
+        }
+        // The provider's items count as shown only when this call's messages, after the host's hook, still hold the
+        // block as it was rendered: a hook can drop or rewrite it, a fallback hop's call included. The session keeps
+        // each step's serving call's answer for the turn's `memoryShown`.
+        if (turn.onProviderMemoryShown) {
+          const block = turn.memoryContext;
+          turn.onProviderMemoryShown(block !== undefined && messages.some(({ content }) =>
+            typeof content === 'string'
+              ? content.includes(block)
+              : Array.isArray(content) && content.some((part) => 'text' in part && typeof part.text === 'string' && part.text.includes(block)),
+          ));
         }
         return changed ? messages : undefined;
       },
