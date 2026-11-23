@@ -8,6 +8,7 @@ import type { MemoryRecallConfig } from '../../cognition/memory/core/config';
 import { conversationScopeKey } from '../../cognition/memory/retrieval/store/conversationScopeKey';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 import { gmi } from '../gmi';
+import type { MemoryRecallBlock } from '../runtime/memoryDataBlock';
 import { souledAgent, type SouledAgent, type SouledAgentOptions } from '../souledAgent';
 import type { MemoryShownItem } from '../index';
 import { reply, script, type ProviderScript } from './helpers/stubProviders';
@@ -36,6 +37,7 @@ const QUESTION = 'What do you remember about my canary?';
 const MIND_USER = 'My canary is named LARK-7.';
 const MIND_ASSISTANT = 'A canary named LARK-7, noted.';
 const PROVIDER = 'My canary practices scales at dawn.';
+const OTHER_PROVIDER = 'My canary sleeps beside the window.';
 const PAGE = 'Canary food stays in the blue tin.';
 const PAGE_ID = 'concepts/canary';
 const REPLY = 'I remember.';
@@ -90,12 +92,7 @@ async function fileMemories(agent: SouledAgent) {
   const filing = await agent.session('filing', { userId: USER }).send(MIND_USER);
   const receipt = await filing.memoryWrite;
   expect(receipt?.entries.map((entry) => entry.outcome)).toEqual(['written', 'written']);
-  const provider = await agent.memory!.remember(PROVIDER, {
-    type: 'episodic',
-    scope: 'conversation',
-    scopeId: conversationScopeKey(AGENT, { kind: 'user', id: USER }),
-    metadata: { speaker: 'user' },
-  });
+  const provider = await rememberForReader(agent, PROVIDER);
   const page = await agent.memory!.remember(PAGE, {
     type: 'semantic',
     scope: 'conversation',
@@ -103,6 +100,19 @@ async function fileMemories(agent: SouledAgent) {
     tags: ['wiki', `page:${PAGE_ID}`],
   });
   return { provider, page };
+}
+
+function rememberForReader(agent: SouledAgent, text: string) {
+  return agent.memory!.remember(text, {
+    type: 'episodic',
+    scope: 'conversation',
+    scopeId: conversationScopeKey(AGENT, { kind: 'user', id: USER }),
+    metadata: { speaker: 'user' },
+  });
+}
+
+function readProviderBlock(content: string): MemoryRecallBlock {
+  return JSON.parse(content.slice('<memory_recall>'.length, -'</memory_recall>'.length));
 }
 
 function blocksOfLastCall(of: ProviderScript = served) {
@@ -242,6 +252,106 @@ describe.each(RUNTIMES)('with %s', (_name, runtime) => {
       expect(result.memoryShown).toBeUndefined();
       expectNoMemoryText(parts);
       expectNoMemoryText(await result.memoryRecall);
+    });
+
+    it('lists the provider memory left unchanged when the hook removes another', async () => {
+      const removedText = PROVIDER.replace(/ /g, '^');
+      const keptText = OTHER_PROVIDER.replace(/ /g, '^');
+      let beforeHook: MemoryRecallBlock['items'] | undefined;
+      const agent = await open({ capture: DETAIL }, {
+        onBeforeGeneration: async ({ messages }) => ({
+          messages: messages.map((message) => {
+            const { content } = message;
+            if (typeof content !== 'string' || !content.startsWith('<memory_recall>')) return message;
+            const block = readProviderBlock(content);
+            beforeHook = block.items;
+            block.items = block.items.filter(({ text }) => text !== removedText);
+            return { ...message, content: `<memory_recall>${JSON.stringify(block)}</memory_recall>` };
+          }),
+        }),
+      });
+      await rememberForReader(agent, PROVIDER);
+      const kept = await rememberForReader(agent, OTHER_PROVIDER);
+
+      const result = await agent.session('reader', { userId: USER }).send(QUESTION);
+      const sent = readProviderBlock(blocksOfLastCall().provider).items;
+      expect(beforeHook?.map(({ text }) => text).sort()).toEqual([keptText, removedText].sort());
+      expect(sent).toEqual([{ text: keptText, speaker: 'user', when: expect.any(String) }]);
+      expect(result.memoryShown?.filter(({ source }) => source === 'provider') ?? []).toEqual([
+        { source: 'provider', id: kept.id, text: OTHER_PROVIDER, speaker: 'user', at: sent[0].when },
+      ]);
+    });
+
+    it('lists the mind memory left unchanged when the hook removes another', async () => {
+      const agent = await open({ capture: DETAIL }, {
+        onBeforeGeneration: async ({ messages }) => ({
+          messages: messages.map((message) => {
+            const { content } = message;
+            if (typeof content !== 'string' || !content.includes('## How To Use Your Memories')) return message;
+            return { ...message, content: content.split('\n').filter((line) => !line.includes(MIND_ASSISTANT)).join('\n') };
+          }),
+        }),
+      });
+      // The recall metadata records the mind's original render, before the hook removes the reply.
+      const filing = await agent.session('filing', { userId: USER }).send(MIND_USER);
+      await filing.memoryWrite;
+      const { traces } = await agent.exportUserMemory!(USER);
+      const user = traces.find(({ text }) => text === MIND_USER)!;
+      const assistant = traces.find(({ text }) => text === MIND_ASSISTANT)!;
+
+      const result = await agent.session('reader', { userId: USER }).send(QUESTION);
+      const sent = blocksOfLastCall();
+      expect(sent.mind).toContain(MIND_USER);
+      expect(sent.mind).not.toContain(MIND_ASSISTANT);
+      expect(result.memoryRecall?.candidates).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: user.id, outcome: 'included' }),
+        expect.objectContaining({ id: assistant.id, outcome: 'included' }),
+      ]));
+      expect(result.memoryShown?.filter(({ source }) => source === 'memory') ?? []).toEqual([
+        { source: 'memory', id: user.id, text: MIND_USER, speaker: 'user', at: user.createdAt },
+      ]);
+    });
+
+    it('omits rewritten entries and duplicated items from the receipt', async () => {
+      const changedMind = 'My canary is named FINCH-8.';
+      const changedProvider = 'My^canary^practices^scales^after^lunch.';
+      const input = PROVIDER.replace(/ /g, '^');
+      const agent = await open({ capture: DETAIL }, {
+        onBeforeGeneration: async ({ messages }) => ({
+          messages: messages.map((message) => {
+            const { content } = message;
+            if (typeof content !== 'string') return message;
+            if (content.startsWith('<memory_recall>')) {
+              const block = readProviderBlock(content);
+              block.items = block.items.flatMap((item) =>
+                item.text === input ? [{ ...item, text: changedProvider }] : [item, item],
+              );
+              return { ...message, content: `<memory_recall>${JSON.stringify(block)}</memory_recall>` };
+            }
+            if (content.includes('## How To Use Your Memories')) {
+              return { ...message, content: content.replace(MIND_USER, changedMind) };
+            }
+            return message;
+          }),
+        }),
+      });
+      const { provider } = await fileMemories(agent);
+      const other = await rememberForReader(agent, OTHER_PROVIDER);
+      const { traces } = await agent.exportUserMemory!(USER);
+      const user = traces.find(({ text }) => text === MIND_USER)!;
+
+      const result = await agent.session('reader', { userId: USER }).send(QUESTION);
+      const sent = blocksOfLastCall();
+      expect(sent.mind).toContain(changedMind);
+      expect(sent.mind).not.toContain(MIND_USER);
+      const sentItems = readProviderBlock(sent.provider).items;
+      expect(sentItems.some(({ text }) => text === changedProvider)).toBe(true);
+      expect(sentItems.filter(({ text }) => text === OTHER_PROVIDER.replace(/ /g, '^'))).toHaveLength(2);
+      const shown = result.memoryShown ?? [];
+      expect(shown.filter(({ source }) => source === 'provider')).toEqual([]);
+      expect(shown.map(({ id }) => id)).not.toContain(provider.id);
+      expect(shown.map(({ id }) => id)).not.toContain(other.id);
+      expect(shown.map(({ id }) => id)).not.toContain(user.id);
     });
 
     it('lists what the serving fallback hop was sent when a hook leaves the provider block out there', async () => {
