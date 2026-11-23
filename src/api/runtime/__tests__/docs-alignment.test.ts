@@ -349,6 +349,9 @@ describe('AgentOS docs alignment', () => {
       expect(content, relative(docsRoot, guide)).not.toContain(
         "`souledAgent()` refuses any of the three, with a `TypeError` and nothing opened, on `runtime: 'gmi'`",
       );
+      expect(content, relative(docsRoot, guide)).not.toContain(
+        "souledAgent: memoryPolicy, screen and sharedMemory act on the souled agent's own memory, and cognitive memory (runtime: 'gmi' with cognition memory on) keeps a store none of them reaches; turn cognitive memory off, or leave them out",
+      );
       for (const match of content.matchAll(/\]\(((?:\.\.?\/)[^)#\s]+\.md)(?:#[^)]*)?\)/g)) {
         const target = resolve(dirname(guide), match[1]);
         if (!target.startsWith(docsRoot) || !existsSync(target)) continue;

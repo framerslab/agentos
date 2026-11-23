@@ -1385,7 +1385,7 @@ console.log(`Pruned ${consolidation.prunedCount}, created ${consolidation.schema
 
 ## Integration with GMI
 
-A GMI with cognitive memory calls the manager through [`CognitiveMemoryBridge`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/CognitiveMemoryBridge.ts) at two points of its turn. The calls below are the bridge's, in outline; `mood` is the GMI's PAD state and `gmiMood` its mood label.
+A GMI with cognitive memory calls the manager through [`CognitiveMemoryBridge`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/CognitiveMemoryBridge.ts) at two points of its turn. The calls below show a standalone GMI. A workspace-backed souled agent instead files accepted session turns under its user's or anonymous session's conversation key and uses a neutral stamp by default. In these examples, `mood` is the GMI's PAD state and `gmiMood` its mood label.
 
 ### Before Prompt Construction (Retrieve + Assemble)
 
