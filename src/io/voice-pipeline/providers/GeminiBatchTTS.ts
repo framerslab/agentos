@@ -131,6 +131,7 @@ export function geminiTranscript(spoken: string, direction?: SpeechDirection): s
 }
 
 interface InteractionResponse {
+  status?: string;
   steps?: Array<{ type?: string; content?: Array<{ type?: string; data?: string }> }>;
   error?: { status?: string; message?: string };
   usage?: { total_input_tokens?: number; total_output_tokens?: number };
@@ -141,6 +142,8 @@ function classifyError(status: number, error?: InteractionResponse['error']): Ge
   if (isQuotaError(status, typeof error?.status === 'string' ? error.status : '')) {
     return new GeminiTtsError('quota');
   }
+  // Invalid voices share the HTTP status of other input errors. Look for explicit
+  // voice messages such as 'Unknown voice' and 'Voice ... not found'.
   const message = typeof error?.message === 'string' ? error.message : '';
   if ((status === 400 || status === 404) &&
       /\b(?:(?:unknown|invalid|unrecognized|unsupported) voice|voice\b.*(?:not found|not supported|does not exist))/i.test(message)) {
@@ -200,7 +203,8 @@ export class GeminiBatchTTS implements IBatchTTS {
       throw new GeminiTtsError('server');
     }
     if (!response.ok) throw classifyError(response.status, result?.error);
-    if (!result || typeof result !== 'object') throw new GeminiTtsError('server');
+    // Incomplete interactions may contain a WAV of only part of the line.
+    if (result?.status !== 'completed') throw new GeminiTtsError('server');
     return result;
   }
 
@@ -258,6 +262,7 @@ export class GeminiBatchTTS implements IBatchTTS {
       throw new GeminiTtsError('server');
     }
     const textTokens = tokenCount(result.usage?.total_input_tokens);
+    // Estimate Gemini speech output at 25 audio tokens per second when usage is absent.
     const audioTokens = tokenCount(result.usage?.total_output_tokens) ?? Math.ceil(durationMs * 25 / 1000);
     return {
       audio,

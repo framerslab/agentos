@@ -166,7 +166,7 @@ const clip = await tts.synthesize('Take your time. We have all night.', {
 });
 ```
 
-The result contains a 24 kHz mono PCM16 WAV, its duration from the WAV data chunk, and token usage. Emotion, delivery, and pace become a style annotation. Matching emphasis, pauses, and vocal reactions become inline cues. `appliedDirection` lists the fields that affected the request. With a comma-separated key pool, the provider tries another available key once after a quota failure.
+This provider always returns a 24 kHz mono PCM16 WAV. The result also contains duration from the WAV data chunk and token usage. Emotion, delivery, and pace become a style annotation. Matching emphasis, pauses, and vocal reactions become inline cues. `appliedDirection` lists the fields that affected the request. With a comma-separated key pool, the provider tries another available key once after a quota failure.
 
 ### OpenAI Realtime TTS
 
