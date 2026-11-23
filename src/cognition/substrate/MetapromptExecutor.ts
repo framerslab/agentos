@@ -134,6 +134,8 @@ export interface MetapromptRun {
    * the unit), else the executor's manager.
    */
   readonly llmProviderManager?: AIModelProviderManager;
+  /** The cognitive memory writer bound to the turn that queued this work, when there is one. */
+  readonly writeMemoryImprint?: MetapromptExecutorConfig['onMemoryImprint'];
 }
 
 /**
@@ -201,8 +203,12 @@ export class MetapromptExecutor {
    * Creates a new MetapromptExecutor.
    *
    * @param config - All dependencies and callbacks.
+   * @param imprintForQueuedWork - An internal hook that binds cognitive memory filing to the turn that queues work.
    */
-  constructor(private readonly config: MetapromptExecutorConfig) {
+  constructor(
+    private readonly config: MetapromptExecutorConfig,
+    private readonly imprintForQueuedWork?: () => MetapromptExecutorConfig['onMemoryImprint'] | undefined,
+  ) {
     this.selfReflectionIntervalTurns = 5; // Will be overridden by initialize
   }
 
@@ -414,6 +420,7 @@ export class MetapromptExecutor {
       isStale: () => overdue || this.closed || this.discards !== discardsAtQueue,
       isDiscarded: () => this.discards !== discardsAtQueue,
       llmProviderManager: this.providersForQueuedWork(),
+      writeMemoryImprint: this.imprintForQueuedWork?.(),
     };
     const unit = async (): Promise<void> => {
       if (run.isStale()) return;
@@ -1019,6 +1026,10 @@ export class MetapromptExecutor {
           }
           storedImprintKeys.push(imprint.key);
           stateChanged = true;
+          if (run?.writeMemoryImprint && !run.isStale()) {
+            const content = typeof imprint.value === 'string' ? imprint.value : JSON.stringify(imprint.value);
+            if (content?.trim()) await run.writeMemoryImprint(content, ['assistant', 'metaprompt']);
+          }
         }
       }
     }

@@ -75,6 +75,7 @@ import type { MemoryShownItem } from '../../api/runtime/memoryWriteRecord.js';
 import type { MemoryRecallCapture } from '../memory/retrieval/recall/capture.js';
 import { effectiveRecallBudget, estimateMemoryTokens } from '../memory/retrieval/recall/budget.js';
 import { ConversationHistoryManager } from './ConversationHistoryManager';
+import { scopeIdOf, taggedScopeId } from '../learning/scopes.js';
 import { CognitiveMemoryBridge, captureWithoutBlock, type CognitiveMemoryTurnLearning, type CognitiveMemoryTurnScope } from './CognitiveMemoryBridge';
 import { SentimentTracker } from './SentimentTracker';
 import { MetapromptExecutor } from './MetapromptExecutor';
@@ -652,6 +653,18 @@ export class GMI implements IGMI {
       (turnId) => this.turnInputs.has(turnId),
     );
 
+    // Bind the imprint to the turn that queued the work. The metaprompt may finish during a later turn.
+    const imprintForQueuedWork = () => {
+      const soul = this.turnSoulMemory;
+      const bridge = this.memoryBridge;
+      if (!bridge || !bridge.usesSoul(soul)) return undefined;
+      return async (content: string, tags: string[]): Promise<void> => {
+        // Filing waits on the person's write chain, which may be held by a compile.
+        void bridge.encode(content, { type: 'semantic', sourceType: 'agent_inference', role: 'assistant', tags, soul })
+          .catch(() => undefined);
+      };
+    };
+
     // Initialize metaprompt executor
     this.metapromptExecutor = new MetapromptExecutor({
       workingMemory: this.workingMemory,
@@ -673,32 +686,7 @@ export class GMI implements IGMI {
         Object.assign(this.currentTaskContext, updates);
         this.workingMemory.set('currentTaskContext', this.currentTaskContext);
       },
-      onMemoryImprint: async (content, tags) => {
-        // On a souled agent's mind an imprint is derived from the person's turns: it is filed through the last turn's
-        // view of the soul, as the agent's own words, through the same gate as the turn. The person's write chain can
-        // be held by a compile, so the metaprompt does not wait for it. With no view, the bridge files nothing.
-        const soul = this.turnSoulMemory;
-        const bridge = this.memoryBridge;
-        if (bridge && bridge.usesSoul(soul)) {
-          void bridge
-            .encode(content, { type: 'semantic', sourceType: 'agent_inference', role: 'assistant', tags, soul })
-            .catch(() => undefined);
-          return;
-        }
-        // With a learning layer's scope ids, an imprint is filed with the last prepared turn's; before any, nowhere.
-        const learning = this.memoryLearningOfLastTurn();
-        if (learning === null) {
-          this.addTraceEntry(ReasoningEntryType.DEBUG, 'A metaprompt imprint was not filed: no turn of this session has scope ids yet.');
-          return;
-        }
-        await this.memoryBridge?.encode(content, {
-          type: 'semantic',
-          sourceType: 'agent_inference',
-          role: 'system',
-          tags,
-          ...(learning ? { learning } : {}),
-        });
-      },
+      onMemoryImprint: async (content, tags) => imprintForQueuedWork()?.(content, tags),
       getPendingEvents: () => this.sentimentTracker.pendingEvents,
       getEventHistory: () => this.sentimentTracker.events,
       getConversationHistory: () => this.conversationHistoryManager.history,
@@ -709,7 +697,7 @@ export class GMI implements IGMI {
       setState: (state) => { this.state = state; },
       getState: () => this.state,
       getGmiId: () => this.gmiId,
-    });
+    }, imprintForQueuedWork);
 
     const reflectionMetaPrompt = this.activePersona.metaPrompts?.find(mp => mp.id === 'gmi_self_trait_adjustment');
     this.metapromptExecutor.selfReflectionIntervalTurns = reflectionMetaPrompt?.trigger?.type === 'turn_interval' && typeof reflectionMetaPrompt.trigger.intervalTurns === 'number'
@@ -911,7 +899,7 @@ export class GMI implements IGMI {
   }
 
   /**
-   * The memory learning that feedback or a metaprompt's imprint is filed with between turns: `undefined` on a
+   * The memory learning that feedback is filed with between turns: `undefined` on a
    * GMI whose learner session gives no scope ids, neither through `scopesFor` nor in the last turn's preparation (the
    * bridge files as before); otherwise the last prepared turn's, and `null` (not filed) before any turn was prepared,
    * or for feedback from another user than that turn's.
@@ -1273,13 +1261,14 @@ export class GMI implements IGMI {
   }
 
   /**
-   * The user context as cognitive memory reads it: the turn's memory scope user
-   * in place of the turn's user when the turn named one, so memory files and
-   * recalls under that id while tools and prompts keep the turn's user.
+   * The user key cognitive memory uses. A high-level session gives it a named user or a key in the session form.
+   * Tools and prompts keep the turn's own user context.
    */
   private memoryUserContext(): UserContext {
-    const userId = this.turnMemoryScope?.userId;
-    return userId ? { ...this.currentUserContext, userId } : this.currentUserContext;
+    const { userId, sessionId } = this.turnMemoryScope ?? {};
+    if (userId) return { ...this.currentUserContext, userId: scopeIdOf(userId) };
+    if (sessionId) return { ...this.currentUserContext, userId: taggedScopeId(sessionId, '') };
+    return this.currentUserContext;
   }
 
   /**
@@ -1294,7 +1283,7 @@ export class GMI implements IGMI {
       return { sessionId: turnInput.sessionId, conversationId: this.getConversationIdForTurn(turnInput), organizationId };
     }
     const namedConversation = typeof turnInput.metadata?.conversationId === 'string' ? turnInput.metadata.conversationId.trim() : '';
-    return { sessionId, conversationId: namedConversation || sessionId, organizationId };
+    return { sessionId, conversationId: namedConversation || sessionId, organizationId, sessionUserScopeId: taggedScopeId(sessionId, '') };
   }
 
   /**
@@ -2991,7 +2980,7 @@ export class GMI implements IGMI {
       // of the soul, and the turn does not wait for it: the output carries the record of the write.
       const memorySessionId = this.turnMemoryScope?.sessionId;
       const synced = await this.memoryBridge?.syncForTurn(
-        memorySessionId ? { ...turnInput, sessionId: memorySessionId } : turnInput,
+        memorySessionId ? { ...turnInput, sessionId: taggedScopeId(memorySessionId, '') } : turnInput,
         aggregatedResponseText,
         turnLearning.memory,
         turnSoul,
