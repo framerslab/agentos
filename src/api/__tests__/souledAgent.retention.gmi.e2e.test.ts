@@ -227,6 +227,81 @@ describe.each(['agent.sweepRetention()', 'close()'] as const)('retention on a so
 });
 
 describe('close() on a souled agent on the GMI runtime', () => {
+  it("compiles the mind's turns with their speakers into each person's own page", async () => {
+    const aliceSaid = 'My canary is named LARK-7.';
+    const ariaAnswered = 'A canary, lovely.';
+    const bobSaid = 'My finch is named WREN-2.';
+    const compileKey = `k-souled-retention-gmi-compile-${++n}`;
+    const compiler = script('openai', compileKey, {
+      whole: true,
+      replies: [reply.text('A note about the conversation.'), reply.text('A note about the conversation.')],
+    });
+    const a = await open(
+      { tombstoneKey: 'k-souled-retention-gmi-tombstones', compile: { provider: 'openai', model: 'stub-model', apiKey: compileKey } },
+      [reply.text(ariaAnswered), reply.text('A finch, lovely.'), ...spare()],
+    );
+    await writeOf(await a.session('s1', { userId: 'alice' }).send(aliceSaid));
+    await writeOf(await a.session('s2', { userId: 'bob' }).send(bobSaid));
+    const aliceRows = rowsUnder(keyOf('alice'));
+    const bobRows = rowsUnder(keyOf('bob'));
+    expect(aliceRows).toHaveLength(2);
+    expect(bobRows).toHaveLength(2);
+    expect([...aliceRows, ...bobRows].map((row) => metaOf(row).filedBy)).toEqual(['mind', 'mind', 'mind', 'mind']);
+
+    await closed(a);
+
+    const calls = compiler.seen.flatMap((call) => call.messages.map((message) => message.content));
+    const prompt = calls.find((content): content is string => typeof content === 'string' && content.includes(aliceSaid));
+    expect(prompt).toBeDefined();
+    expect(prompt).not.toContain(bobSaid);
+    const records = JSON.parse(prompt!.slice(prompt!.lastIndexOf('\n\n') + 2));
+    expect(records).toHaveLength(2);
+    expect(records).toEqual(expect.arrayContaining([
+      expect.objectContaining({ speaker: 'user', text: aliceSaid }),
+      expect.objectContaining({ speaker: 'assistant', text: ariaAnswered }),
+    ]));
+
+    const pages = rows<{ content: string }>('SELECT content FROM memory_pages WHERE scope_id = ?', [keyOf('alice')]);
+    expect(pages).toHaveLength(1);
+    expect(pages[0].content).toContain('A note about the conversation.');
+    for (const row of aliceRows) expect(pages[0].content).toContain(row.id);
+    for (const row of bobRows) expect(pages[0].content).not.toContain(row.id);
+  });
+
+  it("rebuilds a corrected page from the mind's turns that are left, with their speakers", async () => {
+    const aliceSaid = 'My canary is named LARK-7.';
+    const compileKey = `k-souled-retention-gmi-rebuild-${++n}`;
+    const compiler = script('openai', compileKey, {
+      whole: true,
+      replies: [reply.text('A note about the canary.'), reply.text('A rebuilt note about the canary.'), reply.text('A spare note.')],
+    });
+    const a = await open(
+      { tombstoneKey: 'k-souled-retention-gmi-tombstones', compile: { provider: 'openai', model: 'stub-model', apiKey: compileKey } },
+      [reply.text('A canary, lovely.'), ...spare()],
+    );
+    await writeOf(await a.session('s1', { userId: 'alice' }).send(aliceSaid));
+    const hers = rowsUnder(keyOf('alice'));
+    expect(hers.map((row) => metaOf(row).speaker).sort()).toEqual(['assistant', 'user']);
+    const answered = hers.find((row) => metaOf(row).speaker === 'assistant')!;
+    await a.memory!.compileWiki();
+    expect(rows('SELECT page_id FROM memory_pages WHERE scope_id = ?', [keyOf('alice')])).toHaveLength(1);
+    const before = compiler.seen.length;
+
+    // Deleting the reply deletes the page compiled from it; the next compile builds the page again from what is left.
+    await a.correctUserMemory!('alice', { traceIds: [answered.id] });
+    expect(rows('SELECT page_id FROM memory_pages WHERE scope_id = ?', [keyOf('alice')])).toHaveLength(0);
+    await a.memory!.compileWiki();
+
+    const prompts = compiler.seen
+      .slice(before)
+      .flatMap((call) => call.messages.map((message) => message.content))
+      .filter((content): content is string => typeof content === 'string' && content.includes(aliceSaid));
+    expect(prompts).toHaveLength(1);
+    const records = JSON.parse(prompts[0].slice(prompts[0].lastIndexOf('\n\n') + 2));
+    expect(records).toEqual([expect.objectContaining({ speaker: 'user', text: aliceSaid })]);
+    expect(rows('SELECT page_id FROM memory_pages WHERE scope_id = ?', [keyOf('alice')])).toHaveLength(1);
+  });
+
   it('says through the logger what it left, never on the console: writes still pending, a failed sweep, a failed compile', async () => {
     const a = await open({ pendingWritesTimeoutMs: 50 }, [reply.text('A canary, lovely.'), ...spare()]);
     await writeOf(await a.session('s1', { userId: 'alice' }).send('My canary is named LARK-7.'));

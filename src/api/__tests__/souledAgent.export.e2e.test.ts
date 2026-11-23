@@ -22,6 +22,7 @@ import * as path from 'node:path';
 import Database from 'better-sqlite3';
 import pino from 'pino';
 import { souledAgent, type SouledAgent, type SouledAgentOptions } from '../souledAgent';
+import { CognitiveMemoryManager } from '../../cognition/memory/CognitiveMemoryManager';
 import type { MemoryRecipient } from '../runtime/memoryRecipients';
 import { exportSubjectMemory, type UserMemoryExport } from '../../cognition/memory/io/userMemoryExport';
 import { SqlStorageMemoryArchive } from '../../cognition/memory/archive/SqlStorageMemoryArchive';
@@ -35,6 +36,7 @@ import { clearDefaultProvider, setDefaultProvider } from '../runtime/global-defa
 
 /** The runtime the cases run on; a case that needs what only the GMI runtime has names it. */
 const RUNTIME = 'legacy' as const;
+const JOINED_RUNTIME = 'gmi' as const;
 
 /** What `open()`'s options send a person's text to: the agent's own model, and the compile on its route. */
 const OWN_ROUTE: MemoryRecipient[] = [
@@ -694,5 +696,125 @@ describe('the export over an archive and a live memory graph', () => {
     expect(doc.held.graphLinks).toEqual([{ from: said[0].id, to: said[1].id, type: 'TEMPORAL_SEQUENCE', weight: 0.4 }]);
     expect(JSON.stringify(doc)).not.toContain('WREN-2');
     expect(JSON.stringify(doc)).not.toContain(bobs.id);
+  });
+});
+
+describe(`one person's export of memory filed by the mind, on runtime ${JOINED_RUNTIME}`, () => {
+  const first = 'My canary is LARK-7.';
+  const second = 'I keep it in the attic.';
+  const other = 'My finch is WREN-2.';
+  const original = 'My canary is LARK-7, the yellow one with a ring.';
+
+  async function openWithTurns() {
+    writeOperatorPage('Guests check out by HERON-5 hours.');
+    const embeddingKey = `k-souled-export-embed-${++n}`;
+    script('openai', embeddingKey, { replies: [] });
+    vi.stubEnv('OPENAI_API_KEY', embeddingKey);
+    const initialized = vi.spyOn(CognitiveMemoryManager.prototype, 'initialize');
+    const { a } = await open({
+      runtime: JOINED_RUNTIME,
+      cognition: { memory: { embedding: { provider: 'openai' } }, mechanisms: false },
+    });
+
+    await turn(a, 's1', alice.id, first);
+    await turn(a, 's1', alice.id, second);
+    await turn(a, 's2', bob.id, other);
+    expect(initialized).toHaveBeenCalledTimes(1);
+    const manager = initialized.mock.contexts[0] as CognitiveMemoryManager;
+    const archive = manager.getConfig().archive!;
+    const graph = manager.getGraph()!;
+    const [aFirst] = saidOf(keyOf(alice)).filter((trace) => trace.content === first);
+    const [aSecond] = saidOf(keyOf(alice)).filter((trace) => trace.content === second);
+    const [bFirst] = saidOf(keyOf(bob)).filter((trace) => trace.content === other);
+    for (const [traceId, text] of [
+      [aFirst.id, original],
+      [bFirst.id, 'WREN-2, the original words.'],
+    ]) {
+      await archive.store({
+        traceId,
+        agentId: 'aria-1',
+        verbatimContent: text,
+        contentHash: createHash('sha256').update(text, 'utf8').digest('hex'),
+        traceType: 'episodic',
+        emotionalContext: { valence: 0, arousal: 0, dominance: 0, intensity: 0, gmiMood: 'neutral' },
+        entities: [],
+        tags: [],
+        createdAt: Date.now(),
+        archivedAt: Date.now(),
+        archiveReason: 'temporal_gist',
+      });
+    }
+
+    const inside = { sourceId: aFirst.id, targetId: aSecond.id, type: 'TEMPORAL_SEQUENCE', weight: 0.8 } as const;
+    await graph.addEdge({ ...inside, createdAt: Date.now() });
+    await graph.addEdge({ sourceId: aFirst.id, targetId: bFirst.id, type: 'SAME_TOPIC', weight: 0.9, createdAt: Date.now() });
+    expect(graph.getEdges(aFirst.id)).toContainEqual(expect.objectContaining(inside));
+    return { a, inside, bFirst, graph };
+  }
+
+  it("exports both turns with their speakers, held fields, archived original and live graph link", async () => {
+    const { a, inside } = await openWithTurns();
+    const doc = await exportOf(a, alice.id);
+
+    expect(doc.provided.messages.map((message) => message.text)).toEqual([first, second]);
+    expect(doc.held.traces).toHaveLength(4);
+    expect(doc.held.traces.filter((trace) => trace.speaker === 'user').map((trace) => trace.text)).toEqual([first, second]);
+    expect(doc.held.traces.filter((trace) => trace.speaker === 'assistant').map((trace) => trace.text)).toEqual([
+      expect.stringMatching(/^Noted /),
+      expect.stringMatching(/^Noted /),
+    ]);
+    for (const trace of doc.held.traces) {
+      expect(trace).toMatchObject({
+        filedBy: 'mind',
+        emotionalContext: { valence: 0, arousal: 0.5, dominance: 0, intensity: 0, gmiMood: 'neutral' },
+      });
+      expect(Number.isFinite(trace.encodingStrength)).toBe(true);
+      expect(Number.isFinite(trace.stability)).toBe(true);
+      expect(Number.isInteger(trace.retrievalCount)).toBe(true);
+      expect(new Date(trace.lastAccessedAt).toISOString()).toBe(trace.lastAccessedAt);
+    }
+    expect(doc.held.typedFacts).toEqual([]);
+    expect(doc.unread).toEqual([]);
+    expect.soft(doc.held.archivedOriginals).toEqual([{ traceId: inside.sourceId, text: original }]);
+    expect.soft(doc.held.graphLinks).toContainEqual({
+      from: inside.sourceId,
+      to: inside.targetId,
+      type: inside.type,
+      weight: inside.weight,
+    });
+  });
+
+  it('keeps a stored link and a live link of another type between the same two traces, and lists a link both hold once', async () => {
+    const { a, inside, graph } = await openWithTurns();
+    const own = (id: string) => ({ id, key: keyOf(alice) });
+    // The store's graph links the live link's two traces by another type.
+    await link(a, own(inside.sourceId), own(inside.targetId), 0.3);
+    // Both graphs link the first message to the agent's first reply by the same type, each with a weight of its own.
+    const [firstReply] = saidOf(keyOf(alice)).filter((trace) => trace.content.startsWith('Noted '));
+    await link(a, own(inside.sourceId), own(firstReply.id), 0.6);
+    await graph.addEdge({ sourceId: inside.sourceId, targetId: firstReply.id, type: 'SAME_TOPIC', weight: 0.95, createdAt: Date.now() });
+
+    const links = (await exportOf(a, alice.id)).held.graphLinks;
+    expect(links).toContainEqual({ from: inside.sourceId, to: inside.targetId, type: 'SAME_TOPIC', weight: 0.3 });
+    expect(links).toContainEqual({ from: inside.sourceId, to: inside.targetId, type: inside.type, weight: inside.weight });
+    // The store's record of a link the live graph holds too is the one listed.
+    expect(links.filter((one) => one.from === inside.sourceId && one.to === firstReply.id)).toEqual([
+      { from: inside.sourceId, to: firstReply.id, type: 'SAME_TOPIC', weight: 0.6 },
+    ]);
+  });
+
+  it("excludes another person's traces, archived text and page, and the operator's page", async () => {
+    const { a, bFirst } = await openWithTurns();
+    await a.memory!.compileWiki();
+    expect((await exportOf(a, bob.id)).held.pages).toHaveLength(1);
+    const doc = await exportOf(a, alice.id);
+    expect(doc.held.pages).toHaveLength(1);
+
+    const text = JSON.stringify(doc);
+    expect(text).toContain('LARK-7');
+    expect(text).not.toContain('WREN-2');
+    expect(text).not.toContain(bFirst.id);
+    expect(text).not.toContain('HERON-5');
+    expect(text).not.toContain('concepts/house');
   });
 });

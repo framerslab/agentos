@@ -84,7 +84,7 @@ export interface UserMemoryExport {
     archivedOriginals: Array<{ traceId: string; text: string }>;
     /** Typed facts extracted from the subject's traces: none, as no souled agent extracts them. */
     typedFacts: [];
-    /** The memory graph's links between two of the subject's own traces. */
+    /** Links between two held traces from the store's graph and the live cognitive memory graph. */
     graphLinks: Array<{ from: string; to: string; type: string; weight: number }>;
     /** The pages compiled from the subject's traces, as {@link UserMemoryExport.pages}. */
     pages: ExportedPage[];
@@ -233,7 +233,7 @@ export async function exportSubjectMemory(options: {
   profilingOf?: (scopeId: string) => 'on' | 'off';
   /** The subject's learned state, when the agent runs a learning layer. A read that fails is named in `unread`. */
   learner?: () => Promise<LearnedStateDocument>;
-  /** An archive of verbatim originals: each held trace's original is read from it for the export. */
+  /** The opened store's archive. Only held trace ids are rehydrated, with the `user_export` access context. */
   archive?: Pick<IMemoryArchive, 'rehydrate'>;
   /** A memory graph held in this process beside the store's: its links between the subject's traces are added. */
   liveGraph?: { getEdges(memoryId: string): Array<{ sourceId: string; targetId: string; type: string; weight: number }> };
@@ -373,9 +373,13 @@ export async function exportSubjectMemory(options: {
 
   if (heldIds.length > 0) {
     await reading('memory graph', async () => {
+      // One record a link, by its two ends and its type: a live link of another type between the same two traces is a
+      // link of its own, and a link both graphs hold is listed once, as the store records it.
       const links = new Map<string, UserMemoryExport['held']['graphLinks'][number]>();
+      const linkKeyOf = (edge: { sourceId: string; targetId: string; type: string }) =>
+        `${edge.sourceId}\u0000${edge.targetId}\u0000${edge.type}`;
       for (const edge of await memoryGraphEdgesAmong(brainOf(memory), heldIds)) {
-        links.set(`${edge.sourceId}\u0000${edge.targetId}`, { from: edge.sourceId, to: edge.targetId, type: edge.type, weight: edge.weight });
+        links.set(linkKeyOf(edge), { from: edge.sourceId, to: edge.targetId, type: edge.type, weight: edge.weight });
       }
       const live = options.liveGraph;
       if (live) {
@@ -383,7 +387,7 @@ export async function exportSubjectMemory(options: {
         for (const id of heldIds) {
           for (const edge of live.getEdges(id)) {
             if (edge.sourceId !== id || !held.has(edge.targetId)) continue;
-            const linkKey = `${edge.sourceId}\u0000${edge.targetId}`;
+            const linkKey = linkKeyOf(edge);
             if (!links.has(linkKey)) links.set(linkKey, { from: edge.sourceId, to: edge.targetId, type: edge.type, weight: edge.weight });
           }
         }

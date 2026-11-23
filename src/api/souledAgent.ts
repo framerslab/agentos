@@ -3075,6 +3075,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       const owns = legacyOwnerKey !== undefined && key === legacyOwnerKey;
       const days = policyDays.get(key);
       const exportLearned = built.learning?.exportLearnedState;
+      const liveGraph = mindManagers.values().next().value?.getGraph();
       return exportSubjectMemory({
         memory,
         wiki: { storeFor: pagesOf },
@@ -3084,6 +3085,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
         recipients: listRecipients,
         retention: { period: retention?.traces ?? 'none', ...(days !== undefined ? { policyDays: days } : {}) },
         profilingOf: sentimentOf,
+        ...(mindArchive ? { archive: mindArchive } : {}),
+        ...(liveGraph ? { liveGraph } : {}),
         ...(exportLearned ? { learner: () => exportLearned.call(built.learning, userId) } : {}),
       });
     };
