@@ -9,8 +9,7 @@ import { conversationScopeKey } from '../../cognition/memory/retrieval/store/con
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 import { gmi } from '../gmi';
 import { souledAgent, type SouledAgent, type SouledAgentOptions } from '../souledAgent';
-import type { GenerateTextResult } from '../generateText';
-import type { StreamTextResult } from '../streamText';
+import type { MemoryShownItem } from '../index';
 import { reply, script, type ProviderScript } from './helpers/stubProviders';
 
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({
@@ -28,19 +27,7 @@ const PROVIDER = 'My canary practices scales at dawn.';
 const PAGE = 'Canary food stays in the blue tin.';
 const PAGE_ID = 'concepts/canary';
 const REPLY = 'I remember.';
-const DETAIL = 'metadata+text' as never;
-
-interface Shown {
-  source: 'memory' | 'provider';
-  id?: string;
-  text: string;
-  speaker?: 'user' | 'assistant' | 'note';
-  page?: string;
-  at?: string;
-}
-
-const shownOf = (result: GenerateTextResult) => (result as unknown as { memoryShown?: Shown[] }).memoryShown;
-const streamedShownOf = (result: StreamTextResult) => (result as unknown as { memoryShown?: Promise<Shown[]> }).memoryShown;
+const DETAIL = 'metadata+text';
 
 let serial = 0;
 let dir: string;
@@ -134,9 +121,11 @@ async function expectRecallDetail(store?: Pick<SouledAgentOptions, 'soulStore' |
   const fromMind = traces.filter(({ text }) => blocks.mind.includes(text));
   const includedIds = result.memoryRecall?.candidates.filter(({ outcome }) => outcome === 'included').map(({ id }) => id) ?? [];
   expect(includedIds.slice().sort()).toEqual(fromMind.map(({ id }) => id).sort());
-  const expectedMind = includedIds.map((id) => {
+  const expectedMind = includedIds.map<MemoryShownItem>((id) => {
     const trace = fromMind.find((item) => item.id === id)!;
-    return { source: 'memory', id, text: trace.text, speaker: trace.speaker, at: trace.createdAt };
+    const text = trace.speaker === 'assistant' ? `You said: ${trace.text}` : trace.text;
+    expect(blocks.mind).toContain(text);
+    return { source: 'memory', id, text, speaker: trace.speaker, at: trace.createdAt };
   });
 
   const modelItems = (JSON.parse(blocks.provider.slice('<memory_recall>'.length, -'</memory_recall>'.length)) as {
@@ -156,7 +145,7 @@ async function expectRecallDetail(store?: Pick<SouledAgentOptions, 'soulStore' |
     expect(item.when).toMatch(/\d{4}-\d{2}-\d{2}/);
     if (item.speaker === 'note') expect(item.page).toBe(PAGE_ID);
   }
-  const expectedProvider = modelItems.map(({ text, speaker, page: pageId, when }) => ({
+  const expectedProvider = modelItems.map<MemoryShownItem>(({ text, speaker, page: pageId, when }) => ({
     source: 'provider',
     text: text.replace(/\^/g, ' '),
     speaker,
@@ -164,7 +153,7 @@ async function expectRecallDetail(store?: Pick<SouledAgentOptions, 'soulStore' |
     ...(pageId ? { page: pageId } : { id: provider.id }),
   }));
 
-  const shown = shownOf(result);
+  const shown = result.memoryShown;
   expect(shown).toEqual([...expectedMind, ...expectedProvider]);
   expectNoMemoryText(result.memoryRecall);
   const traceId = shown!.find((item) => item.source === 'provider' && item.speaker === 'user')!.id!;
@@ -183,7 +172,7 @@ describe('recall detail on a souled agent', () => {
     expect(blocks.mind).toContain(MIND_USER);
     expect(blocks.provider).toContain(PROVIDER.replace(/ /g, '^'));
     expect(result.memoryRecall?.candidates.some(({ outcome }) => outcome === 'included')).toBe(true);
-    expect(shownOf(result)).toBeUndefined();
+    expect(result.memoryShown).toBeUndefined();
     expectNoMemoryText(result);
     expectNoMemoryText(result.memoryRecall);
   });
@@ -216,13 +205,13 @@ describe('recall detail on a souled agent', () => {
     await fileMemories(agent);
     const send = await agent.session('reader', { userId: USER }).send(QUESTION);
     const stream = agent.session('stream-reader', { userId: USER }).stream(QUESTION);
-    const shown = streamedShownOf(stream);
+    const shown = stream.memoryShown;
     expect(shown).toBeInstanceOf(Promise);
     const parts = [];
     for await (const part of stream.fullStream) parts.push(part);
     expect(await stream.text).toBe(REPLY);
-    expect(shownOf(send)?.length).toBeGreaterThan(0);
-    expect(await shown).toEqual(shownOf(send));
+    expect(send.memoryShown?.length).toBeGreaterThan(0);
+    expect(await shown).toEqual(send.memoryShown);
     expectNoMemoryText(parts);
   });
 
@@ -234,7 +223,7 @@ describe('recall detail on a souled agent', () => {
     for await (const part of result.fullStream) parts.push(part);
     expect(blocksOfLastCall().mind).toContain(MIND_USER);
     expect(await result.memoryRecall).toBeDefined();
-    expect(await streamedShownOf(result)).toBeUndefined();
+    expect(result.memoryShown).toBeUndefined();
     expectNoMemoryText(parts);
     expectNoMemoryText(await result.memoryRecall);
   });
@@ -243,7 +232,9 @@ describe('recall detail on a souled agent', () => {
     const agent = await open({ capture: DETAIL, budget: { totalTokens: 0 } });
     const result = await agent.session('empty', { userId: USER }).send(QUESTION);
     expect(blocksOfLastCall()).toEqual({ mind: '', provider: '' });
-    expect(shownOf(result)).toBeUndefined();
+    expect(result.memoryShown).toBeUndefined();
+    const stream = agent.session('empty-stream', { userId: USER }).stream(QUESTION);
+    expect(await stream.memoryShown).toEqual([]);
   });
 });
 
