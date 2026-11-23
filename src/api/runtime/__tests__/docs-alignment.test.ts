@@ -346,6 +346,9 @@ describe('AgentOS docs alignment', () => {
     const offenders: string[] = [];
     for (const guide of publishedGuides) {
       const content = readFileSync(guide, 'utf8');
+      expect(content, relative(docsRoot, guide)).not.toContain(
+        "`souledAgent()` refuses any of the three, with a `TypeError` and nothing opened, on `runtime: 'gmi'`",
+      );
       for (const match of content.matchAll(/\]\(((?:\.\.?\/)[^)#\s]+\.md)(?:#[^)]*)?\)/g)) {
         const target = resolve(dirname(guide), match[1]);
         if (!target.startsWith(docsRoot) || !existsSync(target)) continue;
@@ -355,6 +358,27 @@ describe('AgentOS docs alignment', () => {
       }
     }
     expect(offenders, 'published guides that link to a docs file the manifest does not publish').toEqual([]);
+  });
+
+  it('publishes the entry point guide with upgrade instructions and per-user memory calls', () => {
+    const { publicationManifest } = createRequire(import.meta.url)('../../../../docs/publication-manifest.cjs') as {
+      publicationManifest: Array<{ sourcePath?: string }>;
+    };
+    expect(publicationManifest.some(entry => entry.sourcePath === 'packages/agentos/docs/SOUL_ENTRY_POINTS.md')).toBe(true);
+    const page = read('../../../../docs/SOUL_ENTRY_POINTS.md');
+    expect(page).toMatch(/^#{1,6} Upgrading\s*$/m);
+    for (const name of ['forgetUser', 'exportUserMemory', 'correctUserMemory', 'sweepRetention']) {
+      expect(page).toContain(name);
+    }
+    expect(page).not.toMatch(/\bcomplian(?:t|ce)\b/i);
+  });
+
+  it('introduces the memory options, recipients, turn receipt and copy call with souledAgent()', () => {
+    const guide = read('../../../../docs/getting-started/HIGH_LEVEL_API.md');
+    const section = guide.split(/^### `souledAgent\(\)`/m)[1]?.split(/^#{1,3} /m)[0] ?? '';
+    for (const name of ['soulStore', 'emotionalStamp', 'sendUserIdToProvider', 'recipients()', 'memoryWrite', 'copyLegacyGmiMemory']) {
+      expect(section, name).toContain(name);
+    }
   });
 
   it('publishes the host-duties page, linked from the index, with no claim of compliance and no pasted legal citation', () => {
