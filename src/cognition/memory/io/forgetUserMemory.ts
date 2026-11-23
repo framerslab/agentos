@@ -15,7 +15,8 @@ import { memoryLog } from '../log.js';
 import { CONVERSATION_SCOPE, conversationScopeKey, parseConversationScopeKey } from '../retrieval/store/conversationScopeKey.js';
 import type { ForgottenLedger, SuppressionSubject } from '../suppression/ForgottenLedger.js';
 import { guardedWrite } from '../suppression/guardedWrite.js';
-import type { Memory } from './facade/Memory.js';
+import { listNamedMemoryUsers, readStoredTraceRefs, type Memory } from './facade/Memory.js';
+import { LEGACY_GMI_STORE, type LegacyGmiStore } from './legacyGmiStore.js';
 import { LEGACY_SCOPE } from './legacyMemory.js';
 import { RETENTION_DAY_MS } from './retentionSweep.js';
 
@@ -41,7 +42,8 @@ export interface ForgetMemoryReport {
   /** How many of them were still running at the deadline. */
   pendingAtDeadline: number;
   /**
-   * False when anything was still pending at the deadline, or a part of {@link parts} was not reached: a store the
+   * False when the passed GMI store was missed, anything was still pending at the deadline, or a part of
+   * {@link parts} was not reached: a store the
    * call deletes from failed (the full-text index, the vector index and the write-ahead log included), a page failed,
    * the store holds memory from before per-user scope that nobody attributed, or open sessions kept what they hold of
    * the subject. The stores the call never reaches by design are named and do not count. The next open, or the next
@@ -133,6 +135,11 @@ export interface ForgetUserMemoryOptions {
   mind?: Pick<SoulMind, 'deleteKey' | 'deleteTraces'>;
   /** The caller's own stores failed: the report's `store` part is missed, and the report is incomplete. */
   alsoIncomplete?: boolean;
+  /**
+   * The passed GMI store's deletion, after the tombstone, mind, store and sessions. Its outcome changes `complete`
+   * independently of those four parts. @internal
+   */
+  afterParts?: () => Promise<{ stores: ForgetMemoryReport['stores']; incomplete: boolean }>;
   /**
    * Whether the store holds memory from before per-user scope that nobody attributed, read when the deletes are
    * done.
@@ -606,8 +613,10 @@ export async function forgetUserMemory(options: ForgetUserMemoryOptions): Promis
     missed.length === 0 ? { part: 'store', reached: true, deleted: ran.rows } : { part: 'store', reached: false, reason: missed.join('; ') };
   const sessionsPart: DeletionPart = { part: 'sessions', ...sessions };
   const parts = [tombstonePart, mindPart, storePart, sessionsPart];
+  const after = await options.afterParts?.();
+  if (after) stores.push(...after.stores);
 
-  const complete = pendingAtDeadline === 0 && parts.every((part) => part.reached);
+  const complete = pendingAtDeadline === 0 && parts.every((part) => part.reached) && !after?.incomplete;
   const completedAt = new Date().toISOString();
   memoryLog.info('memory.forget_done', {
     stores: stores.filter((entry) => entry.reached).length,
@@ -653,8 +662,10 @@ export interface ReapplyTombstonesOptions
   forSubject?: (
     subject: SuppressionSubject,
   ) => Promise<
-    Pick<ForgetUserMemoryOptions, 'drain' | 'onChain' | 'extraStores' | 'alsoIncomplete' | 'legacy' | 'sessions' | 'recipients' | 'mind'>
+    Pick<ForgetUserMemoryOptions, 'drain' | 'onChain' | 'extraStores' | 'alsoIncomplete' | 'legacy' | 'sessions' | 'recipients' | 'mind' | 'afterParts'>
   >;
+  /** A passed GMI store whose forgotten users and marked traces are reached again. @internal */
+  legacyGmiStore?: LegacyGmiStore;
   /**
    * Runs the work on one conversation key in that subject's turn, after its writes and compiles: the deleted traces a
    * restore brought back under the key, and the corrections filed again under it. Unset: at once.
@@ -939,14 +950,26 @@ async function refileKeptCorrections(
  * @throws What the ledger throws when its copy cannot be read: nothing is deleted.
  */
 export async function reapplyTombstones(options: ReapplyTombstonesOptions): Promise<ForgetMemoryReport[]> {
-  const { memory, agentId, forSubject } = options;
+  const { memory, agentId, forSubject, legacyGmiStore } = options;
   const ledger = options.ledger ?? memory.forgotten;
   if (!ledger) throw new Error('reapplyTombstones: the store has no forgotten-user ledger');
   const { added } = await ledger.reconcile();
   const reports: ForgetMemoryReport[] = [];
+  let legacyFailures = 0;
   // A store that has forgotten nobody holds nothing to delete again, and its rows are not listed.
   if ((await ledger.size()) > 0) {
-    for (const subject of await memory.listHeldSubjects()) {
+    const held = await memory.listHeldSubjects();
+    if (legacyGmiStore) {
+      const soulUsers = new Set(held.filter(({ kind }) => kind === 'user').map(({ id }) => id));
+      try {
+        for (const id of await listNamedMemoryUsers(legacyGmiStore.brain, legacyGmiStore.namespace)) {
+          if (!soulUsers.has(id)) held.push({ kind: 'user', id });
+        }
+      } catch {
+        legacyFailures += 1;
+      }
+    }
+    for (const subject of held) {
       try {
         conversationScopeKey(agentId, subject);
       } catch {
@@ -978,7 +1001,20 @@ export async function reapplyTombstones(options: ReapplyTombstonesOptions): Prom
   } catch (error) {
     memoryLog.warn('memory.erasure_unfinished', errorFields(error));
   }
-  if (reports.length > 0 || added.length > 0 || traces.traces > 0 || traces.missed > 0 || corrections.refiled > 0 || corrections.missed > 0) {
+  if (legacyGmiStore) {
+    legacyFailures += reports.filter(({ stores }) => stores.some((entry) => entry.store === LEGACY_GMI_STORE && !entry.reached)).length;
+    let held: string[] = [];
+    try {
+      const marked = await ledger.deletedTraceIds();
+      held = (await readStoredTraceRefs(legacyGmiStore.brain, marked)).map(({ id }) => id);
+      if (held.length > 0) traces.traces += (await legacyGmiStore.deleteTraces(held)).deleted;
+    } catch {
+      traces.missed += held.length;
+      legacyFailures += 1;
+    }
+  }
+  if (reports.length > 0 || added.length > 0 || traces.traces > 0 || traces.missed > 0 ||
+      corrections.refiled > 0 || corrections.missed > 0 || legacyFailures > 0) {
     memoryLog.info('memory.tombstone_reapplied', {
       subjects: reports.length,
       reconciled: added.length,
@@ -986,6 +1022,7 @@ export async function reapplyTombstones(options: ReapplyTombstonesOptions): Prom
       tracesMissed: traces.missed,
       correctionsRefiled: corrections.refiled,
       correctionsMissed: corrections.missed,
+      ...(legacyGmiStore ? { legacyFailures } : {}),
     });
   }
   return reports;

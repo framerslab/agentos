@@ -116,10 +116,6 @@ function restore(file: string): void {
   for (const suffix of ['-wal', '-shm']) rmSync(legacyFile + suffix, { force: true });
 }
 
-function legacyExport(document: Awaited<ReturnType<NonNullable<SouledAgent['exportUserMemory']>>>) {
-  return (document.held as unknown as { legacyGmiStore?: Array<{ id: string; text: string }> }).legacyGmiStore;
-}
-
 beforeEach(() => {
   globalLLMProviderHealth.reset();
   directory = mkdtempSync(join(tmpdir(), 'souled-legacy-gmi-'));
@@ -180,7 +176,7 @@ describe('a passed store on a souled GMI', () => {
     const id = await legacyCanaryId();
     const joined = await open();
     const exported = await joined.exportUserMemory!(ALICE);
-    expect.soft(legacyExport(exported)).toContainEqual(expect.objectContaining({ id, text: CANARY }));
+    expect.soft(exported.held.legacyGmiStore).toContainEqual(expect.objectContaining({ id, text: CANARY }));
     expect(JSON.stringify(exported)).not.toContain(OTHER);
     await expect(joined.correctUserMemory!(BOB, { traceIds: [id] })).rejects.toThrow();
     expect(await legacyCanaryId()).toBe(id);
@@ -239,6 +235,7 @@ describe('a passed store on a souled GMI', () => {
 
     embeddings.failEmbedding = () => true;
     const report = await joined.forgetUser!(ALICE);
+    expect(report.tombstone).toEqual({ form: 'keyed', written: true });
     expect(report.parts).toContainEqual(expect.objectContaining({ part: 'tombstone', reached: true }));
     expect(report.parts).toContainEqual(expect.objectContaining({ part: 'store', reached: true }));
     expect(await brainOf(joined.memory!).get('SELECT id FROM memory_traces WHERE id = ?', [trace.id])).toBeFalsy();

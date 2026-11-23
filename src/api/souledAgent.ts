@@ -51,7 +51,7 @@ import {
 import type { ForgetReport } from '../cognition/learning/types.js';
 import { openForgottenCopy } from '../cognition/memory/suppression/forgottenCopy.js';
 import { shareForgottenLedger } from '../cognition/memory/suppression/learnerTombstones.js';
-import { createSoulMind, shareSoulStore } from './runtime/soulStore.js';
+import { createSoulMind, shareSoulStore, type LegacyGmiMemory } from './runtime/soulStore.js';
 import { SOUL_TURN_NOTHING, type SoulFiling, type SoulTurnAnswer, type SoulTurnMemory } from '../cognition/substrate/soulTurnMemory.js';
 import { guardedWrite } from '../cognition/memory/suppression/guardedWrite.js';
 import { retentionDaysOf, sweepRetention, type RetentionPeriod } from '../cognition/memory/io/retentionSweep.js';
@@ -97,8 +97,9 @@ import {
   type RecipientRoutes,
 } from './runtime/memoryRecipients.js';
 import { resolveCognition, type CognitionInputs, type ResolvedCognition } from './runtime/gmiCognition.js';
+import { LEGACY_GMI_STORE, type LegacyGmiStore } from '../cognition/memory/io/legacyGmiStore.js';
 import { shareRouteObserver } from './runtime/routeObserver.js';
-import { assertBigintReadsAsNumbers, embeddingRouteOf } from './runtime/agentCognitiveMemory.js';
+import { assertBigintReadsAsNumbers, embeddingRouteOf, openAgentMemoryBrain } from './runtime/agentCognitiveMemory.js';
 import { serializeTransactionsOn } from '../cognition/memory/retrieval/store/adapterTransactionLock.js';
 import { soulLog } from '../cognition/substrate/personas/soulLog.js';
 import { resolveModelOption, resolveProviderRoute, routedProviderOf } from './model.js';
@@ -1303,13 +1304,20 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   const forgotten = memory.forgotten as ForgottenLedger;
   /** Set once the store starts to close: a deletion is then refused before any part of it runs. */
   let storeClosed = false;
-  /** Closes the store, then the copy. */
+  const legacyGmi: { connection?: LegacyGmiMemory; store?: LegacyGmiStore } = {};
+  /** Closes both stores and the tombstones' copy. */
   const closeStore = async (): Promise<void> => {
     storeClosed = true;
     try {
       await memory.close();
     } finally {
-      await closeCopy();
+      try {
+        const connection = legacyGmi.connection;
+        legacyGmi.connection = undefined;
+        await connection?.close();
+      } finally {
+        await closeCopy();
+      }
     }
   };
   /** Runs a step of the open; a step that throws closes the store first, so a failed open leaves no handle open. */
@@ -2494,6 +2502,12 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       sendUserIdToProvider: sendUserIdToProvider === true,
       forTurn: soulTurnOf,
       brain: soulBrain,
+      legacyGmiStore: {
+        open: openAgentMemoryBrain,
+        attach: (connection) => {
+          legacyGmi.connection = connection;
+        },
+      },
       mechanisms: soulMechanismsOf(mind?.mechanisms),
       memoryBuilt: (manager) => {
         mindManagers.add(manager);
@@ -2840,18 +2854,6 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       report.stores.push(...listed.stores.map((entry) => ({ ...entry })));
     }
   };
-  /** Deletes one subject's memory on its own chain, after its pending writes. */
-  const forgetSubject = async (subject: SuppressionSubject, extra: ReportExtras): Promise<ForgetMemoryReport> =>
-    forgetUserMemory({
-      memory,
-      ledger: forgotten,
-      wiki: { storeFor: pagesOf },
-      subject,
-      agentId,
-      ...deletionPartsOf(subject, extra),
-      legacy: await legacyDeletionOf(),
-      legacyUnattributed,
-    });
   /**
    * The learning layer's own `forgetUser`, kept before `agent.learning.forgetUser` is replaced below by a call that
    * runs the agent's whole deletion: the deletion calls this one, never the replacement.
@@ -2872,12 +2874,30 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
         incomplete: false,
       };
     }
-    const learned = await layerForget(userId);
+    const legacy = legacyGmi.store;
+    let learned: ForgetReport;
+    try {
+      learned = await layerForget(userId);
+    } catch (error) {
+      if (!legacy) throw error;
+      const { type } = errorFields(error);
+      return {
+        stores: [{ store: LEGACY_GMI_STORE, reached: false, reason: `the store's deletion failed (${type})` }],
+        incomplete: true,
+      };
+    }
+    const legacyManager = legacy ? `memory manager of brain ${legacy.brain.brainId}` : undefined;
     const stores = learned.stores.map((given): ForgetMemoryReport['stores'][number] => {
       // The layer says a session keeps its messages; the sessions this handle holds open are emptied by the deletion's
       // sessions part, so what is left out is a session held elsewhere.
-      const entry =
-        !given.reached && given.store === CONVERSATION_HISTORY ? { ...given, reason: HISTORY_HELD_ELSEWHERE } : given;
+      let entry = given;
+      if (given.store === legacyManager) {
+        entry = given.reached
+          ? { ...given, store: LEGACY_GMI_STORE }
+          : { store: LEGACY_GMI_STORE, reached: false, reason: "the store's memory manager could not finish the deletion" };
+      } else if (!given.reached && given.store === CONVERSATION_HISTORY) {
+        entry = { ...given, reason: HISTORY_HELD_ELSEWHERE };
+      }
       const made: ForgetMemoryReport['stores'][number] = entry.reached
         ? {
             store: entry.store,
@@ -2888,8 +2908,39 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       layerEntryOf.set(made, entry);
       return made;
     });
-    return { stores, incomplete: learned.stores.some((entry) => entry.store === 'learning store' && !entry.reached), learned };
+    if (legacy && !stores.some(({ store }) => store === LEGACY_GMI_STORE)) {
+      stores.push({ store: LEGACY_GMI_STORE, reached: false, reason: 'the deletion did not reach its memory manager' });
+    }
+    const incomplete = stores.some((entry) => (entry.store === 'learning store' || entry.store === LEGACY_GMI_STORE) && !entry.reached);
+    return { stores, incomplete, learned };
   };
+  /** The subject's deletion options, including the learning route in the order the store requires. */
+  const subjectDeletionOf = async (subject: SuppressionSubject, capture?: (learned: ForgetReport | undefined) => void) => {
+    const empty: ReportExtras = { stores: [], incomplete: false };
+    const deleteLearner = async (): Promise<ReportExtras> => {
+      if (subject.kind !== 'user') return empty;
+      const { learned, ...extra } = await forgetLearner(subject.id);
+      capture?.(learned);
+      return extra;
+    };
+    return {
+      ...(subject.kind === 'user' && legacyGmi.store
+        ? { ...deletionPartsOf(subject, empty), afterParts: deleteLearner }
+        : deletionPartsOf(subject, await deleteLearner())),
+      legacy: await legacyDeletionOf(),
+    };
+  };
+  /** Deletes one subject's memory on its own chain, after its pending writes. */
+  const forgetSubject = async (subject: SuppressionSubject, capture?: (learned: ForgetReport | undefined) => void): Promise<ForgetMemoryReport> =>
+    forgetUserMemory({
+      memory,
+      ledger: forgotten,
+      wiki: { storeFor: pagesOf },
+      subject,
+      agentId,
+      ...(await subjectDeletionOf(subject, capture)),
+      legacyUnattributed,
+    });
   /**
    * One person's deletion with each linked session's, as one report, and the learning layer's own report of the same
    * run when the agent runs a layer.
@@ -2921,8 +2972,10 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       );
     }
     const run = async (): Promise<{ report: ForgetMemoryReport; learned?: ForgetReport }> => {
-      const { learned, ...ofLearner } = await forgetLearner(userId);
-      const ofUser = await forgetSubject({ kind: 'user', id: userId }, ofLearner);
+      let learned: ForgetReport | undefined;
+      const ofUser = await forgetSubject({ kind: 'user', id: userId }, (result) => {
+        learned = result;
+      });
       // A subject the store holds nothing more of no longer counts toward the retention requirement.
       const forgottenSubjects: SuppressionSubject[] = [{ kind: 'user', id: userId }, ...sessions.map((id) => ({ kind: 'session' as const, id }))];
       const report: ForgetMemoryReport = {
@@ -2932,7 +2985,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
         parts: [...ofUser.parts],
       };
       for (const sessionId of sessions) {
-        const ofSession = await forgetSubject({ kind: 'session', id: sessionId }, { stores: [], incomplete: false });
+        const ofSession = await forgetSubject({ kind: 'session', id: sessionId });
         report.stores.push(...ofSession.stores.map((entry) => ({ ...entry, store: `${entry.store} (linked session)` })));
         report.pages.deleted += ofSession.pages.deleted;
         report.pages.failed.push(...ofSession.pages.failed);
@@ -2962,13 +3015,13 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
         ...report,
         stores: report.stores.map((entry) => layerEntryOf.get(entry) ?? entry),
         userId: learned?.userId ?? userId,
-        namespace: learned?.namespace ?? '',
+        namespace: learned?.namespace ?? learningConfig?.namespace ?? '',
         plainFormLeft: learned?.plainFormLeft ?? 0,
       }));
   }
   /**
    * Brings the ledger up to date from its copy and deletes again whatever the store holds of a forgotten subject. A
-   * forgotten user's learner rows are deleted again by the learning layer first, when the agent runs one.
+   * passed GMI store's forgotten users and deleted traces are reached again as well.
    */
   const applyTombstones = async (): Promise<ForgetMemoryReport[]> => {
     /** The subjects deleted again, in the order of their reports. */
@@ -2979,13 +3032,10 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       wiki: { storeFor: pagesOf },
       agentId,
       legacyUnattributed,
+      ...(legacyGmi.store ? { legacyGmiStore: legacyGmi.store } : {}),
       forSubject: async (subject) => {
         reapplied.push(subject);
-        const ofLearner = subject.kind === 'user' ? await forgetLearner(subject.id) : { stores: [], incomplete: false };
-        return {
-          ...deletionPartsOf(subject, ofLearner),
-          legacy: await legacyDeletionOf(),
-        };
+        return subjectDeletionOf(subject);
       },
       // A trace a correction deleted, and a correction filed again, are handled in the person's turn, after the
       // writes and compiles of theirs that are running; once close() is waiting for those, at once.
@@ -3076,6 +3126,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
         ...(mindArchive ? { archive: mindArchive } : {}),
         ...(liveGraph ? { liveGraph } : {}),
         ...(exportLearned ? { learner: () => exportLearned.call(built.learning, userId) } : {}),
+        ...(legacyGmi.store ? { legacyGmiStore: legacyGmi.store } : {}),
       });
     };
     // The read runs on the person's chain, after the writes their turns started and their compiles: a turn whose
@@ -3099,6 +3150,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     return awaitedOnClose(
       correctSubjectMemory({
         memory,
+        ...(legacyGmi.store ? { legacyGmiStore: legacyGmi.store } : {}),
         wiki: { storeFor: pagesOf },
         agentId,
         subject,
@@ -3187,6 +3239,16 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   // before a deletion, and a deletion that did not finish, hold nothing of a forgotten subject once this returns. A
   // ledger whose copy cannot be read fails the open, and no memory is served.
   try {
+    const passed = legacyGmi.connection;
+    if (passed) {
+      const { brain } = await passed.open();
+      legacyGmi.store = { brain, namespace: learningConfig?.namespace ?? '', deleteTraces: passed.deleteTraces };
+      const count = await brain.get<{ traces: number | string }>(
+        'SELECT COUNT(*) AS traces FROM memory_traces WHERE brain_id = ?',
+        [brain.brainId],
+      );
+      memoryLog.info('memory.legacy_gmi_store', { traces: Number(count?.traces ?? 0), call: 'copyLegacyGmiMemory' });
+    }
     await applyTombstones();
     // The checks of who the store holds read it once the tombstones are applied: a forgotten subject a restore put
     // back is deleted again first, and counts for neither.
