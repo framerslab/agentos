@@ -1212,7 +1212,7 @@ const preview = await aria.copyLegacyGmiMemory!({ users: knownUserIds });
 const result = await aria.copyLegacyGmiMemory!({ dryRun: false, users: knownUserIds });
 ```
 
-The move files each person's traces oldest first and preserves their IDs and dates, including traces with identical text. It runs the configured `screen` at the `file` stage, leaves dropped or failed rows in place, and counts them as `kept`. The move makes no embedding calls. The source row is deleted once its copy is filed, leaving one live copy under the soul's retention policy. Run the move again after an interruption to finish any outstanding source deletes. A storage failure reports its error class for that person and the move continues with the next person.
+The move files each person's traces oldest first and preserves their IDs and dates, including traces with identical text. It runs the configured `screen` at the `file` stage, leaves dropped or failed rows in place, and counts them as `kept`. The move makes no embedding calls. The source row is deleted once its copy is filed, leaving one live copy under the soul's retention policy. Run the move again after an interruption to finish any outstanding source deletes; the next run checks each trace by its ID, so it files nothing twice. When the soul's store already holds another trace under a source trace's ID, both stay as they are and that person's move stops there with `failed`. `correctUserMemory` on a trace an interrupted move left in both stores deletes both copies. A storage failure reports its error class for that person and the move continues with the next person.
 
 Retention:
 
