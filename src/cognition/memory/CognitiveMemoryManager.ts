@@ -38,7 +38,7 @@ import {
   type IContentFeatureDetector,
 } from './core/encoding/ContentFeatureDetector.js';
 import { computeCurrentStrength } from './core/decay/DecayModel.js';
-import { MemoryStore } from './retrieval/store/MemoryStore.js';
+import { MemoryStore, mindFilingRefusal } from './retrieval/store/MemoryStore.js';
 import {
   MEMORY_RECALL_CAPTURE_VERSION,
   candidatesFrom,
@@ -141,6 +141,14 @@ export interface ICognitiveMemoryManager {
       entities?: string[];
       /** {@link MemoryTrace.turnUserId}: set on a trace a turn with no learner files for a second user. */
       turnUserId?: string;
+      /**
+       * {@link MemoryTrace.filing}: set on a trace a souled agent's mind files for a turn. A manager configured with
+       * `rows: 'mind'` files a `conversation` trace that carries one, under the conversation key of its subject
+       * (`scopeId`), and rejects any other before its text reaches the feature detector or the embedding model.
+       *
+       * @internal
+       */
+      filing?: MemoryTrace['filing'];
       /**
        * When encoding a subjective trace from `PerspectiveObserver`
        * (`@framers/agentos/memory/pipeline/observation/PerspectiveObserver`),
@@ -503,6 +511,8 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
       moodProvider: config.moodProvider,
       enableGraphActivation: config.enableGraphActivation ?? false,
       ...(config.persistAccessState === false ? { persistAccessState: false } : {}),
+      ...(config.rows === 'mind' ? { rows: 'mind' as const } : {}),
+      ...(config.hydration === 'scopes' ? { hydration: 'scopes' as const } : {}),
     });
 
     // Attach Brain for durable write-through when configured.
@@ -789,6 +799,13 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
   ): Promise<MemoryTrace> {
     this.ensureInitialized();
 
+    // A manager of a souled agent's mind refuses here what its store would refuse, before the text reaches the feature
+    // detector, the mechanisms or the embedding model.
+    if (this.config.rows === 'mind') {
+      const refused = mindFilingRefusal(options.scope ?? 'user', options.scopeId ?? this.config.agentId, options.filing);
+      if (refused) throw new Error(`CognitiveMemoryManager.encode: ${refused}`);
+    }
+
     const now = Date.now();
     const encodingConfig = { ...DEFAULT_ENCODING_CONFIG, ...this.config.encoding };
 
@@ -841,6 +858,8 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
       isActive: true,
     };
     if (options.turnUserId) trace.turnUserId = options.turnUserId;
+    // A copy, so the caller's object never changes the stored trace; the store checks its shape.
+    if (options.filing) trace.filing = { ...options.filing, subject: { ...options.filing.subject } };
 
     // Stamp PerspectiveObserver provenance into MechanismMetadata when this
     // trace originated from a subjective rewrite of an objective event. The
@@ -1079,9 +1098,11 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
       }
     }
 
-    // Record access for retrieved memories (spaced repetition)
+    // Record access for retrieved memories (spaced repetition). A recall that skips reconsolidation still counts
+    // the access, and leaves the emotional context of what it read.
+    const accessOptions = options.skipReconsolidation === true ? { reconsolidate: false } : undefined;
     for (const trace of scored.filter((t) => !suppliedIds.has(t.id)).slice(0, 5)) {
-      await this.store.recordAccess(trace.id);
+      await this.store.recordAccess(trace.id, accessOptions);
       await workingMemory.focus(trace.id, trace.retrievalScore);
     }
 
@@ -1144,7 +1165,8 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
   ): Promise<AssembledMemoryContext> {
     this.ensureInitialized();
     // Under `recall.capture: 'off'` the assembly takes no timings and builds no capture.
-    const capturing = this.recallCaptureMode() !== 'off';
+    const captureMode = this.recallCaptureMode();
+    const capturing = captureMode !== 'off';
     const startedAt = capturing ? performance.now() : 0;
 
     // The three pre-assembly stages that hit a backend — retrieval (vector
@@ -1227,6 +1249,9 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     const selection = this.recallSelections.get(result);
     const suppliedIds = new Set(selection?.suppliedIds ?? []);
     const reservedIds = hybrid ? (selection?.reservedIds ?? []).filter((id) => result.retrieved.some((trace) => trace.id === id)) : [];
+    const textTraces = captureMode === 'metadata+text'
+      ? new Map<string, MemoryTrace>(result.retrieved.map((trace) => [trace.id, trace]))
+      : undefined;
 
     // --- Batch 2: Graph associations ---
     const graphContext: MemoryGraphAssociation[] = [];
@@ -1258,6 +1283,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
               traceId: node.memoryId,
               text: `[associated, activation=${node.activation.toFixed(2)}] ${asShownInMemoryBlock(trace).content}`,
             });
+            textTraces?.set(trace.id, trace);
           }
         }
       } catch {
@@ -1280,6 +1306,12 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     };
 
     const context = assembleMemoryContext(input);
+    if (textTraces) {
+      context.shownTexts = Array.from(textTraces.values(), (trace) => {
+        const speaker = trace.filing?.speaker ?? trace.tags.find((tag): tag is 'user' | 'assistant' => tag === 'user' || tag === 'assistant');
+        return { id: trace.id, text: asShownInMemoryBlock(trace).content, ...(speaker ? { speaker } : {}), createdAt: trace.createdAt };
+      });
+    }
     // How many reserved lines the block shows, read from its lines, so the count is the same with the capture off.
     const reserveAdded = (lines: readonly AssembledLineOutcome[] | undefined): number => {
       const ids = new Set(reservedIds);
@@ -1345,6 +1377,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     if (!kept) throw new Error('reassembleForBudget: this memory manager did not return that context.');
     const startedAt = performance.now();
     const next = assembleMemoryContext({ ...kept.input, totalTokenBudget: tokenBudget });
+    if (context.shownTexts) next.shownTexts = context.shownTexts;
     if (kept.capture) {
       // The same candidates in the same order, with this rendering's outcomes: one no section had a line for is left
       // out for the budget.

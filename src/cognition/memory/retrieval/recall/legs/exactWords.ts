@@ -68,11 +68,20 @@ export function lexicalBackendOf(store: MemoryStore, lexical: ScopedLexicalIndex
 
 /**
  * The scope, type and time conditions a durable leg writes into its query, with their bindings. A scope id is bound
- * as the turn passes it, the form the store writes into `scope_id`.
+ * as the turn passes it, the form the store writes into `scope_id`. With `store`, the rows the store reads
+ * (`MemoryStore.rowsCondition`): a store of a souled agent's mind reads the rows the mind filed alone.
  */
-export function scopeAndFilterSql(q: Pick<LegQuery, 'scopes' | 'types' | 'after'>): { sql: string; params: unknown[] } {
+export function scopeAndFilterSql(
+  q: Pick<LegQuery, 'scopes' | 'types' | 'after'>,
+  store?: Pick<MemoryStore, 'rowsCondition'>,
+): { sql: string; params: unknown[] } {
   const clauses = [`(${q.scopes.map(() => '(mt.scope = ? AND mt.scope_id = ?)').join(' OR ')})`];
   const params: unknown[] = q.scopes.flatMap((s) => [s.scope, s.scopeId]);
+  const filed = typeof store?.rowsCondition === 'function' ? store.rowsCondition('mt.metadata') : undefined;
+  if (filed) {
+    clauses.push(filed.sql);
+    params.push(...filed.params);
+  }
   if (q.types?.length) {
     clauses.push(`mt.type IN (${q.types.map(() => '?').join(', ')})`);
     params.push(...q.types);
@@ -178,7 +187,7 @@ export async function exactWordsLeg(deps: { store: MemoryStore; lexical: ScopedL
       if (!words) return answer({});
       const { fts } = brain.features;
       const order = fts.relevanceOrder('memory_traces_fts', '?');
-      const filter = scopeAndFilterSql(q);
+      const filter = scopeAndFilterSql(q, deps.store);
       // Equal relevance by id, so each page continues the one before it.
       const gated = await readGatedPages(deps.store, q, async (offset, size) =>
         (

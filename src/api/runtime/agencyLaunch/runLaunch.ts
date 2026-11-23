@@ -69,6 +69,8 @@ export interface LaunchParent {
   approvalGate?: ApprovalGateFn;
   signal?: AbortSignal;
   providerUserId?: string;
+  /** The parent turn's agent sends no end-user id to its provider: every seat of the tree runs as the user and sends none. */
+  withholdUserId?: true;
   namespace: string;
   /** ctx.correlationId: the parent turn, whose launch pool a root launch draws on. */
   turnId?: string;
@@ -249,6 +251,9 @@ async function resolveParent(host: LaunchHost, ctx: ToolExecutionContext): Promi
       ...(gate ? { approvalGate: gate } : {}),
       signal: ctx.signal ? AbortSignal.any([entry.signal, ctx.signal]) : entry.signal,
       ...(entry.providerUserId !== undefined ? { providerUserId: entry.providerUserId } : {}),
+      // The tree's rule, or the launching seat's own: a seat whose agent sends no end-user id (a souled persistent
+      // member that does not opt in) has the team it launches send none either.
+      ...(entry.withholdUserId || ctx.callerTurn?.withholdUserId ? { withholdUserId: true as const } : {}),
       namespace: entry.namespace,
       ...(ctx.correlationId ? { turnId: ctx.correlationId } : {}),
       toolHooks: ctx.callerTurn?.toolHooks ?? entry.toolHooks,
@@ -742,6 +747,7 @@ export async function runLaunch(host: LaunchHost, args: LaunchAgencyArgs, ctx: T
       ...(parent.approvalGate ? { approvalGate: parent.approvalGate } : {}),
       signal: controller.signal,
       ...(parent.providerUserId !== undefined ? { providerUserId: parent.providerUserId } : {}),
+      ...(parent.withholdUserId ? { withholdUserId: true as const } : {}),
       namespace: parent.namespace,
       toolHooks: parent.toolHooks,
       seatTools: new Map(),

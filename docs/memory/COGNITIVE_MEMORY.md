@@ -354,7 +354,9 @@ With no Brain, the vector store is the store's only record. Each vector document
 
 ### Loading and moving one scope
 
-A store loads the 1,000 most recent traces of its Brain at its first recall, whatever their scope, newest first by `createdAt`. On the in-process vector index that `agent()` and `gmi()` build, two traces of a scope that a recall scores equally on every signal come back in the order the store loaded them. Traces stored in the same millisecond load by id, compared character code by character code (`B` before `a`), on SQLite and on PostgreSQL alike (there under the `C` collation, since a database's default collation sorts by language), so every load of the same traces gives two equally scored ones one order in the block. `MemoryStore.hydrateScope(scope, scopeId, limit?)` loads one scope's most recent traces by the `scope_id` column, 1,000 by default, in the same order, and skips the traces the store holds already, so a returning user's older memories are recallable however many traces other scopes hold. It returns how many traces it loaded, and refuses a `limit` that is not a positive integer with a `RangeError`. It reads by the column, so a row a release older than the column wrote since the Brain opened, which holds `''` there until the next open files it, is loaded by the whole-brain hydration while it is among the brain's 1,000 most recent.
+A store using whole-Brain hydration loads its 1,000 most recent traces at first recall, whatever their scope, newest first by `createdAt`. On the in-process vector index that `agent()` and `gmi()` build, two traces of a scope that a recall scores equally on every signal come back in the order the store loaded them. Traces stored in the same millisecond load by id, compared character code by character code (`B` before `a`), on SQLite and on PostgreSQL alike (there under the `C` collation, since a database's default collation sorts by language), so every load of the same traces gives two equally scored ones one order in the block. `MemoryStore.hydrateScope(scope, scopeId, limit?)` loads one scope's most recent traces by the `scope_id` column, 1,000 by default, in the same order, and skips the traces the store holds already, so a returning user's older memories are recallable however many traces other scopes hold. It returns how many traces it loaded, and refuses a `limit` that is not a positive integer with a `RangeError`. A souled agent's GMI memory loads a person's key this way, the rows it filed itself alone, as the first turn of each session opening begins, and never the brain's newest traces: a person with more than 1,000 of its traces has the older ones in a turn's recall only by their words (`recall.retrieval: 'hybrid'`). It reads by the column, so a row a release older than the column wrote since the Brain opened, which holds `''` there until the next open files it, is loaded by the whole-brain hydration while it is among the brain's 1,000 most recent.
+
+**Changing embedding dimensions.** When you reopen a souled agent with a `memory.embedding` model of another vector size, the agent skips incompatible vectors during the user's load. Dense recall omits those rows. Hybrid recall (`recall.retrieval: 'hybrid'`) can still retrieve them by their words. Export, correction, retention and deletion still reach them. The load leaves the stored text and vectors intact, makes no embedding call for them and logs their count in `memory.vectors_unfit`.
 
 `MemoryStore.refileScope(scope, fromScopeId, toScopeId)` moves one scope id's traces to another, as a host does once when it starts passing an organization id: a learner under a namespace reads `user:<namespace>/<userId>`, not the plain form filed before. Every Brain row filed under the old id moves (`scope_id` and the metadata's `scopeId`), soft-deleted rows included, so a later delete of the new id finds them all. Each live trace the store holds moves with its vector document, from the old collection into the new one, with the vector the store holds, the one its Brain row or the index holds, or a new embedding of its text. A trace the store does not hold leaves the old collection, and a store files it in the new one when it loads it (`hydrateScope`, or the whole-brain hydration). A live trace's knowledge-graph copy moves where the graph holds one; a trace with no copy gets none. With no Brain, the old collection is walked from its start as `deleteScope` walks it, and the documents another store filed into a durable index before a restart move too; a stale document there, of a trace the store holds under another scope, is deleted from it, as `deleteScope` deletes one. Each Brain row's metadata is written with a compare against what the move read, so a write another writer makes to the row meanwhile, such as a facade's recall or feedback, is read again and kept. A hydration of this store, or of another store on the same Brain in this process, that read a row before the move reads it again before it loads it, so the trace loads under the new id. It returns the number of traces it moved. An empty scope id on either side is refused with a `TypeError`, so a caller's missing id never moves the traces filed under no scope id or files a scope's traces under none. Each trace's row moves before its vector document, as a Brain's re-file moves its rows: a store on the same Brain or vector index that reads the new id meanwhile finds no document there yet, where a document whose row still named the old id would read as stale, and such a read deletes a stale document. It throws when a live trace's vector cannot be embedded or written into the new collection, or when a row changes under each of three reads; the traces moved before it stay moved, and a call made again moves the rest. A trace whose vector could not be written has its row under the new id already, and the store reads it under neither id until that call moves its vector. A trace the store holds under the old id whose row another store or process moved to another scope or a third id, or deleted for good, before this move or while it runs, stays as the store holds it, and the move does not count it: the words of a deleted trace go into no collection.
 
@@ -1012,7 +1014,7 @@ await manager.initialize({ ...config, recall: { budget: { totalTokens: 2400 } } 
 const assistant = agent({ runtime: 'gmi', provider: 'openai', memory: { embedding: { provider: 'openai' }, recall: { budget: { totalTokens: 2400 } } } });
 ```
 
-`initialize()` checks the recall settings before it builds anything: a `budget.totalTokens` that is not an integer of at least 0, a `capture` other than `'off'`, `'metadata'` and `'metadata+stream'`, a `retrieval` other than `'dense'` and `'hybrid'`, or a `rerank` that is neither `'none'` nor a `local` or `llm` setting with its fields, is refused with a `RecallOptionError` naming the field (`option`, with `reason: 'invalid_value'`, or `'unsupported_provider'` for a `rerank` of another `kind`), after one `memory.recall.option_rejected` line. A host of `AgentOS.create` sets `recall` on the manager its `gmiManagerConfig.cognitiveMemoryFactory` builds; `agent()` and `gmi()` set it from `memory.recall` ([GMIs from agent()](../GMI.md#gmis-from-agent)). The bridge reads it at each turn, so a change to a built manager's configuration applies from its next turn. A direct `assembleForPrompt()` call passes a budget of its own, and `AgentMemory.getContext()` passes its caller's `tokenBudget`, 2,000 by default.
+`initialize()` checks the recall settings before it builds anything: a `budget.totalTokens` that is not an integer of at least 0, a `capture` outside the four levels below, a `retrieval` other than `'dense'` and `'hybrid'`, or a `rerank` that is neither `'none'` nor a `local` or `llm` setting with its fields, is refused with a `RecallOptionError` naming the field (`option`, with `reason: 'invalid_value'`, or `'unsupported_provider'` for a `rerank` of another `kind`), after one `memory.recall.option_rejected` line. A host of `AgentOS.create` sets `recall` on the manager its `gmiManagerConfig.cognitiveMemoryFactory` builds; `agent()` and `gmi()` set it from `memory.recall` ([GMIs from agent()](../GMI.md#gmis-from-agent)). The bridge reads it at each turn, so a change to a built manager's configuration applies from its next turn. A direct `assembleForPrompt()` call passes a budget of its own, and `AgentMemory.getContext()` passes its caller's `tokenBudget`, 2,000 by default.
 
 ### Budget and the prompt share
 
@@ -1107,7 +1109,10 @@ The rest of the record:
 |---|---|---|---|
 | `'metadata'` (default) | Set | Set | Not sent |
 | `'metadata+stream'` | Set | Set | Sent, the update before the reply's text; a turn that stops for the host's tool calls ends, after the host's results, with a `FINAL_RESPONSE` that carries the capture the turn announced. The runtime stream is the one `AgentOS.create()`'s `processRequest()` returns: a session of `agent({ runtime: 'gmi' })` or `gmi()` records under `'metadata+stream'` what it records under `'metadata'`, and its `stream()` parts carry no memory part |
+| `'metadata+text'` | Set | Set, with a separate `memoryShown` result for recalled items shown to the model | Not sent |
 | `'off'` | Unset | Unset | Not sent |
+
+**Recall text.** With `'metadata+text'`, `memoryShown` lists the text, speaker when known, and date of the recalled items shown on the serving hop. On a souled GMI, the list includes cognitive memory items (`source: 'memory'`, with an ISO 8601 date) and the soul provider's items (`source: 'provider'`, with the date as the block phrases it). A page note carries its page and has no trace id. Other items carry the trace id, which a souled agent's host can pass to `correctUserMemory` for the person who owns the trace. A provider's trace ids stay out of the model's data block. `send()` omits `memoryShown` when there are no shown items. An opted-in `stream()` exposes it as a promise that resolves at the end of the stream and yields an empty list when there are no shown items; a stream that ends on an error lists what the hop last tried was sent, as `memoryRecall` reports that hop. A block that a host hook changes or removes on the serving hop lists none of its items, even if the hook removed only one memory and the rest still reached the model. The default capture keeps recall text out of the turn result. Opting in puts people's words in the result, so keep `memoryShown` out of application logs.
 
 ```typescript
 await manager.initialize({ ...config, recall: { capture: 'metadata+stream' } });
@@ -1138,6 +1143,40 @@ The budget is kept in the assembler's count: `tokensUsed` counts the block's hea
 To hold `delivery.memoryBlockTokens` at or under a figure `T` on a `gpt-4` model, set `budget.totalTokens` to `floor(T × 0.95)`: the block then holds at most `3.8 × T` characters, which PromptEngine counts as at most `T`. For 1,600 that budget is 1,520. On every other model id the budget itself bounds the count.
 
 Two things stay outside both counts and the budget. The fixed line that opens the note ([Where the block goes in the request](#where-the-block-goes-in-the-request)) is 107 characters with its line break ([`PromptEngine.ts` L150-L169](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/core/llm/PromptEngine.ts#L150-L169)). And the labels `Source: cognitive_memory` and `Content:` are counted with the block only for a host that calls PromptEngine itself with its other retrieved context as a list ([`PromptEngine.ts` L127-L130](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/core/llm/PromptEngine.ts#L127-L130)); a GMI passes that context as one string ([`GMI.ts` L2006](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/cognition/substrate/GMI.ts#L2006)), so its record counts the block's text alone.
+
+---
+
+## Write Record
+
+A session turn's result says what became of the turn in memory, beside `memoryRecall` and `historyOmitted`. On an agent whose memory provider observes its turns (a [`souledAgent()`](../getting-started/HIGH_LEVEL_API.md#souledagent-soul-plus-a-memory-wiki), or an `agent()` whose `memoryProvider` has `observe`), `send()`'s result carries `memoryWrite` and so does `stream()`'s: a promise of the turn's write record, on the default runtime and on `runtime: 'gmi'`. On a `souledAgent()` on `runtime: 'gmi'` with cognitive memory on, the turn is filed by its GMI's memory into the souled agent's own store, under the person's key, and the record names the traces it filed there ([GMI.md](../GMI.md#gmis-from-agent)).
+
+```typescript
+const result = await session.send('My canary is LARK-7.');
+const record = await result.memoryWrite;
+// { entries: [
+//   { role: 'user', outcome: 'written', traceId: '…' },
+//   { role: 'assistant', outcome: 'written', traceId: '…' } ] }
+```
+
+`entries` has one entry for each side of the turn that had text, the user's message first. A turn with an empty reply has the entry of the user's message alone, and a message with no text (an image alone) has no entry of its own.
+
+| `outcome` | With | Meaning |
+|---|---|---|
+| `written` | `traceId` | The side was filed as that trace |
+| `skipped` | `reason` | The agent's rules filed nothing. On a `souledAgent()`: `policy_off`, `policy_failed` and `minor_no_retention` (the host's `memoryPolicy`), `screened` and `screen_failed` (the host's `screen`), `forgotten` (the person was forgotten before the write or while it ran, and nothing of it is left), `no_subject` (a user id no memory key can be built from), `corrected` (the reply of a turn that was running when `correctUserMemory` changed the person's memory; what the person said in that turn is filed: [Delete or correct one memory](../getting-started/HIGH_LEVEL_API.md#delete-or-correct-one-memory)) |
+| `failed` | `errorName` | The write threw or rejected: the error's class name |
+
+**What it holds.** Ids, outcomes, reasons and error class names, never the turn's text and never an error's message, which can quote the text.
+
+**When it settles.** The turn does not wait for its writes. On `send()` the promise is on the result the turn resolves with and settles when the writes have; on `stream()` it settles after the stream has ended and the writes have. On a `souledAgent()` a person's writes run one after another with that person's compiles and deletions, so a record can settle after a compile that was running. The promise never rejects. On the default runtime a stream runs once it is read, so the record of a stream nobody reads does not settle.
+
+**A turn that is not filed.** A turn whose model call failed rejects and files neither side. A stream that ended in an error or that its `abortSignal` stopped, a turn whose input a guard replaced, and on the default runtime a turn whose input a guard rewrote, are not observed: the record has no entry. On `runtime: 'gmi'` a rewritten turn is observed with the rewritten text ([On the GMI runtime](../safety/GUARDRAILS_USAGE.md#on-the-gmi-runtime)), and its record has its entries.
+
+**A souled agent's GMI memory.** The GMI's memory files a turn once the session keeps it, so the turns above that are not filed file neither side there too, and so does a structured send whose answer does not parse. A write of the GMI's memory that throws or rejects (its embedding provider down, for one) is a `failed` entry; the log writes it as `memory.hook_failed` with the hook `soulMemory`, the error's type and code, on the first failure and then at the 10th, 100th and so on, and never as the memory provider's `observe`. A write whose trace is stored and that then fails to write its key's registry row or compile mark is a `written` entry, logged the same way. The turn's own recall goes on with the provider's block.
+
+**A host's own provider.** The entry of a side is what the provider's `observe` resolved with. An `observe` that resolves with nothing leaves no entry, and one that throws or rejects gives a `failed` entry while the log keeps its `memory.hook_failed` line ([High-Level API](../getting-started/HIGH_LEVEL_API.md#schema-validation-and-retries)). A provider wrapped with `guardMemoryProvider()` answers `skipped` with `forgotten` for a forgotten person, and what the provider itself resolves with for anyone else.
+
+**Where it is unset.** On `generateText()` and `streamText()`, on a one-shot `generate()` or `stream()`, and on an agent with no observing memory provider. The cognitive memory of a `gmi()` or `agent({ runtime: 'gmi' })` files the turn inside the turn, awaits those writes and adds no entry: the record is the memory provider's. A seat's session of a team on that runtime calls no `observe` and carries no record.
 
 ---
 
@@ -1214,7 +1253,7 @@ interface CognitiveMemoryConfig {
 
 interface ManagerRecallConfig {
   budget?: { totalTokens?: number };           // Default: 1600, the whole block (see Recall Budget)
-  capture?: 'metadata' | 'metadata+stream' | 'off'; // Default: 'metadata' (see Recall Capture)
+  capture?: 'metadata' | 'metadata+stream' | 'metadata+text' | 'off'; // Default: 'metadata' (see Recall Capture)
   retrieval?: 'dense' | 'hybrid';              // Default: 'dense' (see Recall)
   rerank?:                                     // Default: 'none' (see Recall, Rerank)
     | 'none'
@@ -1346,7 +1385,7 @@ console.log(`Pruned ${consolidation.prunedCount}, created ${consolidation.schema
 
 ## Integration with GMI
 
-A GMI with cognitive memory calls the manager through [`CognitiveMemoryBridge`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/CognitiveMemoryBridge.ts) at two points of its turn. The calls below are the bridge's, in outline; `mood` is the GMI's PAD state and `gmiMood` its mood label.
+A GMI with cognitive memory calls the manager through [`CognitiveMemoryBridge`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/CognitiveMemoryBridge.ts) at two points of its turn. The calls below show a standalone GMI. A workspace-backed souled agent instead files accepted session turns under its user's or anonymous session's conversation key and uses a neutral stamp by default. In these examples, `mood` is the GMI's PAD state and `gmiMood` its mood label.
 
 ### Before Prompt Construction (Retrieve + Assemble)
 
@@ -1526,6 +1565,8 @@ Modulation runs once via `applyPersonalityModulation()`. Trait-to-parameter scal
 - **Dead-trace protection:** RIF skips traces with `encodingStrength < 0.1`.
 - **Inactive skip:** all consolidation mechanisms skip `isActive === false` traces.
 - **Disabled bypass:** every mechanism returns immediately when `config.enabled === false`.
+- **Corrections kept:** reconsolidation and temporal gist skip a trace tagged `correction`, the tag a person's own correction of their memory is stored under, so it keeps its emotional context and its text.
+- **A recall that skips reconsolidation:** `retrieve()` and `assembleForPrompt()` called with `skipReconsolidation: true` pass `{ reconsolidate: false }` to `recordAccess()`: the access is counted, strength and stability update, and `engine.onAccess()` is not called for the traces that recall reads.
 
 ### Rehydration
 

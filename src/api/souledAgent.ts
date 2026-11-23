@@ -4,7 +4,8 @@
  *
  * Composes existing, tested pieces:
  * - {@link loadSoulFromOption} resolves the soul and its `memory/` dir.
- * - {@link Memory.createSqlite} opens the single backing store, in `memory/.store/`.
+ * - {@link Memory.createSqlite} opens the single backing store, in `memory/.store/`; with `soulStore`,
+ *   {@link Memory.createWithAdapter} opens it on the host's own adapter.
  * - {@link attachMemoryWiki} wires the wiki write-back loop + the
  *   `read_memory_page` tool + the boot index over the same facade.
  * - {@link agent} runs it; its `buildSystemPrompt` already injects the index of the operator's pages.
@@ -28,8 +29,18 @@ import {
 } from './agent.js';
 import { generateText } from './generateText.js';
 import type { StreamTextResult } from './streamText.js';
-import { Memory, type AttachedWiki, type ScoredTrace } from '../cognition/memory/io/facade/Memory.js';
-import type { StorageAdapter } from '@framers/sql-storage-adapter';
+import type { IModelRouter } from '../core/llm/routing/IModelRouter.js';
+import {
+  listNamedMemoryUsers,
+  Memory,
+  readStoredTraceRefs,
+  type AttachedWiki,
+  type ScoredTrace,
+} from '../cognition/memory/io/facade/Memory.js';
+import type { MemoryTrace } from '../cognition/memory/core/types.js';
+import { brainOf } from '../cognition/memory/io/facade/handedBrain.js';
+import { SqlStorageMemoryArchive } from '../cognition/memory/archive/SqlStorageMemoryArchive.js';
+import { createStorageFeatures, type StorageAdapter } from '@framers/sql-storage-adapter';
 import {
   ForgottenLedger,
   copyUnavailableError,
@@ -41,11 +52,15 @@ import {
   reapplyTombstones,
   type ForgetMemoryReport,
   type ForgetUserMemoryOptions,
+  type PartOutcome,
 } from '../cognition/memory/io/forgetUserMemory.js';
+import type { ForgetReport } from '../cognition/learning/types.js';
 import { openForgottenCopy } from '../cognition/memory/suppression/forgottenCopy.js';
 import { shareForgottenLedger } from '../cognition/memory/suppression/learnerTombstones.js';
+import { createSoulMind, shareSoulStore, type LegacyGmiMemory } from './runtime/soulStore.js';
+import { SOUL_TURN_NOTHING, type SoulFiling, type SoulTurnAnswer, type SoulTurnMemory } from '../cognition/substrate/soulTurnMemory.js';
 import { guardedWrite } from '../cognition/memory/suppression/guardedWrite.js';
-import { sweepRetention, type RetentionPeriod } from '../cognition/memory/io/retentionSweep.js';
+import { retentionDaysOf, sweepRetention, type RetentionPeriod } from '../cognition/memory/io/retentionSweep.js';
 import { correctSubjectMemory, exportSubjectMemory, type UserMemoryExport } from '../cognition/memory/io/userMemoryExport.js';
 import {
   assertLegacyMemory,
@@ -56,6 +71,7 @@ import {
 } from '../cognition/memory/io/legacyMemory.js';
 import type { WikiPage } from '../cognition/substrate/memory/wiki/types.js';
 import { WriteChains } from '../cognition/learning/writeChains.js';
+import { couldBeSessionForm, learnerUserScopeId } from '../cognition/learning/scopes.js';
 import { conversationScopeKey, parseConversationScopeKey } from '../cognition/memory/retrieval/store/conversationScopeKey.js';
 import { encodePlainScopeId } from '../cognition/memory/retrieval/store/scopeIdForm.js';
 import { memoryLog } from '../cognition/memory/log.js';
@@ -68,13 +84,68 @@ import { errorFields } from '../core/logging/events.js';
 import { formatMemoryAge } from '../cognition/memory/core/prompt/MemoryFormatters.js';
 import { parseTraceMetadata } from '../cognition/memory/retrieval/store/tracePersistence.js';
 import { DEFAULT_MEMORY_TOKEN_BUDGET, MEMORY_TIMEOUT_MS } from './runtime/memoryProviderHooks.js';
-import { messageOf } from './runtime/memoryObserveFailures.js';
+import { messageOf, reportMindWriteFailure, reportObserveFailure } from './runtime/memoryObserveFailures.js';
+import { ensureScopeRow } from '../cognition/memory/retrieval/store/conversationScopes.js';
+import type { ICognitiveMemoryManager } from '../cognition/memory/CognitiveMemoryManager.js';
+import type { CognitiveMechanismsConfig } from '../cognition/memory/mechanisms/types.js';
+import { errorNameOf, failedWriteEntry, type MemoryWriteEntry } from './runtime/memoryWriteRecord.js';
 import { isAnonymousUserId } from './runtime/memorySubject.js';
 import { asSpendBudget } from './runtime/spendBudget.js';
 import { credentialsGoWith, modelNamesAnotherProvider } from './runtime/credentialOwner.js';
-import { resolveCognition, type CognitionInputs } from './runtime/gmiCognition.js';
-import { resolveModelOption } from './model.js';
+import {
+  PROVIDER_FROM_THE_ROUTER,
+  recipientKey,
+  recipientsOf,
+  recordedRecipients,
+  recordRecipient,
+  routeRecipient,
+  type MemoryRecipient,
+  type NamedRoute,
+  type RecipientRoutes,
+} from './runtime/memoryRecipients.js';
+import { resolveCognition, type CognitionInputs, type ResolvedCognition } from './runtime/gmiCognition.js';
+import {
+  checkpointLegacyGmiStore,
+  countLegacyGmiScopes,
+  LEGACY_GMI_STORE,
+  legacyGmiTraceIdsOf,
+  readLegacyGmiRows,
+  type LegacyGmiStore,
+} from '../cognition/memory/io/legacyGmiStore.js';
+import { shareRouteObserver } from './runtime/routeObserver.js';
+import { assertBigintReadsAsNumbers, embeddingRouteOf, openAgentMemoryBrain } from './runtime/agentCognitiveMemory.js';
+import { serializeTransactionsOn } from '../cognition/memory/retrieval/store/adapterTransactionLock.js';
+import { soulLog } from '../cognition/substrate/personas/soulLog.js';
+import { resolveModelOption, resolveProviderRoute, routedProviderOf } from './model.js';
 import type { AgentOSUsageLedgerOptions } from './runtime/usageLedger.js';
+
+/** One of a deletion's four parts, as its report lists it. */
+type DeletionPart = ForgetMemoryReport['parts'][number];
+
+/**
+ * What a souled agent adds to one subject's deletion report: the stores it reached or names itself, and whether one of
+ * its own failed.
+ */
+type ReportExtras = { stores: ForgetMemoryReport['stores']; incomplete: boolean };
+
+/**
+ * One part of a person's deletion with the same part of a linked session's added: reached with the sum of the two
+ * counts when both reached it, else missed with the reason of each that missed it.
+ */
+function addPart(part: DeletionPart, other: DeletionPart | undefined): DeletionPart {
+  if (!other) return part;
+  if (part.reached && other.reached) return { part: part.part, reached: true, deleted: part.deleted + other.deleted };
+  const reasons = [part, other].flatMap((each) => (each.reached ? [] : [each.reason]));
+  return { part: part.part, reached: false, reason: [...new Set(reasons)].join('; ') };
+}
+
+/**
+ * Whether a deletion left nothing of its subject in the store: no write of theirs running at the deadline, and every
+ * part reached but the open sessions, which hold no row of the store.
+ */
+function storeHoldsNoMore(report: ForgetMemoryReport): boolean {
+  return report.pendingAtDeadline === 0 && report.parts.every((part) => part.part === 'sessions' || part.reached);
+}
 
 /** Characters a token is estimated at, as `estimateTokens` counts them. */
 const CHARS_PER_TOKEN = 4;
@@ -84,6 +155,15 @@ const CHARS_PER_TOKEN = 4;
  * compiles, unless an option sets it.
  */
 export const DEFAULT_PENDING_WRITES_TIMEOUT_MS = 5_000;
+
+/** The learning layer's entry, among the stores its deletion does not reach, for a conversation's messages. */
+const CONVERSATION_HISTORY = "a conversation's own history";
+
+/**
+ * Why a souled agent's deletion does not reach a conversation's messages, in place of the learning layer's reason:
+ * the sessions the agent's handle holds open for the person are emptied (the report's `sessions` part).
+ */
+const HISTORY_HELD_ELSEWHERE = 'a session another agent object or another process holds open keeps its messages until the host closes it';
 
 /** The longest delay a timer takes (2^31 - 1 ms, about 24.8 days); a longer one fires at once. */
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
@@ -101,6 +181,28 @@ export const SPEAKER_METADATA_KEY = 'speaker';
 /** Who spoke a trace, as the observer records it. */
 type Speaker = 'user' | 'assistant';
 
+/** The role tag precedes the persona and any user tags in a legacy GMI trace. */
+function legacyGmiSpeaker(tags: string): Speaker | undefined {
+  try {
+    const parsed: unknown = JSON.parse(tags);
+    const role: unknown = Array.isArray(parsed) ? parsed[0] : undefined;
+    if (role === 'user' || role === 'role:user') return 'user';
+    if (role === 'assistant' || role === 'role:assistant') return 'assistant';
+  } catch {
+    // Unreadable tags leave the text without a speaker.
+  }
+  return undefined;
+}
+
+type LegacyGmiUnattributed = { scope: string; scopes: number; traces: number; reason: string };
+/**
+ * How many source rows a move deletes from a passed GMI store at once, once their copies are filed: each delete on a
+ * SQLite store rebuilds the store's full-text index, so a row at a time would rebuild it once a row.
+ */
+const LEGACY_MOVE_BATCH = 200;
+type LegacyGmiMove = { userId: string; moved: number; kept: number; failed?: string };
+type LegacyGmiPerson = { subject: { kind: 'user'; id: string }; scopeId: string; traces: number };
+
 /** Who a turn's memory belongs to: the user its session named, else the session. */
 type MemorySubject = MemoryHookContext['subject'];
 
@@ -113,11 +215,24 @@ const RECALL_LIMIT = 8;
  * - `{ longTerm: 'off' }`: nothing is filed for the account, and its turns recall the operator's pages alone.
  * - `{ longTerm: 'raw' }`: its turns are filed and recalled as traces, and no page is compiled for it.
  * - `{ longTerm: 'compiled' }`: its turns are filed, recalled and compiled into its pages. The default.
+ *
+ * Each form may add two marks, with exactly these values:
+ *
+ * - `minor: true`: the account is a child's. On a store that keeps the account's memory until deletion (its period in
+ *   `retention`, or no `retention` at all), the answer keeps no long-term memory, as `longTerm: 'off'` does, whatever
+ *   `retentionDays` it holds, and one `memory.write_refused` line a session says `minor_no_retention`. On a store that
+ *   keeps it for a number of days, the account's pages are compiled only by the target `compile.minors` names, and
+ *   not at all without one (`memory.compile_skipped`, `minor_no_compile`).
+ * - `profiling: 'off'`: the person objects to profiling. The default runtime's store keeps no mood or emotional
+ *   context of anyone, so on its path the answer files, recalls and compiles as `longTerm` says. On `runtime: 'gmi'`
+ *   the person's turns are not scored for sentiment, whatever `longTerm` says; with cognitive memory on they are
+ *   stored with a neutral emotional state under `emotionalStamp: 'mood'` too, and what they recall keeps its
+ *   emotional context with reconsolidation on. The same holds for a minor's.
  */
 export type MemoryPolicy =
-  | { longTerm: 'off' }
-  | { longTerm: 'raw'; retentionDays?: number }
-  | { longTerm: 'compiled'; retentionDays?: number };
+  | { longTerm: 'off'; profiling?: 'off'; minor?: true }
+  | { longTerm: 'raw'; retentionDays?: number; profiling?: 'off'; minor?: true }
+  | { longTerm: 'compiled'; retentionDays?: number; profiling?: 'off'; minor?: true };
 
 /**
  * How long a souled agent's store keeps what people said.
@@ -145,12 +260,172 @@ export interface MemoryRetention {
 const RETENTION_REQUIRED =
   "souledAgent: this store holds memory of more than one person or session; set retention: { traces: { days } } or { traces: 'until-deletion' }";
 
+/**
+ * What the open of a store more than one subject shares, and the open of a second subject's session, is refused with
+ * when no `tombstoneKey` is set and the ledger holds no tombstone yet.
+ */
+const TOMBSTONE_KEY_REQUIRED =
+  'souledAgent: this store would hold memory of more than one person or session; set tombstoneKey: without it, the tombstone a deletion leaves is an unkeyed SHA-256 hash of the id, which anyone who can read the ledger can match by hashing a guessed id';
+
+/** What a `soulStore` that is not `{ adapter }` with a storage adapter is refused with. */
+const SOUL_STORE_SHAPE = 'souledAgent: soulStore must be { adapter } with a StorageAdapter of @framers/sql-storage-adapter';
+
+/** What an open with `soulStore` and no `tombstoneCopy`, or one that names no file and no adapter, is refused with. */
+const SOUL_STORE_NEEDS_COPY =
+  "souledAgent: soulStore needs tombstoneCopy ({ path } or { adapter }), the tombstones' second copy outside what a restore of the store replaces; the default copy is a file on one machine, and a store in the host's database usually serves several";
+
+/** What an open on the file store with a `tombstoneCopy` that is set and names no file and no adapter is refused with. */
+const TOMBSTONE_COPY_NAMES_NOTHING =
+  "souledAgent: tombstoneCopy names no copy; pass { path } with a non-empty file path or { adapter } with a StorageAdapter, or leave it out for the default file memory/.store/forgotten.sqlite in the store's own folder";
+
+/** What an open with `soulStore` and no `retention`, or no `tombstoneKey` that holds a key, is refused with. */
+const SOUL_STORE_NEEDS_RETENTION_AND_KEY =
+  "souledAgent: soulStore needs retention and tombstoneKey: the agent counts the people and sessions it holds memory of in its own process, and a store in the host's database is usually served by several processes, each of which would let its own first one in without them";
+
+/** What an open on a database that holds another agent's memory is refused with. */
+const SOUL_STORE_HOLDS_ANOTHER_AGENT =
+  "souledAgent: soulStore's database already holds another agent's memory (rows under another brain id in brain_meta, memory_traces or memory_scopes); give each agent a database or PostgreSQL schema of its own: the tombstone ledger is database-wide, so two agents on one database would share each other's deletions";
+
+/** The tables a Brain keeps its rows in under its own `brain_id`; a row under another id is another agent's. */
+const BRAIN_TABLES = ['brain_meta', 'memory_traces', 'memory_scopes'] as const;
+
+/** Whether `value` has the calls of a `StorageAdapter` the store and the ledger make, and a `kind`. */
+function isStorageAdapter(value: unknown): value is StorageAdapter {
+  const calls = ['get', 'all', 'run', 'exec', 'transaction'];
+  return (
+    value !== null &&
+    typeof value === 'object' &&
+    typeof (value as { kind?: unknown }).kind === 'string' &&
+    calls.every((name) => typeof (value as Record<string, unknown>)[name] === 'function')
+  );
+}
+
+/** Throws {@link SOUL_STORE_SHAPE} unless `soulStore` is `{ adapter }` with an adapter's calls. */
+function assertSoulStore(soulStore: unknown): asserts soulStore is { adapter: StorageAdapter } {
+  const adapter = soulStore !== null && typeof soulStore === 'object' ? (soulStore as { adapter?: unknown }).adapter : undefined;
+  if (!isStorageAdapter(adapter)) throw new TypeError(SOUL_STORE_SHAPE);
+}
+
+/**
+ * Whether `tombstoneCopy` names a second copy, read as the open reads it: an option that has an `adapter` key is an
+ * adapter's, whatever else it holds, so it names one only when that key holds an object with an adapter's calls; any
+ * other option names a file by a non-empty path.
+ */
+function namesTombstoneCopy(tombstoneCopy: unknown): boolean {
+  if (tombstoneCopy === null || typeof tombstoneCopy !== 'object') return false;
+  if ('adapter' in tombstoneCopy) return isStorageAdapter((tombstoneCopy as { adapter?: unknown }).adapter);
+  const file = (tombstoneCopy as { path?: unknown }).path;
+  return typeof file === 'string' && file !== '';
+}
+
+/**
+ * Whether the database behind `adapter` has `table` in the place a Brain opened on the adapter makes its own: on
+ * PostgreSQL the connection's current schema. Before the Brain has made its tables there, the bare name of a table can
+ * resolve to a same-named table of a later schema on the search path (a schema of the agent's own ahead of a `public`
+ * another brain uses), which is not this database's. False when the catalog cannot be read.
+ */
+async function hasTableOfItsOwn(adapter: StorageAdapter, table: string): Promise<boolean> {
+  try {
+    if (String(adapter.kind).includes('postgres')) {
+      const row = await adapter.get<{ found: boolean }>(
+        'SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = ?) AS found',
+        [table],
+      );
+      return row?.found === true;
+    }
+    return (await adapter.get("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", [table])) != null;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether the database behind `adapter` holds a row of another brain than `brainId`, in a table every open makes.
+ *
+ * @param beforeOpen - The read before this agent's Brain has opened: a table the database does not have yet in the
+ *   Brain's own place ({@link hasTableOfItsOwn}), or has in an older shape that cannot be read, counts as holding no
+ *   such row. The read after the open decides, and its errors are thrown.
+ */
+async function holdsAnotherBrain(adapter: StorageAdapter, brainId: string, beforeOpen = false): Promise<boolean> {
+  for (const table of BRAIN_TABLES) {
+    if (beforeOpen && !(await hasTableOfItsOwn(adapter, table))) continue;
+    const row = adapter.get(`SELECT 1 AS n FROM ${table} WHERE brain_id <> ? LIMIT 1`, [brainId]);
+    if ((await (beforeOpen ? row.catch(() => null) : row)) != null) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether `brain_meta` holds a row of `brainId`, read before the Brain opens; false while the database has no such
+ * table of its own ({@link hasTableOfItsOwn}) or it cannot be read.
+ */
+async function brainIsSeeded(adapter: StorageAdapter, brainId: string): Promise<boolean> {
+  if (!(await hasTableOfItsOwn(adapter, 'brain_meta'))) return false;
+  return adapter.get('SELECT 1 AS n FROM brain_meta WHERE brain_id = ? LIMIT 1', [brainId]).then(
+    (row) => row != null,
+    () => false,
+  );
+}
+
+/**
+ * After an open refused because another agent seeded the database at the same moment, deletes the `brain_meta` rows
+ * this open seeded for `brainId`, so the agent that stays opens again. The caller calls it only for a brain the
+ * database did not hold before the open. Only rows seeded at or after `since` (a brain that was there before keeps its
+ * own time) of a brain that holds no trace and no scope are deleted.
+ */
+async function dropSeededBrain(adapter: StorageAdapter, brainId: string, since: number): Promise<void> {
+  const seeded = await adapter.get<{ value: string }>("SELECT value FROM brain_meta WHERE brain_id = ? AND key = 'created_at'", [brainId]);
+  if (!seeded || !(Number(seeded.value) >= since)) return;
+  for (const table of ['memory_traces', 'memory_scopes']) {
+    if ((await adapter.get(`SELECT 1 AS n FROM ${table} WHERE brain_id = ? LIMIT 1`, [brainId])) != null) return;
+  }
+  await adapter.run('DELETE FROM brain_meta WHERE brain_id = ?', [brainId]);
+}
+
+/** Whether a file, a folder or a link is at `target`. */
+async function somethingAt(target: string): Promise<boolean> {
+  return fs.lstat(target).then(
+    () => true,
+    () => false,
+  );
+}
+
 /** Whether a tombstone copy's ledger table holds no row; false when the table cannot be read. */
 async function holdsNoLedgerRow(copy: StorageAdapter): Promise<boolean> {
   try {
     return (await copy.get('SELECT hash FROM agentos_learning_forgotten LIMIT 1')) == null;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Throws unless `compile.minors`, when the key is there with a value, names a provider and a model as non-empty
+ * strings, with an `apiKey` and a `baseUrl` that are strings when given. A target with no provider or no model would
+ * resolve to the agent's or the environment's provider, which the host never named for minors.
+ *
+ * @throws TypeError naming `compile.minors` and what it must hold.
+ */
+function assertCompileMinors(compile: unknown): void {
+  if (compile === null || typeof compile !== 'object') return;
+  const minors = (compile as { minors?: unknown }).minors;
+  if (minors === undefined) return;
+  const target = (
+    minors !== null && typeof minors === 'object' && !Array.isArray(minors) ? minors : {}
+  ) as Record<string, unknown>;
+  const named = (value: unknown) => typeof value === 'string' && value !== '';
+  const optional = (value: unknown) => value === undefined || typeof value === 'string';
+  if (!named(target.provider) || !named(target.model) || !optional(target.apiKey) || !optional(target.baseUrl)) {
+    throw new TypeError(
+      "souledAgent: compile.minors needs { provider, model } as non-empty strings (apiKey and baseUrl strings when given): a minor's compile goes only to the target named for it",
+    );
+  }
+  // A `provider:` prefix the library knows wins over the named provider when the call resolves, so such a model
+  // would send a minor's compile to the provider of the prefix, on that provider's key from the environment.
+  if (modelNamesAnotherProvider(target.provider as string, target.model as string)) {
+    throw new TypeError(
+      "souledAgent: compile.minors.model names another provider than compile.minors.provider; name the model without that provider's prefix, or name that provider",
+    );
   }
 }
 
@@ -188,13 +463,101 @@ const TIMED_OUT = Symbol('timed out');
 /** A screen hook that failed: a symbol, so no text a screen answers, and no text a person writes, is read as it. */
 const SCREEN_FAILED = Symbol('screen failed');
 
+/**
+ * The provider a route names itself: `provider`, else the known provider its model's own `provider:` or `provider/`
+ * prefix names. Never one the environment or a default picks for a plain model.
+ */
+function providerNamedBy(provider: string | undefined, model: string | undefined): string | undefined {
+  if (provider !== undefined) return provider;
+  if (model === undefined) return undefined;
+  const prefix = /^([^:/]+)[:/]/.exec(model)?.[1];
+  if (prefix === undefined) return undefined;
+  try {
+    // A prefix no provider owns falls through to detection, which picks some other provider: that one is not named.
+    const resolved = resolveModelOption({ model }, 'text').providerId;
+    return resolved === prefix ? resolved : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** A route a call is sent on: its provider and model as named, its own key and base URL, and whether it is strict. */
+interface CallRoute {
+  provider?: string;
+  model?: string;
+  apiKey?: string;
+  baseUrl?: string;
+  /** Sent to its provider alone: no Anthropic to OpenRouter reroute. */
+  strict?: boolean;
+}
+
+/** What a GMI built from `opts` runs; undefined for options that do not resolve, which are left for agent() to refuse. */
+function cognitionOf(opts: CognitionInputs): ResolvedCognition | undefined {
+  try {
+    return resolveCognition(opts);
+  } catch {
+    return undefined;
+  }
+}
+
 /** Whether a GMI built from `opts` runs cognitive memory; options that do not resolve are left for agent() to refuse. */
 function cognitiveMemoryOf(opts: CognitionInputs): boolean {
-  try {
-    return Boolean(resolveCognition(opts).memory);
-  } catch {
-    return false;
+  return Boolean(cognitionOf(opts)?.memory);
+}
+
+/**
+ * Throws unless the cognitive memory a souled agent runs on `runtime: 'gmi'` names the provider that embeds what
+ * people say, and leaves consolidation off.
+ *
+ * - `memory.embedding.provider` must be a non-blank string. A memory that names none picks its provider from the
+ *   default provider or the environment when it is built, so a person's words would go to a recipient the host never
+ *   named.
+ * - `memory.embedding.model` must not carry another provider's prefix (`'openai:text-embedding-3-small'` under
+ *   `provider: 'gemini'`): a known `provider:` prefix wins over `provider` when the model is resolved, so the words
+ *   would go to the prefix's provider. A prefix that repeats the provider is accepted.
+ * - `memory.consolidation.enabled` must not be `true`: a consolidation cycle can merge two people's traces into one,
+ *   and a souled agent files each person's memory under a key of their own.
+ *
+ * Nothing is probed: no call leaves the process before a turn does.
+ *
+ * @throws TypeError naming `memory.embedding`, or `memory.consolidation` with its reason.
+ */
+function assertSoulMindMemory(memory: Exclude<ResolvedCognition['memory'], false>): void {
+  const provider: unknown = memory.embedding?.provider;
+  if (typeof provider !== 'string' || provider.trim() === '') {
+    throw new TypeError(
+      "souledAgent: cognitive memory on runtime: 'gmi' needs memory.embedding.provider, the provider that embeds what people say (memory: { embedding: { provider: 'openai' } }, or a local one such as 'ollama'); a souled agent picks none from the default provider or the environment, so a person's words go only where you named",
+    );
   }
+  const model: unknown = memory.embedding?.model;
+  const routed = routedProviderOf({ provider, model: typeof model === 'string' ? model : undefined });
+  if (routed !== provider) {
+    throw new TypeError(
+      `souledAgent: memory.embedding.model names the provider '${String(routed)}' by its prefix, and memory.embedding.provider is '${provider}'; a souled agent embeds what people say only with the provider memory.embedding.provider names, so drop the prefix or name that provider`,
+    );
+  }
+  if (memory.consolidation?.enabled === true) {
+    throw new TypeError(
+      "souledAgent: memory.consolidation.enabled is true, and a consolidation cycle can merge two people's traces into one, while a souled agent files each person's memory under a key of their own; leave memory.consolidation off",
+    );
+  }
+}
+
+/**
+ * The mechanisms the soul's mind runs, from those a GMI built from the agent's options resolves to: the host's config,
+ * with reconsolidation, involuntary recall and temporal gist each on only where the host's config for it says
+ * `enabled: true`, and every other mechanism and setting as given. Each of the three changes or resurfaces what a
+ * person said (a recalled trace's emotional context drifts, an old trace is shown unasked, a trace's text is cut to a
+ * gist), so none runs unless the host turns it on. No config stays none: the mechanisms are off.
+ */
+function soulMechanismsOf(given: CognitiveMechanismsConfig | undefined): CognitiveMechanismsConfig | undefined {
+  if (!given) return undefined;
+  return {
+    ...given,
+    reconsolidation: { ...given.reconsolidation, enabled: given.reconsolidation?.enabled === true },
+    involuntaryRecall: { ...given.involuntaryRecall, enabled: given.involuntaryRecall?.enabled === true },
+    temporalGist: { ...given.temporalGist, enabled: given.temporalGist?.enabled === true },
+  };
 }
 
 /** `work`'s result, or {@link TIMED_OUT} when it has not settled within `ms`. A rejection is the caller's to catch. */
@@ -213,19 +576,33 @@ async function within<T>(work: Promise<T>, ms: number): Promise<T | typeof TIMED
 }
 
 /**
- * True for an object that holds `longTerm`, one of the three words a policy takes, and nothing else but, on a policy
- * that keeps memory, `retentionDays` as a positive number.
+ * True for an object that holds `longTerm`, one of the three words a policy takes, and nothing else but `profiling`
+ * as `'off'`, `minor` as `true` and, on a policy that keeps memory, `retentionDays` as a positive number.
  */
 function isMemoryPolicy(value: unknown): value is MemoryPolicy {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
-  const { longTerm, retentionDays, ...others } = value as { longTerm?: unknown; retentionDays?: unknown };
+  const { longTerm, retentionDays, profiling, minor, ...others } = value as {
+    longTerm?: unknown;
+    retentionDays?: unknown;
+    profiling?: unknown;
+    minor?: unknown;
+  };
   if (Object.keys(others).length > 0) return false;
+  // A mark is given with its one value or not at all: a key present with any other value is not an answer.
+  if (Object.prototype.hasOwnProperty.call(value, 'profiling') && profiling !== 'off') return false;
+  if (Object.prototype.hasOwnProperty.call(value, 'minor') && minor !== true) return false;
   if (longTerm === 'off') return !Object.prototype.hasOwnProperty.call(value, 'retentionDays');
   if (longTerm !== 'raw' && longTerm !== 'compiled') return false;
   if (!Object.prototype.hasOwnProperty.call(value, 'retentionDays')) return true;
   return typeof retentionDays === 'number' && Number.isFinite(retentionDays) && retentionDays > 0;
 }
 
+/**
+ * The refusal of `memoryPolicy`, `screen` or `sharedMemory` beside cognitive memory on a soul that gives no store: an
+ * inline soul, or an optional soul that did not load.
+ */
+const SOULLESS_HOOKS_WITH_COGNITIVE_MEMORY =
+  "souledAgent: memoryPolicy, screen and sharedMemory act on the soul's own store, and this soul gives none (an inline { content } soul has no workspace folder, and an optional soul that did not load has none either), so the plain agent built in its place keeps its GMI's cognitive memory (runtime: 'gmi' with cognition memory on) in a store none of them reaches; pass the folder that holds SOUL.md, turn cognitive memory off, or leave them out";
 /** What `sharedMemory` must be, as the rejection of an option that is not says it. */
 const SHARED_MEMORY_SHAPE =
   "souledAgent: sharedMemory needs { as: <a user id>, reason: 'one-persons-machine' | 'operators-notes' }";
@@ -235,6 +612,8 @@ const PAGE_TAG = 'page:';
 
 /** One recalled trace: the label that opens its line, then its text, and the label's parts as a record's fields. */
 interface RecallLine {
+  /** The trace id of a recalled message. A wiki note is identified by its page. */
+  id?: string;
   /** `[user, 26 days ago, 2026-10-14] `: who spoke it and when it was stored; ends with a space. Empty when dropped. */
   prefix: string;
   content: string;
@@ -387,6 +766,17 @@ function isBudgetRefusal(error: unknown): boolean {
   return name === 'CostCapExceededError' || name === 'UnpricedModelError' || name === 'SpendMeterUnavailableError';
 }
 
+/**
+ * Thrown in place of a compile's next model call when the account's latest answer no longer lets it run: the
+ * scope's compile stops there, is logged as skipped for `reason`, and its traces wait with their watermark.
+ */
+class CompileStopped extends Error {
+  constructor(readonly reason: 'policy_raw' | 'minor_no_compile') {
+    super(`the compile stopped before its next model call: ${reason}`);
+    this.name = 'CompileStopped';
+  }
+}
+
 /** Options for {@link souledAgent}: those of {@link AgentOptions}, with `soul` required. */
 export interface SouledAgentOptions extends AgentOptions {
   soul: NonNullable<AgentOptions['soul']>;
@@ -394,8 +784,10 @@ export interface SouledAgentOptions extends AgentOptions {
    * How long `close()` waits, in milliseconds, for the agent's turns still running and then for the memory writes of
    * its turns, one deadline for both, before it compiles the wiki. Default {@link DEFAULT_PENDING_WRITES_TIMEOUT_MS}
    * (5 seconds); 0 waits for none, and `Infinity` (or any wait past the longest timer, about 24.8 days) waits for them
-   * all. When the wait ends with turns or writes still pending, the compile takes what is stored and one `console.warn`
-   * line gives their number.
+   * all. When the wait ends with turns or writes still pending, the compile takes what is stored and one
+   * `memory.close_pending` line, through the host's logger, gives their number. A deletion (`forgetUser`) waits as
+   * long for the person's pending writes and then, with `runtime: 'gmi'`, as long again for a turn still running on a
+   * session it empties, unless the deletion was called from that turn's own hook or tool.
    */
   pendingWritesTimeoutMs?: number;
   /**
@@ -409,14 +801,37 @@ export interface SouledAgentOptions extends AgentOptions {
    * ledger. An object names another provider or model (a local model included): the compile's text then goes to that
    * provider alone, with no fallback and no router, and the agent's own key is sent only to the agent's own provider.
    * `false`: no compile; raw traces only, and no per-user page is ever written.
+   *
+   * `minors` names where the compile of an account `memoryPolicy` answers `minor: true` for goes: that provider and
+   * model alone, with no fallback and no router, as a named target above, and no other provider in its place: with no
+   * key for it, the compile fails rather than going to OpenRouter, and a `setDefaultProvider()` default that names no
+   * provider lends it nothing. The agent's own key and base URL go with it only when the agent names that provider, as
+   * its `provider` or its model's prefix, never when the environment picks it. `provider` and `model` are required and
+   * non-empty, and a `model` whose `provider:` prefix names another provider is refused, or the agent does not open
+   * (`TypeError`). Without it, no page is compiled for a minor.
+   * Each merge of a compile is sent on the route the account's latest answer gives at that moment. An object that
+   * holds `minors` alone leaves every other account's compile on the agent's own provider, model and route.
    */
-  compile?: { provider?: string; model?: string; apiKey?: string; baseUrl?: string } | false;
+  compile?:
+    | {
+        provider?: string;
+        model?: string;
+        apiKey?: string;
+        baseUrl?: string;
+        minors?: { provider: string; model: string; apiKey?: string; baseUrl?: string };
+      }
+    | false;
   /**
-   * The host's policy for the account a turn serves; asked once a session and kept for it. A hook that throws,
-   * rejects, does not answer within the memory hooks' timeout (`memoryProviderOptions.timeoutMs`) or answers anything
-   * but one of the three policies fails closed: nothing is filed for that turn, it recalls the operator's pages alone,
-   * and the next turn asks again. `retentionDays` on a policy that keeps memory shortens the agent's `retention`
-   * period for that account, in the sweeps of the process that asked; it never lengthens it.
+   * The host's policy for the account a turn serves. A session asks once and keeps the answer for its next turns,
+   * until a later answer for the same account, given to any session or call of this agent, replaces it from the
+   * session's next turn; a later answer that failed makes the session ask again. A hook that throws, rejects, does not
+   * answer within the memory hooks' timeout (`memoryProviderOptions.timeoutMs`) or answers anything but one of the
+   * three policies, with `minor: true` and `profiling: 'off'` as the only marks it may add, fails closed: nothing is
+   * filed for that turn, it recalls the operator's pages alone (one that does not answer in time holds the turn's recall
+   * for the same timeout, so that turn recalls nothing), and the next turn asks again. `retentionDays` on a
+   * policy that keeps memory shortens the agent's `retention` period for that account, in the sweeps of the process
+   * that asked; it never lengthens it. Another agent object, in this process or another, reads the host's answer at
+   * its own sessions' next ask.
    */
   memoryPolicy?: (context: MemoryHookContext) => MemoryPolicy | Promise<MemoryPolicy>;
   /**
@@ -436,12 +851,18 @@ export interface SouledAgentOptions extends AgentOptions {
    * The secret that keys the tombstones (HMAC-SHA-256). Without it tombstones are unkeyed SHA-256 hashes, which can be
    * matched by hashing a guessed id. After a rotation the previous keys are still needed to check the old tombstones.
    * A store whose tombstones are keyed does not open without it.
+   *
+   * Required once the store holds, or would hold, the memory of a second user or session, while its ledger holds no
+   * tombstone: the open of such a store, and the second subject's session, are refused without it. A ledger that
+   * already holds unkeyed tombstones lets the second subject in, and one `memory.tombstones_unkeyed` line an open
+   * says so. One stable `userId`, or `sharedMemory`, is one subject and needs none.
    */
   tombstoneKey?: TombstoneKey | { current: TombstoneKey; previous?: ReadonlyArray<TombstoneKey> };
   /**
    * Where the second copy of the tombstones lives, out of what a restore of the store replaces: a SQLite file path, or
    * an adapter (left open on close). Default: `memory/.store/forgotten.sqlite`. A store whose copy is missing or
-   * unreadable does not open.
+   * unreadable does not open, and an option that names neither a file by a non-empty path nor an adapter (`null`,
+   * `{}`, `{ path: undefined }`, `{ adapter: undefined }`) is refused before anything opens.
    */
   tombstoneCopy?: { path: string } | { adapter: StorageAdapter };
   /**
@@ -453,6 +874,50 @@ export interface SouledAgentOptions extends AgentOptions {
    * never attributed.
    */
   legacyMemory?: { attributeTo: string; reason: LegacyMemoryReason };
+  /**
+   * Keeps the store in the host's own database: a `StorageAdapter` of `@framers/sql-storage-adapter`, SQLite or
+   * PostgreSQL, in place of the SQLite file `memory/.store/memory.sqlite`. Every call reaches the store there as it
+   * reaches the file. `close()` leaves the adapter open, and on SQLite the agent turns `secure_delete` on for it.
+   *
+   * Give the agent a database or PostgreSQL schema of its own: the tombstone ledger is database-wide, so the open is
+   * refused on a database that holds another agent's memory, before anything is written there. Give it an adapter
+   * object of its own too: the agent runs its own transactions on a PostgreSQL adapter one after another, and a
+   * transaction the host runs on the same adapter is outside that order. A PostgreSQL adapter must read BIGINT as
+   * numbers (`typeParsers: { int8: 'number' }`).
+   * `tombstoneCopy` is required with it, and the open is refused while a store file is still at
+   * `memory/.store/memory.sqlite`: the memory it holds would be out of reach of every call on the new store.
+   * `retention` and `tombstoneKey` are required with it too, with or without `sharedMemory`: the agent counts the
+   * people and sessions it holds memory of in its own process, and other processes serve the same database.
+   */
+  soulStore?: { adapter: StorageAdapter };
+  /**
+   * Whether a session turn on `runtime: 'gmi'` sends the end user's id to the model provider: the `userId` the session
+   * was opened with, in the provider's end-user field (OpenAI's `user` or `safety_identifier`), as the name the user's
+   * messages are sent under (which OpenAI's Chat Completions API receives) and as a tag of the cognitive memory a turn
+   * files (which the memory block shows the model), a seat's session included. Default
+   * `false`: no turn of the agent sends one, and a team a session launches seats its sessions as the session's user and
+   * sends none either. Set it only where the session's `userId` is an opaque or hashed id, never an email address: the
+   * provider receives it. Tools, the user context and the memory hooks get the user id either way. The default runtime
+   * sends no end-user id, with or without it.
+   */
+  sendUserIdToProvider?: boolean;
+  /**
+   * The emotional state each side of a session turn is stored with on `runtime: 'gmi'` with cognitive memory on.
+   *
+   * - `'neutral'`, the default: a neutral state (no valence, no dominance, the middle of the arousal scale, the mood
+   *   `neutral`), whatever the mood of the agent's mind; the trace's encoding strength reads no mood either.
+   * - `'mood'`: the mood of the agent's mind when the turn's filing starts, its own mood and never a reading of the
+   *   person's message. Under sentiment tracking (`cognition: 'full'`) a metaprompt that answers a sentiment event can
+   *   change that mood, so a stored mood can follow how a conversation went. An account whose `memoryPolicy` answer
+   *   holds `minor: true` or `profiling: 'off'` is stored neutral under this setting too.
+   *
+   * The default runtime's store keeps no emotional state of anyone, with or without it. A plain agent (an inline
+   * soul, or an optional soul that did not load) has no store, and its GMI stamps its own mood on what its cognitive
+   * memory keeps, as `gmi()` does, with or without it.
+   *
+   * @default 'neutral'
+   */
+  emotionalStamp?: 'neutral' | 'mood';
 }
 
 /**
@@ -467,13 +932,21 @@ export type SouledAgent = Agent & {
   /**
    * Deletes one person's memory from this agent's store for good and keeps it deleted: it waits for the person's
    * pending writes (up to `pendingWritesTimeoutMs`), records a tombstone, deletes their traces, document chunks,
-   * compiled pages and registry row, writes the vector index again, and clears the history of the sessions this
-   * handle holds open for them. With a learning layer, the layer's own `forgetUser` runs first. `linkedSessions`
-   * names the anonymous sessions the host has tied to the person: each is deleted the same way.
+   * compiled pages and registry row, writes the vector index again, and empties the sessions this handle holds open
+   * for them: on the default runtime each session's history is cleared; with `runtime: 'gmi'` each session's messages
+   * go at once and its GMI drops its history, its reasoning trace, its sentiment trend, its working-memory slots and
+   * its metaprompts' imprints once no turn of the session runs, which the call waits for up to
+   * `pendingWritesTimeoutMs`. A session still running a turn then leaves the report's `sessions` part missed, and is
+   * emptied when that turn ends. With a learning layer, the layer's own deletion runs first, and
+   * `agent.learning.forgetUser(userId)` runs this same deletion. `linkedSessions` names the anonymous sessions the
+   * host has tied to the person: each is deleted the same way, and its counts add into the report's parts.
    *
-   * @returns One report for the user and the linked sessions: each store with `reached` and a count or a reason,
-   *   the pages deleted and those that failed, `drained`, `pendingAtDeadline` and `complete`. It never holds the
-   *   user's id or any text.
+   * @returns One report for the user and the linked sessions, the receipt a host keeps beside its own record of the
+   *   request: each store with `reached` and a count or a reason, the pages deleted and those that failed, `drained`,
+   *   `pendingAtDeadline`, `complete`, `completedAt`, `agentId`, `libraryVersion`, the four `parts` in order
+   *   (`tombstone`, `mind`, `store`, `sessions`) and `recipients`. It never holds the user's id, a hash of the id or
+   *   any text. The person's deletion and each linked session's write one `memory.forget_incomplete` warn line when
+   *   incomplete, with each part reached or missed.
    * @throws TypeError when `userId`, or an entry of `linkedSessions`, is not a non-empty string, or holds a NUL or a
    *   lone surrogate, so no memory key can be built from it; nothing is deleted and no tombstone is written.
    */
@@ -496,87 +969,137 @@ export type SouledAgent = Agent & {
   sweepRetention?(): Promise<{ traces: number; pages: number; scopes: number }>;
   /**
    * One person's memory as JSON: their conversation traces (id, time, speaker, text, tags) and their compiled pages
-   * (id, summary, updated, sources, body), read from their own scope alone. Operator pages, other people's memory and
-   * a gmi() session's history are not in it; a forgotten person's export is empty. It reads after the memory writes
-   * of the person's turns already sent, so a turn whose `send()` resolved before the call is in it.
+   * (id, summary, updated, sources, body), read from their own scope alone; what they provided (their own messages);
+   * what is held about them (each trace with its entities, filing side, emotional context and strength fields, the
+   * memory graph's links between their traces, their pages, and their learned state when the agent runs a learning
+   * layer); {@link SouledAgent.recipients}; the retention period; whether their messages are scored for sentiment; and
+   * each read that failed (`unread`). Operator pages, other people's memory and a gmi() session's history are not in
+   * it; a forgotten person's export holds nothing of them. It reads after the memory writes of the person's turns
+   * already sent, so a turn whose `send()` resolved before the call is in it.
    *
    * @throws TypeError when `userId` is not a non-empty string.
    */
   exportUserMemory?(userId: string): Promise<UserMemoryExport>;
   /**
-   * Corrects one person's memory: deletes the named traces for good, files `text` as a trace tagged `correction`,
-   * deletes each page built from a deleted trace and has the next compile build it again from the traces that are
-   * left. It rejects, and changes nothing, when any id is not one of that person's live traces. When the person's
-   * memory already holds `text` word for word, that trace is the correction: it is tagged `correction`, kept, and
-   * not deleted even when it is one of the named traces.
+   * Previews a move from a passed GMI `memory.store`, or moves the named learners' traces into this soul's store.
+   * The default dry run reads counts. Pass `dryRun: false` to file and then delete each attributable source trace.
+   * `users` supplements the people named by the passed store's learning tables.
+   */
+  copyLegacyGmiMemory?(options?: { dryRun?: boolean; users?: readonly string[] }): Promise<
+    | { dryRun: true; people: Array<{ userId: string; traces: number }>; unattributed: LegacyGmiUnattributed[]; forgotten: number }
+    | { dryRun: false; people: LegacyGmiMove[]; unattributed: LegacyGmiUnattributed[]; forgotten: number }
+  >;
+  /**
+   * Who receives a person's text from this agent, outside the process: its model's provider and model, a model
+   * router's pick, each fallback hop (or the automatic fallback chain), the compile's target, the target for minors'
+   * compiles, the embedding provider and model of cognitive memory, and every route a call took that the options do
+   * not name (a `generate()` or `stream()` with its own `provider`, `model`, router or `fallbackProviders`, each provider
+   * and model a model router picked, or a route the credential layer sent elsewhere), which the store records so it is
+   * still named after a restart. An entry names a provider, not the endpoint a `baseUrl` sends it to. Each entry names
+   * where the text goes: the provider a model's `provider:` prefix names, and OpenRouter for an Anthropic route with no
+   * Anthropic key or base URL while `OPENROUTER_API_KEY` is set. The list is agent-wide, the same for every person.
+   * The library sends these recipients nothing.
    *
-   * @returns How many traces and pages it deleted, and the id of the correction's trace, a live trace.
-   * @throws TypeError when `userId`, the trace ids or the text is missing.
+   * @throws Error when the store cannot be read.
+   */
+  recipients?(): Promise<MemoryRecipient[]>;
+  /**
+   * Deletes or corrects one person's memories. It deletes the named traces for good, deletes each page built from a
+   * deleted trace and has the next compile build it again from the traces that are left. With `text` it files `text`
+   * in their place, as a trace tagged `correction`; with no `text` it files nothing. It rejects, and changes nothing,
+   * when any id is not one of that person's live traces. When the person's memory already holds `text` word for
+   * word, that trace is the correction: it is tagged `correction`, kept, and not deleted even when it is one of the
+   * named traces. No newer statement replaces an older one by itself: this call is how one does.
+   *
+   * A session turn of the person that was running when the call changed their memory does not file its reply, which
+   * can restate what the turn recalled before: the turn's `memoryWrite` names the reply `skipped`, `corrected`. What
+   * the person said in that turn is filed.
+   *
+   * @returns How many traces and pages it deleted, and `recipients`, the list {@link SouledAgent.recipients} returns:
+   *   the call sends them nothing, so telling each one is the host's. A correction adds `correctionTraceId`, the id
+   *   of the correction's trace, a live trace; a deletion with no `text` has no such key.
+   * @throws TypeError when `userId` or the trace ids are missing, or when `text` is given and is not a non-empty
+   *   string: a deletion leaves `text` out.
    * @throws Error when the correction's trace was deleted before it was marked; the call deletes no named trace. The
    *   same call made again files the correction anew when every named trace is still live; otherwise it rejects.
    */
-  correctUserMemory?(
-    userId: string,
-    correction: { traceIds: readonly string[]; text: string },
-  ): Promise<{ deleted: number; pagesDeleted: number; correctionTraceId: string }>;
+  correctUserMemory?: {
+    (
+      userId: string,
+      correction: { traceIds: readonly string[]; text: string },
+    ): Promise<{ deleted: number; pagesDeleted: number; correctionTraceId: string; recipients: MemoryRecipient[] }>;
+    (
+      userId: string,
+      correction: { traceIds: readonly string[]; text?: undefined },
+    ): Promise<{ deleted: number; pagesDeleted: number; recipients: MemoryRecipient[] }>;
+    (
+      userId: string,
+      correction: { traceIds: readonly string[]; text?: string },
+    ): Promise<{ deleted: number; pagesDeleted: number; correctionTraceId?: string; recipients: MemoryRecipient[] }>;
+  };
 };
 
 /**
- * Create an agent whose long-term memory is its soul-file `memory/` wiki.
+ * Create an agent with a soul and a per-person memory store. The default runtime is `'legacy'`.
  *
- * When the soul resolves to a workspace directory, the wiki is wired end to end
- * (store + write-back + `read_memory_page` tool + prelude `index.md`). For inline
- * souls (`{ content }`) there is no workspace, so this falls back to a plain
- * {@link agent} and says so in one `console.warn` line.
+ * A workspace soul supplies its operator pages under `memory/`, the `read_memory_page` tool and a wiki compiled
+ * from each subject's stored traces. The subject is the named user or the anonymous session id. Recall combines
+ * that subject's memory with the operator's pages. A one-shot call without a subject reads only operator pages
+ * and files nothing. An inline soul or an optional soul that fails to load falls back to a plain {@link agent}.
  *
- * Memory is kept per subject. A session turn is filed under the key of its subject, the user the session named or
- * else the session itself, the user's message and the reply alike, and it recalls that subject's memory and the
- * operator's pages, and nobody else's. A one-shot `generate()` or `stream()` names no user: nothing is filed for it,
- * it recalls the operator's pages alone, and one `memory.one_shot_unfiled` line an agent says so. With
- * {@link SouledAgentOptions.sharedMemory} every session that names no user, and every one-shot call, runs as one
- * user. Traces an earlier version filed under the agent's plain id stay in the store, are read by no turn, and are
- * counted in one `memory.legacy_traces` line at open. The store's folder, `memory/.store/`, gets a `.gitignore` holding
- * `*` when it has none; a file git tracked before stays tracked until the host removes it from the index.
+ * On a workspace-backed agent with `runtime: 'gmi'` and cognitive memory enabled, the GMI and wiki use the same
+ * durable store. The GMI files each accepted side of a session turn under the subject's key and recalls the traces
+ * it filed. The soul's memory provider recalls earlier and provider-filed traces and wiki pages. With cognitive
+ * memory off, the provider handles both filing and recall. Team seat sessions run with cognitive memory off.
  *
- * Each stored turn records who spoke it in the trace's metadata ({@link SPEAKER_METADATA_KEY}), outside its text and
- * its tags, so recall never matches a trace by its speaker; each recalled trace is sent as one record, with its
- * speaker and its date, in a data block. The wiki compile's model calls go on the agent's route with its fallback
- * settings, are checked against and charged to its spend budget, and are written to its usage ledger under the source
- * {@link SOULED_AGENT_COMPILE_SOURCE}.
+ * The workspace's three memory hooks apply on both runtimes, including with GMI cognitive memory enabled.
  *
- * The wiki is compiled once a subject, from that subject's traces alone, into pages that are rows of the store and
- * never files under `memory/`; each subject has its own watermark. `close()` compiles the subjects its turns wrote
- * to, and `agent.memory.compileWiki()` every subject with new traces. A subject whose compile the spend budget
- * refuses is skipped with one `memory.compile_skipped` line: its traces wait for the next compile, and the other
- * subjects compile.
+ * - {@link SouledAgentOptions.memoryPolicy} chooses `off`, `raw` or `compiled` for the subject. `off` keeps no new
+ *   long-term memory and recalls only operator pages. `raw` allows filing and recall without compiling new pages.
+ *   `compiled` also allows wiki compilation, subject to {@link SouledAgentOptions.compile}. The latest policy
+ *   answer for the subject on this agent takes effect on an open session's next turn.
+ * - {@link SouledAgentOptions.screen} can redact or drop text before filing and embedding and before compilation.
+ *   A failed or timed-out policy or screening hook fails closed for the affected work.
+ * - {@link SouledAgentOptions.sharedMemory} assigns anonymous sessions and one-shot calls to the one named user
+ *   on a personal machine or for an operator's notes.
  *
- * Three options say what is kept and where it goes. {@link SouledAgentOptions.compile} names the provider or model
- * the compile's calls go to, or turns the compile off (`false`: raw traces only, one `memory.compile_skipped` line at
- * open). {@link SouledAgentOptions.memoryPolicy} is asked once a session for the account the turn serves: `off` files
- * nothing and recalls the operator's pages alone, `raw` files and recalls and compiles no page, `compiled` is the
- * default. {@link SouledAgentOptions.screen} is given each text before it is filed and again before it is compiled.
- * Both hooks fail closed: a hook that throws, times out or answers anything else files nothing for that write
- * (`memory.write_refused`), and a compile it fails for does not run (`memory.compile_skipped`), its traces waiting
- * with their watermark where it was. A compile started in a process that served no turn of a subject has no policy
- * answer and no hook context for it: under a policy hook it is not compiled, and under a screen hook neither.
+ * {@link SouledAgentOptions.soulStore} uses a host-owned SQLite or PostgreSQL adapter in place of the workspace's
+ * SQLite store. Supply `retention`, `tombstoneKey` and a separate `tombstoneCopy`. The host owns the adapter's
+ * lifetime. GMI cognitive memory uses the embedding provider you name. Its traces in the workspace-backed store
+ * carry a neutral emotional stamp by default. {@link SouledAgentOptions.emotionalStamp} can opt into storing the
+ * agent's mood, with neutral stamps still used for minors and subjects whose policy sets `profiling: 'off'`. GMI
+ * session requests omit the end-user id by default. Use {@link SouledAgentOptions.sendUserIdToProvider} to opt in
+ * with an opaque id.
  *
- * `close()` first closes the agent (with `runtime: 'gmi'` that stops its session turns), then waits, within one
- * deadline (see {@link SouledAgentOptions.pendingWritesTimeoutMs}), for the turns still running (a `generate()`, a
- * `stream()`, a session's `send()` or `stream()`, on either runtime; a stream whose signal aborted before anything was
- * read from it is not waited for, and on the default runtime a stream nobody reads and nobody aborts keeps the wait
- * until the deadline) and for the memory writes of its turns, then compiles the wiki, then closes the store. A turn or a write
- * still pending when the deadline passes is left out of the compile, and a write that reaches the store after it is
- * closed is not stored.
+ * On a workspace-backed session, the `memoryWrite` promise on a `send()` or stream result reports each text
+ * side's write outcome without delaying the reply or carrying its text. {@link SouledAgent.recipients} lists
+ * the configured and recorded routes that receive text. Export, deletion, correction and retention operate on the
+ * unified store. With cognitive memory enabled and a passed GMI `memory.store` attached,
+ * {@link SouledAgent.copyLegacyGmiMemory} previews a move by default. Pass `dryRun: false` to move eligible traces to
+ * the soul's store and remove their source rows.
+ *
+ * Closing the agent gives in-flight turns and writes one deadline, set by
+ * {@link SouledAgentOptions.pendingWritesTimeoutMs}. It then sweeps expired memory, compiles from stored traces
+ * for the subjects whose turns wrote memory, where the policy allows it, and closes its own store handles. Call
+ * `agent.memory.compileWiki()` to compile without closing the agent. Closing a GMI session ends that session in
+ * process and preserves its durable memory under the same key, subject to retention and forgetting.
  *
  * @param opts - Agent options with a required `soul`.
- * @returns A fully-wired {@link Agent}.
- * @throws TypeError when `sharedMemory` is not `{ as, reason }` with a user id that names someone and one of the two
- *   reasons; nothing is opened.
- * @throws Error when `sharedMemory` is set and the store already holds the memory of another user or session; the
- *   store is closed first.
- * @throws TypeError when `memoryPolicy`, `screen` or `sharedMemory` is set on an agent whose cognitive memory is on
- *   (`runtime: 'gmi'` with `cognition.memory`, the `full` profile, or the `memory` option): the GMI keeps that memory
- *   in a store of its own, which none of them reaches; nothing is opened.
+ * @returns The {@link SouledAgent}. Its memory store and memory operations are available with a workspace soul.
+ * @throws SoulLoadError when a required soul fails to load.
+ * @throws TypeError for invalid `sharedMemory`, `retention` or `compile.minors` settings.
+ * @throws TypeError when GMI cognitive memory is enabled and `memory.embedding.provider` is missing or blank,
+ *   a known model prefix routes to a different provider, or `memory.consolidation.enabled` is `true`.
+ * @throws TypeError when `memoryPolicy`, `screen` or `sharedMemory` is supplied with GMI cognitive memory enabled
+ *   and the soul provides no workspace store.
+ * @throws TypeError for an invalid `tombstoneCopy` or `soulStore`, or when `soulStore` lacks an explicit copy,
+ *   retention or tombstone key.
+ * @throws ForgottenLedgerError when the tombstone ledger cannot open, for example if its copy is unavailable or
+ *   its existing keyed tombstones require a key.
+ * @throws Error when a workspace soul lacks a usable agent id, `sharedMemory` conflicts with an existing subject,
+ *   or the store holds multiple subjects without retention or without a tombstone key on a ledger with no tombstones.
+ * @throws Error when `soulStore` conflicts with an existing workspace store file, its PostgreSQL adapter fails to
+ *   return BIGINT values as numbers, or its database holds another agent's memory.
  */
 export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent> {
   const {
@@ -589,6 +1112,9 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     tombstoneCopy,
     retention,
     legacyMemory,
+    soulStore,
+    sendUserIdToProvider,
+    emotionalStamp,
     ...rest
   } = opts;
   /** The ids the agent itself reads as naming nobody, beside the built-in ones. */
@@ -596,30 +1122,81 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     typeof rest.learning === 'object' && rest.learning !== null ? rest.learning.anonymousUserIds : undefined;
   if (sharedMemory !== undefined) assertSharedMemory(sharedMemory, anonymousUserIds);
   if (retention !== undefined) assertRetention(retention);
+  assertCompileMinors(compile);
   if (legacyMemory !== undefined) assertLegacyMemory(legacyMemory, (id) => isAnonymousUserId(id, anonymousUserIds));
-  // The two hooks and sharedMemory act on this agent's own store. A GMI's cognitive memory files and recalls in a store
-  // of its own, which none of them reaches: an account the policy turns off would still be remembered there, and
-  // sessions sharedMemory runs as one user would not share it. They are refused together, before the soul is loaded:
-  // an inline soul, or an optional one that does not load, builds a plain agent that keeps cognitive memory too.
-  if ((memoryPolicy || screen || sharedMemory !== undefined) && rest.runtime === 'gmi' && cognitiveMemoryOf(rest as CognitionInputs)) {
-    throw new TypeError(
-      "souledAgent: memoryPolicy, screen and sharedMemory act on the souled agent's own memory, and cognitive memory (runtime: 'gmi' with cognition memory on) keeps a store none of them reaches; turn cognitive memory off, or leave them out",
-    );
+  /**
+   * What the agent's GMIs run on `runtime: 'gmi'`; undefined on the default runtime, and for options that do not
+   * resolve, which agent() refuses.
+   */
+  const mind = rest.runtime === 'gmi' ? cognitionOf(rest as CognitionInputs) : undefined;
+  // Cognitive memory names its embedding provider and leaves consolidation off: refused here, before the soul loads,
+  // so nothing has been opened.
+  if (mind?.memory) assertSoulMindMemory(mind.memory);
+  /** The key the tombstone ledger is handed: one key is the current key. A `tombstoneKey` that holds nothing is none. */
+  const key =
+    tombstoneKey === undefined
+      ? undefined
+      : typeof tombstoneKey === 'string' || tombstoneKey instanceof Uint8Array
+        ? { current: tombstoneKey }
+        : tombstoneKey;
+  if (soulStore !== undefined) {
+    assertSoulStore(soulStore);
+    // An option that names nothing would fall back to the default file, or to a ledger with no second copy.
+    if (!namesTombstoneCopy(tombstoneCopy)) throw new TypeError(SOUL_STORE_NEEDS_COPY);
+    // The rule that a second person needs a retention period and a tombstone key counts the people this process
+    // holds memory of. Another process on the same database counts its own, so each would let its first one in; with
+    // sharedMemory, two processes that name different users would each open an empty store as one person's.
+    if (retention === undefined || !key) throw new TypeError(SOUL_STORE_NEEDS_RETENTION_AND_KEY);
+  } else if (tombstoneCopy !== undefined && !namesTombstoneCopy(tombstoneCopy)) {
+    // A copy option built from configuration that is not there ({ path: process.env.X } with X unset, or null) would
+    // put the second copy in the default file inside the store's own folder, which a restore of that folder replaces,
+    // in a file named by an empty path, or nowhere ({ adapter: undefined } opens the ledger with no copy). Only an
+    // option left out keeps the default file.
+    throw new TypeError(TOMBSTONE_COPY_NAMES_NOTHING);
   }
+  /**
+   * Refuses the two hooks and sharedMemory where the soul gives no store and the plain agent built in its place keeps
+   * cognitive memory: its GMI files and recalls in a store of its own, which none of them reaches, so an account the
+   * policy turns off would still be remembered there, and sessions sharedMemory runs as one user would not share it.
+   * Called before the plain agent is built, so nothing has been opened.
+   */
+  const refuseHooksWithoutStore = (): void => {
+    if ((memoryPolicy || screen || sharedMemory !== undefined) && rest.runtime === 'gmi' && cognitiveMemoryOf(rest as CognitionInputs)) {
+      throw new TypeError(SOULLESS_HOOKS_WITH_COGNITIVE_MEMORY);
+    }
+  };
+  /**
+   * A plain agent, where the soul gives no workspace to keep a store in. On the GMI runtime it keeps the souled
+   * agent's rule for the end user's id: no session turn sends it to the model provider unless the host opts in.
+   */
+  const plainAgent = (options: AgentOptions, agentId: string | undefined): Agent => {
+    if (options.runtime === 'gmi') {
+      // No store: its cognitive memory, when on, stays its GMI's own.
+      shareSoulStore(options, {
+        agentId: agentId ?? '',
+        sendUserIdToProvider: sendUserIdToProvider === true,
+        forTurn: () => undefined,
+        mechanisms: undefined,
+        memoryBuilt: () => undefined,
+        memoryClosed: () => undefined,
+        drainWrites: async () => undefined,
+      });
+    }
+    return agent(options);
+  };
   const loaded = loadSoulFromOption(rest.soul);
   if (!loaded) {
     // The soul failed to load, and loadSoulFromOption has warned: a plain agent without it, which loads it no
     // second time and so does not warn again.
-    return agent({ ...rest, soul: undefined });
+    refuseHooksWithoutStore();
+    return plainAgent({ ...rest, soul: undefined }, opts.name?.trim() || undefined);
   }
   if (!loaded.memoryDir) {
-    // Inline soul: no workspace dir, so no wiki. A plain agent, and a line that says so.
-    console.warn(
-      '[agentos] souledAgent: the soul has no workspace folder (an inline { content } soul), so no wiki memory is ' +
-        'wired: no memory index, no read_memory_page tool and no compile on close. Pass the folder that holds ' +
-        'SOUL.md to have them.',
-    );
-    return agent(rest);
+    // Inline soul: no workspace dir, so no wiki. A plain agent, and a line that says so: no memory index, no
+    // read_memory_page tool and no compile on close.
+    refuseHooksWithoutStore();
+    soulLog.warn('soul.inline_no_wiki', {});
+    return plainAgent(rest, soulAgentIdOf(loaded.frontmatter, opts.name));
   }
   // NaN, a negative number or none is the default; Infinity is held to the longest timer when the wait starts.
   const waitMs =
@@ -643,9 +1220,32 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
 
   // The operator's pages under memory/ are markdown files; what people said to the agent lives in the store.
   const storeDir = path.join(loaded.memoryDir, '.store');
-  await fs.mkdir(storeDir, { recursive: true });
-  // The store holds what people said: it stays out of version control. A .gitignore already there is left as it is.
-  createFileOutsideLinksSync(path.join(storeDir, '.gitignore'), '*\n');
+  /** The adapter of the host's database the store lives in (`soulStore`); undefined for the store's own file. */
+  const hostAdapter = soulStore?.adapter;
+  /** Whether the host's database held rows of this agent's brain before this open; such rows are never taken back. */
+  let seededBefore = false;
+  /** Why the open was refused: `anotherAgent` when another agent seeded the database while this one opened. */
+  const refusal = { anotherAgent: false };
+  if (hostAdapter) {
+    // Checked before anything opens. A store file left beside the soul holds people the new store's calls never reach.
+    const leftover = path.join(storeDir, 'memory.sqlite');
+    if (await somethingAt(leftover)) {
+      throw new Error(
+        `souledAgent: soulStore is set and a store file is still at ${leftover}: the memory it holds would be out of reach of forgetUser, exportUserMemory, correctUserMemory and retention on the new store; move it into the host's database, or delete it, first`,
+      );
+    }
+    await assertBigintReadsAsNumbers(hostAdapter, "souledAgent: soulStore's PostgreSQL adapter");
+    // One agent a database: the tombstone ledger is database-wide. Another agent's database is refused here, before
+    // this agent's Brain makes or migrates a table in it.
+    if (await holdsAnotherBrain(hostAdapter, agentId, true)) throw new Error(SOUL_STORE_HOLDS_ANOTHER_AGENT);
+    seededBefore = await brainIsSeeded(hostAdapter, agentId);
+    // The agent's transactions on a PostgreSQL adapter run one at a time from here on, the open's migrations included.
+    serializeTransactionsOn(hostAdapter);
+  } else {
+    await fs.mkdir(storeDir, { recursive: true });
+    // The store holds what people said: it stays out of version control. A .gitignore already there is left as it is.
+    createFileOutsideLinksSync(path.join(storeDir, '.gitignore'), '*\n');
+  }
   // The tombstones' second copy, outside the store's database, so a restore of the store does not replace it. A copy
   // the host passes as an adapter is the host's to close.
   const copyPath =
@@ -668,23 +1268,38 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   const closeCopy = async (): Promise<void> => {
     await ownCopy?.adapter.close().catch(() => undefined);
   };
-  const key =
-    tombstoneKey === undefined
-      ? undefined
-      : typeof tombstoneKey === 'string' || tombstoneKey instanceof Uint8Array
-        ? { current: tombstoneKey }
-        : tombstoneKey;
   // A learning layer gmi() builds writes tombstones under its namespace: the ledger reads it beside the store-wide one.
   const learningConfig = typeof rest.learning === 'object' && rest.learning !== null ? rest.learning : undefined;
   const namespaces =
     rest.runtime === 'gmi' && (rest.learning === true || learningConfig !== undefined) ? [learningConfig?.namespace ?? ''] : [];
+  /** When this open began: the rows it seeds in the host's database are dated from here on. */
+  const openedAt = Date.now();
   let memory: Memory;
   try {
-    memory = await Memory.createSqlite(path.join(storeDir, 'memory.sqlite'), {
-      graph: true,
-      selfImprove: true,
-      forgotten: { copy, ...(key ? { key } : {}), namespaces },
-    });
+    const forgottenOptions = { copy, ...(key ? { key } : {}), namespaces };
+    memory = hostAdapter
+      ? await Memory.createWithAdapter(hostAdapter, {
+          brainId: agentId,
+          graph: true,
+          selfImprove: true,
+          forgotten: forgottenOptions,
+          leaveAdapterOpen: true,
+          // The one-agent check again, for two agents opened at once on an empty database: each passed the check
+          // before the open. The Brain's open has seeded this agent's own brain_meta rows before this reads, so the
+          // one that reads second finds the other's. It runs before the ledger opens, so a refused agent never
+          // touches the other agent's tombstones.
+          beforeLedger: async () => {
+            if (await holdsAnotherBrain(hostAdapter, agentId)) {
+              refusal.anotherAgent = true;
+              throw new Error(SOUL_STORE_HOLDS_ANOTHER_AGENT);
+            }
+          },
+        })
+      : await Memory.createSqlite(path.join(storeDir, 'memory.sqlite'), {
+          graph: true,
+          selfImprove: true,
+          forgotten: forgottenOptions,
+        });
   } catch (err) {
     // A store whose copy is missing or unreadable, or whose tombstones need a key not given, serves nothing. A copy
     // file this open made is removed with it while its ledger table holds no row, so the next open still finds the
@@ -692,16 +1307,33 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     const emptyNewCopy = ownCopy !== undefined && !ownCopy.existed && (await holdsNoLedgerRow(ownCopy.adapter));
     await closeCopy();
     if (emptyNewCopy && copyPath !== undefined) await fs.rm(copyPath, { force: true }).catch(() => undefined);
+    // The host's adapter is left open. An agent refused because another one seeded the database at the same moment
+    // takes back the brain_meta rows its own open seeded, so the agent that stays opens again. No other refusal takes
+    // rows back: they are this agent's own, in the database its host gave it, and an open of the same agent that is
+    // live there at this moment relies on them.
+    if (hostAdapter && refusal.anotherAgent && !seededBefore) {
+      await dropSeededBrain(hostAdapter, agentId, openedAt).catch(() => undefined);
+    }
     throw err;
   }
   /** The store's forgotten-user ledger: every write and read of a subject asks it. */
   const forgotten = memory.forgotten as ForgottenLedger;
-  /** Closes the store, then the copy. */
+  /** Set once the store starts to close: a deletion is then refused before any part of it runs. */
+  let storeClosed = false;
+  const legacyGmi: { connection?: LegacyGmiMemory; store?: LegacyGmiStore } = {};
+  /** Closes both stores and the tombstones' copy. */
   const closeStore = async (): Promise<void> => {
+    storeClosed = true;
     try {
       await memory.close();
     } finally {
-      await closeCopy();
+      try {
+        const connection = legacyGmi.connection;
+        legacyGmi.connection = undefined;
+        await connection?.close();
+      } finally {
+        await closeCopy();
+      }
     }
   };
   /** Runs a step of the open; a step that throws closes the store first, so a failed open leaves no handle open. */
@@ -714,6 +1346,14 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     }
   };
 
+  if (hostAdapter) {
+    // A deleted row's bytes are overwritten in a SQLite file; the pragma builder answers nothing on PostgreSQL.
+    await closingOnThrow(async () => {
+      const secure = createStorageFeatures(hostAdapter).dialect.pragma('secure_delete', 'ON');
+      if (secure) await hostAdapter.exec(secure);
+    });
+  }
+
   /** The user every session that names none, and every one-shot call, runs as; undefined without `sharedMemory`. */
   const sharedUser = sharedMemory?.as;
 
@@ -721,9 +1361,42 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
    * This agent's key of every subject this store holds memory of, and of every session this process opened: read
    * from the registry once the open has applied the tombstones, and kept current by the session wrapper and the
    * deletions. A subject the store holds under several agent ids counts once. Without `retention`, a second one is
-   * refused.
+   * refused; without `tombstoneKey`, too, unless the ledger already holds tombstones.
    */
   const subjects = new Set<string>();
+  /**
+   * Whether the ledger holds a tombstone: read once the open has applied the tombstones, and set by every unkeyed
+   * tombstone this ledger handle writes (the agent's deletions, its learning layer's, a call on `agent.memory`). Read
+   * only while the ledger keys nothing, where every tombstone it holds is unkeyed (a ledger that holds a key's marker
+   * does not open without that key).
+   */
+  let ledgerHoldsTombstones = false;
+  // The agent's deletions, its learning layer's and a call on agent.memory write through this handle: each unkeyed
+  // tombstone they write is seen here.
+  const markForgotten = forgotten.markForgotten.bind(forgotten);
+  forgotten.markForgotten = async (...args: Parameters<ForgottenLedger['markForgotten']>) => {
+    const written = await markForgotten(...args);
+    if (written.form === 'unkeyed') ledgerHoldsTombstones = true;
+    return written;
+  };
+  /** Whether this open has written its `memory.tombstones_unkeyed` line. */
+  let unkeyedNoted = false;
+  /**
+   * The tombstone rule for `count` subjects, the one being opened included. With a key, or one subject, nothing. With
+   * no key and a ledger that holds no tombstone, a second subject is refused: its deletion would leave a tombstone
+   * anyone who reads the ledger can match by hashing a guessed id. With no key and a ledger that already holds such
+   * tombstones, the subject is let in, and `noteUnkeyed` says so once it is.
+   */
+  const assertSubjectAllowed = (count: number): void => {
+    if (forgotten.keyed || count <= 1) return;
+    if (!ledgerHoldsTombstones) throw new Error(TOMBSTONE_KEY_REQUIRED);
+  };
+  /** One `memory.tombstones_unkeyed` line an open, once `count` subjects are let in with no key. */
+  const noteUnkeyed = (count: number): void => {
+    if (forgotten.keyed || count <= 1 || unkeyedNoted) return;
+    unkeyedNoted = true;
+    memoryLog.warn('memory.tombstones_unkeyed', {});
+  };
   /** This agent's key of the user or session a stored key names; undefined for the operator's and for none. */
   const ownKeyOf = (scopeId: string): string | undefined => {
     const subject = parseConversationScopeKey(scopeId)?.subject;
@@ -782,18 +1455,47 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     ...(subject.kind === 'user' ? { userId: subject.id } : {}),
   });
   /**
-   * The policy the host answered for each subject of a session, by session id then by the subject's key, kept until
-   * the session closes: a session id opened again for another user never reads the answer given for the first.
+   * The policy the host answered for each subject of a session, by session id then by the subject's key, with the
+   * place of the ask that gave it, kept until the session closes: a session id opened again for another user never
+   * reads the answer given for the first, and a later answer for the subject replaces it.
    */
-  const sessionPolicies = new Map<string, Map<string, MemoryPolicy>>();
+  const sessionPolicies = new Map<string, Map<string, { policy: MemoryPolicy; ask: number }>>();
+  /**
+   * On the GMI runtime with cognitive memory on, the keys whose rows the soul's mind has loaded for each open session,
+   * by session id: a person's rows are loaded as the first turn of each session opening begins, and kept until the
+   * session closes. A load that failed is not kept, so the next turn loads again.
+   */
+  const mindLoads = new Map<string, Set<string>>();
   /** How many times each session id has been closed: an answer asked for before a close is kept for nothing. */
   const sessionCloses = new Map<string, number>();
+  /**
+   * How many corrections and single deletions of each subject's memory this process has run, by the subject's key:
+   * counted twice a call, when it has passed its ownership check and before it changes anything, and again when its
+   * change has settled. So each one that finished is in it, and so is one that failed partway, which may have deleted
+   * a named trace already; a turn whose decision was opened while the call was changing the memory, and which may
+   * have recalled a trace the call then deleted, sees the count move too. A call the agent rejected whole is not
+   * counted.
+   */
+  const correctionCounts = new Map<string, number>();
+  /**
+   * For each turn's decision, its subject's count in {@link correctionCounts} when the turn asked for the decision,
+   * which is before the turn recalls anything. A turn whose count has moved by the time its reply is written recalled
+   * memory that a correction or a single deletion has changed since.
+   */
+  const correctionsAtDecision = new WeakMap<Promise<TurnPolicy>, number>();
   /**
    * What each turn decided, from its first hook to its reply's write, by the context the turn's hooks share: a turn
    * of the default runtime and a one-shot call have one of their own, and a GMI session one for its turns, which run
    * one at a time. Two turns of one session that overlap never read each other's decision.
    */
   const turnDecisions = new WeakMap<MemoryHookContext, Promise<TurnPolicy>>();
+  /**
+   * The decision a GMI turn read when it asked for its answer (`begin()` of the turn's soul memory), by the turn's
+   * context, for as long as the context lives: a recall that resumes after its timeout reads it, so the host is asked
+   * once a turn and the turn's writes keep the decision the turn began with. A metaprompt's imprint, filed once the
+   * turn's reply has closed the turn's decision, reads it too.
+   */
+  const mindDecisions = new WeakMap<MemoryHookContext, Promise<TurnPolicy>>();
   /**
    * The host's latest answer for each subject this process asked about, a failure among them: what the page tool and
    * the compile read, so an earlier answer one session keeps never outlasts a later one.
@@ -836,19 +1538,50 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     }
   };
   /**
+   * Whether a child's memory may be kept for `subject` at all: only where the store keeps that subject's memory for a
+   * number of days. The period is `retention.sessions ?? retention.traces` for a session and `retention.traces` for a
+   * user; an agent with no `retention` keeps memory until deletion.
+   */
+  const keepsMinorsMemory = (subject: MemorySubject): boolean => {
+    const period = subject.kind === 'session' ? (retention?.sessions ?? retention?.traces) : retention?.traces;
+    return period !== undefined && period !== 'until-deletion';
+  };
+  /**
+   * The host's answer as the agent applies it: `minor: true` where the store would keep the child's memory until
+   * deletion keeps no long-term memory, whatever `retentionDays` the answer holds.
+   */
+  const applied = (policy: TurnPolicy, subject: MemorySubject): TurnPolicy =>
+    policy !== 'failed' && policy.minor === true && policy.longTerm !== 'off' && !keepsMinorsMemory(subject)
+      ? { longTerm: 'off', minor: true, ...(policy.profiling === 'off' ? { profiling: 'off' as const } : {}) }
+      : policy;
+  /**
    * What one turn's memory does, decided once a turn: the answer kept for its session, else the host's answer now. A
    * valid answer of a session turn is kept for the session; a failure is kept for nothing, so the next turn asks again.
+   * A later answer for the same subject, given to any turn of this agent, replaces the one a session keeps from the
+   * session's next turn: a valid one with no new ask, a failed one by asking again.
    */
   const decide = async (context: MemoryHookContext, subject: MemorySubject, scopeId: string): Promise<TurnPolicy> => {
     const hookContext = hookContextOf(context, subject);
     const session = context.call === 'session' ? context.sessionId : undefined;
     const closesBefore = session !== undefined ? (sessionCloses.get(session) ?? 0) : 0;
-    const kept = session !== undefined ? sessionPolicies.get(session)?.get(scopeId) : undefined;
-    const ask = kept === undefined ? ++asks : 0;
-    const policy = kept ?? (await askPolicy(hookContext));
+    const ofSession = session !== undefined ? sessionPolicies.get(session) : undefined;
+    const kept = ofSession?.get(scopeId);
+    if (ofSession && kept) {
+      const newestAsk = answeredAsk.get(scopeId) ?? 0;
+      if (newestAsk <= kept.ask) return kept.policy;
+      const newest = latestAnswers.get(scopeId);
+      if (newest !== undefined && newest !== 'failed') {
+        // The newest answer was applied, and its period and its compile recorded, by the turn that asked for it.
+        ofSession.set(scopeId, { policy: newest, ask: newestAsk });
+        return newest;
+      }
+      ofSession.delete(scopeId);
+    }
+    const ask = ++asks;
+    const policy = applied(await askPolicy(hookContext), subject);
     // The subject's answer is the one asked for last, whenever the host gives it: an answer to an earlier ask that
     // comes after a later one's decides this turn alone.
-    const latest = kept === undefined && ask > (answeredAsk.get(scopeId) ?? 0);
+    const latest = ask > (answeredAsk.get(scopeId) ?? 0);
     if (latest) {
       answeredAsk.set(scopeId, ask);
       latestAnswers.set(scopeId, policy);
@@ -864,9 +1597,9 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     // Kept only where a hook reads it later: the session's answer for its next turns, the scope's for its compile. An
     // answer that came after its session closed is not kept for the session's next opening.
     if (memoryPolicy && session !== undefined && (sessionCloses.get(session) ?? 0) === closesBefore) {
-      const ofSession = sessionPolicies.get(session) ?? new Map<string, MemoryPolicy>();
-      ofSession.set(scopeId, policy);
-      sessionPolicies.set(session, ofSession);
+      const answers = sessionPolicies.get(session) ?? new Map<string, { policy: MemoryPolicy; ask: number }>();
+      answers.set(scopeId, { policy, ask });
+      sessionPolicies.set(session, answers);
     }
     // The compile reads the host's latest answer for the subject: an `off` answer takes back an earlier permission,
     // and neither an answer a session keeps from before nor one to an earlier ask is a new one.
@@ -879,18 +1612,212 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   /**
    * The decision of the turn a hook call belongs to. A turn's recall opens it; the write of its reply closes it, so
    * the whole turn recalls and files under one answer, and a hook that failed is not asked a second time in the turn.
+   * A decision keeps, from when it is opened, how many corrections and single deletions its subject's memory had been
+   * through ({@link correctionsAtDecision}). What a GMI turn files as the agent's once its reply has closed its
+   * decision, a metaprompt's imprint, reads the decision the turn began with: the host is asked nothing for a turn
+   * that has ended.
    */
   const turnPolicyOf = (
     context: MemoryHookContext,
     subject: MemorySubject,
     scopeId: string,
-    at: 'recall' | 'user' | 'assistant',
+    at: 'recall' | 'mind' | 'user' | 'assistant',
   ): Promise<TurnPolicy> => {
+    // A recall that comes after its turn asked for its answer (one that timed out and resumed) reads that answer.
+    const asked = at === 'recall' ? mindDecisions.get(context) : undefined;
+    if (asked) return asked;
     const open = at === 'recall' ? undefined : turnDecisions.get(context);
+    const ended = at === 'assistant' && !open ? mindDecisions.get(context) : undefined;
+    if (ended) return ended;
     const decision = open ?? decide(context, subject, scopeId);
+    if (!open) correctionsAtDecision.set(decision, correctionCounts.get(scopeId) ?? 0);
+    if (at === 'mind') mindDecisions.set(context, decision);
     if (at === 'assistant') turnDecisions.delete(context);
     else turnDecisions.set(context, decision);
     return decision;
+  };
+  /**
+   * What a turn may do with the person it serves, from its decision. A policy that keeps memory recalls; it lets a
+   * recall drift what it reads, and the person's message be scored for sentiment, unless it marks them a minor or a
+   * person who objects to profiling. `off` recalls nothing, and the message is scored unless the answer holds one of
+   * those marks. A failed hook allows nothing.
+   */
+  const soulAnswerOf = (policy: TurnPolicy): SoulTurnAnswer => {
+    if (policy === 'failed') return { ...SOUL_TURN_NOTHING };
+    const profiled = policy.profiling !== 'off' && policy.minor !== true;
+    if (policy.longTerm === 'off') return { recall: false, reconsolidation: false, sentiment: profiled };
+    return { recall: true, reconsolidation: profiled, sentiment: profiled };
+  };
+  /**
+   * Whether the tombstone ledger says `subject` is not forgotten, read within the memory hooks' timeout: a read that
+   * has not answered by then counts as forgotten, with one `memory.hook_failed` line (`hook: 'soulMemory'`), so a
+   * stalled store never holds a turn before its model call.
+   */
+  const notForgottenWithin = async (subject: MemorySubject): Promise<boolean> => {
+    const read = await within(forgotten.isForgotten(subject), hookTimeoutMs);
+    if (read !== TIMED_OUT) return !read;
+    memoryLog.warn('memory.hook_failed', { hook: 'soulMemory', type: 'TimeoutError', code: 'MEMORY_HOOK_TIMEOUT' });
+    return false;
+  };
+  /**
+   * Whether the agent's cognitive memory is the soul's mind: on the GMI runtime with cognitive memory on, the mind
+   * files each session turn in this store and recalls the rows it filed, and the provider recalls the rest.
+   */
+  const mindRecalls = rest.runtime === 'gmi' && cognitiveMemoryOf(rest as CognitionInputs);
+  /** The store's own Brain, which the soul's mind files into and reads on the GMI runtime with cognitive memory on. */
+  const soulBrain = brainOf(memory);
+  /**
+   * The archive the soul's mind keeps the originals of its traces in, on the soul's Brain, as each manager it builds
+   * there does: its tables are made once at the open, so a deletion with no manager open in this process drops a
+   * person's originals without building one, which would need the embedding provider. Undefined with cognitive memory
+   * off.
+   */
+  const mindArchive = mindRecalls ? new SqlStorageMemoryArchive(soulBrain.adapter, soulBrain.features, soulBrain.brainId) : undefined;
+  if (mindArchive) await closingOnThrow(() => mindArchive.initialize());
+  /** The managers of the soul's mind open in this process: the ones `gmi()` built on {@link soulBrain}, until it shuts each down. */
+  const mindManagers = new Set<ICognitiveMemoryManager>();
+  /** When `close()` began: the turns and the writes it waits for, the mind's among them, share one deadline from here. */
+  let closeStartedAt: number | undefined;
+  /** What is left of `close()`'s one deadline; all of it before the close begins. */
+  const closeWaitLeft = (): number => (closeStartedAt === undefined ? waitMs : Math.max(0, closeStartedAt + waitMs - Date.now()));
+  /** What the failures of the soul's mind to store a side of a turn are counted by, for their sparse log line. */
+  const mindFailures = {};
+  /** The filings of the soul's mind that have started and not settled: `agent.close()` waits for them. */
+  const mindFilings = new Set<Promise<unknown>>();
+  /** Holds one filing of the soul's mind in {@link mindFilings} until it settles; returns it unchanged. */
+  const mindFiling = <T>(run: Promise<T>): Promise<T> => {
+    mindFilings.add(run);
+    const settle = () => {
+      mindFilings.delete(run);
+    };
+    void run.then(settle, settle);
+    return run;
+  };
+  /**
+   * Loads the rows the soul's mind filed under `scopeId` into its manager, on the first turn of a session opening that
+   * recalls: the key's newest rows, which the store already holding some of skips. Any other manager reads its own
+   * store and is not asked. A load that rejects is the caller's, and is not kept, so the session's next turn loads again;
+   * one that the session's close outran is not kept either.
+   */
+  const loadForSession = async (manager: ICognitiveMemoryManager, context: MemoryHookContext, scopeId: string): Promise<void> => {
+    if (manager.getConfig?.()?.rows !== 'mind' || context.call !== 'session') return;
+    const session = context.sessionId;
+    if (mindLoads.get(session)?.has(scopeId)) return;
+    const closesBefore = sessionCloses.get(session) ?? 0;
+    await manager.getStore().hydrateScope('conversation', scopeId);
+    if ((sessionCloses.get(session) ?? 0) !== closesBefore) return;
+    const loaded = mindLoads.get(session) ?? new Set<string>();
+    loaded.add(scopeId);
+    mindLoads.set(session, loaded);
+  };
+  /**
+   * Names a trace the soul's mind stored under `scopeId` for the key's next compile, when the trace's time is at or
+   * before the key's compile watermark (`compiled_at`): a clock set back stamps a trace at a time a compile has read
+   * past, and an incremental compile reads only the traces newer than its watermark. The facade's own writes stamp a
+   * trace after the last compile read for the same reason; the mind's are stamped by the clock.
+   */
+  const namedForNextCompile = async (scopeId: string, traceId: string): Promise<void> => {
+    const row = await soulBrain.get<{ compiled_at: number | string | null; created_at: number | string }>(
+      `SELECT s.compiled_at AS compiled_at, t.created_at AS created_at
+         FROM memory_scopes s
+         JOIN memory_traces t ON t.brain_id = s.brain_id AND t.scope = s.scope AND t.scope_id = s.scope_id
+        WHERE s.brain_id = ? AND s.scope = ? AND s.scope_id = ? AND t.id = ?`,
+      [soulBrain.brainId, 'conversation', scopeId, traceId],
+    );
+    if (!row || row.compiled_at === null || row.compiled_at === undefined) return;
+    if (Number(row.created_at) <= Number(row.compiled_at)) await memory.addRebuildSources(scopeId, [traceId]);
+  };
+  /**
+   * The emotional stamp the soul's mind stores one side of a turn with: the mind's mood only where the host opted in
+   * (`emotionalStamp: 'mood'`) and the turn's policy marks neither a minor nor a person who objects to profiling, and
+   * neutral otherwise.
+   */
+  const stampOf = (policy: MemoryPolicy): SoulFiling['stamp'] =>
+    emotionalStamp === 'mood' && policy.profiling !== 'off' && policy.minor !== true ? 'mood' : 'neutral';
+  /**
+   * One session turn's view of the memory rules, for the GMI that serves it on `runtime: 'gmi'`: the subject's key, and
+   * the turn's decision, which its recall may have opened and its two writes share. A turn with no subject has none. A
+   * subject whose id no key can be built from has no key and no policy to ask: its view has no scope and allows
+   * nothing, so the turn is not scored for sentiment, and one `memory.hook_failed` line says so; it files nothing
+   * (`no_subject`).
+   *
+   * Its `file` runs one side of the turn through the same gate as the provider's writes ({@link fileTurn}), on the
+   * subject's chain, so close() waits for it and no compile, deletion or sweep of the subject runs beside it. The
+   * mind's writer is handed the text the screen kept, the stamp the turn's policy allows ({@link stampOf}), and the
+   * filing that marks the row as the mind's
+   * with its speaker and its subject, the subject whose key the view names; the key's registry row is written before
+   * the trace and again after it, a trace stamped at or before the key's compile watermark is named for its next compile
+   * ({@link namedForNextCompile}), and `agent.close()` waits for the filing before the mind's manager shuts down. A
+   * throw in the write is counted as the mind's own failure; one once the trace is stored is counted the same way and
+   * leaves the side written. Its `begin()` loads the subject's rows into the mind as the
+   * first turn of a session opening that recalls begins ({@link loadForSession}).
+   */
+  const soulTurnOf = (context: MemoryHookContext): SoulTurnMemory | undefined => {
+    const subject = turnSubjectOf(context);
+    if (!subject) return undefined;
+    let scopeId: string;
+    try {
+      scopeId = conversationScopeKey(agentId, subject);
+    } catch (err) {
+      memoryLog.warn('memory.hook_failed', { hook: 'soulMemory', ...errorFields(err) });
+      return {
+        begin: async () => ({ ...SOUL_TURN_NOTHING }),
+        file: async (role) => ({ role, outcome: 'skipped', reason: 'no_subject' }),
+      };
+    }
+    const filedFor = { kind: subject.kind, id: subject.id };
+    return {
+      scope: { scope: 'conversation', scopeId },
+      file: (role, content, write, undo) =>
+        mindFiling(
+          onSubject(scopeId, () =>
+            fileTurn(
+              role,
+              content,
+              context,
+              subject,
+              scopeId,
+              async (text, policy) => {
+                // The key's registry row, before the trace and again after it, as the store's own writes keep it: a
+                // deletion of the key that ran meanwhile took the row away.
+                await ensureScopeRow(soulBrain, soulBrain.brainId, scopeId, Date.now());
+                const trace = await write({
+                  text,
+                  stamp: stampOf(policy),
+                  filing: { filedBy: 'mind', speaker: role, subject: { ...filedFor } },
+                  ...(subject.kind === 'user' ? { turnUserId: subject.id } : {}),
+                });
+                // The trace is stored: what follows keeps it within reach, and a failure of it is counted as the mind's
+                // and never undoes the write, so the tombstone is still read again once the trace is stored.
+                try {
+                  await ensureScopeRow(soulBrain, soulBrain.brainId, scopeId, Date.now());
+                  await namedForNextCompile(scopeId, trace.id);
+                } catch (err) {
+                  reportMindWriteFailure(mindFailures, err);
+                }
+                return trace;
+              },
+              undo,
+              (err) => reportMindWriteFailure(mindFailures, err),
+            ),
+          ),
+        ),
+      begin: async (manager, stop) => {
+        // A forgotten subject is allowed nothing, and the host's hook is not asked about them.
+        if (!(await notForgottenWithin(subject))) return { ...SOUL_TURN_NOTHING };
+        // A turn stopped meanwhile asks the host nothing: an answer it started after its session closed would be kept
+        // for the session's next opening.
+        if (stop?.aborted) return { ...SOUL_TURN_NOTHING };
+        const policy = await turnPolicyOf(context, subject, scopeId, 'mind');
+        // Nor is a subject forgotten while the host answered.
+        if (!(await notForgottenWithin(subject))) return { ...SOUL_TURN_NOTHING };
+        const answer = soulAnswerOf(policy);
+        // A turn that recalls loads the person's rows into the mind first, once a session opening. A load that throws is
+        // the answer's failure: the turn recalls nothing of the mind and files as usual.
+        if (answer.recall && manager) await loadForSession(manager, context, scopeId);
+        return answer;
+      },
+    };
   };
   /**
    * Whether the page tool serves a subject its own pages: always without a policy hook; under one, only when the
@@ -931,8 +1858,18 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   };
   /**
    * Files one side of a turn under its subject's key, when the account's policy keeps memory and the screen hook
-   * lets the text through. Each write that is not made says why in one `memory.write_refused` line, except under an
-   * `off` policy, the host's standing choice for the account, which is said once a session.
+   * lets the text through, and answers what became of it. A reply is not filed either when a correction or a single
+   * deletion has changed its subject's memory since its turn's decision was opened (`corrected`). Each write that is
+   * not made says why in one `memory.write_refused` line, except under an `off` policy, the host's standing choice for
+   * the account, which is said once a session; the entry it answers names the same reason. It never rejects: a throw,
+   * from the write or from a read before it, answers a `failed` entry with the error's class name, and is counted and
+   * logged as a failure of the provider's `observe` (`memory.hook_failed`, sparsely).
+   *
+   * @param write - Stores the text the screen let through, under the policy the turn was decided with, and resolves
+   *   with its trace.
+   * @param undo - Deletes a trace `write` stored, for good: a write that landed after the subject was forgotten.
+   * @param reportFailure - Counts and logs a throw: the provider's `observe` failure, unless the writer says whose it is
+   *   (the soul's mind reports its own).
    */
   const fileTurn = async (
     role: Speaker,
@@ -940,65 +1877,80 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     context: MemoryHookContext,
     subject: MemorySubject,
     scopeId: string,
-  ): Promise<void> => {
-    // A forgotten subject's text goes nowhere: not to the host's hooks, not to the store.
-    if (await forgotten.isForgotten(subject)) {
-      memoryLog.warn('memory.write_refused', { reason: 'forgotten' });
-      return;
-    }
-    const policy = await turnPolicyOf(context, subject, scopeId, role);
-    if (policy === 'failed') {
-      memoryLog.warn('memory.write_refused', { reason: 'policy_failed' });
-      return;
-    }
-    if (policy.longTerm === 'off') {
-      if (context.call !== 'session' || !offSaid.has(context.sessionId)) {
-        if (context.call === 'session') offSaid.add(context.sessionId);
-        memoryLog.warn('memory.write_refused', { reason: 'policy_off' });
+    write: (text: string, policy: MemoryPolicy) => Promise<MemoryTrace>,
+    undo: (trace: MemoryTrace) => Promise<void>,
+    reportFailure: (error: unknown) => void = (error) => reportObserveFailure(provider, error),
+  ): Promise<MemoryWriteEntry> => {
+    try {
+      // A forgotten subject's text goes nowhere: not to the host's hooks, not to the store.
+      if (await forgotten.isForgotten(subject)) {
+        memoryLog.warn('memory.write_refused', { reason: 'forgotten' });
+        return { role, outcome: 'skipped', reason: 'forgotten' };
       }
-      return;
-    }
-    const filed = await screened(text, hookContextOf(context, subject), 'file');
-    if (filed === SCREEN_FAILED) {
-      memoryLog.warn('memory.write_refused', { reason: 'screen_failed' });
-      return;
-    }
-    if (filed === null || filed === '') {
-      memoryLog.warn('memory.write_refused', { reason: 'screened' });
-      return;
-    }
-    written.add(scopeId);
-    // The user's message and the reply alike go under the subject's key. Who spoke goes in the trace's metadata:
-    // outside its text and its tags, which full-text search reads. The tombstone is read again once the trace is
-    // stored: a trace that landed after the subject was forgotten is deleted again.
-    let landed = false;
-    const outcome = await guardedWrite(
-      forgotten,
-      subject,
-      async () => {
-        const trace = await memory.remember(filed, {
-          type: 'episodic',
-          scope: 'conversation',
-          scopeId,
-          metadata: {
-            [SPEAKER_METADATA_KEY]: role,
-            subject: { kind: subject.kind, id: subject.id },
-            ...(subject.kind === 'user' ? { turnUserId: subject.id } : {}),
-          },
-        });
-        landed = true;
-        return trace;
-      },
-      async (trace) => {
-        await memory.deleteTraces([trace.id]);
-      },
-    );
-    if (outcome.status !== 'refused') return;
-    memoryLog.warn('memory.write_refused', { reason: 'forgotten' });
-    if (landed) {
-      // The write landed after the subject's tombstone and is taken back. Its scope's registry row, which the write
-      // made again when the subject's deletion had already run, goes with whatever the scope still holds.
-      await memory.deleteScope('conversation', scopeId).catch(() => undefined);
+      // A metaprompt's imprint can be filed after its turn's reply closed the turn's decision. It is held to that
+      // decision, read with no new ask of the host, and to the account's newest answer: one given since that keeps no
+      // memory, or a failed one, stops it.
+      const afterItsTurn = role === 'assistant' && !turnDecisions.has(context) && mindDecisions.has(context);
+      const decision = turnPolicyOf(context, subject, scopeId, role);
+      const decided = await decision;
+      const newest = afterItsTurn ? latestAnswers.get(scopeId) : undefined;
+      const policy = newest !== undefined && decided !== 'failed' && decided.longTerm !== 'off' ? newest : decided;
+      if (policy === 'failed') {
+        memoryLog.warn('memory.write_refused', { reason: 'policy_failed' });
+        return { role, outcome: 'skipped', reason: 'policy_failed' };
+      }
+      if (policy.longTerm === 'off') {
+        // A child's answer on a store that would keep their memory until deletion says so in its own reason.
+        const reason: 'minor_no_retention' | 'policy_off' =
+          policy.minor === true && !keepsMinorsMemory(subject) ? 'minor_no_retention' : 'policy_off';
+        if (context.call !== 'session' || !offSaid.has(context.sessionId)) {
+          if (context.call === 'session') offSaid.add(context.sessionId);
+          memoryLog.warn('memory.write_refused', { reason });
+        }
+        return { role, outcome: 'skipped', reason };
+      }
+      // A reply written from memory that a correction or a single deletion has changed since the turn recalled it can
+      // restate what was deleted, under a new id no later call names: it is not filed, and goes to no hook. What the
+      // person said themselves is filed as usual.
+      if (role === 'assistant' && (correctionCounts.get(scopeId) ?? 0) !== (correctionsAtDecision.get(decision) ?? 0)) {
+        memoryLog.warn('memory.write_refused', { reason: 'corrected' });
+        return { role, outcome: 'skipped', reason: 'corrected' };
+      }
+      const filed = await screened(text, hookContextOf(context, subject), 'file');
+      if (filed === SCREEN_FAILED) {
+        memoryLog.warn('memory.write_refused', { reason: 'screen_failed' });
+        return { role, outcome: 'skipped', reason: 'screen_failed' };
+      }
+      if (filed === null || filed === '') {
+        memoryLog.warn('memory.write_refused', { reason: 'screened' });
+        return { role, outcome: 'skipped', reason: 'screened' };
+      }
+      written.add(scopeId);
+      // The tombstone is read again once the trace is stored: a trace that landed after the subject was forgotten is
+      // deleted again.
+      let landed = false;
+      const outcome = await guardedWrite(
+        forgotten,
+        subject,
+        async () => {
+          const trace = await write(filed, policy);
+          landed = true;
+          return trace;
+        },
+        undo,
+      );
+      if (outcome.status !== 'refused') return { role, outcome: 'written', traceId: outcome.result.id };
+      memoryLog.warn('memory.write_refused', { reason: 'forgotten' });
+      if (landed) {
+        // The write landed after the subject's tombstone and is taken back. Its scope's registry row, which the write
+        // made again when the subject's deletion had already run, goes with whatever the scope still holds.
+        await memory.deleteScope('conversation', scopeId).catch(() => undefined);
+      }
+      return { role, outcome: 'skipped', reason: 'forgotten' };
+    } catch (err) {
+      // The record names the error's class; the log counts the failure as its writer's and writes it sparsely.
+      reportFailure(err);
+      return failedWriteEntry(role, err);
     }
   };
   /**
@@ -1007,28 +1959,51 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
    * has no context to screen with, and is not compiled; otherwise each trace's text goes through the hook again: what
    * it returns is what is compiled, a trace it drops is left out, and a failure stops the scope's compile. The
    * account's latest answer is read again once the screen has answered, so an `off` answer given meanwhile stops the
-   * compile.
+   * compile. A minor's scope is compiled by the target `compile.minors` names, and not at all without one. The batch's
+   * model call it hands back reads the latest answer again before each merge.
    */
   const beforeScopeCompile: NonNullable<AttachedWiki['beforeScopeCompile']> = async (scopeId, traces) => {
     const turn = served.get(scopeId);
     if (memoryPolicy && turn?.policy.longTerm !== 'compiled') return { skip: 'policy_raw' };
-    if (!screen) return { traces };
-    if (!turn) return { skip: 'screen_failed' };
-    const kept: typeof traces = [];
-    let dropped = false;
-    for (const trace of traces) {
-      const text = await screened(trace.content, turn.context, 'compile');
-      if (text === SCREEN_FAILED) return { skip: 'screen_failed' };
-      if (text === null || text === '') {
-        dropped = true;
-        continue;
+    // Checked before the screen, so a minor's text goes to no hook for a compile that cannot run.
+    if (turn?.policy.minor === true && !minorsLlm) return { skip: 'minor_no_compile' };
+    let kept: typeof traces = traces;
+    if (screen) {
+      if (!turn) return { skip: 'screen_failed' };
+      kept = [];
+      let dropped = false;
+      for (const trace of traces) {
+        const text = await screened(trace.content, turn.context, 'compile');
+        if (text === SCREEN_FAILED) return { skip: 'screen_failed' };
+        if (text === null || text === '') {
+          dropped = true;
+          continue;
+        }
+        kept.push(text === trace.content ? trace : { ...trace, content: text });
       }
-      kept.push(text === trace.content ? trace : { ...trace, content: text });
+      // The host may have answered again while the screen ran: the compile goes on only under the latest answer.
+      if (memoryPolicy && served.get(scopeId)?.policy.longTerm !== 'compiled') return { skip: 'policy_raw' };
+      if (dropped) memoryLog.warn('memory.write_refused', { reason: 'screened' });
     }
-    // The host may have answered again while the screen ran: the compile goes on only under the latest answer.
-    if (memoryPolicy && served.get(scopeId)?.policy.longTerm !== 'compiled') return { skip: 'policy_raw' };
-    if (dropped) memoryLog.warn('memory.write_refused', { reason: 'screened' });
-    return { traces: kept };
+    // A minor's pages go to the target named for minors alone, and nowhere without one.
+    if (served.get(scopeId)?.policy.minor === true && !minorsLlm) return { skip: 'minor_no_compile' };
+    // Each model call of the compile reads the latest answer again (compileCallOf).
+    return { traces: kept, llm: (prompt) => compileCallOf(scopeId, prompt) };
+  };
+  /**
+   * One model call of `scopeId`'s compile, on the route the account's latest answer gives when the call is sent: a
+   * minor's on the target `compile.minors` names, any other account's on the compile's own. An answer given while the
+   * compile runs holds from its next call; one that no longer compiles the account, or a minor's with no target named
+   * for minors, stops the compile before the call is sent ({@link CompileStopped}).
+   */
+  const compileCallOf = async (scopeId: string, prompt: string): Promise<string> => {
+    const latest = served.get(scopeId)?.policy;
+    if (memoryPolicy && latest?.longTerm !== 'compiled') throw new CompileStopped('policy_raw');
+    if (latest?.minor === true) {
+      if (!minorsLlm) throw new CompileStopped('minor_no_compile');
+      return minorsLlm(prompt);
+    }
+    return llm(prompt);
   };
 
   // The turns still running and the memory writes the observer has started, until each settles: close() waits for
@@ -1123,16 +2098,41 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       // Nothing is ever filed without the subject of its turn.
       if (!context) return Promise.reject(new TypeError('souledAgent: a memory write needs the hook context of its turn'));
       const subject = turnSubjectOf(context);
-      if (!subject) return Promise.resolve();
+      if (!subject) return Promise.resolve<MemoryWriteEntry>({ role, outcome: 'skipped', reason: 'no_subject' });
       let scopeId: string;
       try {
         scopeId = conversationScopeKey(agentId, subject);
       } catch (err) {
-        // An id no key can be built from rejects the write: the runtime logs the hook's failure and the turn goes on.
-        return Promise.reject(err);
+        // An id no key can be built from files nothing: the failure is logged as the hook's, and the turn goes on.
+        reportObserveFailure(provider, err);
+        return Promise.resolve<MemoryWriteEntry>({ role, outcome: 'skipped', reason: 'no_subject' });
       }
       // The whole write, its policy and its screening with it, runs on the subject's chain, and close() waits for it.
-      return onSubject(scopeId, () => fileTurn(role, text, context, subject, scopeId));
+      // The user's message and the reply alike go under the subject's key. Who spoke goes in the trace's metadata:
+      // outside its text and its tags, which full-text search reads.
+      return onSubject(scopeId, () =>
+        fileTurn(
+          role,
+          text,
+          context,
+          subject,
+          scopeId,
+          (filed) =>
+            memory.remember(filed, {
+              type: 'episodic',
+              scope: 'conversation',
+              scopeId,
+              metadata: {
+                [SPEAKER_METADATA_KEY]: role,
+                subject: { kind: subject.kind, id: subject.id },
+                ...(subject.kind === 'user' ? { turnUserId: subject.id } : {}),
+              },
+            }),
+          async (trace) => {
+            await memory.deleteTraces([trace.id]);
+          },
+        ),
+      );
     },
     getContext: async (text, options) => {
       // Two reads, each of one key, by equality: the turn's own subject, and the operator's pages. Nothing a caller
@@ -1154,7 +2154,10 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
         if (scopeId !== undefined) {
           const policy = await turnPolicyOf(context, subject, scopeId, 'recall');
           if (policy !== 'failed' && policy.longTerm !== 'off') {
-            own = await memory.recall(text, { scope: 'conversation', scopeId, limit: RECALL_LIMIT });
+            // On a session turn the soul's mind recalls what it filed itself: the provider reads the rest of the key.
+            // A one-shot call, which the mind does not serve, reads the key whole.
+            const side = mindRecalls && context.call === 'session' ? { filedBy: 'soul' as const } : {};
+            own = await memory.recall(text, { scope: 'conversation', scopeId, limit: RECALL_LIMIT, ...side });
             // The older memory attributed to this user is theirs too: a third read, of each form of the agent's plain
             // scope, merged with the other two under the same budget. No other subject reads it.
             if (legacyOwnerKey !== undefined && scopeId === legacyOwnerKey) {
@@ -1179,6 +2182,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
           return {
             prefix: recallPrefix(trace, label, now),
             content: onOneLine(trace.content),
+            ...(page ? {} : { id: trace.id }),
             ...(speaker ? { speaker } : {}),
             ...(page ? { page } : {}),
             when: formatMemoryAge(trace.createdAt, now),
@@ -1189,8 +2193,9 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       if (kept.length === 0) return null;
       return {
         contextText: kept.map((line) => `${line.prefix}${line.content}`).join('\n'),
-        // The same lines as records: a line whose label was dropped for the budget keeps its text alone.
+        // The same lines as records, with trace ids for the host. A line whose label was dropped keeps no label fields.
         items: kept.map((line) => ({
+          ...(line.id ? { id: line.id } : {}),
           ...(line.prefix && line.speaker ? { speaker: line.speaker } : {}),
           ...(line.prefix && line.page ? { page: line.page } : {}),
           ...(line.prefix ? { when: line.when } : {}),
@@ -1205,19 +2210,15 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   // refusal skips that subject's compile, and its watermark stays where it was), and its usage ledger. A compile
   // target the host named takes them instead: that provider and model alone, with no fallback and no router, so a
   // compile's text goes nowhere else; the agent's own key and base URL go with it only to the agent's own provider.
-  const target = typeof compile === 'object' && compile !== null ? compile : undefined;
-  // A target that names a model alone, whose `provider:` prefix names another provider than the agent's, does not take
-  // the agent's provider. The agent's key and base URL go with the compile only when its call resolves to the
-  // provider they were set for, whether the agent names it or only its model does.
-  const compileProvider =
-    target === undefined
-      ? rest.provider
-      : (target.provider ??
-        (rest.provider !== undefined && target.model !== undefined && modelNamesAnotherProvider(rest.provider, target.model)
-          ? undefined
-          : rest.provider));
-  // A target that names a provider alone runs on that provider's default model, unless it is the agent's own provider:
-  // the agent's model belongs to the agent's provider.
+  // `compile.minors` is such a target, for the accounts the host answers `minor: true` for alone.
+  const compileOptions = typeof compile === 'object' && compile !== null ? compile : undefined;
+  const { minors: minorsTarget, ...namedTarget } = compileOptions ?? ({} as NonNullable<typeof compileOptions>);
+  // An object that holds `minors` alone names no target for the other accounts: their compile keeps the agent's route.
+  const target =
+    compileOptions !== undefined && (Object.keys(namedTarget).length > 0 || minorsTarget === undefined)
+      ? namedTarget
+      : undefined;
+  // The provider the agent's own model belongs to, when only its model names it.
   const agentProvider = (() => {
     if (rest.provider !== undefined) return rest.provider;
     if (rest.model === undefined) return undefined;
@@ -1227,35 +2228,225 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       return undefined;
     }
   })();
-  const compileModel =
-    target?.model ?? (target?.provider === undefined || target.provider === agentProvider ? rest.model : undefined);
-  const agentCredentialsGo =
-    target === undefined ||
-    credentialsGoWith({ provider: rest.provider, model: rest.model }, { provider: compileProvider, model: compileModel });
-  const llm = async (prompt: string): Promise<string> =>
-    (
-      await generateText({
-        provider: compileProvider,
-        model: compileModel,
-        prompt,
-        maxTokens: rest.maxTokens ?? rest.controls?.maxTotalTokens,
-        apiKey: target?.apiKey ?? (agentCredentialsGo ? rest.apiKey : undefined),
-        baseUrl: target?.baseUrl ?? (agentCredentialsGo ? rest.baseUrl : undefined),
-        ...(target
-          ? { fallbackProviders: [] }
-          : {
-              fallbackProviders: rest.fallbackProviders,
-              onFallback: rest.onFallback,
-              router: rest.router,
-              hostPolicy: rest.hostPolicy,
-              routerParams: rest.routerParams,
-              policyTier: rest.policyTier,
-            }),
-        ...(budget ? { budget } : {}),
-        ...(rest.accountIdOf ? { accountIdOf: rest.accountIdOf } : {}),
-        usageLedger: { ...(ledger ?? {}), source: SOULED_AGENT_COMPILE_SOURCE },
-      })
-    ).text;
+  /**
+   * The provider the agent names itself: its `provider`, else the known provider its model's own `provider:` or
+   * `provider/` prefix names. Never one the environment or a default picks for a plain model.
+   */
+  const agentNamedProvider = providerNamedBy(rest.provider, rest.model);
+  /** The provider and model a compile on `named` calls, or on the agent's own route when it is undefined. */
+  const compileRouteOf = (
+    named: { provider?: string; model?: string } | undefined,
+  ): { provider: string | undefined; model: string | undefined } => {
+    // A target that names a model alone, whose `provider:` prefix names another provider than the agent's, does not
+    // take the agent's provider.
+    const provider =
+      named === undefined
+        ? rest.provider
+        : (named.provider ??
+          (rest.provider !== undefined && named.model !== undefined && modelNamesAnotherProvider(rest.provider, named.model)
+            ? undefined
+            : rest.provider));
+    // A target that names a provider alone runs on that provider's default model, unless it is the agent's own
+    // provider: the agent's model belongs to the agent's provider.
+    const model = named?.model ?? (named?.provider === undefined || named.provider === agentProvider ? rest.model : undefined);
+    return { provider, model };
+  };
+  /**
+   * The provider, model, key and base URL a compile on `named` is sent with, or on the agent's own route when it is
+   * undefined. The agent's key and base URL go with it only when its call resolves to the provider they were set for,
+   * whether the agent names it or only its model does; with `strict`, only when the agent names that provider itself.
+   */
+  const compileSendOf = (
+    named: { provider?: string; model?: string; apiKey?: string; baseUrl?: string } | undefined,
+    strict: boolean,
+  ): CallRoute => {
+    const route = compileRouteOf(named);
+    const agentCredentialsGo =
+      named === undefined ||
+      (strict
+        ? agentNamedProvider !== undefined && agentNamedProvider === route.provider
+        : credentialsGoWith({ provider: rest.provider, model: rest.model }, route));
+    return {
+      ...route,
+      apiKey: named?.apiKey ?? (agentCredentialsGo ? rest.apiKey : undefined),
+      baseUrl: named?.baseUrl ?? (agentCredentialsGo ? rest.baseUrl : undefined),
+      strict,
+    };
+  };
+  /**
+   * The compile's model call on `named`, a target the host named, or on the agent's own route when it is undefined.
+   * `strict`, for the target named for minors, sends to that provider alone: no Anthropic to OpenRouter reroute when
+   * it has no key, no `setDefaultProvider()` default that names no provider, and the agent's own key and base URL only
+   * when the agent names that provider itself ({@link agentNamedProvider}).
+   */
+  const compileLlmOn = (
+    named: { provider?: string; model?: string; apiKey?: string; baseUrl?: string } | undefined,
+    strict = false,
+  ) => {
+    const call = compileSendOf(named, strict);
+    // Where the compile's text goes, as recipients() names it, recorded when the options do not name it (an Anthropic
+    // target the credential layer sends to OpenRouter).
+    const role = strict ? 'compile-minors' : 'compile';
+    return async (prompt: string): Promise<string> => {
+      noteRoute(routeRecipient(role, destinationOf(call, true)));
+      return (
+        await generateText({
+          provider: call.provider,
+          model: call.model,
+          prompt,
+          maxTokens: rest.maxTokens ?? rest.controls?.maxTotalTokens,
+          apiKey: call.apiKey,
+          baseUrl: call.baseUrl,
+          ...(named
+            ? { fallbackProviders: [] }
+            : {
+                fallbackProviders: rest.fallbackProviders,
+                onFallback: rest.onFallback,
+                router: rest.router ? recordingPicks(rest.router, role, () => call) : undefined,
+                hostPolicy: rest.hostPolicy,
+                routerParams: rest.routerParams,
+                policyTier: rest.policyTier,
+              }),
+          ...(budget ? { budget } : {}),
+          ...(rest.accountIdOf ? { accountIdOf: rest.accountIdOf } : {}),
+          usageLedger: { ...(ledger ?? {}), source: SOULED_AGENT_COMPILE_SOURCE },
+          ...(strict ? { __strictCredentials: true } : {}),
+        })
+      ).text;
+    };
+  };
+  const llm = compileLlmOn(target);
+  /** The compile's model call for a minor's pages: the target `compile.minors` names, or none, and no page. */
+  const minorsLlm = minorsTarget === undefined ? undefined : compileLlmOn(minorsTarget, true);
+
+  /**
+   * Where a route sends a person's text: the provider a known `provider:` prefix of its model names, over its own
+   * `provider`, as a call resolves it; with `inEnvironment`, also where the credential layer sends it in this process
+   * now (an Anthropic route with no key or base URL of its own while `OPENROUTER_API_KEY` is set goes to OpenRouter).
+   * A route that names no provider is the environment's pick at each call.
+   */
+  const destinationOf = (route: CallRoute, inEnvironment: boolean): NamedRoute => {
+    let provider = route.provider;
+    let model = route.model;
+    if (model !== undefined && (provider !== undefined || providerNamedBy(undefined, model) !== undefined)) {
+      try {
+        const resolved = resolveModelOption({ ...(provider !== undefined ? { provider } : {}), model }, 'text');
+        provider = resolved.providerId;
+        model = resolved.modelId;
+      } catch {
+        // A route that does not resolve is named as the options give it.
+      }
+    }
+    if (inEnvironment && provider !== undefined) {
+      try {
+        const sent = resolveProviderRoute(provider, model ?? '', { apiKey: route.apiKey, baseUrl: route.baseUrl, strict: route.strict });
+        if (sent.providerId !== provider) {
+          provider = sent.providerId;
+          model = model === undefined ? undefined : sent.modelId;
+        }
+      } catch {
+        // No credentials for it in this process: a call on it fails before it sends anything.
+      }
+    }
+    return { provider, model };
+  };
+  /**
+   * The embedding route of cognitive memory on the GMI runtime, resolved at open as the memory resolves it when it is
+   * built (a model's `provider:` prefix, the provider's default model, the default provider's or the environment's pick
+   * when no provider is named); undefined when cognitive memory is off. The route the memory was built with, which a
+   * default provider changed in between can move, is recorded when the memory is built.
+   */
+  const embeddingRoute = ((): NamedRoute | undefined => {
+    if (rest.runtime !== 'gmi') return undefined;
+    let memoryConfig: ReturnType<typeof resolveCognition>['memory'];
+    try {
+      memoryConfig = resolveCognition(rest as CognitionInputs).memory;
+    } catch {
+      return undefined;
+    }
+    if (!memoryConfig) return undefined;
+    try {
+      return embeddingRouteOf(memoryConfig);
+    } catch {
+      // gmi() refuses to build such a memory; named as the options give it.
+      return { provider: memoryConfig.embedding?.provider, model: memoryConfig.embedding?.model };
+    }
+  })();
+  /** The options' own fallback hops, each with its own key and base URL; undefined for the automatic chain. */
+  const optionHops: CallRoute[] | undefined = Array.isArray(rest.fallbackProviders)
+    ? rest.fallbackProviders
+        .filter((hop) => hop !== null && typeof hop === 'object' && typeof hop.provider === 'string')
+        .map((hop) => ({ provider: hop.provider, model: hop.model, apiKey: hop.apiKey, baseUrl: hop.baseUrl }))
+    : undefined;
+  /**
+   * The routes the options send a person's text on: each as the options name it, or, with `inEnvironment`, where it
+   * goes in this process now.
+   */
+  const routesOf = (inEnvironment: boolean): RecipientRoutes => ({
+    model: destinationOf({ provider: rest.provider, model: rest.model, apiKey: rest.apiKey, baseUrl: rest.baseUrl }, inEnvironment),
+    router: rest.router !== undefined,
+    fallbacks: optionHops?.map((hop) => destinationOf(hop, inEnvironment)),
+    ...(compile === false ? {} : { compile: destinationOf(compileSendOf(target, false), inEnvironment) }),
+    ...(minorsTarget !== undefined ? { compileMinors: destinationOf(compileSendOf(minorsTarget, true), inEnvironment) } : {}),
+    ...(embeddingRoute ? { embedding: embeddingRoute } : {}),
+  });
+  /** The keys of what the options name: a route a call takes among them is not recorded. */
+  const namedKeys = new Set(recipientsOf(routesOf(false)).map(recipientKey));
+  /** The routes calls of this process took that the options do not name, by key: listed whether or not they are stored. */
+  const calledRoutes = new Map<string, MemoryRecipient>();
+  /** The keys of the routes stored, or being stored, by this process. */
+  const storedRoutes = new Set<string>();
+  /** The writes of routes still running: close() waits for them again after its compile, before the store closes. */
+  const routeWrites = new Set<Promise<unknown>>();
+  /**
+   * Records a route a call takes that the options do not name. Each is stored once, as one `brain_meta` row of the
+   * store that holds no person, no text and no time, so `recipients()` names it after a restart; close() waits for the
+   * write. A write that fails leaves the route listed in this process, is tried again by the next call on the route,
+   * and one `memory.recipient_unrecorded` line says so.
+   */
+  const noteRoute = (route: MemoryRecipient): void => {
+    const routeKey = recipientKey(route);
+    if (namedKeys.has(routeKey)) return;
+    calledRoutes.set(routeKey, route);
+    if (storedRoutes.has(routeKey)) return;
+    storedRoutes.add(routeKey);
+    const write = Promise.resolve()
+      .then(() => recordRecipient(brainOf(memory), route))
+      .catch((err: unknown) => {
+        storedRoutes.delete(routeKey);
+        memoryLog.warn('memory.recipient_unrecorded', errorFields(err));
+      });
+    routeWrites.add(write);
+    void write.then(() => routeWrites.delete(write));
+    awaitedOnClose(write);
+  };
+  /**
+   * `router` with each pick recorded in `role` before the call is sent: the provider and model it picks, where the
+   * credential layer sends them, the call's own key and base URL going with a pick of the call's own provider alone.
+   * A pick that names no provider keeps the call's. Every other member reads through to `router`, called on it.
+   */
+  const recordingPicks = (router: IModelRouter, role: MemoryRecipient['role'], own: () => CallRoute): IModelRouter => ({
+    get routerId() {
+      return router.routerId;
+    },
+    get policyTier() {
+      return router.policyTier;
+    },
+    initialize: (config, providerManager, promptEngine) => router.initialize(config, providerManager, promptEngine),
+    selectModel: async (params, availableModels) => {
+      const picked = await router.selectModel(params, availableModels);
+      if (picked && typeof picked.modelId === 'string') {
+        const call = own();
+        const provider = picked.modelInfo?.providerId ?? call.provider;
+        const ownProvider = provider === call.provider;
+        const pick: CallRoute = { provider, model: picked.modelId, ...(call.strict ? { strict: true } : {}) };
+        noteRoute(
+          routeRecipient(role, destinationOf(ownProvider ? { ...pick, apiKey: call.apiKey, baseUrl: call.baseUrl } : pick, true)),
+        );
+      }
+      return picked;
+    },
+  });
 
   const chunker = new SemanticChunker();
   const priorTools = rest.tools;
@@ -1271,8 +2462,10 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     // keeps memory.
     subjectOf,
     ownPagesServed,
-    // A subject whose compile the budget refuses is skipped: its traces wait, and the other subjects compile.
-    compileSkipReasonOf: (error) => (isBudgetRefusal(error) ? 'budget' : undefined),
+    // A subject whose compile the budget refuses, or whose latest answer stopped it, is skipped: its traces wait, and
+    // the other subjects compile.
+    compileSkipReasonOf: (error) =>
+      isBudgetRefusal(error) ? 'budget' : error instanceof CompileStopped ? error.reason : undefined,
     ...(memoryPolicy || screen ? { beforeScopeCompile } : {}),
     // No compile at all: raw traces only, and no page is ever written.
     ...(compile === false ? { compile: false as const } : {}),
@@ -1292,17 +2485,156 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     priorTools && !Array.isArray(priorTools) ? priorTools : augmentedTools
   ) as AgentOptions['tools'];
 
-  const agentOptions: AgentOptions = { ...rest, ...(budget ? { budget } : {}), memoryProvider: provider, tools };
+  /** The agent's own route, as its options give it. */
+  const agentRoute: CallRoute = { provider: rest.provider, model: rest.model, apiKey: rest.apiKey, baseUrl: rest.baseUrl };
+  const agentOptions: AgentOptions = {
+    ...rest,
+    ...(budget ? { budget } : {}),
+    // Each pick of the agent's model router is recorded where it sends the text, as a call's own route is. The GMI
+    // runtime tells each attempt as its gateway resolved it (below), a router's pick and a call's own credentials
+    // applied, so its router is left as given.
+    ...(rest.router && rest.runtime !== 'gmi' ? { router: recordingPicks(rest.router, 'model', () => agentRoute) } : {}),
+    memoryProvider: provider,
+    tools,
+  };
+  /**
+   * The embedding the GMI runtime's cognitive memory was built with, as its build told it; noted again at each call, so
+   * a write of it that failed is tried again without resolving the default provider again.
+   */
+  let builtEmbedding: MemoryRecipient | undefined;
+  if (rest.runtime === 'gmi') {
+    // Where the GMI runtime sends text, as it sends it: each model attempt where its gateway resolved it, and the
+    // embedding its cognitive memory was built with (a default provider changed after the agent opened included).
+    shareRouteObserver(agentOptions, {
+      attempt: ({ providerId, modelId, hop }) =>
+        noteRoute(routeRecipient(hop === 0 ? 'model' : 'fallback-model', { provider: providerId, model: modelId })),
+      embedding: (route) => {
+        builtEmbedding = routeRecipient('embedding', route);
+        noteRoute(builtEmbedding);
+      },
+    });
+  }
   // A learning layer gmi() builds from these options writes and reads the store's ledger.
   shareForgottenLedger(agentOptions, forgotten);
+  if (rest.runtime === 'gmi') {
+    // The GMI runtime reads the soul's store by the same options object, cognitive memory on or off: each session
+    // turn's view of the memory rules, whether the end user's id goes to the model provider, and the Brain its
+    // cognitive memory files into, with the managers it builds there and the writes close() waits for.
+    shareSoulStore(agentOptions, {
+      agentId,
+      sendUserIdToProvider: sendUserIdToProvider === true,
+      forTurn: soulTurnOf,
+      brain: soulBrain,
+      legacyGmiStore: {
+        open: openAgentMemoryBrain,
+        attach: (connection) => {
+          legacyGmi.connection = connection;
+        },
+      },
+      mechanisms: soulMechanismsOf(mind?.mechanisms),
+      memoryBuilt: (manager) => {
+        mindManagers.add(manager);
+      },
+      memoryClosed: (manager) => {
+        mindManagers.delete(manager);
+      },
+      drainWrites: async () => {
+        await waitForWrites(mindFilings, closeWaitLeft());
+      },
+    });
+  }
   const built = (await closingOnThrow(() => agent(agentOptions))) as SouledAgent;
 
+  /**
+   * Records where a call sends a person's text when the options do not name it: its own `provider` or `model` (the
+   * agent's for the one it leaves out), or the agent's own route where the credential layer sends it elsewhere; on the
+   * default runtime its own model router; and each fallback hop it may take, its own on the default runtime, else the
+   * options'. The route is recorded before the call starts. Returns the call's own route.
+   */
+  const noteCallRoute = (call: unknown): CallRoute => {
+    const given = (call !== null && typeof call === 'object' ? call : {}) as {
+      provider?: unknown;
+      model?: unknown;
+      apiKey?: unknown;
+      baseUrl?: unknown;
+      router?: unknown;
+      fallbackProviders?: unknown;
+    };
+    const text = (value: unknown): string | undefined => (typeof value === 'string' && value !== '' ? value : undefined);
+    const callProvider = text(given.provider);
+    const callModel = text(given.model);
+    // A call whose model's `provider:` prefix names another provider does not take the agent's.
+    const routeProvider =
+      callProvider ??
+      (callModel !== undefined && rest.provider !== undefined && modelNamesAnotherProvider(rest.provider, callModel)
+        ? undefined
+        : rest.provider);
+    const routeModel = callModel ?? rest.model;
+    // The agent's key and base URL go with a call only to the provider they were set for.
+    const agentCredentialsGo = credentialsGoWith(
+      { provider: rest.provider, model: rest.model },
+      { provider: routeProvider, model: routeModel },
+    );
+    const own: CallRoute = {
+      provider: routeProvider,
+      model: routeModel,
+      apiKey: text(given.apiKey) ?? (agentCredentialsGo ? rest.apiKey : undefined),
+      baseUrl: text(given.baseUrl) ?? (agentCredentialsGo ? rest.baseUrl : undefined),
+    };
+    noteRoute(routeRecipient('model', destinationOf(own, true)));
+    // The GMI runtime refuses a call's own router and fallbackProviders before any model call.
+    const ownLegs = rest.runtime !== 'gmi';
+    if (ownLegs && given.router !== undefined && given.router !== null) {
+      noteRoute(routeRecipient('model', { provider: PROVIDER_FROM_THE_ROUTER }));
+    }
+    const hops: CallRoute[] | undefined =
+      ownLegs && Array.isArray(given.fallbackProviders)
+        ? (given.fallbackProviders as unknown[]).flatMap((hop): CallRoute[] => {
+            const entry = (hop !== null && typeof hop === 'object' ? hop : {}) as Record<string, unknown>;
+            const provider = text(entry.provider);
+            return provider === undefined
+              ? []
+              : [{ provider, model: text(entry.model), apiKey: text(entry.apiKey), baseUrl: text(entry.baseUrl) }];
+          })
+        : optionHops;
+    for (const hop of hops ?? []) noteRoute(routeRecipient('fallback-model', destinationOf(hop, true)));
+    if (builtEmbedding) noteRoute(builtEmbedding);
+    return own;
+  };
+  /**
+   * A call's options with its own model router recording each pick it makes, on the default runtime; unchanged
+   * otherwise, and on the GMI runtime, which refuses a call's own router.
+   */
+  const withRecordedRouter = <E>(extra: E, own: CallRoute): E => {
+    if (rest.runtime === 'gmi') return extra;
+    const given = extra !== null && typeof extra === 'object' ? (extra as Record<string, unknown>) : undefined;
+    // The router the call runs with: its own (`router: undefined` turns the agent's off), else the agent's.
+    const router = given && 'router' in given ? given.router : rest.router;
+    if (router === null || typeof router !== 'object' || typeof (router as IModelRouter).selectModel !== 'function') {
+      return extra;
+    }
+    return { ...(given ?? {}), router: recordingPicks(router as IModelRouter, 'model', () => own) } as unknown as E;
+  };
+  /**
+   * Who receives a person's text: where the options' routes go in this process now, then every route a call took
+   * that the options do not name, stored or of this process.
+   */
+  const listRecipients = async (): Promise<MemoryRecipient[]> =>
+    recipientsOf(routesOf(true), [...(await recordedRecipients(brainOf(memory))), ...calledRoutes.values()]);
+
   // Every turn joins what close() waits for: its promise, or a stream's settled usage. The default runtime's own close
-  // does not wait for a running turn, and the GMI runtime's does not wait for a one-shot call.
+  // does not wait for a running turn, and the GMI runtime's does not wait for a one-shot call. A call's own route is
+  // recorded before it starts.
   const generateTurn = built.generate.bind(built);
-  built.generate = (prompt, extra) => awaitedOnClose(generateTurn(prompt, extra));
+  built.generate = (prompt, extra) => {
+    const own = noteCallRoute(extra);
+    return awaitedOnClose(generateTurn(prompt, withRecordedRouter(extra, own)));
+  };
   const streamTurn = built.stream.bind(built);
-  built.stream = (prompt, extra) => awaitStreamOnClose(streamTurn(prompt, extra), extra?.abortSignal);
+  built.stream = (prompt, extra) => {
+    const own = noteCallRoute(extra);
+    return awaitStreamOnClose(streamTurn(prompt, withRecordedRouter(extra, own)), extra?.abortSignal);
+  };
   const openSession = built.session.bind(built);
   const trackedSessions = new WeakSet<AgentSession>();
   /** The sessions this handle gave out and has not closed, by the key of the subject each one's memory is kept under. */
@@ -1342,13 +2674,13 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
         throw new Error('souledAgent: sharedMemory runs every session as one user; this session named another');
       }
     }
-    if (retention === undefined) {
-      // A second subject needs a retention choice. A session opened with no id is a new session, and so a new
-      // subject, unless it names a user or runs as the one user of sharedMemory.
-      const asked = reopened ?? sessionKeyOf(id ?? '', sessionOptions?.userId);
-      const held = asked !== undefined && subjects.has(asked);
-      if (!held && subjects.size > 0) throw new Error(RETENTION_REQUIRED);
-    }
+    // A second subject needs a retention choice, and a tombstone key unless the ledger already holds unkeyed
+    // tombstones. A session opened with no id is a new session, and so a new subject, unless it names a user or runs
+    // as the one user of sharedMemory.
+    const asked = reopened ?? sessionKeyOf(id ?? '', sessionOptions?.userId);
+    const count = asked !== undefined && subjects.has(asked) ? subjects.size : subjects.size + 1;
+    if (retention === undefined && count > 1) throw new Error(RETENTION_REQUIRED);
+    assertSubjectAllowed(count);
     const session = openSession(id, sessionOptions);
     const subjectKey = reopened ?? sessionKeyOf(session.id, sessionOptions?.userId);
     if (subjectKey !== undefined) {
@@ -1361,12 +2693,17 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     if (!trackedSessions.has(session)) {
       trackedSessions.add(session);
       const send = session.send.bind(session) as (...args: unknown[]) => Promise<unknown>;
-      session.send = ((...args: unknown[]) => awaitedOnClose(send(...args))) as AgentSession['send'];
+      session.send = ((...args: unknown[]) => {
+        noteCallRoute(args[1]);
+        return awaitedOnClose(send(...args));
+      }) as AgentSession['send'];
       // A closed session keeps nothing of its account's policy: its next opening asks again.
       const closeSession = (session as { close?: (...args: unknown[]) => Promise<unknown> }).close?.bind(session);
       if (closeSession) {
         (session as { close: (...args: unknown[]) => Promise<unknown> }).close = (...args: unknown[]) => {
           sessionPolicies.delete(session.id);
+          // Its next opening loads its person's rows into the mind again, with any another process filed meanwhile.
+          mindLoads.delete(session.id);
           offSaid.delete(session.id);
           sessionCloses.set(session.id, (sessionCloses.get(session.id) ?? 0) + 1);
           for (const [key, held] of sessionsBySubject) {
@@ -1377,8 +2714,13 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
         };
       }
       const streamSession = session.stream.bind(session);
-      session.stream = (input, streamOpts) => awaitStreamOnClose(streamSession(input, streamOpts), streamOpts?.abortSignal);
+      session.stream = (input, streamOpts) => {
+        noteCallRoute(streamOpts);
+        return awaitStreamOnClose(streamSession(input, streamOpts), streamOpts?.abortSignal);
+      };
     }
+    // Once the session is registered and wrapped: a logger that opens a session of its own finds this one in place.
+    noteUnkeyed(count);
     return session;
   };
 
@@ -1427,79 +2769,258 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     },
   });
   /**
-   * What a deletion of one subject reaches beside the store: the history of the sessions this handle holds open for
-   * the subject, which the default runtime keeps in this process. A gmi() session keeps its own messages.
+   * The mind side of the agent on the GMI runtime, cognitive memory on or off: a deletion empties the open sessions
+   * of its subject through it, and with cognitive memory on deletes the subject's rows through it, with what the
+   * managers open in this process keep of each, or with none open each trace's archived original. It waits for a
+   * session's running turn as long as close() waits for its turns and writes.
    */
-  const sessionHistoryOf = (key: string): ForgetMemoryReport['stores'][number] => {
-    if (rest.runtime === 'gmi') {
-      return {
-        store: "a gmi() session's history",
-        reached: false,
-        reason: 'a gmi() session keeps its messages until the host closes it',
-      };
+  const soulMind =
+    rest.runtime === 'gmi'
+      ? createSoulMind({
+          managers: () => mindManagers,
+          ...(mindArchive
+            ? {
+                archive: {
+                  originals: mindArchive,
+                  traceIdsOf: (scopeId: string) => memory.tracesStoredBefore('conversation', scopeId, Number.MAX_SAFE_INTEGER),
+                },
+              }
+            : {}),
+          deadlineMs: waitMs,
+        })
+      : undefined;
+  /**
+   * What a deletion of one subject does to the sessions this handle holds open for the subject, as an entry of the
+   * report's stores and as the deletion's `sessions` part. The default runtime keeps a session's history in this
+   * process: each is cleared and counted. On the GMI runtime each is emptied (its messages, and its GMI's history,
+   * reasoning trace, sentiment trend, working-memory slots and metaprompt imprints) and counted; a session whose turn
+   * is still running at the deadline is emptied once that turn ends, and the part is missed meanwhile. A session
+   * opened with history off holds nothing between its turns and is not counted. It never rejects: an emptying that
+   * fails is the part missed, with the error's message.
+   */
+  const sessionHistoryOf = async (key: string): Promise<{ entry: ForgetMemoryReport['stores'][number]; part: PartOutcome }> => {
+    const open = sessionsBySubject.get(key) ?? new Set<AgentSession>();
+    const store = 'session history in this process';
+    const both = (part: PartOutcome) => ({ entry: { store, ...part }, part });
+    if (soulMind) {
+      try {
+        const { evicted, running } = await soulMind.evictSessions([...open]);
+        if (running === 0) return both({ reached: true, deleted: evicted });
+        return both({
+          reached: false,
+          reason:
+            running === 1
+              ? '1 open session was still running a turn at the deadline'
+              : `${running} open sessions were still running a turn at the deadline`,
+        });
+      } catch (err) {
+        return both({ reached: false, reason: messageOf(err) });
+      }
     }
     let cleared = 0;
-    for (const session of sessionsBySubject.get(key) ?? []) {
+    for (const session of open) {
       session.clear();
       cleared += 1;
     }
-    return { store: 'session history in this process', reached: true, deleted: cleared };
+    return both({ reached: true, deleted: cleared });
   };
   /**
    * The parts of one subject's deletion that are this agent's: the wait for the subject's pending writes, its chain,
-   * and what the agent reached beside the store.
+   * what the agent reached beside the store, the open sessions and, with cognitive memory on, the mind the rows are
+   * deleted through.
    */
   const deletionPartsOf = (
     subject: SuppressionSubject,
-    extra: { stores: ForgetMemoryReport['stores']; incomplete: boolean },
-  ): Pick<ForgetUserMemoryOptions, 'drain' | 'onChain' | 'extraStores' | 'alsoIncomplete'> => {
+    extra: ReportExtras,
+  ): Pick<ForgetUserMemoryOptions, 'drain' | 'onChain' | 'extraStores' | 'alsoIncomplete' | 'sessions' | 'mind'> => {
     const key = conversationScopeKey(agentId, subject);
+    // The sessions are dealt with once, when the deletion first asks: after the tombstone is written and the deletes
+    // are done, so a deletion that cannot write its tombstone leaves them as they are. The `sessions` part and the
+    // entry among the stores tell of that one pass.
+    let history: ReturnType<typeof sessionHistoryOf> | undefined;
+    const historyOf = () => (history ??= sessionHistoryOf(key));
     return {
       drain: () => drainSubject(key),
       onChain: (work) => onSubject(key, work),
-      // The history goes once the tombstone is written: a deletion that cannot write it deletes nothing.
-      extraStores: () => [...extra.stores, sessionHistoryOf(key)],
+      sessions: async () => (await historyOf()).part,
+      extraStores: async () => [...extra.stores, (await historyOf()).entry],
       alsoIncomplete: extra.incomplete,
+      ...(soulMind && mindRecalls ? { mind: soulMind } : {}),
+    };
+  };
+  /**
+   * Who receives a person's text, for a deletion's report: what `recipients()` lists. A deletion never fails on the
+   * list: when the routes the store recorded cannot be read, the report lists the routes the options name and those
+   * this process's calls took, names the recorded ones among its stores as not reached, and one
+   * `memory.recipients_unread` line is logged.
+   */
+  const recipientsForReport = async (): Promise<{ recipients: MemoryRecipient[]; stores: ForgetMemoryReport['stores'] }> => {
+    try {
+      return { recipients: await listRecipients(), stores: [] };
+    } catch (err) {
+      memoryLog.warn('memory.recipients_unread', errorFields(err));
+      return {
+        recipients: recipientsOf(routesOf(true), [...calledRoutes.values()]),
+        stores: [{ store: 'recipients recorded in the store', reached: false, reason: messageOf(err) }],
+      };
+    }
+  };
+  /**
+   * Puts who receives a person's text into deletion reports, read once for all of them after their deletions ran: each
+   * waited for its subject's writes and compiles, so a route one of those took meanwhile is listed.
+   */
+  const withRecipients = async (reports: readonly ForgetMemoryReport[]): Promise<void> => {
+    if (reports.length === 0) return;
+    const listed = await recipientsForReport();
+    for (const report of reports) {
+      report.recipients = [...listed.recipients];
+      report.stores.push(...listed.stores.map((entry) => ({ ...entry })));
+    }
+  };
+  /**
+   * The learning layer's own `forgetUser`, kept before `agent.learning.forgetUser` is replaced below by a call that
+   * runs the agent's whole deletion: the deletion calls this one, never the replacement.
+   */
+  const layerForget = built.learning?.forgetUser?.bind(built.learning);
+  /** The learning layer's own entry behind each entry of a deletion report made from it, which sums its counts. */
+  const layerEntryOf = new WeakMap<object, ForgetReport['stores'][number]>();
+  /**
+   * What the agent's learning layer deleted of a user, as entries of a deletion report, beside the layer's own
+   * report; with no layer, one entry saying so.
+   */
+  const forgetLearner = async (
+    userId: string,
+  ): Promise<{ stores: ForgetMemoryReport['stores']; incomplete: boolean; learned?: ForgetReport }> => {
+    if (!layerForget) {
+      return {
+        stores: [{ store: 'learning store', reached: false, reason: 'this agent runs no learning layer' }],
+        incomplete: false,
+      };
+    }
+    const legacy = legacyGmi.store;
+    /**
+     * The person's rows in the passed store, recorded as deleted before any delete: a restore of that store alone is
+     * undone at the next open, even when the learning tables that name the person live in another store.
+     */
+    let legacyIds: string[] = [];
+    /** The layer's deletion did not finish: neither the passed store nor the learning store, its index, is done. */
+    const layerUnfinished = (legacyReason: string, learningReason: string) => ({
+      stores: [
+        { store: LEGACY_GMI_STORE, reached: false as const, reason: legacyReason },
+        { store: 'learning store', reached: false as const, reason: learningReason },
+      ],
+      incomplete: true,
+    });
+    if (legacy) {
+      try {
+        legacyIds = await legacyGmiTraceIdsOf(legacy, userId);
+        await forgotten.markTracesDeleted(legacyIds);
+      } catch (error) {
+        const { type } = errorFields(error);
+        return layerUnfinished(
+          `the ids of its traces could not be recorded before the deletion (${type}), so the learning layer's deletion did not run`,
+          "the learning layer's deletion did not run, since the passed GMI store's trace ids could not be recorded first",
+        );
+      }
+    }
+    let learned: ForgetReport;
+    try {
+      learned = await layerForget(userId);
+    } catch (error) {
+      if (!legacy) throw error;
+      const { type } = errorFields(error);
+      return layerUnfinished(
+        `the learning layer's deletion, which reaches it, failed (${type})`,
+        `the learning layer's deletion failed (${type}), so the user's rows stay for a second call`,
+      );
+    }
+    const legacyManager = legacy ? `memory manager of brain ${legacy.brain.brainId}` : undefined;
+    const stores = learned.stores.map((given): ForgetMemoryReport['stores'][number] => {
+      // The layer says a session keeps its messages; the sessions this handle holds open are emptied by the deletion's
+      // sessions part, so what is left out is a session held elsewhere.
+      let entry = given;
+      if (given.store === legacyManager) {
+        entry = given.reached
+          ? { ...given, store: LEGACY_GMI_STORE }
+          : { store: LEGACY_GMI_STORE, reached: false, reason: "the store's memory manager could not finish the deletion" };
+      } else if (!given.reached && given.store === CONVERSATION_HISTORY) {
+        entry = { ...given, reason: HISTORY_HELD_ELSEWHERE };
+      }
+      const made: ForgetMemoryReport['stores'][number] = entry.reached
+        ? {
+            store: entry.store,
+            reached: true,
+            deleted: typeof entry.deleted === 'number' ? entry.deleted : Object.values(entry.deleted).reduce((sum, n) => sum + n, 0),
+          }
+        : { store: entry.store, reached: false, reason: entry.reason };
+      layerEntryOf.set(made, entry);
+      return made;
+    });
+    if (legacy && !stores.some(({ store }) => store === LEGACY_GMI_STORE)) {
+      stores.push({ store: LEGACY_GMI_STORE, reached: false, reason: 'the deletion did not reach its memory manager' });
+    }
+    const at = legacy ? stores.findIndex((entry) => entry.store === LEGACY_GMI_STORE && entry.reached) : -1;
+    const reachedLegacy = at >= 0 ? stores[at] : undefined;
+    if (legacy && reachedLegacy?.reached) {
+      try {
+        // The person's rows the layer's index did not name (persona and session notes an earlier GMI's own learning
+        // tables index, when the learning store is now another), then the log, so neither file keeps the deleted text.
+        const left = (await readStoredTraceRefs(legacy.brain, legacyIds)).map(({ id }) => id);
+        if (left.length > 0) reachedLegacy.deleted += (await legacy.deleteTraces(left)).deleted;
+        if ((await checkpointLegacyGmiStore(legacy)) === 'busy') {
+          stores[at] = {
+            store: LEGACY_GMI_STORE,
+            reached: false,
+            reason: "another connection held the store's write-ahead log, which keeps the deleted text until a later checkpoint",
+          };
+        }
+      } catch (error) {
+        stores[at] = { store: LEGACY_GMI_STORE, reached: false, reason: `the store's deletion failed (${errorFields(error).type})` };
+      }
+    }
+    const incomplete = stores.some((entry) => (entry.store === 'learning store' || entry.store === LEGACY_GMI_STORE) && !entry.reached);
+    return { stores, incomplete, learned };
+  };
+  /** The subject's deletion options, including the learning route in the order the store requires. */
+  const subjectDeletionOf = async (subject: SuppressionSubject, capture?: (learned: ForgetReport | undefined) => void) => {
+    const empty: ReportExtras = { stores: [], incomplete: false };
+    const deleteLearner = async (): Promise<ReportExtras> => {
+      if (subject.kind !== 'user') return empty;
+      const { learned, ...extra } = await forgetLearner(subject.id);
+      capture?.(learned);
+      return extra;
+    };
+    return {
+      ...(subject.kind === 'user' && legacyGmi.store
+        ? { ...deletionPartsOf(subject, empty), afterParts: deleteLearner }
+        : deletionPartsOf(subject, await deleteLearner())),
+      legacy: await legacyDeletionOf(),
     };
   };
   /** Deletes one subject's memory on its own chain, after its pending writes. */
-  const forgetSubject = async (
-    subject: SuppressionSubject,
-    extra: { stores: ForgetMemoryReport['stores']; incomplete: boolean },
-  ): Promise<ForgetMemoryReport> =>
+  const forgetSubject = async (subject: SuppressionSubject, capture?: (learned: ForgetReport | undefined) => void): Promise<ForgetMemoryReport> =>
     forgetUserMemory({
       memory,
       ledger: forgotten,
       wiki: { storeFor: pagesOf },
       subject,
       agentId,
-      ...deletionPartsOf(subject, extra),
-      legacy: await legacyDeletionOf(),
+      ...(await subjectDeletionOf(subject, capture)),
       legacyUnattributed,
     });
-  /** What the agent's learning layer deleted of a user, as entries of a deletion report; none when it runs no layer. */
-  const forgetLearner = async (userId: string): Promise<{ stores: ForgetMemoryReport['stores']; incomplete: boolean }> => {
-    const forget = built.learning?.forgetUser;
-    if (!forget) {
-      return {
-        stores: [{ store: 'learning store', reached: false, reason: 'this agent runs no learning layer' }],
-        incomplete: false,
-      };
-    }
-    const learned = await forget.call(built.learning, userId);
-    const stores = learned.stores.map((entry): ForgetMemoryReport['stores'][number] =>
-      entry.reached
-        ? {
-            store: entry.store,
-            reached: true,
-            deleted: typeof entry.deleted === 'number' ? entry.deleted : Object.values(entry.deleted).reduce((sum, n) => sum + n, 0),
-          }
-        : { store: entry.store, reached: false, reason: entry.reason },
-    );
-    return { stores, incomplete: learned.stores.some((entry) => entry.store === 'learning store' && !entry.reached) };
-  };
-  built.forgetUser = (userId, options) => {
+  /**
+   * One person's deletion with each linked session's, as one report, and the learning layer's own report of the same
+   * run when the agent runs a layer.
+   */
+  const deleteUser = (
+    userId: string,
+    options: { linkedSessions?: readonly string[] } | undefined,
+  ): Promise<{ report: ForgetMemoryReport; learned?: ForgetReport }> => {
     const linked: unknown = options?.linkedSessions ?? [];
+    // A closed store takes no delete: refused before the learning layer's part, so nothing is half deleted.
+    if (storeClosed) {
+      return Promise.reject(new Error('souledAgent: the agent was closed; open it again to delete a person from its store'));
+    }
     if (typeof userId !== 'string' || userId === '') {
       return Promise.reject(new TypeError('souledAgent: forgetUser needs a non-empty user id'));
     }
@@ -1517,29 +3038,57 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
         new TypeError('souledAgent: forgetUser needs a user id and linked session ids with no NUL and no lone surrogate'),
       );
     }
-    const run = async (): Promise<ForgetMemoryReport> => {
-      const ofUser = await forgetSubject({ kind: 'user', id: userId }, await forgetLearner(userId));
+    const run = async (): Promise<{ report: ForgetMemoryReport; learned?: ForgetReport }> => {
+      let learned: ForgetReport | undefined;
+      const ofUser = await forgetSubject({ kind: 'user', id: userId }, (result) => {
+        learned = result;
+      });
       // A subject the store holds nothing more of no longer counts toward the retention requirement.
       const forgottenSubjects: SuppressionSubject[] = [{ kind: 'user', id: userId }, ...sessions.map((id) => ({ kind: 'session' as const, id }))];
-      const report: ForgetMemoryReport = { ...ofUser, stores: [...ofUser.stores], pages: { ...ofUser.pages, failed: [...ofUser.pages.failed] } };
+      const report: ForgetMemoryReport = {
+        ...ofUser,
+        stores: [...ofUser.stores],
+        pages: { ...ofUser.pages, failed: [...ofUser.pages.failed] },
+        parts: [...ofUser.parts],
+      };
       for (const sessionId of sessions) {
-        const ofSession = await forgetSubject({ kind: 'session', id: sessionId }, { stores: [], incomplete: false });
+        const ofSession = await forgetSubject({ kind: 'session', id: sessionId });
         report.stores.push(...ofSession.stores.map((entry) => ({ ...entry, store: `${entry.store} (linked session)` })));
         report.pages.deleted += ofSession.pages.deleted;
         report.pages.failed.push(...ofSession.pages.failed);
         report.drained += ofSession.drained;
         report.pendingAtDeadline += ofSession.pendingAtDeadline;
         report.complete = report.complete && ofSession.complete;
+        // A linked session's counts add into the same four parts; a part either of them missed is not reached.
+        report.parts = report.parts.map((part, at) => addPart(part, ofSession.parts[at]));
+        // The deletion ends when its last subject's does.
+        report.completedAt = ofSession.completedAt;
       }
-      if (report.complete) for (const subject of forgottenSubjects) subjects.delete(conversationScopeKey(agentId, subject));
-      return report;
+      if (storeHoldsNoMore(report)) for (const subject of forgottenSubjects) subjects.delete(conversationScopeKey(agentId, subject));
+      // Read once for the person and the linked sessions, the list being the agent's: after the waits above.
+      await withRecipients([report]);
+      return learned ? { report, learned } : { report };
     };
     // close() waits for a deletion that is running, as it waits for a write.
     return awaitedOnClose(run());
   };
+  built.forgetUser = (userId, options) => deleteUser(userId, options).then(({ report }) => report);
+  // With a learning layer, agent.learning.forgetUser runs the same deletion and resolves to its report with the three
+  // fields the layer's report type requires, taken from the layer's own report of that run, and the layer's own entries
+  // with their counts table by table. agent.forgetUser's report stays free of the id.
+  if (built.learning && layerForget) {
+    built.learning.forgetUser = (userId) =>
+      deleteUser(userId, undefined).then(({ report, learned }) => ({
+        ...report,
+        stores: report.stores.map((entry) => layerEntryOf.get(entry) ?? entry),
+        userId: learned?.userId ?? userId,
+        namespace: learned?.namespace ?? learningConfig?.namespace ?? '',
+        plainFormLeft: learned?.plainFormLeft ?? 0,
+      }));
+  }
   /**
    * Brings the ledger up to date from its copy and deletes again whatever the store holds of a forgotten subject. A
-   * forgotten user's learner rows are deleted again by the learning layer first, when the agent runs one.
+   * passed GMI store's forgotten users and deleted traces are reached again as well.
    */
   const applyTombstones = async (): Promise<ForgetMemoryReport[]> => {
     /** The subjects deleted again, in the order of their reports. */
@@ -1550,19 +3099,34 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       wiki: { storeFor: pagesOf },
       agentId,
       legacyUnattributed,
+      ...(legacyGmi.store ? { legacyGmiStore: legacyGmi.store } : {}),
       forSubject: async (subject) => {
         reapplied.push(subject);
-        return {
-          ...deletionPartsOf(subject, subject.kind === 'user' ? await forgetLearner(subject.id) : { stores: [], incomplete: false }),
-          legacy: await legacyDeletionOf(),
-        };
+        return subjectDeletionOf(subject);
       },
+      // A trace a correction deleted, and a correction filed again, are handled in the person's turn, after the
+      // writes and compiles of theirs that are running; once close() is waiting for those, at once.
+      onKey: (key, work) => (closing ? work() : onSubject(key, work)),
+      retentionDaysOf: (key, kind) => (retention === undefined ? undefined : retentionDaysOf(retention, kind, policyDays.get(key))),
+      // A trace deleted again is counted as a correction's own deletion is: a running turn of the person that recalled
+      // it does not file a reply restating it.
+      changing: (key) => {
+        correctionCounts.set(key, (correctionCounts.get(key) ?? 0) + 1);
+      },
+      // With cognitive memory on, through the mind first, which takes each trace with what it keeps of it, and out of
+      // the working memory of the person's open sessions.
+      ...(soulMind && mindRecalls ? { mind: soulMind, sessionsOf: (scopeId: string) => sessionsBySubject.get(scopeId) ?? [] } : {}),
     });
     // A subject the store holds nothing more of no longer counts toward the retention requirement.
     reports.forEach((report, at) => {
       const subject = reapplied[at];
-      if (report.complete && subject) subjects.delete(conversationScopeKey(agentId, subject));
+      if (storeHoldsNoMore(report) && subject) subjects.delete(conversationScopeKey(agentId, subject));
     });
+    // Read once for every subject deleted again, after all of them: most re-applications delete nobody.
+    await withRecipients(reports);
+    // Read once the ledger is up to date from its copy: at the open, and again while it held none. Only a tombstone
+    // found turns the flag on: a read that began before a deletion wrote can answer after it, with none.
+    if (!forgotten.keyed && !ledgerHoldsTombstones && (await forgotten.size()) > 0) ledgerHoldsTombstones = true;
     return reports;
   };
   built.applyTombstones = () => awaitedOnClose(applyTombstones());
@@ -1575,9 +3139,31 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       retention,
       daysFor: (scopeId) => policyDays.get(scopeId),
       onChain: (scopeId, work) => (closing ? work() : onSubject(scopeId, work)),
+      // With cognitive memory on, the expired traces go through the mind first, with what it keeps of each, and leave
+      // the working memory of their person's open sessions.
+      ...(soulMind && mindRecalls ? { mind: soulMind, sessionsOf: (scopeId: string) => sessionsBySubject.get(scopeId) ?? [] } : {}),
     });
   };
   built.sweepRetention = () => awaitedOnClose(sweep());
+  built.recipients = () => awaitedOnClose(listRecipients());
+  /** Whether the agent scores a person's messages for sentiment at all: on the GMI runtime, with sentiment on. */
+  const scoresSentiment = (() => {
+    if (rest.runtime !== 'gmi') return false;
+    try {
+      return resolveCognition(rest as CognitionInputs).sentiment;
+    } catch {
+      return false;
+    }
+  })();
+  /**
+   * Whether a subject's messages are scored for sentiment, as the host's latest answer for the subject in this process
+   * leaves the agent's switch: a subject not asked about yet is scored when the switch is on.
+   */
+  const sentimentOf = (scopeId: string): 'on' | 'off' => {
+    if (!scoresSentiment) return 'off';
+    const latest = latestAnswers.get(scopeId);
+    return latest === undefined || soulAnswerOf(latest).sentiment ? 'on' : 'off';
+  };
   built.exportUserMemory = (userId) => {
     if (typeof userId !== 'string' || userId === '') {
       return Promise.reject(new TypeError('souledAgent: exportUserMemory needs a non-empty user id'));
@@ -1592,34 +3178,241 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     const run = async (): Promise<UserMemoryExport> => {
       // The owner of the older memory gets it in their export too.
       const owns = legacyOwnerKey !== undefined && key === legacyOwnerKey;
+      const days = policyDays.get(key);
+      const exportLearned = built.learning?.exportLearnedState;
+      const liveGraph = mindManagers.values().next().value?.getGraph();
       return exportSubjectMemory({
         memory,
         wiki: { storeFor: pagesOf },
         agentId,
         subject,
         ...(owns ? { legacy: { forms: legacyForms, pages: legacyCompiledPages } } : {}),
+        recipients: listRecipients,
+        retention: { period: retention?.traces ?? 'none', ...(days !== undefined ? { policyDays: days } : {}) },
+        profilingOf: sentimentOf,
+        ...(mindArchive ? { archive: mindArchive } : {}),
+        ...(liveGraph ? { liveGraph } : {}),
+        ...(exportLearned ? { learner: () => exportLearned.call(built.learning, userId) } : {}),
+        ...(legacyGmi.store ? { legacyGmiStore: legacyGmi.store } : {}),
       });
     };
     // The read runs on the person's chain, after the writes their turns started and their compiles: a turn whose
     // send() resolved before the call is in the export. Once close() is waiting for those writes it reads at once.
     return awaitedOnClose(closing ? run() : onSubject(key, run));
   };
-  built.correctUserMemory = (userId, correction) => {
+  const correctUser = (
+    userId: string,
+    correction: { traceIds: readonly string[]; text?: string },
+  ): Promise<{ deleted: number; pagesDeleted: number; correctionTraceId?: string; recipients: MemoryRecipient[] }> => {
     if (typeof userId !== 'string' || userId === '') {
       return Promise.reject(new TypeError('souledAgent: correctUserMemory needs a non-empty user id'));
     }
     const subject: SuppressionSubject = { kind: 'user', id: userId };
+    const countChange = () => {
+      const key = conversationScopeKey(agentId, subject);
+      correctionCounts.set(key, (correctionCounts.get(key) ?? 0) + 1);
+    };
+    let changing = false;
     // The change runs on the person's chain, after their writes and compiles; close() waits for it.
     return awaitedOnClose(
       correctSubjectMemory({
         memory,
+        ...(legacyGmi.store ? { legacyGmiStore: legacyGmi.store } : {}),
         wiki: { storeFor: pagesOf },
         agentId,
         subject,
         correction,
-        onChain: (work) => onSubject(conversationScopeKey(agentId, subject), work),
+        // As a deletion's report lists them: the call never fails on the list.
+        recipients: async () => (await recipientsForReport()).recipients,
+        // Counted on the person's chain once the named traces are known to be theirs, and again when the change has
+        // settled, before the chain runs the person's next write: a reply of theirs written after this, from a turn
+        // that began before the change or while it ran, is not filed.
+        beforeChange: () => {
+          changing = true;
+          countChange();
+        },
+        onChain: (work) =>
+          onSubject(conversationScopeKey(agentId, subject), () =>
+            work().finally(() => {
+              if (changing) countChange();
+            }),
+          ),
+        // With cognitive memory on, the named traces go through the mind first, with what it keeps of each, and leave
+        // the working memory of the person's open sessions.
+        ...(soulMind && mindRecalls
+          ? { mind: soulMind, sessions: () => sessionsBySubject.get(conversationScopeKey(agentId, subject)) ?? [] }
+          : {}),
       }),
     );
+  };
+  // The one implementation answers each signature of the call: its result holds `correctionTraceId` exactly when the
+  // call passed `text`.
+  built.correctUserMemory = correctUser as NonNullable<SouledAgent['correctUserMemory']>;
+
+  /** Files and removes one person's legacy rows on the same chain as their other memory changes. */
+  const moveLegacyGmiPerson = (
+    legacy: LegacyGmiStore,
+    { subject, scopeId, traces }: LegacyGmiPerson,
+  ): Promise<LegacyGmiMove | { forgotten: number }> =>
+    onSubject(scopeId, async () => {
+      const userId = subject.id;
+      const result: LegacyGmiMove = { userId, moved: 0, kept: 0 };
+      /** Source rows whose copies are filed, deleted together. */
+      let moving: string[] = [];
+      /** Source rows the passed store had marked deleted and the soul's store holds no live copy of. */
+      let stale: string[] = [];
+      const flush = async (): Promise<void> => {
+        const filed = moving;
+        const marked = stale;
+        moving = [];
+        stale = [];
+        if (filed.length > 0) result.moved += (await legacy.deleteTraces(filed, { withoutEmbeddings: true })).deleted;
+        if (marked.length > 0) await legacy.deleteTraces(marked, { withoutEmbeddings: true });
+      };
+      /** Why the account's policy keeps this person's rows out of the soul's store; asked once, before the first filing. */
+      let refusal: 'policy_failed' | 'policy_off' | 'minor_no_retention' | undefined;
+      let asked = false;
+      try {
+        if (await forgotten.isForgotten(subject)) return { forgotten: traces };
+        const rows = await readLegacyGmiRows(legacy, userId, true);
+        const marked = new Set(await forgotten.deletedTraceIds(rows.map(({ id }) => id).filter((id) => id !== '')));
+        const context: MemoryHookContext = { sessionId: 'copyLegacyGmiMemory', userId, subject, agentId, call: 'one-shot' };
+        for (const row of rows) {
+          // A correction can have marked the source id before its delete reached this store.
+          if (marked.has(row.id)) continue;
+          const createdAt = Number(row.created_at);
+          const prior = await soulBrain.get<{
+            scope: string; scope_id: string; deleted: number; metadata: string; created_at: number;
+          }>(
+            'SELECT scope, scope_id, deleted, metadata, created_at FROM memory_traces WHERE brain_id = ? AND id = ?',
+            [soulBrain.brainId, row.id],
+          );
+          const copied = prior && prior.scope === 'conversation' && prior.scope_id === scopeId &&
+            Number(prior.deleted) === 0 && Number(prior.created_at) === createdAt &&
+            parseTraceMetadata(prior.metadata).copiedFrom === 'gmi-store';
+          // A row the passed store marked deleted is never filed. With its live copy it is a move's delete that stopped
+          // after the mark, finished below; with none (the store's own delete, or a copy that has since expired) it
+          // goes for good.
+          if (Number(row.deleted) !== 0 && !copied) {
+            stale.push(row.id);
+            if (moving.length + stale.length >= LEGACY_MOVE_BATCH) await flush();
+            continue;
+          }
+          if (prior && !copied) throw new Error('souledAgent: a legacy trace id is already in use');
+          if (!copied) {
+            if (await forgotten.isForgotten(subject)) break;
+            if (!asked) {
+              asked = true;
+              // The account's policy holds for what a move files, as for a turn: an account kept from memory, a child's
+              // on a store that would keep it until deletion, and a failed answer leave the rows where they are.
+              const policy = applied(await askPolicy(context), subject);
+              if (policy === 'failed') refusal = 'policy_failed';
+              else if (policy.longTerm === 'off') {
+                refusal = policy.minor === true && !keepsMinorsMemory(subject) ? 'minor_no_retention' : 'policy_off';
+              } else if (policy.retentionDays !== undefined) {
+                // A shorter period the answer gives holds for the moved rows in this process's sweeps, as a turn's does.
+                policyDays.set(scopeId, Math.min(policyDays.get(scopeId) ?? Number.POSITIVE_INFINITY, policy.retentionDays));
+              }
+              if (refusal) memoryLog.warn('memory.write_refused', { reason: refusal });
+            }
+            if (refusal) {
+              result.kept += 1;
+              continue;
+            }
+            const text = await screened(row.content, context, 'file');
+            if (text === SCREEN_FAILED || text === null || (screen && text === '')) {
+              result.kept += 1;
+              continue;
+            }
+            const speaker = legacyGmiSpeaker(row.tags);
+            const filed = await guardedWrite(
+              forgotten,
+              subject,
+              () => {
+                if (closing || storeClosed) throw new Error('souledAgent: the memory store is closing');
+                if (sharedUser !== undefined && userId !== sharedUser) throw new Error('souledAgent: sharedMemory has another user');
+                if (!Number.isSafeInteger(createdAt)) throw new TypeError('souledAgent: a legacy trace has an invalid date');
+                const count = subjects.has(scopeId) ? subjects.size : subjects.size + 1;
+                if (retention === undefined && count > 1) throw new Error(RETENTION_REQUIRED);
+                assertSubjectAllowed(count);
+                subjects.add(scopeId);
+                noteUnkeyed(count);
+                return memory.remember(text, {
+                  id: row.id, type: row.type, scope: 'conversation', scopeId, createdAt, keepDuplicates: true,
+                  metadata: { ...(speaker ? { [SPEAKER_METADATA_KEY]: speaker } : {}), subject, turnUserId: userId, copiedFrom: 'gmi-store' },
+                });
+              },
+              async (trace) => { await memory.deleteTraces([trace.id]); },
+            );
+            if (filed.status === 'refused') break;
+          }
+          await namedForNextCompile(scopeId, row.id);
+          moving.push(row.id);
+          if (moving.length + stale.length >= LEGACY_MOVE_BATCH) await flush();
+        }
+        await flush();
+      } catch (error) {
+        result.failed = errorNameOf(error);
+        // The rows filed before the failure lose their source rows now, so a failure at one row never leaves the
+        // copies before it in both stores; a delete that fails again is finished by the next run.
+        await flush().catch(() => undefined);
+      }
+      return result;
+    });
+
+  /** One preview or move over the passed store, included in the work close() waits for. */
+  const legacyGmiCopyOf = (legacy: LegacyGmiStore): NonNullable<SouledAgent['copyLegacyGmiMemory']> => {
+    const run: NonNullable<SouledAgent['copyLegacyGmiMemory']> = async (options) => {
+      if (storeClosed || closing) throw new Error('souledAgent: open the agent to copy a passed GMI store');
+      const dryRun = options?.dryRun !== false;
+      const learners = await listNamedMemoryUsers(legacy.brain, legacy.namespace, { onlyLearningTables: true });
+      const peopleByLegacyScope = new Map<string, LegacyGmiPerson>();
+      for (const id of [...new Set([...learners, ...(options?.users ?? [])])].sort()) {
+        if (typeof id !== 'string' || isAnonymousUserId(id, anonymousUserIds)) continue;
+        const subject = { kind: 'user' as const, id };
+        try {
+          const scopeId = conversationScopeKey(agentId, subject);
+          peopleByLegacyScope.set(learnerUserScopeId({ namespace: legacy.namespace, userId: id }), { subject, scopeId, traces: 0 });
+        } catch {
+          // Rows for an id with no conversation key remain unattributed.
+        }
+      }
+      const unmatched = new Map<string, LegacyGmiUnattributed>();
+      for (const { scope, scope_id: scopeId, traces } of await countLegacyGmiScopes(legacy)) {
+        const person = scope === 'user' ? peopleByLegacyScope.get(scopeId) : undefined;
+        if (person) {
+          person.traces = Number(traces);
+          continue;
+        }
+        const reason = scope !== 'user'
+          ? 'requires a user scope'
+          : couldBeSessionForm(scopeId) ? 'session-form scope id' : 'no listed user maps to this scope';
+        const key = JSON.stringify([scope, reason]);
+        const group = unmatched.get(key) ?? { scope, scopes: 0, traces: 0, reason };
+        group.scopes += 1;
+        group.traces += Number(traces);
+        unmatched.set(key, group);
+      }
+      const unattributed = [...unmatched.values()];
+      let forgottenTraces = 0;
+      if (dryRun) {
+        const people: Array<{ userId: string; traces: number }> = [];
+        for (const { subject, traces } of peopleByLegacyScope.values()) {
+          if (await forgotten.isForgotten(subject)) forgottenTraces += traces;
+          else people.push({ userId: subject.id, traces });
+        }
+        return { dryRun: true, people, unattributed, forgotten: forgottenTraces };
+      }
+
+      const people: LegacyGmiMove[] = [];
+      for (const person of peopleByLegacyScope.values()) {
+        const result = await moveLegacyGmiPerson(legacy, person);
+        if ('forgotten' in result) forgottenTraces += result.forgotten;
+        else people.push(result);
+      }
+      return { dryRun: false, people, unattributed, forgotten: forgottenTraces };
+    };
+    return (options) => awaitedOnClose(run(options));
   };
 
   // On teardown: close the agent (with runtime: 'gmi' that stops its running session turns and shuts its sessions
@@ -1631,6 +3424,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   built.close = async () => {
     let closeFailed = false;
     let closeError: unknown;
+    // One deadline for the close, counted from here: the agent's own close waits within it for the mind's writes.
+    closeStartedAt ??= Date.now();
     try {
       await originalClose();
     } catch (err) {
@@ -1638,24 +3433,18 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       closeError = err;
     }
     try {
-      const stillPending = await waitForWrites(pending, waitMs);
-      if (stillPending > 0) {
-        console.warn(
-          `[agentos] souledAgent: close() waited ${waitMs} ms for its turns still running and the memory writes of ` +
-            `its turns; still pending: ${stillPending}. The wiki compile takes what is stored, and a write that ` +
-            'reaches the store once it is closed is not stored.',
-        );
-      }
+      const stillPending = await waitForWrites(pending, closeWaitLeft());
+      // The wiki compile takes what is stored, and a write that reaches the store once it is closed is not stored.
+      if (stillPending > 0) memoryLog.warn('memory.close_pending', { pending: stillPending });
       closing = true;
       if (retention !== undefined) {
         try {
           // Expired memory goes before the compile, so no page is built from it.
           await sweep();
-        } catch {
-          // A failed sweep never blocks the close. No error text: it may hold what a store said.
-          console.warn(
-            '[agentos] souledAgent: the retention sweep on close failed; expired memory stays in the store until the next sweep.',
-          );
+        } catch (err) {
+          // A failed sweep never blocks the close; expired memory stays in the store until the next sweep. The listed
+          // type and code alone: an error's text may hold what a store said.
+          memoryLog.warn('memory.close_sweep_failed', errorFields(err));
         }
       }
       try {
@@ -1663,14 +3452,13 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
         // `compile: false` no wiki is attached, and this compiles nothing.
         await memory.compileWiki({ reason: 'session-end', scopes: [...written] });
       } catch (err) {
-        // A subject's watermark moves only past compiled traces, so the next compile takes these up again.
-        // The reason goes in as text alone: the console's inspection of an error can throw, and close must go on.
-        console.warn(
-          `[agentos] souledAgent: the memory wiki compile on close failed (${messageOf(err)}); ` +
-            'the conversation traces stay in the store for the next compile.',
-        );
+        // A subject's watermark moves only past compiled traces, so the next compile takes these up again. The listed
+        // type and code alone, which never throw on a value that cannot be read: close must go on.
+        memoryLog.warn('memory.close_compile_failed', errorFields(err));
       }
     } finally {
+      // A compile above can record a route it took: its write lands before the store closes.
+      await waitForWrites(routeWrites, waitMs);
       await closeStore();
     }
     if (closeFailed) throw closeError;
@@ -1684,6 +3472,17 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   // before a deletion, and a deletion that did not finish, hold nothing of a forgotten subject once this returns. A
   // ledger whose copy cannot be read fails the open, and no memory is served.
   try {
+    const passed = legacyGmi.connection;
+    if (passed) {
+      const { brain } = await passed.open();
+      legacyGmi.store = { brain, namespace: learningConfig?.namespace ?? '', deleteTraces: passed.deleteTraces };
+      built.copyLegacyGmiMemory = legacyGmiCopyOf(legacyGmi.store);
+      const count = await brain.get<{ traces: number | string }>(
+        'SELECT COUNT(*) AS traces FROM memory_traces WHERE brain_id = ? AND deleted = 0',
+        [brain.brainId],
+      );
+      memoryLog.info('memory.legacy_gmi_store', { traces: Number(count?.traces ?? 0), call: 'copyLegacyGmiMemory' });
+    }
     await applyTombstones();
     // The checks of who the store holds read it once the tombstones are applied: a forgotten subject a restore put
     // back is deleted again first, and counts for neither.
@@ -1706,6 +3505,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       if (key !== undefined) subjects.add(key);
     }
     if (retention === undefined && subjects.size > 1) throw new Error(RETENTION_REQUIRED);
+    assertSubjectAllowed(subjects.size);
     // On a single person's own machine the older memory is attributed to its one user, once the tombstones are
     // applied: a forgotten user, an attribution to another user, and a store that records anyone else refuse the open.
     if (legacyMemory !== undefined) {
@@ -1723,6 +3523,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     // An attributed owner already has memory even if no turn has registered their conversation scope yet.
     if (legacyOwnerKey !== undefined) subjects.add(legacyOwnerKey);
     if (retention === undefined && subjects.size > 1) throw new Error(RETENTION_REQUIRED);
+    assertSubjectAllowed(subjects.size);
+    noteUnkeyed(subjects.size);
   } catch (err) {
     await originalClose().catch(() => undefined);
     await closeStore().catch(() => undefined);

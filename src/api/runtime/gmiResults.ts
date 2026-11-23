@@ -25,6 +25,8 @@ import { normalizeStreamFinishReason, type StreamPart, type StreamTextResult } f
 import type { SessionTranscriptMessage } from '../sessionTranscript.js';
 import type { MemoryRecallCapture } from '../../cognition/memory/retrieval/recall/capture.js';
 import type { PromptHistoryOmission } from '../../core/llm/IPromptEngine.js';
+import type { TextGuardrailReport } from './textGuardrails.js';
+import { emptyMemoryWriteRecord, type MemoryShownItem, type MemoryWriteRecord } from './memoryWriteRecord.js';
 
 /** The error a turn ended with, as the GMI reported it. */
 export interface GmiTurnError {
@@ -99,8 +101,17 @@ export class GmiTurnFolder {
   private lastStepCalledTools = false;
   /** The recall capture of the turn's memory assembly, from the GMI's output that ended the turn. */
   private memoryRecall: MemoryRecallCapture | undefined;
+  private memoryShown: MemoryShownItem[] | undefined;
   /** The history the turn's requests left out, from the GMI's output that ended the turn. */
   private historyOmitted: PromptHistoryOmission | undefined;
+  /** What the turn's input guards decided, when the turn carried `guards`: their report, and the reply that took the turn's place. */
+  private inputGuards: { report: TextGuardrailReport | undefined; replacement?: string } | undefined;
+  /** The record of the turn's memory writes, once the turn handed its two sides to the memory provider. */
+  private memoryWrite: Promise<MemoryWriteRecord> | undefined;
+  /** The record of the writes a souled agent's mind started as its GMI ended the turn, from the GMI's output. */
+  private mindMemoryWrite: Promise<MemoryWriteRecord> | undefined;
+  /** The reply as the GMI wrote it, which its memory files: its output's text, before any hook replaced a step's. */
+  private gmiReplyText = '';
 
   push(chunk: GMIOutputChunk): void {
     switch (chunk.type) {
@@ -148,10 +159,30 @@ export class GmiTurnFolder {
     }
   }
 
-  /** Records the GMI's output that ended the turn: its recall capture and its history report reach the result. */
+  /** Records recall, history and the reply from the GMI's output that ended the turn. */
   finish(output: GMIOutput | undefined): void {
     this.memoryRecall = output?.memoryRecall;
+    this.memoryShown = output?.memoryShown;
     this.historyOmitted = output?.historyOmitted ? { ...output.historyOmitted } : undefined;
+    this.mindMemoryWrite = output?.memoryWrite;
+    this.gmiReplyText = output?.responseText ?? '';
+  }
+
+  /**
+   * The record of the writes a souled agent's mind started as its GMI ended the turn (`GMIOutput.memoryWrite`);
+   * undefined when the GMI's output carried none.
+   */
+  mindWrite(): Promise<MemoryWriteRecord> | undefined {
+    return this.mindMemoryWrite;
+  }
+
+  /**
+   * The reply as the GMI's output wrote it (`GMIOutput.responseText`), the text its memory was handed to file; '' before
+   * the turn ended or when it had none. {@link text} is the reply as the session keeps it, an `onAfterGeneration`
+   * hook's replacement included.
+   */
+  gmiReply(): string {
+    return this.gmiReplyText;
   }
 
   /** The recall capture of the GMI's output that ended the turn; undefined before the turn ended, or when it carried none. */
@@ -159,9 +190,40 @@ export class GmiTurnFolder {
     return this.memoryRecall;
   }
 
+  /** The items shown on a turn with text capture, when any reached the model. */
+  shown(): MemoryShownItem[] | undefined {
+    return this.memoryShown;
+  }
+
+  /** Records the promise of the turn's memory writes, when the turn hands its sides to the memory provider. */
+  wrote(record: Promise<MemoryWriteRecord>): void {
+    this.memoryWrite = record;
+  }
+
+  /**
+   * The record of the turn's memory writes: the promise the turn recorded, which never rejects, or a record with no
+   * entry for a turn that handed nothing to the memory provider (it failed, was stopped, or a guard replaced it).
+   */
+  written(): Promise<MemoryWriteRecord> {
+    return this.memoryWrite ?? Promise.resolve(emptyMemoryWriteRecord());
+  }
+
   /** The history the turn's requests left out, from the GMI's output that ended the turn; undefined when they left none out. */
   omittedHistory(): PromptHistoryOmission | undefined {
     return this.historyOmitted;
+  }
+
+  /**
+   * Records what the turn's input guards decided: their report, which the result carries, and, when they replaced the
+   * turn, the reply that takes its place with no model call.
+   */
+  guarded(report: TextGuardrailReport | undefined, replacement?: string): void {
+    this.inputGuards = { report, ...(replacement !== undefined ? { replacement } : {}) };
+  }
+
+  /** Whether the turn carried `guards`, and the report they made. */
+  guards(): { report: TextGuardrailReport | undefined } | undefined {
+    return this.inputGuards ? { report: this.inputGuards.report } : undefined;
   }
 
   /** Marks the turn failed by a thrown error (the turn's generator itself threw). An ERROR chunk already seen wins. */
@@ -208,13 +270,13 @@ export class GmiTurnFolder {
     return this.overrides.get(step.stepIndex) ?? step.text;
   }
 
-  /** The latest step that produced text, streamText's rule. */
+  /** The latest step that produced text, streamText's rule; the input guards' replacement for a turn they replaced. */
   text(): string {
     for (let i = this.steps.length - 1; i >= 0; i--) {
       const t = this.stepText(this.steps[i]);
       if (t) return t;
     }
-    return '';
+    return this.inputGuards?.replacement ?? '';
   }
 
   /**
@@ -324,18 +386,20 @@ export class GmiTurnFolder {
       finishReason: this.finishReason(),
       ...(transcriptDelta ? { transcriptDelta } : {}),
       ...(this.memoryRecall ? { memoryRecall: this.memoryRecall } : {}),
+      ...(this.memoryShown ? { memoryShown: this.memoryShown } : {}),
       ...(this.historyOmitted ? { historyOmitted: this.historyOmitted } : {}),
+      ...(this.inputGuards ? { guardReport: this.inputGuards.report } : {}),
     };
   }
 }
 
 interface Deferred<T> {
   promise: Promise<T>;
-  resolve: (value: T) => void;
+  resolve: (value: T | PromiseLike<T>) => void;
 }
 
 function deferred<T>(): Deferred<T> {
-  let resolve!: (value: T) => void;
+  let resolve!: (value: T | PromiseLike<T>) => void;
   const promise = new Promise<T>((r) => {
     resolve = r;
   });
@@ -362,6 +426,15 @@ export interface GmiStreamOptions {
    * turn's failure is recorded (`GmiTurnFolderOptions.onFailure`).
    */
   stoppedBy?: () => Error | undefined;
+  /** True when the turn carries `guards`: the result then has `guardReport`, which resolves when the turn ends. */
+  guarded?: boolean;
+  /** True when the host opted in to the stream result's `memoryShown` promise. */
+  captureMemoryText?: boolean;
+  /**
+   * True for a session turn whose memory provider observes it: the result then has `memoryWrite`, which settles once
+   * the turn has ended and its memory writes have.
+   */
+  observed?: boolean;
 }
 
 /**
@@ -383,7 +456,10 @@ export interface GmiStreamOptions {
  * the GMI's output that ended the turn (`GmiTurnFolder.finish`), undefined when
  * the turn stopped before it returned one; `historyOmitted` is that output's
  * report of the history the turn's requests left out, undefined likewise or
- * when they left none out.
+ * when they left none out. With `options.observed`, `memoryWrite` is the
+ * record of the turn's memory writes (`GmiTurnFolder.written`), which settles
+ * after the turn has ended and the writes have, with no entry for a turn that
+ * failed or was stopped.
  *
  * @param turn - The turn's chunks.
  * @param options - A caller-owned folder; see {@link GmiStreamOptions}.
@@ -424,7 +500,10 @@ export function streamFromGmiTurn(turn: AsyncIterable<GMIOutputChunk>, options: 
     cacheDiagnostics: deferred<Awaited<StreamTextResult['cacheDiagnostics']>>(),
     providerMessageId: deferred<string | null>(),
     memoryRecall: deferred<MemoryRecallCapture | undefined>(),
+    memoryShown: options.captureMemoryText ? deferred<MemoryShownItem[]>() : undefined,
     historyOmitted: deferred<PromptHistoryOmission | undefined>(),
+    guardReport: deferred<TextGuardrailReport | undefined>(),
+    memoryWrite: deferred<MemoryWriteRecord>(),
   };
   // Provider and model resolve once the turn's model call is routed, as streamText's do.
   folder.onRoute(({ providerId, modelId }) => {
@@ -485,7 +564,11 @@ export function streamFromGmiTurn(turn: AsyncIterable<GMIOutputChunk>, options: 
       p.providerMessageId.resolve(folder.providerMessageId());
       // The GMI's output reaches the folder when its generator returns, before the turn's chunks end.
       p.memoryRecall.resolve(folder.recall());
+      p.memoryShown?.resolve(folder.shown() ?? []);
       p.historyOmitted.resolve(folder.omittedHistory());
+      p.guardReport.resolve(folder.guards()?.report);
+      // The turn handed its sides to the memory provider before its chunks ended; the record settles when they do.
+      p.memoryWrite.resolve(folder.written());
       done = true;
       wake();
     }
@@ -528,6 +611,9 @@ export function streamFromGmiTurn(turn: AsyncIterable<GMIOutputChunk>, options: 
     cacheDiagnostics: p.cacheDiagnostics.promise,
     providerMessageId: p.providerMessageId.promise,
     memoryRecall: p.memoryRecall.promise,
+    ...(p.memoryShown ? { memoryShown: p.memoryShown.promise } : {}),
     historyOmitted: p.historyOmitted.promise,
+    ...(options.guarded ? { guardReport: p.guardReport.promise } : {}),
+    ...(options.observed ? { memoryWrite: p.memoryWrite.promise } : {}),
   };
 }

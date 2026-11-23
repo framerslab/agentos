@@ -84,6 +84,7 @@ import {
 import { fillScopeIds } from '../../retrieval/store/migrations/v2-to-v3.js';
 import { ForgottenLedger, type SuppressionSubject } from '../../suppression/ForgottenLedger.js';
 import { CONVERSATION_SCOPE, parseConversationScopeKey } from '../../retrieval/store/conversationScopeKey.js';
+import { notFiledByMindCondition } from '../../retrieval/store/mindFiled.js';
 import { isMissingTableError } from '../../retrieval/store/missingTable.js';
 import { ensureScopeRow, registerUnregisteredConversationScopes } from '../../retrieval/store/conversationScopes.js';
 import { memoryLog } from '../../log.js';
@@ -92,6 +93,7 @@ import { assertWikiPageId } from '../../../substrate/memory/wiki/WikiPageId.js';
 import { refileBrainScopeIds, snapshotInEncodedForm, takeScopeIdFormLock } from '../../retrieval/store/scopeIdForm.js';
 import { SqlKnowledgeGraph } from '../../retrieval/store/SqlKnowledgeGraph.js';
 import { SqlMemoryGraph } from '../../retrieval/store/SqlMemoryGraph.js';
+import { registerHandedBrain } from './handedBrain.js';
 import { ChunkingEngine } from '../ingestion/ChunkingEngine.js';
 import { UrlLoader } from '../ingestion/UrlLoader.js';
 import { RetrievalFeedbackSignal } from '../../retrieval/feedback/RetrievalFeedbackSignal.js';
@@ -117,7 +119,7 @@ import {
 // ---------------------------------------------------------------------------
 
 /** Why a scope's wiki compile did not run in a call, as its `memory.compile_skipped` line says it. */
-export type CompileSkipReason = 'budget' | 'policy_raw' | 'screen_failed' | 'forgotten';
+export type CompileSkipReason = 'budget' | 'policy_raw' | 'screen_failed' | 'forgotten' | 'minor_no_compile';
 
 /** What {@link Memory.attachWiki} takes: a page store per conversation scope, a compiler, and two optional hooks. */
 export interface AttachedWiki {
@@ -129,26 +131,32 @@ export interface AttachedWiki {
       reason: 'consolidation' | 'session-end' | 'explicit';
       /** The store of the scope the traces are of: the compile reads and writes its pages there. */
       store: WikiCompilerStorePort;
+      /** The model call that compiles this batch, in place of the compiler's own; unset, the compiler's own. */
+      llm?: (prompt: string) => Promise<string>;
     }): Promise<CompileResult>;
   };
   /**
-   * Asked once a batch of a scope's traces, before the compiler: the traces to compile, or why this scope's
-   * compile does not run. A skipped scope keeps its watermark.
+   * Asked once a batch of a scope's traces, before the compiler: the traces to compile, and the model call that
+   * compiles them when it is not the compiler's own, or why this scope's compile does not run. A skipped scope keeps
+   * its watermark.
    */
   beforeScopeCompile?(
     scopeId: string,
     traces: MemoryTrace[],
-  ): Promise<{ traces: MemoryTrace[] } | { skip: 'policy_raw' | 'screen_failed' | 'forgotten' }>;
+  ): Promise<
+    | { traces: MemoryTrace[]; llm?: (prompt: string) => Promise<string> }
+    | { skip: 'policy_raw' | 'screen_failed' | 'forgotten' | 'minor_no_compile' }
+  >;
   /**
    * Runs one scope's compile: a host that orders each subject's writes, compiles and deletion one after another
    * passes it, and runs `work` in the subject's turn. Unset: the compile runs at once.
    */
   runScope?<T>(scopeId: string, work: () => Promise<T>): Promise<T>;
   /**
-   * The reason to log for an error a scope's compile threw: `'budget'` for a spend budget's refusal. Undefined:
-   * the error is the call's, thrown once every scope has run.
+   * The reason to log for an error a scope's compile threw: `'budget'` for a spend budget's refusal, or the reason a
+   * host's model call stopped the compile for. Undefined: the error is the call's, thrown once every scope has run.
    */
-  compileSkipReasonOf?(error: unknown): 'budget' | undefined;
+  compileSkipReasonOf?(error: unknown): CompileSkipReason | undefined;
 }
 
 /**
@@ -273,6 +281,39 @@ const LEARNER_USER_COLUMNS: ReadonlyArray<readonly [string, string]> = [
   ['agentos_learning_skills', 'user_id'],
 ];
 
+/** Reads named users without decoding scope ids. By default, reads both trace metadata and learning tables. @internal */
+export async function listNamedMemoryUsers(
+  brain: Brain,
+  namespace?: string,
+  options?: { onlyLearningTables?: boolean },
+): Promise<string[]> {
+  const users = new Set<string>();
+  const holdUser = (userId: unknown): void => {
+    if (typeof userId === 'number') users.add(String(userId));
+    else if (typeof userId === 'string' && userId !== '') users.add(userId);
+  };
+  if (!options?.onlyLearningTables) {
+    const named = await brain.all<{ user_id: unknown }>(
+      `SELECT DISTINCT ${brain.features.dialect.jsonExtract('metadata', '$.turnUserId')} AS user_id FROM memory_traces WHERE brain_id = ?`,
+      [brain.brainId],
+    );
+    for (const row of named) holdUser(row.user_id);
+  }
+  for (const [table, column] of LEARNER_USER_COLUMNS) {
+    try {
+      const rows = await brain.all<{ user_id: unknown }>(
+        `SELECT DISTINCT ${column} AS user_id FROM ${table} WHERE ${column} IS NOT NULL${namespace === undefined ? '' : ' AND namespace = ?'}`,
+        namespace === undefined ? [] : [namespace],
+      );
+      for (const row of rows) holdUser(row.user_id);
+    } catch (error) {
+      // A store whose database holds no learning tables has no learner to name.
+      if (!isMissingTableError(error)) throw error;
+    }
+  }
+  return [...users];
+}
+
 /** Thrown inside a page write's transaction when the row is no longer the one read, so the transaction rolls back. */
 class PageRowChangedError extends Error {
   constructor() {
@@ -372,6 +413,32 @@ function isPageChunkTags(tags: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** The stored rows of the given ids, including soft-deleted ones, without loading their words or vectors. @internal */
+export async function readStoredTraceRefs(
+  brain: Brain,
+  traceIds: readonly string[],
+): Promise<Array<{ id: string; scope: string; scopeId: string; deleted: boolean; chunk: boolean }>> {
+  const ids = [...new Set(traceIds)];
+  const found: Array<{ id: string; scope: string; scopeId: string; deleted: boolean; chunk: boolean }> = [];
+  for (let offset = 0; offset < ids.length; offset += 400) {
+    const slice = ids.slice(offset, offset + 400);
+    const rows = await brain.all<{ id: string; scope: string; scope_id: string | null; deleted: number | boolean | string; tags: string }>(
+      `SELECT id, scope, scope_id, deleted, tags FROM memory_traces WHERE brain_id = ? AND id IN (${slice.map(() => '?').join(', ')})`,
+      [brain.brainId, ...slice],
+    );
+    for (const row of rows) {
+      found.push({
+        id: row.id,
+        scope: row.scope,
+        scopeId: row.scope_id ?? '',
+        deleted: Number(row.deleted) !== 0,
+        chunk: isPageChunkTags(row.tags),
+      });
+    }
+  }
+  return found;
 }
 
 /** Raw row shape from the `memory_traces` table. */
@@ -482,6 +549,15 @@ export class Memory {
   /** The forgotten-user ledger the store was opened with, if any (config.forgotten). */
   private readonly _forgotten: ForgottenLedger | undefined;
 
+  /** Whether {@link close} leaves the Brain's adapter open: one the host passed and keeps using (`leaveAdapterOpen`). */
+  private readonly _leaveAdapterOpen: boolean;
+
+  /**
+   * True once {@link close} has run on a store whose adapter the caller keeps: the facade admits nothing new after it
+   * ({@link _refuseOnceClosed}).
+   */
+  private _closedOnKeptAdapter = false;
+
   // -------------------------------------------------------------------
   // Constructor (private — use Memory.create() instead)
   // -------------------------------------------------------------------
@@ -494,10 +570,15 @@ export class Memory {
     brain: Brain,
     config: Required<Pick<MemoryConfig, 'store' | 'graph' | 'selfImprove' | 'decay'>> & MemoryConfig,
     forgotten?: ForgottenLedger,
+    leaveAdapterOpen = false,
   ) {
     this._brain = brain;
     this._config = config;
     this._forgotten = forgotten;
+    this._leaveAdapterOpen = leaveAdapterOpen;
+    // Code inside the library that reads or writes this store's rows beside the facade reaches the Brain through
+    // brainOf(); the facade keeps it private to everyone else.
+    registerHandedBrain(this, brain);
 
     // Store the optional embedding function for vector search.
     this._embed = config.embed ?? null;
@@ -678,13 +759,24 @@ export class Memory {
    * Open a Memory with a pre-resolved StorageAdapter. Use when sharing an
    * adapter across subsystems or when you need full control over adapter
    * resolution.
+   *
+   * `leaveAdapterOpen` (internal) is for an adapter the caller keeps using: {@link close}, and a refused open, leave it
+   * open. `beforeLedger` (internal) runs once the Brain is open and before the forgotten-user ledger opens; a throw
+   * refuses the open before the ledger reads or writes anything.
    */
   static async createWithAdapter(
     adapter: import('@framers/sql-storage-adapter').StorageAdapter,
-    opts: Omit<MemoryConfig, 'store' | 'path'> & { brainId?: string } = {},
+    opts: Omit<MemoryConfig, 'store' | 'path'> & {
+      brainId?: string;
+      /** @internal Leave the adapter open on close and on a refused open; the caller closes it. */
+      leaveAdapterOpen?: boolean;
+      /** @internal A check of the opened Brain, before the ledger opens; a throw refuses the open. */
+      beforeLedger?: (brain: Brain) => Promise<void>;
+    } = {},
   ): Promise<Memory> {
-    const brain = await Brain.openWithAdapter(adapter, { brainId: opts.brainId });
-    return Memory._initialize(brain, { ...opts, store: 'sqlite' });
+    const { leaveAdapterOpen = false, beforeLedger, ...config } = opts;
+    const brain = await Brain.openWithAdapter(adapter, { brainId: config.brainId });
+    return Memory._initialize(brain, { ...config, store: 'sqlite' }, leaveAdapterOpen, beforeLedger);
   }
 
   /**
@@ -692,11 +784,14 @@ export class Memory {
    * Wires the Memory facade around an already-opened Brain, and opens the
    * forgotten-user ledger over the Brain's adapter when the config asks for one.
    *
-   * @throws {ForgottenLedgerError} When the ledger does not open; the Brain is closed first.
+   * @throws {ForgottenLedgerError} When the ledger does not open; the Brain is closed first, unless
+   *   `leaveAdapterOpen` leaves its adapter to the caller. Whatever `beforeLedger` throws, the same way.
    */
   private static async _initialize(
     brain: Brain,
     config: MemoryConfig,
+    leaveAdapterOpen = false,
+    beforeLedger?: (brain: Brain) => Promise<void>,
   ): Promise<Memory> {
     const merged = {
       store: 'sqlite' as const,
@@ -719,19 +814,21 @@ export class Memory {
 
     // The ledger's table lives beside the traces, on the store's own adapter, which exists only now.
     let forgotten: ForgottenLedger | undefined;
-    if (config.forgotten instanceof ForgottenLedger) {
-      forgotten = config.forgotten;
-    } else if (config.forgotten) {
-      try {
+    try {
+      await beforeLedger?.(brain);
+      if (config.forgotten instanceof ForgottenLedger) {
+        forgotten = config.forgotten;
+      } else if (config.forgotten) {
         forgotten = await ForgottenLedger.open({ ...config.forgotten, primary: brain.adapter });
-      } catch (error) {
-        // A store whose ledger does not open is not served, and the refused open leaves no handle behind.
-        await brain.close();
-        throw error;
       }
+    } catch (error) {
+      // A store whose ledger does not open is not served, and the refused open leaves no handle behind: closing the
+      // Brain closes its adapter, so an adapter the caller keeps is left to the caller.
+      if (!leaveAdapterOpen) await brain.close();
+      throw error;
     }
 
-    return new Memory(brain, merged, forgotten);
+    return new Memory(brain, merged, forgotten, leaveAdapterOpen);
   }
 
   /**
@@ -771,6 +868,7 @@ export class Memory {
    *   `conversationScopeKey` built; nothing is stored.
    */
   async remember(content: string, options?: RememberOptions): Promise<MemoryTrace> {
+    this._refuseOnceClosed();
     const type = options?.type ?? 'episodic';
     const scope = options?.scope ?? 'user';
     const scopeId = options?.scopeId ?? '';
@@ -788,18 +886,29 @@ export class Memory {
     // A chunk of a wiki page is its page's: a message of the same text is a trace of its own, so the page's next
     // rewrite, which deletes its chunks, takes nothing a person said.
     const asChunk = (options?.tags ?? []).includes('wiki');
-    const existing = await this._findExistingTraceByHash(contentHash, type, scope, scopeId, turnUserId, asChunk);
+    const existing = options?.keepDuplicates
+      ? undefined
+      : await this._findExistingTraceByHash(contentHash, type, scope, scopeId, turnUserId, asChunk);
     if (existing) {
       // The text is stored already; its scope's registry row is written when it is missing.
       if (conversation) await ensureScopeRow(this._brain, this._brain.brainId, scopeId, Date.now());
       return this._buildTrace(existing);
     }
 
-    const id = typeof options?.id === 'string' && options.id !== '' ? options.id : nextTraceId();
+    const id = typeof options?.id === 'string' && (options.id !== '' || options.keepDuplicates)
+      ? options.id
+      : nextTraceId();
     // A conversation trace is stamped after the last compile read of this facade, and counted as not yet stored until
     // its row is in: a compile reads below it meanwhile, so no watermark moves past a trace a compile has not read.
     const fence = conversation ? coordinationOf(this._brain.coordinationToken) : undefined;
-    const now = fence ? Math.max(Date.now(), fence.compileReadAt + 1) : Date.now();
+    // A trace filed again keeps the time it first had; the caller names it for the next compile to read by id.
+    const given = options?.createdAt;
+    const now =
+      typeof given === 'number' && Number.isFinite(given)
+        ? Math.trunc(given)
+        : fence
+          ? Math.max(Date.now(), fence.compileReadAt + 1)
+          : Date.now();
     if (fence && now > fence.lastConversationStamp) fence.lastConversationStamp = now;
     const tags = options?.tags ?? [];
     const entities = options?.entities ?? [];
@@ -882,7 +991,8 @@ export class Memory {
    * `before` is never returned, however near its vector.
    *
    * @param query   - Natural-language search query.
-   * @param options - Optional filters (limit, type, scope, scopeId, minStrength, after, before).
+   * @param options - Optional filters (limit, type, scope, scopeId, filedBy, minStrength, after, before). With
+   *   `filedBy: 'soul'`, no trace a souled agent's mind filed is returned on either half.
    * @returns Ranked array of {@link ScoredTrace} results.
    * A call with no scope and no scope id reads the whole brain, every subject's conversation traces among them: the
    * host's own read of its store. No turn, tool or prompt of a souled agent makes one; pass the scope and a key to read
@@ -893,6 +1003,10 @@ export class Memory {
    */
   async recall(query: string, options?: RecallOptions): Promise<ScoredTrace[]> {
     assertConversationKeyGiven('recall', options?.scope, options?.scopeId);
+    const filedBy: unknown = options?.filedBy;
+    if (filedBy !== undefined && filedBy !== 'soul') {
+      throw new TypeError("Memory.recall: filedBy reads the soul's side ('soul'), or is left unset to read every trace");
+    }
     await this._initPromise;
 
     const ftsQuery = buildNaturalLanguageFtsQuery(query);
@@ -937,6 +1051,12 @@ export class Memory {
     if (options?.before != null) {
       conditions.push('t.created_at < ?');
       params.push(options.before);
+    }
+    if (filedBy === 'soul') {
+      // The soul's side: every trace but the ones a souled agent's mind filed, on each path below.
+      const notMind = notFiledByMindCondition(this._brain.features.dialect, 't.metadata');
+      conditions.push(notMind.sql);
+      params.push(...notMind.params);
     }
 
     const filters = conditions.join(' AND ');
@@ -991,9 +1111,9 @@ export class Memory {
           }
         }
 
-        // The vector index holds every trace of this brain, whatever its type,
-        // scope, scope id, strength or age, so the candidates of both halves
-        // pass the recall's filters, this brain's id first, before they rank.
+        // The vector index holds the facade's own traces of this brain, whatever
+        // their type, scope, scope id, strength or age, so the candidates of both
+        // halves pass the recall's filters, this brain's id first, before they rank.
         const candidateIds = [...new Set([...hnswCandidates.map(c => c.id), ...ftsRows.map(r => r.id)])];
         const candidateRows = await this._brain.all<FtsJoinRow>(
           `SELECT t.*, 0.0 as rank FROM memory_traces t
@@ -1352,6 +1472,75 @@ export class Memory {
   }
 
   /**
+   * The rows this facade's Brain holds of the given ids, live or soft-deleted, each with its scope, its scope id,
+   * whether it is soft-deleted and whether it is a wiki page's chunk; an id with no row is left out. A correction made
+   * again owns by it a trace it named that a delete left soft-deleted under the person's key, and the tombstones'
+   * re-application finds by it the deleted traces a restore brought back. 400 ids a statement.
+   *
+   * @internal
+   */
+  async storedTracesAmong(
+    traceIds: readonly string[],
+  ): Promise<Array<{ id: string; scope: string; scopeId: string; deleted: boolean; chunk: boolean }>> {
+    await this._initPromise;
+    return readStoredTraceRefs(this._brain, traceIds);
+  }
+
+  /**
+   * Deletes the document chunks the given traces were filed from, with their text, the pictures of those chunks and
+   * each document left with no chunk, as {@link deleteTraces} does with `documentChunks: 'delete'`. A souled agent's
+   * deletion calls it before its mind deletes the traces' rows: a chunk is found by the row it was filed into, and a
+   * row deleted for good lets go of its chunk.
+   *
+   * @internal
+   */
+  async deleteDocumentChunksOf(traceIds: readonly string[]): Promise<void> {
+    await this._initPromise;
+    const ids = [...new Set(traceIds)];
+    if (ids.length === 0) return;
+    await this._deleteDocumentChunksOf(ids);
+  }
+
+  /**
+   * Deletes what this facade's graphs keep of the given traces by their ids, and leaves the traces' rows: each trace's
+   * knowledge-graph copy, with its text, and its memory-graph node with the node's edges, as {@link deleteTraces} does
+   * around a trace's row. A souled agent's deletion calls it before its mind deletes the traces' rows: once a row is
+   * gone, nothing finds the trace's copy or node by its id again.
+   *
+   * @throws When the knowledge graph cannot delete the copies: no row has been deleted, so the deletion made again finds
+   *   the traces.
+   * @internal
+   */
+  async deleteGraphRecordsOf(traceIds: readonly string[]): Promise<void> {
+    await this._initPromise;
+    const ids = [...new Set(traceIds)];
+    if (ids.length === 0) return;
+    await this._knowledgeGraph.deleteMemories({ traceIds: ids });
+    for (const id of ids) {
+      try {
+        await this._memoryGraph.removeNode(id);
+      } catch {
+        // As in deleteTraces: a node whose delete fails stays, holding no words of the trace, and its delete is tried
+        // again there.
+      }
+    }
+  }
+
+  /**
+   * Records that rows of this facade's Brain were deleted for good by another writer in this process (a souled
+   * agent's mind, whose manager deletes the rows itself), or may have been by one that failed part way, as each of
+   * this facade's own deletes is recorded: the write-ahead log is owed a checkpoint, the full-text index on SQLite a
+   * rebuild, and the vector index a rewrite, which a person's deletion runs and {@link finishErasure} runs again where
+   * one failed.
+   *
+   * @internal
+   */
+  markErasureOwed(): void {
+    this._erasureOwed.deletes += 1;
+    if (this._hnswSidecar) this._erasureOwed.vectorIndex = true;
+  }
+
+  /**
    * Deletes the document chunks the given traces were filed from, with their text: first the pictures of those
    * chunks, as the foreign key of `document_images` on `document_chunks` requires, then the chunks, 400 ids a
    * statement. A document left with no chunk is deleted with the pictures filed under it; a document that still has
@@ -1608,26 +1797,7 @@ export class Memory {
       const subject = parseConversationScopeKey(row.owner_key)?.subject;
       if (subject && subject.kind !== 'operator') hold({ kind: subject.kind, id: subject.id });
     }
-    const holdUser = (userId: unknown): void => {
-      if (typeof userId === 'number') hold({ kind: 'user', id: String(userId) });
-      else if (typeof userId === 'string' && userId !== '') hold({ kind: 'user', id: userId });
-    };
-    const named = await this._brain.all<{ user_id: unknown }>(
-      `SELECT DISTINCT ${this._brain.features.dialect.jsonExtract('metadata', '$.turnUserId')} AS user_id FROM memory_traces WHERE brain_id = ?`,
-      [brainId],
-    );
-    for (const row of named) holdUser(row.user_id);
-    for (const [table, column] of LEARNER_USER_COLUMNS) {
-      try {
-        const rows = await this._brain.all<{ user_id: unknown }>(
-          `SELECT DISTINCT ${column} AS user_id FROM ${table} WHERE ${column} IS NOT NULL`,
-        );
-        for (const row of rows) holdUser(row.user_id);
-      } catch (error) {
-        // A store whose database holds no learning tables has no learner to name.
-        if (!isMissingTableError(error)) throw error;
-      }
-    }
+    for (const id of await listNamedMemoryUsers(this._brain)) hold({ kind: 'user', id });
     return [...held.values()];
   }
 
@@ -1893,6 +2063,7 @@ export class Memory {
       keepChunksIfUnchanged?: boolean;
     },
   ): Promise<{ chunkIds: string[] }> {
+    this._refuseOnceClosed();
     assertPageOwnerKey(scopeId);
     assertWikiPageId(page.pageId);
     await this._initPromise;
@@ -2263,7 +2434,7 @@ export class Memory {
           WHERE brain_id = ? AND deleted = 0 AND scope = ? AND scope_id = ? AND id IN (${slice.map(() => '?').join(', ')})`,
         [this._brain.brainId, CONVERSATION_SCOPE, scopeId, ...slice],
       );
-      for (const row of rows) if (!isPageChunkTags(row.tags)) traces.push(this._buildTrace(row));
+      for (const row of rows) if (!isPageChunkTags(row.tags)) traces.push(this._buildCompileTrace(row));
     }
     return traces;
   }
@@ -2304,6 +2475,7 @@ export class Memory {
     reason?: 'consolidation' | 'session-end' | 'explicit';
     scopes?: readonly string[];
   }): Promise<CompileResult> {
+    this._refuseOnceClosed();
     await this._initPromise;
     const aggregate: CompileResult = { pagesWritten: [], tracesConsumed: 0, conflicts: [] };
     const wiki = this._wiki;
@@ -2424,7 +2596,7 @@ export class Memory {
               range.sinceMs,
               range.limit,
             ]);
-    return rows.map((row) => this._buildTrace(row));
+    return rows.map((row) => this._buildCompileTrace(row));
   }
 
   /**
@@ -2483,12 +2655,14 @@ export class Memory {
         );
       }
       if (traces.length > 0) {
+        let llm: ((prompt: string) => Promise<string>) | undefined;
         if (wiki.beforeScopeCompile) {
           const answer = await wiki.beforeScopeCompile(scopeId, traces);
           if ('skip' in answer) return answer.skip;
           traces = answer.traces;
+          llm = answer.llm;
         }
-        const result = await wiki.compiler.compile({ traces, reason, store });
+        const result = await wiki.compiler.compile({ traces, reason, store, ...(llm ? { llm } : {}) });
         aggregate.pagesWritten.push(...result.pagesWritten);
         aggregate.tracesConsumed += result.tracesConsumed;
         aggregate.conflicts.push(...result.conflicts);
@@ -2554,6 +2728,7 @@ export class Memory {
    * @returns Summary of the ingestion run.
    */
   async ingest(source: string, options?: IngestOptions): Promise<IngestResult> {
+    this._refuseOnceClosed();
     await this._initPromise;
 
     const result: IngestResult = {
@@ -2686,6 +2861,7 @@ export class Memory {
   async addEntity(
     entity: Partial<KnowledgeEntity>,
   ): Promise<KnowledgeEntity> {
+    this._refuseOnceClosed();
     await this._initPromise;
 
     return this._knowledgeGraph.upsertEntity({
@@ -2717,6 +2893,7 @@ export class Memory {
   async addRelation(
     relation: Partial<KnowledgeRelation>,
   ): Promise<KnowledgeRelation> {
+    this._refuseOnceClosed();
     await this._initPromise;
 
     return this._knowledgeGraph.upsertRelation({
@@ -2951,6 +3128,7 @@ export class Memory {
    * @returns Summary of the import operation.
    */
   async importFrom(source: string, options?: ImportOptions): Promise<ImportResult> {
+    this._refuseOnceClosed();
     await this._initPromise;
 
     const format = await this._detectImportFormat(source, options);
@@ -3026,6 +3204,7 @@ export class Memory {
     format: 'json' | 'csv',
     options?: Pick<ImportOptions, 'dedup'>,
   ): Promise<ImportResult> {
+    this._refuseOnceClosed();
     await this._initPromise;
 
     let result: ImportResult;
@@ -3223,30 +3402,60 @@ export class Memory {
    * Close the Memory instance and release all resources.
    *
    * Flushes the SQLite WAL and releases the file lock. Must be called when
-   * the agent shuts down.
+   * the agent shuts down. A store opened on an adapter the caller keeps
+   * (`leaveAdapterOpen`) finishes its work and leaves that adapter open; the
+   * facade itself then admits nothing new (`remember`, `ingest`, the imports,
+   * the wiki compile, a page row, a graph entity and a relation reject), so a
+   * write that reaches it once it is closed is not stored, as on a store whose
+   * connection this class closes. A write already running finishes, and the
+   * reads, the deletes and `restoreTrace` are still served, so such a write
+   * can be taken back when its subject was forgotten meanwhile.
    */
   async close(): Promise<void> {
     await this._initPromise;
     // A rewrite of the vector index reads the traces through the Brain: it finishes before the Brain closes.
     await this._vectorIndexWork;
+    if (this._leaveAdapterOpen) {
+      // The adapter stays open for the caller that passed it, so a closed connection cannot be what stops a late
+      // write here: the facade itself admits nothing new from now on.
+      this._closedOnKeptAdapter = true;
+      return;
+    }
     await this._brain.close();
+  }
+
+  /**
+   * Refuses a call that would add to the store once {@link close} has run on an adapter the caller keeps. The calls
+   * that read, delete and restore are not refused: a write admitted before the close finishes, and is taken back
+   * through them when its subject was forgotten while it ran.
+   */
+  private _refuseOnceClosed(): void {
+    if (this._closedOnKeptAdapter) {
+      throw new Error('Memory: this store is closed; its adapter stays open for the caller that passed it');
+    }
   }
 
   // =========================================================================
   // Private helpers
   // =========================================================================
 
+  /** Builds the compiler's trace with the stored speaker when the row names one. */
+  private _buildCompileTrace(row: TraceRow): MemoryTrace & { speaker?: 'user' | 'assistant' } {
+    const metadata = parseTraceMetadata(row.metadata);
+    const trace = this._buildTrace(row, metadata);
+    const speaker = metadata.speaker;
+    return speaker === 'user' || speaker === 'assistant' ? { ...trace, speaker } : trace;
+  }
+
   /**
    * Convert a raw `memory_traces` row into a `MemoryTrace` object.
    */
-  private _buildTrace(row: TraceRow): MemoryTrace {
+  private _buildTrace(row: TraceRow, metadata = parseTraceMetadata(row.metadata)): MemoryTrace {
     let tags: string[] = [];
     try { tags = JSON.parse(row.tags); } catch { /* empty */ }
 
     let emotions = {};
     try { emotions = JSON.parse(row.emotions); } catch { /* empty */ }
-
-    const metadata = parseTraceMetadata(row.metadata);
 
     const entities = Array.isArray(metadata.entities) ? metadata.entities as string[] : [];
     const scopeId = typeof metadata.scopeId === 'string' ? metadata.scopeId : '';
@@ -3344,9 +3553,11 @@ export class Memory {
     const sidecar = this._hnswSidecar;
     if (sidecar) {
       await this._onVectorIndex(async () => {
+        // A trace whose metadata names a souled agent's mind as its filer keeps its vector out of this index.
+        const own = this._ownVectorCondition();
         const stored = await this._brain.get<{ embedding: Buffer | null }>(
-          'SELECT embedding FROM memory_traces WHERE brain_id = ? AND id = ?',
-          [this._brain.brainId, row.id],
+          `SELECT embedding FROM memory_traces WHERE brain_id = ? AND id = ? AND ${own.sql}`,
+          [this._brain.brainId, row.id, ...own.params],
         );
         if (stored?.embedding && stored.embedding.length > 0) {
           const { blobCodec } = this._brain.features;
@@ -3707,9 +3918,10 @@ export class Memory {
    * after the last write, is read and added, and the files are saved.
    */
   private async _checkLoadedVectorIndex(sidecar: import('../../retrieval/store/HnswSidecar.js').HnswSidecar): Promise<void> {
+    const own = this._ownVectorCondition();
     const rows = await this._brain.all<{ id: string }>(
-      'SELECT id FROM memory_traces WHERE brain_id = ? AND deleted = 0 AND embedding IS NOT NULL',
-      [this._brain.brainId],
+      `SELECT id FROM memory_traces WHERE brain_id = ? AND deleted = 0 AND embedding IS NOT NULL AND ${own.sql}`,
+      [this._brain.brainId, ...own.params],
     );
     const live = new Set(rows.map((row) => row.id));
     const indexed = sidecar.ids();
@@ -3727,8 +3939,9 @@ export class Memory {
         ...this._decodedEmbeddings(
           await this._brain.all<{ id: string; embedding: Uint8Array | string | null }>(
             `SELECT id, embedding FROM memory_traces
-              WHERE brain_id = ? AND deleted = 0 AND embedding IS NOT NULL AND id IN (${slice.map(() => '?').join(', ')})`,
-            [this._brain.brainId, ...slice],
+              WHERE brain_id = ? AND deleted = 0 AND embedding IS NOT NULL AND ${own.sql}
+                AND id IN (${slice.map(() => '?').join(', ')})`,
+            [this._brain.brainId, ...own.params, ...slice],
           ),
         ),
       );
@@ -3739,14 +3952,26 @@ export class Memory {
   /**
    * This brain's live traces that carry an embedding, decoded for the HNSW
    * sidecar. A database can hold several brains; the sidecar is this brain's,
-   * so it is built from this brain's vectors only.
+   * so it is built from this brain's vectors only, and from the facade's own:
+   * no trace a souled agent's mind filed.
    */
   private async _ownEmbeddedTraces(): Promise<{ id: string; embedding: number[] }[]> {
+    const own = this._ownVectorCondition();
     const rows = await this._brain.all<{ id: string; embedding: Uint8Array | string | null }>(
-      'SELECT id, embedding FROM memory_traces WHERE brain_id = ? AND deleted = 0 AND embedding IS NOT NULL',
-      [this._brain.brainId],
+      `SELECT id, embedding FROM memory_traces WHERE brain_id = ? AND deleted = 0 AND embedding IS NOT NULL AND ${own.sql}`,
+      [this._brain.brainId, ...own.params],
     );
     return this._decodedEmbeddings(rows);
+  }
+
+  /**
+   * The condition a trace row meets to have its vector in the facade's vector index: its metadata does not name a
+   * souled agent's mind as its filer. The mind's manager on this Brain keeps its rows' vectors in an index of its own,
+   * of the size its embedding model makes, so a rewrite of this index writes none of them into a file this facade
+   * owns, and an open adds none of them to the index it loads.
+   */
+  private _ownVectorCondition(): { sql: string; params: unknown[] } {
+    return notFiledByMindCondition(this._brain.features.dialect, 'metadata');
   }
 
   /** Embedding rows decoded into vectors; an empty embedding is left out. */

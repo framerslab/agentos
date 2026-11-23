@@ -89,9 +89,13 @@ let replyNo = 0;
 /** Replies to spare, each with words of its own: the store keeps one trace for a text a subject's memory already holds. */
 const spare = (): ProviderScript['replies'] => Array.from({ length: 60 }, () => reply.text(`Noted ${++replyNo}.`));
 
+/** The key the suite's stores key their tombstones with, unless a case names its own or none. */
+const SUITE_KEY = 'k-souled-deletion-tombstones';
+
 /**
- * A souled agent on the stubbed provider. The model answers `first`, then replies to spare; `retention` is set so
- * two users may share the store.
+ * A souled agent on the stubbed provider. The model answers `first`, then replies to spare; `retention` and
+ * `tombstoneKey` are set so two users may share the store. A case that passes `tombstoneKey` (undefined included)
+ * gets that instead.
  */
 async function open(
   extra: Partial<SouledAgentOptions> = {},
@@ -106,6 +110,7 @@ async function open(
     fallbackProviders: [],
     soul: dir,
     retention: { traces: 'until-deletion' },
+    ...('tombstoneKey' in extra ? {} : { tombstoneKey: SUITE_KEY }),
     ...extra,
   } as unknown as SouledAgentOptions);
   opened.push(a);
@@ -292,7 +297,10 @@ describe('a forgotten subject', () => {
 
 describe('forgetUser', () => {
   it('deletes one user for good and leaves the other', async () => {
-    const { a } = await open();
+    // Unkeyed tombstones: a ledger that already holds one lets a second user in with no key.
+    const { a } = await open({ tombstoneKey: undefined });
+    expect((await a.forgetUser!('nobody-yet')).complete).toBe(true);
+    events.length = 0;
     await turn(a, 's1', 'alice', 'My canary is LARK-7.');
     await turn(a, 's2', 'bob', 'My canary is WREN-2.');
     const said = tracesOf(keyOf(alice)).find((trace) => trace.content === 'My canary is LARK-7.')!;
@@ -488,7 +496,9 @@ describe('forgetUser', () => {
     await turn(again, 's2', 'bob', 'My canary is WREN-2.');
     const report = await again.forgetUser!('bob');
     expect(report.stores).toContainEqual(expect.objectContaining({ store: 'learning store', reached: true }));
-    expect(report.stores).toContainEqual(expect.objectContaining({ store: "a gmi() session's history", reached: false }));
+    // The session the handle holds open for him is emptied.
+    expect(report.stores).toContainEqual({ store: 'session history in this process', reached: true, deleted: 1 });
+    expect(report.parts[3]).toEqual({ part: 'sessions', reached: true, deleted: 1 });
     expect(tracesOf(keyOf(bob))).toEqual([]);
   });
 
@@ -522,23 +532,25 @@ describe('forgetUser', () => {
     } finally {
       db.close();
     }
-    const forgetLearner = vi.spyOn(a.learning!, 'forgetUser');
 
-    await a.applyTombstones!();
+    const reports = await a.applyTombstones!();
 
-    expect(forgetLearner).toHaveBeenCalledWith('alice');
+    // The one row led back to her: her deletion ran again, the learning layer's own with it. The row sits in the soul's
+    // file, outside the layer's own store, so it is not the layer's to delete.
+    expect(reports).toHaveLength(1);
+    expect(reports[0]!.stores).toContainEqual(expect.objectContaining({ store: 'learning store', reached: true }));
   });
 
   it('refuses an id no key can be built from before it deletes anything', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const { a } = await open({ runtime: 'gmi', learning: true });
-    const forgetLearner = vi.spyOn(a.learning!, 'forgetUser');
 
     await expect(a.forgetUser!('a\u0000b')).rejects.toThrow(TypeError);
     await expect(a.forgetUser!('alice', { linkedSessions: ['s\uD800'] })).rejects.toThrow(TypeError);
+    await expect(a.learning!.forgetUser!('a\u0000b')).rejects.toThrow(TypeError);
 
-    // Neither the learning layer nor the store was reached, and no tombstone was written.
-    expect(forgetLearner).not.toHaveBeenCalled();
+    // Neither the learning layer nor the store was reached, and no tombstone was written: the layer writes its
+    // tombstone to the store's ledger.
     expect(lines('memory.forget_done')).toEqual([]);
     expect(await a.memory!.isForgotten(alice)).toBe(false);
   });
@@ -672,7 +684,9 @@ describe('tombstones after a restore', () => {
     BigInt(`0x${rows<{ forgotten_at: string }>(file, "SELECT forgotten_at FROM agentos_learning_forgotten WHERE hash = 's1:state'")[0]?.forgotten_at ?? ''}`);
 
   it('cleans a store put back from before the deletion, at the next open', async () => {
-    const { a } = await open();
+    // Unkeyed tombstones: a ledger that already holds one lets a second user in with no key.
+    const { a } = await open({ tombstoneKey: undefined });
+    expect((await a.forgetUser!('nobody-yet')).complete).toBe(true);
     await turn(a, 's1', 'alice', 'My canary is LARK-7.');
     await turn(a, 's2', 'bob', 'My canary is WREN-2.');
     await a.memory!.compileWiki();
@@ -680,7 +694,7 @@ describe('tombstones after a restore', () => {
     const backup = path.join(dir, 'backup.sqlite');
     fs.copyFileSync(storeFile(), backup);
 
-    const { a: second } = await open();
+    const { a: second } = await open({ tombstoneKey: undefined });
     expect((await second.forgetUser!('alice')).complete).toBe(true);
     await second.close();
     swapStore(backup);
@@ -688,7 +702,7 @@ describe('tombstones after a restore', () => {
     expect(ledgerRows()).not.toContain(await ForgottenLedger.hash('', alice));
 
     events.length = 0;
-    await open();
+    await open({ tombstoneKey: undefined });
     expect(tracesOf(keyOf(alice))).toEqual([]);
     expect(pagesOf(keyOf(alice))).toEqual([]);
     expect(registryOf(keyOf(alice))).toEqual([]);
@@ -822,7 +836,7 @@ describe('tombstones after a restore', () => {
 
   it('keys the tombstones, keeps the old ones in force, and stays closed without the key', async () => {
     const users = ['alice', 'bob', 'carol'];
-    const first = await open();
+    const first = await open({ tombstoneKey: undefined });
     await first.a.forgetUser!('bob');
     await first.a.close();
 
@@ -841,7 +855,7 @@ describe('tombstones after a restore', () => {
     await a.close();
     for (const user of users) expect(tracesOf(keyOf({ kind: 'user', id: user }))).toEqual([]);
 
-    await expect(open()).rejects.toMatchObject({
+    await expect(open({ tombstoneKey: undefined })).rejects.toMatchObject({
       name: 'ForgottenLedgerError',
       code: 'KEY_REQUIRED',
       message: expect.stringMatching(/tombstoneKey/),

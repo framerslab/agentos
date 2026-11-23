@@ -188,6 +188,12 @@ export interface CallerTurnContext {
   budget?: SpendBudget;
   /** The explicit user id the turn's session named; undefined when it named none. */
   providerUserId?: string;
+  /**
+   * The turn's agent sends no end-user id to its model provider (a souled agent without `sendUserIdToProvider`): a
+   * tool learns the user from {@link providerUserId} and must not pass it to a provider, and a team the turn launches
+   * seats its sessions as that user and sends no id either.
+   */
+  withholdUserId?: true;
   /** A seat's tool names: the only tools its turn lists and runs, a composed tool's steps included. */
   toolNames?: ReadonlySet<string>;
   /** gmi(): the onBeforeToolExecution hooks the turn's calls run under, outermost first. */

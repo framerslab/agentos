@@ -224,6 +224,26 @@ const result = await generateText({
 
 [Guards on a call](../getting-started/HIGH_LEVEL_API.md#guards-on-a-call) has the options, the error, the report and what a stream delivers after a stop.
 
+### On the GMI runtime
+
+An agent with `runtime: 'gmi'`, and `gmi()`, enforces the input stage on its `generate()` and `stream()` and on a session's `send()` and `stream()` when `guards` names that stage alone:
+
+```typescript
+const reply = await session.send(message, {
+  guards: { services: [hardBan, classifier], context: { userId: user.id, sessionId: thread.id }, stages: ['input'] },
+});
+```
+
+On a souled agent with cognitive memory, a blocked turn sends no query text to the embedding provider. A sanitized turn uses the replacement text for its recall query. The soul's `screen` runs on filing and compilation, after the decision about which query to send.
+
+- **When.** The turn's input, its text and its images, is judged once, after the turn takes the session's lock and before the session's GMI is built or any model call is made. A turn whose signal aborted, or whose session closed, while it waited for the lock ends there, and its input reaches no guard. A stop while the guards judge ends the turn at once with the stop's reason, even when a guard never answers, so the session's lock and its `close()` wait for no guard.
+- **A stop** rejects the call with `GuardrailStopError`; a stream yields it as its one `error` part. Nothing of the turn is sent to the model, added to the session's history, passed to a memory provider or filed in memory.
+- **A replacement** (a `BLOCK` with a non-empty `replacementText`) is the reply, with no model call and zero usage. The turn adds nothing to the history, and nothing of it is passed to a memory provider or filed in memory.
+- **A rewrite** (a `SANITIZE` that changed the text) runs the turn on the rewritten text: the model, the session's history, a memory provider's `getContext()` and `observe()`, cognitive memory and `verifyCitations` get that text, and the caller's text reaches none of them. A stream's rewritten turn is added to the history as a send's is.
+- **The report.** `guardReport` is on the result, a promise on a stream, and a stop's error carries it; its `result` says `passed`, `sanitized`, `replaced` or `stopped`.
+- **Closed by default.** A guard that throws or times out follows its posture, as under the text functions: closed unless its config says `failClosed: false`.
+- **Other stages.** `guards` whose `stages` holds `'toolCalls'` or `'output'`, is empty, or is unset (every stage) throws before any turn starts, naming `guards`: the tool-call and output stages run on the default runtime.
+
 ## The Dry Run
 
 `mode: 'dryRun'` on `moderateContent()` and on `guards` runs every guard as enforcement would, and changes nothing:

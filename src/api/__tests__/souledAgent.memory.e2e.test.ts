@@ -9,7 +9,7 @@
  *   turns' memory writes before it compiles.
  * - The compile's model calls are held to the agent's spend budget and written to its usage ledger.
  * - Recalled traces carry their speaker and their date.
- * - A soul with no workspace folder, and a soul beside systemBlocks, are named in one warning line.
+ * - A soul with no workspace folder is named in one log line, and a soul beside systemBlocks in one warning line.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
@@ -65,6 +65,14 @@ async function pageRowOf(scopeId: string) {
 
 /** Every console.warn line, its arguments joined. */
 const linesOf = (warn: { mock: { calls: unknown[][] } }) => warn.mock.calls.map((call) => call.map(String).join(' '));
+/** The library's log lines from here to the end of the case, parsed, as the host's logger receives them. */
+function logLines(): Array<Record<string, unknown>> {
+  const lines: Array<Record<string, unknown>> = [];
+  setLogger(pino({ level: 'debug', base: undefined }, { write(line: string) { lines.push(JSON.parse(line)); } }));
+  return lines;
+}
+/** The `memory.close_pending` lines among `lines`. */
+const closePending = (lines: Array<Record<string, unknown>>) => lines.filter((line) => line.event === 'memory.close_pending');
 
 /** The text of every system message one model call was sent. */
 const systemTexts = (call: ProviderScript['seen'][number]) =>
@@ -191,6 +199,7 @@ describe("souledAgent()'s close()", () => {
 
   it('compiles what is stored when the writes outlast the wait, and says how many are still pending', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const log = logLines();
     const k = key();
     script('openai', k, { whole: true, replies: [reply.text('Lovely.'), reply.text('Notes.')] });
     const a = await souledAgent({ ...stubbed(k), soul: dir, pendingWritesTimeoutMs: 50 } as never);
@@ -200,9 +209,9 @@ describe("souledAgent()'s close()", () => {
     await a.close();
     expect(Date.now() - started).toBeLessThan(900);
 
-    const pending = linesOf(warn).filter((line) => /pending/.test(line) && /souledAgent/.test(line));
-    expect(pending).toHaveLength(1);
-    expect(pending[0]).toMatch(/\b2\b/);
+    // One line through the host's logger, never the console.
+    expect(closePending(log)).toEqual([expect.objectContaining({ pending: 2 })]);
+    expect(linesOf(warn).filter((line) => /pending/.test(line) && /souledAgent/.test(line))).toEqual([]);
   });
 
   it('waits for a turn still running when close() is called, and compiles it', async () => {
@@ -228,6 +237,7 @@ describe("souledAgent()'s close()", () => {
 
   it('gives a turn that outlasts the wait up, within the same deadline as the writes, and says so', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const log = logLines();
     const k = key();
     let answer!: () => void;
     const gate = new Promise<void>((resolve) => {
@@ -243,9 +253,8 @@ describe("souledAgent()'s close()", () => {
     await turn;
 
     expect(mergeCalls(s)).toHaveLength(0);
-    const pending = linesOf(warn).filter((line) => /pending/.test(line) && /souledAgent/.test(line));
-    expect(pending).toHaveLength(1);
-    expect(pending[0]).toMatch(/\b1\b/);
+    expect(closePending(log)).toEqual([expect.objectContaining({ pending: 1 })]);
+    expect(linesOf(warn).filter((line) => /pending/.test(line) && /souledAgent/.test(line))).toEqual([]);
   });
 });
 
@@ -267,7 +276,7 @@ describe("the compile's model calls", () => {
     const skipped = logged.filter((line) => line.event === 'memory.compile_skipped');
     expect(skipped).toHaveLength(1);
     expect(skipped[0]).toMatchObject({ reason: 'budget' });
-    expect(linesOf(warn).filter((line) => line.includes('compile on close failed'))).toEqual([]);
+    expect(logged.filter((line) => line.event === 'memory.close_compile_failed')).toEqual([]);
     expect(await pageRowOf(USER_U1)).toBeNull();
 
     // The watermark did not move: the next agent on the same soul compiles the trace.
@@ -445,7 +454,8 @@ describe("what a souled agent's recall matches and how it renders it", () => {
 
 describe("souledAgent()'s close() wait", () => {
   it('waits for the writes when pendingWritesTimeoutMs is Infinity', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const log = logLines();
     const k = key();
     const s = script('openai', k, { whole: true, replies: [reply.text('Lovely.'), reply.text('Jasmine tea.')] });
     const a = await souledAgent({ ...stubbed(k), soul: dir, pendingWritesTimeoutMs: Infinity } as never);
@@ -456,11 +466,12 @@ describe("souledAgent()'s close() wait", () => {
     const merges = mergeCalls(s);
     expect(merges).toHaveLength(1);
     expect(JSON.stringify(merges[0].messages)).toContain('My favourite tea is jasmine.');
-    expect(linesOf(warn).filter((line) => /pending/.test(line))).toEqual([]);
+    expect(closePending(log)).toEqual([]);
   });
 
   it('does not wait for a session stream whose signal aborted before anything was read from it', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const log = logLines();
     const k = key();
     const s = script('openai', k, { whole: true });
     const a = await souledAgent({ ...stubbed(k), soul: dir, pendingWritesTimeoutMs: 1500 } as never);
@@ -472,11 +483,12 @@ describe("souledAgent()'s close() wait", () => {
     // A stream runs only once it is read: one aborted before that never starts, so close() has nothing to wait for.
     expect(Date.now() - started).toBeLessThan(900);
     expect(mergeCalls(s)).toHaveLength(0);
-    expect(linesOf(warn).filter((line) => /pending/.test(line))).toEqual([]);
+    expect(closePending(log)).toEqual([]);
   });
 
   it('does not wait for a stream() whose signal aborted before anything was read from it', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const log = logLines();
     const k = key();
     const s = script('openai', k, { whole: true });
     const a = await souledAgent({ ...stubbed(k), soul: dir, pendingWritesTimeoutMs: 1500 } as never);
@@ -487,17 +499,19 @@ describe("souledAgent()'s close() wait", () => {
     await a.close();
     expect(Date.now() - started).toBeLessThan(900);
     expect(mergeCalls(s)).toHaveLength(0);
-    expect(linesOf(warn).filter((line) => /pending/.test(line))).toEqual([]);
+    expect(closePending(log)).toEqual([]);
   });
 });
 
 describe('a soul the agent cannot use in full', () => {
-  it('warns once when souledAgent() is given an inline soul, which has no workspace folder', async () => {
+  it('logs one line when souledAgent() is given an inline soul, which has no workspace folder', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const logged: Array<Record<string, unknown>> = [];
+    setLogger(pino({ level: 'debug', base: undefined }, { write(line: string) { logged.push(JSON.parse(line)); } }));
     await souledAgent({ provider: 'openai', model: 'gpt-4o', soul: { content: '# Aria' } } as never);
-    const lines = linesOf(warn).filter((line) => /workspace folder/.test(line));
-    expect(lines).toHaveLength(1);
-    expect(lines[0]).toMatch(/wiki memory/);
+    expect(logged.filter((line) => line.event === 'soul.inline_no_wiki')).toHaveLength(1);
+    // Through the host's logger, not the console.
+    expect(linesOf(warn).filter((line) => /workspace folder/.test(line))).toEqual([]);
   });
 
   it('warns once when a soul is given beside systemBlocks, for agent(), the GMI path and souledAgent()', async () => {

@@ -393,6 +393,26 @@ export interface CognitiveMemoryConfig {
   brain?: import('../retrieval/store/Brain.js').Brain;
 
   /**
+   * Which of the Brain's rows the manager's store loads, reads and files (`MemoryStoreConfig.rows`). `'mind'`: the
+   * rows a souled agent's mind filed alone (`MemoryTrace.filing`), and `encode()` files a `conversation` trace with a
+   * `filing`, under the conversation key of the filing's subject, and refuses any other before its text is read.
+   *
+   * @default 'all'
+   * @internal
+   */
+  rows?: 'all' | 'mind';
+
+  /**
+   * When the manager's store loads the Brain's rows into its index (`MemoryStoreConfig.hydration`). `'scopes'`: a
+   * scope at a time, when a caller loads it (`MemoryStore.hydrateScope`), never the brain's newest rows at the first
+   * read.
+   *
+   * @default 'brain'
+   * @internal
+   */
+  hydration?: 'brain' | 'scopes';
+
+  /**
    * Keeps each trace's stability, access count, reinforcement interval and
    * next reinforcement time across a restart: written to the Brain (with no
    * Brain, to the vector store's metadata) at every access and read back at
@@ -494,7 +514,8 @@ export interface MemoryRecallConfig {
    * context (`AssembledMemoryContext.capture`) and on a GMI turn's result;
    * `'metadata+stream'` also sends it on the runtime stream (a
    * `METADATA_UPDATE` carrying `memorySources`, and `memoryRecall` on the
-   * `FINAL_RESPONSE`); `'off'` records nothing. The record holds ids, ranks,
+   * `FINAL_RESPONSE`). `'metadata+text'` adds a separate `memoryShown` list of
+   * the memories shown to the model. `'off'` records nothing. The capture holds ids, ranks,
    * scores, counts and timings, never a memory's text or the query's; ids and
    * scores can concern memories of the other scopes a turn reads (the
    * organization's, the persona's), so the host decides who sees a capture.

@@ -346,6 +346,12 @@ describe('AgentOS docs alignment', () => {
     const offenders: string[] = [];
     for (const guide of publishedGuides) {
       const content = readFileSync(guide, 'utf8');
+      expect(content, relative(docsRoot, guide)).not.toContain(
+        "`souledAgent()` refuses any of the three, with a `TypeError` and nothing opened, on `runtime: 'gmi'`",
+      );
+      expect(content, relative(docsRoot, guide)).not.toContain(
+        "souledAgent: memoryPolicy, screen and sharedMemory act on the souled agent's own memory, and cognitive memory (runtime: 'gmi' with cognition memory on) keeps a store none of them reaches; turn cognitive memory off, or leave them out",
+      );
       for (const match of content.matchAll(/\]\(((?:\.\.?\/)[^)#\s]+\.md)(?:#[^)]*)?\)/g)) {
         const target = resolve(dirname(guide), match[1]);
         if (!target.startsWith(docsRoot) || !existsSync(target)) continue;
@@ -357,7 +363,28 @@ describe('AgentOS docs alignment', () => {
     expect(offenders, 'published guides that link to a docs file the manifest does not publish').toEqual([]);
   });
 
-  it('publishes the host-duties page, linked from the index, with no claim of compliance and no pasted legal citation', () => {
+  it('publishes the entry point guide with upgrade instructions and per-user memory calls', () => {
+    const { publicationManifest } = createRequire(import.meta.url)('../../../../docs/publication-manifest.cjs') as {
+      publicationManifest: Array<{ sourcePath?: string }>;
+    };
+    expect(publicationManifest.some(entry => entry.sourcePath === 'packages/agentos/docs/SOUL_ENTRY_POINTS.md')).toBe(true);
+    const page = read('../../../../docs/SOUL_ENTRY_POINTS.md');
+    expect(page).toMatch(/^#{1,6} Upgrading\s*$/m);
+    for (const name of ['forgetUser', 'exportUserMemory', 'correctUserMemory', 'sweepRetention']) {
+      expect(page).toContain(name);
+    }
+    expect(page).not.toMatch(/\bcomplian(?:t|ce)\b/i);
+  });
+
+  it('introduces the memory options, recipients, turn receipt and copy call with souledAgent()', () => {
+    const guide = read('../../../../docs/getting-started/HIGH_LEVEL_API.md');
+    const section = guide.split(/^### `souledAgent\(\)`/m)[1]?.split(/^#{1,3} /m)[0] ?? '';
+    for (const name of ['soulStore', 'emotionalStamp', 'sendUserIdToProvider', 'recipients()', 'memoryWrite', 'copyLegacyGmiMemory']) {
+      expect(section, name).toContain(name);
+    }
+  });
+
+  it('publishes the host-duties page, linked from the index, without claiming compliance', () => {
     // The page says what the library does with per-user memory and what a host must do itself.
     expect(exists('../../../../docs/safety/MEMORY_HOST_DUTIES.md'), 'docs/safety/MEMORY_HOST_DUTIES.md exists').toBe(true);
     const page = read('../../../../docs/safety/MEMORY_HOST_DUTIES.md');
@@ -370,9 +397,8 @@ describe('AgentOS docs alignment', () => {
     expect(publicationManifest.some((entry) => (entry.sourcePath ?? '').endsWith('MEMORY_HOST_DUTIES.md'))).toBe(true);
     expect(read('../../../../docs/README.md')).toContain('./safety/MEMORY_HOST_DUTIES.md');
 
-    // It describes behaviour and duties. It never calls a product compliant, and it links to no law's text.
+    // Describe the host’s duties without claiming the product meets them.
     expect(page).not.toMatch(/\bcomplian(t|ce)\b/i);
-    expect(page).not.toMatch(/eur-lex|legislation\.gov|leginfo|ecfr\.gov|app\.leg\.wa\.gov/i);
     // Every option and call is named as the code names it, never as a placeholder in angle brackets.
     expect(page).not.toMatch(
       /<(deleteUser|exportUser|correct|reapplyTombstones|retention|memoryPolicy|compileProvider|tombstoneKey|redactionHook|sharedMemory|runWithoutSoul)>/,
@@ -389,6 +415,25 @@ describe('AgentOS docs alignment', () => {
       'legacyMemory',
     ]) {
       expect(page, name).toContain(name);
+    }
+  });
+
+  it('links legal citations in the entry point and host-duties guides to official sources', () => {
+    const officialHosts = new Set([
+      'app.leg.wa.gov',
+      'cppa.ca.gov',
+      'eur-lex.europa.eu',
+      'leginfo.legislature.ca.gov',
+      'www.ecfr.gov',
+    ]);
+    for (const path of ['docs/SOUL_ENTRY_POINTS.md', 'docs/safety/MEMORY_HOST_DUTIES.md']) {
+      const page = read(`../../../../${path}`);
+      // Match the legal citation labels used in these guides, leaving technical links alone.
+      const citations = [...page.matchAll(/\[(?:Articles?\s|(?:\d+ (?:CFR|CCR)|BPC) §\s|RCW\s)[^\]\n]+\]\(<?([^\s)>]+)>?\)/g)];
+      expect(citations.length, path).toBeGreaterThan(0);
+      for (const [, link] of citations) {
+        expect(officialHosts.has(new URL(link).hostname), `${path}: ${link}`).toBe(true);
+      }
     }
   });
 });

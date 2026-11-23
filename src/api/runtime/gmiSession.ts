@@ -10,6 +10,7 @@
  * that served it: a usage ledger row and a usage event for the process-wide
  * observer, as `generateText` and `streamText` meter a call.
  */
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import type { ZodType } from 'zod';
 import {
@@ -22,7 +23,7 @@ import {
   type ToolCallRequest,
   type ToolResultChunkPayload,
 } from '../../cognition/substrate/IGMI.js';
-import { addModelUsage, extractTextFromContent, type GenerateTextResult, type MessageContent, type TokenUsage } from '../generateText.js';
+import { addModelUsage, extractTextFromContent, type GenerateTextOptions, type GenerateTextResult, type MessageContent, type TokenUsage } from '../generateText.js';
 import { normalizeStreamFinishReason, type StreamTextResult } from '../streamText.js';
 import { ObjectGenerationError } from '../generateObject.js';
 import { dropNullsForOptionalFields, parseJsonWithDistinctKeys } from './structuredReply.js';
@@ -40,11 +41,38 @@ import type { AgencyLaunchFrame, ToolCallHook } from './agencyLaunch/types.js';
 import { GmiTurnFolder, streamFromGmiTurn } from './gmiResults.js';
 import { stepToTranscript, transcriptToConversation } from './gmiTranscript.js';
 import { observeWithoutWaiting } from './memoryObserveFailures.js';
+import { emptyMemoryWriteRecord, memoryWriteRecordOf, type MemoryShownItem, type MemoryWriteEntry, type MemoryWriteRecord } from './memoryWriteRecord.js';
+import { contentWithTurnText, judgeTurnInput } from './textGuardrails.js';
+import type { SoulTurnMemory } from '../../cognition/substrate/soulTurnMemory.js';
 
 /** A signal's reason as an error, as streamText reports a stop: the reason itself when it is an Error. */
 function abortReasonError(signal: AbortSignal): Error {
   const reason: unknown = signal.reason;
   return reason instanceof Error ? reason : new Error(String(reason));
+}
+
+/**
+ * `work`'s value, or a rejection with the signal's reason once `signal` aborts first: a turn that its session's
+ * `close()` or its caller's signal stops while its memory provider recalls ends then, and the recall, which never
+ * rejects, finishes on its own.
+ */
+function untilStopped<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return work;
+  if (signal.aborted) return Promise.reject(abortReasonError(signal));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(abortReasonError(signal));
+    signal.addEventListener('abort', onAbort, { once: true });
+    work.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
 }
 
 /**
@@ -54,6 +82,16 @@ function abortReasonError(signal: AbortSignal): Error {
 async function* withReturn<T, R>(source: AsyncGenerator<T, R, undefined>, keep: (value: R) => void): AsyncGenerator<T, void, undefined> {
   keep(yield* source);
 }
+
+/** One turn driven in an async context: its lock, whether it holds the lock now, and the turn it runs inside. */
+interface TurnScope {
+  lock: TurnLock;
+  holding: boolean;
+  outer: TurnScope | undefined;
+}
+
+/** The turns whose code runs in the current async context: a hook or a tool of a turn reads its own. */
+const turnScopes = new AsyncLocalStorage<TurnScope>();
 
 /** Serialises turns: `acquire()` resolves with a release function once every earlier holder released. */
 export class TurnLock {
@@ -68,6 +106,22 @@ export class TurnLock {
     this.tail = previous.then(() => held);
     return previous.then(() => release);
   }
+
+  /**
+   * Whether the code calling it runs inside a turn that holds this lock now (a hook or a tool of that turn, or a turn
+   * that turn started): a wait for the lock from there waits for a turn that is waiting for the caller.
+   */
+  heldByCaller(): boolean {
+    for (let scope = turnScopes.getStore(); scope; scope = scope.outer) {
+      if (scope.lock === this && scope.holding) return true;
+    }
+    return false;
+  }
+}
+
+/** Runs `drive`, the code that drives one turn on `lock`, so the turn's own code can tell that it holds the lock. */
+function drivingTurnOn<T>(lock: TurnLock, drive: () => T): T {
+  return turnScopes.run({ lock, holding: false, outer: turnScopes.getStore() }, drive);
 }
 
 /** What one turn asks for beyond its input. */
@@ -109,6 +163,14 @@ export interface GmiTurnOptions {
    */
   launchFrame?: AgencyLaunchFrame;
   /**
+   * Guards whose input stage judges the turn's input once the turn holds the session's lock, before its GMI is built
+   * or any model call is made; `stages` must be `['input']` (the caller checks it, {@link judgeTurnInput} again). A
+   * stop rejects the turn with the `GuardrailStopError` and nothing is sent, kept or filed; a replacement is the
+   * turn's reply, with no model call and no history; a rewritten text is what the model, the history, the memory
+   * provider's recall and `observe` get. The report goes on the result as `guardReport`.
+   */
+  guards?: GenerateTextOptions['guards'];
+  /**
    * Checks the reply of a turn that ended without error, before the session
    * keeps it. A throw keeps nothing of the turn (no history, no
    * `memoryProvider.observe`) and is the turn's error: a structured send whose
@@ -126,6 +188,8 @@ export interface GmiTurnContext {
    * before the turn's user message on every model call.
    */
   memoryContext: string | undefined;
+  /** Called on every model call of the turn: whether its messages, after the host's hook, hold the provider's recall block. */
+  onProviderMemoryShown?: (shown: boolean) => void;
   /** Called before every model call of the turn with the provider and model its hop was routed to. */
   onModelCall?: (route: { providerId: string; modelId: string }) => void;
   /** True for a structured send: its model calls go without tools. */
@@ -146,6 +210,8 @@ export interface GmiTurnContext {
   toolHooks?: readonly ToolCallHook[];
   /** The explicit user id the session named; undefined when it named none. */
   providerUserId?: string;
+  /** The turn sends no end-user id to its provider ({@link GmiSessionDeps.withholdUserId}). */
+  withholdUserId?: boolean;
   /** The turn's stop ({@link GmiTurnOptions.abortSignal}): every tool call of the turn carries it. */
   abortSignal?: AbortSignal;
 }
@@ -161,7 +227,7 @@ export interface GmiForTurn {
    * The ids the turn's cognitive memory files and recalls under, when the session learns them only as it serves the
    * turn (a gmi() session id's generation, which `memory.store` holds); in place of {@link GmiSessionDeps.memoryScope}.
    */
-  memoryScope?: { userId: string; sessionId: string };
+  memoryScope?: { userId?: string; sessionId: string };
 }
 
 /** What a session hands the turn runner. */
@@ -178,13 +244,26 @@ export interface GmiSessionDeps {
    * id opened again after close() keeps its id for tools, and its memory gets
    * a scope of its own. Unset, memory uses `userId` and `sessionId`.
    */
-  memoryScope?: { userId: string; sessionId: string };
+  memoryScope?: { userId?: string; sessionId: string };
   /**
    * The end-user id the turn's model calls send to the provider (OpenAI's `user`
    * / `safety_identifier`): a user id the caller passed, never a session or call
-   * id. Unset, they send none, as agent() sends none.
+   * id. Unset, they send none, as agent() sends none; with {@link withholdUserId}
+   * they send none either, and tools still learn it.
    */
   providerUserId?: string;
+  /**
+   * True when no request of the turn carries {@link providerUserId}: neither the provider's end-user field nor the name
+   * a user message is sent under (`GMITurnInput.metadata.withholdUserId`). Tools still learn the user, with the rule. A
+   * souled agent sets it unless its host opts in, and so does the seat of a team such an agent's turn launched.
+   */
+  withholdUserId?: boolean;
+  /**
+   * A souled agent's view of its memory rules for this turn (`GMITurnInput.metadata.soulMemory`): the key the
+   * person's memory is kept under and the turn's answer, which the GMI asks for once before it reads the person.
+   * Unset on every other agent and on a seat's turn.
+   */
+  soulMemory?: SoulTurnMemory;
   /** False when cognitive memory supplies the memory context, and on a seat session: `memoryProvider.getContext` is then skipped. */
   useMemoryProviderContext: boolean;
   /**
@@ -193,8 +272,20 @@ export interface GmiSessionDeps {
    * `memoryProviderOptions.tokenBudget`, else `DEFAULT_MEMORY_TOKEN_BUDGET`.
    */
   providerTokenBudget?: number;
+  /** True for a GMI session with the host's `'metadata+text'` capture level. */
+  captureMemoryText?: boolean;
   /** False on a seat session: the turn calls no `memoryProvider.observe`, which would file a team turn's text in the agent's long-term store. Default true. */
   observeMemoryProvider?: boolean;
+  /**
+   * True on a session turn of a souled agent whose cognitive memory is the soul's mind: the GMI files the turn, once,
+   * through the turn's view of the soul ({@link soulMemory}), so the turn calls no `memoryProvider.observe`; the
+   * turn's write record is the one the GMI's output carries, or `no_subject` for each side with text when the turn has
+   * no view. The filings wait until the session keeps the turn, so a turn it does not keep (a reply it refuses, a stop
+   * after the turn's last request, a failure) files neither side, as such a turn is not observed, and the reply is filed
+   * as the session keeps it (an `onAfterGeneration` hook's replacement), as an observed reply is. The turn's tools are
+   * still told its memory subject, which {@link observeMemoryProvider} `false` would take from them.
+   */
+  mindFilesTurn?: boolean;
   /** Who the turn's memory hooks are told it serves. */
   memoryHook: MemoryHookContext;
   /** The session store, or null when the turn keeps no history. */
@@ -215,9 +306,89 @@ export interface GmiSessionDeps {
  * `this`; and it is never the turn's error: the turn has been answered and
  * stored, and a memory store that fails to record it does not undo that. The
  * failure is logged sparsely (`observeWithoutWaiting`).
+ *
+ * @returns What became of the side's write, once the provider answers; the promise never rejects.
  */
-function observeTurn(provider: AgentMemoryProvider, role: 'user' | 'assistant', text: string, context: MemoryHookContext): void {
-  observeWithoutWaiting(provider, role, text, context);
+function observeTurn(provider: AgentMemoryProvider, role: 'user' | 'assistant', text: string, context: MemoryHookContext): Promise<MemoryWriteEntry | undefined> {
+  return observeWithoutWaiting(provider, role, text, context);
+}
+
+/**
+ * Whether a turn's result carries `memoryWrite`: a session turn (not a one-shot call, not a seat's) of an agent whose
+ * memory provider observes its turns.
+ */
+function carriesWriteRecord(deps: GmiSessionDeps): boolean {
+  if (deps.memoryHook.call !== 'session') return false;
+  return deps.mindFilesTurn === true || (deps.observeMemoryProvider !== false && Boolean(deps.opts.memoryProvider?.observe));
+}
+
+/** The record of a turn the soul's mind could file under no key: `no_subject` for each side that had text. */
+function noSubjectRecord(userText: string, reply: string): Promise<MemoryWriteRecord> {
+  const sides: MemoryWriteEntry[] = [];
+  if (userText) sides.push({ role: 'user', outcome: 'skipped', reason: 'no_subject' });
+  if (reply) sides.push({ role: 'assistant', outcome: 'skipped', reason: 'no_subject' });
+  return Promise.resolve({ entries: sides });
+}
+
+/**
+ * The entry of a side of a turn its session did not keep: its filing was stopped before it reached the soul's gate,
+ * so it is `failed` under the name of an abort. No result carries it: such a turn has no write record.
+ */
+const notKeptEntry = (role: 'user' | 'assistant'): MemoryWriteEntry => ({ role, outcome: 'failed', errorName: 'AbortError' });
+
+/**
+ * The entry of a reply the session keeps empty (an `onAfterGeneration` hook replaced it with ''): nothing of it is
+ * filed. The turn's record leaves it out ({@link withoutReplyEntry}), as it has no entry for an empty reply.
+ */
+const emptiedReplyEntry: MemoryWriteEntry = { role: 'assistant', outcome: 'skipped', reason: 'screened' };
+
+/** The session's verdict on a turn the soul's mind files: not kept, or kept with its reply as the GMI wrote it and as the session keeps it. */
+type FilingVerdict = { kept: false } | { kept: true; gmiReply: string; reply: string };
+
+/**
+ * A souled turn's view as its GMI gets it on a turn the soul's mind files ({@link GmiSessionDeps.mindFilesTurn}):
+ * `view`, with its filings held until the session says whether it keeps the turn. The GMI starts the turn's filings
+ * as it ends the turn, which is before the session has checked the reply (a structured send whose answer does not
+ * parse is refused then) and before a stop that came after the turn's last request ends it. A turn the session keeps
+ * files through `view`, the filings reaching it in the order the GMI started them; a turn it does not keep files
+ * neither side, and `view` is never asked ({@link notKeptEntry}). The turn's reply is filed as the session keeps it:
+ * the GMI hands its memory the reply as it wrote it, and an `onAfterGeneration` hook may have replaced it since; a
+ * reply the session keeps empty files nothing ({@link emptiedReplyEntry}).
+ *
+ * @param view - The turn's view of the soul, as the souled agent built it.
+ * @returns The view to hand the GMI, and `keep`, which the turn calls once with the session's verdict; later calls
+ *   change nothing.
+ */
+function filingOnceKept(view: SoulTurnMemory): { view: SoulTurnMemory; keep: (verdict: FilingVerdict) => void } {
+  let keep!: (verdict: FilingVerdict) => void;
+  const verdict = new Promise<FilingVerdict>((resolve) => {
+    keep = resolve;
+  });
+  // The turn's reply is the first side the GMI files as the agent's with the text it wrote: an imprint is another.
+  let replyFiled = false;
+  return {
+    view: {
+      ...(view.scope ? { scope: view.scope } : {}),
+      keptReply: true,
+      begin: (manager, stop) => view.begin(manager, stop),
+      file: async (role, content, write, undo) => {
+        const said = await verdict;
+        if (!said.kept) return notKeptEntry(role);
+        if (role === 'assistant' && !replyFiled && content === said.gmiReply) {
+          replyFiled = true;
+          return said.reply ? view.file(role, said.reply, write, undo) : emptiedReplyEntry;
+        }
+        return view.file(role, content, write, undo);
+      },
+    },
+    keep,
+  };
+}
+
+/** The write record of a kept turn whose reply the session keeps empty: no entry for the reply, as an empty reply has none. */
+async function withoutReplyEntry(record: Promise<MemoryWriteRecord>): Promise<MemoryWriteRecord> {
+  const written = await record;
+  return { ...written, entries: written.entries.filter((entry) => entry.role !== 'assistant') };
 }
 
 /**
@@ -323,19 +494,27 @@ async function afterGeneration(opts: AgentOptions, folder: GmiTurnFolder, step: 
  */
 export async function* runGmiTurn(
   deps: GmiSessionDeps,
-  input: MessageContent,
+  given: MessageContent,
   turn: GmiTurnOptions,
   folder: GmiTurnFolder,
   surface: GmiTurnSurface = 'generateText',
 ): AsyncGenerator<GMIOutputChunk, SessionTranscriptMessage[], undefined> {
   const release = await deps.lock.acquire();
+  // The turn's driver marked its context (drivingTurnOn): from here to the release, the turn holds the lock.
+  const scope = turnScopes.getStore();
+  const holds = scope?.lock === deps.lock ? scope : undefined;
+  if (holds) holds.holding = true;
   const recorded: SessionTranscriptMessage[] = [];
   let writer: SessionTurnWriter | undefined;
   let ended = false;
   let releaseGmi: (() => Promise<void>) | undefined;
+  // On a turn the soul's mind files: tells the filings its GMI started whether the session kept the turn, and its reply.
+  let keepFilings: ((verdict: FilingVerdict) => void) | undefined;
   // The turn's usage ledger writes, awaited before the turn ends.
   const ledgerWrites: Array<Promise<void>> = [];
-  const userMessage: SessionTranscriptMessage = { role: 'user', content: input };
+  // The input as the turn sends it: the caller's, or the text an input guard rewrote it to.
+  let input = given;
+  let userMessage: SessionTranscriptMessage = { role: 'user', content: input };
   // False until a step is kept with the turn's user message in front of it.
   let userMessageKept = false;
   let pending: { step: StepFinishedChunkPayload; calls: ToolCallRequest[]; results: ToolResultChunkPayload[] } | undefined;
@@ -364,6 +543,30 @@ export async function* runGmiTurn(
     // What the turn starts from, read together before any wait.
     const epochAtStart = deps.history?.epoch();
     const priorMessages = deps.history ? deps.history.messages() : [];
+
+    if (turn.guards) {
+      // A turn stopped while it waited for the lock ends here: its input reaches no guard.
+      turn.abortSignal?.throwIfAborted();
+      // The input stage, before the GMI is built and before any model call. A stop of the turn meanwhile ends it there,
+      // so a guard that never answers holds neither the session's lock nor its close().
+      const judged = await untilStopped(judgeTurnInput(turn.guards, input), turn.abortSignal);
+      folder.guarded(judged.report);
+      // A stop while the guards judged (the caller's signal, a session's close()) ends the turn before anything else.
+      turn.abortSignal?.throwIfAborted();
+      if (judged.kind === 'stopped') throw judged.error;
+      if (judged.kind === 'replaced') {
+        // No model call and no history: the replacement is the reply, and nothing of the turn is kept or observed.
+        folder.guarded(judged.report, judged.text);
+        ended = true;
+        turn.acceptReply?.();
+        yield { type: GMIOutputChunkType.TEXT_DELTA, content: judged.text, interactionId: `turn-${randomUUID()}`, timestamp: new Date() };
+        return recorded;
+      }
+      if (judged.text !== undefined) {
+        input = contentWithTurnText(input, judged.text);
+        userMessage = { role: 'user', content: input };
+      }
+    }
     const userText = typeof input === 'string' ? input : extractTextFromContent(input);
 
     const served = await deps.gmiFor();
@@ -371,16 +574,24 @@ export async function* runGmiTurn(
     const gmi = served.gmi;
     const memoryScope = served.memoryScope ?? deps.memoryScope;
     gmi.replaceHistory?.(transcriptToConversation(priorMessages));
-    // One recall for the turn, within its timeout; a failure or a timeout is a memory.hook_failed line.
+    // One recall for the turn, within its timeout; a failure or a timeout is a memory.hook_failed line. A stop of the
+    // turn meanwhile ends it there.
     const recallProvider = deps.opts.memoryProvider;
     const recalled = deps.useMemoryProviderContext && recallProvider
-      ? await recallForTurn(recallProvider, { userText, context: deps.memoryHook }, {
-          ...deps.opts.memoryProviderOptions,
-          ...(deps.providerTokenBudget !== undefined ? { tokenBudget: deps.providerTokenBudget } : {}),
-        })
+      ? await untilStopped(
+          recallForTurn(recallProvider, { userText, context: deps.memoryHook }, {
+            ...deps.opts.memoryProviderOptions,
+            ...(deps.providerTokenBudget !== undefined ? { tokenBudget: deps.providerTokenBudget } : {}),
+          }),
+          turn.abortSignal,
+        )
       : null;
     const items = memoryItemsOf(recalled);
     const memoryContext = items.length > 0 ? renderMemoryRecallBlock(items) : undefined;
+    // Whether the provider's block reached the model: the step in progress takes its newest call's answer, so a
+    // fallback hop's call replaces the failed hop's, and a finished step that was sent it keeps it for the turn.
+    let providerShownInStep = false;
+    let providerShownInTurn = false;
     // When the model call in progress started: the turn's start, the end of the
     // tool round before it, or the failure of the attempt it replaces.
     let callStartedAt = Date.now();
@@ -389,6 +600,9 @@ export async function* runGmiTurn(
     served.prepare?.({
       prompt: typeof input === 'string' ? input : undefined,
       memoryContext,
+      ...(deps.captureMemoryText && memoryContext
+        ? { onProviderMemoryShown: (shown: boolean) => { providerShownInStep = shown; } }
+        : {}),
       onModelCall: ({ providerId, modelId }) => folder.route(providerId, modelId),
       structured: turn.responseSchema !== undefined,
       budget: turn.budget,
@@ -396,6 +610,7 @@ export async function* runGmiTurn(
       toolNames: turn.toolNames,
       toolHooks: turn.toolHooks,
       providerUserId: deps.providerUserId,
+      ...(deps.withholdUserId ? { withholdUserId: true } : {}),
       abortSignal: turn.abortSignal,
       // The bill a provider reports for a call this turn stopped (close() during
       // the call) arrives after the turn has ended: it is metered, counted and
@@ -418,6 +633,11 @@ export async function* runGmiTurn(
     });
     writer = deps.history?.beginTurn(turn.blockLabel, epochAtStart);
 
+    // The mind's filings of the turn wait for the session to keep it: a reply the session refuses, and a turn stopped
+    // after its last request, file neither side.
+    const heldSoul = deps.mindFilesTurn && deps.soulMemory ? filingOnceKept(deps.soulMemory) : undefined;
+    keepFilings = heldSoul?.keep;
+    const turnSoul = heldSoul?.view ?? deps.soulMemory;
     const turnInput: GMITurnInput = {
       interactionId: `turn-${randomUUID()}`,
       userId: deps.userId,
@@ -427,9 +647,11 @@ export async function* runGmiTurn(
       type: typeof input === 'string' ? GMIInteractionType.TEXT : GMIInteractionType.MULTIMODAL_CONTENT,
       content: input as GMITurnInput['content'],
       metadata: {
-        providerUserId: deps.providerUserId ?? null,
+        providerUserId: deps.withholdUserId ? null : (deps.providerUserId ?? null),
+        ...(deps.withholdUserId ? { withholdUserId: true } : {}),
         ...(deps.providerUserId === undefined ? { noTurnUser: true } : {}),
         ...(memoryScope ? { memoryScope } : {}),
+        ...(turnSoul ? { soulMemory: turnSoul } : {}),
         ...(turn.launchFrame ? { agencyLaunch: turn.launchFrame } : {}),
         options: {
           ...(turn.options ?? {}),
@@ -441,13 +663,29 @@ export async function* runGmiTurn(
 
     let stepCalls: ToolCallRequest[] = [];
     // The GMI's output, the generator's return value, carries the turn's recall capture to the result.
-    for await (const chunk of withReturn(gmi.processTurnStream(turnInput), (output) => folder.finish(output))) {
+    for await (const chunk of withReturn(gmi.processTurnStream(turnInput), (output) => {
+      if (!output || !(providerShownInTurn || providerShownInStep)) {
+        folder.finish(output);
+        return;
+      }
+      const providerItems = items.map<MemoryShownItem>(({ id, text, speaker, page, when }) => ({
+        source: 'provider',
+        text,
+        ...(id ? { id } : {}),
+        ...(speaker ? { speaker } : {}),
+        ...(page ? { page } : {}),
+        ...(when ? { at: when } : {}),
+      }));
+      folder.finish({ ...output, memoryShown: [...(output.memoryShown ?? []), ...providerItems] });
+    })) {
       folder.push(chunk);
       switch (chunk.type) {
         case GMIOutputChunkType.TOOL_CALL_REQUEST:
           stepCalls.push(...((chunk.content as ToolCallRequest[]) ?? []));
           break;
         case GMIOutputChunkType.STEP_FINISHED: {
+          providerShownInTurn ||= providerShownInStep;
+          providerShownInStep = false;
           flush();
           const step = chunk.content as StepFinishedChunkPayload;
           await afterGeneration(deps.opts, folder, step, stepCalls);
@@ -498,10 +736,13 @@ export async function* runGmiTurn(
     }
     flush();
     ended = true;
-    // The caller's signal aborted after the turn's last request (while a hook ran): the turn ends with its reason, as
-    // generateText's check after each step's hook ends a call, and keeps its finished steps marked partial, as a turn
-    // stopped during a request does.
-    if (!folder.error()) turn.callerSignal?.throwIfAborted();
+    // The caller's signal, or the session's close(), aborted after the turn's last request (while a hook ran): the turn
+    // ends with its reason, as generateText's check after each step's hook ends a call, keeps its finished steps marked
+    // partial, as a turn stopped during a request does, and files nothing.
+    if (!folder.error()) {
+      turn.callerSignal?.throwIfAborted();
+      turn.abortSignal?.throwIfAborted();
+    }
     if (folder.error()) {
       writer?.abort({ partial: true });
     } else {
@@ -513,11 +754,23 @@ export async function* runGmiTurn(
         throw refusal;
       }
       writer?.commit();
-      const memoryProvider = deps.observeMemoryProvider === false ? undefined : deps.opts.memoryProvider;
-      if (memoryProvider?.observe) {
-        observeTurn(memoryProvider, 'user', userText, deps.memoryHook);
+      const memoryProvider = deps.observeMemoryProvider === false || deps.mindFilesTurn ? undefined : deps.opts.memoryProvider;
+      if (deps.mindFilesTurn) {
+        // The session keeps the turn: the filings the soul's mind started as its GMI ended it go on from here, with the
+        // reply as the session keeps it, and the turn does not wait for them either.
         const reply = folder.text();
-        if (reply) observeTurn(memoryProvider, 'assistant', reply, deps.memoryHook);
+        keepFilings?.({ kept: true, gmiReply: folder.gmiReply(), reply });
+        const mindWrite = folder.mindWrite();
+        if (mindWrite) folder.wrote(reply ? mindWrite : withoutReplyEntry(mindWrite));
+        else folder.wrote(deps.soulMemory ? Promise.resolve(emptyMemoryWriteRecord()) : noSubjectRecord(userText, reply));
+      } else if (memoryProvider?.observe) {
+        // The turn does not wait for its writes: their record is a promise the turn's result carries.
+        const user = observeTurn(memoryProvider, 'user', userText, deps.memoryHook);
+        // A message with no text (an image alone) is observed as before and has no entry of its own.
+        const sides = userText ? [user] : [];
+        const reply = folder.text();
+        if (reply) sides.push(observeTurn(memoryProvider, 'assistant', reply, deps.memoryHook));
+        folder.wrote(memoryWriteRecordOf(sides));
       }
     }
     return recorded;
@@ -528,6 +781,8 @@ export async function* runGmiTurn(
     writer?.abort({ partial: true });
     throw error;
   } finally {
+    // A turn that did not reach the line that keeps it files nothing of itself.
+    keepFilings?.({ kept: false });
     try {
       // A turn its consumer stopped reading keeps the steps that finished, marked partial.
       if (!ended) {
@@ -543,6 +798,7 @@ export async function* runGmiTurn(
     } finally {
       // Whatever the lines above threw, the next turn gets the lock.
       if (releaseGmi) void releaseGmi().catch(() => undefined);
+      if (holds) holds.holding = false;
       release();
     }
   }
@@ -649,13 +905,12 @@ export async function sendGmiTurn(
   const run = runGmiTurn(deps, input, checked, folder);
   let recorded: SessionTranscriptMessage[] = [];
   try {
-    for (;;) {
-      const next = await run.next();
-      if (next.done) {
-        recorded = next.value;
-        break;
+    recorded = await drivingTurnOn(deps.lock, async () => {
+      for (;;) {
+        const next = await run.next();
+        if (next.done) return next.value;
       }
-    }
+    });
   } catch (error) {
     if (stopped && callerSignal) throw callerSignal.reason;
     throw error;
@@ -663,6 +918,8 @@ export async function sendGmiTurn(
   const error = folder.toError();
   if (error) throw stopped && callerSignal ? callerSignal.reason : error;
   const result = folder.toGenerateTextResult(recorded);
+  // A session turn's write record, which settles when its memory writes do.
+  if (carriesWriteRecord(deps)) result.memoryWrite = folder.written();
   if (!schema) return result;
   return { ...result, object };
 }
@@ -678,10 +935,13 @@ export function streamGmiTurn(deps: GmiSessionDeps, input: MessageContent, turn:
   // A stream whose caller's signal has already aborted starts no turn, as streamText ends before anything is set up:
   // no lock, GMI, memory context, hook or budget check, and one error part that carries the signal's reason.
   const callerSignal = turn.callerSignal;
+  const guarded = turn.guards !== undefined;
+  const observed = carriesWriteRecord(deps);
+  const captureMemoryText = deps.captureMemoryText;
   if (callerSignal?.aborted) {
     const reason = abortReasonError(callerSignal);
     const refused: AsyncIterable<GMIOutputChunk> = { [Symbol.asyncIterator]: () => ({ next: () => Promise.reject(reason) }) };
-    return streamFromGmiTurn(refused);
+    return streamFromGmiTurn(refused, { guarded, observed, captureMemoryText });
   }
   // Whether the caller's signal had aborted when the turn's failure was recorded: then the stop ended the turn, and its
   // error part carries the signal's reason. A failure that came first (a provider's error, a budget's refusal) keeps
@@ -711,5 +971,6 @@ export function streamGmiTurn(deps: GmiSessionDeps, input: MessageContent, turn:
   // runGmiTurn pushes every chunk into `folder` (with the onAfterGeneration replacements); the stream reads that folder.
   // A turn the caller's signal stopped ends with the signal's reason in its error part, as streamText reports it,
   // whatever error the GMI made of the abort.
-  return streamFromGmiTurn(chunks, { folder, stop: () => stop.abort(), stoppedBy: () => stoppedBy });
+  // The stream reads the turn from here on, so the turn's own code runs in this context.
+  return drivingTurnOn(deps.lock, () => streamFromGmiTurn(chunks, { folder, stop: () => stop.abort(), stoppedBy: () => stoppedBy, guarded, observed, captureMemoryText }));
 }

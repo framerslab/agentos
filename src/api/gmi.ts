@@ -33,6 +33,7 @@ import { StatisticalUtilityAI } from '../cognition/nlp/ai_utilities/StatisticalU
 import { PromptEngine } from '../core/llm/PromptEngine.js';
 import type { PromptEngineConfig } from '../core/llm/IPromptEngine.js';
 import type { ChatMessage } from '../core/llm/providers/IProvider.js';
+import type { IEmbeddingManager } from '../core/embeddings/IEmbeddingManager.js';
 import { ToolPermissionManager } from '../core/tools/permissions/ToolPermissionManager.js';
 import { ToolExecutor } from '../core/tools/ToolExecutor.js';
 import { ToolOrchestrator } from '../core/tools/ToolOrchestrator.js';
@@ -72,12 +73,14 @@ import {
   assertEmbeddingConfig,
   assertMemoryStore,
   createAgentCognitiveMemory,
+  embeddingBuiltFor,
   openAgentMemoryBrain,
   type AgentCognitiveMemory,
   type AgentMemoryBrain,
 } from './runtime/agentCognitiveMemory.js';
 import { sendGmiTurn, streamGmiTurn, TurnLock, type GmiForTurn, type GmiSessionDeps, type GmiTurnContext, type GmiTurnOptions } from './runtime/gmiSession.js';
 import { resolveRecallOptions } from './runtime/recallOptions.js';
+import { assertTurnInputGuards, inputDecisionOf } from './runtime/textGuardrails.js';
 import { recallLog } from '../cognition/memory/retrieval/recall/log.js';
 import { endSessionGeneration, readSessionGeneration, sessionGenerationKey, type SessionGeneration } from './runtime/sessionGenerations.js';
 import { transcriptToConversation } from './runtime/gmiTranscript.js';
@@ -110,6 +113,11 @@ import type {
 } from '../cognition/learning/types.js';
 import type { ICognitiveMemoryManager } from '../cognition/memory/CognitiveMemoryManager.js';
 import { sharedForgottenLedgerOf } from '../cognition/memory/suppression/learnerTombstones.js';
+import { registerSessionEvictor, registerSessionTraceDropper, sharedSoulStoreOf, type SessionEviction } from './runtime/soulStore.js';
+import { memoryLog } from '../cognition/memory/log.js';
+import { errorFields } from '../core/logging/events.js';
+import { settlesWithin } from '../cognition/substrate/shutdownBound.js';
+import { routeObserverOf } from './runtime/routeObserver.js';
 import { normalizeHexacoTraits } from '../cognition/substrate/personas/hexaco.js';
 
 /** The options of {@link gmi}: the options of `agent()`. */
@@ -121,12 +129,12 @@ export type GmiHandle = Agent;
 const UNSUPPORTED_ON_GMI = ['voice', 'avatar', 'channels'] as const;
 /**
  * Per-call overrides generate() and stream() accept on the GMI path: the completion options, the route,
- * the step limit, the ledger, the call's stop, budget and usage account, and the tool-approval gate `agency()` passes
- * with every call to a member.
+ * the step limit, the ledger, the call's stop, budget and usage account, the tool-approval gate `agency()` passes
+ * with every call to a member, and `guards` with `stages: ['input']`.
  */
-const ALLOWED_CALL_OVERRIDES = new Set(['temperature', 'maxTokens', 'topP', 'responseFormat', 'model', 'provider', 'maxSteps', 'usageLedger', '__approvalGate', 'abortSignal', 'budget', 'accountIdOf']);
-/** Per-call overrides that pick the route, the step limit, the ledger, the stop, the budget, the usage account or the gate rather than a completion option. */
-const ROUTE_OVERRIDES = new Set(['model', 'provider', 'maxSteps', 'usageLedger', '__approvalGate', 'abortSignal', 'budget', 'accountIdOf']);
+const ALLOWED_CALL_OVERRIDES = new Set(['temperature', 'maxTokens', 'topP', 'responseFormat', 'model', 'provider', 'maxSteps', 'usageLedger', '__approvalGate', 'abortSignal', 'budget', 'accountIdOf', 'guards']);
+/** Per-call overrides that pick the route, the step limit, the ledger, the stop, the budget, the usage account, the gate or the input guards rather than a completion option. */
+const ROUTE_OVERRIDES = new Set(['model', 'provider', 'maxSteps', 'usageLedger', '__approvalGate', 'abortSignal', 'budget', 'accountIdOf', 'guards']);
 /** `agent()`'s step limit. */
 const DEFAULT_MAX_STEPS = 5;
 
@@ -146,12 +154,14 @@ const GMI_PROMPT_ENGINE_CONFIG: PromptEngineConfig = {
  * rejection builds again, so one transient failure does not fail every later
  * call.
  */
-function retryingOnce<T>(build: () => Promise<T>): { get(): Promise<T>; peek(): Promise<T> | undefined } {
+function retryingOnce<T, Args extends unknown[] = []>(
+  build: (...args: Args) => Promise<T>,
+): { get(...args: Args): Promise<T>; peek(): Promise<T> | undefined } {
   let pending: Promise<T> | undefined;
   return {
-    get() {
+    get(...args) {
       if (!pending) {
-        const attempt = build();
+        const attempt = build(...args);
         pending = attempt;
         attempt.catch(() => {
           if (pending === attempt) pending = undefined;
@@ -162,6 +172,17 @@ function retryingOnce<T>(build: () => Promise<T>): { get(): Promise<T>; peek(): 
     peek: () => pending,
   };
 }
+
+/** The deletion manager needs a vector-store dimension even when it only removes stored material. */
+const LEGACY_DELETION_EMBEDDER: IEmbeddingManager = {
+  initialize: async () => undefined,
+  generateEmbeddings: async () => {
+    throw new Error('The legacy deletion manager only removes traces.');
+  },
+  getEmbeddingModelInfo: async () => undefined,
+  getEmbeddingDimension: async () => 1,
+  checkHealth: async () => ({ isHealthy: false }),
+};
 
 /**
  * `messages` with `text` first in the system prompt: before the first system
@@ -266,6 +287,7 @@ function hookTools(
       ...(gate ? { approvalGate: gate } : {}),
       ...(turn.budget ? { budget: turn.budget } : {}),
       ...(turn.providerUserId !== undefined ? { providerUserId: turn.providerUserId } : {}),
+      ...(turn.withholdUserId ? { withholdUserId: true as const } : {}),
       ...(turn.toolNames ? { toolNames: turn.toolNames } : {}),
       toolHooks: hooks,
       dispatch: processToolCall,
@@ -377,8 +399,11 @@ interface GenerationEnd {
 
 /** The session options gmi() reads beside the public ones: `__seat`, set only by a seat (sessionSeat(), launch_agency). */
 interface SeatSessionOptions extends AgentSessionOptions {
-  /** The session's memory is scoped to itself and it has no learner. */
-  __seat?: { memoryScope: 'session'; learner: 'none' };
+  /**
+   * The session's memory is scoped to itself and it has no learner. `withholdUserId`: the turn that launched the seat
+   * sent its provider no end-user id, so the seat's turns send none either.
+   */
+  __seat?: { memoryScope: 'session'; learner: 'none'; withholdUserId?: true };
 }
 
 /** The keys a seat puts on its session's sends (sessionSeat.ts), beside the public ones. */
@@ -601,21 +626,47 @@ export function gmi(opts: GmiOptions): GmiHandle {
       "gmi(): a SQL learning.store needs learning.agentKey, the stable id of the agent's learners; two agents on one store would otherwise be one agent to the learning layer.",
     );
   }
-  /**
-   * The Brain behind `memory.store`, which holds the agent's memory and its learning store. A file's Brain is one per
-   * memory generation: `agent.close()` closes it, and the next use opens the file again. A host's adapter keeps one
-   * Brain for the agent's life, never closed.
-   */
-  const openStoreBrain = () => retryingOnce<AgentMemoryBrain>(() => openAgentMemoryBrain(memoryStore!, brainKey!));
-  let storeBrain = memoryStore ? openStoreBrain() : undefined;
-  /** The host calls of `agent.learning` still running: `agent.close()` lets them finish before it closes what they use. */
-  const runningHostCalls = new Set<Promise<unknown>>();
-  /** The in-process learning store of a `memory.store` whose adapter has no transactions: one for the agent's life. */
-  let inProcessStore: InMemoryLearningStore | undefined;
   // One learning layer for the agent, only when its `learning` option is on. With it off nothing below builds or
   // passes anything of the layer, and the agent runs as it did before the layer existed.
   // A souled agent hands the ledger of its memory store to the layer by the options object it was built from.
   const forgotten = sharedForgottenLedgerOf(opts);
+  // And its store, read once: each session turn's view of the soul's memory rules, whether the end user's id goes to
+  // the model provider, and the Brain its cognitive memory files into.
+  const soulStore = sharedSoulStoreOf(opts);
+  /**
+   * The soul's store, when this agent's cognitive memory is the soul's mind: a souled agent's own Brain, with cognitive
+   * memory on. Its manager files and reads there the rows it marks as the mind's, under each person's key, and loads a
+   * person's rows as their session's first turn begins; the soul's store is the soul's to close. Undefined for every
+   * other agent, which keeps its cognitive memory as before.
+   */
+  const soulBrain = cognitiveMemoryOn ? soulStore?.brain : undefined;
+  const legacyStore = memoryStore && soulBrain ? soulStore?.legacyGmiStore : undefined;
+  /**
+   * The Brain behind `memory.store` supplies the learning store. A plain GMI also uses it for its sessions and opens
+   * a new file handle after close. With a soul's Brain, the passed store is held until the souled agent closes.
+   */
+  const openStoreBrain = () => retryingOnce<AgentMemoryBrain>(() =>
+    (legacyStore?.open ?? openAgentMemoryBrain)(memoryStore!, brainKey!),
+  );
+  let storeBrain = memoryStore ? openStoreBrain() : undefined;
+  /** The host calls still running: close lets them finish before closing what they use. */
+  const runningHostCalls = new Set<Promise<unknown>>();
+  /** The learning store of a passed adapter without transactions: one for the agent's life. */
+  let inProcessStore: InMemoryLearningStore | undefined;
+  if (cognition.memory && cognition.mechanisms) {
+    // Involuntary recall needs a prompt assembler input the manager never supplies, and schema encoding needs centroids.
+    const inactive = ['involuntaryRecall', 'schemaEncoding'] as const;
+    const requiresConsolidation = ['temporalGist', 'sourceConfidenceDecay', 'emotionRegulation', 'personaDrift'] as const;
+    const unavailable = cognition.memory.consolidation?.enabled === true ? inactive : [...inactive, ...requiresConsolidation];
+    for (const mechanism of unavailable) {
+      if (cognition.mechanisms[mechanism]?.enabled === true) {
+        memoryLog.warn('memory.mechanism_inactive', { mechanism });
+      }
+    }
+  }
+  // And who hears where the agent sends text: each model attempt as the gateway resolved it, and the embedding its
+  // cognitive memory was built with.
+  const routeObserver = routeObserverOf(opts);
   const layer: LearningLayerHandle | undefined = cognition.learning
     ? createLearningLayer({
         ...(learningConfig ?? {}),
@@ -663,9 +714,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
   const authoredTraits = normalizeHexacoTraits(opts.personality ?? soul?.frontmatter.hexaco);
   const hasTraits = Object.keys(authoredTraits).length > 0;
   if (cognition.memory) assertEmbeddingConfig(cognition.memory);
-  if (cognition.memory && opts.memoryProvider?.getContext) {
-    console.warn('[agentos] gmi(): cognitive memory supplies the memory context; memoryProvider.getContext is skipped (observe still runs).');
-  }
+  // The soul's mind recalls beside its provider, so only another agent's provider context is skipped.
+  if (cognition.memory && opts.memoryProvider?.getContext && !soulBrain) memoryLog.warn('memory.provider_context_skipped', {});
   const ledger = mergeLedger((opts.observability?.usageLedger as AgentOSUsageLedgerOptions | undefined) ?? opts.usageLedger);
   // `agencies`: every bound is checked here, `launch` on or off.
   const launchLimits = opts.agencies ? resolveLaunchLimits(opts.agencies) : undefined;
@@ -739,16 +789,46 @@ export function gmi(opts: GmiOptions): GmiHandle {
    * `close()` hands back the build it kept, if any; a build asked for after
    * that fails, so nothing builds a memory that no one will close.
    */
-  const memoryForSessions = (brain: typeof storeBrain) => {
+  const buildMemory = (brain: typeof storeBrain, use: 'sessions' | 'legacy' = 'sessions') => {
     let closed = false;
-    const build = retryingOnce<AgentCognitiveMemory | undefined>(async () => {
+    const build = retryingOnce<AgentCognitiveMemory | undefined, [withoutEmbeddings?: true]>(async (withoutEmbeddings) => {
       if (!cognition.memory) return undefined;
       if (closed) throw new Error('gmi(): the agent was closed; agent.session() opens a new session.');
       const { persona } = await shared.get();
+      // The passed store's deletion manager needs no session hydration or consolidation.
+      if (use === 'legacy') {
+        const opened = await brain!.get();
+        return createAgentCognitiveMemory({
+          persona,
+          memory: cognition.memory,
+          brain: opened.brain,
+          hydration: 'scopes',
+          ...(withoutEmbeddings ? { embeddingManager: LEGACY_DELETION_EMBEDDER } : {}),
+        });
+      }
+      // Reads the environment for the embedding provider when memory.embedding names none.
+      if (soulBrain) {
+        // The soul's mind: on the soul's own Brain, the mind's rows alone, each person's loaded as their session's first
+        // turn begins, under the mechanisms the soul gives it. A passed memory.store holds none of it.
+        const builtMemory = await createAgentCognitiveMemory({
+          persona,
+          memory: cognition.memory,
+          mechanisms: soulStore!.mechanisms,
+          brain: soulBrain,
+          rows: 'mind',
+          hydration: 'scopes',
+        });
+        const embedder = embeddingBuiltFor(builtMemory);
+        if (embedder) routeObserver?.embedding(embedder);
+        soulStore!.memoryBuilt(builtMemory.manager);
+        return builtMemory;
+      }
       // With memory.store, the memory files into this generation's Brain; a store that does not open fails the build.
       const opened = brain ? await brain.get() : undefined;
-      // Reads the environment for the embedding provider when memory.embedding names none.
-      return createAgentCognitiveMemory({ persona, memory: cognition.memory, mechanisms: cognition.mechanisms, ...(opened ? { brain: opened.brain } : {}) });
+      const builtMemory = await createAgentCognitiveMemory({ persona, memory: cognition.memory, mechanisms: cognition.mechanisms, ...(opened ? { brain: opened.brain } : {}) });
+      const embedder = embeddingBuiltFor(builtMemory);
+      if (embedder) routeObserver?.embedding(embedder);
+      return builtMemory;
     });
     return {
       get: build.get,
@@ -760,18 +840,39 @@ export function gmi(opts: GmiOptions): GmiHandle {
   };
   // The memory of the sessions open now. agent.close() closes it once they
   // have finished, and the sessions opened after that share a new one.
-  let memory = memoryForSessions(storeBrain);
-  /**
-   * With `memory.store`, hands the layer the memory the agent's sessions file into, built for the call when no session
-   * has built it, so `forgetUser` reaches the store whether or not a session is open. A memory that does not build
-   * fails the call, before the tombstone: a deletion that could not reach the store's traces is never reported done.
-   */
-  const memoryForForget = memoryStore
+  let memory = buildMemory(soulBrain ? undefined : storeBrain);
+  let memoryForForget = memoryStore && !soulBrain
     ? async (): Promise<void> => {
         const built = await memory.get();
         if (built && layer) await adoptLearningMemory(layer, built.manager);
       }
     : undefined;
+  if (legacyStore && storeBrain) {
+    const passedBrain = storeBrain;
+    const legacyMemory = buildMemory(passedBrain, 'legacy');
+    legacyStore.attach({
+      open: passedBrain.get,
+      async deleteTraces(ids, options) {
+        const built = await legacyMemory.get(options?.withoutEmbeddings);
+        return built!.manager.deleteTraces(ids);
+      },
+      async close() {
+        const built = await legacyMemory.close()?.catch(() => undefined);
+        try {
+          await built?.close();
+        } finally {
+          if (layer && built) releaseLearningMemory(layer, built.manager);
+          if (layer) releaseLearningStore(layer);
+          const opened = await passedBrain.peek()?.catch(() => undefined);
+          await opened?.close();
+        }
+      },
+    });
+    memoryForForget = async () => {
+      const built = await legacyMemory.get();
+      if (built && layer) await adoptLearningMemory(layer, built.manager);
+    };
+  }
 
   /**
    * A learner session for one session or one call of the agent; `undefined` when learning is off. `sessionId` is the
@@ -866,6 +967,12 @@ export function gmi(opts: GmiOptions): GmiHandle {
           // nothing and ends it with the stop, and the budget hears of no refusal for a call that would not be sent.
           const budget = turn.budget;
           const onLateUsage = turn.onLateUsage;
+          // The provider and model the attempt goes to, told as it is sent; an attempt of a stopped turn sends nothing.
+          const sending = (): void => {
+            if (!options.abortSignal?.aborted) {
+              routeObserver?.attempt({ providerId: resolution.providerId, modelId: resolution.modelId, hop: resolution.hop });
+            }
+          };
           if (budget && !options.abortSignal?.aborted) {
             // The options the gateway sends for this hop: a fallback hop's overrides raise maxTokens by its headroom
             // (fallbackHopOverrides in generateText.ts), so the estimate counts that cap. A structured request goes
@@ -890,7 +997,10 @@ export function gmi(opts: GmiOptions): GmiHandle {
               return heldAttempt(
                 budget,
                 call,
-                (held, onLate) => gateway.stream(resolution, messages, { ...options, ...held }, responseSchema, schemaName, schemaInPrompt, onLate),
+                (held, onLate) => {
+                  sending();
+                  return gateway.stream(resolution, messages, { ...options, ...held }, responseSchema, schemaName, schemaInPrompt, onLate);
+                },
                 onLateUsage,
               );
             }
@@ -900,6 +1010,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
               return refusedAttempt(refusal);
             }
           }
+          sending();
           return gateway.stream(resolution, messages, options, responseSchema, schemaName, schemaInPrompt, onLateUsage);
         },
         schemaInstruction: gateway.schemaInstruction,
@@ -978,6 +1089,17 @@ export function gmi(opts: GmiOptions): GmiHandle {
             console.warn('[agentos] onBeforeGeneration hook error:', hookError);
           }
         }
+        // The provider's items count as shown only when this call's messages, after the host's hook, still hold the
+        // block as it was rendered: a hook can drop or rewrite it, a fallback hop's call included. The session keeps
+        // each step's serving call's answer for the turn's `memoryShown`.
+        if (turn.onProviderMemoryShown) {
+          const block = turn.memoryContext;
+          turn.onProviderMemoryShown(block !== undefined && messages.some(({ content }) =>
+            typeof content === 'string'
+              ? content.includes(block)
+              : Array.isArray(content) && content.some((part) => 'text' in part && typeof part.text === 'string' && part.text.includes(block)),
+          ));
+        }
         return changed ? messages : undefined;
       },
     };
@@ -1029,9 +1151,12 @@ export function gmi(opts: GmiOptions): GmiHandle {
   const unrecordedEnds = new Map<string, GenerationEnd>();
   const agentTally = createEmptyUsageAggregate();
 
-  /** A session's send or stream with `guards` throws as generate() and stream() do: nothing here would enforce them. */
+  /**
+   * A call's `guards` with a stage other than `'input'`, or with no `stages`, throws before any turn starts: the input
+   * stage is the only one the GMI path enforces.
+   */
   function refuseGuards(callOpts: { guards?: unknown } | undefined): void {
-    if (callOpts?.guards !== undefined) throw new Error("gmi(): the per-call option 'guards' is not supported on the GMI path.");
+    assertTurnInputGuards(callOpts?.guards);
   }
 
   /** The per-call overrides as completion options; throws naming an override the GMI path does not take. */
@@ -1040,6 +1165,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
     for (const [k, v] of Object.entries(extra ?? {})) {
       if (v === undefined) continue;
       if (!ALLOWED_CALL_OVERRIDES.has(k)) throw new Error(`gmi(): the per-call option '${k}' is not supported on the GMI path.`);
+      if (k === 'guards') refuseGuards(extra);
       if (!ROUTE_OVERRIDES.has(k)) out[k] = v;
     }
     return out;
@@ -1082,8 +1208,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
     };
   }
 
-  /** What a generate() or stream() call hands its turn: its stop, its budget (a new one from settings) or the agent's, its usage account and its gate. */
-  const callTurn = (extra?: Partial<GenerateTextOptions>): Pick<GmiTurnOptions, 'abortSignal' | 'callerSignal' | 'budget' | 'accountIdOf' | 'approvalGate'> => {
+  /** What a generate() or stream() call hands its turn: its stop, its budget (a new one from settings) or the agent's, its usage account, its gate and its input guards. */
+  const callTurn = (extra?: Partial<GenerateTextOptions>): Pick<GmiTurnOptions, 'abortSignal' | 'callerSignal' | 'budget' | 'accountIdOf' | 'approvalGate' | 'guards'> => {
     const budget = asSpendBudget(extra?.budget) ?? agentBudget;
     return {
       // The call's signal is its only stop, and the caller's own.
@@ -1091,6 +1217,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
       ...(budget ? { budget } : {}),
       ...(extra?.accountIdOf ? { accountIdOf: extra.accountIdOf } : {}),
       ...(extra?.__approvalGate ? { approvalGate: extra.__approvalGate } : {}),
+      ...(extra?.guards ? { guards: extra.guards } : {}),
     };
   };
 
@@ -1105,9 +1232,12 @@ export function gmi(opts: GmiOptions): GmiHandle {
       const result = await sendGmiTurn(oneShotDeps('agent.generate', extra), prompt, { options, ...callTurn(extra) });
       // A signal that aborted once the turn had ended rejects the call too, and no source is retrieved for it.
       callerSignal?.throwIfAborted();
-      // As agent().generate() does: the answer checked against the sources retrieved for the input.
-      if (opts.verifyCitations) {
-        const userText = typeof prompt === 'string' ? prompt : extractTextFromContent(prompt);
+      // As agent().generate() does: the answer checked against the sources retrieved for the input as it was sent (the
+      // text an input guard rewrote it to); a call whose input a guard replaced made no request, and is not checked.
+      const decision = inputDecisionOf(result.guardReport);
+      if (opts.verifyCitations && decision !== 'replaced') {
+        const sent = decision === 'sanitized' ? result.transcriptDelta?.find((message) => message.role === 'user')?.content : prompt;
+        const userText = typeof sent === 'string' ? sent : sent ? extractTextFromContent(sent as MessageContent) : '';
         result.grounding = await runCitationVerification(result.text, userText, opts.verifyCitations);
       }
       return result;
@@ -1152,7 +1282,9 @@ export function gmi(opts: GmiOptions): GmiHandle {
       // new id.
       // A seat session's memory scope is its own, new at each opening: it recalls nothing of the user it runs as.
       const namespace = learningConfig?.namespace ?? '';
-      const generationKey = memoryStore && !seat ? sessionGenerationKey(sessionId, namespace) : undefined;
+      // The soul's mind files under the person's key, so an id opened again files and recalls under it too: no
+      // generation is read for it.
+      const generationKey = memoryStore && !seat && !soulBrain ? sessionGenerationKey(sessionId, namespace) : undefined;
       // An end of this id that an earlier session's close() asked for and the store has not recorded: recorded first.
       const endBefore = generationKey ? unrecordedEnds.get(generationKey) : undefined;
       const generation = generationKey
@@ -1186,36 +1318,44 @@ export function gmi(opts: GmiOptions): GmiHandle {
       if (ownsTally) sessionTallies.set(sessionId, createEmptyUsageAggregate(sessionId));
       const tally = sessionTallies.get(sessionId)!;
       const lock = new TurnLock();
+      // When this session entry opened: every handle of the open id is this one object, and the id's next opening
+      // after close() is a new entry with a time of its own.
+      const startedAt = Date.now();
       let closing: Promise<void> | undefined;
       // Every turn of the session runs under this signal; close() aborts it.
       const stopTurns = new AbortController();
       // The memory the agent's sessions shared when this one opened.
-      const sessionMemory = memory;
+      // A seat of a souled agent has conversation history but no cognitive memory.
+      const sessionMemory = seat && soulStore ? undefined : memory;
 
       // The session's learner session, when learning is on: one for this agent.session() entry, built with its
       // first turn and ended by close(). A session that keeps no history builds a GMI per turn, and each gets it.
-      // It is told the session's memory scope id and its memory, which the build of its first turn builds anyway.
+      // It is told the session's memory scope id and its memory, which the build of its first turn builds anyway; the
+      // soul's mind is not the layer's to hydrate or delete from, so it is told none.
       const learner = retryingOnce<ILearnerSession | undefined>(async () => {
         const { persona } = await shared.get();
         const memoryScopeId = await memoryScopeIdOf();
-        const manager = (await sessionMemory.get())?.manager;
+        const manager = soulBrain ? undefined : (await sessionMemory?.get())?.manager;
         return learnerSessionFor(memoryScopeId, persona.id, sessionOptions?.userId, { noLearner: seat?.learner === 'none', ...(manager ? { manager } : {}) });
       });
       const buildSessionGmi = async (gmiId: string): Promise<BuiltGmi> => {
         const { persona } = await shared.get();
-        return buildGmi(gmiId, persona, await sessionMemory.get(), maxSteps, undefined, await learner.get());
+        return buildGmi(gmiId, persona, await sessionMemory?.get(), maxSteps, undefined, await learner.get());
       };
       // The session's own GMI, when it keeps history; a GMI per turn otherwise.
       const own = retryingOnce(async () => buildSessionGmi(`gmi-${await memoryScopeIdOf()}`));
       let ownBuilt: BuiltGmi | undefined;
 
-      // Cognitive memory files the replies under the memory scope's session and
-      // the user's messages under its user: the session's own scope, a new one
-      // for an id opened again after close(). A seat session's user is its own
-      // scope too, so nothing it is told is filed under the user it runs as.
-      const turnMemoryScope = (memoryScopeId: string): { sessionId: string; userId: string } => ({
+      /**
+       * A deletion of the session's person has emptied its messages and has not yet reached its GMI: the turn that
+       * takes the GMI next has it forget them first.
+       */
+      let forgetOwed = false;
+      // The bridge uses the session's own form for its replies and for every turn without a named memory user,
+      // including a seat. A session id may equal another person's user id.
+      const turnMemoryScope = (memoryScopeId: string): NonNullable<GmiForTurn['memoryScope']> => ({
         sessionId: memoryScopeId,
-        userId: seat?.memoryScope === 'session' ? memoryScopeId : (hookUser ?? memoryScopeId),
+        ...(!seat && hookUser ? { userId: hookUser } : {}),
       });
 
       // A send made after close() fails; one made before it runs, and close() waits for it. The turn's memory scope
@@ -1225,6 +1365,14 @@ export function gmi(opts: GmiOptions): GmiHandle {
         const memoryScope = turnMemoryScope(await memoryScopeIdOf());
         if (!history) return { ...forOneTurn(await buildSessionGmi(`gmi-${memoryScope.sessionId}-${randomUUID()}`)), memoryScope };
         ownBuilt = await own.get();
+        if (forgetOwed) {
+          // A deletion of the session's person came while another turn held the lock: this turn, queued behind that
+          // one, takes the lock before the deletion's own pass does, and runs on a GMI that has forgotten them. A
+          // forgetting that fails ends the turn, and the next one tries again.
+          ownBuilt.prepare({ prompt: undefined, memoryContext: undefined });
+          await ownBuilt.gmi.forgetPerson?.();
+          forgetOwed = false;
+        }
         return { ...ownBuilt, memoryScope };
       };
 
@@ -1242,40 +1390,55 @@ export function gmi(opts: GmiOptions): GmiHandle {
           .catch((error: unknown) => console.warn('[agentos] gmi(): could not clear the session GMI history:', error));
       };
 
-      const deps = (source: 'agent.session.send' | 'agent.session.stream', sendOpts?: unknown): GmiSessionDeps => ({
-        // Tools, the user context and the reasoning trace see the id the caller
-        // opened and the user id (that session id unless the caller named one).
-        sessionId,
-        opts,
-        userId,
-        // The turn's memory scope comes with its GMI (gmiFor), once the session has read it.
-        // Only a user id the caller passed reaches the provider's end-user field, and never an anonymous one.
-        providerUserId: seat ? sessionOptions?.userId : hookUser,
-        history,
-        lock,
-        // A seat session records under its ledger's own source when it names one (a temporary seat's is launch_agency).
-        ledger: mergeLedger(ledger, { sessionId, source: seat ? (ledger?.source ?? source) : source }),
-        // A seat session's turn takes no context from the memory provider and files nothing with it.
-        useMemoryProviderContext: !cognition.memory && !seat,
-        providerTokenBudget: resolvedRecall.providerTokenBudget,
-        observeMemoryProvider: !seat,
-        // Who the turn's memory hooks are told it serves.
-        memoryHook: memoryHookContextOf({ sessionId, namedUser: hookUser, agentId: agentStableId, call: 'session' }),
-        gmiFor: gmiFor(closing !== undefined),
-        onUsage: (u) => {
-          accumulateUsage(tally, u);
-          accumulateUsage(agentTally, u);
-          // A seat's record of its calls, which a send's result does not carry when its turn fails.
-          const toSeat = (sendOpts as SeatSendKeys | undefined)?.__onUsage;
-          if (typeof toSeat === 'function') {
-            try {
-              toSeat({ ...u });
-            } catch (error) {
-              console.warn("[agentos] gmi(): a seat's usage hand-off failed:", error);
+      // The user id the caller passed, which the provider's end-user field may carry; never an anonymous one.
+      const namedUser = seat ? sessionOptions?.userId : hookUser;
+      // A souled agent sends it only when its host opts in (sendUserIdToProvider), a seat's turn included, and so does
+      // the seat of a team such an agent's turn launched.
+      const withheldUser = (soulStore !== undefined && !soulStore.sendUserIdToProvider) || seat?.withholdUserId === true;
+      const deps = (source: 'agent.session.send' | 'agent.session.stream', sendOpts?: unknown): GmiSessionDeps => {
+        const memoryHook = memoryHookContextOf({ sessionId, namedUser: hookUser, agentId: agentStableId, call: 'session' });
+        // A souled agent's view of its memory rules for the turn, by the context its hooks share; a seat's turn has none.
+        const soulMemory = soulStore && !seat ? soulStore.forTurn(memoryHook) : undefined;
+        return {
+          // Tools, the user context and the reasoning trace see the id the caller
+          // opened and the user id (that session id unless the caller named one).
+          sessionId,
+          opts,
+          userId,
+          // The turn's memory scope comes with its GMI (gmiFor), once the session has read it.
+          // The named user: tools and a team the turn launches run as it; withheld, no request carries it.
+          providerUserId: namedUser,
+          ...(withheldUser ? { withholdUserId: true } : {}),
+          ...(soulMemory ? { soulMemory } : {}),
+          history,
+          lock,
+          // A seat session records under its ledger's own source when it names one (a temporary seat's is launch_agency).
+          ledger: mergeLedger(ledger, { sessionId, source: seat ? (ledger?.source ?? source) : source }),
+          // A seat session's turn takes no context from the memory provider and files nothing with it. The soul's
+          // provider recalls beside the soul's mind, and the mind files the turn, once: the provider does not.
+          useMemoryProviderContext: (!cognition.memory || soulBrain !== undefined) && !seat,
+          providerTokenBudget: resolvedRecall.providerTokenBudget,
+          captureMemoryText: resolvedRecall.managerRecall?.capture === 'metadata+text',
+          observeMemoryProvider: !seat,
+          ...(soulBrain && !seat ? { mindFilesTurn: true } : {}),
+          // Who the turn's memory hooks are told it serves.
+          memoryHook,
+          gmiFor: gmiFor(closing !== undefined),
+          onUsage: (u) => {
+            accumulateUsage(tally, u);
+            accumulateUsage(agentTally, u);
+            // A seat's record of its calls, which a send's result does not carry when its turn fails.
+            const toSeat = (sendOpts as SeatSendKeys | undefined)?.__onUsage;
+            if (typeof toSeat === 'function') {
+              try {
+                toSeat({ ...u });
+              } catch (error) {
+                console.warn("[agentos] gmi(): a seat's usage hand-off failed:", error);
+              }
             }
-          }
-        },
-      });
+          },
+        };
+      };
 
       // A turn runs under the session's stop and the caller's own signal, when it
       // passes one: either ends the turn, and only close() ends the session.
@@ -1341,6 +1504,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
 
       const session = {
         id: sessionId,
+        startedAt,
+        elapsedMs: (): number => Math.max(0, Date.now() - startedAt),
         send: async (input: MessageContent, sendOpts?: SessionSendOptions<GmiTurnOptions['responseSchema']>) => {
           refuseGuards(sendOpts);
           const callerSignal = sendOpts?.abortSignal;
@@ -1367,6 +1532,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
             abortSignal: turnSignal(callerSignal),
             ...(callerSignal ? { callerSignal } : {}),
             budget: turnBudget(sendOpts?.budget),
+            ...(sendOpts?.guards ? { guards: sendOpts.guards } : {}),
             ...seatTurnOf(sendOpts),
           });
         },
@@ -1377,6 +1543,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
             abortSignal: turnSignal(streamOpts?.abortSignal),
             ...(streamOpts?.abortSignal ? { callerSignal: streamOpts.abortSignal } : {}),
             budget: turnBudget(streamOpts?.budget),
+            ...(streamOpts?.guards ? { guards: streamOpts.guards } : {}),
             ...seatTurnOf(streamOpts),
           });
         },
@@ -1416,6 +1583,57 @@ export function gmi(opts: GmiOptions): GmiHandle {
           if (ended.status === 'rejected') throw ended.reason;
         },
       } as unknown as AgentSession;
+      if (soulStore && history) {
+        // A souled agent's deletion of the session's person empties the session through this. The messages go at once,
+        // so a turn running now writes nothing more into them. Under the session's lock, once no turn runs, they go
+        // again (a turn that was waiting for the lock ran meanwhile, on a GMI that forgot the person as it began: see
+        // `forgetOwed`) and the session's GMI forgets the person. The wait
+        // for the lock ends at the deadline: the session is then emptied when the lock comes, and a failure there has
+        // no report left to go in. A deletion called from a hook or a tool of the session's own turn does not wait: that
+        // turn ends only once the call returns. A session that keeps no history builds a GMI for each turn and holds
+        // nothing between its turns: it registers none.
+        registerSessionEvictor(session, async (deadlineMs): Promise<SessionEviction> => {
+          history.reseed([]);
+          forgetOwed = true;
+          const emptied = lock.acquire().then(async (release) => {
+            try {
+              if (history.messages().length > 0) history.reseed([]);
+              const built = await own.peek()?.catch(() => undefined);
+              // The last turn's prompt and recalled memory, which the GMI's hooks read, until a next turn sets its own.
+              built?.prepare({ prompt: undefined, memoryContext: undefined });
+              await built?.gmi.forgetPerson?.();
+              forgetOwed = false;
+            } finally {
+              release();
+            }
+          });
+          if (!lock.heldByCaller() && (await settlesWithin(emptied, deadlineMs))) return 'evicted';
+          void emptied.catch((error: unknown) => memoryLog.warn('memory.session_evict_failed', errorFields(error)));
+          return 'running';
+        });
+        // A correction or a retention sweep of the person's traces drops them from the session's working memory, at
+        // once: a slot holds a trace's id and no words, and the trace's row is gone, so no turn recalls it again. A
+        // turn running now may have ranked one of them before the delete and focus it as its recall ends: they go
+        // again under the session's lock, once no turn runs. That second drop is not waited for, so a correction
+        // called from a hook or a tool of the session's own turn does not wait for the turn that waits for it.
+        registerSessionTraceDropper(session, async (traceIds) => {
+          const drop = async (): Promise<void> => {
+            const built = await own.peek()?.catch(() => undefined);
+            built?.gmi.getCognitiveMemoryManager?.()?.getWorkingMemory().dropTraces(traceIds);
+          };
+          await drop();
+          void lock
+            .acquire()
+            .then(async (release) => {
+              try {
+                await drop();
+              } finally {
+                release();
+              }
+            })
+            .catch((error: unknown) => memoryLog.warn('memory.session_evict_failed', errorFields(error)));
+        });
+      }
       const entry: SessionEntry = { session, userId, shutdown };
       sessions.set(sessionId, entry);
       return session;
@@ -1446,8 +1664,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
       const closingMemory = memory;
       const closingBrain = storeBrain;
       // A file's Brain is one per memory generation; a host's adapter keeps its Brain.
-      if (memoryStore && 'path' in memoryStore) storeBrain = openStoreBrain();
-      memory = memoryForSessions(storeBrain);
+      if (!legacyStore && memoryStore && 'path' in memoryStore) storeBrain = openStoreBrain();
+      memory = buildMemory(soulBrain ? undefined : storeBrain);
       // Together with the memory, so a session opened while this closes the others is recorded in the new one.
       openedSessionIds.clear();
       // Each session closes without ending its id's memory, which a restart keeps too.
@@ -1458,11 +1676,15 @@ export function gmi(opts: GmiOptions): GmiHandle {
       // holds before they close; one that fails keeps its own error.
       await Promise.allSettled([...runningHostCalls]);
       const mem = await closingMemory.close()?.catch(() => undefined);
+      // The soul's mind stores the turns its sessions finished before it shuts down, within the soul's close deadline:
+      // a write still running would otherwise fail on a manager that is shut.
+      if (mem && soulBrain) await soulStore!.drainWrites();
       try {
         await mem?.close();
       } finally {
         // The layer reaches the closed memory no more: a deletion asks the memory open now.
-        if (mem && layer) releaseLearningMemory(layer, mem.manager);
+        if (mem && layer && !soulBrain) releaseLearningMemory(layer, mem.manager);
+        if (mem && soulBrain) soulStore!.memoryClosed(mem.manager);
       }
       if (closingBrain && closingBrain !== storeBrain) {
         // The learning store ran on this Brain: its next use opens it on the next generation's.

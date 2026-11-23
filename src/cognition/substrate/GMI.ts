@@ -67,13 +67,15 @@ import { IUtilityAI, SummarizationOptions } from '../nlp/ai_utilities/IUtilityAI
 import { IToolOrchestrator } from '../../core/tools/IToolOrchestrator';
 
 import { ToolExecutionRequestDetails } from '../../core/tools/ToolExecutor';
-import { ConversationMessage } from '../../core/conversation/ConversationMessage';
+import { ConversationMessage, MessageRole } from '../../core/conversation/ConversationMessage';
 import { GMIError, GMIErrorCode, createGMIErrorFromError } from '../../core/utils/errors.js';
 import type { ICognitiveMemoryManager } from '../memory/CognitiveMemoryManager.js';
 import type { AssembledMemoryContext } from '../memory/core/types.js';
+import type { MemoryShownItem } from '../../api/runtime/memoryWriteRecord.js';
 import type { MemoryRecallCapture } from '../memory/retrieval/recall/capture.js';
 import { effectiveRecallBudget, estimateMemoryTokens } from '../memory/retrieval/recall/budget.js';
 import { ConversationHistoryManager } from './ConversationHistoryManager';
+import { scopeIdOf, taggedScopeId } from '../learning/scopes.js';
 import { CognitiveMemoryBridge, captureWithoutBlock, type CognitiveMemoryTurnLearning, type CognitiveMemoryTurnScope } from './CognitiveMemoryBridge';
 import { SentimentTracker } from './SentimentTracker';
 import { MetapromptExecutor } from './MetapromptExecutor';
@@ -83,6 +85,9 @@ import { settlesWithin, shutdownTimeoutOrDefault } from './shutdownBound';
 import { FORGE_TRACE_HOOK_BOUND_MS } from '../emergent/ForgeTrace.js';
 import { turnContentText } from './turnContent';
 import { moduleLogger } from '../../core/logging/loggerFactory';
+import { errorFields } from '../../core/logging/events.js';
+import { memoryLog } from '../memory/log.js';
+import { SOUL_TURN_NOTHING, type SoulTurnAnswer, type SoulTurnMemory } from './soulTurnMemory';
 
 const DEFAULT_MAX_CONVERSATION_HISTORY_TURNS = 20;
 const DEFAULT_SELF_REFLECTION_INTERVAL_TURNS = 5;
@@ -300,6 +305,14 @@ function memoryScopeOf(turnInput: GMITurnInput): TurnMemoryScope | undefined {
   return { ...(userId ? { userId } : {}), ...(sessionId ? { sessionId } : {}) };
 }
 
+/** The souled agent's view of its memory rules a turn carries in `metadata.soulMemory`; undefined when it carries none. */
+function soulMemoryOf(turnInput: GMITurnInput): SoulTurnMemory | undefined {
+  const soul: unknown = turnInput.metadata?.soulMemory;
+  return soul !== null && typeof soul === 'object' && typeof (soul as SoulTurnMemory).begin === 'function'
+    ? (soul as SoulTurnMemory)
+    : undefined;
+}
+
 /**
  * The host's note a turn carries in `metadata.applicationNote` (`AgentOSInput.applicationNote` for a user turn,
  * `GMIToolResultOptions.applicationNote` for a continuation), trimmed; undefined when it carries none or a blank one.
@@ -467,6 +480,20 @@ export class GMI implements IGMI {
   private turnMemoryScope: TurnMemoryScope | undefined;
 
   /**
+   * True while the turn may send no request the user's id (`metadata.withholdUserId`): the memory the turn files is
+   * not tagged with it, since the memory block shows a trace's tags to the model. Set when a user turn starts.
+   */
+  private turnWithholdsUserId = false;
+
+  /**
+   * A souled agent's view of its memory rules for the turn (`metadata.soulMemory`), and the answer it gave, asked once
+   * a turn before the user's message is scored for sentiment. Set when a user turn starts; a tool continuation keeps
+   * the view and the answer of the turn it continues.
+   */
+  private turnSoulMemory: SoulTurnMemory | undefined;
+  private turnSoulAnswer: SoulTurnAnswer | undefined;
+
+  /**
    * The gate the turn's tool round asks before each call runs, when the turn
    * named one (`metadata.toolCallGate`). Set when a user turn starts; a tool
    * continuation that names no gate asks this one.
@@ -594,6 +621,7 @@ export class GMI implements IGMI {
         () => this.getCurrentPrimaryPersonaId(),
         () => this.gmiId,
         (type, message, details) => this.addTraceEntry(type as ReasoningEntryType, message, details),
+        () => this.turnWithholdsUserId,
       );
     } else {
       this.memoryBridge = null;
@@ -625,6 +653,24 @@ export class GMI implements IGMI {
       (turnId) => this.turnInputs.has(turnId),
     );
 
+    // Bind the imprint to the turn that queued the work. The metaprompt may finish during a later turn.
+    const imprintForQueuedWork = () => {
+      const soul = this.turnSoulMemory;
+      const bridge = this.memoryBridge;
+      if (!bridge || !bridge.usesSoul(soul)) return undefined;
+      return async (content: string, tags: string[]): Promise<void> => {
+        // A metaprompt reads the conversation as it stands when it runs. Once a newer turn has begun, that can hold the
+        // newer turn's words, which the queuing turn's view does not answer for: the imprint is not filed.
+        if (this.turnSoulMemory !== soul) {
+          this.addTraceEntry(ReasoningEntryType.DEBUG, 'A metaprompt imprint was not filed: a newer turn began before it was written.');
+          return;
+        }
+        // Filing waits on the person's write chain, which may be held by a compile.
+        void bridge.encode(content, { type: 'semantic', sourceType: 'agent_inference', role: 'assistant', tags, soul })
+          .catch(() => undefined);
+      };
+    };
+
     // Initialize metaprompt executor
     this.metapromptExecutor = new MetapromptExecutor({
       workingMemory: this.workingMemory,
@@ -646,21 +692,7 @@ export class GMI implements IGMI {
         Object.assign(this.currentTaskContext, updates);
         this.workingMemory.set('currentTaskContext', this.currentTaskContext);
       },
-      onMemoryImprint: async (content, tags) => {
-        // With a learning layer's scope ids, an imprint is filed with the last prepared turn's; before any, nowhere.
-        const learning = this.memoryLearningOfLastTurn();
-        if (learning === null) {
-          this.addTraceEntry(ReasoningEntryType.DEBUG, 'A metaprompt imprint was not filed: no turn of this session has scope ids yet.');
-          return;
-        }
-        await this.memoryBridge?.encode(content, {
-          type: 'semantic',
-          sourceType: 'agent_inference',
-          role: 'system',
-          tags,
-          ...(learning ? { learning } : {}),
-        });
-      },
+      onMemoryImprint: async (content, tags) => imprintForQueuedWork()?.(content, tags),
       getPendingEvents: () => this.sentimentTracker.pendingEvents,
       getEventHistory: () => this.sentimentTracker.events,
       getConversationHistory: () => this.conversationHistoryManager.history,
@@ -671,7 +703,7 @@ export class GMI implements IGMI {
       setState: (state) => { this.state = state; },
       getState: () => this.state,
       getGmiId: () => this.gmiId,
-    });
+    }, imprintForQueuedWork);
 
     const reflectionMetaPrompt = this.activePersona.metaPrompts?.find(mp => mp.id === 'gmi_self_trait_adjustment');
     this.metapromptExecutor.selfReflectionIntervalTurns = reflectionMetaPrompt?.trigger?.type === 'turn_interval' && typeof reflectionMetaPrompt.trigger.intervalTurns === 'number'
@@ -873,7 +905,7 @@ export class GMI implements IGMI {
   }
 
   /**
-   * The memory learning that feedback or a metaprompt's imprint is filed with between turns: `undefined` on a
+   * The memory learning that feedback is filed with between turns: `undefined` on a
    * GMI whose learner session gives no scope ids, neither through `scopesFor` nor in the last turn's preparation (the
    * bridge files as before); otherwise the last prepared turn's, and `null` (not filed) before any turn was prepared,
    * or for feedback from another user than that turn's.
@@ -1235,13 +1267,14 @@ export class GMI implements IGMI {
   }
 
   /**
-   * The user context as cognitive memory reads it: the turn's memory scope user
-   * in place of the turn's user when the turn named one, so memory files and
-   * recalls under that id while tools and prompts keep the turn's user.
+   * The user key cognitive memory uses. A high-level session gives it a named user or a key in the session form.
+   * Tools and prompts keep the turn's own user context.
    */
   private memoryUserContext(): UserContext {
-    const userId = this.turnMemoryScope?.userId;
-    return userId ? { ...this.currentUserContext, userId } : this.currentUserContext;
+    const { userId, sessionId } = this.turnMemoryScope ?? {};
+    if (userId) return { ...this.currentUserContext, userId: scopeIdOf(userId) };
+    if (sessionId) return { ...this.currentUserContext, userId: taggedScopeId(sessionId, '') };
+    return this.currentUserContext;
   }
 
   /**
@@ -1256,7 +1289,7 @@ export class GMI implements IGMI {
       return { sessionId: turnInput.sessionId, conversationId: this.getConversationIdForTurn(turnInput), organizationId };
     }
     const namedConversation = typeof turnInput.metadata?.conversationId === 'string' ? turnInput.metadata.conversationId.trim() : '';
-    return { sessionId, conversationId: namedConversation || sessionId, organizationId };
+    return { sessionId, conversationId: namedConversation || sessionId, organizationId, sessionUserScopeId: taggedScopeId(sessionId, '') };
   }
 
   /**
@@ -1386,6 +1419,46 @@ export class GMI implements IGMI {
   }
 
   /**
+   * Drops what the GMI holds of the person its session serves, for a deletion of that person: the conversation
+   * history with what the GMI recorded about its turns (as {@link GMI.clearHistory}), its reasoning trace, the input
+   * and the retrieved sources it kept of its last turn, the working-memory slots of its cognitive memory, the
+   * sentiment tracker's history and events (`gmi_sentiment_history` leaves working memory), `currentSentiment` on the
+   * user context, and the memory imprints its metaprompts wrote to working memory. A metaprompt queued or running
+   * applies nothing of its results. The GMI's mood, its task context and what a metaprompt set on the user context
+   * (`skillLevel`) stay, and the traces a store holds are not the GMI's to delete. A runtime calls it between turns:
+   * a turn that starts while it runs waits for it, and a turn already running goes on with what it has read. A GMI
+   * that is shut down, or was never initialized, drops what it holds in this process and writes nothing to working
+   * memory.
+   *
+   * @throws What working memory throws when a delete or a write fails; the history, the trace, the last turn's input
+   *   and sources and the slots are dropped by then, and no metaprompt applies its results.
+   */
+  public forgetPerson(): Promise<void> {
+    // Before anything else, so a metaprompt that answers meanwhile applies nothing.
+    this.metapromptExecutor?.discardRuns();
+    this.clearHistory();
+    // What the trace kept of those turns: an entry's message can quote the person (a provider's error does).
+    this.reasoningTrace.entries.length = 0;
+    this.lastTurnInput = undefined;
+    this.turnRagSources = undefined;
+    this.cognitiveMemory?.getWorkingMemory().clearSlots();
+    // After the scrub clearHistory() started, so the tracker's delete is the last write of the two.
+    const forgetting = this.historyForgetting.then(async () => {
+      if (!this.isInitialized) return;
+      await this.sentimentTracker.clearHistory();
+      if ('currentSentiment' in this.currentUserContext) {
+        const { currentSentiment: _dropped, ...context } = this.currentUserContext;
+        this.currentUserContext = context;
+        await this.workingMemory.set('currentUserContext', this.currentUserContext);
+      }
+      await this.metapromptExecutor.forgetImprints();
+    });
+    // A turn that starts meanwhile waits for it, as it waits for a cleared history's scrub.
+    this.historyForgetting = forgetting.catch(() => undefined);
+    return forgetting;
+  }
+
+  /**
    * Sets the turn a tool continuation goes on with: the ids its continuation runs under and the sources its tool
    * calls and reply are judged with. A blank session or conversation id leaves the GMI's as it is; a blank
    * organization means the turn has none, and clears the GMI's. `ragSources` replaces the sources the GMI keeps for
@@ -1410,6 +1483,9 @@ export class GMI implements IGMI {
         // the GMI's last turn was another conversation's: nothing it kept for that turn belongs to this one
         this.turnResolution = undefined;
         this.turnMemoryScope = undefined;
+        this.turnWithholdsUserId = false;
+        this.turnSoulMemory = undefined;
+        this.turnSoulAnswer = undefined;
         this.turnToolCallGate = undefined;
         this.turnModelSelection = {};
         this.turnLearning = undefined;
@@ -1485,13 +1561,21 @@ export class GMI implements IGMI {
     historyAtTurnStart: readonly ChatMessage[];
     currentUserMessage: ChatMessage | undefined;
     turnMessages: readonly ChatMessage[];
+    withholdUserId?: boolean;
   }): { conversationHistory: ConversationMessage[]; userInput: string | null; currentTurnMessageCount: number } {
     const { durableHistory, historyAtTurnStart, currentUserMessage, turnMessages } = turn;
+    // A turn that may send no request the user's id sends no user message under a name, which would carry it.
+    const unnamed = (message: ConversationMessage): ConversationMessage => {
+      if (!turn.withholdUserId || message.role !== MessageRole.USER || message.name === undefined) return message;
+      const rest: ConversationMessage = { ...message };
+      delete rest.name;
+      return rest;
+    };
     const toConversationMessage = (message: ChatMessage): ConversationMessage =>
-      this.conversationHistoryManager.convertToConversationMessage(message);
+      unnamed(this.conversationHistoryManager.convertToConversationMessage(message));
 
     const historyBeforeTurn =
-      durableHistory ??
+      durableHistory?.map(unnamed) ??
       historyAtTurnStart
         .filter((message) => message !== currentUserMessage)
         .map(toConversationMessage);
@@ -1594,6 +1678,30 @@ export class GMI implements IGMI {
     };
   }
 
+  /**
+   * The answer a souled agent's view gives for a turn, asked once; undefined for a turn that carries no view. A view
+   * whose ask throws or rejects allows nothing, and one `memory.hook_failed` line says so. A turn stopped while it
+   * waits (a session's close(), the caller's signal, shutdown()) stops waiting at once and is allowed nothing.
+   */
+  private async soulAnswerOf(soul: SoulTurnMemory | undefined, stop: AbortSignal): Promise<SoulTurnAnswer | undefined> {
+    if (!soul) return undefined;
+    if (stop.aborted) return { ...SOUL_TURN_NOTHING };
+    // Set at once: a promise's executor runs when the promise is made.
+    let onStop!: () => void;
+    const stopped = new Promise<SoulTurnAnswer>((resolve) => {
+      onStop = () => resolve({ ...SOUL_TURN_NOTHING });
+      stop.addEventListener('abort', onStop, { once: true });
+    });
+    try {
+      return await Promise.race([soul.begin(this.cognitiveMemory, stop), stopped]);
+    } catch (error) {
+      memoryLog.warn('memory.hook_failed', { hook: 'soulMemory', ...errorFields(error) });
+      return { ...SOUL_TURN_NOTHING };
+    } finally {
+      stop.removeEventListener('abort', onStop);
+    }
+  }
+
   /** @inheritdoc */
 
   public async *processTurnStream(turnInput: GMITurnInput): AsyncGenerator<GMIOutputChunk, GMIOutput, undefined> {
@@ -1612,6 +1720,9 @@ export class GMI implements IGMI {
     if (turnInput.metadata?.isToolContinuation !== true) {
       this.turnResolution = undefined;
       this.turnMemoryScope = memoryScopeOf(turnInput);
+      this.turnWithholdsUserId = turnInput.metadata?.withholdUserId === true;
+      this.turnSoulMemory = soulMemoryOf(turnInput);
+      this.turnSoulAnswer = undefined;
       this.turnLearning = undefined;
       this.turnToolCallGate = toolCallGateOf(turnInput);
       this.turnModelSelection = modelSelectionOf(turnInput);
@@ -1635,6 +1746,12 @@ export class GMI implements IGMI {
     const toolCallGate = toolCallGateOf(turnInput) ?? this.turnToolCallGate;
     // The launched team this turn's tool calls sit in, likewise: a continuation that names none sits in its turn's.
     const launchFrame = launchFrameOf(turnInput) ?? this.turnLaunchFrame;
+    // The souled agent's view of the turn, read before any wait: a newer turn of this GMI sets its own.
+    const turnSoul = this.turnSoulMemory;
+    // Whether this call may send no request the user's id: its own input's word, or, on a continuation, the turn's.
+    const withholdsUserId =
+      turnInput.metadata?.withholdUserId === true ||
+      (turnInput.metadata?.isToolContinuation === true && this.turnWithholdsUserId);
     // The host's note every request of this call sends (each step of its tool loop and each hop), read from its own
     // input alone: a user turn's from AgentOSInput, a continuation's from the options its results came with. The GMI
     // keeps no note between calls, since one GMI serves every conversation of its session.
@@ -1672,6 +1789,7 @@ export class GMI implements IGMI {
     // The recall capture of the turn's memory assembly, for the turn's output: the error output carries it too, so a
     // turn that fails after its memory was assembled still reports what that assembly recalled.
     let turnMemoryRecall: MemoryRecallCapture | undefined;
+    let turnMemoryShown: MemoryShownItem[] | undefined;
     // The history the turn's requests left out: the report of the serving request that left the most messages out.
     let turnHistoryOmitted: PromptHistoryOmission | undefined;
 
@@ -1780,10 +1898,10 @@ export class GMI implements IGMI {
           this.turnInputs.delete(oldest);
         }
       }
+      // The turn as text, for the recall and retrieval queries: an image part is `[image]`, so no image data or URL is
+      // sent to be embedded.
       const currentTurnText = currentUserMessage?.content
-        ? (typeof currentUserMessage.content === 'string'
-            ? currentUserMessage.content
-            : JSON.stringify(currentUserMessage.content))
+        ? turnContentText(currentUserMessage.content as GMITurnInput['content'])
         : '';
       const durableHistoryForPrompt =
         Array.isArray(turnInput.metadata?.conversationHistoryForPrompt) && turnInput.metadata?.conversationHistoryForPrompt.length > 0
@@ -1791,8 +1909,19 @@ export class GMI implements IGMI {
           : null;
       const turnMessages: ChatMessage[] = [];
 
+      // A souled agent's answer for the turn, asked once before anything reads the person: a turn it allows no
+      // sentiment (a minor, a person who objects to profiling, a failed policy hook, a forgotten person) is not scored.
+      // A continuation keeps the answer of the turn it continues.
+      const continuesTurn = turnInput.metadata?.isToolContinuation === true;
+      const soulAnswer = continuesTurn ? this.turnSoulAnswer : await this.soulAnswerOf(turnSoul, stop.signal);
+      if (!continuesTurn && ownsState()) this.turnSoulAnswer = soulAnswer;
+      // A turn stopped while it waited for its answer starts nothing more: no learning, recall or prompt.
+      if (!continuesTurn && turnSoul && stop.signal.aborted) {
+        throw new GMIError('Turn aborted: it was stopped while it waited for its memory rules.', GMIErrorCode.LLM_PROVIDER_ERROR, { turnId });
+      }
+
       // Analyze sentiment of user input only when sentiment tracking is enabled
-      if (this.activePersona.sentimentTracking?.enabled) {
+      if (this.activePersona.sentimentTracking?.enabled && soulAnswer?.sentiment !== false) {
         const lastMsg = this.conversationHistoryManager.history.length > 0
           ? this.conversationHistoryManager.history[this.conversationHistoryManager.history.length - 1]
           : null;
@@ -1922,12 +2051,19 @@ export class GMI implements IGMI {
           }
         }
 
-        if (isUserInitiatedTurn && currentTurnText) {
+        // On a souled agent's mind the turn recalls only when its rules' answer allows it: an answer that keeps no
+        // memory, a failed policy hook and a forgotten person read nothing, and no recall query is embedded.
+        const soulAllowsRecall = !this.memoryBridge?.usesSoul(turnSoul) || soulAnswer?.recall === true;
+        if (isUserInitiatedTurn && currentTurnText && soulAllowsRecall) {
           // Recall is limited to this turn's user, session and conversation scopes; with a learning layer's scope ids, to
           // the turn's own.
+          // On a souled agent's mind, to the person's key that the turn's view of the soul names, and with no drift of
+          // what it reads unless the view's answer allows it.
           assembledMemoryContext = await this.memoryBridge?.assembleContext(currentTurnText, {
             ...this.memoryTurnScope(turnInput),
             ...(turnLearning.memory ? { learning: turnLearning.memory } : {}),
+            ...(turnSoul ? { soul: turnSoul } : {}),
+            ...(soulAnswer ? { soulAnswer } : {}),
           }) ?? null;
           const capture = assembledMemoryContext?.capture;
           if (capture) {
@@ -2024,6 +2160,7 @@ export class GMI implements IGMI {
           historyAtTurnStart,
           currentUserMessage,
           turnMessages,
+          withholdUserId: withholdsUserId,
         });
 
         const promptComponents: PromptComponents = {
@@ -2091,9 +2228,11 @@ export class GMI implements IGMI {
         const personaOptions = (this.activePersona.defaultModelCompletionOptions ?? {}) as Record<string, unknown>;
         // The provider's end-user field: the host's choice when the turn names one
         // (null sends none), else the turn's user.
-        const providerUserId = turnInput.metadata && 'providerUserId' in turnInput.metadata
-          ? turnInput.metadata.providerUserId
-          : this.currentUserContext.userId;
+        const providerUserId = withholdsUserId
+          ? null
+          : turnInput.metadata && 'providerUserId' in turnInput.metadata
+            ? turnInput.metadata.providerUserId
+            : this.currentUserContext.userId;
         const llmOptions: ModelCompletionOptions = {
           ...pickCompletionOptions(personaOptions),
           ...pickCompletionOptions(turnOptions),
@@ -2409,6 +2548,33 @@ export class GMI implements IGMI {
                   ? 'Dropped the GMI system cache marker because the hook put a shorter-lived marker before it.'
                   : 'Dropped the GMI system cache marker because the hook put a one-hour marker after it.',
             );
+          }
+
+          if (assembledMemoryContext?.shownTexts) {
+            // A fallback can re-render the block or leave it out. A host hook can also remove it.
+            turnMemoryShown = undefined;
+            const block = hopMemoryText?.trim();
+            if (hopCapture && block && sendMessages.some(({ content }) =>
+              typeof content === 'string'
+                ? content.includes(block)
+                : Array.isArray(content) && content.some((part) => 'text' in part && typeof part.text === 'string' && part.text.includes(block)),
+            )) {
+              const texts = new Map(hopMemoryContext?.shownTexts?.map((entry) => [entry.id, entry]));
+              const shown: MemoryShownItem[] = [];
+              for (const { id, outcome } of hopCapture.candidates) {
+                const entry = texts.get(id);
+                if (outcome !== 'included' || !entry) continue;
+                const date = new Date(entry.createdAt);
+                shown.push({
+                  source: 'memory',
+                  id,
+                  text: entry.text,
+                  ...(entry.speaker ? { speaker: entry.speaker } : {}),
+                  ...(Number.isFinite(date.getTime()) ? { at: date.toISOString() } : {}),
+                });
+              }
+              if (shown.length > 0) turnMemoryShown = shown;
+            }
           }
 
           let attempt: AsyncIterable<ModelCompletionResponse>;
@@ -2816,13 +2982,16 @@ export class GMI implements IGMI {
       }
 
       // The exchange is filed under the turn's memory scope session, when it named one, and, with a learning layer's
-      // scope ids, under the turn's own through its guard.
+      // scope ids, under the turn's own through its guard. On a souled agent's mind it is filed through the turn's view
+      // of the soul, and the turn does not wait for it: the output carries the record of the write.
       const memorySessionId = this.turnMemoryScope?.sessionId;
-      await this.memoryBridge?.syncForTurn(
-        memorySessionId ? { ...turnInput, sessionId: memorySessionId } : turnInput,
+      const synced = await this.memoryBridge?.syncForTurn(
+        memorySessionId ? { ...turnInput, sessionId: taggedScopeId(memorySessionId, '') } : turnInput,
         aggregatedResponseText,
         turnLearning.memory,
+        turnSoul,
       );
+      const memoryWrite = synced?.write;
 
       await this.performPostTurnIngestion(
         this.stringifyTurnContent(turnInput.content) ?? '',
@@ -2853,8 +3022,10 @@ export class GMI implements IGMI {
         // its calls are judged with too
         ragSources: lastRagSources ?? continuedTurnSources,
         ...(turnMemoryRecall ? { memoryRecall: turnMemoryRecall } : {}),
+        ...(turnMemoryShown ? { memoryShown: turnMemoryShown } : {}),
         ...(turnHistoryOmitted ? { historyOmitted: turnHistoryOmitted } : {}),
         ...(structuredResult ? { structuredOutput: structuredResult } : {}),
+        ...(memoryWrite ? { memoryWrite } : {}),
       };
       return finalTurnOutput; // Return the aggregated output
 
@@ -2883,6 +3054,8 @@ export class GMI implements IGMI {
         error: lastErrorForOutput,
         usage: aggregatedUsage, // Could be partial
         ...(turnMemoryRecall ? { memoryRecall: turnMemoryRecall } : {}),
+        // What the hop last tried was sent, as its recall record above reports it.
+        ...(turnMemoryShown ? { memoryShown: turnMemoryShown } : {}),
         ...(turnHistoryOmitted ? { historyOmitted: turnHistoryOmitted } : {}),
       };
     } finally {

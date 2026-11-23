@@ -52,7 +52,8 @@ import { sessionSeat } from '../runtime/agencyLaunch/sessionSeat';
 
 let n = 0;
 const key = () => `k-souled-scoped-${++n}`;
-// The cases here file the memory of several users and sessions in one store, which needs a retention choice.
+// The cases here file the memory of several users and sessions in one store, which needs a retention choice and a
+// key for its tombstones.
 const stubbed = (apiKey: string, extra: Partial<AgentOptions> = {}) =>
   ({
     provider: 'openai',
@@ -60,6 +61,7 @@ const stubbed = (apiKey: string, extra: Partial<AgentOptions> = {}) =>
     apiKey,
     fallbackProviders: [],
     retention: { traces: 'until-deletion' },
+    tombstoneKey: 'k-souled-scoped-tombstones',
     ...extra,
   }) as unknown as AgentOptions;
 
@@ -1742,12 +1744,12 @@ describe("a souled agent on runtime: 'gmi', beyond its own sessions", () => {
   });
 });
 
-describe('the options cognitive memory does not reach', () => {
+describe('the memory hooks beside cognitive memory', () => {
   it.each<[string, Record<string, unknown>]>([
     ['memoryPolicy', { memoryPolicy: () => ({ longTerm: 'off' }) }],
     ['screen', { screen: async (text: string) => text }],
     ['sharedMemory', { sharedMemory: { as: 'me', reason: 'one-persons-machine' } }],
-  ])('%s is refused at the open of an agent whose cognitive memory is on', async (_name, hook) => {
+  ])('%s opens on an agent whose cognitive memory is on, with a soul that has its folder', async (_name, hook) => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const embeddings = key();
     script('openai', embeddings, { replies: [] });
@@ -1765,9 +1767,9 @@ describe('the options cognitive memory does not reach', () => {
       (err: unknown) => (err instanceof Error ? err.message : String(err)),
     );
 
-    expect(outcome).toMatch(/cognitive memory/);
-    // Nothing was opened: no store folder was made.
-    expect(fs.existsSync(path.join(dir, 'memory', '.store', 'memory.sqlite'))).toBe(false);
+    // The hooks act on the soul's own store, which the GMI's cognitive memory files into and recalls from.
+    expect(outcome).toBe('opened');
+    expect(fs.existsSync(path.join(dir, 'memory', '.store', 'memory.sqlite'))).toBe(true);
   });
 
   it.each<[string, Record<string, unknown>]>([

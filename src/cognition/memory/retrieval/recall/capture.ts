@@ -35,9 +35,10 @@ export type RerankSkipReason = 'loading' | 'unavailable' | 'timeout' | 'error' |
 /**
  * How much of a turn's recall is recorded: `'off'` records nothing,
  * `'metadata'` (the default) returns the record with the assembled context and
- * the turn result, `'metadata+stream'` also sends it on the runtime stream.
+ * the turn result, `'metadata+stream'` also sends it on the runtime stream, and
+ * `'metadata+text'` adds the shown memories' text to the turn result separately.
  */
-export type RecallCaptureMode = 'off' | 'metadata' | 'metadata+stream';
+export type RecallCaptureMode = 'off' | 'metadata' | 'metadata+stream' | 'metadata+text';
 
 /** One candidate memory of a turn: how it ranked and what became of it. */
 export interface MemoryRecallCandidate {

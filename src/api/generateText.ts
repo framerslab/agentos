@@ -1196,6 +1196,12 @@ export interface GenerateTextResult {
    */
   memoryRecall?: import('../cognition/memory/retrieval/recall/capture.js').MemoryRecallCapture;
   /**
+   * The memories shown to the model on a GMI session turn with
+   * `memory.recall.capture: 'metadata+text'`. A souled agent includes items
+   * from both recall blocks. Unset when no recalled items were shown.
+   */
+  memoryShown?: import('./runtime/memoryWriteRecord.js').MemoryShownItem[];
+  /**
    * On a `gmi()` or `agent({ runtime: 'gmi' })` session's turn: the
    * conversation history the turn's requests left out to fit the prompt
    * engine's history budget (35 percent of the serving model's context
@@ -1206,6 +1212,21 @@ export interface GenerateTextResult {
    * runtime, which sends the whole history.
    */
   historyOmitted?: import('../core/llm/IPromptEngine.js').PromptHistoryOmission;
+  /**
+   * On a session's `send()` of an agent whose memory provider observes its
+   * turns (a `souledAgent()`, or an `agent()` with a `memoryProvider` that has
+   * `observe`): the record of the turn's memory writes, one entry for each
+   * side that had text, the user's message first. Each entry says whether the
+   * side was `written` (with the id of its trace), `skipped` (with the reason)
+   * or `failed` (with the error's class name); it holds no text. The turn does
+   * not wait for its writes: the promise settles when they have, and never
+   * rejects. Its record has no entry when an input guard replaced the turn,
+   * or rewrote it on the default runtime: such a turn is not filed. On
+   * `runtime: 'gmi'` a rewritten turn is filed with the rewritten text. Unset
+   * on `generateText()`, on a one-shot `generate()`, and on an agent with no
+   * observing memory provider.
+   */
+  memoryWrite?: Promise<import('./runtime/memoryWriteRecord.js').MemoryWriteRecord>;
   /**
    * Per-hop provider fallback trail. `fired` is true when any non-primary
    * provider produced — or was tried for — the result, so callers can flag a

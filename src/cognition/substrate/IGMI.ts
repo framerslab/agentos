@@ -22,6 +22,7 @@ import type { ChatMessage, ModelUsage, ThinkingBlock } from '../../core/llm/prov
 import type { HexacoTraitValues } from './personas/hexaco';
 import type { ILearnerSession } from '../learning/types.js';
 import type { AgencyLaunchFrame } from '../../api/runtime/agencyLaunch/types';
+import type { SoulTurnMemory } from './soulTurnMemory';
 
 /**
  * Defines the possible moods a GMI can be in, influencing its behavior and responses.
@@ -359,9 +360,21 @@ export interface GMITurnInput {
      */
     providerUserId?: string | null;
     /**
+     * True when no request of the turn may carry the user's id: the user's message is recorded with no `name`, which
+     * would be its `userId` and which OpenAI's Chat Completions API receives with the message. A souled agent on the GMI
+     * runtime sets it unless its host opts in to sending the end user's id (`sendUserIdToProvider`), with
+     * `providerUserId: null`.
+     */
+    withholdUserId?: boolean;
+    /**
      * The ids the turn's cognitive memory files and recalls traces under, in
      * place of the turn's `userId` and `sessionId` (the session also stands in
-     * for the conversation when no `conversationId` is given). Tools, the user
+     * for the conversation when no `conversationId` is given). Where no
+     * learning layer gives the turn's scope ids, the session's key within the
+     * `user` scope is written in the session form (a leading `/`) and the
+     * user's in the plain form (`/`, `%` and `:` percent-encoded), so a
+     * session id that equals another person's user id names another key, and
+     * the turn reads those two keys alone in that scope. Tools, the user
      * context and the reasoning trace keep the turn's own ids. Unset, memory
      * uses the turn's ids.
      */
@@ -371,6 +384,15 @@ export interface GMITurnInput {
      * their own session id, which is no user's. A learning layer reads such a turn's user as `null`.
      */
     noTurnUser?: boolean;
+    /**
+     * A souled agent's view of its memory rules for this turn (`souledAgent()` on the GMI runtime): the GMI asks for the
+     * turn's answer once, before it scores the user's message for sentiment, and skips the analysis when the answer
+     * says so, as it does for a subject whose id no memory key can be built from. A tool continuation keeps the answer
+     * of the turn it continues. Internal.
+     *
+     * @internal
+     */
+    soulMemory?: SoulTurnMemory;
     /**
      * The launched team this turn's GMI sits in (`launch_agency`): the launch, the seat's role and the team's level.
      * The GMI hands each tool call of the turn a frozen copy in `sessionData.agencyLaunch`, where a launch from that
@@ -618,6 +640,8 @@ export interface GMIOutput {
      * continuation assembles none and carries none.
      */
     memoryRecall?: import('../memory/retrieval/recall/capture.js').MemoryRecallCapture;
+    /** The trace text and attribution included in the serving hop's memory block under `'metadata+text'`; on a failed turn, the hop last tried. */
+    memoryShown?: import('../../api/runtime/memoryWriteRecord.js').MemoryShownItem[];
     /**
      * The conversation history the turn's requests left out to fit the prompt engine's history budget: of the
      * requests that served the turn's steps, the one that left the most messages out (a fallback hop's prompt that
@@ -627,6 +651,15 @@ export interface GMIOutput {
     historyOmitted?: import('../../core/llm/IPromptEngine.js').PromptHistoryOmission;
     /** On a structured turn: the parsed value and its check (see `api/runtime/structuredReply`). */
     structuredOutput?: import('../../api/runtime/structuredReply.js').StructuredReplyOutput;
+    /**
+     * On a turn of a souled agent's mind that carried the agent's view of its memory rules (`metadata.soulMemory`): the
+     * record of the turn's memory writes, one entry for each side that had text. The turn does not wait for it: it
+     * settles once the view has answered for both sides, and never rejects. Unset on any other turn, and on a turn
+     * that failed or stopped before it was filed.
+     *
+     * @internal
+     */
+    memoryWrite?: Promise<import('../../api/runtime/memoryWriteRecord.js').MemoryWriteRecord>;
 }
 
 
@@ -871,6 +904,15 @@ export interface IGMI {
   replaceHistory?(messages: ConversationMessage[]): void;
   /** Empties the conversation history; `GMI` drops what it recorded about its turns, as for `replaceHistory`. */
   clearHistory?(): void;
+  /**
+   * Drops what the GMI holds of the person its session serves, for a deletion of that person: the conversation
+   * history as `clearHistory()` drops it, and whatever else the implementation keeps of the person between turns.
+   * `GMI` also drops its reasoning trace, the input and the retrieved sources of its last turn, the working-memory
+   * slots of its cognitive memory, its sentiment history and events, the user context's `currentSentiment` and the
+   * memory imprints its metaprompts wrote, and no metaprompt queued or running applies its results. A runtime calls it
+   * between turns, and it rejects when a store it writes to fails.
+   */
+  forgetPerson?(): Promise<void>;
 
   /**
    * Sets the turn a tool continuation goes on with: the session, conversation and organization the continuation runs

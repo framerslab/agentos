@@ -182,21 +182,25 @@ function userTurnOf(opts: GenerateTextOptions): UserTurn | undefined {
   if (!last || last.role !== 'user') return undefined;
   return { text: textOf(last.content), images: imagesOf(last.content) };
 }
-/** The options with the user turn's text replaced. In multi-part content one text part takes the place of the text parts; the other parts stay. */
+/**
+ * @internal A turn's content with its text replaced: a string becomes `text`; in multi-part content one text part
+ * takes the place of the text parts, where the first of them stood, and the other parts stay.
+ */
+export function contentWithTurnText(content: MessageContent, text: string): MessageContent {
+  if (!Array.isArray(content)) return text;
+  const first = content.findIndex((p) => p.type === 'text');
+  const rest: MessageContentPart[] = content.filter((p) => p.type !== 'text');
+  rest.splice(first === -1 ? rest.length : first, 0, { type: 'text', text });
+  return rest;
+}
+/** The options with the user turn's text replaced (see {@link contentWithTurnText}). */
 function withTurnText(opts: GenerateTextOptions, text: string): GenerateTextOptions {
   // an emptied prompt is still the turn: the text functions send it, where a caller's empty prompt adds none
   if (typeof opts.prompt === 'string' && opts.prompt.length > 0) return { ...opts, prompt: text, ...(text.length === 0 ? { __emptyPrompt: true } : {}) };
   const messages = [...(opts.messages ?? [])];
   const last = messages[messages.length - 1];
   if (!last) return opts;
-  let content: MessageContent = text;
-  if (Array.isArray(last.content)) {
-    const first = last.content.findIndex((p) => p.type === 'text');
-    const rest: MessageContentPart[] = last.content.filter((p) => p.type !== 'text');
-    rest.splice(first === -1 ? rest.length : first, 0, { type: 'text', text });
-    content = rest;
-  }
-  messages[messages.length - 1] = { ...last, content };
+  messages[messages.length - 1] = { ...last, content: contentWithTurnText(last.content, text) };
   return { ...opts, messages };
 }
 /**
@@ -527,6 +531,42 @@ class GuardRun implements TextGuardRun {
     for await (const part of out.parts) if (part.type === 'text') delivered += part.text;
     return { end: out.end(), text: delivered };
   }
+}
+
+/** What the input stage decided for one turn of the GMI runtime, with the run's report. */
+export type TurnInputJudgement =
+  /** `text`: the turn's text as a guard rewrote it; unset when the turn goes as given. */
+  | { kind: 'pass'; text?: string; report: TextGuardrailReport | undefined }
+  /** `text`: the reply that takes the turn's place, with no model call. */
+  | { kind: 'replaced'; text: string; report: TextGuardrailReport | undefined }
+  | { kind: 'stopped'; error: GuardrailStopError; report: TextGuardrailReport | undefined };
+
+/** The refusal of a `guards` the GMI runtime does not enforce. */
+const GMI_GUARDS_REFUSAL = "gmi(): the per-call option 'guards' is not supported on the GMI path unless its stages are ['input'].";
+
+/**
+ * @internal Throws the GMI runtime's refusal unless `guards` is unset or names its stages and every one is `'input'`:
+ * the input stage is the only one enforced on that runtime, and an unset `stages` means every stage.
+ */
+export function assertTurnInputGuards(guards: unknown): void {
+  if (guards === undefined) return;
+  const stages = typeof guards === 'object' && guards !== null ? (guards as { stages?: unknown }).stages : undefined;
+  // A spread reads a sparse array's holes as undefined, which some() alone would skip.
+  if (!Array.isArray(stages) || stages.length === 0 || [...stages].some((stage) => stage !== 'input')) throw new Error(GMI_GUARDS_REFUSAL);
+}
+
+/**
+ * The input stage of `guards` over one user turn of the GMI runtime, before any model call: the turn's text and its
+ * images, judged once, as `generateText()` judges its own user turn.
+ *
+ * @throws The GMI runtime's refusal when `guards.stages` is unset or holds anything but `'input'`, and the error
+ *   `generateText()` gives for a `mode` or `services` it cannot take.
+ */
+export async function judgeTurnInput(guards: NonNullable<GenerateTextOptions['guards']>, input: MessageContent): Promise<TurnInputJudgement> {
+  assertTurnInputGuards(guards);
+  const run = new GuardRun(guards);
+  const judged = await run.judgeInput({ text: textOf(input), images: imagesOf(input) });
+  return { ...judged, report: run.report };
 }
 
 /** generateText() with `guards`: the input stage, the call itself with the run handle in place of the option, the output stage. */

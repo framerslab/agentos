@@ -295,6 +295,13 @@ export interface StreamTextResult {
    */
   memoryRecall?: Promise<import('../cognition/memory/retrieval/recall/capture.js').MemoryRecallCapture | undefined>;
   /**
+   * On a GMI session's `stream()` with `memory.recall.capture: 'metadata+text'`,
+   * the memories shown to the model, as `GenerateTextResult.memoryShown`
+   * reports them on `send()`. Resolves when the stream ends, with an empty
+   * list when no recalled items were shown.
+   */
+  memoryShown?: Promise<import('./runtime/memoryWriteRecord.js').MemoryShownItem[]>;
+  /**
    * On a `gmi()` or `agent({ runtime: 'gmi' })` session's `stream()`: the
    * conversation history the turn's requests left out to fit the prompt
    * engine's history budget, as `GenerateTextResult.historyOmitted` reports it
@@ -303,6 +310,20 @@ export interface StreamTextResult {
    * returned its output. Unset on `streamText()` and on the default runtime.
    */
   historyOmitted?: Promise<import('../core/llm/IPromptEngine.js').PromptHistoryOmission | undefined>;
+  /**
+   * On a session's `stream()` of an agent whose memory provider observes its
+   * turns: the record of the turn's memory writes, as
+   * `GenerateTextResult.memoryWrite` carries it on `send()`. It settles after
+   * the stream has ended and its writes have, and never rejects. A stream
+   * that ended in an error or that its `abortSignal` stopped, and one whose
+   * input a guard replaced, or rewrote on the default runtime, is not filed:
+   * its record has no entry. On `runtime: 'gmi'` a rewritten turn is filed
+   * with the rewritten text. On the default
+   * runtime a stream runs once it is read, so the record of a stream nobody
+   * reads does not settle. Unset on `streamText()`, on a one-shot `stream()`,
+   * and on an agent with no observing memory provider.
+   */
+  memoryWrite?: Promise<import('./runtime/memoryWriteRecord.js').MemoryWriteRecord>;
   /**
    * Resolves to the reason the FINAL model step stopped emitting, on the
    * same cadence as {@link usage} (when the stream completes):

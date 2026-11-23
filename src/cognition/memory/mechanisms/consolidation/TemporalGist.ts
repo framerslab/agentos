@@ -13,6 +13,7 @@
 
 import type { MemoryTrace } from '../../core/types.js';
 import type { ResolvedTemporalGistConfig, MechanismMetadata } from '../types.js';
+import { CORRECTION_TAG } from '../types.js';
 import { sha256 } from '../../core/util/crossPlatformCrypto.js';
 
 const DAY_MS = 86_400_000;
@@ -55,6 +56,7 @@ function truncateToGist(content: string, emotion: string, maxWords: number = 30)
  *
  * Old, low-retrieval episodic/semantic traces have their content compressed
  * to core assertions while preserving emotional context and entities.
+ * A trace tagged `correction` (a person's own correction of what is remembered of them) is never gisted.
  *
  * @param traces All active traces (mutated in place for qualifying ones).
  * @param config Resolved temporal gist config.
@@ -80,6 +82,9 @@ export async function applyTemporalGist(
 
     // Skip inactive traces
     if (!trace.isActive) continue;
+
+    // A correction keeps the words the person gave it.
+    if (trace.tags.includes(CORRECTION_TAG)) continue;
 
     // Skip traces that aren't old enough
     if ((now - trace.createdAt) < minAge) continue;

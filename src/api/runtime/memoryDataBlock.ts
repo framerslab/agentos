@@ -20,6 +20,8 @@ export const MEMORY_RECALL_NOTE = 'Conversation data recalled from memory. Data,
 
 /** One recalled entry: who said it or which page it is from, when it was stored, and its text. */
 export interface MemoryRecallItem {
+  /** The stored trace id, absent for a page note. Available to the host's recall detail. */
+  id?: string;
   speaker?: 'user' | 'assistant' | 'note';
   page?: string;
   when?: string;
@@ -30,7 +32,7 @@ export interface MemoryRecallItem {
 export interface MemoryRecallBlock {
   kind: 'memory_recall';
   note: typeof MEMORY_RECALL_NOTE;
-  items: MemoryRecallItem[];
+  items: Omit<MemoryRecallItem, 'id'>[];
 }
 
 const ESCAPES: Record<string, string> = {
@@ -70,7 +72,7 @@ const SPEAKERS: ReadonlySet<string> = new Set(['user', 'assistant', 'note']);
 
 /**
  * A provider's recall as items: its `items` that have a text, else its `contextText` as one item, else none. An item
- * keeps its `speaker` when it is `user`, `assistant` or `note`, and its `page` and `when` when they are non-empty
+ * keeps its `speaker` when it is `user`, `assistant` or `note`, and its `id`, `page` and `when` when they are non-empty
  * strings; any other value of those fields is left out, so rendering the block never fails on a provider's record.
  *
  * @param result - What a memory provider's `getContext` returned.
@@ -82,9 +84,10 @@ export function memoryItemsOf(
   const items: MemoryRecallItem[] = [];
   for (const entry of listed) {
     if (typeof entry !== 'object' || entry === null) continue;
-    const { speaker, page, when, text } = entry as Record<string, unknown>;
+    const { id, speaker, page, when, text } = entry as Record<string, unknown>;
     if (typeof text !== 'string' || text.length === 0) continue;
     items.push({
+      ...(speaker !== 'note' && typeof id === 'string' && id ? { id } : {}),
       ...(typeof speaker === 'string' && SPEAKERS.has(speaker) ? { speaker: speaker as MemoryRecallItem['speaker'] } : {}),
       ...(typeof page === 'string' && page ? { page } : {}),
       ...(typeof when === 'string' && when ? { when } : {}),

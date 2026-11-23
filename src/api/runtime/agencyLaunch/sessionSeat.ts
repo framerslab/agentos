@@ -72,6 +72,8 @@ export interface InternalSeatOptions extends SessionSeatOptions {
   memberRef?: string;
   /** The explicit user the seat's session runs as: the parent turn's. sessionSeat() names none. */
   userId?: string;
+  /** The seat's session sends no end-user id to its provider: the parent turn sent none. */
+  withholdUserId?: true;
   /** Memory scoped to the seat session and no learner. Set when absent, so every seat's session is a seat session. */
   seat?: { memoryScope: 'session'; learner: 'none' };
   /** The frame each of the seat's turns carries (`metadata.agencyLaunch`). */
@@ -112,7 +114,10 @@ const SEND_OVERRIDES = ['maxTokens', 'requestTimeout', 'toolChoice', 'cacheDiagn
 const READ_ON_EVERY_CALL = new Set(['abortSignal', 'budget', 'usageLedger']);
 
 /** A gmi() handle's session opener, which takes the internal `__seat` setting. */
-type SeatSessionOpener = (id: string, options: { userId?: string; __seat: { memoryScope: 'session'; learner: 'none' } }) => AgentSession;
+type SeatSessionOpener = (
+  id: string,
+  options: { userId?: string; __seat: { memoryScope: 'session'; learner: 'none'; withholdUserId?: true } },
+) => AgentSession;
 
 const emptyUsage = (): LaunchUsage => ({ promptTokens: 0, completionTokens: 0, totalTokens: 0 });
 
@@ -268,7 +273,10 @@ export function buildSessionSeat(member: Agent, options: InternalSeatOptions): S
   const open = (): AgentSession => {
     if (!session) {
       const opener = (member as unknown as { session: SeatSessionOpener }).session.bind(member);
-      session = opener(seatId, { ...(options.userId !== undefined ? { userId: options.userId } : {}), __seat: seatSettings });
+      session = opener(seatId, {
+        ...(options.userId !== undefined ? { userId: options.userId } : {}),
+        __seat: { ...seatSettings, ...(options.withholdUserId ? { withholdUserId: true as const } : {}) },
+      });
     }
     return session;
   };

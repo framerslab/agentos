@@ -28,6 +28,18 @@ import type { GuardedMemoryWrite, TurnScopes } from '../learning/types.js';
 import { GMIMood, GMIInteractionType } from './IGMI';
 import type { UserContext, GMITurnInput } from './IGMI';
 import { turnContentText } from './turnContent';
+import type { SoulFiling, SoulTurnAnswer, SoulTurnMemory } from './soulTurnMemory';
+import {
+  errorNameOf,
+  failedWriteEntry,
+  memoryWriteRecordOf,
+  writeEntryOf,
+  type MemoryWriteEntry,
+  type MemoryWriteRecord,
+} from '../../api/runtime/memoryWriteRecord.js';
+
+/** The emotional state a filing stamped `'neutral'` is stored with. */
+const NEUTRAL_PAD: Readonly<PADState> = Object.freeze({ valence: 0, arousal: 0, dominance: 0 });
 
 /**
  * Identity of the turn a memory retrieval runs for. The bridge combines it
@@ -41,8 +53,27 @@ export interface CognitiveMemoryTurnScope {
   conversationId?: string;
   /** Organization the turn runs under, when known. */
   organizationId?: string;
+  /** The high-level session's key within `user`, in a form distinct from any named user's key. @internal */
+  sessionUserScopeId?: string;
   /** Where a learning layer exists: the turn's scope ids, which take the place of the lists below. */
   learning?: CognitiveMemoryTurnLearning;
+  /**
+   * A souled agent's view of the turn: on the manager of that agent's mind (`rows: 'mind'`) the turn reads the
+   * person's key alone, in place of every list above, and nothing for a view with no key. On any other manager it is
+   * not read.
+   *
+   * @internal
+   */
+  soul?: SoulTurnMemory;
+  /**
+   * The answer that view gave for the turn (`soul.begin()`). On the manager of a souled agent's mind, a turn's recall
+   * drifts the emotional context of what it reads (reconsolidation) only when the answer allows it: an answer that
+   * holds `reconsolidation: false`, the one a minor's turn and the turn of a person who objects to profiling get, and
+   * a turn with no answer, read with `skipReconsolidation`. On any other manager it is not read.
+   *
+   * @internal
+   */
+  soulAnswer?: SoulTurnAnswer;
 }
 
 /**
@@ -122,12 +153,6 @@ export function captureWithoutBlock(capture: MemoryRecallCapture, budget: Effect
   };
 }
 
-/** The name of an error's class, for a trace entry: a manager's or a store's message can quote the query or a memory. */
-function errorNameOf(error: unknown): string {
-  const name = (error as { name?: unknown } | null | undefined)?.name;
-  return typeof name === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(name) ? name : 'Error';
-}
-
 /**
  * Options for encoding a piece of content into cognitive memory.
  */
@@ -147,6 +172,53 @@ export interface CognitiveMemoryEncodeOptions {
    * names the turn's second user, and is written only while that user's tombstone is clear.
    */
   learning?: CognitiveMemoryTurnLearning;
+  /**
+   * A souled agent's view of the turn: on the manager of that agent's mind (`rows: 'mind'`) the content is filed
+   * through the view's gate under the person's key, in place of `scopeId` and `learning`. On any other manager it is
+   * not read.
+   *
+   * @internal
+   */
+  soul?: SoulTurnMemory;
+}
+
+
+/**
+ * `text`, a memory block, with `tag` left out of each tag list its structured lines show (`| tags: a, b, c)`). A turn
+ * that sends the model no user id shows the user's id among no recalled trace's tags, a trace an earlier turn or an
+ * earlier release tagged with it included. A list that held `tag` alone goes with it; the stored traces are unchanged.
+ *
+ * @internal
+ */
+export function withoutShownTag(text: string, tag: string): string {
+  if (!tag || !text.includes(tag)) return text;
+  // A list runs from a line's last ` | tags: ` to the last `)` of the line, so an id that holds `, ` or `)` is matched
+  // whole.
+  return text.replace(/ \| tags: ((?:(?! \| tags: )[^\n])*)\)/g, (whole: string, list: string) => {
+    const kept = withoutListItem(list, tag);
+    if (kept === list) return whole;
+    return kept ? ` | tags: ${kept})` : ')';
+  });
+}
+
+/** `list`, a tag list joined with `, `, with each item equal to `tag` left out; `tag` may itself hold `, `. */
+function withoutListItem(list: string, tag: string): string {
+  const separator = ', ';
+  let kept = list;
+  for (;;) {
+    if (kept === tag) return '';
+    if (kept.startsWith(tag + separator)) {
+      kept = kept.slice(tag.length + separator.length);
+      continue;
+    }
+    if (kept.endsWith(separator + tag)) {
+      kept = kept.slice(0, kept.length - separator.length - tag.length);
+      continue;
+    }
+    const at = kept.indexOf(separator + tag + separator);
+    if (at < 0) return kept;
+    kept = kept.slice(0, at) + kept.slice(at + separator.length + tag.length);
+  }
 }
 
 /**
@@ -161,8 +233,14 @@ export interface CognitiveMemoryEncodeOptions {
  * needing direct mutation access.
  */
 export class CognitiveMemoryBridge {
-  /** The query and scopes each context {@link assembleContext} returned was assembled for, so a hop can ask again. */
-  private readonly turns = new WeakMap<AssembledMemoryContext, { query: string; scopes: Array<{ scope: MemoryScope; scopeId: string }> }>();
+  /**
+   * The query, the scopes and whether reconsolidation was skipped for each context {@link assembleContext} returned,
+   * so a hop can ask again as the turn asked.
+   */
+  private readonly turns = new WeakMap<
+    AssembledMemoryContext,
+    { query: string; scopes: Array<{ scope: MemoryScope; scopeId: string }>; skipReconsolidation: boolean }
+  >();
 
   /**
    * Creates a new CognitiveMemoryBridge.
@@ -181,6 +259,8 @@ export class CognitiveMemoryBridge {
     private readonly getPersonaId: () => string,
     private readonly getGmiId: () => string,
     private readonly addTraceEntry: (type: string, message: string, details?: Record<string, any>) => void,
+    /** True while the turn may send no request the user's id: its traces are not tagged with the user's id. */
+    private readonly withholdsUserId: () => boolean = () => false,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -221,8 +301,9 @@ export class CognitiveMemoryBridge {
   /**
    * Builds a de-duplicated set of tags for a memory trace.
    *
-   * Tags include the message role, active persona ID, current user ID, and
-   * the task domain. Falsy or whitespace-only values are filtered out. The
+   * Tags include the message role, active persona ID, current user ID (none on
+   * a turn that sends the model no user id), and the task domain. Falsy or
+   * whitespace-only values are filtered out. The
    * memory block reads the role tag 'assistant' on a trace with sourceType
    * 'agent_inference' as the agent's own earlier reply.
    *
@@ -234,7 +315,8 @@ export class CognitiveMemoryBridge {
     const tags = [
       role,
       this.getPersonaId(),
-      userCtx?.userId,
+      // The memory block shows a trace's tags to the model: a turn that sends it no user id tags nothing with one.
+      this.withholdsUserId() ? undefined : userCtx?.userId,
       (userCtx as any)?.domain,
     ].filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
     return Array.from(new Set(tags));
@@ -256,10 +338,15 @@ export class CognitiveMemoryBridge {
    * - every scope for the memory manager's owner id, under which the manager
    *   files a trace written without a scope id.
    *
-   * Scopes owned by other users or other sessions are never listed.
+   * A high-level session supplies its own key within `user`. That scope then reads the named user and session
+   * keys alone, since a GMI id or the memory owner id can be another person's id.
    *
    * Where a learning layer exists (`turn.learning`) the lists are the turn's own: see
    * {@link CognitiveMemoryBridge.learnerRetrievalScopes}.
+   *
+   * On the manager of a souled agent's mind (`rows: 'mind'`) the list is the one scope of the turn's view of the soul
+   * (`turn.soul`), the person's conversation key, whatever else the turn names; a turn with no view, or a view with no
+   * key, reads nothing.
    *
    * @param turn - Session, conversation and organization of the current turn.
    * @returns A de-duplicated scope list.
@@ -267,6 +354,10 @@ export class CognitiveMemoryBridge {
   public buildRetrievalScopes(
     turn?: CognitiveMemoryTurnScope,
   ): Array<{ scope: MemoryScope; scopeId: string }> {
+    if (this.isMindManager()) {
+      const own = turn?.soul?.scope;
+      return own ? [{ scope: own.scope, scopeId: own.scopeId }] : [];
+    }
     if (turn?.learning) return this.learnerRetrievalScopes(turn, turn.learning.scopes);
     const userId = nonBlank(this.getUserContext()?.userId);
     const personaId = nonBlank(this.getPersonaId());
@@ -281,8 +372,8 @@ export class CognitiveMemoryBridge {
     };
 
     add('user', userId);
-    add('user', sessionId);
-    add('user', nonBlank(this.getGmiId()));
+    add('user', turn?.sessionUserScopeId ?? sessionId);
+    if (!turn?.sessionUserScopeId) add('user', nonBlank(this.getGmiId()));
     add('thread', nonBlank(turn?.conversationId));
     add('thread', sessionId);
     add('persona', personaId);
@@ -294,7 +385,8 @@ export class CognitiveMemoryBridge {
     // The manager files a trace written without a scope id under its own
     // owner id, whatever the scope (AgentMemory.remember writes `thread`).
     const owner = this.memoryOwnerId();
-    for (const scope of ['user', 'thread', 'persona', 'organization'] as const) {
+    if (!turn?.sessionUserScopeId) add('user', owner);
+    for (const scope of ['thread', 'persona', 'organization'] as const) {
       add(scope, owner);
     }
     return scopes;
@@ -353,6 +445,28 @@ export class CognitiveMemoryBridge {
     }
   }
 
+  /**
+   * True when the memory manager is a souled agent's mind (`CognitiveMemoryConfig.rows` is `'mind'`): it files and
+   * reads only through the turn's view of the soul.
+   */
+  private isMindManager(): boolean {
+    try {
+      return this.cognitiveMemory.getConfig?.()?.rows === 'mind';
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Whether the bridge files and reads through `soul`, a souled agent's view of a turn: only on the manager of that
+   * agent's mind (`rows: 'mind'`). On any other manager the view is not used.
+   *
+   * @internal
+   */
+  public usesSoul(soul: SoulTurnMemory | undefined): soul is SoulTurnMemory {
+    return soul !== undefined && this.isMindManager();
+  }
+
   /** The memory manager's recall settings, or undefined when it has none or cannot be read. */
   private recallConfig(): ManagerRecallConfig | undefined {
     try {
@@ -382,6 +496,10 @@ export class CognitiveMemoryBridge {
    * shared by several sessions never surfaces another user's or another
    * session's traces in this turn's prompt.
    *
+   * On the manager of a souled agent's mind the recall skips reconsolidation unless the turn's answer
+   * (`turn.soulAnswer`) allows it: what the turn of a minor, or of a person who objects to profiling, reads keeps its
+   * emotional context, and the access is still counted.
+   *
    * @param query - The user's current input text to use as a retrieval query.
    * @param turn - Session, conversation and organization of the current turn.
    * @returns The assembled memory context, or null if cognitive memory is unavailable
@@ -401,13 +519,17 @@ export class CognitiveMemoryBridge {
       if (scopes.length === 0) {
         return null;
       }
+      // On a souled agent's mind, what the recall reads drifts only where the turn's answer says it may.
+      const skipReconsolidation = this.isMindManager() && turn?.soulAnswer?.reconsolidation !== true;
       // The manager's recall.budget.totalTokens, 1600 when unset: the whole block, its preamble included.
       const context = await this.cognitiveMemory.assembleForPrompt(
         query,
         recallBudgetTokens(this.recallConfig()),
         this.getPadState(),
-        { scopes },
+        { scopes, ...(skipReconsolidation ? { skipReconsolidation: true } : {}) },
       );
+      // Changed in place: the manager renders this context again for a model hop by the object it returned.
+      context.contextText = this.withUserTagHidden(context.contextText);
       if (context.contextText.trim()) {
         // Counts, the retrieval, the reranker and the absent legs; the ids only on the host's ask, the text never.
         // With the capture off, the counts come from the assembler's line report, one entry a trace.
@@ -427,13 +549,20 @@ export class CognitiveMemoryBridge {
           ...(this.recallConfig()?.traceIds === true ? { includedMemoryIds: context.includedMemoryIds } : {}),
         });
       }
-      this.turns.set(context, { query, scopes });
+      this.turns.set(context, { query, scopes, skipReconsolidation });
       return context;
     } catch (error: unknown) {
       // The error's class name only: a manager's, a vector store's or a full-text error can quote the turn's words.
       this.addTraceEntry('WARNING', 'Cognitive memory assembly failed.', { errorName: errorNameOf(error) });
       return null;
     }
+  }
+
+  /** A memory block as the turn may show it: with no tag that names the user, on a turn that sends the model no user id. */
+  private withUserTagHidden(text: string): string {
+    if (!this.withholdsUserId()) return text;
+    const userId = this.getUserContext()?.userId;
+    return typeof userId === 'string' && userId.trim() ? withoutShownTag(text, userId) : text;
   }
 
   /** The configured budget of the memory block: the manager's `recall.budget.totalTokens`, 1600 when unset. */
@@ -483,9 +612,12 @@ export class CognitiveMemoryBridge {
       } else {
         const turn = this.turns.get(context);
         if (!turn) return null;
-        next = await this.cognitiveMemory.assembleForPrompt(turn.query, budget.effective, this.getPadState(), { scopes: turn.scopes });
+        next = await this.cognitiveMemory.assembleForPrompt(turn.query, budget.effective, this.getPadState(), {
+          scopes: turn.scopes,
+          ...(turn.skipReconsolidation ? { skipReconsolidation: true } : {}),
+        });
       }
-      return stamped(next, true);
+      return stamped({ ...next, contextText: this.withUserTagHidden(next.contextText) }, true);
     } catch (error: unknown) {
       this.addTraceEntry('WARNING', 'Cognitive memory re-render for a model hop failed.', { errorName: errorNameOf(error) });
       return null;
@@ -502,11 +634,27 @@ export class CognitiveMemoryBridge {
    * is fed once the guard reports the filing kept: a refused filing, and one the guard takes back because its user was
    * forgotten while it ran, feed it nothing. A refused filing is traced with its reason, never its words.
    *
+   * On the manager of a souled agent's mind (`rows: 'mind'`) the content is filed through `options.soul` alone, and
+   * this resolves once the view has answered: see {@link CognitiveMemoryBridge.syncForTurn}. With no view nothing is
+   * filed, and one reasoning-trace warning says so.
+   *
    * @param content - The text content to encode.
-   * @param options - Encoding options (type, sourceType, scopeId, role, and the turn's learning).
+   * @param options - Encoding options (type, sourceType, scopeId, role, the turn's learning, and a souled agent's view).
    */
   public async encode(content: string, options: CognitiveMemoryEncodeOptions): Promise<void> {
     if (!content.trim()) {
+      return;
+    }
+    if (this.isMindManager()) {
+      if (options.soul) {
+        await this.fileThroughSoul(content, options, options.soul);
+        return;
+      }
+      this.addTraceEntry(
+        'WARNING',
+        `Cognitive memory did not file the ${options.role} message: a souled agent's mind files through the turn's view of its soul alone.`,
+        { role: options.role, reason: 'no_soul' },
+      );
       return;
     }
 
@@ -570,24 +718,48 @@ export class CognitiveMemoryBridge {
    *   read from the sourceType and the 'assistant' tag, so a reply an earlier
    *   version filed is shown the same way.
    *
+   * On the manager of a souled agent's mind (`rows: 'mind'`) with the turn's view of the soul (`soul`), the two
+   * sides are filed through the view's gate under the person's key, the user's message first, and this resolves at once
+   * to `{ write }`: the record of the two filings, which settles once the view has answered for each side that had
+   * text, and never rejects. The turn does not wait for it, since the person's write chain can be held by a compile
+   * for as long as its model call runs. On any other manager the view is not used, both sides are awaited as described
+   * above, and this resolves to undefined.
+   *
    * @param turnInput - The turn's input payload.
    * @param responseText - The assistant's generated response text.
    * @param learning - Where a learning layer exists: both are filed under the turn's own user scope id, each through
    *   the turn's guard.
+   * @param soul - A souled agent's view of the turn.
+   * @returns The record of a souled agent's filings, held in an object so that awaiting this never waits for them.
    */
   public async syncForTurn(
     turnInput: GMITurnInput,
     responseText: string,
     learning?: CognitiveMemoryTurnLearning,
-  ): Promise<void> {
+    soul?: SoulTurnMemory,
+  ): Promise<{ write: Promise<MemoryWriteRecord> } | undefined> {
     const inputText = this.stringifyTurnContent(turnInput.content);
     const userCtx = this.getUserContext();
     const filing = learning ? { learning } : {};
+    const filesInput =
+      inputText !== null &&
+      (turnInput.type === GMIInteractionType.TEXT || turnInput.type === GMIInteractionType.MULTIMODAL_CONTENT);
 
-    if (inputText && (
-      turnInput.type === GMIInteractionType.TEXT ||
-      turnInput.type === GMIInteractionType.MULTIMODAL_CONTENT
-    )) {
+    if (this.usesSoul(soul)) {
+      // Both are started here, in order, so the person's chain runs the message before the reply.
+      const sides: Array<Promise<MemoryWriteEntry>> = [];
+      if (filesInput) {
+        sides.push(this.fileThroughSoul(inputText, { type: 'episodic', sourceType: 'user_statement', role: 'user' }, soul));
+      }
+      // A view whose session decides the reply files the reply the session keeps, which a hook may give a turn whose
+      // model wrote nothing.
+      if (responseText.trim() || soul.keptReply === true) {
+        sides.push(this.fileThroughSoul(responseText, { type: 'semantic', sourceType: 'agent_inference', role: 'assistant' }, soul));
+      }
+      return { write: memoryWriteRecordOf(sides) };
+    }
+
+    if (filesInput) {
       await this.encode(inputText, {
         type: 'episodic',
         sourceType: 'user_statement',
@@ -606,11 +778,111 @@ export class CognitiveMemoryBridge {
         ...filing,
       });
     }
+    return undefined;
   }
 
   // ---------------------------------------------------------------------------
   // Private helpers
   // ---------------------------------------------------------------------------
+
+  /**
+   * Starts one filing through a souled agent's view of the turn and resolves with what became of it; never rejects.
+   * The view is called at once, so filings started in order reach the person's chain in that order. Its gate decides
+   * what is kept: the writer it is handed stores the text the gate passes, with the emotional stamp the gate names (a
+   * neutral state, or the mind's mood when the filing was started), under the view's key and marked as the mind's; a
+   * trace that landed after the person was forgotten is deleted through `undo`. The observer hears the kept text once
+   * the entry says it was written, and nothing otherwise; the entry does not wait for it. A view with no key files
+   * nothing (`no_subject`). A failed or skipped side is traced with its error's class name or its reason, never its
+   * words.
+   *
+   * @param content - The side's text.
+   * @param options - Its type, source and role; the role `'user'` files as the person's message, any other as the
+   *   agent's own words.
+   * @param soul - The turn's view of the soul.
+   */
+  private fileThroughSoul(content: string, options: CognitiveMemoryEncodeOptions, soul: SoulTurnMemory): Promise<MemoryWriteEntry> {
+    const role: 'user' | 'assistant' = options.role === 'user' ? 'user' : 'assistant';
+    const own = soul.scope;
+    if (!own) {
+      const entry: MemoryWriteEntry = { role, outcome: 'skipped', reason: 'no_subject' };
+      this.traceSoulEntry(entry);
+      return Promise.resolve(entry);
+    }
+    // Read when the filing starts: the person's chain may reach the write after the next turn has changed them.
+    const pad = this.getPadState();
+    const mood = this.getMood();
+    const tags = options.tags ?? this.buildTags(options.role);
+    let kept: { text: string; pad: PADState } | undefined;
+    const write = async (filing: SoulFiling): Promise<MemoryTrace> => {
+      const stamped = filing.stamp === 'mood';
+      const filedPad: PADState = stamped ? pad : { ...NEUTRAL_PAD };
+      const trace = await this.cognitiveMemory.encode(filing.text, filedPad, stamped ? mood : GMIMood.NEUTRAL, {
+        type: options.type,
+        scope: 'conversation',
+        scopeId: own.scopeId,
+        sourceType: options.sourceType,
+        tags,
+        filing: filing.filing,
+        ...(filing.turnUserId ? { turnUserId: filing.turnUserId } : {}),
+      });
+      kept = { text: filing.text, pad: filedPad };
+      return trace;
+    };
+    const undo = async (trace: MemoryTrace): Promise<void> => {
+      if (typeof this.cognitiveMemory.deleteTraces !== 'function') {
+        throw new Error('the memory manager has no deleteTraces');
+      }
+      await this.cognitiveMemory.deleteTraces([trace.id]);
+    };
+    let filed: Promise<unknown>;
+    try {
+      filed = Promise.resolve(soul.file(role, content, write, undo));
+    } catch (error: unknown) {
+      filed = Promise.reject(error);
+    }
+    return filed.then(
+      async (answer) => {
+        // The view's answer as the record keeps it: the side's own role, and nothing else the view put on it.
+        const entry = writeEntryOf(role, answer) ?? failedWriteEntry(role, new TypeError('the soul gave no write entry'));
+        if (entry.outcome === 'written' && kept) {
+          // Started here and not awaited: the record settles on the gate's answer, never on the observer's model call.
+          void this.observeKept(options.role, kept.text, kept.pad, role).catch(() => undefined);
+        } else if (entry.outcome !== 'written') {
+          this.traceSoulEntry(entry);
+        }
+        return entry;
+      },
+      (error: unknown) => {
+        const entry = failedWriteEntry(role, error);
+        this.traceSoulEntry(entry);
+        return entry;
+      },
+    );
+  }
+
+  /**
+   * Feeds the observer the text a souled agent's gate kept. It is called at once and never rejects: a failure is one
+   * reasoning-trace warning with the error's class name.
+   */
+  private async observeKept(observedRole: CognitiveMemoryEncodeOptions['role'], text: string, pad: PADState, role: 'user' | 'assistant'): Promise<void> {
+    try {
+      await this.cognitiveMemory.observe?.(observedRole, text, pad);
+    } catch (error: unknown) {
+      this.addTraceEntry('WARNING', 'Cognitive memory observation failed.', { role, errorName: errorNameOf(error) });
+    }
+  }
+
+  /** A reasoning-trace entry for a side the soul's gate did not file: its reason, or its error's class name. */
+  private traceSoulEntry(entry: MemoryWriteEntry): void {
+    if (entry.outcome === 'failed') {
+      this.addTraceEntry('WARNING', 'Cognitive memory encoding failed.', { role: entry.role, errorName: entry.errorName });
+    } else if (entry.outcome === 'skipped') {
+      this.addTraceEntry('DEBUG', `Cognitive memory did not file the ${entry.role} message (${entry.reason}).`, {
+        role: entry.role,
+        reason: entry.reason,
+      });
+    }
+  }
 
   /**
    * Converts turn content to a non-empty string or null.

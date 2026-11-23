@@ -116,6 +116,19 @@ function isGmiStateKey(key: string): boolean {
 }
 
 /**
+ * A memory imprint as the one line cognitive memory files: its key, its value and, when it gives one, its
+ * description, so the trace says what it records. An imprint with no value gives none.
+ */
+function imprintText(imprint: { key: string; value?: unknown; description?: unknown }): string {
+  if (imprint.value === undefined || imprint.value === null) return '';
+  // JSON.stringify answers undefined for a value JSON has no form for.
+  const value: unknown = typeof imprint.value === 'string' ? imprint.value : JSON.stringify(imprint.value);
+  if (typeof value !== 'string' || !value.trim()) return '';
+  const description = typeof imprint.description === 'string' ? imprint.description.trim() : '';
+  return `${imprint.key}: ${value}${description ? ` (${description})` : ''}`;
+}
+
+/**
  * One unit of metaprompt work on the queue (a batch or a self-reflection
  * cycle). `isStale()` turns true when the unit ran past its deadline and the
  * queue moved on without it, or when the executor was closed; its results are
@@ -124,11 +137,18 @@ function isGmiStateKey(key: string): boolean {
 export interface MetapromptRun {
   isStale(): boolean;
   /**
+   * True once a deletion of the person the GMI serves discarded the unit ({@link MetapromptExecutor.discardRuns}): it
+   * then keeps nothing of its failure either, whose error can quote the conversation it was sent.
+   */
+  isDiscarded?(): boolean;
+  /**
    * The provider manager the unit's model calls go through, chosen when the unit was queued: the view the executor's
    * manager makes for queued work when it makes one (a gmi() agent's binds the spend budget of the turn that queued
    * the unit), else the executor's manager.
    */
   readonly llmProviderManager?: AIModelProviderManager;
+  /** The cognitive memory writer bound to the turn that queued this work, when there is one. */
+  readonly writeMemoryImprint?: MetapromptExecutorConfig['onMemoryImprint'];
 }
 
 /**
@@ -165,6 +185,12 @@ export class MetapromptExecutor {
   /** Set by {@link MetapromptExecutor.close}: no further work starts, and late results are discarded. */
   private closed = false;
 
+  /** Counted by {@link MetapromptExecutor.discardRuns}: a unit queued before the count moved is stale. */
+  private discards = 0;
+
+  /** The working-memory keys a memory imprint was written to, which {@link MetapromptExecutor.forgetImprints} deletes. */
+  private readonly imprintKeys = new Set<string>();
+
   /** User turns counted so far, to tell whether a queued event batch still belongs to the latest turn. */
   private countedTurns = 0;
 
@@ -190,8 +216,12 @@ export class MetapromptExecutor {
    * Creates a new MetapromptExecutor.
    *
    * @param config - All dependencies and callbacks.
+   * @param imprintForQueuedWork - An internal hook that binds cognitive memory filing to the turn that queues work.
    */
-  constructor(private readonly config: MetapromptExecutorConfig) {
+  constructor(
+    private readonly config: MetapromptExecutorConfig,
+    private readonly imprintForQueuedWork?: () => MetapromptExecutorConfig['onMemoryImprint'] | undefined,
+  ) {
     this.selfReflectionIntervalTurns = 5; // Will be overridden by initialize
   }
 
@@ -363,6 +393,29 @@ export class MetapromptExecutor {
   }
 
   /**
+   * Makes every unit of work queued or running now stale, for a deletion of the person the GMI serves: none applies
+   * its results, and one that has not started makes no model call. Work queued afterwards runs as usual.
+   */
+  public discardRuns(): void {
+    this.discards += 1;
+  }
+
+  /**
+   * Deletes from working memory each key a memory imprint was written to, once the writes to it that had started have
+   * ended: what the metaprompts recorded of the person a GMI serves. Call {@link MetapromptExecutor.discardRuns}
+   * first, so no unit writes an imprint again.
+   *
+   * @throws What working memory throws when a delete fails; the keys not deleted are deleted by the next call.
+   */
+  public async forgetImprints(): Promise<void> {
+    await Promise.all(this.writeTails.values());
+    for (const key of [...this.imprintKeys]) {
+      await this.config.workingMemory.delete(key);
+      this.imprintKeys.delete(key);
+    }
+  }
+
+  /**
    * Chains one unit of metaprompt work onto the queue, so it starts only after
    * all earlier work has settled. A failure is logged to the console and the
    * reasoning trace, and the queue moves on to the next unit.
@@ -375,9 +428,15 @@ export class MetapromptExecutor {
     this.inFlight += 1;
     let overdue = false;
     // The provider manager is chosen now, while the turn that queues the unit is in progress, not when the unit runs.
-    const run: MetapromptRun = { isStale: () => overdue || this.closed, llmProviderManager: this.providersForQueuedWork() };
+    const discardsAtQueue = this.discards;
+    const run: MetapromptRun = {
+      isStale: () => overdue || this.closed || this.discards !== discardsAtQueue,
+      isDiscarded: () => this.discards !== discardsAtQueue,
+      llmProviderManager: this.providersForQueuedWork(),
+      writeMemoryImprint: this.imprintForQueuedWork?.(),
+    };
     const unit = async (): Promise<void> => {
-      if (this.closed) return;
+      if (run.isStale()) return;
       // A provider call that never settles would hold the queue forever;
       // past the deadline the queue moves on, and the unit's late results
       // are discarded (run.isStale()).
@@ -558,7 +617,9 @@ export class MetapromptExecutor {
       );
 
       results.forEach((result, idx) => {
-        if (result.status === 'rejected') {
+        if (result.status === 'rejected' && run?.isDiscarded?.()) {
+          this.config.addTraceEntry('WARNING', `Discarded late results of metaprompt '${metaPrompts[idx].id}'.`);
+        } else if (result.status === 'rejected') {
           // One line for the host as well, which may read no trace (gmi() exposes none): a provider's failure, or a spend
           // budget's refusal, whose default calls nothing.
           const reason: unknown = result.reason;
@@ -967,21 +1028,28 @@ export class MetapromptExecutor {
           continue;
         }
         if (imprint.key) {
-          const stored = await this.writeInOrder(run, imprint.key, () =>
-            this.config.workingMemory.set(imprint.key, imprint.value),
-          );
+          const stored = await this.writeInOrder(run, imprint.key, () => {
+            // Recorded before the write starts, so a forget that waits for the write deletes what it wrote.
+            this.imprintKeys.add(imprint.key);
+            return this.config.workingMemory.set(imprint.key, imprint.value);
+          });
           if (!stored) {
             this.config.addTraceEntry('WARNING', `Discarded late results of metaprompt '${metapromptId}'.`);
             break;
           }
           storedImprintKeys.push(imprint.key);
           stateChanged = true;
+          if (run?.writeMemoryImprint && !run.isStale()) {
+            const content = imprintText(imprint);
+            if (content) await run.writeMemoryImprint(content, ['assistant', 'metaprompt']);
+          }
         }
       }
     }
 
-    // Log state change
-    if (stateChanged) {
+    // Log state change. A run a deletion of the person discarded while a write of it was pending leaves no rationale in
+    // the trace: its words come from the conversation it was sent.
+    if (stateChanged && !run?.isDiscarded?.()) {
       this.config.addTraceEntry(
         'STATE_CHANGE',
         `GMI state updated by metaprompt '${metapromptId}'`,
@@ -1132,6 +1200,13 @@ export class MetapromptExecutor {
         },
       );
 
+      // A cycle that went stale while the provider answered is discarded: the trace keeps nothing of its answer, which
+      // can quote the conversation it was sent, and no JSON repair call is made on its behalf.
+      if (run?.isStale()) {
+        this.config.addTraceEntry('WARNING', "Discarded late results of metaprompt 'gmi_self_trait_adjustment'.");
+        return;
+      }
+
       const responseContent = llmResponse.choices?.[0]?.message?.content;
       if (!responseContent || typeof responseContent !== 'string') {
         throw new GMIError(
@@ -1145,13 +1220,6 @@ export class MetapromptExecutor {
         'LLM response for reflection received.',
         { preview: responseContent.substring(0, 100) },
       );
-
-      // A cycle that went stale while the provider answered is discarded
-      // anyway, so no JSON repair call is made on its behalf.
-      if (run?.isStale()) {
-        this.config.addTraceEntry('WARNING', "Discarded late results of metaprompt 'gmi_self_trait_adjustment'.");
-        return;
-      }
 
       const parseOptions: ParseJsonOptions = {
         attemptFixWithLLM: true,
@@ -1170,6 +1238,11 @@ export class MetapromptExecutor {
         parseOptions,
       );
 
+      // The same once the answer was parsed, or repaired, while the cycle went stale.
+      if (run?.isStale()) {
+        this.config.addTraceEntry('WARNING', "Discarded late results of metaprompt 'gmi_self_trait_adjustment'.");
+        return;
+      }
       if (!parsedUpdates) {
         throw new GMIError(
           'Failed to parse/fix JSON from self-reflection LLM.',
@@ -1185,6 +1258,9 @@ export class MetapromptExecutor {
 
       // Apply updates via callbacks
       const storedImprintKeys = await this.applyMetapromptUpdates(parsedUpdates, 'gmi_self_trait_adjustment', run);
+
+      // A cycle a deletion discarded while its updates were being applied keeps nothing of them in the trace either.
+      if (run?.isDiscarded?.()) return;
 
       // Trace only the imprints that were stored: a late or stale run
       // stores none, and later reflections read this trace as evidence.
@@ -1204,6 +1280,12 @@ export class MetapromptExecutor {
         );
       }
     } catch (error: any) {
+      if (run?.isDiscarded?.()) {
+        // A deletion of the person the GMI serves discarded the cycle: its failure, whose error can quote the
+        // conversation it was sent, is kept nowhere either.
+        this.config.addTraceEntry('WARNING', "Discarded late results of metaprompt 'gmi_self_trait_adjustment'.");
+        return;
+      }
       const gmiError = createGMIErrorFromError(
         error,
         GMIErrorCode.GMI_PROCESSING_ERROR,

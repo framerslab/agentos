@@ -24,6 +24,7 @@
  * With `memory.store` the manager files into a Brain there and keeps an archive over the Brain's adapter; the caller
  * opens the Brain ({@link openAgentMemoryBrain}) and closes it once the manager has closed.
  */
+import type { StorageAdapter } from '@framers/sql-storage-adapter';
 import { CognitiveMemoryManager } from '../../cognition/memory/CognitiveMemoryManager.js';
 import { assertRecallConfig } from '../../cognition/memory/retrieval/recall/budget.js';
 import type { CognitiveMemoryConfig, CognitiveMemoryPersonaConfig, HexacoTraits, ManagerRecallConfig, PADState } from '../../cognition/memory/core/config.js';
@@ -207,6 +208,19 @@ export function assertEmbeddingAvailable(memory: MemoryConfig, env: Env = proces
 }
 
 /**
+ * The provider and model cognitive memory's embedding calls go to, resolved as the memory resolves them when it is
+ * built: a model's own `provider:` prefix, and the provider default and environment when `memory.embedding` names no
+ * provider.
+ *
+ * @internal
+ * @throws {Error} As {@link assertEmbeddingAvailable} does.
+ */
+export function embeddingRouteOf(memory: MemoryConfig, env: Env = process.env): { provider: string; model: string } {
+  const target = resolveEmbeddingTarget(memory, env);
+  return { provider: target.providerId, model: target.modelId };
+}
+
+/**
  * The checks on `memory.embedding` that read no environment, for `gmi()` to run
  * when the agent is built: with a provider set, that it has embeddings, that the
  * model resolves on it, that a declared dimension is a positive integer, and that
@@ -265,6 +279,25 @@ export function assertMemoryStore(store: unknown, learningOn: boolean, agentKey:
   }
 }
 
+/**
+ * Refuses a PostgreSQL adapter that reads BIGINT as text, before a Brain opens on it: the Brain's integer columns are
+ * BIGINT there, and read as text a trace's retrieval count and times load as strings and an access appends to the
+ * count. Runs one statement, on a PostgreSQL adapter alone; any other adapter is let through.
+ *
+ * @param adapter - The adapter a Brain is about to open on.
+ * @param what - Who holds the adapter, the start of the refusal's message (`its PostgreSQL adapter`).
+ * @throws {Error} `<what> reads BIGINT as text; ...`, naming `typeParsers: { int8: 'number' }`.
+ */
+export async function assertBigintReadsAsNumbers(adapter: StorageAdapter, what: string): Promise<void> {
+  if (!String(adapter.kind).includes('postgres')) return;
+  const probe = await adapter.get<{ n: unknown }>('SELECT CAST(1 AS BIGINT) AS n');
+  if (typeof probe?.n !== 'number') {
+    throw new Error(
+      `${what} reads BIGINT as text; open the adapter with typeParsers: { int8: 'number' }, as Brain.openPostgres opens its own, so a trace's counts and times load as numbers`,
+    );
+  }
+}
+
 /** The Brain behind `memory.store`, and how to let go of it. */
 export interface AgentMemoryBrain {
   brain: Brain;
@@ -289,14 +322,7 @@ export async function openAgentMemoryBrain(store: NonNullable<MemoryConfig['stor
       const brain = await Brain.openSqlite(store.path, { brainId: agentKey });
       return { brain, close: () => brain.close() };
     }
-    if (String(store.adapter.kind).includes('postgres')) {
-      const probe = await store.adapter.get<{ n: unknown }>('SELECT CAST(1 AS BIGINT) AS n');
-      if (typeof probe?.n !== 'number') {
-        throw new Error(
-          "its PostgreSQL adapter reads BIGINT as text; open the adapter with typeParsers: { int8: 'number' }, as Brain.openPostgres opens its own, so a trace's counts and times load as numbers",
-        );
-      }
-    }
+    await assertBigintReadsAsNumbers(store.adapter, 'its PostgreSQL adapter');
     const brain = await Brain.openWithAdapter(store.adapter, { brainId: store.brainId?.trim() || agentKey });
     return { brain, close: async () => undefined };
   } catch (error) {
@@ -327,6 +353,22 @@ export interface AgentCognitiveMemoryOptions {
    * memory's `close()`.
    */
   brain?: Brain;
+  /**
+   * Which of the Brain's rows the manager loads, reads and files (`CognitiveMemoryConfig.rows`): `'mind'` for a souled
+   * agent's mind, which files its conversation traces with a filing and reads those alone.
+   *
+   * @default 'all'
+   * @internal
+   */
+  rows?: 'all' | 'mind';
+  /**
+   * When the manager loads the Brain's rows (`CognitiveMemoryConfig.hydration`): `'scopes'` loads a scope when a caller
+   * asks for it, and never the brain's newest rows at the first read.
+   *
+   * @default 'brain'
+   * @internal
+   */
+  hydration?: 'brain' | 'scopes';
 }
 
 export interface AgentCognitiveMemory {
@@ -530,6 +572,8 @@ export async function createAgentCognitiveMemory(opts: AgentCognitiveMemoryOptio
     ...(opts.mechanisms ? { cognitiveMechanisms: opts.mechanisms } : {}),
     consolidation: { enabled: consolidationEnabled },
     ...(opts.brain ? { brain: opts.brain, archive } : {}),
+    ...(opts.rows === 'mind' ? { rows: 'mind' as const } : {}),
+    ...(opts.hydration === 'scopes' ? { hydration: 'scopes' as const } : {}),
     ...(opts.memory.persistAccessState === false ? { persistAccessState: false } : {}),
     // The block's budget and the capture (memory.recall), checked again by the manager's initialize().
     ...recallFor(opts, embedding.label),
@@ -538,7 +582,7 @@ export async function createAgentCognitiveMemory(opts: AgentCognitiveMemoryOptio
   await manager.initialize(config);
 
   let closing: Promise<void> | undefined;
-  return {
+  const built: AgentCognitiveMemory = {
     manager,
     close: () =>
       (closing ??= (async () => {
@@ -553,4 +597,21 @@ export async function createAgentCognitiveMemory(opts: AgentCognitiveMemoryOptio
         }
       })()),
   };
+  if (embedding.label) builtEmbeddings.set(built, { ...embedding.label });
+  return built;
+}
+
+/** The provider and model each cognitive memory this module built embeds with; none for a caller's embedding manager. */
+const builtEmbeddings = new WeakMap<AgentCognitiveMemory, { provider: string; model: string }>();
+
+/**
+ * The provider and model a cognitive memory {@link createAgentCognitiveMemory} built embeds with: what its build
+ * resolved, whatever the default provider or the environment say after it. Undefined for one built on an embedding
+ * manager the caller passed, which names none.
+ *
+ * @internal
+ */
+export function embeddingBuiltFor(memory: AgentCognitiveMemory): { provider: string; model: string } | undefined {
+  const label = builtEmbeddings.get(memory);
+  return label ? { ...label } : undefined;
 }
