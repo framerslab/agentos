@@ -523,16 +523,6 @@ function soulMechanismsOf(given: CognitiveMechanismsConfig | undefined): Cogniti
   };
 }
 
-/**
- * The mechanisms a host turned on (`enabled: true`) that nothing runs on an agent `souledAgent()` builds: temporal
- * gist and persona drift run only inside a consolidation cycle, which such an agent refuses, and involuntary recall
- * only where the prompt assembler is handed the mechanisms engine and every trace, which the agent's memory manager
- * does not do.
- */
-function inactiveMechanismsOf(given: CognitiveMechanismsConfig | undefined): Array<'temporalGist' | 'involuntaryRecall' | 'personaDrift'> {
-  return (['temporalGist', 'involuntaryRecall', 'personaDrift'] as const).filter((name) => given?.[name]?.enabled === true);
-}
-
 /** `work`'s result, or {@link TIMED_OUT} when it has not settled within `ms`. A rejection is the caller's to catch. */
 async function within<T>(work: Promise<T>, ms: number): Promise<T | typeof TIMED_OUT> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -1049,8 +1039,8 @@ export type SouledAgent = Agent & {
  *
  * With `runtime: 'gmi'` and cognitive memory on, `memory.embedding.provider` is named by the host: none is picked from
  * the default provider or the environment, and a model whose `provider:` prefix names another provider is refused.
- * Consolidation stays off. A `temporalGist`, `involuntaryRecall` or `personaDrift` turned on writes one
- * `memory.mechanism_inactive` line as the agent is built, since nothing runs it on such an agent. Where the soul gives
+ * Consolidation stays off. Each explicitly enabled mechanism whose hook cannot act writes one
+ * `memory.mechanism_inactive` line as the agent is built. A seat session has no cognitive memory. Where the soul gives
  * a store, the agent's mind runs on these defaults too: reconsolidation, involuntary recall and temporal gist run only
  * where the host's mechanisms config turns one on (`enabled: true`), and every other mechanism as the config gives it.
  * Each side of a turn is stored with a neutral emotional state unless {@link SouledAgentOptions.emotionalStamp} is
@@ -1125,14 +1115,6 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   // Cognitive memory names its embedding provider and leaves consolidation off: refused here, before the soul loads,
   // so nothing has been opened.
   if (mind?.memory) assertSoulMindMemory(mind.memory);
-  /**
-   * Says each mechanism the host turned on that nothing runs on the agent, in one `memory.mechanism_inactive` line
-   * each, as the agent is built.
-   */
-  const sayInactiveMechanisms = (): void => {
-    if (!mind?.memory) return;
-    for (const mechanism of inactiveMechanismsOf(mind.mechanisms)) memoryLog.warn('memory.mechanism_inactive', { mechanism });
-  };
   /** The key the tombstone ledger is handed: one key is the current key. A `tombstoneKey` that holds nothing is none. */
   const key =
     tombstoneKey === undefined
@@ -1171,7 +1153,6 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
    * agent's rule for the end user's id: no session turn sends it to the model provider unless the host opts in.
    */
   const plainAgent = (options: AgentOptions, agentId: string | undefined): Agent => {
-    sayInactiveMechanisms();
     if (options.runtime === 'gmi') {
       // No store: its cognitive memory, when on, stays its GMI's own.
       shareSoulStore(options, {
@@ -1487,7 +1468,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   /**
    * The decision a GMI turn read when it asked for its answer (`begin()` of the turn's soul memory), by the turn's
    * context, for as long as the context lives: a recall that resumes after its timeout reads it, so the host is asked
-   * once a turn and the turn's writes keep the decision the turn began with.
+   * once a turn and the turn's writes keep the decision the turn began with. A metaprompt's imprint, filed once the
+   * turn's reply has closed the turn's decision, reads it too.
    */
   const mindDecisions = new WeakMap<MemoryHookContext, Promise<TurnPolicy>>();
   /**
@@ -1607,7 +1589,9 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
    * The decision of the turn a hook call belongs to. A turn's recall opens it; the write of its reply closes it, so
    * the whole turn recalls and files under one answer, and a hook that failed is not asked a second time in the turn.
    * A decision keeps, from when it is opened, how many corrections and single deletions its subject's memory had been
-   * through ({@link correctionsAtDecision}).
+   * through ({@link correctionsAtDecision}). What a GMI turn files as the agent's once its reply has closed its
+   * decision, a metaprompt's imprint, reads the decision the turn began with: the host is asked nothing for a turn
+   * that has ended.
    */
   const turnPolicyOf = (
     context: MemoryHookContext,
@@ -1619,6 +1603,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     const asked = at === 'recall' ? mindDecisions.get(context) : undefined;
     if (asked) return asked;
     const open = at === 'recall' ? undefined : turnDecisions.get(context);
+    const ended = at === 'assistant' && !open ? mindDecisions.get(context) : undefined;
+    if (ended) return ended;
     const decision = open ?? decide(context, subject, scopeId);
     if (!open) correctionsAtDecision.set(decision, correctionCounts.get(scopeId) ?? 0);
     if (at === 'mind') mindDecisions.set(context, decision);
@@ -1877,8 +1863,14 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
         memoryLog.warn('memory.write_refused', { reason: 'forgotten' });
         return { role, outcome: 'skipped', reason: 'forgotten' };
       }
+      // A metaprompt's imprint can be filed after its turn's reply closed the turn's decision. It is held to that
+      // decision, read with no new ask of the host, and to the account's newest answer: one given since that keeps no
+      // memory, or a failed one, stops it.
+      const afterItsTurn = role === 'assistant' && !turnDecisions.has(context) && mindDecisions.has(context);
       const decision = turnPolicyOf(context, subject, scopeId, role);
-      const policy = await decision;
+      const decided = await decision;
+      const newest = afterItsTurn ? latestAnswers.get(scopeId) : undefined;
+      const policy = newest !== undefined && decided !== 'failed' && decided.longTerm !== 'off' ? newest : decided;
       if (policy === 'failed') {
         memoryLog.warn('memory.write_refused', { reason: 'policy_failed' });
         return { role, outcome: 'skipped', reason: 'policy_failed' };
@@ -2500,7 +2492,6 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   }
   // A learning layer gmi() builds from these options writes and reads the store's ledger.
   shareForgottenLedger(agentOptions, forgotten);
-  sayInactiveMechanisms();
   if (rest.runtime === 'gmi') {
     // The GMI runtime reads the soul's store by the same options object, cognitive memory on or off: each session
     // turn's view of the memory rules, whether the end user's id goes to the model provider, and the Brain its

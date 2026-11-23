@@ -53,6 +53,8 @@ export interface CognitiveMemoryTurnScope {
   conversationId?: string;
   /** Organization the turn runs under, when known. */
   organizationId?: string;
+  /** The high-level session's key within `user`, in a form distinct from any named user's key. @internal */
+  sessionUserScopeId?: string;
   /** Where a learning layer exists: the turn's scope ids, which take the place of the lists below. */
   learning?: CognitiveMemoryTurnLearning;
   /**
@@ -315,7 +317,8 @@ export class CognitiveMemoryBridge {
    * - every scope for the memory manager's owner id, under which the manager
    *   files a trace written without a scope id.
    *
-   * Scopes owned by other users or other sessions are never listed.
+   * A high-level session supplies its own key within `user`. That scope then reads the named user and session
+   * keys alone, since a GMI id or the memory owner id can be another person's id.
    *
    * Where a learning layer exists (`turn.learning`) the lists are the turn's own: see
    * {@link CognitiveMemoryBridge.learnerRetrievalScopes}.
@@ -348,8 +351,8 @@ export class CognitiveMemoryBridge {
     };
 
     add('user', userId);
-    add('user', sessionId);
-    add('user', nonBlank(this.getGmiId()));
+    add('user', turn?.sessionUserScopeId ?? sessionId);
+    if (!turn?.sessionUserScopeId) add('user', nonBlank(this.getGmiId()));
     add('thread', nonBlank(turn?.conversationId));
     add('thread', sessionId);
     add('persona', personaId);
@@ -361,7 +364,8 @@ export class CognitiveMemoryBridge {
     // The manager files a trace written without a scope id under its own
     // owner id, whatever the scope (AgentMemory.remember writes `thread`).
     const owner = this.memoryOwnerId();
-    for (const scope of ['user', 'thread', 'persona', 'organization'] as const) {
+    if (!turn?.sessionUserScopeId) add('user', owner);
+    for (const scope of ['thread', 'persona', 'organization'] as const) {
       add(scope, owner);
     }
     return scopes;

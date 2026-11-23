@@ -637,6 +637,17 @@ export function gmi(opts: GmiOptions): GmiHandle {
    * other agent, which keeps its cognitive memory as before.
    */
   const soulBrain = cognitiveMemoryOn ? soulStore?.brain : undefined;
+  if (cognition.memory && cognition.mechanisms) {
+    // Involuntary recall needs a prompt assembler input the manager never supplies, and schema encoding needs centroids.
+    const inactive = ['involuntaryRecall', 'schemaEncoding'] as const;
+    const requiresConsolidation = ['temporalGist', 'sourceConfidenceDecay', 'emotionRegulation', 'personaDrift'] as const;
+    const unavailable = cognition.memory.consolidation?.enabled === true ? inactive : [...inactive, ...requiresConsolidation];
+    for (const mechanism of unavailable) {
+      if (cognition.mechanisms[mechanism]?.enabled === true) {
+        memoryLog.warn('memory.mechanism_inactive', { mechanism });
+      }
+    }
+  }
   // And who hears where the agent sends text: each model attempt as the gateway resolved it, and the embedding its
   // cognitive memory was built with.
   const routeObserver = routeObserverOf(opts);
@@ -1267,7 +1278,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
       // Every turn of the session runs under this signal; close() aborts it.
       const stopTurns = new AbortController();
       // The memory the agent's sessions shared when this one opened.
-      const sessionMemory = memory;
+      // A seat of a souled agent has conversation history but no cognitive memory.
+      const sessionMemory = seat && soulStore ? undefined : memory;
 
       // The session's learner session, when learning is on: one for this agent.session() entry, built with its
       // first turn and ended by close(). A session that keeps no history builds a GMI per turn, and each gets it.
@@ -1276,24 +1288,22 @@ export function gmi(opts: GmiOptions): GmiHandle {
       const learner = retryingOnce<ILearnerSession | undefined>(async () => {
         const { persona } = await shared.get();
         const memoryScopeId = await memoryScopeIdOf();
-        const manager = soulBrain ? undefined : (await sessionMemory.get())?.manager;
+        const manager = soulBrain ? undefined : (await sessionMemory?.get())?.manager;
         return learnerSessionFor(memoryScopeId, persona.id, sessionOptions?.userId, { noLearner: seat?.learner === 'none', ...(manager ? { manager } : {}) });
       });
       const buildSessionGmi = async (gmiId: string): Promise<BuiltGmi> => {
         const { persona } = await shared.get();
-        return buildGmi(gmiId, persona, await sessionMemory.get(), maxSteps, undefined, await learner.get());
+        return buildGmi(gmiId, persona, await sessionMemory?.get(), maxSteps, undefined, await learner.get());
       };
       // The session's own GMI, when it keeps history; a GMI per turn otherwise.
       const own = retryingOnce(async () => buildSessionGmi(`gmi-${await memoryScopeIdOf()}`));
       let ownBuilt: BuiltGmi | undefined;
 
-      // Cognitive memory files the replies under the memory scope's session and
-      // the user's messages under its user: the session's own scope, a new one
-      // for an id opened again after close(). A seat session's user is its own
-      // scope too, so nothing it is told is filed under the user it runs as.
-      const turnMemoryScope = (memoryScopeId: string): { sessionId: string; userId: string } => ({
+      // The bridge uses the session's own form for its replies and for every turn without a named memory user,
+      // including a seat. A session id may equal another person's user id.
+      const turnMemoryScope = (memoryScopeId: string): NonNullable<GmiForTurn['memoryScope']> => ({
         sessionId: memoryScopeId,
-        userId: seat?.memoryScope === 'session' ? memoryScopeId : (hookUser ?? memoryScopeId),
+        ...(!seat && hookUser ? { userId: hookUser } : {}),
       });
 
       // A send made after close() fails; one made before it runs, and close() waits for it. The turn's memory scope

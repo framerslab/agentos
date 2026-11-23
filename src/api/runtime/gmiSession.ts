@@ -227,7 +227,7 @@ export interface GmiForTurn {
    * The ids the turn's cognitive memory files and recalls under, when the session learns them only as it serves the
    * turn (a gmi() session id's generation, which `memory.store` holds); in place of {@link GmiSessionDeps.memoryScope}.
    */
-  memoryScope?: { userId: string; sessionId: string };
+  memoryScope?: { userId?: string; sessionId: string };
 }
 
 /** What a session hands the turn runner. */
@@ -244,7 +244,7 @@ export interface GmiSessionDeps {
    * id opened again after close() keeps its id for tools, and its memory gets
    * a scope of its own. Unset, memory uses `userId` and `sessionId`.
    */
-  memoryScope?: { userId: string; sessionId: string };
+  memoryScope?: { userId?: string; sessionId: string };
   /**
    * The end-user id the turn's model calls send to the provider (OpenAI's `user`
    * / `safety_identifier`): a user id the caller passed, never a session or call
