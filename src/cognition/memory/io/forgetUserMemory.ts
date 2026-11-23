@@ -7,6 +7,7 @@
  */
 import { messageOf } from '../../../api/runtime/memoryObserveFailures.js';
 import type { MemoryRecipient } from '../../../api/runtime/memoryRecipients.js';
+import type { AgentSession } from '../../../api/agent.js';
 import type { SoulMind } from '../../../api/runtime/soulStore.js';
 import { errorFields } from '../../../core/logging/events.js';
 import { agentosVersion } from '../../learning/ledger/canonical.js';
@@ -667,6 +668,17 @@ export interface ReapplyTombstonesOptions
   /** The clock, in Unix ms. Default `Date.now`. */
   now?: () => number;
   /**
+   * The mind of a souled agent on `runtime: 'gmi'` with cognitive memory on: each trace the ledger records as deleted
+   * that the store holds again is deleted through it before the store's own delete, with what the mind keeps of it,
+   * and the traces deleted under a conversation key leave the working memory of that key's open sessions
+   * (`sessionsOf`).
+   *
+   * @internal
+   */
+  mind?: Pick<SoulMind, 'deleteTraces' | 'evictTraces'>;
+  /** The sessions open for one conversation key's subject, whose working memory `mind` drops the traces from. Unset: none. */
+  sessionsOf?: (scopeId: string) => Iterable<AgentSession>;
+  /**
    * Called with a conversation key just before the traces a restore brought back under it are deleted again, and once
    * more when that has settled, as a correction's own deletion is announced: a running turn of that subject that
    * recalled one of them does not file a reply restating it. Unset: nothing is called.
@@ -684,16 +696,17 @@ interface DeletedTracesReapplied {
 
 /**
  * Deletes again each trace the ledger records as deleted ({@link ForgottenLedger.markTracesDeleted}) that the store
- * still holds, live or soft-deleted, as after a restore from a backup taken before a correction or a single deletion.
+ * still holds, live or soft-deleted, as after a restore from a backup taken before a correction or a single deletion,
+ * through a souled agent's mind first when there is one (`mind`).
  * Under a conversation key, each page built from one goes first and is named for the next compile to build again from
  * the traces of it that are left, as in a correction; a key whose page cannot be deleted keeps its traces, so the next
  * re-application finds the page by them.
  */
 async function reapplyDeletedTraces(
-  options: Pick<ReapplyTombstonesOptions, 'memory' | 'wiki' | 'onKey' | 'changing'>,
+  options: Pick<ReapplyTombstonesOptions, 'memory' | 'wiki' | 'onKey' | 'changing' | 'mind' | 'sessionsOf'>,
   ledger: ForgottenLedger,
 ): Promise<DeletedTracesReapplied> {
-  const { memory } = options;
+  const { memory, mind } = options;
   const done: DeletedTracesReapplied = { traces: 0, missed: 0 };
   const marked = await ledger.deletedTraceIds();
   if (marked.length === 0) return done;
@@ -703,11 +716,27 @@ async function reapplyDeletedTraces(
     if (row.scope === CONVERSATION_SCOPE && row.scopeId !== '') byKey.set(row.scopeId, [...(byKey.get(row.scopeId) ?? []), row.id]);
     else elsewhere.push(row.id);
   }
-  const remove = async (ids: readonly string[]): Promise<void> => {
+  /** Deletes the traces again; whether they went. */
+  const remove = async (ids: readonly string[]): Promise<boolean> => {
     try {
+      if (mind) {
+        // As in a correction: the graph records while the rows still name them, then the mind takes the rows with what
+        // it keeps of each, then the store's own delete.
+        await memory.deleteGraphRecordsOf(ids);
+        try {
+          const { deleted } = await mind.deleteTraces(ids);
+          done.traces += deleted;
+          if (deleted > 0) memory.markErasureOwed();
+        } catch (error) {
+          memory.markErasureOwed();
+          throw error;
+        }
+      }
       done.traces += (await memory.deleteTraces(ids)).deleted;
+      return true;
     } catch {
       done.missed += ids.length;
+      return false;
     }
   };
   for (const [key, ids] of byKey) {
@@ -730,7 +759,8 @@ async function reapplyDeletedTraces(
           done.missed += ids.length;
           return;
         }
-        await remove(ids);
+        // As in a correction: a slot of an open session holds a trace's id and no words, and goes once the trace has.
+        if ((await remove(ids)) && mind) await mind.evictTraces(ids, options.sessionsOf?.(key) ?? []);
       } finally {
         options.changing?.(key);
       }

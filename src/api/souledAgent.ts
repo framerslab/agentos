@@ -755,10 +755,10 @@ export interface SouledAgentOptions extends AgentOptions {
    * How long `close()` waits, in milliseconds, for the agent's turns still running and then for the memory writes of
    * its turns, one deadline for both, before it compiles the wiki. Default {@link DEFAULT_PENDING_WRITES_TIMEOUT_MS}
    * (5 seconds); 0 waits for none, and `Infinity` (or any wait past the longest timer, about 24.8 days) waits for them
-   * all. When the wait ends with turns or writes still pending, the compile takes what is stored and one `console.warn`
-   * line gives their number. A deletion (`forgetUser`) waits as long for the person's pending writes and then, with
-   * `runtime: 'gmi'`, as long again for a turn still running on a session it empties, unless the deletion was called
-   * from that turn's own hook or tool.
+   * all. When the wait ends with turns or writes still pending, the compile takes what is stored and one
+   * `memory.close_pending` line, through the host's logger, gives their number. A deletion (`forgetUser`) waits as
+   * long for the person's pending writes and then, with `runtime: 'gmi'`, as long again for a turn still running on a
+   * session it empties, unless the deletion was called from that turn's own hook or tool.
    */
   pendingWritesTimeoutMs?: number;
   /**
@@ -3008,6 +3008,9 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       changing: (key) => {
         correctionCounts.set(key, (correctionCounts.get(key) ?? 0) + 1);
       },
+      // With cognitive memory on, through the mind first, which takes each trace with what it keeps of it, and out of
+      // the working memory of the person's open sessions.
+      ...(soulMind && mindRecalls ? { mind: soulMind, sessionsOf: (scopeId: string) => sessionsBySubject.get(scopeId) ?? [] } : {}),
     });
     // A subject the store holds nothing more of no longer counts toward the retention requirement.
     reports.forEach((report, at) => {
@@ -3031,6 +3034,9 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       retention,
       daysFor: (scopeId) => policyDays.get(scopeId),
       onChain: (scopeId, work) => (closing ? work() : onSubject(scopeId, work)),
+      // With cognitive memory on, the expired traces go through the mind first, with what it keeps of each, and leave
+      // the working memory of their person's open sessions.
+      ...(soulMind && mindRecalls ? { mind: soulMind, sessionsOf: (scopeId: string) => sessionsBySubject.get(scopeId) ?? [] } : {}),
     });
   };
   built.sweepRetention = () => awaitedOnClose(sweep());
@@ -3121,6 +3127,11 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
               if (changing) countChange();
             }),
           ),
+        // With cognitive memory on, the named traces go through the mind first, with what it keeps of each, and leave
+        // the working memory of the person's open sessions.
+        ...(soulMind && mindRecalls
+          ? { mind: soulMind, sessions: () => sessionsBySubject.get(conversationScopeKey(agentId, subject)) ?? [] }
+          : {}),
       }),
     );
   };
@@ -3147,23 +3158,17 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     }
     try {
       const stillPending = await waitForWrites(pending, closeWaitLeft());
-      if (stillPending > 0) {
-        console.warn(
-          `[agentos] souledAgent: close() waited ${waitMs} ms for its turns still running and the memory writes of ` +
-            `its turns; still pending: ${stillPending}. The wiki compile takes what is stored, and a write that ` +
-            'reaches the store once it is closed is not stored.',
-        );
-      }
+      // The wiki compile takes what is stored, and a write that reaches the store once it is closed is not stored.
+      if (stillPending > 0) memoryLog.warn('memory.close_pending', { pending: stillPending });
       closing = true;
       if (retention !== undefined) {
         try {
           // Expired memory goes before the compile, so no page is built from it.
           await sweep();
-        } catch {
-          // A failed sweep never blocks the close. No error text: it may hold what a store said.
-          console.warn(
-            '[agentos] souledAgent: the retention sweep on close failed; expired memory stays in the store until the next sweep.',
-          );
+        } catch (err) {
+          // A failed sweep never blocks the close; expired memory stays in the store until the next sweep. The listed
+          // type and code alone: an error's text may hold what a store said.
+          memoryLog.warn('memory.close_sweep_failed', errorFields(err));
         }
       }
       try {
@@ -3171,12 +3176,9 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
         // `compile: false` no wiki is attached, and this compiles nothing.
         await memory.compileWiki({ reason: 'session-end', scopes: [...written] });
       } catch (err) {
-        // A subject's watermark moves only past compiled traces, so the next compile takes these up again.
-        // The reason goes in as text alone: the console's inspection of an error can throw, and close must go on.
-        console.warn(
-          `[agentos] souledAgent: the memory wiki compile on close failed (${messageOf(err)}); ` +
-            'the conversation traces stay in the store for the next compile.',
-        );
+        // A subject's watermark moves only past compiled traces, so the next compile takes these up again. The listed
+        // type and code alone, which never throw on a value that cannot be read: close must go on.
+        memoryLog.warn('memory.close_compile_failed', errorFields(err));
       }
     } finally {
       // A compile above can record a route it took: its write lands before the store closes.

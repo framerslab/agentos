@@ -213,8 +213,8 @@ waits for none, `Infinity` for all of them), first for the turns still running (
 `generate()`, a `stream()`, a session's `send()` or `stream()`, on either runtime),
 then for the memory writes of its turns; the compile; then the store's close. A turn
 never waits for its memory writes; only `close()` does. When the wait ends with turns
-or writes still pending, the compile takes what is stored and one `console.warn`
-line gives the number still pending; a turn or a write that ends after that is not
+or writes still pending, the compile takes what is stored and one `memory.close_pending`
+line, through your logger, gives the number still pending; a turn or a write that ends after that is not
 folded into the wiki, and a write that reaches the store once it is closed is not
 stored. A stream whose `abortSignal` aborts before anything was read from it is not
 waited for; on the default runtime a stream runs only once it is read, so one nobody

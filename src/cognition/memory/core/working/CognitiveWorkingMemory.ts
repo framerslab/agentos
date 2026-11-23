@@ -125,6 +125,25 @@ export class CognitiveWorkingMemory implements IWorkingMemory {
     this.slots.clear();
   }
 
+  /**
+   * Removes the slots of the given traces and leaves the backing store and every other slot as they are: what a
+   * session drops of traces deleted for good, by a correction or a retention sweep. No slot goes through `onEvict`, so
+   * nothing is encoded on its way out.
+   *
+   * @returns How many slots it removed.
+   */
+  dropTraces(traceIds: Iterable<string>): number {
+    const gone = new Set(traceIds);
+    let dropped = 0;
+    for (const [slotId, slot] of this.slots) {
+      if (!gone.has(slot.traceId)) continue;
+      this.slots.delete(slotId);
+      dropped += 1;
+    }
+    if (dropped > 0) this.rebalanceAttention();
+    return dropped;
+  }
+
   async size(): Promise<number> {
     return this.backing.size();
   }

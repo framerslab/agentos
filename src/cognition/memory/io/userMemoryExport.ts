@@ -8,6 +8,8 @@ import type { MemoryRecipient } from '../../../api/runtime/memoryRecipients.js';
 import type { LearnedStateDocument } from '../../learning/types.js';
 import type { WikiPage } from '../../substrate/memory/wiki/types.js';
 import { errorFields } from '../../../core/logging/events.js';
+import type { AgentSession } from '../../../api/agent.js';
+import type { SoulMind } from '../../../api/runtime/soulStore.js';
 import type { IMemoryArchive } from '../archive/IMemoryArchive.js';
 import { buildEmotionalContext } from '../core/encoding/EncodingModel.js';
 import type { MemoryTrace } from '../core/types.js';
@@ -472,6 +474,22 @@ export interface SubjectCorrectionOptions {
   beforeChange?: () => void;
   /** Runs the change in the subject's turn, after its writes and compiles. Unset: at once. */
   onChain?: <T>(work: () => Promise<T>) => Promise<T>;
+  /**
+   * The mind of a souled agent on `runtime: 'gmi'` with cognitive memory on, which files into this store: the named
+   * traces are deleted through it before the store's own delete, with what it keeps of each (its cached copy, vector,
+   * memory-graph node and archived original), and dropped from the subject's open sessions once they are gone. A
+   * delete of the mind that fails rejects the call, and the same call made again finishes it.
+   *
+   * @internal
+   */
+  mind?: Pick<SoulMind, 'deleteTraces' | 'evictTraces'>;
+  /**
+   * The sessions open for the subject, read once the named traces are deleted, whose working memory `mind` drops them
+   * from. Unset: none.
+   *
+   * @internal
+   */
+  sessions?: () => Iterable<AgentSession>;
 }
 
 /** What a deletion of named traces resolves with; a correction adds the id of the trace it filed. */
@@ -501,8 +519,10 @@ export interface SubjectCorrectionResult {
  * the pages built from them may be deleted by then, and the next compile builds them again.
  *
  * The named traces go last, so a call that failed partway is finished by the same call made again: it still finds
- * them. An index rewrite or a log checkpoint that fails does not fail the call; one `memory.erasure_unfinished` line
- * says so, and the next deletion, sweep or re-application of the tombstones runs it.
+ * them. With a souled agent's mind (`mind`), each trace's graph records go first, then the mind deletes the traces with
+ * what it keeps of each, then the store's own delete runs, and last the traces leave the working memory of the
+ * subject's open sessions (`sessions`). An index rewrite or a log checkpoint that fails does not fail the call; one
+ * `memory.erasure_unfinished` line says so, and the next deletion, sweep or re-application of the tombstones runs it.
  *
  * Every named id must be one of the subject's own traces (a page's chunk is not one): live, or recorded as deleted by
  * an earlier call that failed partway while its row still sits under the subject's key. When any is another
@@ -634,7 +654,33 @@ export async function correctSubjectMemory(
     // finished by the same call made again.
     const going = ids.filter((id) => id !== correctionTraceId);
     await ledger?.markTracesDeleted(going, kept ? { keep: kept } : {});
-    const { deleted } = await memory.deleteTraces(going);
+    let deleted = 0;
+    const mind = options.mind;
+    if (mind) {
+      // What the store finds of each trace by its id while its row is still there (its knowledge-graph copy, with its
+      // text, and its memory-graph node) goes first: the mind's delete takes the rows, with what the mind keeps of
+      // each, and a call made again after a failure further on finds the traces by their rows.
+      await memory.deleteGraphRecordsOf(going);
+      try {
+        deleted += (await mind.deleteTraces(going)).deleted;
+      } catch (error) {
+        // A delete that failed part way may have deleted rows: their words leave the indexes with the call made again.
+        memory.markErasureOwed();
+        throw error;
+      }
+      if (deleted > 0) memory.markErasureOwed();
+    }
+    // The store's own delete reaches each trace's vector, and any row the mind left.
+    try {
+      deleted += (await memory.deleteTraces(going)).deleted;
+    } catch (error) {
+      // Once the mind has taken every named row, the store owes them its indexes alone, which the rewrite below makes;
+      // a call made again would find no row to own. With a row left, the call made again finishes it.
+      if (!mind || (await memory.storedTracesAmong(going)).length > 0) throw error;
+      memory.markErasureOwed();
+    }
+    // A slot of an open session holds a trace's id and no words: it goes once the traces are gone.
+    if (mind) await mind.evictTraces(going, options.sessions?.() ?? []);
     try {
       // A delete only marks a vector in the index, and the log still holds the pages written before the delete.
       await memory.finishErasure();
