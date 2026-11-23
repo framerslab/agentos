@@ -630,7 +630,8 @@ describe.each(RUNTIMES)('a correction kept through a restore, on runtime %s', (r
     const { correctionTraceId } = await a.correctUserMemory!('alice', { traceIds: [wrong], text: 'My canary is WREN-9.' });
     await a.close();
     // The store comes back holding the correction's id under bob's key, as a trace with no correction tag: an id a
-    // host filed twice.
+    // host filed twice. The correction itself named its trace for alice's next compile; that note is cleared, so the
+    // open is seen to add none.
     const db = new Database(storeFile());
     try {
       db.prepare("UPDATE memory_traces SET scope_id = ?, metadata = json_set(metadata, '$.scopeId', ?), tags = '[]' WHERE id = ?").run(
@@ -638,6 +639,7 @@ describe.each(RUNTIMES)('a correction kept through a restore, on runtime %s', (r
         keyOf(bob),
         correctionTraceId,
       );
+      db.prepare('UPDATE memory_scopes SET rebuild_sources = NULL WHERE scope_id = ?').run(keyOf(alice));
     } finally {
       db.close();
     }

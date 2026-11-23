@@ -670,6 +670,37 @@ describe('a passed store on a souled GMI', () => {
     expect(JSON.stringify(await joined.exportUserMemory!(ALICE))).not.toContain(ladder);
   });
 
+  it('holds a message another user sent on the person’s own session, and lists it under what that user provided', async () => {
+    await seed();
+    const visitor = 'Bob asked Alice about the quince trees.';
+    // The session the passed store's learning tables index for her, where a turn of bob's was filed naming him.
+    const [hers] = await withLegacyBrain((brain) =>
+      brain.all<{ session_id: string }>(
+        "SELECT session_id FROM agentos_learning_sessions WHERE namespace = ? AND user_id = ? AND kind = 'learner'",
+        [learning.namespace, ALICE],
+      ),
+    );
+    expect(hers).toBeDefined();
+    await onLegacyFile([
+      [
+        `INSERT INTO memory_traces (brain_id, id, type, scope, scope_id, content, created_at, tags, metadata)
+         VALUES (?, ?, 'episodic', 'user', ?, ?, ?, ?, ?)`,
+        [
+          AGENT_ID, 'bob-visiting-alice', taggedScopeId(hers.session_id, learning.namespace), visitor, 1_700_000_000_003,
+          JSON.stringify(['user']), JSON.stringify({ turnUserId: BOB }),
+        ],
+      ],
+    ]);
+    const joined = await open();
+
+    const ofAlice = await joined.exportUserMemory!(ALICE);
+    expect(ofAlice.held.legacyGmiStore).toContainEqual(expect.objectContaining({ id: 'bob-visiting-alice', text: visitor }));
+    expect(ofAlice.provided.messages.map(({ text }) => text)).toContain(CANARY);
+    expect(ofAlice.provided.messages.map(({ text }) => text)).not.toContain(visitor);
+    // It is what bob provided.
+    expect((await joined.exportUserMemory!(BOB)).provided.messages.map(({ text }) => text)).toContain(visitor);
+  });
+
   it('reaches no row of a person of the same id in another namespace that shares the passed store', async () => {
     await seed();
     const ours = 'Alice asked about the pear trees.';
