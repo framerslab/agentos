@@ -234,6 +234,8 @@ const reply = await session.send(message, {
 });
 ```
 
+On a souled agent with cognitive memory, a blocked turn sends no query text to the embedding provider. A sanitized turn uses the replacement text for its recall query. The soul's `screen` runs on filing and compilation, after the decision about which query to send.
+
 - **When.** The turn's input, its text and its images, is judged once, after the turn takes the session's lock and before the session's GMI is built or any model call is made. A turn whose signal aborted, or whose session closed, while it waited for the lock ends there, and its input reaches no guard.
 - **A stop** rejects the call with `GuardrailStopError`; a stream yields it as its one `error` part. Nothing of the turn is sent to the model, added to the session's history, passed to a memory provider or filed in memory.
 - **A replacement** (a `BLOCK` with a non-empty `replacementText`) is the reply, with no model call and zero usage. The turn adds nothing to the history, and nothing of it is passed to a memory provider or filed in memory.

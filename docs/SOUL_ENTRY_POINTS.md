@@ -1,11 +1,11 @@
 ---
-title: "Choose an agent for character and per-user memory"
+title: "Choose a character that remembers each user"
 description: "Choose souledAgent(), gmi() or agent() for a character. See what each stores by user id, how to export or delete memory, and how to upgrade an existing store."
 ---
 
-# Choose an agent for character and per-user memory
+# Choose a character that remembers each user
 
-Use `souledAgent()` for a character that remembers each user across visits and lets you export, correct and delete memory by user id. A **soul** is a character's identity, style and limits written in Markdown. A **GMI** (Generalized Mind Instance) is the runtime that serves a session with the agent's persona, working memory, mood and reasoning trace.
+Use `souledAgent()` to remember each user across visits. Pass the same user id to export, correct or delete that person’s memory. A **soul** is a character's identity, style and limits written in Markdown. A **GMI** (Generalized Mind Instance) is the runtime that serves a session with the agent's persona, working memory, mood and reasoning trace.
 
 | What you need | Call |
 |---|---|
@@ -14,7 +14,7 @@ Use `souledAgent()` for a character that remembers each user across visits and l
 | A character with a mind whose memory you manage yourself | `gmi({ soul })` or `agent({ runtime: 'gmi', soul })` |
 | A character's voice and limits for the conversation | `agent({ soul })` |
 
-## Remember each player by user id
+## Remember each player by user id with `souledAgent()`
 
 Give a game character a workspace folder and pass the same player id on each visit. The default runtime is `'legacy'`. To add cognitive recall to this example, set `runtime: 'gmi'` and name the embedding provider in `memory.embedding.provider`.
 
@@ -40,7 +40,7 @@ There is no file-to-`soulStore` import call. The file's brain id comes from its 
 | Question | Default runtime, or GMI with cognitive memory off | A souled agent on the GMI runtime with cognitive memory on |
 |---|---|---|
 | What is stored, and where? | The soul's store files each speaker's text and time as a conversation trace. | The same store holds each accepted side of a session turn once, marked `filedBy: 'mind'`. The turn result's `memoryWrite` reports each side's outcome. |
-| Under which key? | `conversationScopeKey(agentId, subject)` uses the session's named user or, for an anonymous session, its session id. `sharedMemory: { as }` assigns unnamed calls to one user. | The mind uses the same key. Its recall reads marked rows. The soul's provider reads the remaining rows for that user and the operator's pages. |
+| Under which key? | `conversationScopeKey(agentId, subject)` uses the session's named user or, for an anonymous session, its session id. With `sharedMemory`, unnamed calls use the user id in `as`. | The mind uses the same key. Its recall reads marked rows. The soul's provider reads the remaining rows for that user and the operator's pages. |
 | For how long? | `retention.traces` sets days or `'until-deletion'`. Anonymous sessions can have their own period. Schedule `sweepRetention()` on a server that stays open. Closing the agent also sweeps. | The same sweep reaches mind-filed traces. Closing a session leaves its stored memory under its existing key. |
 | What is derived? | Per-user wiki pages and their chunks, a search index and graph records. The deletion ledger records tombstones, deleted trace ids and live corrections. | Cognitive recall adds vectors, trace strengths, access records and graph links. Stored emotional context defaults to neutral. Each user's traces feed that user's wiki compile. |
 | Who receives text? | The chat model receives the conversation and recalled text. The compile model receives the user's screened traces when compilation runs. `compile: false` disables it. | The named embedding provider also receives recall queries and text accepted for embedding. `agent.recipients()` lists configured and recorded routes. Session requests withhold the end-user id unless you set `sendUserIdToProvider: true` on a GMI path whose provider accepts it. |
@@ -49,7 +49,7 @@ There is no file-to-`soulStore` import call. The file's brain id comes from its 
 
 A one-shot call without a user reads operator pages and files nothing unless you set `sharedMemory`. A seat session runs without cognitive memory. For the difference between screening text for storage and blocking a turn before its first provider call, see [input guards](./safety/GUARDRAILS_USAGE.md).
 
-## Give a tutor a mind with cognitive recall
+## Give a tutor cognitive recall with `gmi()`
 
 ```ts
 import { gmi } from '@framers/agentos';
@@ -62,7 +62,7 @@ await tutor.session('lesson-1', { userId: 'student-42' }).send('Help me practise
 await tutor.close();
 ```
 
-## Give a support agent a character
+## Give a support agent a voice with `agent()`
 
 ```ts
 import { agent } from '@framers/agentos';
@@ -89,27 +89,53 @@ Show the user the `pages` from their `exportUserMemory` result. Each page's `sou
 
 ```ts
 const memory = await innkeeper.exportUserMemory!(playerId);
-const statements = memory.traces.filter(trace => memory.pages[0]?.sources.includes(trace.id));
-await innkeeper.correctUserMemory!(playerId, { traceIds: [selectedTraceId], text: correctedText });
+const page = memory.pages.find(page => page.id === selectedPageId);
+if (page?.sources.includes(selectedTraceId)) {
+  await innkeeper.correctUserMemory!(playerId, { traceIds: [selectedTraceId], text: correctedText });
+}
 ```
 
 See [the high-level API](./getting-started/HIGH_LEVEL_API.md) for signatures and [host duties](./safety/MEMORY_HOST_DUTIES.md) for deletion receipts, restores and recipients.
 
 ## Before you serve users
 
-Keep sentiment off for an EU workplace or education institution until your counsel clears its use. Design your product’s AI disclosure for the first interaction. For children, set `minor: true`, choose a retention period in days and handle parent requests with the same export and deletion calls. For a California companion chatbot, implement a crisis protocol of your own. Read the [host duties and official sources](./safety/MEMORY_HOST_DUTIES.md#eu-ai-act), including the [video game exclusion](./safety/MEMORY_HOST_DUTIES.md#california-companion-chatbots-and-game-characters).
+### EU workplaces and education
+
+Keep sentiment off in an EU workplace or education institution unless your counsel clears the use. `cognition: 'full'` enables sentiment.
+
+If you provide an agent that interacts directly with people, design it to disclose that it is an AI unless that is obvious in context to a reasonably well-informed, observant person. [Article 50(1)](https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:02024R1689-20260727)
+
+The EU AI Act's open-source exception leaves Articles 5 and 50 in force for systems within their scope. [Article 2(12)](https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:02024R1689-20260727)
+
+### Children
+
+Return `minor: true` in the account’s memory policy. Choose a retention period in days if you keep its traces. Use the same export and deletion calls to handle a verified parent's request.
+
+If the US children's privacy rule applies to your service, give a verified parent access to their child's personal information and a way to request its deletion. [16 CFR § 312.6](https://www.ecfr.gov/current/title-16/chapter-I/subchapter-C/part-312)
+
+Under that rule, maintain a written retention policy that states why you collect children's information, why you need to keep it and when you will delete it. [16 CFR § 312.10](https://www.ecfr.gov/current/title-16/chapter-I/subchapter-C/part-312)
+
+### California companion chatbots and game characters
+
+Implement a crisis protocol of your own. Sentiment events describe the tone of text. Use a separate mechanism for crisis detection.
+
+If you operate a companion chatbot covered by California Business and Professions Code section 22602(b), maintain a protocol for preventing suicide or self-harm content, refer users expressing suicidal ideation, suicide or self-harm to crisis services and publish the protocol details on your website. [BPC § 22602(b)](https://leginfo.legislature.ca.gov/faces/codes_displayText.xhtml?lawCode=BPC&division=8.&title=&part=&chapter=22.6.&article=)
+
+The video game exclusion reads as follows.
+
+> A bot that is a feature of a video game and is limited to replies related to the video game that cannot discuss topics related to mental health, self-harm, sexually explicit conduct, or maintain a dialogue on other topics unrelated to the video game. [BPC § 22601(b)(2)(B)](https://leginfo.legislature.ca.gov/faces/codes_displayText.xhtml?lawCode=BPC&division=8.&title=&part=&chapter=22.6.&article=)
 
 ## Upgrading
 
 A workspace-backed `souledAgent({ runtime: 'gmi' })` gives each user one durable memory. The wiki and cognitive recall read the same store. Export, correction, retention and deletion reach the turns the mind files there. The default runtime stays `'legacy'`.
 
 - **Configure cognitive memory.** Name the provider that receives text in `memory.embedding.provider`. Enabling cognitive memory without it, or setting `memory.consolidation.enabled: true`, throws at open. `session.close()` ends the conversation in process. An anonymous session reopened with the same id keeps the same stored memory, subject to retention and forgetting. Use a fresh session id for a different anonymous visitor.
-- **Move traces from a passed GMI store.** Turns stop reading and writing traces in `memory.store`. Keep it attached while moving its data. Preview the move with `agent.copyLegacyGmiMemory()`, pass known user ids in `users` to identify more rows, then pass `dryRun: false` to file eligible traces in the soul's store and remove their source rows. Check the report for traces left behind.
+- **Migrate `memory.store` with `copyLegacyGmiMemory`.** Turns stop reading and writing traces in `memory.store`. Keep it attached while moving its data. Preview the move with `agent.copyLegacyGmiMemory()`, pass known user ids in `users` to identify more rows, then pass `dryRun: false` to file eligible traces in the soul's store and remove their source rows. Check the report for traces left behind.
 - **Set a tombstone key before adding a second person or anonymous session.** A multi-person store needs `retention` and, when its ledger holds no tombstones, `tombstoneKey`.
 - **Choose a period in days for a minor's memory.** With `minor: true` on an `'until-deletion'` store, the session keeps no long-term memory, even with a shorter `retentionDays` policy answer.
-- **Choose what leaves the process.** GMI session requests omit the end user's id unless you set `sendUserIdToProvider: true`. Use an opaque id if you enable it.
-- **Choose what stays with a trace.** The mind stores a neutral emotional stamp by default. Set `emotionalStamp: 'mood'` to store the agent's mood. A minor's traces and those of a user with `profiling: 'off'` stay neutral.
-- **Team seats.** A seat session on a souled agent runs without cognitive memory.
+- **Send the user id only when needed.** GMI session requests omit the end user's id unless you set `sendUserIdToProvider: true`. Use an opaque id if you enable it.
+- **Set the emotional stamp.** The mind stores a neutral emotional stamp by default. Set `emotionalStamp: 'mood'` to store the agent's mood. A minor's traces and those of a user with `profiling: 'off'` stay neutral.
+- **Account for team sessions.** A seat session on a souled agent runs without cognitive memory.
 - **Update policy on open sessions.** On either runtime, a later `memoryPolicy` answer for a user on the same agent object replaces an open session's answer from its next turn.
 - **Route warnings through your logger.** Four former `console.warn` calls in `souledAgent()` emit `soul.inline_no_wiki`, `memory.close_pending`, `memory.close_sweep_failed` and `memory.close_compile_failed`. In `gmi()`, a skipped provider context emits `memory.provider_context_skipped`.
 - **Protect the second copy and plan a rollback.** The tombstone copy also holds the text of each live correction. When rolling back to 0.19.x, drop the `memory_corrections` table from that copy. Version 0.19.x reads mind-filed rows as ordinary conversation rows and recalls them through the provider. If you opened the agent with `soulStore`, moving back to the file store requires moving your data.
