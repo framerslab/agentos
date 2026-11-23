@@ -373,9 +373,13 @@ export async function exportSubjectMemory(options: {
 
   if (heldIds.length > 0) {
     await reading('memory graph', async () => {
+      // One record a link, by its two ends and its type: a live link of another type between the same two traces is a
+      // link of its own, and a link both graphs hold is listed once, as the store records it.
       const links = new Map<string, UserMemoryExport['held']['graphLinks'][number]>();
+      const linkKeyOf = (edge: { sourceId: string; targetId: string; type: string }) =>
+        `${edge.sourceId}\u0000${edge.targetId}\u0000${edge.type}`;
       for (const edge of await memoryGraphEdgesAmong(brainOf(memory), heldIds)) {
-        links.set(`${edge.sourceId}\u0000${edge.targetId}`, { from: edge.sourceId, to: edge.targetId, type: edge.type, weight: edge.weight });
+        links.set(linkKeyOf(edge), { from: edge.sourceId, to: edge.targetId, type: edge.type, weight: edge.weight });
       }
       const live = options.liveGraph;
       if (live) {
@@ -383,7 +387,7 @@ export async function exportSubjectMemory(options: {
         for (const id of heldIds) {
           for (const edge of live.getEdges(id)) {
             if (edge.sourceId !== id || !held.has(edge.targetId)) continue;
-            const linkKey = `${edge.sourceId}\u0000${edge.targetId}`;
+            const linkKey = linkKeyOf(edge);
             if (!links.has(linkKey)) links.set(linkKey, { from: edge.sourceId, to: edge.targetId, type: edge.type, weight: edge.weight });
           }
         }
