@@ -1199,6 +1199,13 @@ export class MetapromptExecutor {
         },
       );
 
+      // A cycle that went stale while the provider answered is discarded: the trace keeps nothing of its answer, which
+      // can quote the conversation it was sent, and no JSON repair call is made on its behalf.
+      if (run?.isStale()) {
+        this.config.addTraceEntry('WARNING', "Discarded late results of metaprompt 'gmi_self_trait_adjustment'.");
+        return;
+      }
+
       const responseContent = llmResponse.choices?.[0]?.message?.content;
       if (!responseContent || typeof responseContent !== 'string') {
         throw new GMIError(
@@ -1212,13 +1219,6 @@ export class MetapromptExecutor {
         'LLM response for reflection received.',
         { preview: responseContent.substring(0, 100) },
       );
-
-      // A cycle that went stale while the provider answered is discarded
-      // anyway, so no JSON repair call is made on its behalf.
-      if (run?.isStale()) {
-        this.config.addTraceEntry('WARNING', "Discarded late results of metaprompt 'gmi_self_trait_adjustment'.");
-        return;
-      }
 
       const parseOptions: ParseJsonOptions = {
         attemptFixWithLLM: true,
@@ -1237,6 +1237,11 @@ export class MetapromptExecutor {
         parseOptions,
       );
 
+      // The same once the answer was parsed, or repaired, while the cycle went stale.
+      if (run?.isStale()) {
+        this.config.addTraceEntry('WARNING', "Discarded late results of metaprompt 'gmi_self_trait_adjustment'.");
+        return;
+      }
       if (!parsedUpdates) {
         throw new GMIError(
           'Failed to parse/fix JSON from self-reflection LLM.',
@@ -1271,6 +1276,12 @@ export class MetapromptExecutor {
         );
       }
     } catch (error: any) {
+      if (run?.isDiscarded?.()) {
+        // A deletion of the person the GMI serves discarded the cycle: its failure, whose error can quote the
+        // conversation it was sent, is kept nowhere either.
+        this.config.addTraceEntry('WARNING', "Discarded late results of metaprompt 'gmi_self_trait_adjustment'.");
+        return;
+      }
       const gmiError = createGMIErrorFromError(
         error,
         GMIErrorCode.GMI_PROCESSING_ERROR,
