@@ -12,7 +12,8 @@
  * - A session opened with a user id sends no end-user id to the model provider, and the turn's tools still read the
  *   user; `sendUserIdToProvider` sends it.
  * - A front-matter `voice` or `avatar` is left out, with one `soul.field_ignored` line each.
- * - `close()` stops a session turn still running: the turn rejects, and nothing of it is compiled.
+ * - `close()` stops a session turn still running: the turn rejects, and nothing of it is compiled. A host's
+ *   `onBeforeGeneration`, `onAfterGeneration` or `onBeforeToolExecution` hook that never answers does not hold it.
  * - An inline soul, and an optional soul that does not load, give a plain agent on the GMI runtime too.
  * - `runtime: 'legacy'` still runs the legacy path: no GMI mark, one whole model call a turn, the three options
  *   accepted, `generate()` validated against a `responseSchema`, no end-user id with or without
@@ -263,6 +264,37 @@ describe('a souled agent with no runtime set', () => {
       expect(s.seen.filter(isMerge)).toEqual([]);
     } finally {
       late.answer();
+    }
+  });
+
+  it.each<[string, ProviderScript['replies']]>([
+    ['onBeforeGeneration', [reply.text('Hello.')]],
+    ['onAfterGeneration', [reply.text('Hello.')]],
+    ['onBeforeToolExecution', [askWho()]],
+  ])('close() stops a session turn whose %s hook never answers, and returns', async (hook, replies) => {
+    let entered!: () => void;
+    const inHook = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const answers: Array<() => void> = [];
+    // The host's hook: it is entered and does not answer until the case ends.
+    const hang = () => {
+      entered();
+      return new Promise<undefined>((resolve) => answers.push(() => resolve(undefined)));
+    };
+    const { a } = await open({ pendingWritesTimeoutMs: 50, [hook]: hang }, [...replies, ...spare()]);
+    try {
+      const turn = a.session('s1').send('Hi.').then(
+        () => 'answered',
+        () => 'stopped',
+      );
+      await inHook;
+
+      // The turn holds its session while the hook runs: close() ends the wait for the hook and the turn.
+      expect(await Promise.race([a.close().then(() => 'closed'), sleep(3_000).then(() => 'still closing')])).toBe('closed');
+      expect(await Promise.race([turn, sleep(2_000).then(() => 'still running')])).toBe('stopped');
+    } finally {
+      for (const answer of answers) answer();
     }
   });
 
