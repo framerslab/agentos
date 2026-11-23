@@ -749,7 +749,7 @@ describe(`one person's export of memory filed by the mind, on runtime ${JOINED_R
     await graph.addEdge({ ...inside, createdAt: Date.now() });
     await graph.addEdge({ sourceId: aFirst.id, targetId: bFirst.id, type: 'SAME_TOPIC', weight: 0.9, createdAt: Date.now() });
     expect(graph.getEdges(aFirst.id)).toContainEqual(expect.objectContaining(inside));
-    return { a, inside, bFirst };
+    return { a, inside, bFirst, graph };
   }
 
   it("exports both turns with their speakers, held fields, archived original and live graph link", async () => {
@@ -782,6 +782,25 @@ describe(`one person's export of memory filed by the mind, on runtime ${JOINED_R
       type: inside.type,
       weight: inside.weight,
     });
+  });
+
+  it('keeps a stored link and a live link of another type between the same two traces, and lists a link both hold once', async () => {
+    const { a, inside, graph } = await openWithTurns();
+    const own = (id: string) => ({ id, key: keyOf(alice) });
+    // The store's graph links the live link's two traces by another type.
+    await link(a, own(inside.sourceId), own(inside.targetId), 0.3);
+    // Both graphs link the first message to the agent's first reply by the same type, each with a weight of its own.
+    const [firstReply] = saidOf(keyOf(alice)).filter((trace) => trace.content.startsWith('Noted '));
+    await link(a, own(inside.sourceId), own(firstReply.id), 0.6);
+    await graph.addEdge({ sourceId: inside.sourceId, targetId: firstReply.id, type: 'SAME_TOPIC', weight: 0.95, createdAt: Date.now() });
+
+    const links = (await exportOf(a, alice.id)).held.graphLinks;
+    expect(links).toContainEqual({ from: inside.sourceId, to: inside.targetId, type: 'SAME_TOPIC', weight: 0.3 });
+    expect(links).toContainEqual({ from: inside.sourceId, to: inside.targetId, type: inside.type, weight: inside.weight });
+    // The store's record of a link the live graph holds too is the one listed.
+    expect(links.filter((one) => one.from === inside.sourceId && one.to === firstReply.id)).toEqual([
+      { from: inside.sourceId, to: firstReply.id, type: 'SAME_TOPIC', weight: 0.6 },
+    ]);
   });
 
   it("excludes another person's traces, archived text and page, and the operator's page", async () => {
