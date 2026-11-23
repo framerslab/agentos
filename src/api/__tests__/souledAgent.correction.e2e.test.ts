@@ -18,6 +18,11 @@
  * - A correction stays corrected after the store is put back from a backup taken before it: the next open deletes the
  *   old text again and files the correction again from the tombstones' second copy, which keeps the text of each live
  *   correction until the correction or the person is deleted, or the correction expires.
+ * - On the GMI runtime with cognitive memory on, a correction of a trace the agent's mind filed reaches what the mind
+ *   keeps of it: its cached copy, its graph node, its archived original and the open session's working-memory slot,
+ *   besides the row, the pages and the export; the correction is a trace of the soul's own memory, which a new
+ *   session's provider recalls. A turn that overlapped it files no reply, and a correction whose delete in the mind
+ *   failed after the store had soft-deleted the row is finished by the same call made again, or by applyTombstones().
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
@@ -46,6 +51,11 @@ import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory'
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 import { conversationScopeKey } from '../../cognition/memory/retrieval/store/conversationScopeKey';
 import { Memory } from '../../cognition/memory/io/facade/Memory';
+import { createHash } from 'node:crypto';
+import { brainOf } from '../../cognition/memory/io/facade/handedBrain';
+import { CognitiveMemoryManager } from '../../cognition/memory/CognitiveMemoryManager';
+import type { IMemoryArchive } from '../../cognition/memory/archive/IMemoryArchive';
+import { GMI } from '../../cognition/substrate/GMI';
 
 /** The runtimes the cases run on: the default one, and the GMI runtime with cognitive memory off. */
 const RUNTIMES = ['legacy', 'gmi'] as const;
@@ -953,4 +963,242 @@ describe.each(RUNTIMES)('a correction kept through a restore, on runtime %s', (r
     const [registry] = rows<{ rebuild_sources: string | null }>('SELECT rebuild_sources FROM memory_scopes WHERE scope_id = ?', [keyOf(alice)]);
     expect(JSON.parse(registry?.rebuild_sources ?? '[]') as string[]).toContain(correctionTraceId);
   });
+});
+
+
+describe('correcting a memory the mind filed, on the GMI runtime with cognitive memory on', () => {
+  /** Cognitive memory on, embedding through OpenAI, with no mechanism that rewrites a stored row. */
+  const MIND = { cognition: { memory: { embedding: { provider: 'openai' } }, mechanisms: false } } as unknown as Partial<SouledAgentOptions>;
+  /** Starts the mind's memory block: the assembler's preamble. */
+  const MIND_BLOCK = '## How To Use Your Memories';
+  beforeEach(() => {
+    // The mind embeds through the stubbed OpenAI provider, which embeds with a deterministic word hash.
+    const embeddingKey = `k-souled-correction-embed-${++n}`;
+    script('openai', embeddingKey, { replies: [] });
+    vi.stubEnv('OPENAI_API_KEY', embeddingKey);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+  /** A souled agent on the GMI runtime whose mind files its session turns. */
+  const openMind = (replies: ProviderScript['replies'] = spare()) => open('gmi', replies, MIND);
+
+  type ModelCall = ProviderScript['seen'][number];
+  /** The texts of a message: its one string, or the text of each of its text parts. */
+  const textPartsOf = (message: ModelCall['messages'][number]): string[] => {
+    const content = message.content as unknown;
+    if (typeof content === 'string') return [content];
+    if (!Array.isArray(content)) return [];
+    return content.flatMap((part) => (part && typeof part === 'object' && typeof (part as { text?: unknown }).text === 'string' ? [(part as { text: string }).text] : []));
+  };
+  /** The mind's memory block of one model call; '' when absent. */
+  const mindBlockOf = (call: ModelCall): string => call.messages.flatMap(textPartsOf).find((part) => part.includes(MIND_BLOCK)) ?? '';
+  /** The soul's provider block of one model call, its texts' spaces restored; '' when absent. */
+  const providerBlockOf = (call: ModelCall): string => {
+    const block = call.messages.find((m) => m.role === 'user' && typeof m.content === 'string' && m.content.startsWith('<memory_recall>'));
+    return block ? (block.content as unknown as string).replace(/\^/g, ' ') : '';
+  };
+  /** Each trace row under one key with its metadata, in the order it was stored. */
+  const filedUnder = (key: string) =>
+    rows<{ id: string; content: string; metadata: string }>(
+      "SELECT id, content, metadata FROM memory_traces WHERE scope = 'conversation' AND scope_id = ? ORDER BY created_at, id",
+      [key],
+    ).map((row) => ({ ...row, meta: JSON.parse(row.metadata || '{}') as Record<string, unknown> }));
+  /** The trace ids among `ids` that hold an archived original in the store. */
+  const archivedAmong = (ids: readonly string[]): string[] =>
+    ids.length === 0
+      ? []
+      : rows<{ trace_id: string }>(`SELECT trace_id FROM archived_traces WHERE trace_id IN (${ids.map(() => '?').join(', ')})`, [...ids])
+          .map((row) => row.trace_id)
+          .sort();
+  /** Plants an archived original of a trace, as a gist would have left it, through `archive`. */
+  const plantOriginal = async (archive: IMemoryArchive, traceId: string, text: string): Promise<void> => {
+    await archive.store({
+      traceId,
+      agentId: 'aria-1',
+      verbatimContent: text,
+      contentHash: createHash('sha256').update(text, 'utf8').digest('hex'),
+      traceType: 'episodic',
+      emotionalContext: { valence: 0, arousal: 0, dominance: 0, intensity: 0, gmiMood: 'neutral' },
+      entities: [],
+      tags: [],
+      createdAt: Date.now(),
+      archivedAt: Date.now(),
+      archiveReason: 'temporal_gist',
+    });
+  };
+  /** The cognitive memory managers the agent's sessions built, in the order they were built. */
+  const managersBuilt = (): (() => CognitiveMemoryManager[]) => {
+    const built = vi.spyOn(CognitiveMemoryManager.prototype, 'initialize');
+    return () => built.mock.contexts as unknown as CognitiveMemoryManager[];
+  };
+  /** The GMIs built in the case, in order: a session that keeps history builds one, with its first turn. */
+  const builtGmis = (): GMI[] => {
+    const built: GMI[] = [];
+    const initialize = GMI.prototype.initialize;
+    vi.spyOn(GMI.prototype, 'initialize').mockImplementation(async function (this: GMI, ...args) {
+      built.push(this);
+      return initialize.apply(this, args);
+    });
+    return built;
+  };
+  /** What a manager still holds of a set of traces: the live ones of its cache, and those its graph has a node of. */
+  const heldBy = (manager: CognitiveMemoryManager, ids: readonly string[]): { cached: string[]; nodes: string[]; words: boolean } => {
+    const cache = manager.getStore().listTraces();
+    const wanted = new Set(ids);
+    return {
+      cached: cache.filter((trace) => trace.isActive && wanted.has(trace.id)).map((trace) => trace.id).sort(),
+      nodes: ids.filter((id) => manager.getGraph()?.hasNode(id) === true).sort(),
+      words: cache.some((trace) => wanted.has(trace.id) && trace.content !== ''),
+    };
+  };
+  /** The trace ids one GMI's working memory holds a slot of. */
+  const slotsOf = (gmi: GMI): string[] => gmi.getCognitiveMemoryManager()!.getWorkingMemory().getSlots().map((slot) => slot.traceId);
+
+  it("a correction of a trace the mind filed leaves its old text nowhere: not in the mind, the store, the pages or an open session", async () => {
+    const managers = managersBuilt();
+    const gmis = builtGmis();
+    const a = await openMind([
+      reply.text('A canary, lovely.'),
+      reply.text('The user keeps a canary named LARK-7.'),
+      reply.text('Your canary is WREN-9.'),
+      ...spare(),
+    ]);
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    await a.memory!.compileWiki();
+    expect(pagesOf(keyOf(alice))).toHaveLength(1);
+    const x = filedUnder(keyOf(alice)).find((row) => row.content.includes('LARK-7'))!;
+    expect(x.meta.filedBy).toBe('mind');
+    expect(managers()).toHaveLength(1);
+    const manager = managers()[0];
+    // An original of the trace, planted through the mind's own archive, as a gist leaves one.
+    await plantOriginal(manager.getConfig().archive!, x.id, 'My canary is LARK-7, the yellow one.');
+    expect(archivedAmong([x.id])).toEqual([x.id]);
+    expect(heldBy(manager, [x.id])).toEqual({ cached: [x.id], nodes: [x.id], words: true });
+    expect(gmis).toHaveLength(1);
+    expect(slotsOf(gmis[0])).toContain(x.id);
+
+    const result = await a.correctUserMemory!('alice', { traceIds: [x.id], text: 'My canary is WREN-9.' });
+
+    expect(result).toMatchObject({ deleted: 1, pagesDeleted: 1, correctionTraceId: expect.any(String) });
+    expect(result.recipients).toEqual(await a.recipients!());
+    expect(result.recipients.length).toBeGreaterThan(0);
+    // Nothing of the old text: no row, no page, no original, nothing the mind keeps, no slot in the open session.
+    expect(holding('LARK-7')).toEqual([]);
+    expect(pagesOf(keyOf(alice))).toEqual([]);
+    expect(archivedAmong([x.id])).toEqual([]);
+    expect(heldBy(manager, [x.id])).toEqual({ cached: [], nodes: [], words: false });
+    expect(slotsOf(gmis[0])).not.toContain(x.id);
+    // The correction is a trace of the soul's own memory: it carries no mark of the mind.
+    const filed = filedUnder(keyOf(alice)).find((row) => row.content === 'My canary is WREN-9.')!;
+    expect(filed.id).toBe(result.correctionTraceId);
+    expect(filed.meta.filedBy).toBeUndefined();
+
+    // The export holds the correction and never the old text.
+    const doc = await a.exportUserMemory!('alice');
+    expect(JSON.stringify(doc)).not.toContain('LARK-7');
+    expect(doc.traces.find((trace) => trace.id === filed.id)).toMatchObject({ filedBy: 'soul', text: 'My canary is WREN-9.' });
+
+    // A new session: the provider recalls the correction, and nothing the model reads holds the old text.
+    const calls = served.seen.length;
+    await turn(a, 's2', 'alice', 'What is my canary called?');
+    const call = served.seen[calls];
+    expect(providerBlockOf(call)).toContain('WREN-9');
+    expect(JSON.stringify(call.messages)).not.toContain('LARK-7');
+  });
+
+  it('a reply that restates a memory the mind filed, corrected during its turn, is not filed', async () => {
+    const { gate, release } = gated();
+    const a = await openMind([
+      reply.text('A canary, lovely.'),
+      reply.hold([], gate, reply.text('Your canary is LARK-7.')),
+      reply.text('You are welcome.'),
+      ...spare(),
+    ]);
+    try {
+      await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+      const x = idOf(saidOf(keyOf(alice)), 'LARK-7')!;
+
+      // A turn of a new session: the mind recalls x, and the model call stays open.
+      const calls = served.seen.length;
+      const session = a.session('s2', { userId: 'alice' });
+      const running = session.send('What is my canary called?');
+      await vi.waitFor(() => expect(served.seen).toHaveLength(calls + 1), { timeout: 4_000 });
+      expect(mindBlockOf(served.seen[calls])).toContain('LARK-7');
+
+      // x is corrected while the model is still answering.
+      expect((await correct(a, 'alice', [x], 'My canary is WREN-9.')).deleted).toBe(1);
+      expect(holding('LARK-7')).toEqual([]);
+
+      // The model then answers with what x said: the person's message is filed, the reply is not.
+      release();
+      const result = await running;
+      expect(result.text).toBe('Your canary is LARK-7.');
+      const record = await writeOf(result);
+      expect(record).toEqual({
+        entries: [
+          { role: 'user', outcome: 'written', traceId: idOf(saidOf(keyOf(alice)), 'What is my canary called?') },
+          { role: 'assistant', outcome: 'skipped', reason: 'corrected' },
+        ],
+      });
+      expect(holding('LARK-7')).toEqual([]);
+      expect(filedUnder(keyOf(alice)).find((row) => row.content.includes('What is my canary called?'))?.meta.filedBy).toBe('mind');
+
+      // The session's next turn began after the change: both of its sides are filed.
+      const next = await writeOf(await session.send('Thank you.'));
+      expect(next.entries.map((entry) => entry.outcome)).toEqual(['written', 'written']);
+    } finally {
+      release();
+    }
+  });
+
+  it.each(['the same call made again', 'applyTombstones()'] as const)(
+    "a correction whose delete in the mind failed after the store soft-deleted the row is finished by %s",
+    async (finish) => {
+      const managers = managersBuilt();
+      const a = await openMind([reply.text('A canary, lovely.'), reply.text('Your canary is WREN-9.'), ...spare()]);
+      await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+      const x = idOf(saidOf(keyOf(alice)), 'LARK-7')!;
+      const manager = managers()[0];
+      expect(heldBy(manager, [x]).cached).toEqual([x]);
+
+      // The store's first delete of a trace row fails once.
+      const brain = brainOf(a.memory!);
+      const run = brain.run.bind(brain);
+      let refused = false;
+      vi.spyOn(brain, 'run').mockImplementation(async (...args: Parameters<typeof brain.run>) => {
+        if (!refused && /^DELETE FROM memory_traces WHERE brain_id = \? AND id IN/.test(args[0])) {
+          refused = true;
+          throw new Error('the store is busy');
+        }
+        return run(...args);
+      });
+      const correction = { traceIds: [x], text: 'My canary is WREN-9.' };
+      await expect(a.correctUserMemory!('alice', correction)).rejects.toThrow('the store is busy');
+      expect(refused).toBe(true);
+      expect(markedIn(copyFile())).toEqual([x]);
+      const [filed] = storedAs('My canary is WREN-9.');
+      expect(keptIn().map((row) => row.trace_id)).toEqual([filed.id]);
+
+      if (finish === 'the same call made again') {
+        const again = await a.correctUserMemory!('alice', correction);
+        expect(again).toMatchObject({ deleted: 1, correctionTraceId: filed.id });
+      } else {
+        events.length = 0;
+        expect(await a.applyTombstones!()).toEqual([]);
+        expect(lines('memory.tombstone_reapplied')[0]).toMatchObject({ traces: 1, tracesMissed: 0 });
+      }
+      // No row, no copy in the mind, and neither the export nor a new session's recall holds the old text.
+      expect(rows('SELECT id FROM memory_traces WHERE id = ?', [x])).toEqual([]);
+      expect(holding('LARK-7')).toEqual([]);
+      expect(heldBy(manager, [x])).toEqual({ cached: [], nodes: [], words: false });
+      expect(JSON.stringify(await a.exportUserMemory!('alice'))).not.toContain('LARK-7');
+      const calls = served.seen.length;
+      await turn(a, 's2', 'alice', 'What is my canary called?');
+      expect(JSON.stringify(served.seen[calls].messages)).not.toContain('LARK-7');
+      expect(storedAs('My canary is WREN-9.').map((trace) => trace.id)).toEqual([filed.id]);
+    },
+  );
 });
