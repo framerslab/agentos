@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { resolveStorageAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
 import pino from 'pino';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { learnerUserScopeId } from '../../cognition/learning/scopes';
+import { learnerUserScopeId, taggedScopeId } from '../../cognition/learning/scopes';
 import { brainOf } from '../../cognition/memory/io/facade/handedBrain';
 import { Brain } from '../../cognition/memory/retrieval/store/Brain';
 import { conversationScopeKey } from '../../cognition/memory/retrieval/store/conversationScopeKey';
@@ -104,6 +104,38 @@ async function legacyCanaryId(): Promise<string> {
   expect(row).toBeDefined();
   return row!.id;
 }
+
+async function withLegacyBrain<T>(work: (brain: Brain) => Promise<T>): Promise<T> {
+  const brain = await Brain.openSqlite(legacyFile, { brainId: AGENT_ID });
+  try {
+    return await work(brain);
+  } finally {
+    await brain.close();
+  }
+}
+
+function plantTrace(
+  id: string,
+  scope: string,
+  scopeId: string,
+  text = CANARY,
+  createdAt = 1_700_000_000_000,
+  speaker = 'user',
+): Promise<void> {
+  return withLegacyBrain(async (brain) => {
+    await brain.run(
+      `INSERT INTO memory_traces (brain_id, id, type, scope, scope_id, content, created_at, tags)
+       VALUES (?, ?, 'episodic', ?, ?, ?, ?, ?)`,
+      [AGENT_ID, id, scope, scopeId, text, createdAt, JSON.stringify([speaker])],
+    );
+  });
+}
+
+function traceSnapshot(brain: Brain): Promise<Record<string, unknown>[]> {
+  return brain.all('SELECT * FROM memory_traces WHERE brain_id = ? ORDER BY id', [brain.brainId]);
+}
+
+type CopyCall = (options?: { dryRun?: boolean; users?: readonly string[] }) => Promise<unknown>;
 
 function backup(): string {
   const file = join(directory, 'legacy-backup.sqlite');
@@ -259,5 +291,103 @@ describe('a passed store on a souled GMI', () => {
     const exported = await joined.exportUserMemory!(ALICE);
     expect(exported.traces).toContainEqual(expect.objectContaining({ text: 'The soul store remains readable.' }));
     expect(exported.unread).toContainEqual({ store: STORE_LABEL, reason: expect.any(String) });
+  });
+
+  it('previews the people and unattributed scopes without changing either store', async () => {
+    await seed();
+    const hostUser = 'registered-by-host';
+    await plantTrace('from-host', 'user', userScope(hostUser));
+    await plantTrace('session-only', 'user', taggedScopeId('anonymous-session', learning.namespace));
+    await plantTrace('unknown-person', 'user', userScope('unknown-person'));
+    await plantTrace('thread-only', 'thread', taggedScopeId('old-thread', learning.namespace));
+    await plantTrace('persona-only', 'persona', `${userScope(ALICE)}::orchard`);
+
+    const joined = await open();
+    const soul = brainOf(joined.memory!);
+    await joined.memory!.remember('A note already in the soul store.', {
+      scope: 'conversation',
+      scopeId: conversationScopeKey(AGENT_ID, { kind: 'user', id: ALICE }),
+    });
+    const legacyBefore = await withLegacyBrain(traceSnapshot);
+    const soulBefore = await traceSnapshot(soul);
+    const report = await (joined as unknown as { copyLegacyGmiMemory: CopyCall }).copyLegacyGmiMemory({
+      users: [hostUser, ALICE, hostUser],
+    });
+    expect(report).toEqual({
+      dryRun: true,
+      people: expect.arrayContaining([
+        { userId: ALICE, traces: await legacyRows(ALICE).then((rows) => rows.length) },
+        { userId: BOB, traces: await legacyRows(BOB).then((rows) => rows.length) },
+        { userId: hostUser, traces: 1 },
+      ]),
+      unattributed: expect.arrayContaining([
+        { scope: 'user', scopes: 1, traces: 1, reason: expect.stringMatching(/session/i) },
+        { scope: 'user', scopes: 1, traces: 1, reason: expect.stringMatching(/user|person|learner/i) },
+        { scope: 'thread', scopes: 1, traces: 1, reason: expect.any(String) },
+        { scope: 'persona', scopes: 1, traces: 1, reason: expect.any(String) },
+      ]),
+      forgotten: 0,
+    });
+    expect(report).toMatchObject({ people: { length: 3 }, unattributed: { length: 4 } });
+    expect(await withLegacyBrain(traceSnapshot)).toEqual(legacyBefore);
+    expect(await traceSnapshot(soul)).toEqual(soulBefore);
+  });
+
+  it('moves by id in date order, resumes after an interrupted delete, and leaves unknown and forgotten rows', async () => {
+    await seed();
+    const joined = await open();
+    await joined.forgetUser!(BOB);
+    const oldDate = 1_700_000_000_001;
+    const newDate = oldDate + 86_400_000;
+    await plantTrace('dated-new', 'user', userScope(ALICE), CANARY, newDate, 'assistant');
+    await plantTrace('dated-old', 'user', userScope(ALICE), CANARY, oldDate);
+    await plantTrace('forgotten-person', 'user', userScope(BOB), OTHER);
+    await plantTrace('unmapped-person', 'user', userScope('unknown-person'), OTHER);
+    await withLegacyBrain(async (brain) => {
+      await brain.exec(`CREATE TRIGGER interrupt_legacy_delete BEFORE DELETE ON memory_traces
+        WHEN OLD.id = 'dated-old' BEGIN SELECT RAISE(ABORT, 'interrupted legacy delete'); END`);
+    });
+
+    const soul = brainOf(joined.memory!);
+    const embeddedBefore = [...embeddings.embedded];
+    const source = await legacyRows(ALICE);
+    const move = () => (joined as unknown as { copyLegacyGmiMemory: CopyCall }).copyLegacyGmiMemory({
+      dryRun: false, users: [BOB],
+    });
+    const interrupted = await move();
+    expect(interrupted).toMatchObject({
+      dryRun: false,
+      people: [{ userId: ALICE, moved: 0, kept: 0, failed: expect.any(String) }],
+      forgotten: 1,
+    });
+    expect((await traceSnapshot(soul)).map(({ id }) => id)).toEqual(['dated-old']);
+    expect((await legacyRows(ALICE)).map(({ id }) => id)).toContain('dated-old');
+    await withLegacyBrain(async (brain) => {
+      await brain.exec('DROP TRIGGER interrupt_legacy_delete');
+    });
+
+    expect(await move()).toMatchObject({
+      dryRun: false,
+      people: [{ userId: ALICE, moved: source.length, kept: 0 }],
+      forgotten: 1,
+    });
+    const after = await traceSnapshot(soul);
+    const scopeId = conversationScopeKey(AGENT_ID, { kind: 'user', id: ALICE });
+    expect(after.map(({ id }) => id)).toEqual(source.map(({ id }) => id));
+    for (const [id, date, speaker] of [['dated-old', oldDate, 'user'], ['dated-new', newDate, 'assistant']] as const) {
+      const row = after.find((trace) => trace.id === id);
+      expect(row).toMatchObject({ id, created_at: date, content: CANARY, scope: 'conversation', scope_id: scopeId });
+      expect(JSON.parse(String(row?.metadata))).toMatchObject({
+        speaker, subject: { kind: 'user', id: ALICE }, turnUserId: ALICE, copiedFrom: 'gmi-store',
+      });
+    }
+    expect(await legacyRows(ALICE)).toEqual([]);
+    expect((await legacyRows()).map(({ id }) => id)).toEqual(['forgotten-person', 'unmapped-person']);
+    const repeated = await move();
+    expect(repeated).toMatchObject({
+      dryRun: false, people: [{ userId: ALICE, moved: 0, kept: 0 }], forgotten: 1,
+    });
+    expect(await traceSnapshot(soul)).toEqual(after);
+    expect(embeddings.embedded).toEqual(embeddedBefore);
   });
 });
