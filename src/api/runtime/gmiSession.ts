@@ -53,10 +53,10 @@ function abortReasonError(signal: AbortSignal): Error {
 
 /**
  * `work`'s value, or a rejection with the signal's reason once `signal` aborts first: a turn that its session's
- * `close()` or its caller's signal stops while its memory provider recalls ends then, and the recall, which never
- * rejects, finishes on its own.
+ * `close()` or its caller's signal stops while its memory provider recalls, or while a host's hook runs, ends then, and
+ * the recall or the hook finishes on its own, its answer unread.
  */
-function untilStopped<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+export function untilStopped<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
   if (!signal) return work;
   if (signal.aborted) return Promise.reject(abortReasonError(signal));
   return new Promise<T>((resolve, reject) => {
@@ -456,24 +456,41 @@ function meterCall(ledger: AgentOSUsageLedgerOptions | undefined, surface: GmiTu
     );
 }
 
-/** `onAfterGeneration` for one finished step: a returned text replaces the step's text in the result and in the store. */
-async function afterGeneration(opts: AgentOptions, folder: GmiTurnFolder, step: StepFinishedChunkPayload, calls: ToolCallRequest[]): Promise<void> {
+/**
+ * `onAfterGeneration` for one finished step: a returned text replaces the step's text in the result and in the store.
+ * A stop of the turn (`stop`: the caller's signal or the session's `close()`) ends the wait for the hook, so a hook that
+ * never answers does not hold the session; the turn then ends with the stop's reason, after its loop.
+ */
+async function afterGeneration(
+  opts: AgentOptions,
+  folder: GmiTurnFolder,
+  step: StepFinishedChunkPayload,
+  calls: ToolCallRequest[],
+  stop: AbortSignal | undefined,
+): Promise<void> {
   if (!opts.onAfterGeneration) return;
   const usage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
   addModelUsage(usage, step.usage);
   try {
-    const modified = await opts.onAfterGeneration({
-      text: folder.stepText(step),
-      toolCalls: calls.map((call) => ({ name: call.name, args: call.arguments })),
-      usage,
-      step: step.stepIndex,
-      ...(step.cacheDiagnostics !== undefined ? { cacheDiagnostics: step.cacheDiagnostics as GenerateTextResult['cacheDiagnostics'] } : {}),
-    });
+    const modified = await untilStopped(
+      Promise.resolve(
+        opts.onAfterGeneration({
+          text: folder.stepText(step),
+          toolCalls: calls.map((call) => ({ name: call.name, args: call.arguments })),
+          usage,
+          step: step.stepIndex,
+          ...(step.cacheDiagnostics !== undefined ? { cacheDiagnostics: step.cacheDiagnostics as GenerateTextResult['cacheDiagnostics'] } : {}),
+        }),
+      ),
+      stop,
+    );
     // A schema answer stays the JSON the schema validated.
     if (modified && typeof modified.text === 'string' && step.structuredOutput === undefined) {
       folder.overrideStepText(step.stepIndex, modified.text);
     }
   } catch (hookError) {
+    // A stop is not the hook's error: the turn ends with it after its loop.
+    if (stop?.aborted) return;
     console.warn('[agentos] onAfterGeneration hook error:', hookError);
   }
 }
@@ -688,7 +705,7 @@ export async function* runGmiTurn(
           providerShownInStep = false;
           flush();
           const step = chunk.content as StepFinishedChunkPayload;
-          await afterGeneration(deps.opts, folder, step, stepCalls);
+          await afterGeneration(deps.opts, folder, step, stepCalls, turn.abortSignal);
           pending = { step, calls: stepCalls, results: [] };
           stepCalls = [];
           ledgerWrites.push(

@@ -78,7 +78,7 @@ import {
   type AgentCognitiveMemory,
   type AgentMemoryBrain,
 } from './runtime/agentCognitiveMemory.js';
-import { sendGmiTurn, streamGmiTurn, TurnLock, type GmiForTurn, type GmiSessionDeps, type GmiTurnContext, type GmiTurnOptions } from './runtime/gmiSession.js';
+import { sendGmiTurn, streamGmiTurn, TurnLock, untilStopped, type GmiForTurn, type GmiSessionDeps, type GmiTurnContext, type GmiTurnOptions } from './runtime/gmiSession.js';
 import { resolveRecallOptions } from './runtime/recallOptions.js';
 import { assertTurnInputGuards, inputDecisionOf } from './runtime/textGuardrails.js';
 import { recallLog } from '../cognition/memory/retrieval/recall/log.js';
@@ -267,12 +267,15 @@ function hookTools(
       // Once the turn has stopped, no hook runs: the orchestrator refuses the call.
       if (signal?.aborted) break;
       try {
-        const hookResult = await run({ name: req.name, args, id: req.id, step: step.index });
+        // The turn's stop ends the wait for a hook, so a hook that never answers does not hold the session.
+        const hookResult = await untilStopped(Promise.resolve(run({ name: req.name, args, id: req.id, step: step.index })), signal);
         if (hookResult === null) {
           return { toolCallId: req.id, toolName: req.name, output: { skipped: true }, isError: true, errorDetails: { message: 'Skipped by onBeforeToolExecution hook' } };
         }
         args = hookResult.args;
       } catch (hookError) {
+        // Stopped while the hook ran: no other hook runs, and the orchestrator refuses the call.
+        if (signal?.aborted) break;
         console.warn('[agentos] onBeforeToolExecution hook error:', hookError);
       }
     }
@@ -1064,7 +1067,10 @@ export function gmi(opts: GmiOptions): GmiHandle {
         }
         if (opts.onBeforeGeneration) {
           try {
-            const modified = await opts.onBeforeGeneration({
+            // A stop of the turn (the caller's signal, the session's close()) ends the wait for the hook, so a hook that
+            // never answers does not hold the session: the call goes on with the messages as they were, under the
+            // aborted signal, and the turn ends as a turn stopped during a request does.
+            const modified = await untilStopped(Promise.resolve(opts.onBeforeGeneration({
               messages: messages as unknown as Message[],
               // With learning on, the base prompt holds no personality section: the system text in `messages` holds
               // the turn's section after it.
@@ -1080,13 +1086,14 @@ export function gmi(opts: GmiOptions): GmiHandle {
               provider: ctx.providerId,
               step: ctx.stepIndex,
               prompt: turn.prompt,
-            });
+            })), turn.abortSignal);
             if (modified?.messages) {
               messages = modified.messages as unknown as ChatMessage[];
               changed = true;
             }
           } catch (hookError) {
-            console.warn('[agentos] onBeforeGeneration hook error:', hookError);
+            // A stop is not the hook's error.
+            if (!turn.abortSignal?.aborted) console.warn('[agentos] onBeforeGeneration hook error:', hookError);
           }
         }
         // The provider's items count as shown only when this call's messages, after the host's hook, still hold the
