@@ -1047,8 +1047,9 @@ export class MetapromptExecutor {
       }
     }
 
-    // Log state change
-    if (stateChanged) {
+    // Log state change. A run a deletion of the person discarded while a write of it was pending leaves no rationale in
+    // the trace: its words come from the conversation it was sent.
+    if (stateChanged && !run?.isDiscarded?.()) {
       this.config.addTraceEntry(
         'STATE_CHANGE',
         `GMI state updated by metaprompt '${metapromptId}'`,
@@ -1257,6 +1258,9 @@ export class MetapromptExecutor {
 
       // Apply updates via callbacks
       const storedImprintKeys = await this.applyMetapromptUpdates(parsedUpdates, 'gmi_self_trait_adjustment', run);
+
+      // A cycle a deletion discarded while its updates were being applied keeps nothing of them in the trace either.
+      if (run?.isDiscarded?.()) return;
 
       // Trace only the imprints that were stored: a late or stale run
       // stores none, and later reflections read this trace as evidence.
