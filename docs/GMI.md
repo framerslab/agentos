@@ -206,7 +206,8 @@ A soul file's front matter is applied through the loader's one mapping, so the "
 
   On a workspace-backed `souledAgent({ runtime: 'gmi' })`, a passed `memory.store` still supplies the learning store's
   adapter when `learning.store` is unset. Session turns read and write their traces in the soul's store. The passed
-  Brain is opened with the agent and logs one `memory.legacy_gmi_store` event with the count of its live traces and
+  Brain is opened with the agent (a passed store that does not open fails `souledAgent()` with its error, after the
+  soul's store is closed) and logs one `memory.legacy_gmi_store` event with the count of its live traces and
   `call: 'copyLegacyGmiMemory'`. `forgetUser()` reaches the passed store after the soul's tombstone, mind, store and
   sessions. It first records in the tombstone ledger the id of each of the person's traces there (under their user
   and persona scopes, the scopes of their sessions that store's own learning tables index, and a turn's rows filed

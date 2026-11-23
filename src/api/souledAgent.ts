@@ -2892,20 +2892,36 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
      * undone at the next open, even when the learning tables that name the person live in another store.
      */
     let legacyIds: string[] = [];
-    let learned: ForgetReport;
-    try {
-      if (legacy) {
+    /** The layer's deletion did not finish: neither the passed store nor the learning store, its index, is done. */
+    const layerUnfinished = (legacyReason: string, learningReason: string) => ({
+      stores: [
+        { store: LEGACY_GMI_STORE, reached: false as const, reason: legacyReason },
+        { store: 'learning store', reached: false as const, reason: learningReason },
+      ],
+      incomplete: true,
+    });
+    if (legacy) {
+      try {
         legacyIds = await legacyGmiTraceIdsOf(legacy, userId);
         await forgotten.markTracesDeleted(legacyIds);
+      } catch (error) {
+        const { type } = errorFields(error);
+        return layerUnfinished(
+          `the ids of its traces could not be recorded before the deletion (${type}), so the learning layer's deletion did not run`,
+          "the learning layer's deletion did not run, since the passed GMI store's trace ids could not be recorded first",
+        );
       }
+    }
+    let learned: ForgetReport;
+    try {
       learned = await layerForget(userId);
     } catch (error) {
       if (!legacy) throw error;
       const { type } = errorFields(error);
-      return {
-        stores: [{ store: LEGACY_GMI_STORE, reached: false, reason: `the store's deletion failed (${type})` }],
-        incomplete: true,
-      };
+      return layerUnfinished(
+        `the learning layer's deletion, which reaches it, failed (${type})`,
+        `the learning layer's deletion failed (${type}), so the user's rows stay for a second call`,
+      );
     }
     const legacyManager = legacy ? `memory manager of brain ${legacy.brain.brainId}` : undefined;
     const stores = learned.stores.map((given): ForgetMemoryReport['stores'][number] => {
