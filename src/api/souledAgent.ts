@@ -603,6 +603,12 @@ function isMemoryPolicy(value: unknown): value is MemoryPolicy {
  */
 const SOULLESS_HOOKS_WITH_COGNITIVE_MEMORY =
   "souledAgent: memoryPolicy, screen and sharedMemory act on the soul's own store, and this soul gives none (an inline { content } soul has no workspace folder, and an optional soul that did not load has none either), so the plain agent built in its place keeps its GMI's cognitive memory (runtime: 'gmi' with cognition memory on) in a store none of them reaches; pass the folder that holds SOUL.md, turn cognitive memory off, or leave them out";
+/**
+ * The refusal of `responseSchema` on the GMI runtime: only the legacy runtime's `generate()` validates its reply
+ * against the agent's schema, so on the GMI runtime a reply would come back unchecked, with no `parsed` value.
+ */
+const RESPONSE_SCHEMA_ON_GMI =
+  "souledAgent: responseSchema validates generate() on runtime: 'legacy' alone; the GMI runtime, which is souledAgent()'s default, does not read it, so a reply would come back unchecked and with no parsed value. Pass the schema to a session's send() and read its result's object, or set runtime: 'legacy'";
 /** What `sharedMemory` must be, as the rejection of an option that is not says it. */
 const SHARED_MEMORY_SHAPE =
   "souledAgent: sharedMemory needs { as: <a user id>, reason: 'one-persons-machine' | 'operators-notes' }";
@@ -1060,9 +1066,9 @@ export type SouledAgent = Agent & {
  *
  * The `light` profile leaves cognitive memory off unless `memory` is set, scores no sentiment and runs no
  * metaprompt, so the default needs no embedding model. The GMI runtime refuses the `channels`, `voice` and `avatar`
- * options, leaves a front-matter `voice` or `avatar` out with one `soul.field_ignored` line each, gives a session's
- * history a share of the context window and reports what it left out in `historyOmitted`, and stops running
- * session turns on `close()`.
+ * options, and a souled agent on it refuses `responseSchema`, which that runtime does not read. It leaves a
+ * front-matter `voice` or `avatar` out with one `soul.field_ignored` line each, gives a session's history a share of
+ * the context window and reports what it left out in `historyOmitted`, and stops running session turns on `close()`.
  *
  * On a workspace-backed agent on the GMI runtime with cognitive memory enabled, the GMI and wiki use the same
  * durable store. The GMI files each accepted side of a session turn under the subject's key and recalls the traces
@@ -1107,6 +1113,8 @@ export type SouledAgent = Agent & {
  * @throws TypeError for invalid `sharedMemory`, `retention` or `compile.minors` settings.
  * @throws Error on the GMI runtime, which is the default, when `channels`, `voice` or `avatar` is set: the error
  *   names the option, and `runtime: 'legacy'` takes all three.
+ * @throws TypeError on the GMI runtime when `responseSchema` is set, before anything opens: that runtime does not
+ *   validate `generate()` against it. Pass the schema to a session's `send()`, or set `runtime: 'legacy'`.
  * @throws TypeError when GMI cognitive memory is enabled and `memory.embedding.provider` is missing or blank,
  *   a known model prefix routes to a different provider, or `memory.consolidation.enabled` is `true`.
  * @throws TypeError when `memoryPolicy`, `screen` or `sharedMemory` is supplied with GMI cognitive memory enabled
@@ -1157,6 +1165,9 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   // Cognitive memory names its embedding provider and leaves consolidation off: refused here, before the soul loads,
   // so nothing has been opened.
   if (mind?.memory) assertSoulMindMemory(mind.memory);
+  // The GMI runtime does not read the agent's responseSchema, so generate() would return a reply nobody checked:
+  // refused here too, before the soul loads.
+  if (runtime === 'gmi' && rest.responseSchema) throw new TypeError(RESPONSE_SCHEMA_ON_GMI);
   /** The key the tombstone ledger is handed: one key is the current key. A `tombstoneKey` that holds nothing is none. */
   const key =
     tombstoneKey === undefined
