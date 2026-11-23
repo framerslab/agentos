@@ -417,4 +417,23 @@ describe('AgentOS docs alignment', () => {
       expect(page, name).toContain(name);
     }
   });
+
+  it('links legal citations in the entry point and host-duties guides to official sources', () => {
+    const officialHosts = new Set([
+      'app.leg.wa.gov',
+      'cppa.ca.gov',
+      'eur-lex.europa.eu',
+      'leginfo.legislature.ca.gov',
+      'www.ecfr.gov',
+    ]);
+    for (const path of ['docs/SOUL_ENTRY_POINTS.md', 'docs/safety/MEMORY_HOST_DUTIES.md']) {
+      const page = read(`../../../../${path}`);
+      // Match the legal citation labels used in these guides, leaving technical links alone.
+      const citations = [...page.matchAll(/\[(?:Articles?\s|(?:\d+ (?:CFR|CCR)|BPC) §\s|RCW\s)[^\]\n]+\]\(<?([^\s)>]+)>?\)/g)];
+      expect(citations.length, path).toBeGreaterThan(0);
+      for (const [, link] of citations) {
+        expect(officialHosts.has(new URL(link).hostname), `${path}: ${link}`).toBe(true);
+      }
+    }
+  });
 });
