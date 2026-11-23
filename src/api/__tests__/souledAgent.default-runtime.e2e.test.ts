@@ -13,7 +13,8 @@
  *   user; `sendUserIdToProvider` sends it.
  * - A front-matter `voice` or `avatar` is left out, with one `soul.field_ignored` line each.
  * - `close()` stops a session turn still running: the turn rejects, and nothing of it is compiled. A host's
- *   `onBeforeGeneration`, `onAfterGeneration` or `onBeforeToolExecution` hook that never answers does not hold it.
+ *   `onBeforeGeneration`, `onAfterGeneration` or `onBeforeToolExecution` hook that never answers does not hold it,
+ *   and one that stops its own turn and then fails leaves no unhandled rejection.
  * - An inline soul, and an optional soul that does not load, give a plain agent on the GMI runtime too.
  * - `runtime: 'legacy'` still runs the legacy path: no GMI mark, one whole model call a turn, the three options
  *   accepted, `generate()` validated against a `responseSchema`, no end-user id with or without
@@ -295,6 +296,34 @@ describe('a souled agent with no runtime set', () => {
       expect(await Promise.race([turn, sleep(2_000).then(() => 'still running')])).toBe('stopped');
     } finally {
       for (const answer of answers) answer();
+    }
+  });
+
+  it.each<[string, ProviderScript['replies']]>([
+    ['onBeforeGeneration', [reply.text('Hello.')]],
+    ['onAfterGeneration', [reply.text('Hello.')]],
+    ['onBeforeToolExecution', [askWho()]],
+  ])('a %s hook that stops its own turn and then fails leaves no unhandled rejection', async (hook, replies) => {
+    const unhandled: unknown[] = [];
+    const listen = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', listen);
+    const stop = new AbortController();
+    // The host's hook stops the turn through the caller's signal, then fails.
+    const failing = async () => {
+      stop.abort(new Error('stopped by the host'));
+      throw new Error('the host hook failed');
+    };
+    try {
+      const { a } = await open({ [hook]: failing }, [...replies, ...spare()]);
+
+      await expect(a.session('s1').send('Hi.', { abortSignal: stop.signal })).rejects.toThrow();
+      // Long enough for a rejection nobody handled to be reported.
+      await sleep(100);
+      expect(unhandled.filter((reason) => reason instanceof Error && reason.message === 'the host hook failed')).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', listen);
     }
   });
 
