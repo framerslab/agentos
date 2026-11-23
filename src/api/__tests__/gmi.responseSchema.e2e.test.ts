@@ -4,6 +4,7 @@ import { agent, type Agent, type AgentOptions } from '../agent';
 import { ObjectGenerationError } from '../generateObject';
 import { gmi } from '../gmi';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
+import { SCHEMA_INSTRUCTION_LEAD } from '../runtime/structuredReply';
 import { reply, script } from './helpers/stubProviders';
 
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({
@@ -20,10 +21,18 @@ const constructors: { name: string; create: (options: AgentOptions) => Agent }[]
   { name: 'gmi()', create: gmi },
 ];
 
+/** The system text of one request, as the provider received it. */
+function systemText(request: { messages: ReadonlyArray<{ role: string; content?: unknown }> }): string {
+  return request.messages
+    .filter(({ role }) => role === 'system')
+    .map(({ content }) => (typeof content === 'string' ? content : JSON.stringify(content ?? '')))
+    .join('\n');
+}
+
 beforeEach(() => globalLLMProviderHealth.reset());
 
 describe.each(constructors)('$name response schema', ({ create }) => {
-  function setup(...replies: string[]) {
+  function setupWith(options: Partial<AgentOptions>, ...replies: string[]) {
     const apiKey = `k-response-schema-${++nextKey}`;
     const provider = script('openai', apiKey, {
       whole: true,
@@ -35,9 +44,11 @@ describe.each(constructors)('$name response schema', ({ create }) => {
       apiKey,
       fallbackProviders: [],
       responseSchema,
+      ...options,
     });
     return { handle, provider };
   }
+  const setup = (...replies: string[]) => setupWith({}, ...replies);
 
   it('sends a repair turn and rejects with the final validation error', async () => {
     const first = 'three';
@@ -71,6 +82,52 @@ describe.each(constructors)('$name response schema', ({ create }) => {
     try {
       const result = await handle.generate(question);
       expect(result.parsed).toEqual({ count: 3 });
+      expect(provider.seen).toHaveLength(1);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('states the schema in the system prompt of the first request and of the repair', async () => {
+    const { handle, provider } = setup('three', '{"count":3}');
+    try {
+      const result = await handle.generate(question);
+      expect(result.parsed).toEqual({ count: 3 });
+      expect(provider.seen).toHaveLength(2);
+      for (const request of provider.seen) {
+        expect(systemText(request)).toContain(SCHEMA_INSTRUCTION_LEAD);
+        expect(systemText(request)).toContain('count');
+      }
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("states the agent's schema when the call passes a response format of its own", async () => {
+    const { handle, provider } = setup('{"count":3}');
+    try {
+      // No typed generate() option: the GMI runtime sends a call's own payload format to the provider, and that
+      // format's schema is the caller's, which need not be the agent's.
+      const ownFormat = { responseFormat: { type: 'json_schema', json_schema: { name: 'anything', schema: { type: 'object' } } } };
+      const result = await handle.generate(question, ownFormat as unknown as Parameters<Agent['generate']>[1]);
+      expect(result.parsed).toEqual({ count: 3 });
+      expect(provider.seen).toHaveLength(1);
+      expect(systemText(provider.seen[0])).toContain(SCHEMA_INSTRUCTION_LEAD);
+      expect(systemText(provider.seen[0])).toContain('count');
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('rejects the first invalid reply when controls.maxValidationRetries is 0', async () => {
+    const { handle, provider } = setupWith({ controls: { maxValidationRetries: 0 } }, 'three', '{"count":3}');
+    try {
+      const result = handle.generate(question);
+      await expect(result).rejects.toBeInstanceOf(ObjectGenerationError);
+      await expect(result).rejects.toMatchObject({
+        message: expect.stringMatching(/^Response is not valid JSON/),
+        rawText: 'three',
+      });
       expect(provider.seen).toHaveLength(1);
     } finally {
       await handle.close();
