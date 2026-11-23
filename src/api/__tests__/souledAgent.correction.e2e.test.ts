@@ -1099,7 +1099,8 @@ describe('correcting a memory the mind filed, on the GMI runtime with cognitive 
     // The export holds the correction and never the old text.
     const doc = await a.exportUserMemory!('alice');
     expect(JSON.stringify(doc)).not.toContain('LARK-7');
-    expect(doc.traces.find((trace) => trace.id === filed.id)).toMatchObject({ filedBy: 'soul', text: 'My canary is WREN-9.' });
+    expect(doc.traces.find((trace) => trace.id === filed.id)).toMatchObject({ text: 'My canary is WREN-9.', tags: expect.arrayContaining(['correction']) });
+    expect(doc.held.traces.find((trace) => trace.id === filed.id)).toMatchObject({ filedBy: 'soul', text: 'My canary is WREN-9.' });
 
     // A new session: the provider recalls the correction, and nothing the model reads holds the old text.
     const calls = served.seen.length;
