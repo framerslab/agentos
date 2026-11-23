@@ -1371,10 +1371,6 @@ export interface IStreamingTTS {
 // ============================================================================
 
 /**
- * Configuration for a batch (one-shot) TTS synthesis request.
- * Used by {@link IBatchTTS.synthesize} for non-streaming narration.
- */
-/**
  * Optional prosody / expressiveness controls for TTS synthesis.
  *
  * Providers apply the SUBSET of knobs their API supports and silently
@@ -1410,6 +1406,29 @@ export interface TTSExpressiveness {
   instructions?: string;
 }
 
+/**
+ * Acting and timing cues for a line of speech. Providers apply the cues their
+ * models support and report them in {@link BatchTTSResult.appliedDirection}.
+ */
+export interface SpeechDirection {
+  /** Emotion to convey. */
+  emotion?: string;
+  /** Natural-language acting direction. */
+  delivery?: string;
+  /** Speaking pace. */
+  pace?: 'slow' | 'measured' | 'natural' | 'brisk' | 'fast';
+  /** Words to stress. */
+  emphasis?: string[];
+  /** Pauses anchored to words in the transcript. */
+  pauses?: Array<{ after: string; length: 'short' | 'long' }>;
+  /** Vocal reactions anchored to words in the transcript. */
+  bursts?: Array<{ after: string; kind: 'breath' | 'sigh' | 'laugh' | 'gasp' }>;
+}
+
+/**
+ * Configuration for a batch (one-shot) TTS synthesis request.
+ * Used by {@link IBatchTTS.synthesize} for non-streaming narration.
+ */
 export interface BatchTTSConfig {
   /** Provider-specific voice identifier. */
   voice?: string;
@@ -1425,6 +1444,8 @@ export interface BatchTTSConfig {
    * `speed` takes precedence over `expressiveness.speed`.
    */
   expressiveness?: TTSExpressiveness;
+  /** Acting and timing cues for providers that support speech direction. */
+  direction?: SpeechDirection;
   /** Pass-through options forwarded to the underlying provider SDK. */
   providerOptions?: Record<string, unknown>;
 }
@@ -1433,10 +1454,10 @@ export interface BatchTTSConfig {
  * Result of a batch TTS synthesis operation.
  */
 export interface BatchTTSResult {
-  /** Raw audio bytes in the requested format. */
+  /** Raw audio bytes in the returned format. */
   audio: Buffer;
   /** Audio format of the returned buffer. */
-  format: 'mp3' | 'opus' | 'pcm';
+  format: 'mp3' | 'opus' | 'pcm' | 'wav';
   /** Estimated duration in milliseconds. */
   durationMs: number;
   /** Provider ID that served this request. */
@@ -1448,6 +1469,15 @@ export interface BatchTTSResult {
    * e.g. Deepgram Aura, which has no prosody parameters.
    */
   appliedExpressiveness?: string[];
+  /** Direction fields applied to the request. Unset when none were applied. */
+  appliedDirection?: Array<keyof SpeechDirection>;
+  /** Token usage, when the provider can report or estimate it. */
+  usage?: {
+    /** Text input tokens reported by the provider. */
+    textTokens?: number;
+    /** Audio output tokens, reported by the provider or estimated from duration. */
+    audioTokens?: number;
+  };
 }
 
 /**

@@ -27,8 +27,8 @@ function wav24kMono(samples = 24_000): Buffer {
 function audioResponse(wav = wav24kMono()) {
   return {
     steps: [
-      { content: [{ type: 'text', text: 'metadata' }] },
-      { content: [{ type: 'audio', data: wav.toString('base64') }] },
+      { type: 'model_output', content: [{ type: 'text', text: 'metadata' }] },
+      { type: 'model_output', content: [{ type: 'audio', data: wav.toString('base64') }] },
     ],
     usage: { total_input_tokens: 17, total_output_tokens: 25 },
   };
@@ -60,6 +60,7 @@ describe('GeminiBatchTTS', () => {
     expect(new Headers(init?.headers).get('x-goog-api-key')).toBe('k');
     expect(JSON.parse(String(init?.body))).toMatchObject({
       model: 'gemini-3.8-flash-tts',
+      store: false,
       input: [{
         type: 'user_input',
         content: [{
@@ -74,6 +75,7 @@ describe('GeminiBatchTTS', () => {
     expect(result.audio).toEqual(wav);
     expect(result.format).toBe('wav');
     expect(result.durationMs).toBe(1000);
+    expect(result.usage).toEqual({ textTokens: 17, audioTokens: 25 });
     expect(result.appliedDirection).toEqual(['emotion', 'delivery', 'pace', 'emphasis', 'pauses']);
   });
 
@@ -92,6 +94,16 @@ describe('GeminiBatchTTS', () => {
     expect(body.generation_config.speech_config).toEqual([{ voice: 'Puck' }]);
     expect(body.input[0].content[0]).toEqual({ type: 'text', text: 'Wait, then go.' });
     expect(result.appliedDirection).toBeUndefined();
+  });
+
+  it('estimates audio tokens from PCM duration when usage is absent', async () => {
+    const { steps } = audioResponse(wav24kMono(48_000));
+    const tts = new GeminiBatchTTS({ apiKey: 'k', fetchImpl: fakeFetch({ steps }) });
+
+    await expect(tts.synthesize('Keep going.')).resolves.toMatchObject({
+      durationMs: 2000,
+      usage: { audioTokens: 50 },
+    });
   });
 
   it('applies bursts and pauses to the original words and keeps punctuation', async () => {
