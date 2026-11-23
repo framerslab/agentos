@@ -148,6 +148,26 @@ wunderland chat \
 
 `DeepgramStreamingSTT` sends Deepgram's `KeepAlive` ([Audio Keep Alive](https://developers.deepgram.com/docs/audio-keep-alive)) as a text frame after every 3 seconds that send it no audio, and only then: each frame a source pushes restarts the idle clock, and a session that has ended (closed, cut by the server, or draining after its `CloseStream`) sends nothing. Deepgram closes a socket whose audio pauses for 10 seconds without a `KeepAlive` (`NET-0001`), so a source whose capture pauses, such as a LiveKit track unpublished and published again, keeps its session instead of losing the socket and paying for the reconnect ([#585](https://github.com/framerslab/agentos/issues/585)). A `KeepAlive` alone does not keep a socket that has received no audio at all ([STT troubleshooting](https://developers.deepgram.com/docs/stt-troubleshooting-websocket-data-and-net-errors)), so when no audio has gone out 3 seconds after the socket opened, the session sends 20 ms of silence first, metered as audio, and `KeepAlive` frames after it.
 
+### Gemini batch TTS
+
+Use `GeminiBatchTTS` for clips synthesized from a complete line of text. It defaults to `gemini-3.8-flash-tts` and the prebuilt voice Kore. You can also use `gemini-3.8-flash-lite-tts` and select a different prebuilt voice. [Google's speech generation guide](https://aistudio.google.com/docs/speech-generation#single-speaker)
+
+```typescript
+import { GeminiBatchTTS } from '@framers/agentos/io/voice-pipeline/providers';
+
+const tts = new GeminiBatchTTS({ apiKey: process.env.GEMINI_API_KEY! });
+const clip = await tts.synthesize('Take your time. We have all night.', {
+  voice: 'Kore',
+  direction: {
+    emotion: 'reassuring',
+    pace: 'measured',
+    pauses: [{ after: 'your time', length: 'short' }],
+  },
+});
+```
+
+This provider always returns a 24 kHz mono PCM16 WAV. The result also contains duration from the WAV data chunk and token usage. Emotion, delivery, and pace become a style annotation. Matching emphasis, pauses, and vocal reactions become inline cues. `appliedDirection` lists the fields that affected the request. With a comma-separated key pool, the provider tries another available key once after a quota failure.
+
 ### OpenAI Realtime TTS
 
 `OpenAIRealtimeTTS` speaks through OpenAI's Realtime API ([client events](https://developers.openai.com/api/reference/resources/realtime/client-events)), default model `gpt-realtime-2.1-mini`, the replacement OpenAI names for `tts-1`, `tts-1-hd` and `gpt-4o-mini-tts`, which leave `/v1/audio/speech` on 6 January 2027 ([deprecations](https://developers.openai.com/api/docs/deprecations)). `createVoiceProvidersFromEnv()` adds it to the TTS chain at priority 20 when `OPENAI_API_KEY` is set.
