@@ -1402,7 +1402,7 @@ const memoryContext = await cognitiveMemory.assembleForPrompt(
 
 ### After the Turn (Observe + Encode)
 
-A plain GMI checks the turn's stop before filing the exchange. A stop during a model request or in the final generation hook leaves neither side in cognitive memory. If a stop arrives after filing has started, the bridge finishes its writes and the session can still report the turn as stopped. A souled agent files its exchange when the session keeps the turn.
+A GMI reads the turn's stop before it files the exchange, unless its memory is a souled agent's mind. A stop during a model request or in the final generation hook leaves neither side in cognitive memory. A stop that arrives after filing has started does not take it back: the bridge goes on with both writes, and the session still reports the turn as stopped. A session's `close()` waits for the turn before it shuts its GMI down, so it waits for those writes. A host that calls `GMI.shutdown()` itself gets a bounded wait: the GMI waits for a running turn at most the shutdown bound (`shutdownTimeoutMs`, 8000 ms by default) and then closes its memories ([Getting a GMI](../GMI.md#getting-a-gmi)), so a write still under way by then may not land. A souled agent files its exchange when the session keeps the turn.
 
 ```typescript
 // After the turn, for the user's message:
