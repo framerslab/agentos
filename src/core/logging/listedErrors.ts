@@ -45,7 +45,7 @@ export const LISTED_ERROR_TYPES: ReadonlySet<string> = closedList([
   'DocumentTooComplexError', 'DocumentTooLargeError', 'DuplicateIdempotencyKeyError', 'EgressRefusedError',
   'ElevenLabsApiError', 'EmptyTranscriptError', 'FencedError', 'ForgottenLedgerError', 'GMIError', 'GMIManagerError',
   'GeminiCLIProviderError',
-  'GeminiProviderError', 'GuardedFetchError', 'GuardrailStopError', 'ImageEditNotSupportedError',
+  'GeminiProviderError', 'GeminiTtsError', 'GuardedFetchError', 'GuardrailStopError', 'ImageEditNotSupportedError',
   'ImageUpscaleNotSupportedError', 'ImageVariationNotSupportedError', 'IngestRouterBudgetExceededError',
   'IngestRouterDispatcherMissingError', 'IngestRouterUnknownKindError', 'InvalidAgentWorkspaceIdError',
   'InvalidSegmentationPromptError', 'InvalidToolNameError', 'InvalidWikiPageIdError', 'LLMProviderCircuitOpenError',
