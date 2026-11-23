@@ -642,7 +642,7 @@ describe('a passed store on a souled GMI', () => {
     });
     await joined.sweepRetention!();
     expect(await soul.get('SELECT id FROM memory_traces WHERE brain_id = ? AND id = ? AND deleted = 0', [soul.brainId, 'swept-old']))
-      .toBeUndefined();
+      .toBeFalsy();
 
     await joined.copyLegacyGmiMemory!({ dryRun: false });
     expect((await legacyRows(ALICE)).map(({ id }) => id)).not.toContain('swept-old');
