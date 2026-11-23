@@ -11,9 +11,11 @@
  * - A session opened with a user id sends no end-user id to the model provider, and the turn's tools still read the
  *   user; `sendUserIdToProvider` sends it.
  * - A front-matter `voice` or `avatar` is left out, with one `soul.field_ignored` line each.
+ * - `close()` stops a session turn still running: the turn rejects, and nothing of it is compiled.
  * - An inline soul, and an optional soul that does not load, give a plain agent on the GMI runtime too.
  * - `runtime: 'legacy'` still runs the legacy path: no GMI mark, one whole model call a turn, the three options
- *   accepted, no end-user id with or without `sendUserIdToProvider`, and a plain legacy agent for an inline soul.
+ *   accepted, no end-user id with or without `sendUserIdToProvider`, a running turn let finish by `close()`, and a
+ *   plain legacy agent for an inline soul.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
@@ -129,6 +131,15 @@ const holdersOf = (call: ModelCall, id: string) =>
 const gmiMarkOf = (a: unknown) => (a as { __gmiHandle?: unknown }).__gmiHandle;
 /** A model step that calls `whoami` once. */
 const askWho = () => reply.tools([{ id: 'c1', name: 'whoami', args: {} }]);
+/** A reply the provider holds until `answer` is called, and its opener. */
+function held(text: string): { reply: ProviderScript['replies'][number]; answer: () => void } {
+  let answer!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    answer = resolve;
+  });
+  return { reply: reply.hold([], gate, reply.text(text)), answer };
+}
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 describe('a souled agent with no runtime set', () => {
   it('runs on the GMI runtime: its handle carries the GMI mark, and a session turn streams its model call', async () => {
@@ -200,6 +211,26 @@ describe('a souled agent with no runtime set', () => {
     expect(lines('soul.field_ignored').map((line) => line.field).sort()).toEqual(['avatar', 'voice']);
   });
 
+  it('close() stops a session turn still running: the turn rejects, and nothing of it is compiled', async () => {
+    const late = held('Lovely.');
+    const { a, s } = await open({ pendingWritesTimeoutMs: 50 }, [late.reply, ...spare()]);
+    try {
+      const turn = a.session('s1').send('My favourite tea is jasmine.').then(
+        () => 'answered',
+        () => 'stopped',
+      );
+      // The turn has reached its model call, which the provider holds.
+      await vi.waitFor(() => expect(turnCalls(s)).toHaveLength(1), { timeout: 4_000 });
+      await a.close();
+
+      // The reply never came: close() ended the turn, where the legacy runtime leaves it running.
+      expect(await Promise.race([turn, sleep(2_000).then(() => 'still running')])).toBe('stopped');
+      expect(s.seen.filter(isMerge)).toEqual([]);
+    } finally {
+      late.answer();
+    }
+  });
+
   it.each([
     ['an inline soul', { content: 'You are Aria.' }],
     ['an optional soul that does not load', { path: '/no/such/soul-default-runtime', optional: true }],
@@ -247,6 +278,20 @@ describe("a souled agent on runtime: 'legacy'", () => {
     // The turn's tool still reads the session's user.
     expect(told).toHaveLength(1);
     expect(told[0].userContext).toMatchObject({ userId: 'u-42' });
+  });
+
+  it('close() lets a session turn still running finish, within its wait', async () => {
+    const late = held('Lovely.');
+    const { a, s } = await open({ runtime: 'legacy' }, [late.reply, ...spare()]);
+    const turn = a.session('s1').send('My favourite tea is jasmine.');
+    await vi.waitFor(() => expect(turnCalls(s)).toHaveLength(1), { timeout: 4_000 });
+    const closing = a.close();
+    // The reply arrives while close() is running: the turn answers, and its text is compiled.
+    setTimeout(late.answer, 100);
+    const [answer] = await Promise.all([turn, closing]);
+
+    expect(answer.text).toBe('Lovely.');
+    expect(JSON.stringify(s.seen.filter(isMerge).map((call) => call.messages))).toContain('My favourite tea is jasmine.');
   });
 
   it('writes no soul.field_ignored line for a front-matter voice or avatar', async () => {

@@ -20,7 +20,7 @@
  *   person's session is left as it is, and an idle session is emptied whatever the deadline. A
  *   session whose turn is still running at the deadline leaves the `sessions` part missed; it is emptied once that
  *   turn ends, the turn's memory writes are refused, and the deletion made again reports the part reached. The
- *   default runtime clears each open session handle and counts it.
+ *   legacy runtime clears each open session handle and counts it.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
@@ -267,7 +267,7 @@ describe(`a deletion report a host can keep, on runtime ${RUNTIME}`, () => {
 });
 
 describe("a deletion report a host can keep, on runtime 'gmi' with cognitive memory off", () => {
-  it('the report is the same receipt as on the default runtime: its time, version, four parts and recipients, with no id and no text', async () => {
+  it('the report is the same receipt as on the legacy runtime: its time, version, four parts and recipients, with no id and no text', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const a = await open({ runtime: 'gmi' } as Partial<SouledAgentOptions>);
     await turn(a, 's1', 'alice', 'My canary is LARK-7.');
@@ -916,7 +916,7 @@ describe("a deletion and the open sessions, on runtime 'gmi' with cognitive memo
 describe(`a deletion and the open sessions, on runtime ${RUNTIME}`, () => {
   it('clears each session handle open for the person and counts it', async () => {
     const a = await open();
-    // One handle a session: the default runtime hands out a new one at each session() call, and each is counted.
+    // One handle a session: the legacy runtime hands out a new one at each session() call, and each is counted.
     const first = a.session('s1', { userId: 'alice' });
     const second = a.session('s2', { userId: 'alice' });
     const other = a.session('s3', { userId: 'bob' });
