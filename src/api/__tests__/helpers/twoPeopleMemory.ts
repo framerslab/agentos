@@ -91,7 +91,8 @@ export function blocksOf(call: ModelCall) {
   };
 }
 
-const mechanisms = {
+/** Each mechanism set to fire whenever its hook runs. */
+export const mechanisms = {
   retrievalInducedForgetting: { enabled: true, similarityThreshold: 0, suppressionFactor: 0.5 },
   metacognitiveFOK: { enabled: true, partialActivationThreshold: 0 },
   reconsolidation: { enabled: true, driftRate: 1 },
