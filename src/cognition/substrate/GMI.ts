@@ -71,6 +71,7 @@ import { ConversationMessage, MessageRole } from '../../core/conversation/Conver
 import { GMIError, GMIErrorCode, createGMIErrorFromError } from '../../core/utils/errors.js';
 import type { ICognitiveMemoryManager } from '../memory/CognitiveMemoryManager.js';
 import type { AssembledMemoryContext } from '../memory/core/types.js';
+import type { MemoryShownItem } from '../../api/runtime/memoryWriteRecord.js';
 import type { MemoryRecallCapture } from '../memory/retrieval/recall/capture.js';
 import { effectiveRecallBudget, estimateMemoryTokens } from '../memory/retrieval/recall/budget.js';
 import { ConversationHistoryManager } from './ConversationHistoryManager';
@@ -1793,6 +1794,7 @@ export class GMI implements IGMI {
     // The recall capture of the turn's memory assembly, for the turn's output: the error output carries it too, so a
     // turn that fails after its memory was assembled still reports what that assembly recalled.
     let turnMemoryRecall: MemoryRecallCapture | undefined;
+    let turnMemoryShown: MemoryShownItem[] | undefined;
     // The history the turn's requests left out: the report of the serving request that left the most messages out.
     let turnHistoryOmitted: PromptHistoryOmission | undefined;
 
@@ -2553,6 +2555,33 @@ export class GMI implements IGMI {
             );
           }
 
+          if (assembledMemoryContext?.shownTexts) {
+            // A fallback can re-render the block or leave it out. A host hook can also remove it.
+            turnMemoryShown = undefined;
+            const block = hopMemoryText?.trim();
+            if (hopCapture && block && sendMessages.some(({ content }) =>
+              typeof content === 'string'
+                ? content.includes(block)
+                : Array.isArray(content) && content.some((part) => 'text' in part && typeof part.text === 'string' && part.text.includes(block)),
+            )) {
+              const texts = new Map(hopMemoryContext?.shownTexts?.map((entry) => [entry.id, entry]));
+              const shown: MemoryShownItem[] = [];
+              for (const { id, outcome } of hopCapture.candidates) {
+                const entry = texts.get(id);
+                if (outcome !== 'included' || !entry) continue;
+                const date = new Date(entry.createdAt);
+                shown.push({
+                  source: 'memory',
+                  id,
+                  text: entry.text,
+                  ...(entry.speaker ? { speaker: entry.speaker } : {}),
+                  ...(Number.isFinite(date.getTime()) ? { at: date.toISOString() } : {}),
+                });
+              }
+              if (shown.length > 0) turnMemoryShown = shown;
+            }
+          }
+
           let attempt: AsyncIterable<ModelCompletionResponse>;
           let attemptOutcome: Promise<CompletionOutcome> | undefined;
           // Initialised through the assertion, as stepSchemaInPayload is.
@@ -2998,6 +3027,7 @@ export class GMI implements IGMI {
         // its calls are judged with too
         ragSources: lastRagSources ?? continuedTurnSources,
         ...(turnMemoryRecall ? { memoryRecall: turnMemoryRecall } : {}),
+        ...(turnMemoryShown ? { memoryShown: turnMemoryShown } : {}),
         ...(turnHistoryOmitted ? { historyOmitted: turnHistoryOmitted } : {}),
         ...(structuredResult ? { structuredOutput: structuredResult } : {}),
         ...(memoryWrite ? { memoryWrite } : {}),

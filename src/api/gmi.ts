@@ -913,6 +913,12 @@ export function gmi(opts: GmiOptions): GmiHandle {
           const sending = (): void => {
             if (!options.abortSignal?.aborted) {
               routeObserver?.attempt({ providerId: resolution.providerId, modelId: resolution.modelId, hop: resolution.hop });
+              const block = turn.memoryContext;
+              if (turn.onProviderMemoryShown && block && messages.some(({ content }) =>
+                content === block || (Array.isArray(content) && content.some((part) => 'text' in part && part.text === block)),
+              )) {
+                turn.onProviderMemoryShown();
+              }
             }
           };
           if (budget && !options.abortSignal?.aborted) {
@@ -1337,6 +1343,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
           // provider recalls beside the soul's mind, and the mind files the turn, once: the provider does not.
           useMemoryProviderContext: (!cognition.memory || soulBrain !== undefined) && !seat,
           providerTokenBudget: resolvedRecall.providerTokenBudget,
+          captureMemoryText: resolvedRecall.managerRecall?.capture === 'metadata+text',
           observeMemoryProvider: !seat,
           ...(soulBrain && !seat ? { mindFilesTurn: true } : {}),
           // Who the turn's memory hooks are told it serves.

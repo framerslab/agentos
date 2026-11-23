@@ -295,6 +295,13 @@ export interface StreamTextResult {
    */
   memoryRecall?: Promise<import('../cognition/memory/retrieval/recall/capture.js').MemoryRecallCapture | undefined>;
   /**
+   * On a GMI session's `stream()` with `memory.recall.capture: 'metadata+text'`,
+   * the memories shown to the model, as `GenerateTextResult.memoryShown`
+   * reports them on `send()`. Resolves when the stream ends, with an empty
+   * list when no recalled items were shown.
+   */
+  memoryShown?: Promise<import('./runtime/memoryWriteRecord.js').MemoryShownItem[]>;
+  /**
    * On a `gmi()` or `agent({ runtime: 'gmi' })` session's `stream()`: the
    * conversation history the turn's requests left out to fit the prompt
    * engine's history budget, as `GenerateTextResult.historyOmitted` reports it

@@ -697,6 +697,8 @@ export interface AssembledMemoryContext {
    * context another way may leave it out.
    */
   capture?: import('../retrieval/recall/capture.js').MemoryRecallCapture;
+  /** Candidate text and attribution for the block's renderings, available with `recall.capture: 'metadata+text'`. */
+  shownTexts?: Array<{ id: string; text: string; speaker?: 'user' | 'assistant'; createdAt: number }>;
 }
 
 // ---------------------------------------------------------------------------

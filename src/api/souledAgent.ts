@@ -585,6 +585,8 @@ const PAGE_TAG = 'page:';
 
 /** One recalled trace: the label that opens its line, then its text, and the label's parts as a record's fields. */
 interface RecallLine {
+  /** The trace id of a recalled message. A wiki note is identified by its page. */
+  id?: string;
   /** `[user, 26 days ago, 2026-10-14] `: who spoke it and when it was stored; ends with a space. Empty when dropped. */
   prefix: string;
   content: string;
@@ -2164,6 +2166,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
           return {
             prefix: recallPrefix(trace, label, now),
             content: onOneLine(trace.content),
+            ...(page ? {} : { id: trace.id }),
             ...(speaker ? { speaker } : {}),
             ...(page ? { page } : {}),
             when: formatMemoryAge(trace.createdAt, now),
@@ -2174,8 +2177,9 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       if (kept.length === 0) return null;
       return {
         contextText: kept.map((line) => `${line.prefix}${line.content}`).join('\n'),
-        // The same lines as records: a line whose label was dropped for the budget keeps its text alone.
+        // The same lines as records, with trace ids for the host. A line whose label was dropped keeps no label fields.
         items: kept.map((line) => ({
+          ...(line.id ? { id: line.id } : {}),
           ...(line.prefix && line.speaker ? { speaker: line.speaker } : {}),
           ...(line.prefix && line.page ? { page: line.page } : {}),
           ...(line.prefix ? { when: line.when } : {}),

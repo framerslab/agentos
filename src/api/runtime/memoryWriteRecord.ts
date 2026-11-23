@@ -2,10 +2,22 @@
  * @file memoryWriteRecord.ts
  * The record of one session turn's memory writes, which the turn's result carries as `memoryWrite`: for each side of
  * the turn that had text, whether it was written, skipped or failed. It holds trace ids, outcomes, reasons and error
- * class names, never the turn's text and never an error's message.
+ * class names, never the turn's text and never an error's message. The opt-in recall detail has its own result shape.
  *
  * @module api/runtime/memoryWriteRecord
  */
+
+/** A memory sent in a turn's recall block, returned with `memory.recall.capture: 'metadata+text'`. */
+export interface MemoryShownItem {
+  source: 'memory' | 'provider';
+  /** The trace id, absent for a page note. */
+  id?: string;
+  text: string;
+  speaker?: 'user' | 'assistant' | 'note';
+  page?: string;
+  /** ISO 8601 for cognitive memory. For a provider item this is the date wording used in its block. */
+  at?: string;
+}
 
 /**
  * What became of one side of a turn in memory.

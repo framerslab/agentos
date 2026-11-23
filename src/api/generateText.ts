@@ -1196,6 +1196,12 @@ export interface GenerateTextResult {
    */
   memoryRecall?: import('../cognition/memory/retrieval/recall/capture.js').MemoryRecallCapture;
   /**
+   * The memories shown to the model on a GMI session turn with
+   * `memory.recall.capture: 'metadata+text'`. A souled agent includes items
+   * from both recall blocks. Unset when no recalled items were shown.
+   */
+  memoryShown?: import('./runtime/memoryWriteRecord.js').MemoryShownItem[];
+  /**
    * On a `gmi()` or `agent({ runtime: 'gmi' })` session's turn: the
    * conversation history the turn's requests left out to fit the prompt
    * engine's history budget (35 percent of the serving model's context
