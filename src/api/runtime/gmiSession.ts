@@ -188,8 +188,8 @@ export interface GmiTurnContext {
    * before the turn's user message on every model call.
    */
   memoryContext: string | undefined;
-  /** Called when a request includes the provider's recall block. */
-  onProviderMemoryShown?: () => void;
+  /** Called on every model call of the turn: whether its messages, after the host's hook, hold the provider's recall block. */
+  onProviderMemoryShown?: (shown: boolean) => void;
   /** Called before every model call of the turn with the provider and model its hop was routed to. */
   onModelCall?: (route: { providerId: string; modelId: string }) => void;
   /** True for a structured send: its model calls go without tools. */
@@ -586,7 +586,10 @@ export async function* runGmiTurn(
       : null;
     const items = memoryItemsOf(recalled);
     const memoryContext = items.length > 0 ? renderMemoryRecallBlock(items) : undefined;
-    let providerMemoryShown = false;
+    // Whether the provider's block reached the model: the step in progress takes its newest call's answer, so a
+    // fallback hop's call replaces the failed hop's, and a finished step that was sent it keeps it for the turn.
+    let providerShownInStep = false;
+    let providerShownInTurn = false;
     // When the model call in progress started: the turn's start, the end of the
     // tool round before it, or the failure of the attempt it replaces.
     let callStartedAt = Date.now();
@@ -596,7 +599,7 @@ export async function* runGmiTurn(
       prompt: typeof input === 'string' ? input : undefined,
       memoryContext,
       ...(deps.captureMemoryText && memoryContext
-        ? { onProviderMemoryShown: () => { providerMemoryShown = true; } }
+        ? { onProviderMemoryShown: (shown: boolean) => { providerShownInStep = shown; } }
         : {}),
       onModelCall: ({ providerId, modelId }) => folder.route(providerId, modelId),
       structured: turn.responseSchema !== undefined,
@@ -659,7 +662,7 @@ export async function* runGmiTurn(
     let stepCalls: ToolCallRequest[] = [];
     // The GMI's output, the generator's return value, carries the turn's recall capture to the result.
     for await (const chunk of withReturn(gmi.processTurnStream(turnInput), (output) => {
-      if (!output || !providerMemoryShown) {
+      if (!output || !(providerShownInTurn || providerShownInStep)) {
         folder.finish(output);
         return;
       }
@@ -679,6 +682,8 @@ export async function* runGmiTurn(
           stepCalls.push(...((chunk.content as ToolCallRequest[]) ?? []));
           break;
         case GMIOutputChunkType.STEP_FINISHED: {
+          providerShownInTurn ||= providerShownInStep;
+          providerShownInStep = false;
           flush();
           const step = chunk.content as StepFinishedChunkPayload;
           await afterGeneration(deps.opts, folder, step, stepCalls);

@@ -635,7 +635,7 @@ export interface GMIOutput {
      * continuation assembles none and carries none.
      */
     memoryRecall?: import('../memory/retrieval/recall/capture.js').MemoryRecallCapture;
-    /** The trace text and attribution included in the serving hop's memory block under `'metadata+text'`. */
+    /** The trace text and attribution included in the serving hop's memory block under `'metadata+text'`; on a failed turn, the hop last tried. */
     memoryShown?: import('../../api/runtime/memoryWriteRecord.js').MemoryShownItem[];
     /**
      * The conversation history the turn's requests left out to fit the prompt engine's history budget: of the
