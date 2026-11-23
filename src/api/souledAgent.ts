@@ -33,6 +33,7 @@ import type { IModelRouter } from '../core/llm/routing/IModelRouter.js';
 import { Memory, type AttachedWiki, type ScoredTrace } from '../cognition/memory/io/facade/Memory.js';
 import type { MemoryTrace } from '../cognition/memory/core/types.js';
 import { brainOf } from '../cognition/memory/io/facade/handedBrain.js';
+import { SqlStorageMemoryArchive } from '../cognition/memory/archive/SqlStorageMemoryArchive.js';
 import { createStorageFeatures, type StorageAdapter } from '@framers/sql-storage-adapter';
 import {
   ForgottenLedger,
@@ -1653,6 +1654,14 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   const mindRecalls = rest.runtime === 'gmi' && cognitiveMemoryOf(rest as CognitionInputs);
   /** The store's own Brain, which the soul's mind files into and reads on the GMI runtime with cognitive memory on. */
   const soulBrain = brainOf(memory);
+  /**
+   * The archive the soul's mind keeps the originals of its traces in, on the soul's Brain, as each manager it builds
+   * there does: its tables are made once at the open, so a deletion with no manager open in this process drops a
+   * person's originals without building one, which would need the embedding provider. Undefined with cognitive memory
+   * off.
+   */
+  const mindArchive = mindRecalls ? new SqlStorageMemoryArchive(soulBrain.adapter, soulBrain.features, soulBrain.brainId) : undefined;
+  if (mindArchive) await closingOnThrow(() => mindArchive.initialize());
   /** The managers of the soul's mind open in this process: the ones `gmi()` built on {@link soulBrain}, until it shuts each down. */
   const mindManagers = new Set<ICognitiveMemoryManager>();
   /** When `close()` began: the turns and the writes it waits for, the mind's among them, share one deadline from here. */
@@ -2736,10 +2745,25 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   });
   /**
    * The mind side of the agent on the GMI runtime, cognitive memory on or off: a deletion empties the open sessions
-   * of its subject through it. It waits for a session's running turn as long as close() waits for its turns and
-   * writes.
+   * of its subject through it, and with cognitive memory on deletes the subject's rows through it, with what the
+   * managers open in this process keep of each, or with none open each trace's archived original. It waits for a
+   * session's running turn as long as close() waits for its turns and writes.
    */
-  const soulMind = rest.runtime === 'gmi' ? createSoulMind({ managers: () => mindManagers, deadlineMs: waitMs }) : undefined;
+  const soulMind =
+    rest.runtime === 'gmi'
+      ? createSoulMind({
+          managers: () => mindManagers,
+          ...(mindArchive
+            ? {
+                archive: {
+                  originals: mindArchive,
+                  traceIdsOf: (scopeId: string) => memory.tracesStoredBefore('conversation', scopeId, Number.MAX_SAFE_INTEGER),
+                },
+              }
+            : {}),
+          deadlineMs: waitMs,
+        })
+      : undefined;
   /**
    * What a deletion of one subject does to the sessions this handle holds open for the subject, as an entry of the
    * report's stores and as the deletion's `sessions` part. The default runtime keeps a session's history in this
@@ -2777,12 +2801,13 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   };
   /**
    * The parts of one subject's deletion that are this agent's: the wait for the subject's pending writes, its chain,
-   * what the agent reached beside the store and the open sessions.
+   * what the agent reached beside the store, the open sessions and, with cognitive memory on, the mind the rows are
+   * deleted through.
    */
   const deletionPartsOf = (
     subject: SuppressionSubject,
     extra: ReportExtras,
-  ): Pick<ForgetUserMemoryOptions, 'drain' | 'onChain' | 'extraStores' | 'alsoIncomplete' | 'sessions'> => {
+  ): Pick<ForgetUserMemoryOptions, 'drain' | 'onChain' | 'extraStores' | 'alsoIncomplete' | 'sessions' | 'mind'> => {
     const key = conversationScopeKey(agentId, subject);
     // The sessions are dealt with once, when the deletion first asks: after the tombstone is written and the deletes
     // are done, so a deletion that cannot write its tombstone leaves them as they are. The `sessions` part and the
@@ -2795,6 +2820,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       sessions: async () => (await historyOf()).part,
       extraStores: async () => [...extra.stores, (await historyOf()).entry],
       alsoIncomplete: extra.incomplete,
+      ...(soulMind && mindRecalls ? { mind: soulMind } : {}),
     };
   };
   /**
