@@ -281,6 +281,33 @@ const LEARNER_USER_COLUMNS: ReadonlyArray<readonly [string, string]> = [
   ['agentos_learning_skills', 'user_id'],
 ];
 
+/** Reads named users from a Brain's trace metadata and learning tables, without decoding scope ids. @internal */
+export async function listNamedMemoryUsers(brain: Brain, namespace?: string): Promise<string[]> {
+  const users = new Set<string>();
+  const holdUser = (userId: unknown): void => {
+    if (typeof userId === 'number') users.add(String(userId));
+    else if (typeof userId === 'string' && userId !== '') users.add(userId);
+  };
+  const named = await brain.all<{ user_id: unknown }>(
+    `SELECT DISTINCT ${brain.features.dialect.jsonExtract('metadata', '$.turnUserId')} AS user_id FROM memory_traces WHERE brain_id = ?`,
+    [brain.brainId],
+  );
+  for (const row of named) holdUser(row.user_id);
+  for (const [table, column] of LEARNER_USER_COLUMNS) {
+    try {
+      const rows = await brain.all<{ user_id: unknown }>(
+        `SELECT DISTINCT ${column} AS user_id FROM ${table} WHERE ${column} IS NOT NULL${namespace === undefined ? '' : ' AND namespace = ?'}`,
+        namespace === undefined ? [] : [namespace],
+      );
+      for (const row of rows) holdUser(row.user_id);
+    } catch (error) {
+      // A store whose database holds no learning tables has no learner to name.
+      if (!isMissingTableError(error)) throw error;
+    }
+  }
+  return [...users];
+}
+
 /** Thrown inside a page write's transaction when the row is no longer the one read, so the transaction rolls back. */
 class PageRowChangedError extends Error {
   constructor() {
@@ -380,6 +407,32 @@ function isPageChunkTags(tags: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** The stored rows of the given ids, including soft-deleted ones, without loading their words or vectors. @internal */
+export async function readStoredTraceRefs(
+  brain: Brain,
+  traceIds: readonly string[],
+): Promise<Array<{ id: string; scope: string; scopeId: string; deleted: boolean; chunk: boolean }>> {
+  const ids = [...new Set(traceIds)];
+  const found: Array<{ id: string; scope: string; scopeId: string; deleted: boolean; chunk: boolean }> = [];
+  for (let offset = 0; offset < ids.length; offset += 400) {
+    const slice = ids.slice(offset, offset + 400);
+    const rows = await brain.all<{ id: string; scope: string; scope_id: string | null; deleted: number | boolean | string; tags: string }>(
+      `SELECT id, scope, scope_id, deleted, tags FROM memory_traces WHERE brain_id = ? AND id IN (${slice.map(() => '?').join(', ')})`,
+      [brain.brainId, ...slice],
+    );
+    for (const row of rows) {
+      found.push({
+        id: row.id,
+        scope: row.scope,
+        scopeId: row.scope_id ?? '',
+        deleted: Number(row.deleted) !== 0,
+        chunk: isPageChunkTags(row.tags),
+      });
+    }
+  }
+  return found;
 }
 
 /** Raw row shape from the `memory_traces` table. */
@@ -1420,25 +1473,7 @@ export class Memory {
     traceIds: readonly string[],
   ): Promise<Array<{ id: string; scope: string; scopeId: string; deleted: boolean; chunk: boolean }>> {
     await this._initPromise;
-    const ids = [...new Set(traceIds)];
-    const found: Array<{ id: string; scope: string; scopeId: string; deleted: boolean; chunk: boolean }> = [];
-    for (let offset = 0; offset < ids.length; offset += 400) {
-      const slice = ids.slice(offset, offset + 400);
-      const rows = await this._brain.all<{ id: string; scope: string; scope_id: string | null; deleted: number | boolean | string; tags: string }>(
-        `SELECT id, scope, scope_id, deleted, tags FROM memory_traces WHERE brain_id = ? AND id IN (${slice.map(() => '?').join(', ')})`,
-        [this._brain.brainId, ...slice],
-      );
-      for (const row of rows) {
-        found.push({
-          id: row.id,
-          scope: row.scope,
-          scopeId: row.scope_id ?? '',
-          deleted: Number(row.deleted) !== 0,
-          chunk: isPageChunkTags(row.tags),
-        });
-      }
-    }
-    return found;
+    return readStoredTraceRefs(this._brain, traceIds);
   }
 
   /**
@@ -1752,26 +1787,7 @@ export class Memory {
       const subject = parseConversationScopeKey(row.owner_key)?.subject;
       if (subject && subject.kind !== 'operator') hold({ kind: subject.kind, id: subject.id });
     }
-    const holdUser = (userId: unknown): void => {
-      if (typeof userId === 'number') hold({ kind: 'user', id: String(userId) });
-      else if (typeof userId === 'string' && userId !== '') hold({ kind: 'user', id: userId });
-    };
-    const named = await this._brain.all<{ user_id: unknown }>(
-      `SELECT DISTINCT ${this._brain.features.dialect.jsonExtract('metadata', '$.turnUserId')} AS user_id FROM memory_traces WHERE brain_id = ?`,
-      [brainId],
-    );
-    for (const row of named) holdUser(row.user_id);
-    for (const [table, column] of LEARNER_USER_COLUMNS) {
-      try {
-        const rows = await this._brain.all<{ user_id: unknown }>(
-          `SELECT DISTINCT ${column} AS user_id FROM ${table} WHERE ${column} IS NOT NULL`,
-        );
-        for (const row of rows) holdUser(row.user_id);
-      } catch (error) {
-        // A store whose database holds no learning tables has no learner to name.
-        if (!isMissingTableError(error)) throw error;
-      }
-    }
+    for (const id of await listNamedMemoryUsers(this._brain)) hold({ kind: 'user', id });
     return [...held.values()];
   }
 

@@ -5,6 +5,7 @@
  * deleted for good and the corrected statement is filed in their place, or nothing is, for a deletion of named traces.
  */
 import type { MemoryRecipient } from '../../../api/runtime/memoryRecipients.js';
+import { learnerUserScopeId } from '../../learning/scopes.js';
 import type { LearnedStateDocument } from '../../learning/types.js';
 import type { WikiPage } from '../../substrate/memory/wiki/types.js';
 import { errorFields } from '../../../core/logging/events.js';
@@ -20,8 +21,9 @@ import { parseTraceMetadata } from '../retrieval/store/tracePersistence.js';
 import type { KeptCorrection, SuppressionSubject } from '../suppression/ForgottenLedger.js';
 import { guardedWrite } from '../suppression/guardedWrite.js';
 import { brainOf } from './facade/handedBrain.js';
-import type { Memory } from './facade/Memory.js';
+import { readStoredTraceRefs, type Memory } from './facade/Memory.js';
 import type { SubjectPages } from './forgetUserMemory.js';
+import { LEGACY_GMI_STORE, readLegacyGmiRows, type LegacyGmiStore } from './legacyGmiStore.js';
 import { LEGACY_SCOPE } from './legacyMemory.js';
 import type { RetentionPeriod } from './retentionSweep.js';
 
@@ -90,6 +92,8 @@ export interface UserMemoryExport {
     pages: ExportedPage[];
     /** The subject's learned state, when the agent runs a learning layer. */
     learner?: LearnedStateDocument;
+    /** Live traces under the learner's user scope in a passed GMI store, oldest first. */
+    legacyGmiStore?: Array<{ id: string; createdAt: string; speaker?: 'user' | 'assistant'; text: string }>;
     /**
      * The corrections of the subject whose text the tombstones' second copy also keeps. `text` is given for one the
      * export holds no trace of: a restore of the store took it, and filing it again has not succeeded yet, so the copy
@@ -129,6 +133,7 @@ export const EXPORT_STORES = [
   'older compiled pages',
   'compiled pages',
   'learning store',
+  LEGACY_GMI_STORE,
 ] as const;
 /** One store an export reads. */
 export type ExportStore = (typeof EXPORT_STORES)[number];
@@ -225,6 +230,8 @@ export async function exportSubjectMemory(options: {
    * the written forms of the agent's plain scope id its traces sit under, and its compiled pages.
    */
   legacy?: { forms: readonly string[]; pages(): Promise<WikiPage[]> };
+  /** A passed GMI store whose learner rows are exported separately from the soul's store. @internal */
+  legacyGmiStore?: LegacyGmiStore;
   /** Who receives a person's text from the agent. Unset: none is named. A read that fails is named in `unread`. */
   recipients?: () => Promise<MemoryRecipient[]>;
   /** How long the subject's traces are kept. Unset: `{ period: 'none' }`. */
@@ -248,7 +255,15 @@ export async function exportSubjectMemory(options: {
     traces: [],
     pages: [],
     provided: { messages: [] },
-    held: { traces: [], archivedOriginals: [], typedFacts: [], graphLinks: [], pages: [], restoreCopies: [] },
+    held: {
+      traces: [],
+      archivedOriginals: [],
+      typedFacts: [],
+      graphLinks: [],
+      pages: [],
+      restoreCopies: [],
+      ...(options.legacyGmiStore ? { legacyGmiStore: [] } : {}),
+    },
     recipients: [],
     // What the host answered for this subject (policyDays, the sentiment its answer leaves) is added once the ledger
     // says the subject is not forgotten.
@@ -371,6 +386,28 @@ export async function exportSubjectMemory(options: {
   document.profiling.moodStamps = document.held.traces.filter((trace) => isMoodStamp(trace.emotionalContext)).length;
   const heldIds = document.held.traces.map((trace) => trace.id);
 
+  const legacyGmiStore = options.legacyGmiStore;
+  if (legacyGmiStore && subject.kind === 'user') {
+    await reading(LEGACY_GMI_STORE, async () => {
+      const held: NonNullable<UserMemoryExport['held']['legacyGmiStore']> = [];
+      for (const row of await readLegacyGmiRows(legacyGmiStore, subject.id)) {
+        let tags: unknown;
+        try {
+          tags = JSON.parse(row.tags);
+        } catch {
+          // A trace with unreadable tags still has text to export.
+        }
+        if (Array.isArray(tags) && tags.includes('wiki')) continue;
+        const role = Array.isArray(tags) ? tags[0] : undefined;
+        const speaker = role === 'user' || role === 'assistant' ? role : undefined;
+        held.push({ id: row.id, text: row.content, createdAt: isoOf(row.created_at), ...(speaker ? { speaker } : {}) });
+      }
+      return held;
+    }, (rows) => {
+      document.held.legacyGmiStore = rows;
+    });
+  }
+
   if (heldIds.length > 0) {
     await reading('memory graph', async () => {
       // One record a link, by its two ends and its type: a live link of another type between the same two traces is a
@@ -460,6 +497,8 @@ export async function exportSubjectMemory(options: {
 /** What {@link correctSubjectMemory} is handed beside the change itself. */
 export interface SubjectCorrectionOptions {
   memory: Memory;
+  /** A passed GMI store that can also hold the named user's traces. @internal */
+  legacyGmiStore?: LegacyGmiStore;
   wiki: { storeFor(scopeId: string): SubjectPages };
   agentId: string;
   subject: SuppressionSubject;
@@ -576,15 +615,26 @@ export async function correctSubjectMemory(
     const own = new Set(await memory.liveTraceIdsOf(CONVERSATION_SCOPE, key, ids));
     const ledger = memory.forgotten;
     const notLive = ids.filter((id) => !own.has(id));
-    if (ledger && notLive.length > 0) {
+    const recorded = new Set(ledger && notLive.length > 0 ? await ledger.deletedTraceIds(notLive) : []);
+    if (recorded.size > 0) {
       // A call that failed partway recorded these ids as deleted; a delete that soft-deleted a row and then failed left
       // it under the subject's key. The call made again owns such a row, whatever its deleted flag, and finishes it.
-      const recorded = new Set(await ledger.deletedTraceIds(notLive));
       for (const row of await memory.storedTracesAmong(notLive.filter((id) => recorded.has(id)))) {
         if (row.scope === CONVERSATION_SCOPE && row.scopeId === key && !row.chunk) own.add(row.id);
       }
     }
-    const missing = ids.filter((id) => !own.has(id)).length;
+    const legacy = options.legacyGmiStore;
+    const ownLegacy = new Set<string>();
+    const outsideSoul = ids.filter((id) => !own.has(id));
+    if (legacy && subject.kind === 'user' && outsideSoul.length > 0) {
+      const scopeId = learnerUserScopeId({ namespace: legacy.namespace, userId: subject.id });
+      for (const row of await readStoredTraceRefs(legacy.brain, outsideSoul)) {
+        if (row.scope === 'user' && row.scopeId === scopeId && !row.chunk && (!row.deleted || recorded.has(row.id))) {
+          ownLegacy.add(row.id);
+        }
+      }
+    }
+    const missing = outsideSoul.length - ownLegacy.size;
     if (missing > 0) {
       memoryLog.warn('memory.write_refused', { reason: 'foreign_trace' });
       throw new Error(`correctUserMemory: ${missing} of ${ids.length} trace ids are not this user's live traces`);
@@ -656,8 +706,9 @@ export async function correctSubjectMemory(
     // tombstones' second copy in the same write to it, before any named trace is deleted: a restore from before this
     // call has them deleted again and the correction filed again at the next open, and a call that fails from here is
     // finished by the same call made again.
-    const going = ids.filter((id) => id !== correctionTraceId);
-    await ledger?.markTracesDeleted(going, kept ? { keep: kept } : {});
+    const removed = ids.filter((id) => id !== correctionTraceId);
+    await ledger?.markTracesDeleted(removed, kept ? { keep: kept } : {});
+    const going = removed.filter((id) => own.has(id));
     let deleted = 0;
     const mind = options.mind;
     if (mind) {
@@ -690,6 +741,10 @@ export async function correctSubjectMemory(
       await memory.finishErasure();
     } catch (error) {
       memoryLog.warn('memory.erasure_unfinished', errorFields(error));
+    }
+    const legacyIds = removed.filter((id) => ownLegacy.has(id));
+    if (legacy && legacyIds.length > 0) {
+      deleted += (await legacy.deleteTraces(legacyIds)).deleted;
     }
     return { deleted, pagesDeleted, ...(correctionTraceId !== undefined ? { correctionTraceId } : {}), recipients };
   };

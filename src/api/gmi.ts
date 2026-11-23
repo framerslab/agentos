@@ -612,17 +612,6 @@ export function gmi(opts: GmiOptions): GmiHandle {
       "gmi(): a SQL learning.store needs learning.agentKey, the stable id of the agent's learners; two agents on one store would otherwise be one agent to the learning layer.",
     );
   }
-  /**
-   * The Brain behind `memory.store`, which holds the agent's memory and its learning store. A file's Brain is one per
-   * memory generation: `agent.close()` closes it, and the next use opens the file again. A host's adapter keeps one
-   * Brain for the agent's life, never closed.
-   */
-  const openStoreBrain = () => retryingOnce<AgentMemoryBrain>(() => openAgentMemoryBrain(memoryStore!, brainKey!));
-  let storeBrain = memoryStore ? openStoreBrain() : undefined;
-  /** The host calls of `agent.learning` still running: `agent.close()` lets them finish before it closes what they use. */
-  const runningHostCalls = new Set<Promise<unknown>>();
-  /** The in-process learning store of a `memory.store` whose adapter has no transactions: one for the agent's life. */
-  let inProcessStore: InMemoryLearningStore | undefined;
   // One learning layer for the agent, only when its `learning` option is on. With it off nothing below builds or
   // passes anything of the layer, and the agent runs as it did before the layer existed.
   // A souled agent hands the ledger of its memory store to the layer by the options object it was built from.
@@ -637,6 +626,19 @@ export function gmi(opts: GmiOptions): GmiHandle {
    * other agent, which keeps its cognitive memory as before.
    */
   const soulBrain = cognitiveMemoryOn ? soulStore?.brain : undefined;
+  const legacyStore = memoryStore && soulBrain ? soulStore?.legacyGmiStore : undefined;
+  /**
+   * The Brain behind `memory.store` supplies the learning store. A plain GMI also uses it for its sessions and opens
+   * a new file handle after close. With a soul's Brain, the passed store is held until the souled agent closes.
+   */
+  const openStoreBrain = () => retryingOnce<AgentMemoryBrain>(() =>
+    (legacyStore?.open ?? openAgentMemoryBrain)(memoryStore!, brainKey!),
+  );
+  let storeBrain = memoryStore ? openStoreBrain() : undefined;
+  /** The host calls still running: close lets them finish before closing what they use. */
+  const runningHostCalls = new Set<Promise<unknown>>();
+  /** The learning store of a passed adapter without transactions: one for the agent's life. */
+  let inProcessStore: InMemoryLearningStore | undefined;
   if (cognition.memory && cognition.mechanisms) {
     // Involuntary recall needs a prompt assembler input the manager never supplies, and schema encoding needs centroids.
     const inactive = ['involuntaryRecall', 'schemaEncoding'] as const;
@@ -773,12 +775,22 @@ export function gmi(opts: GmiOptions): GmiHandle {
    * `close()` hands back the build it kept, if any; a build asked for after
    * that fails, so nothing builds a memory that no one will close.
    */
-  const memoryForSessions = (brain: typeof storeBrain) => {
+  const buildMemory = (brain: typeof storeBrain, use: 'sessions' | 'legacy' = 'sessions') => {
     let closed = false;
     const build = retryingOnce<AgentCognitiveMemory | undefined>(async () => {
       if (!cognition.memory) return undefined;
       if (closed) throw new Error('gmi(): the agent was closed; agent.session() opens a new session.');
       const { persona } = await shared.get();
+      // The passed store's deletion manager needs no session hydration or consolidation.
+      if (use === 'legacy') {
+        const opened = await brain!.get();
+        return createAgentCognitiveMemory({
+          persona,
+          memory: cognition.memory,
+          brain: opened.brain,
+          hydration: 'scopes',
+        });
+      }
       // Reads the environment for the embedding provider when memory.embedding names none.
       if (soulBrain) {
         // The soul's mind: on the soul's own Brain, the mind's rows alone, each person's loaded as their session's first
@@ -813,19 +825,39 @@ export function gmi(opts: GmiOptions): GmiHandle {
   };
   // The memory of the sessions open now. agent.close() closes it once they
   // have finished, and the sessions opened after that share a new one.
-  let memory = memoryForSessions(storeBrain);
-  /**
-   * With `memory.store`, hands the layer the memory the agent's sessions file into, built for the call when no session
-   * has built it, so `forgetUser` reaches the store whether or not a session is open. A memory that does not build
-   * fails the call, before the tombstone: a deletion that could not reach the store's traces is never reported done.
-   * The soul's mind is never handed to the layer: the souled agent's own deletion reaches the soul's store.
-   */
-  const memoryForForget = memoryStore && !soulBrain
+  let memory = buildMemory(soulBrain ? undefined : storeBrain);
+  let memoryForForget = memoryStore && !soulBrain
     ? async (): Promise<void> => {
         const built = await memory.get();
         if (built && layer) await adoptLearningMemory(layer, built.manager);
       }
     : undefined;
+  if (legacyStore && storeBrain) {
+    const passedBrain = storeBrain;
+    const legacyMemory = buildMemory(passedBrain, 'legacy');
+    legacyStore.attach({
+      open: passedBrain.get,
+      async deleteTraces(ids) {
+        const built = await legacyMemory.get();
+        return built!.manager.deleteTraces(ids);
+      },
+      async close() {
+        const built = await legacyMemory.close()?.catch(() => undefined);
+        try {
+          await built?.close();
+        } finally {
+          if (layer && built) releaseLearningMemory(layer, built.manager);
+          if (layer) releaseLearningStore(layer);
+          const opened = await passedBrain.peek()?.catch(() => undefined);
+          await opened?.close();
+        }
+      },
+    });
+    memoryForForget = async () => {
+      const built = await legacyMemory.get();
+      if (built && layer) await adoptLearningMemory(layer, built.manager);
+    };
+  }
 
   /**
    * A learner session for one session or one call of the agent; `undefined` when learning is off. `sessionId` is the
@@ -1601,8 +1633,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
       const closingMemory = memory;
       const closingBrain = storeBrain;
       // A file's Brain is one per memory generation; a host's adapter keeps its Brain.
-      if (memoryStore && 'path' in memoryStore) storeBrain = openStoreBrain();
-      memory = memoryForSessions(storeBrain);
+      if (!legacyStore && memoryStore && 'path' in memoryStore) storeBrain = openStoreBrain();
+      memory = buildMemory(soulBrain ? undefined : storeBrain);
       // Together with the memory, so a session opened while this closes the others is recorded in the new one.
       openedSessionIds.clear();
       // Each session closes without ending its id's memory, which a restart keeps too.

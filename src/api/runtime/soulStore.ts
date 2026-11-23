@@ -12,6 +12,7 @@
  * @internal
  */
 import type { AgentSession, MemoryHookContext } from '../agent.js';
+import type { AgentMemoryBrain, openAgentMemoryBrain } from './agentCognitiveMemory.js';
 import { memoryLog } from '../../cognition/memory/log.js';
 import { errorFields } from '../../core/logging/events.js';
 import type { IMemoryArchive } from '../../cognition/memory/archive/IMemoryArchive.js';
@@ -19,6 +20,13 @@ import type { ICognitiveMemoryManager } from '../../cognition/memory/CognitiveMe
 import type { CognitiveMechanismsConfig } from '../../cognition/memory/mechanisms/types.js';
 import type { Brain } from '../../cognition/memory/retrieval/store/Brain.js';
 import type { SoulTurnMemory } from '../../cognition/substrate/soulTurnMemory.js';
+
+/** A passed GMI store, opened and closed with the soul's store. Its manager serves deletion only. */
+export interface LegacyGmiMemory {
+  open(): Promise<AgentMemoryBrain>;
+  deleteTraces(ids: readonly string[]): Promise<{ deleted: number }>;
+  close(): Promise<void>;
+}
 
 /** A souled agent's store, as `gmi()` reads it. */
 export interface SoulStore {
@@ -38,6 +46,11 @@ export interface SoulStore {
    * memory stays its GMI's own.
    */
   brain?: Brain;
+  /** Opens a passed memory.store and receives the operations that share its Brain. */
+  legacyGmiStore?: {
+    open: typeof openAgentMemoryBrain;
+    attach(memory: LegacyGmiMemory): void;
+  };
   /** The mechanisms the agent's cognitive memory runs on that store, in place of the ones its options resolve to. */
   mechanisms: CognitiveMechanismsConfig | undefined;
   /** Told of each cognitive memory manager `gmi()` built on {@link brain}, once it is built. */
