@@ -94,3 +94,18 @@ await innkeeper.correctUserMemory!(playerId, { traceIds: [selectedTraceId], text
 ```
 
 See [the high-level API](./getting-started/HIGH_LEVEL_API.md) for signatures and [host duties](./safety/MEMORY_HOST_DUTIES.md) for deletion receipts, restores and recipients.
+
+## Upgrading
+
+A workspace-backed `souledAgent({ runtime: 'gmi' })` gives each user one durable memory. The wiki and cognitive recall read the same store. Export, correction, retention and deletion reach the turns the mind files there. The default runtime stays `'legacy'`.
+
+- **Configure cognitive memory.** Name the provider that receives text in `memory.embedding.provider`. Enabling cognitive memory without it, or setting `memory.consolidation.enabled: true`, throws at open. `session.close()` ends the conversation in process. An anonymous session reopened with the same id keeps the same stored memory, subject to retention and forgetting. Use a fresh session id for a different anonymous visitor.
+- **Move traces from a passed GMI store.** Turns stop reading and writing traces in `memory.store`. Keep it attached while moving its data. Preview the move with `agent.copyLegacyGmiMemory()`, pass known user ids in `users` to identify more rows, then pass `dryRun: false` to file eligible traces in the soul's store and remove their source rows. Check the report for traces left behind.
+- **Set a tombstone key before adding a second person or anonymous session.** A multi-person store needs `retention` and, when its ledger holds no tombstones, `tombstoneKey`.
+- **Choose a period in days for a minor's memory.** With `minor: true` on an `'until-deletion'` store, the session keeps no long-term memory, even with a shorter `retentionDays` policy answer.
+- **Choose what leaves the process.** GMI session requests omit the end user's id unless you set `sendUserIdToProvider: true`. Use an opaque id if you enable it.
+- **Choose what stays with a trace.** The mind stores a neutral emotional stamp by default. Set `emotionalStamp: 'mood'` to store the agent's mood. A minor's traces and those of a user with `profiling: 'off'` stay neutral.
+- **Team seats.** A seat session on a souled agent runs without cognitive memory.
+- **Update policy on open sessions.** On either runtime, a later `memoryPolicy` answer for a user on the same agent object replaces an open session's answer from its next turn.
+- **Route warnings through your logger.** Four former `console.warn` calls in `souledAgent()` emit `soul.inline_no_wiki`, `memory.close_pending`, `memory.close_sweep_failed` and `memory.close_compile_failed`. In `gmi()`, a skipped provider context emits `memory.provider_context_skipped`.
+- **Protect the second copy and plan a rollback.** The tombstone copy also holds the text of each live correction. When rolling back to 0.19.x, drop the `memory_corrections` table from that copy. Version 0.19.x reads mind-filed rows as ordinary conversation rows and recalls them through the provider. If you opened the agent with `soulStore`, moving back to the file store requires moving your data.
