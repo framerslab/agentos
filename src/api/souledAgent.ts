@@ -30,7 +30,7 @@ import {
 import { generateText } from './generateText.js';
 import type { StreamTextResult } from './streamText.js';
 import type { IModelRouter } from '../core/llm/routing/IModelRouter.js';
-import { Memory, type AttachedWiki, type ScoredTrace } from '../cognition/memory/io/facade/Memory.js';
+import { listNamedMemoryUsers, Memory, type AttachedWiki, type ScoredTrace } from '../cognition/memory/io/facade/Memory.js';
 import type { MemoryTrace } from '../cognition/memory/core/types.js';
 import { brainOf } from '../cognition/memory/io/facade/handedBrain.js';
 import { SqlStorageMemoryArchive } from '../cognition/memory/archive/SqlStorageMemoryArchive.js';
@@ -65,6 +65,7 @@ import {
 } from '../cognition/memory/io/legacyMemory.js';
 import type { WikiPage } from '../cognition/substrate/memory/wiki/types.js';
 import { WriteChains } from '../cognition/learning/writeChains.js';
+import { couldBeSessionForm, learnerUserScopeId } from '../cognition/learning/scopes.js';
 import { conversationScopeKey, parseConversationScopeKey } from '../cognition/memory/retrieval/store/conversationScopeKey.js';
 import { encodePlainScopeId } from '../cognition/memory/retrieval/store/scopeIdForm.js';
 import { memoryLog } from '../cognition/memory/log.js';
@@ -81,7 +82,7 @@ import { messageOf, reportMindWriteFailure, reportObserveFailure } from './runti
 import { ensureScopeRow } from '../cognition/memory/retrieval/store/conversationScopes.js';
 import type { ICognitiveMemoryManager } from '../cognition/memory/CognitiveMemoryManager.js';
 import type { CognitiveMechanismsConfig } from '../cognition/memory/mechanisms/types.js';
-import { failedWriteEntry, type MemoryWriteEntry } from './runtime/memoryWriteRecord.js';
+import { errorNameOf, failedWriteEntry, type MemoryWriteEntry } from './runtime/memoryWriteRecord.js';
 import { isAnonymousUserId } from './runtime/memorySubject.js';
 import { asSpendBudget } from './runtime/spendBudget.js';
 import { credentialsGoWith, modelNamesAnotherProvider } from './runtime/credentialOwner.js';
@@ -97,7 +98,7 @@ import {
   type RecipientRoutes,
 } from './runtime/memoryRecipients.js';
 import { resolveCognition, type CognitionInputs, type ResolvedCognition } from './runtime/gmiCognition.js';
-import { LEGACY_GMI_STORE, type LegacyGmiStore } from '../cognition/memory/io/legacyGmiStore.js';
+import { countLegacyGmiScopes, LEGACY_GMI_STORE, readLegacyGmiRows, type LegacyGmiStore } from '../cognition/memory/io/legacyGmiStore.js';
 import { shareRouteObserver } from './runtime/routeObserver.js';
 import { assertBigintReadsAsNumbers, embeddingRouteOf, openAgentMemoryBrain } from './runtime/agentCognitiveMemory.js';
 import { serializeTransactionsOn } from '../cognition/memory/retrieval/store/adapterTransactionLock.js';
@@ -166,6 +167,23 @@ export const SPEAKER_METADATA_KEY = 'speaker';
 
 /** Who spoke a trace, as the observer records it. */
 type Speaker = 'user' | 'assistant';
+
+/** The role tag precedes the persona and any user tags in a legacy GMI trace. */
+function legacyGmiSpeaker(tags: string): Speaker | undefined {
+  try {
+    const parsed: unknown = JSON.parse(tags);
+    const role: unknown = Array.isArray(parsed) ? parsed[0] : undefined;
+    if (role === 'user' || role === 'role:user') return 'user';
+    if (role === 'assistant' || role === 'role:assistant') return 'assistant';
+  } catch {
+    // Unreadable tags leave the text without a speaker.
+  }
+  return undefined;
+}
+
+type LegacyGmiUnattributed = { scope: string; scopes: number; traces: number; reason: string };
+type LegacyGmiMove = { userId: string; moved: number; kept: number; failed?: string };
+type LegacyGmiPerson = { subject: { kind: 'user'; id: string }; scopeId: string; traces: number };
 
 /** Who a turn's memory belongs to: the user its session named, else the session. */
 type MemorySubject = MemoryHookContext['subject'];
@@ -944,6 +962,15 @@ export type SouledAgent = Agent & {
    * @throws TypeError when `userId` is not a non-empty string.
    */
   exportUserMemory?(userId: string): Promise<UserMemoryExport>;
+  /**
+   * Previews a move from a passed GMI `memory.store`, or moves the named learners' traces into this soul's store.
+   * The default dry run reads counts. Pass `dryRun: false` to file and then delete each attributable source trace.
+   * `users` supplements the people named by the passed store's learning tables.
+   */
+  copyLegacyGmiMemory?(options?: { dryRun?: boolean; users?: readonly string[] }): Promise<
+    | { dryRun: true; people: Array<{ userId: string; traces: number }>; unattributed: LegacyGmiUnattributed[]; forgotten: number }
+    | { dryRun: false; people: LegacyGmiMove[]; unattributed: LegacyGmiUnattributed[]; forgotten: number }
+  >;
   /**
    * Who receives a person's text from this agent, outside the process: its model's provider and model, a model
    * router's pick, each fallback hop (or the automatic fallback chain), the compile's target, the target for minors'
@@ -3189,6 +3216,128 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   // call passed `text`.
   built.correctUserMemory = correctUser as NonNullable<SouledAgent['correctUserMemory']>;
 
+  /** Files and removes one person's legacy rows on the same chain as their other memory changes. */
+  const moveLegacyGmiPerson = (
+    legacy: LegacyGmiStore,
+    { subject, scopeId, traces }: LegacyGmiPerson,
+  ): Promise<LegacyGmiMove | { forgotten: number }> =>
+    onSubject(scopeId, async () => {
+      const userId = subject.id;
+      const result: LegacyGmiMove = { userId, moved: 0, kept: 0 };
+      try {
+        if (await forgotten.isForgotten(subject)) return { forgotten: traces };
+        const rows = await readLegacyGmiRows(legacy, userId, true);
+        const marked = new Set(await forgotten.deletedTraceIds(rows.map(({ id }) => id).filter((id) => id !== '')));
+        const context: MemoryHookContext = { sessionId: 'copyLegacyGmiMemory', userId, subject, agentId, call: 'one-shot' };
+        for (const row of rows) {
+          // A correction can have marked the source id before its delete reached this store.
+          if (marked.has(row.id)) continue;
+          const createdAt = Number(row.created_at);
+          const prior = await soulBrain.get<{
+            scope: string; scope_id: string; deleted: number; metadata: string; created_at: number;
+          }>(
+            'SELECT scope, scope_id, deleted, metadata, created_at FROM memory_traces WHERE brain_id = ? AND id = ?',
+            [soulBrain.brainId, row.id],
+          );
+          const copied = prior && prior.scope === 'conversation' && prior.scope_id === scopeId &&
+            Number(prior.deleted) === 0 && Number(prior.created_at) === createdAt &&
+            parseTraceMetadata(prior.metadata).copiedFrom === 'gmi-store';
+          // Hard deletion can stop after marking the source row. Retry it only with its live destination copy.
+          if (Number(row.deleted) !== 0 && !copied) continue;
+          if (prior && !copied) throw new Error('souledAgent: a legacy trace id is already in use');
+          if (!copied) {
+            if (await forgotten.isForgotten(subject)) break;
+            const text = await screened(row.content, context, 'file');
+            if (text === SCREEN_FAILED || text === null || (screen && text === '')) {
+              result.kept += 1;
+              continue;
+            }
+            const speaker = legacyGmiSpeaker(row.tags);
+            const filed = await guardedWrite(
+              forgotten,
+              subject,
+              () => {
+                if (closing || storeClosed) throw new Error('souledAgent: the memory store is closing');
+                if (sharedUser !== undefined && userId !== sharedUser) throw new Error('souledAgent: sharedMemory has another user');
+                if (!Number.isSafeInteger(createdAt)) throw new TypeError('souledAgent: a legacy trace has an invalid date');
+                const count = subjects.has(scopeId) ? subjects.size : subjects.size + 1;
+                if (retention === undefined && count > 1) throw new Error(RETENTION_REQUIRED);
+                assertSubjectAllowed(count);
+                subjects.add(scopeId);
+                noteUnkeyed(count);
+                return memory.remember(text, {
+                  id: row.id, type: row.type, scope: 'conversation', scopeId, createdAt, keepDuplicates: true,
+                  metadata: { ...(speaker ? { [SPEAKER_METADATA_KEY]: speaker } : {}), subject, turnUserId: userId, copiedFrom: 'gmi-store' },
+                });
+              },
+              async (trace) => { await memory.deleteTraces([trace.id]); },
+            );
+            if (filed.status === 'refused') break;
+          }
+          await namedForNextCompile(scopeId, row.id);
+          result.moved += (await legacy.deleteTraces([row.id], { withoutEmbeddings: true })).deleted;
+        }
+      } catch (error) {
+        result.failed = errorNameOf(error);
+      }
+      return result;
+    });
+
+  /** One preview or move over the passed store, included in the work close() waits for. */
+  const legacyGmiCopyOf = (legacy: LegacyGmiStore): NonNullable<SouledAgent['copyLegacyGmiMemory']> => {
+    const run: NonNullable<SouledAgent['copyLegacyGmiMemory']> = async (options) => {
+      if (storeClosed || closing) throw new Error('souledAgent: open the agent to copy a passed GMI store');
+      const dryRun = options?.dryRun !== false;
+      const learners = await listNamedMemoryUsers(legacy.brain, legacy.namespace, { onlyLearningTables: true });
+      const peopleByLegacyScope = new Map<string, LegacyGmiPerson>();
+      for (const id of [...new Set([...learners, ...(options?.users ?? [])])].sort()) {
+        if (typeof id !== 'string' || isAnonymousUserId(id, anonymousUserIds)) continue;
+        const subject = { kind: 'user' as const, id };
+        try {
+          const scopeId = conversationScopeKey(agentId, subject);
+          peopleByLegacyScope.set(learnerUserScopeId({ namespace: legacy.namespace, userId: id }), { subject, scopeId, traces: 0 });
+        } catch {
+          // Rows for an id with no conversation key remain unattributed.
+        }
+      }
+      const unmatched = new Map<string, LegacyGmiUnattributed>();
+      for (const { scope, scope_id: scopeId, traces } of await countLegacyGmiScopes(legacy)) {
+        const person = scope === 'user' ? peopleByLegacyScope.get(scopeId) : undefined;
+        if (person) {
+          person.traces = Number(traces);
+          continue;
+        }
+        const reason = scope !== 'user'
+          ? 'requires a user scope'
+          : couldBeSessionForm(scopeId) ? 'session-form scope id' : 'no listed user maps to this scope';
+        const key = JSON.stringify([scope, reason]);
+        const group = unmatched.get(key) ?? { scope, scopes: 0, traces: 0, reason };
+        group.scopes += 1;
+        group.traces += Number(traces);
+        unmatched.set(key, group);
+      }
+      const unattributed = [...unmatched.values()];
+      let forgottenTraces = 0;
+      if (dryRun) {
+        const people: Array<{ userId: string; traces: number }> = [];
+        for (const { subject, traces } of peopleByLegacyScope.values()) {
+          if (await forgotten.isForgotten(subject)) forgottenTraces += traces;
+          else people.push({ userId: subject.id, traces });
+        }
+        return { dryRun: true, people, unattributed, forgotten: forgottenTraces };
+      }
+
+      const people: LegacyGmiMove[] = [];
+      for (const person of peopleByLegacyScope.values()) {
+        const result = await moveLegacyGmiPerson(legacy, person);
+        if ('forgotten' in result) forgottenTraces += result.forgotten;
+        else people.push(result);
+      }
+      return { dryRun: false, people, unattributed, forgotten: forgottenTraces };
+    };
+    return (options) => awaitedOnClose(run(options));
+  };
+
   // On teardown: close the agent (with runtime: 'gmi' that stops its running session turns and shuts its sessions
   // down); wait, within one deadline, for the turns still running and then for the memory writes of its turns; fold
   // the conversation into the wiki; then close the backing store. The compile is best-effort (a failed LLM merge must
@@ -3250,6 +3399,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     if (passed) {
       const { brain } = await passed.open();
       legacyGmi.store = { brain, namespace: learningConfig?.namespace ?? '', deleteTraces: passed.deleteTraces };
+      built.copyLegacyGmiMemory = legacyGmiCopyOf(legacyGmi.store);
       const count = await brain.get<{ traces: number | string }>(
         'SELECT COUNT(*) AS traces FROM memory_traces WHERE brain_id = ?',
         [brain.brainId],

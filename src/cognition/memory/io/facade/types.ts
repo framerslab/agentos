@@ -358,18 +358,24 @@ export interface RememberOptions {
 
   /**
    * The new trace's id, when the caller names it before the write: a write the learning ledger records names its new
-   * traces in its `pending` row first. A text the scope already holds is not stored again, and the trace that holds
-   * it is returned under its own id.
+   * traces in its `pending` row first. By default, a text the scope already holds returns the trace under its own id.
    */
   id?: string;
 
   /**
-   * When the trace was stored, in Unix ms: a correction that a restore of the store took away is filed again from the
-   * tombstones' second copy under the id and the time it first had. Unset: the time of the call.
+   * When the trace was first stored, in Unix ms. Restored corrections and moved legacy traces keep this time.
+   * Unset uses the time of the call.
    *
    * @internal
    */
   createdAt?: number;
+
+  /**
+   * File a separate trace for an existing text. Legacy moves use this to retain each source id and date.
+   *
+   * @internal
+   */
+  keepDuplicates?: boolean;
 
   /**
    * Extra keys for the trace's stored metadata, merged under the keys the facade sets itself (`scopeId`,

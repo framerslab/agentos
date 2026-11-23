@@ -11,7 +11,7 @@ import { conversationScopeKey } from '../../cognition/memory/retrieval/store/con
 import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 import { gmi } from '../gmi';
-import { souledAgent, type SouledAgent } from '../souledAgent';
+import { souledAgent, type SouledAgent, type SouledAgentOptions } from '../souledAgent';
 import { reply, script, type ProviderScript } from './helpers/stubProviders';
 
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({
@@ -68,7 +68,7 @@ async function seed(store: Store = { path: legacyFile }): Promise<void> {
   }
 }
 
-async function open(store: Store = { path: legacyFile }): Promise<SouledAgent> {
+async function open(store: Store = { path: legacyFile }, screen?: SouledAgentOptions['screen']): Promise<SouledAgent> {
   agent = await souledAgent({
     ...options(store),
     runtime: RUNTIME,
@@ -76,6 +76,7 @@ async function open(store: Store = { path: legacyFile }): Promise<SouledAgent> {
     compile: false,
     retention: { traces: 'until-deletion' },
     tombstoneKey: 'orchard-test-tombstones',
+    ...(screen ? { screen } : {}),
   });
   return agent;
 }
@@ -134,8 +135,6 @@ function plantTrace(
 function traceSnapshot(brain: Brain): Promise<Record<string, unknown>[]> {
   return brain.all('SELECT * FROM memory_traces WHERE brain_id = ? ORDER BY id', [brain.brainId]);
 }
-
-type CopyCall = (options?: { dryRun?: boolean; users?: readonly string[] }) => Promise<unknown>;
 
 function backup(): string {
   const file = join(directory, 'legacy-backup.sqlite');
@@ -301,6 +300,11 @@ describe('a passed store on a souled GMI', () => {
     await plantTrace('unknown-person', 'user', userScope('unknown-person'));
     await plantTrace('thread-only', 'thread', taggedScopeId('old-thread', learning.namespace));
     await plantTrace('persona-only', 'persona', `${userScope(ALICE)}::orchard`);
+    await withLegacyBrain(async (brain) => {
+      await brain.run('UPDATE memory_traces SET metadata = ? WHERE brain_id = ? AND id = ?', [
+        JSON.stringify({ turnUserId: 'unknown-person' }), AGENT_ID, 'unknown-person',
+      ]);
+    });
 
     const joined = await open();
     const soul = brainOf(joined.memory!);
@@ -310,7 +314,7 @@ describe('a passed store on a souled GMI', () => {
     });
     const legacyBefore = await withLegacyBrain(traceSnapshot);
     const soulBefore = await traceSnapshot(soul);
-    const report = await (joined as unknown as { copyLegacyGmiMemory: CopyCall }).copyLegacyGmiMemory({
+    const report = await joined.copyLegacyGmiMemory!({
       users: [hostUser, ALICE, hostUser],
     });
     expect(report).toEqual({
@@ -328,21 +332,32 @@ describe('a passed store on a souled GMI', () => {
       ]),
       forgotten: 0,
     });
-    expect(report).toMatchObject({ people: { length: 3 }, unattributed: { length: 4 } });
+    expect(report.people).toHaveLength(3);
+    expect(report.unattributed).toHaveLength(4);
     expect(await withLegacyBrain(traceSnapshot)).toEqual(legacyBefore);
     expect(await traceSnapshot(soul)).toEqual(soulBefore);
   });
 
   it('moves by id in date order, resumes after an interrupted delete, and leaves unknown and forgotten rows', async () => {
     await seed();
-    const joined = await open();
-    await joined.forgetUser!(BOB);
+    const first = await open();
+    await first.forgetUser!(BOB);
+    await close();
+    const dropped = 'The screen drops this note.';
+    const failed = 'The screen fails on this note.';
+    const joined = await open(undefined, async (text) => {
+      if (text === dropped) return null;
+      if (text === failed) throw new Error('screen unavailable');
+      return text;
+    });
     const oldDate = 1_700_000_000_001;
     const newDate = oldDate + 86_400_000;
     await plantTrace('dated-new', 'user', userScope(ALICE), CANARY, newDate, 'assistant');
     await plantTrace('dated-old', 'user', userScope(ALICE), CANARY, oldDate);
     await plantTrace('forgotten-person', 'user', userScope(BOB), OTHER);
     await plantTrace('unmapped-person', 'user', userScope('unknown-person'), OTHER);
+    await plantTrace('screen-drop', 'user', userScope(ALICE), dropped, newDate);
+    await plantTrace('screen-failure', 'user', userScope(ALICE), failed, newDate);
     await withLegacyBrain(async (brain) => {
       await brain.exec(`CREATE TRIGGER interrupt_legacy_delete BEFORE DELETE ON memory_traces
         WHEN OLD.id = 'dated-old' BEGIN SELECT RAISE(ABORT, 'interrupted legacy delete'); END`);
@@ -350,8 +365,9 @@ describe('a passed store on a souled GMI', () => {
 
     const soul = brainOf(joined.memory!);
     const embeddedBefore = [...embeddings.embedded];
-    const source = await legacyRows(ALICE);
-    const move = () => (joined as unknown as { copyLegacyGmiMemory: CopyCall }).copyLegacyGmiMemory({
+    embeddings.failEmbedding = () => true;
+    const source = (await legacyRows(ALICE)).filter(({ id }) => !id.startsWith('screen-'));
+    const move = () => joined.copyLegacyGmiMemory!({
       dryRun: false, users: [BOB],
     });
     const interrupted = await move();
@@ -368,7 +384,7 @@ describe('a passed store on a souled GMI', () => {
 
     expect(await move()).toMatchObject({
       dryRun: false,
-      people: [{ userId: ALICE, moved: source.length, kept: 0 }],
+      people: [{ userId: ALICE, moved: source.length, kept: 2 }],
       forgotten: 1,
     });
     const after = await traceSnapshot(soul);
@@ -381,11 +397,13 @@ describe('a passed store on a souled GMI', () => {
         speaker, subject: { kind: 'user', id: ALICE }, turnUserId: ALICE, copiedFrom: 'gmi-store',
       });
     }
-    expect(await legacyRows(ALICE)).toEqual([]);
-    expect((await legacyRows()).map(({ id }) => id)).toEqual(['forgotten-person', 'unmapped-person']);
+    expect((await legacyRows(ALICE)).map(({ id }) => id)).toEqual(['screen-drop', 'screen-failure']);
+    expect((await legacyRows()).map(({ id }) => id)).toEqual([
+      'forgotten-person', 'screen-drop', 'screen-failure', 'unmapped-person',
+    ]);
     const repeated = await move();
     expect(repeated).toMatchObject({
-      dryRun: false, people: [{ userId: ALICE, moved: 0, kept: 0 }], forgotten: 1,
+      dryRun: false, people: [{ userId: ALICE, moved: 0, kept: 2 }], forgotten: 1,
     });
     expect(await traceSnapshot(soul)).toEqual(after);
     expect(embeddings.embedded).toEqual(embeddedBefore);

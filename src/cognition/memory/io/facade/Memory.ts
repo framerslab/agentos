@@ -281,18 +281,24 @@ const LEARNER_USER_COLUMNS: ReadonlyArray<readonly [string, string]> = [
   ['agentos_learning_skills', 'user_id'],
 ];
 
-/** Reads named users from a Brain's trace metadata and learning tables, without decoding scope ids. @internal */
-export async function listNamedMemoryUsers(brain: Brain, namespace?: string): Promise<string[]> {
+/** Reads named users without decoding scope ids. By default, reads both trace metadata and learning tables. @internal */
+export async function listNamedMemoryUsers(
+  brain: Brain,
+  namespace?: string,
+  options?: { onlyLearningTables?: boolean },
+): Promise<string[]> {
   const users = new Set<string>();
   const holdUser = (userId: unknown): void => {
     if (typeof userId === 'number') users.add(String(userId));
     else if (typeof userId === 'string' && userId !== '') users.add(userId);
   };
-  const named = await brain.all<{ user_id: unknown }>(
-    `SELECT DISTINCT ${brain.features.dialect.jsonExtract('metadata', '$.turnUserId')} AS user_id FROM memory_traces WHERE brain_id = ?`,
-    [brain.brainId],
-  );
-  for (const row of named) holdUser(row.user_id);
+  if (!options?.onlyLearningTables) {
+    const named = await brain.all<{ user_id: unknown }>(
+      `SELECT DISTINCT ${brain.features.dialect.jsonExtract('metadata', '$.turnUserId')} AS user_id FROM memory_traces WHERE brain_id = ?`,
+      [brain.brainId],
+    );
+    for (const row of named) holdUser(row.user_id);
+  }
   for (const [table, column] of LEARNER_USER_COLUMNS) {
     try {
       const rows = await brain.all<{ user_id: unknown }>(
@@ -880,14 +886,18 @@ export class Memory {
     // A chunk of a wiki page is its page's: a message of the same text is a trace of its own, so the page's next
     // rewrite, which deletes its chunks, takes nothing a person said.
     const asChunk = (options?.tags ?? []).includes('wiki');
-    const existing = await this._findExistingTraceByHash(contentHash, type, scope, scopeId, turnUserId, asChunk);
+    const existing = options?.keepDuplicates
+      ? undefined
+      : await this._findExistingTraceByHash(contentHash, type, scope, scopeId, turnUserId, asChunk);
     if (existing) {
       // The text is stored already; its scope's registry row is written when it is missing.
       if (conversation) await ensureScopeRow(this._brain, this._brain.brainId, scopeId, Date.now());
       return this._buildTrace(existing);
     }
 
-    const id = typeof options?.id === 'string' && options.id !== '' ? options.id : nextTraceId();
+    const id = typeof options?.id === 'string' && (options.id !== '' || options.keepDuplicates)
+      ? options.id
+      : nextTraceId();
     // A conversation trace is stamped after the last compile read of this facade, and counted as not yet stored until
     // its row is in: a compile reads below it meanwhile, so no watermark moves past a trace a compile has not read.
     const fence = conversation ? coordinationOf(this._brain.coordinationToken) : undefined;

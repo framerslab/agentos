@@ -24,7 +24,7 @@ import type { SoulTurnMemory } from '../../cognition/substrate/soulTurnMemory.js
 /** A passed GMI store, opened and closed with the soul's store. Its manager serves deletion only. */
 export interface LegacyGmiMemory {
   open(): Promise<AgentMemoryBrain>;
-  deleteTraces(ids: readonly string[]): Promise<{ deleted: number }>;
+  deleteTraces(ids: readonly string[], options?: { withoutEmbeddings?: true }): Promise<{ deleted: number }>;
   close(): Promise<void>;
 }
 
