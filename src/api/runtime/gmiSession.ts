@@ -58,7 +58,12 @@ function abortReasonError(signal: AbortSignal): Error {
  */
 export function untilStopped<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
   if (!signal) return work;
-  if (signal.aborted) return Promise.reject(abortReasonError(signal));
+  if (signal.aborted) {
+    // The work is still observed: a hook that stopped its own turn and then failed is not the turn's error, and its
+    // rejection must not go unhandled.
+    work.catch(() => undefined);
+    return Promise.reject(abortReasonError(signal));
+  }
   return new Promise<T>((resolve, reject) => {
     const onAbort = (): void => reject(abortReasonError(signal));
     signal.addEventListener('abort', onAbort, { once: true });
