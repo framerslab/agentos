@@ -78,8 +78,7 @@ export const RETENTION_DAY_MS = DAY_MS;
  * whole, then the scope's traces stored longer ago than its period (soft-deleted rows and the document chunks they
  * were filed from included), with the text the tombstones' second copy keeps of an expired correction. With a souled
  * agent's mind (`mind`), the traces go through it first, with what it keeps of each, and leave the working memory of
- * the subject's open sessions. The pages go
- * first: while a page is left, the expired traces it was built from are left
+ * the subject's open sessions. The pages go first: while a page is left, the expired traces it was built from are left
  * too, so a sweep that stopped is finished by the next one. With `pages: 'rebuild'` the next compile builds such a
  * page again from the traces of it that are left. A page whose sources all survive is not touched, and a page's own
  * age is no second clock. A scope left with no trace and no page loses its registry row. The operator's pages and

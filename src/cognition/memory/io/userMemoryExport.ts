@@ -521,8 +521,8 @@ export interface SubjectCorrectionResult {
  * The named traces go last, so a call that failed partway is finished by the same call made again: it still finds
  * them. With a souled agent's mind (`mind`), each trace's graph records go first, then the mind deletes the traces with
  * what it keeps of each, then the store's own delete runs, and last the traces leave the working memory of the
- * subject's open sessions (`sessions`). An index rewrite or a log checkpoint that fails does not fail the call; one `memory.erasure_unfinished` line
- * says so, and the next deletion, sweep or re-application of the tombstones runs it.
+ * subject's open sessions (`sessions`). An index rewrite or a log checkpoint that fails does not fail the call; one
+ * `memory.erasure_unfinished` line says so, and the next deletion, sweep or re-application of the tombstones runs it.
  *
  * Every named id must be one of the subject's own traces (a page's chunk is not one): live, or recorded as deleted by
  * an earlier call that failed partway while its row still sits under the subject's key. When any is another
