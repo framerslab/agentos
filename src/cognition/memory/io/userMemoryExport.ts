@@ -84,7 +84,7 @@ export interface UserMemoryExport {
     archivedOriginals: Array<{ traceId: string; text: string }>;
     /** Typed facts extracted from the subject's traces: none, as no souled agent extracts them. */
     typedFacts: [];
-    /** The memory graph's links between two of the subject's own traces. */
+    /** Links between two held traces from the store's graph and the live cognitive memory graph. */
     graphLinks: Array<{ from: string; to: string; type: string; weight: number }>;
     /** The pages compiled from the subject's traces, as {@link UserMemoryExport.pages}. */
     pages: ExportedPage[];
@@ -233,7 +233,7 @@ export async function exportSubjectMemory(options: {
   profilingOf?: (scopeId: string) => 'on' | 'off';
   /** The subject's learned state, when the agent runs a learning layer. A read that fails is named in `unread`. */
   learner?: () => Promise<LearnedStateDocument>;
-  /** An archive of verbatim originals: each held trace's original is read from it for the export. */
+  /** The opened store's archive. Only held trace ids are rehydrated, with the `user_export` access context. */
   archive?: Pick<IMemoryArchive, 'rehydrate'>;
   /** A memory graph held in this process beside the store's: its links between the subject's traces are added. */
   liveGraph?: { getEdges(memoryId: string): Array<{ sourceId: string; targetId: string; type: string; weight: number }> };
