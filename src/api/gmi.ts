@@ -1346,6 +1346,11 @@ export function gmi(opts: GmiOptions): GmiHandle {
       const own = retryingOnce(async () => buildSessionGmi(`gmi-${await memoryScopeIdOf()}`));
       let ownBuilt: BuiltGmi | undefined;
 
+      /**
+       * A deletion of the session's person has emptied its messages and has not yet reached its GMI: the turn that
+       * takes the GMI next has it forget them first.
+       */
+      let forgetOwed = false;
       // The bridge uses the session's own form for its replies and for every turn without a named memory user,
       // including a seat. A session id may equal another person's user id.
       const turnMemoryScope = (memoryScopeId: string): NonNullable<GmiForTurn['memoryScope']> => ({
@@ -1360,6 +1365,14 @@ export function gmi(opts: GmiOptions): GmiHandle {
         const memoryScope = turnMemoryScope(await memoryScopeIdOf());
         if (!history) return { ...forOneTurn(await buildSessionGmi(`gmi-${memoryScope.sessionId}-${randomUUID()}`)), memoryScope };
         ownBuilt = await own.get();
+        if (forgetOwed) {
+          // A deletion of the session's person came while another turn held the lock: this turn, queued behind that
+          // one, takes the lock before the deletion's own pass does, and runs on a GMI that has forgotten them. A
+          // forgetting that fails ends the turn, and the next one tries again.
+          ownBuilt.prepare({ prompt: undefined, memoryContext: undefined });
+          await ownBuilt.gmi.forgetPerson?.();
+          forgetOwed = false;
+        }
         return { ...ownBuilt, memoryScope };
       };
 
@@ -1573,13 +1586,15 @@ export function gmi(opts: GmiOptions): GmiHandle {
       if (soulStore && history) {
         // A souled agent's deletion of the session's person empties the session through this. The messages go at once,
         // so a turn running now writes nothing more into them. Under the session's lock, once no turn runs, they go
-        // again (a turn that was waiting for the lock ran meanwhile) and the session's GMI forgets the person. The wait
+        // again (a turn that was waiting for the lock ran meanwhile, on a GMI that forgot the person as it began: see
+        // `forgetOwed`) and the session's GMI forgets the person. The wait
         // for the lock ends at the deadline: the session is then emptied when the lock comes, and a failure there has
         // no report left to go in. A deletion called from a hook or a tool of the session's own turn does not wait: that
         // turn ends only once the call returns. A session that keeps no history builds a GMI for each turn and holds
         // nothing between its turns: it registers none.
         registerSessionEvictor(session, async (deadlineMs): Promise<SessionEviction> => {
           history.reseed([]);
+          forgetOwed = true;
           const emptied = lock.acquire().then(async (release) => {
             try {
               if (history.messages().length > 0) history.reseed([]);
@@ -1587,6 +1602,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
               // The last turn's prompt and recalled memory, which the GMI's hooks read, until a next turn sets its own.
               built?.prepare({ prompt: undefined, memoryContext: undefined });
               await built?.gmi.forgetPerson?.();
+              forgetOwed = false;
             } finally {
               release();
             }
