@@ -369,7 +369,12 @@ export interface GMITurnInput {
     /**
      * The ids the turn's cognitive memory files and recalls traces under, in
      * place of the turn's `userId` and `sessionId` (the session also stands in
-     * for the conversation when no `conversationId` is given). Tools, the user
+     * for the conversation when no `conversationId` is given). Where no
+     * learning layer gives the turn's scope ids, the session's key within the
+     * `user` scope is written in the session form (a leading `/`) and the
+     * user's in the plain form (`/`, `%` and `:` percent-encoded), so a
+     * session id that equals another person's user id names another key, and
+     * the turn reads those two keys alone in that scope. Tools, the user
      * context and the reasoning trace keep the turn's own ids. Unset, memory
      * uses the turn's ids.
      */

@@ -26,7 +26,7 @@ const otherText = 'Orchard cedar lantern cobalttrail.';
 const otherReply = 'Orchard cedar lantern silvercache.';
 const question = 'What do you remember about the orchard cedar lantern?';
 
-type Row = { id: string; content: string; scope: 'user' | 'conversation'; scope_id: string; metadata: string; deleted: number };
+type Row = { id: string; content: string; scope: 'user' | 'conversation'; scope_id: string; tags: string; metadata: string; deleted: number };
 export const rowsOf = (adapter: StorageAdapter) =>
   adapter.all<Row>('SELECT * FROM memory_traces ORDER BY id');
 
@@ -38,7 +38,7 @@ export async function memoryFixture(engine: (typeof engines)[number]) {
   const embeddingKey = `embedding-${run}`;
   const served = script('openai', apiKey, { whole: true });
   const embedded = script('openai', embeddingKey);
-  const events: Array<{ event: string; mechanism?: string }> = [];
+  const events: Array<{ event: string; mechanism?: string; reason?: string }> = [];
   globalLLMProviderHealth.reset();
   vi.stubEnv('OPENAI_API_KEY', embeddingKey);
   setLogger(pino({ level: 'debug', base: undefined }, { write: (line) => events.push(JSON.parse(line)) }));
@@ -91,7 +91,8 @@ export function blocksOf(call: ModelCall) {
   };
 }
 
-const mechanisms = {
+/** Each mechanism set to fire whenever its hook runs. */
+export const mechanisms = {
   retrievalInducedForgetting: { enabled: true, similarityThreshold: 0, suppressionFactor: 0.5 },
   metacognitiveFOK: { enabled: true, partialActivationThreshold: 0 },
   reconsolidation: { enabled: true, driftRate: 1 },

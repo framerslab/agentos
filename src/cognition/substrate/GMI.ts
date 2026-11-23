@@ -659,6 +659,12 @@ export class GMI implements IGMI {
       const bridge = this.memoryBridge;
       if (!bridge || !bridge.usesSoul(soul)) return undefined;
       return async (content: string, tags: string[]): Promise<void> => {
+        // A metaprompt reads the conversation as it stands when it runs. Once a newer turn has begun, that can hold the
+        // newer turn's words, which the queuing turn's view does not answer for: the imprint is not filed.
+        if (this.turnSoulMemory !== soul) {
+          this.addTraceEntry(ReasoningEntryType.DEBUG, 'A metaprompt imprint was not filed: a newer turn began before it was written.');
+          return;
+        }
         // Filing waits on the person's write chain, which may be held by a compile.
         void bridge.encode(content, { type: 'semantic', sourceType: 'agent_inference', role: 'assistant', tags, soul })
           .catch(() => undefined);
