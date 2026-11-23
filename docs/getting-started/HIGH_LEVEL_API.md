@@ -972,11 +972,11 @@ const streamedVerdicts = await streamed.grounding;
 
 ### Schema validation and retries
 
-On the default runtime, `agent({ responseSchema })` validates `generate()`'s
-final text with the supplied Zod schema and returns the value in `result.parsed`.
-`souledAgent()` takes it on `runtime: 'legacy'` alone and throws at open for it
-on the GMI runtime, its default.
-It can extract JSON from a code fence. `controls.maxValidationRetries` defaults
+On both runtimes, `agent({ responseSchema })` validates `generate()`'s final
+text with the supplied Zod schema and returns the value in `result.parsed`.
+`gmi()` and `souledAgent()` accept the same option. `stream()` delivers text
+without applying the agent's schema.
+`generate()` can extract JSON from a code fence. `controls.maxValidationRetries` defaults
 to 1, so an invalid reply gets one more attempt. Set it to 0 to throw
 `ObjectGenerationError` on the first invalid reply. A [refusal](#a-refusal-from-the-model)
 is not retried: the send throws `ObjectGenerationError` with the model's
@@ -986,8 +986,13 @@ and names it in its construction warning, so pass an agent's schema as
 `responseSchema`.
 Repair attempts retain the completed transcript, including native tool calls
 and their results, and run without tools so they cannot repeat an action.
+`generate()` returns the accepted attempt's result: its `usage` and `toolCalls`
+are that attempt's own, while `usage()`, the usage ledger and a budget count
+every attempt.
 
-For a session, pass the schema to `send()` and read `result.object`:
+For a session, pass the schema to `send()` and read `result.object`. The agent's
+`responseSchema` applies to `generate()` alone: a `send()` without a schema of
+its own is not validated, on either runtime.
 
 ```ts
 import { z } from 'zod';
@@ -998,12 +1003,12 @@ const result = await session.send('Count the records.', {
 });
 ```
 
-Session sends default to zero extra attempts. Each retry includes the failed
+On the legacy runtime, session sends default to zero extra attempts. Each retry includes the failed
 reply and validation feedback. Only the original user input and final valid
 reply enter session history; an exhausted send adds nothing. Usage totals count
 every completed attempt. Retry counts must be non-negative integers. Schema
-sends omit configured tools and their chain-of-thought instruction, as before.
-These retry options apply to the default runtime.
+sends omit configured tools and their chain-of-thought instruction. On the GMI
+runtime, schema sends reject an invalid reply without a repair turn.
 
 For schema calls, `memoryProvider.observe` records the original user input once
 and only the accepted answer, after caller hooks and validation. Failed attempts
@@ -1149,7 +1154,7 @@ const aria = await souledAgent({
 });
 ```
 
-`souledAgent()` runs on the GMI runtime unless `runtime` names another, so every session is a GMI. With `cognition` unset it runs the `light` profile, which scores no message for sentiment and keeps cognitive memory off unless `memory` is set; with cognitive memory off, no embedding model is needed. `cognition.memory`, or `cognition: 'full'` unless `memory: false`, turns cognitive memory on too, and with it on the open needs `memory.embedding.provider`. `cognition: 'full'` or `cognition: { sentiment: true }` scores messages for sentiment. Where this section says `runtime: 'gmi'`, it describes that default. `runtime: 'legacy'` selects the legacy runtime, which `agent()` runs by default. The GMI runtime throws at open for a `channels`, `voice` or `avatar` option, and `souledAgent()` throws there for `responseSchema`, which that runtime does not read: pass the schema to a session's `send()`. [Upgrading](../SOUL_ENTRY_POINTS.md#upgrading) lists what an agent that set no `runtime` meets.
+`souledAgent()` runs on the GMI runtime unless `runtime` names another, so every session is a GMI. With `cognition` unset it runs the `light` profile, which scores no message for sentiment and keeps cognitive memory off unless `memory` is set; with cognitive memory off, no embedding model is needed. `cognition.memory`, or `cognition: 'full'` unless `memory: false`, turns cognitive memory on too, and with it on the open needs `memory.embedding.provider`. `cognition: 'full'` or `cognition: { sentiment: true }` scores messages for sentiment. Where this section says `runtime: 'gmi'`, it describes that default. `runtime: 'legacy'` selects the legacy runtime, which `agent()` runs by default. The GMI runtime throws at open for a `channels`, `voice` or `avatar` option. It validates `generate()` against an agent-level `responseSchema` as the legacy runtime does ([Schema validation and retries](#schema-validation-and-retries)). [Upgrading](../SOUL_ENTRY_POINTS.md#upgrading) lists what an agent that set no `runtime` meets.
 
 What it wires:
 

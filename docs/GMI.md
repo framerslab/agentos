@@ -164,7 +164,25 @@ A soul file's front matter is applied through the loader's one mapping, so the "
 
 A turn stopped before cognitive memory starts filing its exchange files neither side. In that case, `session.close()` has no exchange encoding to wait for. The stop is read once, as filing starts. A souled agent's turn is filed only once its session keeps it. On any other agent, a stop that comes after filing has started does not take the filing back: the session waits for the writes before it reports the stop, and `session.close()` waits for them too.
 
-`agent.generate()` and `agent.stream()` run one turn on a GMI built for that call, on the `'light'` profile whatever `cognition` sets, with no history and no cognitive memory. They take the per-call options `temperature`, `maxTokens`, `topP`, `responseFormat`, `model`, `provider`, `maxSteps`, `usageLedger`, `abortSignal`, `budget`, `accountIdOf` and `guards` with `stages: ['input']` ([On the GMI runtime](./safety/GUARDRAILS_USAGE.md#on-the-gmi-runtime)), and the tool-approval gate `agency()` passes with each call to a member ([Multi-agent work](#multi-agent-work)), and throw naming any other. An `abortSignal` stops the call's turn: `generate()` rejects with the signal's reason and `stream()` ends with an `error` part that carries it, unless the turn had already failed on its own, which keeps its own error on both. A call whose signal has already aborted starts no turn: `generate()` rejects with the reason, and `stream()` ends at once with one `error` part that carries it. A signal that aborts after the turn's last request, while `onAfterGeneration` runs, ends the call the same way, as `agent()`'s check after each step's hook does, and `generate()` then verifies no citations. With `verifyCitations`, `generate()` checks its answer against the sources the configured retriever returns for the prompt and sets `result.grounding`, as `agent().generate()` does.
+`agent.generate()` and `agent.stream()` build their own GMIs on the `'light'` profile whatever `cognition` sets, with no session history or cognitive memory. They take the per-call options `temperature`, `maxTokens`, `topP`, `responseFormat`, `model`, `provider`, `maxSteps`, `usageLedger`, `abortSignal`, `budget`, `accountIdOf` and `guards` with `stages: ['input']` ([On the GMI runtime](./safety/GUARDRAILS_USAGE.md#on-the-gmi-runtime)), and the tool-approval gate `agency()` passes with each call to a member ([Multi-agent work](#multi-agent-work)), and throw naming any other. An `abortSignal` stops the call's turn: `generate()` rejects with the signal's reason and `stream()` ends with an `error` part that carries it, unless the turn had already failed on its own, which keeps its own error on both. A call whose signal has already aborted starts no turn: `generate()` rejects with the reason, and `stream()` ends at once with one `error` part that carries it. A signal that aborts after the turn's last request, while `onAfterGeneration` runs, ends the call the same way, as `agent()`'s check after each step's hook does, and `generate()` then verifies no citations. With `verifyCitations`, `generate()` checks its answer against the sources the configured retriever returns for the prompt and sets `result.grounding`, as `agent().generate()` does.
+
+With an agent-level `responseSchema`, `generate()` extracts JSON from the reply,
+validates it with Zod, and puts the value in `result.parsed`, as on the legacy
+runtime. Every request of the call states the schema at the start of its system
+prompt, after the chain-of-thought instruction on a request that offers tools,
+whatever `responseFormat` the call passes. An invalid reply
+gets up to `controls.maxValidationRetries ?? 1` repair attempts. Each repair
+sends the completed transcript and validation feedback with tools disabled.
+The transcript travels as the repair's history, so one over the history's share
+of the context window loses its oldest messages first, as a session's history
+does (**Sessions**, above), where the legacy runtime sends all of it.
+If validation still fails, `generate()` throws `ObjectGenerationError` with
+the last reply. A model refusal throws immediately. The result is the accepted
+attempt's: its `usage` and `toolCalls` are that attempt's own, while `usage()`,
+the usage ledger and a budget count every attempt. `stream()` delivers text
+without schema validation. The schema applies to `generate()` alone: a session
+validates only a schema passed to its `send()`, and returns that value in
+`result.object`.
 
 **Cognitive memory.** With memory on, the agent builds one [`CognitiveMemoryManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/CognitiveMemoryManager.ts) on the first session turn and every session of the agent shares it ([`agentCognitiveMemory.ts`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/agentCognitiveMemory.ts)): an in-memory vector store, the in-memory knowledge graph (the `'knowledge-graph'` graph backend), an embedding manager for `memory.embedding`, the persona's HEXACO traits (0.5 for a trait `personality` leaves out) and the profile's mechanisms. Without `memory.store`, everything it holds lives in process memory and ends with the process or `agent.close()`, except on a souled agent, whose memory is its soul's store (**A souled agent's memory**, below).
 

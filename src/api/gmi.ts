@@ -78,7 +78,7 @@ import {
   type AgentCognitiveMemory,
   type AgentMemoryBrain,
 } from './runtime/agentCognitiveMemory.js';
-import { sendGmiTurn, streamGmiTurn, TurnLock, untilStopped, type GmiForTurn, type GmiSessionDeps, type GmiTurnContext, type GmiTurnOptions } from './runtime/gmiSession.js';
+import { generateGmiTurn, sendGmiTurn, streamGmiTurn, TurnLock, untilStopped, type GmiForTurn, type GmiSessionDeps, type GmiTurnContext, type GmiTurnOptions } from './runtime/gmiSession.js';
 import { resolveRecallOptions } from './runtime/recallOptions.js';
 import { assertTurnInputGuards, inputDecisionOf } from './runtime/textGuardrails.js';
 import { recallLog } from '../cognition/memory/retrieval/recall/log.js';
@@ -1041,6 +1041,10 @@ export function gmi(opts: GmiOptions): GmiHandle {
           });
           changed = true;
         }
+        if (turn.schemaInstruction) {
+          messages = withLeadingSystemText(messages, turn.schemaInstruction);
+          changed = true;
+        }
         // The tools the call offers: none on a structured send's calls, and on
         // a seat's turn only the tools its tool names allow.
         const names = turn.toolNames;
@@ -1236,14 +1240,20 @@ export function gmi(opts: GmiOptions): GmiHandle {
       callerSignal?.throwIfAborted();
       // A turn the caller's signal stopped rejects with its reason, as a session's send does, and a failure that came
       // before the stop keeps its own error: sendGmiTurn decides when the turn's failure is recorded.
-      const result = await sendGmiTurn(oneShotDeps('agent.generate', extra), prompt, { options, ...callTurn(extra) });
+      const { result, first } = await generateGmiTurn(
+        oneShotDeps('agent.generate', extra),
+        prompt,
+        { options, ...callTurn(extra) },
+        opts.responseSchema,
+        opts.controls?.maxValidationRetries ?? 1,
+      );
       // A signal that aborted once the turn had ended rejects the call too, and no source is retrieved for it.
       callerSignal?.throwIfAborted();
       // As agent().generate() does: the answer checked against the sources retrieved for the input as it was sent (the
       // text an input guard rewrote it to); a call whose input a guard replaced made no request, and is not checked.
-      const decision = inputDecisionOf(result.guardReport);
+      const decision = inputDecisionOf(first.guardReport);
       if (opts.verifyCitations && decision !== 'replaced') {
-        const sent = decision === 'sanitized' ? result.transcriptDelta?.find((message) => message.role === 'user')?.content : prompt;
+        const sent = decision === 'sanitized' ? first.transcriptDelta?.find((message) => message.role === 'user')?.content : prompt;
         const userText = typeof sent === 'string' ? sent : sent ? extractTextFromContent(sent as MessageContent) : '';
         result.grounding = await runCitationVerification(result.text, userText, opts.verifyCitations);
       }
