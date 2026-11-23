@@ -233,6 +233,8 @@ A soul file's front matter is applied through the loader's one mapping, so the "
 
 A hook that throws (or an `onBeforeToolExecution` that resolves with nothing) is warned about, and the turn goes on as if the hook were not set.
 
+A turn does not wait for a hook past its stop. When the caller's `abortSignal` aborts, or `close()` stops the session's turns, while one of the three hooks runs, the turn stops waiting for it and ends as a turn stopped during a request does; the hook's later answer is not read, and a hook that never answers does not hold the session or `close()`.
+
 **Callbacks.** `on` fires only for what the agent launches with `launch_agency` (`agencies.launch`): the callbacks of each team, which name the team `launch:<agencyId>`, and the launch's failures, under `launch_agency seat <role>` and the like ([Teams a GMI launches](./AGENCIES.md#teams-a-gmi-launches)). The agent's own turns fire none of its callbacks.
 
 **Usage.** Each model call of a turn is metered with the provider and model that served it: one usage ledger row and one usage event for the process-wide observer (`setGlobalLlmObserver()`; none while content-safe telemetry is on) per finished step, and one for each attempt that failed and was billed, with the finish reason `error`. Each event names the turn's account as `accountId` when the turn's budget or `accountIdOf` names one; a seat's turn, held to two budgets, reads the one its team's call carries, then the agent's own ([The usage observer](./observability/OBSERVABILITY.md#the-usage-observer)). `session.usage()` and `agent.usage(id)` add a session's turns, and `agent.usage()` adds every session's and every `generate()` and `stream()` call's; with the usage ledger enabled they read the ledger alone.

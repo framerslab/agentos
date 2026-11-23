@@ -10,13 +10,13 @@ Use `souledAgent()` to remember each user across visits. Pass the same user id t
 | What you need | Call |
 |---|---|
 | A character with durable memory and readable notes for each user | `await souledAgent({ soul })` |
-| The same character and notes, with cognitive recall from the same store | `await souledAgent({ soul, runtime: 'gmi', memory: { embedding: { provider } } })` |
+| The same character and notes, with cognitive recall from the same store | `await souledAgent({ soul, memory: { embedding: { provider } } })` |
 | A character with a mind whose memory you manage yourself | `gmi({ soul })` or `agent({ runtime: 'gmi', soul })` |
 | A character's voice and limits for the conversation | `agent({ soul })` |
 
 ## Remember each player by user id with `souledAgent()`
 
-Give a game character a workspace folder and pass the same player id on each visit. The default runtime is `'legacy'`. To add cognitive recall to this example, set `runtime: 'gmi'` and name the embedding provider in `memory.embedding.provider`.
+Give a game character a workspace folder and pass the same player id on each visit. `souledAgent()` runs on the GMI runtime with the `light` profile: cognitive memory is off, and the soul's store files and recalls each player's turns. To add cognitive recall to this example, name the embedding provider in `memory.embedding.provider`. `runtime: 'legacy'` selects the legacy runtime.
 
 ```ts
 import { souledAgent } from '@framers/agentos';
@@ -37,7 +37,7 @@ There is no file-to-`soulStore` import call. The file's brain id comes from its 
 
 ### What each workspace-backed agent keeps
 
-| Question | Default runtime, or GMI with cognitive memory off | A souled agent on the GMI runtime with cognitive memory on |
+| Question | Cognitive memory off: the default, and `runtime: 'legacy'` | A souled agent on the GMI runtime with cognitive memory on |
 |---|---|---|
 | What is stored, and where? | The soul's store files each speaker's text and time as a conversation trace. | The same store holds each accepted side of a session turn once, marked `filedBy: 'mind'`. The turn result's `memoryWrite` reports each side's outcome. |
 | Under which key? | `conversationScopeKey(agentId, subject)` uses the session's named user or, for an anonymous session, its session id. With `sharedMemory`, unnamed calls use the user id in `as`. | The mind uses the same key. Its recall reads marked rows. The soul's provider reads the remaining rows for that user and the operator's pages. |
@@ -131,7 +131,27 @@ The video game exclusion reads as follows.
 
 ## Upgrading
 
-A workspace-backed `souledAgent({ runtime: 'gmi' })` gives each user one durable memory. The wiki and cognitive recall read the same store. Export, correction, retention and deletion reach the turns the mind files there. The default runtime stays `'legacy'`.
+### From 0.20: `souledAgent()` runs on the GMI runtime by default
+
+`souledAgent()` with no `runtime` runs on the GMI runtime with the `light` profile. `runtime: 'legacy'` keeps the legacy runtime, and `agent()` keeps its own default. An app that sets no other option meets these changes.
+
+- **Set `memory` only for cognitive memory.** Cognitive memory stays off unless `memory`, `cognition.memory` or `cognition: 'full'` turns it on. With it on, name the provider that receives text in `memory.embedding.provider`, or the open throws. The GMI runtime does not read the legacy runtime's `memory.working` callback.
+- **Expect the same recall for each user.** With cognitive memory off, the soul's store files each turn and recalls each user's memory and the operator's pages, as on the legacy runtime.
+- **Read `historyOmitted` on long sessions.** A request gives the session's history 35 percent of the model's context window. Messages over that share are left out, oldest first, with no summary in their place, and the turn's result reports them in `historyOmitted`. The legacy runtime sends the whole stored history and throws `ContextWindowExceededError` when a request does not fit a model whose window is in the model catalog.
+- **Check replies against the soul's front matter.** The GMI's persona applies the soul's traits, mood, reasoning-trace limits and hard limits. The legacy runtime renders the traits and the hard limits and has no renderer for the mood and the trace limits, so replies can differ.
+- **Expect a log line for a front-matter `voice` or `avatar`.** The GMI runtime leaves each out, as the legacy runtime does, and says so in one `soul.field_ignored` line for each.
+- **Remove the `channels`, `voice` and `avatar` options, or set `runtime: 'legacy'`.** The GMI runtime throws at open when one is set, naming the option.
+- **Pass a schema to a session's `send()`, or set `runtime: 'legacy'`.** The GMI runtime does not validate `generate()` against the agent's `responseSchema`, so `souledAgent()` throws at open when one is set, before anything opens. A session's `send()` takes `responseSchema` and returns the value in `result.object`.
+- **Let a turn finish before `close()`.** `close()` stops the session turns still running. The legacy runtime lets them finish within the close's wait.
+- **Keep your keys as they are.** The default needs no embedding model, and no session request sends the end user's id to the model provider unless you set `sendUserIdToProvider: true`.
+
+An agent that sets other `agent()` options meets the GMI runtime's handling of each. [GMIs from agent()](./GMI.md#gmis-from-agent) lists them, the per-call options `generate()` and `stream()` take among them: a call that passes any other throws, naming it.
+
+A store written under either runtime opens under the other. To go back, set `runtime: 'legacy'` or install 0.20; neither needs a data move.
+
+### From 0.19: one memory for a souled agent on the GMI runtime
+
+A workspace-backed `souledAgent({ runtime: 'gmi' })` gives each user one durable memory. The wiki and cognitive recall read the same store. Export, correction, retention and deletion reach the turns the mind files there. 0.20 keeps `'legacy'` as the default runtime.
 
 - **Configure cognitive memory.** Name the provider that receives text in `memory.embedding.provider`. Enabling cognitive memory without it, or setting `memory.consolidation.enabled: true`, throws at open. `session.close()` ends the conversation in process. An anonymous session reopened with the same id keeps the same stored memory, subject to retention and forgetting. Use a fresh session id for a different anonymous visitor.
 - **Migrate `memory.store` with `copyLegacyGmiMemory`.** Turns stop reading and writing traces in `memory.store`. Keep it attached while moving its data. Preview the move with `agent.copyLegacyGmiMemory()`, pass known user ids in `users` to identify more rows, then pass `dryRun: false` to file eligible traces in the soul's store and remove their source rows. Check the report for traces left behind.

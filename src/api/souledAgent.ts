@@ -223,7 +223,7 @@ const RECALL_LIMIT = 8;
  *   `retentionDays` it holds, and one `memory.write_refused` line a session says `minor_no_retention`. On a store that
  *   keeps it for a number of days, the account's pages are compiled only by the target `compile.minors` names, and
  *   not at all without one (`memory.compile_skipped`, `minor_no_compile`).
- * - `profiling: 'off'`: the person objects to profiling. The default runtime's store keeps no mood or emotional
+ * - `profiling: 'off'`: the person objects to profiling. The legacy runtime's store keeps no mood or emotional
  *   context of anyone, so on its path the answer files, recalls and compiles as `longTerm` says. On `runtime: 'gmi'`
  *   the person's turns are not scored for sentiment, whatever `longTerm` says; with cognitive memory on they are
  *   stored with a neutral emotional state under `emotionalStamp: 'mood'` too, and what they recall keeps its
@@ -603,6 +603,12 @@ function isMemoryPolicy(value: unknown): value is MemoryPolicy {
  */
 const SOULLESS_HOOKS_WITH_COGNITIVE_MEMORY =
   "souledAgent: memoryPolicy, screen and sharedMemory act on the soul's own store, and this soul gives none (an inline { content } soul has no workspace folder, and an optional soul that did not load has none either), so the plain agent built in its place keeps its GMI's cognitive memory (runtime: 'gmi' with cognition memory on) in a store none of them reaches; pass the folder that holds SOUL.md, turn cognitive memory off, or leave them out";
+/**
+ * The refusal of `responseSchema` on the GMI runtime: only the legacy runtime's `generate()` validates its reply
+ * against the agent's schema, so on the GMI runtime a reply would come back unchecked, with no `parsed` value.
+ */
+const RESPONSE_SCHEMA_ON_GMI =
+  "souledAgent: responseSchema validates generate() on runtime: 'legacy' alone; the GMI runtime, which is souledAgent()'s default, does not read it, so a reply would come back unchecked and with no parsed value. Pass the schema to a session's send() and read its result's object, or set runtime: 'legacy'";
 /** What `sharedMemory` must be, as the rejection of an option that is not says it. */
 const SHARED_MEMORY_SHAPE =
   "souledAgent: sharedMemory needs { as: <a user id>, reason: 'one-persons-machine' | 'operators-notes' }";
@@ -781,6 +787,15 @@ class CompileStopped extends Error {
 export interface SouledAgentOptions extends AgentOptions {
   soul: NonNullable<AgentOptions['soul']>;
   /**
+   * Which engine serves this agent. `'gmi'` (the default) serves every session with a Generalized Mind Instance
+   * (docs/GMI.md, "GMIs from agent()"), on the `light` profile unless `cognition` names another: cognitive memory off
+   * unless `memory` is set, no sentiment tracking and no metaprompts. `'legacy'` calls the model through generateText
+   * and streamText, as `agent()` does by default; it stays as a setting.
+   *
+   * @default 'gmi'
+   */
+  runtime?: AgentOptions['runtime'];
+  /**
    * How long `close()` waits, in milliseconds, for the agent's turns still running and then for the memory writes of
    * its turns, one deadline for both, before it compiles the wiki. Default {@link DEFAULT_PENDING_WRITES_TIMEOUT_MS}
    * (5 seconds); 0 waits for none, and `Infinity` (or any wait past the longest timer, about 24.8 days) waits for them
@@ -897,7 +912,7 @@ export interface SouledAgentOptions extends AgentOptions {
    * files (which the memory block shows the model), a seat's session included. Default
    * `false`: no turn of the agent sends one, and a team a session launches seats its sessions as the session's user and
    * sends none either. Set it only where the session's `userId` is an opaque or hashed id, never an email address: the
-   * provider receives it. Tools, the user context and the memory hooks get the user id either way. The default runtime
+   * provider receives it. Tools, the user context and the memory hooks get the user id either way. The legacy runtime
    * sends no end-user id, with or without it.
    */
   sendUserIdToProvider?: boolean;
@@ -911,7 +926,7 @@ export interface SouledAgentOptions extends AgentOptions {
    *   change that mood, so a stored mood can follow how a conversation went. An account whose `memoryPolicy` answer
    *   holds `minor: true` or `profiling: 'off'` is stored neutral under this setting too.
    *
-   * The default runtime's store keeps no emotional state of anyone, with or without it. A plain agent (an inline
+   * The legacy runtime's store keeps no emotional state of anyone, with or without it. A plain agent (an inline
    * soul, or an optional soul that did not load) has no store, and its GMI stamps its own mood on what its cognitive
    * memory keeps, as `gmi()` does, with or without it.
    *
@@ -933,7 +948,7 @@ export type SouledAgent = Agent & {
    * Deletes one person's memory from this agent's store for good and keeps it deleted: it waits for the person's
    * pending writes (up to `pendingWritesTimeoutMs`), records a tombstone, deletes their traces, document chunks,
    * compiled pages and registry row, writes the vector index again, and empties the sessions this handle holds open
-   * for them: on the default runtime each session's history is cleared; with `runtime: 'gmi'` each session's messages
+   * for them: on the legacy runtime each session's history is cleared; with `runtime: 'gmi'` each session's messages
    * go at once and its GMI drops its history, its reasoning trace, its sentiment trend, its working-memory slots and
    * its metaprompts' imprints once no turn of the session runs, which the call waits for up to
    * `pendingWritesTimeoutMs`. A session still running a turn then leaves the report's `sessions` part missed, and is
@@ -1040,14 +1055,22 @@ export type SouledAgent = Agent & {
 };
 
 /**
- * Create an agent with a soul and a per-person memory store. The default runtime is `'legacy'`.
+ * Create an agent with a soul and a per-person memory store. It runs on the GMI runtime with the `light`
+ * profile unless {@link SouledAgentOptions.runtime} names another: `runtime: 'legacy'` keeps the legacy path, and
+ * `agent()` keeps its own default.
  *
  * A workspace soul supplies its operator pages under `memory/`, the `read_memory_page` tool and a wiki compiled
  * from each subject's stored traces. The subject is the named user or the anonymous session id. Recall combines
  * that subject's memory with the operator's pages. A one-shot call without a subject reads only operator pages
  * and files nothing. An inline soul or an optional soul that fails to load falls back to a plain {@link agent}.
  *
- * On a workspace-backed agent with `runtime: 'gmi'` and cognitive memory enabled, the GMI and wiki use the same
+ * The `light` profile leaves cognitive memory off unless `memory` is set, scores no sentiment and runs no
+ * metaprompt, so the default needs no embedding model. The GMI runtime refuses the `channels`, `voice` and `avatar`
+ * options, and a souled agent on it refuses `responseSchema`, which that runtime does not read. It leaves a
+ * front-matter `voice` or `avatar` out with one `soul.field_ignored` line each, gives a session's history a share of
+ * the context window and reports what it left out in `historyOmitted`, and stops running session turns on `close()`.
+ *
+ * On a workspace-backed agent on the GMI runtime with cognitive memory enabled, the GMI and wiki use the same
  * durable store. The GMI files each accepted side of a session turn under the subject's key and recalls the traces
  * it filed. The soul's memory provider recalls earlier and provider-filed traces and wiki pages. With cognitive
  * memory off, the provider handles both filing and recall. Team seat sessions run with cognitive memory off.
@@ -1088,6 +1111,10 @@ export type SouledAgent = Agent & {
  * @returns The {@link SouledAgent}. Its memory store and memory operations are available with a workspace soul.
  * @throws SoulLoadError when a required soul fails to load.
  * @throws TypeError for invalid `sharedMemory`, `retention` or `compile.minors` settings.
+ * @throws Error on the GMI runtime, which is the default, when `channels`, `voice` or `avatar` is set: the error
+ *   names the option, and `runtime: 'legacy'` takes all three.
+ * @throws TypeError on the GMI runtime when `responseSchema` is set, before anything opens: that runtime does not
+ *   validate `generate()` against it. Pass the schema to a session's `send()`, or set `runtime: 'legacy'`.
  * @throws TypeError when GMI cognitive memory is enabled and `memory.embedding.provider` is missing or blank,
  *   a known model prefix routes to a different provider, or `memory.consolidation.enabled` is `true`.
  * @throws TypeError when `memoryPolicy`, `screen` or `sharedMemory` is supplied with GMI cognitive memory enabled
@@ -1115,8 +1142,14 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     soulStore,
     sendUserIdToProvider,
     emotionalStamp,
-    ...rest
+    ...given
   } = opts;
+  /**
+   * The runtime the agent runs on: the GMI runtime unless the host names one. Read once: every check and seam below
+   * reads this value, and the options the agent is built from carry it, a plain agent's included.
+   */
+  const runtime: NonNullable<AgentOptions['runtime']> = given.runtime ?? 'gmi';
+  const rest = { ...given, runtime };
   /** The ids the agent itself reads as naming nobody, beside the built-in ones. */
   const anonymousUserIds =
     typeof rest.learning === 'object' && rest.learning !== null ? rest.learning.anonymousUserIds : undefined;
@@ -1125,13 +1158,16 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   assertCompileMinors(compile);
   if (legacyMemory !== undefined) assertLegacyMemory(legacyMemory, (id) => isAnonymousUserId(id, anonymousUserIds));
   /**
-   * What the agent's GMIs run on `runtime: 'gmi'`; undefined on the default runtime, and for options that do not
+   * What the agent's GMIs run on the GMI runtime; undefined on the legacy runtime, and for options that do not
    * resolve, which agent() refuses.
    */
-  const mind = rest.runtime === 'gmi' ? cognitionOf(rest as CognitionInputs) : undefined;
+  const mind = runtime === 'gmi' ? cognitionOf(rest as CognitionInputs) : undefined;
   // Cognitive memory names its embedding provider and leaves consolidation off: refused here, before the soul loads,
   // so nothing has been opened.
   if (mind?.memory) assertSoulMindMemory(mind.memory);
+  // The GMI runtime does not read the agent's responseSchema, so generate() would return a reply nobody checked:
+  // refused here too, before the soul loads.
+  if (runtime === 'gmi' && rest.responseSchema) throw new TypeError(RESPONSE_SCHEMA_ON_GMI);
   /** The key the tombstone ledger is handed: one key is the current key. A `tombstoneKey` that holds nothing is none. */
   const key =
     tombstoneKey === undefined
@@ -1161,7 +1197,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
    * Called before the plain agent is built, so nothing has been opened.
    */
   const refuseHooksWithoutStore = (): void => {
-    if ((memoryPolicy || screen || sharedMemory !== undefined) && rest.runtime === 'gmi' && cognitiveMemoryOf(rest as CognitionInputs)) {
+    if ((memoryPolicy || screen || sharedMemory !== undefined) && runtime === 'gmi' && cognitiveMemoryOf(rest as CognitionInputs)) {
       throw new TypeError(SOULLESS_HOOKS_WITH_COGNITIVE_MEMORY);
     }
   };
@@ -1271,7 +1307,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   // A learning layer gmi() builds writes tombstones under its namespace: the ledger reads it beside the store-wide one.
   const learningConfig = typeof rest.learning === 'object' && rest.learning !== null ? rest.learning : undefined;
   const namespaces =
-    rest.runtime === 'gmi' && (rest.learning === true || learningConfig !== undefined) ? [learningConfig?.namespace ?? ''] : [];
+    runtime === 'gmi' && (rest.learning === true || learningConfig !== undefined) ? [learningConfig?.namespace ?? ''] : [];
   /** When this open began: the rows it seeds in the host's database are dated from here on. */
   const openedAt = Date.now();
   let memory: Memory;
@@ -1485,7 +1521,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   const correctionsAtDecision = new WeakMap<Promise<TurnPolicy>, number>();
   /**
    * What each turn decided, from its first hook to its reply's write, by the context the turn's hooks share: a turn
-   * of the default runtime and a one-shot call have one of their own, and a GMI session one for its turns, which run
+   * of the legacy runtime and a one-shot call have one of their own, and a GMI session one for its turns, which run
    * one at a time. Two turns of one session that overlap never read each other's decision.
    */
   const turnDecisions = new WeakMap<MemoryHookContext, Promise<TurnPolicy>>();
@@ -1663,7 +1699,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
    * Whether the agent's cognitive memory is the soul's mind: on the GMI runtime with cognitive memory on, the mind
    * files each session turn in this store and recalls the rows it filed, and the provider recalls the rest.
    */
-  const mindRecalls = rest.runtime === 'gmi' && cognitiveMemoryOf(rest as CognitionInputs);
+  const mindRecalls = runtime === 'gmi' && cognitiveMemoryOf(rest as CognitionInputs);
   /** The store's own Brain, which the soul's mind files into and reads on the GMI runtime with cognitive memory on. */
   const soulBrain = brainOf(memory);
   /**
@@ -2049,7 +2085,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   let closing = false;
   /**
    * A stream is settled once its usage and its text are known; its text settles after its observation has started.
-   * On the default runtime a stream runs only once a consumer reads it, so one whose `signal` aborts before anything
+   * On the legacy runtime a stream runs only once a consumer reads it, so one whose `signal` aborts before anything
    * was read from it would never settle: its entry is released on that abort instead. An abort after the first read
    * ends the stream on either runtime, which settles its usage.
    */
@@ -2357,7 +2393,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
    * default provider changed in between can move, is recorded when the memory is built.
    */
   const embeddingRoute = ((): NamedRoute | undefined => {
-    if (rest.runtime !== 'gmi') return undefined;
+    if (runtime !== 'gmi') return undefined;
     let memoryConfig: ReturnType<typeof resolveCognition>['memory'];
     try {
       memoryConfig = resolveCognition(rest as CognitionInputs).memory;
@@ -2493,7 +2529,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     // Each pick of the agent's model router is recorded where it sends the text, as a call's own route is. The GMI
     // runtime tells each attempt as its gateway resolved it (below), a router's pick and a call's own credentials
     // applied, so its router is left as given.
-    ...(rest.router && rest.runtime !== 'gmi' ? { router: recordingPicks(rest.router, 'model', () => agentRoute) } : {}),
+    ...(rest.router && runtime !== 'gmi' ? { router: recordingPicks(rest.router, 'model', () => agentRoute) } : {}),
     memoryProvider: provider,
     tools,
   };
@@ -2502,7 +2538,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
    * a write of it that failed is tried again without resolving the default provider again.
    */
   let builtEmbedding: MemoryRecipient | undefined;
-  if (rest.runtime === 'gmi') {
+  if (runtime === 'gmi') {
     // Where the GMI runtime sends text, as it sends it: each model attempt where its gateway resolved it, and the
     // embedding its cognitive memory was built with (a default provider changed after the agent opened included).
     shareRouteObserver(agentOptions, {
@@ -2516,7 +2552,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   }
   // A learning layer gmi() builds from these options writes and reads the store's ledger.
   shareForgottenLedger(agentOptions, forgotten);
-  if (rest.runtime === 'gmi') {
+  if (runtime === 'gmi') {
     // The GMI runtime reads the soul's store by the same options object, cognitive memory on or off: each session
     // turn's view of the memory rules, whether the end user's id goes to the model provider, and the Brain its
     // cognitive memory files into, with the managers it builds there and the writes close() waits for.
@@ -2548,7 +2584,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   /**
    * Records where a call sends a person's text when the options do not name it: its own `provider` or `model` (the
    * agent's for the one it leaves out), or the agent's own route where the credential layer sends it elsewhere; on the
-   * default runtime its own model router; and each fallback hop it may take, its own on the default runtime, else the
+   * legacy runtime its own model router; and each fallback hop it may take, its own on the legacy runtime, else the
    * options'. The route is recorded before the call starts. Returns the call's own route.
    */
   const noteCallRoute = (call: unknown): CallRoute => {
@@ -2583,7 +2619,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     };
     noteRoute(routeRecipient('model', destinationOf(own, true)));
     // The GMI runtime refuses a call's own router and fallbackProviders before any model call.
-    const ownLegs = rest.runtime !== 'gmi';
+    const ownLegs = runtime !== 'gmi';
     if (ownLegs && given.router !== undefined && given.router !== null) {
       noteRoute(routeRecipient('model', { provider: PROVIDER_FROM_THE_ROUTER }));
     }
@@ -2602,11 +2638,11 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     return own;
   };
   /**
-   * A call's options with its own model router recording each pick it makes, on the default runtime; unchanged
+   * A call's options with its own model router recording each pick it makes, on the legacy runtime; unchanged
    * otherwise, and on the GMI runtime, which refuses a call's own router.
    */
   const withRecordedRouter = <E>(extra: E, own: CallRoute): E => {
-    if (rest.runtime === 'gmi') return extra;
+    if (runtime === 'gmi') return extra;
     const given = extra !== null && typeof extra === 'object' ? (extra as Record<string, unknown>) : undefined;
     // The router the call runs with: its own (`router: undefined` turns the agent's off), else the agent's.
     const router = given && 'router' in given ? given.router : rest.router;
@@ -2622,7 +2658,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   const listRecipients = async (): Promise<MemoryRecipient[]> =>
     recipientsOf(routesOf(true), [...(await recordedRecipients(brainOf(memory))), ...calledRoutes.values()]);
 
-  // Every turn joins what close() waits for: its promise, or a stream's settled usage. The default runtime's own close
+  // Every turn joins what close() waits for: its promise, or a stream's settled usage. The legacy runtime's own close
   // does not wait for a running turn, and the GMI runtime's does not wait for a one-shot call. A call's own route is
   // recorded before it starts.
   const generateTurn = built.generate.bind(built);
@@ -2775,7 +2811,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
    * session's running turn as long as close() waits for its turns and writes.
    */
   const soulMind =
-    rest.runtime === 'gmi'
+    runtime === 'gmi'
       ? createSoulMind({
           managers: () => mindManagers,
           ...(mindArchive
@@ -2791,7 +2827,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       : undefined;
   /**
    * What a deletion of one subject does to the sessions this handle holds open for the subject, as an entry of the
-   * report's stores and as the deletion's `sessions` part. The default runtime keeps a session's history in this
+   * report's stores and as the deletion's `sessions` part. The legacy runtime keeps a session's history in this
    * process: each is cleared and counted. On the GMI runtime each is emptied (its messages, and its GMI's history,
    * reasoning trace, sentiment trend, working-memory slots and metaprompt imprints) and counted; a session whose turn
    * is still running at the deadline is emptied once that turn ends, and the part is missed meanwhile. A session
@@ -3148,7 +3184,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   built.recipients = () => awaitedOnClose(listRecipients());
   /** Whether the agent scores a person's messages for sentiment at all: on the GMI runtime, with sentiment on. */
   const scoresSentiment = (() => {
-    if (rest.runtime !== 'gmi') return false;
+    if (runtime !== 'gmi') return false;
     try {
       return resolveCognition(rest as CognitionInputs).sentiment;
     } catch {

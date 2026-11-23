@@ -36,9 +36,16 @@ import { conversationScopeKey } from '../../cognition/memory/retrieval/store/con
 import { guardMemoryProvider } from '../../cognition/memory/suppression/guardMemoryProvider';
 import type { MemoryWriteEntry, MemoryWriteRecord } from '../runtime/memoryWriteRecord';
 
-/** The runtimes the cases run on: the default one, and the GMI runtime with cognitive memory off. */
-const RUNTIMES = ['legacy', 'gmi'] as const;
-type Runtime = (typeof RUNTIMES)[number];
+/**
+ * The runtimes the cases run on, each as its name and the `runtime` option that selects it: the legacy runtime, the
+ * GMI runtime with cognitive memory off, and no `runtime` at all.
+ */
+const RUNTIMES = [
+  ['legacy', 'legacy'],
+  ['gmi', 'gmi'],
+  ["unset, souledAgent()'s default", undefined],
+] as const;
+type Runtime = (typeof RUNTIMES)[number][1];
 
 /** An entry's outcome, without the side it is the entry of. */
 type WithoutRole<Entry> = Entry extends unknown ? Omit<Entry, 'role'> : never;
@@ -163,7 +170,7 @@ const both = (outcome: Outcome): MemoryWriteRecord => ({
   entries: (['user', 'assistant'] as const).map((role) => ({ role, ...outcome }) as MemoryWriteEntry),
 });
 
-describe.each(RUNTIMES)('a receipt for each memory write, on runtime %s', (runtime) => {
+describe.each(RUNTIMES)('a receipt for each memory write, on runtime %s', (_name, runtime) => {
   it("a turn's result names the traces it filed", async () => {
     const a = await open(runtime, {}, [reply.text('A canary, lovely.'), ...spare()]);
 
@@ -389,7 +396,7 @@ describe.each(RUNTIMES)('a receipt for each memory write, on runtime %s', (runti
   });
 });
 
-describe.each(RUNTIMES)("a host's own memory provider, on runtime %s", (runtime) => {
+describe.each(['legacy', 'gmi'] as const)("a host's own memory provider, on runtime %s", (runtime) => {
   /** A session of a plain agent on the stubbed provider, with the host's `memoryProvider`. */
   function sessionWith(memoryProvider: AgentMemoryProvider) {
     const apiKey = `k-write-receipts-host-${++n}`;

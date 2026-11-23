@@ -27,8 +27,12 @@ import { reply, script, type ProviderScript } from './helpers/stubProviders';
 import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 
-/** The runtimes every case runs on. */
-const RUNTIMES = ['legacy', 'gmi'] as const;
+/** The runtimes every case runs on, each as its name and the `runtime` option that selects it; the last sets none. */
+const RUNTIMES = [
+  ['legacy', 'legacy'],
+  ['gmi', 'gmi'],
+  ["unset, souledAgent()'s default", undefined],
+] as const;
 
 /** The refusal of a second subject on a clean ledger with no key. */
 const KEY_NEEDED = /set tombstoneKey/;
@@ -89,7 +93,7 @@ const brainOf = (a: SouledAgent): Brain => (a.memory as unknown as { _brain: Bra
 /** The words every model call was sent, joined. */
 const sentIn = (call: ProviderScript['seen'][number]): string => JSON.stringify(call.messages);
 
-describe.each(RUNTIMES)('the tombstone key, on runtime %s', (runtime) => {
+describe.each(RUNTIMES)('the tombstone key, on runtime %s', (_name, runtime) => {
   /** A souled agent on the stubbed provider that may keep several people's memory (`retention` is set). */
   async function open(extra: Partial<SouledAgentOptions> = {}): Promise<{ a: SouledAgent; s: ProviderScript }> {
     const apiKey = `k-souled-tombstone-key-${++n}`;
@@ -192,11 +196,12 @@ describe.each(RUNTIMES)('the tombstone key, on runtime %s', (runtime) => {
   });
 
   it('lets a second person in once a tombstone is written past the agent, through its memory or its learning layer', async () => {
-    // The GMI runtime runs the learning layer, which writes to the store's ledger; the default runtime runs none.
-    const { a } = await open(runtime === 'gmi' ? ({ learning: true } as Partial<SouledAgentOptions>) : {});
+    // The GMI runtime, which is also the default, runs the learning layer, which writes to the store's ledger; the
+    // legacy runtime runs none.
+    const { a } = await open(runtime !== 'legacy' ? ({ learning: true } as Partial<SouledAgentOptions>) : {});
     expect(a.session('s1', { userId: 'alice' }).id).toBe('s1');
     expect(() => a.session('s2', { userId: 'bob' })).toThrow(KEY_NEEDED);
-    if (runtime === 'gmi') await a.learning!.forgetUser!('carol');
+    if (runtime !== 'legacy') await a.learning!.forgetUser!('carol');
     else expect(await a.memory!.markForgotten({ kind: 'user', id: 'carol' })).toEqual({ form: 'unkeyed', written: true });
     expect(a.session('s2', { userId: 'bob' }).id).toBe('s2');
     expect(lines('memory.tombstones_unkeyed')).toHaveLength(1);

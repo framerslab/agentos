@@ -18,7 +18,7 @@
  * - With no cognitive memory built yet, the deletion builds none and sends nothing to the embedding provider, and an
  *   archived original of the person's still goes.
  */
-import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
@@ -47,8 +47,16 @@ import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory'
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 import type { MemoryWriteRecord } from '../runtime/memoryWriteRecord';
 
-/** The runtime every case runs on. */
-const RUNTIME = 'gmi' as const;
+/**
+ * The runtimes every case runs on, each as the options that select it: `runtime: 'gmi'`, and no `runtime` at all,
+ * which is souledAgent()'s default.
+ */
+const RUNTIMES = [
+  ["runtime: 'gmi'", { runtime: 'gmi' }],
+  ['no runtime set', {}],
+] as const;
+/** The runtime options of the suite that is running: each suite of the runtimes sets them before its cases. */
+let RUNTIME: (typeof RUNTIMES)[number][1] = RUNTIMES[0][1];
 /** Cognitive memory on, embedding through OpenAI, with no mechanism that rewrites a stored row. */
 const COGNITIVE = { cognition: { memory: { embedding: { provider: 'openai' } }, mechanisms: false } };
 
@@ -130,7 +138,7 @@ async function open(extra: Record<string, unknown> = {}, replies: ProviderScript
   const apiKey = `k-souled-joined-deletion-${++n}`;
   served = script('openai', apiKey, { whole: true, replies });
   const a = await souledAgent({
-    runtime: RUNTIME,
+    ...RUNTIME,
     provider: 'openai',
     model: 'stub-model',
     apiKey,
@@ -379,261 +387,267 @@ const STORES: Array<[string, () => Promise<Record<string, unknown>>, boolean]> =
   ['a PostgreSQL adapter of the host', async () => ({ soulStore: { adapter: await postgresAdapter() }, tombstoneCopy: { path: path.join(dir, 'forgotten.sqlite') } }), Boolean(POSTGRES_URL)],
 ];
 
-describe.each(STORES)('forgetUser on a souled agent on the GMI runtime with learning off, its store on %s', (_store, storeOptions, runs) => {
-  it.runIf(runs)("reaches every copy of one person's memory and leaves the other person's", async () => {
-    const options = await storeOptions();
-    const managers = managersBuilt();
-    const a = await open(options, [reply.text('A canary, lovely.'), reply.text('A finch, lovely.'), ...spare()]);
-    const brain = storeBrain(a);
-    await writeOf(await a.session('s1', { userId: 'alice' }).send('My canary is named LARK-7.'));
-    await writeOf(await a.session('s2', { userId: 'bob' }).send('My finch is named WREN-2.'));
-    // What she told the soul's provider before the join: a row of her key with no mark of the mind.
-    const told = await a.memory!.remember('Alice keeps a ferret named QUILL-9.', { type: 'episodic', scope: 'conversation', scopeId: keyOf('alice') });
-    expect(managers()).toHaveLength(1);
-    const manager = managers()[0];
-    const hers = await rowsUnder(brain, keyOf('alice'));
-    const his = await rowsUnder(brain, keyOf('bob'));
-    const herIds = hers.map((row) => row.id);
-    const herMindIds = hers.filter((row) => metaOf(row).filedBy === 'mind').map((row) => row.id);
-    const hisIds = his.map((row) => row.id);
-    // An original of one trace of each, planted through the mind's own archive, as a gist leaves one.
-    const archive = manager.getConfig().archive!;
-    await plantOriginal(archive, herMindIds[0], 'My canary is named LARK-7, the yellow one.');
-    await plantOriginal(archive, hisIds[0], 'My finch is named WREN-2, the brown one.');
-
-    // What the store and the mind hold of her before the deletion.
-    expect(hers).toHaveLength(3);
-    expect(herMindIds).toHaveLength(2);
-    expect(herIds).toContain(told.id);
-    expect(heldBy(manager, herMindIds)).toEqual({ cached: [...herMindIds].sort(), nodes: [...herMindIds].sort(), words: true });
-    expect(vectorsAmong(manager, herMindIds)).not.toEqual([]);
-    const hisVectors = vectorsAmong(manager, hisIds);
-    expect(hisVectors).not.toEqual([]);
-    expect(await manager.getStore().getByScope('conversation', keyOf('alice'))).not.toEqual([]);
-    expect(await archivedAmong(brain, herIds)).toEqual([herMindIds[0]]);
-    expect(await graphNodesAmong(brain, [told.id])).toEqual([told.id]);
-    for (const word of ['lark', 'quill']) expect(await fullTextHits(brain, word)).toBeGreaterThan(0);
-
-    const report = await a.forgetUser!('alice');
-
-    // No row of hers, by either side, live or soft-deleted.
-    expect(await rowsUnder(brain, keyOf('alice'))).toEqual([]);
-    expect(await archivedAmong(brain, herIds)).toEqual([]);
-    expect(await graphNodesAmong(brain, herIds)).toEqual([]);
-    for (const word of ['lark', 'quill']) expect(await fullTextHits(brain, word)).toBe(0);
-    // Nothing of hers in the mind: no live trace in its cache, no words in what it keeps, no graph node, no vector.
-    expect(heldBy(manager, herIds)).toEqual({ cached: [], nodes: [], words: false });
-    expect(vectorsAmong(manager, herIds)).toEqual([]);
-    expect(await manager.getStore().getByScope('conversation', keyOf('alice'))).toEqual([]);
-    // Every row of his stands, with his original, his graph nodes and his vectors.
-    expect((await rowsUnder(brain, keyOf('bob'))).map((row) => row.id)).toEqual(hisIds);
-    expect(await archivedAmong(brain, hisIds)).toEqual([hisIds[0]]);
-    expect(heldBy(manager, hisIds).nodes).toEqual([...hisIds].sort());
-    expect(vectorsAmong(manager, hisIds)).toEqual(hisVectors);
-    expect(await fullTextHits(brain, 'wren')).toBeGreaterThan(0);
-    // The receipt: complete, and the mind's part counts each row of hers it deleted.
-    expect(report.complete).toBe(true);
-    expect(report.parts.map((part) => part.part)).toEqual(['tombstone', 'mind', 'store', 'sessions']);
-    expect(report.parts[1]).toEqual({ part: 'mind', reached: true, deleted: hers.length });
-    expect(report.stores).toContainEqual({ store: 'cognitive memory', reached: true, deleted: hers.length });
-    expect(lines('memory.forget_incomplete')).toEqual([]);
-    expect(JSON.stringify(report)).not.toMatch(/alice|LARK-7|QUILL-9/);
-
-    // A new agent on the same store recalls nothing of her, and still recalls him.
-    await closed(a);
-    const again = await open(options, [reply.text('I do not know.'), reply.text('It is WREN-2.'), ...spare()]);
-    await again.session('s3', { userId: 'alice' }).send('What are my pets named?');
-    const asked = JSON.stringify(lastCall().messages);
-    for (const word of ['LARK-7', 'QUILL-9']) expect(asked).not.toContain(word);
-    await again.session('s4', { userId: 'bob' }).send('What is my finch named?');
-    expect(mindBlockOf(lastCall())).toContain('WREN-2');
-  });
-});
-
-describe('forgetUser and the open sessions of the person, on the GMI runtime with cognitive memory on', () => {
-  it('empties an idle session of the person, whose next turn recalls nothing and files nothing', async () => {
-    const gmis = builtGmis();
-    const a = await open({}, [reply.text('A canary, lovely.'), reply.text('I do not know.'), ...spare()]);
-    const session = a.session('s1', { userId: 'alice' });
-    await writeOf(await session.send('My canary is named LARK-7.'));
-    expect(gmis).toHaveLength(1);
-    const view = gmis[0].getCognitiveMemoryManager()!.getWorkingMemory();
-    expect(view.getSlotCount()).toBeGreaterThan(0);
-    expect(session.messages().length).toBeGreaterThan(0);
-
-    const report = await a.forgetUser!('alice');
-
-    expect(report.parts[3]).toEqual({ part: 'sessions', reached: true, deleted: 1 });
-    expect(report.complete).toBe(true);
-    expect(view.getSlotCount()).toBe(0);
-    expect(session.messages()).toEqual([]);
-    const record = await writeOf(await session.send('What is my canary named?'));
-    expect(JSON.stringify(lastCall().messages)).not.toContain('LARK-7');
-    expect(mindBlockOf(lastCall())).not.toContain('canary');
-    expect(record).toEqual(bothSkipped('forgotten'));
-    expect(await rowsUnder(storeBrain(a), keyOf('alice'))).toEqual([]);
+describe.each(RUNTIMES)('with %s', (_name, runtime) => {
+  beforeAll(() => {
+    RUNTIME = runtime;
   });
 
-  it("files nothing of a turn running at the deletion, and the turn's reply reaches its caller", async () => {
-    const { gate, release } = gated();
-    const a = await open({ pendingWritesTimeoutMs: 100 }, [reply.text('A canary, lovely.'), reply.hold([], gate, reply.text('In the attic, noted.')), ...spare()]);
-    const session = a.session('s1', { userId: 'alice' });
-    await writeOf(await session.send('My canary is named LARK-7.'));
-    const calls = served.seen.length;
-    const running = session.send('I keep it in the attic.');
-    try {
-      await vi.waitFor(() => expect(served.seen.length).toBeGreaterThan(calls), { timeout: 4_000 });
+  describe.each(STORES)('forgetUser on a souled agent on the GMI runtime with learning off, its store on %s', (_store, storeOptions, runs) => {
+    it.runIf(runs)("reaches every copy of one person's memory and leaves the other person's", async () => {
+      const options = await storeOptions();
+      const managers = managersBuilt();
+      const a = await open(options, [reply.text('A canary, lovely.'), reply.text('A finch, lovely.'), ...spare()]);
+      const brain = storeBrain(a);
+      await writeOf(await a.session('s1', { userId: 'alice' }).send('My canary is named LARK-7.'));
+      await writeOf(await a.session('s2', { userId: 'bob' }).send('My finch is named WREN-2.'));
+      // What she told the soul's provider before the join: a row of her key with no mark of the mind.
+      const told = await a.memory!.remember('Alice keeps a ferret named QUILL-9.', { type: 'episodic', scope: 'conversation', scopeId: keyOf('alice') });
+      expect(managers()).toHaveLength(1);
+      const manager = managers()[0];
+      const hers = await rowsUnder(brain, keyOf('alice'));
+      const his = await rowsUnder(brain, keyOf('bob'));
+      const herIds = hers.map((row) => row.id);
+      const herMindIds = hers.filter((row) => metaOf(row).filedBy === 'mind').map((row) => row.id);
+      const hisIds = his.map((row) => row.id);
+      // An original of one trace of each, planted through the mind's own archive, as a gist leaves one.
+      const archive = manager.getConfig().archive!;
+      await plantOriginal(archive, herMindIds[0], 'My canary is named LARK-7, the yellow one.');
+      await plantOriginal(archive, hisIds[0], 'My finch is named WREN-2, the brown one.');
+
+      // What the store and the mind hold of her before the deletion.
+      expect(hers).toHaveLength(3);
+      expect(herMindIds).toHaveLength(2);
+      expect(herIds).toContain(told.id);
+      expect(heldBy(manager, herMindIds)).toEqual({ cached: [...herMindIds].sort(), nodes: [...herMindIds].sort(), words: true });
+      expect(vectorsAmong(manager, herMindIds)).not.toEqual([]);
+      const hisVectors = vectorsAmong(manager, hisIds);
+      expect(hisVectors).not.toEqual([]);
+      expect(await manager.getStore().getByScope('conversation', keyOf('alice'))).not.toEqual([]);
+      expect(await archivedAmong(brain, herIds)).toEqual([herMindIds[0]]);
+      expect(await graphNodesAmong(brain, [told.id])).toEqual([told.id]);
+      for (const word of ['lark', 'quill']) expect(await fullTextHits(brain, word)).toBeGreaterThan(0);
 
       const report = await a.forgetUser!('alice');
 
-      expect(report.parts[3]).toMatchObject({ part: 'sessions', reached: false });
-      expect(report.parts[1]).toMatchObject({ part: 'mind', reached: true });
+      // No row of hers, by either side, live or soft-deleted.
+      expect(await rowsUnder(brain, keyOf('alice'))).toEqual([]);
+      expect(await archivedAmong(brain, herIds)).toEqual([]);
+      expect(await graphNodesAmong(brain, herIds)).toEqual([]);
+      for (const word of ['lark', 'quill']) expect(await fullTextHits(brain, word)).toBe(0);
+      // Nothing of hers in the mind: no live trace in its cache, no words in what it keeps, no graph node, no vector.
+      expect(heldBy(manager, herIds)).toEqual({ cached: [], nodes: [], words: false });
+      expect(vectorsAmong(manager, herIds)).toEqual([]);
+      expect(await manager.getStore().getByScope('conversation', keyOf('alice'))).toEqual([]);
+      // Every row of his stands, with his original, his graph nodes and his vectors.
+      expect((await rowsUnder(brain, keyOf('bob'))).map((row) => row.id)).toEqual(hisIds);
+      expect(await archivedAmong(brain, hisIds)).toEqual([hisIds[0]]);
+      expect(heldBy(manager, hisIds).nodes).toEqual([...hisIds].sort());
+      expect(vectorsAmong(manager, hisIds)).toEqual(hisVectors);
+      expect(await fullTextHits(brain, 'wren')).toBeGreaterThan(0);
+      // The receipt: complete, and the mind's part counts each row of hers it deleted.
+      expect(report.complete).toBe(true);
+      expect(report.parts.map((part) => part.part)).toEqual(['tombstone', 'mind', 'store', 'sessions']);
+      expect(report.parts[1]).toEqual({ part: 'mind', reached: true, deleted: hers.length });
+      expect(report.stores).toContainEqual({ store: 'cognitive memory', reached: true, deleted: hers.length });
+      expect(lines('memory.forget_incomplete')).toEqual([]);
+      expect(JSON.stringify(report)).not.toMatch(/alice|LARK-7|QUILL-9/);
+
+      // A new agent on the same store recalls nothing of her, and still recalls him.
+      await closed(a);
+      const again = await open(options, [reply.text('I do not know.'), reply.text('It is WREN-2.'), ...spare()]);
+      await again.session('s3', { userId: 'alice' }).send('What are my pets named?');
+      const asked = JSON.stringify(lastCall().messages);
+      for (const word of ['LARK-7', 'QUILL-9']) expect(asked).not.toContain(word);
+      await again.session('s4', { userId: 'bob' }).send('What is my finch named?');
+      expect(mindBlockOf(lastCall())).toContain('WREN-2');
+    });
+  });
+
+  describe('forgetUser and the open sessions of the person, on the GMI runtime with cognitive memory on', () => {
+    it('empties an idle session of the person, whose next turn recalls nothing and files nothing', async () => {
+      const gmis = builtGmis();
+      const a = await open({}, [reply.text('A canary, lovely.'), reply.text('I do not know.'), ...spare()]);
+      const session = a.session('s1', { userId: 'alice' });
+      await writeOf(await session.send('My canary is named LARK-7.'));
+      expect(gmis).toHaveLength(1);
+      const view = gmis[0].getCognitiveMemoryManager()!.getWorkingMemory();
+      expect(view.getSlotCount()).toBeGreaterThan(0);
+      expect(session.messages().length).toBeGreaterThan(0);
+
+      const report = await a.forgetUser!('alice');
+
+      expect(report.parts[3]).toEqual({ part: 'sessions', reached: true, deleted: 1 });
+      expect(report.complete).toBe(true);
+      expect(view.getSlotCount()).toBe(0);
+      expect(session.messages()).toEqual([]);
+      const record = await writeOf(await session.send('What is my canary named?'));
+      expect(JSON.stringify(lastCall().messages)).not.toContain('LARK-7');
+      expect(mindBlockOf(lastCall())).not.toContain('canary');
+      expect(record).toEqual(bothSkipped('forgotten'));
       expect(await rowsUnder(storeBrain(a), keyOf('alice'))).toEqual([]);
-    } finally {
-      release();
-    }
-    const result = await running;
-    expect(result.text).toBe('In the attic, noted.');
-    expect(await writeOf(result)).toEqual(bothSkipped('forgotten'));
-    expect(await rowsUnder(storeBrain(a), keyOf('alice'))).toEqual([]);
-  });
-});
-
-describe("forgetUser when the mind's delete fails", () => {
-  it("keeps the person's rows, names the mind's part, says so in one line, and applyTombstones() finishes it", async () => {
-    const managers = managersBuilt();
-    const a = await open({}, [reply.text('A canary, lovely.'), reply.text('A finch, lovely.'), ...spare()]);
-    const brain = storeBrain(a);
-    await writeOf(await a.session('s1', { userId: 'alice' }).send('My canary is named LARK-7.'));
-    await writeOf(await a.session('s2', { userId: 'bob' }).send('My finch is named WREN-2.'));
-    const hers = (await rowsUnder(brain, keyOf('alice'))).map((row) => row.id);
-    const his = (await rowsUnder(brain, keyOf('bob'))).map((row) => row.id);
-    expect(hers).toHaveLength(2);
-    vi.spyOn(CognitiveMemoryManager.prototype, 'deleteScope').mockRejectedValueOnce(new Error('the mind is busy'));
-
-    const report = await a.forgetUser!('alice');
-
-    expect(report.parts[1]).toEqual({ part: 'mind', reached: false, reason: 'the mind is busy' });
-    expect(report.complete).toBe(false);
-    expect(report.stores).toContainEqual({ store: 'cognitive memory', reached: false, reason: 'the mind is busy' });
-    const said = lines('memory.forget_incomplete');
-    expect(said).toEqual([expect.objectContaining({ tombstone: 'reached', mind: 'missed' })]);
-    expect(JSON.stringify(said)).not.toMatch(/alice|LARK-7|busy/);
-    // Her rows stand, so the deletion made again finds them.
-    expect((await rowsUnder(brain, keyOf('alice'))).map((row) => row.id)).toEqual(hers);
-
-    const [again, ...more] = await a.applyTombstones!();
-
-    expect(more).toEqual([]);
-    expect(again.complete).toBe(true);
-    expect(again.parts[1]).toEqual({ part: 'mind', reached: true, deleted: hers.length });
-    expect(await rowsUnder(brain, keyOf('alice'))).toEqual([]);
-    expect(heldBy(managers()[0], hers)).toEqual({ cached: [], nodes: [], words: false });
-    expect(vectorsAmong(managers()[0], hers)).toEqual([]);
-    expect((await rowsUnder(brain, keyOf('bob'))).map((row) => row.id)).toEqual(his);
-  });
-});
-
-describe("forgetUser when the mind's delete fails part way", () => {
-  it('leaves no word of the rows it deleted in the full-text index and no graph node of theirs', async () => {
-    const a = await open({}, [reply.text('A canary, lovely.'), ...spare()]);
-    const brain = storeBrain(a);
-    await writeOf(await a.session('s1', { userId: 'alice' }).send('My canary is named LARK-7.'));
-    const told = await a.memory!.remember('Alice keeps a ferret named QUILL-9.', { type: 'episodic', scope: 'conversation', scopeId: keyOf('alice') });
-    const hers = await rowsUnder(brain, keyOf('alice'));
-    const herIds = hers.map((row) => row.id);
-    const lark = hers.find((row) => row.content.includes('LARK-7'))!.id;
-    expect(await graphNodesAmong(brain, [told.id])).toEqual([told.id]);
-    for (const word of ['lark', 'quill']) expect(await fullTextHits(brain, word)).toBeGreaterThan(0);
-    // The mind's store deletes rows 400 at a time: it deletes a first batch, two of her rows, and fails on the next.
-    vi.spyOn(CognitiveMemoryManager.prototype, 'deleteScope').mockImplementationOnce(async () => {
-      await deleteTraceRows(brain, brain.brainId, [lark, told.id]);
-      throw new Error('the mind stopped part way');
     });
 
-    const report = await a.forgetUser!('alice');
+    it("files nothing of a turn running at the deletion, and the turn's reply reaches its caller", async () => {
+      const { gate, release } = gated();
+      const a = await open({ pendingWritesTimeoutMs: 100 }, [reply.text('A canary, lovely.'), reply.hold([], gate, reply.text('In the attic, noted.')), ...spare()]);
+      const session = a.session('s1', { userId: 'alice' });
+      await writeOf(await session.send('My canary is named LARK-7.'));
+      const calls = served.seen.length;
+      const running = session.send('I keep it in the attic.');
+      try {
+        await vi.waitFor(() => expect(served.seen.length).toBeGreaterThan(calls), { timeout: 4_000 });
 
-    expect(report.complete).toBe(false);
-    expect(report.parts[1]).toEqual({ part: 'mind', reached: false, reason: 'the mind stopped part way' });
-    // The two rows gone leave no node in the store's graph and no word in its full-text index.
-    expect.soft(await graphNodesAmong(brain, [lark, told.id])).toEqual([]);
-    for (const word of ['lark', 'quill']) expect.soft(await fullTextHits(brain, word)).toBe(0);
+        const report = await a.forgetUser!('alice');
 
-    const [again, ...more] = await a.applyTombstones!();
-
-    expect(more).toEqual([]);
-    expect(again.complete).toBe(true);
-    expect(await rowsUnder(brain, keyOf('alice'))).toEqual([]);
-    expect(await graphNodesAmong(brain, herIds)).toEqual([]);
-  });
-});
-
-describe("forgetUser when the store's graph fails on what the person said on another person's session", () => {
-  it('keeps that trace until its graph copy is gone, so the deletion made again deletes the copy', async () => {
-    const a = await open({}, [reply.text('A canary, lovely.'), reply.text('A finch, lovely.'), ...spare()]);
-    const brain = storeBrain(a);
-    await writeOf(await a.session('s1', { userId: 'alice' }).send('My canary is named LARK-7.'));
-    await writeOf(await a.session('s2', { userId: 'bob' }).send('My finch is named WREN-2.'));
-    const his = (await rowsUnder(brain, keyOf('bob'))).map((row) => row.id);
-    // What she said on his session, filed by a host's own memory on the store, whose graph is the store's own: the
-    // graph keeps a copy of it, with her words.
-    const plant = await planter(brain, new SqlKnowledgeGraph(brain));
-    const said = { ...mindTrace('alice-on-bob', 'Alice says her ferret is named QUILL-9.', 'bob', Date.now() - 60_000), turnUserId: 'alice' } as MemoryTrace & { filing?: unknown };
-    delete said.filing;
-    await plant.store(said);
-    const copyOfHers = () => brain.all<{ id: string }>('SELECT id FROM knowledge_nodes WHERE brain_id = ? AND id = ?', [brain.brainId, copyKey('alice-on-bob')]);
-    expect(await copyOfHers()).toHaveLength(1);
-    // The store's graph fails once to delete that copy.
-    const deleteMemories = SqlKnowledgeGraph.prototype.deleteMemories;
-    let failed = false;
-    vi.spyOn(SqlKnowledgeGraph.prototype, 'deleteMemories').mockImplementation(async function (this: SqlKnowledgeGraph, filter) {
-      if (!failed && filter.traceIds?.includes('alice-on-bob')) {
-        failed = true;
-        throw new Error('the graph is busy');
+        expect(report.parts[3]).toMatchObject({ part: 'sessions', reached: false });
+        expect(report.parts[1]).toMatchObject({ part: 'mind', reached: true });
+        expect(await rowsUnder(storeBrain(a), keyOf('alice'))).toEqual([]);
+      } finally {
+        release();
       }
-      return deleteMemories.call(this, filter);
+      const result = await running;
+      expect(result.text).toBe('In the attic, noted.');
+      expect(await writeOf(result)).toEqual(bothSkipped('forgotten'));
+      expect(await rowsUnder(storeBrain(a), keyOf('alice'))).toEqual([]);
     });
-
-    const report = await a.forgetUser!('alice');
-
-    expect(failed).toBe(true);
-    expect(report.complete).toBe(false);
-    // Her words stay where the deletion made again finds them: the trace, with its copy.
-    expect((await rowsUnder(brain, keyOf('bob'))).map((row) => row.id)).toContain('alice-on-bob');
-
-    const [again, ...more] = await a.applyTombstones!();
-
-    expect(more).toEqual([]);
-    expect(again.complete).toBe(true);
-    expect(await copyOfHers()).toEqual([]);
-    expect((await rowsUnder(brain, keyOf('bob'))).map((row) => row.id)).toEqual(his);
   });
-});
 
-describe('an erasure never waits for an embedding provider', () => {
-  it('with no cognitive memory built yet, deletes the person and their archived original, builds none and embeds nothing', async () => {
-    const a = await open();
-    const brain = storeBrain(a);
-    const t0 = Date.now() - 60_000;
-    const plant = await planter(brain);
-    await plant.store(mindTrace('alice-1', 'My canary is named LARK-7.', 'alice', t0));
-    await plant.store(mindTrace('bob-1', 'My finch is named WREN-2.', 'bob', t0 + 1));
-    const archive = new SqlStorageMemoryArchive(brain.adapter, brain.features, brain.brainId);
-    await archive.initialize();
-    await plantOriginal(archive, 'alice-1', 'My canary is named LARK-7, the yellow one.');
-    await plantOriginal(archive, 'bob-1', 'My finch is named WREN-2, the brown one.');
-    const managers = managersBuilt();
-    // The embedding provider is down: a deletion that built the mind's memory would fail at its test embedding.
-    embeddings.failEmbedding = () => true;
-    embeddings.embedded.length = 0;
+  describe("forgetUser when the mind's delete fails", () => {
+    it("keeps the person's rows, names the mind's part, says so in one line, and applyTombstones() finishes it", async () => {
+      const managers = managersBuilt();
+      const a = await open({}, [reply.text('A canary, lovely.'), reply.text('A finch, lovely.'), ...spare()]);
+      const brain = storeBrain(a);
+      await writeOf(await a.session('s1', { userId: 'alice' }).send('My canary is named LARK-7.'));
+      await writeOf(await a.session('s2', { userId: 'bob' }).send('My finch is named WREN-2.'));
+      const hers = (await rowsUnder(brain, keyOf('alice'))).map((row) => row.id);
+      const his = (await rowsUnder(brain, keyOf('bob'))).map((row) => row.id);
+      expect(hers).toHaveLength(2);
+      vi.spyOn(CognitiveMemoryManager.prototype, 'deleteScope').mockRejectedValueOnce(new Error('the mind is busy'));
 
-    const report = await a.forgetUser!('alice');
+      const report = await a.forgetUser!('alice');
 
-    expect(report.complete).toBe(true);
-    expect(await rowsUnder(brain, keyOf('alice'))).toEqual([]);
-    expect(await archivedAmong(brain, ['alice-1', 'bob-1'])).toEqual(['bob-1']);
-    expect((await rowsUnder(brain, keyOf('bob'))).map((row) => row.id)).toEqual(['bob-1']);
-    expect(managers()).toEqual([]);
-    expect(embeddings.embedded).toEqual([]);
+      expect(report.parts[1]).toEqual({ part: 'mind', reached: false, reason: 'the mind is busy' });
+      expect(report.complete).toBe(false);
+      expect(report.stores).toContainEqual({ store: 'cognitive memory', reached: false, reason: 'the mind is busy' });
+      const said = lines('memory.forget_incomplete');
+      expect(said).toEqual([expect.objectContaining({ tombstone: 'reached', mind: 'missed' })]);
+      expect(JSON.stringify(said)).not.toMatch(/alice|LARK-7|busy/);
+      // Her rows stand, so the deletion made again finds them.
+      expect((await rowsUnder(brain, keyOf('alice'))).map((row) => row.id)).toEqual(hers);
+
+      const [again, ...more] = await a.applyTombstones!();
+
+      expect(more).toEqual([]);
+      expect(again.complete).toBe(true);
+      expect(again.parts[1]).toEqual({ part: 'mind', reached: true, deleted: hers.length });
+      expect(await rowsUnder(brain, keyOf('alice'))).toEqual([]);
+      expect(heldBy(managers()[0], hers)).toEqual({ cached: [], nodes: [], words: false });
+      expect(vectorsAmong(managers()[0], hers)).toEqual([]);
+      expect((await rowsUnder(brain, keyOf('bob'))).map((row) => row.id)).toEqual(his);
+    });
+  });
+
+  describe("forgetUser when the mind's delete fails part way", () => {
+    it('leaves no word of the rows it deleted in the full-text index and no graph node of theirs', async () => {
+      const a = await open({}, [reply.text('A canary, lovely.'), ...spare()]);
+      const brain = storeBrain(a);
+      await writeOf(await a.session('s1', { userId: 'alice' }).send('My canary is named LARK-7.'));
+      const told = await a.memory!.remember('Alice keeps a ferret named QUILL-9.', { type: 'episodic', scope: 'conversation', scopeId: keyOf('alice') });
+      const hers = await rowsUnder(brain, keyOf('alice'));
+      const herIds = hers.map((row) => row.id);
+      const lark = hers.find((row) => row.content.includes('LARK-7'))!.id;
+      expect(await graphNodesAmong(brain, [told.id])).toEqual([told.id]);
+      for (const word of ['lark', 'quill']) expect(await fullTextHits(brain, word)).toBeGreaterThan(0);
+      // The mind's store deletes rows 400 at a time: it deletes a first batch, two of her rows, and fails on the next.
+      vi.spyOn(CognitiveMemoryManager.prototype, 'deleteScope').mockImplementationOnce(async () => {
+        await deleteTraceRows(brain, brain.brainId, [lark, told.id]);
+        throw new Error('the mind stopped part way');
+      });
+
+      const report = await a.forgetUser!('alice');
+
+      expect(report.complete).toBe(false);
+      expect(report.parts[1]).toEqual({ part: 'mind', reached: false, reason: 'the mind stopped part way' });
+      // The two rows gone leave no node in the store's graph and no word in its full-text index.
+      expect.soft(await graphNodesAmong(brain, [lark, told.id])).toEqual([]);
+      for (const word of ['lark', 'quill']) expect.soft(await fullTextHits(brain, word)).toBe(0);
+
+      const [again, ...more] = await a.applyTombstones!();
+
+      expect(more).toEqual([]);
+      expect(again.complete).toBe(true);
+      expect(await rowsUnder(brain, keyOf('alice'))).toEqual([]);
+      expect(await graphNodesAmong(brain, herIds)).toEqual([]);
+    });
+  });
+
+  describe("forgetUser when the store's graph fails on what the person said on another person's session", () => {
+    it('keeps that trace until its graph copy is gone, so the deletion made again deletes the copy', async () => {
+      const a = await open({}, [reply.text('A canary, lovely.'), reply.text('A finch, lovely.'), ...spare()]);
+      const brain = storeBrain(a);
+      await writeOf(await a.session('s1', { userId: 'alice' }).send('My canary is named LARK-7.'));
+      await writeOf(await a.session('s2', { userId: 'bob' }).send('My finch is named WREN-2.'));
+      const his = (await rowsUnder(brain, keyOf('bob'))).map((row) => row.id);
+      // What she said on his session, filed by a host's own memory on the store, whose graph is the store's own: the
+      // graph keeps a copy of it, with her words.
+      const plant = await planter(brain, new SqlKnowledgeGraph(brain));
+      const said = { ...mindTrace('alice-on-bob', 'Alice says her ferret is named QUILL-9.', 'bob', Date.now() - 60_000), turnUserId: 'alice' } as MemoryTrace & { filing?: unknown };
+      delete said.filing;
+      await plant.store(said);
+      const copyOfHers = () => brain.all<{ id: string }>('SELECT id FROM knowledge_nodes WHERE brain_id = ? AND id = ?', [brain.brainId, copyKey('alice-on-bob')]);
+      expect(await copyOfHers()).toHaveLength(1);
+      // The store's graph fails once to delete that copy.
+      const deleteMemories = SqlKnowledgeGraph.prototype.deleteMemories;
+      let failed = false;
+      vi.spyOn(SqlKnowledgeGraph.prototype, 'deleteMemories').mockImplementation(async function (this: SqlKnowledgeGraph, filter) {
+        if (!failed && filter.traceIds?.includes('alice-on-bob')) {
+          failed = true;
+          throw new Error('the graph is busy');
+        }
+        return deleteMemories.call(this, filter);
+      });
+
+      const report = await a.forgetUser!('alice');
+
+      expect(failed).toBe(true);
+      expect(report.complete).toBe(false);
+      // Her words stay where the deletion made again finds them: the trace, with its copy.
+      expect((await rowsUnder(brain, keyOf('bob'))).map((row) => row.id)).toContain('alice-on-bob');
+
+      const [again, ...more] = await a.applyTombstones!();
+
+      expect(more).toEqual([]);
+      expect(again.complete).toBe(true);
+      expect(await copyOfHers()).toEqual([]);
+      expect((await rowsUnder(brain, keyOf('bob'))).map((row) => row.id)).toEqual(his);
+    });
+  });
+
+  describe('an erasure never waits for an embedding provider', () => {
+    it('with no cognitive memory built yet, deletes the person and their archived original, builds none and embeds nothing', async () => {
+      const a = await open();
+      const brain = storeBrain(a);
+      const t0 = Date.now() - 60_000;
+      const plant = await planter(brain);
+      await plant.store(mindTrace('alice-1', 'My canary is named LARK-7.', 'alice', t0));
+      await plant.store(mindTrace('bob-1', 'My finch is named WREN-2.', 'bob', t0 + 1));
+      const archive = new SqlStorageMemoryArchive(brain.adapter, brain.features, brain.brainId);
+      await archive.initialize();
+      await plantOriginal(archive, 'alice-1', 'My canary is named LARK-7, the yellow one.');
+      await plantOriginal(archive, 'bob-1', 'My finch is named WREN-2, the brown one.');
+      const managers = managersBuilt();
+      // The embedding provider is down: a deletion that built the mind's memory would fail at its test embedding.
+      embeddings.failEmbedding = () => true;
+      embeddings.embedded.length = 0;
+
+      const report = await a.forgetUser!('alice');
+
+      expect(report.complete).toBe(true);
+      expect(await rowsUnder(brain, keyOf('alice'))).toEqual([]);
+      expect(await archivedAmong(brain, ['alice-1', 'bob-1'])).toEqual(['bob-1']);
+      expect((await rowsUnder(brain, keyOf('bob'))).map((row) => row.id)).toEqual(['bob-1']);
+      expect(managers()).toEqual([]);
+      expect(embeddings.embedded).toEqual([]);
+    });
   });
 });

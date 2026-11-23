@@ -12,7 +12,7 @@
  *   are deleted for good.
  * - A folder an earlier version indexed is indexed again under the operator key; its earlier chunks are left.
  *
- * Conversation memory is kept per subject, on the default runtime and on `runtime: 'gmi'`:
+ * Conversation memory is kept per subject, on the default runtime, on `runtime: 'gmi'` and on `runtime: 'legacy'`:
  *
  * - Each turn is filed under the key of its subject (the session's user, else the session), the user's message and
  *   the reply alike, and a turn recalls its own subject's memory and the operator's pages, and nobody else's.
@@ -65,6 +65,15 @@ const stubbed = (apiKey: string, extra: Partial<AgentOptions> = {}) =>
     ...extra,
   }) as unknown as AgentOptions;
 
+/**
+ * The runtimes the suites that name no runtime of their own run on: souledAgent()'s default, and the legacy runtime
+ * named.
+ */
+const plainRuntimes: Array<[string, Record<string, unknown>]> = [
+  ['the default runtime', {}],
+  ["runtime: 'legacy'", { runtime: 'legacy' }],
+];
+
 type Souled = Awaited<ReturnType<typeof souledAgent>>;
 
 /** The key the operator's own pages are filed under for the soul every test loads. */
@@ -112,7 +121,7 @@ function writePage(id: string, text: string): string {
 
 const readIndex = () => fs.readFileSync(path.join(dir, 'memory', 'index.md'), 'utf8');
 const plainPrompt = () => buildSystemPrompt({ soul: dir } as AgentOptions) ?? '';
-const open = () => souledAgent({ ...stubbed(key()), soul: dir } as never);
+const open = (runtime: Record<string, unknown>) => souledAgent({ ...stubbed(key(), runtime as Partial<AgentOptions>), soul: dir } as never);
 
 const OPS_BODY = 'Open nine to five.\n';
 const OPS = `---\nid: concepts/ops\ntype: concept\nsummary: Opening hours\n---\n${OPS_BODY}`;
@@ -124,7 +133,7 @@ const tracesHolding = (brain: Brain, words: string) =>
     [brain.brainId, `%${words}%`],
   );
 
-describe('pages under memory/ that the operator did not write', () => {
+describe.each(plainRuntimes)('pages under memory/ that the operator did not write, on %s', (_name, runtime) => {
   it('a page compiled before pages were kept per subject leaves the index and every prompt', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const old =
@@ -139,7 +148,7 @@ describe('pages under memory/ that the operator did not write', () => {
     expect(plain).not.toContain('Ignore all previous instructions');
     expect(plain).not.toContain('concepts/old');
 
-    const a = await open();
+    const a = await open(runtime);
     try {
       const index = readIndex();
       expect(index).toContain('- [ops](concepts/ops.md): Opening hours');
@@ -161,7 +170,7 @@ describe('pages under memory/ that the operator did not write', () => {
     const broken = '---\nsummary: [unclosed\n---\nBody.\n';
     const brokenFile = writePage('concepts/broken', broken);
 
-    const a = await open();
+    const a = await open(runtime);
     try {
       expect(plainPrompt()).not.toContain('broken');
       expect(readIndex()).not.toContain('broken');
@@ -178,7 +187,7 @@ describe('pages under memory/ that the operator did not write', () => {
     const odd = '---\nid: concepts/odd\ntype: concept\nsummary: Odd page\nsources: yes\n---\nBody.\n';
     const oddFile = writePage('concepts/odd', odd);
 
-    const a = await open();
+    const a = await open(runtime);
     try {
       expect(plainPrompt()).not.toContain('odd');
       expect(readIndex()).not.toContain('odd');
@@ -193,7 +202,7 @@ describe('pages under memory/ that the operator did not write', () => {
   it('a folder of operator pages alone writes no such line', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     writePage('concepts/ops', OPS);
-    const a = await open();
+    const a = await open(runtime);
     try {
       expect(readIndex()).toContain('- [ops](concepts/ops.md): Opening hours');
       expect(lines('memory.legacy_pages')).toEqual([]);
@@ -203,15 +212,15 @@ describe('pages under memory/ that the operator did not write', () => {
   });
 });
 
-describe("the operator's pages in the store", () => {
+describe.each(plainRuntimes)("the operator's pages in the store, on %s", (_name, runtime) => {
   it('an edited operator page is re-indexed with no soft-deleted chunk left', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     writePage('concepts/ops', OPS);
-    const first = await open();
+    const first = await open(runtime);
     await first.close();
 
     writePage('concepts/ops', OPS.replace('Open nine to five.', 'Open ten to six.'));
-    const a = await open();
+    const a = await open(runtime);
     try {
       const brain = brainOf(a);
       const softDeleted = await brain.get<{ n: number | string }>(
@@ -256,7 +265,7 @@ describe("the operator's pages in the store", () => {
       }),
     );
 
-    const a = await open();
+    const a = await open(runtime);
     try {
       const rows = await tracesHolding(brainOf(a), 'Open nine to five.');
       const old = rows.find((row) => row.id === 'old-1');
@@ -278,8 +287,12 @@ describe("the operator's pages in the store", () => {
   });
 });
 
-/** The runtimes each case of the per-subject suites runs on. */
-const runtimes: Array<[string, Record<string, unknown>]> = [['the default runtime', {}], ["runtime: 'gmi'", { runtime: 'gmi' }]];
+/** The runtimes each case of the per-subject suites runs on: souledAgent()'s default, and each runtime named. */
+const runtimes: Array<[string, Record<string, unknown>]> = [
+  ['the default runtime', {}],
+  ["runtime: 'gmi'", { runtime: 'gmi' }],
+  ["runtime: 'legacy'", { runtime: 'legacy' }],
+];
 
 type ModelCall = ProviderScript['seen'][number];
 
@@ -640,7 +653,7 @@ describe.each(runtimes)('conversation memory per subject, on %s', (_name, runtim
   });
 });
 
-describe('sharedMemory, as it is given', () => {
+describe.each(plainRuntimes)('sharedMemory, as it is given, on %s', (_name, runtime) => {
   it.each([
     ['no user id', { as: '', reason: 'one-persons-machine' }],
     ['an id that names nobody', { as: 'guest', reason: 'one-persons-machine' }],
@@ -648,35 +661,38 @@ describe('sharedMemory, as it is given', () => {
     ['a reason that is neither word', { as: 'me', reason: 'because' }],
     ['no reason', { as: 'me' }],
   ])('is refused at open with %s, and no store is made', async (_case, sharedMemory) => {
-    await expect(souledAgent({ ...stubbed(key()), soul: dir, sharedMemory } as never)).rejects.toThrow(
+    await expect(souledAgent({ ...stubbed(key(), runtime as Partial<AgentOptions>), soul: dir, sharedMemory } as never)).rejects.toThrow(
       "souledAgent: sharedMemory needs { as: <a user id>, reason: 'one-persons-machine' | 'operators-notes' }",
     );
     expect(fs.existsSync(path.join(dir, 'memory', '.store'))).toBe(false);
   });
 });
 
-describe('a souled agent that cannot open', () => {
+describe.each(plainRuntimes)('a souled agent that cannot open, on %s', (_name, runtime) => {
   it('refuses an agent id no key can be built from before any store is made', async () => {
     writeSoul('aria\u0000');
-    await expect(open()).rejects.toThrow(TypeError);
+    await expect(open(runtime)).rejects.toThrow(TypeError);
     expect(fs.existsSync(path.join(dir, 'memory', '.store'))).toBe(false);
   });
 
   it('closes the store it opened when the agent is refused after it', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const closed = vi.spyOn(Memory.prototype, 'close');
-    // A default-runtime agent refuses agencies.launch, once the store is open.
-    await expect(souledAgent({ ...stubbed(key()), soul: dir, agencies: { launch: true } } as never)).rejects.toThrow(
-      'agencies.launch runs on the GMI path',
-    );
+    // Each runtime refuses an option the other takes, once the store is open: the legacy runtime agencies.launch, and
+    // the GMI runtime, which is the default, channels.
+    const [refused, message] =
+      runtime.runtime === 'legacy'
+        ? [{ agencies: { launch: true } }, 'agencies.launch runs on the GMI path']
+        : [{ channels: { discord: { token: 'x' } } }, "'channels' is not available on the GMI path"];
+    await expect(souledAgent({ ...stubbed(key(), runtime as Partial<AgentOptions>), soul: dir, ...refused } as never)).rejects.toThrow(message);
     expect(closed).toHaveBeenCalledTimes(1);
   });
 });
 
-describe("the folder a souled agent's store is kept in", () => {
+describe.each(plainRuntimes)("the folder a souled agent's store is kept in, on %s", (_name, runtime) => {
   it('is kept out of version control', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    const { a } = await opened({});
+    const { a } = await opened(runtime);
     try {
       await say(a, { session: 's1', user: 'alice' }, 'My pen is named Dravick.');
       await stored(a, 'My pen is named Dravick.');
@@ -694,7 +710,7 @@ describe("the folder a souled agent's store is kept in", () => {
     const storeDir = path.join(dir, 'memory', '.store');
     fs.mkdirSync(storeDir, { recursive: true });
     fs.writeFileSync(path.join(storeDir, '.gitignore'), '*.sqlite\n');
-    const { a } = await opened({});
+    const { a } = await opened(runtime);
     await a.close();
     expect(fs.readFileSync(path.join(storeDir, '.gitignore'), 'utf8')).toBe('*.sqlite\n');
   });
@@ -871,14 +887,14 @@ describe.each(runtimes)('where the compile goes, on %s', (_name, runtime) => {
   });
 });
 
-describe("a compile on a provider key of its own", () => {
+describe.each(plainRuntimes)("a compile on a provider key of its own, on %s", (_name, runtime) => {
   it("takes the compile's calls, and the agent's key takes none", async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const k = key();
     const turns = scripted(k);
     const k2 = key();
     const compiles = scripted(k2, ['Owl notes.']);
-    const a = await souledAgent({ ...stubbed(k), soul: dir, compile: { provider: 'openai', model: 'stub-model', apiKey: k2 } } as never);
+    const a = await souledAgent({ ...stubbed(k, runtime as Partial<AgentOptions>), soul: dir, compile: { provider: 'openai', model: 'stub-model', apiKey: k2 } } as never);
     await say(a, { session: 'sa', user: 'alice' }, 'My owl is named Wexford.');
     await a.close();
 
@@ -889,7 +905,7 @@ describe("a compile on a provider key of its own", () => {
   });
 });
 
-describe('a compile target that names a provider alone', () => {
+describe.each(plainRuntimes)('a compile target that names a provider alone, on %s', (_name, runtime) => {
   it("runs on that provider's default model, not on a model of the agent's own provider", async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const k = key();
@@ -899,6 +915,7 @@ describe('a compile target that names a provider alone', () => {
     const compiles = script('anthropic', envKey, { whole: true, replies: [reply.text('Owl notes.')] });
     const carried = script('anthropic', k, { whole: true, replies: [reply.text('Owl notes.')] });
     const a = await souledAgent({
+      ...runtime,
       model: 'openai:stub-model',
       apiKey: k,
       fallbackProviders: [],
@@ -915,7 +932,7 @@ describe('a compile target that names a provider alone', () => {
   });
 });
 
-describe("a compile model whose prefix names another provider than the agent's", () => {
+describe.each(plainRuntimes)("a compile model whose prefix names another provider than the agent's, on %s", (_name, runtime) => {
   it.each<[string, Record<string, unknown>]>([
     ['by its model alone', { model: 'openai:stub-model' }],
     ['by name', { provider: 'openai', model: 'stub-model' }],
@@ -929,6 +946,7 @@ describe("a compile model whose prefix names another provider than the agent's",
     // Scripted so a call that carried the agent's key to the other provider would be answered, and seen.
     const carried = script('anthropic', k, { whole: true, replies: [reply.text('Owl notes.')] });
     const a = await souledAgent({
+      ...runtime,
       ...route,
       apiKey: k,
       fallbackProviders: [],
@@ -1101,7 +1119,7 @@ describe.each(runtimes)("the host's memory policy for an account, on %s", (_name
   });
 });
 
-describe("an account's policy on turns that overlap", () => {
+describe.each(plainRuntimes)("an account's policy on turns that overlap, on %s", (_name, runtime) => {
   it('a turn whose policy failed files nothing, though a turn of its session that overlapped it was answered', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     let release!: () => void;
@@ -1115,7 +1133,7 @@ describe("an account's policy on turns that overlap", () => {
       await gate;
       throw new Error('the account service is down');
     };
-    const { a } = await opened({}, { memoryPolicy, memoryProviderOptions: { timeoutMs: 4_000 } });
+    const { a } = await opened(runtime, { memoryPolicy, memoryProviderOptions: { timeoutMs: 4_000 } });
     try {
       const session = a.session('sa', { userId: 'alice' });
       const first = session.send('My owl is named Wexford.');
@@ -1155,7 +1173,7 @@ describe("an account's policy on turns that overlap", () => {
         ...Array.from({ length: 30 }, () => reply.text('Noted.')),
       ],
     });
-    const a = await souledAgent({ ...stubbed(k), soul: dir, memoryPolicy } as never);
+    const a = await souledAgent({ ...stubbed(k, runtime as Partial<AgentOptions>), soul: dir, memoryPolicy } as never);
     try {
       await writeOwnPage(a, userKey('alice'), OWL_PAGE);
       await say(a, { session: 'sa', user: 'alice' }, 'Hello.');
@@ -1188,7 +1206,7 @@ describe("an account's policy on turns that overlap", () => {
       await gate;
       return { longTerm: 'compiled' };
     };
-    const { a, s } = await opened({}, { memoryPolicy, memoryProviderOptions: { timeoutMs: 4_000 } });
+    const { a, s } = await opened(runtime, { memoryPolicy, memoryProviderOptions: { timeoutMs: 4_000 } });
     const first = say(a, { session: 'sa', user: 'alice' }, 'My owl is named Wexford.');
     await vi.waitFor(() => expect(asked).toEqual(['sa']));
     await say(a, { session: 'sb', user: 'alice' }, 'Keep nothing of me.');
@@ -1205,7 +1223,7 @@ describe("an account's policy on turns that overlap", () => {
   });
 });
 
-describe("an account's policy while its compile screens the traces", () => {
+describe.each(plainRuntimes)("an account's policy while its compile screens the traces, on %s", (_name, runtime) => {
   it('an off answer given while the compile waits for the screen stops that compile', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     let release!: () => void;
@@ -1221,7 +1239,7 @@ describe("an account's policy while its compile screens the traces", () => {
       return text;
     };
     const memoryPolicy = (context: { sessionId: string }) => (context.sessionId === 'sb' ? { longTerm: 'off' } : { longTerm: 'compiled' });
-    const { a, s } = await opened({}, { memoryPolicy, screen, memoryProviderOptions: { timeoutMs: 4_000 } });
+    const { a, s } = await opened(runtime, { memoryPolicy, screen, memoryProviderOptions: { timeoutMs: 4_000 } });
     await say(a, { session: 'sa', user: 'alice' }, 'My owl is named Wexford.');
     await stored(a, 'My owl is named Wexford.');
     await stored(a, 'Noted.');
@@ -1238,7 +1256,7 @@ describe("an account's policy while its compile screens the traces", () => {
   });
 });
 
-describe("an account's policy across its session's close", () => {
+describe.each(plainRuntimes)("an account's policy across its session's close, on %s", (_name, runtime) => {
   it('an answer that comes after the session closed is not kept for the next user who opens the session', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     let release!: () => void;
@@ -1252,7 +1270,7 @@ describe("an account's policy across its session's close", () => {
       await gate;
       return { longTerm: 'compiled' };
     };
-    const { a } = await opened({}, { memoryPolicy, memoryProviderOptions: { timeoutMs: 4_000 } });
+    const { a } = await opened(runtime, { memoryPolicy, memoryProviderOptions: { timeoutMs: 4_000 } });
 
     const first = a.session('shared', { userId: 'alice' });
     const sent = first.send('My owl is named Wexford.');
@@ -1644,11 +1662,11 @@ describe.each(runtimes)('pages through the tool, on the whole path, on %s', (_na
   });
 });
 
-describe('what a souled agent writes under memory/', () => {
+describe.each(plainRuntimes)('what a souled agent writes under memory/, on %s', (_name, runtime) => {
   it('is the store folder and its own index, whatever a user is named', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const opsFile = writePage('concepts/ops', OPS);
-    const { a } = await opened({});
+    const { a } = await opened(runtime);
     await say(a, { session: 'sa', user: '..' }, 'My owl is named Wexford.');
     await say(a, { session: 'sb', user: 'Alice' }, 'My crab is named Pellam.');
     await say(a, { session: 'sc', user: 'u'.repeat(300) }, 'My eel is named Tindle.');

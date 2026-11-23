@@ -208,7 +208,7 @@ describe(`one person's export, on runtime ${RUNTIME}`, () => {
 
     expect(doc.recipients).toEqual(OWN_ROUTE);
     expect(doc.retention).toEqual({ period: 'until-deletion' });
-    // The default runtime scores no sentiment, and the soul files every trace with a neutral emotional context.
+    // The legacy runtime scores no sentiment, and the soul files every trace with a neutral emotional context.
     expect(doc.profiling).toEqual({ sentiment: 'off', moodStamps: 0 });
     expect(doc.unread).toEqual([]);
   });
@@ -294,7 +294,7 @@ describe(`one person's export, on runtime ${RUNTIME}`, () => {
 });
 
 describe("one person's export, on runtime 'gmi' with cognitive memory off", () => {
-  it('has the same shape as on the default runtime: what the person provided, what is held, recipients, retention and profiling', async () => {
+  it('has the same shape as on the legacy runtime: what the person provided, what is held, recipients, retention and profiling', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const { a } = await open({ runtime: 'gmi' } as Partial<SouledAgentOptions>);
     await turn(a, 's1', 'alice', 'My canary is LARK-7.');
